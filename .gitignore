@@ -39,8 +39,10 @@ vignettes/*.pdf
 # R Environment Variables
 .Renviron
 
-# pkgdown site
-docs/
+# pkgdown site output (generated under dev/ or docs/ if it holds rendered site;
+# keep tracked ADRs under dev/ by ignoring only generated artifacts, e.g.:
+#   dev/reference/
+#   dev/articles/
 
 # translation temp files
 po/*~
