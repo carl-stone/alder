@@ -1,0 +1,8 @@
+^demo\.R$
+^\.lintr$
+^AGENTS\.md$
+^VISION\.md$
+^dev$
+^\.git$
+^\.DS_Store$
+^LICENSE$

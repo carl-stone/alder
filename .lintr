@@ -1,0 +1,29 @@
+linters: linters_with_defaults(
+    # Keep meaningful checks
+    object_usage_linter = object_usage_linter(),
+    # R-idiomatic names are legal here: dotted.case (S3 methods like
+    # Summary.alder_widget_proxy, base args like na.rm), UPPERCASE constants
+    # (RESERVED, NB_ENV), CamelCase R6 classes (Worker).
+    object_name_linter = object_name_linter(
+      styles = c(
+        "snake_case", "symbols", "dotted.case", "UPPERCASE", "SNAKE_CASE",
+        "CamelCase"
+      ),
+      # lintr's base-generics table omits `is.<type>` generics, so method
+      # names like is.character.alder_widget_proxy are checked whole and
+      # fail (the class part is snake_case). Allow that one shape.
+      regexes = c("is-methods for alder_widget_proxy" =
+                    "^is\\.[a-z.]+\\.[a-z_]+$")
+    ),
+    commented_code_linter = commented_code_linter(),
+    # Disable style noise that is not a correctness signal for this project
+    line_length_linter = NULL,
+    brace_linter = NULL,
+    semicolon_linter = NULL,
+    indentation_linter = NULL,
+    object_length_linter = NULL,
+    unnecessary_concatenation_linter = NULL,
+    infix_spaces_linter = NULL,
+    assignment_linter = NULL
+  )
+encoding: "UTF-8"

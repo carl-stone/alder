@@ -1,0 +1,28 @@
+Package: alder
+Title: Reactive Notebook for R
+Version: 0.1.0
+Authors@R:
+    person("Carl", "Stone", role = c("aut", "cre"), email = "carl@alder.dev")
+Description: A modern reactive notebook environment for R. Plain-text .R
+    notebook files are statically analyzed into a dependency DAG and executed
+    in dependency order, with a marimo-inspired UX and app mode. Change the
+    code in a cell and downstream cells are marked stale; run a cell and its
+    stale dependents re-execute in order.
+License: Apache License (>= 2)
+Encoding: UTF-8
+Roxygen: list(markdown = TRUE)
+RoxygenNote: 7.3.2
+Depends:
+    R (>= 4.1)
+Imports:
+    httpuv,
+    jsonlite,
+    later,
+    processx,
+    R6
+Suggests:
+    testthat (>= 3.0.0),
+    curl,
+    ggplot2,
+    htmlwidgets
+Config/testthat/edition: 3

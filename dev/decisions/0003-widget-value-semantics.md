@@ -21,3 +21,9 @@ This is the closest native-R analogue to marimo's model: code uses the control a
 ## Consequences
 
 Easier: idiomatic R usage (`df |> filter(x > n)`), no magic string rewriting, obvious fallback outside the notebook. Harder: the proxy must implement a broad, careful set of S3 dispatch to behave naturally everywhere; some R constructs that bypass methods (e.g. certain internal `[[` usage or `attr<-` paths) may see the raw object.
+
+Clarifications required by the implementation:
+
+- The public value accessor is `x$value`; the internal/protocol field stays
+  `.value`. Widget values are exchanged with the UI exclusively through
+  `.value`, and `set_widget()` mirrors the committed value back through it.

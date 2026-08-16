@@ -21,3 +21,15 @@ This keeps state deterministic and cheap with expensive R computations, and sati
 ## Consequences
 
 Easier: deterministic state, low recompute cost, predictable for expensive cells, agent-friendly (agents control exactly when execution happens). Harder: users must manage staleness explicitly rather than getting live feedback; stale badges must be accurate and clearly communicated.
+
+Clarifications required by the implementation:
+
+- **Widget changes mark stale but never run.** Setting a control's value
+  invalidates every executed cell that reads it; recomputation happens only
+  on an explicit Run.
+- **Stale outputs persist.** Marking a cell stale never clears its previous
+  output, log, or widget specs — the last computed result stays visible
+  until the cell is rerun.
+- **Cancellation is per explicit run.** Editing or deleting an upstream
+  cell interrupts the running cell (if affected) and removes that run's
+  queued dependent jobs; jobs belonging to another explicit run survive.

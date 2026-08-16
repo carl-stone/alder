@@ -21,3 +21,11 @@ Serial single-process execution is deterministic, matches R's own semantics (glo
 ## Consequences
 
 Easier: deterministic, understandable state; safe with R globals/seeds; UI responsiveness via process separation. Harder: serial throughput bound by slow cells; `SIGINT` may be ignored by long-running compiled code paths (data.table, BLAS) until they return — a limitation shared with other R kernels. Known item: an explicit background/async cell mechanism remains an open option.
+
+Clarifications required by the implementation:
+
+- **Worker exit is a terminal, deterministic failure.** If the worker
+  process dies, the active cell receives `Error: Worker exited before
+  responding`, the queue is dropped (no worker remains to drain it), and
+  every later Run request fails with `worker is not running` until a new
+  session is started.
