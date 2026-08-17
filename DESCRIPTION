@@ -5,9 +5,12 @@ Authors@R:
     person("Carl", "Stone", role = c("aut", "cre"), email = "carl@alder.dev")
 Description: A modern reactive notebook environment for R. Plain-text .R
     notebook files are statically analyzed into a dependency DAG and executed
-    in dependency order, with a marimo-inspired UX and app mode. Change the
-    code in a cell and downstream cells are marked stale; run a cell and its
-    stale dependents re-execute in order.
+    in dependency order, with a marimo-inspired UX. Running a cell reruns its
+    dependencies and descendants automatically (with an optional lazy mode);
+    widgets are ordinary notebook values read through explicit $value; apps
+    are output-only views. R-specific limitations (reference-object and
+    external side effects, worker process isolation rather than a sandbox)
+    are explicit.
 License: Apache License (>= 2)
 Encoding: UTF-8
 Roxygen: list(markdown = TRUE)
@@ -15,14 +18,19 @@ RoxygenNote: 7.3.2
 Depends:
     R (>= 4.1)
 Imports:
+    commonmark,
+    fs,
     httpuv,
     jsonlite,
     later,
     processx,
-    R6
+    R6,
+    xml2,
+    yaml
 Suggests:
     testthat (>= 3.0.0),
     curl,
     ggplot2,
-    htmlwidgets
+    htmlwidgets,
+    chromote
 Config/testthat/edition: 3
