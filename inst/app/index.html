@@ -9,40 +9,61 @@
 <body>
   <header id="topbar">
     <div class="brand">alder</div>
-    <div id="path" class="path"></div>
+    <div id="path" class="path" aria-label="Notebook path"></div>
     <div class="spacer"></div>
-    <button id="run-all" class="btn primary" title="Run all cells">Run all</button>
-    <button id="stop" class="btn danger" title="Stop the running cell" disabled>Stop</button>
-    <button id="app-mode" class="btn" title="Toggle app mode (hide code)">App mode</button>
-    <button id="save" class="btn" title="Save notebook to disk">Save</button>
+    <label class="runtime-control editor-only" for="runtime-select">Runtime
+      <select id="runtime-select" aria-label="Runtime execution mode">
+        <option value="automatic">Automatic</option>
+        <option value="lazy">Lazy</option>
+      </select>
+    </label>
+    <button id="run-all" class="btn primary editor-only" type="button">Run all</button>
+    <button id="stop" class="btn danger" type="button" disabled>Stop</button>
+    <button id="save" class="btn editor-only" type="button">Save</button>
+    <a id="app-mode" class="btn editor-only" href="/?view=app">App mode</a>
+    <a id="edit-mode" class="btn" href="/?view=editor" hidden>Edit mode</a>
   </header>
 
   <div id="status" role="status" aria-live="polite"></div>
 
-  <main id="notebook"></main>
+  <main id="notebook" aria-label="Notebook cells"></main>
 
   <template id="cell-tpl">
-    <section class="cell">
-      <div class="cell-head">
-        <span class="badge"></span>
-        <span class="cell-actions">
-          <button data-act="run" class="btn mini primary" title="Run cell">Run</button>
-          <button data-act="add-below" class="btn mini" title="Add code cell below">+ code</button>
-          <button data-act="delete" class="btn mini" title="Delete cell">&#10005;</button>
-        </span>
+    <section class="cell idle">
+      <div class="cell-head" data-editor-only>
+        <div class="cell-meta">
+          <label class="type-control" data-editor-only>Type
+            <select data-role="type" aria-label="Cell type">
+              <option value="code">Code</option>
+              <option value="markdown">Markdown</option>
+            </select>
+          </label>
+          <span class="cell-badge" data-role="badge">idle</span>
+        </div>
+        <div class="cell-actions" data-role="cell-actions">
+          <button data-act="run" class="btn mini primary" type="button">Run</button>
+          <button data-act="delete" class="btn mini" type="button">Delete</button>
+        </div>
       </div>
-      <div class="code-area" hidden>
-        <textarea class="code" spellcheck="false"></textarea>
+      <div class="source-area code-area" data-role="source-area" data-editor-only>
+        <textarea data-role="source" spellcheck="false" aria-label="R source"></textarea>
       </div>
-      <div class="md-area" hidden>
-        <textarea class="md" spellcheck="false" placeholder="# Markdown cell"></textarea>
+      <div class="diagnostics-area" data-role="diagnostics"></div>
+      <div class="output-area" data-role="output"></div>
+      <div class="log-area" data-role="log"></div>
+      <div class="cell-add editor-only" data-role="cell-add">
+        <button data-act="add" data-type="code" class="btn mini" type="button">+ Add code</button>
+        <button data-act="add" data-type="markdown" class="btn mini" type="button">+ Add Markdown</button>
       </div>
-      <div class="output-area">
-        <div class="widgets" hidden></div>
-        <div class="value"></div>
-      </div>
-      <div class="log"></div>
     </section>
+  </template>
+
+  <template id="empty-bar">
+    <div class="empty-bar">
+      <span class="empty-message">Empty notebook</span>
+      <button data-act="add" data-type="code" class="btn mini" type="button">+ Add code</button>
+      <button data-act="add" data-type="markdown" class="btn mini" type="button">+ Add Markdown</button>
+    </div>
   </template>
 
   <script src="/static/app.js"></script>
