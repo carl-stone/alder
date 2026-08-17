@@ -1,15 +1,21 @@
 # Notebook file format (ADR 0001): plain-text .R with `# %%` cells.
 #
 # A notebook is ordinary R source. Cells are delimited by `# %%` comment
-# lines; `# %% [markdown]` opens a markdown cell. Cell metadata uses `#|`
-# (Quarto code-option syntax). Notebook-level metadata lives in a YAML block
-# inside `# ---` comment fences at the top of the file.
+# lines; a standalone `[markdown]` tag (case-insensitive) opens a markdown
+# cell. Cell metadata uses `#|` (Quarto code-option syntax). Notebook-level
+# metadata lives in a YAML block inside `# ---` comment fences at the top of
+# the file.
 #
 # Round-trip fidelity: parsing never rewrites the file. Every physical
 # source line is a record `list(text = <scalar>, eol = "\n"|"\r\n"|"\r"|"",
 # kind = "header"|"delimiter"|"option"|"body")`; serialization concatenates
 # `text + eol` exactly, so an unedited notebook reproduces the input
 # byte-for-byte, including mixed line terminators and a missing final EOL.
+#
+# Body mutation: EVERY `kind == "body"` record is an editable slot
+# (including trailing blanks). The body returned by /api/state round-trips
+# exactly: sending `c("x")` removes a previously visible trailing blank
+# while `c("x", "")` retains it.
 
 # ---------------------------------------------------------------------------
 # Data model
@@ -18,7 +24,7 @@
 # (the raw `# %% ...` delimiter line), body (raw code or markdown lines,
 # excluding the delimiter and `#|` lines), options (named list parsed from
 # `#| key: value` lines, last value wins), option_duplicates (named list:
-# duplicated option key -> 1-based positions of its records within
+# duplicated option key -> 1-based positions of all its records within
 # `cell$records`), raw (every source line text of the cell, delimiter
 # included) and records (the physical source records that own the cell's
 # delimiter/options/body bytes).
@@ -74,10 +80,32 @@ cell_number <- function(id) {
 # Parsing
 # ---------------------------------------------------------------------------
 
-# A cell delimiter is a comment line whose content matches `# %%`.
+# A cell delimiter is a comment line whose content is `# %%` followed by
+# end-of-line or whitespace (`# %%x` is not a delimiter). A standalone
+# `[markdown]` token (case-insensitive) makes it a markdown cell.
 cell_delim_index <- function(lines) {
-  m <- grepl("^\\s*#\\s*%%", lines)
+  m <- grepl("^\\s*#\\s*%%(\\s|$)", lines, perl = TRUE)
   which(m)
+}
+
+# `# %% [markdown]` (any case), and only that trailing token.
+is_markdown_delim <- function(delim) {
+  m <- regexec("^\\s*#\\s*%%\\s*(.*)$", delim, perl = TRUE)
+  mm <- regmatches(delim, m)[[1L]]
+  if (length(mm) != 2L) return(FALSE)
+  tolower(trimws(mm[[2L]])) == "[markdown]"
+}
+
+# Markdown cells must remain ordinary R source: every body line is blank or
+# an R comment (`^\\s*#`), so a `.R` file with markdown cells still parses.
+validate_markdown_lines <- function(body, id) {
+  ok <- vapply(body,
+               function(ln) !nzchar(trimws(ln)) || grepl("^\\s*#", ln),
+               logical(1))
+  if (!all(ok)) {
+    stop("markdown cell lines must be blank or R comments: ", id, call. = FALSE)
+  }
+  invisible(body)
 }
 
 # Split a whole UTF-8 file text into physical records. Each record keeps
@@ -133,9 +161,10 @@ parse_records <- function(path, records) {
     start <- breaks[[i]]
     end <- breaks[[i + 1L]] - 1L
     cell_recs <- records[start:end]
-    parsed <- parse_cell_records(cell_recs)
+    id <- paste0("cell-", i)
+    parsed <- parse_cell_records(cell_recs, id)
     cells[[i]] <- new_cell(
-      id = paste0("cell-", i),
+      id = id,
       type = parsed$type,
       delim = parsed$delim,
       body = parsed$body,
@@ -157,8 +186,7 @@ parse_records <- function(path, records) {
 sync_cell_from_records <- function(cell) {
   recs <- cell$records
   delim_rec <- recs[[1L]]
-  cell$type <- "code"
-  if (grepl("\\[markdown\\]", delim_rec$text)) cell$type <- "markdown"
+  cell$type <- if (is_markdown_delim(delim_rec$text)) "markdown" else "code"
   cell$delim <- delim_rec$text
   kinds <- vapply(recs, function(r) r$kind, "")
   opt_pos <- which(kinds == "option")
@@ -168,20 +196,21 @@ sync_cell_from_records <- function(cell) {
   cell$options <- po$options
   cell$option_duplicates <- po$duplicates
   cell$raw <- vapply(recs, function(r) r$text, "")
+  if (cell$type == "markdown") validate_markdown_lines(cell$body, cell$id)
   cell
 }
 
-parse_cell_records <- function(cell_records) {
+parse_cell_records <- function(cell_records, id = "?") {
   delim <- cell_records[[1L]]$text
-  type <- "code"
-  if (grepl("\\[markdown\\]", delim)) type <- "markdown"
+  type <- if (is_markdown_delim(delim)) "markdown" else "code"
   kinds <- vapply(cell_records, function(r) r$kind, "")
   opt_pos <- which(kinds == "option")
   body_pos <- which(kinds == "body")
+  body <- vapply(cell_records[body_pos], function(r) r$text, "")
   po <- parse_option_values(cell_records, opt_pos)
+  if (type == "markdown") validate_markdown_lines(body, id)
   list(
-    type = type, delim = delim,
-    body = vapply(cell_records[body_pos], function(r) r$text, ""),
+    type = type, delim = delim, body = body,
     options = po$options,
     option_duplicates = po$duplicates,
     raw = vapply(cell_records, function(r) r$text, "")
@@ -190,36 +219,25 @@ parse_cell_records <- function(cell_records) {
 
 # Parse `#| key: value` / `#| key` option records into (a) a named list of
 # values (last occurrence wins) and (b) a map from each duplicated key to
-# its 1-based record positions within the cell's records.
+# ALL its 1-based record positions within the cell's records.
 parse_option_values <- function(records, opt_pos) {
   options <- list()
-  first_pos <- list()
-  duplicates <- list()
+  positions <- list()
   for (pos in opt_pos) {
     s <- sub("^\\s*#\\|\\s*", "", records[[pos]]$text)
     kv <- strsplit(s, ":", fixed = TRUE)[[1L]]
     key <- trimws(kv[[1L]])
     if (!length(key) || !nzchar(key)) next
+    positions[[key]] <- c(positions[[key]], pos)
     if (length(kv) >= 2L) {
       val <- parse_scalar(trimws(paste(kv[-1L], collapse = ":")))
     } else {
       val <- TRUE
     }
-    if (key %in% names(first_pos)) {
-      duplicates[[key]] <- c(first_pos[[key]], pos)
-    } else {
-      first_pos[[key]] <- pos
-    }
     options[[key]] <- val
   }
-  list(options = options, duplicates = duplicates)
-}
-
-# Compatibility surface: parse `#| key: value` lines into a named list.
-# Kept for callers that hold plain option lines (not records).
-parse_option_lines <- function(meta_lines) {
-  recs <- lapply(meta_lines, function(ln) new_record(ln, "\n", "option"))
-  parse_option_values(recs, seq_along(recs))$options
+  dups <- positions[vapply(positions, length, 0L) > 1L]
+  list(options = options, duplicates = dups)
 }
 
 parse_scalar <- function(s) {
@@ -257,23 +275,44 @@ try_extract_yaml <- function(header) {
   sub("^\\s*#\\s?", "", interior)
 }
 
+# Parse comment-stripped YAML with yaml::yaml.load(eval.expr = FALSE): tagged
+# expressions are never evaluated. The metadata root must be empty or a
+# named mapping; parser warnings (e.g. duplicate mapping keys) are treated
+# as malformed metadata.
 parse_yaml_lines <- function(lines) {
-  out <- list()
-  for (ln in lines) {
-    if (!nzchar(trimws(ln))) next
-    kv <- strsplit(ln, ":", fixed = TRUE)[[1L]]
-    if (length(kv) < 2L) next
-    out[[trimws(kv[[1L]])]] <- parse_scalar(trimws(paste(kv[-1L], collapse = ":")))
+  text <- paste(lines, collapse = "\n")
+  if (!nzchar(trimws(text))) return(list())
+  res <- tryCatch(
+    withCallingHandlers(
+      yaml::yaml.load(text, eval.expr = FALSE),
+      warning = function(w) {
+        stop("malformed YAML metadata: ", conditionMessage(w), call. = FALSE)
+      }
+    ),
+    error = function(e) {
+      if (startsWith(conditionMessage(e), "malformed YAML metadata:")) stop(e)
+      stop("malformed YAML metadata: ", conditionMessage(e), call. = FALSE)
+    }
+  )
+  if (is.null(res)) return(list())
+  if (!is.list(res) || is.null(names(res))) {
+    stop("notebook metadata must be a named mapping", call. = FALSE)
   }
-  out
+  res
 }
 
-# Raw-byte reader: validates UTF-8 and splits records without normalizing
-# terminators. Invalid UTF-8 fails with the file path before any change.
+# Raw-byte reader: rejects directories, unreadable files, invalid UTF-8,
+# and embedded NULs with deterministic path-bearing errors; invalid text
+# fails as `notebook is not valid UTF-8: <path>` before parsing/mutation.
 read_notebook <- function(path) {
+  if (dir.exists(path)) stop("notebook path is a directory: ", path)
   if (!file.exists(path)) stop("notebook file not found: ", path)
+  if (file.access(path, 4) != 0L) stop("notebook file is not readable: ", path)
   size <- file.info(path)$size
   bytes <- readBin(path, "raw", n = size)
+  if (0L %in% as.integer(bytes)) {
+    stop("notebook contains an embedded NUL: ", path)
+  }
   text <- rawToChar(bytes)
   if (!validUTF8(text)) stop("notebook is not valid UTF-8: ", path)
   parse_records(path, split_records(text))
@@ -310,101 +349,157 @@ write_notebook <- function(nb, path = nb$path) {
   invisible(nb)
 }
 
-# ---------------------------------------------------------------------------
-# Body mutation (byte-aware) and boundary normalization
-# ---------------------------------------------------------------------------
+# Atomic save with optimistic conflict detection. The Session re-reads the
+# path immediately before saving and passes the expected disk version; this
+# function re-checks the same bytes, writes a temporary file in the target
+# directory, preserves existing mode when present, and replaces the target
+# with fs::file_move(). A move failure leaves the original in place and
+# always removes the temporary file.
+write_notebook_atomic <- function(nb, expected_version = NULL) {
+  path <- nb$path
+  if (!is.character(path) || length(path) != 1L || is.na(path) ||
+      !nzchar(path)) {
+    stop("notebook has no path", call. = FALSE)
+  }
+  parent <- dirname(path)
+  if (!dir.exists(parent)) {
+    stop("notebook directory does not exist: ", parent, call. = FALSE)
+  }
+  if (file.access(parent, 2L) != 0L) {
+    stop("notebook directory is not writable: ", parent, call. = FALSE)
+  }
+  if (!is.null(expected_version)) {
+    cur_exists <- file.exists(path)
+    cur_bytes <- if (cur_exists) readBin(path, "raw", n = file.info(path)$size)
+                 else raw()
+    if (identical(expected_version$exists, FALSE)) {
+      if (cur_exists) {
+        stop("notebook changed on disk; restart alder before saving",
+             call. = FALSE)
+      }
+    } else {
+      if (!cur_exists || !identical(cur_bytes, expected_version$bytes)) {
+        stop("notebook changed on disk; restart alder before saving",
+             call. = FALSE)
+      }
+    }
+  }
+  bytes <- charToRaw(serialize_notebook(nb))
+  tmp <- tempfile(pattern = ".alder-save-", tmpdir = parent)
+  on.exit(unlink(tmp), add = TRUE)
+  con <- file(tmp, "wb")
+  on.exit(tryCatch(close(con), error = function(e) NULL), add = TRUE)
+  writeBin(bytes, con)
+  flush(con)
+  close(con)
+  if (file.exists(path) && file.access(path, 0L) == 0L) {
+    mode <- file.info(path)$mode
+    if (!is.na(mode)) tryCatch(Sys.chmod(tmp, mode), error = function(e) NULL)
+  }
+  # fs::file_move returns the destination path (invisibly); any failure
+  # raises and leaves the original in place.
+  fs::file_move(tmp, path)
+  invisible(nb)
+}
 
-# Enforce the terminal-EOL invariant after any record-count mutation:
-# - if the file had a final newline, no record may carry eol = "";
+# ---------------------------------------------------------------------------
+# Terminal-EOL invariant
+# ---------------------------------------------------------------------------
+# After any record-count mutation:
+# - if the file had a final newline (final_newline TRUE), no record may
+#   carry eol = "";
 # - if it had none, exactly the final physical record carries eol = "" and
 #   every record that became interior receives preferred_eol.
-normalize_nb_boundary <- function(nb) {
+#
+# `normalize_nb_boundary()` touches only the mutated cells (`region`, an
+# integer vector of 1-based cell indices) plus, when `hdr` is set, the last
+# header record, and the true terminal record — never an O(total records)
+# pass over an untouched notebook.
+
+terminal_ref <- function(nb) {
+  if (length(nb$cells)) {
+    ci <- length(nb$cells)
+    ri <- length(nb$cells[[ci]]$records)
+    if (ri >= 1L) return(list(where = "cell", ci = ci, ri = ri))
+  }
+  if (length(nb$header_records)) {
+    return(list(where = "header", ri = length(nb$header_records)))
+  }
+  NULL
+}
+
+record_eol_of <- function(nb, ref) {
+  if (identical(ref$where, "cell")) nb$cells[[ref$ci]]$records[[ref$ri]]$eol
+  else nb$header_records[[ref$ri]]$eol
+}
+
+set_record_eol <- function(nb, ref, eol) {
+  if (identical(ref$where, "cell")) nb$cells[[ref$ci]]$records[[ref$ri]]$eol <- eol
+  else nb$header_records[[ref$ri]]$eol <- eol
+  nb
+}
+
+normalize_nb_boundary <- function(nb, region = integer(), hdr = FALSE) {
   pref <- nb$preferred_eol
-  flat <- list()
-  owners <- list()  # parallel: c("h", i) header record i | c("c", ci, ri)
-  for (i in seq_along(nb$header_records)) {
-    flat[[length(flat) + 1L]] <- nb$header_records[[i]]
-    owners[[length(owners) + 1L]] <- c("h", i)
+  tr <- terminal_ref(nb)
+  if (hdr && !isTRUE(nb$final_newline) && length(nb$header_records) &&
+      identical(record_eol_of(nb, list(where = "header",
+                                       ri = length(nb$header_records))), "")) {
+    nb <- set_record_eol(nb, list(where = "header",
+                                  ri = length(nb$header_records)), pref)
   }
-  for (ci in seq_along(nb$cells)) {
+  for (ci in region) {
+    if (ci < 1L || ci > length(nb$cells)) next
     recs <- nb$cells[[ci]]$records
+    term_ri <- if (!is.null(tr) && identical(tr$where, "cell") &&
+                   identical(tr$ci, ci)) tr$ri else 0L
     for (ri in seq_along(recs)) {
-      flat[[length(flat) + 1L]] <- recs[[ri]]
-      owners[[length(owners) + 1L]] <- c("c", ci, ri)
+      if (identical(recs[[ri]]$eol, "") && ri != term_ri) recs[[ri]]$eol <- pref
     }
+    nb$cells[[ci]]$records <- recs
   }
-  n <- length(flat)
-  if (n == 0L) return(nb)
-  for (i in seq_len(n)) {
-    if (identical(flat[[i]]$eol, "")) {
-      if (isTRUE(nb$final_newline) || i < n) flat[[i]]$eol <- pref
-    } else if (!isTRUE(nb$final_newline) && i == n) {
-      flat[[i]]$eol <- ""
-    }
-  }
-  hi <- 0L
-  for (i in seq_len(n)) {
-    if (owners[[i]][[1L]] == "h") {
-      hi <- hi + 1L
-      nb$header_records[[hi]] <- flat[[i]]
-    } else {
-      ci <- as.integer(owners[[i]][[2L]])
-      ri <- as.integer(owners[[i]][[3L]])
-      nb$cells[[ci]]$records[[ri]] <- flat[[i]]
-    }
+  # A file that ends with a terminator keeps its terminal bytes verbatim —
+  # only a no-final-newline file carries a bare terminal record.
+  if (!is.null(tr) && !isTRUE(nb$final_newline) &&
+      !identical(record_eol_of(nb, tr), "")) {
+    nb <- set_record_eol(nb, tr, "")
   }
   nb
 }
 
-# Splice new body lines into a cell's records: replace existing body slots
-# in order (retaining each slot's eol), remove surplus body slots, and
-# insert extra lines after the last old body slot (or after all option
-# records when no body slot existed).
+# ---------------------------------------------------------------------------
+# Body mutation (byte-aware)
+# ---------------------------------------------------------------------------
+
+# Splice new body lines into a cell's records: every `kind == "body"`
+# record is a body slot (including trailing blanks). Replace slots in
+# order (retaining each slot's eol), delete every surplus slot, and insert
+# extra slots after the final old body slot, or after the last option
+# record when no body slot exists. No immutable separator is invented.
 splice_body_records <- function(records, body, preferred_eol) {
   kinds <- vapply(records, function(r) r$kind, "")
-  opt_pos <- which(kinds == "option")
   body_pos <- which(kinds == "body")
-  n_body <- length(body_pos)
-
-  # Trailing blank body records separate the cell from the next one; they
-  # are not content the user typed in this edit, so every splice preserves
-  # them byte-for-byte (ADR 0001). Content slots are the non-blank head.
-  n_content <- n_body
-  while (n_content > 0L && identical(records[[body_pos[[n_content]]]]$text, "")) {
-    n_content <- n_content - 1L
-  }
-  content_pos <- if (n_content > 0L) body_pos[seq_len(n_content)] else integer()
-  n_old <- length(content_pos)
+  opt_last <- tail(which(kinds == "option"), 1L)
+  n_old <- length(body_pos)
   n_new <- length(body)
 
   if (n_old == 0L) {
     if (n_new == 0L) return(records)
-    # Insert fresh content after the options (or before any trailing blank
-    # separators when no option record exists), preserving blank records.
     extra <- lapply(body, function(ln) new_record(ln, preferred_eol, "body"))
-    if (length(opt_pos)) {
-      return(append(records, extra, after = opt_pos[[length(opt_pos)]]))
-    }
-    if (n_body > 0L) {
-      return(append(records, extra, after = body_pos[[1L]] - 1L))
-    }
-    return(append(records, extra, after = 1L))
+    anchor <- if (length(opt_last)) opt_last[[1L]] else 1L
+    return(append(records, extra, after = anchor))
   }
 
-  # Replace content slots 1:1, keeping each slot's own EOL bytes.
   k <- min(n_old, n_new)
   if (k > 0L) {
-    for (j in seq_len(k)) records[[content_pos[[j]]]]$text <- body[[j]]
+    for (j in seq_len(k)) records[[body_pos[[j]]]]$text <- body[[j]]
   }
   if (n_new > n_old) {
-    # Grow: append the extra lines after the last content slot, before any
-    # trailing blank separators.
     extra <- lapply(body[(n_old + 1L):n_new],
                     function(ln) new_record(ln, preferred_eol, "body"))
-    records <- append(records, extra, after = content_pos[[n_old]])
+    records <- append(records, extra, after = body_pos[[n_old]])
   } else if (n_new < n_old) {
-    # Shrink: drop the removed tail content slots, keep blank separators.
-    records <- records[-(content_pos[(n_new + 1L):n_old])]
+    records <- records[-body_pos[(n_new + 1L):n_old]]
   }
   records
 }
@@ -419,27 +514,44 @@ rebuild_cell_raw <- function(cell) {
 # Cell mutation helpers
 # ---------------------------------------------------------------------------
 
-nb_cell <- function(nb, id) {
-  for (c in nb$cells) if (identical(c$id, id)) return(c)
-  NULL
+nb_cell_index <- function(nb, id) {
+  hits <- which(vapply(nb$cells, function(c) identical(c$id, id), FALSE))
+  if (!length(hits)) stop("no such cell: ", id, call. = FALSE)
+  hits[[1L]]
 }
 
-# Set cell body (code/markdown), preserving position, delimiter, options and
-# every untouched byte.
-nb_set_cell_body <- function(nb, id, body) {
-  for (i in seq_along(nb$cells)) {
-    if (identical(nb$cells[[i]]$id, id)) {
-      cell <- nb$cells[[i]]
-      cell$records <- splice_body_records(cell$records, body, nb$preferred_eol)
-      nb$cells[[i]] <- sync_cell_from_records(cell)
-      break
-    }
+nb_cell <- function(nb, id) {
+  hits <- which(vapply(nb$cells, function(c) identical(c$id, id), FALSE))
+  if (!length(hits)) NULL else nb$cells[[hits[[1L]]]]
+}
+
+# Update a cell's body and type. `type` is exactly "code" or "markdown";
+# markdown bodies must be blank or R comments so the file stays ordinary R
+# source. The delimiter text is preserved when the type is unchanged; on a
+# type change only the delimiter text is replaced with the canonical
+# `# %%` or `# %% [markdown]`, retaining its original EOL.
+nb_update_cell <- function(nb, id, body, type) {
+  if (!(identical(type, "code") || identical(type, "markdown"))) {
+    stop("invalid cell type; must be \"code\" or \"markdown\"", call. = FALSE)
   }
-  nb <- normalize_nb_boundary(nb)
-  nb
+  if (type == "markdown") validate_markdown_lines(body, id)
+  ci <- nb_cell_index(nb, id)
+  cell <- nb$cells[[ci]]
+  records <- splice_body_records(cell$records, body, nb$preferred_eol)
+  old_type <- if (is_markdown_delim(records[[1L]]$text)) "markdown" else "code"
+  if (!identical(old_type, type)) {
+    records[[1L]]$text <- if (type == "markdown") "# %% [markdown]" else "# %%"
+  }
+  cell$records <- records
+  nb$cells[[ci]] <- sync_cell_from_records(cell)
+  normalize_nb_boundary(nb, region = ci)
 }
 
 nb_add_cell <- function(nb, body = character(), type = "code", after = NULL) {
+  if (!(identical(type, "code") || identical(type, "markdown"))) {
+    stop("invalid cell type; must be \"code\" or \"markdown\"", call. = FALSE)
+  }
+  if (type == "markdown") validate_markdown_lines(body, "<new cell>")
   delim <- if (type == "markdown") "# %% [markdown]" else "# %%"
   # Monotonic id allocation: never reuse a previously allocated number.
   id <- paste0("cell-", nb$next_cell_number)
@@ -456,16 +568,29 @@ nb_add_cell <- function(nb, body = character(), type = "code", after = NULL) {
   )
   cell <- new_cell(id, type, delim, body, list(), c(delim, body), recs)
 
-  idx <- if (is.null(after)) length(nb$cells) + 1L
-         else which(vapply(nb$cells, function(c) identical(c$id, after), FALSE)) + 1L
+  n_before <- length(nb$cells)
+  if (is.null(after)) {
+    idx <- length(nb$cells) + 1L
+  } else {
+    idx <- nb_cell_index(nb, after) + 1L
+  }
   nb$cells <- append(nb$cells, list(cell), after = idx - 1L)
-  nb <- normalize_nb_boundary(nb)
+  # Boundary repair only when the new cell is appended at the end (the old
+  # terminal record may have become interior).
+  if (idx == length(nb$cells)) {
+    nb <- normalize_nb_boundary(nb, unique(c(idx, idx - 1L)),
+                                hdr = n_before == 0L)
+  }
   nb
 }
 
 nb_delete_cell <- function(nb, id) {
-  keep <- vapply(nb$cells, function(c) !identical(c$id, id), FALSE)
-  nb$cells <- nb$cells[keep]
-  nb <- normalize_nb_boundary(nb)
+  ci <- nb_cell_index(nb, id)
+  was_last <- ci == length(nb$cells)
+  nb$cells <- nb$cells[-ci]
+  if (was_last) {
+    # The true terminal record moved: repair the invariant in place.
+    nb <- normalize_nb_boundary(nb, hdr = length(nb$cells) == 0L)
+  }
   nb
 }
