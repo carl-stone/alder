@@ -1,316 +1,649 @@
-# Static analysis: turn each cell's code into its top-level definitions,
-# references, and self-references, then assemble a dependency DAG over the
-# cells (ADR 0001's "notebook state corresponds to source"; ADR 0002's
-# manual-rerun model).
+# Static analysis: R evaluation-order scoping walk (ADR 0001's "notebook
+# state corresponds to source"; ADR 0002's reactive dependency model).
 #
-# R is dynamically scoped and masking-heavy, so the analyzer favours
+# R is dynamically typed and masking-heavy, so the analyzer favours
 # over-approximating references (a missed dependency silently breaks stale
-# marking, which is worse than a spurious one). Names that are provably local
-# to a function body are excluded; everything else mentioned is a reference.
-# Where code is too dynamic to analyse confidently, the cell reports a
-# diagnostic instead of guessing (VISION: "understandable diagnostics when
-# code is too dynamic to analyze safely").
+# marking, which is worse than a spurious one). Names provably local to a
+# function body are excluded; everything else a cell reads eagerly is a
+# reference, and a read of a name the cell itself defines — before that
+# definition executes — is a self-references. Where code is too dynamic to
+# analyse confidently, the cell reports a blocking error diagnostic instead
+# of guessing (VISION: "understandable diagnostics when code is too dynamic
+# to analyze safely").
 #
 # Evaluation order within a cell matters:
-# - Eager reads (ordinary RHSs, subscripts of compound LHSs, control-flow
-#   conditions) that happen before the cell's own first definition of the
-#   same name are SELF references (`self_refs`): `x <- x + 1` reads x before
-#   defining it, so the cell depends on its own prior value.
-# - Deferred reads (function bodies, formal defaults) execute later and
-#   never become self references; a same-cell definition just removes them
-#   from the external `refs`.
+# - Eager reads (ordinary RHSs, compound-LHS subscripts, control-flow
+#   conditions) that happen before the cell's own first unconditional
+#   definition of the same name are SELF references: `x <- x + 1` reads x
+#   before defining it, so the cell depends on its own prior value.
+# - Deferred reads (function bodies, formal defaults, lazy arguments) execute
+#   later; a name the cell defines anywhere is cell-local there, while a
+#   name the cell never defines remains an external reference.
+# - A definition is definitely available afterwards only when it is a direct
+#   sequential assignment, a `for` iterator, or on every branch of an
+#   if/switch. Definitions inside loop bodies and lazily evaluated call
+#   arguments are never definitely available afterwards.
 
 # Names that are never notebook variables.
-RESERVED <- c("NA", "TRUE", "FALSE", "NULL", "Inf", "NaN", "...", ".",
-              "T", "F", "break", "next")
+RESERVED <- c("NA", "TRUE", "FALSE", "NULL", "Inf", "NaN", "...", ".", "T",
+              "F", "break", "next", ".data", ".env")
+
+# Bare syntactic operators / infrastructure whose head is never a notebook
+# reference, but whose arguments still are.
+OPERATORS <- c("(", "{", "[", "[[", "$", "@", "::", ":::",
+               "+", "-", "*", "/", "^", "%%", "%/%", "%*%", "%in%",
+               "==", "!=", "<", ">", "<=", ">=", "&&", "||", "!", "&", "|",
+               "|>", "~")
+
+# Operations whose NSE/quoting semantics prevent treating their contents as
+# evaluated reads or definitions.
+QUOTE_OPS <- c("quote", "expression", "alist")
+
+# Data-mask NSE verbs (first argument is the data; the rest mask columns).
+MASK_VERBS <- c("subset", "with", "within", "transform", "filter", "mutate",
+                "transmute", "select", "summarise", "summarize", "arrange",
+                "group_by", "count")
+
+# Plotting verbs whose arguments are all data-mask columns.
+AES_VERBS <- c("aes", "aes_string")
+
+# Operations whose notebook bindings cannot be determined safely; a cell
+# using any of them (bare or namespace-qualified) is blocked from dispatch.
+BLOCKED_DYNAMIC <- c(
+  "eval", "evalq", "eval.parent", "source", "sys.source", "load",
+  "attach", "detach", "delayedAssign", "makeActiveBinding",
+  "assign", "rm", "get", "get0", "mget", "exists", "dynGet", "do.call")
 
 is_reserved <- function(nm) nm %in% RESERVED
+
+# ---------------------------------------------------------------------------
+# AST helpers
+# ---------------------------------------------------------------------------
+
+# The statically identifiable bare root name of an assignment LHS
+# (`x`, `x[i]`, `x$y`, `x@y`, `names(x)`, `attr(x, ...)`, and nested
+# combinations). Returns NULL when no static root exists (dynamic/deparsed
+# target), which is a blocking diagnostic.
+lhs_root_name <- function(lhs) {
+  while (is.call(lhs) && length(lhs) >= 2L) {
+    h <- lhs[[1L]]
+    hc <- if (is.symbol(h)) as.character(h) else ""
+    if (hc %in% c("[", "[[", "$", "@")) {
+      lhs <- lhs[[2L]]
+    } else if (is.symbol(h)) {
+      # replacement-function form f(a, ...) -> root lives in the first arg
+      lhs <- lhs[[2L]]
+    } else {
+      return(NULL)
+    }
+  }
+  if (is.symbol(lhs)) as.character(lhs) else NULL
+}
+
+# For a call whose head is the `pkg::fn` / `pkg:::fn` expression, return
+# list(pkg, name); otherwise list(pkg = NULL, name = NULL).
+qualified_name <- function(node) {
+  if (is.call(node) && length(node) >= 2L) {
+    head <- node[[1L]]
+    if (is.call(head) && length(head) >= 3L) {
+      hh <- head[[1L]]
+      if (is.symbol(hh) && as.character(hh) %in% c("::", ":::")) {
+        pkg <- head[[2L]]
+        nm <- head[[3L]]
+        if (is.symbol(pkg) && is.symbol(nm)) {
+          return(list(pkg = as.character(pkg), name = as.character(nm)))
+        }
+      }
+    }
+  }
+  list(pkg = NULL, name = NULL)
+}
+
+# A literal target/name argument. For the get-family the argument is a NAME,
+# so only a scalar character constant is truly literal (a bare symbol is an
+# unknown name and must block). For do.call the argument is a function, so a
+# bare symbol names a known function reference and is accepted.
+literal_name_of <- function(node, string_only = FALSE) {
+  if (string_only) {
+    if (is.character(node) && length(node) == 1L && !is.na(node) &&
+        nzchar(node)) return(node)
+    return(NULL)
+  }
+  if (is.symbol(node)) return(as.character(node))
+  if (is.character(node) && length(node) == 1L && !is.na(node) &&
+      nzchar(node)) return(node)
+  NULL
+}
 
 # ---------------------------------------------------------------------------
 # Per-cell analysis
 # ---------------------------------------------------------------------------
 
 cell_defs_refs <- function(code) {
-  # Returns list(defs, refs, self_refs, error = NULL | msg).
-  if (length(code) == 0L) {
-    return(list(defs = character(), refs = character(),
-                self_refs = character(), error = NULL))
-  }
+  # Returns list(defs, refs, self_refs, barrier, diagnostics, error).
+  empty <- list(defs = character(), refs = character(),
+                self_refs = character(), barrier = FALSE,
+                diagnostics = list(), error = NULL)
+  if (length(code) == 0L) return(empty)
   text <- paste(code, collapse = "\n")
-  exprs <- tryCatch(
-    base::parse(text = text),
-    error = function(e) conditionMessage(e)
-  )
+  exprs <- tryCatch(base::parse(text = text),
+                    error = function(e) conditionMessage(e))
   if (is.character(exprs)) {
-    return(list(defs = character(), refs = character(),
-                self_refs = character(), error = exprs))
+    empty$error <- exprs
+    return(empty)
   }
 
-  # Pass 1: every name defined at the top level of this cell, in order.
-  defs <- new.env(parent = emptyenv())
-  defs$defs <- character()
-  for (i in seq_along(exprs)) collect_top_defs(exprs[[i]], defs)
-  defs <- unique(defs$defs)
+  # Pass 1: every name this cell could define at top level (including under
+  # branches and loops), used to classify reads in pass 2.
+  p1 <- new.env(parent = emptyenv())
+  p1$defs <- character()
+  for (i in seq_along(exprs)) collect_top_defs(exprs[[i]], p1)
 
-  # Pass 2: walk evaluation order. Reads of names this cell defines are
-  # self references when they occur (eagerly) before that definition.
   state <- new.env(parent = emptyenv())
-  state$defs_all <- defs
+  state$defs <- unique(p1$defs)
   state$refs <- character()
   state$self_refs <- character()
-  state$defined_so_far <- character()
-  for (i in seq_along(exprs)) scan_expr(exprs[[i]], character(), state, in_fn = FALSE)
+  state$barrier <- FALSE
+  state$diagnostics <- list()
+  state$mask_warned <- character()
 
-  list(defs = defs,
+  top <- new_frame(character(), "top")
+  for (i in seq_along(exprs)) walk_expr(exprs[[i]], top, new_ctx(), state)
+
+  list(defs = state$defs,
        refs = unique(state$refs),
        self_refs = unique(state$self_refs),
+       barrier = isTRUE(state$barrier),
+       diagnostics = state$diagnostics,
        error = NULL)
 }
 
-# Names assigned by this top-level expression (walking call arguments, but
-# not function bodies: their assignments are closure-local).
-collect_top_defs <- function(node, defs) {
-  if (!is.call(node) || length(node) < 2L) return(invisible())
-  h <- if (is.symbol(node[[1L]])) as.character(node[[1L]]) else ""
-  if (h == "function") return(invisible())
-  if (h %in% c("<-", "=", "<<-")) {
-    lhs <- node[[2L]]
-  } else if (h %in% c("->", "->>")) {
-    lhs <- node[[3L]]
-  } else {
-    lhs <- NULL
+# Names assigned anywhere at the top level of this cell, in order. Function
+# bodies, local() and quoting operators carry their own scope; data-mask
+# expressions never promote their assignments to notebook definitions.
+collect_top_defs <- function(node, p1) {
+  if (!is.call(node) || identical(node, quote(expr = ))) return(invisible())
+  head <- node[[1L]]
+  hn <- if (is.symbol(head)) as.character(head) else ""
+
+  if (hn %in% c("function", "quote", "expression", "alist", "local")) {
+    return(invisible())
   }
-  if (!is.null(lhs)) {
-    nm <- lhs_def_root(lhs)
-    if (length(nm) && nzchar(nm) && !is_reserved(nm)) defs$defs <- c(defs$defs, nm)
+  q <- qualified_name(node)
+  if (!is.null(q$name)) {
+    if (q$name %in% c(MASK_VERBS, AES_VERBS)) {
+      if (length(node) >= 2L) collect_top_defs(node[[2L]], p1)
+      return(invisible())
+    }
+    for (j in seq_along(node)[-1L]) {
+      if (!is.null(node[[j]])) collect_top_defs(node[[j]], p1)
+    }
+    return(invisible())
   }
+  if (hn %in% c(MASK_VERBS, AES_VERBS) || hn == "~") {
+    if (hn %in% c(MASK_VERBS, AES_VERBS) && length(node) >= 2L) {
+      collect_top_defs(node[[2L]], p1)
+    }
+    return(invisible())
+  }
+  if (hn %in% c("<-", "=", "->")) {
+    target <- if (hn == "->") node[[3L]] else node[[2L]]
+    r <- lhs_root_name(target)
+    if (length(r) && nzchar(r) && !is_reserved(r)) p1$defs <- c(p1$defs, r)
+    val_idx <- if (hn == "->") 2L else 3L
+    value <- node[[val_idx]]
+    if (is.call(value)) {
+      vh <- value[[1L]]
+      if (!(is.symbol(vh) && as.character(vh) == "function")) {
+        collect_top_defs(value, p1)
+      }
+    }
+    return(invisible())
+  }
+  if (hn == "for") {
+    ivar <- as.character(node[[2L]])
+    if (length(ivar) && !is_reserved(ivar)) p1$defs <- c(p1$defs, ivar)
+    for (j in 3:4) if (!is.null(node[[j]])) collect_top_defs(node[[j]], p1)
+    return(invisible())
+  }
+  # brace, if, switch, and ordinary calls: recurse for nested possible defs.
   for (j in seq_along(node)[-1L]) {
-    if (!is.null(node[[j]])) collect_top_defs(node[[j]], defs)
+    if (!is.null(node[[j]])) collect_top_defs(node[[j]], p1)
   }
   invisible()
 }
 
-# scan_expr walks one expression. `locals` holds names that are provably not
-# notebook variables (function formals, function-body assignments, loop
-# variables); it is passed BY VALUE so a function's locals can never leak
-# into the enclosing scope. `in_fn` marks a deferred context (a function
-# body or formal default): reads evaluate later, so same-cell names read
-# there are neither refs nor self_refs. R's actual runtime scoping is
-# dynamic, so this is intentionally a conservative approximation.
-scan_expr <- function(node, locals, state, in_fn = FALSE) {
-  if (is.symbol(node)) {
-    nm <- as.character(node)
-    if (is_reserved(nm) || (nm %in% locals)) return(invisible())
-    if (nm %in% state$defs_all) {
-      # Defined somewhere in this cell: same-cell use.
-      if (!in_fn && !(nm %in% state$defined_so_far)) {
-        state$self_refs <- c(state$self_refs, nm)  # read before own def
-      }
+# ---------------------------------------------------------------------------
+# Evaluation-order scope walk (pass 2)
+# ---------------------------------------------------------------------------
+
+new_frame <- function(defined, kind) {
+  e <- new.env(parent = baseenv())
+  e$defined <- unique(defined)
+  e$kind <- kind
+  e
+}
+
+new_ctx <- function(deferred = FALSE, mask = 0L) {
+  list(deferred = deferred, mask = mask)
+}
+
+define_name <- function(nm, frame) {
+  if (!is_reserved(nm)) frame$defined <- c(frame$defined, nm)
+  invisible(nm)
+}
+
+# A call argument is lazily evaluated: an assignment inside it is never
+# definitely available in the caller frame afterward. Scan it in an isolated
+# frame that shares the current definitely-local set, so its reads are still
+# classified but its definitions cannot leak into the caller.
+walk_lazy_arg <- function(node, frame, ctx, state) {
+  aframe <- new_frame(frame$defined, frame$kind)
+  if (!is.null(node)) walk_expr(node, aframe, ctx, state)
+  invisible()
+}
+
+record_read <- function(nm, frame, ctx, state) {
+  if (!length(nm) || !nzchar(nm) || is_reserved(nm) || nm %in% frame$defined) {
+    return(invisible())
+  }
+  if (ctx$deferred) {
+    if (nm %in% state$defs) return(invisible())  # cell-local, deferred use
+    state$refs <- c(state$refs, nm)
+  } else {
+    if (nm %in% state$defs) {
+      if (nm %in% frame$defined) return(invisible())  # local read
+      state$self_refs <- c(state$self_refs, nm)
     } else {
       state$refs <- c(state$refs, nm)
     }
-    return(invisible())
   }
-  if (!is.call(node)) return(invisible())  # literals: no refs
+  invisible()
+}
+
+# A bare value symbol in a data-mask context: conservative reference plus an
+# ambiguity warning (it may be a column or a notebook variable).
+mask_read <- function(nm, frame, state) {
+  if (is_reserved(nm) || nm %in% frame$defined) return(invisible())
+  state$refs <- c(state$refs, nm)
+  if (!(nm %in% state$mask_warned)) {
+    state$mask_warned <- c(state$mask_warned, nm)
+    state$diagnostics <- c(state$diagnostics, list(list(
+      level = "warning",
+      code = "ambiguous-data-mask-reference",
+      message = paste0("could be a data column or a notebook variable: ", nm),
+      symbol = nm)))
+  }
+  invisible()
+}
+
+add_block <- function(state, symbol, message) {
+  state$diagnostics <- c(state$diagnostics, list(list(
+    level = "error", code = "dynamic-dependency",
+    message = message, symbol = symbol)))
+  invisible()
+}
+
+# Walk one expression in evaluation order. Mutates `frame$defined` (direct
+# sequential definitions) and `state`; returns the names this subtree
+# DEFINITELY adds to the frame (used by if/switch intersections).
+walk_expr <- function(node, frame, ctx, state) {
+  if (is.symbol(node)) {
+    nm <- as.character(node)
+    if (ctx$mask > 0L) {
+      mask_read(nm, frame, state)
+    } else {
+      record_read(nm, frame, ctx, state)
+    }
+    return(character())
+  }
+  if (!is.call(node) || identical(node, quote(expr = ))) {
+    return(character())
+  }
 
   head <- node[[1L]]
-  head_name <- if (is.symbol(head)) as.character(head) else ""
+  hn <- if (is.symbol(head)) as.character(head) else ""
+  if (hn %in% c("::", ":::")) return(character())  # bare pkg::fn is inert
 
-  if (head_name %in% c("<-", "=", "<<-", "->", "->>")) {
-    if (head_name %in% c("<-", "=", "<<-")) {
-      value <- node[[3L]]
-      target <- node[[2L]]
-    } else {
-      value <- node[[2L]]
-      target <- node[[3L]]
-    }
-    # A function RHS may refer to its own name (recursion): the assignment
-    # name is a local inside that closure only.
-    nm <- lhs_def_root(target)
-    extra <- character()
-    if (length(nm) && nzchar(nm) && !is_reserved(nm) &&
-        is.call(value) && identical(as.character(value[[1L]]), "function")) {
-      extra <- nm
-    }
-    scan_expr(value, c(locals, extra), state, in_fn)
-    # `<<-`: the target is a nonlocal reference when the scan is deferred
-    # (function body); at top level it is a definition, not a read.
-    if (head_name %in% c("<<-", "->>")) {
-      if (in_fn) scan_expr(target, locals, state, in_fn)
-    }
-    scan_lhs_reads(target, locals, state, in_fn)
-    if (!in_fn) define_lhs(target, state)
-    return(invisible())
+  q <- qualified_name(node)
+  if (!is.null(q$name)) {
+    return(walk_qualified(node, q$name, frame, ctx, state))
   }
 
-  if (head_name == "function") {
-    # The closure's own scope: formals, formal defaults and every `<-`
-    # assignment in the body are local. `<<-`/`->>` targets are NOT local
-    # (they reach enclosing frames) and are scanned as nonlocal references.
-    f_locals <- unique(c(
-      function_args(node[[2L]]),
-      body_assigns(node[[3L]])
-    ))
-    body_locals <- c(f_locals, locals)
-    scan_expr(node[[3L]], body_locals, state, in_fn = TRUE)
-    # Formal defaults are deferred and see all formals as local.
-    formals <- node[[2L]]
-    if (is.pairlist(formals)) {
-      fml <- as.list(formals)  # missing defaults become empty symbols
-      for (nm in names(fml)) {
-        # Extract inline: assigning the empty symbol to a variable would
-        # turn it into a missing-argument error on later use.
-        if (!identical(fml[[nm]], quote(expr = )) && !is.null(fml[[nm]])) {
-          scan_expr(fml[[nm]], body_locals, state, in_fn = TRUE)
-        }
+  if (hn %in% c("<-", "=", "->", "->>", "<<-")) {
+    return(walk_assignment(node, hn, frame, ctx, state))
+  }
+  if (hn == "function") {
+    walk_function(node, frame, ctx, state, "")
+    return(character())
+  }
+  if (hn %in% QUOTE_OPS) return(character())
+  if (hn == "local") {
+    lframe <- new_frame(frame$defined, "local")
+    if (length(node) >= 2L && !is.null(node[[2L]])) {
+      walk_expr(node[[2L]], lframe, ctx, state)
+    }
+    for (j in seq_along(node)[-(1:2)]) {
+      if (!is.null(node[[j]])) walk_expr(node[[j]], frame, ctx, state)
+    }
+    return(character())
+  }
+  if (hn == "substitute") {
+    for (j in seq_along(node)[-(1:2)]) {
+      if (!is.null(node[[j]])) walk_lazy_arg(node[[j]], frame, ctx, state)
+    }
+    return(character())
+  }
+  if (hn == "{") {
+    out <- character()
+    for (j in seq_along(node)[-1L]) {
+      if (is.null(node[[j]])) next
+      out <- c(out, walk_expr(node[[j]], frame, ctx, state))
+    }
+    return(unique(out))
+  }
+  if (hn == "if") {
+    walk_expr(node[[2L]], frame, ctx, state)
+    then_def <- walk_expr(node[[3L]], new_frame(frame$defined, frame$kind),
+                          ctx, state)
+    else_def <- if (length(node) >= 4L && !is.null(node[[4L]])) {
+      walk_expr(node[[4L]], new_frame(frame$defined, frame$kind), ctx, state)
+    } else character()
+    common <- intersect(then_def, else_def)
+    for (nm in common) define_name(nm, frame)
+    return(common)
+  }
+  if (hn == "for") {
+    walk_expr(node[[3L]], frame, ctx, state)
+    ivar <- as.character(node[[2L]])
+    if (length(ivar) && !is_reserved(ivar)) define_name(ivar, frame)
+    # body definitions are never definitely available afterwards
+    walk_expr(node[[4L]], new_frame(frame$defined, frame$kind), ctx, state)
+    return(if (length(ivar) && !is_reserved(ivar)) ivar else character())
+  }
+  if (hn == "while") {
+    walk_expr(node[[2L]], frame, ctx, state)
+    walk_expr(node[[3L]], new_frame(frame$defined, frame$kind), ctx, state)
+    return(character())
+  }
+  if (hn == "repeat") {
+    walk_expr(node[[2L]], new_frame(frame$defined, frame$kind), ctx, state)
+    return(character())
+  }
+  if (hn %in% c("return")) {
+    for (j in seq_along(node)[-1L]) {
+      if (!is.null(node[[j]])) walk_expr(node[[j]], frame, ctx, state)
+    }
+    return(character())
+  }
+  if (hn == "switch") {
+    walk_expr(node[[2L]], frame, ctx, state)
+    common <- character()
+    if (length(node) >= 3L) {
+      common <- NULL
+      for (j in 3:length(node)) {
+        d <- walk_expr(node[[j]], new_frame(frame$defined, frame$kind),
+                       ctx, state)
+        common <- if (is.null(common)) d else intersect(common, d)
+      }
+      if (is.null(common)) common <- character()
+    }
+    for (nm in common) define_name(nm, frame)
+    return(common)
+  }
+  if (hn == "~") {
+    mctx <- ctx
+    mctx$mask <- ctx$mask + 1L
+    for (j in seq_along(node)[-1L]) {
+      if (!is.null(node[[j]])) walk_expr(node[[j]], frame, mctx, state)
+    }
+    return(character())
+  }
+  if (hn %in% AES_VERBS) {
+    mctx <- ctx
+    mctx$mask <- ctx$mask + 1L
+    for (j in seq_along(node)[-1L]) {
+      if (!is.null(node[[j]])) walk_expr(node[[j]], frame, mctx, state)
+    }
+    return(character())
+  }
+  if (hn %in% MASK_VERBS) {
+    mctx <- ctx
+    mctx$mask <- ctx$mask + 1L
+    for (j in seq_along(node)[-1L]) {
+      if (j == 2L) {
+        walk_lazy_arg(node[[j]], frame, ctx, state)   # the data argument
+      } else if (!is.null(node[[j]])) {
+        walk_lazy_arg(node[[j]], frame, mctx, state)
       }
     }
-    return(invisible())
+    return(character())
+  }
+  if (hn %in% BLOCKED_DYNAMIC) {
+    return(walk_blocked(node, hn, frame, ctx, state))
+  }
+  if (hn %in% c("library", "require")) {
+    if (!ctx$deferred) state$barrier <- TRUE
+    # arg 1 is the package name under NSE, never a notebook reference
+    for (j in seq_along(node)[-(1:2)]) {
+      if (!is.null(node[[j]])) walk_lazy_arg(node[[j]], frame, ctx, state)
+    }
+    return(character())
+  }
+  if (hn %in% c("[", "[[")) {
+    for (j in seq_along(node)[-1L]) {
+      if (!is.null(node[[j]])) walk_expr(node[[j]], frame, ctx, state)
+    }
+    return(character())
+  }
+  if (hn %in% c("$", "@")) {
+    obj <- node[[2L]]
+    if (is.symbol(obj) && as.character(obj) == ".data") {
+      # data-column pronoun: not a notebook reference
+    } else if (is.symbol(obj) && as.character(obj) == ".env") {
+      elem <- node[[3L]]
+      if (is.symbol(elem)) {
+        # unambiguous notebook reference (never an ambiguous-mask warning)
+        record_read(as.character(elem), frame, ctx, state)
+      }
+    } else {
+      walk_expr(obj, frame, ctx, state)  # element name is static
+    }
+    return(character())
+  }
+  if (hn == "|>") {
+    for (j in seq_along(node)[-1L]) {
+      if (!is.null(node[[j]])) walk_expr(node[[j]], frame, ctx, state)
+    }
+    return(character())
   }
 
-  if (head_name %in% c("::", ":::")) {
-    # pkg::fun — package name is not a notebook variable; skip it.
-    return(invisible())
+  # Default: an ordinary call. The head is a reference unless it is a bare
+  # operator or a non-symbol call head (e.g. `ui$slider(...)`), in which
+  # case the head expression itself is walked; every argument is lazily
+  # evaluated (isolated frame).
+  if (!(hn %in% OPERATORS)) {
+    if (nzchar(hn)) {
+      record_read(hn, frame, ctx, state)
+    } else {
+      walk_expr(node[[1L]], frame, ctx, state)
+    }
   }
-
-  if (head_name %in% c("$", "@")) {
-    # x$y / x@y — the object is a reference; the element name is not.
-    scan_expr(node[[2L]], locals, state, in_fn)
-    return(invisible())
+  for (j in seq_along(node)[-1L]) {
+    if (!is.null(node[[j]])) walk_lazy_arg(node[[j]], frame, ctx, state)
   }
+  character()
+}
 
-  if (head_name %in% c("[[", "[")) {
-    # x[i] / x[[i]] — object and index are references (index may be a name).
-    for (j in seq_along(node)[-1]) scan_expr(node[[j]], locals, state, in_fn)
-    return(invisible())
+# A namespace-qualified call `pkg::fn(...)`: fn belongs to the package, so
+# the head is never a notebook reference; dispatch on fn's role.
+walk_qualified <- function(node, name, frame, ctx, state) {
+  if (name %in% c(MASK_VERBS, AES_VERBS)) {
+    mctx <- ctx
+    mctx$mask <- ctx$mask + 1L
+    if (name %in% AES_VERBS) {
+      for (j in seq_along(node)[-1L]) {
+        if (!is.null(node[[j]])) walk_lazy_arg(node[[j]], frame, mctx, state)
+      }
+    } else {
+      for (j in seq_along(node)[-1L]) {
+        if (j == 2L) walk_lazy_arg(node[[j]], frame, ctx, state)
+        else if (!is.null(node[[j]])) walk_lazy_arg(node[[j]], frame, mctx, state)
+      }
+    }
+    return(character())
   }
-
-  if (head_name %in% c("|>")) {
-    # native pipe: both sides are eager references.
-    for (j in seq_along(node)[-1]) scan_expr(node[[j]], locals, state, in_fn)
-    return(invisible())
+  if (name %in% BLOCKED_DYNAMIC) {
+    return(walk_blocked(node, name, frame, ctx, state))
   }
-
-  if (head_name %in% c("~", "formula")) {
-    for (j in seq_along(node)[-1]) scan_expr(node[[j]], locals, state, in_fn)
-    return(invisible())
+  if (name %in% c("library", "require")) {
+    if (!ctx$deferred) state$barrier <- TRUE
+    for (j in seq_along(node)[-(1:2)]) {
+      if (!is.null(node[[j]])) walk_lazy_arg(node[[j]], frame, ctx, state)
+    }
+    return(character())
   }
-
-  if (head_name == "for") {
-    # for (var in seq) body — var is local; seq and body are references.
-    varname <- as.character(node[[2L]])
-    scan_expr(node[[3L]], c(varname, locals), state, in_fn)
-    scan_expr(node[[4L]], locals, state, in_fn)
-    return(invisible())
+  for (j in seq_along(node)[-1L]) {
+    if (!is.null(node[[j]])) walk_lazy_arg(node[[j]], frame, ctx, state)
   }
+  character()
+}
 
-  if (head_name %in% c("while", "if", "repeat", "return")) {
-    for (j in seq_along(node)[-1]) scan_expr(node[[j]], locals, state, in_fn)
-    return(invisible())
+# Superassignment never creates a binding in the current environment and is
+# a blocking dynamic mutation.
+walk_assignment <- function(node, hn, frame, ctx, state) {
+  right <- hn %in% c("->", "->>")
+  if (right) {
+    value <- node[[2L]]
+    target <- node[[3L]]
+  } else {
+    target <- node[[2L]]
+    value <- node[[3L]]
   }
+  if (hn %in% c("<<-", "->>")) {
+    r <- lhs_root_name(target)
+    add_block(state, if (length(r) && nzchar(r)) r else NULL,
+              "superassignment (<<- / ->>) cannot be analysed safely")
+    return(character())
+  }
+  if (is.call(value) && is.symbol(value[[1L]]) &&
+      as.character(value[[1L]]) == "function") {
+    r <- lhs_root_name(target)
+    recname <- if (length(r) && nzchar(r) && !is_reserved(r)) r else ""
+    walk_function(value, frame, ctx, state, recname)
+  } else {
+    walk_expr(value, frame, ctx, state)
+  }
+  # compound assignment targets read their prior root value, the replacement
+  # function, and any indices/arguments before defining the root
+  if (is.call(target)) walk_expr(target, frame, ctx, state)
+  r <- lhs_root_name(target)
+  if (is.null(r)) {
+    add_block(state, NULL,
+              "compound assignment with no statically identifiable root")
+    return(character())
+  }
+  if (is_reserved(r) || ctx$mask > 0L) return(character())
+  define_name(r, frame)
+  r
+}
 
-  # Default: a normal call. The function head is a reference (e.g. `filter`,
-  # `ggplot`), and so are all arguments. The head may be a composite
-  # expression (e.g. `pkg$fun`), which is scanned like any read.
-  scan_expr(head, locals, state, in_fn)
-  for (j in seq_along(node)[-1]) scan_expr(node[[j]], locals, state, in_fn)
+# A function definition: formals start local, defaults are scanned as
+# deferred expressions with the formals and lexical parents in scope, and
+# the body accumulates definitely-local names in evaluation order. Nested
+# closures receive the enclosing function's definitely-local set as lexical
+# parents. No body assignment becomes a notebook definition.
+walk_function <- function(node, frame, ctx, state, recname = "") {
+  formals <- node[[2L]]
+  body <- node[[3L]]
+  fnames <- names(formals)
+  fnames <- fnames[!(fnames %in% c("", "..."))]
+  base_def <- unique(c(frame$defined, fnames,
+                       if (nzchar(recname)) recname else character()))
+  fctx <- ctx
+  fctx$deferred <- TRUE
+  if (is.pairlist(formals)) {
+    fml <- as.list(formals)
+    for (j in seq_along(fml)) {
+      # compare before binding: assigning the empty symbol would make the
+      # local itself a missing argument
+      if (identical(fml[[j]], quote(expr = ))) next
+      d <- fml[[j]]
+      if (!is.null(d)) walk_expr(d, new_frame(base_def, "fn"), fctx, state)
+    }
+  }
+  walk_expr(body, new_frame(base_def, "fn"), fctx, state)
   invisible()
 }
 
-# Eager reads an assignment target performs: bare `x <- v` reads nothing;
-# `x[i] <- v`, `x[[i]] <- v`, `x$y <- v` and `x@y <- v` evaluate the root
-# object and the subscripts before assignment.
-scan_lhs_reads <- function(lhs, locals, state, in_fn) {
-  if (!is.call(lhs) || length(lhs) < 2L) return(invisible())
-  h <- as.character(lhs[[1L]])
-  if (!(h %in% c("$", "@", "[[", "["))) return(invisible())
-  scan_expr(lhs[[2L]], locals, state, in_fn)          # root object
-  if (h %in% c("[", "[[")) {
-    for (j in 3:length(lhs)) scan_expr(lhs[[j]], locals, state, in_fn)
-  }
-  invisible()
-}
-
-# Names assigned anywhere in a function body (including inside if/for/while
-# and braced blocks, but NOT inside nested function definitions whose scope
-# is their own). `<<-` and `->>` targets are excluded: they reach outside
-# the closure and are scanned as nonlocal references instead.
-body_assigns <- function(node) {
-  out <- character()
-  collect <- function(n) {
-    if (!is.call(n)) return(invisible())
-    h <- as.character(n[[1L]])
-    if (h == "function") return(invisible())  # nested closure: own scope
-    if (h %in% c("<-", "=", "->")) {
-      lhs <- if (h == "->") n[[3L]] else n[[2L]]
-      nm <- lhs_def_root(lhs)
-      if (length(nm) && nzchar(nm) && !is_reserved(nm)) out <<- c(out, nm)
+# Blocked dynamic operations, with support for literal lookup/do.call names.
+walk_blocked <- function(node, name, frame, ctx, state) {
+  if (name %in% c("get", "get0", "mget", "exists", "dynGet") &&
+      length(node) >= 2L && !is.null(node[[2L]])) {
+    lit <- literal_name_of(node[[2L]], string_only = TRUE)
+    if (!is.null(lit)) {
+      record_read(lit, frame, ctx, state)
+      for (j in seq_along(node)[-(1:2)]) {
+        if (!is.null(node[[j]])) walk_lazy_arg(node[[j]], frame, ctx, state)
+      }
+      return(character())
     }
-    if (h == "for" && length(n) >= 2L) {
-      vn <- as.character(n[[2L]])
-      if (length(vn) && !is_reserved(vn)) out <<- c(out, vn)
+  }
+  if (name == "do.call" && length(node) >= 2L && !is.null(node[[2L]])) {
+    lit <- literal_name_of(node[[2L]])
+    if (!is.null(lit)) {
+      if (lit %in% BLOCKED_DYNAMIC) {
+        add_block(state, lit,
+                  paste0("non-literal or blocked target in do.call: ", lit))
+        return(character())
+      }
+      if (lit %in% c("library", "require")) {
+        if (!ctx$deferred) state$barrier <- TRUE
+        for (j in seq_along(node)[-(1:2)]) {
+          if (!is.null(node[[j]])) walk_lazy_arg(node[[j]], frame, ctx, state)
+        }
+        return(character())
+      }
+      # ordinary literal do.call: the target is a function reference
+      record_read(lit, frame, ctx, state)
+      for (j in seq_along(node)[-(1:2)]) {
+        if (!is.null(node[[j]])) walk_lazy_arg(node[[j]], frame, ctx, state)
+      }
+      return(character())
     }
-    for (j in seq_along(n)[-1]) {
-      if (!is.null(n[[j]])) collect(n[[j]])
-    }
-    invisible()
   }
-  collect(node)
-  out
+  add_block(state, name,
+            paste0(name, "() cannot be analysed safely"))
+  character()
 }
 
-# Capture a definition name from an assignment LHS, handling x, x[i],
-# x$y, x[[i]] (the root object name is what's defined).
-define_lhs <- function(lhs, state) {
-  nm <- lhs_def_root(lhs)
-  if (length(nm) && nzchar(nm) && !is_reserved(nm)) {
-    state$defined_so_far <- c(state$defined_so_far, nm)
-  }
-}
-
-lhs_def_root <- function(lhs) {
-  while (is.call(lhs) && length(lhs) >= 2L) {
-    h <- as.character(lhs[[1L]])
-    if (h %in% c("[", "[[", "$", "@")) lhs <- lhs[[2L]]
-    else break
-  }
-  if (is.symbol(lhs)) as.character(lhs) else character(0)
-}
-
-function_args <- function(formals) {
-  # formals is a pairlist; names are the argument names.
-  argn <- names(formals)
-  argn[!(argn %in% c("", "..."))]
-}
 # ---------------------------------------------------------------------------
 # Dependency DAG
 # ---------------------------------------------------------------------------
 
 build_dag <- function(cells) {
-  # cells: list of cells with $id and analyzed defs/refs ($defs, $refs,
-  # $self_refs). Returns list(nodes, edges, duplicates, cycles, error).
+  # cells: list of cells with $id, $type, analyzed $defs/$refs/$self_refs,
+  # and $barrier. Returns list(nodes, edges, duplicates, cycles, error).
   n <- length(cells)
   if (n == 0L) {
     return(list(nodes = list(), edges = list(), duplicates = list(),
                 cycles = list(), error = NULL))
   }
-
   ids <- vapply(cells, function(c) c$id, "")
   defof <- new.env(parent = emptyenv())  # name -> character ids defining it
-  refs <- vector("list", n)
-  names(refs) <- ids
+  barrier_at <- which(vapply(cells, function(c) isTRUE(c$barrier), FALSE))
+
+  edges <- vector("list", n)
+  names(edges) <- ids
+  for (i in seq_along(cells)) edges[[ids[[i]]]] <- character()
 
   for (i in seq_along(cells)) {
     c <- cells[[i]]
-    refs[[c$id]] <- c$refs %||% character()
-    for (d in c$defs) {
-      defof[[d]] <- c(defof[[d]], c$id)
-    }
+    for (d in c$defs) defof[[d]] <- c(defof[[d]], c$id)
   }
 
-  # Edge A -> B when B references a name A defines.
-  edges <- vector("list", n)
-  names(edges) <- ids
+  # Edge A -> B when B references a name A defines; plus each cell's own
+  # self references (read-before-define) as a self-loop.
   for (i in seq_along(cells)) {
     ci <- cells[[i]]
     deps <- character()
@@ -319,32 +652,38 @@ build_dag <- function(cells) {
       if (length(producers)) deps <- c(deps, producers)
     }
     deps <- unique(setdiff(deps, ci$id))
-    # A cell that reads a name before defining it depends on its own prior
-    # value (`x <- x + 1`): a self-loop marks it stale on itself.
-    if (length(ci$self_refs %||% character())) deps <- c(deps, ci$id)
+    if (length(ci$self_refs)) deps <- c(deps, ci$id)
     edges[[ci$id]] <- deps
   }
 
-  # Duplicate/contradictory definitions: a name defined by >1 cell.
+  # Package-attach barriers order every later code cell after the barrier:
+  # a successful barrier run invalidates/reruns code whose lookup can change.
+  for (i in barrier_at) {
+    for (j in seq_len(n)) {
+      if (j > i && identical(cells[[j]]$type, "code")) {
+        edges[[cells[[j]]$id]] <- c(edges[[cells[[j]]$id]], cells[[i]]$id)
+      }
+    }
+  }
+  for (i in seq_along(cells)) edges[[ids[[i]]]] <- unique(edges[[ids[[i]]]])
+
+  # Contradictory definitions: a name defined by >1 cell.
   duplicates <- list()
-  nm_names <- ls(defof, all.names = TRUE)
-  for (nm in nm_names) {
-    if (length(defof[[nm]]) > 1L) duplicates[[nm]] <- defof[[nm]]
+  for (nm in ls(defof, all.names = TRUE)) {
+    defs <- defof[[nm]]
+    if (length(unique(defs)) > 1L) duplicates[[nm]] <- unique(defs)
   }
 
   cycles <- detect_cycles(edges, ids)
-
   list(nodes = ids, edges = edges, duplicates = duplicates,
        cycles = cycles, error = NULL)
 }
 
-`%||%` <- function(a, b) if (is.null(a)) b else a
-
 # Topological order of cell execution: a cell before its dependents.
 # Repeatedly emit every cell whose remaining dependencies are already
-# emitted (Kahn's algorithm); deterministic in input order.
-# Returns a character vector, or NULL if the graph has a cycle (including
-# self-loops, whose cells can never satisfy their own dependency).
+# emitted (Kahn's algorithm); deterministic in input order. Returns a
+# character vector, or NULL when the graph has a cycle (including self-loops,
+# whose cells can never satisfy their own dependency).
 topo_order <- function(edges, ids) {
   remaining <- ids
   order <- character()
@@ -376,8 +715,7 @@ detect_cycles <- function(edges, ids) {
     low[[v]] <<- counter
     stack <<- c(stack, v)
     on_stack[[v]] <<- TRUE
-    ws <- edges[[v]]
-    for (w in ws) {
+    for (w in edges[[v]]) {
       if (is.na(idx[[w]])) {
         visit(w)
         low[[v]] <<- min(low[[v]], low[[w]])
@@ -394,7 +732,7 @@ detect_cycles <- function(edges, ids) {
         comp <- c(comp, w)
         if (identical(w, v)) break
       }
-      self_loop <- length(comp) == 1L && v %in% (edges[[v]] %||% character())
+      self_loop <- length(comp) == 1L && v %in% edges[[v]]
       if (length(comp) > 1L || self_loop) members <<- c(members, comp)
     }
     invisible()
