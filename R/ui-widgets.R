@@ -1,120 +1,225 @@
-# alder `ui$` widgets (ADR 0003): an S3 proxy that IS its value.
+# alder `ui$` widgets (ADR 0003): plain classed lists with explicit `$value`.
 #
-# `n <- ui$slider(10, 1000)` binds `n` to a proxy object carrying the current
-# value. S3 methods (arithmetic, comparison, coercion, subsetting, aggregation)
-# make the proxy behave as the underlying value in ordinary R code, plots, and
-# tidy-eval predicates — no explicit unwrap, no source rewriting. In the UI the
-# proxy renders as an interactive control; setting its value propagates to the
-# notebook and invalidates dependents (handled by the server, not here).
+# A widget is not interchangeable with its value: notebook code reads the
+# current value explicitly (`n$value`), and the web UI renders an
+# interactive control for it. Values are validated eagerly at construction
+# and re-validated on every worker set_widget before assignment.
+#
+# R strings cannot reliably carry embedded NULs (jsonlite rejects \u0000 at
+# the JSON boundary), so embedded-NUL rejection happens at the raw-input
+# boundaries (read_json_body / the worker request loop / read_notebook),
+# not inside this module. UTF-8 validity is still checked here.
+#
+# This module is mirrored byte-for-byte into inst/worker/ui-widgets.R
+# (ADR 0007). It must stay self-contained: base R only, no package helpers,
+# no `%||%`.
 
-`%||%` <- function(a, b) if (is.null(a)) b else a
+is_widget <- function(x) inherits(x, "alder_widget")
 
-# `.Generic` is injected by the S3 group-generic dispatch machinery (Writing
-# R Extensions, Ops/Math/Summary sections); declare it so static checks
-# treat it as provided.
-utils::globalVariables(".Generic")
+# Read the current value without dispatching into `$`.
+widget_value <- function(x) .subset2(x, "value")
 
-is_widget <- function(x) inherits(x, "alder_widget_proxy")
+# ---------------------------------------------------------------------------
+# Scalar-field validation
+# ---------------------------------------------------------------------------
 
-# Read the proxy's current value without going through S3 dispatch (which
-# would recurse back into `[[.alder_widget_proxy`).
-widget_value <- function(x) .subset2(x, ".value")
-as_widget_value <- function(x) if (is_widget(x)) widget_value(x) else x
+require_scalar_character <- function(x, what, null_ok = FALSE) {
+  if (is.null(x)) {
+    if (null_ok) return(invisible(NULL))
+    stop(what, " must be a scalar character string", call. = FALSE)
+  }
+  if (!is.character(x) || length(x) != 1L || is.na(x)) {
+    stop(what, " must be a scalar non-missing character string", call. = FALSE)
+  }
+  if (!validUTF8(x)) stop(what, " must be valid UTF-8", call. = FALSE)
+  invisible(x)
+}
 
-# Generic proxy constructor.
-proxy <- function(kind, value, ..., label = NULL) {
-  structure(
-    c(list(.kind = kind, .label = label %||% "", .value = value), list(...)),
-    class = "alder_widget_proxy"
+require_scalar_logical <- function(x, what) {
+  if (!is.logical(x) || length(x) != 1L || is.na(x)) {
+    stop(what, " must be a scalar non-missing logical", call. = FALSE)
+  }
+  invisible(x)
+}
+
+# Finite scalar number, normalized to unclassed double.
+require_finite_double <- function(x, what, null_ok = FALSE) {
+  if (is.null(x)) {
+    if (null_ok) return(invisible(NULL))
+    stop(what, " must be a finite scalar number", call. = FALSE)
+  }
+  if (!is.numeric(x) || length(x) != 1L || is.na(x) || !is.finite(as.double(x))) {
+    stop(what, " must be a finite scalar number", call. = FALSE)
+  }
+  as.double(x)
+}
+
+require_positive_step <- function(step) {
+  step <- require_finite_double(step, "`step`")
+  if (step <= 0) stop("`step` must be positive", call. = FALSE)
+  step
+}
+
+# (value - base) / step must be an integer within floating-point tolerance.
+check_step_lattice <- function(value, base, step, what) {
+  v <- (value - base) / step
+  if (!isTRUE(all.equal(v, round(v), tolerance = 1e-9))) {
+    stop(what, " must lie on the step lattice from the base value", call. = FALSE)
+  }
+  invisible(NULL)
+}
+
+validate_choices <- function(choices) {
+  if (is.null(choices) || length(choices) == 0L) {
+    stop("`choices` must be a non-empty vector", call. = FALSE)
+  }
+  if (!is.null(names(choices)) || is.object(choices)) {
+    stop("`choices` must be an unnamed, unclassed vector", call. = FALSE)
+  }
+  if (!(is.logical(choices) || is.integer(choices) || is.double(choices) ||
+        is.character(choices))) {
+    stop("`choices` must be a logical, integer, double, or character vector",
+         call. = FALSE)
+  }
+  if (anyNA(choices)) stop("`choices` must not contain missing values", call. = FALSE)
+  if (any(duplicated(choices))) stop("`choices` must be unique", call. = FALSE)
+  if (is.numeric(choices) && any(!is.finite(choices))) {
+    stop("numeric `choices` must be finite", call. = FALSE)
+  }
+  if (is.character(choices)) {
+    for (ch in choices) require_scalar_character(ch, "every character `choice`")
+  }
+  choices
+}
+
+# ---------------------------------------------------------------------------
+# Kind-specific value validation
+# ---------------------------------------------------------------------------
+
+validate_slider <- function(value, min, max, step) {
+  minim <- require_finite_double(min, "`min`")
+  maxim <- require_finite_double(max, "`max`")
+  stepv <- require_positive_step(step)
+  if (minim > maxim) stop("`min` must not exceed `max`", call. = FALSE)
+  value <- require_finite_double(value, "`value`")
+  if (value < minim || value > maxim) {
+    stop("`value` must lie between `min` and `max`", call. = FALSE)
+  }
+  check_step_lattice(value, minim, stepv, "`value`")
+  value
+}
+
+validate_number <- function(value, min, max, step) {
+  minim <- require_finite_double(min, "`min`", null_ok = TRUE)
+  maxim <- require_finite_double(max, "`max`", null_ok = TRUE)
+  stepv <- require_positive_step(step)
+  if (!is.null(minim) && !is.null(maxim) && minim > maxim) {
+    stop("`min` must not exceed `max`", call. = FALSE)
+  }
+  value <- require_finite_double(value, "`value`")
+  if (!is.null(minim) && value < minim) {
+    stop("`value` must not be below `min`", call. = FALSE)
+  }
+  if (!is.null(maxim) && value > maxim) {
+    stop("`value` must not exceed `max`", call. = FALSE)
+  }
+  base <- if (is.null(minim)) 0 else minim
+  check_step_lattice(value, base, stepv, "`value`")
+  value
+}
+
+validate_dropdown <- function(value, choices) {
+  choices <- validate_choices(choices)
+  if (length(value) != 1L || is.na(value)) {
+    stop("`value` must be a non-missing scalar", call. = FALSE)
+  }
+  if (!any(vapply(choices, function(c) identical(c, value), logical(1)))) {
+    stop("`value` must be identical in type and value to one of `choices`", call. = FALSE)
+  }
+  value
+}
+
+# Validate a whole widget object (construction-time / re-validation
+# contract shared with the worker): the kind name, the label, and the value
+# against the kind-specific constraint spec must all hold.
+validate_widget <- function(x) {
+  if (!inherits(x, "alder_widget")) stop("not an alder_widget", call. = FALSE)
+  require_scalar_character(x$kind, "`kind`")
+  require_scalar_character(x$label, "`label`", null_ok = TRUE)
+  validate_widget_value(x$kind, x$value,
+    list(min = x$min, max = x$max, step = x$step, choices = x$choices))
+  invisible(x)
+}
+
+# Validate a candidate value against a widget's constraint spec. Returns the
+# normalized scalar for slider/number; for other kinds the value is returned
+# unchanged after canonical-type checks. `spec` uses min/max/step/choices.
+validate_widget_value <- function(kind, value, spec) {
+  switch(kind,
+    slider = validate_slider(value, spec$min, spec$max, spec$step),
+    number = validate_number(value, spec$min, spec$max, spec$step),
+    dropdown = validate_dropdown(value, spec$choices),
+    text_input = {
+      require_scalar_character(value, "`value`")
+      value
+    },
+    checkbox = {
+      require_scalar_logical(value, "`value`")
+      value
+    },
+    run_button = {
+      require_scalar_logical(value, "`value`")
+      value
+    },
+    stop("unknown widget kind: ", kind, call. = FALSE)
   )
 }
 
-`ui` <- list(
-  slider = function(min, max, value = min, step = 1, label = NULL)
-    proxy("slider", value, min = min, max = max, step = step, label = label),
-  dropdown = function(choices, value = choices[[1L]], label = NULL)
-    proxy("dropdown", value, choices = choices, label = label),
-  text_input = function(value = "", label = NULL)
-    proxy("text_input", value, label = label),
-  number = function(value, min = NA_real_, max = NA_real_, step = 1, label = NULL)
-    proxy("number", value, min = min, max = max, step = step, label = label),
-  button = function(label = "Run", value = 0L)
-    proxy("button", value, label = label),
-  checkbox = function(value = FALSE, label = NULL)
-    proxy("checkbox", value, label = label)
+# ---------------------------------------------------------------------------
+# Constructors
+# ---------------------------------------------------------------------------
+
+ui <- list(
+  slider = function(min, max, value = min, step = 1, label = NULL) {
+    if (!is.null(label)) require_scalar_character(label, "`label`")
+    spec <- list(min = require_finite_double(min, "`min`"),
+                 max = require_finite_double(max, "`max`"),
+                 step = require_positive_step(step))
+    val <- validate_widget_value("slider", value, spec)
+    structure(c(list(kind = "slider", label = label, value = val), spec),
+              class = "alder_widget")
+  },
+  dropdown = function(choices, value = choices[[1L]], label = NULL) {
+    if (!is.null(label)) require_scalar_character(label, "`label`")
+    spec <- list(choices = validate_choices(choices))
+    val <- validate_widget_value("dropdown", value, spec)
+    structure(c(list(kind = "dropdown", label = label, value = val), spec),
+              class = "alder_widget")
+  },
+  text_input = function(value = "", label = NULL) {
+    if (!is.null(label)) require_scalar_character(label, "`label`")
+    val <- validate_widget_value("text_input", value, list())
+    structure(list(kind = "text_input", label = label, value = val),
+              class = "alder_widget")
+  },
+  number = function(value = 0, min = NULL, max = NULL, step = 1, label = NULL) {
+    if (!is.null(label)) require_scalar_character(label, "`label`")
+    spec <- list(min = require_finite_double(min, "`min`", null_ok = TRUE),
+                 max = require_finite_double(max, "`max`", null_ok = TRUE),
+                 step = require_positive_step(step))
+    val <- validate_widget_value("number", value, spec)
+    structure(c(list(kind = "number", label = label, value = val), spec),
+              class = "alder_widget")
+  },
+  run_button = function(label = "Run") {
+    if (!is.null(label)) require_scalar_character(label, "`label`")
+    structure(list(kind = "run_button", label = label, value = FALSE),
+              class = "alder_widget")
+  },
+  checkbox = function(value = FALSE, label = NULL) {
+    if (!is.null(label)) require_scalar_character(label, "`label`")
+    val <- validate_widget_value("checkbox", value, list())
+    structure(list(kind = "checkbox", label = label, value = val),
+              class = "alder_widget")
+  }
 )
-
-# -- Coercion ---------------------------------------------------------------
-as.numeric.alder_widget_proxy <- function(x, ...) as.numeric(widget_value(x))
-as.integer.alder_widget_proxy <- function(x, ...) as.integer(widget_value(x))
-as.character.alder_widget_proxy <- function(x, ...) as.character(widget_value(x))
-as.logical.alder_widget_proxy <- function(x, ...) as.logical(widget_value(x))
-as.double.alder_widget_proxy <- function(x, ...) as.double(widget_value(x))
-
-# -- Ops (arithmetic & comparison) ------------------------------------------
-Ops.alder_widget_proxy <- function(e1, e2) {
-  v1 <- as_widget_value(e1)
-  missing_e2 <- missing(e2)   # literal NULL stays a binary operand
-  v2 <- if (missing_e2) NULL else as_widget_value(e2)
-  base_op <- get(.Generic, envir = baseenv())
-  if (missing_e2) base_op(v1) else base_op(v1, v2)
-}
-
-# -- Math -------------------------------------------------------------------
-Math.alder_widget_proxy <- function(x, ...) {
-  get(.Generic, envir = baseenv())(widget_value(x), ...)
-}
-
-# -- Summary (aggregation: sum, min, max, ...) ------------------------------
-Summary.alder_widget_proxy <- function(..., na.rm = FALSE) {
-  args <- lapply(list(...), as_widget_value)
-  do.call(get(.Generic, envir = baseenv()), c(args, list(na.rm = na.rm)))
-}
-
-# `mean()` is not a Summary generic member; give the proxy its own method so
-# plain `mean(widget)` — including trim/na.rm arguments — delegates to the
-# unwrapped value.
-mean.alder_widget_proxy <- function(x, trim = 0, na.rm = FALSE, ...) {
-  mean(widget_value(x), trim = trim, na.rm = na.rm, ...)
-}
-
-# -- Subsetting -------------------------------------------------------------
-`[.alder_widget_proxy` <- function(x, i) widget_value(x)[i]
-`[[.alder_widget_proxy` <- function(x, i) widget_value(x)[[i]]
-`[<-.alder_widget_proxy` <- function(x, i, value) {
-  v <- widget_value(x)
-  v[i] <- value
-  x[[".value"]] <- v
-  x
-}
-# `$value` is the public value accessor (a widget's value in plain R code);
-# `.value` stays the protocol/internal storage field. Other names reveal the
-# control spec (.kind/.label/min/max/...); unknown names fall through to the
-# underlying value's element.
-`$.alder_widget_proxy` <- function(x, name) {
-  if (identical(name, "value")) return(widget_value(x))
-  nms <- names(unclass(x))
-  if (name %in% nms) return(.subset2(x, name))
-  widget_value(x)[[name]]
-}
-length.alder_widget_proxy <- function(x) length(widget_value(x))
-names.alder_widget_proxy <- function(x) names(widget_value(x))
-is.na.alder_widget_proxy <- function(x) is.na(widget_value(x))
-is.numeric.alder_widget_proxy <- function(x) is.numeric(widget_value(x))
-is.character.alder_widget_proxy <- function(x) is.character(widget_value(x))
-is.logical.alder_widget_proxy <- function(x) is.logical(widget_value(x))
-xtfrm.alder_widget_proxy <- function(x) xtfrm(widget_value(x))
-as.matrix.alder_widget_proxy <- function(x, ...) as.matrix(widget_value(x), ...)
-as.data.frame.alder_widget_proxy <- function(x, ...) as.data.frame(widget_value(x), ...)
-
-c.alder_widget_proxy <- function(...) {
-  args <- lapply(list(...), as_widget_value)
-  do.call(base::c, args)
-}
-
-# -- Formatting -------------------------------------------------------------
-print.alder_widget_proxy <- function(x, ...) {
-  cat("<alder widget:", .subset2(x, ".kind"), "value =", widget_value(x), ">\n")
-  invisible(x)
-}
-format.alder_widget_proxy <- function(x, ...) format(widget_value(x), ...)
