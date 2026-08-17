@@ -38,3 +38,19 @@ such client is planned now.
 - Adopting a desktop shell or an editor extension later does not change
   the notebook format, the execution engine, or the transport — it only
   starts reusing them.
+
+Clarifications required by the implementation:
+
+- **App view is output-only.** It renders Markdown, logs, visible values,
+  and widgets in notebook order and removes source textareas, cell
+  headers, empty outputs, and every editor control (add/save/delete/run/
+  runtime selector) from the active surface; it retains Stop, the status
+  region, nonempty stdout/message/error logs as output, and an accessible
+  Edit-mode link. Rendering Markdown is a first-class app-view behavior.
+- **App view always uses automatic widget reactivity.** A widget
+  interaction in app view automatically executes referencing cells and
+  their descendants, regardless of the editor's runtime mode; the defining
+  cell never reruns on its own widget change.
+- **An app URL never triggers code.** Serving `/?view=app` is read-only;
+  it never auto-runs cells (startup execution is governed only by the
+  Session's `run_on_startup` setting, ADR 0002).

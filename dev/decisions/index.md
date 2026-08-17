@@ -7,8 +7,8 @@ Only **accepted** decisions are ADRs. Undecided questions — including proposed
 | # | Status | Title |
 |---|--------|-------|
 | 0001 | Accepted | Notebook file format: plain-text `.R` with `# %%` cells |
-| 0002 | Accepted | Cell rerun model: manual run with stale marking |
-| 0003 | Accepted | Widget values: S3 proxy that is its value |
+| 0002 | Accepted | Reactive execution: automatic by default, optional lazy mode |
+| 0003 | Accepted | Widget values: explicit `$value` |
 | 0004 | Accepted | Execution engine: one serial R worker per notebook |
 | 0005 | Accepted | marimo is the behavioral reference; not Reactor |
 | 0006 | Accepted | Process transport: processx worker + `later` event loop |

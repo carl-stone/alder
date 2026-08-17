@@ -41,9 +41,13 @@ Cells are statically analyzed to determine top-level definitions and references 
 The runtime should:
 
 - execute cells in dependency order;
-- automatically rerun or mark stale downstream cells when dependencies change;
+- rerun or mark stale downstream cells automatically: running a cell is the
+  change boundary, after which all descendants rerun by default
+  (`automatic` execution mode), with an optional `lazy` mode that leaves
+  descendants stale and runs stale ancestors before a requested cell;
 - remove values whose definitions disappear;
-- prevent contradictory definitions and cyclic dependencies;
+- prevent contradictory definitions and cyclic dependencies (globals are
+  unique);
 - distinguish notebook globals from function-local names and data-masked expressions;
 - handle normal modern R syntax, pipes, formulas, namespaces, functions, S3/S4/R7 objects, and common tidy-evaluation patterns intelligently;
 - provide understandable diagnostics when code is too dynamic to analyze safely;
@@ -117,17 +121,24 @@ Plots should render crisply and support useful inspection/export behavior.
 
 Reactive UI values should be ordinary notebook values.
 
-Users should be able to add sliders, dropdowns, text inputs, tables, buttons, selectors, and other controls without manually constructing a Shiny-style callback graph.
-
-For example, changing:
+Users should be able to add sliders, dropdowns, text inputs, buttons,
+selectors, and other controls without manually constructing a Shiny-style
+callback graph. Widget values are explicit — a control binds as an object
+whose current value is read through `$value`:
 
 ```
 n <- ui$slider(10, 1000)
+heavy <- subset(peng, Sepal.Length >= n$value)
 ```
 
-should naturally invalidate calculations depending on `n`.
+Changing a control should naturally invalidate calculations depending on
+that widget value — rerunning its referencing cells and their descendants
+automatically, and in every app view.
 
-Any suitable notebook should be runnable as a clean interactive application with code hidden, similar to marimo app mode.
+Any suitable notebook should be runnable as a clean interactive application
+with code hidden, similar to marimo app mode: an output-only view that
+renders Markdown, logs, values, and widgets in notebook order and exposes
+no editor controls.
 
 Where useful, interoperate with Shiny rather than competing unnecessarily with it.
 

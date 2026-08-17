@@ -1,29 +1,52 @@
-# 0003 — Widget values: S3 proxy that is its value
+# 0003 — Widget values: explicit `$value`
 
 Status: Accepted  
 Date: 2026-08-16
 
 ## Context
 
-The vision requires reactive UI controls to be ordinary notebook values — `n <- ui$slider(10, 1000)` should invalidate calculations depending on `n`, with no explicit value unwrapping. Marimo achieves this by rewriting references to UI elements into value lookups and by Python's object model. R's data masking (dplyr::filter, ggplot) makes silent source rewriting fragile, because `n` resolution happens inside an evaluation environment that we do not control.
+The vision requires reactive UI controls to be ordinary notebook values —
+`n <- ui$slider(10, 1000)` should invalidate calculations depending on `n`.
+Marimo elements expose an explicit `.value` attribute, so user code reads
+`n.value`. R has no operator overloading that can make a plain scalar
+"react", so alder must choose a representation. The first implementation
+used an S3 proxy that claimed to *be* its value through coercion, Ops,
+Math/Summary, subsetting, and formatting methods; that object model fell
+short of R's semantics (internal `[[`/`attr<-` paths bypass S3 dispatch,
+tidy-eval data masks do not consistently route through it, and the
+"interchangeable with its value" claim is not true).
 
 ## Decision
 
-`ui$slider()` (and other controls) return an S3 proxy object that IS the value.
+A control is a plain classed list, class `alder_widget`, with public fields
+`kind`, `label`, `value`, and kind-specific constraint fields. The value is
+**explicit**: notebook code reads `n$value`. There is no `$ .value`
+protocol field, no S3 coercion, arithmetic, comparison, subsetting,
+formatting, or aggregation promise, and no claim that the object is
+interchangeable with its value.
 
-- The object has a `.value` field holding the current value.
-- It registers S3 methods (arithmetic, comparison, coercion `as.numeric`, `[i`, vector ops, subscripting) so that downstream code sees the underlying value when used in computations, plots, and tidy-eval predicates.
-- When shown in the notebook UI, the object renders as the interactive control instead of a plain value; user interaction updates `.value` and invalidates dependents.
-- Outside the notebook, the object is still a plain structured list with `$value` fully accessible.
+- `ui$slider(min, max, value = min, step = 1, label = NULL)` returns a
+  slider control.
+- `ui$dropdown(choices, value = choices[[1L]], label = NULL)` returns a
+  dropdown control; user code reads the selected choice through `$value`.
+- `ui$text_input(value = "", label = NULL)`, `ui$number(...)`,
+  `ui$checkbox(value = FALSE, label = NULL)` return the corresponding
+  controls.
+- `ui$run_button(label = "Run")` returns a Boolean one-shot input: it is
+  set to `TRUE` when clicked and resets to `FALSE` after its consumers
+  finish (or once, immediately, when it has no consumers).
+- `ui$button()` is removed with no alias.
 
-This is the closest native-R analogue to marimo's model: code uses the control as if it were the value, with no explicit unwrap and no fragile source rewriting.
+The widget value is exchanged over the worker/JSON protocol by explicit
+typed values; the client only ever carries a validated option index for
+dropdowns and a scalar value for other controls.
 
 ## Consequences
 
-Easier: idiomatic R usage (`df |> filter(x > n)`), no magic string rewriting, obvious fallback outside the notebook. Harder: the proxy must implement a broad, careful set of S3 dispatch to behave naturally everywhere; some R constructs that bypass methods (e.g. certain internal `[[` usage or `attr<-` paths) may see the raw object.
-
-Clarifications required by the implementation:
-
-- The public value accessor is `x$value`; the internal/protocol field stays
-  `.value`. Widget values are exchanged with the UI exclusively through
-  `.value`, and `set_widget()` mirrors the committed value back through it.
+Easier: one unambiguous data model, no silent unwrapping that can produce
+wrong results on S3-bypassing paths, explicit `n$value` reads that work
+identically inside and outside the notebook, and a small surface to
+validate. Harder: author code must write `min_wt$value` (explicit), and the
+worker must render an interactive control only when a cell's visible
+expression is a bare global name owned by that cell whose value is an
+`alder_widget`; otherwise it fails with a structured render error.

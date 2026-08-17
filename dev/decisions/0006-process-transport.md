@@ -25,18 +25,21 @@ reinventing that machine.
 
 - Spawn with `processx::process$new(stdin="|", stdout="|", stderr="|",
   supervise=TRUE)`; stdin/stdout carry a JSON-lines RPC (`eval_cell`,
-  `set_widget`, `get_value`, ping/reply); stderr is a diagnostic channel.
+  `clear_cell`, `set_widget`, `get_value`, ping/reply); stderr is a
+  diagnostic channel.
 - One `poll_cycle` callback scheduled on `later` pumps the connections
   non-blockingly on every loop turn; nothing in the browser request path
   ever blocks on the worker.
 - SIGINT via `proc$interrupt()` is the stop mechanism (worker catches
   interrupts inside cell evaluation and reports `Interrupted`; the process
   stays alive for the next cell).
-- Widget proxy module resolution is host-side: the server passes the
-  resolved `ui-widgets.R` path to the worker via `ALDER_UI_WIDGETS`
-  (cwd-independent; testing harnesses move the cwd).
-- The host also passes `ALDER_APP_DIR`; the worker keeps probe fallbacks but
-  must not rely on its own cwd.
+- The widget module resolution is host-side: the server passes the resolved
+  `ui-widgets.R` path to the worker via `ALDER_UI_WIDGETS`
+  (cwd-independent; testing harnesses move the cwd). The worker consumes
+  the `ALDER_UI_WIDGETS`/`ALDER_ARTIFACT_DIR` transport variables and
+  immediately unsets them so notebook code cannot see them.
+- The host also passes `ALDER_APP_DIR`; the worker has no cwd-dependent
+  probes.
 
 ## Consequences
 
@@ -46,13 +49,25 @@ reinventing that machine.
 - JSON-lines is trivial to replay in tests and to reimplement for future
   clients (Positron/VS Code adapter, per VISION).
 - `callr::r_session` stays a possible future swap: the seam is `Worker`
-  (R6), whose public surface (`send`, `poll`, `interrupt`, `kill`, `alive`)
-  is the only interface the session uses.
+  (R6), whose public surface (`send`, `poll`, `interrupt`, `kill`, `alive`,
+  `restart`) is the only interface the session uses.
 
 Clarifications required by the implementation:
 
-- **Protocol stdout is exclusive.** The worker's stdout carries protocol
-  JSON only; all user-code output (`cat`, prints, visible-value rendering)
-  is captured into the cell log, and `Rscript --vanilla`'s non-interactive
-  SIGINT behavior is handled by acknowledging evaluation before any
-  interrupt is sent, so Stop never kills the process.
+- **Protocol stdout is exclusive and request-scoped.** The worker's stdout
+  carries protocol JSON only. Explicit user output (`print`, `cat`,
+  warnings, messages) becomes the cell **log**; visible-value rendering is a
+  **separate output** and is never auto-printed into the log. Every
+  response echoes `req` and `cmd`; eval responses also echo `id`,
+  `revision`, and `run_id`; a worker that emits malformed JSON, a response
+  with no pending request, or a mismatched identity is treated as a
+  terminal transport failure.
+- **Ack-gated interrupt.** Eval emits one start acknowledgement, then the
+  host may send exactly one SIGINT gated on that request's ack
+  (`executing_req`, ADR 0004). A SIGINT that lands on the blocking read is
+  caught and ignored by the outer loop. A Stop arriving after a successful
+  response is too late: the success commits (ADR 0004).
+- **Worker transport failures fail closed.** If the worker dies, every
+  pending callback fires exactly once with a synthetic transport error, the
+  active cell errors, queued jobs are dropped, and a single terminal
+  `on_failure` callback drives the Session's worker-unavailable transition.
