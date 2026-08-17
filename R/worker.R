@@ -3,30 +3,27 @@
 # We spawn one Rscript per notebook and drive it over stdin/stdout JSON.
 # Responses are matched to requests by a monotonically increasing `req` id and
 # dispatched on the httpuv/later event loop (non-blocking poll), so a long cell
-# never freezes the editor. Interrupt sends SIGINT to the worker process.
+# never freezes the editor. Interrupt sends SIGINT to the worker exactly once,
+# and only after that request's start acknowledgement (ack-gated), never while
+# the worker is blocked on an idle stdin read (ADR 0004).
 #
-# Every pending request stores its callback plus the outgoing identity
-# {cmd, id, revision, run_id}; callbacks receive (context, response). When
-# the process dies, every pending callback is invoked exactly once with a
-# synthetic transport error so the session can fail closed deterministically.
+# Every pending request stores its callback plus the full outgoing identity
+# {cmd, req, id, revision, run_id, name, op_id, token}; a response is accepted
+# only when every present identity field matches exactly. Malformed JSON, a
+# response with no pending request, or a mismatched identity is a terminal
+# transport failure: we kill the worker, fail every remaining pending request,
+# and invoke the one `on_failure` callback exactly once.
 
-# Resolve the widget proxy module path (ADR 0003) from the host side.
-# Works under install, pkgload, and plain-source layouts; the worker cannot
-# rely on its own cwd (testing harnesses move it).
+# Resolve the mirrored widget module only from the installed package
+# (ADR 0007 / Plan §7): no cwd probing, no direct-source fallback.
 alder_ui_module <- function() {
-  cand <- c(
-    system.file("worker", "ui-widgets.R", package = "alder"),
-    file.path(getwd(), "inst", "worker", "ui-widgets.R"),
-    file.path(getwd(), "R", "ui-widgets.R")
-  )
-  for (p in cand) if (nzchar(p) && file.exists(p)) return(p)
-  stop("alder widget module (ui-widgets.R) not found")
+  system.file("worker", "ui-widgets.R", package = "alder", mustWork = TRUE)
 }
 
-# Spawn the worker with a validated artifact directory on the host side.
-# The worker re-validates and fails closed when the directory is absent or
-# invalid (it owns every rendered artifact under it).
-.spawn_worker <- function(worker_script, app_dir, artifact_dir) {
+# Spawn the worker process with a validated artifact directory supplied on the
+# host side; the worker re-validates and fails closed when the directory is
+# absent or invalid (it owns every rendered artifact under it).
+.spawn_worker_process <- function(worker_script, app_dir, artifact_dir) {
   if (length(artifact_dir) != 1L || is.na(artifact_dir) || !nzchar(artifact_dir)) {
     stop("artifact directory must be a single non-NA path")
   }
@@ -45,14 +42,19 @@ alder_ui_module <- function() {
            ALDER_UI_WIDGETS = alder_ui_module(),
            env)
   env <- env[!duplicated(names(env))]
-  proc <- processx::process$new(
+  processx::process$new(
     file.path(R.home("bin"), "Rscript"),
     args = c("--vanilla", worker_script),
     env = env,
     stdin = "|",
     stdout = "|", stderr = "|", supervise = TRUE
   )
-  Worker$new(proc)
+}
+
+# Spawn a fully wired Worker for a fresh notebook session.
+.spawn_worker <- function(worker_script, app_dir, artifact_dir) {
+  proc <- .spawn_worker_process(worker_script, app_dir, artifact_dir)
+  Worker$new(proc, worker_script, app_dir, artifact_dir)
 }
 
 # A Worker is a small stateful controller for one worker process.
@@ -63,45 +65,75 @@ Worker <- R6::R6Class(
     pending = NULL,     # named env: req id -> list(callback, context)
     counter = NULL,     # next req id
     poll_active = NULL,
-    executing = NULL,   # the worker acked an eval; safe to SIGINT
+    executing_req = NULL,   # req id whose start ack has been received
+    interrupt_sent = NULL,  # req id already SIGINTed (exactly once per eval)
+    failed_once = NULL,     # the terminal transport failure has fired
+    on_failure = NULL,      # one terminal callback(message)
+    worker_script = NULL,   # respawn parameters for Worker$restart()
+    app_dir = NULL,
+    artifact_dir = NULL,
 
-    initialize = function(proc) {
+    initialize = function(proc, worker_script, app_dir, artifact_dir) {
       self$proc <- proc
       self$pending <- new.env(parent = emptyenv())
       self$counter <- 1L
       self$poll_active <- FALSE
-      self$executing <- FALSE
+      self$executing_req <- NULL
+      self$interrupt_sent <- NULL
+      self$failed_once <- NULL
+      self$on_failure <- NULL
+      self$worker_script <- worker_script
+      self$app_dir <- app_dir
+      self$artifact_dir <- artifact_dir
+    },
+
+    # Register the single terminal transition: called at most once when the
+    # worker dies or sends a protocol-invalid response.
+    set_on_failure = function(callback) {
+      self$on_failure <- callback
+      invisible(self)
     },
 
     # Send a command; call `on_response(context, response)` with the parsed
-    # response. Identity context {cmd, id, revision, run_id} is captured
-    # from the outgoing message. If the process is already dead, the
-    # callback fires once, synchronously, with a synthetic transport error.
+    # response. The identity context {cmd, req, id, revision, run_id, name,
+    # op_id, token} is captured from the outgoing message. If the process is
+    # already dead, the callback fires once, synchronously, with a synthetic
+    # transport error echoing every identity field.
     send = function(cmd, ..., on_response = NULL) {
       dots <- list(...)
       req <- self$counter
       self$counter <- self$counter + 1L
-      ctx <- list(cmd = cmd, id = dots$id %||% NULL,
+      ctx <- list(cmd = cmd, req = req,
+                  id = dots$id %||% NULL,
                   revision = dots$revision %||% NULL,
-                  run_id = dots$run_id %||% NULL)
+                  run_id = dots$run_id %||% NULL,
+                  name = dots$name %||% NULL,
+                  op_id = dots$op_id %||% NULL,
+                  token = dots$token %||% NULL)
+      if (is.null(on_response)) on_response <- function(ctx, resp) invisible()
       if (!self$proc$is_alive()) {
-        if (!is.null(on_response)) {
-          on_response(ctx, list(req = req, ok = FALSE,
-                                error = list(message = "Worker exited before responding",
-                                             transport = TRUE)))
-        }
+        on_response(ctx, self$synthetic_error(ctx, "Worker exited before responding"))
         return(req)
       }
-      message <- list(req = req)
-      message[names(dots)] <- dots
+      message <- c(list(req = req), dots)
       message$cmd <- cmd
-      if (!is.null(on_response)) {
-        self$pending[[as.character(req)]] <- list(callback = on_response, context = ctx)
-      }
+      # the worker answers every command; register each request so the
+      # response is consumed (never an unsolicited line)
+      self$pending[[as.character(req)]] <- list(callback = on_response, context = ctx)
       self$proc$write_input(jsonlite::toJSON(message, auto_unbox = TRUE, null = "null"))
       self$proc$write_input("\n")
       self$ensure_polling()
       req
+    },
+
+    # A synthetic transport error echoing the request's saved identity.
+    synthetic_error = function(ctx, message) {
+      e <- list(req = ctx$req, ok = FALSE, cmd = ctx$cmd,
+                error = list(message = message, transport = TRUE))
+      for (f in c("id", "revision", "run_id", "name", "op_id", "token")) {
+        if (!is.null(ctx[[f]])) e[[f]] <- ctx[[f]]
+      }
+      e
     },
 
     ensure_polling = function() {
@@ -115,7 +147,7 @@ Worker <- R6::R6Class(
       proc <- self$proc
       if (!proc$is_alive()) {
         self$poll_active <- FALSE
-        if (length(ls(self$pending, all.names = TRUE))) self$fail_pending()
+        self$transport_error("Worker exited before responding")
         return(invisible())
       }
       out <- proc$get_output_connection()
@@ -129,7 +161,8 @@ Worker <- R6::R6Class(
         el <- tryCatch(proc$read_error_lines(100), error = function(e) character())
         for (ln in el) if (nzchar(ln)) message("[worker stderr] ", ln)
       }
-      if (length_pending(self$pending) || proc$is_alive()) {
+      # poll while requests are outstanding; idle polling is unnecessary
+      if (length(ls(self$pending, all.names = TRUE))) {
         later::later(self$poll_cycle, 0.02)
       } else {
         self$poll_active <- FALSE
@@ -137,39 +170,69 @@ Worker <- R6::R6Class(
       invisible()
     },
 
+    # Parse one stdout protocol line. Any malformed or unidentifiable input
+    # is a terminal failure: nothing may be silently ignored.
     handle_line = function(line) {
       resp <- tryCatch(jsonlite::fromJSON(line, simplifyVector = FALSE),
                        error = function(e) NULL)
-      if (is.null(resp)) return(invisible())
-      rid <- as.character(resp$req %||% NULL)
-      entry <- NULL
+      if (is.null(resp) || !is.list(resp)) {
+        self$transport_error("invalid worker response")
+        return(invisible())
+      }
       if (!is.null(resp$ack)) {
-        # The worker has begun evaluating the request: the only SIGINT-safe
-        # window is now (a signal on the blocking read would kill it).
-        if (length(rid) && nzchar(rid) && !is.null(self$pending[[rid]])) {
-          self$executing <- TRUE
+        rid <- as.character(resp$req %||% NULL)
+        if (identical(as.character(resp$ack), "started") &&
+            length(rid) && nzchar(rid) &&
+            identical(as.character(resp$cmd), "eval_cell") &&
+            !is.null(self$pending[[rid]])) {
+          # begin the ack-gated SIGINT window for this request
+          self$executing_req <- rid
+        } else {
+          self$transport_error("invalid worker response")
         }
         return(invisible())
       }
-      if (length(rid)) {
-        entry <- self$pending[[rid]]
-        if (!is.null(entry)) rm(list = rid, envir = self$pending)
+      rid <- as.character(resp$req %||% NULL)
+      entry <- NULL
+      if (length(rid) && nzchar(rid)) entry <- self$pending[[rid]]
+      if (is.null(entry) || !self$identity_matches(entry$context, resp)) {
+        self$transport_error("invalid worker response")
+        return(invisible())
       }
-      self$executing <- FALSE
-      if (!is.null(entry)) {
-        tryCatch(
-          entry$callback(entry$context, resp),
-          error = function(e) message("worker callback error: ", conditionMessage(e))
-        )
-      }
+      rm(list = rid, envir = self$pending)
+      self$executing_req <- NULL
+      self$interrupt_sent <- NULL
+      self$invoke_callback(entry$callback, entry$context, resp)
       invisible()
     },
 
-    # Fail every pending request once: snapshot and remove the entries, then
-    # invoke each callback with its identity and a synthetic transport error.
-    fail_pending = function(message = "Worker exited before responding") {
+    # Exact equality with the pending identity on every present field.
+    identity_matches = function(ctx, resp) {
+      if (!identical(resp$cmd %||% NULL, ctx$cmd %||% NULL)) return(FALSE)
+      for (f in c("id", "revision", "run_id")) {
+        if (!is.null(ctx[[f]]) && !resp_field_equal(ctx[[f]], resp[[f]])) return(FALSE)
+      }
+      if (!is.null(ctx$name) && !identical(resp$name %||% NULL, ctx$name)) return(FALSE)
+      if (!is.null(ctx$op_id) && !identical(resp$op_id %||% NULL, ctx$op_id)) return(FALSE)
+      if (!is.null(ctx$token) && !identical(resp$token %||% NULL, ctx$token)) return(FALSE)
+      TRUE
+    },
+
+    invoke_callback = function(callback, context, resp) {
+      tryCatch(callback(context, resp),
+        error = function(e) {
+          message("worker callback error: ", conditionMessage(e))
+          self$transport_error("invalid worker response")
+        },
+        interrupt = function(e) self$transport_error("invalid worker response"))
+      invisible()
+    },
+
+    # Fail every pending request once with its identity and a synthetic
+    # transport error, without running the terminal transition again.
+    fail_pending = function(message) {
       ids <- ls(self$pending, all.names = TRUE)
-      self$executing <- FALSE
+      self$executing_req <- NULL
       if (!length(ids)) return(invisible())
       entries <- lapply(ids, function(rid) {
         e <- self$pending[[rid]]
@@ -177,39 +240,94 @@ Worker <- R6::R6Class(
         e
       })
       for (i in seq_along(entries)) {
-        rid <- ids[[i]]
         e <- entries[[i]]
         if (is.null(e)) next
         tryCatch(
-          e$callback(e$context, list(req = as.integer(rid), ok = FALSE,
-                                     error = list(message = message, transport = TRUE))),
-          error = function(err) message("worker callback error: ", conditionMessage(err))
-        )
+          e$callback(e$context, self$synthetic_error(e$context, message)),
+          error = function(err) message("worker callback error: ", conditionMessage(err)),
+          interrupt = function(err) NULL)
       }
       invisible()
     },
 
-    # SIGINT only while the worker is known to be evaluating (ack received)
-    # or after its response already arrived. A signal during the worker's
-    # blocking stdin read would terminate a non-interactive Rscript.
-    interrupt = function() {
-      if (!self$proc$is_alive()) return(invisible())
-      if (self$executing) {
-        self$proc$interrupt()
-      } else {
-        self$retry_interrupt()
+    # The single terminal path: kill, fail remaining callbacks, run the
+    # session's on_failure transition once.
+    transport_error = function(message) {
+      if (isTRUE(self$failed_once)) return(invisible())
+      self$failed_once <- TRUE
+      self$poll_active <- FALSE
+      tryCatch(self$proc$kill(), error = function(e) NULL)
+      self$fail_pending(message)
+      if (!is.null(self$on_failure)) {
+        tryCatch(self$on_failure(message),
+                 error = function(e) message("worker on_failure callback: ",
+                                             conditionMessage(e)),
+                 interrupt = function(e) NULL)
       }
       invisible()
     },
 
-    retry_interrupt = function() {
-      if (!self$proc$is_alive()) return(invisible())
-      if (self$executing) {
-        self$proc$interrupt()
-        return(invisible())
+    # SIGINT exactly once for one acknowledged request, never retried. For a
+    # request that has not acked (still in the blocking read), no signal is
+    # sent; the fast result will commit or be discarded by the Session.
+    interrupt = function(rid = NULL) {
+      if (is.null(rid)) rid <- self$executing_req
+      if (is.null(rid)) return(invisible())
+      rid <- as.character(rid)
+      if (!identical(rid, as.character(self$executing_req))) return(invisible())
+      if (identical(rid, self$interrupt_sent)) return(invisible())
+      if (self$proc$is_alive()) tryCatch(self$proc$interrupt(), error = function(e) NULL)
+      self$interrupt_sent <- rid
+      invisible()
+    },
+
+    # Deliberate clean restart (package-attach barrier invalidation only):
+    # only valid while transport is healthy. Pending callbacks fail once so
+    # the session can release its active identity without a terminal failure.
+    restart = function() {
+      self$poll_active <- FALSE
+      # a deliberate restart is not a failure: detach the session transition
+      # only during old-process teardown, then restore it on the new worker
+      failure_cb <- self$on_failure
+      self$on_failure <- NULL
+      tryCatch(self$send("shutdown"), error = function(e) NULL)
+      tryCatch(self$proc$wait(300), error = function(e) NULL)
+      if (self$alive()) tryCatch(self$proc$kill(), error = function(e) NULL)
+      self$fail_pending("Worker restarted")
+      self$executing_req <- NULL
+      self$interrupt_sent <- NULL
+      self$failed_once <- NULL
+      proc <- .spawn_worker_process(self$worker_script, self$app_dir,
+                                    self$artifact_dir)
+      self$proc <- proc
+      self$pending <- new.env(parent = emptyenv())
+      self$counter <- 1L
+      self$poll_active <- FALSE
+      self$on_failure <- failure_cb
+      invisible(self)
+    },
+
+    # Unlink a contained regular rendered artifact (.png/.html) under the
+    # configured artifact directory. Callers (Session output transitions)
+    # pass only a basename produced by a committed worker response.
+    release_artifact = function(artifact) {
+      if (is.null(artifact) || length(artifact) != 1L || is.na(artifact) ||
+          !nzchar(artifact)) {
+        return(invisible(FALSE))
       }
-      if (!length(ls(self$pending, all.names = TRUE))) return(invisible())
-      later::later(self$retry_interrupt, 0.005)
+      base <- basename(artifact)
+      if (!grepl("\\.png$", base) && !grepl("\\.html$", base)) {
+        return(invisible(FALSE))
+      }
+      root <- normalizePath(self$artifact_dir, mustWork = TRUE)
+      p <- file.path(root, base)
+      if (!startsWith(tryCatch(normalizePath(p), error = function(e) ""),
+                      paste0(root, .Platform$file.sep))) {
+        return(invisible(FALSE))
+      }
+      if (!file.exists(p) || dir.exists(p)) return(invisible(FALSE))
+      unlink(p)
+      invisible(TRUE)
     },
 
     stop = function(grace = 0.2) {
@@ -226,7 +344,12 @@ Worker <- R6::R6Class(
   )
 )
 
-length_pending <- function(env) length(ls(env, all.names = TRUE))
-
-# Minimal `%||%` without importing rlang across the package.
-`%||%` <- function(a, b) if (is.null(a)) b else a
+# Numeric identity fields round-trip through JSON as double; compare
+# numerically rather than by storage mode.
+resp_field_equal <- function(a, b) {
+  if (is.null(a) || is.null(b)) return(is.null(a) && is.null(b))
+  if (is.numeric(a) || is.numeric(b)) {
+    return(isTRUE(all.equal(as.numeric(a), as.numeric(b))))
+  }
+  identical(a, b)
+}
