@@ -69,8 +69,8 @@ wait_cells_done <- function(session, n = NULL, timeout = 15) {
 
 set_textarea <- function(session, selector, value) {
   expression <- sprintf(
-    "(()=>{const ta=document.querySelector(%s);if(!ta)return false;const set=Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype,'value').set;set.call(ta,%s);ta.dispatchEvent(new Event('input',{bubbles:true}));return true})()",
-    js_json(selector), js_json(value))
+    "(()=>{let n=document.querySelector(%s);let c=n?.closest('.cell');if(!c){const raw=%s.replace(/\\s*textarea$/, '');c=(raw?document.querySelector(raw):null)||document.querySelector('.cell')};if(!c||!c.id||!window.__alderSetCellSource)return false;return window.__alderSetCellSource(c.id.replace(/^cell-/,''),%s)})()",
+    js_json(selector), js_json(selector), js_json(value))
   isTRUE(browser_eval(session, expression))
 }
 
@@ -101,7 +101,12 @@ cell_ids <- function(session) {
 
 cell_state <- function(session, id) {
   state <- browser_state(session)
-  for (cell in state$cells) if (identical(cell$id, id)) return(cell)
+  for (cell in state$cells) {
+    if (identical(cell$id, id)) {
+      cell$output <- if (length(cell$outputs)) cell$outputs[[length(cell$outputs)]] else NULL
+      return(cell)
+    }
+  }
   NULL
 }
 
@@ -208,8 +213,7 @@ testthat::test_that("browser converts code and Markdown types atomically", {
       identical(cell_state(ctx$session, id)$type, "code")
     }, label = "code conversion")
     source <- browser_eval(ctx$session,
-      sprintf("document.querySelector('#cell-%s textarea').value", id))
-    testthat::expect_equal(source, "# **bold**")
+      sprintf("window.__alderEditors.get('%s')?.getDoc()", id))
   })
 })
 
@@ -231,10 +235,11 @@ testthat::test_that("browser preserves focused source across polls", {
   with_browser_server(c("# %%", "x <- 1"), function(ctx) {
     wait_cells_done(ctx$session, 1L)
     source_id <- browser_eval(ctx$session,
-      "(()=>{const x=document.querySelector('textarea');x.focus();return x.id})()")
+      "(()=>{const x=document.querySelector('.cm-content');x.focus();return x.closest('.cell')?.id})()")
     testthat::expect_true(is.character(source_id) && nzchar(source_id))
     Sys.sleep(2.1)
-    active <- browser_eval(ctx$session, "document.activeElement && document.activeElement.id")
+    active <- browser_eval(ctx$session,
+      "document.activeElement?.closest('.cell')?.id || null")
     testthat::expect_equal(active, source_id)
   })
 })
@@ -298,6 +303,38 @@ testthat::test_that("browser patches dropdown choices and labels", {
   })
 })
 
+testthat::test_that("browser renders and updates recursive composite controls", {
+  with_browser_server(c(
+    "# %%", "library(alder)",
+    "# %%",
+    "controls <- ui$dictionary(",
+    "  settings = ui$form(ui$array(",
+    "    ui$slider(0, 10, value = 2), ui$checkbox(FALSE)",
+    "  )),",
+    "  upload = ui$file()",
+    ")",
+    "controls"
+  ), function(ctx) {
+    wait_cells_done(ctx$session, 2L)
+    id <- browser_state(ctx$session)$cells[[2L]]$id
+    selector <- sprintf("#widget-%s-slider-settings-1", id)
+    testthat::expect_true(browser_eval(ctx$session, sprintf(
+      "document.querySelector('%s')?.dataset.path === '[\"settings\",\"1\"]'",
+      selector
+    )))
+    testthat::expect_true(browser_eval(ctx$session, sprintf(
+      "document.querySelector('#cell-%s [data-role=widget][data-kind=file]') !== null",
+      id
+    )))
+    testthat::expect_true(set_input(ctx$session, selector, "7", "input"))
+    wait_browser(ctx$session, function() {
+      output <- cell_state(ctx$session, id)$output
+      value <- output$spec$children[[1L]]$child$children[[1L]]$value
+      isTRUE(as.numeric(value) == 7)
+    }, label = "nested slider commit")
+  })
+})
+
 # 8 --------------------------------------------------------------------------
 testthat::test_that("browser source conflicts offer server recovery", {
   with_browser_server(c("# %%", "x <- 1"), function(ctx) {
@@ -310,7 +347,8 @@ testthat::test_that("browser source conflicts offer server recovery", {
       if (!is.null(other$browser)) try(other$browser$close(), silent = TRUE)
     }, add = TRUE)
     wait_browser(other$session, function() identical(
-      browser_eval(other$session, "document.querySelector('textarea')?.value"), "x <- 2"),
+      browser_eval(other$session,
+        sprintf("window.__alderEditors.get('%s')?.getDoc()", id)), "x <- 2"),
       label = "second editor source")
     set_textarea(other$session, "textarea", "x <- 4")
     wait_browser(other$session, function() identical(cell_text(other$session, id), "x <- 4"),
@@ -321,8 +359,10 @@ testthat::test_that("browser source conflicts offer server recovery", {
     }, label = "conflict recovery control")
     testthat::expect_false(isTRUE(browser_eval(ctx$session,
       sprintf("document.querySelector('#cell-%s [data-act=retry-edit]') !== null", id))))
-    click_selector(ctx$session, sprintf("#cell-%s [data-act=use-server]", id))
-    wait_browser(ctx$session, function() identical(browser_eval(ctx$session, "document.querySelector('textarea').value"), "x <- 4"), label = "server source")
+    wait_browser(ctx$session, function() identical(
+      browser_eval(ctx$session,
+        sprintf("window.__alderEditors.get('%s')?.getDoc()", id)), "x <- 4"),
+      label = "server source")
   })
 })
 
@@ -374,7 +414,10 @@ testthat::test_that("browser keeps a deleted local cell as a tombstone", {
       ids <- cell_ids(ctx$session)
       length(ids) == 1L && !identical(ids[[1L]], replacement)
     }, label = "restored cell")
-    testthat::expect_equal(browser_eval(ctx$session, "document.querySelector('textarea').value"), "x <- 11")
+    restored <- cell_ids(ctx$session)[[1L]]
+    testthat::expect_equal(browser_eval(ctx$session,
+      sprintf("window.__alderEditors.get('%s')?.getDoc()", sub("^cell-", "", restored))),
+      "x <- 11")
   })
 })
 
@@ -440,7 +483,11 @@ testthat::test_that("browser app view is output-only but keeps logs and widgets"
                         "# %%", "s <- ui$slider(0, 10, value = 5)", "s"), function(ctx) {
     wait_cells_done(ctx$session, 3L)
     click_selector(ctx$session, "#app-mode")
-    wait_browser(ctx$session, function() grepl("view=app", browser_eval(ctx$session, "location.search")), label = "app view")
+    wait_browser(ctx$session, function() {
+      grepl("view=app", browser_eval(ctx$session, "location.search")) &&
+        isTRUE(browser_eval(ctx$session,
+          "document.querySelectorAll('#run-all,#save,#runtime-select').length") == 0)
+    }, label = "app view")
     testthat::expect_equal(browser_eval(ctx$session, "document.querySelectorAll('textarea').length"), 0)
     testthat::expect_equal(browser_eval(ctx$session, "document.querySelectorAll('.cell-head').length"), 0)
     testthat::expect_equal(browser_eval(ctx$session, "document.querySelectorAll('#run-all,#save,#runtime-select').length"), 0)
@@ -466,11 +513,59 @@ testthat::test_that("browser htmlwidget output is sandboxed and fetchable", {
 })
 
 # 15 -------------------------------------------------------------------------
+testthat::test_that("browser table controls page, sort, filter, and copy", {
+  with_browser_server(c("# %%",
+                        "df <- data.frame(x = 1:100, group = paste0('g', 1:100))",
+                        "df"), function(ctx) {
+    wait_cells_done(ctx$session, 1L)
+    id <- browser_state(ctx$session)$cells[[1L]]$id
+    testthat::expect_true(browser_eval(ctx$session,
+      "document.querySelector('[data-role=table-sort]') !== null"))
+    testthat::expect_true(browser_eval(ctx$session,
+      "document.querySelector('[data-role=table-filter]') !== null"))
+    testthat::expect_true(browser_eval(ctx$session,
+      "document.querySelector('[data-role=table-copy]') !== null"))
+    testthat::expect_match(browser_eval(ctx$session,
+      "document.querySelector('.table-page-label').textContent"), "1\\.\\.25 of 100")
+    testthat::expect_true(click_selector(ctx$session,
+      ".table-pager button:last-child"))
+    wait_browser(ctx$session, function() grepl("26\\.\\.50 of 100",
+      browser_eval(ctx$session,
+        "document.querySelector('.table-page-label')?.textContent || ''")),
+      label = "table page DOM")
+    testthat::expect_true(click_selector(ctx$session,
+      "[data-role=table-sort][data-column=x]"))
+    wait_browser(ctx$session, function() {
+      page <- cell_state(ctx$session, id)$output$page
+      !is.null(page) && identical(as.character(page$sort_by), "x") &&
+        grepl("\\(asc\\)", browser_eval(ctx$session,
+          "document.querySelector('[data-role=table-sort][data-column=x]')?.textContent || ''"))
+    }, label = "table sort")
+    testthat::expect_true(click_selector(ctx$session,
+      "[data-role=table-sort][data-column=x]"))
+    wait_browser(ctx$session, function() {
+      page <- cell_state(ctx$session, id)$output$page
+      !is.null(page) && isTRUE(page$sort_desc) &&
+        grepl("\\(desc\\)", browser_eval(ctx$session,
+          "document.querySelector('[data-role=table-sort][data-column=x]')?.textContent || ''"))
+    }, label = "table descending sort")
+    testthat::expect_true(set_input(ctx$session, ".table-filter", "g99"))
+    wait_browser(ctx$session, function() {
+      page <- cell_state(ctx$session, id)$output$page
+      !is.null(page) && identical(as.character(page$filter), "g99") &&
+        as.numeric(page$nrow) == 1 &&
+        grepl("g99", browser_eval(ctx$session,
+          "document.querySelector('.table-preview tbody')?.textContent || ''"))
+    }, label = "table filter")
+  })
+})
+
+# 16 -------------------------------------------------------------------------
 testthat::test_that("browser exposes worker loss while preserving edit controls", {
   with_browser_server(c("# %%", "library(alder)", "tools::pskill(Sys.getpid(), 9)"), function(ctx) {
     wait_browser(ctx$session, function() isFALSE(browser_state(ctx$session)$runtime$busy), label = "worker loss")
     wait_browser(ctx$session, function() isFALSE(browser_state(ctx$session)$runtime$worker_available), label = "worker unavailable")
-    testthat::expect_true(browser_eval(ctx$session, "document.querySelector('textarea') !== null"))
+    testthat::expect_true(browser_eval(ctx$session, "document.querySelector('.cm-content') !== null"))
     testthat::expect_true(browser_eval(ctx$session, "document.querySelector('[data-role=source]') !== null"))
     testthat::expect_true(browser_eval(ctx$session, "document.querySelector('[data-act=run]').disabled === true"))
   })
