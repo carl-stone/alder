@@ -144,6 +144,12 @@ main { max-width: 920px; margin: 24px auto; padding: 0 16px; }
 .cell.done { border-left: 4px solid var(--done); }
 .cell.error { border-color: #e6a3a3; border-left: 4px solid var(--danger); }
 .cell.stale { border-left: 4px solid var(--stale); background: #fffaf0; }
+.cell.stale .btn[data-act="run"] {
+  border-color: #f59e0b;
+  background: #fbbf24;
+  color: #78350f;
+}
+.cell.stale .btn[data-act="run"]:hover { background: #f59e0b; color: #1f2937; }
 .cell.tombstone { border-style: dashed; }
 .cell-head {
   display: flex;
