@@ -15,6 +15,13 @@ cell_of <- function(s, id) {
   stop("no such cell: ", id)
 }
 
+# Visible-value record: the last element of the outputs array.
+visible_output <- function(s, id) {
+  out <- cell_of(s, id)$outputs
+  if (is.null(out) || !length(out)) return(NULL)
+  out[[length(out)]]
+}
+
 test_that("trailing-blank replacement round-trips exactly", {
   m <- make_test_session(c("# %%", "x <- 1"))
   s <- m$session
@@ -96,7 +103,7 @@ test_that("failed rerun cannot leave a newly introduced global binding", {
   # reference to q/z)
   probe <- s$add_cell(NULL, c("any(ls() %in% c('q', 'z'))"), "code")$id
   call_run(probe)
-  expect_match(cell_of(s, probe)$output$text, "\\[1\\] FALSE")
+  expect_match(visible_output(s, probe)$text, "\\[1\\] FALSE")
 
   # positive control: repairing the cell restores the binding, so the worker
   # env is alive and the probe itself works
@@ -107,5 +114,5 @@ test_that("failed rerun cannot leave a newly introduced global binding", {
   prag <- cell_of(s, probe)
   s$set_cell(probe, c("any(ls() %in% 'z')"), "code", prag$revision)
   call_run(probe)
-  expect_match(cell_of(s, probe)$output$text, "\\[1\\] TRUE")
+  expect_match(visible_output(s, probe)$text, "\\[1\\] TRUE")
 })

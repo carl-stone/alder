@@ -138,6 +138,39 @@ test_that("start_alder validates its arguments", {
                "parent directory")
 })
 
+test_that("start_alder uses runtime metadata unless arguments are explicit", {
+  root <- tempfile("alder-runtime-default-")
+  dir.create(root)
+  nb_path <- file.path(root, "notebook.R")
+  writeLines(c(
+    "# ---",
+    "# runtime:",
+    "#   execution_mode: lazy",
+    "#   run_on_startup: false",
+    "# ---",
+    "# %%",
+    "x <- 1"
+  ), nb_path)
+  port <- httpuv::randomPort()
+  srv <- start_alder(nb_path, port = port)
+  on.exit({
+    stop_alder(srv)
+    unlink(root, recursive = TRUE, force = TRUE)
+  }, add = TRUE)
+  expect_true(dir.exists(srv$cache_dir))
+  expect_true(any(grepl("^\\.alder/", readLines(file.path(root, ".gitignore")))))
+  expect_identical(srv$session$state()$runtime$execution_mode, "lazy")
+  expect_false(srv$session$state()$runtime$run_on_startup)
+  stop_alder(srv)
+
+  srv <- start_alder(
+    nb_path, port = httpuv::randomPort(),
+    execution_mode = "automatic", run_on_startup = FALSE
+  )
+  expect_identical(srv$session$state()$runtime$execution_mode, "automatic")
+  expect_false(srv$session$state()$runtime$run_on_startup)
+})
+
 test_that("origin validation: Host required, Origin exact, loopback defaults", {
   origins <- alder:::build_origins("127.0.0.1", 8899L, NULL)
   expect_setequal(origins,
@@ -466,9 +499,126 @@ test_that("widget route enforces exact value/index schemas", {
   expect_true(any(grepl("^pick 202 \\|.*\"token\"", out)))
   expect_true(any(grepl("^go 202 \\|.*\"token\"", out)))
   expect_true(any(grepl("^ ?400 \\| .*missing required field: source", out)))
-  expect_true(any(grepl("^ ?400 \\| .*exactly one of.*value.*index", out)))
+  expect_true(any(grepl("^ ?400 \\| .*exactly one widget update field", out)))
   expect_true(any(grepl("^ ?400 \\| .*no such widget: nope", out)))
 })
+
+test_that("/api/upload stores validated files for file widgets", {
+  nb_path <- tempfile("alder-upload-route-", fileext = ".R")
+  writeLines(c(
+    "# %%", "library(alder)",
+    "# %%", "files <- ui$file()", "files",
+    "# %%", "files$value"
+  ), nb_path)
+  port <- httpuv::randomPort()
+  srv <- start_alder(nb_path, port = port, run_on_startup = FALSE)
+  on.exit({
+    stop_alder(srv)
+    unlink(nb_path)
+  }, add = TRUE)
+  code <- '    base <- sprintf("http://%s:%d", host, port)
+    post <- function(url, obj, tag = "") {
+      body <- jsonlite::toJSON(obj, auto_unbox = TRUE)
+      h <- curl::new_handle(postfields = body, customrequest = "POST")
+      curl::handle_setheaders(h, "Content-Type" = "application/json")
+      r <- curl::curl_fetch_memory(paste0(base, url), handle = h)
+      cat(tag, r$status_code, "|", rawToChar(r$content), "\n")
+    }
+    get_state <- function() jsonlite::fromJSON(
+      rawToChar(curl::curl_fetch_memory(paste0(base, "/api/state"))$content),
+      simplifyVector = FALSE)
+    post("/api/run", list(all = TRUE), "run")
+    repeat {
+      st <- get_state()
+      if (identical(st$runtime$busy, FALSE)) break
+      Sys.sleep(0.1)
+    }
+    post("/api/upload", list(
+      name = "files",
+      files = list(list(name = "hello.txt", content_base64 = "aGVsbG8="))
+    ), "upload")'
+  out <- http_child(port, code)
+  expect_true(any(grepl("^run 202 \\|", out)))
+  expect_true(any(grepl("^upload 202 \\|.*\"token\"", out)))
+  deadline <- Sys.time() + 10
+  repeat {
+    later::run_now(0.05)
+    state <- srv$session$state()
+    widget <- state$cells[[2L]]$outputs[[length(state$cells[[2L]]$outputs)]]
+    operation <- if (is.null(widget$operation)) NULL else widget$operation
+    if (!is.null(operation) && !identical(operation$status, "pending")) break
+    if (Sys.time() >= deadline) break
+  }
+  expect_equal(widget$kind, "widget")
+  file_row <- widget$spec$value[[1L]]
+  expect_equal(file_row$name, "hello.txt")
+  expect_equal(file_row$size, 5)
+  expect_true(file.exists(file_row$path))
+  expect_identical(readBin(file_row$path, "raw", 5L),
+                   charToRaw("hello"))
+})
+
+test_that("/api/cell disables and re-enables a cell", {
+  nb_path <- tempfile("alder-disable-route-", fileext = ".R")
+  writeLines(c("# %%", "x <- 1", "# %%", "x + 1"), nb_path)
+  port <- httpuv::randomPort()
+  srv <- start_alder(nb_path, port = port, run_on_startup = FALSE)
+  on.exit({
+    stop_alder(srv)
+    unlink(nb_path)
+  }, add = TRUE)
+  code <- '    base <- sprintf("http://%s:%d", host, port)
+    post <- function(value) {
+      body <- jsonlite::toJSON(list(
+        op = "disable", cell = "cell-1", disabled = value
+      ), auto_unbox = TRUE)
+      h <- curl::new_handle(postfields = body, customrequest = "POST")
+      curl::handle_setheaders(h, "Content-Type" = "application/json")
+      r <- curl::curl_fetch_memory(paste0(base, "/api/cell"), handle = h)
+      cat(r$status_code, "|", rawToChar(r$content), "\n")
+    }
+    post_name <- function(value) {
+      body <- jsonlite::toJSON(list(
+        op = "name", cell = "cell-1", name = value
+      ), auto_unbox = TRUE, null = "null")
+      h <- curl::new_handle(postfields = body, customrequest = "POST")
+      curl::handle_setheaders(h, "Content-Type" = "application/json")
+      r <- curl::curl_fetch_memory(paste0(base, "/api/cell"), handle = h)
+      cat("name", r$status_code, "|", rawToChar(r$content), "\n")
+    }
+    post_move <- function(after) {
+      body <- jsonlite::toJSON(list(
+        op = "move", cell = "cell-2", after = after
+      ), auto_unbox = TRUE, null = "null")
+      h <- curl::new_handle(postfields = body, customrequest = "POST")
+      curl::handle_setheaders(h, "Content-Type" = "application/json")
+      r <- curl::curl_fetch_memory(paste0(base, "/api/cell"), handle = h)
+      cat("move", r$status_code, "|", rawToChar(r$content), "\n")
+    }
+    post(TRUE)
+    post(FALSE)
+    post_name("named_1")
+    post_name("not valid")
+    post_move(NULL)'
+  out <- http_child(port, code)
+  expect_true(any(grepl('^200 \\|.*"disabled":true', out)))
+  expect_true(any(grepl('^200 \\|.*"disabled":false', out)))
+  expect_false(srv$session$state()$cells[[1L]]$disabled)
+  expect_true(any(grepl('^name 200 \\|.*"name":"named_1"', out)))
+  expect_true(any(grepl('^name 400 \\|.*cell name must match', out)))
+  expect_true(any(grepl('^move 200 \\|.*"id":"cell-2"', out)))
+  expect_identical(
+    vapply(srv$session$state()$cells, function(cell) cell$id, ""),
+    c("cell-2", "cell-1")
+  )
+  expect_equal(
+    srv$session$state()$cells[[which(vapply(
+      srv$session$state()$cells, function(cell) cell$id, "") == "cell-1"
+    )]]$options$name,
+    "named_1"
+  )
+})
+
 test_that("/api/value returns a token and the matching state last_value", {
   nb_path <- tempfile("alder-nb-", fileext = ".R")
   writeLines(c("# %%", "x <- 41 + 1"), nb_path)
@@ -521,6 +671,58 @@ test_that("/api/value returns a token and the matching state last_value", {
   expect_true(any(grepl("^vop done \\| [0-9]+", out)))
   expect_true(any(grepl("^last text \\| \\[1\\] 42", out)))
   expect_true(any(grepl("^vop2 error \\| no such name: nope", out)))
+})
+test_that("table paging route returns an asynchronous bounded page", {
+  nb_path <- tempfile("alder-table-route-", fileext = ".R")
+  writeLines(c("# %%",
+               "df <- data.frame(x = 1:100, group = paste0(\"g\", 1:100))",
+               "df"), nb_path)
+  port <- httpuv::randomPort()
+  srv <- start_alder(nb_path, port = port, run_on_startup = FALSE)
+  on.exit({
+    stop_alder(srv)
+    unlink(nb_path)
+  }, add = TRUE)
+  code <- '    base <- sprintf("http://%s:%d", host, port)
+    post <- function(url, obj, tag = "") {
+      body <- jsonlite::toJSON(obj, auto_unbox = TRUE)
+      h <- curl::new_handle()
+      curl::handle_setopt(h, postfields = body, customrequest = "POST")
+      curl::handle_setheaders(h, "Content-Type" = "application/json")
+      r <- curl::curl_fetch_memory(paste0(base, url), handle = h)
+      parsed <- tryCatch(jsonlite::fromJSON(rawToChar(r$content),
+                                            simplifyVector = FALSE),
+                         error = function(e) list())
+      token <- if (!is.null(parsed$token)) parsed$token else ""
+      cat(tag, r$status_code, "|", token, "\n")
+      parsed
+    }
+    get_state <- function() jsonlite::fromJSON(
+      rawToChar(curl::curl_fetch_memory(paste0(base, "/api/state"))$content),
+      simplifyVector = FALSE)
+    post("/api/run", list(all = TRUE), "run")
+    repeat {
+      st <- get_state()
+      if (identical(st$runtime$busy, FALSE)) break
+      Sys.sleep(0.1)
+    }
+    out <- st$cells[[1]]$outputs[[length(st$cells[[1]]$outputs)]]
+    cat("kind", out$kind, "| handle", out$handle, "\n")
+    post("/api/table", list(handle = out$handle, offset = 10,
+                            limit = 5, sort_by = "x", sort_desc = TRUE,
+                            filter = ""), "page")
+    repeat {
+      st <- get_state()
+      current <- st$cells[[1]]$outputs[[length(st$cells[[1]]$outputs)]]
+      if (!is.null(current$page) && as.numeric(current$page$offset) == 10) break
+      Sys.sleep(0.1)
+    }
+    cat("page", current$page$offset, current$page$limit,
+        current$page$preview[[1]][[1]], "\n")'
+  out <- http_child(port, code)
+  expect_true(any(grepl("^run 202 \\|", out)))
+  expect_true(any(grepl("^kind table \\| handle ", out)))
+  expect_true(any(grepl("^page 10 5 90", out)))
 })
 test_that("unknown routes are 404 JSON", {
   port <- httpuv::randomPort()
