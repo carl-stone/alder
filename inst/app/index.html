@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>alder</title>
   <link rel="stylesheet" href="/static/style.css">
+  <link rel="icon" href="data:,">
 </head>
 <body>
   <header id="topbar">
@@ -17,16 +18,109 @@
         <option value="lazy">Lazy</option>
       </select>
     </label>
+    <button id="panel-toggle" class="btn editor-only" type="button"
+      aria-controls="dataflow-panel" aria-expanded="true">Dataflow</button>
     <button id="run-all" class="btn primary editor-only" type="button">Run all</button>
-    <button id="stop" class="btn danger" type="button" disabled>Stop</button>
     <button id="save" class="btn editor-only" type="button">Save</button>
+    <button id="settings-open" class="btn editor-only" type="button"
+            aria-haspopup="dialog" aria-controls="settings">Settings</button>
+    <span id="vim-mode-indicator" class="vim-mode-indicator editor-only"
+          data-role="vim-mode-indicator" aria-live="polite" hidden>Vim</span>
     <a id="app-mode" class="btn editor-only" href="/?view=app">App mode</a>
     <a id="edit-mode" class="btn" href="/?view=editor" hidden>Edit mode</a>
   </header>
 
+  <dialog id="settings" class="settings-dialog editor-only"
+          aria-labelledby="settings-title">
+    <form id="settings-form" method="dialog">
+      <div class="settings-head">
+        <h2 id="settings-title">Settings</h2>
+        <button id="settings-close" class="btn mini" type="button"
+                aria-label="Close settings">Close</button>
+      </div>
+      <div class="settings-grid">
+        <label for="settings-theme">Theme
+          <select id="settings-theme" name="theme">
+            <option value="system">System</option>
+            <option value="light">Light</option>
+            <option value="dark">Dark</option>
+          </select>
+        </label>
+        <label for="settings-keymap">Keymap
+          <select id="settings-keymap" name="keymap">
+            <option value="default">Default</option>
+            <option value="vim">Vim</option>
+          </select>
+        </label>
+        <label for="settings-font-size">Editor font size
+          <input id="settings-font-size" name="font_size" type="number"
+                 min="10" max="32" step="1">
+        </label>
+        <label for="settings-tab-size">Editor tab size
+          <input id="settings-tab-size" name="tab_size" type="number"
+                 min="1" max="8" step="1">
+        </label>
+        <label for="settings-table-page-size">Table page size
+          <input id="settings-table-page-size" name="page_size" type="number"
+                 min="5" max="200" step="1">
+        </label>
+        <label class="settings-check" for="settings-line-numbers">
+          <input id="settings-line-numbers" name="line_numbers" type="checkbox">
+          Show line numbers
+        </label>
+        <label class="settings-check" for="settings-autosave">
+          <input id="settings-autosave" name="autosave" type="checkbox">
+          Autosave after edits
+        </label>
+        <label class="settings-check" for="settings-format-on-save">
+          <input id="settings-format-on-save" name="format_on_save" type="checkbox">
+          Format before saving
+        </label>
+      </div>
+      <div class="settings-actions">
+        <button id="settings-cancel" class="btn" type="button">Cancel</button>
+        <button id="settings-apply" class="btn primary" type="submit">Apply</button>
+      </div>
+    </form>
+  </dialog>
+
   <div id="status" role="status" aria-live="polite"></div>
 
-  <main id="notebook" aria-label="Notebook cells"></main>
+  <div id="editor-workspace">
+    <main id="notebook" aria-label="Notebook cells"></main>
+
+    <aside id="dataflow-panel" class="editor-only" aria-label="Notebook dataflow">
+      <div class="panel-head">
+        <strong>Dataflow</strong>
+        <button id="panel-close" class="panel-icon-btn" type="button"
+          aria-label="Close dataflow panel">×</button>
+      </div>
+      <div class="panel-tabs" role="tablist" aria-label="Dataflow views">
+        <button id="panel-tab-variables" type="button" role="tab"
+          aria-controls="panel-variables" aria-selected="true"
+          data-panel-tab="variables">Variables</button>
+        <button id="panel-tab-dependencies" type="button" role="tab"
+          aria-controls="panel-dependencies" aria-selected="false"
+          data-panel-tab="dependencies">Dependencies</button>
+        <button id="panel-tab-graph" type="button" role="tab"
+          aria-controls="panel-graph" aria-selected="false"
+          data-panel-tab="graph">Graph</button>
+        <button id="panel-tab-outline" type="button" role="tab"
+          aria-controls="panel-outline" aria-selected="false"
+          data-panel-tab="outline">Outline</button>
+      </div>
+      <div id="panel-variables" class="panel-view" role="tabpanel"
+        aria-labelledby="panel-tab-variables"></div>
+      <div id="panel-dependencies" class="panel-view" role="tabpanel"
+        aria-labelledby="panel-tab-dependencies" hidden></div>
+      <div id="panel-graph" class="panel-view" role="tabpanel"
+        aria-labelledby="panel-tab-graph" hidden></div>
+      <div id="panel-outline" class="panel-view" role="tabpanel"
+        aria-labelledby="panel-tab-outline" hidden></div>
+    </aside>
+
+    <nav id="minimap" class="minimap editor-only" aria-label="Notebook minimap"></nav>
+  </div>
 
   <template id="cell-tpl">
     <section class="cell idle">
@@ -36,17 +130,21 @@
             <select data-role="type" aria-label="Cell type">
               <option value="code">Code</option>
               <option value="markdown">Markdown</option>
+              <option value="sql">SQL</option>
             </select>
           </label>
           <span class="cell-badge" data-role="badge">idle</span>
         </div>
         <div class="cell-actions" data-role="cell-actions">
           <button data-act="run" class="btn mini primary" type="button">Run</button>
+          <button data-act="disable" class="btn mini" type="button">Disable</button>
+          <button data-act="move-up" class="btn mini" type="button">Up</button>
+          <button data-act="move-down" class="btn mini" type="button">Down</button>
           <button data-act="delete" class="btn mini" type="button">Delete</button>
         </div>
       </div>
       <div class="source-area code-area" data-role="source-area" data-editor-only>
-        <textarea data-role="source" spellcheck="false" aria-label="R source"></textarea>
+        <div class="cm-host" data-role="source" aria-label="R source"></div>
       </div>
       <div class="diagnostics-area" data-role="diagnostics"></div>
       <div class="output-area" data-role="output"></div>
@@ -54,6 +152,7 @@
       <div class="cell-add editor-only" data-role="cell-add">
         <button data-act="add" data-type="code" class="btn mini" type="button">+ Add code</button>
         <button data-act="add" data-type="markdown" class="btn mini" type="button">+ Add Markdown</button>
+        <button data-act="add" data-type="sql" class="btn mini" type="button">+ Add SQL</button>
       </div>
     </section>
   </template>
@@ -63,9 +162,11 @@
       <span class="empty-message">Empty notebook</span>
       <button data-act="add" data-type="code" class="btn mini" type="button">+ Add code</button>
       <button data-act="add" data-type="markdown" class="btn mini" type="button">+ Add Markdown</button>
+      <button data-act="add" data-type="sql" class="btn mini" type="button">+ Add SQL</button>
     </div>
   </template>
 
+  <script src="/static/vendor/alder-editor.js"></script>
   <script src="/static/app.js"></script>
 </body>
 </html>
