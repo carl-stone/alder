@@ -140,11 +140,67 @@ test_that("run_button is a Boolean one-shot input that starts FALSE", {
   expect_error(alder:::validate_widget_value("run_button", 1, list()), "logical")
 })
 
-test_that("ui$button is removed with no alias", {
-  expect_false("button" %in% names(alder:::ui))
-  expect_length(names(alder:::ui), 6L)
-  expect_setequal(names(alder:::ui),
-                  c("slider", "dropdown", "text_input", "number",
-                    "run_button", "checkbox"))
+test_that("ui exposes the supported widget constructor set", {
+  expect_setequal(
+    names(alder:::ui),
+    c(
+      "slider", "range_slider", "dropdown", "radio", "multiselect",
+      "text_input", "text_area", "number", "checkbox", "switch",
+      "run_button", "button", "date", "date_range", "datetime",
+      "code_editor", "refresh", "file", "table", "dataframe",
+      "array", "dictionary", "form"
+    )
+  )
+})
+
+test_that("composite widget paths update only the addressed child", {
+  original <- alder:::ui$array(
+    alder:::ui$slider(0, 10, value = 2),
+    alder:::ui$checkbox(FALSE)
+  )
+  expect_equal(alder:::widget_child(original, c("1"))$value, 2)
+  expect_true(isTRUE(alder:::widget_child(original, c("2"))$value == FALSE))
+  expect_error(alder:::widget_child(original, c(NA_character_)), "non-empty")
+  expect_error(
+    alder:::widget_set_child(original, c("missing"), TRUE),
+    "does not exist"
+  )
+
+  updated <- alder:::widget_set_child(original, c("1"), 7)
+  expect_equal(updated$value[[1]], 7)
+  expect_identical(updated$value[[2]], FALSE)
+  expect_equal(original$value[[1]], 2)
+
+  form <- alder:::ui$form(original)
+  edited_form <- alder:::widget_set_child(form, c("1"), 8)
+  expect_null(edited_form$value)
+  expect_equal(alder:::widget_child(edited_form$child, c("1"))$value, 8)
+})
+
+test_that("nested composites expose recursive child paths", {
+  nested <- alder:::ui$dictionary(
+    settings = alder:::ui$form(alder:::ui$array(
+      alder:::ui$checkbox(FALSE),
+      alder:::ui$dictionary(name = alder:::ui$text_input("before"))
+    )),
+    files = alder:::ui$file()
+  )
+  expect_true(isTRUE(alder:::widget_child(
+    nested, c("settings", "1"))$value == FALSE))
+  expect_identical(
+    alder:::widget_child(nested, c("settings", "2", "name"))$value,
+    "before"
+  )
+  changed <- alder:::widget_set_child(
+    nested, c("settings", "2", "name"), "after"
+  )
+  expect_identical(
+    alder:::widget_child(changed, c("settings", "2", "name"))$value,
+    "after"
+  )
+  expect_identical(
+    alder:::widget_child(changed, c("files"))$value,
+    nested$value$files
+  )
 })
 

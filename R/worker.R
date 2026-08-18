@@ -20,11 +20,11 @@ alder_ui_module <- function() {
   system.file("worker", "ui-widgets.R", package = "alder", mustWork = TRUE)
 }
 
-# Spawn the worker process with a validated artifact directory supplied on the
-# host side; the worker re-validates and fails closed when the directory is
-# absent or invalid (it owns every rendered artifact under it).
-.spawn_worker_process <- function(worker_script, app_dir, artifact_dir) {
-  if (length(artifact_dir) != 1L || is.na(artifact_dir) || !nzchar(artifact_dir)) {
+# Spawn the worker process with validated artifact and cache directories.
+.spawn_worker_process <- function(worker_script, app_dir, artifact_dir,
+                                  cache_dir = artifact_dir, env = character()) {
+  if (length(artifact_dir) != 1L || is.na(artifact_dir) ||
+      !nzchar(artifact_dir)) {
     stop("artifact directory must be a single non-NA path")
   }
   if (!dir.exists(artifact_dir)) {
@@ -33,14 +33,31 @@ alder_ui_module <- function() {
   if (file.access(artifact_dir, 2) != 0L) {
     stop("artifact directory is not writable: ", artifact_dir)
   }
+  if (length(cache_dir) != 1L || is.na(cache_dir) || !nzchar(cache_dir)) {
+    stop("cache directory must be a single non-NA path")
+  }
+  if (!dir.exists(cache_dir)) {
+    stop("cache directory does not exist: ", cache_dir)
+  }
+  if (file.access(cache_dir, 2) != 0L) {
+    stop("cache directory is not writable: ", cache_dir)
+  }
   if (!file.exists(worker_script)) {
     stop("worker script not found: ", worker_script)
   }
-  env <- Sys.getenv()
+  if (!is.character(env) || (length(env) && is.null(names(env))) ||
+      anyNA(names(env)) || any(!nzchar(names(env)))) {
+    stop("worker environment must be a named character vector")
+  }
+  # NOTE: do not run as.character() on `env` here: it strips the names,
+  # which are the environment variable names themselves.
+  inherited <- Sys.getenv()
   env <- c(ALDER_APP_DIR = app_dir,
            ALDER_ARTIFACT_DIR = artifact_dir,
+           ALDER_CACHE_DIR = cache_dir,
            ALDER_UI_WIDGETS = alder_ui_module(),
-           env)
+           env,
+           inherited)
   env <- env[!duplicated(names(env))]
   processx::process$new(
     file.path(R.home("bin"), "Rscript"),
@@ -50,14 +67,15 @@ alder_ui_module <- function() {
     stdout = "|", stderr = "|", supervise = TRUE
   )
 }
-
-# Spawn a fully wired Worker for a fresh notebook session.
-.spawn_worker <- function(worker_script, app_dir, artifact_dir) {
-  proc <- .spawn_worker_process(worker_script, app_dir, artifact_dir)
-  Worker$new(proc, worker_script, app_dir, artifact_dir)
+.spawn_worker <- function(worker_script, app_dir, artifact_dir,
+                          cache_dir = artifact_dir, env = character()) {
+  proc <- .spawn_worker_process(worker_script, app_dir, artifact_dir,
+                                cache_dir, env)
+  Worker$new(proc, worker_script, app_dir, artifact_dir, cache_dir, env)
 }
 
-# A Worker is a small stateful controller for one worker process.
+
+# A Worker is a small stateful controller for one notebook session.
 Worker <- R6::R6Class(
   "alder_worker",
   public = list(
@@ -66,31 +84,41 @@ Worker <- R6::R6Class(
     counter = NULL,     # next req id
     poll_active = NULL,
     executing_req = NULL,   # req id whose start ack has been received
-    interrupt_sent = NULL,  # req id already SIGINTed (exactly once per eval)
-    failed_once = NULL,     # the terminal transport failure has fired
+    interrupt_sent = NULL,  # req id already SIGINTed
+    failed_once = NULL,     # terminal transport failure has fired
     on_failure = NULL,      # one terminal callback(message)
+    on_notify = NULL,       # callback(context, notify_frame)
     worker_script = NULL,   # respawn parameters for Worker$restart()
     app_dir = NULL,
     artifact_dir = NULL,
-
-    initialize = function(proc, worker_script, app_dir, artifact_dir) {
+    cache_dir = NULL,
+    env = character(),
+    initialize = function(proc, worker_script, app_dir, artifact_dir,
+                          cache_dir = artifact_dir, env = character()) {
       self$proc <- proc
       self$pending <- new.env(parent = emptyenv())
       self$counter <- 1L
       self$poll_active <- FALSE
-      self$executing_req <- NULL
       self$interrupt_sent <- NULL
       self$failed_once <- NULL
       self$on_failure <- NULL
+      self$on_notify <- NULL
       self$worker_script <- worker_script
       self$app_dir <- app_dir
       self$artifact_dir <- artifact_dir
+      self$cache_dir <- cache_dir
+      self$env <- env
     },
 
     # Register the single terminal transition: called at most once when the
     # worker dies or sends a protocol-invalid response.
     set_on_failure = function(callback) {
       self$on_failure <- callback
+      invisible(self)
+    },
+
+    set_on_notify = function(callback) {
+      self$on_notify <- callback
       invisible(self)
     },
 
@@ -119,7 +147,8 @@ Worker <- R6::R6Class(
       message$cmd <- cmd
       # the worker answers every command; register each request so the
       # response is consumed (never an unsolicited line)
-      self$pending[[as.character(req)]] <- list(callback = on_response, context = ctx)
+      self$pending[[as.character(req)]] <- list(
+        callback = on_response, context = ctx, last_seq = 0L)
       self$proc$write_input(jsonlite::toJSON(message, auto_unbox = TRUE, null = "null"))
       self$proc$write_input("\n")
       self$ensure_polling()
@@ -177,6 +206,48 @@ Worker <- R6::R6Class(
                        error = function(e) NULL)
       if (is.null(resp) || !is.list(resp)) {
         self$transport_error("invalid worker response")
+        return(invisible())
+      }
+      if (!is.null(resp$notify)) {
+        rid <- as.character(resp$req %||% NA_character_)
+        entry <- if (length(rid) == 1L && !is.na(rid) && nzchar(rid)) {
+          self$pending[[rid]]
+        } else NULL
+        kind <- as.character(resp$notify %||% "")
+        seq <- resp$seq
+        payload <- resp$payload
+        payload_valid <- if (identical(kind, "append")) {
+          is.list(payload) && is.list(payload$output) &&
+            length(payload$output) > 0L
+        } else if (identical(kind, "progress")) {
+          is.list(payload) && is.list(payload$progress) &&
+            identical(as.character(payload$progress$kind %||% ""), "progress")
+        } else if (identical(kind, "log")) {
+          is.list(payload) &&
+            (is.character(payload$lines) || is.list(payload$lines))
+        } else FALSE
+        valid <- !is.null(entry) &&
+          identical(entry$context$cmd, "eval_cell") &&
+          identical(resp_field_equal(entry$context$id, resp$id), TRUE) &&
+          identical(resp_field_equal(entry$context$run_id, resp$run_id), TRUE) &&
+          length(seq) == 1L && is.numeric(seq) && !is.na(seq) &&
+          is.finite(seq) && seq == floor(seq) &&
+          seq > (entry$last_seq %||% 0) &&
+          kind %in% c("append", "progress", "log") &&
+          isTRUE(payload_valid)
+        if (!isTRUE(valid)) {
+          self$transport_error("invalid worker response")
+          return(invisible())
+        }
+        entry$last_seq <- seq
+        self$pending[[rid]] <- entry
+        failed <- FALSE
+        if (!is.null(self$on_notify)) {
+          tryCatch(self$on_notify(entry$context, resp),
+                   error = function(e) failed <<- TRUE,
+                   interrupt = function(e) failed <<- TRUE)
+        }
+        if (failed) self$transport_error("invalid worker response")
         return(invisible())
       }
       if (!is.null(resp$ack)) {
@@ -298,7 +369,8 @@ Worker <- R6::R6Class(
       self$interrupt_sent <- NULL
       self$failed_once <- NULL
       proc <- .spawn_worker_process(self$worker_script, self$app_dir,
-                                    self$artifact_dir)
+                                    self$artifact_dir, self$cache_dir,
+                                    self$env)
       self$proc <- proc
       self$pending <- new.env(parent = emptyenv())
       self$counter <- 1L

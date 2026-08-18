@@ -112,6 +112,30 @@ test_that("malformed YAML front matter is rejected, not executed", {
   expect_identical(nb$metadata$p, "stop(\"boom\")")
 })
 
+test_that("metadata mutation writes runtime YAML and creates a header", {
+  nb <- alder:::parse_notebook_lines("x.R", c("# %%", "x <- 1"))
+  nb <- alder:::nb_set_metadata(
+    nb, "runtime", list(execution_mode = "lazy", run_on_startup = FALSE)
+  )
+  expect_identical(
+    alder:::serialize_notebook(nb),
+    paste0(
+      "# ---\n# runtime:\n#   execution_mode: lazy\n",
+      "#   run_on_startup: no\n# ---\n# %%\nx <- 1\n"
+    )
+  )
+  expect_identical(
+    alder:::read_notebook(write_raw_file(alder:::serialize_notebook(nb)))$metadata$runtime,
+    list(execution_mode = "lazy", run_on_startup = FALSE)
+  )
+
+  nb <- alder:::nb_set_metadata(nb, "runtime", NULL)
+  expect_identical(
+    alder:::serialize_notebook(nb),
+    paste0("# ---\n# ---\n# %%\nx <- 1\n")
+  )
+})
+
 test_that("cell body mutation preserves position and serializes correctly", {
   nb <- alder:::parse_notebook_lines("x.R", c("# %%", "a <- 1", "", "# %%", "b <- 2"))
   nb <- alder:::nb_update_cell(nb, "cell-2", c("b <- 20", "b2 <- b + 1"), "code")
@@ -289,6 +313,36 @@ test_that("duplicate and oddly-spaced options survive edits byte-for-byte", {
   expect_equal(c3$options$tag, "3")
 })
 
+test_that("cell option mutation is byte-faithful outside the target", {
+  text <- paste0(
+    "# %%\r\n#| disabled: false\r\n#| keep: untouched\nx <- 1\r\n",
+    "# %%\n#| tag: one\n#| tag: two\nx <- 2"
+  )
+  nb <- alder:::read_notebook(write_raw_file(text))
+  nb <- alder:::nb_set_cell_option(nb, "cell-1", "disabled", TRUE)
+  expected <- paste0(
+    "# %%\r\n#| disabled: true\r\n#| keep: untouched\nx <- 1\r\n",
+    "# %%\n#| tag: one\n#| tag: two\nx <- 2"
+  )
+  expect_identical(alder:::serialize_notebook(nb), expected)
+
+  nb <- alder:::nb_set_cell_option(nb, "cell-2", "name", "second")
+  expected <- paste0(
+    "# %%\r\n#| disabled: true\r\n#| keep: untouched\nx <- 1\r\n",
+    "# %%\n#| name: second\n#| tag: one\n#| tag: two\nx <- 2"
+  )
+  expect_identical(alder:::serialize_notebook(nb), expected)
+
+  nb <- alder:::nb_set_cell_option(nb, "cell-2", "tag", NULL)
+  expected <- paste0(
+    "# %%\r\n#| disabled: true\r\n#| keep: untouched\nx <- 1\r\n",
+    "# %%\n#| name: second\nx <- 2"
+  )
+  expect_identical(alder:::serialize_notebook(nb), expected)
+  expect_identical(alder:::nb_cell(nb, "cell-1")$options$disabled, TRUE)
+  expect_null(alder:::nb_cell(nb, "cell-2")$options$tag)
+})
+
 test_that("adding a cell transfers terminal EOF ownership", {
   # no final newline: old final record gains preferred EOL, new cell ends bare
   f <- write_raw_file("# %%\na")
@@ -303,6 +357,25 @@ test_that("adding a cell transfers terminal EOF ownership", {
   # deleting the last cell in a no-final-newline file keeps the policy
   nb3 <- alder:::nb_delete_cell(nb, "cell-2")
   expect_identical(alder:::serialize_notebook(nb3), "# %%\na")
+})
+
+test_that("moving cells preserves ids and repairs terminal EOF ownership", {
+  text <- paste0("# %%\r\none\r\n# %%\ntwo")
+  nb <- alder:::read_notebook(write_raw_file(text))
+  nb <- alder:::nb_move_cell(nb, "cell-2", NULL)
+  expect_identical(
+    vapply(nb$cells, function(cell) cell$id, ""),
+    c("cell-2", "cell-1")
+  )
+  expect_identical(
+    alder:::serialize_notebook(nb),
+    paste0("# %%\ntwo\r\n# %%\r\none")
+  )
+  nb <- alder:::nb_move_cell(nb, "cell-1", "cell-2")
+  expect_identical(
+    alder:::serialize_notebook(nb),
+    paste0("# %%\ntwo\r\n# %%\r\none")
+  )
 })
 
 test_that("delete/add allocate from a monotonic counter, never reusing ids", {

@@ -24,9 +24,8 @@
 #   if/switch. Definitions inside loop bodies and lazily evaluated call
 #   arguments are never definitely available afterwards.
 
-# Names that are never notebook variables.
 RESERVED <- c("NA", "TRUE", "FALSE", "NULL", "Inf", "NaN", "...", ".", "T",
-              "F", "break", "next", ".data", ".env")
+              "F", "break", "next", ".data", ".env", ".Random.seed")
 
 # Bare syntactic operators / infrastructure whose head is never a notebook
 # reference, but whose arguments still are.
@@ -52,8 +51,11 @@ AES_VERBS <- c("aes", "aes_string")
 BLOCKED_DYNAMIC <- c(
   "eval", "evalq", "eval.parent", "source", "sys.source", "load",
   "attach", "detach", "delayedAssign", "makeActiveBinding",
-  "assign", "rm", "get", "get0", "mget", "exists", "dynGet", "do.call")
+  "assign", "get", "get0", "mget", "exists", "dynGet", "do.call")
 
+# Runtime helpers are available to every notebook cell and are not notebook
+# bindings.
+RUNTIME_CALLS <- c("sql")
 is_reserved <- function(nm) nm %in% RESERVED
 
 # ---------------------------------------------------------------------------
@@ -120,10 +122,10 @@ literal_name_of <- function(node, string_only = FALSE) {
 # ---------------------------------------------------------------------------
 
 cell_defs_refs <- function(code) {
-  # Returns list(defs, refs, self_refs, barrier, diagnostics, error).
+  # Returns list(defs, refs, self_refs, locals, barrier, diagnostics, error).
   empty <- list(defs = character(), refs = character(),
-                self_refs = character(), barrier = FALSE,
-                diagnostics = list(), error = NULL)
+                self_refs = character(), locals = character(),
+                barrier = FALSE, diagnostics = list(), error = NULL)
   if (length(code) == 0L) return(empty)
   text <- paste(code, collapse = "\n")
   exprs <- tryCatch(base::parse(text = text),
@@ -149,10 +151,11 @@ cell_defs_refs <- function(code) {
 
   top <- new_frame(character(), "top")
   for (i in seq_along(exprs)) walk_expr(exprs[[i]], top, new_ctx(), state)
-
-  list(defs = state$defs,
-       refs = unique(state$refs),
-       self_refs = unique(state$self_refs),
+  locals <- unique(state$defs[grepl("^\\.", state$defs)])
+  list(defs = setdiff(state$defs, locals),
+       refs = setdiff(unique(state$refs), locals),
+       self_refs = setdiff(unique(state$self_refs), locals),
+       locals = locals,
        barrier = isTRUE(state$barrier),
        diagnostics = state$diagnostics,
        error = NULL)
@@ -171,6 +174,11 @@ collect_top_defs <- function(node, p1) {
   }
   q <- qualified_name(node)
   if (!is.null(q$name)) {
+    if (identical(q$name, "rm")) {
+      nms <- rm_target_names(node)
+      if (!is.null(nms)) p1$defs <- c(p1$defs, nms)
+      return(invisible())
+    }
     if (q$name %in% c(MASK_VERBS, AES_VERBS)) {
       if (length(node) >= 2L) collect_top_defs(node[[2L]], p1)
       return(invisible())
@@ -178,6 +186,11 @@ collect_top_defs <- function(node, p1) {
     for (j in seq_along(node)[-1L]) {
       if (!is.null(node[[j]])) collect_top_defs(node[[j]], p1)
     }
+    return(invisible())
+  }
+  if (identical(hn, "rm")) {
+    nms <- rm_target_names(node)
+    if (!is.null(nms)) p1$defs <- c(p1$defs, nms)
     return(invisible())
   }
   if (hn %in% c(MASK_VERBS, AES_VERBS) || hn == "~") {
@@ -275,6 +288,27 @@ mask_read <- function(nm, frame, state) {
       symbol = nm)))
   }
   invisible()
+}
+rm_target_names <- function(node) {
+  args <- as.list(node)[-1L]
+  nms <- names(node)[-1L]
+  if (length(nms) && any(nzchar(nms))) return(NULL)
+  if (!length(args) ||
+      !all(vapply(args, is.symbol, logical(1)))) return(NULL)
+  out <- vapply(args, as.character, character(1))
+  if (any(is_reserved(out))) return(NULL)
+  out
+}
+
+walk_rm <- function(node, frame, state) {
+  nms <- rm_target_names(node)
+  if (is.null(nms)) {
+    add_block(state, "rm",
+              "rm() may only remove names this cell defines, as bare symbols")
+    return(character())
+  }
+  for (nm in nms) define_name(nm, frame)
+  nms
 }
 
 add_block <- function(state, symbol, message) {
@@ -419,6 +453,9 @@ walk_expr <- function(node, frame, ctx, state) {
     }
     return(character())
   }
+  if (identical(hn, "rm")) {
+    return(walk_rm(node, frame, state))
+  }
   if (hn %in% BLOCKED_DYNAMIC) {
     return(walk_blocked(node, hn, frame, ctx, state))
   }
@@ -462,7 +499,7 @@ walk_expr <- function(node, frame, ctx, state) {
   # operator or a non-symbol call head (e.g. `ui$slider(...)`), in which
   # case the head expression itself is walked; every argument is lazily
   # evaluated (isolated frame).
-  if (!(hn %in% OPERATORS)) {
+  if (!(hn %in% c(OPERATORS, RUNTIME_CALLS))) {
     if (nzchar(hn)) {
       record_read(hn, frame, ctx, state)
     } else {
@@ -492,6 +529,9 @@ walk_qualified <- function(node, name, frame, ctx, state) {
       }
     }
     return(character())
+  }
+  if (identical(name, "rm")) {
+    return(walk_rm(node, frame, state))
   }
   if (name %in% BLOCKED_DYNAMIC) {
     return(walk_blocked(node, name, frame, ctx, state))
@@ -658,6 +698,7 @@ build_dag <- function(cells) {
 
   # Package-attach barriers order every later code cell after the barrier:
   # a successful barrier run invalidates/reruns code whose lookup can change.
+  # SQL cells need no barrier: the worker attaches alder before any cell.
   for (i in barrier_at) {
     for (j in seq_len(n)) {
       if (j > i && identical(cells[[j]]$type, "code")) {

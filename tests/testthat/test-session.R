@@ -25,7 +25,12 @@ wait_widget_done <- function(s, cell_id, token, timeout = 10) {
 
 cell_of <- function(s, id) {
   st <- s$state()
-  for (c in st$cells) if (identical(c$id, id)) return(c)
+  for (c in st$cells) {
+    if (identical(c$id, id)) {
+      c$output <- if (length(c$outputs)) c$outputs[[length(c$outputs)]] else NULL
+      return(c)
+    }
+  }
   stop("no such cell: ", id)
 }
 
@@ -92,6 +97,86 @@ test_that("startup autorun executes all cells; graph rejection is recorded", {
   expect_equal(cell_of(s3, "cell-1")$status, "idle")
 })
 
+test_that("disabled cells keep outputs, block descendants, and resume on enable", {
+  m <- make_test_session(c(
+    "# %%", "x <- 1",
+    "# %%", "y <- x + 1",
+    "# %%", "y + 1"
+  ))
+  s <- m$session
+  withr::defer(s$stop(), testthat::teardown_env())
+
+  s$run_all()
+  wait_until_settled(s)
+  expect_equal(cell_of(s, "cell-3")$output$text, "[1] 3")
+
+  result <- s$set_cell_disabled("cell-2", TRUE)
+  expect_true(result$disabled)
+  expect_true(s$state()$cells[[2L]]$disabled)
+  expect_equal(cell_of(s, "cell-2")$status, "disabled")
+  expect_equal(cell_of(s, "cell-3")$status, "stale")
+  expect_equal(cell_of(s, "cell-3")$output$text, "[1] 3")
+
+  s$run_all()
+  wait_until_settled(s)
+  expect_equal(cell_of(s, "cell-2")$status, "disabled")
+  expect_equal(cell_of(s, "cell-3")$status, "stale")
+
+  result <- s$set_cell_disabled("cell-2", FALSE)
+  expect_false(result$disabled)
+  wait_until_settled(s)
+  expect_equal(cell_of(s, "cell-2")$status, "done")
+  expect_equal(cell_of(s, "cell-3")$status, "done")
+  expect_equal(cell_of(s, "cell-3")$output$text, "[1] 3")
+})
+
+
+test_that("cell names validate and duplicate names warn without blocking", {
+  m <- make_test_session(c(
+    "# %%", "#| name: first", "x <- 1",
+    "# %%", "#| name: first", "x + 1"
+  ), run_on_startup = FALSE)
+  s <- m$session
+  withr::defer(s$stop(), testthat::teardown_env())
+
+  diagnostics <- lapply(s$state()$cells, function(cell) cell$diagnostics)
+  expect_true(all(vapply(
+    diagnostics,
+    function(items) any(vapply(items, function(d)
+      identical(d$code, "duplicate-cell-name"), FALSE)),
+    FALSE
+  )))
+  expect_silent(s$run_all())
+  wait_until_settled(s)
+  expect_equal(cell_of(s, "cell-2")$status, "done")
+
+  expect_error(
+    s$set_cell_name("cell-1", "not valid"),
+    "cell name must match"
+  )
+  s$set_cell_name("cell-1", "renamed_1")
+  expect_equal(s$state()$cells[[1L]]$options$name, "renamed_1")
+  s$set_cell_name("cell-1", NULL)
+  expect_null(s$state()$cells[[1L]]$options$name)
+})
+
+test_that("runtime updates persist both runtime fields in notebook metadata", {
+  m <- make_test_session(c("# %%", "x <- 1"))
+  s <- m$session
+  withr::defer(s$stop(), testthat::teardown_env())
+
+  expect_error(s$set_runtime(), "provide execution_mode")
+  s$set_runtime(run_on_startup = FALSE)
+  expect_identical(s$state()$runtime$execution_mode, "automatic")
+  expect_false(s$state()$runtime$run_on_startup)
+  expect_identical(
+    s$state()$metadata$runtime,
+    list(execution_mode = "automatic", run_on_startup = FALSE)
+  )
+  s$set_runtime(execution_mode = "lazy")
+  expect_identical(s$state()$runtime$execution_mode, "lazy")
+  expect_false(s$state()$runtime$run_on_startup)
+})
 test_that("duplicate definitions and cycles dispatch nothing", {
   m <- make_test_session(c("# %%", "a <- 1", "# %%", "a <- 2"),
                          run_on_startup = FALSE)
@@ -284,6 +369,47 @@ test_that("run_button is one-shot and resets after its consumers finish", {
   expect_equal(cell_of(s, "cell-2")$output$operation$status, "done")
 })
 
+test_that("nested run_button resets its addressed composite child", {
+  m <- make_test_session(c(
+    "# %%", "library(alder)",
+    "# %%",
+    "controls <- ui$array(go = ui$run_button(label = \"Go\"),",
+    "                     level = ui$slider(min = 0, max = 10, value = 5))",
+    "controls",
+    "# %%",
+    "controls$value$go"
+  ))
+  s <- m$session
+  withr::defer(s$stop(), testthat::teardown_env())
+  s$run_all()
+  wait_until_settled(s)
+  key <- paste("controls", "go", sep = "\001")
+  child_value <- function(out) {
+    idx <- which(vapply(
+      out$spec$children, function(x) identical(x$name, "go"), FALSE
+    ))
+    out$spec$children[[idx[[1L]]]]$value
+  }
+  out <- cell_of(s, "cell-2")$output
+  expect_false(child_value(out))
+
+  tok <- s$set_widget(
+    "controls", path = "go", update = list(value = TRUE), source = "editor"
+  )
+  wait_for(s, function() {
+    op <- cell_of(s, "cell-2")$output$operations[[key]]
+    !is.null(op) && identical(op$token, tok) &&
+      !identical(op$status, "pending")
+  })
+  wait_until_settled(s)
+  wait_for(s, function() {
+    out <- cell_of(s, "cell-2")$output
+    op <- out$operations[[key]]
+    identical(child_value(out), FALSE) &&
+      !is.null(op) && identical(op$status, "done")
+  })
+})
+
 test_that("editing a widget owner cancels its pending update", {
   m <- make_test_session(c(
     "# %%", "library(alder)",
@@ -447,6 +573,52 @@ test_that("a malformed worker line is a terminal transport failure", {
   # no second terminal transition for a later bad line
   w$handle_line("{\"req\": 1, \"cmd\": \"eval_cell\"}")
   expect_equal(fired, 1L)
+})
+
+test_that("notify frames accept matching context but reject stale run ids as terminal", {
+  fake_proc <- list(
+    is_alive = function() TRUE,
+    kill = function() invisible(),
+    wait = function(t) invisible(),
+    interrupt = function() invisible(),
+    write_input = function(x) invisible()
+  )
+  fired <- 0L
+  seen <- NULL
+  w <- Worker$new(fake_proc, "ws", "app", tempfile("art-"))
+  dir.create(w$artifact_dir)
+  w$set_on_failure(function(message) fired <<- fired + 1L)
+  w$set_on_notify(function(context, frame) seen <<- frame$id)
+  # register a pending eval_cell with run_id 2L directly (no send(): the
+  # fake process cannot supply output/error connections for poll_cycle)
+  w$pending[["7"]] <- list(
+    callback = function(context, resp) invisible(),
+    context = list(cmd = "eval_cell", req = 7, id = "cell-1", run_id = 2L),
+    last_seq = 0L)
+
+  # a matching notify (same req/id/run_id, invalid sequence and payload
+  # checks exercised) is accepted and routes to on_notify
+  w$handle_line(jsonlite::toJSON(
+    list(notify = "append", req = 7L, id = "cell-1",
+         run_id = 2L, seq = 1L,
+         payload = list(output = list(kind = "text", text = "hi",
+                                      truncated = FALSE))),
+    auto_unbox = TRUE, null = "null"))
+  expect_equal(fired, 0L)
+  expect_false(isTRUE(w$failed_once))
+  expect_equal(seen, "cell-1")
+  expect_equal(w$pending[["7"]]$last_seq, 1L)
+
+  # a notify frame from a stale run (run_id mismatch) is a terminal
+  # transport failure; nothing may weaken the identity discipline
+  w$handle_line(jsonlite::toJSON(
+    list(notify = "append", req = 7L, id = "cell-1",
+         run_id = 1L, seq = 2L,
+         payload = list(output = list(kind = "text", text = "stale",
+                                      truncated = FALSE))),
+    auto_unbox = TRUE, null = "null"))
+  expect_equal(fired, 1L)
+  expect_true(w$failed_once)
 })
 
 test_that("a throwing response callback fails once and invokes on_failure", {

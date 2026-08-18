@@ -95,7 +95,96 @@ is_markdown_delim <- function(delim) {
   if (length(mm) != 2L) return(FALSE)
   tolower(trimws(mm[[2L]])) == "[markdown]"
 }
+is_sql_delim <- function(delim) {
+  m <- regexec("^\\s*#\\s*%%\\s*(.*)$", delim, perl = TRUE)
+  mm <- regmatches(delim, m)[[1L]]
+  if (length(mm) != 2L) return(FALSE)
+  tolower(trimws(mm[[2L]])) == "[sql]"
+}
 
+sql_cell_shape <- function() {
+  paste0("<into> <- sql(r\"---(\n",
+         "SELECT ...\n",
+         ")---\", conn = <conn>)")
+}
+
+parse_sql_cell <- function(body) {
+  if (!is.character(body) || !length(body)) return(NULL)
+  text <- paste(body, collapse = "\n")
+  m <- regexec(
+    paste0("^\\s*([A-Za-z][A-Za-z0-9_.]*)\\s*<-\\s*sql\\(\\s*",
+           "r\\\"(-+)\\(([\\s\\S]*)\\)\\2\\\"",
+           "(?:\\s*,\\s*conn\\s*=\\s*(.+?))?\\s*\\)\\s*$"),
+    text, perl = TRUE
+  )
+  mm <- regmatches(text, m)[[1L]]
+  if (length(mm) != 5L) return(NULL)
+  query <- mm[[4L]]
+  if (startsWith(query, "\n")) query <- substring(query, 2L)
+  if (endsWith(query, "\n")) query <- substr(query, 1L, nchar(query) - 1L)
+  conn <- trimws(mm[[5L]])
+  if (!nzchar(conn)) conn <- NULL
+  list(into = mm[[2L]], query = query, conn = conn)
+}
+
+sql_raw_delimiter <- function(query) {
+  dashes <- "---"
+  while (grepl(paste0(")", dashes, "\""), query, fixed = TRUE)) {
+    dashes <- paste0(dashes, "-")
+  }
+  dashes
+}
+
+# Bare identifiers appearing in a SQL query body (ADR 0012). These become
+# cell references: minus well-known SQL keywords they are the table/column
+# names a query reads at runtime, so the notebook dependency graph orders
+# the SQL cell after any cell defining one of them (e.g. a data frame
+# registered into duckdb by sql()).
+sql_query_identifiers <- function(query) {
+  if (!is.character(query) || length(query) != 1L || is.na(query)) {
+    return(character())
+  }
+  ids <- regmatches(query, gregexpr("[A-Za-z_][A-Za-z0-9_]*", query,
+                                    perl = TRUE))[[1L]]
+  keywords <- c(
+    "all", "alter", "and", "as", "asc", "between", "by", "case", "check",
+    "column", "constraint", "count", "create", "cross", "current",
+    "default", "delete", "desc", "distinct", "drop", "else", "end",
+    "except", "exists", "false", "fetch", "for", "foreign", "from", "full",
+    "grant", "group", "having", "in", "index", "inner", "insert",
+    "intersect", "into", "is", "join", "key", "left", "like", "limit",
+    "not", "null", "offset", "on", "or", "order", "outer", "primary",
+    "references", "right", "rollback", "select", "set", "table", "then",
+    "true", "union", "unique", "update", "using", "values", "when",
+    "where", "with"
+  )
+  unique(ids[!tolower(ids) %in% keywords])
+}
+
+sql_cell_body <- function(query, conn = NULL, into = "result") {
+  if (!is.character(query) || length(query) != 1L || is.na(query)) {
+    stop("SQL query must be a single string", call. = FALSE)
+  }
+  if (!cell_name_valid(into)) {
+    stop("SQL result name must match ^[A-Za-z][A-Za-z0-9_.]*$",
+         call. = FALSE)
+  }
+  if (!is.null(conn) &&
+      (!is.character(conn) || length(conn) != 1L || is.na(conn) ||
+       !grepl("^[A-Za-z][A-Za-z0-9_.]*(:::[A-Za-z][A-Za-z0-9_.]*)?$",
+              conn, perl = TRUE))) {
+    stop("SQL connection must be a symbol or namespace-qualified name",
+         call. = FALSE)
+  }
+  dashes <- sql_raw_delimiter(query)
+  query_lines <- if (nzchar(query)) strsplit(query, "\n", fixed = TRUE)[[1L]]
+    else ""
+  opening <- paste0(into, ' <- sql(r"', dashes, "(")
+  closing <- paste0(")", dashes, '"')
+  if (!is.null(conn)) closing <- paste0(closing, ", conn = ", conn)
+  closing <- paste0(closing, ")")
+  c(opening, query_lines, closing)
+}
 # Markdown cells must remain ordinary R source: every body line is blank or
 # an R comment (`^\\s*#`), so a `.R` file with markdown cells still parses.
 validate_markdown_lines <- function(body, id) {
@@ -186,7 +275,8 @@ parse_records <- function(path, records) {
 sync_cell_from_records <- function(cell) {
   recs <- cell$records
   delim_rec <- recs[[1L]]
-  cell$type <- if (is_markdown_delim(delim_rec$text)) "markdown" else "code"
+  cell$type <- if (is_markdown_delim(delim_rec$text)) "markdown"
+    else if (is_sql_delim(delim_rec$text)) "sql" else "code"
   cell$delim <- delim_rec$text
   kinds <- vapply(recs, function(r) r$kind, "")
   opt_pos <- which(kinds == "option")
@@ -202,7 +292,8 @@ sync_cell_from_records <- function(cell) {
 
 parse_cell_records <- function(cell_records, id = "?") {
   delim <- cell_records[[1L]]$text
-  type <- if (is_markdown_delim(delim)) "markdown" else "code"
+  type <- if (is_markdown_delim(delim)) "markdown"
+    else if (is_sql_delim(delim)) "sql" else "code"
   kinds <- vapply(cell_records, function(r) r$kind, "")
   opt_pos <- which(kinds == "option")
   body_pos <- which(kinds == "body")
@@ -301,6 +392,58 @@ parse_yaml_lines <- function(lines) {
   res
 }
 
+metadata_records <- function(metadata, eol) {
+  if (!length(metadata)) return(list())
+  rendered <- yaml::as.yaml(metadata)
+  rendered <- sub("[\r\n]+$", "", rendered)
+  lines <- strsplit(rendered, "\n", fixed = TRUE)[[1L]]
+  lapply(lines, function(line) {
+    text <- if (nzchar(line)) paste0("# ", line) else "#"
+    new_record(text, eol, "header")
+  })
+}
+
+nb_set_metadata <- function(nb, key, value) {
+  if (!is.character(key) || length(key) != 1L || is.na(key) ||
+      !grepl("^[A-Za-z][A-Za-z0-9_.-]*$", key, perl = TRUE)) {
+    stop("metadata key must be a non-empty scalar", call. = FALSE)
+  }
+  metadata <- nb$metadata %||% list()
+  if (is.null(value)) metadata[[key]] <- NULL else metadata[[key]] <- value
+  records <- nb$header_records
+  fences <- which(vapply(
+    records, function(record) grepl("^\\s*#\\s*---\\s*$",
+                                     record$text, perl = TRUE), FALSE
+  ))
+  eol <- if (length(fences) && nzchar(records[[fences[[1L]]]]$eol)) {
+    records[[fences[[1L]]]]$eol
+  } else {
+    nb$preferred_eol
+  }
+  interior <- metadata_records(metadata, eol)
+  if (length(fences) >= 2L) {
+    open <- fences[[1L]]
+    close <- fences[[2L]]
+    records <- c(
+      if (open > 1L) records[seq_len(open)] else records[open],
+      interior,
+      records[close:length(records)]
+    )
+  } else {
+    block <- c(
+      list(new_record("# ---", eol, "header")),
+      interior,
+      list(new_record("# ---", eol, "header"))
+    )
+    records <- c(block, records)
+  }
+  nb$header_records <- records
+  nb$header <- vapply(records, function(record) record$text, "")
+  nb$metadata <- metadata
+  normalize_nb_boundary(nb, hdr = TRUE)
+}
+
+
 # Raw-byte reader: rejects directories, unreadable files, invalid UTF-8,
 # and embedded NULs with deterministic path-bearing errors; invalid text
 # fails as `notebook is not valid UTF-8: <path>` before parsing/mutation.
@@ -343,6 +486,57 @@ serialize_notebook <- function(nb) {
            use.names = FALSE)
   ), collapse = "")
 }
+# Return the 1-based physical line numbers occupied by a cell's source
+# records. `#|` option records are intentionally excluded even when they are
+# interleaved with the source body.
+nb_body_lines <- function(nb, id) {
+  cell <- nb_cell(nb, id)
+  if (is.null(cell)) return(integer())
+  before <- if (length(nb$header_records)) length(nb$header_records) else 0L
+  for (candidate in nb$cells) {
+    if (identical(candidate$id, id)) {
+      kinds <- vapply(candidate$records, function(record) record$kind, "")
+      return(before + which(kinds == "body"))
+    }
+    before <- before + length(candidate$records)
+  }
+  integer()
+}
+
+# Translate a zero-based cell-body position to a zero-based LSP file
+# position. Characters are passed through unchanged; LSP and R use UTF-8
+# source text here, and the editor sends the same byte-faithful body.
+nb_to_file_pos <- function(nb, id, line, character) {
+  if (length(line) != 1L || is.na(line) || line < 0L ||
+      length(character) != 1L || is.na(character) || character < 0L) {
+    return(NULL)
+  }
+  lines <- nb_body_lines(nb, id)
+  index <- as.integer(line) + 1L
+  if (!length(lines) || index > length(lines)) return(NULL)
+  list(line = as.integer(lines[[index]] - 1L),
+       character = as.integer(character))
+}
+
+# Translate a zero-based LSP file line to a zero-based cell-body line.
+# Non-body lines (headers, delimiters, and #| options) return NULL.
+nb_from_file_pos <- function(nb, line) {
+  if (length(line) != 1L || is.na(line) || line < 0L) return(NULL)
+  physical <- as.integer(line) + 1L
+  cursor <- if (length(nb$header_records)) length(nb$header_records) else 0L
+  for (cell in nb$cells) {
+    kinds <- vapply(cell$records, function(record) record$kind, "")
+    body <- which(kinds == "body")
+    hits <- which(cursor + seq_along(kinds) == physical & kinds == "body")
+    if (length(hits)) {
+      body_line <- match(hits[[1L]], body) - 1L
+      return(list(id = cell$id, line = as.integer(body_line)))
+    }
+    cursor <- cursor + length(kinds)
+  }
+  NULL
+}
+
 
 write_notebook <- function(nb, path = nb$path) {
   writeBin(charToRaw(serialize_notebook(nb)), path)
@@ -525,34 +719,147 @@ nb_cell <- function(nb, id) {
   if (!length(hits)) NULL else nb$cells[[hits[[1L]]]]
 }
 
-# Update a cell's body and type. `type` is exactly "code" or "markdown";
-# markdown bodies must be blank or R comments so the file stays ordinary R
-# source. The delimiter text is preserved when the type is unchanged; on a
-# type change only the delimiter text is replaced with the canonical
-# `# %%` or `# %% [markdown]`, retaining its original EOL.
+# Update a cell's body and type. SQL bodies are canonicalized by
+# `nb_set_sql_cell`; this lower-level helper also accepts raw SQL bodies so
+# malformed source can be displayed and diagnosed by Session.
 nb_update_cell <- function(nb, id, body, type) {
-  if (!(identical(type, "code") || identical(type, "markdown"))) {
-    stop("invalid cell type; must be \"code\" or \"markdown\"", call. = FALSE)
+  if (!type %in% c("code", "markdown", "sql")) {
+    stop("invalid cell type; must be \"code\", \"markdown\", or \"sql\"",
+         call. = FALSE)
   }
   if (type == "markdown") validate_markdown_lines(body, id)
   ci <- nb_cell_index(nb, id)
   cell <- nb$cells[[ci]]
   records <- splice_body_records(cell$records, body, nb$preferred_eol)
-  old_type <- if (is_markdown_delim(records[[1L]]$text)) "markdown" else "code"
+  old_type <- if (is_markdown_delim(records[[1L]]$text)) "markdown"
+    else if (is_sql_delim(records[[1L]]$text)) "sql" else "code"
   if (!identical(old_type, type)) {
-    records[[1L]]$text <- if (type == "markdown") "# %% [markdown]" else "# %%"
+    records[[1L]]$text <- switch(
+      type,
+      markdown = "# %% [markdown]",
+      sql = "# %% [sql]",
+      code = "# %%"
+    )
   }
   cell$records <- records
   nb$cells[[ci]] <- sync_cell_from_records(cell)
   normalize_nb_boundary(nb, region = ci)
 }
 
+nb_set_sql_cell <- function(nb, id, query, conn = NULL, into = "result") {
+  nb_update_cell(nb, id, sql_cell_body(query, conn, into), "sql")
+}
+
+option_record_key <- function(text) {
+  if (!grepl("^\\s*#\\|", text, perl = TRUE)) return("")
+  value <- sub("^\\s*#\\|\\s*", "", text, perl = TRUE)
+  key <- strsplit(value, ":", fixed = TRUE)[[1L]][[1L]]
+  trimws(key)
+}
+
+serialize_cell_option <- function(key, value) {
+  if (!is.character(key) || length(key) != 1L || is.na(key) ||
+      !nzchar(trimws(key)) || grepl("[:\r\n]", key, perl = TRUE)) {
+    stop("cell option key must be a non-empty scalar without ':'", call. = FALSE)
+  }
+  if (length(value) != 1L || is.na(value)) {
+    stop("cell option value must be a scalar", call. = FALSE)
+  }
+  rendered <- if (is.logical(value)) {
+    if (isTRUE(value)) "true" else "false"
+  } else if (is.character(value)) {
+    value
+  } else if (is.numeric(value) || is.integer(value)) {
+    format(value, trim = TRUE, scientific = FALSE)
+  } else {
+    stop("cell option value must be logical, character, or numeric",
+         call. = FALSE)
+  }
+  if (length(rendered) != 1L || grepl("[\r\n]", rendered, fixed = FALSE)) {
+    stop("cell option value must be a single line", call. = FALSE)
+  }
+  paste0("#| ", trimws(key), ": ", rendered)
+}
+
+cell_name_valid <- function(value) {
+  is.character(value) && length(value) == 1L && !is.na(value) &&
+    grepl("^[A-Za-z][A-Za-z0-9_.]*$", value, perl = TRUE)
+}
+
+validate_cell_name <- function(value) {
+  if (!cell_name_valid(value)) {
+    stop("cell name must match ^[A-Za-z][A-Za-z0-9_.]*$", call. = FALSE)
+  }
+  invisible(value)
+}
+
+
+# Set or remove one cell option without rewriting unrelated physical records.
+# Existing options use their original record and EOL; new options use the
+# cell's delimiter EOL and are inserted immediately after the delimiter.
+nb_set_cell_option <- function(nb, id, key, value) {
+  ci <- nb_cell_index(nb, id)
+  cell <- nb$cells[[ci]]
+  records <- cell$records
+  if (identical(key, "name") && !is.null(value)) {
+    validate_cell_name(value)
+  }
+  option_positions <- which(vapply(
+    records, function(record) identical(option_record_key(record$text), key),
+    FALSE
+  ))
+  if (is.null(value)) {
+    if (length(option_positions)) records <- records[-option_positions]
+  } else {
+    text <- serialize_cell_option(key, value)
+    if (length(option_positions)) {
+      # The last record is the effective value when duplicate options exist.
+      records[[option_positions[[length(option_positions)]]]]$text <- text
+    } else {
+      eol <- records[[1L]]$eol
+      if (!nzchar(eol)) {
+        eol <- vapply(records, function(record) record$eol, "")
+        eol <- eol[nzchar(eol)]
+        eol <- if (length(eol)) eol[[1L]] else nb$preferred_eol
+      }
+      option <- new_record(text, eol, "option")
+      records <- append(records, list(option), after = 1L)
+    }
+  }
+  cell$records <- records
+  nb$cells[[ci]] <- sync_cell_from_records(cell)
+  normalize_nb_boundary(nb, region = ci)
+}
+
+nb_move_cell <- function(nb, id, after = NULL) {
+  from <- nb_cell_index(nb, id)
+  if (!is.null(after)) {
+    if (identical(after, id)) {
+      stop("cannot move a cell after itself", call. = FALSE)
+    }
+    nb_cell_index(nb, after)
+  }
+  cells <- nb$cells
+  moved <- cells[[from]]
+  remaining <- cells[-from]
+  target <- if (is.null(after)) {
+    1L
+  } else {
+    match(after, vapply(remaining, function(cell) cell$id, "")) + 1L
+  }
+  if (target == from) return(nb)
+  nb$cells <- append(remaining, list(moved), after = target - 1L)
+  normalize_nb_boundary(nb, region = unique(c(from, target)))
+}
+
 nb_add_cell <- function(nb, body = character(), type = "code", after = NULL) {
-  if (!(identical(type, "code") || identical(type, "markdown"))) {
-    stop("invalid cell type; must be \"code\" or \"markdown\"", call. = FALSE)
+  if (!type %in% c("code", "markdown", "sql")) {
+    stop("invalid cell type; must be \"code\", \"markdown\", or \"sql\"",
+         call. = FALSE)
   }
   if (type == "markdown") validate_markdown_lines(body, "<new cell>")
-  delim <- if (type == "markdown") "# %% [markdown]" else "# %%"
+  delim <- switch(type, markdown = "# %% [markdown]",
+                  sql = "# %% [sql]", code = "# %%")
   # Monotonic id allocation: never reuse a previously allocated number.
   id <- paste0("cell-", nb$next_cell_number)
   ids <- vapply(nb$cells, function(c) c$id, "")
