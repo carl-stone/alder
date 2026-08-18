@@ -14,7 +14,6 @@ Description: A modern reactive notebook environment for R. Plain-text .R
 License: Apache License (>= 2)
 Encoding: UTF-8
 Roxygen: list(markdown = TRUE)
-RoxygenNote: 7.3.2
 Depends:
     R (>= 4.1)
 Imports:
@@ -25,6 +24,9 @@ Imports:
     later,
     processx,
     R6,
+    rlang,
+    base64enc,
+    mime,
     xml2,
     yaml
 Suggests:
@@ -32,5 +34,16 @@ Suggests:
     curl,
     ggplot2,
     htmlwidgets,
-    chromote
+    chromote,
+    DBI,
+    duckdb,
+    languageserver,
+    styler,
+    lintr,
+    rmarkdown,
+    renv,
+    pak,
+    ragg,
+    withr
 Config/testthat/edition: 3
+Config/roxygen2/version: 8.0.0
