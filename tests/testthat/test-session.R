@@ -56,6 +56,22 @@ test_that("worker executes cells end to end with visible values", {
   expect_length(c2$log, 0)
 })
 
+test_that("summary results render as text instead of erroring as tables", {
+  m <- make_test_session(c(
+    "# %%", "peng <- iris",
+    "# %%", "summary(peng$Sepal.Length)"
+  ))
+  s <- m$session
+  withr::defer(s$stop(), testthat::teardown_env())
+  s$run_all()
+  wait_until_settled(s)
+  c2 <- cell_of(s, "cell-2")
+  expect_equal(c2$status, "done")
+  expect_equal(c2$output$kind, "text")
+  expect_match(c2$output$text, "Min\\.")
+  expect_match(c2$output$text, "Max\\.")
+})
+
 test_that("top-level functions have .GlobalEnv as their environment", {
   m <- make_test_session(c(
     "# %%", "f <- function() 1",

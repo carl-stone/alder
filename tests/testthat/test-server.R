@@ -290,6 +290,27 @@ test_that("editor document carries CSP and frame protection headers", {
   expect_true(any(grepl("^ref no-referrer", out)))
   expect_true(any(grepl("^cache no-store", out)))
 })
+test_that("/api/log accepts client error reports", {
+  port <- httpuv::randomPort()
+  srv <- start_alder(NULL, port = port, run_on_startup = FALSE)
+  on.exit(stop_alder(srv), add = TRUE)
+  code <- '    base <- sprintf("http://127.0.0.1:%d/api/log", port)
+    post <- function(obj) {
+      h <- curl::new_handle()
+      curl::handle_setopt(h,
+        postfields = jsonlite::toJSON(obj, auto_unbox = TRUE),
+        customrequest = "POST")
+      curl::handle_setheaders(h, "Content-Type" = "application/json")
+      r <- curl::curl_fetch_memory(base, handle = h)
+      cat(r$status_code, "\n", sep = "")
+    }
+    post(list(level = "error", message = "boom",
+              source = "window.error", stack = "line 1\\nline 2"))
+    post(list())'
+  out <- http_child(port, code)
+  expect_true(any(grepl("^200$", out)))
+  expect_true(any(grepl("^400$", out)))
+})
 
 test_that("forbidden Host and Origin are rejected before any route", {
   port <- httpuv::randomPort()

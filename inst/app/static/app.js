@@ -51,6 +51,37 @@ const pendingWidgetOps = new Map();
 const widgetWaiters = new Map();
 let actionError = null;
 let pollError = null;
+
+// Best-effort report of client-side failures to the server logs. Never throws:
+// logging itself must not crash the app or recurse back into error handling.
+async function clientLog(level, message, extra = {}) {
+  try {
+    await fetch('/api/log', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ level, message, ...extra }),
+    });
+  } catch (error) {
+    // swallowing is intentional: /api/log must never break the caller
+  }
+}
+
+window.addEventListener('error', (event) => {
+  const error = event.error;
+  clientLog('error', event.message || 'Uncaught JS error', {
+    source: 'window.error',
+    url: event.filename || location.href,
+    stack: (error && error.stack) || '',
+  });
+});
+
+window.addEventListener('unhandledrejection', (event) => {
+  const reason = event.reason;
+  clientLog('error', (reason && reason.message) || String(reason), {
+    source: 'unhandledrejection',
+    stack: (reason && reason.stack) || '',
+  });
+});
 const pollAbort = new AbortController();
 let lastState = null;
 let renderingState = null;
@@ -90,35 +121,45 @@ async function api(path, opts = {}) {
     init.headers['Content-Type'] = 'application/json';
     init.body = JSON.stringify(opts.body);
   }
+  function fail(error) {
+    if (error && error.name !== 'AbortError') {
+      clientLog('error', `API ${path}: ${error.message}`, {
+        source: 'api',
+        code: error.code,
+        status: error.status,
+      });
+    }
+    throw error;
+  }
   let response;
   try {
     response = await fetch(path, init);
   } catch (error) {
     if (error && error.name === 'AbortError') throw error;
-    throw new ApiError(`Network error: ${error.message}`, 'internal_error', 0);
+    return fail(new ApiError(`Network error: ${error.message}`, 'internal_error', 0));
   }
   let data = null;
   try {
     data = await response.json();
   } catch (error) {
-    throw new ApiError(`Invalid JSON from ${path} (HTTP ${response.status})`,
-      'internal_error', response.status);
+    return fail(new ApiError(`Invalid JSON from ${path} (HTTP ${response.status})`,
+      'internal_error', response.status));
   }
   if (!response.ok || (data && data.ok === false)) {
     const detail = data && data.error;
     if (detail && typeof detail === 'object') {
-      throw new ApiError(detail.message || 'Request failed',
-        detail.code || 'internal_error', response.status);
+      return fail(new ApiError(detail.message || 'Request failed',
+        detail.code || 'internal_error', response.status));
     }
-    throw new ApiError(typeof detail === 'string' ? detail : `HTTP ${response.status}`,
-      'internal_error', response.status);
+    return fail(new ApiError(typeof detail === 'string' ? detail : `HTTP ${response.status}`,
+      'internal_error', response.status));
   }
   return data;
 }
-
 function showActionError(message) {
   actionError = message || 'Request failed';
   renderStatus();
+  clientLog('error', `UI: ${actionError}`, { source: 'toast' });
 }
 
 
@@ -1781,9 +1822,11 @@ function renderWidgetOutput(container, widget) {
     container.replaceChildren();
     row = createWidgetRow(widget);
     container.appendChild(row);
-  } else {
-    patchWidget(row, widget);
   }
+  // Freshly created controls are built without their spec attributes (min,
+  // max, step, value, selection). Patch every row so a just-created slider is
+  // fully configured for its widget spec instead of showing browser defaults.
+  patchWidget(row, widget);
 }
 
 function appendText(container, className, text) {
@@ -2710,6 +2753,7 @@ async function handleCellAction(button) {
   if (act === 'run') {
     await flushPendingEdits();
     await flushWidgetUpdates();
+    await api('/api/run', { body: { cell: id } });
   } else if (act === 'move-up') {
     await moveCell(id, 'up');
   } else if (act === 'move-down') {

@@ -1352,7 +1352,7 @@ start_alder <- function(path = NULL, host = "127.0.0.1", port = 8899L,
                     "/api/run", "/api/lazy", "/api/table", "/api/cell",
                     "/api/widget", "/api/upload", "/api/value", "/api/runtime",
                     "/api/interrupt", "/api/save", "/api/lsp", "/api/format",
-                    "/api/export", "/api/check", "/api/packages")
+                    "/api/export", "/api/check", "/api/packages", "/api/log")
 
     if (!(path_req %in% api_routes)) {
       return(error_res("not_found", "not found", 404L))
@@ -1450,6 +1450,32 @@ start_alder <- function(path = NULL, host = "127.0.0.1", port = 8899L,
                        parsed$error$status))
     }
     body <- parsed$body
+
+    # --- /api/log (surface client-side errors in server logs) --------------
+    if (identical(path_req, "/api/log")) {
+      lv <- body$level %||% "error"
+      if (!is.character(lv) || length(lv) != 1L || is.na(lv) || !nzchar(lv)) {
+        lv <- "error"
+      }
+      msg <- body$message
+      if (!is.character(msg) || length(msg) != 1L || is.na(msg)) {
+        msg <- "(no message)"
+      }
+      attrs <- character(0)
+      if (nzchar(body$source %||% "")) {
+        attrs <- c(attrs, paste0("source=", body$source))
+      }
+      if (nzchar(body$url %||% "")) {
+        attrs <- c(attrs, paste0("url=", body$url))
+      }
+      if (nzchar(body$stack %||% "")) {
+        attrs <- c(attrs, paste0("stack=", gsub("\n", " ", body$stack)))
+      }
+      cat(sprintf("[client:%s] %s%s\n", lv, msg,
+                  if (length(attrs)) paste0(" | ", paste(attrs, collapse = " ")) else ""),
+          file = stderr())
+      return(ok_res(logged = TRUE))
+    }
 
     # --- /api/config -------------------------------------------------------
     if (identical(path_req, "/api/config")) {

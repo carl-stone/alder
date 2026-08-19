@@ -263,6 +263,70 @@ testthat::test_that("browser coalesces slider input to its final value", {
 })
 
 # 6 --------------------------------------------------------------------------
+
+# 5b -------------------------------------------------------------------------
+testthat::test_that("browser initializes a non-zero-min slider to its spec and accepts drags", {
+  with_browser_server(c("# %%", "library(alder)",
+                        "# %%", "min_wt <- ui$slider(1, 8, value = 3, label = \"min\")", "min_wt"), function(ctx) {
+    wait_cells_done(ctx$session, 2L)
+    id <- browser_state(ctx$session)$cells[[2L]]$id
+    selector <- sprintf("#widget-%s-slider", id)
+    min_attr <- browser_eval(ctx$session, sprintf("document.querySelector('%s')?.min", selector))
+    max_attr <- browser_eval(ctx$session, sprintf("document.querySelector('%s')?.max", selector))
+    val_attr <- browser_eval(ctx$session, sprintf("document.querySelector('%s')?.value", selector))
+    testthat::expect_equal(min_attr, "1")
+    testthat::expect_equal(max_attr, "8")
+    testthat::expect_equal(val_attr, "3")
+    testthat::expect_true(set_input(ctx$session, selector, "5", "input"))
+    wait_idle(ctx$session)
+    wait_browser(ctx$session, function() {
+      cell <- cell_state(ctx$session, id)
+      isTRUE(as.numeric(cell$output$spec$value) == 5)
+    }, label = "non-zero-min slider commit")
+    testthat::expect_equal(as.numeric(cell_state(ctx$session, id)$output$spec$value), 5)
+  })
+})
+
+
+# 5c -------------------------------------------------------------------------
+testthat::test_that("browser runs a freshly added summary cell and reruns it", {
+  with_browser_server(c("# %%", "library(alder)",
+                        "# %%", "peng <- iris"), function(ctx) {
+    wait_cells_done(ctx$session, 2L)
+    before <- sub("^cell-", "", cell_ids(ctx$session))
+    expect_true(click_selector(ctx$session,
+      sprintf("#cell-%s [data-act=add][data-type=code]", before[[1L]])))
+    wait_browser(ctx$session, function() length(cell_ids(ctx$session)) == 3L,
+                 label = "added cell")
+    after <- sub("^cell-", "", cell_ids(ctx$session))
+    id <- setdiff(after, before)
+    testthat::expect_length(id, 1L)
+    id <- id[[1L]]
+    testthat::expect_true(browser_eval(ctx$session, sprintf(
+      "window.__alderSetCellSource(%s, %s)", js_json(id),
+      js_json("summary(peng$Sepal.Length)"))))
+    wait_browser(ctx$session,
+      function() identical(cell_text(ctx$session, id), "summary(peng$Sepal.Length)"),
+      label = "source committed")
+    testthat::expect_true(click_selector(ctx$session,
+      sprintf("#cell-%s [data-act=run]", id)))
+    wait_browser(ctx$session, function() {
+      c <- cell_state(ctx$session, id)
+      identical(c$status, "done") && identical(c$output$kind, "text") &&
+        grepl("Min\\.", c$output$text)
+    }, label = "summary output")
+    testthat::expect_match(cell_state(ctx$session, id)$output$text, "Max\\.")
+    # A second run must also produce output (issue #4: no silent no-ops).
+    testthat::expect_true(click_selector(ctx$session,
+      sprintf("#cell-%s [data-act=run]", id)))
+    wait_browser(ctx$session, function() {
+      c <- cell_state(ctx$session, id)
+      identical(c$status, "done") && identical(c$output$kind, "text") &&
+        grepl("Min\\.", c$output$text)
+    }, label = "rerun output")
+  })
+})
+# 6 --------------------------------------------------------------------------
 testthat::test_that("browser resets run buttons after their consumers finish", {
   with_browser_server(c("# %%", "library(alder)",
                         "# %%", "go <- ui$run_button()", "go",

@@ -530,6 +530,12 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
     if (inherits(x, "alder_progress")) {
       return(list(kind = "error", message = "a progress handle is not an output"))
     }
+    # summary() results carry class "summaryDefault" but inherit "table",
+    # whose dimnames shape breaks render_table. Their printed form (what the
+    # REPL shows) is the useful output, so render them as text.
+    if (inherits(x, "summaryDefault")) {
+      return(render_text_value(x))
+    }
     if (inherits(x, "data.frame") || inherits(x, "matrix") ||
         inherits(x, "table") || inherits(x, "tbl_df") ||
         inherits(x, "data.table")) {
@@ -537,6 +543,12 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
         function() render_table(x, cell_id = cell_id, name = name, path = path),
         262144L)
       if (!is.null(cap$error)) {
+        # A table-shaped object the renderer cannot page still has a printed
+        # form; fall back to text instead of failing the whole cell.
+        fallback <- tryCatch(render_text_value(x), error = function(e) NULL)
+        if (!is.null(fallback) && identical(fallback$kind, "text")) {
+          return(fallback)
+        }
         return(list(kind = "error", message = paste("could not render value:",
                                                      cap$error)))
       }
