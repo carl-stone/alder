@@ -1,5 +1,3 @@
-# Command-line entry point and launcher installation.
-
 alder_cli_help <- function() {
   paste(
     "Usage: alder [edit] [options] NOTEBOOK.R",

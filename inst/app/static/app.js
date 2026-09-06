@@ -1,6 +1,4 @@
-// alder frontend: one small, dependency-free controller for the editor and
-// output-only app view.  The server is authoritative; local source/widget
-// edits are kept separately until their acknowledgements arrive.
+// Local source/widget intent stays separate until the server acknowledges it.
 
 const els = {
   notebook: document.getElementById('notebook'),

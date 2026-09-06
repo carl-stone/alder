@@ -1,7 +1,3 @@
-# Notebook parser/serializer contracts (ADR 0001): byte-identical round
-# trips, physical record model, body-slot splicing, strict YAML metadata,
-# terminal-EOL invariants, and hardened raw-read boundaries.
-
 write_raw_file <- function(text) {
   f <- tempfile(fileext = ".R")
   writeBin(charToRaw(text), f)

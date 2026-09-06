@@ -1590,7 +1590,6 @@ alder_mcp_handle <- mcp_dispatch
 mcp_request <- mcp_dispatch
 mcp_request_handler <- mcp_dispatch
 
-
 #' Run the alder Model Context Protocol server over stdin/stdout.
 #'
 #' @param path Optional notebook path.  When omitted, an in-memory notebook is

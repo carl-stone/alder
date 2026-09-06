@@ -1,22 +1,11 @@
-# alder `ui$` widgets (ADR 0003): plain classed lists with explicit `$value`.
-#
-# A widget is not interchangeable with its value: notebook code reads the
-# current value explicitly (`n$value`), and the web UI renders an interactive
-# control for it. Values are validated eagerly at construction and re-validated
-# on every worker set_widget before assignment.
-#
-# This module is mirrored byte-for-byte into inst/worker/ui-widgets.R
-# (ADR 0007). It must stay self-contained: base R only, no package helpers,
-# no `%||%`.
+# Keep this module base-R-only: the worker sources its byte-identical mirror
+# into a private environment without package helpers. Explicit $value avoids
+# coercion promises that R's S3-bypassing operations cannot uphold.
 
 is_widget <- function(x) inherits(x, "alder_widget")
 
 # Read the current value without dispatching into `$`.
 widget_value <- function(x) .subset2(x, "value")
-
-# ---------------------------------------------------------------------------
-# Scalar-field validation
-# ---------------------------------------------------------------------------
 
 require_scalar_character <- function(x, what, null_ok = FALSE) {
   if (is.null(x)) {
@@ -179,7 +168,6 @@ validate_file_value <- function(value, what = "`value`") {
   value
 }
 
-
 validate_children <- function(children, dictionary = FALSE) {
   if (!is.list(children)) stop("widget children must be a list", call. = FALSE)
   if (dictionary) {
@@ -196,10 +184,6 @@ validate_children <- function(children, dictionary = FALSE) {
   }
   invisible(children)
 }
-
-# ---------------------------------------------------------------------------
-# Kind-specific value validation
-# ---------------------------------------------------------------------------
 
 validate_slider <- function(value, min, max, step) {
   minim <- require_finite_double(min, "`min`")
@@ -382,10 +366,6 @@ new_widget <- function(kind, label, value, spec = list()) {
   x
 }
 
-# ---------------------------------------------------------------------------
-# Composite helpers
-# ---------------------------------------------------------------------------
-
 widget_validate_path <- function(path = character()) {
   if (is.null(path)) return(character())
   if (!is.character(path) || anyNA(path) || any(!nzchar(path)) ||
@@ -461,10 +441,6 @@ widget_child_paths <- function(x, prefix = character()) {
   }
   out
 }
-
-# ---------------------------------------------------------------------------
-# Constructors
-# ---------------------------------------------------------------------------
 
 #' Notebook UI widgets
 #'

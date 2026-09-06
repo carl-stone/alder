@@ -1,12 +1,5 @@
-# Package and project-library management.
-#
-# Package declarations are project metadata, not R session state.  The only
-# on-disk state owned by this module is `.alder/packages.yaml`; writes are
-# performed with a same-directory temporary file followed by rename so a
-# process observing the project never sees a partially written document.
-# Installation is deliberately delegated to a fresh Rscript process.  In
-# particular, this file never calls library(), require(), or .libPaths() for a
-# package selected by the user.
+# Install in a fresh R process so package loading and library changes cannot
+# alter the host's runtime.
 
 ALDER_PACKAGE_NAME_RE <- "^[A-Za-z][A-Za-z0-9.]*[A-Za-z0-9]$"
 ALDER_PACKAGE_METADATA_FILE <- file.path(".alder", "packages.yaml")

@@ -1,7 +1,3 @@
-# Pure app-layout and gallery helpers.
-#
-# Layouts are persisted next to a notebook as <notebook>.alder-layout.json.
-
 LAYOUT_VERSION <- 1L
 LAYOUT_GRID_COLUMNS <- 12L
 LAYOUT_MAX_ROW <- 1000000L
@@ -243,7 +239,6 @@ layout_json <- function(layout) {
   }
   paste0("{", paste(fields, collapse = ","), "}")
 }
-
 
 alder_layout_write <- function(path, layout) {
   sidecar <- layout_sidecar_path(path)

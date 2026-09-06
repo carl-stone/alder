@@ -1,5 +1,3 @@
-# Source formatting helpers shared by the HTTP route and tests.
-
 format_notebook_source <- function(nb, cell = NULL) {
   if (!is.null(cell) &&
       (!is.character(cell) || length(cell) != 1L || is.na(cell) ||

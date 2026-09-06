@@ -1,9 +1,5 @@
-# Static export, diagnostics, and script execution helpers.
-#
-# Export deliberately consumes a Session state snapshot. The worker remains
-# the only place that renders notebook values, so this module never evaluates
-# user code while producing an export (alder_source/alder_test are explicit
-# execution APIs).
+# Export snapshots use worker-rendered values; serializing an existing result
+# must not evaluate notebook code again.
 
 export_formats <- c("html", "md", "script", "ipynb", "qmd", "session")
 ALDER_TEST_REGISTRY <- new.env(parent = emptyenv())

@@ -1,9 +1,5 @@
-# Pure dataflow projections for editor and app clients.
-#
-# These helpers intentionally consume an already materialised Session$state()
-# snapshot. They never inspect a live Session, evaluate notebook code, or call
-# user supplied methods. State produced by older alder versions is accepted
-# where possible (missing fields are represented by deterministic defaults).
+# Project snapshots without inspecting live R objects or invoking user methods;
+# a sidebar refresh must not execute notebook code.
 
 # Keep this module usable in isolation during package development: utils.R
 # normally provides `%||%`, but dataflow helpers do not need to depend on its

@@ -1,28 +1,7 @@
-# Static analysis: R evaluation-order scoping walk (ADR 0001's "notebook
-# state corresponds to source"; ADR 0002's reactive dependency model).
-#
-# R is dynamically typed and masking-heavy, so the analyzer favours
-# over-approximating references (a missed dependency silently breaks stale
-# marking, which is worse than a spurious one). Names provably local to a
-# function body are excluded; everything else a cell reads eagerly is a
-# reference, and a read of a name the cell itself defines — before that
-# definition executes — is a self-references. Where code is too dynamic to
-# analyse confidently, the cell reports a blocking error diagnostic instead
-# of guessing (VISION: "understandable diagnostics when code is too dynamic
-# to analyze safely").
-#
-# Evaluation order within a cell matters:
-# - Eager reads (ordinary RHSs, compound-LHS subscripts, control-flow
-#   conditions) that happen before the cell's own first unconditional
-#   definition of the same name are SELF references: `x <- x + 1` reads x
-#   before defining it, so the cell depends on its own prior value.
-# - Deferred reads (function bodies, formal defaults, lazy arguments) execute
-#   later; a name the cell defines anywhere is cell-local there, while a
-#   name the cell never defines remains an external reference.
-# - A definition is definitely available afterwards only when it is a direct
-#   sequential assignment, a `for` iterator, or on every branch of an
-#   if/switch. Definitions inside loop bodies and lazily evaluated call
-#   arguments are never definitely available afterwards.
+# Over-approximate uncertain references: missing a dependency can silently
+# preserve stale values. Eager reads before definition are self-dependencies;
+# deferred reads can use definitions appearing later in the cell. Only bindings
+# established on every branch are definitely available afterward.
 
 RESERVED <- c("NA", "TRUE", "FALSE", "NULL", "Inf", "NaN", "...", ".", "T",
               "F", "break", "next", ".data", ".env", ".Random.seed")
@@ -59,10 +38,6 @@ BLOCKED_DYNAMIC <- c(
 # through the explicit `ui` module binding.
 RUNTIME_CALLS <- character()
 is_reserved <- function(nm) nm %in% RESERVED
-
-# ---------------------------------------------------------------------------
-# AST helpers
-# ---------------------------------------------------------------------------
 
 # The statically identifiable bare root name of an assignment LHS
 # (`x`, `x[i]`, `x$y`, `x@y`, `names(x)`, `attr(x, ...)`, and nested
@@ -144,10 +119,6 @@ literal_assign_parts <- function(node) {
   if (is.null(target) || is_reserved(target)) return(NULL)
   list(name = target, value = args[[positions[["value"]]]])
 }
-
-# ---------------------------------------------------------------------------
-# Per-cell analysis
-# ---------------------------------------------------------------------------
 
 cell_defs_refs <- function(code) {
   # Returns list(defs, refs, self_refs, locals, barrier, diagnostics, error).
@@ -291,10 +262,6 @@ collect_top_defs <- function(node, p1) {
   }
   invisible()
 }
-
-# ---------------------------------------------------------------------------
-# Evaluation-order scope walk (pass 2)
-# ---------------------------------------------------------------------------
 
 new_frame <- function(defined, kind) {
   e <- new.env(parent = baseenv())
@@ -837,10 +804,6 @@ literal_eval_nodes <- function(node, name) {
   NULL
 }
 
-# ---------------------------------------------------------------------------
-# Dependency DAG
-# ---------------------------------------------------------------------------
-
 build_dag <- function(cells) {
   # cells: list of cells with $id, $type, analyzed $defs/$refs/$self_refs,
   # and $barrier. Returns list(nodes, edges, duplicates, cycles, error).
@@ -904,7 +867,6 @@ build_dag <- function(cells) {
   }
   for (i in seq_along(cells)) edges[[ids[[i]]]] <- unique(edges[[ids[[i]]]])
 
-  # Contradictory definitions: a name defined by >1 cell.
   duplicates <- list()
   for (nm in ls(defof, all.names = TRUE)) {
     defs <- defof[[nm]]

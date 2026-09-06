@@ -1,5 +1,3 @@
-# Conversion from common document formats into alder's byte-faithful .R form.
-
 convert_fail <- function(message) alder_abort("convert_failed", as.character(message))
 
 convert_read_lines <- function(path) {

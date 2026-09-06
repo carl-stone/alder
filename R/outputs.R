@@ -1,5 +1,3 @@
-# Output records and runtime hooks shared by notebook code and the worker.
-
 RUNTIME <- new.env(parent = emptyenv())
 RUNTIME$emit <- NULL
 RUNTIME$render <- NULL

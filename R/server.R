@@ -1,19 +1,3 @@
-# httpuv server: editor frontend + JSON API over one Session.
-#
-# The R worker runs as a separate process (ADR 0004); httpuv and the worker's
-# non-blocking poll share the `later` event loop, so a long cell never blocks
-# the editor. All state changes flow through Session, which owns the rerun
-# model (ADR 2).
-#
-# Artifacts (PNG/HTML renders) live in one server-owned temp directory
-# and are served through `/plot/<basename>` with a normalized containment
-# check; static frontend assets are confined to the app directory through
-# the same helper.
-
-# ---------------------------------------------------------------------------
-# Bootstrap helpers — system.file only, no cwd probing (plan §7)
-# ---------------------------------------------------------------------------
-
 alder_app_dir <- function() {
   sys <- system.file("app", package = "alder", mustWork = TRUE)
   if (!nzchar(sys) || !dir.exists(sys)) {
@@ -67,9 +51,6 @@ prepare_cache_dir <- function(notebook_path, artifact_dir) {
   }
   normalizePath(cache_dir, mustWork = TRUE)
 }
-# ---------------------------------------------------------------------------
-# Gallery/session bootstrap helpers
-# ---------------------------------------------------------------------------
 
 alder_start_lsp <- function(notebook, path, session,
                             diagnostics = FALSE) {
@@ -446,10 +427,6 @@ alder_snapshot_after_save <- function(path) {
   out
 }
 
-# ---------------------------------------------------------------------------
-# HTTP utilities
-# ---------------------------------------------------------------------------
-
 json_res <- function(obj, status = 200L) {
   list(
     status = as.integer(status),
@@ -459,7 +436,6 @@ json_res <- function(obj, status = 200L) {
   )
 }
 
-# Standard JSON error response (plan §7: stable boundary codes only)
 error_res <- function(code, message, status = 400L) {
   json_res(list(ok = FALSE,
                 error = list(code = code, message = as.character(message))),
@@ -610,9 +586,6 @@ json_structure_within_limits <- function(x, max_depth = 1024L,
   TRUE
 }
 
-# Strict JSON body reader (plan §7): media type, size, NUL bytes,
-# object root, duplicate keys, parse validity. Returns
-# list(body = parsed | NULL, error = NULL | list(code, message, status)).
 json_body_limit_message <- function(max_bytes) {
   mib <- 1024L * 1024L
   if (is.numeric(max_bytes) && length(max_bytes) == 1L &&
@@ -749,10 +722,6 @@ artifact_content_type <- function(ext) switch(tolower(ext),
   webm = "video/webm",
   pdf = "application/pdf",
   NULL)
-
-# ---------------------------------------------------------------------------
-# Route validation helpers
-# ---------------------------------------------------------------------------
 
 # Validate a route body's fields. `fields` is a named list of specs:
 #   type = "scalar_char" | "scalar_num" | "scalar_revision" |
@@ -958,8 +927,6 @@ decode_upload_files <- function(files, upload_dir, max_total = 12582912L) {
   list(value = value, error = NULL, paths = written)
 }
 
-
-# Map an alder_error condition code to HTTP status (plan §7)
 alder_error_status <- function(code) {
   switch(code,
     invalid_request = 400L,
@@ -997,10 +964,6 @@ alder_error_status <- function(code) {
     eval_error = 500L,
     500L)
 }
-
-# ---------------------------------------------------------------------------
-# Origin/Host validation (DNS rebinding protection, plan §7)
-# ---------------------------------------------------------------------------
 
 alder_loopback_hosts <- function() c("127.0.0.1", "localhost", "::1")
 
@@ -1121,10 +1084,6 @@ alder_shutdown_authenticated <- function(req, lifecycle) {
     nzchar(supplied) && identical(supplied, lifecycle$shutdown_token)
 }
 
-# ---------------------------------------------------------------------------
-# CSP/security headers for the main editor document (plan §7)
-# ---------------------------------------------------------------------------
-
 editor_csp <- function(nonce) paste(
   "default-src 'self'", "connect-src 'self'",
   "img-src 'self' data: http: https:", "script-src 'self'",
@@ -1219,7 +1178,7 @@ start_alder <- function(path = NULL, host = "127.0.0.1", port = 8899L,
                         allowed_origins = NULL,
                         sandbox = FALSE,
                         idle_timeout = NULL) {
-  # --- argument validation ------------------------------------------------
+
   validate_loopback_host(host)
   if (!is.null(path)) {
     if (!is.character(path) || length(path) != 1L || is.na(path) ||
@@ -1282,7 +1241,6 @@ start_alder <- function(path = NULL, host = "127.0.0.1", port = 8899L,
     idle_timeout <- NULL
   }
 
-  # --- bootstrap ----------------------------------------------------------
   app_dir <- alder_app_dir()
   worker_script <- alder_worker_script()
   if (!gallery) {
@@ -1320,7 +1278,6 @@ start_alder <- function(path = NULL, host = "127.0.0.1", port = 8899L,
       is.na(run_on_startup)) {
     stop("`run_on_startup` must be TRUE or FALSE")
   }
-
 
   artifact_dir <- tempfile("alder-artifacts-")
   dir.create(artifact_dir, recursive = TRUE)
@@ -1386,7 +1343,6 @@ start_alder <- function(path = NULL, host = "127.0.0.1", port = 8899L,
     nb, path, sess,
     diagnostics = isTRUE(config$editor$live_diagnostics)
   )
-
 
   } else {
     # A gallery has no default notebook session. Entries are opened on the
@@ -1517,8 +1473,6 @@ start_alder <- function(path = NULL, host = "127.0.0.1", port = 8899L,
     invisible()
   }
 
-
-  # --- httpuv call handler ------------------------------------------------
   call_handler_impl <- function(req) {
     path_req <- sub("\\?.*$", "", req$PATH_INFO %||% "")
     method <- req$REQUEST_METHOD %||% ""
@@ -1601,7 +1555,6 @@ start_alder <- function(path = NULL, host = "127.0.0.1", port = 8899L,
       res
     }
 
-    # --- gallery index and notebook pages ---------------------------------
     if (gallery && (identical(path_req, "/") ||
                     identical(path_req, "/index.html"))) {
       m <- need("GET")
@@ -1621,7 +1574,6 @@ start_alder <- function(path = NULL, host = "127.0.0.1", port = 8899L,
       return(res)
     }
 
-    # --- static assets ---------------------------------------------------
     if (identical(path_req, "/") || identical(path_req, "/index.html")) {
       m <- need("GET")
       if (!is.null(m)) return(m)
@@ -1681,8 +1633,6 @@ start_alder <- function(path = NULL, host = "127.0.0.1", port = 8899L,
       return(file_res(f, ctype, inline = identical(ext, "svg")))
     }
 
-
-    # --- artifact (plot/media) files ---------------------------------------
     if (startsWith(path_req, "/plot/")) {
       m <- need("GET")
       if (!is.null(m)) return(m)
@@ -1697,7 +1647,6 @@ start_alder <- function(path = NULL, host = "127.0.0.1", port = 8899L,
       return(file_res(f, ct, inline = identical(ext, "svg")))
     }
 
-    # --- exported files ----------------------------------------------------
     if (startsWith(path_req, "/download/")) {
       m <- need("GET")
       if (!is.null(m)) return(m)
@@ -1721,7 +1670,6 @@ start_alder <- function(path = NULL, host = "127.0.0.1", port = 8899L,
       return(res)
     }
 
-    # --- API: unknown paths are 404 before any body parsing ---------------
     api_routes <- c("/api/state", "/api/config", "/api/app", "/api/layout",
                     "/api/run", "/api/lazy", "/api/table", "/api/cell",
                     "/api/widget", "/api/widget-operation",
@@ -1859,7 +1807,6 @@ start_alder <- function(path = NULL, host = "127.0.0.1", port = 8899L,
         })
     }
 
-    # --- /api/interrupt (zero-byte body, no JSON required) -------------------
     if (identical(path_req, "/api/interrupt")) {
       raw <- tryCatch(req$rook.input$read(1L), error = function(e) raw())
       if (length(raw)) {
@@ -1872,7 +1819,6 @@ start_alder <- function(path = NULL, host = "127.0.0.1", port = 8899L,
       }))
     }
 
-    # --- /api/restart (zero-byte body, restart + dependency-order replay) ---
     if (identical(path_req, "/api/restart")) {
       raw <- tryCatch(req$rook.input$read(1L), error = function(e) raw())
       if (length(raw)) {
@@ -1885,7 +1831,6 @@ start_alder <- function(path = NULL, host = "127.0.0.1", port = 8899L,
       }))
     }
 
-    # --- /api/save (zero-byte body, no JSON required) -------------------------
     if (identical(path_req, "/api/save")) {
       raw <- tryCatch(req$rook.input$read(1L), error = function(e) raw())
       if (length(raw)) {
@@ -1936,7 +1881,6 @@ start_alder <- function(path = NULL, host = "127.0.0.1", port = 8899L,
     }
     body <- parsed$body
 
-    # --- /api/log (surface client-side errors in server logs) --------------
     if (identical(path_req, "/api/log")) {
       v <- validate_body(body, list(
         level = list(type = "scalar_char", required = TRUE,
@@ -1991,7 +1935,6 @@ start_alder <- function(path = NULL, host = "127.0.0.1", port = 8899L,
       return(ok_res(logged = TRUE))
     }
 
-    # --- /api/config -------------------------------------------------------
     if (identical(path_req, "/api/config")) {
       return(session_call({
         result <- sess$set_config(body)
@@ -2019,7 +1962,6 @@ start_alder <- function(path = NULL, host = "127.0.0.1", port = 8899L,
       }))
     }
 
-    # --- /api/app ----------------------------------------------------------
     if (identical(path_req, "/api/app")) {
       v <- validate_body(body, list(
         layout = list(type = "scalar_char", required = FALSE),
@@ -2035,7 +1977,6 @@ start_alder <- function(path = NULL, host = "127.0.0.1", port = 8899L,
       }))
     }
 
-    # --- /api/layout -------------------------------------------------------
     if (identical(path_req, "/api/layout")) {
       if (identical(method, "GET")) {
         state <- sess$state()
@@ -2111,7 +2052,7 @@ start_alder <- function(path = NULL, host = "127.0.0.1", port = 8899L,
         }
       }))
     }
-    # --- /api/lsp ----------------------------------------------------------
+
     if (identical(path_req, "/api/lsp")) {
       v <- validate_body(body, list(
         method = list(type = "scalar_char", required = TRUE),
@@ -2191,7 +2132,6 @@ start_alder <- function(path = NULL, host = "127.0.0.1", port = 8899L,
       }))
     }
 
-    # --- /api/format -------------------------------------------------------
     if (identical(path_req, "/api/format")) {
       v <- validate_body(body, list(
         cell = list(type = "scalar_char", required = FALSE),
@@ -2219,9 +2159,6 @@ start_alder <- function(path = NULL, host = "127.0.0.1", port = 8899L,
       }))
     }
 
-
-
-    # --- /api/export -------------------------------------------------------
     if (identical(path_req, "/api/export")) {
       v <- validate_body(body, list(
         format = list(type = "scalar_char", required = TRUE),
@@ -2258,7 +2195,6 @@ start_alder <- function(path = NULL, host = "127.0.0.1", port = 8899L,
       }))
     }
 
-    # --- /api/check --------------------------------------------------------
     if (identical(path_req, "/api/check")) {
       v <- validate_body(body, list())
       if (!is.null(v)) return(error_res(v$code, v$message, v$status))
@@ -2270,7 +2206,6 @@ start_alder <- function(path = NULL, host = "127.0.0.1", port = 8899L,
       }))
     }
 
-    # --- /api/run ----------------------------------------------------------
     if (identical(path_req, "/api/run")) {
       has_cell <- "cell" %in% names(body)
       has_all <- "all" %in% names(body)
@@ -2313,7 +2248,7 @@ start_alder <- function(path = NULL, host = "127.0.0.1", port = 8899L,
         }
       }))
     }
-    # --- /api/lazy ---------------------------------------------------------
+
     if (identical(path_req, "/api/lazy")) {
       v <- validate_body(body, list(
         key = list(type = "scalar_char", required = TRUE)))
@@ -2323,7 +2258,7 @@ start_alder <- function(path = NULL, host = "127.0.0.1", port = 8899L,
         ok_res(token = token, status = 202L)
       }))
     }
-    # --- /api/table --------------------------------------------------------
+
     if (identical(path_req, "/api/table")) {
       v <- validate_body(body, list(
         handle = list(type = "scalar_char", required = TRUE),
@@ -2345,8 +2280,6 @@ start_alder <- function(path = NULL, host = "127.0.0.1", port = 8899L,
       }))
     }
 
-
-    # --- /api/upload --------------------------------------------------------
     if (identical(path_req, "/api/upload")) {
       v <- validate_body(body, list(
         name = list(type = "scalar_char", required = TRUE),
@@ -2388,7 +2321,6 @@ body_chars <- function(x) {
   if (is.null(v)) character(0) else v
 }
 
-# --- /api/cell --------------------------------------------------------------
     if (identical(path_req, "/api/cell")) {
       op <- body$op %||% ""
       if (op == "disable") {
@@ -2473,7 +2405,6 @@ body_chars <- function(x) {
       }))
     }
 
-    # --- /api/widget --------------------------------------------------------
     if (identical(path_req, "/api/widget")) {
       v <- validate_body(body, list(
         name = list(type = "scalar_char", required = TRUE),
@@ -2511,7 +2442,6 @@ body_chars <- function(x) {
       }))
     }
 
-    # --- /api/value ----------------------------------------------------------
     if (identical(path_req, "/api/value")) {
       v <- validate_body(body,
                          list(name = list(type = "scalar_char",
@@ -2525,7 +2455,6 @@ body_chars <- function(x) {
 
     # all remaining POST routes require the POST method (checked above)
 
-    # --- /api/runtime ---------------------------------------------------------
     if (identical(path_req, "/api/runtime")) {
       v <- validate_body(body, list(
         execution_mode = list(type = "scalar_char", required = FALSE,
@@ -2582,7 +2511,6 @@ body_chars <- function(x) {
     response
   }
 
-  # --- start httpuv server ---------------------------------------------------
   server <- tryCatch(
     httpuv::startServer(host, port, list(call = call_handler)),
     error = function(e) {

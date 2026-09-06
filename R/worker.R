@@ -1,26 +1,13 @@
-# Server-side control of the per-notebook R worker (ADR 0004).
-#
-# We spawn one Rscript per notebook and drive it over stdin/stdout JSON.
-# Responses are matched to requests by a monotonically increasing `req` id and
-# dispatched on the httpuv/later event loop (non-blocking poll), so a long cell
-# never freezes the editor. Interrupt sends SIGINT to the worker exactly once,
-# and only after that request's start acknowledgement (ack-gated), never while
-# the worker is blocked on an idle stdin read (ADR 0004).
-#
-# Every pending request stores its callback plus the full outgoing identity
-# {cmd, req, id, revision, run_id, name, op_id, token}; a response is accepted
-# only when every present identity field matches exactly. Malformed JSON, a
-# response with no pending request, or a mismatched identity is a terminal
-# transport failure: we kill the worker, fail every remaining pending request,
-# and invoke the one `on_failure` callback exactly once.
+# Interrupt only after the matching request's start acknowledgement; a late
+# SIGINT must not hit an idle read or the next evaluation. Response identity
+# mismatches are terminal because subsequent notebook state cannot be trusted.
 
-# Resolve the mirrored widget module only from the installed package
-# (ADR 0007 / Plan §7): no cwd probing, no direct-source fallback.
+# Resolve the installed mirror so source-checkout files cannot mask a broken
+# installation or disagree with the worker's package version.
 alder_ui_module <- function() {
   system.file("worker", "ui-widgets.R", package = "alder", mustWork = TRUE)
 }
 
-# Spawn the worker process with validated artifact and cache directories.
 .spawn_worker_process <- function(worker_script, app_dir, artifact_dir,
                                   cache_dir = artifact_dir, env = character()) {
   if (length(artifact_dir) != 1L || is.na(artifact_dir) ||
@@ -140,8 +127,6 @@ alder_ui_module <- function() {
        call. = FALSE)
 }
 
-
-# A Worker is a small stateful controller for one notebook session.
 Worker <- R6::R6Class(
   "alder_worker",
   public = list(
@@ -233,7 +218,6 @@ Worker <- R6::R6Class(
       req
     },
 
-    # A synthetic transport error echoing the request's saved identity.
     synthetic_error = function(ctx, message) {
       e <- list(req = ctx$req, ok = FALSE, cmd = ctx$cmd,
                 error = list(message = message, transport = TRUE))
@@ -362,7 +346,6 @@ Worker <- R6::R6Class(
             length(rid) && nzchar(rid) &&
             identical(as.character(resp$cmd), "eval_cell") &&
             !is.null(self$pending[[rid]])) {
-          # begin the ack-gated SIGINT window for this request
           self$executing_req <- rid
           if (identical(rid, self$interrupt_requested)) {
             self$interrupt_requested <- NULL

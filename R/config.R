@@ -1,10 +1,3 @@
-# Layered notebook configuration.
-#
-# Configuration is deliberately kept as ordinary R lists so it can travel over
-# the existing JSON state/API without an additional object model.  The four
-# layers are merged in order: built-ins, the user file, the project file, and
-# notebook runtime metadata.
-
 config_defaults <- function() {
   list(
     theme = "system",

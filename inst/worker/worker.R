@@ -1,21 +1,5 @@
-# alder worker — the one serial R process per notebook (ADR 0004).
-#
-# A long-lived Rscript. Reads one JSON request per line on stdin, writes one
-# JSON response per line on stdout; stderr stays a diagnostic channel. The
-# server spawns us, writes requests to our stdin, matches responses by `req`
-# id, and SIGINTs us to interrupt a running cell. We own the notebook's
-# global environment and widget values, so notebook state has a single
-# unambiguous owner.
-#
-# The whole runtime is private (ADR 0006): notebook code evaluates directly
-# in our process's .GlobalEnv with ordinary R lookup, while `emit`, the
-# ownership maps, artifact paths, and jsonlite are invisible to it. This is
-# process isolation, not a security sandbox — run only trusted notebook code.
-#
-# Protocol discipline: stdout carries protocol JSON ONLY. Every user-code
-# output path (cat, print, auto-print of visible results, renderers) runs
-# inside bounded captures and lands in the cell log or the rendered output;
-# nothing user code prints may leak into the protocol stream.
+# Runtime helpers stay private so notebook lookup matches ordinary Rscript.
+# Capture user output: stdout belongs exclusively to the JSON protocol.
 
 suppressPackageStartupMessages(library(alder))
 
@@ -52,11 +36,9 @@ local({
   perf_begin <- get(".alder_perf_begin", asNamespace("alder"))
   perf_end <- get(".alder_perf_end", asNamespace("alder"))
 
-  # -------------------------------------------------------------------------
   # Private environment: source the mirrored widget module here only so we can
   # recognise and validate widgets; the module's names are never part of the
   # notebook's lookup. Consume and immediately unset the transport variables.
-  # -------------------------------------------------------------------------
   ui_module <- Sys.getenv("ALDER_UI_WIDGETS", unset = "")
   Sys.unsetenv("ALDER_UI_WIDGETS")
   UI_ENV <- new.env(parent = baseenv())
@@ -170,13 +152,11 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
     flush(stdout())
   }
 
-  # -------------------------------------------------------------------------
   # Bounded capture: sink evaluation/render output to a temporary file so a
   # noisy cell can never corrupt the protocol stream, cap it at `max_bytes`,
   # and always unlink the file. Warnings/messages are written to the same
   # stream and muffled. Returns list(result, lines, truncated, error,
   # interrupted).
-  # -------------------------------------------------------------------------
   restore_sinks <- function() {
     while (sink.number() > 0L) tryCatch(sink(), error = function(e) NULL)
     invisible()
@@ -361,7 +341,6 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
     )
   }
 
-  # -------------------------------------------------------------------------
   table_data_frame <- function(x) {
     if (inherits(x, "matrix")) {
       return(as.data.frame(x, stringsAsFactors = FALSE,
@@ -774,10 +753,6 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
     }
     render_kind(x)
   }
-
-  # -------------------------------------------------------------------------
-  # Commands
-  # -------------------------------------------------------------------------
 
   # A JSON array arrives under simplifyVector = FALSE as a list; normalize it
   # to a character vector, rejecting non-string, empty, or duplicate names as
@@ -1216,7 +1191,6 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
     }
     defs <- unique(c(defs, dynamic_owned))
 
-    # success: own only the requested/dynamically observed definitions
     new_owned <- character()
     for (nm in defs) {
       if (exists(nm, envir = NB_ENV, inherits = FALSE)) {
@@ -1547,7 +1521,6 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
     value
   }
 
-  # set_widget: the host validated the request; re-validate and assign here.
   set_widget <- function(req) {
     name <- as.character(req$name %||% "")
     op_id <- req$op_id
@@ -1871,10 +1844,6 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
     list(ok = TRUE, name = name, path = I(path), op_id = op_id,
          selected = selected)
   }
-
-  # -------------------------------------------------------------------------
-  # Main loop
-  # -------------------------------------------------------------------------
 
   echo_identity <- function(req, resp) {
     if (!is.null(req$req)) resp$req <- req$req

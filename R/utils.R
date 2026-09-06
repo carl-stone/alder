@@ -90,10 +90,6 @@ alder_output_replace <- function(stage, out) {
   invisible(out)
 }
 
-# ---------------------------------------------------------------------------
-# Markdown rendering (sanitized)
-# ---------------------------------------------------------------------------
-
 # Markdown output goes through a strict whitelist sanitizer because it is
 # rendered into the page. Allowed tags keep only safe attributes; links and
 # images accept relative URLs plus http/https (and mailto for links);
@@ -237,10 +233,6 @@ render_markdown_cell_output <- function(body) {
        html = render_markdown_fragment(body),
        text = paste(body, collapse = "\n"))
 }
-
-# ---------------------------------------------------------------------------
-# Notebook change token
-# ---------------------------------------------------------------------------
 
 # Client-visible md5 change token over the exact serialized notebook.
 notebook_etag <- function(nb) {

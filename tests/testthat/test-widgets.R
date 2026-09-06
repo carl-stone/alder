@@ -1,7 +1,3 @@
-# Widget semantics (ADR 0003): plain classed `alder_widget` lists with
-# explicit `$value`; no coercion/arithmetic/subsetting promises. The
-# module is mirrored byte-for-byte into inst/worker (ADR 0007).
-
 test_that("the worker mirror is byte-identical to the source of truth", {
   # testthat relocates the cwd to tests/testthat; anchor to the repo root.
   repo <- normalizePath(testthat::test_path("..", ".."))

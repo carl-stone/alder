@@ -1,11 +1,3 @@
-# Session: the complete per-notebook execution state machine.
-#
-# The Session owns the notebook data, its dependency DAG, per-cell runtime
-# state, the run queue, and the single serial worker process. It is driven
-# entirely by the server routes, which translate HTTP requests into Session
-# method calls and map thrown conditions to HTTP status codes. No mutable
-# session field is ever read outside this file.
-
 Session <- R6::R6Class(
   "alder_session",
   public = list(
@@ -87,8 +79,6 @@ Session <- R6::R6Class(
           private$on_notify(context, frame))
       }
       private$recompute()
-      # Markdown cells never execute: render them locally and mark done so
-      # a freshly loaded notebook already shows its Markdown (plan §8).
       for (id in private$dag_nodes()) {
         if (identical(private$cell_type(id), "markdown")) {
           private$cell_state[[id]] <- list(
@@ -105,10 +95,6 @@ Session <- R6::R6Class(
       # single constructor-side startup effect until that boundary completes.
       if (!isTRUE(defer_startup)) private$startup_run()
     },
-
-    # ------------------------------------------------------------------
-    # Read-only state
-    # ------------------------------------------------------------------
 
     worker_available = function() {
       private$detect_worker_failure()
@@ -350,10 +336,6 @@ Session <- R6::R6Class(
       invisible(TRUE)
     },
 
-    # ------------------------------------------------------------------
-    # Graph validation
-    # ------------------------------------------------------------------
-
     # NULL when the graph is runnable, else the validation messages
     # (sorted, de-duplicated) to surface to the user.
     validate_graph = function() {
@@ -384,10 +366,6 @@ Session <- R6::R6Class(
       msgs <- sort(unique(msgs))
       if (length(msgs)) msgs else NULL
     },
-
-    # ------------------------------------------------------------------
-    # Topological queries (also used by the app view)
-    # ------------------------------------------------------------------
 
     ancestors = function(id) {
       if (is.null(private$dag)) return(character())
@@ -424,10 +402,6 @@ Session <- R6::R6Class(
       seen
     },
 
-    # ------------------------------------------------------------------
-    # Cell source mutation
-    # ------------------------------------------------------------------
-
     set_cell = function(id, body, type, expected_revision = NULL) {
       perf <- .alder_perf_begin("source.edit", list(cell = id,
         expected_revision = expected_revision))
@@ -457,7 +431,6 @@ Session <- R6::R6Class(
       }
       cs <- private$cell_source(id)
       if (identical(cs$body, body) && identical(cs$type, type)) {
-        # exact same-body/same-type edit is a successful no-op
         return(list(id = id, revision = old$revision,
                     version = private$state_version))
       }
@@ -501,7 +474,6 @@ Session <- R6::R6Class(
           if (!is.null(private$cell_state[[d]])) private$mark_stale(d)
         }
       } else {
-        # code cell: keep stale output/artifact, stale the affected union
         affected <- unique(c(id, old_desc, new_desc))
         for (a in affected) {
           if (!is.null(private$cell_state[[a]])) private$mark_stale(a)
@@ -769,10 +741,6 @@ Session <- R6::R6Class(
       list(id = id, version = private$state_version)
     },
 
-    # ------------------------------------------------------------------
-    # Runs
-    # ------------------------------------------------------------------
-
     # Plan the run for one explicitly requested cell: idle/stale/error
     # ancestors in topological order, then the target, then (in automatic
     # or app mode) a dependency-closed closure.
@@ -852,10 +820,6 @@ Session <- R6::R6Class(
       private$bump()
       list(run_id = cur$job$run_id, version = private$state_version)
     },
-
-    # ------------------------------------------------------------------
-    # Runtime mode
-    # ------------------------------------------------------------------
 
     set_runtime = function(execution_mode = NULL, run_on_startup = NULL) {
       private$assert_active()
@@ -1234,16 +1198,11 @@ Session <- R6::R6Class(
       invisible(TRUE)
     },
 
-
     # Read-only current runtime mode for server dispatch (e.g. which global
     # run action applies).
     get_execution_mode = function() {
       private$execution_mode
     },
-
-    # ------------------------------------------------------------------
-    # Widgets and value inspection
-    # ------------------------------------------------------------------
 
     # Apply a widget update, returning the operation token. Throws 409
     # operation_in_progress when the same widget already has a pending op.
@@ -1441,10 +1400,6 @@ Session <- R6::R6Class(
       tok
     },
 
-    # ------------------------------------------------------------------
-    # Persistence
-    # ------------------------------------------------------------------
-
     # Atomic save. Re-reads the path and compares exact bytes against the
     # recorded disk version; a mismatch is a 409 conflict. Creating a path
     # that does not exist yet is only ever done here.
@@ -1481,10 +1436,6 @@ Session <- R6::R6Class(
       list(path = path, etag = notebook_etag(private$notebook),
            version = private$state_version)
     },
-
-    # ------------------------------------------------------------------
-    # Lifecycle
-    # ------------------------------------------------------------------
 
     restart_worker = function(replay = TRUE) {
       private$assert_not_stopped()
@@ -1591,7 +1542,7 @@ Session <- R6::R6Class(
     table_operations = list(),
     lsp_diagnostics = list(),
     disk_version = list(exists = NA, bytes = raw()),
-    # --- small navigation helpers ------------------------------------
+
 
     wire_date_valid = function(x) {
       if (!is.character(x) || length(x) != 1L || is.na(x) ||
@@ -1840,7 +1791,6 @@ Session <- R6::R6Class(
       invisible()
     },
 
-    # --- graph + analysis ---------------------------------------------
 
     recompute = function() {
       perf <- .alder_perf_begin("analysis", list(cells = length(private$notebook$cells)))
@@ -2009,7 +1959,6 @@ Session <- R6::R6Class(
       ))
     },
 
-    # --- stale marking ------------------------------------------------
 
     mark_stale = function(id) {
       rec <- private$cell_state[[id]]
@@ -2030,7 +1979,6 @@ Session <- R6::R6Class(
       invisible()
     },
 
-    # --- cancellation of in-flight work --------------------------------
 
     # Cancel the active eval and queued jobs whose cells intersect `ids`
     # (source edits and newer widget commits). The interrupted eval keeps
@@ -2113,7 +2061,6 @@ Session <- R6::R6Class(
       invisible()
     },
 
-    # --- run launch + pumping ------------------------------------------
 
     assert_can_launch = function() {
       private$assert_active()
@@ -2212,7 +2159,6 @@ Session <- R6::R6Class(
       }
     },
 
-    # --- eval responses -----------------------------------------------
 
     on_cell_result = function(job, resp) {
       perf <- .alder_perf_begin("result.commit", list(cell = job$id,
@@ -3013,7 +2959,6 @@ Session <- R6::R6Class(
       invisible()
     },
 
-    # --- commit transitions --------------------------------------------
 
     commit_success = function(id, resp) {
       rec <- private$cell_state[[id]]
@@ -3070,7 +3015,6 @@ Session <- R6::R6Class(
       invisible()
     },
 
-
     normalize_log = function(log) {
       if (is.null(log)) return(character())
       as.character(unlist(log, use.names = FALSE))
@@ -3116,7 +3060,6 @@ Session <- R6::R6Class(
       invisible()
     },
 
-    # --- worker failure ------------------------------------------------
 
     # Keep retained output bytes, but invalidate everything owned by an old
     # runtime. Repeat after teardown/readiness so late old-operation callbacks
@@ -3502,7 +3445,6 @@ Session <- R6::R6Class(
       spec
     },
 
-    # --- widget internals ----------------------------------------------
 
     widget_owner = function(name) {
       location <- private$find_widget_output(name)
@@ -3936,7 +3878,6 @@ Session <- R6::R6Class(
       private$topo_order_of(plan)
     },
 
-    # --- button resets -------------------------------------------------
 
     send_button_reset = function(name, path = character(),
                                  trigger_token = NULL, run_id = NULL) {
@@ -4092,7 +4033,6 @@ Session <- R6::R6Class(
       invisible()
     },
 
-    # --- value inspection ----------------------------------------------
 
     value_owner = function(name) {
       owner <- private$definition_owner(name)
@@ -4207,7 +4147,6 @@ Session <- R6::R6Class(
       TRUE
     },
 
-    # --- maintenance clear + barrier invalidation ----------------------
 
     # clear_cell runs before any later eval of the same cell so a removed
     # definition cannot survive only because the new DAG lost its old edge.

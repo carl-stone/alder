@@ -245,8 +245,7 @@ Phases may overlap behind the engine interface, but there is only one execution
 owner for a notebook at any time. Differential tests use isolated notebooks and
 processes; never evaluate effectful user code twice to compare backends. Existing
 regressions are specifications to port, not code to discard merely because the
-implementation language changes. The current task implements phase 0 and this
-specification, not the host migration itself.
+implementation language changes.
 
 ## Measurement rules and references
 

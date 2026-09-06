@@ -1,7 +1,3 @@
-# Static analysis contracts: R evaluation-order scoping, blocking
-# diagnostics for unsafe dynamic code, package-attach barriers, data-mask
-# ambiguity, and the dependency DAG (ADR 0002 / marimo reactive model).
-
 cell <- function(id, defs = character(), refs = character(),
                  self_refs = character(), barrier = FALSE, opaque = FALSE,
                  type = "code") {

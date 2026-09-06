@@ -1,39 +1,6 @@
-# Notebook file format (ADR 0001): plain-text .R with `# %%` cells.
-#
-# A notebook is ordinary R source. Cells are delimited by `# %%` comment
-# lines; a standalone `[markdown]` tag (case-insensitive) opens a markdown
-# cell. Cell metadata uses `#|` (Quarto code-option syntax). Notebook-level
-# metadata lives in a YAML block inside `# ---` comment fences at the top of
-# the file.
-#
-# Round-trip fidelity: parsing never rewrites the file. Every physical
-# source line is a record `list(text = <scalar>, eol = "\n"|"\r\n"|"\r"|"",
-# kind = "header"|"delimiter"|"option"|"body")`; serialization concatenates
-# `text + eol` exactly, so an unedited notebook reproduces the input
-# byte-for-byte, including mixed line terminators and a missing final EOL.
-#
-# Body mutation: EVERY `kind == "body"` record is an editable slot
-# (including trailing blanks). The body returned by /api/state round-trips
-# exactly: sending `c("x")` removes a previously visible trailing blank
-# while `c("x", "")` retains it.
-
-# ---------------------------------------------------------------------------
-# Data model
-# ---------------------------------------------------------------------------
-# A Cell holds: id (stable character id), type ("code" or "markdown"), delim
-# (the raw `# %% ...` delimiter line), body (raw code or markdown lines,
-# excluding the delimiter and `#|` lines), options (named list parsed from
-# `#| key: value` lines, last value wins), option_duplicates (named list:
-# duplicated option key -> 1-based positions of all its records within
-# `cell$records`), raw (every source line text of the cell, delimiter
-# included) and records (the physical source records that own the cell's
-# delimiter/options/body bytes).
-#
-# A Notebook holds: path, header (raw texts before the first cell),
-# metadata (parsed YAML front matter), cells, header_records (physical
-# records owning the pre-cell bytes), preferred_eol (first nonempty source
-# EOL, or LF), final_newline (whether the final physical record had a
-# nonempty EOL) and next_cell_number (monotonic cell-N allocator).
+# Physical records retain their own EOL so mixed line endings and a missing
+# final newline survive edits. Every body record, including trailing blanks,
+# is editable; treating blanks as immutable separators would change source.
 
 new_record <- function(text, eol, kind) {
   list(text = text, eol = eol, kind = kind)
@@ -69,26 +36,17 @@ new_notebook <- function(path, header, metadata, cells, header_records = list(),
   )
 }
 
-# Numeric suffix of a `cell-N` id, or NA for ids outside that scheme.
 cell_number <- function(id) {
   m <- regexec("^cell-([0-9]+)$", id)
   mm <- regmatches(id, m)[[1L]]
   if (length(mm) == 2L) as.integer(mm[[2L]]) else NA_integer_
 }
 
-# ---------------------------------------------------------------------------
-# Parsing
-# ---------------------------------------------------------------------------
-
-# A cell delimiter is a comment line whose content is `# %%` followed by
-# end-of-line or whitespace (`# %%x` is not a delimiter). A standalone
-# `[markdown]` token (case-insensitive) makes it a markdown cell.
 cell_delim_index <- function(lines) {
   m <- grepl("^\\s*#\\s*%%(\\s|$)", lines, perl = TRUE)
   which(m)
 }
 
-# `# %% [markdown]` (any case), and only that trailing token.
 is_markdown_delim <- function(delim) {
   m <- regexec("^\\s*#\\s*%%\\s*(.*)$", delim, perl = TRUE)
   mm <- regmatches(delim, m)[[1L]]
@@ -107,9 +65,6 @@ validate_markdown_lines <- function(body, id) {
   invisible(body)
 }
 
-# Split a whole UTF-8 file text into physical records. Each record keeps
-# its terminator verbatim; the final record carries eol = "" when the file
-# does not end with a line terminator. Mixed \n / \r\n / \r are preserved.
 split_records <- function(text) {
   if (!nzchar(text)) return(list())
   parts <- strsplit(text, "(?<=\n)|(?<=\r)(?!\n)", perl = TRUE)[[1L]]
@@ -125,7 +80,6 @@ split_records <- function(text) {
   })
 }
 
-# Parse a record list (kinds re-derived from content) into a Notebook.
 parse_records <- function(path, records) {
   texts <- vapply(records, function(r) r$text, "")
   d <- cell_delim_index(texts)
@@ -180,8 +134,6 @@ parse_records <- function(path, records) {
                final_newline = final_newline)
 }
 
-# Derive the caller-facing fields of a cell from its records. Called after
-# parsing and after every record mutation; the id is untouched (stable).
 sync_cell_from_records <- function(cell) {
   recs <- cell$records
   delim_rec <- recs[[1L]]
@@ -216,9 +168,6 @@ parse_cell_records <- function(cell_records, id = "?") {
   )
 }
 
-# Parse `#| key: value` / `#| key` option records into (a) a named list of
-# values (last occurrence wins) and (b) a map from each duplicated key to
-# ALL its 1-based record positions within the cell's records.
 parse_option_values <- function(records, opt_pos) {
   options <- list()
   positions <- list()
@@ -245,22 +194,16 @@ parse_scalar <- function(s) {
   s
 }
 
-# Parse the `# ---` YAML header block (metadata) from the raw line texts.
-# Returns list(header = raw line texts, metadata = named list).
 parse_notebook_header <- function(lines) {
-  # The header is everything up to (excluding) the first cell delimiter.
   d <- cell_delim_index(lines)
   header_end <- if (length(d)) d[[1L]] - 1L else length(lines)
   header <- if (header_end >= 1L) lines[seq_len(header_end)] else character()
 
-  # Metadata = the `# ---` fenced YAML block within the header.
   yaml_lines <- try_extract_yaml(header)
   metadata <- parse_yaml_lines(yaml_lines)
   list(header = header, metadata = metadata)
 }
 
-# Locate a `# ---` ... `# ---` fenced region whose interior lines look like
-# YAML (comment-prefixed), returning the interior (comment prefix stripped).
 try_extract_yaml <- function(header) {
   fences <- which(grepl("^\\s*#\\s*---\\s*$", header))
   if (length(fences) < 2L) return(character())
@@ -351,10 +294,6 @@ nb_set_metadata <- function(nb, key, value) {
   normalize_nb_boundary(nb, hdr = TRUE)
 }
 
-
-# Raw-byte reader: rejects directories, unreadable files, invalid UTF-8,
-# and embedded NULs with deterministic path-bearing errors; invalid text
-# fails as `notebook is not valid UTF-8: <path>` before parsing/mutation.
 .alder_file_access <- function(path, mode) file.access(path, mode)
 
 read_notebook <- function(path) {
@@ -382,15 +321,10 @@ parse_notebook_lines <- function(path = NA_character_, lines) {
   parse_records(path, records)
 }
 
-# ---------------------------------------------------------------------------
-# Serialization
-# ---------------------------------------------------------------------------
-
 record_texts <- function(records) {
   vapply(records, function(r) paste0(r$text, r$eol), "")
 }
 
-# Concatenate header records and every cell's records byte-for-byte.
 serialize_notebook <- function(nb) {
   paste0(c(
     record_texts(nb$header_records),
@@ -415,9 +349,6 @@ nb_body_lines <- function(nb, id) {
   integer()
 }
 
-# Translate a zero-based cell-body position to a zero-based LSP file
-# position. Characters are passed through unchanged; LSP and R use UTF-8
-# source text here, and the editor sends the same byte-faithful body.
 nb_to_file_pos <- function(nb, id, line, character) {
   if (length(line) != 1L || is.na(line) || line < 0L ||
       length(character) != 1L || is.na(character) || character < 0L) {
@@ -449,18 +380,11 @@ nb_from_file_pos <- function(nb, line) {
   NULL
 }
 
-
 write_notebook <- function(nb, path = nb$path) {
   writeBin(charToRaw(serialize_notebook(nb)), path)
   invisible(nb)
 }
 
-# Atomic save with optimistic conflict detection. The Session re-reads the
-# path immediately before saving and passes the expected disk version; this
-# function re-checks the same bytes, writes a temporary file in the target
-# directory, preserves existing mode when present, and replaces the target
-# with fs::file_move(). A move failure leaves the original in place and
-# always removes the temporary file.
 write_notebook_atomic <- function(nb, expected_version = NULL) {
   path <- nb$path
   if (!is.character(path) || length(path) != 1L || is.na(path) ||
@@ -502,15 +426,10 @@ write_notebook_atomic <- function(nb, expected_version = NULL) {
     mode <- file.info(path)$mode
     if (!is.na(mode)) tryCatch(Sys.chmod(tmp, mode), error = function(e) NULL)
   }
-  # fs::file_move returns the destination path (invisibly); any failure
-  # raises and leaves the original in place.
   fs::file_move(tmp, path)
   invisible(nb)
 }
 
-# ---------------------------------------------------------------------------
-# Terminal-EOL invariant
-# ---------------------------------------------------------------------------
 # After any record-count mutation:
 # - if the file had a final newline (final_newline TRUE), no record may
 #   carry eol = "";
@@ -573,15 +492,6 @@ normalize_nb_boundary <- function(nb, region = integer(), hdr = FALSE) {
   nb
 }
 
-# ---------------------------------------------------------------------------
-# Body mutation (byte-aware)
-# ---------------------------------------------------------------------------
-
-# Splice new body lines into a cell's records: every `kind == "body"`
-# record is a body slot (including trailing blanks). Replace slots in
-# order (retaining each slot's eol), delete every surplus slot, and insert
-# extra slots after the final old body slot, or after the last option
-# record when no body slot exists. No immutable separator is invented.
 splice_body_records <- function(records, body, preferred_eol) {
   kinds <- vapply(records, function(r) r$kind, "")
   body_pos <- which(kinds == "body")
@@ -610,15 +520,9 @@ splice_body_records <- function(records, body, preferred_eol) {
   records
 }
 
-# Rebuild a cell's raw line vector (delimiter + options + body texts) —
-# compatibility helper kept for tests and introspection.
 rebuild_cell_raw <- function(cell) {
   vapply(cell$records, function(r) r$text, "")
 }
-
-# ---------------------------------------------------------------------------
-# Cell mutation helpers
-# ---------------------------------------------------------------------------
 
 nb_cell_index <- function(nb, id) {
   hits <- which(vapply(nb$cells, function(c) identical(c$id, id), FALSE))
@@ -631,7 +535,6 @@ nb_cell <- function(nb, id) {
   if (!length(hits)) NULL else nb$cells[[hits[[1L]]]]
 }
 
-# Update a cell's body and type.
 nb_update_cell <- function(nb, id, body, type) {
   if (!type %in% c("code", "markdown")) {
     stop("invalid cell type; must be \"code\" or \"markdown\"", call. = FALSE)
@@ -695,7 +598,6 @@ validate_cell_name <- function(value) {
   }
   invisible(value)
 }
-
 
 # Set or remove one cell option without rewriting unrelated physical records.
 # Existing options use their original record and EOL; new options use the
@@ -761,7 +663,6 @@ nb_add_cell <- function(nb, body = character(), type = "code", after = NULL) {
   }
   if (type == "markdown") validate_markdown_lines(body, "<new cell>")
   delim <- switch(type, markdown = "# %% [markdown]", code = "# %%")
-  # Monotonic id allocation: never reuse a previously allocated number.
   id <- paste0("cell-", nb$next_cell_number)
   ids <- vapply(nb$cells, function(c) c$id, "")
   while (id %in% ids) {
