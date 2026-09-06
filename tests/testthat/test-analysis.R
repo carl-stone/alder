@@ -3,9 +3,10 @@
 # ambiguity, and the dependency DAG (ADR 0002 / marimo reactive model).
 
 cell <- function(id, defs = character(), refs = character(),
-                 self_refs = character(), barrier = FALSE, type = "code") {
+                 self_refs = character(), barrier = FALSE, opaque = FALSE,
+                 type = "code") {
   list(id = id, defs = defs, refs = refs, self_refs = self_refs,
-       barrier = barrier, type = type)
+       barrier = barrier, opaque = opaque, type = type)
 }
 
 err_codes <- function(r) {
@@ -31,6 +32,17 @@ test_that("cell_defs_refs finds top-level definitions and references", {
   expect_null(p$error)
   expect_false(p$barrier)
   expect_length(p$diagnostics, 0)
+})
+
+test_that("ordinary R database calls need no special cell type", {
+  p <- alder:::cell_defs_refs(
+    "result <- DBI::dbGetQuery(connection, 'SELECT * FROM measurements')"
+  )
+  expect_identical(p$defs, "result")
+  expect_true("connection" %in% p$refs)
+  expect_false("DBI" %in% p$refs)
+  expect_length(p$diagnostics, 0L)
+  expect_null(p$error)
 })
 
 test_that("function-local names and args are excluded from top-level refs", {
@@ -193,18 +205,90 @@ test_that("replacement targets without a static root are blocked", {
   expect_true(has_error(p2))
 })
 
+test_that("literal default-environment assign and rm are statically bounded", {
+  assigned <- alder:::cell_defs_refs(
+    "assign(\"assigned_value\", input + 1L)"
+  )
+  expect_false(has_error(assigned))
+  expect_identical(assigned$defs, "assigned_value")
+  expect_identical(assigned$refs, "input")
+
+  reordered <- alder:::cell_defs_refs(
+    "base::assign(value = input + 2L, x = \"qualified_value\")"
+  )
+  expect_false(has_error(reordered))
+  expect_identical(reordered$defs, "qualified_value")
+  expect_identical(reordered$refs, "input")
+
+  self_update <- alder:::cell_defs_refs(
+    "assign(x = \"counter\", value = counter + 1L)"
+  )
+  expect_identical(self_update$defs, "counter")
+  expect_identical(self_update$self_refs, "counter")
+
+  removed <- alder:::cell_defs_refs(c("x <- 1L", "rm(\"x\")"))
+  expect_false(has_error(removed))
+  expect_identical(removed$defs, "x")
+  expect_false("x" %in% removed$refs)
+  removed_alias <- alder:::cell_defs_refs(c("y <- 1L", "remove(\"y\")"))
+  expect_false(has_error(removed_alias))
+  expect_identical(removed_alias$defs, "y")
+  qualified_rm <- alder:::cell_defs_refs(c("z <- 1L", "base::rm(\"z\")"))
+  expect_false(has_error(qualified_rm))
+  expect_identical(qualified_rm$defs, "z")
+
+  consumer <- alder:::cell_defs_refs("answer <- assigned_value + 1L")
+  dag <- alder:::build_dag(list(
+    cell("producer", defs = assigned$defs, refs = assigned$refs,
+         self_refs = assigned$self_refs),
+    cell("consumer", defs = consumer$defs, refs = consumer$refs,
+         self_refs = consumer$self_refs)
+  ))
+  expect_identical(dag$edges$consumer, "producer")
+})
+
+test_that("computed or explicit-environment mutation blocks dispatch", {
+  computed <- alder:::cell_defs_refs("assign(target, 1L)")
+  expect_true(has_error(computed))
+  expect_match(computed$diagnostics[[1L]]$message,
+               "scalar string literal name", fixed = TRUE)
+  explicit <- alder:::cell_defs_refs(
+    "assign(\"x\", 1L, envir = target_env)"
+  )
+  expect_true(has_error(explicit))
+  expect_match(explicit$diagnostics[[1L]]$message,
+               "default evaluation environment", fixed = TRUE)
+  expect_true(has_error(alder:::cell_defs_refs("base::assign(target, 1L)")))
+
+  computed_rm <- alder:::cell_defs_refs("rm(list = target)")
+  expect_true(has_error(computed_rm))
+  expect_match(computed_rm$diagnostics[[1L]]$message,
+               "bare names or scalar string literals", fixed = TRUE)
+  expect_true(has_error(alder:::cell_defs_refs(
+    "rm(\"x\", envir = target_env)"
+  )))
+  expect_true(has_error(alder:::cell_defs_refs("remove(list = target)")))
+})
+
 test_that("unsafe dynamic evaluation blocks dispatch", {
   expect_true(has_error(alder:::cell_defs_refs("eval(parse(text = \"x <- 1\"))")))
   expect_true(has_error(alder:::cell_defs_refs("base::eval(x)")))
-  expect_true(has_error(alder:::cell_defs_refs("source(\"file.R\")")))
+  literal_eval <- alder:::cell_defs_refs("eval(quote(x <- input + 1))")
+  expect_false(has_error(literal_eval))
+  expect_true("x" %in% literal_eval$defs)
+  expect_true("input" %in% literal_eval$refs)
+  literal_source <- alder:::cell_defs_refs("source(\"file.R\", local = TRUE)")
+  expect_false(has_error(literal_source))
+  expect_true(literal_source$opaque)
+  expect_true(literal_source$barrier)
+  expect_true("opaque-dependency" %in% err_codes(literal_source))
+  expect_true(has_error(alder:::cell_defs_refs("source(path_var)")))
   expect_true(has_error(alder:::cell_defs_refs("sys.source(\"file.R\")")))
   expect_true(has_error(alder:::cell_defs_refs("load(\"x.RData\")")))
   expect_true(has_error(alder:::cell_defs_refs("attach(list(a = 1))")))
   expect_true(has_error(alder:::cell_defs_refs("detach(\"pkg\")")))
   expect_true(has_error(alder:::cell_defs_refs("delayedAssign(\"x\", 1)")))
   expect_true(has_error(alder:::cell_defs_refs("makeActiveBinding(\"x\", f, e)")))
-  expect_true(has_error(alder:::cell_defs_refs("assign(\"x\", 1)")))
-  expect_true(has_error(alder:::cell_defs_refs("rm(\"x\")")))
   expect_true(has_error(alder:::cell_defs_refs("exists(nm)")))
   expect_true(has_error(alder:::cell_defs_refs("get(x_var)")))
   # do.call with a symbol target names a known function reference, but a
@@ -215,6 +299,23 @@ test_that("unsafe dynamic evaluation blocks dispatch", {
   p <- alder:::cell_defs_refs("p <- parse(text = \"x <- 1\")")
   expect_false(has_error(p))
   expect_true("p" %in% p$defs)
+})
+
+test_that("literal source runs from the notebook project directory", {
+  root <- tempfile("alder-literal-source-")
+  dir.create(root)
+  withr::defer(unlink(root, recursive = TRUE, force = TRUE))
+  writeLines("helper_value <- 9L", file.path(root, "helper.R"))
+  path <- file.path(root, "notebook.R")
+  writeLines(c(
+    "# %%", "eval_result <- eval(quote(1L + 1L))",
+    "# %%", "source('helper.R', local = TRUE)",
+    "# %%", "combined <- eval_result + helper_value"
+  ), path)
+  env <- alder::alder_source(path, env = new.env(parent = globalenv()))
+  expect_identical(env$eval_result, 2L)
+  expect_identical(env$helper_value, 9L)
+  expect_identical(env$combined, 11L)
 })
 
 test_that("literal lookup and do.call names are supported", {
@@ -275,6 +376,19 @@ test_that("bare data-mask symbols warn and stay references", {
   expect_false("z" %in% p4$defs)           # columns are never notebook defs
   expect_true(all(c("d", "mean", "x") %in% p4$refs))
   expect_true(has_mask_warning(p4, "x"))
+})
+
+test_that("formulas track globals quietly and respect explicit data", {
+  standalone <- alder:::cell_defs_refs("form <- y ~ poly(x, 2)")
+  expect_true(all(c("y", "poly", "x") %in% standalone$refs))
+  expect_false(any(err_levels(standalone) == "warning"))
+
+  model <- alder:::cell_defs_refs(
+    "fit <- stats::lm(mpg ~ poly(wt, 2) + .env$offset, data = mtcars)"
+  )
+  expect_true(all(c("poly", "offset", "mtcars") %in% model$refs))
+  expect_false(any(c("mpg", "wt") %in% model$refs))
+  expect_false(any(err_levels(model) == "warning"))
 })
 
 test_that("syntax errors are reported as diagnostics, not crashes", {
@@ -347,4 +461,19 @@ test_that("package-attach barriers order every later code cell", {
   dag2 <- alder:::build_dag(cells2)
   expect_false("y" %in% dag2$edges$x)                # no edge to an earlier cell
   expect_true(all(dag2$nodes %in% alder:::topo_order(dag2$edges, dag2$nodes)))
+})
+
+test_that("opaque cells are ordered between every executable neighbor", {
+  cells <- list(
+    cell("a", defs = "x"),
+    cell("b", barrier = TRUE, opaque = TRUE),
+    cell("c", defs = "y"),
+    cell("d", type = "markdown"),
+    cell("e", type = "code")
+  )
+  dag <- alder:::build_dag(cells)
+  expect_true("a" %in% dag$edges$b)
+  expect_true("b" %in% dag$edges$c)
+  expect_true("b" %in% dag$edges$e)
+  expect_false("b" %in% dag$edges$d)
 })

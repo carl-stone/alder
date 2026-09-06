@@ -2,7 +2,7 @@
 % Please edit documentation in R/export.R
 \name{alder_export}
 \alias{alder_export}
-\title{Export a notebook to a static interchange or document format.}
+\title{Export a notebook to a static interchange or document format}
 \usage{
 alder_export(path, format = export_formats, out = NULL, include_code = FALSE)
 }
@@ -11,7 +11,8 @@ alder_export(path, format = export_formats, out = NULL, include_code = FALSE)
 
 \item{format}{One of \code{html}, \code{md}, \code{script}, \code{ipynb}, \code{qmd}, or \code{session}.}
 
-\item{out}{Optional output path.}
+\item{out}{Optional output path. It must not identify the input notebook,
+including through a symlink or hard link.}
 
 \item{include_code}{Include code in document-oriented exports.}
 }
@@ -19,5 +20,15 @@ alder_export(path, format = export_formats, out = NULL, include_code = FALSE)
 The output path, invisibly.
 }
 \description{
-Export a notebook to a static interchange or document format.
+Blocking syntax, duplicate-definition, dependency-cycle, and dynamic
+analysis diagnostics are reported before user code runs or an existing
+destination is changed. Runtime failures also preserve existing destinations;
+the error contains the execution state with cell logs and condition details.
+HTML and Markdown retain console output, conditions, and appended results in
+execution order. Session JSON retains each cell's log and error fields.
+}
+\examples{
+\dontrun{
+alder_export("analysis.R", "html", include_code = TRUE)
+}
 }

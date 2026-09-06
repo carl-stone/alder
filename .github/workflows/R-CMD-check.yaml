@@ -1,0 +1,125 @@
+name: R package quality
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions: read-all
+
+jobs:
+  check:
+    name: R ${{ matrix.r }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        r: ['4.6.1', devel]
+    env:
+      GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
+      NOT_CRAN: "true"
+      R_KEEP_PKG_SOURCE: "yes"
+      _R_CHECK_FORCE_SUGGESTS_: "true"
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: ${{ matrix.r }}
+          use-public-rspm: true
+
+      - uses: r-lib/actions/setup-pandoc@v2
+
+      - uses: quarto-dev/quarto-actions/setup@v2
+
+      - uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          dependencies: '"all"'
+          extra-packages: |
+            any::rcmdcheck
+            any::lintr
+
+      - name: Verify required runtimes
+        run: |
+          Rscript -e 'stopifnot(getRversion() >= "4.6.1", nzchar(Sys.which("pandoc")), nzchar(Sys.which("quarto")), nzchar(chromote::find_chrome()))'
+          R --version
+          pandoc --version
+          quarto --version
+
+      - name: Verify vendored editor bundle
+        if: matrix.r == '4.6.1'
+        run: |
+          npm ci --prefix js
+          npm run build --prefix js
+          git diff --exit-code -- inst/app/static/vendor/alder-editor.js
+
+      - name: Lint package
+        if: matrix.r == '4.6.1'
+        run: Rscript -e 'pkgload::load_all(quiet = TRUE); lints <- lintr::lint_package(); print(lints); quit(status = length(lints) > 0L)'
+
+      - uses: r-lib/actions/check-r-package@v2
+        with:
+          args: 'c("--no-manual", "--as-cran")'
+          build_args: 'c("--no-build-vignettes")'
+          error-on: '"warning"'
+
+      - name: Input-to-result correctness and profiling smoke
+        if: matrix.r == '4.6.1'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tini
+          tini -s -- bash dev/reviews/run-input-latency.sh /tmp/alder-input-latency-ci 1 0 1
+
+      - name: Retain input-to-result evidence
+        if: always() && matrix.r == '4.6.1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: input-to-result-linux
+          path: /tmp/alder-input-latency-ci
+          if-no-files-found: ignore
+
+  windows-cli:
+    name: Windows R 4.6.1 launcher and MCP
+    runs-on: windows-latest
+    env:
+      GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
+      NOT_CRAN: "true"
+      R_KEEP_PKG_SOURCE: "yes"
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: '4.6.1'
+          use-public-rspm: true
+
+      - uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          dependencies: '"all"'
+          extra-packages: |
+            any::devtools
+
+      - name: Verify Windows runtime and focused CLI contracts
+        shell: pwsh
+        run: |
+          Rscript -e 'stopifnot(getRversion() >= "4.6.1", .Platform$OS.type == "windows")'
+          Rscript -e 'devtools::load_all(quiet = TRUE); testthat::test_file("tests/testthat/test-cli.R", reporter = "summary", stop_on_failure = TRUE, stop_on_warning = TRUE)'
+
+      - name: Install package and exercise the packaged Windows command
+        shell: pwsh
+        run: |
+          R CMD INSTALL .
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Rscript -e 'options(warn = 2); library(alder); descriptions <- c("MCP validates request identifiers before applying effects", "MCP initialize and simple methods require object-shaped params", "MCP lifecycle gates local requests until the initialized notification", "MCP tools/call validates its wire envelope before tool execution", "MCP lifecycle and tools/call schemas match over URL transport", "mcp_json preserves safe numeric precision for response correlation", "stdio MCP rejects duplicate JSON members and preserves the source", "stdio MCP reader bounds one line and recovers at the next frame", "stdio MCP dispatches a live pipe before EOF"); for (description in descriptions) testthat::test_file("tests/testthat/test-mcp.R", package = "alder", desc = description, reporter = "summary", stop_on_failure = TRUE, stop_on_warning = TRUE)'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Rscript -e 'dir.create(".ci-bin"); alder::alder_install_cli(".ci-bin")'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & .\.ci-bin\alder.cmd --help
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & .\.ci-bin\alder.cmd --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & .\.ci-bin\alder.cmd
+          if ($LASTEXITCODE -ne 2) {
+            throw "expected usage exit 2, received $LASTEXITCODE"
+          }

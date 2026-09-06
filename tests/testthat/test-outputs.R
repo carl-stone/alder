@@ -14,7 +14,7 @@ output_records <- function(s, id) {
 }
 
 wait_output_session <- function(s, timeout = 10) {
-  wait_for(s, function() {
+  wait_for(s, function() { # nolint: object_usage_linter
     !any(vapply(s$state()$cells,
       function(cell) identical(cell$status, "running"), logical(1)))
   }, timeout)
@@ -39,7 +39,7 @@ test_that("out constructors produce sanitized wire records", {
   withr::defer({
     runtime$artifact_dir <- old_dir
     unlink(artifact_dir, recursive = TRUE)
-  }, testthat::teardown_env())
+  })
 
   raw <- as.raw(c(137L, 80L, 78L, 71L))
   for (constructor in list(out$image, out$audio, out$video, out$pdf)) {
@@ -65,7 +65,7 @@ test_that("base graphics and media records precede the final value", {
     "# %%", "plot(1:10); out$md('tail')"
   ))
   s <- m$session
-  withr::defer(s$stop(), testthat::teardown_env())
+  withr::defer(s$stop())
   s$run_all()
   wait_output_session(s)
   outputs <- output_records(s, "cell-2")
@@ -79,7 +79,31 @@ test_that("base graphics and media records precede the final value", {
   expect_true(file.exists(file.path(m$worker$artifact_dir, old_artifact)))
   s$run_cell("cell-2")
   wait_output_session(s)
+  current_outputs <- output_records(s, "cell-2")
+  current_index <- which(vapply(current_outputs,
+    function(x) identical(x$kind, "image"), logical(1)))[[1L]]
+  current_artifact <- current_outputs[[current_index]]$artifact
+  expect_false(identical(current_artifact, old_artifact))
+  expect_true(file.exists(file.path(m$worker$artifact_dir, current_artifact)))
+
+  # A state response can publish the old immutable URL immediately before the
+  # new commit. Keep it fetchable for a bounded grace, then retire only it.
+  expect_true(file.exists(file.path(m$worker$artifact_dir, old_artifact)))
+  expect_equal(m$worker$sweep_artifacts(Sys.time()), 0L)
+
+  media_artifact <- "retirement-check.wav"
+  media_path <- file.path(m$worker$artifact_dir, media_artifact)
+  writeBin(as.raw(c(82L, 73L, 70L, 70L)), media_path)
+  expect_true(m$worker$release_artifact(media_artifact))
+  expect_true(m$worker$release_artifact(media_artifact))
+  expect_false(m$worker$release_artifact(file.path("..", media_artifact)))
+  expect_false(m$worker$release_artifact("not-rendered.txt"))
+  expect_true(file.exists(media_path))
+
+  expect_equal(m$worker$sweep_artifacts(Sys.time() + 10), 2L)
   expect_false(file.exists(file.path(m$worker$artifact_dir, old_artifact)))
+  expect_false(file.exists(media_path))
+  expect_true(file.exists(file.path(m$worker$artifact_dir, current_artifact)))
 })
 
 test_that("lazy output expands once and expires after a rerun", {
@@ -88,7 +112,7 @@ test_that("lazy output expands once and expires after a rerun", {
     "# %%", "out$lazy(function() 1 + 1)"
   ), execution_mode = "lazy")
   s <- m$session
-  withr::defer(s$stop(), testthat::teardown_env())
+  withr::defer(s$stop())
   s$run_all()
   wait_output_session(s)
   key <- output_records(s, "cell-2")[[1L]]$key
@@ -109,7 +133,7 @@ test_that("lazy output expands once and expires after a rerun", {
   expect_equal(err$code, "lazy_expired")
   expect_match(conditionMessage(err), "earlier run")
 })
- 
+
 test_that("table pages sort, filter, and expire with the source", {
   m <- make_test_session(c(
     "# %%", "library(alder)",
@@ -117,7 +141,7 @@ test_that("table pages sort, filter, and expire with the source", {
     "# %%", "df"
   ))
   s <- m$session
-  withr::defer(s$stop(), testthat::teardown_env())
+  withr::defer(s$stop())
   s$run_all()
   wait_output_session(s)
   wait_for(s, function() {

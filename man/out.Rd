@@ -15,5 +15,16 @@ progress bar, \code{out$append()} emits an extra output, \code{out$lazy()}
 defers a computation behind a button, \code{out$inspect()} prints a
 bounded \code{str()}, and \code{out$stop()} halts a cell early. When the
 notebook runs as a plain Rscript (no worker), every constructor degrades
-to ordinary R behavior (ADR 0001).
+to ordinary R behavior. Named widgets nested in supported
+layouts or resolved lazy outputs retain reactive updates, focus, and
+operation identity. Layouts and appended outputs use the same native plot,
+HTML widget, table, and printed model renderers as standalone values;
+character scalars are displayed as readable text. Use \code{out$inspect()}
+explicitly for an object's internal structure.
+Tabs expose linked tab/tablist/tabpanel selection
+semantics, and accordions expose linked expanded/region state.
+}
+\examples{
+out$md("## Result")
+out$callout("Check assumptions", variant = "warn")
 }

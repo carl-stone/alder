@@ -13,7 +13,14 @@ config_defaults <- function() {
     on_startup = TRUE,
     autosave = FALSE,
     format = list(on_save = FALSE),
-    editor = list(font_size = 14L, tab_size = 2L, line_numbers = TRUE),
+    editor = list(
+      font_size = 14L,
+      tab_size = 2L,
+      line_numbers = TRUE,
+      completions = TRUE,
+      signature_help = TRUE,
+      live_diagnostics = FALSE
+    ),
     table = list(page_size = 25L),
     cache = list(enabled = TRUE, dir = NULL),
     gallery = list(max_sessions = 4L)
@@ -125,7 +132,12 @@ validate_config_layer <- function(value, prefix = "", partial = TRUE) {
     if (!is.list(x) || (length(x) && is.null(names(x)))) {
       config_invalid("editor", "must be a mapping")
     }
-    config_unknown_keys(x, c("font_size", "tab_size", "line_numbers"), "editor")
+    config_unknown_keys(
+      x,
+      c("font_size", "tab_size", "line_numbers", "completions",
+        "signature_help", "live_diagnostics"),
+      "editor"
+    )
     out$editor <- list()
     if ("font_size" %in% names(x)) {
       out$editor$font_size <- config_scalar_integer(x$font_size,
@@ -138,6 +150,18 @@ validate_config_layer <- function(value, prefix = "", partial = TRUE) {
     if ("line_numbers" %in% names(x)) {
       out$editor$line_numbers <- config_scalar_logical(x$line_numbers,
                                                        "editor.line_numbers")
+    }
+    if ("completions" %in% names(x)) {
+      out$editor$completions <- config_scalar_logical(
+        x$completions, "editor.completions")
+    }
+    if ("signature_help" %in% names(x)) {
+      out$editor$signature_help <- config_scalar_logical(
+        x$signature_help, "editor.signature_help")
+    }
+    if ("live_diagnostics" %in% names(x)) {
+      out$editor$live_diagnostics <- config_scalar_logical(
+        x$live_diagnostics, "editor.live_diagnostics")
     }
   }
 
@@ -280,6 +304,22 @@ resolve_alder_config <- function(path = NULL, metadata = NULL,
 #'
 #' @param path Optional notebook path.  When supplied, project configuration
 #'   and notebook runtime metadata are included in the result.
+#' @return The fully merged and validated configuration list. Editor settings
+#'   include independently persisted logical flags for `completions`,
+#'   `signature_help`, and opt-in `live_diagnostics`. The latter controls
+#'   language-server lintr notes; Alder's own parse and safety diagnostics are
+#'   always retained.
+#' @details
+#' Opt-in linting uses the notebook's native file path and project `.lintr`
+#' settings. Diagnostics that cannot be located within one cell, including
+#' linter failures, appear as document-level editor diagnostics. Their error,
+#' warning, or information level is retained without blocking notebook
+#' execution. New diagnostics replace the previous set; turning lint off
+#' clears retained cell and document lint notes even if the language server
+#' has stopped.
+#' @examples
+#' config <- alder_config()
+#' config$editor$completions
 #' @export
 alder_config <- function(path = NULL) {
   if (!is.null(path) && (!is.character(path) || length(path) != 1L ||

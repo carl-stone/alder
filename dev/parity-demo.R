@@ -6,7 +6,7 @@
 # # alder parity demo
 #
 # Exercises the marimo-parity feature surface: streaming progress,
-# appended outputs, base graphics capture, rich tables, SQL cells,
+# appended outputs, base graphics capture, rich tables, database-ready R,
 # disk caching, composite widget forms, disabled and tested cells,
 # lazy outputs and media. Runnable as plain Rscript (ADR 0001).
 
@@ -33,10 +33,10 @@ plot(1:10)
 df <- data.frame(x = seq_len(500), y = rnorm(500))
 nrow(df)
 
-# %% [sql]
-result <- sql(r"---(
-SELECT count(*) AS n FROM df
-)---")
+# %%
+# Ordinary R database clients such as DBI/dbplyr can be used here without a
+# dedicated cell type. This dependency-only example stays package-free.
+result <- data.frame(n = nrow(df))
 
 # %%
 result$n

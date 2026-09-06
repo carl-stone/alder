@@ -1,11 +1,58 @@
 # Notebook-scoped memory and disk caching.
 
+cache_fingerprintable <- function(value, depth = 0L) {
+  if (depth > 100L || is.environment(value) || is.function(value) ||
+      isS4(value) || typeof(value) %in% c("externalptr", "weakref")) {
+    return(FALSE)
+  }
+  if (is.list(value) || is.pairlist(value) || is.expression(value)) {
+    if (length(value) &&
+        !all(vapply(value, cache_fingerprintable, logical(1),
+                    depth = depth + 1L))) {
+      return(FALSE)
+    }
+  }
+  attrs <- attributes(value)
+  if (length(attrs) &&
+      !all(vapply(attrs, cache_fingerprintable, logical(1),
+                  depth = depth + 1L))) {
+    return(FALSE)
+  }
+  TRUE
+}
+
+cache_dependency_values <- function(f) {
+  globals <- tryCatch(
+    codetools::findGlobals(f, merge = FALSE)$variables,
+    error = function(e) NULL
+  )
+  if (is.null(globals)) return(NULL)
+  globals <- sort(unique(as.character(globals)))
+  env <- environment(f)
+  values <- lapply(globals, function(name) {
+    if (exists(name, envir = env, inherits = TRUE)) {
+      get(name, envir = env, inherits = TRUE)
+    } else {
+      structure(list(), class = "alder_missing_cache_dependency")
+    }
+  })
+  names(values) <- globals
+  if (!cache_fingerprintable(values)) return(NULL)
+  values
+}
+
 cache_key <- function(f, args) {
-  rlang::hash(list(
-    deparse(body(f)),
-    names(formals(f)),
-    args
-  ))
+  dependencies <- cache_dependency_values(f)
+  if (is.null(dependencies) || !cache_fingerprintable(args)) return(NULL)
+  tryCatch(
+    rlang::hash(list(
+      body = body(f),
+      formals = formals(f),
+      dependencies = dependencies,
+      args = args
+    )),
+    error = function(e) NULL
+  )
 }
 
 cache_dir_for <- function(dir = NULL) {
@@ -43,6 +90,10 @@ new_cached_wrapper <- function(f, kind, dir = NULL) {
   wrapped <- function(...) {
     args <- list(...)
     key <- cache_key(f, args)
+    # Environments, external pointers, functions, and other reference-like
+    # dependencies cannot produce a stable cross-run key. Recompute instead
+    # of returning a potentially stale value.
+    if (is.null(key)) return(do.call(f, args))
     if (identical(kind, "memory")) {
       store <- RUNTIME$mem_cache
       if (!is.environment(store)) {
@@ -65,7 +116,14 @@ new_cached_wrapper <- function(f, kind, dir = NULL) {
       unlink(file, force = TRUE)
     }
     value <- do.call(f, args)
-    tryCatch(saveRDS(value, file, version = 3), error = function(e) NULL)
+    tmp <- tempfile(".alder-cache-", tmpdir = cache_dir)
+    on.exit(unlink(tmp, force = TRUE), add = TRUE)
+    tryCatch({
+      saveRDS(value, tmp, version = 3)
+      if (!file.rename(tmp, file) && !file.exists(file)) {
+        unlink(tmp, force = TRUE)
+      }
+    }, error = function(e) unlink(tmp, force = TRUE))
     value
   }
   wrapper_env <- new.env(parent = environment(f))
@@ -110,9 +168,15 @@ clear_cache_disk <- function() {
 #' \code{cache$disk(f, dir)} caches to disk below \code{dir} (default: the
 #' notebook cache directory). \code{cache$clear(which)} drops cached values
 #' from \code{"memory"}, \code{"disk"}, or \code{"all"} stores. Cache keys
-#' include the function body, formal argument names, and call arguments.
+#' include the function body and formals, call arguments, and serializable
+#' values of free variables. Calls with reference-like dependencies that
+#' cannot be fingerprinted are safely recomputed instead of cached.
 #' Wrapped functions carry class \code{alder_cached}.
 #'
+#' @examples
+#' square <- cache$memory(function(x) x ^ 2)
+#' square(4)
+#' cache$clear("memory")
 #' @export
 cache <- list(
   memory = function(f) new_cached_wrapper(f, "memory"),

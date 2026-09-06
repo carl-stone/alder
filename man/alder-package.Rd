@@ -4,9 +4,50 @@
 \name{alder-package}
 \alias{alder}
 \alias{alder-package}
-\title{Alder package}
+\title{Reactive notebooks for R}
 \description{
-Reactive notebooks for R.
+Alder keeps notebooks in ordinary \code{.R} files separated by \verb{# \%\%} comments.
+A local web editor runs cells in dependency order in a dedicated R process.
+Changing a widget reruns its dependents; lazy mode leaves those cells stale
+until requested. Read widget values explicitly with \verb{$value}.
+}
+\section{Getting started}{
+
+Install the shell command with \code{\link[=alder_install_cli]{alder_install_cli()}}, then run
+\verb{alder analysis.R} in a terminal. The command owns the editor, server, and
+worker lifecycle. Copy the installed Iris example to a writable directory
+with the example below, then launch it with \verb{alder iris.R}.
+}
+
+\section{Working with notebooks}{
+
+\link{ui} supplies reactive controls and \link{out} supplies rich presentation.
+\link{cache} reuses computations when code and inputs still match.
+\code{\link[=alder_config]{alder_config()}} resolves editor and runtime settings, and \code{\link[=alder_env]{alder_env()}}
+manages standard renv environments. \code{\link[=alder_source]{alder_source()}} and \code{\link[=alder_test]{alder_test()}} run
+notebooks noninteractively. \code{\link[=alder_render]{alder_render()}} publishes through Quarto/knitr
+or Pandoc; \code{\link[=alder_export]{alder_export()}} and \code{\link[=alder_convert]{alder_convert()}} provide interchange formats.
+\code{\link[=alder_mcp]{alder_mcp()}} exposes notebook inspection, editing, and execution to agents.
+}
+
+\section{Execution boundary}{
+
+Alder serves the local machine and runs trusted R with the user's permissions.
+Definitions must be unique across cells and the dependency graph must be
+acyclic. Dynamic environment operations that cannot be analyzed safely receive
+actionable diagnostics. Reference-object mutations and external side effects
+are not transactional. Warnings, messages, and errors remain visible.
+}
+
+\examples{
+\dontrun{
+file.copy(system.file("examples", "iris.R", package = "alder"), "iris.R")
+alder_install_cli()
+# In a terminal: alder iris.R
+}
+}
+\seealso{
+\code{\link[=start_alder]{start_alder()}}, \code{\link[=stop_alder]{stop_alder()}}, \code{\link[=alder_cli]{alder_cli()}}, \code{\link[=alder_check]{alder_check()}}
 }
 \author{
 \strong{Maintainer}: Carl Stone \email{carl@alder.dev}
@@ -17,4 +58,4 @@ Authors:
 }
 
 }
-\keyword{internal}
+\keyword{package}

@@ -2,7 +2,7 @@
 % Please edit documentation in R/export.R
 \name{alder_source}
 \alias{alder_source}
-\title{Evaluate an alder notebook in topological order.}
+\title{Evaluate runnable cells in an alder notebook in topological order.}
 \usage{
 alder_source(path, env = parent.frame())
 }
@@ -15,5 +15,9 @@ alder_source(path, env = parent.frame())
 The evaluation environment, invisibly.
 }
 \description{
-Evaluate an alder notebook in topological order.
+Cells marked \verb{#| disabled: true} and all of their transitive
+descendants are excluded, matching interactive Session execution.
+}
+\examples{
+\dontrun{results <- alder_source("analysis.R")}
 }

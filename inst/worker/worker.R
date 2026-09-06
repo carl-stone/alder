@@ -20,8 +20,37 @@
 suppressPackageStartupMessages(library(alder))
 
 local({
+  # Library bootstrap changes process-wide lookup, but its transport values
+  # are worker implementation details. Keep every temporary binding outside
+  # the notebook's .GlobalEnv just like the runtime state below.
+  sandbox_lib <- Sys.getenv("ALDER_SANDBOX_LIB", unset = "")
+  Sys.unsetenv("ALDER_SANDBOX_LIB")
+  project_lib <- Sys.getenv("ALDER_PROJECT_LIB", unset = "")
+  Sys.unsetenv("ALDER_PROJECT_LIB")
+  if (nzchar(sandbox_lib)) {
+    if (!dir.exists(sandbox_lib) || file.access(sandbox_lib, 4L) != 0L) {
+      stop("ALDER_SANDBOX_LIB is invalid: '", sandbox_lib,
+           "' (must be an existing readable directory)")
+    }
+    isolated <- c(normalizePath(sandbox_lib, mustWork = TRUE), .Library)
+    if ("include.site" %in% names(formals(.libPaths))) {
+      .libPaths(isolated, include.site = FALSE)
+    } else {
+      # Compatibility with R releases predating include.site: .libPaths()
+      # stores its resolved search path in this unlocked base binding.
+      assign(".lib.loc", unique(normalizePath(isolated, "/")),
+             envir = environment(.libPaths))
+    }
+  } else if (nzchar(project_lib) && dir.exists(project_lib)) {
+    .libPaths(c(normalizePath(project_lib, mustWork = TRUE), .libPaths()))
+  }
+})
+
+local({
 
   `%||%` <- function(a, b) if (is.null(a)) b else a
+  perf_begin <- get(".alder_perf_begin", asNamespace("alder"))
+  perf_end <- get(".alder_perf_end", asNamespace("alder"))
 
   # -------------------------------------------------------------------------
   # Private environment: source the mirrored widget module here only so we can
@@ -40,6 +69,8 @@ local({
   Sys.unsetenv("ALDER_ARTIFACT_DIR")
   cache_dir <- Sys.getenv("ALDER_CACHE_DIR", unset = "")
   Sys.unsetenv("ALDER_CACHE_DIR")
+  notebook_dir <- Sys.getenv("ALDER_NOTEBOOK_DIR", unset = "")
+  Sys.unsetenv("ALDER_NOTEBOOK_DIR")
   if (!nzchar(artifact_dir) || !dir.exists(artifact_dir) ||
       file.access(artifact_dir, 2) != 0L) {
     stop("ALDER_ARTIFACT_DIR is missing or invalid: '", artifact_dir,
@@ -49,6 +80,13 @@ local({
       file.access(cache_dir, 2) != 0L) {
     stop("ALDER_CACHE_DIR is missing or invalid: '", cache_dir,
          "' (must be an existing writable directory)")
+  }
+  if (nzchar(notebook_dir)) {
+    if (!dir.exists(notebook_dir)) {
+      stop("ALDER_NOTEBOOK_DIR is invalid: '", notebook_dir,
+           "' (must be an existing directory)")
+    }
+    setwd(normalizePath(notebook_dir, mustWork = TRUE))
   }
 
 NB_ENV <- globalenv() # notebook globals live in .GlobalEnv
@@ -71,10 +109,23 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
   CAPTURE_SINK <- new.env(parent = emptyenv())
   CAPTURE_SINK$active <- FALSE
   CAPTURE_SINK$con <- NULL
+  RENDER_LOG <- new.env(parent = emptyenv())
+  RENDER_LOG$value <- character()
+
+  capture_offset <- function() {
+    if (!isTRUE(CAPTURE_SINK$active) || is.null(CAPTURE_SINK$con)) return(NULL)
+    flush(CAPTURE_SINK$con)
+    path <- summary(CAPTURE_SINK$con)$description
+    # Match readLines() newline normalization and count characters, so report
+    # slicing also works inside a partial line containing multibyte text.
+    prefix <- utf8_prefix(readBin(path, "raw", n = 1048576L))
+    nchar(gsub("\r\n", "\n", prefix, fixed = TRUE), type = "chars")
+  }
 
   notify <- function(kind, payload) {
     if (is.null(CURRENT_REQ) || is.null(CURRENT_CELL)) return(invisible())
     if (identical(kind, "append") && !is.null(payload$output)) {
+      payload$output$log_offset <- capture_offset()
       EMITTED_OUTPUTS$value <- c(EMITTED_OUTPUTS$value %||% list(),
                                  list(payload$output))
     }
@@ -88,6 +139,11 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
     if (!("alder" %in% loadedNamespaces())) return(invisible())
     rt <- get("RUNTIME", envir = asNamespace("alder"))
     rt$emit <- notify
+    rt$render <- function(x) {
+      output <- render_kind(x)
+      if (identical(output$kind, "error")) stop(output$message, call. = FALSE)
+      structure(output, class = c("alder_output", "list"))
+    }
     rt$cell_id <- function() CURRENT_CELL
     rt$artifact_dir <- artifact_dir
     rt$cache_dir <- cache_dir
@@ -99,6 +155,9 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
                    function(...) inject_runtime()), error = function(e) NULL)
 
   emit <- function(x) {
+    perf <- perf_begin("kernel.emit", list(req = x$req, cell = x$id,
+      revision = x$revision, run_id = x$run_id, ack = x$ack, notify = x$notify))
+    on.exit(perf_end(perf), add = TRUE)
     line <- jsonlite::toJSON(x, auto_unbox = TRUE, null = "null", na = "null",
                              force = TRUE)
     restore_capture <- isTRUE(CAPTURE_SINK$active) &&
@@ -144,39 +203,64 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
     }
   }
 
-  bounded_capture <- function(run, max_bytes) {
+  bounded_capture <- function(run, max_bytes, include_conditions = TRUE) {
     f <- tempfile("alder-cap-")
     con <- NULL
     result <- NULL
     err <- NULL
     err_condition <- NULL
+    err_trace <- list()
     interrupted <- FALSE
+    condition_lines <- character()
+    condition_bytes <- 0L
+    conditions_truncated <- FALSE
+    record_condition <- function(line) {
+      line <- sub("\n$", "", line)
+      remaining <- max_bytes - condition_bytes
+      if (remaining <= 0L) {
+        conditions_truncated <<- TRUE
+        return(invisible())
+      }
+      bytes <- charToRaw(line)
+      if (length(bytes) > remaining) {
+        line <- utf8_prefix(bytes[seq_len(remaining)])
+        conditions_truncated <<- TRUE
+      }
+      condition_lines <<- c(condition_lines, line)
+      condition_bytes <<- condition_bytes + nchar(line, type = "bytes") + 1L
+      invisible()
+    }
     tryCatch({
       con <- file(f, open = "wt")
       CAPTURE_SINK$con <- con
       CAPTURE_SINK$active <- TRUE
       sink(con)
-      withCallingHandlers(
-        tryCatch(result <- run(),
-                 error = function(e) {
-                   err <<- conditionMessage(e)
-                   err_condition <<- e
-                 },
-                 interrupt = function(e) {
-                   interrupted <<- TRUE
-                   err_condition <<- e
-                 }),
+      tryCatch(withCallingHandlers(
+        result <- run(),
+        error = function(e) {
+          err_trace <<- sys.calls()
+        },
         message = function(m) {
           line <- conditionMessage(m)
-          cat(line)
+          record_condition(line)
+          if (isTRUE(include_conditions)) cat(line)
           notify("log", list(lines = line))
           invokeRestart("muffleMessage")
         },
         warning = function(w) {
           line <- paste0("Warning: ", conditionMessage(w))
-          cat(line, "\n", sep = "")
+          record_condition(line)
+          if (isTRUE(include_conditions)) cat(line, "\n", sep = "")
           notify("log", list(lines = line))
           invokeRestart("muffleWarning")
+        }),
+        error = function(e) {
+          err <<- conditionMessage(e)
+          err_condition <<- e
+        },
+        interrupt = function(e) {
+          interrupted <<- TRUE
+          err_condition <<- e
         })
     }, finally = {
       CAPTURE_SINK$active <- FALSE
@@ -201,8 +285,45 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
       }
     }
     unlink(f)
+    if (conditions_truncated) {
+      condition_lines <- c(condition_lines,
+        sprintf("[conditions truncated at %s bytes]", max_bytes))
+    }
     list(result = result, lines = lines, truncated = truncated,
-         error = err, condition = err_condition, interrupted = interrupted)
+         error = err, condition = err_condition, trace = err_trace,
+         interrupted = interrupted, condition_lines = condition_lines)
+  }
+
+  # Layout/append constructors can render while the cell is being captured.
+  # Suspend that sink so the renderer's bounded capture and JSON notifications
+  # retain their normal single-capture behavior, then restore it even on error.
+  # Copy conditions back at their actual position in the surrounding cell log.
+  render_capture <- function(run, max_bytes) {
+    parent_con <- if (isTRUE(CAPTURE_SINK$active)) CAPTURE_SINK$con else NULL
+    if (!is.null(parent_con)) {
+      sink()
+      CAPTURE_SINK$active <- FALSE
+      CAPTURE_SINK$con <- NULL
+      on.exit({
+        CAPTURE_SINK$con <- parent_con
+        CAPTURE_SINK$active <- TRUE
+        sink(parent_con, append = TRUE)
+      }, add = TRUE)
+    }
+    cap <- bounded_capture(run, max_bytes, include_conditions = FALSE)
+    if (length(cap$condition_lines)) {
+      if (!is.null(parent_con)) {
+        writeLines(cap$condition_lines, parent_con)
+      } else {
+        RENDER_LOG$value <- c(RENDER_LOG$value, cap$condition_lines)
+      }
+    }
+    if (isTRUE(cap$interrupted)) {
+      if (!is.null(cap$condition)) stop(cap$condition)
+      stop(structure(list(message = "Interrupted", call = NULL),
+                     class = c("interrupt", "condition")))
+    }
+    cap
   }
 
   # Bound every element of a character vector to a valid-UTF-8 prefix of at
@@ -215,6 +336,29 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
       if (length(ra) <= max_bytes) return(s)
       utf8_prefix(ra[seq_len(max_bytes)])
     }, character(1))
+  }
+
+  condition_payload <- function(condition, fallback = "Unknown error",
+                                trace = list()) {
+    message <- as.character(if (is.null(condition)) fallback else
+      conditionMessage(condition))
+    classes <- if (is.null(condition)) "error" else class(condition)
+    call <- if (is.null(condition)) NULL else conditionCall(condition)
+    call_text <- if (is.null(call)) NULL else
+      bounded_chr(paste(deparse(call, width.cutoff = 120L), collapse = " "),
+                  2048L)[[1L]]
+    trace_text <- if (!length(trace)) character() else {
+      trace <- utils::tail(trace, 40L)
+      vapply(trace, function(entry) bounded_chr(
+        paste(deparse(entry, width.cutoff = 120L), collapse = " "), 2048L
+      )[[1L]], character(1))
+    }
+    list(
+      message = bounded_chr(message, 16384L)[[1L]],
+      class = I(bounded_chr(classes, 256L)),
+      call = call_text,
+      trace = I(trace_text)
+    )
   }
 
   # -------------------------------------------------------------------------
@@ -290,8 +434,15 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
     TABLE_SEQ$value <- as.integer(TABLE_SEQ$value %||% 0L) + 1L
     handle <- paste0(as.character(cell_id %||% ""), ":",
                      as.character(name %||% ""), ":", TABLE_SEQ$value)
-    TABLE_HANDLES[[handle]] <- list(name = as.character(name %||% ""),
-                                    path = as.character(path %||% character()))
+    # A visible table does not need to be assigned to a name (for example,
+    # `data.frame(x = 1:100)`).  Keep the ordinary name/path reference when
+    # one exists, and retain a copy-on-write fallback for anonymous results so
+    # every rendered table can use paging, sorting, and filtering.
+    TABLE_HANDLES[[handle]] <- list(
+      name = as.character(name %||% ""),
+      path = as.character(path %||% character()),
+      value = x
+    )
     page <- table_page_record(x)
     if (!is.null(page$error)) return(list(kind = "error",
                                           message = page$error$message))
@@ -302,44 +453,49 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
 
   render_plot <- function(x) {
     f <- tempfile(tmpdir = artifact_dir, fileext = ".png")
-    devs_before <- names(grDevices::dev.list())
-    tryCatch(
-      ggplot2::ggsave(f, plot = x, width = 8, height = 5, dpi = 96),
-      error = function(e) NULL,
-      finally = {
-        # close only the devices this renderer opened
-        for (d in setdiff(names(grDevices::dev.list()), devs_before)) {
-          tryCatch(grDevices::dev.off(d), error = function(e) NULL)
-        }
-      })
-    if (file.exists(f) && file.info(f)$size > 0) {
-      return(list(kind = "image", artifact = basename(f)))
+    devices_before <- unname(grDevices::dev.list())
+    complete <- FALSE
+    on.exit({
+      # A failed third-party print method can leave ggsave's device open.
+      # Close only devices introduced by this renderer, identified by number.
+      devices_after <- unname(grDevices::dev.list())
+      for (device in rev(setdiff(devices_after, devices_before))) {
+        tryCatch(grDevices::dev.off(which = device), error = function(e) NULL)
+      }
+      if (!complete && file.exists(f)) unlink(f)
+    }, add = TRUE)
+
+    ggplot2::ggsave(f, plot = x, width = 8, height = 5, dpi = 96)
+    if (!file.exists(f) || is.na(file.info(f)$size) || file.info(f)$size <= 0) {
+      stop("ggplot renderer produced no image", call. = FALSE)
     }
-    unlink(f)
-    list(kind = "error", message = "could not render plot")
+    complete <- TRUE
+    list(kind = "image", artifact = basename(f))
   }
 
   render_htmlwidget <- function(x) {
     stage <- tempfile(tmpdir = artifact_dir)
-    dir.create(stage)
-    o <- file.path(stage, "index.html")
-    dest <- ""
-    ok <- FALSE
-    tryCatch({
-      htmlwidgets::saveWidget(x, o, selfcontained = TRUE)
-      if (file.exists(o)) {
-        dest <- tempfile(tmpdir = artifact_dir, fileext = ".html")
-        ok <- file.rename(o, dest)
-      }
-    }, error = function(e) NULL, finally = {
-      # promote only the final regular .html file; drop the staging directory
-      unlink(stage, recursive = TRUE)
-    })
-    if (ok && file.exists(dest)) {
-      list(kind = "html", artifact = basename(dest))
-    } else {
-      list(kind = "error", message = "could not render htmlwidget")
+    if (!dir.create(stage)) {
+      stop("could not create htmlwidget staging directory", call. = FALSE)
     }
+    o <- file.path(stage, "index.html")
+    dest <- tempfile(tmpdir = artifact_dir, fileext = ".html")
+    complete <- FALSE
+    on.exit({
+      unlink(stage, recursive = TRUE)
+      if (!complete && file.exists(dest)) unlink(dest)
+    }, add = TRUE)
+
+    if (is.null(x$width)) x$width <- "100%"
+    htmlwidgets::saveWidget(x, o, selfcontained = TRUE)
+    if (!file.exists(o)) {
+      stop("htmlwidget renderer produced no HTML file", call. = FALSE)
+    }
+    if (!file.rename(o, dest)) {
+      stop("could not promote the rendered htmlwidget artifact", call. = FALSE)
+    }
+    complete <- TRUE
+    list(kind = "html", artifact = basename(dest))
   }
 
   wire_widget_value <- function(kind, value) {
@@ -348,6 +504,7 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
     if (identical(kind, "datetime")) {
       return(format(value, "%Y-%m-%dT%H:%M:%SZ", tz = "UTC"))
     }
+    if (identical(kind, "multiselect")) return(I(value))
     if (identical(kind, "form") && is.null(value)) return(NULL)
     value
   }
@@ -373,9 +530,9 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
       if (kind %in% c("dropdown", "radio")) {
         if (any(indices)) spec$index <- which(indices)[[1L]]
       } else {
-        spec$indices <- which(vapply(x$choices, function(choice)
+        spec$indices <- I(which(vapply(x$choices, function(choice)
           any(vapply(x$value, function(value)
-            identical(choice, value), logical(1))), logical(1)))
+            identical(choice, value), logical(1))), logical(1))))
       }
     } else if (kind == "text_area") {
       spec$rows <- x$rows
@@ -409,7 +566,7 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
       spec$handle <- handle
       spec$selection <- x$selection
       spec$page_size <- x$page_size
-      spec$selected <- as.integer(x$selected %||% integer())
+      spec$selected <- I(as.integer(x$selected %||% integer()))
       spec$page <- widget_table_page(x$data, x$page_size)
     } else if (kind == "dataframe") {
       handle <- x$handle %||% NULL
@@ -482,24 +639,33 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
 
   render_recordedplot <- function(x) {
     f <- tempfile(tmpdir = artifact_dir, fileext = ".png")
-    ok <- FALSE
-    tryCatch({
-      open_png_device(f)
-      grDevices::replayPlot(x)
-      grDevices::dev.off()
-      ok <- file.exists(f) && file.info(f)$size > 0
-    }, error = function(e) {
-      tryCatch(grDevices::dev.off(), error = function(e) NULL)
-    })
-    if (ok) list(kind = "image", artifact = basename(f))
-    else {
-      unlink(f)
-      list(kind = "error", message = "could not render recorded plot")
+    render_device <- NULL
+    complete <- FALSE
+    on.exit({
+      if (!is.null(render_device)) {
+        devices <- grDevices::dev.list()
+        if (!is.null(devices) && render_device %in% unname(devices)) {
+          tryCatch(grDevices::dev.off(which = render_device),
+                   error = function(e) NULL)
+        }
+      }
+      if (!complete && file.exists(f)) unlink(f)
+    }, add = TRUE)
+
+    open_png_device(f)
+    render_device <- unname(grDevices::dev.cur())
+    grDevices::replayPlot(x)
+    grDevices::dev.off(which = render_device)
+    render_device <- NULL
+    if (!file.exists(f) || is.na(file.info(f)$size) || file.info(f)$size <= 0) {
+      stop("recorded plot renderer produced no image", call. = FALSE)
     }
+    complete <- TRUE
+    list(kind = "image", artifact = basename(f))
   }
 
   render_text_value <- function(x, show = FALSE) {
-    cap <- bounded_capture(function() {
+    cap <- render_capture(function() {
       if (isTRUE(show)) methods::show(x) else print(x)
     }, 262144L)
     if (!is.null(cap$error)) {
@@ -539,7 +705,7 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
     if (inherits(x, "data.frame") || inherits(x, "matrix") ||
         inherits(x, "table") || inherits(x, "tbl_df") ||
         inherits(x, "data.table")) {
-      cap <- bounded_capture(
+      cap <- render_capture(
         function() render_table(x, cell_id = cell_id, name = name, path = path),
         262144L)
       if (!is.null(cap$error)) {
@@ -555,7 +721,7 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
       return(cap$result)
     }
     if (inherits(x, "gg") || inherits(x, "ggplot")) {
-      cap <- bounded_capture(function() render_plot(x), 262144L)
+      cap <- render_capture(function() render_plot(x), 262144L)
       if (!is.null(cap$error)) {
         return(list(kind = "error", message = paste("could not render value:",
                                                     cap$error)))
@@ -563,7 +729,7 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
       return(cap$result)
     }
     if (inherits(x, "htmlwidget")) {
-      cap <- bounded_capture(function() render_htmlwidget(x), 262144L)
+      cap <- render_capture(function() render_htmlwidget(x), 262144L)
       if (!is.null(cap$error)) {
         return(list(kind = "error", message = paste("could not render value:",
                                                     cap$error)))
@@ -571,7 +737,7 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
       return(cap$result)
     }
     if (inherits(x, "recordedplot")) {
-      cap <- bounded_capture(function() render_recordedplot(x), 262144L)
+      cap <- render_capture(function() render_recordedplot(x), 262144L)
       if (!is.null(cap$error)) {
         return(list(kind = "error", message = paste("could not render value:",
                                                     cap$error)))
@@ -647,10 +813,37 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
     if (!is.call(node)) return(node)
     head <- node[[1L]]
     head_name <- if (is.symbol(head)) as.character(head) else ""
+    call_name <- head_name
+    if (is.call(head) && length(head) >= 3L && is.symbol(head[[1L]]) &&
+        as.character(head[[1L]]) %in% c("::", ":::") &&
+        is.symbol(head[[2L]]) && identical(as.character(head[[2L]]), "base") &&
+        is.symbol(head[[3L]])) {
+      call_name <- as.character(head[[3L]])
+    }
     if (head_name %in% c("quote", "substitute", "expression", "alist")) {
       return(node)
     }
     parts <- as.list(node)
+    arg_names <- names(parts)
+    if (is.null(arg_names)) arg_names <- rep("", length(parts))
+    if (identical(call_name, "assign") && length(parts) == 3L) {
+      call_names <- arg_names[-1L]
+      target <- which(call_names == "x")
+      if (!length(target)) target <- which(!nzchar(call_names))[[1L]]
+      target <- target[[1L]] + 1L
+      if (is.character(parts[[target]]) && length(parts[[target]]) == 1L &&
+          parts[[target]] %in% names(mapping)) {
+        parts[[target]] <- unname(mapping[[parts[[target]]]])
+      }
+    } else if (call_name %in% c("rm", "remove") &&
+               !any(nzchar(arg_names[-1L]))) {
+      for (i in seq_along(parts)[-1L]) {
+        if (is.character(parts[[i]]) && length(parts[[i]]) == 1L &&
+            parts[[i]] %in% names(mapping)) {
+          parts[[i]] <- unname(mapping[[parts[[i]]]])
+        }
+      }
+    }
     for (i in seq_along(parts)) {
       parts[i] <- list(mangle_local_expr(parts[[i]], mapping))
     }
@@ -668,14 +861,19 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
   # definitions created before the failure and leave this cell with none.
   # Empty code therefore completes cleanup without a special early return.
   exec_cell <- function(req) {
+    perf <- perf_begin("kernel.execute", list(req = req$req, cell = req$id,
+      revision = req$revision, run_id = req$run_id))
+    on.exit(perf_end(perf), add = TRUE)
     id <- as.character(req$id %||% "")
     code <- as.character(req$code %||% "")
     defs <- normalize_defs(req$defs)
     locals <- normalize_defs(req$locals)
-    if (is.null(defs) || is.null(locals)) {
+    opaque <- req$opaque %||% FALSE
+    if (is.null(defs) || is.null(locals) || !is.logical(opaque) ||
+        length(opaque) != 1L || is.na(opaque)) {
       return(list(ok = FALSE, outputs = list(), stopped = FALSE,
                   log = character(),
-                  error = list(message = "invalid definition or local array")))
+                  error = list(message = "invalid definition, local, or opaque value")))
     }
     local_map <- setNames(
       vapply(locals, function(nm) local_mangled_name(id, nm), character(1)),
@@ -686,12 +884,14 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
     CURRENT_RUN_ID <<- as.numeric(req$run_id %||% NA_real_)
     SEQ$value <- 0L
     EMITTED_OUTPUTS$value <- list()
+    RENDER_LOG$value <- character()
     inject_runtime()
     on.exit({
       CURRENT_CELL <<- NULL
       CURRENT_REQ <<- NULL
       CURRENT_RUN_ID <<- NULL
       EMITTED_OUTPUTS$value <- list()
+      RENDER_LOG$value <- character()
     }, add = TRUE)
 
     old_lazy <- ls(LAZY_ENV, all.names = TRUE)
@@ -715,6 +915,11 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
     CELL_LOCALS[[id]] <- local_names
 
     pre <- ls(NB_ENV, all.names = TRUE)
+    pre_values <- if (isTRUE(opaque) && length(pre)) {
+      mget(pre, envir = NB_ENV, inherits = FALSE)
+    } else {
+      NULL
+    }
     exprs <- tryCatch(parse(text = code), error = function(e) NULL)
     if (is.null(exprs)) {
       CELL_LOCALS[[id]] <- NULL
@@ -727,80 +932,169 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
     visible <- FALSE
     vname <- ""
     base_device <- NULL
-    base_file <- NULL
-    open_base_device <- function() {
-      if (!is.null(base_device)) return(invisible())
-      f <- tempfile("alder-plot-", tmpdir = artifact_dir, fileext = ".png")
-      ok <- tryCatch({
-        open_png_device(f)
-        grDevices::dev.control(displaylist = "enable")
-        base_device <<- grDevices::dev.cur()
-        base_file <<- f
-        TRUE
-      }, error = function(e) FALSE)
-      if (!ok) {
-        if (file.exists(f)) unlink(f)
-        base_device <<- NULL
-        base_file <<- NULL
+    base_device_name <- NULL
+    base_scratch <- NULL
+    base_page <- NULL
+    base_page_pending <- FALSE
+    base_before_hook <- NULL
+    base_after_hook <- NULL
+    base_before_installed <- FALSE
+    base_after_installed <- FALSE
+    base_cleaned <- FALSE
+    base_capture_condition <- NULL
+    base_capture_trace <- list()
+
+    remember_base_capture_error <- function(error) {
+      if (is.null(base_capture_condition)) {
+        base_capture_condition <<- error
+        base_capture_trace <<- sys.calls()
       }
       invisible()
     }
-    capture_base_plot <- function() {
-      if (is.null(base_device) || is.null(base_file)) return(invisible())
+    base_device_alive <- function() {
+      if (is.null(base_device) || is.null(base_device_name)) return(FALSE)
       devices <- grDevices::dev.list()
-      if (is.null(devices) || !(base_device %in% devices)) {
-        base_device <<- NULL
-        base_file <<- NULL
+      if (is.null(devices)) return(FALSE)
+      match <- which(unname(devices) == base_device)
+      length(match) == 1L && identical(names(devices)[[match]], base_device_name)
+    }
+    restore_device <- function(device) {
+      number <- unname(device)
+      if (identical(number, base_device)) return(invisible())
+      devices <- grDevices::dev.list()
+      if (!is.null(devices) && number %in% unname(devices)) {
+        tryCatch(grDevices::dev.set(number), error = function(error) {
+          remember_base_capture_error(error)
+        })
+      }
+      invisible()
+    }
+    begin_base_page <- function() {
+      page <- new.env(parent = emptyenv())
+      page$snapshot <- NULL
+      base_page <<- page
+      marker <- structure(list(page = page, log_offset = capture_offset()),
+                          class = "alder_recorded_page")
+      EMITTED_OUTPUTS$value <- c(EMITTED_OUTPUTS$value %||% list(),
+                                 list(marker))
+      invisible()
+    }
+    checkpoint_base_page <- function(finalize = FALSE) {
+      # A display list can contain device setup such as par(mfrow=) before a
+      # page exists. Only the post-plot.new hook creates a page marker; this
+      # prevents setup-only snapshots from becoming blank output images.
+      if (is.null(base_page) || !base_device_alive() ||
+          !is.null(base_capture_condition)) {
+        if (isTRUE(finalize)) base_page <<- NULL
         return(invisible())
       }
       previous <- grDevices::dev.cur()
       tryCatch({
-        grDevices::dev.set(base_device)
+        if (unname(previous) != base_device) grDevices::dev.set(base_device)
         recorded <- grDevices::recordPlot()
         if (!is.null(recorded[[1L]])) {
-          grDevices::dev.off()
-          if (file.exists(base_file) && file.info(base_file)$size > 0) {
-            EMITTED_OUTPUTS$value <- c(
-              EMITTED_OUTPUTS$value %||% list(),
-              list(list(kind = "image", artifact = basename(base_file))))
-          } else {
-            unlink(base_file)
-          }
-          base_device <<- NULL
-          base_file <<- NULL
+          base_page$snapshot <- recorded
         }
-      }, error = function(e) NULL, finally = {
-        current <- grDevices::dev.list()
-        if (!is.null(current) && previous %in% current) {
-          tryCatch(grDevices::dev.set(previous), error = function(e) NULL)
+      }, error = function(error) {
+        remember_base_capture_error(error)
+      }, finally = restore_device(previous))
+      if (isTRUE(finalize)) base_page <<- NULL
+      invisible()
+    }
+    base_before_hook <- function() {
+      tryCatch({
+        base_page_pending <<- FALSE
+        if (!base_device_alive() ||
+            unname(grDevices::dev.cur()) != base_device) return(invisible())
+        if (isTRUE(graphics::par("page"))) {
+          checkpoint_base_page(finalize = TRUE)
+          base_page_pending <<- TRUE
         }
+      }, error = function(error) {
+        remember_base_capture_error(error)
       })
-      if (is.null(base_device)) open_base_device()
       invisible()
     }
-    cleanup_base_device <- function() {
-      if (!is.null(base_device)) {
-        devices <- grDevices::dev.list()
-        if (!is.null(devices) && base_device %in% devices) {
-          previous <- grDevices::dev.cur()
-          tryCatch({
-            grDevices::dev.set(base_device)
-            grDevices::dev.off()
-          }, error = function(e) NULL)
-          current <- grDevices::dev.list()
-          if (!is.null(current) && previous %in% current) {
-            tryCatch(grDevices::dev.set(previous), error = function(e) NULL)
-          }
+    base_after_hook <- function() {
+      tryCatch({
+        if (isTRUE(base_page_pending) && base_device_alive() &&
+            unname(grDevices::dev.cur()) == base_device) {
+          begin_base_page()
         }
-      }
-      if (!is.null(base_file) && file.exists(base_file)) unlink(base_file)
-      base_device <<- NULL
-      base_file <<- NULL
+        base_page_pending <<- FALSE
+      }, error = function(error) {
+        remember_base_capture_error(error)
+      })
       invisible()
     }
-    open_base_device()
-    on.exit(cleanup_base_device(), add = TRUE)
+    remove_base_hook <- function(name, hook) {
+      hooks <- getHook(name)
+      remove <- vapply(hooks, identical, logical(1), hook)
+      if (any(remove)) setHook(name, hooks[!remove], action = "replace")
+      invisible()
+    }
+    cleanup_base_graphics <- function(capture = FALSE) {
+      if (base_cleaned) return(invisible())
+      if (isTRUE(capture)) checkpoint_base_page(finalize = TRUE)
+      if (base_before_installed) {
+        tryCatch(remove_base_hook("before.plot.new", base_before_hook),
+                 error = function(error) remember_base_capture_error(error))
+        base_before_installed <<- FALSE
+      }
+      if (base_after_installed) {
+        tryCatch(remove_base_hook("plot.new", base_after_hook),
+                 error = function(error) remember_base_capture_error(error))
+        base_after_installed <<- FALSE
+      }
+      if (base_device_alive()) {
+        previous <- grDevices::dev.cur()
+        tryCatch(grDevices::dev.off(which = base_device),
+                 error = function(error) remember_base_capture_error(error))
+        restore_device(previous)
+      }
+      if (!is.null(base_scratch) && dir.exists(base_scratch)) {
+        unlink(base_scratch, recursive = TRUE, force = TRUE)
+      }
+      base_device <<- NULL
+      base_device_name <<- NULL
+      base_scratch <<- NULL
+      base_cleaned <<- TRUE
+      invisible()
+    }
+    on.exit(cleanup_base_graphics(), add = TRUE)
+    graphics_setup_error <- tryCatch({
+      graphics_perf <- perf_begin("kernel.graphics_setup", list(req = req$req,
+        cell = req$id, run_id = req$run_id))
+      base_scratch <- tempfile("alder-base-device-")
+      if (!dir.create(base_scratch)) {
+        stop("could not create base graphics scratch directory", call. = FALSE)
+      }
+      open_png_device(file.path(base_scratch, "page-%03d.png"))
+      grDevices::dev.control(displaylist = "enable")
+      current_device <- grDevices::dev.cur()
+      base_device <- unname(current_device)
+      base_device_name <- names(current_device)[[1L]]
+      setHook("before.plot.new", base_before_hook, action = "prepend")
+      base_before_installed <- TRUE
+      setHook("plot.new", base_after_hook, action = "prepend")
+      base_after_installed <- TRUE
+      perf_end(graphics_perf)
+      NULL
+    }, error = identity)
+    if (!is.null(graphics_setup_error)) {
+      cleanup_base_graphics()
+      cleanup_failed_defs(defs, pre, local_names, id, pre_values)
+      return(list(
+        ok = FALSE, outputs = list(), stopped = FALSE, log = character(),
+        error = condition_payload(graphics_setup_error,
+                                  conditionMessage(graphics_setup_error),
+                                  sys.calls())
+      ))
+    }
     cap <- bounded_capture(function() {
+      eval_perf <- perf_begin("kernel.evaluate", list(req = req$req, cell = req$id,
+        revision = req$revision, run_id = req$run_id))
+      on.exit(perf_end(eval_perf), add = TRUE)
       if (length(exprs)) {
         for (i in seq_along(exprs)) {
           if (i == length(exprs)) {
@@ -813,35 +1107,116 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
           } else {
             eval(exprs[[i]], envir = NB_ENV)
           }
-          capture_base_plot()
+          checkpoint_base_page()
         }
       }
     }, 1048576L)
+    keep_pages <- is.null(cap$error) || inherits(cap$condition, "alder_stop")
+    cleanup_base_graphics(capture = keep_pages)
+
+    materialize_base_pages <- function(outputs) {
+      rendered <- list()
+      lines <- character()
+      truncated <- FALSE
+      failure <- NULL
+      interrupted <- FALSE
+      for (output in outputs %||% list()) {
+        if (!inherits(output, "alder_recorded_page")) {
+          rendered <- c(rendered, list(output))
+          next
+        }
+        snapshot <- output$page$snapshot
+        if (is.null(snapshot)) next
+        page_cap <- bounded_capture(
+          function() render_recordedplot(snapshot), 262144L)
+        lines <- c(lines, page_cap$lines)
+        truncated <- truncated || isTRUE(page_cap$truncated)
+        if (isTRUE(page_cap$interrupted)) {
+          interrupted <- TRUE
+          break
+        }
+        if (!is.null(page_cap$error)) {
+          failure <- page_cap
+          break
+        }
+        page_cap$result$log_offset <- output$log_offset
+        rendered <- c(rendered, list(page_cap$result))
+      }
+      list(outputs = rendered, lines = lines, truncated = truncated,
+           failure = failure, interrupted = interrupted)
+    }
 
     msgs <- cap$lines
     if (cap$interrupted) {
-      cleanup_failed_defs(defs, pre, local_names, id)
+      cleanup_failed_defs(defs, pre, local_names, id, pre_values)
       return(list(ok = FALSE, outputs = list(), stopped = FALSE, log = I(msgs),
                   error = list(message = "Interrupted", interrupted = TRUE)))
     }
+    if (!is.null(cap$error) && !inherits(cap$condition, "alder_stop")) {
+      cleanup_failed_defs(defs, pre, local_names, id, pre_values)
+      CELL_DEFS[[id]] <- NULL
+      return(list(ok = FALSE, outputs = list(), stopped = FALSE, log = I(msgs),
+                  error = condition_payload(cap$condition, cap$error, cap$trace)))
+    }
+    if (!is.null(base_capture_condition)) {
+      cleanup_failed_defs(defs, pre, local_names, id, pre_values)
+      CELL_DEFS[[id]] <- NULL
+      return(list(
+        ok = FALSE, outputs = list(), stopped = FALSE, log = I(msgs),
+        error = condition_payload(base_capture_condition,
+                                  conditionMessage(base_capture_condition),
+                                  base_capture_trace)
+      ))
+    }
+
+    pages <- materialize_base_pages(EMITTED_OUTPUTS$value %||% list())
+    msgs <- c(msgs, pages$lines)
+    result_truncated <- isTRUE(cap$truncated) || isTRUE(pages$truncated)
+    if (isTRUE(pages$interrupted)) {
+      cleanup_failed_defs(defs, pre, local_names, id, pre_values)
+      CELL_DEFS[[id]] <- NULL
+      return(list(ok = FALSE, outputs = list(), stopped = FALSE, log = I(msgs),
+                  error = list(message = "Interrupted", interrupted = TRUE)))
+    }
+    if (!is.null(pages$failure)) {
+      cleanup_failed_defs(defs, pre, local_names, id, pre_values)
+      CELL_DEFS[[id]] <- NULL
+      return(list(
+        ok = FALSE, outputs = list(), stopped = FALSE, log = I(msgs),
+        error = condition_payload(pages$failure$condition,
+                                  pages$failure$error,
+                                  pages$failure$trace)
+      ))
+    }
+    EMITTED_OUTPUTS$value <- pages$outputs
     if (inherits(cap$condition, "alder_stop")) {
-      cleanup_failed_defs(defs, pre, local_names, id)
+      cleanup_failed_defs(defs, pre, local_names, id, pre_values)
       CELL_DEFS[[id]] <- NULL
       stopped <- EMITTED_OUTPUTS$value %||% list()
       if (!is.null(cap$condition$output)) {
         stopped <- c(stopped, list(render_kind(cap$condition$output)))
       }
       return(list(ok = TRUE, outputs = I(stopped), stopped = TRUE,
-                  log = I(msgs), truncated = cap$truncated))
-    }
-    if (!is.null(cap$error)) {
-      cleanup_failed_defs(defs, pre, local_names, id)
-      CELL_DEFS[[id]] <- NULL
-      return(list(ok = FALSE, outputs = list(), stopped = FALSE, log = I(msgs),
-                  error = list(message = cap$error)))
+                  log = I(c(msgs, RENDER_LOG$value)), truncated = result_truncated))
     }
 
-    # success: own only the requested definitions that now exist
+    # Opaque literal-source cells may create or replace bindings that were not
+    # present in their AST. Attribute those observable changes to the cell so
+    # reruns and deletion retain the same cleanup guarantees as static defs.
+    dynamic_owned <- character()
+    if (isTRUE(opaque)) {
+      post <- ls(NB_ENV, all.names = TRUE)
+      added <- setdiff(post, pre)
+      common <- intersect(post, pre)
+      changed <- common[vapply(common, function(nm) {
+        !identical(get(nm, envir = NB_ENV, inherits = FALSE), pre_values[[nm]])
+      }, logical(1))]
+      dynamic_owned <- setdiff(unique(c(added, changed)),
+                               c(".Random.seed", ".Last.value", ".Traceback"))
+    }
+    defs <- unique(c(defs, dynamic_owned))
+
+    # success: own only the requested/dynamically observed definitions
     new_owned <- character()
     for (nm in defs) {
       if (exists(nm, envir = NB_ENV, inherits = FALSE)) {
@@ -858,15 +1233,16 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
     if (isTRUE(visible)) {
       rv <- render_visible(value, vname, id, new_owned)
       if (identical(rv$kind, "error")) {
-        cleanup_failed_defs(defs, pre, local_names, id)
+        cleanup_failed_defs(defs, pre, local_names, id, pre_values)
         CELL_DEFS[[id]] <- NULL
-        return(list(ok = FALSE, outputs = list(), stopped = FALSE, log = I(msgs),
+        return(list(ok = FALSE, outputs = list(), stopped = FALSE,
+                    log = I(c(msgs, RENDER_LOG$value)),
                     error = list(message = rv$message)))
       }
       outputs <- c(outputs, list(rv))
     }
     list(ok = TRUE, outputs = I(outputs), stopped = FALSE,
-         log = I(msgs), truncated = cap$truncated)
+         log = I(c(msgs, RENDER_LOG$value)), truncated = result_truncated)
   }
 
   # Evaluate one registered lazy thunk. The key is invalidated whenever its
@@ -885,12 +1261,14 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
     CURRENT_REQ <<- NULL
     CURRENT_RUN_ID <<- NULL
     EMITTED_OUTPUTS$value <- list()
+    RENDER_LOG$value <- character()
     inject_runtime()
     on.exit({
       CURRENT_CELL <<- NULL
       CURRENT_REQ <<- NULL
       CURRENT_RUN_ID <<- NULL
       EMITTED_OUTPUTS$value <- list()
+      RENDER_LOG$value <- character()
     }, add = TRUE)
 
     thunk <- get(key, envir = LAZY_ENV, inherits = FALSE)
@@ -901,15 +1279,15 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
     }
     if (!is.null(cap$error)) {
       return(list(ok = FALSE, log = I(cap$lines),
-                  error = list(message = cap$error)))
+                  error = condition_payload(cap$condition, cap$error, cap$trace)))
     }
     wv <- cap$result
     output <- render_kind(wv$value)
     if (identical(output$kind, "error")) {
-      return(list(ok = FALSE, log = I(cap$lines),
+      return(list(ok = FALSE, log = I(c(cap$lines, RENDER_LOG$value)),
                   error = list(message = output$message)))
     }
-    list(ok = TRUE, output = output, log = I(cap$lines),
+    list(ok = TRUE, output = output, log = I(c(cap$lines, RENDER_LOG$value)),
          truncated = cap$truncated)
   }
   resolve_table_object <- function(req) {
@@ -920,15 +1298,20 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
     }
     ref <- get(handle, envir = TABLE_HANDLES, inherits = FALSE)
     name <- as.character(ref$name %||% "")
-    if (length(name) != 1L || is.na(name) || !nzchar(name) ||
-        !exists(name, envir = NB_ENV, inherits = FALSE)) {
-      return(NULL)
-    }
-    value <- get(name, envir = NB_ENV, inherits = FALSE)
-    for (part in as.character(ref$path %||% character())) {
-      if (is.null(value) || is.null(part) || !nzchar(part)) return(NULL)
-      value <- tryCatch(value[[part]], error = function(e) NULL)
-      if (is.null(value)) return(NULL)
+    has_name <- length(name) == 1L && !is.na(name) && nzchar(name)
+    if (has_name) {
+      if (!exists(name, envir = NB_ENV, inherits = FALSE)) return(NULL)
+      value <- get(name, envir = NB_ENV, inherits = FALSE)
+      for (part in as.character(ref$path %||% character())) {
+        if (is.null(value) || is.null(part) || !nzchar(part)) return(NULL)
+        value <- tryCatch(value[[part]], error = function(e) NULL)
+        if (is.null(value)) return(NULL)
+      }
+    } else {
+      # Only genuinely anonymous visible expressions use the retained value.
+      # A named value that has since been removed must expire rather than
+      # serving a stale snapshot through its old handle.
+      value <- ref$value %||% NULL
     }
     if (!(inherits(value, "data.frame") || inherits(value, "matrix") ||
           inherits(value, "table") || inherits(value, "tbl_df") ||
@@ -969,10 +1352,21 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
   }
 
   # Remove definitions and private locals a failed/interrupted cell created.
-  cleanup_failed_defs <- function(defs, pre, local_names = character(), id = NULL) {
-    for (nm in setdiff(defs, pre)) {
+  cleanup_failed_defs <- function(defs, pre, local_names = character(), id = NULL,
+                                  pre_values = NULL) {
+    current <- ls(NB_ENV, all.names = TRUE)
+    for (nm in unique(c(setdiff(defs, pre), setdiff(current, pre)))) {
       if (exists(nm, envir = NB_ENV, inherits = FALSE)) {
         rm(list = nm, envir = NB_ENV)
+      }
+    }
+    if (!is.null(pre_values)) {
+      for (nm in names(pre_values)) {
+        if (!exists(nm, envir = NB_ENV, inherits = FALSE) ||
+            !identical(get(nm, envir = NB_ENV, inherits = FALSE),
+                       pre_values[[nm]])) {
+          assign(nm, pre_values[[nm]], envir = NB_ENV)
+        }
       }
     }
     for (nm in local_names) {
@@ -1079,6 +1473,58 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
     )
   }
 
+  # Requests are decoded with simplifyVector = FALSE, so JSON arrays arrive
+  # as unnamed lists. Decode only the atomic array fields declared by the
+  # widget protocol; named objects and nested values are invalid.
+  decode_atomic_request_vector <- function(value, type,
+                                           expected_length = NULL,
+                                           integer = FALSE) {
+    empty <- switch(type,
+      numeric = numeric(),
+      character = character(),
+      logical = logical(),
+      NULL
+    )
+    if (is.null(empty)) return(NULL)
+    if (is.list(value)) {
+      if (!is.null(names(value))) return(NULL)
+      if (!length(value)) {
+        value <- empty
+      } else {
+        scalar <- vapply(value, function(item) {
+          is.atomic(item) && length(item) == 1L && !is.na(item)
+        }, logical(1L))
+        if (!all(scalar)) return(NULL)
+        value <- unlist(value, use.names = FALSE)
+      }
+    }
+    valid <- switch(type,
+      numeric = is.numeric(value) && !anyNA(value) &&
+        all(is.finite(value)),
+      character = is.character(value) && !anyNA(value) &&
+        all(validUTF8(value)),
+      logical = is.logical(value) && !anyNA(value),
+      FALSE
+    )
+    if (!isTRUE(valid)) return(NULL)
+    if (!is.null(expected_length) && length(value) != expected_length) {
+      return(NULL)
+    }
+    if (isTRUE(integer)) {
+      if (!is.numeric(value) || any(value != floor(value)) ||
+          any(value < -(.Machine$integer.max + 1) |
+              value > .Machine$integer.max)) {
+        return(NULL)
+      }
+      return(as.integer(value))
+    }
+    switch(type,
+      numeric = as.double(value),
+      character = as.character(value),
+      logical = as.logical(value)
+    )
+  }
+
   validate_file_paths <- function(value) {
     value <- tryCatch(UI_ENV$validate_widget_value(
       "file", value, list()), error = function(e) NULL)
@@ -1124,12 +1570,9 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
     } else {
       path <- character()
     }
-    target <- if (identical(x$kind, "form") && isTRUE(req$submit)) {
-      x
-    } else if (identical(x$kind, "form")) {
-      UI_ENV$widget_child(x$child, path)
-    } else {
-      UI_ENV$widget_child(x, path)
+    target <- UI_ENV$widget_child(x, path)
+    if (identical(target$kind, "form") && !isTRUE(req$submit)) {
+      target <- target$child
     }
     if (is.null(target)) {
       return(list(ok = FALSE, error = list(message = "widget path does not exist")))
@@ -1150,19 +1593,78 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
       if (is.list(value)) return(list(type = "list", value = value))
       list(type = typeof(value), value = unclass(value))
     }
-    set_field <- function(root, at, field, value) {
+    replace_widget_at <- function(root, at, replacement) {
       if (!length(at)) {
+        return(replacement)
+      }
+      if (identical(root$kind, "form")) {
+        root$child <- replace_widget_at(root$child, at, replacement)
+        root$dirty <- TRUE
+        UI_ENV$validate_widget(root)
+        return(root)
+      }
+      if (!(root$kind %in% c("array", "dictionary"))) {
+        stop("widget path does not exist")
+      }
+      key <- at[[1L]]
+      if (!(key %in% names(root$children))) stop("widget path does not exist")
+      root$children[[key]] <- replace_widget_at(
+        root$children[[key]], at[-1L], replacement)
+      UI_ENV$widget_recompute_value(root)
+    }
+    update_control_value <- function(root, at, value) {
+      if (!length(at)) {
+        if (identical(root$kind, "form")) {
+          root$child <- update_control_value(root$child, character(), value)
+          root$dirty <- TRUE
+          UI_ENV$validate_widget(root)
+          return(root)
+        }
+        root$value <- UI_ENV$validate_widget_value(root$kind, value, root)
+        return(UI_ENV$widget_recompute_value(root))
+      }
+      if (identical(root$kind, "form")) {
+        root$child <- update_control_value(root$child, at, value)
+        root$dirty <- TRUE
+        UI_ENV$validate_widget(root)
+        return(root)
+      }
+      if (!(root$kind %in% c("array", "dictionary"))) {
+        stop("widget path does not exist")
+      }
+      key <- at[[1L]]
+      if (!(key %in% names(root$children))) stop("widget path does not exist")
+      root$children[[key]] <- update_control_value(
+        root$children[[key]], at[-1L], value)
+      UI_ENV$widget_recompute_value(root)
+    }
+    update_control_field <- function(root, at, field, value) {
+      if (!length(at)) {
+        if (identical(root$kind, "form")) {
+          root$child <- update_control_field(
+            root$child, character(), field, value)
+          root$dirty <- TRUE
+          UI_ENV$validate_widget(root)
+          return(root)
+        }
         root[[field]] <- value
+        UI_ENV$validate_widget(root)
         return(root)
       }
       if (identical(root$kind, "form")) {
-        root$child <- set_field(root$child, at, field, value)
-      } else {
-        key <- at[[1L]]
-        root$children[[key]] <- set_field(root$children[[key]],
-                                          at[-1L], field, value)
+        root$child <- update_control_field(root$child, at, field, value)
+        root$dirty <- TRUE
+        UI_ENV$validate_widget(root)
+        return(root)
       }
-      root
+      if (!(root$kind %in% c("array", "dictionary"))) {
+        stop("widget path does not exist")
+      }
+      key <- at[[1L]]
+      if (!(key %in% names(root$children))) stop("widget path does not exist")
+      root$children[[key]] <- update_control_field(
+        root$children[[key]], at[-1L], field, value)
+      UI_ENV$widget_recompute_value(root)
     }
     apply_ops <- function(data, ops) {
       if (!is.list(ops)) stop("dataframe ops must be an array")
@@ -1209,10 +1711,13 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
     }
 
     if (identical(target$kind, "form") && isTRUE(req$submit)) {
-      x$value <- UI_ENV$widget_value(x$child)
-      x$dirty <- FALSE
-      assign(name, x, envir = NB_ENV)
-      selected <- selected_payload("form", x$value)
+      submitted <- target
+      submitted$value <- UI_ENV$widget_value(submitted$child)
+      submitted$dirty <- FALSE
+      UI_ENV$validate_widget(submitted)
+      updated <- replace_widget_at(x, path, submitted)
+      assign(name, updated, envir = NB_ENV)
+      selected <- selected_payload("form", submitted$value)
       return(list(ok = TRUE, name = name, path = I(path), op_id = op_id,
                   selected = selected))
     }
@@ -1234,26 +1739,25 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
       idx <- as.integer(idx)
       val <- target$choices[[idx]]
     } else if (identical(kind, "multiselect")) {
-      indices <- req$indices %||% integer()
-      indices <- unlist(indices, use.names = FALSE)
-      if (length(indices) &&
-          (!is.numeric(indices) || anyNA(indices) ||
-           any(indices < 1 | indices > length(target$choices)) ||
-           any(indices != floor(indices)) || anyDuplicated(indices))) {
+      indices <- decode_atomic_request_vector(
+        req$indices %||% integer(), "numeric", integer = TRUE)
+      if (is.null(indices) ||
+          any(indices < 1 | indices > length(target$choices)) ||
+          anyDuplicated(indices)) {
         return(list(ok = FALSE, error = list(message = "choice indices invalid")))
       }
-      indices <- as.integer(indices)
       if (length(indices) && !identical(indices, sort(indices))) {
         return(list(ok = FALSE, error = list(
           message = "choice indices must follow choice order")))
       }
       val <- target$choices[indices]
     } else if (kind %in% c("slider", "range_slider", "number")) {
-      val <- req$value
-      if (!is.numeric(val)) {
+      expected <- if (identical(kind, "range_slider")) 2L else 1L
+      val <- decode_atomic_request_vector(
+        req$value, "numeric", expected_length = expected)
+      if (is.null(val)) {
         return(list(ok = FALSE, error = list(message = "numeric widget value invalid")))
       }
-      val <- as.double(val)
     } else if (kind %in% c("text_input", "text_area", "code_editor")) {
       val <- req$value
       if (!is.character(val) || length(val) != 1L || is.na(val)) {
@@ -1275,13 +1779,29 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
       val <- tryCatch(as.Date(as.character(req$value), format = "%Y-%m-%d"),
                       error = function(e) NA)
     } else if (identical(kind, "date_range")) {
-      raw <- unlist(req$value %||% character(), use.names = FALSE)
+      raw <- decode_atomic_request_vector(
+        req$value %||% character(), "character", expected_length = 2L)
+      if (is.null(raw)) {
+        return(list(ok = FALSE, error = list(message = "date range value invalid")))
+      }
       val <- tryCatch(as.Date(as.character(raw), format = "%Y-%m-%d"),
                       error = function(e) as.Date(c(NA, NA)))
     } else if (identical(kind, "datetime")) {
-      val <- tryCatch(as.POSIXct(as.character(req$value), tz = "UTC",
-                                 format = "%Y-%m-%dT%H:%M:%S"),
-                      error = function(e) as.POSIXct(NA, origin = "1970-01-01"))
+      raw <- as.character(req$value)
+      if (length(raw) != 1L || is.na(raw) || !grepl(paste0(
+          "^[0-9]{4}-[0-9]{2}-[0-9]{2}T",
+          "[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+      ), raw)) {
+        raw <- NA_character_
+      }
+      val <- tryCatch(
+        as.POSIXct(raw, tz = "UTC", format = "%Y-%m-%dT%H:%M:%SZ"),
+        error = function(e) as.POSIXct(NA, origin = "1970-01-01")
+      )
+      if (!is.na(val) && !identical(
+          format(val, "%Y-%m-%dT%H:%M:%SZ", tz = "UTC"), raw)) {
+        val <- as.POSIXct(NA, origin = "1970-01-01")
+      }
     } else if (identical(kind, "file")) {
       val <- decode_file_value(req$value)
       val <- validate_file_paths(val)
@@ -1289,14 +1809,13 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
         return(list(ok = FALSE, error = list(message = "file value invalid")))
       }
     } else if (identical(kind, "table")) {
-      indices <- unlist(req$selected %||% integer(), use.names = FALSE)
-      if (length(indices) &&
-          (!is.numeric(indices) || anyNA(indices) ||
-           any(indices < 1 | indices > nrow(target$data)) ||
-           any(indices != floor(indices)) || anyDuplicated(indices))) {
+      indices <- decode_atomic_request_vector(
+        req$selected %||% integer(), "numeric", integer = TRUE)
+      if (is.null(indices) ||
+          any(indices < 1 | indices > nrow(target$data)) ||
+          anyDuplicated(indices)) {
         return(list(ok = FALSE, error = list(message = "table selection invalid")))
       }
-      indices <- as.integer(indices)
       if (identical(target$selection, "single") && length(indices) > 1L) {
         return(list(ok = FALSE, error = list(message = "table accepts one selected row")))
       }
@@ -1315,53 +1834,39 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
     if (is.null(val)) {
       return(list(ok = FALSE, error = list(message = "widget value rejected")))
     }
-    updated <- tryCatch({
-      if (identical(x$kind, "form") && !isTRUE(req$submit)) {
-        x$child <- UI_ENV$widget_set_child(x$child, path, val)
-        UI_ENV$widget_recompute_value(x)
-      } else {
-        UI_ENV$widget_set_child(x, path, val)
-      }
-    }, error = function(e) NULL)
+    updated <- tryCatch(update_control_value(x, path, val),
+                        error = function(e) NULL)
     if (is.null(updated)) {
       return(list(ok = FALSE, error = list(message = "widget value rejected")))
-    }
-    set_target_field <- function(root, at, field, value) {
-      if (identical(x$kind, "form") && !isTRUE(req$submit)) {
-        root$child <- set_field(root$child, at, field, value)
-        UI_ENV$widget_recompute_value(root)
-      } else {
-        set_field(root, at, field, value)
-      }
     }
     if (identical(kind, "refresh") && !is.null(req$paused)) {
       if (!is.logical(req$paused) || length(req$paused) != 1L ||
           is.na(req$paused)) {
         return(list(ok = FALSE, error = list(message = "refresh pause invalid")))
       }
-      updated <- set_target_field(updated, path, "paused", isTRUE(req$paused))
+      updated <- update_control_field(
+        updated, path, "paused", isTRUE(req$paused))
     }
     if (identical(kind, "table")) {
-      updated <- set_target_field(updated, path, "selected", indices)
+      updated <- update_control_field(updated, path, "selected", indices)
     }
     if (identical(kind, "dataframe")) {
-      updated <- set_target_field(updated, path, "ops", req$ops %||% list())
+      updated <- update_control_field(
+        updated, path, "ops", req$ops %||% list())
     }
-    if (identical(x$kind, "form") && !isTRUE(req$submit)) updated$dirty <- TRUE
     assign(name, updated, envir = NB_ENV)
-    target_after <- if (identical(x$kind, "form") && !isTRUE(req$submit)) {
-      UI_ENV$widget_child(updated$child, path)
-    } else {
-      UI_ENV$widget_child(updated, path)
+    target_after <- UI_ENV$widget_child(updated, path)
+    if (identical(target_after$kind, "form") && !isTRUE(req$submit)) {
+      target_after <- target_after$child
     }
     selected <- if (identical(kind, "table")) {
-      list(type = "integer", value = as.integer(indices))
+      list(type = "integer", value = I(as.integer(indices)))
     } else {
       selected_payload(kind, target_after$value)
     }
     if (!is.null(idx)) selected$index <- idx
     if (!is.null(indices) && identical(kind, "multiselect")) {
-      selected$indices <- as.integer(indices)
+      selected$indices <- I(as.integer(indices))
     }
     list(ok = TRUE, name = name, path = I(path), op_id = op_id,
          selected = selected)
@@ -1394,14 +1899,20 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
 
   run_loop <- function() {
     stdin_con <- file("stdin", open = "r")
-    on.exit(tryCatch(close(stdin_con), error = function(e) NULL))
+    on.exit(tryCatch(suspendInterrupts(close(stdin_con)),
+                     error = function(e) NULL, interrupt = function(e) NULL))
     eof_count <- 0L
-    repeat {
-      line <- ""
-      tryCatch(line <- readLines(stdin_con, n = 1, warn = FALSE),
-               # SIGINT while blocked on the idle read is ignored
-               interrupt = function(e) "",
-               error = function(e) NA_character_)
+    # A start acknowledgement can still be waiting in the controller's pipe
+    # after evaluation has completed. Its matching late SIGINT must not kill
+    # the worker while it parses or answers the next request. Only idle reads
+    # and acknowledged evaluation admit interrupts; protocol work stays whole.
+    tryCatch(suspendInterrupts(repeat {
+      line <- tryCatch(
+        allowInterrupts(readLines(stdin_con, n = 1, warn = FALSE)),
+        interrupt = function(e) NULL,
+        error = function(e) NA_character_)
+      # An ignored idle interrupt is not EOF and cannot consume its allowance.
+      if (is.null(line)) next
       if (length(line) == 0L || is.na(line[[1L]]) || !nzchar(line[[1L]])) {
         if (eof_count >= 1L) break else { eof_count <- eof_count + 1L; next }
       }
@@ -1421,28 +1932,39 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
         next
       }
       cmd <- as.character(req$cmd %||% "")
+      # A deferred signal belongs to a completed evaluation: this request has
+      # not emitted a start acknowledgement. Discard it before dispatch, which
+      # may itself invoke user code (for example, a lazy output).
+      tryCatch(allowInterrupts(Sys.sleep(0)), interrupt = function(e) NULL)
       if (identical(cmd, "eval_cell")) {
-        # ack-gated eval: emit the ack and the complete response inside
-        # suspendInterrupts; evaluation/rendering runs under allowInterrupts
-        # so an interrupt produces a single complete interrupted response
-        # and can never land in the success-to-response gap.
+        # Ack-gated eval: the complete transaction remains inside
+        # suspendInterrupts, but the start acknowledgement is emitted from the
+        # same allowInterrupts region as evaluation. A controller can signal as
+        # soon as it observes that acknowledgement; emitting it while still in
+        # the suspended region created a narrow first-request race where SIGINT
+        # could be accepted by the controller yet fail to interrupt the cell.
+        # The outer suspension still prevents an interrupt from landing in the
+        # success-to-response gap.
         tryCatch(
           suspendInterrupts({
-            emit(ack_identity(req))
             resp <- tryCatch(
-              allowInterrupts(exec_cell(req)),
+              allowInterrupts({
+                emit(ack_identity(req))
+                exec_cell(req)
+              }),
               interrupt = function(e) list(
                 ok = FALSE, outputs = list(), stopped = FALSE, log = character(),
                 error = list(message = "Interrupted", interrupted = TRUE)),
               error = function(e) list(
                 ok = FALSE, outputs = list(), stopped = FALSE, log = character(),
-                error = list(message = conditionMessage(e))))
+                error = condition_payload(e, conditionMessage(e), sys.calls())))
             emit(echo_identity(req, resp))
           }),
           interrupt = function(e) NULL)
       } else {
         resp <- tryCatch(
           switch(cmd,
+            ping = list(ok = TRUE),
             clear_cell = clear_cell(req),
             get_value = get_value(req),
             env_snapshot = env_snapshot(req),
@@ -1456,10 +1978,11 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
             ok = FALSE, error = list(message = "Interrupted",
                                      interrupted = TRUE)),
           error = function(e) list(
-            ok = FALSE, error = list(message = conditionMessage(e))))
+            ok = FALSE,
+            error = condition_payload(e, conditionMessage(e), sys.calls())))
         emit(echo_identity(req, resp))
       }
-    }
+    }), interrupt = function(e) NULL)
     invisible()
   }
 

@@ -140,6 +140,26 @@ test_that("run_button is a Boolean one-shot input that starts FALSE", {
   expect_error(alder:::validate_widget_value("run_button", 1, list()), "logical")
 })
 
+test_that("datetime widgets use explicit UTC whole-second instants", {
+  default <- alder:::ui$datetime()
+  expect_s3_class(default$value, "POSIXct")
+  expect_equal(as.double(default$value), trunc(as.double(default$value)))
+
+  value <- as.POSIXct("2026-09-03 12:34:56", tz = "America/New_York")
+  lower <- as.POSIXct("2026-09-03 12:00:00", tz = "America/New_York")
+  upper <- as.POSIXct("2026-09-03 13:00:00", tz = "America/New_York")
+  widget <- alder:::ui$datetime(value, min = lower, max = upper)
+  expect_identical(widget$value, value)
+  expect_identical(widget$min, lower)
+  expect_identical(widget$max, upper)
+
+  fractional <- as.POSIXct(as.double(value) + 0.5,
+                           origin = "1970-01-01", tz = "UTC")
+  expect_error(alder:::ui$datetime(fractional), "whole-second")
+  expect_error(alder:::ui$datetime(value, min = fractional), "whole-second")
+  expect_error(alder:::ui$datetime(value, max = fractional), "whole-second")
+})
+
 test_that("ui exposes the supported widget constructor set", {
   expect_setequal(
     names(alder:::ui),
@@ -151,6 +171,91 @@ test_that("ui exposes the supported widget constructor set", {
       "array", "dictionary", "form"
     )
   )
+})
+
+test_that("ui constructor signatures and installed reference stay complete", {
+  expected_formals <- list(
+    slider = alist(min = , max = , value = min, step = 1, label = NULL),
+    range_slider = alist(min = , max = , value = c(min, max), step = 1,
+                         label = NULL),
+    dropdown = alist(choices = , value = choices[[1L]], label = NULL),
+    radio = alist(choices = , value = choices[[1L]], label = NULL),
+    multiselect = alist(choices = , value = choices[0], label = NULL),
+    text_input = alist(value = "", label = NULL),
+    text_area = alist(value = "", label = NULL, rows = 4L),
+    number = alist(value = 0, min = NULL, max = NULL, step = 1,
+                   label = NULL),
+    checkbox = alist(value = FALSE, label = NULL),
+    switch = alist(value = FALSE, label = NULL),
+    run_button = alist(label = "Run"),
+    button = alist(label = "Click", value = 0L),
+    date = alist(value = Sys.Date(), min = NULL, max = NULL, label = NULL),
+    date_range = alist(value = c(Sys.Date(), Sys.Date()), min = NULL,
+                       max = NULL, label = NULL),
+    datetime = alist(value = NULL, min = NULL, max = NULL, label = NULL),
+    code_editor = alist(value = "", language = "r", label = NULL),
+    refresh = alist(interval = 5, label = "Refresh"),
+    file = alist(label = NULL, accept = NULL, multiple = FALSE),
+    table = alist(data = , selection = c("multi", "single", "none"),
+                  page_size = 25L, label = NULL),
+    dataframe = alist(data = , label = NULL),
+    array = alist(... = ),
+    dictionary = alist(... = ),
+    form = alist(child = , submit_label = "Submit")
+  )
+  for (nm in names(expected_formals)) {
+    expect_identical(formals(alder:::ui[[nm]]),
+                     as.pairlist(expected_formals[[nm]]),
+                     info = nm)
+  }
+
+  repo <- normalizePath(testthat::test_path("..", ".."))
+  base <- repo
+  if (!file.exists(file.path(base, "man", "ui.Rd"))) {
+    base <- file.path(repo, "00_pkg_src", "alder")
+  }
+  rd_path <- file.path(base, "man", "ui.Rd")
+  expect_true(file.exists(rd_path))
+  rd <- paste(readLines(rd_path, warn = FALSE), collapse = "\n")
+  signatures <- c(
+    "ui$slider(min, max, value = min, step = 1, label = NULL)",
+    "ui$range_slider(min, max, value = c(min, max), step = 1, label = NULL)",
+    "ui$dropdown(choices, value = choices[[1L]], label = NULL)",
+    "ui$radio(choices, value = choices[[1L]], label = NULL)",
+    "ui$multiselect(choices, value = choices[0], label = NULL)",
+    "ui$text_input(value = \"\", label = NULL)",
+    "ui$text_area(value = \"\", label = NULL, rows = 4L)",
+    "ui$number(value = 0, min = NULL, max = NULL, step = 1, label = NULL)",
+    "ui$checkbox(value = FALSE, label = NULL)",
+    "ui$switch(value = FALSE, label = NULL)",
+    "ui$run_button(label = \"Run\")",
+    "ui$button(label = \"Click\", value = 0L)",
+    "ui$date(value = Sys.Date(), min = NULL, max = NULL, label = NULL)",
+    paste0("ui$date_range(value = c(Sys.Date(), Sys.Date()), min = NULL, ",
+           "max = NULL, label = NULL)"),
+    "ui$datetime(value = NULL, min = NULL, max = NULL, label = NULL)",
+    "ui$code_editor(value = \"\", language = \"r\", label = NULL)",
+    "ui$refresh(interval = 5, label = \"Refresh\")",
+    "ui$file(label = NULL, accept = NULL, multiple = FALSE)",
+    paste0("ui$table(data, selection = c(\"multi\", \"single\", \"none\"), ",
+           "page_size = 25L, label = NULL)"),
+    "ui$dataframe(data, label = NULL)",
+    "ui$array(...)",
+    "ui$dictionary(...)",
+    "ui$form(child, submit_label = \"Submit\")"
+  )
+  for (signature in signatures) {
+    expect_true(grepl(signature, rd, fixed = TRUE), info = signature)
+  }
+  for (contract in c(
+    "lattice rooted", "identical in type and value", "one-shot logical",
+    "nonnegative integer", "whole-second", "server-side temporary",
+    "selected rows as a data frame", "current browser transformations",
+    "named list of child values", "Child edits update a draft"
+  )) {
+    expect_true(grepl(contract, rd, fixed = TRUE), info = contract)
+  }
+  expect_false(grepl("ADR 0003", rd, fixed = TRUE))
 })
 
 test_that("composite widget paths update only the addressed child", {
@@ -165,7 +270,6 @@ test_that("composite widget paths update only the addressed child", {
     alder:::widget_set_child(original, c("missing"), TRUE),
     "does not exist"
   )
-
   updated <- alder:::widget_set_child(original, c("1"), 7)
   expect_equal(updated$value[[1]], 7)
   expect_identical(updated$value[[2]], FALSE)
@@ -204,3 +308,17 @@ test_that("nested composites expose recursive child paths", {
   )
 })
 
+test_that("composite widget keys are addressable and unambiguous", {
+  child <- alder:::ui$checkbox()
+  expect_error(
+    do.call(alder:::ui$array, setNames(list(child, child), c("x", "x"))),
+    "unique"
+  )
+  malformed <- alder:::ui$dictionary(x = child)
+  names(malformed$children) <- NA_character_
+  expect_error(
+    alder:::validate_widget(malformed),
+    "non-missing"
+  )
+  expect_error(alder:::ui$dictionary(), "unique names")
+})

@@ -8,6 +8,8 @@ const els = {
   runtime: document.getElementById('runtime-select'),
   runAll: document.getElementById('run-all'),
   stop: document.getElementById('stop'),
+  restart: document.getElementById('restart'),
+  shutdown: document.getElementById('shutdown'),
   save: document.getElementById('save'),
   appMode: document.getElementById('app-mode'),
   editMode: document.getElementById('edit-mode'),
@@ -22,10 +24,15 @@ const els = {
   settingsTabSize: document.getElementById('settings-tab-size'),
   settingsTablePageSize: document.getElementById('settings-table-page-size'),
   settingsLineNumbers: document.getElementById('settings-line-numbers'),
+  settingsCompletions: document.getElementById('settings-completions'),
+  settingsSignatureHelp: document.getElementById('settings-signature-help'),
+  settingsLiveDiagnostics: document.getElementById('settings-live-diagnostics'),
   settingsAutosave: document.getElementById('settings-autosave'),
   settingsFormatOnSave: document.getElementById('settings-format-on-save'),
   vimIndicator: document.getElementById('vim-mode-indicator'),
   status: document.getElementById('status'),
+  editorDiagnostics: document.getElementById('editor-diagnostics'),
+  editorDiagnosticsList: document.getElementById('editor-diagnostics-list'),
   cellTpl: document.getElementById('cell-tpl'),
   emptyTpl: document.getElementById('empty-bar'),
   panelToggle: document.getElementById('panel-toggle'),
@@ -48,21 +55,33 @@ window.__alderEditors = editorHandles;
 const cellEls = new Map();
 const lastWidgetOps = new Map();
 const pendingWidgetOps = new Map();
+const pendingFormSubmits = new Map();
 const widgetWaiters = new Map();
+const outputRenderSignatures = new WeakMap();
+const outputStructureSignatures = new WeakMap();
+let outputLayoutSequence = 0;
 let actionError = null;
+let stateActionError = null;
+let editorHelpServiceError = null;
+let editorHelpRestarting = false;
 let pollError = null;
+let editorDiagnosticsSignature = null;
 
 // Best-effort report of client-side failures to the server logs. Never throws:
 // logging itself must not crash the app or recurse back into error handling.
 async function clientLog(level, message, extra = {}) {
   try {
-    await fetch('/api/log', {
+    const response = await fetch('/api/log', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ level, message, ...extra }),
     });
+    if (!response.ok) {
+      console.warn(`Could not record client error (HTTP ${response.status}):`, message);
+    }
   } catch (error) {
-    // swallowing is intentional: /api/log must never break the caller
+    // Console reporting cannot recurse through the window error listeners.
+    console.warn('Could not record client error:', message, error.message);
   }
 }
 
@@ -94,7 +113,11 @@ const pendingMarker = Symbol('pending-widget-value');
 let focusedCellId = null;
 let variableFilter = '';
 let graphOrientation = 'vertical';
+let graphZoom = 1;
+let graphExpanded = false;
 let dataflowPanel = loadPanelPreference();
+let draggedCellId = null;
+let shuttingDown = false;
 
 class ApiError extends Error {
   constructor(message, code = 'internal_error', status = 0) {
@@ -165,10 +188,31 @@ function showActionError(message) {
 
 function renderStatus() {
   if (!els.status) return;
-  const message = actionError || pollError || '';
-  els.status.textContent = message;
-  els.status.classList.toggle('error', Boolean(actionError));
-  els.status.classList.toggle('poll-error', Boolean(!actionError && pollError));
+  const failedAction = actionError || stateActionError;
+  const message = failedAction ? `Last failed action: ${failedAction}` :
+    editorHelpServiceError || pollError || '';
+  const hasActionError = Boolean(
+    actionError || stateActionError || editorHelpServiceError,
+  );
+  els.status.replaceChildren();
+  if (message) {
+    const detail = document.createElement('span');
+    detail.className = 'status-message';
+    detail.textContent = message;
+    els.status.appendChild(detail);
+  }
+  if (editorHelpServiceError) {
+    const retry = document.createElement('button');
+    retry.type = 'button';
+    retry.className = 'btn mini status-action';
+    retry.dataset.statusAction = 'retry-editor-help';
+    retry.textContent = 'Retry editor help';
+    retry.disabled = editorHelpRestarting || actionInFlight || shuttingDown;
+    if (editorHelpRestarting) retry.setAttribute('aria-busy', 'true');
+    els.status.appendChild(retry);
+  }
+  els.status.classList.toggle('error', hasActionError);
+  els.status.classList.toggle('poll-error', Boolean(!hasActionError && pollError));
 }
 
 function isViewApp() {
@@ -198,47 +242,12 @@ function bodyText(body) {
 }
 
 function cellType(type) {
-  return type === 'markdown' || type === 'sql' ? type : 'code';
-}
-
-function parseSqlBody(body) {
-  const text = bodyText(body);
-  const match = text.match(
-    /^\s*([A-Za-z][A-Za-z0-9_.]*)\s*<-\s*sql\(\s*r"(-+)\(([\s\S]*)\)\2"(?:\s*,\s*conn\s*=\s*(.+?))?\s*\)\s*$/,
-  );
-  if (!match) return null;
-  let query = match[3];
-  if (query.startsWith('\n')) query = query.slice(1);
-  if (query.endsWith('\n')) query = query.slice(0, -1);
-  return {
-    into: match[1],
-    query,
-    conn: match[4] ? match[4].trim() : null,
-  };
-}
-
-function sqlDelimiter(query) {
-  let dashes = '---';
-  while (query.includes(`)${dashes}"`)) dashes += '-';
-  return dashes;
-}
-
-function sqlBody({ query, conn = null, into = 'result' }) {
-  const dashes = sqlDelimiter(query);
-  const lines = query === '' ? [] : query.split('\n');
-  const closing = `)${dashes}"${conn ? `, conn = ${conn}` : ''})`;
-  return [`${into} <- sql(r"${dashes}(`, ...lines, closing];
-}
-
-function sqlSpecFromRecord(record) {
-  if (record?.desiredSql) return record.desiredSql;
-  return parseSqlBody(record?.desiredBody || []) || {
-    into: 'result', query: '', conn: null,
-  };
+  return type === 'markdown' ? 'markdown' : 'code';
 }
 
 function cellOrder() {
-  return lastState && Array.isArray(lastState.cells) ? lastState.cells.map((c) => c.id) : [];
+  const state = renderingState || lastState;
+  return state && Array.isArray(state.cells) ? state.cells.map((c) => c.id) : [];
 }
 
 function makeCellRecord(cell) {
@@ -247,21 +256,22 @@ function makeCellRecord(cell) {
   return {
     desiredBody: body,
     desiredType: cellType(cell.type),
-    desiredSql: cell.type === 'sql' ? parseSqlBody(body) : null,
     generation: 0,
     ackGeneration: 0,
     ackServerRevision: revision,
     latestServerRevision: revision,
     timer: null,
     drainPromise: null,
+    formatBarrier: null,
     failedGeneration: null,
     error: null,
     conflict: false,
     serverBody: body.slice(),
     serverType: cellType(cell.type),
-    serverSql: cell.type === 'sql' ? parseSqlBody(body) : null,
     tombstone: false,
     predecessor: null,
+    diagnosticsVisibleAt: 0,
+    diagnosticsTimer: null,
   };
 }
 
@@ -275,22 +285,15 @@ function ensureCellRecord(cell) {
     ? cell.revision : record.latestServerRevision;
   record.serverBody = Array.isArray(cell.body) ? cell.body.slice() : [];
   record.serverType = cellType(cell.type);
-  record.serverSql = record.serverType === 'sql'
-    ? parseSqlBody(record.serverBody) : null;
 
-  const focusedSql = cellEls.get(cell.id)?.querySelector(
-    '[data-role="sql-query"], [data-role="sql-conn"], [data-role="sql-into"]',
-  );
   const focused = sourceFocused(cell.id) ||
-    Boolean(focusedSql && focusedSql.contains(document.activeElement)) ||
     Boolean(cellEls.get(cell.id) && document.activeElement ===
       cellEls.get(cell.id).querySelector('[data-role="type"]'));
   const protectedLocal = record.ackGeneration < record.generation ||
-    Boolean(record.drainPromise) || Boolean(record.error);
+    Boolean(record.drainPromise) || Boolean(record.formatBarrier) || Boolean(record.error);
   if (!focused && !protectedLocal && record.latestServerRevision >= record.ackServerRevision) {
     record.desiredBody = record.serverBody.slice();
     record.desiredType = record.serverType;
-    record.desiredSql = record.serverSql;
     record.ackServerRevision = record.latestServerRevision;
     record.ackGeneration = record.generation;
     record.failedGeneration = null;
@@ -412,8 +415,57 @@ function lspHover(id, view, pos) {
       body: {method: 'textDocument/hover',
         params: {position: lspPosition(view, id, pos)}},
     }))
+    .then((response) => controller.signal.aborted ? null : {
+      text: lspText(response.result?.contents),
+      html: typeof response.rendered === 'string' ? response.rendered : '',
+    })
+    .catch(() => null)
+    .finally(() => {
+      if (lspRequests.get(key) === controller) lspRequests.delete(key);
+    });
+}
+
+function lspSignatureModel(result) {
+  const signatures = Array.isArray(result?.signatures) ? result.signatures : [];
+  if (!signatures.length) return null;
+  const signatureIndex = Math.max(0, Math.min(signatures.length - 1,
+    Number(result.activeSignature) || 0));
+  const signature = signatures[signatureIndex] || {};
+  const parameters = Array.isArray(signature.parameters) ? signature.parameters : [];
+  const parameterIndex = Math.max(0, Math.min(Math.max(0, parameters.length - 1),
+    Number(result.activeParameter ?? signature.activeParameter) || 0));
+  const parameter = parameters[parameterIndex] || {};
+  let activeParameter = parameter.label || '';
+  if (Array.isArray(activeParameter) && activeParameter.length === 2) {
+    activeParameter = String(signature.label || '').slice(
+      Number(activeParameter[0]) || 0, Number(activeParameter[1]) || 0,
+    );
+  }
+  return {
+    label: String(signature.label || ''),
+    activeParameter: String(activeParameter || ''),
+    documentation: lspText(parameter.documentation || signature.documentation),
+  };
+}
+
+function lspSignature(id, view, pos, trigger) {
+  const key = `signature:${id}`;
+  lspRequests.get(key)?.abort();
+  const controller = new AbortController();
+  lspRequests.set(key, controller);
+  return flushPendingEdits()
+    .then(() => api('/api/lsp', {
+      signal: controller.signal,
+      body: {
+        method: 'textDocument/signatureHelp',
+        params: {
+          position: lspPosition(view, id, pos),
+          context: {triggerKind: 2, triggerCharacter: trigger},
+        },
+      },
+    }))
     .then((response) => controller.signal.aborted ? null
-      : lspText(response.result?.contents))
+      : lspSignatureModel(response.result))
     .catch(() => null)
     .finally(() => {
       if (lspRequests.get(key) === controller) lspRequests.delete(key);
@@ -423,11 +475,32 @@ function lspHover(id, view, pos) {
 function dataflowState(state = renderingState || lastState) {
   const aggregate = state?.dataflow && typeof state.dataflow === 'object'
     ? state.dataflow : {};
+  const rawDag = aggregate.dag && typeof aggregate.dag === 'object'
+    ? aggregate.dag
+    : state?.dag && typeof state.dag === 'object' ? state.dag : {};
+  const fallbackNodes = Array.isArray(state?.cells)
+    ? state.cells.map((cell) => cell.id).filter(Boolean) : [];
+  const nodes = Array.isArray(rawDag.nodes) ? rawDag.nodes.map(String)
+    : typeof rawDag.nodes === 'string' ? [rawDag.nodes] : fallbackNodes;
+  const adjacency = (raw) => Object.fromEntries(nodes.map((id) => {
+    const value = raw && typeof raw === 'object' ? raw[id] : null;
+    const values = Array.isArray(value) ? value
+      : typeof value === 'string' && value ? [value] : [];
+    return [id, [...new Set(values.map(String))]];
+  }));
+  const dag = {
+    ...rawDag,
+    nodes,
+    edges: adjacency(rawDag.edges),
+    reverse_edges: adjacency(rawDag.reverse_edges),
+    edge_records: Array.isArray(rawDag.edge_records) ? rawDag.edge_records
+      : rawDag.edge_records && typeof rawDag.edge_records === 'object'
+        ? [rawDag.edge_records] : [],
+  };
   return {
     variables: Array.isArray(aggregate.variables) ? aggregate.variables
       : Array.isArray(state?.variables) ? state.variables : [],
-    dag: aggregate.dag && typeof aggregate.dag === 'object' ? aggregate.dag
-      : state?.dag && typeof state.dag === 'object' ? state.dag : {},
+    dag,
     outline: Array.isArray(aggregate.outline) ? aggregate.outline
       : Array.isArray(state?.outline) ? state.outline : [],
     reactiveRanges: aggregate.reactive_ranges &&
@@ -435,6 +508,8 @@ function dataflowState(state = renderingState || lastState) {
       ? aggregate.reactive_ranges
       : state?.reactive_ranges && typeof state.reactive_ranges === 'object'
         ? state.reactive_ranges : {},
+    error: aggregate.error && typeof aggregate.error === 'object'
+      ? aggregate.error : null,
   };
 }
 
@@ -540,7 +615,8 @@ function jumpReactiveReference(id, view, pos) {
 }
 
 function loadPanelPreference() {
-  const fallback = {open: true, tab: 'variables'};
+  const mobile = window.matchMedia?.('(max-width: 900px)').matches === true;
+  const fallback = {open: !mobile, tab: 'variables'};
   try {
     const value = JSON.parse(window.localStorage.getItem('alder.panel') || 'null');
     if (!value || typeof value !== 'object') return fallback;
@@ -568,6 +644,23 @@ function cellLabel(id, state = renderingState || lastState) {
   return info?.name || outline?.name || outline?.label || id;
 }
 
+function cellPosition(id, state = renderingState || lastState) {
+  const cells = Array.isArray(state?.cells) ? state.cells : [];
+  const index = cells.findIndex((cell) => cell.id === id);
+  return index < 0 ? null : index + 1;
+}
+
+function cellName(cell) {
+  return cell?.name || cell?.options?.name || '';
+}
+
+function cellDisplayLabel(cell, state = renderingState || lastState) {
+  const position = cellPosition(cell.id, state);
+  const prefix = position === null ? 'Cell' : `Cell ${position}`;
+  const name = cellName(cell);
+  return name ? `${prefix} · ${name}` : prefix;
+}
+
 function navigateToCell(id, line = null, options = {}) {
   const element = cellEls.get(id);
   if (!element) return false;
@@ -593,10 +686,74 @@ function navigateToCell(id, line = null, options = {}) {
   return true;
 }
 
-function panelButton(label, id, line = null, className = '') {
+function navigationKey(node) {
+  return node.nodeType === Node.ELEMENT_NODE
+    ? node.getAttribute('data-navigation-key') : null;
+}
+
+// These trees contain only renderer-owned HTML/SVG and delegated controls.
+// Patch retained navigation targets instead of detaching a user's next action
+// whenever a state poll updates its label, status, or graph geometry.
+function reconcileNavigationChildren(parent, ...children) {
+  const previous = [...parent.childNodes];
+  const keyed = new Map(previous.filter((node) => navigationKey(node) !== null)
+    .map((node) => [navigationKey(node), node]));
+  const unused = new Set(previous);
+  const next = children.map((fresh, index) => {
+    const key = navigationKey(fresh);
+    const candidate = key === null ? previous[index] : keyed.get(key);
+    if (!candidate || !unused.has(candidate) || navigationKey(candidate) !== key ||
+        candidate.nodeType !== fresh.nodeType || candidate.nodeName !== fresh.nodeName ||
+        candidate.namespaceURI !== fresh.namespaceURI) return fresh;
+    unused.delete(candidate);
+    if (fresh.nodeType === Node.ELEMENT_NODE) {
+      for (const attribute of [...candidate.attributes]) {
+        if (!fresh.hasAttribute(attribute.name)) candidate.removeAttribute(attribute.name);
+      }
+      for (const attribute of [...fresh.attributes]) {
+        if (candidate.getAttribute(attribute.name) !== attribute.value) {
+          candidate.setAttribute(attribute.name, attribute.value);
+        }
+      }
+      reconcileNavigationChildren(candidate, ...fresh.childNodes);
+    } else if (candidate.nodeValue !== fresh.nodeValue) {
+      candidate.nodeValue = fresh.nodeValue;
+    }
+    return candidate;
+  });
+  for (const node of unused) node.remove();
+
+  // A DOM move can blur even a retained node. Keep the focused branch in place
+  // and arrange its siblings around it, including during actual list reorders.
+  const active = document.activeElement;
+  const focused = next.findIndex((node) => node === active || node.contains(active));
+  if (focused >= 0) {
+    let cursor = next[focused];
+    for (let index = focused - 1; index >= 0; index -= 1) {
+      const node = next[index];
+      if (node.nextSibling !== cursor) parent.insertBefore(node, cursor);
+      cursor = node;
+    }
+    cursor = next[focused].nextSibling;
+    for (let index = focused + 1; index < next.length; index += 1) {
+      const node = next[index];
+      if (node !== cursor) parent.insertBefore(node, cursor);
+      cursor = node.nextSibling;
+    }
+  } else {
+    let cursor = parent.firstChild;
+    for (const node of next) {
+      if (node !== cursor) parent.insertBefore(node, cursor);
+      cursor = node.nextSibling;
+    }
+  }
+}
+
+function panelButton(label, id, line = null, className = '', key = null) {
   const button = document.createElement('button');
   button.type = 'button';
   button.className = `panel-link ${className}`.trim();
+  button.dataset.navigationKey = JSON.stringify(key || ['cell', id, line, className]);
   button.textContent = label;
   if (id) {
     button.dataset.targetCell = id;
@@ -611,6 +768,13 @@ function panelEmpty(message) {
   const node = document.createElement('p');
   node.className = 'panel-empty';
   node.textContent = message;
+  return node;
+}
+
+function panelFailure(error) {
+  const node = panelEmpty(error?.message || 'Dataflow projection is unavailable.');
+  node.classList.add('error');
+  node.setAttribute('role', 'alert');
   return node;
 }
 
@@ -630,6 +794,10 @@ function renderVariablesPanel(state) {
   const view = els.panelViews.variables;
   if (!view) return;
   const dataflow = dataflowState(state);
+  if (dataflow.error) {
+    reconcileNavigationChildren(view, panelFailure(dataflow.error));
+    return;
+  }
   let input = view.querySelector('.panel-filter');
   if (!input) {
     input = document.createElement('input');
@@ -646,14 +814,14 @@ function renderVariablesPanel(state) {
     list.className = 'variable-list';
     view.appendChild(list);
   }
-  list.replaceChildren();
+  const rows = [];
   const query = variableFilter.trim().toLocaleLowerCase();
   const variables = dataflow.variables.filter((variable) =>
     !query || String(variable?.name || '').toLocaleLowerCase().includes(query));
   for (const variable of variables) {
     const owner = variableOwner(variable);
     const row = panelButton(variable.name || 'unnamed variable', owner, null,
-      'variable-row');
+      'variable-row', ['variable', variable.name]);
     const title = document.createElement('span');
     title.className = 'variable-name';
     title.textContent = variable.name || 'unnamed';
@@ -678,12 +846,13 @@ function renderVariablesPanel(state) {
       tag.textContent = 'widget';
       row.appendChild(tag);
     }
-    list.appendChild(row);
+    rows.push(row);
   }
   if (!variables.length) {
-    list.appendChild(panelEmpty(query ? 'No variables match this filter.'
+    rows.push(panelEmpty(query ? 'No variables match this filter.'
       : 'Run a cell to inspect its variables.'));
   }
+  reconcileNavigationChildren(list, ...rows);
   if (input.nextElementSibling !== list) input.after(list);
 }
 
@@ -705,6 +874,7 @@ function graphNeighbors(map, start) {
 function dependencySection(title, items, state, empty) {
   const section = document.createElement('section');
   section.className = 'dependency-section';
+  section.dataset.navigationKey = JSON.stringify(['dependency-section', title]);
   const heading = document.createElement('h3');
   heading.textContent = title;
   section.appendChild(heading);
@@ -716,7 +886,8 @@ function dependencySection(title, items, state, empty) {
   list.className = 'dependency-list';
   for (const item of items) {
     list.appendChild(panelButton(
-      item.label || cellLabel(item.id, state), item.id, null,
+      item.label || cellLabel(item.id, state), item.id, null, '',
+      ['dependency', item.key || item.id],
     ));
   }
   section.appendChild(list);
@@ -726,13 +897,17 @@ function dependencySection(title, items, state, empty) {
 function renderDependenciesPanel(state) {
   const view = els.panelViews.dependencies;
   if (!view) return;
+  const dataflow = dataflowState(state);
+  if (dataflow.error) {
+    reconcileNavigationChildren(view, panelFailure(dataflow.error));
+    return;
+  }
   const cells = Array.isArray(state?.cells) ? state.cells : [];
   const current = cells.find((cell) => cell.id === focusedCellId);
   if (!current) {
-    view.replaceChildren(panelEmpty('Focus a cell to inspect its dataflow.'));
+    reconcileNavigationChildren(view, panelEmpty('Focus a cell to inspect its dataflow.'));
     return;
   }
-  const dataflow = dataflowState(state);
   const dag = dataflow.dag;
   const variables = new Map(dataflow.variables.map((variable) =>
     [variable.name, variable]));
@@ -741,15 +916,16 @@ function renderDependenciesPanel(state) {
   title.textContent = cellLabel(current.id, state);
   const refs = (current.refs || []).map((name) => {
     const owner = variableOwner(variables.get(name));
-    return {id: owner, label: owner ? `${name} ← ${cellLabel(owner, state)}` : name};
+    return {id: owner, key: name,
+      label: owner ? `${name} ← ${cellLabel(owner, state)}` : name};
   });
   const defs = (current.defs || []).map((name) =>
-    ({id: current.id, label: name}));
+    ({id: current.id, key: name, label: name}));
   const ancestors = graphNeighbors(dag.edges, current.id)
     .map((id) => ({id}));
   const descendants = graphNeighbors(dag.reverse_edges, current.id)
     .map((id) => ({id}));
-  view.replaceChildren(
+  reconcileNavigationChildren(view,
     title,
     dependencySection('References', refs, state, 'No direct references.'),
     dependencySection('Definitions', defs, state, 'No definitions.'),
@@ -776,6 +952,58 @@ function graphRanks(nodes, edges) {
   return ranks;
 }
 
+function graphScale(value) {
+  return Math.max(0.2, Math.min(2.5, Number(value) || 1));
+}
+
+function updateGraphCanvas(value, fitted = false) {
+  const view = els.panelViews.graph;
+  const svg = view?.querySelector('.dag-graph');
+  if (!svg) return;
+  graphZoom = graphScale(value);
+  const width = Number(svg.dataset.intrinsicWidth) || 1;
+  const height = Number(svg.dataset.intrinsicHeight) || 1;
+  svg.setAttribute('width', String(Math.round(width * graphZoom)));
+  svg.setAttribute('height', String(Math.round(height * graphZoom)));
+  svg.dataset.zoom = String(graphZoom);
+  const status = view.querySelector('[data-graph-zoom-status]');
+  if (status) {
+    status.textContent = `${Math.round(graphZoom * 100)}%${fitted ? ' fit' : ''}`;
+  }
+  const zoomOut = view.querySelector('[data-graph-action="zoom-out"]');
+  const zoomIn = view.querySelector('[data-graph-action="zoom-in"]');
+  const reset = view.querySelector('[data-graph-action="reset"]');
+  if (zoomOut) zoomOut.disabled = graphZoom <= 0.2;
+  if (zoomIn) zoomIn.disabled = graphZoom >= 2.5;
+  if (reset) reset.disabled = Math.abs(graphZoom - 1) < 0.001;
+}
+
+function fitGraphCanvas() {
+  const scroller = els.panelViews.graph?.querySelector('.graph-scroll');
+  const svg = scroller?.querySelector('.dag-graph');
+  if (!scroller || !svg) return;
+  const width = Number(svg.dataset.intrinsicWidth) || 1;
+  const height = Number(svg.dataset.intrinsicHeight) || 1;
+  const scale = Math.min(
+    Math.max(1, scroller.clientWidth - 8) / width,
+    Math.max(1, scroller.clientHeight - 8) / height,
+  );
+  updateGraphCanvas(scale, true);
+  scroller.scrollTo({left: 0, top: 0, behavior: 'auto'});
+}
+
+function graphControl(text, action, label) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'panel-secondary graph-control';
+  button.dataset.graphAction = action;
+  button.dataset.navigationKey = JSON.stringify(['graph-action', action]);
+  button.textContent = text;
+  button.setAttribute('aria-label', label);
+  button.title = label;
+  return button;
+}
+
 function svgElement(name, attributes = {}) {
   const node = document.createElementNS('http://www.w3.org/2000/svg', name);
   Object.entries(attributes).forEach(([key, value]) =>
@@ -786,20 +1014,45 @@ function svgElement(name, attributes = {}) {
 function renderGraphPanel(state) {
   const view = els.panelViews.graph;
   if (!view) return;
-  const dag = dataflowState(state).dag;
+  const dataflow = dataflowState(state);
+  if (dataflow.error) {
+    reconcileNavigationChildren(view, panelFailure(dataflow.error));
+    return;
+  }
+  const dag = dataflow.dag;
   const nodes = Array.isArray(dag.nodes) ? dag.nodes : [];
   const records = Array.isArray(dag.edge_records) ? dag.edge_records : [];
   const toolbar = document.createElement('div');
   toolbar.className = 'graph-toolbar';
-  const toggle = document.createElement('button');
-  toggle.type = 'button';
-  toggle.className = 'panel-secondary';
+  toolbar.dataset.navigationKey = 'graph-toolbar';
+  const direction = document.createElement('span');
+  direction.className = 'graph-direction-note';
+  direction.textContent = 'Source → dependent';
+  const toggle = graphControl(
+    graphOrientation === 'vertical' ? 'Horizontal layout' : 'Vertical layout',
+    'orientation',
+    graphOrientation === 'vertical'
+      ? 'Switch to a left-to-right dependency layout'
+      : 'Switch to a top-to-bottom dependency layout',
+  );
   toggle.dataset.graphOrientation = graphOrientation;
-  toggle.textContent = graphOrientation === 'vertical' ? 'Horizontal layout'
-    : 'Vertical layout';
-  toolbar.appendChild(toggle);
+  const zoomOut = graphControl('−', 'zoom-out', 'Zoom dependency graph out');
+  const zoomIn = graphControl('+', 'zoom-in', 'Zoom dependency graph in');
+  const fit = graphControl('Fit', 'fit', 'Fit the dependency graph in the viewport');
+  const reset = graphControl('100%', 'reset', 'Reset dependency graph to readable size');
+  const expand = graphControl(graphExpanded ? 'Collapse' : 'Expand', 'expand',
+    graphExpanded ? 'Collapse the dependency graph panel'
+      : 'Expand the dependency graph panel');
+  expand.setAttribute('aria-pressed', String(graphExpanded));
+  const zoomStatus = document.createElement('span');
+  zoomStatus.className = 'graph-zoom-status';
+  zoomStatus.dataset.graphZoomStatus = 'true';
+  zoomStatus.dataset.navigationKey = 'graph-zoom-status';
+  zoomStatus.setAttribute('role', 'status');
+  zoomStatus.setAttribute('aria-live', 'polite');
+  toolbar.append(direction, toggle, zoomOut, zoomIn, fit, reset, expand, zoomStatus);
   if (!nodes.length) {
-    view.replaceChildren(toolbar, panelEmpty('No dependency graph is available.'));
+    reconcileNavigationChildren(view, toolbar, panelEmpty('No dependency graph is available.'));
     return;
   }
   const ranks = graphRanks(nodes, dag.edges || {});
@@ -809,17 +1062,20 @@ function renderGraphPanel(state) {
     if (!groups.has(rank)) groups.set(rank, []);
     groups.get(rank).push(id);
   });
-  const nodeWidth = 128;
-  const nodeHeight = 38;
-  const rankGap = 70;
-  const itemGap = 18;
+  const longestLabel = Math.max(...nodes.map((id) => cellLabel(id, state).length));
+  const nodeWidth = Math.max(156, Math.min(248, Math.ceil(longestLabel * 7.2 + 24)));
+  const nodeHeight = 46;
+  const rankGap = 72;
+  const itemGap = 22;
+  const primaryExtent = graphOrientation === 'vertical' ? nodeHeight : nodeWidth;
+  const crossExtent = graphOrientation === 'vertical' ? nodeWidth : nodeHeight;
   const positions = new Map();
   let crossCount = 1;
   for (const group of groups.values()) crossCount = Math.max(crossCount, group.length);
   for (const [rank, group] of groups.entries()) {
     group.forEach((id, index) => {
-      const primary = 18 + rank * (nodeHeight + rankGap);
-      const cross = 18 + index * (nodeWidth + itemGap);
+      const primary = 18 + rank * (primaryExtent + rankGap);
+      const cross = 18 + index * (crossExtent + itemGap);
       positions.set(id, graphOrientation === 'vertical'
         ? {x: cross, y: primary} : {x: primary, y: cross});
     });
@@ -833,8 +1089,29 @@ function renderGraphPanel(state) {
     : 36 + crossCount * nodeHeight + (crossCount - 1) * itemGap;
   const svg = svgElement('svg', {
     class: 'dag-graph', viewBox: `0 0 ${width} ${height}`,
-    role: 'img', 'aria-label': 'Notebook dependency graph',
+    'data-navigation-key': 'dag-graph',
+    width: Math.round(width * graphZoom), height: Math.round(height * graphZoom),
+    role: 'img', 'aria-label':
+      'Notebook dependency graph. Arrows point from source cells to dependent cells.',
   });
+  svg.dataset.intrinsicWidth = String(width);
+  svg.dataset.intrinsicHeight = String(height);
+  svg.dataset.orientation = graphOrientation;
+  const svgTitle = svgElement('title');
+  svgTitle.textContent = 'Notebook dependency graph';
+  const svgDescription = svgElement('desc');
+  svgDescription.textContent =
+    'Arrows point from source cells toward cells that depend on them.';
+  const definitions = svgElement('defs');
+  const arrow = svgElement('marker', {
+    id: 'dag-arrowhead', markerWidth: 8, markerHeight: 8,
+    refX: 7, refY: 4, orient: 'auto', markerUnits: 'strokeWidth',
+  });
+  arrow.appendChild(svgElement('path', {
+    class: 'dag-arrowhead', d: 'M 0 0 L 8 4 L 0 8 z',
+  }));
+  definitions.appendChild(arrow);
+  svg.append(svgTitle, svgDescription, definitions);
   const cycleNodes = new Set(dag.cycles || dag.cycle_nodes || []);
   for (const edge of records) {
     const from = positions.get(edge?.from);
@@ -847,6 +1124,9 @@ function renderGraphPanel(state) {
     const path = svgElement('path', {
       class: cycleNodes.has(edge.from) && cycleNodes.has(edge.to)
         ? 'dag-edge cycle' : 'dag-edge',
+      'data-from': edge.from, 'data-to': edge.to,
+      'data-navigation-key': JSON.stringify(['edge', edge.from, edge.to]),
+      'marker-end': 'url(#dag-arrowhead)',
       d: graphOrientation === 'vertical'
         ? `M ${x1} ${from.y + nodeHeight} C ${x1} ${(y1 + y2) / 2} ${x2} ${(y1 + y2) / 2} ${x2} ${to.y}`
         : `M ${from.x + nodeWidth} ${y1} C ${(x1 + x2) / 2} ${y1} ${(x1 + x2) / 2} ${y2} ${to.x} ${y2}`,
@@ -859,17 +1139,19 @@ function renderGraphPanel(state) {
     const group = svgElement('g', {
       class: `dag-node status-${info.status || 'idle'}${cycleNodes.has(id) ? ' cycle' : ''}`,
       role: 'button', tabindex: '0', 'data-target-cell': id,
+      'data-navigation-key': JSON.stringify(['node', id]),
+      'data-rank': ranks.get(id) || 0,
       'aria-label': `Go to ${cellLabel(id, state)}`,
     });
     group.appendChild(svgElement('rect', {
       x: position.x, y: position.y, width: nodeWidth, height: nodeHeight, rx: 5,
     }));
     const label = svgElement('text', {
-      x: position.x + 9, y: position.y + 16,
+      x: position.x + 10, y: position.y + 19,
     });
     label.textContent = cellLabel(id, state);
     const status = svgElement('text', {
-      class: 'dag-node-status', x: position.x + 9, y: position.y + 30,
+      class: 'dag-node-status', x: position.x + 10, y: position.y + 36,
     });
     status.textContent = info.status || 'idle';
     group.append(label, status);
@@ -877,32 +1159,44 @@ function renderGraphPanel(state) {
   }
   const scroller = document.createElement('div');
   scroller.className = 'graph-scroll';
+  scroller.dataset.navigationKey = 'graph-scroll';
+  scroller.tabIndex = 0;
+  scroller.setAttribute('aria-label', 'Scrollable dependency graph canvas');
   scroller.appendChild(svg);
-  view.replaceChildren(toolbar, scroller);
+  reconcileNavigationChildren(view, toolbar, scroller);
+  updateGraphCanvas(graphZoom);
 }
 
 function renderOutlinePanel(state) {
   const view = els.panelViews.outline;
   if (!view) return;
+  const dataflow = dataflowState(state);
+  if (dataflow.error) {
+    reconcileNavigationChildren(view, panelFailure(dataflow.error));
+    return;
+  }
   const list = document.createElement('nav');
   list.className = 'outline-list';
+  list.dataset.navigationKey = 'outline-list';
   list.setAttribute('aria-label', 'Notebook outline');
   let count = 0;
-  for (const item of dataflowState(state).outline) {
+  for (const item of dataflow.outline) {
     if (item?.name) {
-      list.appendChild(panelButton(item.name, item.id, null, 'outline-cell'));
+      list.appendChild(panelButton(item.name, item.id, null, 'outline-cell',
+        ['outline-cell', item.id]));
       count += 1;
     }
     for (const heading of Array.isArray(item?.headings) ? item.headings : []) {
       const button = panelButton(heading.text || 'Untitled heading',
-        heading.cell || item.id, Number(heading.line), 'outline-heading');
+        heading.cell || item.id, Number(heading.line), 'outline-heading',
+        ['outline-heading', heading.cell || item.id, Number(heading.line)]);
       button.style.setProperty('--outline-level',
         String(Math.max(0, Math.min(5, Number(heading.level || 1) - 1))));
       list.appendChild(button);
       count += 1;
     }
   }
-  view.replaceChildren(count ? list : panelEmpty(
+  reconcileNavigationChildren(view, count ? list : panelEmpty(
     'Name a cell or add a Markdown heading to build an outline.',
   ));
 }
@@ -910,17 +1204,24 @@ function renderOutlinePanel(state) {
 function renderMinimap(state) {
   if (!els.minimap) return;
   const cells = Array.isArray(state?.cells) ? state.cells : [];
-  const fragment = document.createDocumentFragment();
-  for (const cell of cells) {
+  const buttons = [];
+  cells.forEach((cell, index) => {
     const button = document.createElement('button');
     button.type = 'button';
     button.className = `minimap-cell status-${cell.status || 'idle'}`;
     button.dataset.targetCell = cell.id;
-    button.title = `${cellLabel(cell.id, state)} — ${cell.status || 'idle'}`;
+    button.dataset.navigationKey = JSON.stringify(['minimap', cell.id]);
+    button.textContent = String(index + 1);
+    const label = cellDisplayLabel(cell, state);
+    button.title = `${label} — ${cell.status || 'idle'} — stable ID ${cell.id}`;
     button.setAttribute('aria-label', button.title);
-    fragment.appendChild(button);
-  }
-  els.minimap.replaceChildren(fragment);
+    const renderedHeight = cellEls.get(cell.id)?.getBoundingClientRect().height || 0;
+    const targetHeight = Math.max(28, Math.min(64,
+      Math.round(28 + Math.log2(Math.max(1, renderedHeight / 120)) * 8)));
+    button.style.height = `${targetHeight}px`;
+    buttons.push(button);
+  });
+  reconcileNavigationChildren(els.minimap, ...buttons);
   updateMinimapViewport();
 }
 
@@ -949,11 +1250,17 @@ function updateMinimapViewport() {
 
 function renderDataflow(state) {
   if (isViewApp() || !els.panel) return;
+  updateTopbarInset();
   const cells = Array.isArray(state?.cells) ? state.cells : [];
   if (!focusedCellId || !cells.some((cell) => cell.id === focusedCellId)) {
     focusedCellId = cells[0]?.id || null;
   }
   document.body.classList.toggle('panel-closed', !dataflowPanel.open);
+  document.body.classList.toggle('mobile-panel-open', dataflowPanel.open &&
+    window.matchMedia?.('(max-width: 900px)').matches === true);
+  if (!dataflowPanel.open) graphExpanded = false;
+  els.panel.classList.toggle('graph-expanded', graphExpanded &&
+    dataflowPanel.tab === 'graph');
   els.panel.hidden = !dataflowPanel.open;
   if (els.panelToggle) els.panelToggle.setAttribute(
     'aria-expanded', String(dataflowPanel.open),
@@ -971,6 +1278,15 @@ function renderDataflow(state) {
   renderGraphPanel(state);
   renderOutlinePanel(state);
   renderMinimap(state);
+  window.requestAnimationFrame(updateTopbarInset);
+}
+
+function updateTopbarInset() {
+  const topbar = document.getElementById('topbar');
+  const bottom = Math.max(0, topbar?.getBoundingClientRect().bottom || 48);
+  document.documentElement.style.setProperty(
+    '--alder-topbar-bottom', `${Math.ceil(bottom)}px`,
+  );
 }
 
 function applyConfig(config) {
@@ -993,6 +1309,10 @@ function applyConfig(config) {
   document.documentElement.style.setProperty('--alder-editor-font-size', `${fontSize}px`);
   document.documentElement.style.setProperty('--alder-editor-tab-size', String(tabSize));
   document.body.classList.toggle('hide-line-numbers', editor.line_numbers === false);
+  for (const handle of editorHandles.values()) {
+    handle.setCompletionsEnabled?.(editor.completions !== false);
+    handle.setSignatureHelpEnabled?.(editor.signature_help !== false);
+  }
   if (els.settings && !els.settings.open) fillSettings(value);
 }
 
@@ -1023,6 +1343,12 @@ function fillSettings(config) {
   }
   if (els.settingsLineNumbers) els.settingsLineNumbers.checked =
     editor.line_numbers !== false;
+  if (els.settingsCompletions) els.settingsCompletions.checked =
+    editor.completions !== false;
+  if (els.settingsSignatureHelp) els.settingsSignatureHelp.checked =
+    editor.signature_help !== false;
+  if (els.settingsLiveDiagnostics) els.settingsLiveDiagnostics.checked =
+    editor.live_diagnostics !== false;
   if (els.settingsAutosave) els.settingsAutosave.checked =
     value.autosave === true;
   if (els.settingsFormatOnSave) els.settingsFormatOnSave.checked =
@@ -1043,6 +1369,9 @@ function settingsPatch() {
       font_size: numberOr(els.settingsFontSize, 14),
       tab_size: numberOr(els.settingsTabSize, 2),
       line_numbers: Boolean(els.settingsLineNumbers?.checked),
+      completions: Boolean(els.settingsCompletions?.checked),
+      signature_help: Boolean(els.settingsSignatureHelp?.checked),
+      live_diagnostics: Boolean(els.settingsLiveDiagnostics?.checked),
     },
     table: {page_size: numberOr(els.settingsTablePageSize, 25)},
   };
@@ -1067,11 +1396,78 @@ function closeSettings() {
   }
 }
 
+function tableOutputs(state) {
+  const found = [];
+  const visit = (output) => {
+    if (!output || typeof output !== 'object') return;
+    if (output.kind === 'table' && output.handle) found.push(output);
+    if (output.kind === 'layout' && Array.isArray(output.children)) {
+      output.children.forEach(visit);
+    }
+    if (output.kind === 'lazy' && output.child) visit(output.child);
+  };
+  for (const cell of state?.cells || []) {
+    for (const output of cell.outputs || []) visit(output);
+  }
+  return found;
+}
+
+async function repaginateTables(state, limit) {
+  const outputs = tableOutputs(state);
+  const requests = outputs.map((output) => {
+    const page = output.page || {};
+    const oldOffset = Number.isFinite(Number(page.offset)) ? Number(page.offset) : 0;
+    const offset = Math.floor(oldOffset / limit) * limit;
+    return api('/api/table', {
+      body: {
+        handle: output.handle,
+        offset,
+        limit,
+        sort_by: String(page.sort_by || ''),
+        sort_desc: Boolean(page.sort_desc),
+        filter: String(page.filter || ''),
+      },
+    });
+  });
+  await Promise.all(requests);
+  if (!outputs.length) return;
+
+  // /api/table acknowledges a queued worker operation.  Keep Apply in flight
+  // until those operations have committed and the matching state is rendered;
+  // otherwise a fast refresh can display the new preference with the old 25
+  // rows until an unrelated background poll happens to arrive.
+  const handles = new Set(outputs.map((output) => output.handle));
+  const deadline = Date.now() + 30000;
+  while (Date.now() < deadline) {
+    const current = await refresh();
+    if (current?.last_action_error) {
+      const error = current.last_action_error;
+      throw new ApiError(error.message || 'Table repagination failed',
+        error.code || 'table_request_failed', 200);
+    }
+    const currentOutputs = tableOutputs(current);
+    const byHandle = new Map(currentOutputs.map((output) => [output.handle, output]));
+    const complete = [...handles].every((handle) => {
+      const page = byHandle.get(handle)?.page;
+      return page && Number(page.limit) === Number(limit);
+    });
+    if (complete) return;
+    await new Promise((resolve) => window.setTimeout(resolve, 100));
+  }
+  throw new ApiError('Timed out while updating visible table pages',
+    'table_request_timeout', 0);
+}
+
 function settingsSubmit(event) {
   event.preventDefault();
   const patch = settingsPatch();
+  const before = lastState;
+  const oldPageSize = Number(before?.config?.table?.page_size || 25);
   action(async () => {
     await api('/api/config', {body: patch});
+    if (patch.table.page_size !== oldPageSize) {
+      await repaginateTables(before, patch.table.page_size);
+    }
     closeSettings();
   });
 }
@@ -1083,15 +1479,43 @@ function destroyEditor(id) {
   editorHandles.delete(id);
 }
 
+function editorPreferences() {
+  const config = renderingState?.config || lastState?.config || {};
+  return config.editor && typeof config.editor === 'object' ? config.editor : {};
+}
+
+function diagnosticSourceCurrent(cell, record) {
+  if (!cell) return false;
+  if (!record) return true;
+  // A typing pause does not acknowledge an edit. An older poll (or a cached
+  // render) can still describe the previous source after the edit succeeds.
+  if (record.tombstone || record.error || record.drainPromise || record.formatBarrier ||
+      record.ackGeneration !== record.generation ||
+      Number(cell.revision || 0) < record.ackServerRevision ||
+      cellType(cell.type) !== record.desiredType ||
+      bodyText(cell.body) !== bodyText(record.desiredBody)) return false;
+  const editor = sourceEditor(cell.id);
+  return !editor || editor.getDoc() === bodyText(cell.body);
+}
+
+function visibleDiagnostics(cell, record) {
+  if (!diagnosticSourceCurrent(cell, record)) return [];
+  if (record && Date.now() < Number(record.diagnosticsVisibleAt || 0)) return [];
+  const values = Array.isArray(cell?.diagnostics) ? cell.diagnostics : [];
+  if (editorPreferences().live_diagnostics === false) {
+    // The LSP diagnostic stream is lintr. Its opt-in preference must not hide
+    // Alder's own parse, dependency, or static-safety diagnostics.
+    return values.filter((diagnostic) => diagnostic?.source !== 'lsp');
+  }
+  return values;
+}
+
 function ensureEditor(id, element, record, protectedLocal) {
   const source = element?.querySelector('[data-role="source"]');
-  if (!source || isViewApp() || record.desiredType === 'sql' ||
-      !window.AlderEditor?.createEditor) {
-    if (record.desiredType === 'sql') destroyEditor(id);
-    return null;
-  }
+  if (!source || isViewApp() || !window.AlderEditor?.createEditor) return null;
   const language = record.desiredType === 'markdown' ? 'markdown' : 'r';
   const keymapName = renderingState?.config?.keymap || lastState?.config?.keymap || 'default';
+  const preferences = editorPreferences();
   let editor = editorHandles.get(id);
   if (editor && (editor._alderLanguage !== language ||
                  editor._alderKeymap !== keymapName)) {
@@ -1105,6 +1529,8 @@ function ensureEditor(id, element, record, protectedLocal) {
       language,
       readOnly: false,
       keymap: keymapName,
+      completionsEnabled: preferences.completions !== false,
+      signatureHelpEnabled: preferences.signature_help !== false,
       onChange: (text) => {
         const current = cellEls.get(id);
         if (!current || current.dataset.tombstone === 'true') return;
@@ -1126,10 +1552,9 @@ function ensureEditor(id, element, record, protectedLocal) {
         await flushWidgetUpdates();
         await api('/api/run', {body: {all: true}});
       }),
-      onSave: () => els.save?.click(),
+      onSave: () => requestSave(),
       onFormat: () => action(async () => {
-        await flushPendingEdits();
-        await api('/api/format', {body: {cell: id}});
+        await formatCells(id);
       }),
       onJump: (kind, value) => {
         if (kind === 'move') {
@@ -1139,19 +1564,26 @@ function ensureEditor(id, element, record, protectedLocal) {
         }
       },
       onHover: (view, pos) => lspHover(id, view, pos),
+      onSignature: (view, pos, trigger) => lspSignature(id, view, pos, trigger),
     });
     editor._alderLanguage = language;
     editor._alderKeymap = keymapName;
     editorHandles.set(id, editor);
   }
-  editor.setCompletionSource(language === 'r'
-    ? (context) => lspCompletionSource(id, context) : null);
+  if (!editor._alderCompletionConfigured) {
+    editor.setCompletionSource(language === 'r'
+      ? (context) => lspCompletionSource(id, context) : null);
+    editor._alderCompletionConfigured = true;
+  }
+  editor.setCompletionsEnabled?.(preferences.completions !== false);
+  editor.setSignatureHelpEnabled?.(preferences.signature_help !== false);
   editor.setReactiveRefs(reactiveReferenceRanges(id, editor.getDoc()));
   const state = renderingState || lastState;
-  editor.setDiagnostics(editorDiagnostics(
-    state?.cells?.find((cell) => cell.id === id) || {diagnostics: []},
-    editor,
-  ));
+  const stateCell = state?.cells?.find((cell) => cell.id === id) || {};
+  editor.setDiagnostics(editorDiagnostics({
+    ...stateCell,
+    diagnostics: visibleDiagnostics(stateCell, record),
+  }, editor));
   if (!sourceFocused(id)) {
     const desired = bodyText(record.desiredBody);
     const server = bodyText(record.serverBody);
@@ -1187,6 +1619,7 @@ function editError(message, code = 'internal_error') {
 function drainEdit(id) {
   const record = cellRecords.get(id);
   if (!record) return Promise.resolve();
+  if (record.formatBarrier) return record.formatBarrier.then(() => drainEdit(id));
   if (record.drainPromise) return record.drainPromise;
   if (record.error && record.failedGeneration === record.generation) {
     return Promise.reject(editError(record.error, record.conflict ? 'source_conflict' : 'internal_error'));
@@ -1199,13 +1632,7 @@ function drainEdit(id) {
         const body = record.desiredBody.slice();
         const type = record.desiredType;
         const expectedRevision = record.ackServerRevision;
-        const sql = sqlSpecFromRecord(record);
-        const request = type === 'sql'
-          ? {
-            op: 'sql', cell: id, expected_revision: expectedRevision,
-            query: sql.query, conn: sql.conn || null, into: sql.into,
-          }
-          : { op: 'edit', id, expected_revision: expectedRevision, body, type };
+        const request = {op: 'edit', id, expected_revision: expectedRevision, body, type};
         try {
           const response = await api('/api/cell', { body: request });
           const revision = Number.isInteger(response.revision)
@@ -1218,7 +1645,6 @@ function drainEdit(id) {
           record.conflict = false;
           record.serverBody = body.slice();
           record.serverType = type;
-          record.serverSql = type === 'sql' ? { ...sql } : null;
           scheduleAutosave();
         } catch (error) {
           record.failedGeneration = generation;
@@ -1239,41 +1665,32 @@ function drainEdit(id) {
   record.drainPromise = promise;
   return promise;
 }
+function clearSourceDiagnostics(id) {
+  const diagnosticsArea = cellEls.get(id)?.querySelector('[data-role="diagnostics"]');
+  if (diagnosticsArea) renderDiagnostics(diagnosticsArea, []);
+  window.setTimeout(() => sourceEditor(id)?.setDiagnostics([]), 0);
+  // Header notes describe the whole document, so any pending source edit
+  // invalidates them immediately, just like that cell's inline notes.
+  if (lastState) renderEditorDiagnostics(lastState);
+}
+
 function startEdit(id, body, type) {
   const record = cellRecords.get(id);
   if (!record) return null;
   record.desiredBody = Array.isArray(body) ? body.slice() : [];
   record.desiredType = cellType(type);
-  record.desiredSql = record.desiredType === 'sql'
-    ? parseSqlBody(record.desiredBody) : null;
+  record.diagnosticsVisibleAt = Date.now() + 1000;
   record.generation += 1;
+  clearSourceDiagnostics(id);
+  clearTimeout(record.diagnosticsTimer);
+  record.diagnosticsTimer = window.setTimeout(() => {
+    record.diagnosticsTimer = null;
+    if (lastState && Date.now() >= record.diagnosticsVisibleAt) render(lastState);
+  }, 1000);
   clearTimeout(record.timer);
   record.timer = null;
   // An unresolved conflict/error is intentionally not silently rebased.  The
   // user can keep typing, but must choose Retry or Use server version.
-  if (!record.error) {
-    record.timer = window.setTimeout(() => {
-      record.timer = null;
-      drainEdit(id).catch((error) => showActionError(error.message));
-    }, 500);
-  }
-  return record;
-}
-
-function startSqlEdit(id, spec) {
-  const record = cellRecords.get(id);
-  if (!record) return null;
-  const sql = {
-    query: String(spec?.query ?? ''),
-    conn: spec?.conn ? String(spec.conn).trim() : null,
-    into: String(spec?.into || 'result').trim() || 'result',
-  };
-  record.desiredSql = sql;
-  record.desiredBody = sqlBody(sql);
-  record.desiredType = 'sql';
-  record.generation += 1;
-  clearTimeout(record.timer);
-  record.timer = null;
   if (!record.error) {
     record.timer = window.setTimeout(() => {
       record.timer = null;
@@ -1308,6 +1725,170 @@ async function flushPendingEdits() {
   }
 }
 
+// A formatter owns a source transformation, not later local keystrokes. Its
+// revision receipt is distinct from an arbitrary state poll or another tab.
+let formatQueue = Promise.resolve();
+
+function formattedChanges(before, after) {
+  if (before.replace(/\s/g, '') !== after.replace(/\s/g, '')) {
+    const changes = [];
+    let from = 0;
+    let nextFrom = 0;
+    while (from < before.length || nextFrom < after.length) {
+      if (from < before.length && before[from] === after[nextFrom]) {
+        from += 1;
+        nextFrom += 1;
+        continue;
+      }
+      // Formatter token edits (quotes, assignment operators) are local. Keep
+      // unchanged characters as anchors without quadratic whole-source diffing.
+      let anchor = null;
+      for (let distance = 1; distance <= 64 && !anchor; distance += 1) {
+        for (let oldSkip = 0; oldSkip <= distance; oldSkip += 1) {
+          const newSkip = distance - oldSkip;
+          const character = before[from + oldSkip];
+          if (character !== undefined && !/\s/.test(character) &&
+              character === after[nextFrom + newSkip]) {
+            anchor = {oldSkip, newSkip};
+            break;
+          }
+        }
+      }
+      if (anchor) {
+        changes.push({from, to: from + anchor.oldSkip,
+          insert: after.slice(nextFrom, nextFrom + anchor.newSkip)});
+        from += anchor.oldSkip;
+        nextFrom += anchor.newSkip;
+      } else {
+        let end = before.length;
+        let nextEnd = after.length;
+        while (end > from && nextEnd > nextFrom && before[end - 1] === after[nextEnd - 1]) {
+          end -= 1;
+          nextEnd -= 1;
+        }
+        changes.push({from, to: end, insert: after.slice(nextFrom, nextEnd)});
+        break;
+      }
+    }
+    return changes;
+  }
+  const changes = [];
+  let oldPos = 0;
+  let newPos = 0;
+  while (oldPos < before.length || newPos < after.length) {
+    const from = oldPos;
+    const nextFrom = newPos;
+    while (oldPos < before.length && /\s/.test(before[oldPos])) oldPos += 1;
+    while (newPos < after.length && /\s/.test(after[newPos])) newPos += 1;
+    const insert = after.slice(nextFrom, newPos);
+    if (before.slice(from, oldPos) !== insert) changes.push({from, to: oldPos, insert});
+    if (oldPos < before.length) oldPos += 1;
+    if (newPos < after.length) newPos += 1;
+  }
+  return changes;
+}
+
+function adoptFormattedEditor(id, text) {
+  const editor = sourceEditor(id);
+  if (!editor || editor.getDoc() === text) return;
+  const changes = editor.view.state.changes(formattedChanges(editor.getDoc(), text));
+  const original = editor.view.state.selection;
+  const mapped = original.map(changes);
+  const Selection = original.constructor;
+  const selection = Selection.create(mapped.ranges.map((range, index) => {
+    const forward = original.ranges[index].anchor <= original.ranges[index].head;
+    return Selection.range(forward ? Math.min(range.anchor, range.head) : Math.max(range.anchor, range.head),
+      forward ? Math.max(range.anchor, range.head) : Math.min(range.anchor, range.head));
+  }), original.mainIndex);
+  editor.setDoc(text, {silent: true});
+  editor.view.dispatch({selection});
+  clearSourceDiagnostics(id);
+}
+
+function formatCells(cell = null) {
+  const operation = formatQueue.then(async () => {
+    // Typing may continue during a format request. Drain and format that newer
+    // generation in turn; Save therefore persists the latest formatted source.
+    while (true) {
+      await flushPendingEdits();
+      const ids = cell === null ? cellOrder() : [cell];
+      const targets = new Map(ids.map((id) => {
+        const record = cellRecords.get(id);
+        if (!record || record.tombstone) throw editError('cell is no longer available', 'not_found');
+        return [id, {record, generation: record.generation, revision: record.ackServerRevision}];
+      }));
+      let release;
+      const barrier = new Promise((resolve) => { release = resolve; });
+      targets.forEach(({record}) => { record.formatBarrier = barrier; });
+      let newerTyping = false;
+      let acknowledged = false;
+      try {
+        const expected_revisions = Object.fromEntries([...targets].map(([id, target]) => [id, target.revision]));
+        const response = await api('/api/format', {body: {
+          ...(cell === null ? {} : {cell}), expected_revisions,
+        }});
+        const rows = response.cells;
+        if (!Array.isArray(rows) || rows.length !== targets.size ||
+            new Set(rows.map((row) => row.id)).size !== targets.size ||
+            rows.some((row) => !targets.has(row.id) || !Array.isArray(row.body) ||
+              row.body.some((line) => typeof line !== 'string') ||
+              !['code', 'markdown'].includes(row.type) ||
+              row.previous_revision !== targets.get(row.id).revision ||
+              !Number.isInteger(row.revision) || row.revision < row.previous_revision)) {
+          throw editError('formatter returned an invalid source acknowledgement', 'invalid_response');
+        }
+        acknowledged = true;
+        let conflict = null;
+        for (const row of rows) {
+          const {record, generation} = targets.get(row.id);
+          if (cellRecords.get(row.id) !== record || record.tombstone) continue;
+          record.ackServerRevision = row.revision;
+          record.ackGeneration = generation;
+          if (record.latestServerRevision <= row.revision) {
+            record.latestServerRevision = row.revision;
+            record.serverBody = row.body.slice();
+            record.serverType = row.type;
+          }
+          if (record.generation === generation) {
+            record.desiredBody = row.body.slice();
+            record.desiredType = row.type;
+            adoptFormattedEditor(row.id, bodyText(row.body));
+          } else {
+            newerTyping = true;
+          }
+          if (record.latestServerRevision > row.revision) {
+            record.error = `cell ${row.id} changed on the server`;
+            record.conflict = true;
+            record.failedGeneration = record.generation;
+            conflict = record.error;
+          }
+        }
+        if (conflict) throw editError(conflict, 'source_conflict');
+      } catch (error) {
+        if (error.code === 'source_conflict' && !acknowledged) {
+          await refresh();
+          targets.forEach(({record, revision}) => {
+            if (record.latestServerRevision !== revision) {
+              record.error = error.message;
+              record.conflict = true;
+              record.failedGeneration = record.generation;
+            }
+          });
+        }
+        throw error;
+      } finally {
+        targets.forEach(({record}) => {
+          if (record.formatBarrier === barrier) record.formatBarrier = null;
+        });
+        release();
+      }
+      if (!newerTyping) return;
+    }
+  });
+  formatQueue = operation.catch(() => {});
+  return operation;
+}
+
 function clearAutosaveTimer() {
   if (autosaveTimer !== null) {
     clearTimeout(autosaveTimer);
@@ -1319,17 +1900,35 @@ function autosaveEnabled() {
   return lastState?.config?.autosave === true && !isViewApp();
 }
 
+let saveQueue = Promise.resolve();
+
+function saveNotebook() {
+  clearAutosaveTimer();
+  const operation = saveQueue.then(async () => {
+    await flushPendingEdits();
+    if (lastState?.config?.format?.on_save === true) {
+      await formatCells();
+    }
+    await api('/api/save', {method: 'POST'});
+  });
+  saveQueue = operation.catch(() => {});
+  return operation;
+}
+
+function requestSave() {
+  if (shuttingDown) return;
+  // A keystroke can precede the poll that enables the toolbar button. Saving
+  // directly still drains that local edit and shares the normal save queue.
+  return action(saveNotebook);
+}
+
 function scheduleAutosave() {
   clearAutosaveTimer();
   if (!autosaveEnabled()) return;
   autosaveTimer = window.setTimeout(async () => {
     autosaveTimer = null;
     try {
-      await flushPendingEdits();
-      if (lastState?.config?.format?.on_save === true) {
-        await api('/api/format', {body: {}});
-      }
-      await api('/api/save', {method: 'POST'});
+      await saveNotebook();
     } catch (error) {
       showActionError(error.message);
     }
@@ -1379,65 +1978,85 @@ function waitForWidgetCompletion(key, token) {
   });
 }
 
+function visitOutputWidgets(output, visit) {
+  if (!output || typeof output !== 'object') return;
+  if (output.kind === 'widget') {
+    visit(output);
+    return;
+  }
+  if (output.kind === 'layout') {
+    for (const child of output.children || []) visitOutputWidgets(child, visit);
+  } else if (output.kind === 'lazy' && output.child) {
+    visitOutputWidgets(output.child, visit);
+  }
+}
+
 function resolveWidgetWaiters(st) {
   const seen = new Set();
   for (const cell of st.cells || []) {
     const outputs = Array.isArray(cell.outputs) ? cell.outputs : [];
-    const output = outputs.length ? outputs[outputs.length - 1] : null;
-    if (!output || output.kind !== 'widget') continue;
-    const visit = (spec, path) => {
-      if (!spec || !spec.kind) return;
-      const key = widgetKey(output.name, spec.kind, path);
-      const operationKey = widgetOpKey(output.name, path);
-      const operation = path.length
-        ? output.operations?.[operationKey]
-        : (output.operation || output.operations?.[operationKey]);
-      const token = operation?.token ?? output.commit_token;
-      const status = operation ? (
-        operation.status === 'error' ? 'error' :
-        operation.status === 'done' ? 'done' : null
-      ) : (output.commit_token ? 'done' : null);
-      const error = operation?.error?.message || operation?.error || null;
-      seen.add(key);
-      lastWidgetOps.set(key, {
-        token: token || null, pendingValue: pendingMarker, source: widgetSource(),
-        status, error,
-      });
-      if (token && status) {
-        const waiters = widgetWaiters.get(key);
-        if (waiters) {
-          const remaining = [];
-          for (const waiter of waiters) {
-            if (status !== 'done' && status !== 'error') {
-              remaining.push(waiter);
-              continue;
+    for (const output of outputs) visitOutputWidgets(output, (widget) => {
+      const visitSpec = (spec, path) => {
+        if (!spec || !spec.kind) return;
+        const key = widgetKey(widget.name, spec.kind, path);
+        const operationKey = widgetOpKey(widget.name, path);
+        const operation = path.length
+          ? widget.operations?.[operationKey]
+          : (widget.operation || widget.operations?.[operationKey]);
+        const token = operation?.token ?? widget.commit_token;
+        const status = operation ? (
+          ['error', 'cancelled'].includes(operation.status) ? 'error' :
+          operation.status === 'done' ? 'done' : null
+        ) : (widget.commit_token ? 'done' : null);
+        const error = operation?.error?.message || operation?.error || null;
+        seen.add(key);
+        lastWidgetOps.set(key, {
+          token: token || null, pendingValue: pendingMarker, source: widgetSource(),
+          status, error,
+        });
+        if (token && status) {
+          const waiters = widgetWaiters.get(key);
+          if (waiters) {
+            const remaining = [];
+            for (const waiter of waiters) {
+              const exact = waiter.token === token;
+              const newer = typeof waiter.token === 'number' && typeof token === 'number'
+                ? token > waiter.token : null;
+              if (!exact && newer !== true) {
+                remaining.push(waiter);
+                continue;
+              }
+              if (status === 'error') {
+                waiter.reject(editError(
+                  error || 'Widget update failed', 'widget_update_failed',
+                ));
+              } else {
+                waiter.resolve();
+              }
             }
-            const exact = waiter.token === token;
-            const newer = typeof waiter.token === 'number' && typeof token === 'number'
-              ? token > waiter.token : null;
-            if (!exact && newer !== true) {
-              remaining.push(waiter);
-              continue;
-            }
-            if (status === 'error') {
-              waiter.reject(editError(error || 'Widget update failed', 'internal_error'));
-            } else {
-              waiter.resolve();
-            }
+            if (remaining.length) widgetWaiters.set(key, remaining);
+            else widgetWaiters.delete(key);
           }
-          if (remaining.length) widgetWaiters.set(key, remaining);
-          else widgetWaiters.delete(key);
         }
-      }
-      if (spec.kind === 'array' || spec.kind === 'dictionary') {
-        for (const child of spec.children || []) {
-          visit(child, [...path, String(child.name || '')]);
+        if (spec.kind === 'array' || spec.kind === 'dictionary') {
+          for (const child of spec.children || []) {
+            visitSpec(child, [...path, String(child.name || '')]);
+          }
+        } else if (spec.kind === 'form') {
+          visitSpec(spec.child, path);
         }
-      } else if (spec.kind === 'form') {
-        visit(spec.child, path);
-      }
-    };
-    visit(output.spec, []);
+      };
+      visitSpec(widget.spec, []);
+    });
+  }
+  for (const [key, waiters] of widgetWaiters) {
+    if (seen.has(key) || !pendingWidgetOps.has(key)) continue;
+    for (const waiter of waiters) {
+      waiter.reject(editError(
+        'Widget is no longer current', 'widget_not_current',
+      ));
+    }
+    widgetWaiters.delete(key);
   }
   for (const key of [...lastWidgetOps.keys()]) {
     if (!seen.has(key) && !pendingWidgetOps.has(key)) lastWidgetOps.delete(key);
@@ -1481,6 +2100,10 @@ function commitWidgetUpdate(name, path, kind, update, source, endpoint = '/api/w
       }
     } finally {
       if (pendingWidgetOps.get(key) === operation) pendingWidgetOps.delete(key);
+      // The terminal state can render while this promise is still registered
+      // as pending. Reconcile once more after removal so one-shot and failed
+      // controls unlock even when no newer server version is needed.
+      if (lastState) render(lastState);
     }
   })();
   pendingWidgetOps.set(key, operation);
@@ -1488,9 +2111,39 @@ function commitWidgetUpdate(name, path, kind, update, source, endpoint = '/api/w
   return operation.promise;
 }
 
+async function flushWidgetSubtree(name, path) {
+  while (true) {
+    const operations = [...pendingWidgetOps.values()].filter((operation) =>
+      operation.name === name && path.every((part, index) =>
+        operation.path[index] === part));
+    if (!operations.length) return;
+    await Promise.all(operations.map((operation) => operation.promise));
+  }
+}
+
+function submitWidgetForm(name, path, source) {
+  const key = widgetKey(name, 'form', path);
+  const current = pendingFormSubmits.get(key);
+  if (current) return current;
+  let request;
+  request = (async () => {
+    await flushWidgetSubtree(name, path);
+    await commitWidgetUpdate(name, path, 'form', { submit: true }, source);
+  })().finally(() => {
+    if (pendingFormSubmits.get(key) === request) pendingFormSubmits.delete(key);
+    if (lastState) render(lastState);
+  });
+  pendingFormSubmits.set(key, request);
+  request.catch(() => {});
+  return request;
+}
+
 async function flushWidgetUpdates() {
-  while (pendingWidgetOps.size) {
-    const promises = [...pendingWidgetOps.values()].map((operation) => operation.promise);
+  while (pendingWidgetOps.size || pendingFormSubmits.size) {
+    const promises = [
+      ...[...pendingWidgetOps.values()].map((operation) => operation.promise),
+      ...pendingFormSubmits.values(),
+    ];
     if (!promises.length) break;
     await Promise.all(promises);
   }
@@ -1693,6 +2346,15 @@ function createWidgetNode(widget, spec, path = []) {
   const label = makeWidgetLabel(spec, control);
   if (label) node.appendChild(label);
   node.appendChild(control);
+  if (kind === 'datetime') {
+    const timezone = document.createElement('span');
+    timezone.className = 'widget-timezone';
+    timezone.id = `${control.id}-timezone`;
+    timezone.textContent = 'UTC';
+    control.setAttribute('aria-describedby', timezone.id);
+    control.title = 'UTC date and time';
+    node.appendChild(timezone);
+  }
   if (kind === 'slider' || kind === 'number') {
     const value = document.createElement('span');
     value.className = 'widget-value';
@@ -1706,6 +2368,19 @@ function widgetControls(node, kind, path) {
     entry.dataset.kind === kind && JSON.stringify(widgetPath(entry)) === encodedPath);
 }
 
+function datetimeLocalFromWire(value) {
+  const text = String(value ?? '');
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(text)) return '';
+  return text.slice(0, -1);
+}
+
+function datetimeWireFromLocal(value) {
+  let text = String(value ?? '');
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(text)) text += ':00';
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/.test(text)) return null;
+  return `${text}Z`;
+}
+
 function patchWidgetNode(node, widget, spec, path = []) {
   const kind = spec?.kind;
   if (!node || node.dataset.kind !== kind) return;
@@ -1715,6 +2390,9 @@ function patchWidgetNode(node, widget, spec, path = []) {
   const current = widgetDoneState(widget);
   const available = workerAvailable(renderingState || lastState);
   node.dataset.current = current ? 'true' : 'false';
+  node.dataset.pending = pending ? 'true' : 'false';
+  if (pending) node.setAttribute('aria-busy', 'true');
+  else node.removeAttribute('aria-busy');
   if (kind === 'array' || kind === 'dictionary') {
     const expected = new Set();
     for (const child of spec.children || []) {
@@ -1749,9 +2427,15 @@ function patchWidgetNode(node, widget, spec, path = []) {
     }
     patchWidgetNode(childNode, widget, child, path);
     if (submit) {
+      const submitting = pendingFormSubmits.has(widgetKey(widget.name, kind, path));
       submit.disabled = !available || !current || !spec.dirty ||
-        pendingWidgetOps.has(widgetKey(widget.name, kind, path));
+        pendingWidgetOps.has(widgetKey(widget.name, kind, path)) || submitting;
       submit.textContent = spec.submit_label || 'Submit';
+      if (submitting) {
+        for (const control of childNode.querySelectorAll('[data-role="widget"]')) {
+          control.disabled = true;
+        }
+      }
     }
     return;
   }
@@ -1764,8 +2448,13 @@ function patchWidgetNode(node, widget, spec, path = []) {
   }
   const controls = widgetControls(node, kind, path);
   const control = controls[0];
+  const lockWhilePending = ['run_button', 'button', 'refresh', 'file'].includes(kind);
   for (const candidate of controls) {
-    candidate.disabled = !available || !current || pending;
+    // Continuous controls remain operable while a request is in flight. The
+    // coalescer retains their newest value; disabling a focused native input
+    // would blur it and discard a follow-up keyboard event. One-shot controls
+    // stay locked so a click cannot accidentally be applied twice.
+    candidate.disabled = !available || !current || (pending && lockWhilePending);
     if (spec.value !== undefined && !Array.isArray(spec.value)) {
       candidate.dataset.value = String(spec.value);
     }
@@ -1783,26 +2472,51 @@ function patchWidgetNode(node, widget, spec, path = []) {
     controls.forEach((entry) => { entry.checked = Number(entry.value) === index; });
   } else if (kind === 'checkbox' || kind === 'switch') {
     control.checked = Boolean(spec.value);
+  } else if (kind === 'datetime') {
+    control.value = datetimeLocalFromWire(spec.value);
+    control.step = '1';
+    if (spec.min != null) control.min = datetimeLocalFromWire(spec.min);
+    else control.removeAttribute('min');
+    if (spec.max != null) control.max = datetimeLocalFromWire(spec.max);
+    else control.removeAttribute('max');
+  } else if (kind === 'date') {
+    control.value = String(spec.value ?? '');
+    if (spec.min != null) control.min = String(spec.min);
+    else control.removeAttribute('min');
+    if (spec.max != null) control.max = String(spec.max);
+    else control.removeAttribute('max');
   } else if (kind === 'date_range' || kind === 'range_slider') {
     const value = Array.isArray(spec.value) ? spec.value : ['', ''];
     controls.forEach((entry, index) => {
-      entry.value = String(value[index] ?? '');
       if (spec.min != null) entry.min = String(spec.min);
+      else entry.removeAttribute('min');
       if (spec.max != null) entry.max = String(spec.max);
+      else entry.removeAttribute('max');
       if (spec.step != null) entry.step = String(spec.step);
+      else entry.removeAttribute('step');
+      // Native ranges clamp immediately against their current constraints.
+      // Apply the declared bounds before the value so e.g. 103 in 100..110
+      // cannot be silently clamped against HTML's default 0..100 range.
+      entry.value = String(value[index] ?? '');
     });
   } else if (kind === 'file') {
     // Browsers do not allow restoring file input values.
+  } else if (kind === 'slider' || kind === 'number') {
+    if (spec.min != null) control.min = String(spec.min);
+    else control.removeAttribute('min');
+    if (spec.max != null) control.max = String(spec.max);
+    else control.removeAttribute('max');
+    if (spec.step != null) control.step = String(spec.step);
+    else control.removeAttribute('step');
+    control.value = Array.isArray(spec.value)
+      ? String(spec.value[0] ?? '') : String(spec.value ?? '');
   } else if (spec.value !== undefined) {
     control.value = Array.isArray(spec.value)
       ? String(spec.value[0] ?? '') : String(spec.value);
   }
   if (kind === 'slider' || kind === 'number') {
-    if (spec.min != null) control.min = String(spec.min);
-    if (spec.max != null) control.max = String(spec.max);
-    if (spec.step != null) control.step = String(spec.step);
     const value = node.querySelector('.widget-value');
-    if (value) value.textContent = String(spec.value ?? '');
+    if (value) value.textContent = String(control.value ?? spec.value ?? '');
   }
 }
 
@@ -2129,26 +2843,68 @@ function renderOutputRecord(container, output) {
     };
     if (layout === 'tabs' || layout === 'accordion') {
       const titles = Array.isArray(output.attrs?.titles) ? output.attrs.titles : [];
+      const layoutId = `alder-output-${layout}-${++outputLayoutSequence}`;
       const controls = document.createElement('div');
       controls.className = layout === 'tabs' ? 'out-tabs' : 'out-accordion';
       const slots = children.map(renderChild);
+      if (layout === 'tabs') {
+        controls.setAttribute('role', 'tablist');
+        controls.setAttribute('aria-label', 'Output tabs');
+      }
+      const buttons = [];
       slots.forEach((slot, index) => {
+        const controlId = `${layoutId}-control-${index}`;
+        const panelId = `${layoutId}-panel-${index}`;
         const button = document.createElement('button');
         button.type = 'button';
         button.className = layout === 'tabs' ? 'out-tab-btn' : 'out-accordion-btn';
+        button.id = controlId;
         button.textContent = String(titles[index] || `Item ${index + 1}`);
-        button.setAttribute('aria-controls', `${layout}-${index}`);
+        button.setAttribute('aria-controls', panelId);
+        slot.id = panelId;
+        slot.setAttribute('aria-labelledby', controlId);
+        if (layout === 'tabs') {
+          button.setAttribute('role', 'tab');
+          button.setAttribute('aria-selected', index === 0 ? 'true' : 'false');
+          button.tabIndex = index === 0 ? 0 : -1;
+          slot.setAttribute('role', 'tabpanel');
+        } else {
+          button.setAttribute('aria-expanded', 'false');
+          slot.setAttribute('role', 'region');
+        }
         button.addEventListener('click', () => {
           slots.forEach((other, otherIndex) => {
             other.hidden = layout === 'tabs'
               ? otherIndex !== index : (otherIndex !== index || !other.hidden);
+            if (layout === 'tabs') {
+              buttons[otherIndex].setAttribute(
+                'aria-selected', otherIndex === index ? 'true' : 'false');
+              buttons[otherIndex].tabIndex = otherIndex === index ? 0 : -1;
+            } else {
+              buttons[otherIndex].setAttribute(
+                'aria-expanded', other.hidden ? 'false' : 'true');
+            }
           });
         });
+        if (layout === 'tabs') {
+          button.addEventListener('keydown', (event) => {
+            const last = buttons.length - 1;
+            const target = event.key === 'Home' ? 0 :
+              event.key === 'End' ? last :
+                event.key === 'ArrowRight' ? (index + 1) % buttons.length :
+                  event.key === 'ArrowLeft' ?
+                    (index + last) % buttons.length : null;
+            if (target === null) return;
+            event.preventDefault();
+            buttons[target].click();
+            buttons[target].focus();
+          });
+        }
+        buttons.push(button);
         controls.appendChild(button);
       });
       wrap.prepend(controls);
       slots.forEach((slot, index) => {
-        slot.id = `${layout}-${index}`;
         slot.hidden = layout === 'tabs' ? index !== 0 : true;
       });
     } else {
@@ -2198,7 +2954,65 @@ function renderOutputRecord(container, output) {
   }
 }
 
-function renderLogs(area, logs) {
+const MUTABLE_WIDGET_SPEC_FIELDS = new Set([
+  'value', 'index', 'indices', 'selected', 'page', 'ops', 'paused', 'dirty',
+]);
+
+function widgetSpecStructure(spec) {
+  if (!spec || typeof spec !== 'object') return spec;
+  const result = {};
+  for (const [field, value] of Object.entries(spec)) {
+    if (MUTABLE_WIDGET_SPEC_FIELDS.has(field)) continue;
+    if (field === 'children' && Array.isArray(value)) {
+      result[field] = value.map(widgetSpecStructure);
+    } else if (field === 'child') {
+      result[field] = widgetSpecStructure(value);
+    } else {
+      result[field] = value;
+    }
+  }
+  return result;
+}
+
+function outputWidgetStructure(output) {
+  if (!output || typeof output !== 'object') return output;
+  if (Array.isArray(output)) return output.map(outputWidgetStructure);
+  const result = {};
+  for (const [field, value] of Object.entries(output)) {
+    if (output.kind === 'widget' &&
+        ['commit_token', 'operation', 'operations'].includes(field)) continue;
+    if (output.kind === 'widget' && field === 'spec') {
+      result[field] = widgetSpecStructure(value);
+    } else if (output.kind === 'layout' && field === 'children') {
+      result[field] = (value || []).map(outputWidgetStructure);
+    } else if (output.kind === 'lazy' && field === 'child') {
+      result[field] = outputWidgetStructure(value);
+    } else {
+      result[field] = value;
+    }
+  }
+  return result;
+}
+
+function patchOutputWidgetsInPlace(container, output) {
+  const widgets = [];
+  visitOutputWidgets(output, (widget) => widgets.push(widget));
+  if (!widgets.length) return false;
+  const rows = [...container.querySelectorAll('[data-widget-key]')];
+  const used = new Set();
+  for (const widget of widgets) {
+    const kind = widget.spec?.kind || '';
+    const key = widgetNodeKey(widget, kind, []);
+    const row = rows.find((candidate) =>
+      !used.has(candidate) && candidate.dataset.widgetKey === key);
+    if (!row) return false;
+    used.add(row);
+    patchWidgetNode(row, widget, widget.spec || {}, []);
+  }
+  return true;
+}
+
+function renderLogs(area, logs, error = null) {
   area.replaceChildren();
   const values = Array.isArray(logs) ? logs : [];
   values.forEach((line) => {
@@ -2207,29 +3021,96 @@ function renderLogs(area, logs) {
     item.textContent = String(line ?? '');
     area.appendChild(item);
   });
-  area.hidden = values.length === 0 && !isViewApp();
+  const trace = Array.isArray(error?.trace) ? error.trace : [];
+  const hasDetails = Boolean(error?.call || trace.length || error?.class?.length);
+  if (hasDetails) {
+    const details = document.createElement('details');
+    details.className = 'error-details';
+    const summary = document.createElement('summary');
+    summary.textContent = 'Call and traceback';
+    const body = document.createElement('pre');
+    body.className = 'error-trace';
+    const classes = Array.isArray(error?.class) ? error.class.join(', ') :
+      String(error?.class || '');
+    body.textContent = [
+      classes ? `Condition: ${classes}` : '',
+      error?.call ? `Call: ${error.call}` : '',
+      trace.length ? `Traceback:\n${trace.map((line, index) =>
+        `${index + 1}. ${line}`).join('\n')}` : '',
+    ].filter(Boolean).join('\n');
+    details.append(summary, body);
+    area.appendChild(details);
+  }
+  area.hidden = values.length === 0 && !hasDetails && !isViewApp();
 }
 
 function renderOutputs(container, outputs, progress = null) {
-  container.replaceChildren();
   container.classList.add('out-stack');
   const values = Array.isArray(outputs) ? outputs : [];
+  const retained = new Set();
+  const updateSlot = (key, output, index = null, progressSlot = false) => {
+    let slot = [...container.children].find((node) =>
+      node.classList?.contains('out-record') && node.dataset.recordKey === key);
+    if (!slot) {
+      slot = document.createElement('div');
+      slot.className = progressSlot ? 'out-record out-progress' : 'out-record';
+      slot.dataset.recordKey = key;
+    }
+    if (index !== null) slot.dataset.index = String(index);
+    else delete slot.dataset.index;
+    slot.classList.toggle('out-progress', progressSlot);
+
+    const kind = String(output?.kind || '');
+    const widgets = [];
+    visitOutputWidgets(output, (widget) => widgets.push(widget));
+    const signature = JSON.stringify(output);
+    if (widgets.length) {
+      const structure = JSON.stringify(outputWidgetStructure(output));
+      const canPatch = slot.dataset.outputKind === kind &&
+        outputStructureSignatures.get(slot) === structure &&
+        patchOutputWidgetsInPlace(slot, output);
+      // Preserve nested layout/tab/lazy DOM only while every non-mutable
+      // detail is identical. Source-driven label, bounds, choice, layout, or
+      // non-widget changes rebuild the record instead of leaving stale UI.
+      if (!canPatch) {
+        slot.replaceChildren();
+        renderOutputRecord(slot, output);
+      }
+      outputRenderSignatures.set(slot, signature);
+      outputStructureSignatures.set(slot, structure);
+    } else {
+      if (slot.dataset.outputKind !== kind ||
+          outputRenderSignatures.get(slot) !== signature) {
+        slot.replaceChildren();
+        renderOutputRecord(slot, output);
+        outputRenderSignatures.set(slot, signature);
+      }
+      outputStructureSignatures.delete(slot);
+    }
+    slot.dataset.outputKind = kind;
+    retained.add(slot);
+    // Re-appending an already connected slot is still a DOM move. Chrome
+    // drops focus from native descendants during that move even when the slot
+    // was already last, so only attach newly created records here.
+    if (slot.parentElement !== container) container.appendChild(slot);
+  };
+
   values.forEach((output, index) => {
-    const slot = document.createElement('div');
-    slot.className = 'out-record';
-    slot.dataset.index = String(index);
-    renderOutputRecord(slot, output);
-    container.appendChild(slot);
+    updateSlot(`output-${index}`, output, index);
   });
   if (progress) {
-    const slot = document.createElement('div');
-    slot.className = 'out-record out-progress';
-    renderOutputRecord(slot, progress);
-    container.appendChild(slot);
+    updateSlot('progress', progress, null, true);
+  }
+  for (const slot of [...container.children]) {
+    if (slot.classList?.contains('out-record') && !retained.has(slot)) {
+      outputRenderSignatures.delete(slot);
+      outputStructureSignatures.delete(slot);
+      slot.remove();
+    }
   }
 }
 
-function renderDiagnostics(area, diagnostics) {
+function renderDiagnostics(area, diagnostics, showSeverity = false) {
   area.replaceChildren();
   const list = document.createElement('ul');
   list.setAttribute('role', 'status');
@@ -2237,13 +3118,33 @@ function renderDiagnostics(area, diagnostics) {
   const values = Array.isArray(diagnostics) ? diagnostics : [];
   values.forEach((diagnostic) => {
     const item = document.createElement('li');
-    const level = diagnostic.level === 'warning' ? 'warning' : 'error';
+    const level = ['error', 'warning', 'info'].includes(diagnostic.level)
+      ? diagnostic.level : 'error';
     item.className = `diagnostic-${level}`;
-    item.textContent = `${diagnostic.code || level}: ${diagnostic.message || ''}`;
+    const label = showSeverity ? `${level[0].toUpperCase()}${level.slice(1)}` : '';
+    const code = diagnostic.code || (showSeverity ? '' : level);
+    item.textContent = [label, code].filter(Boolean).join(' · ') +
+      `: ${diagnostic.message || ''}`;
     list.appendChild(item);
   });
   area.appendChild(list);
   area.hidden = values.length === 0;
+}
+
+function renderEditorDiagnostics(st) {
+  const cells = new Map((st.cells || []).map((cell) => [cell.id, cell]));
+  const sourceCurrent = [...cellRecords.entries()].every(([id, record]) =>
+    diagnosticSourceCurrent(cells.get(id), record));
+  const values = !isViewApp() && st.config?.editor?.live_diagnostics === true &&
+    sourceCurrent && Array.isArray(st.editor_diagnostics) ? st.editor_diagnostics : [];
+  const signature = JSON.stringify(values);
+  // Polling can deliver the same notes repeatedly. Keep the live region stable
+  // until its content changes so screen readers do not repeat announcements.
+  if (signature !== editorDiagnosticsSignature) {
+    renderDiagnostics(els.editorDiagnosticsList, values, true);
+    editorDiagnosticsSignature = signature;
+  }
+  els.editorDiagnostics.hidden = values.length === 0;
 }
 
 function cellHasLocalProtection(id) {
@@ -2251,13 +3152,9 @@ function cellHasLocalProtection(id) {
   if (!record) return false;
   const sourceFocusedCell = sourceFocused(id);
   const typeSelect = cellEls.get(id)?.querySelector('[data-role="type"]');
-  const sqlControl = cellEls.get(id)?.querySelector(
-    '[data-role="sql-query"], [data-role="sql-conn"], [data-role="sql-into"]',
-  );
   return Boolean(record.ackGeneration < record.generation || record.drainPromise ||
-    record.error || sourceFocusedCell ||
-    document.activeElement === typeSelect ||
-    (sqlControl && sqlControl.contains(document.activeElement)));
+    record.formatBarrier || record.error || sourceFocusedCell ||
+    document.activeElement === typeSelect);
 }
 
 function renderEditRecovery(el, record) {
@@ -2273,61 +3170,22 @@ function renderEditRecovery(el, record) {
   actions.appendChild(button);
 }
 
-function renderSqlEditor(area, record, protectedLocal) {
-  if (!area) return;
-  const source = area.querySelector('[data-role="source"]');
-  const isSql = record.desiredType === 'sql';
-  let panel = area.querySelector('[data-role="sql-editor"]');
-  if (!isSql) {
-    panel?.remove();
-    if (source) source.hidden = false;
-    return;
-  }
-  if (source) source.hidden = true;
-  if (!panel) {
-    panel = document.createElement('div');
-    panel.className = 'sql-editor';
-    panel.dataset.role = 'sql-editor';
-    const query = document.createElement('textarea');
-    query.dataset.role = 'sql-query';
-    query.spellcheck = false;
-    query.rows = 6;
-    query.setAttribute('aria-label', 'SQL query');
-    const fields = document.createElement('div');
-    fields.className = 'sql-fields';
-    const connLabel = document.createElement('label');
-    connLabel.textContent = 'Connection';
-    const conn = document.createElement('input');
-    conn.dataset.role = 'sql-conn';
-    conn.type = 'text';
-    conn.placeholder = 'optional connection name';
-    conn.setAttribute('aria-label', 'SQL connection');
-    connLabel.appendChild(conn);
-    const intoLabel = document.createElement('label');
-    intoLabel.textContent = 'Result name';
-    const into = document.createElement('input');
-    into.dataset.role = 'sql-into';
-    into.type = 'text';
-    into.setAttribute('aria-label', 'SQL result name');
-    intoLabel.appendChild(into);
-    fields.append(connLabel, intoLabel);
-    panel.append(query, fields);
-    area.appendChild(panel);
-  }
-  const spec = sqlSpecFromRecord(record);
-  const query = panel.querySelector('[data-role="sql-query"]');
-  const conn = panel.querySelector('[data-role="sql-conn"]');
-  const into = panel.querySelector('[data-role="sql-into"]');
-  if (!protectedLocal || document.activeElement !== query) query.value = spec.query;
-  if (!protectedLocal || document.activeElement !== conn) conn.value = spec.conn || '';
-  if (!protectedLocal || document.activeElement !== into) into.value = spec.into;
-}
-
 function updateCell(el, cell) {
   const record = ensureCellRecord(cell);
   el.dataset.id = cell.id;
-  el.dataset.cellName = cell.name || '';
+  el.dataset.cellName = cellName(cell);
   el.id = `cell-${safeDomPart(cell.id)}`;
+  const title = el.querySelector('[data-role="cell-title"]');
+  const displayLabel = cellDisplayLabel(cell);
+  if (title) {
+    title.id = `${el.id}-title`;
+    title.textContent = displayLabel;
+    title.title = `${displayLabel} — stable ID ${cell.id}`;
+    el.setAttribute('aria-labelledby', title.id);
+  } else {
+    el.removeAttribute('aria-labelledby');
+  }
+  el.dataset.cellIndex = String(cellPosition(cell.id) || '');
   el.dataset.tombstone = 'false';
   el.className = `cell ${cell.status || 'idle'}`;
   const badge = el.querySelector('[data-role="badge"]');
@@ -2351,12 +3209,10 @@ function updateCell(el, cell) {
   const sourceArea = el.querySelector('[data-role="source-area"]');
   if (sourceArea) {
     sourceArea.classList.toggle('md-area', visibleType === 'markdown');
-    sourceArea.classList.toggle('sql-area', visibleType === 'sql');
     sourceArea.classList.toggle('code-area', visibleType === 'code');
-    renderSqlEditor(sourceArea, record, protectedLocal);
   }
   let diagnosticsArea = el.querySelector('[data-role="diagnostics"]');
-  const diagnostics = Array.isArray(cell.diagnostics) ? cell.diagnostics : [];
+  const diagnostics = visibleDiagnostics(cell, record);
   if (isViewApp() && diagnostics.length === 0) {
     diagnosticsArea?.remove();
     diagnosticsArea = null;
@@ -2387,6 +3243,19 @@ function updateCell(el, cell) {
       el.insertBefore(outputArea, anchor || null);
     }
     renderOutputs(outputArea, outputs, progress);
+    const outputRetained = cell.status === 'running' && outputs.length > 0;
+    outputArea.classList.toggle('retained-output', outputRetained);
+    let retainedLabel = outputArea.querySelector(
+      ':scope > .retained-output-label');
+    if (outputRetained && !retainedLabel) {
+      retainedLabel = document.createElement('div');
+      retainedLabel.className = 'retained-output-label';
+      retainedLabel.setAttribute('role', 'status');
+      retainedLabel.textContent = 'Previous output — updating';
+      outputArea.prepend(retainedLabel);
+    } else if (!outputRetained) {
+      retainedLabel?.remove();
+    }
     outputArea.hidden = !outputs.length && !progress && !isViewApp();
   } else if (outputArea) {
     outputArea.remove();
@@ -2394,7 +3263,9 @@ function updateCell(el, cell) {
 
   let logArea = el.querySelector('[data-role="log"]');
   const logs = Array.isArray(cell.log) ? cell.log : [];
-  if (isViewApp() && logs.length === 0) {
+  const hasErrorDetails = Boolean(cell.error?.call || cell.error?.trace?.length ||
+    cell.error?.class?.length);
+  if (isViewApp() && logs.length === 0 && !hasErrorDetails) {
     logArea?.remove();
     logArea = null;
   } else if (!logArea) {
@@ -2403,7 +3274,7 @@ function updateCell(el, cell) {
     logArea.dataset.role = 'log';
     el.appendChild(logArea);
   }
-  if (logArea) renderLogs(logArea, logs);
+  if (logArea) renderLogs(logArea, logs, cell.error);
   const actions = el.querySelector('[data-role="cell-actions"]');
   if (actions && !actions.querySelector('[data-act="run"]') && !isViewApp()) {
     actions.replaceChildren();
@@ -2440,12 +3311,30 @@ function updateCell(el, cell) {
     disable.textContent = isDisabled ? 'Enable' : 'Disable';
     disable.title = isDisabled ? 'Enable this cell' : 'Disable this cell';
   }
-  const order = Array.from(cellRecords.keys());
+  const order = cellOrder();
   const position = order.indexOf(cell.id);
   const moveUp = actions?.querySelector('[data-act="move-up"]');
   const moveDown = actions?.querySelector('[data-act="move-down"]');
+  const reorderHelp = el.querySelector('[data-role="reorder-help"]');
+  if (reorderHelp) reorderHelp.id = `${el.id}-reorder-help`;
+  if (moveUp) {
+    moveUp.textContent = 'Up';
+    moveUp.setAttribute('aria-label', `Move ${displayLabel} up`);
+    if (reorderHelp) moveUp.setAttribute('aria-describedby', reorderHelp.id);
+  }
+  if (moveDown) {
+    moveDown.textContent = 'Down';
+    moveDown.setAttribute('aria-label', `Move ${displayLabel} down`);
+    if (reorderHelp) moveDown.setAttribute('aria-describedby', reorderHelp.id);
+  }
   if (moveUp) moveUp.disabled = position <= 0;
   if (moveDown) moveDown.disabled = position < 0 || position >= order.length - 1;
+  const dragHandle = el.querySelector('[data-role="drag-handle"]');
+  if (dragHandle) {
+    dragHandle.draggable = !actionInFlight;
+    dragHandle.tabIndex = -1;
+    dragHandle.classList.toggle('disabled', actionInFlight);
+  }
   renderEditRecovery(el, record);
   const actionButtons = el.querySelectorAll('[data-act]');
   actionButtons.forEach((button) => {
@@ -2522,8 +3411,7 @@ function createAddButton(type, after) {
   button.dataset.act = 'add';
   button.dataset.type = type;
   if (after !== null && after !== undefined) button.dataset.after = after;
-  button.textContent = type === 'markdown' ? '+ Add Markdown'
-    : type === 'sql' ? '+ Add SQL' : '+ Add code';
+  button.textContent = type === 'markdown' ? '+ Add Markdown' : '+ Add code';
   return button;
 }
 function ensureEmptyBar() {
@@ -2534,7 +3422,7 @@ function ensureEmptyBar() {
       emptyBar = document.createElement('div');
       emptyBar.className = 'empty-bar';
       emptyBar.append(createAddButton('code', null),
-        createAddButton('markdown', null), createAddButton('sql', null));
+        createAddButton('markdown', null));
     }
   }
   if (!isViewApp() && !emptyBar.isConnected) els.notebook.appendChild(emptyBar);
@@ -2613,6 +3501,11 @@ function renderControls(st) {
     els.runAll.disabled = actionInFlight || unavailable || busy;
   }
   if (els.stop) els.stop.disabled = actionInFlight || unavailable || !busy;
+  if (els.shutdown) els.shutdown.disabled = actionInFlight || shuttingDown;
+  if (els.restart) {
+    els.restart.hidden = !unavailable;
+    els.restart.disabled = actionInFlight || busy;
+  }
   if (els.save) els.save.disabled = actionInFlight || !st.changed;
   if (els.appMode) els.appMode.hidden = isViewApp();
   if (els.editMode) els.editMode.hidden = !isViewApp();
@@ -2624,15 +3517,80 @@ function renderControls(st) {
         button.disabled = actionInFlight;
       }
     });
+  }
 }
+
+function hasUnsavedWork() {
+  return Boolean(lastState?.changed) || [...cellRecords.values()].some((record) =>
+    record.ackGeneration < record.generation || record.error);
+}
+
+async function shutDownAlder() {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  renderControls(lastState || {runtime: {}, changed: false});
+  try {
+    // Commit any debounced editor change and refresh the authoritative dirty
+    // state before deciding whether confirmation is required. An edit can be
+    // acknowledged by the server just before the next background poll, when
+    // both the local generation counters and lastState would otherwise look
+    // clean and Shutdown could silently discard the change.
+    await flushPendingEdits();
+    await refresh();
+    if (hasUnsavedWork() && !window.confirm(
+      'This notebook has unsaved changes. Shut down Alder and discard them?',
+    )) {
+      shuttingDown = false;
+      if (lastState) renderControls(lastState);
+      return;
+    }
+    const token = lastState?.shutdown_token;
+    if (!token) {
+      throw new Error(
+        'Shutdown is unavailable because the server did not provide a token.',
+      );
+    }
+    await api('/api/shutdown', {
+      method: 'POST',
+      headers: {'X-Alder-Shutdown-Token': token},
+    });
+    pollAbort.abort();
+    suppressUnloadOnce = true;
+    actionError = null;
+    stateActionError = null;
+    editorHelpServiceError = null;
+    pollError = null;
+    document.body.classList.add('shutdown-complete');
+    if (els.status) {
+      els.status.textContent = 'Alder shut down. You can close this tab.';
+      els.status.className = 'shutdown-status';
+    }
+    document.querySelectorAll('button, select, input, textarea').forEach((control) => {
+      control.disabled = true;
+    });
+  } catch (error) {
+    shuttingDown = false;
+    showActionError(error.message);
+    if (lastState) renderControls(lastState);
+  }
 }
 function render(st) {
   if (!st || typeof st.version !== 'number' || st.version < lastRenderedVersion) return false;
+  // Optional developer observer; ordinary sessions allocate no timing records.
+  window.__alderObserveRender?.('begin', st.version);
   renderingState = st;
   applyConfig(st.config);
-  if (!actionError && st.last_action_error?.message) {
-    actionError = st.last_action_error.message;
-  }
+  // Server-side errors are authoritative state, not sticky client errors.
+  // Synchronizing this value on every accepted state means a later success
+  // clears an earlier evaluation/interrupt banner without hiding a local
+  // request or edit failure that still needs user action.
+  stateActionError = st.last_action_error?.message || null;
+  const serviceError = st.service_errors?.lsp;
+  const lastError = st.last_action_error;
+  const lastErrorIsLsp = lastError?.service === 'lsp' ||
+    ['lsp_unavailable', 'lsp_timeout'].includes(lastError?.code);
+  editorHelpServiceError = serviceError?.message ||
+    (lastErrorIsLsp ? lastError?.message : null) || null;
   document.body.classList.toggle('app-view', isViewApp());
   if (isViewApp()) {
     document.querySelectorAll('#topbar .editor-only').forEach((node) => node.remove());
@@ -2660,16 +3618,18 @@ function render(st) {
       const addArea = element?.querySelector('[data-role="cell-add"]');
       if (addArea) {
         addArea.replaceChildren(createAddButton('code', cell.id),
-          createAddButton('markdown', cell.id), createAddButton('sql', cell.id));
+          createAddButton('markdown', cell.id));
     }
   }
   }
   reconcileCellOrder(cells);
+  renderEditorDiagnostics(st);
   renderDataflow(st);
   renderStatus();
   lastState = st;
   lastRenderedVersion = st.version;
   renderingState = null;
+  window.__alderObserveRender?.('end', st.version);
   return true;
 }
 
@@ -2697,12 +3657,26 @@ async function action(task) {
   }
 }
 
+async function retryEditorHelp() {
+  if (editorHelpRestarting || shuttingDown) return;
+  editorHelpRestarting = true;
+  renderStatus();
+  try {
+    await action(() => api('/api/lsp', {
+      body: {method: 'alder/restart', params: {}},
+    }));
+  } finally {
+    editorHelpRestarting = false;
+    renderStatus();
+  }
+}
+
 async function addCell(type, after) {
   await flushPendingEdits();
-  const body = type === 'markdown' ? ['# ']
-    : type === 'sql' ? sqlBody({ query: 'SELECT 1', into: 'result' }) : [];
+  const normalized = type === 'markdown' ? 'markdown' : 'code';
+  const body = normalized === 'markdown' ? ['# '] : [];
   const response = await api('/api/cell', {
-    body: { op: 'add', after: after ?? null, body, type },
+    body: { op: 'add', after: after ?? null, body, type: normalized },
   });
   focusAfterCell = response.id || null;
   scheduleAutosave();
@@ -2718,8 +3692,21 @@ async function deleteCell(id) {
   scheduleAutosave();
 }
 
+async function moveCellAfter(id, after) {
+  const order = cellOrder();
+  const index = order.indexOf(id);
+  if (index < 0 || after === id) return;
+  const currentAfter = index > 0 ? order[index - 1] : null;
+  if ((after ?? null) === currentAfter) return;
+  await flushPendingEdits();
+  await api('/api/cell', {
+    body: {op: 'move', cell: id, after: after ?? null},
+  });
+  scheduleAutosave();
+}
+
 async function moveCell(id, direction) {
-  const order = Array.from(cellRecords.keys());
+  const order = cellOrder();
   const index = order.indexOf(id);
   if (index < 0) return;
   let after;
@@ -2730,11 +3717,26 @@ async function moveCell(id, direction) {
     if (index >= order.length - 1) return;
     after = order[index + 1];
   }
-  await flushPendingEdits();
-  await api('/api/cell', {
-    body: { op: 'move', cell: id, after },
-  });
-  scheduleAutosave();
+  await moveCellAfter(id, after);
+}
+
+function clearDropAffordances() {
+  for (const element of cellEls.values()) {
+    element.classList.remove('drop-before', 'drop-after', 'dragging');
+  }
+}
+
+function dragPlacement(target, clientY) {
+  const rect = target.getBoundingClientRect();
+  return clientY < rect.top + rect.height / 2 ? 'before' : 'after';
+}
+
+function dropPredecessor(dragged, target, placement) {
+  const remaining = cellOrder().filter((id) => id !== dragged);
+  const targetIndex = remaining.indexOf(target);
+  if (targetIndex < 0) return undefined;
+  const insertionIndex = placement === 'after' ? targetIndex + 1 : targetIndex;
+  return insertionIndex === 0 ? null : remaining[insertionIndex - 1];
 }
 
 function localSourceFor(id) {
@@ -2793,7 +3795,6 @@ function resolveSourceConflict(id) {
   record.timer = null;
   record.desiredBody = record.serverBody.slice();
   record.desiredType = record.serverType;
-  record.desiredSql = record.serverSql ? { ...record.serverSql } : null;
   record.ackGeneration = record.generation;
   record.ackServerRevision = record.latestServerRevision;
   record.failedGeneration = null;
@@ -2877,7 +3878,11 @@ function handleWidgetEvent(control, eventType) {
   if (eventType === 'click' && kind === 'form' &&
       control.dataset.formSubmit === 'true') {
     control.disabled = true;
-    send({ submit: true });
+    const form = control.closest('.widget-group[data-kind="form"]');
+    for (const child of form?.querySelectorAll('[data-role="widget"]') || []) {
+      child.disabled = true;
+    }
+    submitWidgetForm(name, path, source);
     return;
   }
   if (eventType === 'click' && (kind === 'button' || kind === 'refresh')) {
@@ -2925,8 +3930,10 @@ function handleWidgetEvent(control, eventType) {
   } else if (kind === 'text_input' || kind === 'text_area' ||
       kind === 'code_editor') {
     send({ value: control.value });
-  } else if (kind === 'date' || kind === 'datetime') {
+  } else if (kind === 'date') {
     send({ value: control.value });
+  } else if (kind === 'datetime') {
+    send({ value: datetimeWireFromLocal(control.value) ?? control.value });
   } else if (kind === 'date_range') {
     const controls = [...control.closest('.widget-container')?.querySelectorAll(
       '[data-role="widget"][data-kind="date_range"]') || []];
@@ -2938,25 +3945,7 @@ function handleWidgetEvent(control, eventType) {
   }
 }
 
-function sqlSpecFromElement(element) {
-  const record = cellRecords.get(element?.dataset.id);
-  const fallback = sqlSpecFromRecord(record);
-  return {
-    query: element?.querySelector('[data-role="sql-query"]')?.value ?? fallback.query,
-    conn: element?.querySelector('[data-role="sql-conn"]')?.value ?? fallback.conn,
-    into: element?.querySelector('[data-role="sql-into"]')?.value ?? fallback.into,
-  };
-}
-
 els.notebook.addEventListener('input', (event) => {
-  const sqlControl = event.target.closest(
-    '[data-role="sql-query"], [data-role="sql-conn"], [data-role="sql-into"]',
-  );
-  if (sqlControl) {
-    const element = sqlControl.closest('.cell');
-    if (element) startSqlEdit(element.dataset.id, sqlSpecFromElement(element));
-    return;
-  }
   const source = event.target.closest('[data-role="source"]');
   if (source) {
     // CodeMirror sends changes through its update listener. Its content
@@ -2980,17 +3969,7 @@ els.notebook.addEventListener('change', (event) => {
     const element = type.closest('.cell');
     if (element) {
       const id = element.dataset.id;
-      if (type.value === 'sql') {
-        const record = cellRecords.get(id);
-        const parsed = parseSqlBody(record?.desiredBody || []);
-        startSqlEdit(id, parsed || {
-          query: bodyText(record?.desiredBody || []),
-          conn: null,
-          into: 'result',
-        });
-      } else {
-        startEdit(id, localSourceFor(id), type.value);
-      }
+      startEdit(id, localSourceFor(id), type.value);
     }
     return;
   }
@@ -3007,6 +3986,61 @@ els.notebook.addEventListener('focusin', (event) => {
   }
 });
 
+els.notebook.addEventListener('dragstart', (event) => {
+  const handle = event.target.closest('[data-role="drag-handle"]');
+  const cell = handle?.closest('.cell');
+  if (!cell || cell.dataset.tombstone === 'true' || actionInFlight) {
+    event.preventDefault();
+    return;
+  }
+  draggedCellId = cell.dataset.id;
+  cell.classList.add('dragging');
+  if (event.dataTransfer) {
+    event.dataTransfer.effectAllowed = 'move';
+    event.dataTransfer.setData('text/plain', draggedCellId);
+  }
+});
+
+els.notebook.addEventListener('dragover', (event) => {
+  if (!draggedCellId) return;
+  const target = event.target.closest('.cell');
+  if (!target || target.dataset.id === draggedCellId ||
+      target.dataset.tombstone === 'true') return;
+  event.preventDefault();
+  if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
+  const placement = dragPlacement(target, event.clientY);
+  clearDropAffordances();
+  cellEls.get(draggedCellId)?.classList.add('dragging');
+  target.classList.add(placement === 'before' ? 'drop-before' : 'drop-after');
+});
+
+els.notebook.addEventListener('drop', (event) => {
+  if (!draggedCellId) return;
+  const target = event.target.closest('.cell');
+  if (!target || target.dataset.id === draggedCellId ||
+      target.dataset.tombstone === 'true') return;
+  event.preventDefault();
+  const placement = dragPlacement(target, event.clientY);
+  const predecessor = dropPredecessor(draggedCellId, target.dataset.id, placement);
+  const id = draggedCellId;
+  draggedCellId = null;
+  clearDropAffordances();
+  if (predecessor !== undefined) action(() => moveCellAfter(id, predecessor));
+});
+
+els.notebook.addEventListener('dragend', () => {
+  draggedCellId = null;
+  clearDropAffordances();
+});
+
+els.notebook.addEventListener('keydown', (event) => {
+  const button = event.target.closest(
+    'button[data-act="move-up"], button[data-act="move-down"]',
+  );
+  if (!button || button.disabled || !['Enter', ' '].includes(event.key)) return;
+  event.preventDefault();
+  button.click();
+});
 
 els.notebook.addEventListener('click', (event) => {
   const focused = event.target.closest('.cell');
@@ -3062,10 +4096,30 @@ if (els.panel) {
       els.panelTabs.find((item) => item.dataset.panelTab === dataflowPanel.tab)?.focus();
       return;
     }
-    const orientation = event.target.closest('[data-graph-orientation]');
-    if (orientation) {
-      graphOrientation = graphOrientation === 'vertical' ? 'horizontal' : 'vertical';
-      renderGraphPanel(lastState);
+    const graphAction = event.target.closest('[data-graph-action]');
+    if (graphAction) {
+      const actionName = graphAction.dataset.graphAction;
+      if (actionName === 'orientation') {
+        graphOrientation = graphOrientation === 'vertical' ? 'horizontal' : 'vertical';
+        renderGraphPanel(lastState);
+      } else if (actionName === 'zoom-out') {
+        updateGraphCanvas(graphZoom - 0.2);
+      } else if (actionName === 'zoom-in') {
+        updateGraphCanvas(graphZoom + 0.2);
+      } else if (actionName === 'fit') {
+        fitGraphCanvas();
+      } else if (actionName === 'reset') {
+        updateGraphCanvas(1);
+      } else if (actionName === 'expand') {
+        graphExpanded = !graphExpanded;
+        els.panel.classList.toggle('graph-expanded', graphExpanded);
+        renderGraphPanel(lastState);
+      }
+      window.requestAnimationFrame(() => {
+        els.panelViews.graph?.querySelector(
+          `[data-graph-action="${actionName}"]`,
+        )?.focus();
+      });
       return;
     }
     const target = event.target.closest('[data-target-cell]');
@@ -3077,6 +4131,15 @@ if (els.panel) {
     }
   });
   els.panel.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && graphExpanded) {
+      event.preventDefault();
+      graphExpanded = false;
+      els.panel.classList.remove('graph-expanded');
+      renderGraphPanel(lastState);
+      window.requestAnimationFrame(() => els.panelViews.graph
+        ?.querySelector('[data-graph-action="expand"]')?.focus());
+      return;
+    }
     const tab = event.target.closest('[data-panel-tab]');
     if (tab && ['ArrowLeft', 'ArrowRight'].includes(event.key)) {
       event.preventDefault();
@@ -3085,6 +4148,16 @@ if (els.panel) {
       const next = els.panelTabs[(index + direction + els.panelTabs.length) %
         els.panelTabs.length];
       next?.click();
+      return;
+    }
+    const panelLink = event.target.closest('.panel-link[data-target-cell]');
+    if (panelLink && (event.key === 'Enter' || event.key === ' ')) {
+      event.preventDefault();
+      if (event.repeat) return;
+      navigateToCell(panelLink.dataset.targetCell,
+        panelLink.dataset.targetLine === undefined ? null
+          : Number(panelLink.dataset.targetLine),
+        {focus: true});
       return;
     }
     const node = event.target.closest('.dag-node[data-target-cell]');
@@ -3099,6 +4172,23 @@ if (els.minimap) els.minimap.addEventListener('click', (event) => {
   const target = event.target.closest('[data-target-cell]');
   if (target) navigateToCell(target.dataset.targetCell, null, {focus: true});
 });
+if (els.minimap) els.minimap.addEventListener('keydown', (event) => {
+  const target = event.target.closest('[data-target-cell]');
+  if (!target) return;
+  if (event.key === 'Enter' || event.key === ' ') {
+    event.preventDefault();
+    navigateToCell(target.dataset.targetCell, null, {focus: true});
+    return;
+  }
+  if (!['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
+  event.preventDefault();
+  const buttons = [...els.minimap.querySelectorAll('[data-target-cell]')];
+  const index = buttons.indexOf(target);
+  const next = event.key === 'Home' ? buttons[0]
+    : event.key === 'End' ? buttons[buttons.length - 1]
+      : buttons[index + (event.key === 'ArrowDown' ? 1 : -1)];
+  next?.focus();
+});
 
 let minimapFrame = null;
 window.addEventListener('scroll', () => {
@@ -3108,6 +4198,12 @@ window.addEventListener('scroll', () => {
     updateMinimapViewport();
   });
 }, {passive: true});
+window.addEventListener('resize', updateTopbarInset, {passive: true});
+if (typeof window.ResizeObserver === 'function') {
+  const topbar = document.getElementById('topbar');
+  if (topbar) new ResizeObserver(updateTopbarInset).observe(topbar);
+}
+updateTopbarInset();
 
 function installExportMenu() {
   if (isViewApp()) return;
@@ -3217,16 +4313,26 @@ if (els.stop) els.stop.addEventListener('click', (event) => {
   action(() => api('/api/interrupt', { method: 'POST' }));
 });
 
-if (els.save) els.save.addEventListener('click', (event) => {
-  clearAutosaveTimer();
+if (els.shutdown) els.shutdown.addEventListener('click', (event) => {
   event.preventDefault();
-  action(async () => {
-    await flushPendingEdits();
-    if (lastState?.config?.format?.on_save === true) {
-      await api('/api/format', {body: {}});
-    }
-    await api('/api/save', {method: 'POST'});
-  });
+  void shutDownAlder();
+});
+
+if (els.status) els.status.addEventListener('click', (event) => {
+  const button = event.target.closest('[data-status-action="retry-editor-help"]');
+  if (!button) return;
+  event.preventDefault();
+  void retryEditorHelp();
+});
+
+if (els.restart) els.restart.addEventListener('click', (event) => {
+  event.preventDefault();
+  action(() => api('/api/restart', { method: 'POST' }));
+});
+
+if (els.save) els.save.addEventListener('click', (event) => {
+  event.preventDefault();
+  requestSave();
 });
 
 if (els.settingsOpen) els.settingsOpen.addEventListener('click', (event) => {
@@ -3289,7 +4395,7 @@ async function pollLoop() {
     } catch (error) {
       if (error.name !== 'AbortError') {
         pollError = error.message;
-        if (!actionError) renderStatus();
+        if (!actionError && !stateActionError) renderStatus();
       }
     }
     await new Promise((resolve) => {

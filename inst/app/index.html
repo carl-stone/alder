@@ -3,6 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="alder-csp-nonce" content="__ALDER_CSP_NONCE__">
   <title>alder</title>
   <link rel="stylesheet" href="/static/style.css">
   <link rel="icon" href="data:,">
@@ -21,6 +22,9 @@
     <button id="panel-toggle" class="btn editor-only" type="button"
       aria-controls="dataflow-panel" aria-expanded="true">Dataflow</button>
     <button id="run-all" class="btn primary editor-only" type="button">Run all</button>
+    <button id="stop" class="btn danger" type="button" disabled>Stop</button>
+    <button id="restart" class="btn" type="button" hidden>Restart R</button>
+    <button id="shutdown" class="btn shutdown" type="button">Shut down</button>
     <button id="save" class="btn editor-only" type="button">Save</button>
     <button id="settings-open" class="btn editor-only" type="button"
             aria-haspopup="dialog" aria-controls="settings">Settings</button>
@@ -68,6 +72,18 @@
           <input id="settings-line-numbers" name="line_numbers" type="checkbox">
           Show line numbers
         </label>
+        <label class="settings-check" for="settings-completions">
+          <input id="settings-completions" name="completions" type="checkbox">
+          Tab completion
+        </label>
+        <label class="settings-check" for="settings-signature-help">
+          <input id="settings-signature-help" name="signature_help" type="checkbox">
+          Function signature help
+        </label>
+        <label class="settings-check" for="settings-live-diagnostics">
+          <input id="settings-live-diagnostics" name="live_diagnostics" type="checkbox">
+          Lintr style notes (opt-in)
+        </label>
         <label class="settings-check" for="settings-autosave">
           <input id="settings-autosave" name="autosave" type="checkbox">
           Autosave after edits
@@ -85,6 +101,12 @@
   </dialog>
 
   <div id="status" role="status" aria-live="polite"></div>
+
+  <section id="editor-diagnostics" class="editor-only" hidden
+    aria-labelledby="editor-diagnostics-title">
+    <h2 id="editor-diagnostics-title">Editor diagnostics</h2>
+    <div id="editor-diagnostics-list" class="diagnostics-area"></div>
+  </section>
 
   <div id="editor-workspace">
     <main id="notebook" aria-label="Notebook cells"></main>
@@ -119,18 +141,22 @@
         aria-labelledby="panel-tab-outline" hidden></div>
     </aside>
 
-    <nav id="minimap" class="minimap editor-only" aria-label="Notebook minimap"></nav>
+    <nav id="minimap" class="minimap editor-only" aria-label="Notebook cell navigator"></nav>
   </div>
 
   <template id="cell-tpl">
     <section class="cell idle">
       <div class="cell-head" data-editor-only>
         <div class="cell-meta">
+          <span class="drag-handle" data-role="drag-handle" draggable="true"
+                aria-hidden="true" title="Drag this cell with a pointer">⠿</span>
+          <span class="sr-only" data-role="reorder-help">Use the Move up and
+            Move down buttons to reorder this cell with a keyboard.</span>
+          <strong class="cell-title" data-role="cell-title">Cell</strong>
           <label class="type-control" data-editor-only>Type
             <select data-role="type" aria-label="Cell type">
               <option value="code">Code</option>
               <option value="markdown">Markdown</option>
-              <option value="sql">SQL</option>
             </select>
           </label>
           <span class="cell-badge" data-role="badge">idle</span>
@@ -152,7 +178,6 @@
       <div class="cell-add editor-only" data-role="cell-add">
         <button data-act="add" data-type="code" class="btn mini" type="button">+ Add code</button>
         <button data-act="add" data-type="markdown" class="btn mini" type="button">+ Add Markdown</button>
-        <button data-act="add" data-type="sql" class="btn mini" type="button">+ Add SQL</button>
       </div>
     </section>
   </template>
@@ -162,7 +187,6 @@
       <span class="empty-message">Empty notebook</span>
       <button data-act="add" data-type="code" class="btn mini" type="button">+ Add code</button>
       <button data-act="add" data-type="markdown" class="btn mini" type="button">+ Add Markdown</button>
-      <button data-act="add" data-type="sql" class="btn mini" type="button">+ Add SQL</button>
     </div>
   </template>
 

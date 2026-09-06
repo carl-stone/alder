@@ -106,11 +106,10 @@ convert_from_ipynb <- function(path) {
       nb <- nb_add_cell(nb, convert_markdown_body(source), "markdown")
     } else if (identical(type, "code")) {
       md <- raw_cell$metadata %||% list()
-      alder_type <- if (is.list(md) && is.list(md$alder %||% NULL) &&
-                        identical(as.character(md$alder$type %||% ""), "sql")) {
-        "sql"
-      } else "code"
-      nb <- nb_add_cell(nb, source, alder_type)
+      # Legacy `metadata.alder.type = sql` is intentionally imported as an
+      # ordinary R cell. Alder has no dedicated SQL cell surface; the source
+      # remains byte-visible and users can migrate it to explicit DBI code.
+      nb <- nb_add_cell(nb, source, "code")
       if (is.list(md) && !is.null(md$alder) && is.list(md$alder)) {
         for (key in names(md$alder)) {
           if (identical(key, "type")) next
@@ -182,10 +181,6 @@ convert_apply_chunk_options <- function(nb, id, chunk) {
       else if (!identical(value, TRUE)) {
         message("alder_convert: dropping unsupported option eval=", value)
       }
-    } else if (identical(key, "conn") || identical(key, "connection")) {
-      # SQL uses this value while constructing its canonical body; it is not a
-      # cell option and is handled by convert_from_rmd below.
-      next
     } else {
       message("alder_convert: dropping unsupported option ", key)
     }
@@ -225,18 +220,6 @@ convert_from_rmd <- function(path) {
       nb <- nb_add_cell(nb, body, "code")
       id <- nb$cells[[length(nb$cells)]]$id
       nb <- convert_apply_chunk_options(nb, id, chunk)
-    } else if (chunk$language %in% c("sql", "sqlite", "duckdb")) {
-      into <- if (!is.null(chunk$label) && cell_name_valid(chunk$label)) chunk$label else "result"
-      conn <- chunk$options$conn %||% chunk$options$connection %||% NULL
-      if (!is.null(conn)) conn <- as.character(conn)
-      nb <- nb_add_cell(nb, character(), "sql")
-      id <- nb$cells[[length(nb$cells)]]$id
-      nb <- tryCatch(nb_set_sql_cell(nb, id, paste(body, collapse = "\n"),
-                                      conn = conn, into = into),
-                     error = function(e) convert_fail(conditionMessage(e)))
-      nb <- convert_apply_chunk_options(nb, id,
-                                        list(label = chunk$label,
-                                             options = chunk$options))
     } else {
       convert_fail(paste0("unsupported fenced chunk language: ", chunk$language))
     }
@@ -248,8 +231,11 @@ convert_from_rmd <- function(path) {
 #' Convert an ipynb, Rmd, or qmd file to an alder notebook.
 #'
 #' @param path Input `.ipynb`, `.Rmd`, or `.qmd` path.
-#' @param out Optional output `.R` path. Defaults beside the input.
+#' @param out Optional output `.R` path. Defaults beside the input and must
+#'   not identify the input through a direct, symlink, or hard-link path.
 #' @return The output path, invisibly.
+#' @examples
+#' \dontrun{alder_convert("report.qmd")}
 #' @export
 alder_convert <- function(path, out = NULL) {
   if (!is.character(path) || length(path) != 1L || is.na(path) || !nzchar(path) ||
@@ -268,13 +254,24 @@ alder_convert <- function(path, out = NULL) {
       dir.exists(out) || !dir.exists(dirname(out))) {
     convert_fail("output path must be a writable file path")
   }
+  path <- normalizePath(path, mustWork = TRUE)
+  out <- alder_output_path_normalize(out)
+  if (alder_same_file(path, out)) {
+    convert_fail("output path must not refer to input file")
+  }
   nb <- tryCatch(
     if (ext == "ipynb") convert_from_ipynb(path) else convert_from_rmd(path),
     alder_error = function(e) stop(e),
     error = function(e) convert_fail(conditionMessage(e)))
   tryCatch({
-    write_notebook(nb, out)
-    read_notebook(out)
+    stage <- alder_output_stage(out, ".alder-convert-")
+    on.exit(unlink(stage, force = TRUE), add = TRUE)
+    write_notebook(nb, stage)
+    # Verify the staged notebook before the destination is replaced.  This
+    # keeps a valid input and a pre-existing output intact on every parse or
+    # serialization failure.
+    read_notebook(stage)
+    alder_output_replace(stage, out)
   }, error = function(e) convert_fail(conditionMessage(e)))
-  invisible(normalizePath(out, mustWork = FALSE))
+  invisible(out)
 }

@@ -17,16 +17,32 @@ format_notebook_source <- function(nb, cell = NULL) {
 
   air <- Sys.which("air")
   if (nzchar(air)) {
+    air_error <- NULL
     result <- tryCatch(
       processx::run(air, c("format", tmp), error_on_status = FALSE),
-      error = function(e) NULL
+      error = function(error) {
+        air_error <<- conditionMessage(error)
+        NULL
+      }
     )
     if (is.null(result) || !identical(as.integer(result$status), 0L)) {
-      alder_abort("format_failed", "air could not format the notebook")
+      detail <- if (!is.null(air_error)) {
+        air_error
+      } else {
+        text <- trimws(paste(c(result$stdout, result$stderr), collapse = "\n"))
+        if (nzchar(text)) text else paste0("exit status ", result$status)
+      }
+      alder_abort("format_failed", paste0(
+        "air could not format the notebook: ", detail
+      ))
     }
   } else if (requireNamespace("styler", quietly = TRUE)) {
     tryCatch(
-      styler::style_file(tmp, quiet = TRUE),
+      writeLines(
+        as.character(styler::style_text(readLines(tmp, warn = FALSE))),
+        tmp,
+        useBytes = TRUE
+      ),
       error = function(e) alder_abort("format_failed", conditionMessage(e))
     )
   } else {
@@ -34,7 +50,14 @@ format_notebook_source <- function(nb, cell = NULL) {
                 "formatting requires air or the styler package")
   }
 
-  formatted <- tryCatch(read_notebook(tmp), error = function(e) NULL)
+  parse_error <- NULL
+  formatted <- tryCatch(
+    read_notebook(tmp),
+    error = function(error) {
+      parse_error <<- conditionMessage(error)
+      NULL
+    }
+  )
   formatted_ids <- if (!is.null(formatted)) {
     vapply(formatted$cells, function(value) value$id, "")
   } else {
@@ -43,8 +66,12 @@ format_notebook_source <- function(nb, cell = NULL) {
   if (is.null(formatted) || !identical(ids, formatted_ids) ||
       !identical(vapply(nb$cells, function(value) value$type, ""),
                  vapply(formatted$cells, function(value) value$type, ""))) {
-    alder_abort("format_failed",
-                "formatter changed notebook cell order or cell types")
+    detail <- if (!is.null(parse_error)) {
+      paste0("formatter produced an invalid notebook: ", parse_error)
+    } else {
+      "formatter changed notebook cell order or cell types"
+    }
+    alder_abort("format_failed", detail)
   }
 
   selected <- if (is.null(cell)) ids else cell

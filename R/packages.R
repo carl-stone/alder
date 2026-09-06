@@ -261,11 +261,16 @@ ALDER_PACKAGE_JOBS <- new.env(parent = emptyenv())
 }
 
 .alder_candidate_libs <- function(project) {
+  renv_lib <- if (requireNamespace("renv", quietly = TRUE)) {
+    renv_paths <- getExportedValue("renv", "paths")
+    do.call(renv_paths[["library"]], list(project = project))
+  } else {
+    character()
+  }
   unique(c(
-    .alder_validate_libs(.libPaths()),
+    renv_lib,
     file.path(project, ALDER_PACKAGE_INSTALL_LIB),
-    file.path(project, ".alder", "renv", "library", R.version$platform,
-              paste(R.version$major, R.version$minor, sep = "."))
+    .alder_validate_libs(.libPaths())
   ))
 }
 
@@ -554,6 +559,232 @@ alder_install <- function(packages, path = NULL, lib = NULL) {
   final
 }
 
+.alder_renv_paths <- function(project) {
+  if (!requireNamespace("renv", quietly = TRUE)) {
+    .alder_packages_abort(
+      "environment_unavailable",
+      "project snapshots and sandbox mode require the renv package"
+    )
+  }
+  renv_paths <- getExportedValue("renv", "paths")
+  list(
+    lockfile = normalizePath(
+      do.call(renv_paths[["lockfile"]], list(project = project)),
+      mustWork = FALSE
+    ),
+    library = normalizePath(
+      do.call(renv_paths[["library"]], list(project = project)),
+      mustWork = FALSE
+    )
+  )
+}
+
+.alder_env_status <- function(project, declared = character()) {
+  paths <- .alder_renv_paths(project)
+  lock_exists <- file.exists(paths$lockfile) && !dir.exists(paths$lockfile)
+  lock <- if (lock_exists) {
+    tryCatch(
+      renv::lockfile_read(paths$lockfile),
+      error = function(e) .alder_packages_abort(
+        "environment_invalid",
+        paste("could not read renv lockfile:", conditionMessage(e))
+      )
+    )
+  } else {
+    list(R = list(), Packages = list())
+  }
+  records <- lock$Packages %||% list()
+  locked_names <- sort(names(records) %||% character())
+  locked <- data.frame(
+    package = locked_names,
+    version = vapply(locked_names, function(name) {
+      as.character(records[[name]]$Version %||% NA_character_)
+    }, character(1)),
+    source = vapply(locked_names, function(name) {
+      as.character(records[[name]]$Source %||% NA_character_)
+    }, character(1)),
+    stringsAsFactors = FALSE
+  )
+  installed <- alder_package_status(locked_names, lib.loc = paths$library)
+  missing <- installed$package[installed$status == "missing"]
+  present <- match(locked$package, installed$package)
+  mismatch <- which(
+    installed$status[present] == "installed" &
+      !is.na(locked$version) &
+      installed$version[present] != locked$version
+  )
+  mismatched <- if (length(mismatch)) {
+    data.frame(
+      package = locked$package[mismatch],
+      locked = locked$version[mismatch],
+      installed = installed$version[present[mismatch]],
+      stringsAsFactors = FALSE
+    )
+  } else {
+    data.frame(package = character(), locked = character(),
+               installed = character(), stringsAsFactors = FALSE)
+  }
+  declared <- .alder_validate_package_names(declared)
+  unlocked <- setdiff(declared, locked_names)
+  recorded_r <- as.character(lock$R$Version %||% NA_character_)
+  r_matches <- lock_exists && length(recorded_r) == 1L &&
+    !is.na(recorded_r) && identical(recorded_r, as.character(getRversion()))
+  list(
+    ok = TRUE,
+    action = "status",
+    project = project,
+    lockfile = paths$lockfile,
+    library = paths$library,
+    lockfile_exists = lock_exists,
+    r_version = as.character(getRversion()),
+    recorded_r_version = recorded_r,
+    r_matches = r_matches,
+    declared = declared,
+    locked = locked,
+    installed = installed,
+    missing = missing,
+    mismatched = mismatched,
+    unlocked = unlocked,
+    synchronized = lock_exists && r_matches && !length(missing) &&
+      !nrow(mismatched) && !length(unlocked)
+  )
+}
+
+#' Snapshot, inspect, or restore a reproducible project environment
+#'
+#' Alder uses an ordinary project-level `renv.lock` and the standard `renv`
+#' project library. `snapshot` records declared packages (and their recursive
+#' dependencies) from currently available libraries. `restore` installs the
+#' exact lockfile records into the project library. `status` is read-only and
+#' reports missing, mismatched, and declared-but-unlocked packages.
+#'
+#' @param action One of `"status"`, `"snapshot"`, or `"restore"`.
+#' @param path Notebook path or project directory. Defaults to the working
+#'   directory.
+#' @param packages Packages to snapshot. Defaults to Alder's project package
+#'   declarations.
+#' @param clean For restore, remove packages not recorded by the lockfile.
+#' @return A structured environment status list, invisibly for mutating
+#'   actions.
+#' @examples
+#' \dontrun{
+#' alder_env("snapshot", "analysis.R", packages = c("ggplot2", "dplyr"))
+#' alder_env("status", "analysis.R")
+#' alder_env("restore", "analysis.R")
+#' }
+#' @export
+alder_env <- function(action = c("status", "snapshot", "restore"),
+                      path = NULL, packages = NULL, clean = FALSE) {
+  action <- match.arg(action)
+  if (!is.logical(clean) || length(clean) != 1L || is.na(clean)) {
+    .alder_packages_abort("invalid_request", "clean must be TRUE or FALSE")
+  }
+  project <- .alder_package_path(path)
+  paths <- .alder_renv_paths(project)
+  declared <- alder_packages(project)$declared
+  if (identical(action, "status")) {
+    return(.alder_env_status(project, declared))
+  }
+
+  # renv temporarily activates project context while snapshotting/restoring.
+  # Alder's API must not leak that context into the caller or later workers.
+  old_libpaths <- .libPaths()
+  old_wd <- getwd()
+  env_names <- c("RENV_PROJECT", "RENV_PROFILE", "R_LIBS", "R_LIBS_USER",
+                 "R_LIBS_SITE")
+  old_env <- Sys.getenv(env_names, unset = NA_character_)
+  on.exit({
+    if (dir.exists(old_wd)) setwd(old_wd)
+    .libPaths(old_libpaths)
+    for (name in env_names) {
+      value <- old_env[[name]]
+      if (is.na(value)) {
+        Sys.unsetenv(name)
+      } else {
+        do.call(Sys.setenv, stats::setNames(list(value), name))
+      }
+    }
+  }, add = TRUE)
+
+  messages <- character()
+  output <- character()
+  capture <- function(expr) {
+    output <<- utils::capture.output(
+      value <- withCallingHandlers(
+        expr,
+        message = function(message) {
+          messages <<- c(messages, conditionMessage(message))
+          invokeRestart("muffleMessage")
+        }
+      ),
+      type = "output"
+    )
+    value
+  }
+
+  if (identical(action, "snapshot")) {
+    selected <- if (is.null(packages)) declared else
+      .alder_validate_package_names(packages)
+    availability <- alder_package_status(
+      selected, lib.loc = .alder_candidate_libs(project)
+    )
+    absent <- availability$package[availability$status == "missing"]
+    if (length(absent)) {
+      .alder_packages_abort(
+        "environment_unavailable",
+        paste("cannot snapshot unavailable packages:",
+              paste(absent, collapse = ", "))
+      )
+    }
+    libraries <- .alder_validate_libs(c(paths$library, .libPaths()))
+    tryCatch(
+      capture(renv::snapshot(
+        project = project,
+        library = libraries,
+        lockfile = paths$lockfile,
+        packages = selected,
+        prompt = FALSE,
+        force = TRUE
+      )),
+      error = function(e) .alder_packages_abort(
+        "environment_snapshot_failed", conditionMessage(e)
+      )
+    )
+  } else {
+    if (!file.exists(paths$lockfile) || dir.exists(paths$lockfile)) {
+      .alder_packages_abort(
+        "environment_unavailable",
+        paste("renv lockfile not found:", paths$lockfile)
+      )
+    }
+    if (!dir.exists(paths$library) &&
+        (!dir.create(paths$library, recursive = TRUE, mode = "0700",
+                     showWarnings = FALSE) && !dir.exists(paths$library))) {
+      .alder_packages_abort(
+        "environment_restore_failed",
+        paste("could not create project library:", paths$library)
+      )
+    }
+    tryCatch(
+      capture(renv::restore(
+        project = project,
+        library = paths$library,
+        lockfile = paths$lockfile,
+        clean = clean,
+        transactional = TRUE,
+        prompt = FALSE
+      )),
+      error = function(e) .alder_packages_abort(
+        "environment_restore_failed", conditionMessage(e)
+      )
+    )
+  }
+  result <- .alder_env_status(project, declared)
+  result$action <- action
+  result$output <- unique(c(messages, output)[nzchar(c(messages, output))])
+  invisible(result)
+}
+
 #' Resolve and create the deterministic project sandbox library.
 #'
 #' @param path A notebook path.  A project directory or NULL is rejected so a
@@ -572,30 +803,21 @@ alder_sandbox <- function(path = NULL) {
                           "sandbox mode requires a notebook path, not a directory")
   }
   project <- .alder_package_path(path, require_notebook = TRUE)
-  lib <- file.path(project, ".alder", "renv", "library", R.version$platform,
-                   paste(R.version$major, R.version$minor, sep = "."))
+  lib <- .alder_renv_paths(project)$library
   if (!dir.exists(lib) &&
       (!dir.create(lib, recursive = TRUE, mode = "0700",
                    showWarnings = FALSE) && !dir.exists(lib))) {
     .alder_packages_abort("invalid_request",
                           paste("could not create sandbox library:", lib))
   }
-  old_user <- Sys.getenv("R_LIBS_USER", unset = "")
-  user_libs <- c(lib, if (nzchar(old_user)) old_user)
-  user_libs <- paste(user_libs, collapse = .Platform$path.sep)
-  # The sandbox must be first in the worker's library path even when the
-  # parent process set R_LIBS (R_LIBS takes precedence over R_LIBS_USER);
-  # otherwise the worker could resolve packages outside the sandbox.
-  old_libs <- Sys.getenv("R_LIBS", unset = "")
-  env <- c(R_LIBS_USER = user_libs,
-           R_LIBS = if (nzchar(old_libs)) {
-             paste(c(lib, old_libs), collapse = .Platform$path.sep)
-           })
+  # The worker first loads alder from the launching installation, then uses
+  # this signal to restrict notebook package lookup to the renv project
+  # library plus R's base/recommended library.
+  env <- c(ALDER_SANDBOX_LIB = lib)
   list(
     path = project,
-    root = file.path(project, ".alder", "renv"),
+    root = file.path(project, "renv"),
     lib = lib,
-    R_LIBS_USER = user_libs,
     env = env
   )
 }

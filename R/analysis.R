@@ -51,11 +51,13 @@ AES_VERBS <- c("aes", "aes_string")
 BLOCKED_DYNAMIC <- c(
   "eval", "evalq", "eval.parent", "source", "sys.source", "load",
   "attach", "detach", "delayedAssign", "makeActiveBinding",
-  "assign", "get", "get0", "mget", "exists", "dynGet", "do.call")
+  "assign", "remove", "get", "get0", "mget", "exists", "dynGet",
+  "do.call")
 
 # Runtime helpers are available to every notebook cell and are not notebook
-# bindings.
-RUNTIME_CALLS <- c("sql")
+# bindings. Alder currently injects no callable names; widgets are reached
+# through the explicit `ui` module binding.
+RUNTIME_CALLS <- character()
 is_reserved <- function(nm) nm %in% RESERVED
 
 # ---------------------------------------------------------------------------
@@ -117,6 +119,32 @@ literal_name_of <- function(node, string_only = FALSE) {
   NULL
 }
 
+# Return the literal target and value of a two-argument assign() call. Exact
+# `x` / `value` argument names may reorder the call, but environment controls
+# and partial argument names are deliberately excluded: only assignment into
+# the call's default evaluation environment is statically bounded.
+literal_assign_parts <- function(node) {
+  args <- as.list(node)[-1L]
+  if (length(args) != 2L) return(NULL)
+  nms <- names(node)[-1L]
+  if (is.null(nms)) nms <- rep("", length(args))
+  if (any(!(nms %in% c("", "x", "value"))) ||
+      anyDuplicated(nms[nzchar(nms)])) return(NULL)
+
+  positions <- rep(NA_integer_, 2L)
+  names(positions) <- c("x", "value")
+  named <- which(nzchar(nms))
+  if (length(named)) positions[nms[named]] <- named
+  unnamed <- which(!nzchar(nms))
+  remaining <- which(is.na(positions))
+  if (length(unnamed) != length(remaining)) return(NULL)
+  positions[remaining] <- unnamed
+
+  target <- literal_name_of(args[[positions[["x"]]]], string_only = TRUE)
+  if (is.null(target) || is_reserved(target)) return(NULL)
+  list(name = target, value = args[[positions[["value"]]]])
+}
+
 # ---------------------------------------------------------------------------
 # Per-cell analysis
 # ---------------------------------------------------------------------------
@@ -125,7 +153,8 @@ cell_defs_refs <- function(code) {
   # Returns list(defs, refs, self_refs, locals, barrier, diagnostics, error).
   empty <- list(defs = character(), refs = character(),
                 self_refs = character(), locals = character(),
-                barrier = FALSE, diagnostics = list(), error = NULL)
+                barrier = FALSE, opaque = FALSE,
+                diagnostics = list(), error = NULL)
   if (length(code) == 0L) return(empty)
   text <- paste(code, collapse = "\n")
   exprs <- tryCatch(base::parse(text = text),
@@ -146,6 +175,7 @@ cell_defs_refs <- function(code) {
   state$refs <- character()
   state$self_refs <- character()
   state$barrier <- FALSE
+  state$opaque <- FALSE
   state$diagnostics <- list()
   state$mask_warned <- character()
 
@@ -157,6 +187,7 @@ cell_defs_refs <- function(code) {
        self_refs = setdiff(unique(state$self_refs), locals),
        locals = locals,
        barrier = isTRUE(state$barrier),
+       opaque = isTRUE(state$opaque),
        diagnostics = state$diagnostics,
        error = NULL)
 }
@@ -174,7 +205,25 @@ collect_top_defs <- function(node, p1) {
   }
   q <- qualified_name(node)
   if (!is.null(q$name)) {
-    if (identical(q$name, "rm")) {
+    if (identical(q$pkg, "base") && identical(q$name, "assign")) {
+      parts <- literal_assign_parts(node)
+      if (!is.null(parts)) {
+        p1$defs <- c(p1$defs, parts$name)
+        if (is.call(parts$value) &&
+            !(is.symbol(parts$value[[1L]]) &&
+              identical(as.character(parts$value[[1L]]), "function"))) {
+          collect_top_defs(parts$value, p1)
+        }
+      }
+      return(invisible())
+    }
+    literal <- literal_eval_nodes(node, q$name)
+    if (!is.null(literal)) {
+      for (expr in literal) collect_top_defs(expr, p1)
+      return(invisible())
+    }
+    if (identical(q$name, "rm") ||
+        (identical(q$pkg, "base") && identical(q$name, "remove"))) {
       nms <- rm_target_names(node)
       if (!is.null(nms)) p1$defs <- c(p1$defs, nms)
       return(invisible())
@@ -188,7 +237,24 @@ collect_top_defs <- function(node, p1) {
     }
     return(invisible())
   }
-  if (identical(hn, "rm")) {
+  literal <- literal_eval_nodes(node, hn)
+  if (!is.null(literal)) {
+    for (expr in literal) collect_top_defs(expr, p1)
+    return(invisible())
+  }
+  if (identical(hn, "assign")) {
+    parts <- literal_assign_parts(node)
+    if (!is.null(parts)) {
+      p1$defs <- c(p1$defs, parts$name)
+      if (is.call(parts$value) &&
+          !(is.symbol(parts$value[[1L]]) &&
+            identical(as.character(parts$value[[1L]]), "function"))) {
+        collect_top_defs(parts$value, p1)
+      }
+    }
+    return(invisible())
+  }
+  if (hn %in% c("rm", "remove")) {
     nms <- rm_target_names(node)
     if (!is.null(nms)) p1$defs <- c(p1$defs, nms)
     return(invisible())
@@ -237,8 +303,8 @@ new_frame <- function(defined, kind) {
   e
 }
 
-new_ctx <- function(deferred = FALSE, mask = 0L) {
-  list(deferred = deferred, mask = mask)
+new_ctx <- function(deferred = FALSE, mask = 0L, mask_mode = "warn") {
+  list(deferred = deferred, mask = mask, mask_mode = mask_mode)
 }
 
 define_name <- function(nm, frame) {
@@ -274,10 +340,20 @@ record_read <- function(nm, frame, ctx, state) {
   invisible()
 }
 
-# A bare value symbol in a data-mask context: conservative reference plus an
-# ambiguity warning (it may be a column or a notebook variable).
-mask_read <- function(nm, frame, state) {
+# Formula symbols can be tracked quietly, or treated as data columns when the
+# formula is paired with an explicit `data=` argument. Other data masks retain
+# the ambiguity warning because a bare name could genuinely select either a
+# column or a notebook global.
+mask_read <- function(nm, frame, ctx, state) {
   if (is_reserved(nm) || nm %in% frame$defined) return(invisible())
+  mode <- ctx$mask_mode %||% "warn"
+  if (identical(mode, "columns")) return(invisible())
+  if (identical(mode, "quiet")) {
+    rctx <- ctx
+    rctx$mask <- 0L
+    record_read(nm, frame, rctx, state)
+    return(invisible())
+  }
   state$refs <- c(state$refs, nm)
   if (!(nm %in% state$mask_warned)) {
     state$mask_warned <- c(state$mask_warned, nm)
@@ -289,14 +365,49 @@ mask_read <- function(nm, frame, state) {
   }
   invisible()
 }
+
+# Return formula and data argument positions when a call contains a literal
+# formula together with an explicit `data=` argument. This covers base and
+# package modelling APIs without a brittle function-name allowlist.
+formula_data_indices <- function(node) {
+  idx <- seq_along(node)[-1L]
+  nms <- names(node)
+  if (is.null(nms)) nms <- rep("", length(node))
+  data_idx <- idx[nms[idx] == "data"]
+  if (length(data_idx) != 1L) return(NULL)
+  formula_idx <- idx[nms[idx] == "formula"]
+  if (!length(formula_idx)) {
+    formula_idx <- idx[vapply(idx, function(i) {
+      arg <- node[[i]]
+      is.call(arg) && is.symbol(arg[[1L]]) &&
+        identical(as.character(arg[[1L]]), "~")
+    }, logical(1))]
+  }
+  if (!length(formula_idx)) return(NULL)
+  list(formula = formula_idx[[1L]], data = data_idx[[1L]])
+}
+
+walk_call_arguments <- function(node, frame, ctx, state) {
+  formula_data <- formula_data_indices(node)
+  for (j in seq_along(node)[-1L]) {
+    if (is.null(node[[j]])) next
+    arg_ctx <- ctx
+    if (!is.null(formula_data) && identical(j, formula_data$formula)) {
+      arg_ctx$mask_mode <- "columns"
+    }
+    walk_lazy_arg(node[[j]], frame, arg_ctx, state)
+  }
+  invisible()
+}
 rm_target_names <- function(node) {
   args <- as.list(node)[-1L]
   nms <- names(node)[-1L]
   if (length(nms) && any(nzchar(nms))) return(NULL)
-  if (!length(args) ||
-      !all(vapply(args, is.symbol, logical(1)))) return(NULL)
-  out <- vapply(args, as.character, character(1))
-  if (any(is_reserved(out))) return(NULL)
+  if (!length(args)) return(NULL)
+  out <- vapply(args, function(arg) {
+    literal_name_of(arg) %||% NA_character_
+  }, character(1))
+  if (anyNA(out) || any(is_reserved(out))) return(NULL)
   out
 }
 
@@ -304,16 +415,46 @@ walk_rm <- function(node, frame, state) {
   nms <- rm_target_names(node)
   if (is.null(nms)) {
     add_block(state, "rm",
-              "rm() may only remove names this cell defines, as bare symbols")
+              paste0("rm() requires bare names or scalar string literals and ",
+                     "only the default evaluation environment; use ",
+                     "rm(\"name\") when the target is statically known"))
     return(character())
   }
   for (nm in nms) define_name(nm, frame)
   nms
 }
 
+walk_assign <- function(node, frame, ctx, state) {
+  parts <- literal_assign_parts(node)
+  if (is.null(parts)) {
+    add_block(state, "assign",
+              paste0("assign() requires a scalar string literal name and only ",
+                     "the default evaluation environment; use name <- value ",
+                     "when possible"))
+    return(character())
+  }
+  if (is.call(parts$value) && is.symbol(parts$value[[1L]]) &&
+      identical(as.character(parts$value[[1L]]), "function")) {
+    walk_function(parts$value, frame, ctx, state, parts$name)
+  } else {
+    walk_expr(parts$value, frame, ctx, state)
+  }
+  define_name(parts$name, frame)
+  parts$name
+}
+
 add_block <- function(state, symbol, message) {
   state$diagnostics <- c(state$diagnostics, list(list(
     level = "error", code = "dynamic-dependency",
+    message = message, symbol = symbol)))
+  invisible()
+}
+
+add_opaque <- function(state, symbol, message) {
+  state$opaque <- TRUE
+  state$barrier <- TRUE
+  state$diagnostics <- c(state$diagnostics, list(list(
+    level = "warning", code = "opaque-dependency",
     message = message, symbol = symbol)))
   invisible()
 }
@@ -325,7 +466,7 @@ walk_expr <- function(node, frame, ctx, state) {
   if (is.symbol(node)) {
     nm <- as.character(node)
     if (ctx$mask > 0L) {
-      mask_read(nm, frame, state)
+      mask_read(nm, frame, ctx, state)
     } else {
       record_read(nm, frame, ctx, state)
     }
@@ -341,7 +482,7 @@ walk_expr <- function(node, frame, ctx, state) {
 
   q <- qualified_name(node)
   if (!is.null(q$name)) {
-    return(walk_qualified(node, q$name, frame, ctx, state))
+    return(walk_qualified(node, q$name, frame, ctx, state, q$pkg))
   }
 
   if (hn %in% c("<-", "=", "->", "->>", "<<-")) {
@@ -428,6 +569,9 @@ walk_expr <- function(node, frame, ctx, state) {
   if (hn == "~") {
     mctx <- ctx
     mctx$mask <- ctx$mask + 1L
+    if (ctx$mask == 0L && identical(ctx$mask_mode %||% "warn", "warn")) {
+      mctx$mask_mode <- "quiet"
+    }
     for (j in seq_along(node)[-1L]) {
       if (!is.null(node[[j]])) walk_expr(node[[j]], frame, mctx, state)
     }
@@ -453,8 +597,11 @@ walk_expr <- function(node, frame, ctx, state) {
     }
     return(character())
   }
-  if (identical(hn, "rm")) {
+  if (hn %in% c("rm", "remove")) {
     return(walk_rm(node, frame, state))
+  }
+  if (identical(hn, "assign")) {
+    return(walk_assign(node, frame, ctx, state))
   }
   if (hn %in% BLOCKED_DYNAMIC) {
     return(walk_blocked(node, hn, frame, ctx, state))
@@ -506,15 +653,13 @@ walk_expr <- function(node, frame, ctx, state) {
       walk_expr(node[[1L]], frame, ctx, state)
     }
   }
-  for (j in seq_along(node)[-1L]) {
-    if (!is.null(node[[j]])) walk_lazy_arg(node[[j]], frame, ctx, state)
-  }
+  walk_call_arguments(node, frame, ctx, state)
   character()
 }
 
 # A namespace-qualified call `pkg::fn(...)`: fn belongs to the package, so
 # the head is never a notebook reference; dispatch on fn's role.
-walk_qualified <- function(node, name, frame, ctx, state) {
+walk_qualified <- function(node, name, frame, ctx, state, package = NULL) {
   if (name %in% c(MASK_VERBS, AES_VERBS)) {
     mctx <- ctx
     mctx$mask <- ctx$mask + 1L
@@ -530,8 +675,12 @@ walk_qualified <- function(node, name, frame, ctx, state) {
     }
     return(character())
   }
-  if (identical(name, "rm")) {
+  if (identical(name, "rm") ||
+      (identical(package, "base") && identical(name, "remove"))) {
     return(walk_rm(node, frame, state))
+  }
+  if (identical(package, "base") && identical(name, "assign")) {
+    return(walk_assign(node, frame, ctx, state))
   }
   if (name %in% BLOCKED_DYNAMIC) {
     return(walk_blocked(node, name, frame, ctx, state))
@@ -543,9 +692,7 @@ walk_qualified <- function(node, name, frame, ctx, state) {
     }
     return(character())
   }
-  for (j in seq_along(node)[-1L]) {
-    if (!is.null(node[[j]])) walk_lazy_arg(node[[j]], frame, ctx, state)
-  }
+  walk_call_arguments(node, frame, ctx, state)
   character()
 }
 
@@ -618,6 +765,25 @@ walk_function <- function(node, frame, ctx, state, recname = "") {
 
 # Blocked dynamic operations, with support for literal lookup/do.call names.
 walk_blocked <- function(node, name, frame, ctx, state) {
+  literal <- literal_eval_nodes(node, name)
+  if (!is.null(literal)) {
+    out <- character()
+    for (expr in literal) {
+      out <- c(out, walk_expr(expr, frame, ctx, state))
+    }
+    return(unique(out))
+  }
+  if (identical(name, "source") && length(node) >= 2L &&
+      !is.null(literal_name_of(node[[2L]], string_only = TRUE))) {
+    add_opaque(
+      state, "source",
+      "source() reads a literal file at runtime; this cell is conservatively ordered"
+    )
+    for (j in seq_along(node)[-(1:2)]) {
+      if (!is.null(node[[j]])) walk_lazy_arg(node[[j]], frame, ctx, state)
+    }
+    return(character())
+  }
   if (name %in% c("get", "get0", "mget", "exists", "dynGet") &&
       length(node) >= 2L && !is.null(node[[2L]])) {
     lit <- literal_name_of(node[[2L]], string_only = TRUE)
@@ -632,7 +798,7 @@ walk_blocked <- function(node, name, frame, ctx, state) {
   if (name == "do.call" && length(node) >= 2L && !is.null(node[[2L]])) {
     lit <- literal_name_of(node[[2L]])
     if (!is.null(lit)) {
-      if (lit %in% BLOCKED_DYNAMIC) {
+      if (lit %in% c(BLOCKED_DYNAMIC, "rm")) {
         add_block(state, lit,
                   paste0("non-literal or blocked target in do.call: ", lit))
         return(character())
@@ -657,6 +823,20 @@ walk_blocked <- function(node, name, frame, ctx, state) {
   character()
 }
 
+# Return expressions whose default-environment eval is statically visible.
+# Explicit `envir`/`enclos` arguments remain blocked because their binding
+# effects do not belong to the notebook environment.
+literal_eval_nodes <- function(node, name) {
+  if (!name %in% c("eval", "evalq") || length(node) != 2L) return(NULL)
+  arg <- node[[2L]]
+  if (identical(name, "evalq")) return(list(arg))
+  if (!is.call(arg) || !is.symbol(arg[[1L]])) return(NULL)
+  head <- as.character(arg[[1L]])
+  if (identical(head, "quote") && length(arg) == 2L) return(list(arg[[2L]]))
+  if (identical(head, "expression")) return(as.list(arg)[-1L])
+  NULL
+}
+
 # ---------------------------------------------------------------------------
 # Dependency DAG
 # ---------------------------------------------------------------------------
@@ -672,6 +852,7 @@ build_dag <- function(cells) {
   ids <- vapply(cells, function(c) c$id, "")
   defof <- new.env(parent = emptyenv())  # name -> character ids defining it
   barrier_at <- which(vapply(cells, function(c) isTRUE(c$barrier), FALSE))
+  opaque_at <- which(vapply(cells, function(c) isTRUE(c$opaque), FALSE))
 
   edges <- vector("list", n)
   names(edges) <- ids
@@ -698,12 +879,27 @@ build_dag <- function(cells) {
 
   # Package-attach barriers order every later code cell after the barrier:
   # a successful barrier run invalidates/reruns code whose lookup can change.
-  # SQL cells need no barrier: the worker attaches alder before any cell.
   for (i in barrier_at) {
     for (j in seq_len(n)) {
       if (j > i && identical(cells[[j]]$type, "code")) {
         edges[[cells[[j]]$id]] <- c(edges[[cells[[j]]$id]], cells[[i]]$id)
       }
+    }
+  }
+  # Literal external source cells may define or read names not present in the
+  # notebook AST. Treat them as opaque barriers: every earlier executable cell
+  # precedes them and every later executable cell follows them. This permits
+  # ordinary bounded R while preserving conservative invalidation.
+  executable <- vapply(cells, function(cell) identical(cell$type, "code"),
+                       logical(1))
+  for (i in opaque_at) {
+    prior <- which(seq_len(n) < i & executable)
+    if (length(prior)) {
+      edges[[cells[[i]]$id]] <- c(edges[[cells[[i]]$id]], ids[prior])
+    }
+    later_cells <- which(seq_len(n) > i & executable)
+    for (j in later_cells) {
+      edges[[cells[[j]]$id]] <- c(edges[[cells[[j]]$id]], cells[[i]]$id)
     }
   }
   for (i in seq_along(cells)) edges[[ids[[i]]]] <- unique(edges[[ids[[i]]]])

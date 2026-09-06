@@ -11,6 +11,13 @@ cache
 \code{cache$disk(f, dir)} caches to disk below \code{dir} (default: the
 notebook cache directory). \code{cache$clear(which)} drops cached values
 from \code{"memory"}, \code{"disk"}, or \code{"all"} stores. Cache keys
-include the function body, formal argument names, and call arguments.
+include the function body and formals, call arguments, and serializable
+values of free variables. Calls with reference-like dependencies that
+cannot be fingerprinted are safely recomputed instead of cached.
 Wrapped functions carry class \code{alder_cached}.
+}
+\examples{
+square <- cache$memory(function(x) x ^ 2)
+square(4)
+cache$clear("memory")
 }

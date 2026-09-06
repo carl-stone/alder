@@ -2,7 +2,7 @@
 % Please edit documentation in R/export.R
 \name{alder_test}
 \alias{alder_test}
-\title{Run cells marked \verb{#| test: true} with testthat.}
+\title{Run enabled cells marked \verb{#| test: true} with testthat.}
 \usage{
 alder_test(path)
 }
@@ -10,8 +10,16 @@ alder_test(path)
 \item{path}{Path to an alder notebook.}
 }
 \value{
-testthat result records, invisibly.
+testthat result records, invisibly. A failed expectation, error, or
+unexpected warning raises an \code{alder_test_error}; its specific subclass and
+\code{parent} retain the original testthat classification.
 }
 \description{
-Run cells marked \verb{#| test: true} with testthat.
+Cells run once in dependency order: ordinary enabled cells set
+up the shared test environment and enabled test cells run through
+\code{testthat}. Disabled cells and their transitive descendants are excluded,
+while independent enabled tests still run.
+}
+\examples{
+\dontrun{alder_test("analysis.R")}
 }

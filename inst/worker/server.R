@@ -38,7 +38,11 @@ main <- function(args = commandArgs(trailingOnly = TRUE)) {
   on.exit(stop_alder(srv), add = TRUE)
   # A top-level interrupt unwinds this pump (no tryCatch swallowing), so
   # the on.exit cleanup runs instead of a silent Ctrl-C.
-  repeat later::run_now(0.05)
+  repeat {
+    if (isTRUE(srv$lifecycle$stopped)) break
+    later::run_now(0.05)
+    if (!isTRUE(srv$lifecycle$stopped)) Sys.sleep(0.005)
+  }
 }
 
 main()

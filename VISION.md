@@ -2,6 +2,10 @@
 
 Build a **modern reactive notebook environment for R**, inspired by marimo’s product model but designed natively around contemporary R.
 
+**North Star:** What if marimo had originally been designed from the ground up
+to focus on R? This principle is authoritative; implementation decisions and
+ADRs are revised or superseded when they conflict with it.
+
 ## Product vision
 
 The goal is to make the best possible interactive computational environment for R: a notebook that feels as fluid as Jupyter, as reproducible as a well-structured script, as reactive as Shiny, as publishable as Quarto, and as friendly to Git and coding agents as ordinary source code.
@@ -31,6 +35,15 @@ Do **not** build on Reactor. It is useful historical prior art only.
 Prefer existing high-quality R ecosystem components where appropriate. The product should feel at home alongside tidyverse, ggplot2, Shiny, Quarto, renv/pak, and modern R language tooling rather than creating a parallel ecosystem.
 
 The notebook should remain useful as ordinary source code outside the notebook application.
+
+Small assignment/arithmetic cells should feel as immediate as an already-open
+R console. The accepted [architecture and migration spec](dev/ARCHITECTURE.md)
+sets warm input-to-visible-result targets of median <=50 ms and p95 <=100 ms
+on recorded reference hardware, including immediate edit-and-Run and short
+dependency chains inside a long notebook. These are new release requirements;
+historical acceptance does not establish that the current implementation meets
+them. The target uses a TypeScript application host and warm R execution and
+analysis services; implementation proceeds through the specified migration gates.
 
 ## Perfect product
 
@@ -88,7 +101,7 @@ Include:
 - hover information;
 - go-to-definition;
 - references;
-- diagnostics;
+- R parse and Alder safety diagnostics, with style/lint notes opt-in;
 - formatting;
 - rename/refactoring where supported;
 - signature help;
@@ -213,7 +226,7 @@ Support:
 - useful handling of large objects;
 - background-independent deterministic state;
 - connection/database objects where practical;
-- SQL cells or equivalent database workflows where useful.
+- database workflows through ordinary R packages such as DBI and dbplyr.
 
 ### Notebook navigation and organization
 

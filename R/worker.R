@@ -59,9 +59,30 @@ alder_ui_module <- function() {
            env,
            inherited)
   env <- env[!duplicated(names(env))]
+  # Rscript --vanilla does not inherit .libPaths() or library(lib.loc=...).
+  # Bootstrap from the same installed Alder as this parent, including when
+  # another version exists in the site library. Project/sandbox isolation is
+  # applied by the worker after Alder and its runtime imports have loaded.
+  package_path <- getNamespaceInfo(asNamespace("alder"), "path")
+  if (file.exists(file.path(package_path, "Meta", "package.rds"))) {
+    library_env <- if ("R_LIBS" %in% names(env)) env[["R_LIBS"]] else ""
+    inherited_libs <- strsplit(library_env,
+                              .Platform$path.sep, fixed = TRUE)[[1L]]
+    bootstrap_libs <- unique(c(dirname(normalizePath(package_path)),
+                               inherited_libs, .libPaths()))
+    env[["R_LIBS"]] <- paste(bootstrap_libs[nzchar(bootstrap_libs)],
+                              collapse = .Platform$path.sep)
+  }
+  # Parse the complete runtime before evaluating its long-lived local() scope.
+  # Rscript file-mode loading is substantially slower for this large expression.
+  # Unlike sys.source(), eval(parse()) leaves the notebook's R options intact.
+  bootstrap <- paste0(
+    "base::eval(base::parse(file = ", encodeString(worker_script, quote = "\""),
+    ", keep.source = FALSE), envir = globalenv())"
+  )
   processx::process$new(
     file.path(R.home("bin"), "Rscript"),
-    args = c("--vanilla", worker_script),
+    args = c("--vanilla", "-e", bootstrap),
     env = env,
     stdin = "|",
     stdout = "|", stderr = "|", supervise = TRUE
@@ -74,6 +95,51 @@ alder_ui_module <- function() {
   Worker$new(proc, worker_script, app_dir, artifact_dir, cache_dir, env)
 }
 
+# Send exactly one startup request and pump the shared later loop until that
+# tracked request succeeds, the process fails, or the deadline expires.  A
+# generous default covers cold R/package-library startup on constrained
+# machines; callers can shorten it in tests with `alder.worker_startup_timeout`.
+.wait_for_worker <- function(worker, command = "ping",
+                             timeout = getOption("alder.worker_startup_timeout", 45)) {
+  if (!is.numeric(timeout) || length(timeout) != 1L || is.na(timeout) ||
+      !is.finite(timeout) || timeout <= 0) {
+    stop("worker startup timeout must be a positive number", call. = FALSE)
+  }
+  done <- FALSE
+  response <- NULL
+  worker$send(command, on_response = function(context, value) {
+    response <<- value
+    done <<- TRUE
+  })
+  deadline <- Sys.time() + timeout
+  while (!done && worker$alive() && Sys.time() < deadline) {
+    later::run_now(0.05)
+    if (!done) Sys.sleep(0.001)
+  }
+  if (done && isTRUE(response$ok)) return(invisible(response))
+
+  diagnostics <- worker$diagnostics()
+  reason <- if (done) {
+    as.character(response$error$message %||% "readiness request failed")
+  } else if (!worker$alive()) {
+    "worker exited before becoming ready"
+  } else {
+    paste0("worker did not become ready within ", format(timeout), " seconds")
+  }
+  detail <- character()
+  status <- diagnostics$exit_status
+  if (!is.null(status) && length(status) == 1L && !is.na(status)) {
+    detail <- c(detail, paste0("exit status ", as.integer(status)))
+  }
+  if (nzchar(diagnostics$stderr)) {
+    detail <- c(detail, paste0("stderr: ", diagnostics$stderr))
+  }
+  stop(paste0("worker failed to start: ", reason,
+              if (length(detail)) paste0(" (", paste(detail, collapse = "; "), ")")
+              else ""),
+       call. = FALSE)
+}
+
 
 # A Worker is a small stateful controller for one notebook session.
 Worker <- R6::R6Class(
@@ -84,13 +150,18 @@ Worker <- R6::R6Class(
     counter = NULL,     # next req id
     poll_active = NULL,
     executing_req = NULL,   # req id whose start ack has been received
+    interrupt_requested = NULL, # req id waiting for its start ack
     interrupt_sent = NULL,  # req id already SIGINTed
     failed_once = NULL,     # terminal transport failure has fired
     on_failure = NULL,      # one terminal callback(message)
-    on_notify = NULL,       # callback(context, notify_frame)
+    on_notify = NULL,       # Receives a request context and notification frame.
+    stderr_lines = NULL,    # Bounded startup/runtime diagnostics.
     worker_script = NULL,   # respawn parameters for Worker$restart()
     app_dir = NULL,
     artifact_dir = NULL,
+    artifact_retirements = NULL,
+    artifact_sweep_scheduled = FALSE,
+    artifact_retirement_seconds = 5,
     cache_dir = NULL,
     env = character(),
     initialize = function(proc, worker_script, app_dir, artifact_dir,
@@ -99,13 +170,17 @@ Worker <- R6::R6Class(
       self$pending <- new.env(parent = emptyenv())
       self$counter <- 1L
       self$poll_active <- FALSE
+      self$interrupt_requested <- NULL
       self$interrupt_sent <- NULL
       self$failed_once <- NULL
       self$on_failure <- NULL
       self$on_notify <- NULL
+      self$stderr_lines <- character()
       self$worker_script <- worker_script
       self$app_dir <- app_dir
       self$artifact_dir <- artifact_dir
+      self$artifact_retirements <- new.env(parent = emptyenv())
+      self$artifact_sweep_scheduled <- FALSE
       self$cache_dir <- cache_dir
       self$env <- env
     },
@@ -145,6 +220,9 @@ Worker <- R6::R6Class(
       }
       message <- c(list(req = req), dots)
       message$cmd <- cmd
+      perf <- .alder_perf_begin("worker.dispatch", list(cmd = cmd, req = req,
+        cell = ctx$id, revision = ctx$revision, run_id = ctx$run_id))
+      on.exit(.alder_perf_end(perf), add = TRUE)
       # the worker answers every command; register each request so the
       # response is consumed (never an unsolicited line)
       self$pending[[as.character(req)]] <- list(
@@ -175,6 +253,8 @@ Worker <- R6::R6Class(
       if (!self$poll_active) return(invisible())
       proc <- self$proc
       if (!proc$is_alive()) {
+        self$record_stderr(tryCatch(proc$read_error_lines(1000),
+                                    error = function(e) character()))
         self$poll_active <- FALSE
         self$transport_error("Worker exited before responding")
         return(invisible())
@@ -188,6 +268,7 @@ Worker <- R6::R6Class(
       }
       if (resp[[2L]] %in% c("ready", "silent")) {
         el <- tryCatch(proc$read_error_lines(100), error = function(e) character())
+        self$record_stderr(el)
         for (ln in el) if (nzchar(ln)) message("[worker stderr] ", ln)
       }
       # poll while requests are outstanding; idle polling is unnecessary
@@ -199,6 +280,27 @@ Worker <- R6::R6Class(
       invisible()
     },
 
+    record_stderr = function(lines, max_bytes = 65536L) {
+      lines <- as.character(lines)
+      lines <- lines[!is.na(lines) & nzchar(lines)]
+      if (!length(lines)) return(invisible())
+      self$stderr_lines <- c(self$stderr_lines, lines)
+      while (length(self$stderr_lines) > 1L &&
+             nchar(paste(self$stderr_lines, collapse = "\n"), type = "bytes") >
+               max_bytes) {
+        self$stderr_lines <- self$stderr_lines[-1L]
+      }
+      invisible()
+    },
+
+    diagnostics = function() {
+      self$record_stderr(tryCatch(self$proc$read_error_lines(1000),
+                                  error = function(e) character()))
+      status <- tryCatch(self$proc$get_exit_status(), error = function(e) NULL)
+      list(exit_status = status,
+           stderr = paste(self$stderr_lines %||% character(), collapse = "\n"))
+    },
+
     # Parse one stdout protocol line. Any malformed or unidentifiable input
     # is a terminal failure: nothing may be silently ignored.
     handle_line = function(line) {
@@ -208,6 +310,10 @@ Worker <- R6::R6Class(
         self$transport_error("invalid worker response")
         return(invisible())
       }
+      perf <- .alder_perf_begin("worker.receive", list(cmd = resp$cmd,
+        req = resp$req, cell = resp$id, revision = resp$revision,
+        run_id = resp$run_id, ack = resp$ack, notify = resp$notify))
+      on.exit(.alder_perf_end(perf), add = TRUE)
       if (!is.null(resp$notify)) {
         rid <- as.character(resp$req %||% NA_character_)
         entry <- if (length(rid) == 1L && !is.na(rid) && nzchar(rid)) {
@@ -258,6 +364,10 @@ Worker <- R6::R6Class(
             !is.null(self$pending[[rid]])) {
           # begin the ack-gated SIGINT window for this request
           self$executing_req <- rid
+          if (identical(rid, self$interrupt_requested)) {
+            self$interrupt_requested <- NULL
+            self$signal_interrupt(rid)
+          }
         } else {
           self$transport_error("invalid worker response")
         }
@@ -271,8 +381,11 @@ Worker <- R6::R6Class(
         return(invisible())
       }
       rm(list = rid, envir = self$pending)
-      self$executing_req <- NULL
-      self$interrupt_sent <- NULL
+      if (identical(rid, self$interrupt_requested)) {
+        self$interrupt_requested <- NULL
+      }
+      if (identical(rid, self$executing_req)) self$executing_req <- NULL
+      if (identical(rid, self$interrupt_sent)) self$interrupt_sent <- NULL
       self$invoke_callback(entry$callback, entry$context, resp)
       invisible()
     },
@@ -304,6 +417,8 @@ Worker <- R6::R6Class(
     fail_pending = function(message) {
       ids <- ls(self$pending, all.names = TRUE)
       self$executing_req <- NULL
+      self$interrupt_requested <- NULL
+      self$interrupt_sent <- NULL
       if (!length(ids)) return(invisible())
       entries <- lapply(ids, function(rid) {
         e <- self$pending[[rid]]
@@ -327,7 +442,7 @@ Worker <- R6::R6Class(
       if (isTRUE(self$failed_once)) return(invisible())
       self$failed_once <- TRUE
       self$poll_active <- FALSE
-      tryCatch(self$proc$kill(), error = function(e) NULL)
+      self$kill()
       self$fail_pending(message)
       if (!is.null(self$on_failure)) {
         tryCatch(self$on_failure(message),
@@ -338,17 +453,49 @@ Worker <- R6::R6Class(
       invisible()
     },
 
-    # SIGINT exactly once for one acknowledged request, never retried. For a
-    # request that has not acked (still in the blocking read), no signal is
-    # sent; the fast result will commit or be discarded by the Session.
+    # Request SIGINT exactly once for one eval request. Before its start ack,
+    # retain the matching request identity; handle_line() delivers the signal
+    # as soon as that ack arrives. A request that is absent, already complete,
+    # or different from the acknowledged eval can never inherit the signal.
     interrupt = function(rid = NULL) {
       if (is.null(rid)) rid <- self$executing_req
       if (is.null(rid)) return(invisible())
       rid <- as.character(rid)
+      if (length(rid) != 1L || is.na(rid) || !nzchar(rid)) return(invisible())
+      entry <- self$pending[[rid]]
+      if (is.null(entry) || !identical(entry$context$cmd, "eval_cell")) {
+        return(invisible())
+      }
+      if (is.null(self$executing_req)) {
+        if (is.null(self$interrupt_requested)) self$interrupt_requested <- rid
+        return(invisible())
+      }
+      if (!identical(rid, as.character(self$executing_req))) return(invisible())
+      self$signal_interrupt(rid)
+      invisible()
+    },
+
+    signal_interrupt = function(rid) {
+      rid <- as.character(rid)
       if (!identical(rid, as.character(self$executing_req))) return(invisible())
       if (identical(rid, self$interrupt_sent)) return(invisible())
-      if (self$proc$is_alive()) tryCatch(self$proc$interrupt(), error = function(e) NULL)
       self$interrupt_sent <- rid
+      signal_error <- NULL
+      signalled <- if (!self$proc$is_alive()) {
+        signal_error <- "worker process is not alive"
+        FALSE
+      } else {
+        tryCatch(
+          self$proc$interrupt(),
+          error = function(error) {
+            signal_error <<- conditionMessage(error)
+            FALSE
+          })
+      }
+      if (!isTRUE(signalled)) {
+        if (is.null(signal_error)) signal_error <- "interrupt returned false"
+        self$transport_error(paste0("Worker interrupt failed: ", signal_error))
+      }
       invisible()
     },
 
@@ -363,9 +510,10 @@ Worker <- R6::R6Class(
       self$on_failure <- NULL
       tryCatch(self$send("shutdown"), error = function(e) NULL)
       tryCatch(self$proc$wait(300), error = function(e) NULL)
-      if (self$alive()) tryCatch(self$proc$kill(), error = function(e) NULL)
+      if (self$alive()) self$kill()
       self$fail_pending("Worker restarted")
       self$executing_req <- NULL
+      self$interrupt_requested <- NULL
       self$interrupt_sent <- NULL
       self$failed_once <- NULL
       proc <- .spawn_worker_process(self$worker_script, self$app_dir,
@@ -375,22 +523,30 @@ Worker <- R6::R6Class(
       self$pending <- new.env(parent = emptyenv())
       self$counter <- 1L
       self$poll_active <- FALSE
+      self$stderr_lines <- character()
       self$on_failure <- failure_cb
       invisible(self)
     },
 
-    # Unlink a contained regular rendered artifact (.png/.html) under the
-    # configured artifact directory. Callers (Session output transitions)
-    # pass only a basename produced by a committed worker response.
+    # Retire a contained rendered artifact after a bounded grace period. State
+    # snapshots publish immutable artifact URLs before the browser fetches
+    # them; immediate unlink on the next reactive commit can otherwise turn a
+    # valid, just-published plot into a transient 404. Session shutdown still
+    # removes the entire temporary artifact directory.
     release_artifact = function(artifact) {
       if (is.null(artifact) || length(artifact) != 1L || is.na(artifact) ||
           !nzchar(artifact)) {
         return(invisible(FALSE))
       }
       base <- basename(artifact)
-      if (!grepl("\\.png$", base) && !grepl("\\.html$", base)) {
+      if (!identical(base, artifact) ||
+          !(tolower(tools::file_ext(base)) %in% c(
+            "png", "jpg", "jpeg", "gif", "webp", "svg", "html",
+            "mp3", "wav", "ogg", "mp4", "webm", "pdf"
+          ))) {
         return(invisible(FALSE))
       }
+      if (!dir.exists(self$artifact_dir)) return(invisible(FALSE))
       root <- normalizePath(self$artifact_dir, mustWork = TRUE)
       p <- file.path(root, base)
       if (!startsWith(tryCatch(normalizePath(p), error = function(e) ""),
@@ -398,17 +554,102 @@ Worker <- R6::R6Class(
         return(invisible(FALSE))
       }
       if (!file.exists(p) || dir.exists(p)) return(invisible(FALSE))
-      unlink(p)
+      self$artifact_retirements[[base]] <-
+        as.numeric(Sys.time()) + self$artifact_retirement_seconds
+      self$schedule_artifact_sweep()
       invisible(TRUE)
     },
 
+    schedule_artifact_sweep = function(delay = self$artifact_retirement_seconds) {
+      if (isTRUE(self$artifact_sweep_scheduled)) return(invisible())
+      self$artifact_sweep_scheduled <- TRUE
+      later::later(function() {
+        self$artifact_sweep_scheduled <- FALSE
+        self$sweep_artifacts()
+      }, delay)
+      invisible()
+    },
+
+    # Public for deterministic tests; normal callers rely on the scheduled
+    # sweep. Failed unlinks remain queued, are reported, and are retried.
+    sweep_artifacts = function(now = Sys.time()) {
+      ids <- ls(self$artifact_retirements, all.names = TRUE)
+      if (!length(ids)) return(invisible(0L))
+      now <- as.numeric(now)
+      if (length(now) != 1L || is.na(now) || !is.finite(now)) {
+        stop("artifact sweep time must be finite", call. = FALSE)
+      }
+      if (!dir.exists(self$artifact_dir)) {
+        rm(list = ids, envir = self$artifact_retirements)
+        return(invisible(0L))
+      }
+      root <- normalizePath(self$artifact_dir, mustWork = TRUE)
+      removed <- 0L
+      for (base in ids) {
+        deadline <- self$artifact_retirements[[base]]
+        if (!is.numeric(deadline) || length(deadline) != 1L ||
+            is.na(deadline) || deadline > now) {
+          next
+        }
+        p <- file.path(root, base)
+        if (!file.exists(p) || dir.exists(p)) {
+          rm(list = base, envir = self$artifact_retirements)
+          next
+        }
+        status <- unlink(p)
+        if (identical(status, 0L)) {
+          rm(list = base, envir = self$artifact_retirements)
+          removed <- removed + 1L
+        } else {
+          self$artifact_retirements[[base]] <-
+            now + self$artifact_retirement_seconds
+          message("[alder:artifact] Could not retire ", base,
+                  "; cleanup will be retried")
+        }
+      }
+      remaining <- ls(self$artifact_retirements, all.names = TRUE)
+      if (length(remaining)) {
+        deadlines <- vapply(remaining, function(base) {
+          as.numeric(self$artifact_retirements[[base]])
+        }, numeric(1))
+        self$schedule_artifact_sweep(max(0.01, min(deadlines) - now))
+      }
+      invisible(removed)
+    },
+
     stop = function(grace = 0.2) {
-      tryCatch(self$send("shutdown"), error = function(e) NULL)
-      if (grace > 0) later::later(function() self$kill(), grace)
+      self$poll_active <- FALSE
+      # Final shutdown is intentionally synchronous. Returning while the
+      # process (or processx supervisor) is still live leaks children in
+      # non-init containers and lets artifact cleanup race worker teardown.
+      failure_cb <- self$on_failure
+      self$on_failure <- NULL
+      if (self$alive()) {
+        tryCatch(self$send("shutdown"), error = function(e) NULL)
+        self$poll_active <- FALSE
+        wait_ms <- max(0L, as.integer(grace * 1000))
+        tryCatch(self$proc$wait(wait_ms), error = function(e) NULL)
+        if (self$alive()) self$kill()
+      } else {
+        tryCatch(self$proc$wait(0), error = function(e) NULL)
+      }
+      self$fail_pending("Worker stopped")
+      self$executing_req <- NULL
+      self$interrupt_requested <- NULL
+      self$interrupt_sent <- NULL
+      self$artifact_retirements <- new.env(parent = emptyenv())
+      self$artifact_sweep_scheduled <- FALSE
+      self$on_failure <- failure_cb
+      invisible()
     },
 
     kill = function() {
-      tryCatch(self$proc$kill(), error = function(e) NULL)
+      if (self$proc$is_alive()) {
+        tryCatch(self$proc$kill(), error = function(e) NULL)
+      }
+      # processx only reaps the child after an exit-status/wait operation.
+      # A bounded wait is safe after kill and prevents zombie accumulation.
+      tryCatch(self$proc$wait(5000), error = function(e) NULL)
       invisible()
     },
 

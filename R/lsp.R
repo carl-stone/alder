@@ -1,14 +1,29 @@
 # Incremental Language Server Protocol client for the editor.
 #
 # The client is deliberately small: one languageserver process per notebook,
-# full-document synchronization, and the request methods alder exposes.  It
-# never evaluates notebook code and it is optional when the languageserver R
-# package is not installed.
+# full-document synchronization, and the request methods Alder exposes. It
+# never evaluates notebook code. Because editor assistance is a product
+# requirement, process startup and death are observable failures rather than a
+# silently disabled optional feature.
 
 lsp_file_uri <- function(path) {
-  path <- normalizePath(path, mustWork = FALSE)
-  path <- gsub("\\\\", "/", path)
-  paste0("file://", utils::URLencode(path, reserved = TRUE))
+  path <- normalizePath(path.expand(path), winslash = "/", mustWork = FALSE)
+  absolute <- startsWith(path, "/") ||
+    (.Platform$OS.type == "windows" && grepl("^[A-Za-z]:[/\\\\]", path))
+  if (!absolute) path <- file.path(getwd(), path)
+  lsp_encode_file_path(path)
+}
+
+lsp_encode_file_path <- function(path, windows = .Platform$OS.type == "windows") {
+  if (windows) path <- gsub("\\", "/", path, fixed = TRUE)
+  encoded <- utils::URLencode(enc2utf8(path), reserved = TRUE, repeated = TRUE)
+  # Separators and a Windows drive colon belong to the URI path structure.
+  # A literal percent escape in a filename must remain escaped after decoding.
+  encoded <- gsub("%2F", "/", encoded, fixed = TRUE)
+  if (windows) encoded <- sub("^([A-Za-z])%3A/", "\\1:/", encoded)
+  # languageserver uses the five-slash UNC compatibility form on Windows
+  # (RFC 8089 E.3.2); its parser does not accept an authority-form UNC URI.
+  paste0(if (windows) "file:///" else "file://", encoded)
 }
 
 lsp_raw_index <- function(raw, needle) {
@@ -44,8 +59,16 @@ LspClient <- R6::R6Class(
     version = NULL,
     text = NULL,
     diagnostics = NULL,
+    diagnostics_enabled = NULL,
+    on_failure = NULL,
+    failure_reported = NULL,
+    failure = NULL,
+    stderr_text = NULL,
+    stderr_limit = NULL,
 
-    initialize = function(notebook, path = NULL, timeout = 5) {
+    initialize = function(notebook, path = NULL, timeout = 30,
+                          diagnostics = FALSE,
+                          on_failure = NULL, stderr_limit = 16384L) {
       if (!requireNamespace("languageserver", quietly = TRUE)) {
         stop("the languageserver package is not installed", call. = FALSE)
       }
@@ -61,11 +84,25 @@ LspClient <- R6::R6Class(
       self$version <- 1L
       self$text <- serialize_notebook(notebook)
       self$diagnostics <- list()
+      if (!is.logical(diagnostics) || length(diagnostics) != 1L ||
+          is.na(diagnostics)) {
+        stop("`diagnostics` must be TRUE or FALSE", call. = FALSE)
+      }
+      self$diagnostics_enabled <- isTRUE(diagnostics)
+      self$on_failure <- on_failure
+      self$failure_reported <- FALSE
+      self$failure <- NULL
+      self$stderr_text <- ""
+      self$stderr_limit <- as.integer(stderr_limit)
+      if (is.na(self$stderr_limit) || self$stderr_limit < 1024L) {
+        self$stderr_limit <- 16384L
+      }
 
       self$proc <- processx::process$new(
         file.path(R.home("bin"), "Rscript"),
         c("--vanilla", "-e", "languageserver::run()"),
-        stdin = "|", stdout = "|", stderr = "|", supervise = TRUE)
+        stdin = "|", stdout = "|", stderr = "|", supervise = TRUE,
+        wd = dirname(self$path))
       ok <- FALSE
       on.exit(if (!ok) self$stop(), add = TRUE)
       result <- self$request("initialize", list(
@@ -85,10 +122,19 @@ LspClient <- R6::R6Class(
       if (is.null(result)) stop("language server initialization returned no result",
                                call. = FALSE)
       self$notify("initialized", list())
+      # languageserver diagnostics are lintr diagnostics. Keep that background
+      # task disabled unless the user explicitly opts in; completion, hover,
+      # definitions, and signature help do not depend on it.
+      self$notify("workspace/didChangeConfiguration", list(
+        settings = list(diagnostics = self$diagnostics_enabled)
+      ))
       self$notify("textDocument/didOpen", list(
         textDocument = list(uri = self$uri, languageId = "r", version = self$version,
                             text = self$text)
       ))
+      # Continue polling while idle: publishDiagnostics notifications and
+      # process death are asynchronous and must not depend on another request.
+      self$ensure_polling()
       ok <- TRUE
       invisible(self)
     },
@@ -98,7 +144,9 @@ LspClient <- R6::R6Class(
     },
 
     send = function(message) {
-      if (!self$alive()) stop("language server is unavailable", call. = FALSE)
+      if (!self$alive()) stop(self$failure_detail(
+        "language server is unavailable"
+      ), call. = FALSE)
       self$proc$write_input(lsp_message_frame(message))
       invisible()
     },
@@ -109,7 +157,9 @@ LspClient <- R6::R6Class(
     },
 
     request = function(method, params = list(), timeout = 3) {
-      if (!self$alive()) stop("language server is unavailable", call. = FALSE)
+      if (!self$alive()) stop(self$failure_detail(
+        "language server is unavailable"
+      ), call. = FALSE)
       id <- self$next_id
       self$next_id <- self$next_id + 1L
       entry <- new.env(parent = emptyenv())
@@ -130,7 +180,9 @@ LspClient <- R6::R6Class(
         if (exists(key, envir = self$pending, inherits = FALSE)) {
           rm(list = key, envir = self$pending)
         }
-        stop("language server request timed out: ", method, call. = FALSE)
+        stop(self$failure_detail(paste0(
+          "language server request timed out: ", method
+        )), call. = FALSE)
       }
       if (!is.null(entry$error)) {
         stop("language server request failed: ", entry$error, call. = FALSE)
@@ -146,9 +198,13 @@ LspClient <- R6::R6Class(
     },
 
     poll_cycle = function() {
-      if (!isTRUE(self$poll_active) || !self$alive()) {
+      if (!isTRUE(self$poll_active)) return(invisible())
+      if (!self$alive()) {
         self$poll_active <- FALSE
-        self$fail_pending("language server exited")
+        self$drain_stderr()
+        message <- self$failure_detail("language server exited")
+        self$fail_pending(message)
+        self$report_failure(message)
         return(invisible())
       }
       out <- self$proc$get_output_connection()
@@ -163,15 +219,59 @@ LspClient <- R6::R6Class(
         }
       }
       if (status[[2L]] %in% c("ready", "silent")) {
-        # Language-server diagnostics and protocol responses are stdout data;
-        # stderr is intentionally drained so a warning cannot block the pipe.
-        try(self$proc$read_error_bytes(-1), silent = TRUE)
+        self$drain_stderr()
       }
-      waiting <- length(ls(self$pending, all.names = TRUE)) > 0L
-      if (waiting && self$alive()) {
-        later::later(self$poll_cycle, 0.03)
-      } else {
-        self$poll_active <- FALSE
+      later::later(self$poll_cycle, 0.05)
+      invisible()
+    },
+
+    drain_stderr = function() {
+      if (is.null(self$proc)) return(invisible())
+      bytes <- tryCatch(self$proc$read_error_bytes(-1), error = function(e) raw())
+      if (!length(bytes)) return(invisible())
+      chunk <- tryCatch(rawToChar(bytes), error = function(e) "")
+      if (nzchar(chunk)) {
+        self$stderr_text <- paste0(self$stderr_text, enc2utf8(chunk))
+        n <- nchar(self$stderr_text, type = "bytes")
+        if (n > self$stderr_limit) {
+          self$stderr_text <- substr(
+            self$stderr_text, n - self$stderr_limit + 1L, n
+          )
+        }
+      }
+      invisible()
+    },
+
+    failure_detail = function(prefix) {
+      self$drain_stderr()
+      status <- if (is.null(self$proc)) NULL else {
+        tryCatch(self$proc$get_exit_status(), error = function(e) NULL)
+      }
+      suffix <- character()
+      if (!is.null(status) && length(status) == 1L && !is.na(status)) {
+        suffix <- c(suffix, paste0("exit status ", as.integer(status)))
+      }
+      stderr <- trimws(self$stderr_text %||% "")
+      if (nzchar(stderr)) suffix <- c(suffix, paste0("stderr: ", stderr))
+      if (!length(suffix)) as.character(prefix) else {
+        paste0(prefix, " (", paste(suffix, collapse = "; "), ")")
+      }
+    },
+
+    report_failure = function(message) {
+      if (isTRUE(self$closed) || isTRUE(self$failure_reported)) {
+        return(invisible())
+      }
+      self$failure <- as.character(message)
+      self$failure_reported <- TRUE
+      if (is.function(self$on_failure)) {
+        tryCatch(
+          self$on_failure(self$failure),
+          error = function(error) cat(
+            "[alder:lsp] failure callback failed: ",
+            conditionMessage(error), "\n", sep = "", file = stderr()
+          )
+        )
       }
       invisible()
     },
@@ -189,12 +289,18 @@ LspClient <- R6::R6Class(
                      header, perl = TRUE)
         mm <- regmatches(header, m)[[1L]]
         if (length(mm) != 2L) {
-          self$fail_pending("invalid language-server frame")
+          message <- "invalid language-server frame"
+          self$fail_pending(message)
+          self$report_failure(message)
+          if (self$proc$is_alive()) self$proc$kill()
           return(invisible())
         }
         len <- suppressWarnings(as.numeric(mm[[2L]]))
         if (!is.finite(len) || len < 0 || len != floor(len)) {
-          self$fail_pending("invalid language-server content length")
+          message <- "invalid language-server content length"
+          self$fail_pending(message)
+          self$report_failure(message)
+          if (self$proc$is_alive()) self$proc$kill()
           return(invisible())
         }
         start <- sep + sep_len
@@ -206,7 +312,10 @@ LspClient <- R6::R6Class(
           jsonlite::fromJSON(rawToChar(body), simplifyVector = FALSE),
           error = function(e) NULL)
         if (!is.list(message)) {
-          self$fail_pending("invalid language-server JSON")
+          detail <- "invalid language-server JSON"
+          self$fail_pending(detail)
+          self$report_failure(detail)
+          if (self$proc$is_alive()) self$proc$kill()
           return(invisible())
         }
         self$handle_message(message)
@@ -217,7 +326,17 @@ LspClient <- R6::R6Class(
       if (identical(message$method %||% NULL, "textDocument/publishDiagnostics")) {
         params <- message$params %||% list()
         uri <- params$uri %||% self$uri
-        self$diagnostics[[uri]] <- params$diagnostics %||% list()
+        revision <- params$version
+        if (identical(uri, self$uri) && !is.null(revision) &&
+            (!is.numeric(revision) || length(revision) != 1L ||
+             is.na(revision) || revision != self$version)) {
+          return(invisible())
+        }
+        self$diagnostics[[uri]] <- if (isTRUE(self$diagnostics_enabled)) {
+          params$diagnostics %||% list()
+        } else {
+          list()
+        }
         return(invisible())
       }
       if (is.null(message$id)) return(invisible())
@@ -250,10 +369,35 @@ LspClient <- R6::R6Class(
       if (identical(text, self$text)) return(invisible(FALSE))
       self$version <- self$version + 1L
       self$text <- text
+      self$diagnostics[[self$uri]] <- NULL
       self$notify("textDocument/didChange", list(
         textDocument = list(uri = self$uri, version = self$version),
         contentChanges = list(list(text = text))
       ))
+      invisible(TRUE)
+    },
+
+    set_diagnostics = function(enabled) {
+      if (!is.logical(enabled) || length(enabled) != 1L || is.na(enabled)) {
+        stop("`enabled` must be TRUE or FALSE", call. = FALSE)
+      }
+      enabled <- isTRUE(enabled)
+      changed <- !identical(self$diagnostics_enabled, enabled)
+      self$diagnostics_enabled <- enabled
+      if (!enabled) self$diagnostics <- list()
+      if (!changed) return(invisible(FALSE))
+      self$notify("workspace/didChangeConfiguration", list(
+        settings = list(diagnostics = enabled)
+      ))
+      if (enabled) {
+        # A configuration change alone does not schedule languageserver's
+        # lint task. Resend the current document after this explicit opt-in.
+        self$version <- self$version + 1L
+        self$notify("textDocument/didChange", list(
+          textDocument = list(uri = self$uri, version = self$version),
+          contentChanges = list(list(text = self$text))
+        ))
+      }
       invisible(TRUE)
     },
 
@@ -277,24 +421,33 @@ LspClient <- R6::R6Class(
       out <- list()
       rows <- self$diagnostics[[self$uri]] %||% list()
       for (diagnostic in rows) {
-        if (!is.list(diagnostic) || is.null(diagnostic$range)) next
-        start <- diagnostic$range$start %||% list()
-        end <- diagnostic$range$end %||% start
-        a <- nb_from_file_pos(notebook, as.integer(start$line %||% -1L))
-        b <- nb_from_file_pos(notebook, as.integer(end$line %||% -1L))
-        if (is.null(a) || is.null(b) || !identical(a$id, b$id)) next
+        if (!is.list(diagnostic)) next
+        range <- diagnostic$range
+        if (!is.list(range)) range <- list()
+        start <- range$start %||% list()
+        end <- range$end %||% start
+        a <- lsp_diagnostic_position(notebook, start)
+        b <- lsp_diagnostic_position(notebook, end)
         sev <- as.integer(diagnostic$severity %||% 3L)
         level <- if (sev == 1L) "error" else if (sev == 2L) "warning" else "info"
         item <- list(
           level = level, code = as.character(diagnostic$code %||% "lsp"),
           message = as.character(diagnostic$message %||% "language-server diagnostic"),
-          symbol = NULL, source = "lsp",
-          range = list(
-            start = list(line = a$line, character = as.integer(start$character %||% 0L)),
-            end = list(line = b$line, character = as.integer(end$character %||% 0L))
-          )
+          symbol = NULL, source = "lsp", range = NULL
         )
-        out[[a$id]] <- c(out[[a$id]] %||% list(), list(item))
+        if (!is.null(a) && !is.null(b) && identical(a$id, b$id)) {
+          item$range <- list(
+            start = list(line = a$line, character = a$character),
+            end = list(line = b$line, character = b$character)
+          )
+          out[[a$id]] <- c(out[[a$id]] %||% list(), list(item))
+        } else {
+          # Linter failures commonly point to (0, 0), which can be a notebook
+          # delimiter. Preserve these and cross-cell/file-level diagnostics
+          # without inventing a cell location or turning them into DAG errors.
+          item$file_range <- diagnostic$range
+          out[[".document"]] <- c(out[[".document"]] %||% list(), list(item))
+        }
       }
       out
     },
@@ -305,12 +458,41 @@ LspClient <- R6::R6Class(
       self$poll_active <- FALSE
       self$fail_pending("language server stopped")
       if (!is.null(self$proc) && self$proc$is_alive()) {
-        try(self$proc$kill(), silent = TRUE)
+        tryCatch({
+          self$proc$kill()
+          self$proc$wait(5000)
+          if (self$proc$is_alive()) {
+            self$proc$kill_tree()
+            self$proc$wait(5000)
+          }
+          if (self$proc$is_alive()) {
+            cat("[alder:lsp] language server did not exit after termination\n",
+                file = stderr())
+          }
+        }, error = function(error) cat(
+          "[alder:lsp] could not stop language server: ",
+          conditionMessage(error), "\n", sep = "", file = stderr()
+        ))
       }
       invisible()
     }
   )
 )
+
+lsp_diagnostic_position <- function(notebook, position) {
+  if (!is.list(position)) return(NULL)
+  coordinates <- list(position$line, position$character %||% 0L)
+  valid <- vapply(coordinates, function(value) {
+    is.numeric(value) && length(value) == 1L && !is.na(value) &&
+      is.finite(value) && value >= 0 && value <= .Machine$integer.max &&
+      value == trunc(value)
+  }, logical(1L))
+  if (!all(valid)) return(NULL)
+  mapped <- nb_from_file_pos(notebook, as.integer(coordinates[[1L]]))
+  if (is.null(mapped)) return(NULL)
+  mapped$character <- as.integer(coordinates[[2L]])
+  mapped
+}
 
 lsp_translate_position <- function(position, notebook) {
   if (!is.list(position)) return(NULL)

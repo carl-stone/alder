@@ -2,6 +2,7 @@
 
 RUNTIME <- new.env(parent = emptyenv())
 RUNTIME$emit <- NULL
+RUNTIME$render <- NULL
 RUNTIME$cell_id <- function() NULL
 RUNTIME$artifact_dir <- NULL
 RUNTIME$cache_dir <- NULL
@@ -9,7 +10,6 @@ RUNTIME$lazy <- new.env(parent = emptyenv())
 RUNTIME$lazy_seq <- NULL
 RUNTIME$mem_cache <- new.env(parent = emptyenv())
 RUNTIME$disk_cache_dirs <- new.env(parent = emptyenv())
-RUNTIME$duckdb <- NULL
 
 runtime_seq <- function() {
   if (is.environment(RUNTIME$seq)) {
@@ -37,9 +37,24 @@ new_output <- function(kind, ...) {
             class = c("alder_output", "list"))
 }
 
+output_text_record <- function(text, max_bytes = 262144L) {
+  bytes <- charToRaw(enc2utf8(text))
+  truncated <- length(bytes) > max_bytes
+  if (truncated) {
+    suffix <- "\n[output truncated]"
+    keep <- max_bytes - nchar(suffix, type = "bytes")
+    prefix <- rawToChar(bytes[seq_len(keep)])
+    text <- paste0(iconv(prefix, from = "UTF-8", to = "UTF-8", sub = ""), suffix)
+  }
+  new_output("text", text = text, truncated = truncated)
+}
+
 output_text <- function(x) {
   if (inherits(x, "alder_output")) return(x)
   if (is.null(x)) return(new_output("text", text = "NULL", truncated = FALSE))
+  if (is.character(x) && !is.object(x) && length(x) == 1L && !is.na(x)) {
+    return(output_text_record(x))
+  }
   if (is.data.frame(x) || is.matrix(x)) {
     nr <- nrow(x); nc <- ncol(x)
     pv <- if (is.matrix(x)) as.data.frame(utils::head(x, 25L)) else utils::head(x, 25L)
@@ -56,8 +71,8 @@ output_text <- function(x) {
                       truncated_rows = nr > 25L,
                       truncated_columns = nc > 50L))
   }
-  cap <- utils::capture.output(utils::str(x, max.level = 1L))
-  new_output("text", text = paste(cap, collapse = "\n"), truncated = FALSE)
+  cap <- utils::capture.output(print(x))
+  output_text_record(paste(cap, collapse = "\n"))
 }
 
 output_widget <- function(x, name = NULL) {
@@ -78,60 +93,11 @@ output_value <- function(x, widget_name = NULL) {
   if (inherits(x, "alder_widget")) {
     return(output_widget(x, widget_name))
   }
+  if (is.character(x) && !is.object(x) && length(x) == 1L && !is.na(x)) {
+    return(output_text(x))
+  }
+  if (is.function(RUNTIME$render)) return(RUNTIME$render(x))
   output_text(x)
-}
-
-#' Execute SQL against an explicit DBI connection or notebook data frames.
-#'
-#' @param query A single SQL query string.
-#' @param conn An optional DBI connection.
-#' @export
-sql <- function(query, conn = NULL) {
-  if (!is.character(query) || length(query) != 1L || is.na(query)) {
-    stop("sql() query must be a single string", call. = FALSE)
-  }
-  emit_result <- function(result) {
-    if (!is.null(RUNTIME$emit)) {
-      RUNTIME$emit("append", list(output = output_text(result)))
-    }
-    result
-  }
-  if (!is.null(conn)) {
-    if (!requireNamespace("DBI", quietly = TRUE)) {
-      stop("sql() with a connection needs the DBI package", call. = FALSE)
-    }
-    return(emit_result(DBI::dbGetQuery(conn, query)))
-  }
-  if (!requireNamespace("DBI", quietly = TRUE) ||
-      !requireNamespace("duckdb", quietly = TRUE)) {
-    stop("sql() without a connection needs the duckdb package", call. = FALSE)
-  }
-  db <- RUNTIME$duckdb
-  valid <- !is.null(db) && isTRUE(tryCatch(DBI::dbIsValid(db),
-                                            error = function(e) FALSE))
-  if (!valid) {
-    db <- DBI::dbConnect(duckdb::duckdb())
-    RUNTIME$duckdb <- db
-  }
-  names <- ls(envir = .GlobalEnv, all.names = TRUE)
-  names <- names[grepl("^[A-Za-z_][A-Za-z0-9_]*$", names, perl = TRUE)]
-  data_names <- names[vapply(names, function(name) {
-    is.data.frame(get(name, envir = .GlobalEnv, inherits = FALSE))
-  }, logical(1))]
-  registered <- character()
-  on.exit({
-    for (name in registered) {
-      tryCatch(duckdb::duckdb_unregister(db, name),
-               error = function(e) NULL)
-    }
-  }, add = TRUE)
-  for (name in data_names) {
-    duckdb::duckdb_register(db, name,
-                            get(name, envir = .GlobalEnv, inherits = FALSE),
-                            overwrite = TRUE)
-    registered <- c(registered, name)
-  }
-  emit_result(DBI::dbGetQuery(db, query))
 }
 
 render_layout_args <- function(exprs, env) {
@@ -207,8 +173,18 @@ progress_emit <- function(record) {
 #' defers a computation behind a button, \code{out$inspect()} prints a
 #' bounded \code{str()}, and \code{out$stop()} halts a cell early. When the
 #' notebook runs as a plain Rscript (no worker), every constructor degrades
-#' to ordinary R behavior (ADR 0001).
+#' to ordinary R behavior. Named widgets nested in supported
+#' layouts or resolved lazy outputs retain reactive updates, focus, and
+#' operation identity. Layouts and appended outputs use the same native plot,
+#' HTML widget, table, and printed model renderers as standalone values;
+#' character scalars are displayed as readable text. Use \code{out$inspect()}
+#' explicitly for an object's internal structure.
+#' Tabs expose linked tab/tablist/tabpanel selection
+#' semantics, and accordions expose linked expanded/region state.
 #'
+#' @examples
+#' out$md("## Result")
+#' out$callout("Check assumptions", variant = "warn")
 #' @export
 out <- list(
   md = function(text, ...) {
@@ -247,12 +223,12 @@ out <- list(
     exprs <- as.list(substitute(list(...)))[-1L]
     titles <- names(exprs)
     titles[is.null(titles)] <- ""
-    layout_output("tabs", render_layout_args(exprs, parent.frame()), list(titles = titles))
+    layout_output("tabs", render_layout_args(exprs, parent.frame()), list(titles = I(titles)))
   },
   accordion = function(...) {
     exprs <- as.list(substitute(list(...)))[-1L]
     layout_output("accordion", render_layout_args(exprs, parent.frame()),
-                  list(titles = names(exprs)))
+                  list(titles = I(names(exprs) %||% character())))
   },
   sidebar = function(...) {
     exprs <- as.list(substitute(list(...)))[-1L]

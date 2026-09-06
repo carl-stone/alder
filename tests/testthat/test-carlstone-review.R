@@ -25,7 +25,7 @@ visible_output <- function(s, id) {
 test_that("trailing-blank replacement round-trips exactly", {
   m <- make_test_session(c("# %%", "x <- 1"))
   s <- m$session
-  withr::defer(s$stop(), testthat::teardown_env())
+  withr::defer(s$stop())
 
   rev0 <- cell_of(s, "cell-1")$revision
 
@@ -52,7 +52,7 @@ test_that("stale-revision edit leaves acknowledged source unchanged", {
     "# %%", "x + 1"
   ))
   s <- m$session
-  withr::defer(s$stop(), testthat::teardown_env())
+  withr::defer(s$stop())
 
   rev0 <- cell_of(s, "cell-1")$revision
   ack <- s$set_cell("cell-1", c("x <- 2"), "code", rev0)
@@ -77,7 +77,7 @@ test_that("failed rerun cannot leave a newly introduced global binding", {
     "# %%", "42"
   ))
   s <- m$session
-  withr::defer(s$stop(), testthat::teardown_env())
+  withr::defer(s$stop())
 
   # cell-1 first defines z successfully
   s$run_all()

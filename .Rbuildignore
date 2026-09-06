@@ -1,9 +1,17 @@
 ^demo\.R$
 ^\.lintr$
 ^AGENTS\.md$
+^tests/AGENTS\.md$
 ^VISION\.md$
 ^dev$
 ^\.git$
 ^\.DS_Store$
 ^LICENSE$
 ^js$
+^ALDER_TASK\.md$
+^TASK_STATE\.md$
+^SUBAGENTS\.md$
+^USER_FLOWS\.md$
+^NORTH_STAR_RUBRIC\.md$
+^\.github$
+^alder[.]Rproj$

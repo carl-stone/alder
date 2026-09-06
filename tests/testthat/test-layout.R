@@ -33,6 +33,42 @@ test_that("layout sidecars round-trip deterministically and atomically", {
   expect_match(rawToChar(first), '"cell-2"', fixed = TRUE)
 })
 
+test_that("malformed layout sidecars remain intact and visible in state", {
+  notebook <- layout_write_raw("# %%\nx <- 1\n")
+  sidecar <- paste0(notebook, ".alder-layout.json")
+  malformed <- charToRaw("{ this is deliberately malformed layout JSON\n")
+  writeBin(malformed, sidecar)
+
+  nb <- alder:::read_notebook(notebook)
+  expect_message(
+    session <- alder:::Session$new(
+      nb, worker = NULL, run_on_startup = FALSE,
+      disk_version = list(exists = TRUE, bytes = readBin(
+        notebook, "raw", n = file.info(notebook)$size
+      ))
+    ),
+    "invalid layout JSON"
+  )
+  state <- session$state()
+  expect_null(state$layout)
+  expect_identical(state$layout_error$code, "invalid_layout")
+  expect_identical(state$last_action_error, state$layout_error)
+  expect_match(state$layout_error$message, basename(sidecar), fixed = TRUE)
+  expect_identical(
+    readBin(sidecar, "raw", n = file.info(sidecar)$size),
+    malformed
+  )
+
+  session$set_layout(list(
+    version = 1,
+    cells = list(`cell-1` = list(x = 0, y = 0, w = 12, h = 1))
+  ))
+  recovered <- session$state()
+  expect_null(recovered$layout_error)
+  expect_null(recovered$last_action_error)
+  expect_identical(alder:::alder_layout_read(notebook), recovered$layout)
+})
+
 test_that("grid defaults follow document order and honor named cells", {
   nb <- alder:::parse_notebook_lines("x.R", c(
     "# %%", "#| name: first", "a <- 1",
@@ -129,4 +165,30 @@ test_that("gallery index filters notebooks, sorts stably, and truncates descript
   expect_identical(index, alder:::alder_gallery_index(c(
     file.path(dir, "b.R"), file.path(dir, "a.R"), file.path(dir, "ignored.txt")
   )))
+})
+
+test_that("gallery index exposes malformed Alder files but ignores plain R", {
+  dir <- tempfile("alder-gallery-invalid-")
+  dir.create(dir)
+  writeLines(c("# %%", "1 + 1"), file.path(dir, "good.R"))
+  writeLines(c(
+    "# ---", "# title: [unterminated", "# ---", "# %%", "1 + 1"
+  ), file.path(dir, "bad.R"))
+  writeLines("ordinary R file with no Alder cell delimiter",
+             file.path(dir, "plain.R"))
+
+  index <- alder:::alder_gallery_index(dir)
+  expect_identical(vapply(index, `[[`, "", "basename"), c("bad.R", "good.R"))
+  expect_identical(index[[1L]]$error$code, "invalid_notebook")
+  expect_match(index[[1L]]$error$message, "malformed YAML metadata")
+  expect_null(index[[2L]]$error)
+
+  response <- alder:::alder_gallery_index_response(dir)
+  html <- rawToChar(response$body)
+  expect_identical(response$status, 200L)
+  expect_match(html, "gallery-card-error", fixed = TRUE)
+  expect_match(html, "role=\"alert\"", fixed = TRUE)
+  expect_identical(lengths(regmatches(html, gregexpr("bad.R", html,
+                                                     fixed = TRUE))), 1L)
+  expect_false(grepl("plain.R", html, fixed = TRUE))
 })

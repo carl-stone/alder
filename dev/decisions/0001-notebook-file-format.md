@@ -5,7 +5,7 @@ Date: 2026-08-16
 
 ## Context
 
-Notebooks must be readable, diffable, mergeable source files, not opaque JSON. They must remain useful as ordinary source code outside the notebook app, work well in Git, and be safely editable by humans and coding agents. Quarto remains the canonical publishing path; `.qmd` interoperability is a future property of the plain-text format, not an export command in this plan. Runner decides the format architecture.
+Notebooks must be readable, diffable, mergeable source files, not opaque JSON. They must remain useful as ordinary source code outside the notebook app, work well in Git, and be safely editable by humans and coding agents. Quarto remains a first-class publishing path, while direct Pandoc rendering preserves Alder's reactive outputs. ADR 0020 supersedes this ADR's original deferral of publishing commands. Runner decides the format architecture.
 
 ## Decision
 
@@ -23,9 +23,9 @@ A notebook is a plain R source file runnable with `Rscript`.
   code-option syntax).
 - Notebook metadata lives in a YAML block inside `# ---` comment fences at
   the top of the file.
-- There is no notebook-specific primary format. Future `.qmd` interop is a
-  property of the plain-text format, but this plan does not add an export
-  command.
+- There is no notebook-specific primary format. `.qmd` remains an editable
+  interchange format, and the explicit Quarto/knitr and direct-Pandoc render
+  commands are governed by ADR 0020.
 
 `# %%` is already the de-facto interactive-R cell marker (Positron, VS Code R extension), so the file is a normal R script in any editor; only the comments convey cell structure.
 

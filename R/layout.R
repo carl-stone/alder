@@ -91,8 +91,10 @@ layout_slide_group <- function(group, index) {
   if (is.list(group) && !is.null(names(group))) {
     valid_names <- identical(names(group), "cells") ||
       identical(sort(names(group)), c("cells", "title"))
-    if (!valid_names) layout_abort(paste0("slides[[", index,"]] must be an array of cell keys"))
-    if (is.null(group$cells)) layout_abort(paste0("slides[[", index,"]] has no cells"))
+    if (!valid_names) layout_abort(paste0("slides[[", index,
+                                          "]] must be an array of cell keys"))
+    if (is.null(group$cells)) layout_abort(paste0("slides[[", index,
+                                                  "]] has no cells"))
     if ("title" %in% names(group)) {
       title <- layout_scalar(group$title, paste0("slides[[", index, "]].title"))
       if (!is.character(title) || !nzchar(title)) {
@@ -242,7 +244,7 @@ layout_json <- function(layout) {
   paste0("{", paste(fields, collapse = ","), "}")
 }
 
- 
+
 alder_layout_write <- function(path, layout) {
   sidecar <- layout_sidecar_path(path)
   checked <- alder_layout_validate(layout)
@@ -409,13 +411,49 @@ layout_gallery_description <- function(cell) {
   if (nchar(text, type = "chars") > 240L) substr(text, 1L, 240L) else text
 }
 
+layout_gallery_candidate <- function(path) {
+  lines <- tryCatch(
+    readLines(path, warn = FALSE, encoding = "UTF-8"),
+    error = function(e) NULL
+  )
+  if (is.null(lines)) return(TRUE)
+  any(grepl("^#\\s*%%(?:\\s|$|\\[)", lines, perl = TRUE))
+}
+
+layout_gallery_error <- function(path, error) {
+  cause <- gsub("[[:space:]]+", " ", trimws(conditionMessage(error)),
+                perl = TRUE)
+  if (nchar(cause, type = "chars") > 500L) {
+    cause <- paste0(substr(cause, 1L, 497L), "...")
+  }
+  list(
+    path = path,
+    basename = basename(path),
+    title = basename(path),
+    description = "",
+    error = list(code = "invalid_notebook", message = cause)
+  )
+}
+
 alder_gallery_index <- function(paths) {
   candidates <- layout_gallery_paths(paths)
   if (!length(candidates)) return(list())
   result <- list()
   for (path in candidates) {
-    nb <- tryCatch(read_notebook(path), error = function(e) NULL)
-    if (is.null(nb) || !length(nb$cells)) next
+    parsed <- tryCatch(
+      list(notebook = read_notebook(path), error = NULL),
+      error = function(e) list(notebook = NULL, error = e)
+    )
+    if (!is.null(parsed$error)) {
+      if (layout_gallery_candidate(path)) {
+        result[[length(result) + 1L]] <- layout_gallery_error(
+          path, parsed$error
+        )
+      }
+      next
+    }
+    nb <- parsed$notebook
+    if (!length(nb$cells)) next
     markdown <- vapply(nb$cells, function(cell) identical(cell$type, "markdown"), logical(1))
     first_md <- if (any(markdown)) nb$cells[[which(markdown)[[1L]]]] else NULL
     title <- if (is.list(nb$metadata)) nb$metadata$title else NULL
@@ -426,7 +464,8 @@ alder_gallery_index <- function(paths) {
       path = path,
       basename = basename(path),
       title = title,
-      description = if (is.null(first_md)) "" else layout_gallery_description(first_md)
+      description = if (is.null(first_md)) "" else layout_gallery_description(first_md),
+      error = NULL
     )
   }
   result

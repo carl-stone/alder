@@ -10,6 +10,26 @@ alder_config(path = NULL)
 \item{path}{Optional notebook path.  When supplied, project configuration
 and notebook runtime metadata are included in the result.}
 }
+\value{
+The fully merged and validated configuration list. Editor settings
+include independently persisted logical flags for \code{completions},
+\code{signature_help}, and opt-in \code{live_diagnostics}. The latter controls
+language-server lintr notes; Alder's own parse and safety diagnostics are
+always retained.
+}
 \description{
 Resolve alder's layered configuration.
+}
+\details{
+Opt-in linting uses the notebook's native file path and project \code{.lintr}
+settings. Diagnostics that cannot be located within one cell, including
+linter failures, appear as document-level editor diagnostics. Their error,
+warning, or information level is retained without blocking notebook
+execution. New diagnostics replace the previous set; turning lint off
+clears retained cell and document lint notes even if the language server
+has stopped.
+}
+\examples{
+config <- alder_config()
+config$editor$completions
 }

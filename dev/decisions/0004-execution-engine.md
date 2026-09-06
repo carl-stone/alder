@@ -29,17 +29,25 @@ Clarifications required by the implementation:
   request-scoped `executing_req`. An eval emits exactly one start
   acknowledgement, after which the host may send one SIGINT gated on that
   same request's ack; the host never retries a SIGINT against an idle read
-  or another request. A SIGINT received while the worker is blocked on the
-  (next) stdin read is caught and ignored by the outer loop.
+  or another request. The child defers a late signal while parsing protocol
+  input or writing a complete response, and drains it at a guarded checkpoint
+  before dispatching the next request. A SIGINT received during the guarded
+  idle stdin read is ignored without counting as EOF. A completed evaluation's
+  delayed acknowledgement therefore cannot make its signal terminate the worker
+  or interrupt the next evaluation. Actual evaluation still admits interrupts
+  in the same guarded region that emits its start acknowledgement.
 - **Late Stop commits.** A Stop arriving after a successful response is too
   late: the already-completed successful result commits as `done` rather
   than becoming a false `Error: Interrupted`. Only a matching response with
   `error$interrupted = TRUE` becomes `Error: Interrupted`.
-- **Worker exit is a terminal, deterministic failure.** If the worker
-  process dies, the active cell receives `Error: Worker exited before
-  responding`, the queue is dropped (no worker remains to drain it), and
-  every later worker-dependent request fails with `worker is not running`
-  until a new session is started.
+- **Worker exit is a terminal failure for that process, with explicit
+  recovery.** If the worker dies, the active cell receives an error, the queue
+  is dropped, every executable output becomes visibly stale, and runtime
+  values are cleared. The editor exposes **Restart R**; it creates a new
+  worker, performs the readiness handshake, and optionally replays the
+  notebook. Runtime values are invalidated before replacement starts and again
+  after teardown callbacks settle. Failed readiness preserves stale output bytes
+  and editable source; no output from the dead process is presented as current.
 - **R side effects are not transactional.** Reference-object mutation,
   superassignment, and external side effects cannot be rolled back on
   error; a failed cell removes only the bindings it declared (owned

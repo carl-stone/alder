@@ -13,19 +13,21 @@ start_alder(
   execution_mode = NULL,
   run_on_startup = NULL,
   allowed_origins = NULL,
-  sandbox = FALSE
+  sandbox = FALSE,
+  idle_timeout = NULL
 )
 
 stop_alder(srv)
 }
 \arguments{
 \item{path}{Path to a notebook file (plain \code{.R} with \code{# \%\%}
-cells, per ADR 0001). Must be \code{NULL} or one nonempty valid-UTF-8
+cell markers). Must be \code{NULL} or one nonempty valid-UTF-8
 string. When \code{NULL}, an empty notebook with no save path is
 served; a nonexistent path is created only on Save.}
 
-\item{host}{Interface to bind; defaults to loopback only. A non-loopback
-bind requires an explicit \code{allowed_origins}.}
+\item{host}{Loopback interface to bind. Must be exactly
+\code{"127.0.0.1"}, \code{"localhost"}, or \code{"::1"}; Alder does
+not support non-loopback binds.}
 
 \item{port}{TCP port for the local web server; one integer in 1--65535.}
 
@@ -42,16 +44,23 @@ server starts; if \code{FALSE}, opening the editor or an app URL never
 triggers execution. \code{NULL} resolves from notebook metadata and
 configuration.}
 
-\item{allowed_origins}{For loopback binds, optional explicit trusted
-origins; for non-loopback binds, required. \code{NULL} on loopback
-allows exactly \code{http://127.0.0.1:<port>},
+\item{allowed_origins}{Optional explicit trusted browser origins.
+\code{NULL} allows exactly \code{http://127.0.0.1:<port>},
 \code{http://localhost:<port>}, and \code{http://[::1]:<port>}.}
 
 \item{sandbox}{Run the notebook worker with an isolated package library
-(\code{.alder/renv/library} under the notebook directory) prepended to
-\code{R_LIBS_USER}; declared packages install into it. Requires a
-notebook \code{path}; \code{sandbox = TRUE} with a \code{NULL} path or
-a gallery directory is an error.}
+(the standard renv project library); declared packages install into it.
+Notebook lookup is restricted to that library plus base/recommended R
+packages. Requires a notebook \code{path}; \code{sandbox = TRUE} with a
+\code{NULL} path or a gallery directory is an error.}
+
+\item{idle_timeout}{Browser-idle shutdown timeout in seconds. After a browser
+has connected and polled state at least once, the server stops when no
+browser poll arrives for this duration. Dirty notebooks are atomically
+saved first; a save failure or conflict pauses shutdown and is exposed in
+state rather than discarding work. \code{NULL} or zero disables the timer.
+The R API defaults to disabled; the command-line launcher defaults to 30
+seconds.}
 
 \item{srv}{An \code{alder_server} object returned by \code{start_alder}.}
 }
@@ -63,13 +72,19 @@ notebook \code{Session}, and the worker.
 Start the local alder web app for a notebook: a derivation DAG over
 \code{# \%\%} cells is computed, cells execute in dependency order in a
 dedicated R worker process, and the UI supports editing, reactive
-execution (ADR 0002), \code{ui$} widgets with explicit \code{$value}
-(ADR 0003), and interruptible execution.
+execution, \code{ui$} widgets with explicit \code{$value}, and
+interruptible execution.
 }
 \details{
 Only the worker is executed as a separate process for isolation; it is
 not a security sandbox, so only trusted notebook code should be run.
-With \code{sandbox = TRUE} the worker runs with an isolated project
-library (\code{.alder/renv/library} under the notebook directory) and
-declared packages install into it.
+With \code{sandbox = TRUE} the worker runs with the standard renv project
+library (\code{renv/library} under the notebook directory) and declared
+packages install into it.
+}
+\examples{
+\dontrun{
+srv <- start_alder("analysis.R", open = TRUE)
+stop_alder(srv)
+}
 }

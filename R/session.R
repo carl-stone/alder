@@ -12,9 +12,14 @@ Session <- R6::R6Class(
     initialize = function(notebook, worker = NULL,
                           execution_mode = c("automatic", "lazy"),
                           run_on_startup = TRUE,
+                          defer_startup = FALSE,
                           disk_version = list(exists = NA, bytes = raw()),
                           config = NULL, package_lib = NULL) {
       execution_mode <- match.arg(execution_mode)
+      if (!is.logical(defer_startup) || length(defer_startup) != 1L ||
+          is.na(defer_startup)) {
+        stop("`defer_startup` must be TRUE or FALSE", call. = FALSE)
+      }
       private$notebook <- notebook
       private$disk_version <- disk_version
       private$execution_mode <- execution_mode
@@ -31,6 +36,8 @@ Session <- R6::R6Class(
       private$changed <- FALSE
       private$run_counter <- 0L
       private$op_counter <- 0L
+      private$run_operation_results <- list()
+      private$widget_operation_results <- list()
       private$worker_failed <- FALSE
       private$stopped <- FALSE
       private$barrier_restart_required <- FALSE
@@ -38,14 +45,32 @@ Session <- R6::R6Class(
       private$cell_state <- list()
       private$button_resets <- list()
       private$last_action_error <- NULL
+      private$service_errors <- list()
+      private$layout_error <- NULL
       private$layout <- if (exists("alder_layout_read", mode = "function") &&
                             is.character(notebook$path) &&
                             length(notebook$path) == 1L &&
                             !is.na(notebook$path) && nzchar(notebook$path)) {
         tryCatch(alder_layout_read(notebook$path),
-                 error = function(e) NULL)
+                 error = function(e) {
+                   error_message <- paste0(
+                     "Could not load layout sidecar ",
+                     layout_sidecar_path(notebook$path), ": ",
+                     conditionMessage(e)
+                   )
+                   private$layout_error <- list(
+                     token = NULL,
+                     code = e$code %||% "invalid_layout",
+                     message = error_message
+                   )
+                   message("[alder:layout] ", error_message)
+                   NULL
+                 })
       } else {
         NULL
+      }
+      if (!is.null(private$layout_error)) {
+        private$last_action_error <- private$layout_error
       }
       private$last_value <- NULL
       private$value_operation <- NULL
@@ -75,7 +100,10 @@ Session <- R6::R6Class(
         }
       }
       private$bump()
-      private$startup_run()
+      # MCP uses a valid initialize/initialized handshake as its execution
+      # boundary. It retains the normal requested policy while deferring this
+      # single constructor-side startup effect until that boundary completes.
+      if (!isTRUE(defer_startup)) private$startup_run()
     },
 
     # ------------------------------------------------------------------
@@ -83,13 +111,40 @@ Session <- R6::R6Class(
     # ------------------------------------------------------------------
 
     worker_available = function() {
+      private$detect_worker_failure()
       !private$worker_failed && !private$stopped &&
         !is.null(private$worker) && private$worker$alive()
+    },
+
+    # Exact terminal/pending state for one widget token. This internal
+    # journal lets synchronous protocol clients follow the operation they
+    # started even when a one-shot control immediately creates a reset op.
+    widget_operation = function(token) {
+      if (!is.numeric(token) || length(token) != 1L || is.na(token) ||
+          !is.finite(token) || token < 1 || token != floor(token)) {
+        return(NULL)
+      }
+      private$widget_operation_results[[as.character(as.integer(token))]] %||%
+        NULL
+    },
+
+    # Exact settlement state for one accepted run. Runtime `busy` describes
+    # only cell evaluation and can become FALSE while a deferred run-button
+    # reset is still in flight, so synchronous clients follow this journal.
+    run_operation = function(run_id) {
+      if (!is.numeric(run_id) || length(run_id) != 1L || is.na(run_id) ||
+          !is.finite(run_id) || run_id < 1 || run_id != floor(run_id)) {
+        return(NULL)
+      }
+      private$run_operation_results[[as.character(as.integer(run_id))]] %||%
+        NULL
     },
 
     # Full client-visible state snapshot. log/diagnostic arrays, the dag
     # node list, and the topological plan stay arrays under JSON via I().
     state = function() {
+      private$detect_worker_failure()
+      private$refresh_value_freshness()
       nodes <- private$dag_nodes()
       cells <- lapply(private$notebook$cells, function(c) {
         rec <- private$cell_state[[c$id]] %||%
@@ -111,6 +166,7 @@ Session <- R6::R6Class(
              refs = I(p$refs %||% character()),
              locals = I(p$locals %||% character()),
              log = I(rec$log %||% character()),
+             error = rec$error %||% NULL,
              revision = rec$revision %||% 0L,
              diagnostics = I(rec$diagnostics %||% list()))
       })
@@ -160,6 +216,7 @@ Session <- R6::R6Class(
                log = private$package_log %||% "", error = list())
         },
         layout = private$layout,
+        layout_error = private$layout_error,
         variables = I(private$variables %||% list()),
         dag = list(
           nodes = I(nodes),
@@ -171,24 +228,108 @@ Session <- R6::R6Class(
         changed = private$changed,
         last_value = private$last_value,
         value_operation = private$value_operation,
-        last_action_error = private$last_action_error
+        editor_diagnostics = I(private$lsp_diagnostics[[".document"]] %||% list()),
+        service_errors = private$service_errors,
+        last_action_error = private$last_action_error %||%
+          private$layout_error %||%
+          if (length(private$service_errors)) {
+            private$service_errors[[1L]]
+          } else {
+            NULL
+          }
       )
       if (exists("alder_dataflow_state", mode = "function")) {
-        dataflow <- tryCatch(
-          alder_dataflow_state(snapshot, include_values = FALSE),
-          error = function(e) NULL
-        )
-        if (!is.null(dataflow)) {
-          dataflow$reactive_ranges <- setNames(
-            lapply(nodes, function(id) alder_reactive_ranges(snapshot, id)),
-            nodes
+        dataflow <- tryCatch({
+          projected <- alder_dataflow_state(snapshot, include_values = FALSE)
+          # Runtime updates cannot change source positions or symbol owners.
+          # Include every cell in notebook order: edits in another cell can
+          # change ownership even when this cell's source stays identical.
+          range_key <- lapply(cells, function(cell) {
+            cell[c("id", "body", "defs", "refs")]
+          })
+          cached <- private$reactive_range_cache
+          if (is.null(cached) || !identical(cached$key, range_key)) {
+            ranges <- setNames(
+              lapply(nodes, function(id) alder_reactive_ranges(snapshot, id)),
+              nodes
+            )
+            private$reactive_range_cache <- list(key = range_key, ranges = ranges)
+          }
+          projected$reactive_ranges <- private$reactive_range_cache$ranges
+          alder_dataflow_json(projected)
+        }, error = identity)
+        if (inherits(dataflow, "condition")) {
+          projection_error <- list(
+            code = "dataflow_projection_error",
+            message = paste0("Dataflow projection failed: ",
+                             conditionMessage(dataflow))
           )
-          snapshot$dataflow <- dataflow
+          empty_adjacency <- setNames(
+            lapply(nodes, function(id) I(character())), nodes
+          )
+          dataflow <- list(
+            variables = I(list()),
+            dag = list(
+              nodes = I(nodes),
+              edges = empty_adjacency,
+              reverse_edges = empty_adjacency,
+              edge_records = I(list()),
+              cycles = I(character()),
+              cycle_nodes = I(character())
+            ),
+            outline = I(list()),
+            reactive_ranges = setNames(
+              lapply(nodes, function(id) I(list())), nodes
+            ),
+            error = projection_error
+          )
+          snapshot$dataflow_error <- projection_error
+          if (is.null(snapshot$last_action_error)) {
+            snapshot$last_action_error <- projection_error
+          }
+        } else {
           snapshot$outline <- I(dataflow$outline)
           snapshot$reactive_ranges <- dataflow$reactive_ranges
         }
+        snapshot$dataflow <- dataflow
       }
       snapshot
+    },
+
+    # Serialize the same state for transports without encoding thousands of
+    # unchanged source positions twice on every poll. Only encoder-produced
+    # JSON is joined here; source strings never enter the framing directly.
+    state_json = function(fields = list()) {
+      perf <- .alder_perf_begin("state.encode")
+      on.exit(.alder_perf_end(perf), add = TRUE)
+      snapshot <- self$state()
+      snapshot <- c(snapshot, fields)
+      encode <- function(value) as.character(jsonlite::toJSON(
+        value, auto_unbox = TRUE, null = "null", na = "null", force = TRUE
+      ))
+      cached <- private$reactive_range_cache
+      if (is.null(cached) || is.null(snapshot$reactive_ranges) ||
+          !identical(snapshot$reactive_ranges, cached$ranges) ||
+          !identical(snapshot$dataflow$reactive_ranges, cached$ranges)) {
+        return(encode(snapshot))
+      }
+      if (is.null(cached$json)) {
+        cached$json <- encode(cached$ranges)
+        private$reactive_range_cache <- cached
+      }
+      # Both enclosing objects are nonempty; remove only their final brace.
+      append_fields <- function(object, fields) {
+        paste0(substr(object, 1L, nchar(object) - 1L), ",", fields, "}")
+      }
+      dataflow <- snapshot$dataflow
+      dataflow$reactive_ranges <- NULL
+      dataflow_json <- append_fields(encode(dataflow),
+        paste0('"reactive_ranges":', cached$json))
+      snapshot$dataflow <- NULL
+      snapshot$reactive_ranges <- NULL
+      append_fields(encode(snapshot), paste0(
+        '"dataflow":', dataflow_json, ',"reactive_ranges":', cached$json
+      ))
     },
 
     # A defensive notebook snapshot for editor services. Callers must not
@@ -199,10 +340,14 @@ Session <- R6::R6Class(
 
     set_lsp_diagnostics = function(diagnostics = list()) {
       private$assert_active()
-      private$lsp_diagnostics <- diagnostics %||% list()
+      diagnostics <- diagnostics %||% list()
+      if (identical(private$lsp_diagnostics, diagnostics)) {
+        return(invisible(FALSE))
+      }
+      private$lsp_diagnostics <- diagnostics
       private$refresh_diagnostics()
       private$bump()
-      invisible()
+      invisible(TRUE)
     },
 
     # ------------------------------------------------------------------
@@ -284,23 +429,31 @@ Session <- R6::R6Class(
     # ------------------------------------------------------------------
 
     set_cell = function(id, body, type, expected_revision = NULL) {
+      perf <- .alder_perf_begin("source.edit", list(cell = id,
+        expected_revision = expected_revision))
+      on.exit(.alder_perf_end(perf), add = TRUE)
       private$assert_active()
       if (!id %in% private$dag_nodes()) {
         alder_abort("not_found", paste("no such cell:", id))
       }
-      if (!type %in% c("code", "markdown", "sql")) {
+      if (!type %in% c("code", "markdown")) {
         alder_abort("invalid_request",
-                    "cell type must be \"code\", \"markdown\", or \"sql\"")
+                    "cell type must be \"code\" or \"markdown\"")
       }
       if (!is.character(body) || anyNA(body)) {
         alder_abort("invalid_request",
                     "cell body must be a character array")
       }
       old <- private$cell_state[[id]]
-      if (!is.null(expected_revision) &&
-          !identical(as.integer(expected_revision), old$revision)) {
-        alder_abort("source_conflict",
-                    paste("cell", id, "changed on the server"))
+      if (!is.null(expected_revision)) {
+        if (!alder_is_revision(expected_revision)) {
+          alder_abort("invalid_request",
+                      "expected_revision must be a non-negative integer")
+        }
+        if (!identical(as.integer(expected_revision), old$revision)) {
+          alder_abort("source_conflict",
+                      paste("cell", id, "changed on the server"))
+        }
       }
       cs <- private$cell_source(id)
       if (identical(cs$body, body) && identical(cs$type, type)) {
@@ -341,6 +494,7 @@ Session <- R6::R6Class(
         rec$outputs <- list(render_markdown_cell_output(body))
         rec$progress <- NULL
         rec$log <- character()
+        rec$error <- NULL
         rec$revision <- old$revision
         private$cell_state[[id]] <- rec
         for (d in unique(c(old_desc, new_desc))) {
@@ -370,12 +524,44 @@ Session <- R6::R6Class(
     # Apply formatter output as source edits. This deliberately reuses
     # set_cell so formatting has the same stale and clear-binding semantics
     # as a user edit and never executes a cell.
+    format_source = function(cell = NULL, expected_revisions = NULL) {
+      private$assert_active()
+      ids <- vapply(private$notebook$cells, function(value) value$id, "")
+      if (!is.null(cell) && (!is.character(cell) || length(cell) != 1L ||
+          is.na(cell) || !cell %in% ids)) {
+        alder_abort("not_found", "no such cell to format")
+      }
+      selected <- if (is.null(cell)) ids else cell
+      if (!is.null(expected_revisions)) {
+        keys <- names(expected_revisions)
+        if (!is.list(expected_revisions) ||
+            (length(selected) && is.null(keys)) || anyDuplicated(keys) ||
+            !setequal(keys %||% character(), selected)) {
+          alder_abort("invalid_request",
+                      "expected_revisions must name every selected cell exactly once")
+        }
+        for (id in selected) {
+          revision <- expected_revisions[[id]]
+          if (!alder_is_revision(revision)) {
+            alder_abort("invalid_request",
+                        "expected revisions must be non-negative integers")
+          }
+          if (!identical(as.integer(revision), private$cell_state[[id]]$revision)) {
+            alder_abort("source_conflict", paste("cell", id, "changed on the server"))
+          }
+        }
+      }
+      formatted <- format_notebook_source(private$notebook, cell)
+      self$apply_formatted(formatted$bodies)
+    },
+
     apply_formatted = function(bodies) {
       private$assert_active()
-      if (!is.list(bodies) || is.null(names(bodies))) {
+      if (!is.list(bodies) || is.null(names(bodies)) ||
+          anyDuplicated(names(bodies))) {
         alder_abort("invalid_request", "formatted bodies must be a named list")
       }
-      changed <- 0L
+      # Validate every target before the first mutation.
       for (id in names(bodies)) {
         if (!id %in% private$dag_nodes()) {
           alder_abort("not_found", paste("no such cell:", id))
@@ -385,27 +571,21 @@ Session <- R6::R6Class(
           alder_abort("invalid_request",
                       "formatted cell body must be a character array")
         }
+      }
+      changed <- 0L
+      cells <- lapply(names(bodies), function(id) {
+        body <- bodies[[id]]
         cell <- private$cell_source(id)
+        previous_revision <- private$cell_state[[id]]$revision
         if (!identical(cell$body, body)) {
           self$set_cell(id, body, cell$type)
-          changed <- changed + 1L
+          changed <<- changed + 1L
         }
-      }
-      list(changed = changed, version = private$state_version)
-    },
-
-    set_sql_cell = function(id, query, conn = NULL, into = "result",
-                            expected_revision = NULL) {
-      private$assert_active()
-      if (!id %in% private$dag_nodes()) {
-        alder_abort("not_found", paste("no such cell:", id))
-      }
-      nb <- tryCatch(
-        nb_set_sql_cell(private$notebook, id, query, conn, into),
-        error = function(e) alder_abort("invalid_request",
-                                        conditionMessage(e))
-      )
-      self$set_cell(id, nb_cell(nb, id)$body, "sql", expected_revision)
+        list(id = id, body = I(body), type = cell$type,
+             previous_revision = previous_revision,
+             revision = private$cell_state[[id]]$revision)
+      })
+      list(changed = changed, version = private$state_version, cells = I(cells))
     },
 
     set_cell_disabled = function(id, disabled) {
@@ -445,7 +625,7 @@ Session <- R6::R6Class(
 
       run_id <- NULL
       if (!disabled && identical(private$execution_mode, "automatic") &&
-          cell$type %in% c("code", "sql") &&
+          identical(cell$type, "code") &&
           is.null(private$current) && !length(private$queue) &&
           self$worker_available()) {
         plan <- self$plan_cell_run(id, "app")
@@ -517,9 +697,9 @@ Session <- R6::R6Class(
       if (!is.null(after) && !after %in% private$dag_nodes()) {
         alder_abort("not_found", paste("no such cell:", after))
       }
-      if (!type %in% c("code", "markdown", "sql")) {
+      if (!type %in% c("code", "markdown")) {
         alder_abort("invalid_request",
-                    "cell type must be \"code\", \"markdown\", or \"sql\"")
+                    "cell type must be \"code\" or \"markdown\"")
       }
       if (identical(type, "markdown")) {
         tryCatch(validate_markdown_lines(body, "<new cell>"),
@@ -560,10 +740,15 @@ Session <- R6::R6Class(
         alder_abort("not_found", paste("no such cell:", id))
       }
       old <- private$cell_state[[id]]
-      if (!is.null(expected_revision) &&
-          !identical(as.integer(expected_revision), old$revision)) {
-        alder_abort("source_conflict",
-                    paste("cell", id, "changed on the server"))
+      if (!is.null(expected_revision)) {
+        if (!alder_is_revision(expected_revision)) {
+          alder_abort("invalid_request",
+                      "expected_revision must be a non-negative integer")
+        }
+        if (!identical(as.integer(expected_revision), old$revision)) {
+          alder_abort("source_conflict",
+                      paste("cell", id, "changed on the server"))
+        }
       }
       old_barrier <- isTRUE(private$analysis[[id]]$barrier)
       old_desc <- self$descendants(id)
@@ -627,7 +812,7 @@ Session <- R6::R6Class(
         alder_abort("graph_invalid", paste(g, collapse = "\n"), messages = g)
       }
       targets <- private$topo[vapply(private$topo, function(id)
-        private$cell_type(id) %in% c("code", "sql"), FALSE)]
+        identical(private$cell_type(id), "code"), FALSE)]
       rid <- private$launch_run(targets)
       list(run_id = rid, version = private$state_version)
     },
@@ -641,7 +826,7 @@ Session <- R6::R6Class(
         alder_abort("graph_invalid", paste(g, collapse = "\n"), messages = g)
       }
       targets <- private$topo[vapply(private$topo, function(id)
-        private$cell_type(id) %in% c("code", "sql") &&
+        identical(private$cell_type(id), "code") &&
         private$status_of(id) %in% c("idle", "stale", "error"), FALSE)]
       plan <- private$lazy_closure(targets)
       rid <- private$launch_run(plan)
@@ -759,6 +944,7 @@ Session <- R6::R6Class(
       checked <- alder_layout_validate(layout)
       persisted <- alder_layout_write(path, checked)
       private$layout <- persisted
+      private$layout_error <- NULL
       private$last_action_error <- NULL
       private$bump()
       list(layout = persisted, version = private$state_version)
@@ -794,6 +980,10 @@ Session <- R6::R6Class(
                              project = project),
         error = function(e) private$config
       )
+      if (!isTRUE(private$config$editor$live_diagnostics)) {
+        # This also clears retained notes if the language server has died.
+        self$set_lsp_diagnostics(list())
+      }
       private$changed <- TRUE
       private$last_action_error <- NULL
       private$bump()
@@ -947,7 +1137,25 @@ Session <- R6::R6Class(
         }
         finish(TRUE)
       }
-      job <- list(packages = needed, poll = poll)
+      cancel <- function() {
+        if (isTRUE(job_env$finished)) return(invisible(job_env$result))
+        drain()
+        if (job_env$process$is_alive()) {
+          tryCatch(job_env$process$kill(), error = function(e) NULL)
+        }
+        tryCatch(job_env$process$wait(5000), error = function(e) NULL)
+        job_env$finished <- TRUE
+        job_env$result <- list(
+          status = "cancelled", packages = job_env$packages,
+          log = job_env$log, error = NULL
+        )
+        if (exists(job_env$key, envir = ALDER_PACKAGE_JOBS,
+                   inherits = FALSE)) {
+          rm(list = job_env$key, envir = ALDER_PACKAGE_JOBS)
+        }
+        invisible(job_env$result)
+      }
+      job <- list(packages = needed, poll = poll, cancel = cancel)
       assign(key, job, envir = ALDER_PACKAGE_JOBS)
       check <- function() {
         current <- tryCatch(poll(), error = function(e) {
@@ -980,6 +1188,50 @@ Session <- R6::R6Class(
       private$note_action_error(NULL, code, as.character(message))
       private$bump()
       invisible()
+    },
+
+    # Clear only the operational failure that the caller successfully
+    # recovered. This avoids an LSP request erasing an unrelated save or
+    # worker failure banner.
+    clear_action_error = function(code = NULL) {
+      current <- private$last_action_error
+      if (is.null(current)) return(invisible(FALSE))
+      if (!is.null(code) && (is.null(current$code) ||
+          !(current$code %in% as.character(code)))) {
+        return(invisible(FALSE))
+      }
+      private$last_action_error <- NULL
+      private$bump()
+      invisible(TRUE)
+    },
+
+    # Long-lived subsystem failures survive unrelated successful notebook
+    # actions. They remain visible until that subsystem itself recovers.
+    record_service_error = function(service, message,
+                                    code = "service_unavailable") {
+      service <- as.character(service)
+      if (length(service) != 1L || is.na(service) || !nzchar(service)) {
+        alder_abort("invalid_request", "service must be one nonempty string")
+      }
+      error <- list(token = NULL, code = as.character(code),
+                    message = as.character(message), service = service)
+      if (identical(private$service_errors[[service]], error)) {
+        return(invisible(FALSE))
+      }
+      private$service_errors[[service]] <- error
+      private$bump()
+      invisible(TRUE)
+    },
+
+    clear_service_error = function(service) {
+      service <- as.character(service)
+      if (length(service) != 1L || is.na(service) ||
+          !nzchar(service) || is.null(private$service_errors[[service]])) {
+        return(invisible(FALSE))
+      }
+      private$service_errors[[service]] <- NULL
+      private$bump()
+      invisible(TRUE)
     },
 
 
@@ -1022,27 +1274,31 @@ Session <- R6::R6Class(
       if (!is.character(path) || anyNA(path) || any(!nzchar(path))) {
         alder_abort("invalid_request", "widget path invalid")
       }
-      owner <- private$widget_owner(name)
-      if (is.null(owner)) {
+      location <- private$find_widget_output(name)
+      if (is.null(location)) {
         alder_abort("invalid_request", paste("no such widget:", name))
       }
+      owner <- location$id
       rec <- private$cell_state[[owner]]
-      out <- private$visible_output(owner)
+      out <- location$output
       if (!identical(rec$status, "done") || is.null(out) ||
           !identical(out$kind, "widget")) {
         alder_abort("widget_not_current",
                     paste("widget", name, "is not current"))
       }
-      target_kind <- private$widget_kind_at(out$spec, path)
-      if (is.null(target_kind)) {
+      target_spec <- private$widget_spec_at(out$spec, path)
+      if (is.null(target_spec)) {
         alder_abort("invalid_request", "widget path does not exist")
       }
-      if (identical(target_kind, "form") && !isTRUE(update$submit)) {
-        kind <- private$widget_kind_at(out$spec$child, path)
-      } else {
-        kind <- target_kind
+      draft <- private$widget_path_has_form(out$spec, path) &&
+        !isTRUE(update$submit)
+      if (identical(target_spec$kind, "form") && !isTRUE(update$submit)) {
+        target_spec <- target_spec$child
       }
-      if (is.null(kind)) alder_abort("invalid_request", "widget path does not exist")
+      kind <- as.character(target_spec$kind %||% "")
+      if (length(kind) != 1L || is.na(kind) || !nzchar(kind)) {
+        alder_abort("invalid_request", "widget path does not exist")
+      }
       if (is.null(update)) alder_abort("invalid_request", "widget update missing")
       update <- private$validate_widget_update(kind, update)
       key <- private$widget_operation_key(name, path)
@@ -1055,10 +1311,17 @@ Session <- R6::R6Class(
       tok <- private$op_counter + 1L
       private$op_counter <- tok
       pending <- list(token = tok, status = "pending", error = NULL)
+      reset_expected <- identical(kind, "run_button") && !isTRUE(draft) &&
+        (identical(source, "app") ||
+         identical(private$execution_mode, "automatic") ||
+         !length(private$cells_referencing(name, owner)))
+      private$remember_widget_operation(c(
+        pending, list(reset_expected = reset_expected)
+      ))
       ops[[key]] <- pending
       out$operations <- ops
       if (!length(path)) out$operation <- pending
-      private$set_visible_output(owner, out)
+      private$set_widget_output(owner, name, out)
       private$bump()
 
       send_args <- c(list(name = name, path = I(path), op_id = as.integer(tok)),
@@ -1067,7 +1330,7 @@ Session <- R6::R6Class(
               c(list("set_widget"), send_args,
                 list(on_response = function(context, resp)
                   private$on_widget_response(name, owner, tok, kind, path,
-                                             resp, source, update))))
+                                             resp, source, update, draft))))
       tok
     },
 
@@ -1077,6 +1340,7 @@ Session <- R6::R6Class(
       if (!is.character(name) || length(name) != 1L || is.na(name) || !nzchar(name)) {
         alder_abort("invalid_request", "value name invalid")
       }
+      private$refresh_value_freshness()
       vop <- private$value_operation
       if (!is.null(vop) && identical(vop$status, "pending")) {
         alder_abort("operation_in_progress", "a value request is already pending")
@@ -1084,9 +1348,16 @@ Session <- R6::R6Class(
       if (!self$worker_available()) {
         alder_abort("worker_unavailable", "worker is not available")
       }
+      owner <- private$value_owner(name)
+      revision <- if (!is.null(owner)) private$cell_state[[owner]]$revision else NULL
+      if (!private$value_is_current(name, owner, revision)) {
+        private$refresh_value_freshness()
+        alder_abort("stale_value", private$stale_value_message(name))
+      }
       tok <- private$op_counter + 1L
       private$op_counter <- tok
       private$value_operation <- list(token = tok, name = name,
+                                      owner = owner, revision = revision,
                                       status = "pending", error = NULL)
       private$bump()
       private$worker$send("get_value", name = name, token = as.integer(tok),
@@ -1215,17 +1486,65 @@ Session <- R6::R6Class(
     # Lifecycle
     # ------------------------------------------------------------------
 
+    restart_worker = function(replay = TRUE) {
+      private$assert_not_stopped()
+      if (!is.logical(replay) || length(replay) != 1L || is.na(replay)) {
+        alder_abort("invalid_request", "replay must be TRUE or FALSE")
+      }
+      if (is.null(private$worker)) {
+        alder_abort("worker_unavailable", "R worker is unavailable")
+      }
+      if (!is.null(private$current) || length(private$queue)) {
+        alder_abort("run_in_progress", "cannot restart while a run is active")
+      }
+      # The old process owns every retained runtime value. Its replacement
+      # invalidates that view even when spawning or readiness later fails.
+      private$invalidate_runtime_view()
+      private$bump()
+      tryCatch({
+        private$worker$restart()
+        .wait_for_worker(private$worker)
+      }, error = function(e) {
+        # Restart teardown can fail old callbacks after the initial reset.
+        private$invalidate_runtime_view()
+        private$worker_failed <- TRUE
+        private$note_action_error(NULL, "worker_unavailable",
+                                  conditionMessage(e))
+        private$bump()
+        alder_abort("worker_unavailable", conditionMessage(e))
+      })
+      private$worker_failed <- FALSE
+      private$invalidate_runtime_view()
+      private$last_action_error <- NULL
+      private$bump()
+      run_id <- NULL
+      if (isTRUE(replay)) run_id <- self$run_all()$run_id
+      list(run_id = run_id, version = private$state_version)
+    },
+
     stop = function() {
       if (private$stopped) return(invisible())
       private$stopped <- TRUE
+      project <- tryCatch(
+        .alder_package_path(private$notebook$path),
+        error = function(e) NULL
+      )
+      if (!is.null(project)) {
+        key <- normalizePath(project, mustWork = FALSE)
+        if (exists(key, envir = ALDER_PACKAGE_JOBS, inherits = FALSE)) {
+          job <- get(key, envir = ALDER_PACKAGE_JOBS, inherits = FALSE)
+          if (is.function(job$cancel)) {
+            tryCatch(job$cancel(), error = function(e) NULL)
+          }
+          if (exists(key, envir = ALDER_PACKAGE_JOBS, inherits = FALSE)) {
+            rm(list = key, envir = ALDER_PACKAGE_JOBS)
+          }
+        }
+      }
       if (!is.null(private$worker)) {
-        tryCatch(private$worker$stop(grace = 0.2), error = function(e) NULL)
-        # bounded wait: let the shutdown request land and the deferred kill
-        # fire before the caller removes the artifact directory, so a
-        # still-booting worker cannot fail its startup validation afterwards
-        later::run_now(0.3)
+        private$worker$stop(grace = 0.2)
         if (private$worker$alive()) {
-          tryCatch(private$worker$kill(), error = function(e) NULL)
+          private$worker$kill()
         }
       }
       invisible()
@@ -1235,6 +1554,7 @@ Session <- R6::R6Class(
   ),
 
   private = list(
+    reactive_range_cache = NULL,
     notebook = NULL,
     analysis = list(),
     dag = NULL,
@@ -1248,6 +1568,7 @@ Session <- R6::R6Class(
     config = config_defaults(),
     state_version = 0L,
     layout = NULL,
+    layout_error = NULL,
     changed = FALSE,
     run_counter = 0L,
     op_counter = 0L,
@@ -1255,7 +1576,10 @@ Session <- R6::R6Class(
     stopped = FALSE,
     barrier_restart_required = FALSE,
     button_resets = list(),
+    run_operation_results = list(),
+    widget_operation_results = list(),
     last_action_error = NULL,
+    service_errors = list(),
     last_value = NULL,
     value_operation = NULL,
     lazy_operations = list(),
@@ -1268,6 +1592,27 @@ Session <- R6::R6Class(
     lsp_diagnostics = list(),
     disk_version = list(exists = NA, bytes = raw()),
     # --- small navigation helpers ------------------------------------
+
+    wire_date_valid = function(x) {
+      if (!is.character(x) || length(x) != 1L || is.na(x) ||
+          !grepl("^[0-9]{4}-[0-9]{2}-[0-9]{2}$", x)) return(FALSE)
+      parsed <- tryCatch(as.Date(x, format = "%Y-%m-%d"),
+                         error = function(e) as.Date(NA))
+      !is.na(parsed) && identical(format(parsed, "%Y-%m-%d"), x)
+    },
+    wire_datetime_valid = function(x) {
+      if (!is.character(x) || length(x) != 1L || is.na(x) ||
+          !grepl(paste0(
+            "^[0-9]{4}-[0-9]{2}-[0-9]{2}T",
+            "[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+          ), x)) return(FALSE)
+      parsed <- tryCatch(
+        as.POSIXct(x, tz = "UTC", format = "%Y-%m-%dT%H:%M:%SZ"),
+        error = function(e) as.POSIXct(NA, origin = "1970-01-01")
+      )
+      !is.na(parsed) && identical(
+        format(parsed, "%Y-%m-%dT%H:%M:%SZ", tz = "UTC"), x)
+    },
 
     dag_nodes = function() as.character(private$dag$nodes %||% character()),
     cell_source = function(id) nb_cell(private$notebook, id),
@@ -1299,6 +1644,68 @@ Session <- R6::R6Class(
       else rec$outputs[[length(rec$outputs)]] <- output
       private$cell_state[[id]] <- rec
       invisible()
+    },
+    find_widget_in_output = function(output, name) {
+      if (!is.list(output)) return(NULL)
+      if (identical(output$kind %||% NULL, "widget") &&
+          identical(output$name %||% NULL, name)) {
+        return(output)
+      }
+      if (identical(output$kind %||% NULL, "layout")) {
+        for (child in output$children %||% list()) {
+          found <- private$find_widget_in_output(child, name)
+          if (!is.null(found)) return(found)
+        }
+      } else if (identical(output$kind %||% NULL, "lazy") &&
+                 !is.null(output$child)) {
+        return(private$find_widget_in_output(output$child, name))
+      }
+      NULL
+    },
+    find_widget_output = function(name) {
+      for (id in private$dag_nodes()) {
+        rec <- private$cell_state[[id]]
+        outputs <- rec$outputs %||% list()
+        for (i in rev(seq_along(outputs))) {
+          found <- private$find_widget_in_output(outputs[[i]], name)
+          if (!is.null(found)) return(list(id = id, output = found))
+        }
+      }
+      NULL
+    },
+    map_widgets_in_output = function(output, transform) {
+      if (!is.list(output)) return(output)
+      if (identical(output$kind %||% NULL, "widget")) {
+        return(transform(output))
+      }
+      if (identical(output$kind %||% NULL, "layout")) {
+        output$children <- lapply(
+          output$children %||% list(),
+          private$map_widgets_in_output,
+          transform = transform
+        )
+      } else if (identical(output$kind %||% NULL, "lazy") &&
+                 !is.null(output$child)) {
+        output$child <- private$map_widgets_in_output(
+          output$child, transform)
+      }
+      output
+    },
+    map_cell_widgets = function(id, transform) {
+      rec <- private$cell_state[[id]]
+      if (is.null(rec)) return(invisible(FALSE))
+      rec$outputs <- lapply(
+        rec$outputs %||% list(),
+        private$map_widgets_in_output,
+        transform = transform
+      )
+      private$cell_state[[id]] <- rec
+      invisible(TRUE)
+    },
+    set_widget_output = function(id, name, widget) {
+      private$map_cell_widgets(id, function(output) {
+        if (identical(output$name %||% NULL, name)) widget else output
+      })
     },
     find_lazy_in_output = function(output, key) {
       if (!is.list(output)) return(NULL)
@@ -1416,6 +1823,7 @@ Session <- R6::R6Class(
     },
     topo_order_of = function(ids) private$topo[private$topo %in% ids],
     bump = function() {
+      private$refresh_value_freshness()
       private$state_version <- private$state_version + 1L
       invisible()
     },
@@ -1435,35 +1843,20 @@ Session <- R6::R6Class(
     # --- graph + analysis ---------------------------------------------
 
     recompute = function() {
+      perf <- .alder_perf_begin("analysis", list(cells = length(private$notebook$cells)))
+      on.exit(.alder_perf_end(perf), add = TRUE)
       cells <- private$notebook$cells
       analysis <- list()
       dagcells <- vector("list", length(cells))
       for (i in seq_along(cells)) {
         c <- cells[[i]]
-        if (identical(c$type, "code") || identical(c$type, "sql")) {
-          q <- if (identical(c$type, "sql")) parse_sql_cell(c$body) else NULL
-          if (identical(c$type, "sql") && is.null(q)) {
-            p <- list(
-              defs = character(), refs = character(), self_refs = character(),
-              locals = character(), barrier = FALSE,
-              diagnostics = list(list(
-                level = "error", code = "sql-cell-shape",
-                message = sql_cell_shape(), symbol = NULL)),
-              error = NULL
-            )
-          } else {
-            p <- cell_defs_refs(c$body)
-            if (!is.null(q)) {
-              # the query body names the tables it reads at runtime; those
-              # names are references so the DAG orders data sources first
-              p$refs <- unique(c(p$refs %||% character(),
-                                 sql_query_identifiers(q$query)))
-            }
-          }
+        if (identical(c$type, "code")) {
+          p <- cell_defs_refs(c$body)
         } else {
           p <- list(defs = character(), refs = character(),
                     self_refs = character(), locals = character(),
-                    barrier = FALSE, diagnostics = list(), error = NULL)
+                    barrier = FALSE, opaque = FALSE,
+                    diagnostics = list(), error = NULL)
         }
         analysis[[c$id]] <- p
         dagcells[[i]] <- list(
@@ -1472,7 +1865,8 @@ Session <- R6::R6Class(
           refs = p$refs %||% character(),
           self_refs = p$self_refs %||% character(),
           locals = p$locals %||% character(),
-          barrier = isTRUE(p$barrier))
+          barrier = isTRUE(p$barrier),
+          opaque = isTRUE(p$opaque))
       }
       private$analysis <- analysis
       d <- build_dag(dagcells)
@@ -1632,6 +2026,7 @@ Session <- R6::R6Class(
           private$cell_state[[id]] <- rec
         }
       }
+      private$refresh_value_freshness()
       invisible()
     },
 
@@ -1687,13 +2082,7 @@ Session <- R6::R6Class(
     },
     cancel_owned_ops = function(id) {
       private$cancel_lazy_ops(id)
-      rec <- private$cell_state[[id]]
-      out <- if (!is.null(rec) && length(rec$outputs)) {
-        private$visible_output(id)
-      } else {
-        NULL
-      }
-      if (!is.null(out)) {
+      private$map_cell_widgets(id, function(out) {
         ops <- out$operations %||% list()
         for (key in names(ops)) {
           op <- ops[[key]]
@@ -1703,6 +2092,7 @@ Session <- R6::R6Class(
               code = "widget_not_current",
               message = "widget owner changed"
             )
+            private$remember_widget_operation(op)
             ops[[key]] <- op
           }
         }
@@ -1710,8 +2100,8 @@ Session <- R6::R6Class(
         root_key <- private$widget_operation_key(out$name %||% "", character())
         root <- ops[[root_key]] %||% NULL
         if (!is.null(root)) out$operation <- root
-        private$set_visible_output(id, out)
-      }
+        out
+      })
       if (length(private$button_resets)) {
         for (key in names(private$button_resets)) {
           info <- private$button_resets[[key]]
@@ -1738,10 +2128,21 @@ Session <- R6::R6Class(
       },
 
     launch_run = function(plan) {
+      perf <- .alder_perf_begin("run.plan", list(run_id = private$run_counter + 1L,
+        cells = length(plan)))
+      on.exit(.alder_perf_end(perf), add = TRUE)
       rid <- private$run_counter + 1L
       private$run_counter <- rid
+      private$remember_run_operation(list(
+        run_id = rid,
+        status = "pending",
+        execution_done = FALSE,
+        reset_tokens = I(integer()),
+        error = NULL
+      ))
       private$enqueue_targets(plan, rid)
       private$pump()
+      private$complete_run_if_idle(rid)
       rid
     },
     enqueue_targets = function(plan, rid) {
@@ -1753,7 +2154,7 @@ Session <- R6::R6Class(
         unlist(lapply(disabled, self$descendants), use.names = FALSE)
       ))
       for (id in private$topo_order_of(plan)) {
-        if (!private$cell_type(id) %in% c("code", "sql") ||
+        if (!identical(private$cell_type(id), "code") ||
             id %in% blocked) next
         p <- private$analysis[[id]]
         defs <- if (is.null(p)) character() else
@@ -1763,7 +2164,8 @@ Session <- R6::R6Class(
         private$queue[[length(private$queue) + 1L]] <- list(
           id = id, code = private$cell_body(id),
           revision = private$cell_record(id)$revision,
-          run_id = rid, defs = as.list(defs), locals = as.list(locals))
+          run_id = rid, defs = as.list(defs), locals = as.list(locals),
+          opaque = isTRUE(p$opaque))
       }
       invisible()
     },
@@ -1800,6 +2202,7 @@ Session <- R6::R6Class(
       sent <- private$worker$send(
         "eval_cell", id = job$id, code = job$code, run_id = job$run_id,
         revision = job$revision, defs = job$defs, locals = job$locals,
+        opaque = job$opaque,
         on_response = function(context, resp)
           private$on_cell_result(job, resp))
       if (!is.null(private$current) &&
@@ -1812,6 +2215,9 @@ Session <- R6::R6Class(
     # --- eval responses -----------------------------------------------
 
     on_cell_result = function(job, resp) {
+      perf <- .alder_perf_begin("result.commit", list(cell = job$id,
+        revision = job$revision, run_id = job$run_id, req = resp$req))
+      on.exit(.alder_perf_end(perf), add = TRUE)
       cur <- private$current
       if (is.null(cur)) {
         private$discard_late(resp)
@@ -1833,6 +2239,10 @@ Session <- R6::R6Class(
         private$fail_worker_transport(id, resp$error$message %||%
                                      "Worker exited before responding")
         return(invisible())
+      }
+      if (is.list(resp$outputs)) {
+        resp$outputs <- lapply(
+          resp$outputs, private$normalize_output_record)
       }
       if (!is.null(private$validate_eval_response(resp))) {
         if (self$worker_available()) {
@@ -1863,7 +2273,7 @@ Session <- R6::R6Class(
       }
       private$current <- NULL
       private$bump()
-      private$check_pending_button_resets()
+      private$complete_run_if_idle(job$run_id)
       private$pump()
       invisible()
     },
@@ -1881,7 +2291,7 @@ Session <- R6::R6Class(
       payload <- frame$payload %||% list()
       kind <- as.character(frame$notify %||% "")
       if (identical(kind, "append")) {
-        output <- payload$output %||% payload
+        output <- private$normalize_output_record(payload$output %||% payload)
         err <- private$validate_output_record(output)
         if (!is.null(err)) stop(err, call. = FALSE)
         rec$outputs <- c(rec$outputs %||% list(), list(output))
@@ -1900,6 +2310,140 @@ Session <- R6::R6Class(
       private$cell_state[[cur$job$id]] <- rec
       private$bump()
       invisible()
+    },
+
+    # JSON is deliberately parsed with simplifyVector = FALSE so a protocol
+    # array can never silently change the surrounding object shape. Convert
+    # only schema-declared atomic arrays after parsing, with exact type and
+    # cardinality checks. Invalid objects remain unmodified for the regular
+    # response validator to reject.
+    decode_wire_vector = function(value, type,
+                                  expected_length = NULL,
+                                  integer = FALSE) {
+      empty <- switch(type,
+        numeric = numeric(),
+        character = character(),
+        logical = logical(),
+        NULL
+      )
+      if (is.null(empty)) return(NULL)
+      # JSON objects decode as named lists (and named R vectors serialize as
+      # objects). Array-typed protocol fields must never discard those names
+      # and reinterpret an object as an array.
+      if (!is.null(names(value))) return(NULL)
+      if (is.list(value)) {
+        if (!length(value)) {
+          value <- empty
+        } else {
+          scalar <- vapply(value, function(item) {
+            is.atomic(item) && length(item) == 1L && !is.na(item)
+          }, logical(1L))
+          if (!all(scalar)) return(NULL)
+          value <- unlist(value, use.names = FALSE)
+        }
+      }
+      valid <- switch(type,
+        numeric = is.numeric(value) && !anyNA(value) &&
+          all(is.finite(value)),
+        character = is.character(value) && !anyNA(value) &&
+          all(validUTF8(value)),
+        logical = is.logical(value) && !anyNA(value),
+        FALSE
+      )
+      if (!isTRUE(valid)) return(NULL)
+      if (!is.null(expected_length) && length(value) != expected_length) {
+        return(NULL)
+      }
+      if (isTRUE(integer)) {
+        if (!is.numeric(value) || any(value != floor(value)) ||
+            any(value < -(.Machine$integer.max + 1) |
+                value > .Machine$integer.max)) {
+          return(NULL)
+        }
+        return(as.integer(value))
+      }
+      switch(type,
+        numeric = as.double(value),
+        character = as.character(value),
+        logical = as.logical(value)
+      )
+    },
+
+    normalize_widget_spec = function(spec) {
+      if (!is.list(spec) || !is.character(spec$kind) ||
+          length(spec$kind) != 1L || is.na(spec$kind)) {
+        return(spec)
+      }
+      kind <- spec$kind
+      if (identical(kind, "range_slider")) {
+        value <- private$decode_wire_vector(
+          spec$value, "numeric", expected_length = 2L)
+        if (!is.null(value)) spec$value <- value
+      } else if (identical(kind, "date_range")) {
+        value <- private$decode_wire_vector(
+          spec$value, "character", expected_length = 2L)
+        if (!is.null(value)) spec$value <- value
+      } else if (identical(kind, "multiselect")) {
+        choice_types <- unique(vapply(spec$choices %||% list(),
+                                      typeof, character(1L)))
+        wire_type <- if (length(choice_types) == 1L) {
+          switch(choice_types,
+            integer = "numeric", double = "numeric",
+            character = "character", logical = "logical", NULL)
+        } else {
+          NULL
+        }
+        if (!is.null(wire_type)) {
+          value <- private$decode_wire_vector(
+            spec$value, wire_type, integer = identical(choice_types, "integer"))
+          if (!is.null(value)) spec$value <- I(value)
+        }
+        indices <- private$decode_wire_vector(
+          spec$indices %||% integer(), "numeric", integer = TRUE)
+        if (!is.null(indices)) spec$indices <- I(indices)
+      } else if (identical(kind, "table")) {
+        selected <- private$decode_wire_vector(
+          spec$selected %||% integer(), "numeric", integer = TRUE)
+        if (!is.null(selected)) spec$selected <- I(selected)
+      } else if (kind %in% c("array", "dictionary")) {
+        if (is.list(spec$children)) {
+          spec$children <- lapply(spec$children,
+                                  private$normalize_widget_spec)
+          child_names <- vapply(spec$children, function(child) {
+            name <- if (is.list(child)) child$name %||% "" else ""
+            if (!is.character(name) || length(name) != 1L || is.na(name)) {
+              return("")
+            }
+            name
+          }, character(1L))
+          if (!anyNA(child_names) && all(nzchar(child_names)) &&
+              !anyDuplicated(child_names)) {
+            spec$value <- lapply(spec$children, function(child) child$value)
+            names(spec$value) <- child_names
+          }
+        }
+      } else if (identical(kind, "form") && is.list(spec$child)) {
+        spec$child <- private$normalize_widget_spec(spec$child)
+      }
+      spec
+    },
+
+    normalize_output_record = function(output) {
+      if (!is.list(output) || !is.character(output$kind) ||
+          length(output$kind) != 1L || is.na(output$kind)) {
+        return(output)
+      }
+      if (identical(output$kind, "widget") && is.list(output$spec)) {
+        output$spec <- private$normalize_widget_spec(output$spec)
+      } else if (identical(output$kind, "layout") &&
+                 is.list(output$children)) {
+        output$children <- lapply(output$children,
+                                  private$normalize_output_record)
+      } else if (identical(output$kind, "lazy") &&
+                 is.list(output$child)) {
+        output$child <- private$normalize_output_record(output$child)
+      }
+      output
     },
 
     validate_eval_response = function(resp) {
@@ -1936,6 +2480,24 @@ Session <- R6::R6Class(
             (!is.logical(resp$error$interrupted) ||
              length(resp$error$interrupted) != 1L ||
              is.na(resp$error$interrupted))) {
+          return("eval response error invalid")
+        }
+        scalar_chr <- function(value) {
+          is.character(value) && length(value) == 1L && !is.na(value)
+        }
+        array_chr <- function(value, limit) {
+          (is.character(value) || is.list(value)) && length(value) <= limit &&
+            all(vapply(value, scalar_chr, logical(1)))
+        }
+        if (!is.null(resp$error$class) &&
+            !array_chr(resp$error$class, 32L)) {
+          return("eval response error invalid")
+        }
+        if (!is.null(resp$error$call) && !scalar_chr(resp$error$call)) {
+          return("eval response error invalid")
+        }
+        if (!is.null(resp$error$trace) &&
+            !array_chr(resp$error$trace, 40L)) {
           return("eval response error invalid")
         }
       }
@@ -2135,13 +2697,32 @@ Session <- R6::R6Class(
            spec$value != floor(spec$value))) {
         return("counter widget value invalid")
       }
-      if (kind %in% c("date", "datetime") && !scalar_chr(spec$value)) {
+      if (identical(kind, "date") &&
+          !private$wire_date_valid(spec$value)) {
+        return("temporal widget value invalid")
+      }
+      if (identical(kind, "datetime") &&
+          !private$wire_datetime_valid(spec$value)) {
         return("temporal widget value invalid")
       }
       if (identical(kind, "date_range") &&
           (!is.character(spec$value) || length(spec$value) != 2L ||
-           anyNA(spec$value))) {
+           anyNA(spec$value) || !all(vapply(
+             spec$value, private$wire_date_valid, logical(1)
+           )))) {
         return("date range value invalid")
+      }
+      if (kind %in% c("date", "date_range", "datetime")) {
+        bound_ok <- if (identical(kind, "datetime")) {
+          private$wire_datetime_valid
+        } else {
+          private$wire_date_valid
+        }
+        for (field in c("min", "max")) {
+          if (!is.null(spec[[field]]) && !bound_ok(spec[[field]])) {
+            return("temporal widget bounds invalid")
+          }
+        }
       }
       if (kind %in% c("dropdown", "radio", "multiselect")) {
         choices <- spec$choices
@@ -2213,9 +2794,16 @@ Session <- R6::R6Class(
       code <- NULL
       message <- NULL
       child <- NULL
+      log_valid <- is.null(resp$log) ||
+        ((is.character(resp$log) || is.list(resp$log)) &&
+          all(vapply(as.list(resp$log), function(line)
+            is.character(line) && length(line) == 1L && !is.na(line), logical(1))))
       if (isTRUE(private$worker_failed) || isTRUE(resp$error$transport)) {
         code <- "worker_unavailable"
         message <- "Worker exited before responding"
+      } else if (!log_valid) {
+        code <- "worker_unavailable"
+        message <- "invalid worker response"
       } else if (!isTRUE(resp$ok)) {
         code <- as.character(resp$error$code %||% "lazy_eval_failed")
         message <- as.character(resp$error$message %||% "lazy evaluation failed")
@@ -2233,6 +2821,10 @@ Session <- R6::R6Class(
       }
       rec <- private$cell_state[[id]]
       if (!is.null(rec)) {
+        if (log_valid) {
+          rec$log <- private$bounded_log(c(rec$log,
+            private$normalize_log(resp$log)))
+        }
         rec$outputs <- lapply(rec$outputs %||% list(), function(output) {
           changed <- private$replace_lazy_in_output(output, key, function(lazy) {
             lazy$state <- if (is.null(code)) "loaded" else "error"
@@ -2431,6 +3023,7 @@ Session <- R6::R6Class(
       rec$outputs <- resp$outputs %||% list()
       rec$progress <- rec$progress %||% NULL
       rec$log <- private$normalize_log(resp$log)
+      rec$error <- NULL
       private$cell_state[[id]] <- rec
       private$last_action_error <- NULL
       private$refresh_variables()
@@ -2442,6 +3035,7 @@ Session <- R6::R6Class(
       private$release_output_artifacts(rec$outputs)
       rec$status <- "error"
       rec$outputs <- list()
+      rec$error <- resp$error
       if (isTRUE(resp$error$interrupted)) {
         line <- "Error: Interrupted"
       } else {
@@ -2459,7 +3053,7 @@ Session <- R6::R6Class(
         # ones that never ran (idle) — the barrier run was invalidated
         for (cid in private$dag_nodes()) {
           if (!identical(cid, id) &&
-              private$cell_type(cid) %in% c("code", "sql")) {
+              identical(private$cell_type(cid), "code")) {
             rec2 <- private$cell_state[[cid]]
             if (!is.null(rec2) && !identical(rec2$status, "running")) {
               rec2$status <- "stale"
@@ -2470,13 +3064,7 @@ Session <- R6::R6Class(
         private$barrier_restart_required <- TRUE
       }
       message <- resp$error$message %||% "Unknown error"
-      code <- if (startsWith(message,
-                             "sql() without a connection needs the duckdb package")) {
-        "sql_unavailable"
-      } else {
-        "eval_error"
-      }
-      private$note_action_error(NULL, code, message)
+      private$note_action_error(NULL, "eval_error", message)
       private$refresh_variables()
       private$bump()
       invisible()
@@ -2530,6 +3118,36 @@ Session <- R6::R6Class(
 
     # --- worker failure ------------------------------------------------
 
+    # Keep retained output bytes, but invalidate everything owned by an old
+    # runtime. Repeat after teardown/readiness so late old-operation callbacks
+    # cannot leave inspection state attached to a replacement worker.
+    invalidate_runtime_view = function() {
+      private$variables <- list()
+      private$variables_operation <- NULL
+      private$last_value <- NULL
+      private$value_operation <- NULL
+      private$lazy_operations <- list()
+      private$table_operations <- list()
+      private$button_resets <- list()
+      for (id in private$dag_nodes()) {
+        if (!identical(private$cell_type(id), "code")) next
+        rec <- private$cell_state[[id]]
+        if (!is.null(rec)) {
+          rec$status <- "stale"
+          private$cell_state[[id]] <- rec
+        }
+      }
+      invisible()
+    },
+
+    detect_worker_failure = function() {
+      if (!private$stopped && !private$worker_failed &&
+          !is.null(private$worker) && !private$worker$alive()) {
+        private$on_worker_failure("R worker exited")
+      }
+      invisible()
+    },
+
     on_worker_failure = function(message) {
       cur <- private$current
       cur_id <- if (!is.null(cur)) cur$job$id else NULL
@@ -2542,19 +3160,39 @@ Session <- R6::R6Class(
     # return 503; source editing, runtime selection, and conflict-safe
     # Save remain available.
     fail_worker_transport = function(current_id = NULL, message = "Worker exited") {
+      if (private$worker_failed) return(invisible())
       private$worker_failed <- TRUE
-      if (!is.null(current_id)) {
-        rec <- private$cell_state[[current_id]]
+      private$fail_pending_widget_operations("worker_unavailable", message)
+      private$fail_pending_run_operations("worker_unavailable", message)
+      for (id in private$dag_nodes()) {
+        if (!identical(private$cell_type(id), "code")) next
+        rec <- private$cell_state[[id]]
         if (!is.null(rec)) {
-          rec$status <- "error"
-          rec$outputs <- list()
-          rec$log <- c(rec$log, paste("Error:", message))
-          private$cell_state[[current_id]] <- rec
+          if (!is.null(current_id) && identical(id, current_id)) {
+            rec$status <- "error"
+            rec$outputs <- list()
+            rec$error <- list(message = message, class = "worker_error",
+                              call = NULL, trace = character())
+            rec$log <- c(rec$log, paste("Error:", message))
+          } else {
+            rec$status <- "stale"
+          }
+          private$cell_state[[id]] <- rec
         }
       }
       private$current <- NULL
       private$queue <- list()
-      private$note_action_error(NULL, "worker_unavailable", message)
+      private$variables <- list()
+      private$variables_operation <- NULL
+      private$last_value <- NULL
+      private$value_operation <- NULL
+      private$lazy_operations <- list()
+      private$table_operations <- list()
+      private$button_resets <- list()
+      private$note_action_error(
+        NULL, "worker_unavailable",
+        paste0(message, "; outputs are stale. Restart R to replay the notebook")
+      )
       private$bump()
       invisible()
     },
@@ -2582,18 +3220,238 @@ Session <- R6::R6Class(
       paste(c(name, path), collapse = "\u0001")
     },
 
+    # Run records are intentionally independent of cell/output state: a run
+    # can replace the widget owner's output before its reset response arrives.
+    # A bounded Session journal preserves the exact causal identity for MCP.
+    remember_run_operation = function(operation) {
+      run_id <- operation$run_id %||% NULL
+      if (!is.numeric(run_id) || length(run_id) != 1L || is.na(run_id) ||
+          !is.finite(run_id) || run_id < 1 || run_id != floor(run_id)) {
+        return(invisible())
+      }
+      key <- as.character(as.integer(run_id))
+      private$run_operation_results[[key]] <- operation
+      limit <- 256L
+      excess <- length(private$run_operation_results) - limit
+      if (excess > 0L) {
+        private$run_operation_results <-
+          private$run_operation_results[-seq_len(excess)]
+      }
+      invisible()
+    },
+
+    link_run_reset = function(run_id, reset_token) {
+      if (is.null(run_id)) return(invisible())
+      key <- as.character(as.integer(run_id))
+      operation <- private$run_operation_results[[key]] %||% NULL
+      if (is.null(operation) ||
+          !identical(operation$status %||% NULL, "pending")) {
+        return(invisible())
+      }
+      tokens <- unique(c(
+        as.integer(operation$reset_tokens %||% integer()),
+        as.integer(reset_token)
+      ))
+      operation$reset_tokens <- I(tokens)
+      private$remember_run_operation(operation)
+      private$refresh_run_operation(run_id)
+      invisible()
+    },
+
+    fail_run_operation = function(run_id, code, message) {
+      if (is.null(run_id)) return(invisible())
+      key <- as.character(as.integer(run_id))
+      operation <- private$run_operation_results[[key]] %||% NULL
+      if (is.null(operation) ||
+          !identical(operation$status %||% NULL, "pending")) {
+        return(invisible())
+      }
+      operation$status <- "error"
+      operation$error <- list(code = code, message = message)
+      private$remember_run_operation(operation)
+      invisible()
+    },
+
+    fail_pending_run_operations = function(code, message) {
+      for (key in names(private$run_operation_results)) {
+        operation <- private$run_operation_results[[key]]
+        if (!identical(operation$status %||% NULL, "pending")) next
+        operation$status <- "error"
+        operation$error <- list(code = code, message = message)
+        private$run_operation_results[[key]] <- operation
+      }
+      invisible()
+    },
+
+    refresh_run_operation = function(run_id) {
+      key <- as.character(as.integer(run_id))
+      operation <- private$run_operation_results[[key]] %||% NULL
+      if (is.null(operation) ||
+          !identical(operation$status %||% NULL, "pending") ||
+          !isTRUE(operation$execution_done)) {
+        return(invisible())
+      }
+      tokens <- as.integer(operation$reset_tokens %||% integer())
+      for (token in tokens) {
+        reset <- private$widget_operation_results[[as.character(token)]] %||%
+          NULL
+        if (is.null(reset) ||
+            identical(reset$status %||% NULL, "pending")) {
+          return(invisible())
+        }
+        if (!identical(reset$status %||% NULL, "done")) {
+          error <- reset$error %||% list()
+          operation$status <- "error"
+          operation$error <- list(
+            code = error$code %||% "widget_update_failed",
+            message = error$message %||% "run button reset failed"
+          )
+          private$remember_run_operation(operation)
+          return(invisible())
+        }
+      }
+      operation$status <- "done"
+      operation$error <- NULL
+      private$remember_run_operation(operation)
+      invisible()
+    },
+
+    refresh_runs_for_widget_operation = function(token) {
+      for (key in names(private$run_operation_results)) {
+        operation <- private$run_operation_results[[key]]
+        if (!identical(operation$status %||% NULL, "pending")) next
+        tokens <- as.integer(operation$reset_tokens %||% integer())
+        if (as.integer(token) %in% tokens) {
+          private$refresh_run_operation(operation$run_id)
+        }
+      }
+      invisible()
+    },
+
+    complete_run_if_idle = function(run_id) {
+      operation <- private$run_operation_results[[
+        as.character(as.integer(run_id))
+      ]] %||% NULL
+      if (is.null(operation) ||
+          !identical(operation$status %||% NULL, "pending") ||
+          isTRUE(operation$execution_done) ||
+          private$run_has_pending_jobs(run_id)) {
+        return(invisible())
+      }
+      private$check_pending_button_resets(run_id)
+      operation <- private$run_operation_results[[
+        as.character(as.integer(run_id))
+      ]] %||% operation
+      if (!identical(operation$status %||% NULL, "pending")) {
+        return(invisible())
+      }
+      operation$execution_done <- TRUE
+      private$remember_run_operation(operation)
+      private$refresh_run_operation(run_id)
+      invisible()
+    },
+
+    # Retain a bounded token-indexed operation journal. Widget outputs expose
+    # the latest operation per control, but a run-button reset can replace
+    # that record before an asynchronous client next observes state.
+    remember_widget_operation = function(operation) {
+      token <- operation$token %||% NULL
+      if (!is.numeric(token) || length(token) != 1L || is.na(token) ||
+          !is.finite(token) || token < 1 || token != floor(token)) {
+        return(invisible())
+      }
+      key <- as.character(as.integer(token))
+      existing <- private$widget_operation_results[[key]] %||% list()
+      for (field in setdiff(names(existing), names(operation))) {
+        operation[[field]] <- existing[[field]]
+      }
+      private$widget_operation_results[[key]] <- operation
+      limit <- 256L
+      excess <- length(private$widget_operation_results) - limit
+      if (excess > 0L) {
+        private$widget_operation_results <-
+          private$widget_operation_results[-seq_len(excess)]
+      }
+      private$refresh_runs_for_widget_operation(token)
+      invisible()
+    },
+
+    link_widget_operation = function(trigger_token, reset_token) {
+      if (is.null(trigger_token)) return(invisible())
+      key <- as.character(as.integer(trigger_token))
+      operation <- private$widget_operation_results[[key]] %||% NULL
+      if (is.null(operation)) return(invisible())
+      operation$reset_token <- as.integer(reset_token)
+      private$remember_widget_operation(operation)
+      invisible()
+    },
+
+    fail_pending_widget_operations = function(code, message) {
+      for (key in names(private$widget_operation_results)) {
+        operation <- private$widget_operation_results[[key]]
+        if (identical(operation$status %||% NULL, "pending")) {
+          operation$status <- "error"
+          operation$error <- list(code = code, message = message)
+          private$widget_operation_results[[key]] <- operation
+        }
+      }
+      for (id in private$dag_nodes()) {
+        private$map_cell_widgets(id, function(out) {
+          ops <- out$operations %||% list()
+          changed <- FALSE
+          for (key in names(ops)) {
+            operation <- ops[[key]]
+            if (!identical(operation$status %||% NULL, "pending")) next
+            operation$status <- "error"
+            operation$error <- list(code = code, message = message)
+            private$remember_widget_operation(operation)
+            ops[[key]] <- operation
+            changed <- TRUE
+          }
+          if (changed) {
+            out$operations <- ops
+            root_key <- private$widget_operation_key(
+              out$name %||% "", character())
+            root <- ops[[root_key]] %||% NULL
+            if (!is.null(root)) out$operation <- root
+          }
+          out
+        })
+      }
+      invisible()
+    },
+
     widget_kind_at = function(spec, path = character()) {
+      spec <- private$widget_spec_at(spec, path)
+      if (is.null(spec)) return(NULL)
+      as.character(spec$kind %||% "")
+    },
+
+    widget_spec_at = function(spec, path = character()) {
       if (is.null(spec) || !is.list(spec)) return(NULL)
-      if (!length(path)) return(as.character(spec$kind %||% ""))
+      if (!length(path)) return(spec)
       if (identical(spec$kind, "form")) {
-        return(private$widget_kind_at(spec$child, path))
+        return(private$widget_spec_at(spec$child, path))
       }
       if (!(spec$kind %in% c("array", "dictionary"))) return(NULL)
       children <- spec$children %||% list()
       idx <- which(vapply(children, function(child)
         identical(as.character(child$name %||% ""), path[[1L]]), logical(1)))
       if (!length(idx)) return(NULL)
-      private$widget_kind_at(children[[idx[[1L]]]], path[-1L])
+      private$widget_spec_at(children[[idx[[1L]]]], path[-1L])
+    },
+
+    widget_path_has_form = function(spec, path = character()) {
+      if (is.null(spec) || !is.list(spec)) return(FALSE)
+      if (identical(spec$kind, "form")) return(TRUE)
+      if (!length(path) ||
+          !(spec$kind %in% c("array", "dictionary"))) return(FALSE)
+      children <- spec$children %||% list()
+      idx <- which(vapply(children, function(child) {
+        identical(as.character(child$name %||% ""), path[[1L]])
+      }, logical(1)))
+      if (!length(idx)) return(FALSE)
+      private$widget_path_has_form(children[[idx[[1L]]]], path[-1L])
     },
 
     widget_spec_patch = function(spec, path, selected, kind, update = NULL) {
@@ -2606,16 +3464,20 @@ Session <- R6::R6Class(
       }
       if (!length(path)) {
         if (identical(kind, "table")) {
-          spec$selected <- as.integer(selected$selected %||%
-                                      selected$value %||% integer())
+          spec$selected <- I(as.integer(selected$selected %||%
+                                        selected$value %||% integer()))
         } else if (identical(kind, "dataframe")) {
           spec$value <- selected$value
           spec$ops <- update$ops %||% spec$ops
+        } else if (identical(kind, "multiselect")) {
+          spec$value <- I(selected$value)
         } else {
           spec$value <- selected$value
         }
         if (!is.null(selected$index)) spec$index <- as.integer(selected$index)
-        if (!is.null(selected$indices)) spec$indices <- as.integer(selected$indices)
+        if (!is.null(selected$indices)) {
+          spec$indices <- I(as.integer(selected$indices))
+        }
         if (!is.null(update$paused)) spec$paused <- isTRUE(update$paused)
         if (identical(kind, "form")) spec$dirty <- FALSE
         return(spec)
@@ -2643,15 +3505,8 @@ Session <- R6::R6Class(
     # --- widget internals ----------------------------------------------
 
     widget_owner = function(name) {
-      for (id in private$dag_nodes()) {
-        rec <- private$cell_state[[id]]
-        out <- private$visible_output(id)
-        if (!is.null(out) && identical(out$kind, "widget") &&
-            identical(out$name %||% NULL, name)) {
-          return(id)
-        }
-      }
-      NULL
+      location <- private$find_widget_output(name)
+      if (is.null(location)) NULL else location$id
     },
 
     widget_send_value = function(kind, value) {
@@ -2674,26 +3529,27 @@ Session <- R6::R6Class(
         return(list(index = as.integer(idx)))
       }
       if (identical(kind, "multiselect")) {
-        idx <- update$indices %||% integer()
-        idx <- unlist(idx, use.names = FALSE)
-        if (length(idx) && (!is.numeric(idx) || anyNA(idx) ||
-                            any(idx < 1) || any(idx != floor(idx)) ||
-                            anyDuplicated(idx))) {
+        idx <- private$decode_wire_vector(
+          update$indices, "numeric", integer = TRUE)
+        if (is.null(idx) || any(idx < 1L) || anyDuplicated(idx)) {
           alder_abort("invalid_request", "choice indices must be positive integers")
         }
-        return(list(indices = as.integer(idx)))
+        return(list(indices = idx))
       }
       if (kind %in% c("slider", "number") &&
           (!is.numeric(update$value) || length(update$value) != 1L ||
            is.na(update$value) || !is.finite(update$value))) {
         alder_abort("invalid_request", "numeric widget value required")
       }
-      if (identical(kind, "range_slider") &&
-          (!is.numeric(update$value) || length(update$value) != 2L ||
-           anyNA(update$value) || any(!is.finite(update$value)))) {
-        alder_abort("invalid_request", "range widget value required")
+      if (identical(kind, "range_slider")) {
+        value <- private$decode_wire_vector(
+          update$value, "numeric", expected_length = 2L)
+        if (is.null(value)) {
+          alder_abort("invalid_request", "range widget value required")
+        }
+        return(list(value = value))
       }
-      if (kind %in% c("slider", "range_slider", "number")) {
+      if (kind %in% c("slider", "number")) {
         return(list(value = as.double(update$value)))
       }
       if (kind %in% c("text_input", "text_area", "code_editor") &&
@@ -2730,9 +3586,22 @@ Session <- R6::R6Class(
         return(out)
       }
       if (kind %in% c("date", "date_range", "datetime")) {
-        if (is.null(update$value)) alder_abort("invalid_request",
-                                               "temporal widget value required")
-        return(list(value = update$value))
+        expected <- if (identical(kind, "date_range")) 2L else 1L
+        value <- private$decode_wire_vector(
+          update$value, "character", expected_length = expected)
+        valid <- if (identical(kind, "datetime")) {
+          !is.null(value) && all(vapply(
+            value, private$wire_datetime_valid, logical(1)
+          ))
+        } else {
+          !is.null(value) && all(vapply(
+            value, private$wire_date_valid, logical(1)
+          ))
+        }
+        if (!valid) {
+          alder_abort("invalid_request", "temporal widget value required")
+        }
+        return(list(value = value))
       }
       if (kind == "file") {
         value <- tryCatch(validate_file_value(update$value),
@@ -2742,13 +3611,12 @@ Session <- R6::R6Class(
         return(list(value = value))
       }
       if (kind == "table") {
-        idx <- unlist(update$selected %||% integer(), use.names = FALSE)
-        if (length(idx) && (!is.numeric(idx) || anyNA(idx) ||
-                            any(idx < 1) || any(idx != floor(idx)) ||
-                            anyDuplicated(idx))) {
+        idx <- private$decode_wire_vector(
+          update$selected, "numeric", integer = TRUE)
+        if (is.null(idx) || any(idx < 1L) || anyDuplicated(idx)) {
           alder_abort("invalid_request", "table selection must be integer indices")
         }
-        return(list(selected = as.integer(idx)))
+        return(list(selected = idx))
       }
       if (kind == "dataframe") {
         if (!is.list(update$ops %||% list())) alder_abort("invalid_request",
@@ -2773,56 +3641,77 @@ Session <- R6::R6Class(
       typ <- as.character(sel$type %||% "")
       val <- sel$value
       if (kind == "table") {
-        if (!identical(typ, "integer") || !is.numeric(val) || anyNA(val) ||
-            any(val != floor(val)) || any(val < 1L)) {
+        val <- private$decode_wire_vector(val, "numeric", integer = TRUE)
+        if (!identical(typ, "integer") || is.null(val) || any(val < 1L)) {
           return(list(ok = FALSE))
         }
-        return(list(ok = TRUE, value = as.integer(val),
-                    selected = as.integer(val)))
+        return(list(ok = TRUE, value = val, selected = val))
       }
-      if (kind == "dataframe" && !identical(typ, "data.frame")) {
+      if (kind %in% c("dataframe", "file") &&
+          !identical(typ, "data.frame")) {
         return(list(ok = FALSE))
       }
-      if (kind == "form" && !identical(typ, "list")) {
-        return(list(ok = FALSE))
+      if (kind == "form") {
+        if (!(typ %in% c(
+          "logical", "integer", "double", "character", "list",
+          "date", "date_range", "datetime", "data.frame"
+        ))) return(list(ok = FALSE))
+        return(list(ok = TRUE, value = val))
       }
       if (kind %in% c("date", "date_range", "datetime") &&
           !identical(typ, kind)) {
         return(list(ok = FALSE))
       }
-      if (kind %in% c("date", "datetime") &&
-          (!is.character(val) || length(val) != 1L || is.na(val))) {
-        return(list(ok = FALSE))
-      }
       if (kind == "date_range") {
-        raw <- unlist(val %||% character(), use.names = FALSE)
-        if (!is.character(raw) || length(raw) != 2L || anyNA(raw)) {
-          return(list(ok = FALSE))
+        raw <- private$decode_wire_vector(
+          val, "character", expected_length = 2L)
+        if (is.null(raw) || !all(vapply(
+          raw, private$wire_date_valid, logical(1)
+        ))) return(list(ok = FALSE))
+        out <- list(ok = TRUE, value = raw)
+      } else if (kind %in% c("date", "datetime")) {
+        raw <- private$decode_wire_vector(
+          val, "character", expected_length = 1L)
+        valid <- if (identical(kind, "datetime")) {
+          !is.null(raw) && all(vapply(
+            raw, private$wire_datetime_valid, logical(1)
+          ))
+        } else {
+          !is.null(raw) && all(vapply(
+            raw, private$wire_date_valid, logical(1)
+          ))
         }
-      }
-      if (identical(typ, "list") || identical(typ, "data.frame") ||
-          identical(typ, "date_range")) {
-        out <- list(ok = TRUE, value = val)
-      } else if (typ == "logical") {
-        if (!is.logical(val) || length(val) != 1L || is.na(val)) {
-          return(list(ok = FALSE))
-        }
-        out <- list(ok = TRUE, value = val)
-      } else if (typ == "integer") {
-        if (!is.numeric(val) || length(val) != 1L || is.na(val) ||
-            val != floor(val)) return(list(ok = FALSE))
-        out <- list(ok = TRUE, value = as.integer(val))
-      } else if (typ == "double") {
-        if (!is.numeric(val) || length(val) != 1L || is.na(val) ||
-            !is.finite(val)) return(list(ok = FALSE))
-        out <- list(ok = TRUE, value = as.double(val))
-      } else if (typ == "character") {
-        if (!is.character(val) || length(val) != 1L || is.na(val)) {
-          return(list(ok = FALSE))
-        }
+        if (!valid) return(list(ok = FALSE))
+        out <- list(ok = TRUE, value = raw)
+      } else if (kind %in% c("dataframe", "file")) {
         out <- list(ok = TRUE, value = val)
       } else {
-        return(list(ok = FALSE))
+        allowed_types <- switch(kind,
+          slider = "double", range_slider = "double", number = "double",
+          dropdown = c("logical", "integer", "double", "character"),
+          radio = c("logical", "integer", "double", "character"),
+          multiselect = c("logical", "integer", "double", "character"),
+          text_input = "character", text_area = "character",
+          code_editor = "character", checkbox = "logical",
+          switch = "logical", run_button = "logical",
+          button = "integer", refresh = "integer",
+          file = "data.frame", character())
+        if (!(typ %in% allowed_types)) return(list(ok = FALSE))
+        wire_type <- switch(typ,
+          logical = "logical", integer = "numeric", double = "numeric",
+          character = "character", NULL)
+        expected <- if (identical(kind, "range_slider")) {
+          2L
+        } else if (identical(kind, "multiselect")) {
+          NULL
+        } else {
+          1L
+        }
+        raw <- private$decode_wire_vector(
+          val, wire_type, expected_length = expected,
+          integer = identical(typ, "integer"))
+        if (is.null(raw)) return(list(ok = FALSE))
+        out <- list(ok = TRUE, value = raw)
       }
       if (!is.null(sel$index)) {
         idx <- sel$index
@@ -2831,14 +3720,18 @@ Session <- R6::R6Class(
         out$index <- as.integer(idx)
       }
       if (!is.null(sel$indices)) {
-        idx <- unlist(sel$indices, use.names = FALSE)
-        if (length(idx) && (!is.numeric(idx) || anyNA(idx) ||
-                            any(idx < 1) || any(idx != floor(idx)))) {
+        idx <- private$decode_wire_vector(
+          sel$indices, "numeric", integer = TRUE)
+        if (is.null(idx) || any(idx < 1)) {
           return(list(ok = FALSE))
         }
-        out$indices <- as.integer(idx)
+        out$indices <- idx
       }
       if (identical(kind, "multiselect") && is.null(out$indices)) {
+        return(list(ok = FALSE))
+      }
+      if (identical(kind, "multiselect") &&
+          length(out$value) != length(out$indices)) {
         return(list(ok = FALSE))
       }
       out
@@ -2847,23 +3740,24 @@ Session <- R6::R6Class(
     # live (pending); a cancelled/failed op or an edited owner never commits
     # late output.
     on_widget_response = function(name, owner, tok, kind, path, resp, source,
-                                  update) {
+                                  update, draft = FALSE) {
       rec <- private$cell_state[[owner]]
-      out <- private$visible_output(owner)
-      if (is.null(rec) || is.null(out) ||
-          !identical(out$name %||% NULL, name)) return(invisible())
+      location <- private$find_widget_output(name)
+      if (is.null(rec) || is.null(location) ||
+          !identical(location$id, owner)) return(invisible())
+      out <- location$output
       key <- private$widget_operation_key(name, path)
       ops <- out$operations %||% list()
       op <- ops[[key]] %||% NULL
       if (is.null(op) || !identical(op$token, tok) ||
           !identical(op$status, "pending")) return(invisible())
       if (isTRUE(private$worker_failed) || isTRUE(resp$error$transport)) {
-        private$widget_op_error(owner, tok, "worker_unavailable",
+        private$widget_op_error(name, owner, tok, "worker_unavailable",
                                 "Worker exited before responding", path)
         return(invisible())
       }
       if (!isTRUE(resp$ok)) {
-        private$widget_op_error(owner, tok, "widget_update_failed",
+        private$widget_op_error(name, owner, tok, "widget_update_failed",
                                 resp$error$message %||% "widget update failed",
                                 path)
         return(invisible())
@@ -2876,18 +3770,23 @@ Session <- R6::R6Class(
         return(invisible())
       }
       out$spec <- private$widget_spec_patch(out$spec, path, d, kind, update)
+      spec_error <- private$validate_widget_spec(out$spec)
+      if (!is.null(spec_error)) {
+        if (self$worker_available()) {
+          private$worker$transport_error("invalid worker response")
+        }
+        return(invisible())
+      }
       op <- list(token = tok, status = "done", error = NULL)
+      private$remember_widget_operation(op)
       ops[[key]] <- op
       out$operations <- ops
       if (!length(path)) out$operation <- op
       out$commit_token <- tok
-      private$set_visible_output(owner, out)
+      private$set_widget_output(owner, name, out)
       private$last_action_error <- NULL
       private$bump()
-      root_kind <- private$widget_kind_at(out$spec, character())
-      if (identical(root_kind, "form") && length(path)) {
-        return(invisible())
-      }
+      if (isTRUE(draft)) return(invisible())
       if (identical(kind, "run_button")) {
         private$schedule_run_button(name, owner, source, tok, path)
       } else {
@@ -2898,10 +3797,12 @@ Session <- R6::R6Class(
       invisible()
     },
 
-    widget_op_error = function(owner, tok, code, message, path = NULL) {
+    widget_op_error = function(name, owner, tok, code, message, path = NULL) {
       rec <- private$cell_state[[owner]]
-      out <- private$visible_output(owner)
-      if (!is.null(rec) && !is.null(out)) {
+      location <- private$find_widget_output(name)
+      if (!is.null(rec) && !is.null(location) &&
+          identical(location$id, owner)) {
+        out <- location$output
         ops <- out$operations %||% list()
         if (is.null(path) || !length(path)) {
           keys <- names(ops)[vapply(ops, function(op)
@@ -2910,18 +3811,21 @@ Session <- R6::R6Class(
             token = tok, status = "error",
             error = list(code = code, message = message)
           )
+          private$remember_widget_operation(op)
           if (length(keys)) ops[[keys[[1L]]]] <- op
           out$operations <- ops
           out$operation <- op
         } else {
-          key <- private$widget_operation_key(out$name %||% "", path)
-          ops[[key]] <- list(
+          key <- private$widget_operation_key(name, path)
+          op <- list(
             token = tok, status = "error",
             error = list(code = code, message = message)
           )
+          private$remember_widget_operation(op)
+          ops[[key]] <- op
           out$operations <- ops
         }
-        private$set_visible_output(owner, out)
+        private$set_widget_output(owner, name, out)
       }
       private$note_action_error(tok, code, message)
       private$bump()
@@ -2967,12 +3871,12 @@ Session <- R6::R6Class(
       key <- private$widget_operation_key(name, path)
       refs <- private$cells_referencing(name, owner)
       if (!length(refs)) {
-        private$send_button_reset(name, path)
+        private$send_button_reset(name, path, trigger_token = tok)
         private$bump()
         return(invisible())
       }
       info <- list(name = name, path = path, owner = owner, run_id = NULL,
-                   direct = refs)
+                   direct = refs, trigger_token = tok)
       if (identical(source, "app") ||
           identical(private$execution_mode, "automatic")) {
         region <- unique(c(refs, unlist(lapply(refs, function(r)
@@ -3034,35 +3938,58 @@ Session <- R6::R6Class(
 
     # --- button resets -------------------------------------------------
 
-    send_button_reset = function(name, path = character()) {
-      owner <- private$widget_owner(name)
-      if (is.null(owner) || !self$worker_available()) return(invisible())
+    send_button_reset = function(name, path = character(),
+                                 trigger_token = NULL, run_id = NULL) {
+      location <- private$find_widget_output(name)
+      if (is.null(location)) {
+        private$fail_run_operation(
+          run_id, "widget_not_current", "run button is no longer current"
+        )
+        return(invisible())
+      }
+      if (!self$worker_available()) {
+        private$fail_run_operation(
+          run_id, "worker_unavailable", "R worker is unavailable"
+        )
+        return(invisible())
+      }
+      owner <- location$id
       rec <- private$cell_state[[owner]]
-      out <- private$visible_output(owner)
-      if (is.null(rec) || is.null(out)) return(invisible())
+      out <- location$output
+      if (is.null(rec) || is.null(out)) {
+        private$fail_run_operation(
+          run_id, "widget_not_current", "run button is no longer current"
+        )
+        return(invisible())
+      }
       path <- as.character(path %||% character())
       key <- private$widget_operation_key(name, path)
       tok <- private$op_counter + 1L
       private$op_counter <- tok
       pending <- list(token = tok, status = "pending", error = NULL)
+      private$remember_widget_operation(pending)
+      private$link_widget_operation(trigger_token, tok)
+      private$link_run_reset(run_id, tok)
       ops <- out$operations %||% list()
       ops[[key]] <- pending
       out$operations <- ops
       if (!length(path)) out$operation <- pending
-      private$set_visible_output(owner, out)
+      private$set_widget_output(owner, name, out)
       private$worker$send(
         "set_widget", name = name, path = I(path), value = FALSE,
         op_id = as.integer(tok),
         on_response = function(context, resp)
           private$on_button_reset_response(name, owner, path, tok, resp)
       )
-      invisible()
+      invisible(tok)
     },
 
     on_button_reset_response = function(name, owner, path, tok, resp) {
       rec <- private$cell_state[[owner]]
-      out <- private$visible_output(owner)
-      if (is.null(rec) || is.null(out)) return(invisible())
+      location <- private$find_widget_output(name)
+      if (is.null(rec) || is.null(location) ||
+          !identical(location$id, owner)) return(invisible())
+      out <- location$output
       key <- private$widget_operation_key(name, path)
       ops <- out$operations %||% list()
       op <- ops[[key]] %||% NULL
@@ -3071,13 +3998,13 @@ Session <- R6::R6Class(
         return(invisible())
       }
       if (isTRUE(private$worker_failed) || isTRUE(resp$error$transport)) {
-        private$widget_op_error(owner, tok, "worker_unavailable",
+        private$widget_op_error(name, owner, tok, "worker_unavailable",
                                 "Worker exited before responding", path)
         return(invisible())
       }
       if (!isTRUE(resp$ok)) {
         private$widget_op_error(
-          owner, tok, "widget_update_failed",
+          name, owner, tok, "widget_update_failed",
           resp$error$message %||% "button reset failed", path
         )
         return(invisible())
@@ -3094,17 +4021,18 @@ Session <- R6::R6Class(
         out$spec, path, d, kind %||% "run_button", list(value = FALSE)
       )
       op <- list(token = tok, status = "done", error = NULL)
+      private$remember_widget_operation(op)
       ops[[key]] <- op
       out$operations <- ops
       if (!length(path)) out$operation <- op
       out$commit_token <- tok
-      private$set_visible_output(owner, out)
+      private$set_widget_output(owner, name, out)
       private$last_action_error <- NULL
       private$bump()
       invisible()
     },
 
-    check_pending_button_resets = function() {
+    check_pending_button_resets = function(completed_run_id = NULL) {
       if (!length(private$button_resets)) return(invisible())
       for (key in names(private$button_resets)) {
         info <- private$button_resets[[key]]
@@ -3119,13 +4047,17 @@ Session <- R6::R6Class(
             FALSE
           )]
           if (!length(remaining)) {
-            private$send_button_reset(info$name, info$path)
+            private$send_button_reset(
+              info$name, info$path, trigger_token = info$trigger_token,
+              run_id = completed_run_id)
             private$button_resets[[key]] <- NULL
           }
           next
         }
         if (!private$run_has_pending_jobs(info$run_id)) {
-          private$send_button_reset(info$name, info$path)
+          private$send_button_reset(
+            info$name, info$path, trigger_token = info$trigger_token,
+            run_id = info$run_id)
           private$button_resets[[key]] <- NULL
         }
       }
@@ -3149,7 +4081,8 @@ Session <- R6::R6Class(
         if (is.null(info)) next
         still <- private$cells_referencing(info$name, info$owner)
         if (!length(still)) {
-          private$send_button_reset(info$name, info$path)
+          private$send_button_reset(
+            info$name, info$path, trigger_token = info$trigger_token)
           private$button_resets[[key]] <- NULL
         } else {
           info$direct <- still
@@ -3161,7 +4094,49 @@ Session <- R6::R6Class(
 
     # --- value inspection ----------------------------------------------
 
+    value_owner = function(name) {
+      owner <- private$definition_owner(name)
+      if (!is.null(owner)) return(owner)
+      # Retain a former owner's identity while its removed runtime binding is
+      # being cleared. A source deletion must not make an old value unowned.
+      for (value in private$variables) {
+        if (identical(value$name, name)) return(value$owner %||% NULL)
+      }
+      NULL
+    },
+    value_is_current = function(name, owner, revision = NULL) {
+      current <- private$definition_owner(name)
+      if (is.null(owner)) owner <- current
+      if (is.null(owner)) return(TRUE)
+      owners <- vapply(private$dag_nodes(), function(id)
+        name %in% (private$analysis[[id]]$defs %||% character()), FALSE)
+      if (sum(owners) != 1L || !identical(current, owner) ||
+          !identical(private$status_of(owner), "done")) return(FALSE)
+      is.null(revision) ||
+        identical(private$cell_state[[owner]]$revision, revision)
+    },
+    stale_value_message = function(name) {
+      paste0("Value ", sQuote(name), " is not current. Run its defining cell ",
+             "and required dependencies, then inspect it again.")
+    },
+    refresh_value_freshness = function() {
+      value <- private$last_value
+      if (!is.null(value) && !private$value_is_current(
+          value$name, value$owner, value$revision)) {
+        private$last_value <- NULL
+      }
+      op <- private$value_operation
+      if (!is.null(op) && op$status %in% c("pending", "done") &&
+          !private$value_is_current(op$name, op$owner, op$revision)) {
+        op$status <- "error"
+        op$error <- list(code = "stale_value",
+                         message = private$stale_value_message(op$name))
+        private$value_operation <- op
+      }
+      invisible()
+    },
     on_value_response = function(name, tok, resp) {
+      private$refresh_value_freshness()
       vop <- private$value_operation
       if (isTRUE(private$worker_failed) || isTRUE(resp$error$transport)) {
         private$value_operation <- list(token = tok, name = name,
@@ -3190,11 +4165,20 @@ Session <- R6::R6Class(
           }
           return(invisible())
         }
-        private$last_value <- list(token = tok, name = name, value = v)
+        if (!identical(vop$status, "pending") ||
+            !private$value_is_current(name, vop$owner, vop$revision)) {
+          private$release_output_artifacts(list(v))
+          private$bump()
+          return(invisible())
+        }
+        private$last_value <- list(token = tok, name = name, value = v,
+                                   owner = vop$owner, revision = vop$revision)
         private$value_operation <- list(token = tok, name = name,
+                                        owner = vop$owner, revision = vop$revision,
                                         status = "done", error = NULL)
         private$last_action_error <- NULL
       } else {
+        if (!identical(vop$status, "pending")) return(invisible())
         private$value_operation <- list(token = tok, name = name,
                                         status = "error",
                                         error = list(code = "value_request_failed",
@@ -3246,7 +4230,7 @@ Session <- R6::R6Class(
 
     handle_barrier_invalidation = function() {
       for (id in private$dag_nodes()) {
-        if (private$cell_type(id) %in% c("code", "sql")) private$mark_stale(id)
+        if (identical(private$cell_type(id), "code")) private$mark_stale(id)
       }
       private$barrier_restart_required <- TRUE
       private$bump()

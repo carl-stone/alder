@@ -19,6 +19,12 @@ JSON protocol, exactly as the reference marimo-style workflow describes.
 That choice lands the whole scope — project creation, editing, execution,
 state, rendering — on one known-good surface today.
 
+The local server is loopback-only. The `--host` CLI option accepts only
+`127.0.0.1`, `localhost`, or `::1`; non-loopback binds are rejected until a
+real authentication design exists. `--allowed-origin` remains an exact
+browser-origin control, not authentication, and is not a network-sharing
+mechanism.
+
 A desktop wrapper and an editor extension are **not** the current product.
 The R runtime, the worker process model, and the JSON protocol keep
 browser-specific coupling out of the notebook format, the analysis engine,
@@ -27,8 +33,9 @@ such client is planned now.
 
 ## Consequences
 
-- The frontend is plain browser JS served from `inst/app`; there is no
-  bundler or Node build step.
+- The frontend is browser JS served from `inst/app`. Application code remains
+  plain JS; the committed CodeMirror vendor artifact has a deterministic Node/
+  esbuild source build (ADR 0013), with no install-time frontend build.
 - UI behavior (widgets, editor interaction, app mode) is developed and
   tested against the JSON API, which keeps every UI feature on the same
   surface a future editor client would use.

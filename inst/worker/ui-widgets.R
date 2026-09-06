@@ -126,14 +126,23 @@ validate_datetime <- function(value, min = NULL, max = NULL, what = "`value`") {
       !is.finite(as.double(value))) {
     stop(what, " must be a scalar POSIXct", call. = FALSE)
   }
+  if (as.double(value) != trunc(as.double(value))) {
+    stop(what, " must have whole-second precision", call. = FALSE)
+  }
   if (!is.null(min)) {
     if (!inherits(min, "POSIXct") || length(min) != 1L || is.na(min)) {
       stop("`min` must be a scalar POSIXct", call. = FALSE)
+    }
+    if (!is.finite(as.double(min)) || as.double(min) != trunc(as.double(min))) {
+      stop("`min` must have whole-second precision", call. = FALSE)
     }
   }
   if (!is.null(max)) {
     if (!inherits(max, "POSIXct") || length(max) != 1L || is.na(max)) {
       stop("`max` must be a scalar POSIXct", call. = FALSE)
+    }
+    if (!is.finite(as.double(max)) || as.double(max) != trunc(as.double(max))) {
+      stop("`max` must have whole-second precision", call. = FALSE)
     }
   }
   if (!is.null(min) && !is.null(max) && min > max) {
@@ -175,8 +184,10 @@ validate_children <- function(children, dictionary = FALSE) {
   if (!is.list(children)) stop("widget children must be a list", call. = FALSE)
   if (dictionary) {
     nms <- names(children)
-    if (is.null(nms) || any(!nzchar(nms)) || anyDuplicated(nms)) {
-      stop("dictionary children must have unique names", call. = FALSE)
+    if (is.null(nms) || anyNA(nms) || any(!nzchar(nms)) ||
+        any(!validUTF8(nms)) || anyDuplicated(nms)) {
+      stop("dictionary children must have unique names that are non-empty, ",
+           "non-missing, and valid UTF-8", call. = FALSE)
     }
   }
   for (child in children) {
@@ -305,7 +316,7 @@ validate_widget_value <- function(kind, value, spec) {
     dropdown = validate_dropdown(value, get_spec("choices")),
     radio = validate_dropdown(value, get_spec("choices")),
     multiselect = validate_multiselect(value, get_spec("choices")),
-    text_input = { require_scalar_character(value, "`value`" ); value },
+    text_input = { require_scalar_character(value, "`value`"); value },
     text_area = { require_scalar_character(value, "`value`"); value },
     code_editor = { require_scalar_character(value, "`value`"); value },
     checkbox = { require_scalar_logical(value, "`value`"); value },
@@ -457,12 +468,158 @@ widget_child_paths <- function(x, prefix = character()) {
 
 #' Notebook UI widgets
 #'
-#' \code{ui$slider()}, \code{ui$dropdown()}, \code{ui$text_input()},
-#' \code{ui$number()}, \code{ui$run_button()} and \code{ui$checkbox()}
-#' create interactive widgets (ADR 0003). A widget is a plain classed list
-#' whose current value is read explicitly through \code{$value}; the web UI
-#' renders an interactive control for it.
+#' The \code{ui} collection creates interactive notebook inputs. Every
+#' constructor returns an \code{alder_widget}; read its current value explicitly
+#' through \code{$value}. A scalar non-missing valid-UTF-8 character string or
+#' \code{NULL} is accepted for every \code{label} argument. Ordinary input
+#' changes update \code{$value}; automatic and app sessions reactively rerun
+#' consumers, while lazy sessions mark them stale. Buttons, refresh inputs,
+#' tables, data frames, file inputs, and forms have the event semantics below.
 #'
+#' @section Constructor reference:
+#' \describe{
+#' \item{\code{ui$slider(min, max, value = min, step = 1, label = NULL)}}{
+#'   A scalar numeric slider. \code{min}, \code{max}, \code{value}, and
+#'   \code{step} must be finite; \code{min <= max}, \code{step} must be
+#'   positive, and \code{value} must be within the bounds and on the step
+#'   lattice rooted at \code{min}. \code{$value} is an unclassed double.
+#' }
+#' \item{\code{ui$range_slider(min, max, value = c(min, max), step = 1, label = NULL)}}{
+#'   A numeric interval. Bounds and step follow \code{slider}; \code{value}
+#'   must be a finite, non-missing, length-two, non-decreasing numeric vector
+#'   whose endpoints are within the bounds and on the step lattice.
+#'   \code{$value} is a length-two unclassed double vector.
+#' }
+#' \item{\code{ui$dropdown(choices, value = choices[[1L]], label = NULL)}}{
+#'   One value from \code{choices}. Choices must be a nonempty, unnamed,
+#'   unclassed, unique logical, integer, double, or character vector with no
+#'   missing values (and finite numeric values). \code{value} must be scalar
+#'   and identical in type and value to a choice; \code{$value} preserves that
+#'   type.
+#' }
+#' \item{\code{ui$radio(choices, value = choices[[1L]], label = NULL)}}{
+#'   A radio group with the same choices, value, and \code{$value} contract as
+#'   \code{dropdown}.
+#' }
+#' \item{\code{ui$multiselect(choices, value = choices[0], label = NULL)}}{
+#'   Zero or more values from choices satisfying the \code{dropdown} choices
+#'   contract. \code{value} must be a unique, non-missing subset in the choices'
+#'   order; a nonempty value must have the choices' type. \code{$value} is that
+#'   possibly empty vector (the default \code{choices[0]} preserves its type).
+#' }
+#' \item{\code{ui$text_input(value = "", label = NULL)}}{
+#'   A one-line input. \code{value}, and therefore \code{$value}, is one
+#'   non-missing valid-UTF-8 character string.
+#' }
+#' \item{\code{ui$text_area(value = "", label = NULL, rows = 4L)}}{
+#'   A multiline input with the \code{text_input} value contract. \code{rows}
+#'   must be a positive integer.
+#' }
+#' \item{\code{ui$number(value = 0, min = NULL, max = NULL, step = 1, label = NULL)}}{
+#'   A scalar numeric input. \code{value} and \code{step} are finite;
+#'   optional \code{min} and \code{max} are finite with \code{min <= max};
+#'   \code{step} is positive. The value must be within supplied bounds and on
+#'   the lattice rooted at \code{min}, or zero when \code{min} is \code{NULL}.
+#'   \code{$value} is an unclassed double.
+#' }
+#' \item{\code{ui$checkbox(value = FALSE, label = NULL)}}{
+#'   A checkbox whose \code{value} and \code{$value} are one non-missing
+#'   logical value.
+#' }
+#' \item{\code{ui$switch(value = FALSE, label = NULL)}}{
+#'   A switch with the same logical value contract as \code{checkbox}.
+#' }
+#' \item{\code{ui$run_button(label = "Run")}}{
+#'   A one-shot logical event. \code{$value} starts as \code{FALSE}; a click
+#'   supplies \code{TRUE} to reactive consumers and Alder resets it to
+#'   \code{FALSE} after those consumers run.
+#' }
+#' \item{\code{ui$button(label = "Click", value = 0L)}}{
+#'   A persistent click counter. \code{value} must be a nonnegative integer;
+#'   each click increments the integer \code{$value}.
+#' }
+#' \item{\code{ui$date(value = Sys.Date(), min = NULL, max = NULL, label = NULL)}}{
+#'   A scalar, non-missing \code{Date}. Optional \code{min} and \code{max}
+#'   are scalar \code{Date} bounds with \code{min <= max}; \code{$value} is
+#'   the selected \code{Date} within them.
+#' }
+#' \item{\code{ui$date_range(value = c(Sys.Date(), Sys.Date()), min = NULL, max = NULL, label = NULL)}}{
+#'   A non-missing, length-two, non-decreasing \code{Date} vector within the
+#'   optional scalar \code{Date} bounds. \code{$value} preserves that shape.
+#' }
+#' \item{\code{ui$datetime(value = NULL, min = NULL, max = NULL, label = NULL)}}{
+#'   A scalar, finite, whole-second \code{POSIXct} instant within optional
+#'   scalar \code{POSIXct} bounds. \code{NULL} defaults to the current UTC
+#'   instant truncated to a whole second. \code{$value} is a \code{POSIXct};
+#'   browser transport represents the instant in UTC.
+#' }
+#' \item{\code{ui$code_editor(value = "", language = "r", label = NULL)}}{
+#'   A text editor whose \code{value} follows \code{text_input}. \code{language}
+#'   must be one of \code{"r"}, \code{"sql"}, \code{"python"},
+#'   \code{"markdown"}, or \code{"json"}; \code{$value} is the source string.
+#' }
+#' \item{\code{ui$refresh(interval = 5, label = "Refresh")}}{
+#'   A periodic event counter. \code{interval} is a finite number of seconds
+#'   of at least 0.5. \code{$value} starts at integer zero, increments on each
+#'   tick, and drives reactive consumers; the browser can pause the timer.
+#' }
+#' \item{\code{ui$file(label = NULL, accept = NULL, multiple = FALSE)}}{
+#'   A file picker. \code{accept} is \code{NULL} or a nonempty character
+#'   vector of browser file filters, and \code{multiple} is one non-missing
+#'   logical value. \code{$value} is a data frame with \code{name}, numeric
+#'   \code{size}, and server-side temporary \code{path} columns, initially
+#'   with zero rows.
+#' }
+#' \item{\code{ui$table(data, selection = c("multi", "single", "none"), page_size = 25L, label = NULL)}}{
+#'   An interactive table. \code{data} is a data frame or matrix, matrices are
+#'   converted to data frames, \code{selection} resolves to \code{"multi"},
+#'   \code{"single"}, or \code{"none"}, and \code{page_size} is a positive
+#'   integer. \code{$value} is the selected rows as a data frame and starts
+#'   with zero rows; selection changes rerun consumers.
+#' }
+#' \item{\code{ui$dataframe(data, label = NULL)}}{
+#'   An interactive data-frame viewer. \code{data} is a data frame or matrix,
+#'   with matrices converted to data frames. \code{$value} is the data frame
+#'   after current browser transformations such as sorting or filtering.
+#' }
+#' \item{\code{ui$array(...)}}{
+#'   A composite of zero or more widget children. Names must be non-missing,
+#'   valid UTF-8, and unique; unnamed children receive positional names
+#'   \code{"1"}, \code{"2"}, and so on. \code{$value} is a correspondingly
+#'   named list of child values, and a child event updates only its path before
+#'   reactive consumers run.
+#' }
+#' \item{\code{ui$dictionary(...)}}{
+#'   A composite of one or more widget children. Every child must have a
+#'   nonempty, valid UTF-8, unique name that is non-missing. \code{$value} is the named
+#'   list of child values, updated by child path.
+#' }
+#' \item{\code{ui$form(child, submit_label = "Submit")}}{
+#'   A submit boundary around one widget, including a composite. \code{child}
+#'   must be an \code{alder_widget}; \code{submit_label} is one non-missing
+#'   valid-UTF-8 string. Child edits update a draft without rerunning form
+#'   consumers. \code{$value} starts as \code{NULL} and becomes the complete
+#'   child value only when Submit is activated.
+#' }
+#' }
+#'
+#' @examples
+#' threshold <- ui$slider(0, 10, value = 5, label = "Threshold")
+#' threshold$value
+#'
+#' window <- ui$range_slider(0, 24, value = c(8, 17), label = "Hours")
+#' groups <- ui$multiselect(c("control", "treated"), value = "treated")
+#' window$value
+#' groups$value
+#'
+#' settings <- ui$dictionary(
+#'   threshold = ui$number(0.05, min = 0, max = 1, step = 0.01),
+#'   enabled = ui$checkbox(TRUE)
+#' )
+#' settings$value
+#'
+#' approval <- ui$form(ui$text_input("draft"), submit_label = "Apply")
+#' approval$value # NULL until the user submits the form
 #' @export
 ui <- list(
   slider = function(min, max, value = min, step = 1, label = NULL) {
@@ -543,7 +700,11 @@ ui <- list(
     if (!is.null(max) && value[[2L]] > max) stop("`value` exceeds `max`", call. = FALSE)
     new_widget("date_range", label, value, list(min = min, max = max))
   },
-  datetime = function(value = Sys.time(), min = NULL, max = NULL, label = NULL) {
+  datetime = function(value = NULL, min = NULL, max = NULL, label = NULL) {
+    if (is.null(value)) {
+      value <- as.POSIXct(floor(as.double(Sys.time())),
+                          origin = "1970-01-01", tz = "UTC")
+    }
     value <- validate_datetime(value, min, max)
     new_widget("datetime", label, value, list(min = min, max = max))
   },
@@ -593,8 +754,13 @@ ui <- list(
     validate_children(children)
     nms <- names(children)
     if (is.null(nms)) nms <- rep("", length(children))
-    for (i in seq_along(nms)) if (!nzchar(nms[[i]])) nms[[i]] <- as.character(i)
-    if (anyDuplicated(nms)) stop("array child names must be unique", call. = FALSE)
+    for (i in seq_along(nms)) {
+      if (!is.na(nms[[i]]) && !nzchar(nms[[i]])) nms[[i]] <- as.character(i)
+    }
+    if (anyNA(nms) || any(!validUTF8(nms)) || anyDuplicated(nms)) {
+      stop("array child names must be non-missing, valid UTF-8, and unique",
+           call. = FALSE)
+    }
     names(children) <- nms
     new_widget("array", NULL, lapply(children, widget_value),
                list(children = children))
@@ -613,4 +779,3 @@ ui <- list(
                list(child = child, submit_label = submit_label, dirty = FALSE))
   }
 )
-

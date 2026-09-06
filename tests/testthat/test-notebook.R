@@ -54,6 +54,17 @@ test_that("markdown tag is standalone and case-insensitive", {
   expect_equal(nb$cells[[3]]$delim, "# %% [markdown] extra")
 })
 
+test_that("legacy SQL delimiters are ordinary code and round-trip unchanged", {
+  text <- paste0(
+    "# %% [sql]\r\n",
+    "DBI::dbGetQuery(connection, 'SELECT * FROM measurements')\r\n"
+  )
+  nb <- alder:::read_notebook(write_raw_file(text))
+  expect_identical(nb$cells[[1L]]$type, "code")
+  expect_identical(nb$cells[[1L]]$delim, "# %% [sql]")
+  expect_identical(alder:::serialize_notebook(nb), text)
+})
+
 test_that("markdown cells must be blank lines or R comments", {
   # plain text inside a markdown cell is rejected at parse...
   expect_error(
@@ -238,12 +249,19 @@ test_that("raw-read boundaries are hardened with path-bearing errors", {
   expect_error(alder:::read_notebook(tempdir()), "is a directory")
   expect_error(alder:::read_notebook(file.path(tempdir(), "nope.R")), "not found")
 
-  # an unreadable file is rejected (skipped for users who can read mode-000)
+  # An unreadable file is rejected. Root can read mode-000 files, so replace
+  # only Alder's access probe in that environment and still exercise the exact
+  # public error boundary without an environmental skip.
   fu <- tempfile(fileext = ".R")
   writeLines("# %%\nx <- 1\n", fu)
   Sys.chmod(fu, "000")
   on.exit(Sys.chmod(fu, "644"), add = TRUE)
-  if (file.access(fu, 4) == 0L) skip("user can read mode-000 files (root?)")
+  if (file.access(fu, 4) == 0L) {
+    testthat::local_mocked_bindings(
+      .alder_file_access = function(path, mode) -1L,
+      .package = "alder"
+    )
+  }
   expect_error(alder:::read_notebook(fu), "not readable")
 })
 

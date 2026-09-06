@@ -10,7 +10,11 @@ import {
   rectangularSelection,
   crosshairCursor,
   Decoration,
-  hoverTooltip
+  hoverTooltip,
+  activateHover,
+  closeHoverTooltips,
+  hasHoverTooltips,
+  logException
 } from "@codemirror/view";
 import {
   defaultKeymap,
@@ -20,11 +24,19 @@ import {
   toggleComment
 } from "@codemirror/commands";
 import {indentOnInput, bracketMatching, foldGutter, foldKeymap, StreamLanguage} from "@codemirror/language";
-import {autocompletion, completionKeymap, closeBrackets, closeBracketsKeymap} from "@codemirror/autocomplete";
+import {
+  acceptCompletion,
+  autocompletion,
+  completionStatus,
+  completionKeymap,
+  closeCompletion,
+  closeBrackets,
+  closeBracketsKeymap,
+  startCompletion
+} from "@codemirror/autocomplete";
 import {searchKeymap, highlightSelectionMatches, openSearchPanel} from "@codemirror/search";
 import {linter, setDiagnostics} from "@codemirror/lint";
 import {r} from "@codemirror/legacy-modes/mode/r";
-import {sql} from "@codemirror/legacy-modes/mode/sql";
 import {vim} from "@replit/codemirror-vim";
 
 const languageCompartment = new Compartment();
@@ -44,8 +56,78 @@ const reactiveField = StateField.define({
 });
 
 function languageFor(name) {
-  if (name === "sql") return StreamLanguage.define(sql);
   return StreamLanguage.define(r);
+}
+
+function makeSignatureTooltip(value) {
+  if (!value || !value.label) return null;
+  const dom = document.createElement("div");
+  dom.className = "cm-alder-signature";
+  dom.setAttribute("role", "tooltip");
+  const label = document.createElement("code");
+  label.textContent = String(value.label);
+  dom.appendChild(label);
+  if (value.activeParameter) {
+    const argument = document.createElement("div");
+    argument.className = "cm-alder-signature-argument";
+    argument.textContent = `Argument: ${value.activeParameter}`;
+    dom.appendChild(argument);
+  }
+  if (value.documentation) {
+    const documentation = document.createElement("div");
+    documentation.className = "cm-alder-signature-documentation";
+    documentation.textContent = String(value.documentation);
+    dom.appendChild(documentation);
+  }
+  return dom;
+}
+
+function makeHoverTooltip(value, view, focusContent) {
+  const text = typeof value === "string" ? value : String(value?.text ?? "");
+  const html = typeof value?.html === "string" ? value.html : "";
+  const dom = document.createElement("div");
+  dom.className = "cm-alder-hover";
+  dom.setAttribute("role", "dialog");
+  dom.setAttribute("aria-label", "R documentation");
+  const heading = document.createElement("div");
+  heading.className = "cm-alder-hover-heading";
+  const title = document.createElement("strong");
+  title.textContent = "R documentation";
+  const hint = document.createElement("span");
+  hint.textContent = "Esc to close";
+  const close = document.createElement("button");
+  close.type = "button";
+  close.className = "btn mini";
+  close.textContent = "Close";
+  close.setAttribute("aria-label", "Close R documentation");
+  const dismiss = () => {
+    view.dispatch({effects: closeHoverTooltips});
+    view.focus();
+  };
+  close.addEventListener("click", dismiss);
+  dom.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape") return;
+    event.preventDefault();
+    event.stopPropagation();
+    dismiss();
+  });
+  heading.append(title, hint, close);
+  const content = document.createElement("div");
+  content.className = "cm-alder-hover-content";
+  content.tabIndex = 0;
+  content.setAttribute("role", "document");
+  content.setAttribute("aria-label", "R help contents");
+  if (html) {
+    // This optional field is sanitized by the same server boundary as output
+    // Markdown. The original LSP contents remain available as the fallback.
+    content.innerHTML = html;
+  } else {
+    const plain = document.createElement("pre");
+    plain.textContent = text;
+    content.appendChild(plain);
+  }
+  dom.append(heading, content);
+  return {dom, mount() { if (focusContent && view.hasFocus) content.focus(); }};
 }
 
 function toDecorations(ranges) {
@@ -69,11 +151,73 @@ export function createEditor({
   onSave,
   onFormat,
   onJump,
-  onHover
+  onHover,
+  onSignature,
+  completionsEnabled = true,
+  signatureHelpEnabled = true
 } = {}) {
+  const cspNonce = typeof document === "undefined" ? "" :
+    (document.querySelector('meta[name="alder-csp-nonce"]')?.content || "");
   const completionSource = {current: null};
+  const completions = {enabled: completionsEnabled !== false};
+  const signature = {enabled: signatureHelpEnabled !== false, request: 0};
   const diagnostics = {current: []};
+  let signatureNode = null;
   let suppressChanges = false;
+  let keyboardHoverIntent = null;
+  let preparedKeyboardHover = null;
+  const cancelKeyboardHover = () => { keyboardHoverIntent = null; };
+  const helpTooltip = (value, pos, focusContent) => {
+    if (!value) return null;
+    const text = typeof value === "string" ? value : String(value.text ?? "");
+    if (!text && !value.html) return null;
+    return {pos, end: pos, above: true,
+      create: (editor) => makeHoverTooltip(value, editor, focusContent)};
+  };
+  const helpHover = onHover ? hoverTooltip((view, pos) => {
+    if (preparedKeyboardHover?.pos === pos) {
+      const prepared = preparedKeyboardHover;
+      preparedKeyboardHover = null;
+      return helpTooltip(prepared.value, pos, true);
+    }
+    // Delayed mouse retries must neither abort requested F1 help nor replace
+    // help that is already open (including a locked keyboard tooltip).
+    if (keyboardHoverIntent || view.state.field(helpHover.active, false)?.length) return null;
+    return Promise.resolve(onHover(view, pos)).then(value => helpTooltip(value, pos, false));
+  }, {hideOnChange: true}) : null;
+  const openKeyboardHelp = (view) => {
+    if (!helpHover) return false;
+    const selection = view.state.selection;
+    const intent = {doc: view.state.doc, selection, pos: selection.main.head};
+    keyboardHoverIntent = intent;
+    // CodeMirror cancels async hover on any ViewUpdate, including decorations.
+    // Fetch independently, then install the still-requested help synchronously.
+    Promise.resolve().then(() => keyboardHoverIntent === intent ?
+      onHover(view, intent.pos) : null).then(value => {
+      if (keyboardHoverIntent !== intent) return;
+      cancelKeyboardHover();
+      if (!value || !view.hasFocus || view.state.doc !== intent.doc ||
+          !view.state.selection.eq(intent.selection)) return;
+      preparedKeyboardHover = {pos: intent.pos, value};
+      try {
+        activateHover(view, intent.pos, 1, {tooltip: helpHover});
+      } finally {
+        preparedKeyboardHover = null;
+      }
+    }).catch(error => {
+      if (keyboardHoverIntent === intent) cancelKeyboardHover();
+      logException(view.state, error, "R documentation request");
+    });
+    return true;
+  };
+  // Keep CodeMirror's completion StateField installed for the editor's entire
+  // lifetime. Removing it through a compartment while a tooltip/blur handler
+  // is active can leave that handler consulting an absent field. The stable
+  // adapter gates requests without invalidating CodeMirror plugin state.
+  const stableCompletionSource = (context) => {
+    if (!completions.enabled || !completionSource.current) return null;
+    return completionSource.current(context);
+  };
   const extensions = [
     lineNumbers(),
     foldGutter(),
@@ -84,15 +228,24 @@ export function createEditor({
     dropCursor(),
     rectangularSelection(),
     crosshairCursor(),
+    ...(cspNonce ? [EditorView.cspNonce.of(cspNonce)] : []),
     history(),
     closeBrackets(),
     indentOnInput(),
     reactiveField,
     languageCompartment.of(languageFor(language)),
     readOnlyCompartment.of(EditorState.readOnly.of(Boolean(readOnly))),
-    completionCompartment.of(autocompletion()),
-    linter(() => diagnostics.current, {delay: 600}),
+    completionCompartment.of(autocompletion({override: [stableCompletionSource]})),
+    linter(() => diagnostics.current, {delay: 1000}),
     keymap.of([
+      {key: "F1", run: openKeyboardHelp},
+      {key: "Escape", run: (view) => {
+        const pending = Boolean(keyboardHoverIntent);
+        cancelKeyboardHover();
+        if (!hasHoverTooltips(view.state)) return pending;
+        view.dispatch({effects: closeHoverTooltips});
+        return true;
+      }},
       {key: "Mod-Enter", run: () => { onRun?.(); return true; }},
       {key: "Shift-Enter", run: () => { onRun?.(true); return true; }},
       {key: "Mod-s", run: () => { onSave?.(); return true; }},
@@ -107,33 +260,25 @@ export function createEditor({
       ...completionKeymap,
       ...foldKeymap,
       ...searchKeymap,
+      {key: "Tab", run: (view) => {
+        if (!completions.enabled) return false;
+        if (acceptCompletion(view)) return true;
+        const head = view.state.selection.main.head;
+        const previous = head > 0 ? view.state.sliceDoc(head - 1, head) : "";
+        return /[A-Za-z0-9_.]/.test(previous) ? startCompletion(view) : false;
+      }},
       indentWithTab,
       {key: "Mod-f", run: openSearchPanel}
     ])
   ];
-  if (onHover) {
-    extensions.push(hoverTooltip((view, pos) => {
-      const pending = onHover(view, pos);
-      return Promise.resolve(pending).then((value) => {
-        if (!value) return null;
-        const text = typeof value === "string" ? value : String(value.text ?? "");
-        if (!text) return null;
-        return {
-          pos,
-          end: pos,
-          above: true,
-          create() {
-            const dom = document.createElement("pre");
-            dom.className = "cm-alder-hover";
-            dom.textContent = text;
-            return {dom};
-          }
-        };
-      });
-    }));
+  if (helpHover) {
+    extensions.push(helpHover,
+      EditorView.contentAttributes.of({"aria-keyshortcuts": "F1"}));
   }
   extensions.push(EditorView.domEventHandlers({
+    blur() { cancelKeyboardHover(); return false; },
     mousedown(event, view) {
+      cancelKeyboardHover();
       if (!event.metaKey && !event.ctrlKey) return false;
       const pos = view.posAtCoords({x: event.clientX, y: event.clientY});
       if (pos == null) return false;
@@ -143,7 +288,25 @@ export function createEditor({
   }));
   if (keymapName === "vim") extensions.unshift(vim());
   extensions.push(EditorView.updateListener.of(update => {
+    if (update.docChanged || update.selectionSet) cancelKeyboardHover();
     if (update.docChanged && !suppressChanges) onChange?.(update.state.doc.toString(), update);
+    if (!update.docChanged || !signature.enabled || !onSignature) return;
+    signatureNode?.remove();
+    signatureNode = null;
+    const pos = update.state.selection.main.head;
+    const trigger = pos > 0 ? update.state.sliceDoc(pos - 1, pos) : "";
+    if (trigger !== "(" && trigger !== ",") return;
+    const request = ++signature.request;
+    Promise.resolve(onSignature(update.view, pos, trigger)).then((value) => {
+      if (!signature.enabled || request !== signature.request) return;
+      signatureNode = makeSignatureTooltip(value);
+      if (!signatureNode) return;
+      const editorRect = update.view.dom.getBoundingClientRect();
+      const caret = update.view.coordsAtPos(pos);
+      signatureNode.style.left = `${Math.max(0, (caret?.left || editorRect.left) - editorRect.left)}px`;
+      signatureNode.style.top = `${Math.max(0, (caret?.bottom || editorRect.top) - editorRect.top + 4)}px`;
+      update.view.dom.appendChild(signatureNode);
+    }).catch(() => {});
   }));
   const view = new EditorView({
     state: EditorState.create({doc, extensions}),
@@ -173,11 +336,30 @@ export function createEditor({
     },
     setCompletionSource(source) {
       completionSource.current = source || null;
-      view.dispatch({effects: completionCompartment.reconfigure(
-        completionSource.current ? autocompletion({override: [completionSource.current]}) : autocompletion()
-      )});
+      if (!completionSource.current) closeCompletion(view);
     },
-    destroy() { view.destroy(); }
+    setCompletionsEnabled(enabled) {
+      const next = enabled !== false;
+      if (completions.enabled === next) return;
+      completions.enabled = next;
+      if (!next) closeCompletion(view);
+    },
+    setSignatureHelpEnabled(enabled) {
+      const next = enabled !== false;
+      if (signature.enabled === next) return;
+      signature.enabled = next;
+      signature.request += 1;
+      if (!signature.enabled) {
+        signatureNode?.remove();
+        signatureNode = null;
+      }
+    },
+    completionStatus() { return completionStatus(view.state); },
+    destroy() {
+      cancelKeyboardHover();
+      signatureNode?.remove();
+      view.destroy();
+    }
   };
 }
 

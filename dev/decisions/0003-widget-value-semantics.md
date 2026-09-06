@@ -35,11 +35,15 @@ interchangeable with its value.
 - `ui$run_button(label = "Run")` returns a Boolean one-shot input: it is
   set to `TRUE` when clicked and resets to `FALSE` after its consumers
   finish (or once, immediately, when it has no consumers).
-- `ui$button()` is removed with no alias.
+- `ui$button(label = "Click", value = 0L)` returns a button whose validated
+  integer `$value` increments when clicked.
 
 The widget value is exchanged over the worker/JSON protocol by explicit
-typed values; the client only ever carries a validated option index for
-dropdowns and a scalar value for other controls.
+typed values. Choice controls validate their values against their choices;
+`range_slider()` and `date_range()` expose length-two vectors, and
+`multiselect()` exposes a vector containing the selected choices. Other
+controls expose their documented scalar, tabular, or nested value. The
+client carries only the validated representation required by each control.
 
 ## Consequences
 
@@ -47,6 +51,7 @@ Easier: one unambiguous data model, no silent unwrapping that can produce
 wrong results on S3-bypassing paths, explicit `n$value` reads that work
 identically inside and outside the notebook, and a small surface to
 validate. Harder: author code must write `min_wt$value` (explicit), and the
-worker must render an interactive control only when a cell's visible
-expression is a bare global name owned by that cell whose value is an
-`alder_widget`; otherwise it fails with a structured render error.
+worker must retain an owned named widget record before it can render an
+interactive control. That record may be a bare global or may be nested in a
+supported layout or resolved lazy-output tree; unsupported anonymous widget
+expressions fail with a structured render error.

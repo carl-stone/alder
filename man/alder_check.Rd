@@ -15,3 +15,6 @@ A data frame of diagnostics, invisibly.
 \description{
 Check an alder notebook and print diagnostics.
 }
+\examples{
+\dontrun{alder_check("analysis.R")}
+}

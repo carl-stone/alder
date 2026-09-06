@@ -99,17 +99,22 @@ testthat::test_that("installation stays isolated and returns actionable failures
   testthat::expect_equal(diagnostic$code, "install_failed")
   testthat::expect_match(diagnostic$message, "unable to resolve package")
 
-  # Do not contact a repository in the test suite.  Without pak the child
-  # exits before resolving packages and returns its documented alder error.
-  if (!requireNamespace("pak", quietly = TRUE)) {
-    failed <- install("DefinitelyMissingAlderPackage", project$notebook, target)
-    testthat::expect_false(failed$ok)
-    testthat::expect_equal(failed$status, "error")
-    testthat::expect_equal(failed$error$code, "invalid_request")
-    testthat::expect_match(failed$error$message, "requires the pak package")
-  } else {
-    testthat::skip("pak is installed; network installation intentionally skipped")
-  }
+  # Exercise the exact no-pak child path without contacting a repository,
+  # even when the development container has pak installed globally.
+  child <- processx::run(
+    file.path(R.home("bin"), "Rscript"),
+    args = c("--vanilla", "-e", pkg_fn(".alder_install_script")(),
+             "--args", "DefinitelyMissingAlderPackage"),
+    env = c(
+      ALDER_PACKAGE_LIB = target,
+      R_LIBS_USER = target,
+      R_LIBS_SITE = file.path(project$root, "no-site-library")
+    ),
+    stdout = "|", stderr = "|", error_on_status = FALSE
+  )
+  testthat::expect_identical(as.integer(child$status), 42L)
+  testthat::expect_match(child$stderr, "install requires the pak package",
+                         fixed = TRUE)
 })
 
 testthat::test_that("sandbox resolution is deterministic and does not mutate libraries", {
@@ -117,16 +122,10 @@ testthat::test_that("sandbox resolution is deterministic and does not mutate lib
   project <- make_package_project()
   before <- .libPaths()
   result <- sandbox(project$notebook)
-  expected <- file.path(
-    project$root, ".alder", "renv", "library", R.version$platform,
-    paste(R.version$major, R.version$minor, sep = ".")
-  )
+  expected <- pkg_fn(".alder_renv_paths")(project$root)$library
   testthat::expect_equal(normalizePath(result$lib), normalizePath(expected))
-  testthat::expect_true(startsWith(result$env[["R_LIBS_USER"]], result$lib))
-  # A parent R_LIBS must not outrank the sandbox in the worker.
-  if (nzchar(Sys.getenv("R_LIBS", unset = ""))) {
-    testthat::expect_true(startsWith(result$env[["R_LIBS"]], result$lib))
-  }
+  testthat::expect_identical(unname(result$env[["ALDER_SANDBOX_LIB"]]),
+                             result$lib)
   testthat::expect_true(dir.exists(result$lib))
   testthat::expect_identical(.libPaths(), before)
 
@@ -134,14 +133,99 @@ testthat::test_that("sandbox resolution is deterministic and does not mutate lib
   testthat::expect_equal(err$code, "invalid_request")
 })
 
+testthat::test_that("renv snapshot and status use the standard project lockfile", {
+  project <- make_package_project()
+  declare <- pkg_fn("alder_declare")
+  declare("jsonlite", project$notebook)
+  before_libs <- .libPaths()
+  before_project <- Sys.getenv("RENV_PROJECT", unset = NA_character_)
+
+  snapshot <- alder::alder_env("snapshot", project$notebook)
+  testthat::expect_identical(snapshot$action, "snapshot")
+  testthat::expect_true(file.exists(file.path(project$root, "renv.lock")))
+  testthat::expect_true("jsonlite" %in% snapshot$locked$package)
+  testthat::expect_true(snapshot$r_matches)
+  testthat::expect_true("jsonlite" %in% snapshot$missing)
+  testthat::expect_false(snapshot$synchronized)
+
+  dir.create(snapshot$library, recursive = TRUE, showWarnings = FALSE)
+  linked <- file.symlink(find.package("jsonlite"),
+                         file.path(snapshot$library, "jsonlite"))
+  testthat::expect_true(linked)
+  status <- alder::alder_env("status", project$root)
+  testthat::expect_true(status$synchronized)
+  testthat::expect_length(status$missing, 0L)
+  testthat::expect_length(status$unlocked, 0L)
+  testthat::expect_identical(.libPaths(), before_libs)
+  testthat::expect_identical(
+    Sys.getenv("RENV_PROJECT", unset = NA_character_), before_project
+  )
+})
+
+testthat::test_that("renv restore handles an empty lockfile without a repository", {
+  project <- make_package_project()
+  before_libs <- .libPaths()
+  before_project <- Sys.getenv("RENV_PROJECT", unset = NA_character_)
+  snapshot <- alder::alder_env("snapshot", project$root,
+                               packages = character())
+  testthat::expect_true(snapshot$lockfile_exists)
+  restored <- alder::alder_env("restore", project$root)
+  testthat::expect_identical(restored$action, "restore")
+  testthat::expect_true(restored$synchronized)
+  testthat::expect_identical(.libPaths(), before_libs)
+  testthat::expect_identical(
+    Sys.getenv("RENV_PROJECT", unset = NA_character_), before_project
+  )
+})
+
+testthat::test_that("the default worker resolves project-installed packages", {
+  project <- make_package_project()
+  source <- file.path(project$root, "AlderFixture")
+  dir.create(file.path(source, "R"), recursive = TRUE)
+  writeLines(c(
+    "Package: AlderFixture",
+    "Version: 0.0.1",
+    "Title: Alder Project Library Fixture",
+    "Description: Deterministic local package used by Alder tests.",
+    "Authors@R: person('Test', 'Fixture', role = c('aut', 'cre'), email = 'fixture@example.com')",
+    "License: MIT",
+    "Encoding: UTF-8"
+  ), file.path(source, "DESCRIPTION"), useBytes = TRUE)
+  writeLines("export(fixture_value)", file.path(source, "NAMESPACE"),
+             useBytes = TRUE)
+  writeLines("fixture_value <- function() 17L",
+             file.path(source, "R", "fixture.R"), useBytes = TRUE)
+  lib <- file.path(project$root, ".alder", "library")
+  dir.create(lib, recursive = TRUE)
+  install_output <- system2(
+    file.path(R.home("bin"), "R"),
+    c("CMD", "INSTALL", "--no-byte-compile",
+      paste0("--library=", shQuote(lib)), shQuote(source)),
+    stdout = TRUE, stderr = TRUE
+  )
+  testthat::expect_true(is.null(attr(install_output, "status")))
+
+  writeLines(c(
+    "# %%", "library(AlderFixture)",
+    "# %%", "fixture_value()"
+  ), project$notebook, useBytes = TRUE)
+  srv <- alder::start_alder(project$notebook, port = httpuv::randomPort(),
+                            run_on_startup = TRUE)
+  withr::defer(alder::stop_alder(srv))
+  wait_until_settled(srv$session, timeout = 30)
+  output <- srv$session$state()$cells[[2L]]$outputs[[1L]]
+  testthat::expect_identical(output$text, "[1] 17")
+})
+
 testthat::test_that("start_alder sandbox isolates the worker package library", {
   project <- make_package_project()
-  writeLines(c("# %%", "1 + 1", "# %%", ".libPaths()[[1L]]"),
+  writeLines(c(
+    "# %%", "1 + 1",
+    "# %%", ".libPaths()[[1L]]",
+    "# %%", "'dplyr' %in% rownames(installed.packages())"
+  ),
              project$notebook, useBytes = TRUE)
-  sandbox_lib <- file.path(
-    project$root, ".alder", "renv", "library", R.version$platform,
-    paste(R.version$major, R.version$minor, sep = ".")
-  )
+  sandbox_lib <- pkg_fn(".alder_renv_paths")(project$root)$library
 
   # A sandboxed server requires a notebook path: NULL and gallery paths are
   # rejected before any process or server starts.
@@ -158,7 +242,7 @@ testthat::test_that("start_alder sandbox isolates the worker package library", {
 
   srv <- alder::start_alder(project$notebook, port = 8933L,
                             run_on_startup = TRUE, sandbox = TRUE)
-  withr::defer(alder::stop_alder(srv), testthat::teardown_env())
+  withr::defer(alder::stop_alder(srv))
   wait_until_idle(srv$session, timeout = 30)
 
   st <- srv$session$state()
@@ -176,6 +260,8 @@ testthat::test_that("start_alder sandbox isolates the worker package library", {
                                normalizePath(sandbox_lib))),
     perl = TRUE
   )
+  c3 <- st$cells[[3L]]$outputs[[1L]]
+  testthat::expect_identical(c3$text, "[1] FALSE")
 
   # The sandbox library is also the declared-package install target: the
   # session resolves installs into the sandbox instead of the default

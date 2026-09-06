@@ -81,7 +81,9 @@
     for (i in seq_along(x)) {
       one <- .df_json_value(x[[i]], depth + 1L, max_items)
       if (!isTRUE(one$ok)) return(list(ok = FALSE, value = NULL))
-      out[[i]] <- one$value
+      # Assign through a one-element list so a legitimate JSON null does not
+      # delete this slot and desynchronise the value from its field names.
+      out[i] <- list(one$value)
     }
     if (length(out) && any(nzchar(nms))) {
       # A JSON object cannot represent a mixture of named and unnamed list
@@ -402,7 +404,7 @@ alder_variables <- function(snapshot, include_values = TRUE) {
     if (is.list(v) && is.logical(v$widget) && length(v$widget) == 1L &&
         !is.na(v$widget)) rec$widget <- isTRUE(v$widget)
     if (isTRUE(include_values) && isTRUE(found$found) &&
-        !is.null(owner) && !identical(status, "unbound")) {
+        !is.null(owner) && identical(status, "done")) {
       safe <- .df_json_value(actual)
       if (isTRUE(safe$ok)) {
         rec$value <- safe$value
@@ -590,23 +592,20 @@ alder_dependency_graph <- function(snapshot) {
 
 .df_headings <- function(body, cell_id) {
   out <- list()
-  for (i in seq_along(body)) {
-    line <- body[[i]]
-    # Markdown cells retain R comment markers in their body. Accept both
-    # "# Heading" (compact source form) and "# # Heading" (a literal Markdown
-    # heading after the comment marker).
-    m <- regexec("^\\s*(#{1,6})\\s+(.+?)\\s*#*\\s*$", line, perl = TRUE)
+  lines <- markdown_source_lines(body)
+  for (i in seq_along(lines)) {
+    line <- lines[[i]]
+    # CommonMark ATX headings allow at most three leading spaces and one to
+    # six hash marks. A closing hash sequence is markup only when whitespace
+    # separates it from the heading text.
+    m <- regexec("^ {0,3}(#{1,6})(?:[ \\t]+(.*))?$", line, perl = TRUE)
     mm <- regmatches(line, m)[[1L]]
-    if (length(mm) == 3L) {
+    if (length(mm) >= 2L) {
       hashes <- mm[[2L]]
-      text <- trimws(mm[[3L]])
-      nested <- regexec("^(#{1,6})\\s+(.+?)\\s*#*\\s*$",
-                        text, perl = TRUE)
-      nn <- regmatches(text, nested)[[1L]]
-      if (length(nn) == 3L) {
-        hashes <- nn[[2L]]
-        text <- trimws(nn[[3L]])
-      }
+      text <- if (length(mm) >= 3L) mm[[3L]] else ""
+      text <- sub("[ \\t]+#+[ \\t]*$", "", text, perl = TRUE)
+      text <- trimws(text)
+      if (!nzchar(text)) next
       out[[length(out) + 1L]] <- list(
         cell = cell_id, level = as.integer(nchar(hashes)),
         text = text, line = as.integer(i - 1L)
@@ -760,4 +759,33 @@ alder_dataflow_state <- function(snapshot, include_values = TRUE) {
     dag = graph,
     outline = alder_outline(snapshot)
   )
+}
+
+# Convert the editor-facing dataflow projection to a stable JSON shape while
+# leaving the ordinary R projection untouched. jsonlite's `auto_unbox = TRUE`
+# otherwise turns singleton character adjacency values into strings.
+alder_dataflow_json <- function(dataflow) {
+  if (!is.list(dataflow) || !is.list(dataflow$dag)) {
+    .df_stop("dataflow projection must contain a DAG")
+  }
+  out <- dataflow
+  dag <- out$dag
+  ids <- as.character(.df_or(dag$nodes, character()))
+  adjacency <- function(map) {
+    if (is.null(map)) map <- list()
+    if (!is.list(map)) .df_stop("dataflow DAG adjacency must be a list")
+    setNames(lapply(ids, function(id) {
+      value <- map[[id]]
+      if (is.null(value)) value <- character()
+      I(as.character(value))
+    }), ids)
+  }
+  dag$nodes <- I(ids)
+  dag$edges <- adjacency(dag$edges)
+  dag$reverse_edges <- adjacency(dag$reverse_edges)
+  dag$cycles <- I(as.character(.df_or(dag$cycles, character())))
+  dag$cycle_nodes <- I(as.character(.df_or(dag$cycle_nodes, character())))
+  if (!is.null(dag$topo)) dag$topo <- I(as.character(dag$topo))
+  out$dag <- dag
+  out
 }

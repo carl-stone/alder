@@ -9,11 +9,15 @@ alder_convert(path, out = NULL)
 \arguments{
 \item{path}{Input \code{.ipynb}, \code{.Rmd}, or \code{.qmd} path.}
 
-\item{out}{Optional output \code{.R} path. Defaults beside the input.}
+\item{out}{Optional output \code{.R} path. Defaults beside the input and must
+not identify the input through a direct, symlink, or hard-link path.}
 }
 \value{
 The output path, invisibly.
 }
 \description{
 Convert an ipynb, Rmd, or qmd file to an alder notebook.
+}
+\examples{
+\dontrun{alder_convert("report.qmd")}
 }

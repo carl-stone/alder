@@ -71,6 +71,28 @@ prepare_cache_dir <- function(notebook_path, artifact_dir) {
 # Gallery/session bootstrap helpers
 # ---------------------------------------------------------------------------
 
+alder_start_lsp <- function(notebook, path, session,
+                            diagnostics = FALSE) {
+  report <- function(message) {
+    detail <- paste0("R language server unavailable: ", message)
+    cat("[alder:lsp] ", detail, "\n", sep = "", file = stderr())
+    if (!is.null(session) && is.function(session$record_service_error)) {
+      session$record_service_error("lsp", detail, "lsp_unavailable")
+    }
+    invisible()
+  }
+  tryCatch(
+    LspClient$new(
+      notebook, path = path, diagnostics = diagnostics,
+      on_failure = report
+    ),
+    error = function(error) {
+      report(conditionMessage(error))
+      NULL
+    }
+  )
+}
+
 # Build one fully isolated notebook context for a gallery entry. The normal
 # single-notebook path below keeps its historical bootstrap in place; gallery
 # contexts use the same worker/session discipline but are created on demand.
@@ -128,31 +150,33 @@ alder_gallery_session_context <- function(path, execution_mode = NULL,
   }
 
   worker <- tryCatch(
-    .spawn_worker(worker_script, app_dir, artifact_dir, cache_dir),
+    .spawn_worker(
+      worker_script, app_dir, artifact_dir, cache_dir,
+      env = c(
+        ALDER_NOTEBOOK_DIR = dirname(path),
+        ALDER_PROJECT_LIB = file.path(dirname(path), ALDER_PACKAGE_INSTALL_LIB)
+      )
+    ),
     error = function(e) {
       cleanup()
       stop(e)
     }
   )
-  booted <- FALSE
-  deadline <- Sys.time() + 15
-  while (!booted && Sys.time() < deadline) {
-    if (!worker$alive()) break
-    done <- FALSE
-    worker$send("ping", on_response = function(ctx, resp) done <<- TRUE)
-    later::run_now(0.05)
-    booted <- done
-  }
-  if (!booted) {
-    try(worker$kill(), silent = TRUE)
-    cleanup()
-    stop("worker failed to start")
-  }
+  tryCatch(
+    .wait_for_worker(worker),
+    error = function(e) {
+      try(worker$kill(), silent = TRUE)
+      cleanup()
+      stop(e)
+    }
+  )
 
   sess <- tryCatch(
     Session$new(nb, worker, execution_mode = execution_mode,
                 run_on_startup = run_on_startup, disk_version = disk_version,
-                config = config),
+                config = config,
+                package_lib = file.path(dirname(path),
+                                        ALDER_PACKAGE_INSTALL_LIB)),
     error = function(e) {
       try(worker$kill(), silent = TRUE)
       cleanup()
@@ -165,9 +189,9 @@ alder_gallery_session_context <- function(path, execution_mode = NULL,
       config_error$code %||% "config_invalid"
     )
   }
-  lsp <- tryCatch(
-    LspClient$new(nb, path = path),
-    error = function(e) NULL
+  lsp <- alder_start_lsp(
+    nb, path, sess,
+    diagnostics = isTRUE(config$editor$live_diagnostics)
   )
   list(
     path = path, session = sess, worker = worker, lsp = lsp,
@@ -177,19 +201,7 @@ alder_gallery_session_context <- function(path, execution_mode = NULL,
 }
 
 alder_gallery_catalog <- function(root) {
-  files <- list.files(root, pattern = "\\.R$", full.names = TRUE)
-  if (!length(files)) return(list())
-  entries <- lapply(files, function(path) {
-    nb <- tryCatch(read_notebook(path), error = function(e) NULL)
-    if (is.null(nb) || !length(nb$cells)) return(NULL)
-    list(
-      basename = basename(path), path = normalizePath(path, mustWork = TRUE),
-      title = tryCatch(alder_app_title(nb), error = function(e) basename(path)),
-      description = tryCatch(alder_app_description(nb),
-                             error = function(e) "")
-    )
-  })
-  entries[!vapply(entries, is.null, logical(1L))]
+  alder_gallery_index(root)
 }
 
 alder_gallery_entry <- function(root, key) {
@@ -211,12 +223,60 @@ alder_html_escape <- function(value) {
   gsub("'", "&#39;", value, fixed = TRUE)
 }
 
+# Keep the original LSP payload intact while providing safely rendered help
+# for its standard Markdown, plaintext, and MarkedString content shapes.
+lsp_hover_html <- function(contents) {
+  render <- function(value) {
+    if (is.null(value)) return("")
+    if (is.character(value)) {
+      return(commonmark::markdown_html(paste(value, collapse = "\n"),
+                                       extensions = "table"))
+    }
+    if (!is.list(value)) return("")
+    if (is.character(value$value)) {
+      text <- paste(value$value, collapse = "\n")
+      if (identical(value$kind, "plaintext") || !is.null(value$language)) {
+        return(paste0("<pre><code>", alder_html_escape(text), "</code></pre>"))
+      }
+      return(commonmark::markdown_html(text, extensions = "table"))
+    }
+    paste(vapply(value, render, ""), collapse = "\n")
+  }
+  html <- sanitize_markdown_html(render(contents),
+    allowed_tags = c(MD_ALLOWED_TAGS, "div", "span", "table", "thead",
+                     "tbody", "tfoot", "tr", "th", "td"),
+    unwrap_unknown = TRUE)
+  if (!nzchar(html)) return("")
+  doc <- xml2::read_html(paste0("<div>", html, "</div>"),
+                         options = c("RECOVER", "NOERROR", "NONET"))
+  # R's native help uses relative links such as sum.html. Alder does not serve
+  # that help tree; retain their labels without creating a misleading 404 link.
+  for (link in xml2::xml_find_all(doc, "//a[@href]")) {
+    href <- xml2::xml_attr(link, "href")
+    if (!grepl("^(https?|mailto):", href, ignore.case = TRUE)) {
+      xml2::xml_set_name(link, "span")
+      xml2::xml_set_attr(link, "href", NULL)
+    }
+  }
+  nodes <- xml2::xml_contents(xml2::xml_find_first(doc, "//div"))
+  paste0(vapply(nodes, as.character, ""), collapse = "")
+}
+
 alder_gallery_index_response <- function(root) {
   cards <- alder_gallery_catalog(root)
   card_html <- if (!length(cards)) {
     "<p class=\"gallery-empty\">No Alder notebooks found.</p>"
   } else {
     paste(vapply(cards, function(entry) {
+      if (!is.null(entry$error)) {
+        return(paste0(
+          "<article class=\"gallery-card gallery-card-error\">",
+          "<h2>", alder_html_escape(entry$title), "</h2>",
+          "<p role=\"alert\"><strong>Unavailable:</strong> ",
+          alder_html_escape(entry$error$message), "</p>",
+          "</article>"
+        ))
+      }
       href <- paste0("/n/", utils::URLencode(entry$basename, reserved = TRUE))
       paste0(
         "<article class=\"gallery-card\">",
@@ -236,7 +296,9 @@ alder_gallery_index_response <- function(root) {
     "<style>body{font-family:system-ui,sans-serif;max-width:920px;",
     "margin:2rem auto;padding:0 1rem}.gallery-grid{display:grid;",
     "gap:1rem}.gallery-card{border:1px solid #ddd;border-radius:8px;",
-    "padding:1rem}.gallery-card h2{margin-top:0}</style></head>",
+    "padding:1rem}.gallery-card h2{margin-top:0}",
+    ".gallery-card-error{border-color:#b42318;background:#fff4f2}",
+    ".gallery-card-error p{color:#7a271a}</style></head>",
     "<body><main><h1>Alder notebooks</h1><section class=\"gallery-grid\">",
     card_html, "</section></main></body></html>"
   )
@@ -263,6 +325,78 @@ alder_gallery_query_value <- function(query, key) {
     return(tryCatch(utils::URLdecode(value), error = function(e) NULL))
   }
   NULL
+}
+
+# Decode the one integer query parameter accepted by the widget-operation
+# status route.  This route is polled by the URL-backed MCP adapter, so reject
+# duplicate or unrelated fields instead of silently choosing one.
+alder_widget_operation_query <- function(query) {
+  invalid <- function() list(
+    token = NULL,
+    error = list(
+      code = "invalid_request",
+      message = "query must contain exactly one positive integer token",
+      status = 400L
+    )
+  )
+  if (!is.character(query) || length(query) != 1L || is.na(query) ||
+      !nzchar(query) || grepl("%(?![[:xdigit:]]{2})", query, perl = TRUE)) {
+    return(invalid())
+  }
+  # httpuv versions differ on whether QUERY_STRING retains its leading `?`.
+  query <- sub("^\\?", "", query)
+  fields <- strsplit(query, "&", fixed = TRUE)[[1L]]
+  if (length(fields) != 1L) return(invalid())
+  pair <- strsplit(fields[[1L]], "=", fixed = TRUE)[[1L]]
+  if (length(pair) != 2L) return(invalid())
+  decoded <- tryCatch(
+    lapply(pair, utils::URLdecode),
+    error = function(e) NULL
+  )
+  if (is.null(decoded) || !identical(decoded[[1L]], "token") ||
+      !grepl("^[1-9][0-9]*$", decoded[[2L]])) {
+    return(invalid())
+  }
+  token <- suppressWarnings(as.numeric(decoded[[2L]]))
+  if (length(token) != 1L || is.na(token) || !is.finite(token) ||
+      token > .Machine$integer.max) {
+    return(invalid())
+  }
+  list(token = as.integer(token), error = NULL)
+}
+
+# Decode the one run id accepted by the run-operation status route. Keep a
+# separate public message from widget tokens while sharing the same strict
+# positive-integer and single-field boundary.
+alder_run_operation_query <- function(query) {
+  invalid <- function() list(
+    run_id = NULL,
+    error = list(
+      code = "invalid_request",
+      message = "query must contain exactly one positive integer run_id",
+      status = 400L
+    )
+  )
+  if (!is.character(query) || length(query) != 1L || is.na(query) ||
+      !nzchar(query) || grepl("%(?![[:xdigit:]]{2})", query, perl = TRUE)) {
+    return(invalid())
+  }
+  query <- sub("^\\?", "", query)
+  fields <- strsplit(query, "&", fixed = TRUE)[[1L]]
+  if (length(fields) != 1L) return(invalid())
+  pair <- strsplit(fields[[1L]], "=", fixed = TRUE)[[1L]]
+  if (length(pair) != 2L) return(invalid())
+  decoded <- tryCatch(lapply(pair, utils::URLdecode), error = function(e) NULL)
+  if (is.null(decoded) || !identical(decoded[[1L]], "run_id") ||
+      !grepl("^[1-9][0-9]*$", decoded[[2L]])) {
+    return(invalid())
+  }
+  run_id <- suppressWarnings(as.numeric(decoded[[2L]]))
+  if (length(run_id) != 1L || is.na(run_id) || !is.finite(run_id) ||
+      run_id > .Machine$integer.max) {
+    return(invalid())
+  }
+  list(run_id = as.integer(run_id), error = NULL)
 }
 
 alder_gallery_cookie_value <- function(cookie, key) {
@@ -350,85 +484,144 @@ file_res <- function(path, ctype, inline = FALSE) {
        body = readBin(path, "raw", n = file.info(path)$size))
 }
 
-# Detect the first duplicated object key at any depth in a JSON document,
-# or NULL when none exists. Operates on raw text so jsonlite's silent
-# last-wins collapse cannot hide duplicates. The document must already
-# parse (read_json_body parses first), but the scanner is total: an
-# unterminated string or escape bails out without looping.
-json_dup_key <- function(x) {
-  n <- nchar(x)
-  i <- 1L
-  stack <- list()   # frames: list(keys = character())
-  in_string <- FALSE
-  while (i <= n) {
-    ch <- substr(x, i, i)
-    if (in_string) {
-      if (ch == "\\") i <- i + 1L
-      else if (ch == "\"") in_string <- FALSE
-      i <- i + 1L
+# jsonlite preserves duplicate member names when simplifyVector is FALSE. Walk
+# that already-parsed tree instead of rescanning the request bytes: scalar
+# values (including uploads) are never inspected or copied here. Frames live
+# in an environment so nesting does not repeatedly copy an R list stack.
+json_dup_key <- function(obj) {
+  if (!is.list(obj)) return(NULL)
+  # Depth indexes are numeric strings; hashing keeps deep nesting lookup and
+  # insertion constant-time rather than linearly probing prior frames.
+  frames <- new.env(hash = TRUE, parent = emptyenv())
+  depth <- 0L
+  push <- function(node) {
+    depth <<- depth + 1L
+    entry <- new.env(parent = emptyenv())
+    entry$node <- node
+    # Do this once in C and visit only nested lists below. A dense scalar JSON
+    # array must not cause one interpreted loop iteration per scalar element.
+    entry$child_indexes <- which(vapply(node, is.list, logical(1)))
+    entry$next_index <- 1L
+    keys <- names(node)
+    if (!is.null(keys) && length(keys)) {
+      repeated <- duplicated(keys)
+      if (any(repeated)) return(keys[[which(repeated)[[1L]]]])
+    }
+    assign(as.character(depth), entry, envir = frames)
+    NULL
+  }
+  duplicate <- push(obj)
+  if (!is.null(duplicate)) return(duplicate)
+  while (depth) {
+    frame <- get(as.character(depth), envir = frames, inherits = FALSE)
+    if (frame$next_index > length(frame$child_indexes)) {
+      depth <- depth - 1L
       next
     }
-    if (ch == "\"") {
-      j <- i + 1L
-      val <- ""
-      repeat {
-        if (j > n) return(NULL)          # unterminated string: total bail
-        c2 <- substr(x, j, j)
-        if (c2 == "\\") {
-          if (j + 1L > n) return(NULL)
-          esc <- substr(x, j + 1L, j + 1L)
-          if (esc == "u") {
-            if (j + 5L > n) return(NULL)
-            hex <- substr(x, j + 2L, j + 5L)
-            if (!grepl("^[0-9a-fA-F]{4}$", hex)) return(NULL)
-            val <- paste0(val, intToUtf8(strtoi(hex, 16L)))
-            j <- j + 6L
-          } else {
-            val <- paste0(val, switch(esc,
-              `"` = "\"", `\\` = "\\", `/` = "/", b = "\b", f = "\f",
-              n = "\n", r = "\r", t = "\t", ""))
-            j <- j + 2L
-          }
-          next
-        }
-        if (c2 == "\"") break
-        val <- paste0(val, c2)
-        j <- j + 1L
-      }
-      # a key is a string directly followed by ":" (outside strings)
-      k <- j + 1L
-      while (k <= n && grepl("[ \t\r\n]", substr(x, k, k))) k <- k + 1L
-      if (k <= n && identical(substr(x, k, k), ":")) {
-        if (length(stack) && val %in% stack[[length(stack)]]$keys) {
-          return(val)
-        }
-        if (length(stack)) {
-          stack[[length(stack)]]$keys <-
-            c(stack[[length(stack)]]$keys, val)
-        }
-        i <- k + 1L
-      } else {
-        i <- j + 1L
-      }
-      next
-    }
-    if (ch == "{") {
-      stack[[length(stack) + 1L]] <- list(keys = character())
-    } else if (ch == "}") {
-      if (length(stack)) stack <- stack[-length(stack)]
-    } else if (ch == "[") {
-      stack[[length(stack) + 1L]] <- list(keys = character())
-    } else if (ch == "]") {
-      if (length(stack)) stack <- stack[-length(stack)]
-    }
-    i <- i + 1L
+    child <- frame$node[[frame$child_indexes[[frame$next_index]]]]
+    frame$next_index <- frame$next_index + 1L
+    duplicate <- push(child)
+    if (!is.null(duplicate)) return(duplicate)
   }
   NULL
+}
+
+# Bound structural work before jsonlite allocates an object tree. JSON strings
+# are removed by PCRE in C (including escaped quotes and braces); bounded raw
+# chunks then count and inspect only the remaining structural punctuation.
+# This keeps a large scalar upload a single regex match rather than an R-level
+# byte walk, without materializing input-sized logical or integer vectors.
+json_structure_within_limits <- function(x, max_depth = 1024L,
+                                        max_containers = 10000L,
+                                        max_separators = 100000L,
+                                        max_escapes = 100000L,
+                                        max_quotes = 200000L, bytes = NULL) {
+  if (!is.character(x) || length(x) != 1L || is.na(x)) return(FALSE)
+  if (is.null(bytes)) bytes <- charToRaw(x)
+  chunk_size <- 65536L
+  escapes <- 0L
+  quotes <- 0L
+  byte_count <- length(bytes)
+  if (byte_count) {
+    for (start in seq.int(1L, byte_count, by = chunk_size)) {
+      end <- min(start + chunk_size - 1L, byte_count)
+      chunk <- bytes[seq.int(start, end)]
+      counts <- tabulate(as.integer(chunk) + 1L, nbins = 256L)
+      escapes <- escapes + counts[[93L]]
+      quotes <- quotes + counts[[35L]]
+      if (escapes > max_escapes || quotes > max_quotes) return(FALSE)
+    }
+  }
+  # JSON permits DEL (U+007F), so exclude exactly C0 controls, not [:cntrl:].
+  # \u0000 and unpaired UTF-16 surrogate escapes are rejected: jsonlite
+  # otherwise normalizes them lossy before downstream schema validation.
+  string_pattern <- r"("(?:[^"\\\x00-\x1F]++|\\["\\/bfnrt]|\\u(?:[Dd][89AaBb][0-9A-Fa-f]{2}\\u[Dd][CcDdEeFf][0-9A-Fa-f]{2}|000[1-9A-Fa-f]|00[1-9A-Fa-f][0-9A-Fa-f]|0[1-9A-Fa-f][0-9A-Fa-f]{2}|[1-9A-Ca-cE-Fe-f][0-9A-Fa-f]{3}|[Dd][0-7][0-9A-Fa-f]{2}))*")"
+  general_string_pattern <- r"("(?:[^"\\\x00-\x1F]++|\\(?:["\\/bfnrt]|u[0-9A-Fa-f]{4}))*")"
+  utf8 <- enc2utf8(x)
+  if (!escapes) {
+    # Normal uploads/base64 have no escapes: one simple C-level string pass.
+    stripped <- tryCatch(gsub(r"("[^"\x00-\x1F]*+")", "", utf8, perl = TRUE),
+                         warning = function(w) NA_character_, error = function(e) NA_character_)
+  } else {
+    safe_hits <- tryCatch(gregexpr(string_pattern, utf8, perl = TRUE)[[1L]],
+                          warning = function(w) NA_integer_, error = function(e) NA_integer_)
+    general_hits <- tryCatch(gregexpr(general_string_pattern, utf8, perl = TRUE)[[1L]],
+                             warning = function(w) NA_integer_, error = function(e) NA_integer_)
+    if (anyNA(safe_hits) || anyNA(general_hits) ||
+        !identical(safe_hits, general_hits) ||
+        !identical(attr(safe_hits, "match.length"), attr(general_hits, "match.length"))) return(FALSE)
+    stripped <- tryCatch(gsub(general_string_pattern, "", utf8, perl = TRUE),
+                         warning = function(w) NA_character_, error = function(e) NA_character_)
+  }
+  if (is.na(stripped)) return(FALSE)
+  # `stripped` is necessarily a complete character value because PCRE removes
+  # strings globally. Scan its raw bytes in fixed chunks so structural checks
+  # never create input-sized comparison or punctuation vectors.
+  stripped_raw <- charToRaw(stripped)
+  separators <- 0L
+  structural_count <- 0L
+  containers <- 0L
+  depth <- 0L
+  stripped_count <- length(stripped_raw)
+  if (!stripped_count) return(TRUE)
+  for (start in seq.int(1L, stripped_count, by = chunk_size)) {
+    end <- min(start + chunk_size - 1L, stripped_count)
+    chunk <- stripped_raw[seq.int(start, end)]
+    counts <- tabulate(as.integer(chunk) + 1L, nbins = 256L)
+    # A quote left behind was not a safe JSON string (bad escape/control).
+    if (counts[[35L]]) return(FALSE)
+    separators <- separators + counts[[45L]] + counts[[59L]]
+    if (separators > max_separators) return(FALSE)
+    chunk_structural <- counts[[124L]] + counts[[126L]] +
+      counts[[92L]] + counts[[94L]]
+    structural_count <- structural_count + chunk_structural
+    if (structural_count > max_containers * 2L) return(FALSE)
+    chunk_containers <- counts[[124L]] + counts[[92L]]
+    containers <- containers + chunk_containers
+    if (containers > max_containers) return(FALSE)
+    if (!chunk_structural) next
+    # This bounded extraction and cumsum preserve nesting order across chunks.
+    structural <- chunk[chunk %in% as.raw(c(123L, 125L, 91L, 93L))]
+    openers <- structural %in% as.raw(c(123L, 91L))
+    levels <- depth + cumsum(ifelse(openers, 1L, -1L))
+    if (max(levels) > max_depth) return(FALSE)
+    depth <- levels[[length(levels)]]
+  }
+  TRUE
 }
 
 # Strict JSON body reader (plan §7): media type, size, NUL bytes,
 # object root, duplicate keys, parse validity. Returns
 # list(body = parsed | NULL, error = NULL | list(code, message, status)).
+json_body_limit_message <- function(max_bytes) {
+  mib <- 1024L * 1024L
+  if (is.numeric(max_bytes) && length(max_bytes) == 1L &&
+      is.finite(max_bytes) && max_bytes > 0 && max_bytes %% mib == 0) {
+    return(paste("request body exceeds", max_bytes %/% mib, "MiB"))
+  }
+  paste("request body exceeds", max_bytes, "bytes")
+}
+
 read_json_body <- function(req, max_bytes = 1048576L) {
   ct <- req$CONTENT_TYPE %||% ""
   ctype <- tolower(sub(";.*$", "", trimws(ct)))
@@ -443,7 +636,7 @@ read_json_body <- function(req, max_bytes = 1048576L) {
   if (length(clen) == 1L && !is.na(clen) && clen > max_bytes) {
     return(list(body = NULL,
                 error = list(code = "payload_too_large",
-                             message = "request body exceeds 1 MiB",
+                             message = json_body_limit_message(max_bytes),
                              status = 413L)))
   }
   # httpuv Rook input: read() returns up to n raw bytes
@@ -457,7 +650,7 @@ read_json_body <- function(req, max_bytes = 1048576L) {
   if (length(raw) > max_bytes) {
     return(list(body = NULL,
                 error = list(code = "payload_too_large",
-                             message = "request body exceeds 1 MiB",
+                             message = json_body_limit_message(max_bytes),
                              status = 413L)))
   }
   if (any(raw == as.raw(0))) {
@@ -467,11 +660,22 @@ read_json_body <- function(req, max_bytes = 1048576L) {
                              status = 400L)))
   }
   txt <- tryCatch(rawToChar(raw), error = function(e) "")
+  if (!validUTF8(txt)) {
+    return(list(body = NULL,
+                error = list(code = "invalid_request",
+                             message = "invalid JSON body", status = 400L)))
+  }
   first <- sub("^[ \t\r\n]*", "", txt)
   if (!nzchar(first) || !startsWith(first, "{")) {
     return(list(body = NULL,
                 error = list(code = "invalid_request",
                              message = "JSON body must be an object",
+                             status = 400L)))
+  }
+  if (!json_structure_within_limits(txt, bytes = raw)) {
+    return(list(body = NULL,
+                error = list(code = "invalid_request",
+                             message = "JSON body exceeds structural complexity limits",
                              status = 400L)))
   }
   # parse first: malformed JSON (e.g. unterminated strings) is a plain 400
@@ -482,8 +686,8 @@ read_json_body <- function(req, max_bytes = 1048576L) {
                 error = list(code = "invalid_request",
                              message = "invalid JSON body", status = 400L)))
   }
-  # duplicate keys would otherwise be silently collapsed (last wins)
-  dup <- json_dup_key(txt)
+  # jsonlite retains duplicate member names in this unsimplified parsed tree.
+  dup <- json_dup_key(obj)
   if (!is.null(dup)) {
     return(list(body = NULL,
                 error = list(code = "invalid_request",
@@ -499,6 +703,11 @@ read_json_body <- function(req, max_bytes = 1048576L) {
 # escape from `root` are rejected.
 safe_child_path <- function(root, encoded_rel, allowed_ext,
                             allow_nested = FALSE) {
+  if (!is.character(encoded_rel) || length(encoded_rel) != 1L ||
+      is.na(encoded_rel) || grepl("%(?![[:xdigit:]]{2})", encoded_rel,
+                                  perl = TRUE)) {
+    return(NULL)
+  }
   rel <- tryCatch(utils::URLdecode(encoded_rel), error = function(e) "")
   if (is.na(rel) || !nzchar(rel)) return(NULL)
   if (any(charToRaw(rel) == as.raw(0)) ||
@@ -546,9 +755,11 @@ artifact_content_type <- function(ext) switch(tolower(ext),
 # ---------------------------------------------------------------------------
 
 # Validate a route body's fields. `fields` is a named list of specs:
-#   type = "scalar_char" | "scalar_num" | "scalar_logical" | "array_char" |
+#   type = "scalar_char" | "scalar_num" | "scalar_revision" |
+#          "scalar_logical" | "array_char" |
 #          "any" | <character enum vector>
-#   required = TRUE | FALSE
+# The `required`, `allow_empty`, and `allow_controls` fields accept Booleans;
+# `max_bytes` bounds a scalar character field after JSON decoding.
 # Returns NULL or list(code, message, status).
 validate_body <- function(body, fields) {
   extra <- setdiff(names(body), names(fields))
@@ -571,8 +782,9 @@ validate_body <- function(body, fields) {
     t <- spec$type
     if (identical(t, "scalar_char")) {
       if (!is.character(val) || length(val) != 1L || is.na(val) ||
-          !nzchar(val) || any(charToRaw(val) == as.raw(0)) ||
-          grepl("[\r\n]", val)) {
+          (!isTRUE(spec$allow_empty) && !nzchar(val)) ||
+          (!isTRUE(spec$allow_controls) &&
+           (any(charToRaw(val) == as.raw(0)) || grepl("[\r\n]", val)))) {
         return(list(code = "invalid_request",
                     message = paste("field", nm, "must be a nonempty string"),
                     status = 400L))
@@ -581,6 +793,13 @@ validate_body <- function(body, fields) {
       if (!is.numeric(val) || length(val) != 1L || is.na(val)) {
         return(list(code = "invalid_request",
                     message = paste("field", nm, "must be a number"),
+                    status = 400L))
+      }
+    } else if (identical(t, "scalar_revision")) {
+      if (!alder_is_revision(val)) {
+        return(list(code = "invalid_request",
+                    message = paste("field", nm,
+                                    "must be a non-negative integer"),
                     status = 400L))
       }
     } else if (identical(t, "scalar_logical")) {
@@ -618,12 +837,21 @@ validate_body <- function(body, fields) {
     } else if (identical(t, "any")) {
       # no type check
     } else if (is.character(t)) {
-      if (!(val %in% t)) {
+      if (!is.character(val) || length(val) != 1L || is.na(val) ||
+          !(val %in% t)) {
         return(list(code = "invalid_request",
                     message = paste("field", nm, "must be one of",
                                     toString(t)),
                     status = 400L))
       }
+    }
+    if (!is.null(spec$max_bytes) &&
+        (!is.character(val) || length(val) != 1L || is.na(val) ||
+         nchar(enc2utf8(val), type = "bytes") > spec$max_bytes)) {
+      return(list(code = "invalid_request",
+                  message = paste("field", nm, "exceeds", spec$max_bytes,
+                                  "bytes"),
+                  status = 400L))
     }
     if (isTRUE(spec$exact) && !identical(val, spec$exact)) {
       return(list(code = "invalid_request",
@@ -735,6 +963,7 @@ decode_upload_files <- function(files, upload_dir, max_total = 12582912L) {
 alder_error_status <- function(code) {
   switch(code,
     invalid_request = 400L,
+    invalid_notebook = 400L,
     config_invalid = 400L,
     invalid_layout = 400L,
     notebook_has_no_path = 400L,
@@ -749,6 +978,7 @@ alder_error_status <- function(code) {
     run_in_progress = 409L,
     lazy_expired = 409L,
     widget_not_current = 409L,
+    stale_value = 409L,
     no_run_in_progress = 409L,
     payload_too_large = 413L,
     unsupported_media_type = 415L,
@@ -758,7 +988,6 @@ alder_error_status <- function(code) {
     package_metadata_error = 500L,
     internal_error = 500L,
     worker_unavailable = 503L,
-    sql_unavailable = 503L,
     lsp_unavailable = 503L,
     lsp_timeout = 504L,
     format_unavailable = 501L,
@@ -773,19 +1002,27 @@ alder_error_status <- function(code) {
 # Origin/Host validation (DNS rebinding protection, plan §7)
 # ---------------------------------------------------------------------------
 
+alder_loopback_hosts <- function() c("127.0.0.1", "localhost", "::1")
+
+validate_loopback_host <- function(host) {
+  if (!is.character(host) || length(host) != 1L || is.na(host) ||
+      !nzchar(host)) {
+    stop("`host` must be a nonempty string", call. = FALSE)
+  }
+  if (!(host %in% alder_loopback_hosts())) {
+    stop("`host` must be exactly 127.0.0.1, localhost, or ::1; ",
+         "non-loopback binds are not supported", call. = FALSE)
+  }
+  host
+}
+
 build_origins <- function(host, port, allowed_origins) {
-  loopback <- host %in% c("127.0.0.1", "localhost", "::1")
-  if (loopback) {
-    port <- as.integer(port)
-    defaults <- c(paste0("http://127.0.0.1:", port),
-                  paste0("http://localhost:", port),
-                  paste0("http://[::1]:", port))
-    if (is.null(allowed_origins)) return(defaults)
-    return(validate_origin_list(allowed_origins, port))
-  }
-  if (is.null(allowed_origins)) {
-    stop("non-loopback bind requires explicit allowed_origins")
-  }
+  validate_loopback_host(host)
+  port <- as.integer(port)
+  defaults <- c(paste0("http://127.0.0.1:", port),
+                paste0("http://localhost:", port),
+                paste0("http://[::1]:", port))
+  if (is.null(allowed_origins)) return(defaults)
   validate_origin_list(allowed_origins, port)
 }
 
@@ -824,46 +1061,123 @@ validate_origin <- function(req, origins, hosts) {
   origin %in% origins
 }
 
+sanitize_client_log_text <- function(value) {
+  bytes <- charToRaw(enc2utf8(value))
+  bytes[bytes == as.raw(0)] <- as.raw(32)
+  gsub("[\r\n]+", " ", rawToChar(bytes))
+}
+
+new_alder_lifecycle <- function(idle_timeout = NULL) {
+  lifecycle <- new.env(parent = emptyenv())
+  lifecycle$stopped <- FALSE
+  lifecycle$shutdown_requested <- FALSE
+  lifecycle$shutdown_reason <- NULL
+  lifecycle$browser_connected <- FALSE
+  lifecycle$last_browser_poll <- NULL
+  lifecycle$idle_timeout <- idle_timeout
+  lifecycle$idle_blocked <- FALSE
+  lifecycle$idle_block_reason <- NULL
+  lifecycle$stop_callback <- NULL
+  # An interrupt can be delivered while httpuv is evaluating a request
+  # callback. Keep the terminal status on the server itself because httpuv
+  # handles the callback condition before control reaches alder_cli().
+  lifecycle$exit_status <- NULL
+  lifecycle$shutdown_scheduled <- FALSE
+  lifecycle$shutdown_token <- paste0(
+    sample(c(letters, LETTERS, 0:9), 48L, replace = TRUE), collapse = "")
+  lifecycle$csp_nonce <- paste0(
+    sample(c(letters, LETTERS, 0:9), 32L, replace = TRUE), collapse = "")
+  lifecycle
+}
+
+# Request teardown without stopping httpuv from inside an active request
+# callback. httpuv must first receive the callback's response; its later
+# event-loop turn then invokes stop_callback safely.
+alder_request_shutdown <- function(lifecycle, reason, exit_status = NULL) {
+  lifecycle$shutdown_requested <- TRUE
+  lifecycle$shutdown_reason <- reason
+  if (!is.null(exit_status)) lifecycle$exit_status <- as.integer(exit_status)
+  if (!isTRUE(lifecycle$shutdown_scheduled)) {
+    lifecycle$shutdown_scheduled <- TRUE
+    later::later(function() {
+      lifecycle$shutdown_scheduled <- FALSE
+      callback <- lifecycle$stop_callback
+      if (is.function(callback)) callback(reason)
+    }, 0)
+  }
+  invisible()
+}
+
+alder_browser_poll <- function(req) {
+  user_agent <- req$HTTP_USER_AGENT %||% ""
+  fetch_site <- req$HTTP_SEC_FETCH_SITE %||% ""
+  startsWith(user_agent, "Mozilla/") ||
+    fetch_site %in% c("same-origin", "same-site", "none")
+}
+
+alder_shutdown_authenticated <- function(req, lifecycle) {
+  supplied <- req$HTTP_X_ALDER_SHUTDOWN_TOKEN %||% ""
+  is.character(supplied) && length(supplied) == 1L &&
+    nzchar(supplied) && identical(supplied, lifecycle$shutdown_token)
+}
+
 # ---------------------------------------------------------------------------
 # CSP/security headers for the main editor document (plan §7)
 # ---------------------------------------------------------------------------
 
-editor_csp <- paste(
+editor_csp <- function(nonce) paste(
   "default-src 'self'", "connect-src 'self'",
   "img-src 'self' data: http: https:", "script-src 'self'",
-  "style-src 'self'", "frame-src 'self'", "object-src 'none'",
+  "style-src 'self'",
+  paste0("style-src-elem 'self' 'nonce-", nonce, "'"),
+  "style-src-attr 'unsafe-inline'", "frame-src 'self'", "object-src 'none'",
   "base-uri 'none'", "form-action 'none'", "frame-ancestors 'none'",
   sep = "; "
 )
 
-editor_headers <- list(
+editor_headers <- function(nonce) list(
   "X-Content-Type-Options" = "nosniff",
   "Referrer-Policy" = "no-referrer",
   "Cache-Control" = "no-store",
   "X-Frame-Options" = "DENY",
-  "Content-Security-Policy" = editor_csp
+  "Content-Security-Policy" = editor_csp(nonce)
 )
+
+editor_document_res <- function(path, nonce) {
+  response <- file_res(path, "text/html; charset=utf-8")
+  if (!identical(response$status, 200L)) return(response)
+  html <- rawToChar(response$body)
+  marker <- "__ALDER_CSP_NONCE__"
+  if (!grepl(marker, html, fixed = TRUE)) {
+    return(error_res("internal_error",
+                     "editor document is missing its CSP nonce marker", 500L))
+  }
+  response$body <- charToRaw(gsub(marker, nonce, html, fixed = TRUE))
+  response$headers <- c(response$headers, editor_headers(nonce))
+  response
+}
 
 #' Serve an alder notebook
 #'
 #' Start the local alder web app for a notebook: a derivation DAG over
 #' \code{# \%\%} cells is computed, cells execute in dependency order in a
 #' dedicated R worker process, and the UI supports editing, reactive
-#' execution (ADR 0002), \code{ui$} widgets with explicit \code{$value}
-#' (ADR 0003), and interruptible execution.
+#' execution, \code{ui$} widgets with explicit \code{$value}, and
+#' interruptible execution.
 #'
 #' Only the worker is executed as a separate process for isolation; it is
 #' not a security sandbox, so only trusted notebook code should be run.
-#' With \code{sandbox = TRUE} the worker runs with an isolated project
-#' library (\code{.alder/renv/library} under the notebook directory) and
-#' declared packages install into it.
+#' With \code{sandbox = TRUE} the worker runs with the standard renv project
+#' library (\code{renv/library} under the notebook directory) and declared
+#' packages install into it.
 #'
 #' @param path Path to a notebook file (plain \code{.R} with \code{# \%\%}
-#'   cells, per ADR 0001). Must be \code{NULL} or one nonempty valid-UTF-8
+#'   cell markers). Must be \code{NULL} or one nonempty valid-UTF-8
 #'   string. When \code{NULL}, an empty notebook with no save path is
 #'   served; a nonexistent path is created only on Save.
-#' @param host Interface to bind; defaults to loopback only. A non-loopback
-#'   bind requires an explicit \code{allowed_origins}.
+#' @param host Loopback interface to bind. Must be exactly
+#'   \code{"127.0.0.1"}, \code{"localhost"}, or \code{"::1"}; Alder does
+#'   not support non-loopback binds.
 #' @param port TCP port for the local web server; one integer in 1--65535.
 #' @param open Open a browser tab after the server is ready.
 #' @param execution_mode Reactivity mode: \code{"automatic"} runs a cell's
@@ -875,25 +1189,38 @@ editor_headers <- list(
 #'   server starts; if \code{FALSE}, opening the editor or an app URL never
 #'   triggers execution. \code{NULL} resolves from notebook metadata and
 #'   configuration.
-#' @param allowed_origins For loopback binds, optional explicit trusted
-#'   origins; for non-loopback binds, required. \code{NULL} on loopback
-#'   allows exactly \code{http://127.0.0.1:<port>},
+#' @param allowed_origins Optional explicit trusted browser origins.
+#'   \code{NULL} allows exactly \code{http://127.0.0.1:<port>},
 #'   \code{http://localhost:<port>}, and \code{http://[::1]:<port>}.
 #' @param sandbox Run the notebook worker with an isolated package library
-#'   (\code{.alder/renv/library} under the notebook directory) prepended to
-#'   \code{R_LIBS_USER}; declared packages install into it. Requires a
-#'   notebook \code{path}; \code{sandbox = TRUE} with a \code{NULL} path or
-#'   a gallery directory is an error.
+#'   (the standard renv project library); declared packages install into it.
+#'   Notebook lookup is restricted to that library plus base/recommended R
+#'   packages. Requires a notebook \code{path}; \code{sandbox = TRUE} with a
+#'   \code{NULL} path or a gallery directory is an error.
+#' @param idle_timeout Browser-idle shutdown timeout in seconds. After a browser
+#'   has connected and polled state at least once, the server stops when no
+#'   browser poll arrives for this duration. Dirty notebooks are atomically
+#'   saved first; a save failure or conflict pauses shutdown and is exposed in
+#'   state rather than discarding work. \code{NULL} or zero disables the timer.
+#'   The R API defaults to disabled; the command-line launcher defaults to 30
+#'   seconds.
 #' @return An \code{alder_server} list wrapping the httpuv server, the
 #'   notebook \code{Session}, and the worker.
+#' @examples
+#' \dontrun{
+#' srv <- start_alder("analysis.R", open = TRUE)
+#' stop_alder(srv)
+#' }
 #' @export
 start_alder <- function(path = NULL, host = "127.0.0.1", port = 8899L,
                         open = FALSE,
                         execution_mode = NULL,
                         run_on_startup = NULL,
                         allowed_origins = NULL,
-                        sandbox = FALSE) {
+                        sandbox = FALSE,
+                        idle_timeout = NULL) {
   # --- argument validation ------------------------------------------------
+  validate_loopback_host(host)
   if (!is.null(path)) {
     if (!is.character(path) || length(path) != 1L || is.na(path) ||
         !nzchar(path)) {
@@ -922,12 +1249,14 @@ start_alder <- function(path = NULL, host = "127.0.0.1", port = 8899L,
     sb <- alder_sandbox(path)
     worker_env <- sb$env
     package_lib <- sb$lib
+  } else if (!is.null(path) && !dir.exists(path)) {
+    package_lib <- file.path(dirname(path), ALDER_PACKAGE_INSTALL_LIB)
+    worker_env <- c(ALDER_PROJECT_LIB = package_lib)
   }
 
   gallery <- !is.null(path) && dir.exists(path)
-  if (!is.character(host) || length(host) != 1L || is.na(host) ||
-      !nzchar(host)) {
-    stop("`host` must be a nonempty string")
+  if (!is.null(path) && !gallery) {
+    worker_env <- c(ALDER_NOTEBOOK_DIR = dirname(path), worker_env)
   }
   if (!is.numeric(port) || length(port) != 1L || is.na(port) ||
       port < 1L || port > 65535L) {
@@ -944,6 +1273,14 @@ start_alder <- function(path = NULL, host = "127.0.0.1", port = 8899L,
   if (!is.logical(sandbox) || length(sandbox) != 1L || is.na(sandbox)) {
     stop("`sandbox` must be TRUE or FALSE")
   }
+  if (!is.null(idle_timeout) &&
+      (!is.numeric(idle_timeout) || length(idle_timeout) != 1L ||
+       is.na(idle_timeout) || !is.finite(idle_timeout) || idle_timeout < 0)) {
+    stop("`idle_timeout` must be NULL or one non-negative finite number")
+  }
+  if (!is.null(idle_timeout) && identical(as.numeric(idle_timeout), 0)) {
+    idle_timeout <- NULL
+  }
 
   # --- bootstrap ----------------------------------------------------------
   app_dir <- alder_app_dir()
@@ -956,7 +1293,7 @@ start_alder <- function(path = NULL, host = "127.0.0.1", port = 8899L,
                          bytes = readBin(path, "raw",
                                          n = file.info(path)$size))
   } else {
-    nb <- parse_notebook_lines(NULL, character())
+    nb <- parse_notebook_lines(path, character())
     disk_version <- if (!is.null(path)) list(exists = FALSE, bytes = raw())
       else NULL
   }
@@ -1016,20 +1353,14 @@ start_alder <- function(path = NULL, host = "127.0.0.1", port = 8899L,
   # The worker validates its environment (artifact dir, widget module) at
   # startup. Wait until it has booted so a fast stop_alder() cannot unlink
   # the artifact directory from under the booting process.
-  booted <- FALSE
-  deadline <- Sys.time() + 15
-  while (!booted && Sys.time() < deadline) {
-    if (!worker$alive()) break
-    done <- FALSE
-    worker$send("ping", on_response = function(ctx, resp) done <<- TRUE)
-    later::run_now(0.05)
-    booted <- done
-  }
-  if (!booted) {
-    try(worker$kill(), silent = TRUE)
-    cleanup()
-    stop("worker failed to start")
-  }
+  tryCatch(
+    .wait_for_worker(worker),
+    error = function(e) {
+      try(worker$kill(), silent = TRUE)
+      cleanup()
+      stop(e)
+    }
+  )
 
   sess <- tryCatch(
     Session$new(nb, worker, execution_mode = execution_mode,
@@ -1048,11 +1379,12 @@ start_alder <- function(path = NULL, host = "127.0.0.1", port = 8899L,
     )
   }
 
-  # Editor intelligence is optional. A missing or failed languageserver must
-  # not prevent the notebook worker and HTTP UI from starting.
-  lsp <- tryCatch(
-    LspClient$new(nb, path = path),
-    error = function(e) NULL
+  # A language-server failure does not destroy the notebook worker, but it is
+  # a visible operational error because completion and argument help are part
+  # of Alder's required editor experience.
+  lsp <- alder_start_lsp(
+    nb, path, sess,
+    diagnostics = isTRUE(config$editor$live_diagnostics)
   )
 
 
@@ -1083,7 +1415,7 @@ start_alder <- function(path = NULL, host = "127.0.0.1", port = 8899L,
     upload_dir <- file.path(artifact_dir, "uploads")
     dir.create(upload_dir, recursive = TRUE, mode = "0700")
     cache_dir <- NULL
-    gallery_last_used <- new.env(parent = emptyenv())
+    gallery_last_used <- new.env(parent = emptyenv()) # nolint: object_usage_linter
     cleanup <- function() {
       if (dir.exists(artifact_dir)) {
         try(unlink(artifact_dir, recursive = TRUE, force = TRUE),
@@ -1100,6 +1432,16 @@ start_alder <- function(path = NULL, host = "127.0.0.1", port = 8899L,
     ))
     if (is.na(gallery_max) || gallery_max < 1L) gallery_max <- 4L
     gallery_max <- min(gallery_max, 32L)
+    gallery_errors <- Filter(
+      function(entry) !is.null(entry$error),
+      alder_gallery_catalog(path)
+    )
+    for (entry in gallery_errors) {
+      message(
+        "[alder:gallery] Could not load ", entry$basename, ": ",
+        entry$error$message
+      )
+    }
   }
 
   origins <- tryCatch(
@@ -1113,10 +1455,17 @@ start_alder <- function(path = NULL, host = "127.0.0.1", port = 8899L,
     }
   )
   hosts <- origin_hosts(origins)
+  lifecycle <- new_alder_lifecycle(idle_timeout)
   gallery_get_context <- function(key) {
     if (!gallery) return(NULL)
     entry <- alder_gallery_entry(path, key)
     if (is.null(entry)) return(NULL)
+    if (!is.null(entry$error)) {
+      return(structure(
+        list(entry = entry, error = entry$error),
+        class = "alder_gallery_entry_error"
+      ))
+    }
     if (exists(entry$basename, envir = gallery_sessions, inherits = FALSE)) {
       gallery_clock <<- gallery_clock + 1L
       gallery_last_used[[entry$basename]] <- gallery_clock
@@ -1170,12 +1519,33 @@ start_alder <- function(path = NULL, host = "127.0.0.1", port = 8899L,
 
 
   # --- httpuv call handler ------------------------------------------------
-  call_handler <- function(req) {
+  call_handler_impl <- function(req) {
     path_req <- sub("\\?.*$", "", req$PATH_INFO %||% "")
     method <- req$REQUEST_METHOD %||% ""
 
     if (!validate_origin(req, origins, hosts)) {
       return(error_res("forbidden_origin", "origin not allowed", 403L))
+    }
+
+    # This route is server-scoped, including in gallery mode. Teardown is
+    # deferred so httpuv can flush the accepted response before it stops.
+    if (identical(path_req, "/api/shutdown")) {
+      if (!identical(method, "POST")) {
+        res <- error_res("method_not_allowed",
+                         paste("method not allowed:", method), 405L)
+        res$headers$Allow <- "POST"
+        return(res)
+      }
+      if (!alder_shutdown_authenticated(req, lifecycle)) {
+        return(error_res("forbidden", "shutdown token is invalid", 403L))
+      }
+      raw <- tryCatch(req$rook.input$read(1L), error = function(e) raw())
+      if (length(raw)) {
+        return(error_res("invalid_request",
+                         "shutdown requires a zero-byte body", 400L))
+      }
+      alder_request_shutdown(lifecycle, "api")
+      return(ok_res(stopping = TRUE, status = 202L))
     }
 
     gallery_key <- NULL
@@ -1200,6 +1570,14 @@ start_alder <- function(path = NULL, host = "127.0.0.1", port = 8899L,
           return(error_res("not_found", "not found", 404L))
         }
         gallery_context <- gallery_get_context(gallery_key)
+        if (inherits(gallery_context, "alder_gallery_entry_error")) {
+          return(error_res(
+            gallery_context$error$code,
+            paste0("Could not load ", gallery_context$entry$basename, ": ",
+                   gallery_context$error$message),
+            alder_error_status(gallery_context$error$code)
+          ))
+        }
         if (inherits(gallery_context, "alder_gallery_context_error")) {
           return(error_res("internal_error",
                            conditionMessage(gallery_context$error), 500L))
@@ -1210,10 +1588,8 @@ start_alder <- function(path = NULL, host = "127.0.0.1", port = 8899L,
         # Route-local bindings preserve all existing Session calls below.
         sess <- gallery_context$session
         lsp <- gallery_context$lsp
-        worker <- gallery_context$worker
         artifact_dir <- gallery_context$artifact_dir
         upload_dir <- gallery_context$upload_dir
-        cache_dir <- gallery_context$cache_dir
       }
     }
 
@@ -1237,8 +1613,7 @@ start_alder <- function(path = NULL, host = "127.0.0.1", port = 8899L,
       if (!is.null(m)) return(m)
       p <- file.path(app_dir, "index.html")
       if (!file.exists(p)) return(error_res("not_found", "not found", 404L))
-      res <- file_res(p, "text/html; charset=utf-8")
-      res$headers <- c(res$headers, editor_headers)
+      res <- editor_document_res(p, lifecycle$csp_nonce)
       res$headers[["Set-Cookie"]] <- paste0(
         "alder_nb=", utils::URLencode(gallery_key, reserved = TRUE),
         "; Path=/; SameSite=Lax"
@@ -1252,8 +1627,7 @@ start_alder <- function(path = NULL, host = "127.0.0.1", port = 8899L,
       if (!is.null(m)) return(m)
       p <- file.path(app_dir, "index.html")
       if (!file.exists(p)) return(error_res("not_found", "not found", 404L))
-      res <- file_res(p, "text/html; charset=utf-8")
-      res$headers <- c(res$headers, editor_headers)
+      res <- editor_document_res(p, lifecycle$csp_nonce)
       return(res)
     }
     if (startsWith(path_req, "/static/")) {
@@ -1350,8 +1724,11 @@ start_alder <- function(path = NULL, host = "127.0.0.1", port = 8899L,
     # --- API: unknown paths are 404 before any body parsing ---------------
     api_routes <- c("/api/state", "/api/config", "/api/app", "/api/layout",
                     "/api/run", "/api/lazy", "/api/table", "/api/cell",
-                    "/api/widget", "/api/upload", "/api/value", "/api/runtime",
-                    "/api/interrupt", "/api/save", "/api/lsp", "/api/format",
+                    "/api/widget", "/api/widget-operation",
+                    "/api/run-operation", "/api/upload",
+                    "/api/value", "/api/runtime",
+                    "/api/interrupt", "/api/restart", "/api/save",
+                    "/api/lsp", "/api/format",
                     "/api/export", "/api/check", "/api/packages", "/api/log")
 
     if (!(path_req %in% api_routes)) {
@@ -1361,7 +1738,88 @@ start_alder <- function(path = NULL, host = "127.0.0.1", port = 8899L,
     if (identical(path_req, "/api/state")) {
       m <- need("GET")
       if (!is.null(m)) return(m)
-      return(json_res(sess$state()))
+      if (alder_browser_poll(req)) {
+        lifecycle$browser_connected <- TRUE
+        lifecycle$last_browser_poll <- Sys.time()
+        lifecycle$idle_blocked <- FALSE
+        lifecycle$idle_block_reason <- NULL
+      }
+      if (!is.null(lsp) && lsp$alive()) {
+        tryCatch(
+          {
+            notebook <- sess$notebook_snapshot()
+            lsp$sync_document(notebook)
+            sess$set_lsp_diagnostics(lsp$diagnostics_by_cell(notebook))
+          },
+          error = function(error) {
+            sess$set_lsp_diagnostics(list())
+            detail <- paste0("R language server synchronization failed: ",
+                             conditionMessage(error))
+            sess$record_service_error("lsp", detail, "lsp_unavailable")
+            cat("[alder:lsp] ", detail, "\n", sep = "", file = stderr())
+          }
+        )
+      }
+      response <- json_res(list())
+      response$body <- sess$state_json(list(shutdown_token = lifecycle$shutdown_token))
+      return(response)
+    }
+    if (identical(path_req, "/api/widget-operation")) {
+      m <- need("GET")
+      if (!is.null(m)) return(m)
+      parsed <- alder_widget_operation_query(req$QUERY_STRING %||% "")
+      if (!is.null(parsed$error)) {
+        return(error_res(
+          parsed$error$code, parsed$error$message, parsed$error$status
+        ))
+      }
+      # Detect a worker exit before exposing a still-pending journal record.
+      sess$worker_available()
+      operation <- sess$widget_operation(parsed$token)
+      if (is.null(operation)) {
+        return(error_res(
+          "not_found", "widget operation token was not found", 404L
+        ))
+      }
+      # This is deliberately a narrow projection, not a second state surface.
+      public_operation <- list(
+        token = as.integer(operation$token),
+        status = as.character(operation$status),
+        error = operation$error %||% NULL
+      )
+      if (!is.null(operation$reset_expected)) {
+        public_operation$reset_expected <- isTRUE(operation$reset_expected)
+      }
+      if (!is.null(operation$reset_token)) {
+        public_operation$reset_token <- as.integer(operation$reset_token)
+      }
+      return(ok_res(operation = public_operation))
+    }
+    if (identical(path_req, "/api/run-operation")) {
+      m <- need("GET")
+      if (!is.null(m)) return(m)
+      parsed <- alder_run_operation_query(req$QUERY_STRING %||% "")
+      if (!is.null(parsed$error)) {
+        return(error_res(
+          parsed$error$code, parsed$error$message, parsed$error$status
+        ))
+      }
+      # Detect a worker exit before exposing a still-pending journal record.
+      sess$worker_available()
+      operation <- sess$run_operation(parsed$run_id)
+      if (is.null(operation)) {
+        return(error_res(
+          "not_found", "run operation id was not found", 404L
+        ))
+      }
+      # This projection intentionally excludes queue and cell internals.
+      public_operation <- list(
+        run_id = as.integer(operation$run_id),
+        status = as.character(operation$status),
+        reset_tokens = I(as.integer(operation$reset_tokens %||% integer())),
+        error = operation$error %||% NULL
+      )
+      return(ok_res(operation = public_operation))
     }
     if (identical(path_req, "/api/config") && identical(method, "GET")) {
       return(ok_res(config = sess$state()$config))
@@ -1370,7 +1828,15 @@ start_alder <- function(path = NULL, host = "127.0.0.1", port = 8899L,
       return(ok_res(app = sess$state()$app))
     }
     if (identical(path_req, "/api/layout") && identical(method, "GET")) {
-      return(ok_res(layout = sess$state()$layout))
+      state <- sess$state()
+      if (!is.null(state$layout_error)) {
+        return(error_res(
+          state$layout_error$code,
+          state$layout_error$message,
+          alder_error_status(state$layout_error$code)
+        ))
+      }
+      return(ok_res(layout = state$layout))
     }
 
     m <- need("POST")
@@ -1383,6 +1849,12 @@ start_alder <- function(path = NULL, host = "127.0.0.1", port = 8899L,
           error_res(code, conditionMessage(e), alder_error_status(code))
         },
         error = function(e) {
+          message <- conditionMessage(e)
+          cat("[alder:server] internal API error at ", path_req, ": ",
+              message, "\n", sep = "", file = stderr())
+          if (is.function(sess$record_action_error)) {
+            sess$record_action_error(message, "internal_error")
+          }
           error_res("internal_error", "internal server error", 500L)
         })
     }
@@ -1396,6 +1868,19 @@ start_alder <- function(path = NULL, host = "127.0.0.1", port = 8899L,
       }
       return(session_call({
         r <- sess$interrupt()
+        ok_res(run_id = r$run_id, status = 202L)
+      }))
+    }
+
+    # --- /api/restart (zero-byte body, restart + dependency-order replay) ---
+    if (identical(path_req, "/api/restart")) {
+      raw <- tryCatch(req$rook.input$read(1L), error = function(e) raw())
+      if (length(raw)) {
+        return(error_res("invalid_request",
+                         "restart requires a zero-byte body", 400L))
+      }
+      return(session_call({
+        r <- sess$restart_worker(replay = TRUE)
         ok_res(run_id = r$run_id, status = 202L)
       }))
     }
@@ -1453,23 +1938,52 @@ start_alder <- function(path = NULL, host = "127.0.0.1", port = 8899L,
 
     # --- /api/log (surface client-side errors in server logs) --------------
     if (identical(path_req, "/api/log")) {
-      lv <- body$level %||% "error"
-      if (!is.character(lv) || length(lv) != 1L || is.na(lv) || !nzchar(lv)) {
-        lv <- "error"
+      v <- validate_body(body, list(
+        level = list(type = "scalar_char", required = TRUE,
+                     allow_controls = TRUE, max_bytes = 32L),
+        message = list(type = "scalar_char", required = TRUE,
+                       allow_controls = TRUE, max_bytes = 8192L),
+        source = list(type = "scalar_char", required = FALSE,
+                      allow_empty = TRUE, allow_controls = TRUE,
+                      max_bytes = 256L),
+        code = list(type = "scalar_char", required = FALSE, max_bytes = 128L),
+        status = list(type = "scalar_revision", required = FALSE),
+        url = list(type = "scalar_char", required = FALSE,
+                   allow_empty = TRUE, allow_controls = TRUE,
+                   max_bytes = 4096L),
+        stack = list(type = "scalar_char", required = FALSE,
+                     allow_empty = TRUE, allow_controls = TRUE,
+                     max_bytes = 16384L)
+      ))
+      if (!is.null(v)) return(error_res(v$code, v$message, v$status))
+      # Fetch uses status 0 for network failures; HTTP responses use 100--599.
+      # Retain the frontend's structured failure details without accepting
+      # arbitrary or lossy numeric values in a physical log record.
+      if (!is.null(body$status) &&
+          !(body$status == 0 || (body$status >= 100 && body$status <= 599))) {
+        return(error_res("invalid_request",
+                         "field status must be 0 or an HTTP status from 100 to 599", 400L))
       }
-      msg <- body$message
-      if (!is.character(msg) || length(msg) != 1L || is.na(msg)) {
-        msg <- "(no message)"
-      }
+      lv <- sanitize_client_log_text(body$level)
+      msg <- sanitize_client_log_text(body$message)
       attrs <- character(0)
-      if (nzchar(body$source %||% "")) {
-        attrs <- c(attrs, paste0("source=", body$source))
+      source <- sanitize_client_log_text(body$source %||% "")
+      url <- sanitize_client_log_text(body$url %||% "")
+      stack <- sanitize_client_log_text(body$stack %||% "")
+      if (nzchar(source)) {
+        attrs <- c(attrs, paste0("source=", source))
       }
-      if (nzchar(body$url %||% "")) {
-        attrs <- c(attrs, paste0("url=", body$url))
+      if (!is.null(body$code)) {
+        attrs <- c(attrs, paste0("code=", sanitize_client_log_text(body$code)))
       }
-      if (nzchar(body$stack %||% "")) {
-        attrs <- c(attrs, paste0("stack=", gsub("\n", " ", body$stack)))
+      if (!is.null(body$status)) {
+        attrs <- c(attrs, paste0("status=", body$status))
+      }
+      if (nzchar(url)) {
+        attrs <- c(attrs, paste0("url=", url))
+      }
+      if (nzchar(stack)) {
+        attrs <- c(attrs, paste0("stack=", stack))
       }
       cat(sprintf("[client:%s] %s%s\n", lv, msg,
                   if (length(attrs)) paste0(" | ", paste(attrs, collapse = " ")) else ""),
@@ -1481,6 +1995,26 @@ start_alder <- function(path = NULL, host = "127.0.0.1", port = 8899L,
     if (identical(path_req, "/api/config")) {
       return(session_call({
         result <- sess$set_config(body)
+        if (!is.null(lsp) && lsp$alive()) {
+          tryCatch(
+            {
+              lsp$set_diagnostics(
+                isTRUE(result$config$editor$live_diagnostics)
+              )
+              if (!isTRUE(result$config$editor$live_diagnostics)) {
+                sess$set_lsp_diagnostics(list())
+              }
+            },
+            error = function(e) {
+              detail <- paste0(
+                "Could not update language-server diagnostics: ",
+                conditionMessage(e)
+              )
+              sess$record_service_error("lsp", detail, "lsp_unavailable")
+              cat("[alder:lsp] ", detail, "\n", sep = "", file = stderr())
+            }
+          )
+        }
         ok_res(config = result$config, version = result$version)
       }))
     }
@@ -1504,7 +2038,15 @@ start_alder <- function(path = NULL, host = "127.0.0.1", port = 8899L,
     # --- /api/layout -------------------------------------------------------
     if (identical(path_req, "/api/layout")) {
       if (identical(method, "GET")) {
-        return(ok_res(layout = sess$state()$layout))
+        state <- sess$state()
+        if (!is.null(state$layout_error)) {
+          return(error_res(
+            state$layout_error$code,
+            state$layout_error$message,
+            alder_error_status(state$layout_error$code)
+          ))
+        }
+        return(ok_res(layout = state$layout))
       }
       v <- validate_body(body, list(
         version = list(type = "scalar_num", required = FALSE),
@@ -1555,23 +2097,17 @@ start_alder <- function(path = NULL, host = "127.0.0.1", port = 8899L,
         return(error_res("invalid_request", "at least one package is required", 400L))
       }
       return(session_call({
-        path_now <- sess$notebook_snapshot()$path
         if (identical(body$op, "declare")) {
-          if (is.null(path_now) || is.na(path_now) || !nzchar(path_now)) {
-            alder_abort("notebook_has_no_path",
-                        "package declarations require a notebook path")
-          }
-          result <- alder_declare(supplied, path_now)
+          result <- sess$declare_packages(supplied)
           ok_res(packages = result$declared, path = result$metadata)
         } else {
-          result <- alder_install(supplied, path = path_now)
-          if (!isTRUE(result$ok)) {
-            error <- result$error %||% list()
-            alder_abort(error$code %||% "install_failed",
-                        error$message %||% "package installation failed")
-          }
-          ok_res(packages = result$installed, missing = result$missing,
-                 lib = result$lib)
+          result <- sess$install_packages(supplied)
+          ok_res(packages = result$packages,
+                 installed = result$installed,
+                 missing = result$missing,
+                 installing = result$installing,
+                 lib = result$lib,
+                 status = if (identical(result$status, "installing")) 202L else 200L)
         }
       }))
     }
@@ -1583,7 +2119,8 @@ start_alder <- function(path = NULL, host = "127.0.0.1", port = 8899L,
       if (!is.null(v)) return(error_res(v$code, v$message, v$status))
       allowed <- c("textDocument/completion", "textDocument/hover",
                    "textDocument/definition", "textDocument/references",
-                   "textDocument/documentSymbol", "textDocument/signatureHelp")
+                   "textDocument/documentSymbol", "textDocument/signatureHelp",
+                   "alder/restart")
       if (!body$method %in% allowed) {
         return(error_res("invalid_request", "unsupported language-server method",
                          400L))
@@ -1592,8 +2129,37 @@ start_alder <- function(path = NULL, host = "127.0.0.1", port = 8899L,
         return(error_res("invalid_request", "params must be an object", 400L))
       }
       return(session_call({
+        if (identical(body$method, "alder/restart")) {
+          if (!is.null(lsp)) lsp$stop()
+          nb_now <- sess$notebook_snapshot()
+          replacement <- alder_start_lsp(
+            nb_now, nb_now$path, sess,
+            diagnostics = isTRUE(
+              sess$state()$config$editor$live_diagnostics
+            )
+          )
+          if (isTRUE(gallery)) {
+            gallery_context$lsp <- replacement
+            assign(gallery_key, gallery_context, envir = gallery_sessions)
+            lsp <- replacement
+          } else {
+            lsp <<- replacement
+          }
+          if (is.null(replacement) || !replacement$alive()) {
+            alder_abort("lsp_unavailable",
+                        "R language server restart failed; see server diagnostics")
+          }
+          sess$clear_service_error("lsp")
+          return(ok_res(result = list(ready = TRUE)))
+        }
         if (is.null(lsp) || !lsp$alive()) {
-          alder_abort("lsp_unavailable", "language server is unavailable")
+          message <- if (!is.null(lsp) && nzchar(lsp$failure %||% "")) {
+            lsp$failure
+          } else {
+            "language server is unavailable"
+          }
+          sess$record_service_error("lsp", message, "lsp_unavailable")
+          alder_abort("lsp_unavailable", message)
         }
         nb_now <- sess$notebook_snapshot()
         result <- tryCatch(
@@ -1608,12 +2174,19 @@ start_alder <- function(path = NULL, host = "127.0.0.1", port = 8899L,
             } else {
               "invalid_request"
             }
+            sess$record_service_error("lsp", msg, code)
+            cat("[alder:lsp] ", msg, "\n", sep = "", file = stderr())
             alder_abort(code, msg)
           }
         )
         # A publishDiagnostics notification may have arrived with the
-        # response. Only these mapped diagnostics are merged into state.
+        # response. Cell and document diagnostics are merged into state.
         sess$set_lsp_diagnostics(lsp$diagnostics_by_cell(nb_now))
+        sess$clear_service_error("lsp")
+        if (identical(body$method, "textDocument/hover")) {
+          return(ok_res(result = result,
+                        rendered = lsp_hover_html(result$contents)))
+        }
         ok_res(result = result)
       }))
     }
@@ -1621,16 +2194,28 @@ start_alder <- function(path = NULL, host = "127.0.0.1", port = 8899L,
     # --- /api/format -------------------------------------------------------
     if (identical(path_req, "/api/format")) {
       v <- validate_body(body, list(
-        cell = list(type = "scalar_char", required = FALSE)))
+        cell = list(type = "scalar_char", required = FALSE),
+        expected_revisions = list(type = "any", required = FALSE)))
       if (!is.null(v)) return(error_res(v$code, v$message, v$status))
       return(session_call({
-        nb_now <- sess$notebook_snapshot()
-        formatted <- format_notebook_source(nb_now, body$cell %||% NULL)
-        result <- sess$apply_formatted(formatted$bodies)
+        result <- sess$format_source(body$cell %||% NULL,
+                                     body$expected_revisions %||% NULL)
         if (!is.null(lsp) && lsp$alive()) {
-          try(lsp$sync_document(sess$notebook_snapshot()), silent = TRUE)
+          tryCatch(
+            {
+              lsp$sync_document(sess$notebook_snapshot())
+              sess$clear_service_error("lsp")
+            },
+            error = function(error) {
+              message <- conditionMessage(error)
+              sess$record_service_error("lsp", message, "lsp_unavailable")
+              cat("[alder:lsp] document sync failed after formatting: ",
+                  message, "\n", sep = "", file = stderr())
+            }
+          )
         }
-        ok_res(changed = result$changed, version = result$version)
+        ok_res(changed = result$changed, version = result$version,
+               cells = result$cells)
       }))
     }
 
@@ -1695,26 +2280,36 @@ start_alder <- function(path = NULL, host = "127.0.0.1", port = 8899L,
                          400L))
       }
       v <- if (has_cell) {
-        validate_body(body, list(cell = list(type = "scalar_char",
-                                             required = TRUE)))
+        validate_body(body, list(
+          cell = list(type = "scalar_char", required = TRUE),
+          scope = list(type = c("all", "stale"), required = FALSE)
+        ))
       } else {
-        validate_body(body, list(all = list(type = "scalar_logical",
-                                            required = TRUE,
-                                            exact = TRUE)))
+        validate_body(body, list(
+          all = list(type = "scalar_logical", required = TRUE, exact = TRUE),
+          scope = list(type = c("all", "stale"), required = FALSE)
+        ))
       }
       if (!is.null(v)) return(error_res(v$code, v$message, v$status))
+      if (has_cell && "scope" %in% names(body)) {
+        return(error_res(
+          "invalid_request", "scope is valid only with `all`", 400L
+        ))
+      }
       return(session_call({
         if (has_cell) {
-          sess$run_cell(body$cell)
-          ok_res(run_id = sess$state()$runtime$active_run_id, status = 202L)
-        } else if (identical(sess$get_execution_mode(), "lazy")) {
+          run <- sess$run_cell(body$cell)
+          ok_res(run_id = run$run_id, status = 202L)
+        } else if (identical(body$scope %||% NULL, "stale") ||
+                   (is.null(body$scope) &&
+                    identical(sess$get_execution_mode(), "lazy"))) {
           # lazy "Run stale": run every stale cell plus required ancestors;
           # a plain run_all would re-execute current cells and reset widgets.
-          sess$run_stale()
-          ok_res(run_id = sess$state()$runtime$active_run_id, status = 202L)
+          run <- sess$run_stale()
+          ok_res(run_id = run$run_id, status = 202L)
         } else {
-          sess$run_all()
-          ok_res(run_id = sess$state()$runtime$active_run_id, status = 202L)
+          run <- sess$run_all()
+          ok_res(run_id = run$run_id, status = 202L)
         }
       }))
     }
@@ -1832,34 +2427,17 @@ body_chars <- function(x) {
           ok_res(id = r$id, after = r$after, version = r$version)
         }))
       }
-      if (op == "sql") {
-        v <- validate_body(body, list(
-          op = list(type = "scalar_char", required = TRUE),
-          cell = list(type = "scalar_char", required = TRUE),
-          query = list(type = "scalar_char", required = TRUE),
-          conn = list(type = "scalar_char", required = TRUE, nullable = TRUE),
-          into = list(type = "scalar_char", required = TRUE),
-          expected_revision = list(type = "scalar_num", required = TRUE)))
-        if (!is.null(v)) return(error_res(v$code, v$message, v$status))
-        conn <- body$conn
-        if (!is.null(conn) && !nzchar(trimws(conn))) conn <- NULL
-        return(session_call({
-          r <- sess$set_sql_cell(body$cell, body$query, conn, body$into,
-                                 body$expected_revision)
-          ok_res(id = r$id, revision = r$revision, version = r$version)
-        }))
-      }
       if (op == "edit") {
         v <- validate_body(body, list(
           op = list(type = c("edit", "add", "delete"), required = TRUE),
           id = list(type = "scalar_char", required = TRUE),
           body = list(type = "array_char", required = TRUE),
           type = list(type = "scalar_char", required = TRUE),
-          expected_revision = list(type = "scalar_num", required = TRUE)))
+          expected_revision = list(type = "scalar_revision", required = TRUE)))
         if (!is.null(v)) return(error_res(v$code, v$message, v$status))
-        if (!body$type %in% c("code", "markdown", "sql")) {
+        if (!body$type %in% c("code", "markdown")) {
           return(error_res("invalid_request",
-                           "cell type must be code, markdown, or sql", 400L))
+                           "cell type must be code or markdown", 400L))
         }
         return(session_call({
           r <- sess$set_cell(body$id, body_chars(body$body), body$type,
@@ -1875,9 +2453,9 @@ body_chars <- function(x) {
           body = list(type = "array_char", required = TRUE),
           type = list(type = "scalar_char", required = TRUE)))
         if (!is.null(v)) return(error_res(v$code, v$message, v$status))
-        if (!body$type %in% c("code", "markdown", "sql")) {
+        if (!body$type %in% c("code", "markdown")) {
           return(error_res("invalid_request",
-                           "cell type must be code, markdown, or sql", 400L))
+                           "cell type must be code or markdown", 400L))
         }
         return(session_call({
           r <- sess$add_cell(body$after, body_chars(body$body), body$type)
@@ -1887,7 +2465,7 @@ body_chars <- function(x) {
       v <- validate_body(body, list(
         op = list(type = c("edit", "add", "delete"), required = TRUE),
         id = list(type = "scalar_char", required = TRUE),
-        expected_revision = list(type = "scalar_num", required = TRUE)))
+        expected_revision = list(type = "scalar_revision", required = TRUE)))
       if (!is.null(v)) return(error_res(v$code, v$message, v$status))
       return(session_call({
         r <- sess$delete_cell(body$id, body$expected_revision)
@@ -1976,6 +2554,34 @@ body_chars <- function(x) {
     error_res("not_found", "not found", 404L)
   }
 
+  # Keep this handler boundary around the complete httpuv callback. An OS
+  # SIGINT raised while /api/state (or any other route) is being evaluated is
+  # otherwise caught by httpuv and converted into its generic HTTP 500, which
+  # leaves the foreground CLI and its descendants alive. Return a concrete
+  # Alder response, then let the deferred event-loop callback tear down the
+  # server after httpuv has unwound this request.
+  call_handler <- function(req) {
+    perf <- NULL
+    response <- NULL
+    on.exit(.alder_perf_end(perf, list(status = response$status)), add = TRUE)
+    response <- tryCatch(
+      {
+        perf <- .alder_perf_begin("http", list(route = req$PATH_INFO,
+          method = req$REQUEST_METHOD))
+        call_handler_impl(req)
+      },
+      interrupt = function(condition) {
+        alder_request_shutdown(lifecycle, "interrupt", exit_status = 130L)
+        error_res("session_stopped", "Alder is shutting down after interrupt",
+                  410L)
+      }
+    )
+    if (!is.null(perf)) {
+      response$headers[["X-Alder-Perf-Span"]] <- paste(perf$pid, perf$span, sep = ":")
+    }
+    response
+  }
+
   # --- start httpuv server ---------------------------------------------------
   server <- tryCatch(
     httpuv::startServer(host, port, list(call = call_handler)),
@@ -1990,23 +2596,105 @@ body_chars <- function(x) {
   )
   cat("alder running at http://", host, ":", port, "/\n", sep = "")
   if (open) {
-    try(utils::browseURL(paste0("http://", host, ":", port, "/")),
-        silent = TRUE)
+    tryCatch(
+      utils::browseURL(paste0("http://", host, ":", port, "/")),
+      error = function(error) warning(
+        "Alder started, but the browser could not be opened: ",
+        conditionMessage(error), call. = FALSE
+      )
+    )
   }
-  structure(list(server = server, session = sess, lsp = lsp,
-                 worker = worker, gallery = gallery,
-                 gallery_root = if (gallery) path else NULL,
-                 gallery_sessions = if (gallery) gallery_sessions else NULL,
-                 artifact_dir = artifact_dir,
-                 upload_dir = upload_dir, cache_dir = cache_dir,
-                 stopped = FALSE), class = "alder_server")
+  srv <- structure(list(server = server, session = sess, lsp = lsp,
+                        worker = worker, gallery = gallery,
+                        gallery_root = if (gallery) path else NULL,
+                        gallery_sessions = if (gallery) gallery_sessions else NULL,
+                        artifact_dir = artifact_dir,
+                        upload_dir = upload_dir, cache_dir = cache_dir,
+                        lifecycle = lifecycle,
+                        stopped = FALSE), class = "alder_server")
+  lifecycle$stop_callback <- function(reason = "requested") {
+    if (isTRUE(lifecycle$stopped)) return(invisible(srv))
+    lifecycle$shutdown_requested <- TRUE
+    lifecycle$shutdown_reason <- reason
+    stop_alder(srv)
+  }
+  idle_save_session <- function(session, label = "notebook") {
+    state <- session$state()
+    if (!isTRUE(state$changed)) return(TRUE)
+    tryCatch(
+      {
+        session$save()
+        cat("[alder:lifecycle] saved dirty ", label,
+            " before idle shutdown\n", sep = "", file = stderr())
+        TRUE
+      },
+      error = function(error) {
+        message <- paste0(
+          "Automatic idle shutdown is paused because Alder could not save ",
+          label, ": ", conditionMessage(error)
+        )
+        session$record_action_error(message, "idle_save_failed")
+        lifecycle$idle_blocked <- TRUE
+        lifecycle$idle_block_reason <- message
+        cat("[alder:lifecycle] ", message, "\n", sep = "", file = stderr())
+        FALSE
+      }
+    )
+  }
+  idle_work_safe <- function() {
+    if (isTRUE(gallery)) {
+      keys <- ls(gallery_sessions, all.names = TRUE)
+      for (key in keys) {
+        context <- get(key, envir = gallery_sessions, inherits = FALSE)
+        if (!idle_save_session(context$session, paste0("notebook `", key, "`"))) {
+          return(FALSE)
+        }
+      }
+      return(TRUE)
+    }
+    idle_save_session(sess)
+  }
+  if (!is.null(lifecycle$idle_timeout)) {
+    check_idle <- NULL
+    check_idle <- function() {
+      if (isTRUE(lifecycle$stopped)) return(invisible())
+      if (!isTRUE(lifecycle$idle_blocked) &&
+          isTRUE(lifecycle$browser_connected) &&
+          !is.null(lifecycle$last_browser_poll)) {
+        idle <- as.numeric(difftime(Sys.time(), lifecycle$last_browser_poll,
+                                    units = "secs"))
+        if (is.finite(idle) && idle >= lifecycle$idle_timeout) {
+          if (idle_work_safe()) {
+            lifecycle$stop_callback("idle_timeout")
+            return(invisible())
+          }
+        }
+      }
+      interval <- max(0.05, min(1, lifecycle$idle_timeout / 4))
+      later::later(check_idle, interval)
+      invisible()
+    }
+    later::later(check_idle,
+                 max(0.05, min(1, lifecycle$idle_timeout / 4)))
+  }
+  srv
 }
 
 #' @rdname start_alder
 #' @param srv An \code{alder_server} object returned by \code{start_alder}.
 #' @export
 stop_alder <- function(srv) {
-  if (isTRUE(srv$stopped)) return(invisible(srv))
+  lifecycle <- srv$lifecycle
+  if (is.environment(lifecycle)) {
+    if (isTRUE(lifecycle$stopped)) return(invisible(srv))
+    lifecycle$stopped <- TRUE
+    lifecycle$shutdown_requested <- TRUE
+    if (is.null(lifecycle$shutdown_reason)) {
+      lifecycle$shutdown_reason <- "stop_alder"
+    }
+  } else if (isTRUE(srv$stopped)) {
+    return(invisible(srv))
+  }
   srv$stopped <- TRUE
   if (!is.null(srv$gallery_sessions) &&
       is.environment(srv$gallery_sessions)) {

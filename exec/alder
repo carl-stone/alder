@@ -1,0 +1,18 @@
+#!/bin/sh
+
+if ! command -v Rscript >/dev/null 2>&1; then
+  printf '%s\n' 'alder: Rscript was not found on PATH' >&2
+  exit 127
+fi
+
+# Keep R in the launcher's foreground process.  POSIX shells initialize an
+# asynchronous command with SIGINT and SIGQUIT ignored; the former background
+# wrapper therefore leaked SIG_IGN through the CLI into its R worker.  A Stop
+# received in the worker's first acknowledgement window could be reported as
+# accepted yet discarded by the kernel.  `exec` preserves the launcher PID,
+# gives R the ordinary foreground signal disposition, and lets Alder's own
+# on-exit path stop its server and worker before returning the meaningful
+# status selected by alder_cli().
+exec Rscript --vanilla -e \
+  'status <- alder::alder_cli(commandArgs(trailingOnly = TRUE)); quit(save = "no", status = status, runLast = FALSE)' \
+  "$@"

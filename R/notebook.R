@@ -95,96 +95,6 @@ is_markdown_delim <- function(delim) {
   if (length(mm) != 2L) return(FALSE)
   tolower(trimws(mm[[2L]])) == "[markdown]"
 }
-is_sql_delim <- function(delim) {
-  m <- regexec("^\\s*#\\s*%%\\s*(.*)$", delim, perl = TRUE)
-  mm <- regmatches(delim, m)[[1L]]
-  if (length(mm) != 2L) return(FALSE)
-  tolower(trimws(mm[[2L]])) == "[sql]"
-}
-
-sql_cell_shape <- function() {
-  paste0("<into> <- sql(r\"---(\n",
-         "SELECT ...\n",
-         ")---\", conn = <conn>)")
-}
-
-parse_sql_cell <- function(body) {
-  if (!is.character(body) || !length(body)) return(NULL)
-  text <- paste(body, collapse = "\n")
-  m <- regexec(
-    paste0("^\\s*([A-Za-z][A-Za-z0-9_.]*)\\s*<-\\s*sql\\(\\s*",
-           "r\\\"(-+)\\(([\\s\\S]*)\\)\\2\\\"",
-           "(?:\\s*,\\s*conn\\s*=\\s*(.+?))?\\s*\\)\\s*$"),
-    text, perl = TRUE
-  )
-  mm <- regmatches(text, m)[[1L]]
-  if (length(mm) != 5L) return(NULL)
-  query <- mm[[4L]]
-  if (startsWith(query, "\n")) query <- substring(query, 2L)
-  if (endsWith(query, "\n")) query <- substr(query, 1L, nchar(query) - 1L)
-  conn <- trimws(mm[[5L]])
-  if (!nzchar(conn)) conn <- NULL
-  list(into = mm[[2L]], query = query, conn = conn)
-}
-
-sql_raw_delimiter <- function(query) {
-  dashes <- "---"
-  while (grepl(paste0(")", dashes, "\""), query, fixed = TRUE)) {
-    dashes <- paste0(dashes, "-")
-  }
-  dashes
-}
-
-# Bare identifiers appearing in a SQL query body (ADR 0012). These become
-# cell references: minus well-known SQL keywords they are the table/column
-# names a query reads at runtime, so the notebook dependency graph orders
-# the SQL cell after any cell defining one of them (e.g. a data frame
-# registered into duckdb by sql()).
-sql_query_identifiers <- function(query) {
-  if (!is.character(query) || length(query) != 1L || is.na(query)) {
-    return(character())
-  }
-  ids <- regmatches(query, gregexpr("[A-Za-z_][A-Za-z0-9_]*", query,
-                                    perl = TRUE))[[1L]]
-  keywords <- c(
-    "all", "alter", "and", "as", "asc", "between", "by", "case", "check",
-    "column", "constraint", "count", "create", "cross", "current",
-    "default", "delete", "desc", "distinct", "drop", "else", "end",
-    "except", "exists", "false", "fetch", "for", "foreign", "from", "full",
-    "grant", "group", "having", "in", "index", "inner", "insert",
-    "intersect", "into", "is", "join", "key", "left", "like", "limit",
-    "not", "null", "offset", "on", "or", "order", "outer", "primary",
-    "references", "right", "rollback", "select", "set", "table", "then",
-    "true", "union", "unique", "update", "using", "values", "when",
-    "where", "with"
-  )
-  unique(ids[!tolower(ids) %in% keywords])
-}
-
-sql_cell_body <- function(query, conn = NULL, into = "result") {
-  if (!is.character(query) || length(query) != 1L || is.na(query)) {
-    stop("SQL query must be a single string", call. = FALSE)
-  }
-  if (!cell_name_valid(into)) {
-    stop("SQL result name must match ^[A-Za-z][A-Za-z0-9_.]*$",
-         call. = FALSE)
-  }
-  if (!is.null(conn) &&
-      (!is.character(conn) || length(conn) != 1L || is.na(conn) ||
-       !grepl("^[A-Za-z][A-Za-z0-9_.]*(:::[A-Za-z][A-Za-z0-9_.]*)?$",
-              conn, perl = TRUE))) {
-    stop("SQL connection must be a symbol or namespace-qualified name",
-         call. = FALSE)
-  }
-  dashes <- sql_raw_delimiter(query)
-  query_lines <- if (nzchar(query)) strsplit(query, "\n", fixed = TRUE)[[1L]]
-    else ""
-  opening <- paste0(into, ' <- sql(r"', dashes, "(")
-  closing <- paste0(")", dashes, '"')
-  if (!is.null(conn)) closing <- paste0(closing, ", conn = ", conn)
-  closing <- paste0(closing, ")")
-  c(opening, query_lines, closing)
-}
 # Markdown cells must remain ordinary R source: every body line is blank or
 # an R comment (`^\\s*#`), so a `.R` file with markdown cells still parses.
 validate_markdown_lines <- function(body, id) {
@@ -275,8 +185,7 @@ parse_records <- function(path, records) {
 sync_cell_from_records <- function(cell) {
   recs <- cell$records
   delim_rec <- recs[[1L]]
-  cell$type <- if (is_markdown_delim(delim_rec$text)) "markdown"
-    else if (is_sql_delim(delim_rec$text)) "sql" else "code"
+  cell$type <- if (is_markdown_delim(delim_rec$text)) "markdown" else "code"
   cell$delim <- delim_rec$text
   kinds <- vapply(recs, function(r) r$kind, "")
   opt_pos <- which(kinds == "option")
@@ -292,8 +201,7 @@ sync_cell_from_records <- function(cell) {
 
 parse_cell_records <- function(cell_records, id = "?") {
   delim <- cell_records[[1L]]$text
-  type <- if (is_markdown_delim(delim)) "markdown"
-    else if (is_sql_delim(delim)) "sql" else "code"
+  type <- if (is_markdown_delim(delim)) "markdown" else "code"
   kinds <- vapply(cell_records, function(r) r$kind, "")
   opt_pos <- which(kinds == "option")
   body_pos <- which(kinds == "body")
@@ -447,10 +355,14 @@ nb_set_metadata <- function(nb, key, value) {
 # Raw-byte reader: rejects directories, unreadable files, invalid UTF-8,
 # and embedded NULs with deterministic path-bearing errors; invalid text
 # fails as `notebook is not valid UTF-8: <path>` before parsing/mutation.
+.alder_file_access <- function(path, mode) file.access(path, mode)
+
 read_notebook <- function(path) {
   if (dir.exists(path)) stop("notebook path is a directory: ", path)
   if (!file.exists(path)) stop("notebook file not found: ", path)
-  if (file.access(path, 4) != 0L) stop("notebook file is not readable: ", path)
+  if (.alder_file_access(path, 4) != 0L) {
+    stop("notebook file is not readable: ", path)
+  }
   size <- file.info(path)$size
   bytes <- readBin(path, "raw", n = size)
   if (0L %in% as.integer(bytes)) {
@@ -719,35 +631,26 @@ nb_cell <- function(nb, id) {
   if (!length(hits)) NULL else nb$cells[[hits[[1L]]]]
 }
 
-# Update a cell's body and type. SQL bodies are canonicalized by
-# `nb_set_sql_cell`; this lower-level helper also accepts raw SQL bodies so
-# malformed source can be displayed and diagnosed by Session.
+# Update a cell's body and type.
 nb_update_cell <- function(nb, id, body, type) {
-  if (!type %in% c("code", "markdown", "sql")) {
-    stop("invalid cell type; must be \"code\", \"markdown\", or \"sql\"",
-         call. = FALSE)
+  if (!type %in% c("code", "markdown")) {
+    stop("invalid cell type; must be \"code\" or \"markdown\"", call. = FALSE)
   }
   if (type == "markdown") validate_markdown_lines(body, id)
   ci <- nb_cell_index(nb, id)
   cell <- nb$cells[[ci]]
   records <- splice_body_records(cell$records, body, nb$preferred_eol)
-  old_type <- if (is_markdown_delim(records[[1L]]$text)) "markdown"
-    else if (is_sql_delim(records[[1L]]$text)) "sql" else "code"
+  old_type <- if (is_markdown_delim(records[[1L]]$text)) "markdown" else "code"
   if (!identical(old_type, type)) {
     records[[1L]]$text <- switch(
       type,
       markdown = "# %% [markdown]",
-      sql = "# %% [sql]",
       code = "# %%"
     )
   }
   cell$records <- records
   nb$cells[[ci]] <- sync_cell_from_records(cell)
   normalize_nb_boundary(nb, region = ci)
-}
-
-nb_set_sql_cell <- function(nb, id, query, conn = NULL, into = "result") {
-  nb_update_cell(nb, id, sql_cell_body(query, conn, into), "sql")
 }
 
 option_record_key <- function(text) {
@@ -853,13 +756,11 @@ nb_move_cell <- function(nb, id, after = NULL) {
 }
 
 nb_add_cell <- function(nb, body = character(), type = "code", after = NULL) {
-  if (!type %in% c("code", "markdown", "sql")) {
-    stop("invalid cell type; must be \"code\", \"markdown\", or \"sql\"",
-         call. = FALSE)
+  if (!type %in% c("code", "markdown")) {
+    stop("invalid cell type; must be \"code\" or \"markdown\"", call. = FALSE)
   }
   if (type == "markdown") validate_markdown_lines(body, "<new cell>")
-  delim <- switch(type, markdown = "# %% [markdown]",
-                  sql = "# %% [sql]", code = "# %%")
+  delim <- switch(type, markdown = "# %% [markdown]", code = "# %%")
   # Monotonic id allocation: never reuse a previously allocated number.
   id <- paste0("cell-", nb$next_cell_number)
   ids <- vapply(nb$cells, function(c) c$id, "")

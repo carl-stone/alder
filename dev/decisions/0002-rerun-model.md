@@ -35,6 +35,9 @@ optional lazy mode**.
 - Server startup runs all cells once by default in either mode;
   `run_on_startup = FALSE` suppresses startup execution in both editor and
   app views, and opening an app URL never triggers code.
+- A disabled cell and every transitive descendant are excluded from execution.
+  This runnable-plan rule also applies to `alder_source()` and `alder_test()` so
+  interactive, headless, and converted `eval=FALSE` notebooks agree.
 - Stale outputs remain visible. Stop cancels queued descendants of that
   explicit run.
 - Edits retain stale outputs but enqueue removal of the edited code cell's

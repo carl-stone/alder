@@ -106,7 +106,7 @@ test_that("app descriptions use the first markdown cell and truncate at 240 char
   nb <- alder:::parse_notebook_lines(
     NA_character_,
     c(
-      "# %%", "x <- 1", "# %% [markdown]", "# First   paragraph", "#", 
+      "# %%", "x <- 1", "# %% [markdown]", "# First   paragraph", "#",
       paste0("# ", long), "# %% [markdown]", "# Later cell"
     )
   )

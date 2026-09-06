@@ -51,3 +51,8 @@ po/*~
 rsconnect/
 js/node_modules/
 .alder/
+
+# Local review runs: generated notebooks, logs, screenshots, traces and caches.
+/dev/reviews/evidence/
+__pycache__/
+*.pyc
