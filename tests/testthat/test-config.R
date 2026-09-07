@@ -52,19 +52,10 @@ test_that("layered config precedence and validation are deterministic", {
                fixed = TRUE)
 })
 
-test_that("Session exposes and persists project config", {
-  root <- tempfile("alder-session-config-test-")
-  dir.create(root)
-  path <- file.path(root, "notebook.R")
-  writeLines(c("# %%", "x <- 1"), path)
-  on.exit(unlink(root, recursive = TRUE, force = TRUE), add = TRUE)
-
-  nb <- alder:::read_notebook(path)
-  s <- alder:::Session$new(
-    nb, worker = NULL, run_on_startup = FALSE,
-    config = alder:::config_defaults()
-  )
-  on.exit(s$stop(), add = TRUE)
+test_that("production host exposes and persists project config", {
+  m <- make_test_session(c("# %%", "x <- 1"), run_on_startup = FALSE)
+  on.exit(m$close(), add = TRUE)
+  s <- m$session
   expect_false(s$state()$config$autosave)
   result <- s$set_config(list(
     autosave = TRUE,
@@ -80,9 +71,9 @@ test_that("Session exposes and persists project config", {
   expect_false(s$state()$config$editor$completions)
   expect_false(s$state()$config$editor$signature_help)
   expect_false(s$state()$config$editor$live_diagnostics)
-  expect_true(file.exists(file.path(root, ".alder", "config.yaml")))
-  expect_true(alder:::alder_config(path)$autosave)
-  persisted <- alder:::alder_config(path)$editor
+  expect_true(file.exists(file.path(dirname(m$path), ".alder", "config.yaml")))
+  expect_true(alder:::alder_config(m$path)$autosave)
+  persisted <- alder:::alder_config(m$path)$editor
   expect_false(persisted$completions)
   expect_false(persisted$signature_help)
   expect_false(persisted$live_diagnostics)

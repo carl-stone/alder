@@ -4,17 +4,19 @@
   "devDependencies": {
     "@codemirror/autocomplete": "^6.18.6",
     "@codemirror/commands": "^6.8.1",
-    "@codemirror/legacy-modes": "^6.5.3",
     "@codemirror/language": "^6.11.0",
+    "@codemirror/legacy-modes": "^6.5.3",
     "@codemirror/lint": "^6.8.5",
     "@codemirror/search": "^6.5.10",
     "@codemirror/state": "^6.5.2",
     "@codemirror/view": "^6.36.5",
     "@replit/codemirror-vim": "^6.4.0",
     "codemirror": "^6.0.2",
-    "esbuild": "^0.28.2"
+    "esbuild": "^0.28.2",
+    "typescript": "5.9.3"
   },
   "scripts": {
-    "build": "esbuild src/editor.js --bundle --format=iife --global-name=AlderEditor --minify --target=es2020 --outfile=../inst/app/static/vendor/alder-editor.js"
+    "check": "tsc --noEmit",
+    "build": "npm run check && esbuild src/editor.ts --bundle --banner:js=\"//# allFunctionsCalledOnLoad\" --format=iife --global-name=AlderEditor --minify --target=es2020 --outfile=../inst/app/static/vendor/alder-editor.js"
   }
 }

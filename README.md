@@ -147,3 +147,7 @@ effects cannot be rolled back.
 
 Development commands are in [dev/README.md](dev/README.md), planned work in
 [dev/ARCHITECTURE.md](dev/ARCHITECTURE.md), and release changes in [NEWS.md](NEWS.md).
+
+The [latency progress dashboard](https://alder-preview.tail513364.ts.net/)
+requires a connection to the project's Tailscale network and refreshes every
+minute. The preview service currently needs restarting after a droplet reboot.

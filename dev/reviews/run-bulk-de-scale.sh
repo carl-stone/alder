@@ -5,8 +5,12 @@ set -euo pipefail
 # Bioconductor/plotting dependencies must already be installed.
 repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)
 cd -- "$repo"
-evidence=${1:?usage: run-bulk-de-scale.sh EMPTY_EVIDENCE_DIR [ALDER_SOURCE_ARCHIVE]}
-artifact=${2:-dev/reviews/evidence/bulk-de-scale/candidate-v19/alder_0.1.0.tar.gz}
+if (($# != 2)); then
+  echo "usage: run-bulk-de-scale.sh EMPTY_EVIDENCE_DIR ALDER_SOURCE_ARCHIVE" >&2
+  exit 2
+fi
+evidence=$1
+artifact=$2
 evidence=$(realpath -m -- "$evidence")
 artifact=$(realpath -e -- "$artifact")
 if [[ -e "$evidence" ]] && [[ ! -d "$evidence" || -n $(find "$evidence" -mindepth 1 -maxdepth 1 -print -quit) ]]; then
@@ -42,5 +46,6 @@ export R_LIBS="$audit_root/lib${R_LIBS:+:$R_LIBS}"
 Rscript -e 'stopifnot(all(vapply(c("edgeR", "statmod", "ggplot2", "chromote", "curl", "digest"), requireNamespace, logical(1), quietly = TRUE)))'
 Rscript dev/reviews/probe-bulk-de-scale.R "$evidence" \
   > "$evidence/probe.log" 2>&1
+# shellcheck disable=SC2016 # R field access, not shell expansion.
 Rscript -e 'p <- commandArgs(TRUE)[[1]]; r <- jsonlite::fromJSON(file.path(p, "result.json")); c <- jsonlite::fromJSON(file.path(p, "complete.json")); stopifnot(isTRUE(r$passed), isTRUE(c$complete), !isTRUE(r$cleanup$forced))' "$evidence"
 sha256sum --check "$evidence/input-sha256.txt" > "$evidence/final-input-correspondence.log"

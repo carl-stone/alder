@@ -1,0 +1,86 @@
+name: Application host contracts
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  host:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: host/.node-version
+          cache: npm
+          cache-dependency-path: host/package-lock.json
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: '4.6.1'
+          use-public-rspm: true
+      - uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          dependencies: '"all"'
+      - name: Install Chrome for Linux browser contracts
+        if: runner.os == 'Linux'
+        id: chrome
+        uses: browser-actions/setup-chrome@v2
+      - name: Build bundled application
+        run: |
+          npm ci --prefix js
+          npm run build --prefix js
+          npm ci --prefix host
+          node host/scripts/fetch-ark.mjs --archive-output host/.runtime/ark.zip
+          npm run build --prefix host
+          R CMD INSTALL .
+      - name: Stage native transport and select packaged Ark
+        shell: Rscript {0}
+        run: |
+          status <- system2("node", c("host/scripts/stage-native.mjs",
+            shQuote(file.path(find.package("alder"), "host"))))
+          stopifnot(status == 0L)
+          ark <- file.path(normalizePath("host/.runtime"),
+            if (.Platform$OS.type == "windows") "ark.exe" else "ark")
+          cat("ALDER_ARK=", ark, "\n", sep = "", file = Sys.getenv("GITHUB_ENV"), append = TRUE)
+      - name: Protocol, controller, engine and transport contracts
+        shell: bash
+        env:
+          ALDER_BROWSER_TEST: ${{ runner.os == 'Linux' && '1' || '' }}
+          CHROME_BIN: ${{ steps.chrome.outputs.chrome-path }}
+        run: |
+          export ALDER_R_PACKAGE="$(Rscript -e 'cat(find.package("alder"))')"
+          npm test --prefix host
+      - name: Installed R API and notebook contracts
+        shell: Rscript {0}
+        env:
+          CHROMOTE_CHROME: ${{ steps.chrome.outputs.chrome-path }}
+        run: |
+          Sys.setenv(ALDER_TEST_HOST = "1", NOT_CRAN = "true")
+          stopifnot(alder:::alder_host_spec()$identity$protocol == 1L)
+          testthat::test_dir("tests/testthat",
+            package = "alder", load_package = "installed", stop_on_failure = TRUE)
+      - name: Package application runtime and R archive
+        run: |
+          R CMD build --no-build-vignettes .
+          node host/scripts/ci-package.mjs
+          node host/scripts/smoke-release.mjs host/.release
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: host-${{ matrix.os }}
+          path: |
+            inst/host
+            inst/app/static/host-app.js
+            host/.runtime
+            host/.release
+          include-hidden-files: true
+          if-no-files-found: error

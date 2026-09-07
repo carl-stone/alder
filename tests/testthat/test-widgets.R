@@ -1,19 +1,17 @@
-test_that("the worker mirror is byte-identical to the source of truth", {
-  # testthat relocates the cwd to tests/testthat; anchor to the repo root.
-  repo <- normalizePath(testthat::test_path("..", ".."))
-  # Under pkgload::test_local the source sits at the repo root; under
-  # R CMD check the tests copy lives in alder.Rcheck/tests/testthat and the
-  # full source (R/ and inst/) sits under alder.Rcheck/00_pkg_src/alder.
-  base <- repo
-  if (!file.exists(file.path(base, "R", "ui-widgets.R"))) {
-    base <- file.path(repo, "00_pkg_src", "alder")
-  }
-  src <- file.path(base, "R", "ui-widgets.R")
-  mir <- file.path(base, "inst", "worker", "ui-widgets.R")
-  expect_true(file.exists(src))
-  expect_true(file.exists(mir))
-  expect_identical(readBin(mir, "raw", n = file.info(mir)$size),
-                   readBin(src, "raw", n = file.info(src)$size))
+test_that("kernel runtimes use the installed widget implementation", {
+  m <- make_test_session(c(
+    "# %%", "library(alder)",
+    "# %%", "control <- ui$slider(1, 9, value = 3, step = 2)", "control"
+  ), execution_mode = "lazy")
+  withr::defer(m$close())
+  s <- m$session
+  expect_identical(s$await_operation(s$run_all()$run_id)$status, "done")
+  output <- s$state()$cells[[2L]]$outputs[[1L]]
+  expect_identical(output$kind, "widget")
+  expect_identical(output$spec$kind, "slider")
+  expect_identical(output$spec$value, 3L)
+  expect_identical(output$spec$step, 2L)
+  expect_true(s$state()$runtime$kernelAvailable)
 })
 
 test_that("constructors return classed lists with explicit $value and no .value", {
@@ -128,7 +126,7 @@ test_that("run_button is a Boolean one-shot input that starts FALSE", {
   expect_identical(rb$value, FALSE)
   expect_false(is.null(rb$label))
   expect_equal(alder:::ui$run_button("go")$label, "go")
-  # a run-button value is a logical scalar when driven by the worker
+  # A run-button value is a logical scalar when driven by the host.
   rb$value <- TRUE
   expect_true(inherits(rb, "alder_widget"))
   rb <- alder:::validate_widget_value("run_button", TRUE, list())

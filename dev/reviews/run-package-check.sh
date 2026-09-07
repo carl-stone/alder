@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+project_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
+cd "$project_root"
+export NOT_CRAN=true
+
 evidence=${ALDER_CHECK_EVIDENCE:-dev/reviews/evidence/package-check}
 if [[ -d "$evidence" ]] &&
     [[ -n $(find "$evidence" -mindepth 1 -maxdepth 1 -print -quit) ]]; then
@@ -42,9 +46,23 @@ if [[ -n ${ALDER_CHECK_ARTIFACT:-} ]]; then
     printf 'after=%s\n' "$artifact_sha_after"
   } > "$evidence/02-artifact-sha256.txt"
 else
+  # R CMD build copies the tree before applying .Rbuildignore. Stage only
+  # package inputs so local dependencies and review evidence are never copied.
+  mkdir -p "$check_root/source"
+  Rscript --vanilla - "$project_root" "$check_root/source" <<'RSCRIPT'
+args <- commandArgs(TRUE)
+setwd(args[[1L]])
+entries <- c(".Rbuildignore", list.files())
+patterns <- readLines(".Rbuildignore", warn = FALSE)
+excluded <- vapply(entries, function(entry) {
+  any(vapply(patterns[nzchar(patterns)], grepl, logical(1),
+             x = entry, ignore.case = TRUE))
+}, logical(1))
+stopifnot(all(file.copy(entries[!excluded], args[[2L]], recursive = TRUE)))
+RSCRIPT
   (
     cd "$check_root"
-    R CMD build --no-build-vignettes /workspace/alder
+    R CMD build --no-build-vignettes source
   ) 2>&1 | tee "$evidence/01-build.log"
 
   tarball=$(find "$check_root" -maxdepth 1 -type f -name 'alder_*.tar.gz' -print)
@@ -70,6 +88,20 @@ if grep -Eq '^alder/(AGENTS\.md|ALDER_TASK\.md|TASK_STATE\.md|SUBAGENTS\.md|USER
   echo "internal task or review files leaked into source package" >&2
   exit 1
 fi
+
+# R CMD check installs into its own private library. Give its subprocesses
+# the host from this exact archive, with explicitly staged native dependencies.
+runtime_root="$check_root/runtime"
+mkdir -p "$runtime_root"
+tar -xzf "$tarball" -C "$runtime_root" alder/inst/host
+export ALDER_NODE="${ALDER_NODE:-$project_root/host/node_modules/node/bin/node}"
+export ALDER_ARK="${ALDER_ARK:-$project_root/host/.runtime/ark}"
+export ALDER_HOST="$runtime_root/alder/inst/host/alder-host.mjs"
+export ALDER_TEST_HOST=1
+"$ALDER_NODE" "$project_root/host/scripts/stage-native.mjs" \
+  "$runtime_root/alder/inst/host" 2>&1 | tee "$evidence/02-native-runtime.log"
+"$ALDER_NODE" "$ALDER_HOST" --host-info > "$evidence/02-host-identity.json"
+"$ALDER_ARK" --version > "$evidence/02-ark-version.txt"
 
 set +e
 (

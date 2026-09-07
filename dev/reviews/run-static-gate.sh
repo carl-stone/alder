@@ -30,19 +30,29 @@ printf 'bundle_before=%s\n' "$bundle_before"
 printf 'bundle_after=%s\n' "$bundle_after"
 test "$bundle_before" = "$bundle_after"
 
-node --check inst/app/static/app.js
+npm ci --prefix host
+npm audit --prefix host
+host_bundle=inst/host/alder-host.mjs
+host_browser=inst/app/static/host-app.js
+host_bundle_before=$(sha256sum "$host_bundle" | cut -d ' ' -f 1)
+host_browser_before=$(sha256sum "$host_browser" | cut -d ' ' -f 1)
+npm run build --prefix host
+test "$host_bundle_before" = "$(sha256sum "$host_bundle" | cut -d ' ' -f 1)"
+test "$host_browser_before" = "$(sha256sum "$host_browser" | cut -d ' ' -f 1)"
+host/node_modules/.bin/node --check "$host_bundle"
+host/node_modules/.bin/node --check "$host_browser"
+
 node --check "$bundle"
 sh -n exec/alder
 bash -n dev/reviews/run-static-gate.sh dev/reviews/run-package-check.sh \
-  dev/reviews/run-cycle4-final-audit.sh dev/reviews/run-cold-start-validation.sh
+  dev/reviews/run-cold-start-validation.sh dev/reviews/run-bulk-de-scale.sh
 shellcheck \
   exec/alder \
   dev/reviews/run-static-gate.sh \
   dev/reviews/run-package-check.sh \
-  dev/reviews/run-cycle4-final-audit.sh \
-  dev/reviews/run-cold-start-validation.sh
+  dev/reviews/run-cold-start-validation.sh \
+  dev/reviews/run-bulk-de-scale.sh
 python3 -c 'import ast, pathlib; ast.parse(pathlib.Path("dev/reviews/audit-cold-start-processes.py").read_text())'
-cmp R/ui-widgets.R inst/worker/ui-widgets.R
 
 Rscript --vanilla - <<'RSCRIPT'
 r_files <- c(
@@ -57,8 +67,7 @@ r_files <- c(
     pattern = "[.][Rr]$",
     recursive = TRUE,
     full.names = TRUE
-  ),
-  "dev/reviews/probe-mcp-framing.R"
+  )
 )
 invisible(lapply(r_files, parse))
 cat("parsed ", length(r_files), " R files\n", sep = "")
@@ -78,7 +87,8 @@ stopifnot(
   any(grepl("where Rscript", batch, fixed = TRUE)),
   any(grepl("exit /b 127", batch, fixed = TRUE)),
   any(grepl("alder::alder_cli", batch, fixed = TRUE)),
-  any(grepl("--args %*", batch, fixed = TRUE)),
+  any(grepl('runLast = FALSE)" %*', batch, fixed = TRUE)),
+  !any(grepl("--args %*", batch, fixed = TRUE)),
   any(grepl("exit /b %alder_status%", batch, fixed = TRUE))
 )
 cat("Windows launcher static contract: OK\n")

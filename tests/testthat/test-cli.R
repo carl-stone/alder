@@ -288,7 +288,8 @@ testthat::test_that("packaged Windows launcher is a bounded batch entry point", 
   testthat::expect_true(any(grepl("exit /b 127", lines, fixed = TRUE)))
   testthat::expect_true(any(grepl("Rscript --vanilla", lines, fixed = TRUE)))
   testthat::expect_true(any(grepl("alder::alder_cli", lines, fixed = TRUE)))
-  testthat::expect_true(any(grepl("--args %*", lines, fixed = TRUE)))
+  testthat::expect_true(any(grepl('runLast = FALSE)" %*', lines, fixed = TRUE)))
+  testthat::expect_false(any(grepl("--args %*", lines, fixed = TRUE)))
   testthat::expect_true(any(grepl("exit /b %alder_status%", lines,
                                   fixed = TRUE)))
 })
@@ -598,17 +599,14 @@ testthat::test_that("foreground INT TERM and HUP produce clean teardown", {
 })
 
 testthat::test_that(
-  "SIGINT during an active state request tears down the installed CLI",
+  "SIGINT around a large state response tears down the installed CLI",
   {
     if (.Platform$OS.type == "unix") {
-      if (!file.exists("/proc/self/stat")) {
-        testthat::skip("active callback probe requires Linux /proc state")
-      }
       root <- tempfile("alder-cli-active-signal-")
       dir.create(root)
       notebook <- file.path(root, "active-state.R")
-      # Keep the callback busy in state serialization long enough to prove
-      # that the signal lands inside httpuv, rather than in the idle pump.
+      # Keep a large response in flight while stopping the R launcher. The
+      # separate Node host may finish serialization before it receives Stop.
       source_line <- paste0("# ", strrep("x", 4093L))
       writeLines(c("# %%", "x <- 1", rep(source_line, 2048L)), notebook,
                  useBytes = TRUE)
@@ -639,32 +637,17 @@ testthat::test_that(
         cleanup_tree = TRUE
       )
 
-      tcp_established <- function() {
-        hex <- sprintf("%04X", as.integer(port))
-        paths <- c("/proc/net/tcp", "/proc/net/tcp6")
-        lines <- unlist(lapply(paths[file.exists(paths)], readLines,
-                               warn = FALSE), use.names = FALSE)
-        any(grepl(paste0(":", hex, "[[:space:]]"), lines) &
-              grepl("[[:space:]]01[[:space:]]", lines))
-      }
-      process_state <- function(pid) {
-        path <- sprintf("/proc/%d/stat", as.integer(pid))
-        if (!file.exists(path)) return(NA_character_)
-        line <- readLines(path, warn = FALSE, n = 1L)
-        sub("^[0-9]+ \\(.*\\) ([A-Z]).*$", "\\1", line)
-      }
+      # The HTTP owner is Node; the R launcher can be sleeping throughout a
+      # complete response. Synchronize with the client instead of /proc state.
       deadline <- Sys.time() + 15
-      request_observed <- FALSE
-      target_running <- FALSE
-      while (Sys.time() < deadline && client$is_alive() &&
-             process$is_alive()) {
-        request_observed <- isTRUE(tcp_established())
-        target_running <- request_observed &&
-          identical(process_state(process$get_pid()), "R")
-        if (target_running) break
+      response_started <- function() {
+        file.exists(header_path) && isTRUE(file.info(header_path)$size > 0)
       }
-      testthat::expect_true(request_observed)
-      testthat::expect_true(target_running)
+      while (Sys.time() < deadline && client$is_alive() &&
+             process$is_alive() && !response_started()) {
+        Sys.sleep(0.005)
+      }
+      testthat::expect_true(response_started())
       testthat::expect_true(process$signal(2L))
       testthat::expect_identical(cli_wait_exit(process, 20), 130L)
       client$wait(20000)
@@ -678,14 +661,24 @@ testthat::test_that(
         character()
       }
       testthat::expect_false(any(grepl("^HTTP/.* 500", headers)))
-      testthat::expect_true(any(grepl("^HTTP/.* 410", headers)))
+      completed <- any(grepl("^HTTP/.* 200", headers))
+      stopped <- any(grepl("^HTTP/.* 410", headers))
+      testthat::expect_true(xor(completed, stopped))
       testthat::expect_true(file.exists(body_path))
       body <- readLines(body_path, warn = FALSE)
       testthat::expect_false(any(grepl("An exception occurred.", body,
                                        fixed = TRUE)))
       payload <- jsonlite::fromJSON(paste(body, collapse = "\n"),
                                     simplifyVector = FALSE)
-      testthat::expect_identical(payload$error$code, "session_stopped")
+      if (stopped) {
+        testthat::expect_identical(payload$error$code, "session_stopped")
+      } else {
+        testthat::expect_null(payload$error)
+        testthat::expect_identical(length(payload$cells), 1L)
+        testthat::expect_identical(payload$cells[[1L]]$body[[1L]], "x <- 1")
+        testthat::expect_identical(length(payload$cells[[1L]]$body), 2049L)
+        testthat::expect_identical(payload$cells[[1L]]$body[[2049L]], source_line)
+      }
       testthat::expect_false(cli_port_open(port))
       cli_expect_closed(port, descendants)
     }

@@ -1,0 +1,12 @@
+{
+  "version": "0.1.252",
+  "baseUrl": "https://github.com/posit-dev/ark/releases/download/0.1.252/",
+  "assets": {
+    "linux-x64": { "file": "ark-0.1.252-linux-x64.zip", "sha256": "7dda5d05b6c4d67e7ae74e70b6bec5fd3bc526b19e222fa78306e14972cf4495" },
+    "linux-arm64": { "file": "ark-0.1.252-linux-arm64.zip", "sha256": "aed35067f053c495d1e379649620df56142870f011695e1d88580ce32bcedefe" },
+    "darwin-x64": { "file": "ark-0.1.252-darwin-x64.zip", "sha256": "a8df8b55d951732b73fd05e8857b9c4b185b8dc9d6bc307f2ae5dcb84d4cc913" },
+    "darwin-arm64": { "file": "ark-0.1.252-darwin-arm64.zip", "sha256": "aa1186f6e1ad271abaf246fd76e0aa9039cdeeff2cb52147e8887060afd5fb07" },
+    "win32-x64": { "file": "ark-0.1.252-windows-x64.zip", "sha256": "a6c2c6ae931d0dd5e1f771243bf3df4f86968462bbd8e08ceeba7f2e53567e58" },
+    "win32-arm64": { "file": "ark-0.1.252-windows-arm64.zip", "sha256": "358372f5c2a8cf03307d575f11160d71adc18780cd6b1a8d9b4584d9805a21c2" }
+  }
+}

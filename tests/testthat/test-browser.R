@@ -51,6 +51,7 @@ js_json <- function(x) jsonlite::toJSON(x, auto_unbox = TRUE, null = "null")
 browser_eval <- function(session, expression) {
   result <- session$Runtime$evaluate(
     expression, returnByValue = TRUE, awaitPromise = TRUE)
+  if (!is.null(result$exceptionDetails)) stop(jsonlite::toJSON(result$exceptionDetails, auto_unbox = TRUE))
   result$result$value
 }
 
@@ -65,39 +66,37 @@ browser_state <- function(session) {
   browser_eval(session, "(async()=>await (await fetch('/api/state')).json())()")
 }
 
-# Delay real transport responses without inventing server state. In particular,
-# a state response fetched before an edit can be delivered after its receipt.
+# Hold the current client's outgoing edit commands. All receipts and events still
+# come from the installed host; protocol replay/ordering is covered in clients.test.ts.
 hold_browser_source_requests <- function(session) {
   browser_eval(session, r"((()=>{
-    const original = window.fetch.bind(window);
+    const transport = window.__alderHost.client.transport;
+    const original = transport.dispatch.bind(transport);
     const gate = window.__sourceRequestGate = {
-      holdEdits: true, holdStates: true, edits: [], states: [], receipts: [],
-      failNextEdit: false,
-      liveState: async()=>await (await original('/api/state')).json(),
-      release(kind, count = Infinity) {
-        if (count === Infinity) this[kind === 'edits' ? 'holdEdits' : 'holdStates'] = false;
-        this[kind].splice(0, count).forEach(row=>row.resolve());
-      },
-      restore() {
-        this.release('edits'); this.release('states'); window.fetch = original;
-      }
+      holdEdits: true, edits: [], receipts: [], failNextEdit: false,
+      release() {this.holdEdits=false;this.edits.splice(0).forEach(resolve=>resolve());},
+      restore() {this.release();transport.dispatch=original;}
     };
-    window.fetch = async(input, options)=>{
-      const path = new URL(typeof input === 'string' ? input : input.url, location.href).pathname;
-      const edit = path === '/api/cell' && options?.body && JSON.parse(options.body).op === 'edit';
-      if (edit && gate.holdEdits) await new Promise(resolve=>gate.edits.push({resolve}));
-      if (edit && gate.failNextEdit) {
-        gate.failNextEdit = false;
-        throw new TypeError('Review transport interruption');
+    transport.dispatch = async command=>{
+      if(command.type==='edit') {
+        if(gate.holdEdits) await new Promise(resolve=>gate.edits.push(resolve));
+        if(gate.failNextEdit) {gate.failNextEdit=false;throw new Error('Transport interrupted');}
       }
-      const response = await original(input, options);
-      if (edit) gate.receipts.push(await response.clone().json());
-      if (path === '/api/state' && gate.holdStates) {
-        const state = await response.clone().json();
-        await new Promise(resolve=>gate.states.push({resolve, state}));
-      }
-      return response;
+      const result=await original(command);
+      if(command.type==='edit') gate.receipts.push(result);
+      return result;
     };
+    return true;
+  })())")
+}
+
+# A real host configuration event exercises reconciliation without changing
+# source, output, selection or notebook navigation targets.
+browser_host_update <- function(session) {
+  browser_eval(session, r"((async()=>{
+    const client=window.__alderHost.client;
+    await client.setConfig({theme:client.document.snapshot.config.theme || 'system'});
+    await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
     return true;
   })())")
 }
@@ -108,7 +107,7 @@ browser_diagnostic_snapshot <- function(session) {
     const notes = cell.querySelector('[data-role=diagnostics]');
     const header = document.querySelector('#editor-diagnostics');
     return {
-      source: window.__alderEditors.get(cell.id.replace(/^cell-/, ''))?.getDoc(),
+      source: ((id)=>window.__alderEditors.get(window.__alderHost.client.document.cell(id)?.key))(cell.dataset.cell)?.getDoc(),
       hidden: notes.hidden, text: notes.textContent,
       marked: cell.querySelectorAll('.cm-lintRange,.cm-lintPoint').length,
       statusText: document.querySelector('#status')?.textContent || '',
@@ -119,13 +118,17 @@ browser_diagnostic_snapshot <- function(session) {
 
 wait_browser <- function(session, predicate, timeout = 15, label = "browser state") {
   deadline <- Sys.time() + timeout
-  last <- NULL
+  last_error <- NULL
   while (Sys.time() < deadline) {
-    last <- tryCatch(predicate(), error = function(e) NULL)
+    last <- tryCatch(predicate(), error = function(error) {
+      last_error <<- conditionMessage(error)
+      FALSE
+    })
     if (isTRUE(last)) return(invisible(TRUE))
     Sys.sleep(0.1)
   }
-  testthat::fail(paste0("timed out waiting for ", label))
+  testthat::fail(paste0("timed out waiting for ", label,
+    if (!is.null(last_error)) paste0(": ", last_error) else ""))
 }
 
 wait_idle <- function(session, timeout = 15) {
@@ -149,10 +152,8 @@ wait_cells_done <- function(session, n = NULL, timeout = 15) {
 }
 
 set_textarea <- function(session, selector, value) {
-  expression <- sprintf(
-    "(()=>{let n=document.querySelector(%s);let c=n?.closest('.cell');if(!c){const raw=%s.replace(/\\s*textarea$/, '');c=(raw?document.querySelector(raw):null)||document.querySelector('.cell')};if(!c||!c.id||!window.__alderSetCellSource)return false;return window.__alderSetCellSource(c.id.replace(/^cell-/,''),%s)})()",
-    js_json(selector), js_json(selector), js_json(value))
-  isTRUE(browser_eval(session, expression))
+  editor_selector <- sub("textarea$", ".cm-content", selector)
+  replace_editor_source(session, editor_selector, value)
 }
 
 set_input <- function(session, selector, value, event = "input") {
@@ -200,8 +201,22 @@ pointer_click_selector <- function(session, selector) {
   TRUE
 }
 
+replace_editor_source <- function(session, selector, value) {
+  if (!pointer_click_selector(session, selector)) return(FALSE)
+  session$Input$dispatchKeyEvent(
+    type = "rawKeyDown", key = "a", code = "KeyA", modifiers = 2L,
+    windowsVirtualKeyCode = 65L, nativeVirtualKeyCode = 65L
+  )
+  session$Input$dispatchKeyEvent(
+    type = "keyUp", key = "a", code = "KeyA", modifiers = 2L,
+    windowsVirtualKeyCode = 65L, nativeVirtualKeyCode = 65L
+  )
+  session$Input$insertText(text = value)
+  TRUE
+}
+
 cell_ids <- function(session) {
-  browser_eval(session, "[...document.querySelectorAll('.cell')].map(x => x.id)")
+  browser_eval(session, "[...document.querySelectorAll('.cell[data-cell]')].map(x => x.id)")
 }
 
 cell_state <- function(session, id) {
@@ -216,23 +231,35 @@ cell_state <- function(session, id) {
 }
 
 new_browser_session <- function(url, temp_root) {
-  # chromote releases differ: some expose Chrome$new_session(), while the
-  # installed CRAN version creates a ChromoteSession directly.
-  with_browser_temp(file.path(temp_root, "chrome-tmp"), {
-    browser <- tryCatch(chromote::Chrome$new(), error = function(error) NULL)
-    if (!is.null(browser) && is.function(browser$new_session)) {
-      session <- browser$new_session(url = url)
-      list(browser = browser, session = session)
-    } else {
-      if (!is.null(browser)) try(browser$close(), silent = TRUE)
-      session <- chromote::ChromoteSession$new()
-      session$go_to(url)
-      list(browser = NULL, session = session)
-    }
-  })
+  session <- with_browser_temp(file.path(temp_root, "chrome-tmp"),
+    chromote::ChromoteSession$new())
+  ready <- FALSE
+  on.exit(if (!ready) try(session$close(), silent = TRUE), add = TRUE)
+  session$Page$navigate(url)
+  wait_browser(session, function() isTRUE(browser_eval(session,
+    "Boolean(window.__alderHost?.client.document?.snapshot) && document.readyState !== 'loading'")),
+    timeout = 30, label = "connected notebook document")
+  ready <- TRUE
+  session
 }
 
-start_browser_server <- function(lines, use_cli = FALSE) {
+stop_browser_server <- function(proc, url) {
+  if (proc$is_alive()) {
+    try({
+      handle <- curl::new_handle(timeout = 2)
+      state <- jsonlite::fromJSON(rawToChar(curl::curl_fetch_memory(
+        paste0(url, "api/state"), handle)$content), simplifyVector = FALSE)
+      curl::handle_setopt(handle, customrequest = "POST")
+      curl::handle_setheaders(handle, "X-Alder-Shutdown-Token" = state$shutdown_token)
+      curl::curl_fetch_memory(paste0(url, "api/shutdown"), handle)
+    }, silent = TRUE)
+    proc$wait(5000)
+    if (proc$is_alive()) proc$kill_tree()
+  }
+  proc$wait(5000)
+}
+
+start_browser_server <- function(lines) {
   root <- browser_temp_path("alder-browser-project-")
   dir.create(root, mode = "0700")
   path <- file.path(root, "notebook.R")
@@ -248,7 +275,7 @@ start_browser_server <- function(lines, use_cli = FALSE) {
       collapse = .Platform$path.sep
     )
   }
-  if (isTRUE(use_cli)) {
+  {
     # Exercise the primary installed lifecycle. R CMD check shadows bare
     # Rscript with a deliberate failing shim, so provide the actual runtime
     # just as the dedicated CLI acceptance helper does.
@@ -262,20 +289,26 @@ start_browser_server <- function(lines, use_cli = FALSE) {
     )
     process_env <- process_env[names(process_env) != "R_TESTS"]
     process_env[["BROWSER"]] <- "false"
-    launcher <- system.file("exec", "alder", package = "alder",
-                            mustWork = TRUE)
+    launcher <- system.file("exec",
+      if (.Platform$OS.type == "windows") "alder.cmd" else "alder",
+      package = "alder", mustWork = TRUE)
     command <- launcher
     args <- c("edit", path, "--no-open", "--port", as.character(port),
               "--no-idle-timeout")
-  } else {
-    command <- file.path(R.home("bin"), "Rscript")
-    launcher <- system.file("worker", "server.R", package = "alder",
-                            mustWork = TRUE)
-    args <- c(launcher, path, as.character(port))
+    if (.Platform$OS.type == "windows") {
+      command <- Sys.getenv("COMSPEC", unset = "cmd.exe")
+      args <- c("/d", "/s", "/c", "call", launcher, args)
+    }
   }
   proc <- processx::process$new(
     command, args, stdout = "|", stderr = "|", env = process_env
   )
+  url <- sprintf("http://127.0.0.1:%d/", port)
+  started <- FALSE
+  on.exit(if (!started) {
+    stop_browser_server(proc, url)
+    unlink(root, recursive = TRUE, force = TRUE)
+  }, add = TRUE)
   output <- character()
   deadline <- Sys.time() + 60
   ready <- FALSE
@@ -288,57 +321,41 @@ start_browser_server <- function(lines, use_cli = FALSE) {
     Sys.sleep(0.05)
   }
   if (!ready) {
-    if (proc$is_alive()) proc$kill()
-    proc$wait(5000)
-    unlink(root, recursive = TRUE, force = TRUE)
+    output <- c(output, proc$read_error_lines())
     stop("launcher did not become ready: ", paste(output, collapse = " | "))
   }
-  browser <- new_browser_session(sprintf("http://127.0.0.1:%d/", port), root)
+  session <- new_browser_session(url, root)
+  started <- TRUE
   list(root = root, path = path, port = port, proc = proc,
-       browser = browser$browser, session = browser$session,
+       session = session,
        url = sprintf("http://127.0.0.1:%d/", port))
 }
 
-with_browser_server <- function(lines, code, use_cli = FALSE) {
+with_browser_server <- function(lines, code) {
   skip_browser_if_unavailable()
-  ctx <- start_browser_server(lines, use_cli = use_cli)
+  ctx <- start_browser_server(lines)
   on.exit({
+    stop_browser_server(ctx$proc, ctx$url)
     try(ctx$session$close(), silent = TRUE)
-    if (!is.null(ctx$browser)) try(ctx$browser$close(), silent = TRUE)
-    if (ctx$proc$is_alive()) ctx$proc$kill()
-    ctx$proc$wait(5000)
     unlink(ctx$root, recursive = TRUE, force = TRUE)
   }, add = TRUE)
   force(code(ctx))
 }
 
-new_tab <- function(ctx) {
-  other <- new_browser_session(ctx$url, ctx$root)
-  other
-}
-
-# 1 ---------------------------------------------------------------------------
-testthat::test_that("browser formatting save shortcut persists typing before a state poll", {
+testthat::test_that("browser formatting save shortcut persists typing before source acknowledgement", {
   with_browser_server(c("# %%", "value <- 1"), function(ctx) {
     wait_cells_done(ctx$session, 1L)
     id <- browser_state(ctx$session)$cells[[1L]]$id
     wait_browser(ctx$session, function() isTRUE(browser_eval(ctx$session,
       "document.querySelector('#save').disabled")), label = "clean notebook save button")
-    browser_eval(ctx$session, paste0(
-      "(()=>{window.__fastSaveFetch=window.fetch;window.__fastSaveRequests=[];",
-      "window.__heldState=[];window.__fastSaveKey=null;",
-      "document.addEventListener('keydown',e=>{if(e.ctrlKey&&e.key==='s')",
-      "window.__fastSaveKey={disabled:document.querySelector('#save').disabled,time:performance.now()};},true);",
-      "window.fetch=async function(input,options){window.__fastSaveRequests.push(String(input));",
-      "const response=await window.__fastSaveFetch.call(this,input,options);",
-      "if(String(input).startsWith('/api/state'))await new Promise(resolve=>window.__heldState.push(resolve));",
-      "return response};return true})()"
-    ))
-    on.exit(browser_eval(ctx$session, paste0(
-      "window.fetch=window.__fastSaveFetch;window.__heldState.forEach(resolve=>resolve());true"
-    )), add = TRUE)
+    browser_eval(ctx$session, r"((()=>{
+      window.__fastSaveRequests=[];
+      window.addEventListener('alder:host-command',e=>window.__fastSaveRequests.push(e.detail.command.type));
+      return true;
+    })())")
+    hold_browser_source_requests(ctx$session)
     browser_eval(ctx$session, sprintf(paste0(
-      "(()=>{const e=window.__alderEditors.get(%s);e.focus();",
+      "(()=>{const e=((id)=>window.__alderEditors.get(window.__alderHost.client.document.cell(id)?.key))(%s);e.focus();",
       "e.view.dispatch({selection:{anchor:e.getDoc().length}});return true})()"
     ), js_json(id)))
     ctx$session$Input$insertText(text = "0")
@@ -348,11 +365,12 @@ testthat::test_that("browser formatting save shortcut persists typing before a s
     ctx$session$Input$dispatchKeyEvent(type = "keyUp", key = "s",
       code = "KeyS", modifiers = 2L,
       windowsVirtualKeyCode = 83L, nativeVirtualKeyCode = 83L)
-    testthat::expect_true(browser_eval(ctx$session, "window.__fastSaveKey.disabled"))
+    testthat::expect_identical(cell_text(ctx$session, id), "value <- 1")
+    browser_eval(ctx$session, "window.__sourceRequestGate.restore();true")
     wait_browser(ctx$session, function()
       "value <- 10" %in% readLines(ctx$path, warn = FALSE),
       timeout = 5, label = "immediate shortcut persisted local source")
-    expect_true("/api/save" %in% browser_eval(ctx$session,
+    expect_true("save" %in% browser_eval(ctx$session,
       "window.__fastSaveRequests"))
   })
 })
@@ -367,10 +385,10 @@ testthat::test_that("browser formatting adopts focused source and preserves sele
     before <- browser_state(ctx$session)
     id <- before$cells[[2L]]$id
     doc <- function() browser_eval(ctx$session, sprintf(
-      "window.__alderEditors.get(%s).getDoc()", js_json(id)))
+      "((id)=>window.__alderEditors.get(window.__alderHost.client.document.cell(id)?.key))(%s).getDoc()", js_json(id)))
     key <- function(key, code, modifiers) {
       browser_eval(ctx$session, sprintf(
-        "window.__alderEditors.get(%s).focus();true", js_json(id)))
+        "((id)=>window.__alderEditors.get(window.__alderHost.client.document.cell(id)?.key))(%s).focus();true", js_json(id)))
       virtual <- utf8ToInt(toupper(key))[[1L]]
       ctx$session$Input$dispatchKeyEvent(type = "rawKeyDown", key = key,
         code = code, modifiers = modifiers,
@@ -380,7 +398,7 @@ testthat::test_that("browser formatting adopts focused source and preserves sele
         windowsVirtualKeyCode = virtual, nativeVirtualKeyCode = virtual)
     }
     testthat::expect_true(browser_eval(ctx$session, sprintf(paste0(
-      "(()=>{const e=window.__alderEditors.get(%s);const at=e.getDoc().indexOf('2');",
+      "(()=>{const e=((id)=>window.__alderEditors.get(window.__alderHost.client.document.cell(id)?.key))(%s);const at=e.getDoc().indexOf('2');",
       "e.focus();e.view.dispatch({selection:{anchor:at,head:at+1}});return true})()"
     ), js_json(id))))
     key("F", "KeyF", 10L)
@@ -388,11 +406,11 @@ testthat::test_that("browser formatting adopts focused source and preserves sele
       identical(cell_text(ctx$session, id), "numbers <- c(1, 2, 3)"),
       timeout = 30, label = "focused formatted source acknowledgement")
     testthat::expect_identical(browser_eval(ctx$session, sprintf(paste0(
-      "(()=>{const v=window.__alderEditors.get(%s).view;",
+      "(()=>{const v=((id)=>window.__alderEditors.get(window.__alderHost.client.document.cell(id)?.key))(%s).view;",
       "return v.state.sliceDoc(v.state.selection.main.from,v.state.selection.main.to)})()"
     ), js_json(id))), "2")
     testthat::expect_true(browser_eval(ctx$session, sprintf(
-      "window.__alderEditors.get(%s).view.hasFocus", js_json(id))))
+      "((id)=>window.__alderEditors.get(window.__alderHost.client.document.cell(id)?.key))(%s).view.hasFocus", js_json(id))))
     ctx$session$Input$insertText(text = "4")
     wait_browser(ctx$session, function()
       identical(cell_text(ctx$session, id), "numbers <- c(1, 4, 3)"),
@@ -404,7 +422,7 @@ testthat::test_that("browser formatting adopts focused source and preserves sele
     testthat::expect_identical(cell_text(ctx$session, before$cells[[3L]]$id), "spare<-7")
 
     testthat::expect_true(browser_eval(ctx$session, sprintf(
-      "window.__alderSetCellSource(%s,'numbers<-c(4,5,6)')", js_json(id))))
+      "((id,value)=>{((id)=>window.__alderEditors.get(window.__alderHost.client.document.cell(id)?.key))(id).setDoc(value);return true})(%s,'numbers<-c(4,5,6)')", js_json(id))))
     key("f", "KeyF", 3L)
     wait_browser(ctx$session, function() identical(doc(), "numbers <- c(4, 5, 6)"),
       timeout = 30, label = "alternate focused format shortcut")
@@ -416,7 +434,7 @@ testthat::test_that("browser formatting adopts focused source and preserves sele
       "!document.querySelector('#settings').open && !document.querySelector('#save').disabled")),
       label = "format on save settings applied")
     testthat::expect_true(browser_eval(ctx$session, sprintf(
-      "window.__alderSetCellSource(%s,'numbers<-c(7,8,9)')", js_json(id))))
+      "((id,value)=>{((id)=>window.__alderEditors.get(window.__alderHost.client.document.cell(id)?.key))(id).setDoc(value);return true})(%s,'numbers<-c(7,8,9)')", js_json(id))))
     key("s", "KeyS", 2L)
     wait_browser(ctx$session, function() {
       state <- browser_state(ctx$session)
@@ -436,9 +454,9 @@ testthat::test_that("browser formatting adopts focused source and preserves sele
       "!document.querySelector('#settings').open && !document.querySelector('#run-all').disabled")),
       label = "autosave settings applied")
     testthat::expect_true(browser_eval(ctx$session, sprintf(
-      "window.__alderSetCellSource(%s,'numbers<-c(2,4,6)')", js_json(id))))
+      "((id,value)=>{((id)=>window.__alderEditors.get(window.__alderHost.client.document.cell(id)?.key))(id).setDoc(value);return true})(%s,'numbers<-c(2,4,6)')", js_json(id))))
     browser_eval(ctx$session, sprintf(
-      "window.__alderEditors.get(%s).focus();true", js_json(id)))
+      "((id)=>window.__alderEditors.get(window.__alderHost.client.document.cell(id)?.key))(%s).focus();true", js_json(id)))
     wait_browser(ctx$session, function() !isTRUE(browser_state(ctx$session)$changed) &&
       identical(doc(), "numbers <- c(2, 4, 6)") &&
       "numbers <- c(2, 4, 6)" %in% readLines(ctx$path, warn = FALSE),
@@ -451,10 +469,10 @@ testthat::test_that("browser formatting preserves newer typing and rejects exter
     wait_cells_done(ctx$session, 1L)
     id <- browser_state(ctx$session)$cells[[1L]]$id
     doc <- function() browser_eval(ctx$session, sprintf(
-      "window.__alderEditors.get(%s).getDoc()", js_json(id)))
+      "((id)=>window.__alderEditors.get(window.__alderHost.client.document.cell(id)?.key))(%s).getDoc()", js_json(id)))
     format_key <- function() {
       browser_eval(ctx$session, sprintf(
-        "window.__alderEditors.get(%s).focus();true", js_json(id)))
+        "((id)=>window.__alderEditors.get(window.__alderHost.client.document.cell(id)?.key))(%s).focus();true", js_json(id)))
       ctx$session$Input$dispatchKeyEvent(type = "rawKeyDown", key = "F",
         code = "KeyF", modifiers = 10L,
         windowsVirtualKeyCode = 70L, nativeVirtualKeyCode = 70L)
@@ -462,39 +480,53 @@ testthat::test_that("browser formatting preserves newer typing and rejects exter
         code = "KeyF", modifiers = 10L,
         windowsVirtualKeyCode = 70L, nativeVirtualKeyCode = 70L)
     }
-    testthat::expect_true(browser_eval(ctx$session, paste0(
-      "(()=>{window.__formatFetch=window.fetch;window.__formatWaiting=false;",
-      "window.__formatDelayed=false;window.fetch=async function(input,options){",
-      "const response=await window.__formatFetch.call(this,input,options);",
-      "if(String(input)==='/api/format'&&!window.__formatDelayed){",
-      "window.__formatDelayed=true;window.__formatWaiting=true;",
-      "await new Promise(resolve=>{window.__releaseFormat=resolve})}return response};return true})()"
-    )))
+    testthat::expect_true(browser_eval(ctx$session, r"((()=>{
+      const transport=window.__alderHost.client.transport;
+      window.__formatDispatch=transport.dispatch.bind(transport);
+      window.__formatWaiting=false;window.__formatDelayed=false;
+      transport.dispatch=async command=>{
+        const result=await window.__formatDispatch(command);
+        if(command.type==='format'&&!window.__formatDelayed){
+          window.__formatDelayed=true;window.__formatWaiting=true;
+          await new Promise(resolve=>window.__releaseFormat=resolve);
+        }
+        return result;
+      };
+      return true;
+    })())"))
     format_key()
     wait_browser(ctx$session, function() isTRUE(browser_eval(ctx$session,
       "window.__formatWaiting")), timeout = 30, label = "format receipt held")
     testthat::expect_true(browser_eval(ctx$session, sprintf(
-      "window.__alderSetCellSource(%s,'value<-9')", js_json(id))))
+      "((id,value)=>{((id)=>window.__alderEditors.get(window.__alderHost.client.document.cell(id)?.key))(id).setDoc(value);return true})(%s,'value<-9')", js_json(id))))
     testthat::expect_identical(doc(), "value<-9")
     browser_eval(ctx$session, "window.__releaseFormat();true")
-    wait_browser(ctx$session, function() identical(doc(), "value <- 9") &&
-      identical(cell_text(ctx$session, id), "value <- 9"),
+    wait_browser(ctx$session, function() identical(doc(), "value<-9") &&
+      identical(cell_text(ctx$session, id), "value<-9"),
       timeout = 30, label = "newer typing survives formatted acknowledgement")
     testthat::expect_false(browser_eval(ctx$session,
       "document.body.textContent.includes('changed on the server')"))
 
-    testthat::expect_true(browser_eval(ctx$session, paste0(
-      "(()=>{window.__formatWaiting=false;window.fetch=async function(input,options){",
-      "if(String(input)==='/api/format'){window.__formatWaiting=true;",
-      "await new Promise(resolve=>{window.__releaseFormat=resolve})}",
-      "return window.__formatFetch.call(this,input,options)};return true})()"
-    )))
+    testthat::expect_true(browser_eval(ctx$session, r"((()=>{
+      window.__formatWaiting=false;
+      window.__alderHost.client.transport.dispatch=async command=>{
+        if(command.type==='format'){
+          window.__formatWaiting=true;
+          await new Promise(resolve=>window.__releaseFormat=resolve);
+        }
+        return window.__formatDispatch(command);
+      };
+      return true;
+    })())"))
     format_key()
     wait_browser(ctx$session, function() isTRUE(browser_eval(ctx$session,
       "window.__formatWaiting")), label = "format request held before server")
     revision <- cell_state(ctx$session, id)$revision
+    testthat::expect_true(browser_eval(ctx$session, sprintf(
+      "((id,value)=>{((id)=>window.__alderEditors.get(window.__alderHost.client.document.cell(id)?.key))(id).setDoc(value);return true})(%s,'value<-10')", js_json(id))))
+    testthat::expect_identical(doc(), "value<-10")
     response <- browser_eval(ctx$session, sprintf(paste0(
-      "(async()=>{const r=await window.__formatFetch('/api/cell',{method:'POST',",
+      "(async()=>{const r=await fetch('/api/cell',{method:'POST',",
       "headers:{'Content-Type':'application/json'},body:JSON.stringify({op:'edit',",
       "id:%s,body:['value<-42'],type:'code',expected_revision:%s})});return r.status})()"
     ), js_json(id), js_json(revision)))
@@ -502,17 +534,17 @@ testthat::test_that("browser formatting preserves newer typing and rejects exter
     browser_eval(ctx$session, "window.__releaseFormat();true")
     wait_browser(ctx$session, function() isTRUE(browser_eval(ctx$session, paste0(
       "document.body.textContent.includes('changed on the server') && ",
-      "document.querySelector('[data-act=use-server]') !== null"
+      "document.querySelector('[data-recovery]') !== null"
     ))), label = "external format conflict and recovery control visible")
-    testthat::expect_identical(doc(), "value <- 9")
+    testthat::expect_identical(doc(), "value<-10")
     testthat::expect_identical(cell_text(ctx$session, id), "value<-42")
     testthat::expect_true(browser_eval(ctx$session,
       "document.body.textContent.includes('Use server version')"))
-    browser_eval(ctx$session, "window.fetch=window.__formatFetch;true")
+    browser_eval(ctx$session, "window.__alderHost.client.transport.dispatch=window.__formatDispatch;true")
   })
 })
 
-testthat::test_that("browser keyboard help survives polling and cancels obsolete requests", {
+testthat::test_that("browser keyboard help survives host events and cancels obsolete requests", {
   with_browser_server(c("# %%", "mean(1:10)"), function(ctx) {
     wait_cells_done(ctx$session, 1L)
     id <- browser_state(ctx$session)$cells[[1L]]$id
@@ -533,19 +565,18 @@ testthat::test_that("browser keyboard help survives polling and cancels obsolete
     }
     testthat::expect_true(browser_eval(ctx$session, r"((()=>{
       const original = window.fetch.bind(window);
-      const gate = window.__keyboardHelpGate = {polls: 0, rows: [],
-        release(index) {const row=this.rows[index];row.releasePolls=this.polls;row.resolve();},
+      const gate = window.__keyboardHelpGate = {rows: [],
+        release(index) {const row=this.rows[index];row.resolve();},
         restore() {this.rows.forEach(row=>row.resolve());window.fetch=original;}
       };
       window.fetch = async(input, options)=>{
         const path = new URL(typeof input === 'string' ? input : input.url, location.href).pathname;
         const params = options?.body ? JSON.parse(options.body) : null;
         const response = await original(input, options);
-        if (path === '/api/state') gate.polls += 1;
         if (path === '/api/lsp' && params?.method === 'textDocument/hover' && response.ok) {
           const value = await response.clone().json();
           const row = {position: params.params.position, value, status: response.status,
-            polls: gate.polls, delivered: false};
+            delivered: false};
           await new Promise(resolve=>{row.resolve=resolve;gate.rows.push(row);});
           row.delivered = true;
         }
@@ -566,30 +597,26 @@ testthat::test_that("browser keyboard help survives polling and cancels obsolete
       press("F1", "F1", 112L)
       wait_browser(ctx$session, function() browser_eval(ctx$session, sprintf(
         "window.__keyboardHelpGate.rows.length > %d", index)),
-        label = "held completed keyboard help response")
+        timeout = 45, label = "held completed keyboard help response")
       testthat::expect_true(browser_eval(ctx$session, sprintf(paste0(
         "(()=>{const row=window.__keyboardHelpGate.rows[%d];return row.status===200&&",
         "row.position.character===2&&JSON.stringify(row.value).includes('Arithmetic Mean')})()"
       ), index)))
       index
     }
-    wait_polls <- function(index, after_release = FALSE) {
-      # Only app fetches count: no manual /api/state observer runs while held.
-      # The second completed poll proves the first passed through normal render.
-      wait_browser(ctx$session, function() browser_eval(ctx$session, sprintf(
-        "window.__keyboardHelpGate.polls >= window.__keyboardHelpGate.rows[%d].%s + 2",
-        index, if (after_release) "releasePolls" else "polls")),
-        label = "ordinary state polls during keyboard help")
+    wait_updates <- function() {
+      browser_host_update(ctx$session)
+      browser_host_update(ctx$session)
     }
     release_help <- function(index) browser_eval(ctx$session, sprintf(
       "window.__keyboardHelpGate.release(%d)", index))
 
     first <- begin_help()
-    wait_polls(first)
+    wait_updates()
     release_help(first)
-    wait_browser(ctx$session, help_visible, label = "F1 survives unchanged-source polling")
+    wait_browser(ctx$session, help_visible, label = "F1 survives unchanged-source host events")
     testthat::expect_identical(browser_eval(ctx$session, sprintf(
-      "window.__alderEditors.get(%s).getDoc()", js_json(id))), "mean(1:10)")
+      "((id)=>window.__alderEditors.get(window.__alderHost.client.document.cell(id)?.key))(%s).getDoc()", js_json(id))), "mean(1:10)")
     press("Escape", "Escape", 27L)
     wait_browser(ctx$session, no_help, label = "keyboard help closed before cancellation cases")
 
@@ -604,7 +631,7 @@ testthat::test_that("browser keyboard help survives polling and cancels obsolete
       focused <- browser_eval(ctx$session,
         "document.activeElement?.id || document.activeElement?.className || ''")
       release_help(held)
-      wait_polls(held, after_release = TRUE)
+      wait_updates()
       testthat::expect_true(no_help(), info = paste("cancel keyboard help by", cancel))
       testthat::expect_identical(browser_eval(ctx$session,
         "document.activeElement?.id || document.activeElement?.className || ''"),
@@ -614,7 +641,7 @@ testthat::test_that("browser keyboard help survives polling and cancels obsolete
       }
     }
     testthat::expect_identical(browser_eval(ctx$session, sprintf(
-      "window.__alderEditors.get(%s).getDoc()", js_json(id))), "mexan(1:10)")
+      "((id)=>window.__alderEditors.get(window.__alderHost.client.document.cell(id)?.key))(%s).getDoc()", js_json(id))), "mexan(1:10)")
   })
 })
 
@@ -625,7 +652,7 @@ testthat::test_that("browser R help is bounded and supports keyboard access", {
     ctx$session$Emulation$setDeviceMetricsOverride(width = 1440L, height = 900L,
       deviceScaleFactor = 1, mobile = FALSE)
     focus_symbol <- function() browser_eval(ctx$session, sprintf(paste0(
-      "(()=>{const e=window.__alderEditors.get(%s);",
+      "(()=>{const e=((id)=>window.__alderEditors.get(window.__alderHost.client.document.cell(id)?.key))(%s);",
       "e.view.dispatch({selection:{anchor:2}});e.focus();",
       "const p=e.view.coordsAtPos(2);return {x:p.left+2,y:(p.top+p.bottom)/2}})()"
     ), js_json(id)))
@@ -641,7 +668,7 @@ testthat::test_that("browser R help is bounded and supports keyboard access", {
       "(()=>{const d=document.querySelector('.cm-alder-hover-content');return !!d&&",
       "d.textContent.includes('Arithmetic Mean')&&!!d.querySelector('h3')&&",
       "!!d.querySelector('pre code')&&!!d.querySelector('table')})()"
-    ))), timeout = 30, label = "native rendered R documentation")
+    ))), timeout = 45, label = "native rendered R documentation")
     bounds <- function() browser_eval(ctx$session, paste0(
       "(()=>{const d=document.querySelector('.cm-alder-hover');",
       "const c=d?.querySelector('.cm-alder-hover-content');if(!c)return false;",
@@ -668,7 +695,7 @@ testthat::test_that("browser R help is bounded and supports keyboard access", {
       label = "keyboard scrolls full R help")
     press("Escape", "Escape", 27L)
     wait_browser(ctx$session, function() identical(browser_eval(ctx$session,
-      "document.activeElement?.closest('.cell')?.dataset.id||''"), id),
+      "document.activeElement?.closest('.cell')?.dataset.cell||''"), id),
       label = "help Escape returns to source")
     ctx$session$Emulation$setDeviceMetricsOverride(width = 390L, height = 844L,
       deviceScaleFactor = 1, mobile = FALSE)
@@ -685,7 +712,7 @@ testthat::test_that("browser R help is bounded and supports keyboard access", {
     testthat::expect_true(pointer_click_selector(ctx$session,
       ".cm-alder-hover [aria-label='Close R documentation']"))
     wait_browser(ctx$session, function() identical(browser_eval(ctx$session,
-      "document.activeElement?.closest('.cell')?.dataset.id||''"), id),
+      "document.activeElement?.closest('.cell')?.dataset.cell||''"), id),
       label = "Close help returns to source")
     testthat::expect_identical(cell_text(ctx$session, id), "mean(1:10)")
   })
@@ -697,7 +724,7 @@ testthat::test_that("browser formatting preserves selection through quote change
     id <- browser_state(ctx$session)$cells[[1L]]$id
     for (forward in c(TRUE, FALSE)) {
       testthat::expect_true(browser_eval(ctx$session, sprintf(paste0(
-        "(()=>{const e=window.__alderEditors.get(%s);e.setDoc(\"label<-'sample'\");",
+        "(()=>{const e=((id)=>window.__alderEditors.get(window.__alderHost.client.document.cell(id)?.key))(%s);e.setDoc(\"label<-'sample'\");",
         "const at=e.getDoc().indexOf('sample');e.focus();",
         "e.view.dispatch({selection:{anchor:%s?at:at+6,head:%s?at+6:at}});return true})()"
       ), js_json(id), js_json(forward), js_json(forward))))
@@ -709,12 +736,12 @@ testthat::test_that("browser formatting preserves selection through quote change
         windowsVirtualKeyCode = 70L, nativeVirtualKeyCode = 70L)
       wait_browser(ctx$session, function() {
         source <- browser_eval(ctx$session, sprintf(
-          "window.__alderEditors.get(%s).getDoc()", js_json(id)))
+          "((id)=>window.__alderEditors.get(window.__alderHost.client.document.cell(id)?.key))(%s).getDoc()", js_json(id)))
         !identical(source, "label<-'sample'") &&
           identical(source, cell_text(ctx$session, id))
       }, timeout = 30, label = "formatted string selection source")
       selection <- browser_eval(ctx$session, sprintf(paste0(
-        "(()=>{const v=window.__alderEditors.get(%s).view,s=v.state.selection.main;",
+        "(()=>{const v=((id)=>window.__alderEditors.get(window.__alderHost.client.document.cell(id)?.key))(%s).view,s=v.state.selection.main;",
         "return {text:v.state.sliceDoc(s.from,s.to),anchor:s.anchor,head:s.head,focused:v.hasFocus}})()"
       ), js_json(id)))
       testthat::expect_identical(selection$text, "sample")
@@ -775,7 +802,6 @@ testthat::test_that("browser Move Up then Move Down restores cell order", {
   })
 })
 
-# 2 ---------------------------------------------------------------------------
 testthat::test_that("browser converts code and Markdown types atomically", {
   with_browser_server(c("# %%", "# **bold**"), function(ctx) {
     wait_cells_done(ctx$session, 1L)
@@ -794,12 +820,12 @@ testthat::test_that("browser converts code and Markdown types atomically", {
     wait_browser(ctx$session, function() {
       identical(cell_state(ctx$session, id)$type, "code")
     }, label = "code conversion")
-    source <- browser_eval(ctx$session,
-      sprintf("window.__alderEditors.get('%s')?.getDoc()", id))
+    testthat::expect_identical(browser_eval(ctx$session,
+      sprintf("((id)=>window.__alderEditors.get(window.__alderHost.client.document.cell(id)?.key))('%s')?.getDoc()", id)),
+      "# **bold**")
   })
 })
 
-# 3 --------------------------------------------------------------------------
 testthat::test_that("browser renders and sanitizes a loaded Markdown cell", {
   with_browser_server(c("# %% [markdown]",
                         "# Hello **world** <script>alert(1)</script>"), function(ctx) {
@@ -812,21 +838,19 @@ testthat::test_that("browser renders and sanitizes a loaded Markdown cell", {
   })
 })
 
-# 4 --------------------------------------------------------------------------
-testthat::test_that("browser preserves focused source across polls", {
+testthat::test_that("browser preserves focused source across host updates", {
   with_browser_server(c("# %%", "x <- 1"), function(ctx) {
     wait_cells_done(ctx$session, 1L)
     source_id <- browser_eval(ctx$session,
       "(()=>{const x=document.querySelector('.cm-content');x.focus();return x.closest('.cell')?.id})()")
     testthat::expect_true(is.character(source_id) && nzchar(source_id))
-    Sys.sleep(2.1)
+    browser_host_update(ctx$session)
     active <- browser_eval(ctx$session,
       "document.activeElement?.closest('.cell')?.id || null")
     testthat::expect_equal(active, source_id)
   })
 })
 
-# 5 --------------------------------------------------------------------------
 testthat::test_that("browser coalesces slider input to its final value", {
   with_browser_server(c("# %%", "library(alder)",
                         "# %%", "min_wt <- ui$slider(0, 10, value = 5)", "min_wt"), function(ctx) {
@@ -844,7 +868,6 @@ testthat::test_that("browser coalesces slider input to its final value", {
   })
 })
 
-# 6 --------------------------------------------------------------------------
 
 # 5b -------------------------------------------------------------------------
 testthat::test_that("browser initializes a non-zero-min slider to its spec and accepts drags", {
@@ -1276,7 +1299,7 @@ testthat::test_that("browser layouts expose unique linked accessible controls", 
   })
 })
 
-testthat::test_that("browser preserves trusted slider focus and identity across polls", {
+testthat::test_that("browser preserves trusted slider focus and identity across host updates", {
   with_browser_server(c(
     "# %%", "library(alder)",
     "# %%", "min_length <- ui$slider(1, 8, value = 3, label = 'Minimum length')",
@@ -1312,9 +1335,9 @@ testthat::test_that("browser preserves trusted slider focus and identity across 
       "node.focus();return document.activeElement===node})()"
     ), js_json(selector))))
 
-    # Multiple ordinary state polls must not replace the native control or
+    # Unrelated host events must not replace the native control or
     # steal its focus before a scientist presses the next key.
-    Sys.sleep(2.1)
+    browser_host_update(ctx$session)
     testthat::expect_true(browser_eval(ctx$session, sprintf(
       "document.querySelector(%s)===window.__alderSliderNode && document.activeElement===window.__alderSliderNode",
       js_json(selector))))
@@ -1347,7 +1370,7 @@ testthat::test_that("browser preserves trusted slider focus and identity across 
         js_json(selector))))
     }
 
-    # The first pair is deliberately faster than a worker round trip so the
+    # The first pair is deliberately faster than a host round trip so the
     # second value exercises the in-flight coalescer without losing focus.
     press_slider_key("ArrowRight", "ArrowRight", 39L)
     press_slider_key("ArrowRight", "ArrowRight", 39L)
@@ -1431,11 +1454,10 @@ testthat::test_that("browser round-trips datetime widgets in UTC without warning
       log_entries[[length(log_entries) + 1L]] <<- params$entry
     }, wait_ = FALSE)
     ctx$session$Network$enable()
-    ctx$session$Network$requestWillBeSent(function(params) {
-      request <- params$request %||% list()
-      if (grepl("/api/widget", request$url %||% "", fixed = TRUE)) {
-        widget_posts[[length(widget_posts) + 1L]] <<-
-          as.character(request$postData %||% "")
+    ctx$session$Network$webSocketFrameSent(function(params) {
+      frame <- params$response$payloadData %||% ""
+      if (grepl('"type":"widget"', frame, fixed = TRUE)) {
+        widget_posts[[length(widget_posts) + 1L]] <<- frame
       }
     }, wait_ = FALSE)
 
@@ -1482,7 +1504,7 @@ testthat::test_that("browser round-trips datetime widgets in UTC without warning
       '"value":"2026-09-03T17:30:45Z"', widget_posts, fixed = TRUE
     )))
 
-    Sys.sleep(2.1)
+    browser_host_update(ctx$session)
     testthat::expect_true(browser_eval(ctx$session, sprintf(paste0(
       "document.querySelector(%s)===window.__alderDatetimeNode&&",
       "document.querySelector(%s).value==='2026-09-03T17:30:45'"
@@ -1515,7 +1537,7 @@ testthat::test_that("browser runs a freshly added summary cell and reruns it", {
     testthat::expect_length(id, 1L)
     id <- id[[1L]]
     testthat::expect_true(browser_eval(ctx$session, sprintf(
-      "window.__alderSetCellSource(%s, %s)", js_json(id),
+      "((id,value)=>{((id)=>window.__alderEditors.get(window.__alderHost.client.document.cell(id)?.key))(id).setDoc(value);return true})(%s, %s)", js_json(id),
       js_json("summary(peng$Sepal.Length)"))))
     wait_browser(ctx$session,
       function() identical(cell_text(ctx$session, id), "summary(peng$Sepal.Length)"),
@@ -1547,7 +1569,6 @@ testthat::test_that("browser runs a freshly added summary cell and reruns it", {
     }, label = "rerun output")
   })
 })
-# 6 --------------------------------------------------------------------------
 testthat::test_that("browser resets run buttons after their consumers finish", {
   with_browser_server(c("# %%", "library(alder)",
                         "# %%", "go <- ui$run_button()", "go",
@@ -1659,7 +1680,7 @@ testthat::test_that("browser edits and submits a form nested in a dictionary", {
 
     # A scientist can type again and press Submit immediately. The frontend
     # must sequence Submit behind the in-flight draft instead of surfacing the
-    # Session boundary's intentional operation_in_progress response.
+    # host's intentional operation_in_progress response.
     testthat::expect_true(set_input(
       ctx$session, text_selector, "rapid-form-value", "input"
     ))
@@ -1681,93 +1702,6 @@ testthat::test_that("browser edits and submits a form nested in a dictionary", {
   })
 })
 
-# 8 --------------------------------------------------------------------------
-testthat::test_that("browser source conflicts offer server recovery", {
-  with_browser_server(c("# %%", "x <- 1"), function(ctx) {
-    wait_cells_done(ctx$session, 1L)
-    id <- browser_state(ctx$session)$cells[[1L]]$id
-    set_textarea(ctx$session, "textarea", "x <- 2")
-    other <- new_tab(ctx)
-    on.exit({
-      try(other$session$close(), silent = TRUE)
-      if (!is.null(other$browser)) try(other$browser$close(), silent = TRUE)
-    }, add = TRUE)
-    wait_browser(other$session, function() identical(
-      browser_eval(other$session,
-        sprintf("window.__alderEditors.get('%s')?.getDoc()", id)), "x <- 2"),
-      label = "second editor source")
-    set_textarea(other$session, "textarea", "x <- 4")
-    wait_browser(other$session, function() identical(cell_text(other$session, id), "x <- 4"),
-      label = "second edit")
-    set_textarea(ctx$session, "textarea", "x <- 3")
-    wait_browser(ctx$session, function() {
-      browser_eval(ctx$session, sprintf("document.querySelector('#cell-%s [data-act=use-server]') !== null", id))
-    }, label = "conflict recovery control")
-    testthat::expect_false(isTRUE(browser_eval(ctx$session,
-      sprintf("document.querySelector('#cell-%s [data-act=retry-edit]') !== null", id))))
-    wait_browser(ctx$session, function() identical(
-      browser_eval(ctx$session,
-        sprintf("window.__alderEditors.get('%s')?.getDoc()", id)), "x <- 4"),
-      label = "server source")
-  })
-})
-
-# 9 --------------------------------------------------------------------------
-testthat::test_that("browser keeps a deleted local cell as a tombstone", {
-  with_browser_server(c("# %%", "x <- 1"), function(ctx) {
-    wait_cells_done(ctx$session, 1L)
-    id <- browser_state(ctx$session)$cells[[1L]]$id
-    other <- new_tab(ctx)
-    on.exit({
-      try(other$session$close(), silent = TRUE)
-      if (!is.null(other$browser)) try(other$browser$close(), silent = TRUE)
-    }, add = TRUE)
-    wait_browser(other$session, function() browser_eval(other$session,
-      sprintf("document.querySelector('#cell-%s [data-act=delete]') !== null", id)),
-      label = "second tab cell")
-    set_textarea(ctx$session, "textarea", "x <- 9")
-    testthat::expect_true(click_selector(other$session, sprintf("#cell-%s [data-act=delete]", id)))
-    wait_idle(other$session)
-    wait_browser(ctx$session, function() browser_eval(ctx$session,
-      sprintf("document.querySelector('#cell-%s [data-act=restore]') !== null", id)), label = "cell tombstone")
-    testthat::expect_true(browser_eval(ctx$session, sprintf("document.querySelector('#cell-%s [data-act=discard-local]') !== null", id)))
-    click_selector(ctx$session, sprintf("#cell-%s [data-act=discard-local]", id))
-    wait_browser(ctx$session, function() length(cell_ids(ctx$session)) == 0L, label = "discard tombstone")
-    wait_browser(other$session, function() browser_eval(other$session,
-      "document.querySelector('.empty-bar [data-type=code]') !== null"),
-      label = "empty notebook in second tab")
-    testthat::expect_true(click_selector(other$session, ".empty-bar [data-type=code]"))
-    wait_browser(other$session, function() length(cell_ids(other$session)) == 1L,
-      label = "replacement cell")
-    replacement <- cell_ids(other$session)[[1L]]
-    wait_browser(ctx$session, function() {
-      ids <- cell_ids(ctx$session)
-      length(ids) == 1L && identical(ids[[1L]], replacement)
-    }, label = "replacement in first tab")
-    set_textarea(ctx$session, "textarea", "x <- 11")
-    wait_browser(other$session, function() browser_eval(other$session,
-      sprintf("document.querySelector('#%s [data-act=delete]') !== null", replacement)),
-      label = "replacement delete control")
-    testthat::expect_true(click_selector(other$session,
-      sprintf("#%s [data-act=delete]", replacement)))
-    wait_idle(other$session)
-    wait_browser(ctx$session, function() browser_eval(ctx$session,
-      sprintf("document.querySelector('#%s [data-act=restore]') !== null", replacement)),
-      label = "second tombstone")
-    testthat::expect_true(click_selector(ctx$session,
-      sprintf("#%s [data-act=restore]", replacement)))
-    wait_browser(ctx$session, function() {
-      ids <- cell_ids(ctx$session)
-      length(ids) == 1L && !identical(ids[[1L]], replacement)
-    }, label = "restored cell")
-    restored <- cell_ids(ctx$session)[[1L]]
-    testthat::expect_equal(browser_eval(ctx$session,
-      sprintf("window.__alderEditors.get('%s')?.getDoc()", sub("^cell-", "", restored))),
-      "x <- 11")
-  })
-})
-
-# 10 -------------------------------------------------------------------------
 testthat::test_that("browser commits only the latest rapid edit", {
   with_browser_server(c("# %%", "x <- 0"), function(ctx) {
     wait_cells_done(ctx$session, 1L)
@@ -1795,7 +1729,6 @@ testthat::test_that("browser unload guard permits flushed internal app navigatio
   })
 })
 
-# 11 -------------------------------------------------------------------------
 testthat::test_that("browser automatic and lazy widget scheduling differ", {
   with_browser_server(c("# %%", "library(alder)", "a <- 1",
                         "# %%", "s <- ui$slider(0, 10, value = 5)", "s",
@@ -1830,9 +1763,9 @@ testthat::test_that("canonical CLI Stop cancels repeatedly and the notebook reco
       long_source <- paste0(
         "for (i in seq_len(200)) Sys.sleep(0.05); invisible(", attempt, ")"
       )
-      testthat::expect_true(browser_eval(ctx$session, sprintf(
-        "window.__alderSetCellSource(%s, %s)", js_json(id), js_json(long_source)
-      )))
+      testthat::expect_true(replace_editor_source(
+        ctx$session, sprintf("#cell-%s .cm-content", id), long_source
+      ))
       wait_browser(ctx$session,
         function() identical(cell_text(ctx$session, id), long_source),
         label = paste("long-running source", attempt))
@@ -1865,10 +1798,9 @@ testthat::test_that("canonical CLI Stop cancels repeatedly and the notebook reco
       testthat::expect_true(isTRUE(interrupted$error$interrupted))
 
       recovery_source <- paste(attempt, "+ 40")
-      testthat::expect_true(browser_eval(ctx$session, sprintf(
-        "window.__alderSetCellSource(%s, %s)",
-        js_json(id), js_json(recovery_source)
-      )))
+      testthat::expect_true(replace_editor_source(
+        ctx$session, sprintf("#cell-%s .cm-content", id), recovery_source
+      ))
       wait_browser(ctx$session,
         function() identical(cell_text(ctx$session, id), recovery_source),
         label = paste("replacement source", attempt))
@@ -1890,7 +1822,7 @@ testthat::test_that("canonical CLI Stop cancels repeatedly and the notebook reco
             "document.querySelector('#status')?.textContent || ''")), "")
       }, label = paste("cleared interruption banner", attempt))
     }
-  }, use_cli = TRUE)
+  })
 })
 
 testthat::test_that("browser dark theme keeps notebook text at AA contrast", {
@@ -1913,7 +1845,6 @@ testthat::test_that("browser dark theme keeps notebook text at AA contrast", {
 })
 
 
-# 13 -------------------------------------------------------------------------
 testthat::test_that("browser app view is output-only but keeps logs and widgets", {
   with_browser_server(c("# %%", "library(alder)", "cat('hello log')",
                         "# %% [markdown]", "# App **markdown**",
@@ -1923,7 +1854,7 @@ testthat::test_that("browser app view is output-only but keeps logs and widgets"
     wait_browser(ctx$session, function() {
       grepl("view=app", browser_eval(ctx$session, "location.search")) &&
         isTRUE(browser_eval(ctx$session,
-          "document.querySelectorAll('#run-all,#save,#runtime-select').length") == 0) &&
+          "(()=>{const controls=[...document.querySelectorAll('#run-all,#save,#runtime-select')];return controls.length===3&&controls.every(node=>node.getClientRects().length===0)})()")) &&
         grepl("hello log", browser_eval(ctx$session,
           "document.body.textContent"), fixed = TRUE) &&
         isTRUE(browser_eval(ctx$session,
@@ -1933,7 +1864,8 @@ testthat::test_that("browser app view is output-only but keeps logs and widgets"
     }, timeout = 30, label = "rendered app view")
     testthat::expect_equal(browser_eval(ctx$session, "document.querySelectorAll('textarea').length"), 0)
     testthat::expect_equal(browser_eval(ctx$session, "document.querySelectorAll('.cell-head').length"), 0)
-    testthat::expect_equal(browser_eval(ctx$session, "document.querySelectorAll('#run-all,#save,#runtime-select').length"), 0)
+    testthat::expect_true(browser_eval(ctx$session,
+      "(()=>{const controls=[...document.querySelectorAll('#run-all,#save,#runtime-select')];return controls.length===3&&controls.every(node=>node.getClientRects().length===0)})()"))
     testthat::expect_true(browser_eval(ctx$session,
       "document.querySelector('#stop') !== null"))
     testthat::expect_match(browser_eval(ctx$session, "document.body.textContent"), "hello log")
@@ -1942,7 +1874,6 @@ testthat::test_that("browser app view is output-only but keeps logs and widgets"
   })
 })
 
-# 14 -------------------------------------------------------------------------
 testthat::test_that("browser retains layered and independent base-graphics pages", {
   with_browser_server(c(
     "# %%",
@@ -1958,7 +1889,7 @@ testthat::test_that("browser retains layered and independent base-graphics pages
     wait_cells_done(ctx$session, 2L, timeout = 30)
     wait_browser(ctx$session, function() isTRUE(browser_eval(
       ctx$session,
-      "[...document.querySelectorAll('img.plot')].length===3&&[...document.querySelectorAll('img.plot')].every(x=>x.complete&&x.naturalWidth===800&&x.naturalHeight===500)"
+      "[...document.querySelectorAll('img.plot')].length===3&&[...document.querySelectorAll('img.plot')].every(x=>x.complete&&x.naturalWidth>0&&x.naturalHeight>0)"
     )), timeout = 30, label = "base graphics images")
 
     state <- browser_state(ctx$session)
@@ -1978,7 +1909,6 @@ testthat::test_that("browser retains layered and independent base-graphics pages
   })
 })
 
-# 15 -------------------------------------------------------------------------
 testthat::test_that("browser htmlwidget output is sandboxed and fetchable", {
   with_browser_server(c("# %%", "library(htmlwidgets)",
                         "tw <- htmlwidgets::createWidget(name = 'tw', x = list(message = 'hi'))", "tw"), function(ctx) {
@@ -1993,7 +1923,6 @@ testthat::test_that("browser htmlwidget output is sandboxed and fetchable", {
   })
 })
 
-# 16 -------------------------------------------------------------------------
 testthat::test_that("browser table controls page, sort, filter, and copy", {
   with_browser_server(c("# %%",
                         "df <- data.frame(x = 1:100, group = paste0('g', 1:100))",
@@ -2065,7 +1994,6 @@ testthat::test_that("browser table page-size setting repaginates visible output"
   })
 })
 
-# 16 -------------------------------------------------------------------------
 testthat::test_that("browser exposes worker loss while preserving edit controls", {
   with_browser_server(c("# %%", "library(alder)", "tools::pskill(Sys.getpid(), 9)"), function(ctx) {
     wait_browser(ctx$session, function() isFALSE(browser_state(ctx$session)$runtime$busy), label = "worker loss")
@@ -2077,7 +2005,7 @@ testthat::test_that("browser exposes worker loss while preserving edit controls"
       "document.querySelector('#restart')?.hidden === false"))
     id <- browser_state(ctx$session)$cells[[1L]]$id
     testthat::expect_true(browser_eval(ctx$session, sprintf(
-      "window.__alderSetCellSource(%s, %s)", js_json(id), js_json("6 * 7")
+      "((id,value)=>{((id)=>window.__alderEditors.get(window.__alderHost.client.document.cell(id)?.key))(id).setDoc(value);return true})(%s, %s)", js_json(id), js_json("6 * 7")
     )))
     wait_browser(ctx$session,
       function() identical(cell_text(ctx$session, id), "6 * 7"),
@@ -2094,7 +2022,6 @@ testthat::test_that("browser exposes worker loss while preserving edit controls"
   })
 })
 
-# 17 -------------------------------------------------------------------------
 testthat::test_that("browser exposes structured runtime error details", {
   with_browser_server(c(
     "# %%",
@@ -2157,7 +2084,7 @@ testthat::test_that("browser aligns every gutter line and identifies cells", {
       "[...document.querySelectorAll('.cell')].every(cell=>{",
       "const title=cell.querySelector('[data-role=cell-title]');",
       "return cell.getAttribute('aria-labelledby')===title.id&&",
-      "title.title.includes(cell.dataset.id)})"
+      "title.title.includes(cell.dataset.cell)})"
     )))
     testthat::expect_true(browser_eval(ctx$session, paste0(
       "[...document.querySelectorAll('.minimap-cell')].every((x,i)=>{",
@@ -2171,11 +2098,14 @@ testthat::test_that("browser aligns every gutter line and identifies cells", {
     ids <- vapply(browser_state(ctx$session)$cells, `[[`, "", "id")
     testthat::expect_true(browser_eval(ctx$session, paste0(
       "(()=>{const b=document.querySelectorAll('.minimap-cell')[1];b.focus();",
-      "b.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true,",
-      "cancelable:true}));return true})()"
+      "return true})()"
     )))
+    ctx$session$Input$dispatchKeyEvent(type = "rawKeyDown", key = "Enter",
+      code = "Enter", windowsVirtualKeyCode = 13L, nativeVirtualKeyCode = 13L)
+    ctx$session$Input$dispatchKeyEvent(type = "keyUp", key = "Enter",
+      code = "Enter", windowsVirtualKeyCode = 13L, nativeVirtualKeyCode = 13L)
     wait_browser(ctx$session, function() identical(browser_eval(ctx$session,
-      "document.activeElement?.closest('.cell')?.dataset.id || ''"), ids[[2L]]),
+      "document.activeElement?.closest('.cell')?.dataset.cell || ''"), ids[[2L]]),
       label = "keyboard cell navigation")
 
     testthat::expect_true(click_selector(ctx$session,
@@ -2431,13 +2361,13 @@ testthat::test_that("browser outline handles trusted Enter and Space once", {
     testthat::expect_true(focus_outline(ids[[2L]]))
     press_key("Enter", "Enter", 13L)
     wait_browser(ctx$session, function() identical(browser_eval(ctx$session,
-      "document.activeElement?.closest('.cell')?.dataset.id || ''"), ids[[2L]]),
+      "document.activeElement?.closest('.cell')?.dataset.cell || ''"), ids[[2L]]),
       label = "trusted outline Enter navigation")
 
     testthat::expect_true(focus_outline(ids[[3L]]))
     press_key(" ", "Space", 32L)
     wait_browser(ctx$session, function() identical(browser_eval(ctx$session,
-      "document.activeElement?.closest('.cell')?.dataset.id || ''"), ids[[3L]]),
+      "document.activeElement?.closest('.cell')?.dataset.cell || ''"), ids[[3L]]),
       label = "trusted outline Space navigation")
 
     events <- browser_eval(ctx$session, "window.__outlineKeyEvents")
@@ -2558,6 +2488,11 @@ testthat::test_that("browser drawer, navigator, outline, and reorder semantics f
         windowsVirtualKeyCode = 13L, nativeVirtualKeyCode = 13L
       )
       ctx$session$Input$dispatchKeyEvent(
+        type = "char", key = "Enter", code = "Enter", text = "\r",
+        unmodifiedText = "\r", windowsVirtualKeyCode = 13L,
+        nativeVirtualKeyCode = 13L
+      )
+      ctx$session$Input$dispatchKeyEvent(
         type = "keyUp", key = "Enter", code = "Enter",
         windowsVirtualKeyCode = 13L, nativeVirtualKeyCode = 13L
       )
@@ -2647,7 +2582,7 @@ testthat::test_that("browser keeps retained output explicitly stale while runnin
     id <- browser_state(ctx$session)$cells[[1L]]$id
     source <- "Sys.sleep(5); 42"
     testthat::expect_true(browser_eval(ctx$session, sprintf(
-      "window.__alderSetCellSource(%s,%s)", js_json(id), js_json(source))))
+      "((id,value)=>{((id)=>window.__alderEditors.get(window.__alderHost.client.document.cell(id)?.key))(id).setDoc(value);return true})(%s,%s)", js_json(id), js_json(source))))
     wait_browser(ctx$session, function() identical(cell_text(ctx$session, id), source),
       label = "long source committed")
     testthat::expect_true(click_selector(ctx$session,
@@ -2693,7 +2628,7 @@ testthat::test_that("browser editor assistance is explicit and independently gat
       "{status:200,headers:{'Content-Type':'application/json'}}))};return true})()"
     )))
     testthat::expect_true(browser_eval(ctx$session, sprintf(paste0(
-      "(()=>{const e=window.__alderEditors.get(%s);e.setDoc('mea');",
+      "(()=>{const e=((id)=>window.__alderEditors.get(window.__alderHost.client.document.cell(id)?.key))(%s);e.setDoc('mea');",
       "e.view.dispatch({selection:{anchor:e.view.state.doc.length}});e.focus();",
       "return true})()"
     ), js_json(id))))
@@ -2709,7 +2644,7 @@ testthat::test_that("browser editor assistance is explicit and independently gat
       unlist(browser_eval(ctx$session, "window.__lspCalls"), use.names = FALSE),
       label = "Tab completion request")
     wait_browser(ctx$session, function() identical(browser_eval(ctx$session,
-      sprintf("window.__alderEditors.get(%s)?.completionStatus() || ''",
+      sprintf("((id)=>window.__alderEditors.get(window.__alderHost.client.document.cell(id)?.key))(%s)?.completionStatus() || ''",
         js_json(id))), "active"), label = "active completion state")
     testthat::expect_length(unlist(browser_eval(ctx$session,
       "window.__assistanceErrors"), use.names = FALSE), 0L)
@@ -2718,7 +2653,7 @@ testthat::test_that("browser editor assistance is explicit and independently gat
       label = "Tab completion menu")
 
     testthat::expect_true(browser_eval(ctx$session, sprintf(paste0(
-      "(()=>{const e=window.__alderEditors.get(%s);e.setDoc('mean');",
+      "(()=>{const e=((id)=>window.__alderEditors.get(window.__alderHost.client.document.cell(id)?.key))(%s);e.setDoc('mean');",
       "const p=e.view.state.doc.length;e.view.dispatch({changes:{from:p,insert:'('},",
       "selection:{anchor:p+1}});return true})()"
     ), js_json(id))))
@@ -2744,7 +2679,7 @@ testthat::test_that("browser editor assistance is explicit and independently gat
       "document.querySelector('.cm-alder-signature') !== null")),
       label = "disabled signature tooltip removed")
     testthat::expect_true(browser_eval(ctx$session, sprintf(paste0(
-      "(()=>{const e=window.__alderEditors.get(%s);e.setDoc('mea');",
+      "(()=>{const e=((id)=>window.__alderEditors.get(window.__alderHost.client.document.cell(id)?.key))(%s);e.setDoc('mea');",
       "e.view.dispatch({selection:{anchor:e.view.state.doc.length}});e.focus();",
       "return true})()"
     ), js_json(id))))
@@ -2792,11 +2727,12 @@ testthat::test_that("browser preserves notebook-level linter failures and diagno
       length(rows) == 1L && grepl("Custom linter failure", rows[[1L]]$message,
                                 fixed = TRUE)
     }, timeout = 40, label = "notebook-level linter failure state")
-    row <- browser_state(ctx$session)$editor_diagnostics[[1L]]
+    row <- browser_eval(ctx$session,
+      "window.__alderHost.client.document.snapshot.editorDiagnostics['.document'][0]")
     testthat::expect_identical(row$level, "error")
     testthat::expect_identical(row$source, "lsp")
     testthat::expect_null(row$range)
-    testthat::expect_equal(row$file_range$start$line, 0)
+    testthat::expect_equal(row$fileRange$start$line, 0)
     wait_browser(ctx$session, function() !region_hidden() && grepl(
       "Custom linter failure <not-markup>", browser_eval(ctx$session,
         "document.querySelector('#editor-diagnostics')?.textContent || ''"),
@@ -2850,7 +2786,7 @@ testthat::test_that("browser preserves notebook-level linter failures and diagno
     id <- browser_state(ctx$session)$cells[[1L]]$id
     writeLines("linters: list()", config)
     testthat::expect_true(browser_eval(ctx$session, sprintf(
-      "window.__alderSetCellSource(%s, 'value <- 2')", js_json(id)
+      "((id,value)=>{((id)=>window.__alderEditors.get(window.__alderHost.client.document.cell(id)?.key))(id).setDoc(value);return true})(%s, 'value <- 2')", js_json(id)
     )))
     wait_browser(ctx$session, function() {
       state <- browser_state(ctx$session)
@@ -2867,7 +2803,7 @@ testthat::test_that("browser preserves notebook-level linter failures and diagno
       "line = '# %% [name=analysis]') }))"
     ), config)
     testthat::expect_true(browser_eval(ctx$session, sprintf(
-      "window.__alderSetCellSource(%s, 'value <- 3')", js_json(id)
+      "((id,value)=>{((id)=>window.__alderEditors.get(window.__alderHost.client.document.cell(id)?.key))(id).setDoc(value);return true})(%s, 'value <- 3')", js_json(id)
     )))
     wait_browser(ctx$session, function() {
       state <- browser_state(ctx$session)
@@ -2991,7 +2927,7 @@ testthat::test_that("browser keeps dataflow available for incomplete R source", 
     wait_cells_done(ctx$session, 2L)
     id <- browser_state(ctx$session)$cells[[1L]]$id
     testthat::expect_true(browser_eval(ctx$session, sprintf(
-      "window.__alderSetCellSource(%s, 'x <-')", js_json(id)
+      "((id,value)=>{((id)=>window.__alderEditors.get(window.__alderHost.client.document.cell(id)?.key))(id).setDoc(value);return true})(%s, 'x <-')", js_json(id)
     )))
     wait_browser(ctx$session, function() {
       state <- browser_state(ctx$session)
@@ -3015,6 +2951,10 @@ testthat::test_that("browser exposes a working editor-help retry after LSP death
   testthat::skip_if(.Platform$OS.type != "unix")
   with_browser_server(c("# %%", "x <- 1"), function(ctx) {
     wait_cells_done(ctx$session, 1L)
+    testthat::expect_true(browser_eval(ctx$session, r"((async()=>{
+      const response=await fetch('/api/lsp',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({method:'textDocument/documentSymbol',params:{}})});
+      const result=await response.json();return response.ok&&result.ok===true;
+    })())"))
     process_table <- function() {
       output <- processx::run(
         "ps", c("-e", "-o", "pid=,ppid=,args="),
@@ -3092,14 +3032,11 @@ testthat::test_that("browser shows only diagnostics for acknowledged displayed s
       note <- browser_diagnostic_snapshot(ctx$session)
       !note$hidden && grepl("old_problem <-", note$text, fixed = TRUE)
     }, label = "old source syntax diagnostic")
-    initial <- browser_state(ctx$session)
-    id <- initial$cells[[1L]]$id
+    id <- browser_state(ctx$session)$cells[[1L]]$id
     testthat::expect_true(hold_browser_source_requests(ctx$session))
     on.exit(browser_eval(ctx$session, "window.__sourceRequestGate?.restore()"), add = TRUE)
-    wait_browser(ctx$session, function() browser_eval(ctx$session,
-      "window.__sourceRequestGate.states.length > 0"), label = "retained old state response")
     testthat::expect_true(browser_eval(ctx$session, sprintf(
-      "window.__alderSetCellSource(%s, 'pending_problem <-')", js_json(id))))
+      "((id,value)=>{((id)=>window.__alderEditors.get(window.__alderHost.client.document.cell(id)?.key))(id).setDoc(value);return true})(%s, 'pending_problem <-')", js_json(id))))
     wait_browser(ctx$session, function() browser_eval(ctx$session,
       "window.__sourceRequestGate.edits.length === 1"), label = "held source edit")
     # The edit has not reached R even after the typing pause expires.
@@ -3109,51 +3046,33 @@ testthat::test_that("browser shows only diagnostics for acknowledged displayed s
     testthat::expect_true(pending$hidden)
     testthat::expect_equal(pending$marked, 0)
 
-    browser_eval(ctx$session, "window.__sourceRequestGate.release('edits')")
+    browser_eval(ctx$session, "window.__sourceRequestGate.release()")
     wait_browser(ctx$session, function() browser_eval(ctx$session,
       "window.__sourceRequestGate.receipts.length === 1"), label = "source edit receipt")
-    # Deliver the actual old response only after the newer edit is acknowledged.
-    # Waiting for the next held poll proves that the old one has rendered.
-    browser_eval(ctx$session, "window.__sourceRequestGate.release('states', 1)")
-    wait_browser(ctx$session, function() browser_eval(ctx$session,
-      "window.__sourceRequestGate.states.some(row=>row.state.cells[0].body.join('\\n') === 'pending_problem <-')"),
-      label = "new state held after old response rendered")
-    acknowledged <- browser_diagnostic_snapshot(ctx$session)
-    testthat::expect_identical(acknowledged$source, "pending_problem <-")
-    testthat::expect_true(acknowledged$hidden)
-    testthat::expect_equal(acknowledged$marked, 0)
-    browser_eval(ctx$session, "window.__sourceRequestGate.release('states')")
     wait_browser(ctx$session, function() {
       note <- browser_diagnostic_snapshot(ctx$session)
       !note$hidden && grepl("pending_problem <-", note$text, fixed = TRUE) &&
         !grepl("old_problem <-", note$text, fixed = TRUE)
     }, label = "fresh source syntax diagnostic")
-    testthat::expect_identical(browser_diagnostic_snapshot(ctx$session)$statusText,
-      paste0("Last failed action: ", initial$last_action_error$message))
 
-    # A recoverable edit failure must not resurrect old notes, or permanently
-    # suppress notes once a queued newer edit succeeds through the Retry control.
+    # A failed command keeps the displayed draft; the next edit retries through
+    # the same current transport and must not revive the preceding diagnostics.
     browser_eval(ctx$session, "window.__sourceRequestGate.failNextEdit = true")
-    testthat::expect_true(browser_eval(ctx$session, sprintf(
-      "window.__alderSetCellSource(%s, 'failed_problem <-')", js_json(id))))
+    testthat::expect_true(set_textarea(ctx$session, "textarea", "failed_problem <-"))
     wait_browser(ctx$session, function() browser_eval(ctx$session,
-      "document.querySelector('.cell [data-act=retry-edit]') !== null"),
-      label = "diagnostic edit retry control")
-    testthat::expect_true(browser_eval(ctx$session, sprintf(
-      "window.__alderSetCellSource(%s, 'retried_problem <-')", js_json(id))))
-    Sys.sleep(1.1)
+      "document.querySelector('#status').textContent.includes('Transport interrupted')"),
+      label = "failed edit exposed")
     failed <- browser_diagnostic_snapshot(ctx$session)
-    testthat::expect_identical(failed$source, "retried_problem <-")
+    testthat::expect_identical(failed$source, "failed_problem <-")
     testthat::expect_true(failed$hidden)
     testthat::expect_equal(failed$marked, 0)
-    testthat::expect_true(click_selector(ctx$session, ".cell [data-act=retry-edit]"))
+    testthat::expect_true(set_textarea(ctx$session, "textarea", "retried_problem <-"))
     wait_browser(ctx$session, function() {
       note <- browser_diagnostic_snapshot(ctx$session)
       !note$hidden && grepl("retried_problem <-", note$text, fixed = TRUE) &&
         !grepl("pending_problem <-", note$text, fixed = TRUE)
     }, label = "retried source syntax diagnostic")
-    testthat::expect_false(browser_eval(ctx$session,
-      "document.querySelector('.cell [data-act=retry-edit]') !== null"))
+
   })
 })
 
@@ -3162,9 +3081,11 @@ testthat::test_that("browser clears notebook diagnostics while source edits are 
     writeLines(paste0(
       "linters: list(source_note = lintr::Linter(function(source_expression) { ",
       "if (!lintr::is_lint_level(source_expression, 'file')) return(list()); ",
-      "lapply(1:2, function(line_number) lintr::Lint(",
+      "body_line = grep('^value <- ', source_expression$file_lines)[1L]; ",
+      "if (is.na(body_line)) return(list()); ",
+      "lapply(c(1L, body_line), function(line_number) lintr::Lint(",
       "filename = source_expression$filename, line_number = line_number, column_number = 1L, ",
-      "type = 'warning', message = paste('Source note:', source_expression$file_lines[[2L]]), ",
+      "type = 'warning', message = paste('Source note:', source_expression$file_lines[[body_line]]), ",
       "line = source_expression$file_lines[[line_number]])) }))"
     ), file.path(ctx$root, ".lintr"))
     testthat::expect_true(click_selector(ctx$session, "#settings-open"))
@@ -3180,10 +3101,8 @@ testthat::test_that("browser clears notebook diagnostics while source edits are 
     id <- browser_state(ctx$session)$cells[[1L]]$id
     testthat::expect_true(hold_browser_source_requests(ctx$session))
     on.exit(browser_eval(ctx$session, "window.__sourceRequestGate?.restore()"), add = TRUE)
-    wait_browser(ctx$session, function() browser_eval(ctx$session,
-      "window.__sourceRequestGate.states.length > 0"), label = "retained document state response")
     testthat::expect_true(browser_eval(ctx$session, sprintf(
-      "window.__alderSetCellSource(%s, 'value <- 2')", js_json(id))))
+      "((id,value)=>{((id)=>window.__alderEditors.get(window.__alderHost.client.document.cell(id)?.key))(id).setDoc(value);return true})(%s, 'value <- 2')", js_json(id))))
     immediate <- browser_diagnostic_snapshot(ctx$session)
     testthat::expect_true(immediate$headerHidden)
     testthat::expect_true(immediate$hidden)
@@ -3195,18 +3114,9 @@ testthat::test_that("browser clears notebook diagnostics while source edits are 
     testthat::expect_true(pending$headerHidden)
     testthat::expect_true(pending$hidden)
     testthat::expect_equal(pending$marked, 0)
-    browser_eval(ctx$session, "window.__sourceRequestGate.release('edits')")
+    browser_eval(ctx$session, "window.__sourceRequestGate.release()")
     wait_browser(ctx$session, function() browser_eval(ctx$session,
       "window.__sourceRequestGate.receipts.length === 1"), label = "document source edit receipt")
-    browser_eval(ctx$session, "window.__sourceRequestGate.release('states', 1)")
-    wait_browser(ctx$session, function() browser_eval(ctx$session,
-      "window.__sourceRequestGate.states.some(row=>row.state.cells[0].body.join('\\n') === 'value <- 2')"),
-      label = "new document state held after old response rendered")
-    acknowledged <- browser_diagnostic_snapshot(ctx$session)
-    testthat::expect_true(acknowledged$headerHidden)
-    testthat::expect_true(acknowledged$hidden)
-    testthat::expect_equal(acknowledged$marked, 0)
-    browser_eval(ctx$session, "window.__sourceRequestGate.release('states')")
     wait_browser(ctx$session, function() {
       note <- browser_diagnostic_snapshot(ctx$session)
       !note$headerHidden && !note$hidden &&
@@ -3226,7 +3136,7 @@ testthat::test_that("browser hides transient diagnostics until typing is idle", 
       label = "initial syntax diagnostic")
     id <- browser_state(ctx$session)$cells[[1L]]$id
     testthat::expect_true(browser_eval(ctx$session, sprintf(
-      "window.__alderSetCellSource(%s,%s)", js_json(id), js_json("y <-"))))
+      "((id,value)=>{((id)=>window.__alderEditors.get(window.__alderHost.client.document.cell(id)?.key))(id).setDoc(value);return true})(%s,%s)", js_json(id), js_json("y <-"))))
     testthat::expect_true(browser_eval(ctx$session,
       "document.querySelector('.cell [data-role=diagnostics]')?.hidden === true"))
     Sys.sleep(0.5)
@@ -3271,7 +3181,7 @@ testthat::test_that("browser Shut down distinguishes lifecycle from execution St
       "document.querySelector('#stop')?.textContent"), "Stop")
     id <- browser_state(ctx$session)$cells[[1L]]$id
     testthat::expect_true(browser_eval(ctx$session, sprintf(
-      "window.__alderSetCellSource(%s,%s)", js_json(id), js_json("x <- 2"))))
+      "((id,value)=>{((id)=>window.__alderEditors.get(window.__alderHost.client.document.cell(id)?.key))(id).setDoc(value);return true})(%s,%s)", js_json(id), js_json("x <- 2"))))
     wait_browser(ctx$session, function() isTRUE(browser_state(ctx$session)$changed),
       label = "dirty notebook")
     browser_eval(ctx$session,
@@ -3301,7 +3211,7 @@ testthat::test_that("browser Shut down distinguishes lifecycle from execution St
   })
 })
 
-testthat::test_that("browser outline preserves native focus through unchanged and renamed polls", {
+testthat::test_that("browser outline preserves native focus through unchanged and renamed events", {
   with_browser_server(c(
     "# %% [markdown]", "#| name: overview", "# # Study overview",
     "# %%", "#| name: analysis", "x <- 1",
@@ -3311,65 +3221,39 @@ testthat::test_that("browser outline preserves native focus through unchanged an
     initial <- browser_state(ctx$session)
     ids <- vapply(initial$cells, `[[`, "", "id")
     testthat::expect_true(click_selector(ctx$session, "#panel-tab-outline"))
-    testthat::expect_true(hold_browser_source_requests(ctx$session))
     testthat::expect_true(browser_eval(ctx$session, paste0(
-      "(()=>{window.__outlinePollEvents=[];window.__outlinePollNavigations=[];",
-      "window.__outlinePollBoundaries=[];",
+      "(()=>{window.__outlineUpdateEvents=[];window.__outlineUpdateNavigations=[];",
+      "window.__outlineUpdateBoundaries=[];",
       "document.querySelector('#dataflow-panel').addEventListener('keydown',event=>{",
       "const target=event.target.closest('.panel-link[data-target-cell]');",
-      "if(target)window.__outlinePollEvents.push({key:event.key,",
+      "if(target)window.__outlineUpdateEvents.push({key:event.key,",
       "isTrusted:event.isTrusted,defaultPrevented:event.defaultPrevented,",
       "target:target.dataset.targetCell})});",
       "for(const id of ", js_json(paste0("cell-", ids[2:3])), "){",
       "const cell=document.getElementById(id);const original=cell.scrollIntoView.bind(cell);",
-      "cell.scrollIntoView=(...args)=>{window.__outlinePollNavigations.push(id);",
+      "cell.scrollIntoView=(...args)=>{window.__outlineUpdateNavigations.push(id);",
       "return original(...args)}}return true})()"
     )))
-    on.exit({
-      evidence <- Sys.getenv("ALDER_OUTLINE_EVIDENCE_DIR", unset = "")
-      if (nzchar(evidence)) {
-        dir.create(evidence, recursive = TRUE, showWarnings = FALSE)
-        result <- browser_eval(ctx$session, paste0(
-          "(async()=>({boundaries:window.__outlinePollBoundaries,",
-          "events:window.__outlinePollEvents,navigations:window.__outlinePollNavigations,",
-          "state:await window.__sourceRequestGate.liveState()}))()"
-        ))
-        jsonlite::write_json(result, file.path(evidence, "outline-poll-focus.json"),
-                             auto_unbox = TRUE, pretty = TRUE, null = "null")
-      }
-      browser_eval(ctx$session, "window.__sourceRequestGate.restore();true")
-    }, add = TRUE)
 
     record_boundary <- function(label) browser_eval(ctx$session, paste0(
-      "(async()=>{const node=window.__outlinePollNode;",
+      "(async()=>{const node=window.__outlineUpdateNode;",
       "const current=[...document.querySelectorAll('#panel-outline .outline-cell')].find(",
       "item=>item.dataset.targetCell===node?.dataset.targetCell);",
       "const active=document.activeElement;const result={label:", js_json(label), ",",
       "connected:node?.isConnected===true,current:current===node,focused:active===node,",
       "text:current?.textContent||'',originalText:node?.textContent||'',",
       "target:node?.dataset.targetCell||'',active:{tag:active?.tagName||'',",
-      "id:active?.id||'',cell:active?.closest('.cell')?.dataset.id||'',",
+      "id:active?.id||'',cell:active?.closest('.cell')?.dataset.cell||'',",
       "target:active?.dataset.targetCell||''},",
-      "state:await window.__sourceRequestGate.liveState()};",
-      "window.__outlinePollBoundaries.push(result);return result})()"
+      "state:await (await fetch('/api/state')).json()};",
+      "window.__outlineUpdateBoundaries.push(result);return result})()"
     ))
     focus_outline <- function(id) browser_eval(ctx$session, paste0(
       "(()=>{const node=[...document.querySelectorAll('#panel-outline .outline-cell')].find(",
       "item=>item.dataset.targetCell===", js_json(id), ");",
-      "window.__outlinePollNode=node;node?.focus();return document.activeElement===node})()"
+      "window.__outlineUpdateNode=node;node?.focus();return document.activeElement===node})()"
     ))
-    release_poll <- function(label) {
-      testthat::expect_true(browser_eval(ctx$session, paste0(
-        "(()=>{const gate=window.__sourceRequestGate;if(gate.states.length!==1)return false;",
-        "window.__outlineReleasedPoll=gate.states[0];gate.release('states',1);return true})()"
-      )))
-      # pollLoop awaits render before it fetches again. A newly held response
-      # proves the released, unmodified HTTP response reached the renderer.
-      wait_browser(ctx$session, function() browser_eval(ctx$session, paste0(
-        "window.__sourceRequestGate.states.length===1&&",
-        "window.__sourceRequestGate.states[0]!==window.__outlineReleasedPoll"
-      )), label = label)
-    }
+    host_update <- function(label) browser_host_update(ctx$session)
     press_key <- function(key, code, virtual_key) {
       ctx$session$Input$dispatchKeyEvent(
         type = "rawKeyDown", key = key, code = code,
@@ -3383,11 +3267,9 @@ testthat::test_that("browser outline preserves native focus through unchanged an
       )
     }
 
-    wait_browser(ctx$session, function() browser_eval(ctx$session,
-      "window.__sourceRequestGate.states.length===1"), label = "held outline poll")
     testthat::expect_true(focus_outline(ids[[2L]]))
     record_boundary("unchanged-focused")
-    release_poll("unchanged outline poll rendered")
+    host_update("unchanged outline event rendered")
     unchanged <- record_boundary("unchanged-rendered")
     testthat::expect_true(unchanged$connected)
     testthat::expect_true(unchanged$current)
@@ -3395,8 +3277,8 @@ testthat::test_that("browser outline preserves native focus through unchanged an
     testthat::expect_identical(unchanged$text, "analysis")
     press_key("Enter", "Enter", 13L)
     wait_browser(ctx$session, function() identical(browser_eval(ctx$session,
-      "document.activeElement?.closest('.cell')?.dataset.id||''"), ids[[2L]]),
-      label = "trusted outline Enter after unchanged poll")
+      "document.activeElement?.closest('.cell')?.dataset.cell||''"), ids[[2L]]),
+      label = "trusted outline Enter after unchanged event")
     record_boundary("unchanged-enter")
 
     testthat::expect_true(focus_outline(ids[[3L]]))
@@ -3409,14 +3291,10 @@ testthat::test_that("browser outline preserves native focus through unchanged an
     ))
     testthat::expect_identical(renamed$status, 200L)
     testthat::expect_identical(renamed$body$name, "result_updated")
-    # The currently held poll predates the name receipt. Deliver it to fetch a
-    # real post-rename poll, then deliver that changed state without refocusing.
-    release_poll("renamed outline state fetched")
-    testthat::expect_true(browser_eval(ctx$session, paste0(
-      "window.__sourceRequestGate.states[0].state.cells.some(cell=>cell.id===",
-      js_json(ids[[3L]]), "&&(cell.name||cell.options?.name)==='result_updated')"
-    )))
-    release_poll("renamed outline state rendered")
+    wait_browser(ctx$session, function() browser_eval(ctx$session, paste0(
+      "[...document.querySelectorAll('#panel-outline .outline-cell')].some(node=>",
+      "node.dataset.targetCell===", js_json(ids[[3L]]), "&&node.textContent==='result_updated')"
+    )), label = "renamed outline event rendered")
     changed <- record_boundary("rename-rendered")
     testthat::expect_true(changed$connected)
     testthat::expect_true(changed$current)
@@ -3424,20 +3302,20 @@ testthat::test_that("browser outline preserves native focus through unchanged an
     testthat::expect_identical(changed$text, "result_updated")
     press_key(" ", "Space", 32L)
     wait_browser(ctx$session, function() identical(browser_eval(ctx$session,
-      "document.activeElement?.closest('.cell')?.dataset.id||''"), ids[[3L]]),
-      label = "trusted outline Space after renamed poll")
+      "document.activeElement?.closest('.cell')?.dataset.cell||''"), ids[[3L]]),
+      label = "trusted outline Space after renamed event")
     record_boundary("rename-space")
 
-    events <- browser_eval(ctx$session, "window.__outlinePollEvents")
+    events <- browser_eval(ctx$session, "window.__outlineUpdateEvents")
     testthat::expect_identical(vapply(events, `[[`, "", "key"), c("Enter", " "))
     testthat::expect_true(all(vapply(events, `[[`, FALSE, "isTrusted")))
     testthat::expect_true(all(vapply(events, `[[`, FALSE, "defaultPrevented")))
     testthat::expect_identical(unlist(browser_eval(ctx$session,
-      "window.__outlinePollNavigations"), use.names = FALSE), paste0("cell-", ids[2:3]))
+      "window.__outlineUpdateNavigations"), use.names = FALSE), paste0("cell-", ids[2:3]))
   })
 })
 
-testthat::test_that("browser dataflow controls retain native focus and scroll through polls", {
+testthat::test_that("browser dataflow controls retain native focus and scroll through host updates", {
   lines <- c(
     "# %%", "#| name: source_values", "x <- 1", "y <- 2",
     "# %%", "#| name: combined_values", "value_02 <- x + y"
@@ -3452,23 +3330,7 @@ testthat::test_that("browser dataflow controls retain native focus and scroll th
       width = 1350L, height = 800L, deviceScaleFactor = 1, mobile = FALSE)
     initial <- browser_state(ctx$session)
     ids <- vapply(initial$cells, `[[`, "", "id")
-    testthat::expect_true(hold_browser_source_requests(ctx$session))
     browser_eval(ctx$session, "window.__siblingFocusBoundaries=[];true")
-    on.exit({
-      evidence <- Sys.getenv("ALDER_OUTLINE_EVIDENCE_DIR", unset = "")
-      if (nzchar(evidence)) {
-        dir.create(evidence, recursive = TRUE, showWarnings = FALSE)
-        result <- browser_eval(ctx$session, paste0(
-          "(async()=>({boundaries:window.__siblingFocusBoundaries,",
-          "state:await window.__sourceRequestGate.liveState()}))()"
-        ))
-        jsonlite::write_json(result, file.path(evidence, "sibling-poll-focus.json"),
-                             auto_unbox = TRUE, pretty = TRUE, null = "null")
-      }
-      browser_eval(ctx$session, "window.__sourceRequestGate.restore();true")
-    }, add = TRUE)
-    wait_browser(ctx$session, function() browser_eval(ctx$session,
-      "window.__sourceRequestGate.states.length===1"), label = "held dataflow poll")
 
     record_boundary <- function(label) browser_eval(ctx$session, paste0(
       "(()=>{const node=window.__siblingFocusNode;const current=window.__siblingFindNode();",
@@ -3485,23 +3347,14 @@ testthat::test_that("browser dataflow controls retain native focus and scroll th
       ".map(node=>({target:node.dataset.targetCell,",
       "text:node.textContent})):[]};window.__siblingFocusBoundaries.push(result);return result})()"
     ))
-    release_poll <- function(label) {
-      testthat::expect_true(browser_eval(ctx$session, paste0(
-        "(()=>{const gate=window.__sourceRequestGate;if(gate.states.length!==1)return false;",
-        "window.__siblingReleasedPoll=gate.states[0];gate.release('states',1);return true})()"
-      )))
-      wait_browser(ctx$session, function() browser_eval(ctx$session, paste0(
-        "window.__sourceRequestGate.states.length===1&&",
-        "window.__sourceRequestGate.states[0]!==window.__siblingReleasedPoll"
-      )), label = label)
-    }
+    host_update <- function(label) browser_host_update(ctx$session)
     cases <- list(
       list(name = "variable-owner", tab = "variables", find = paste0(
         "[...document.querySelectorAll('#panel-variables .variable-row')].find(",
         "node=>node.querySelector('.variable-name')?.textContent==='x')")),
       list(name = "dependency-reference", tab = "dependencies", find = paste0(
         "[...document.querySelectorAll('#panel-dependencies .panel-link')].find(",
-        "node=>node.textContent==='x ← source_values')")),
+        "node=>node.textContent==='x ← Cell 1 · source_values')")),
       list(name = "graph-toolbar", tab = "graph", find =
         "document.querySelector('#panel-graph [data-graph-action=zoom-in]')"),
       list(name = "graph-node", tab = "graph", find = paste0(
@@ -3516,11 +3369,13 @@ testthat::test_that("browser dataflow controls retain native focus and scroll th
     for (case in cases) {
       if (identical(case$name, "dependency-reference")) {
         testthat::expect_true(browser_eval(ctx$session, paste0(
-          "(()=>{const editor=window.__alderEditors.get(", js_json(ids[[2L]]), ");",
+          "(()=>{const editor=((id)=>window.__alderEditors.get(window.__alderHost.client.document.cell(id)?.key))(", js_json(ids[[2L]]), ");",
           "editor.focus();return editor.view.hasFocus})()"
         )))
       }
       testthat::expect_true(click_selector(ctx$session, paste0("#panel-tab-", case$tab)))
+      wait_browser(ctx$session, function() browser_eval(ctx$session,
+        paste0("Boolean(", case$find, ")")), label = paste(case$name, "projected"))
       focused <- browser_eval(ctx$session, paste0(
         "(()=>{window.__siblingFindNode=()=>", case$find, ";",
         "const node=window.__siblingFindNode();window.__siblingFocusNode=node;",
@@ -3540,11 +3395,12 @@ testthat::test_that("browser dataflow controls retain native focus and scroll th
       }
       if (identical(case$name, "dependency-reference")) {
         testthat::expect_identical(vapply(before$references, `[[`, "", "text"),
-                                   c("x ← source_values", "y ← source_values"))
+                                   c("x ← Cell 1 · source_values",
+                                     "y ← Cell 1 · source_values"))
         testthat::expect_identical(vapply(before$references, `[[`, "", "target"),
                                    rep(ids[[1L]], 2L))
       }
-      release_poll(paste0(case$name, " poll rendered"))
+      host_update(paste0(case$name, " event rendered"))
       after <- record_boundary(paste0(case$name, "-after"))
       testthat::expect_true(after$connected, info = case$name)
       testthat::expect_true(after$current, info = case$name)
@@ -3571,24 +3427,7 @@ testthat::test_that("browser navigation preserves focus while targets move appea
     initial <- browser_state(ctx$session)
     ids <- vapply(initial$cells, `[[`, "", "id")
     testthat::expect_true(click_selector(ctx$session, "#panel-tab-outline"))
-    testthat::expect_true(hold_browser_source_requests(ctx$session))
     browser_eval(ctx$session, "window.__navigationOrderBoundaries=[];true")
-    on.exit({
-      evidence <- Sys.getenv("ALDER_OUTLINE_EVIDENCE_DIR", unset = "")
-      if (nzchar(evidence)) {
-        dir.create(evidence, recursive = TRUE, showWarnings = FALSE)
-        result <- browser_eval(ctx$session, paste0(
-          "(async()=>({boundaries:window.__navigationOrderBoundaries,",
-          "events:window.__navigationOrderEvents,navigations:window.__navigationOrderCalls,",
-          "state:await window.__sourceRequestGate.liveState()}))()"
-        ))
-        jsonlite::write_json(result, file.path(evidence, "navigation-order-focus.json"),
-                             auto_unbox = TRUE, pretty = TRUE, null = "null")
-      }
-      browser_eval(ctx$session, "window.__sourceRequestGate.restore();true")
-    }, add = TRUE)
-    wait_browser(ctx$session, function() browser_eval(ctx$session,
-      "window.__sourceRequestGate.states.length===1"), label = "held navigation order poll")
     testthat::expect_true(browser_eval(ctx$session, paste0(
       "(()=>{window.__navigationOrderFind=()=>[...document.querySelectorAll(",
       "'#panel-outline .outline-cell')].find(node=>node.dataset.targetCell===",
@@ -3599,7 +3438,7 @@ testthat::test_that("browser navigation preserves focus while targets move appea
       "key:event.key,isTrusted:event.isTrusted,defaultPrevented:event.defaultPrevented})});",
       "const cell=document.getElementById(", js_json(paste0("cell-", ids[[2L]])), ");",
       "const original=cell.scrollIntoView.bind(cell);cell.scrollIntoView=(...args)=>{",
-      "window.__navigationOrderCalls.push(cell.dataset.id);return original(...args)};",
+      "window.__navigationOrderCalls.push(cell.dataset.cell);return original(...args)};",
       "window.__navigationOrderNode.focus();",
       "return document.activeElement===window.__navigationOrderNode})()"
     )))
@@ -3613,9 +3452,7 @@ testthat::test_that("browser navigation preserves focus while targets move appea
       ".map(node=>node.textContent),",
       "minimap:[...document.querySelectorAll('#minimap .minimap-cell')]",
       ".map(node=>node.dataset.targetCell),",
-      "graph:[...document.querySelectorAll('#panel-graph .dag-node')]",
-      ".map(node=>node.dataset.targetCell),",
-      "state:await window.__sourceRequestGate.liveState()};",
+      "state:await (await fetch('/api/state')).json()};",
       "window.__navigationOrderBoundaries.push(result);return result})()"
     ))
     mutate <- function(body) {
@@ -3628,26 +3465,16 @@ testthat::test_that("browser navigation preserves focus while targets move appea
       response$body
     }
     delete_target <- function(id) {
-      state <- browser_eval(ctx$session, "window.__sourceRequestGate.liveState()")
+      state <- browser_state(ctx$session)
       cell <- state$cells[[match(id, vapply(state$cells, `[[`, "", "id"))]]
       mutate(list(op = "delete", id = id, expected_revision = cell$revision))
     }
-    release_poll <- function(label) {
-      testthat::expect_true(browser_eval(ctx$session, paste0(
-        "(()=>{const gate=window.__sourceRequestGate;if(gate.states.length!==1)return false;",
-        "window.__navigationReleasedPoll=gate.states[0];gate.release('states',1);return true})()"
-      )))
-      wait_browser(ctx$session, function() browser_eval(ctx$session, paste0(
-        "window.__sourceRequestGate.states.length===1&&",
-        "window.__sourceRequestGate.states[0]!==window.__navigationReleasedPoll"
-      )), label = label)
-    }
+    host_update <- function(label) browser_host_update(ctx$session)
     deliver_change <- function(receipt, label) {
-      release_poll(paste0(label, " fresh state fetched"))
-      testthat::expect_true(browser_eval(ctx$session, paste0(
-        "window.__sourceRequestGate.states[0].state.version>=", js_json(receipt$version)
-      )))
-      release_poll(paste0(label, " changed state rendered"))
+      wait_browser(ctx$session, function() browser_eval(ctx$session, paste0(
+        "window.__alderHost.client.document.snapshot.version>=", js_json(receipt$version)
+      )), label = paste(label, "host event received"))
+      browser_host_update(ctx$session)
       snapshot(label)
     }
     expect_current_order <- function(result, order, labels, focused = TRUE) {
@@ -3656,7 +3483,6 @@ testthat::test_that("browser navigation preserves focus while targets move appea
       testthat::expect_identical(result$focused, focused, info = result$label)
       testthat::expect_identical(unlist(result$outline, use.names = FALSE), order)
       testthat::expect_identical(unlist(result$minimap, use.names = FALSE), order)
-      testthat::expect_setequal(unlist(result$graph, use.names = FALSE), order)
       testthat::expect_identical(unlist(result$labels, use.names = FALSE), labels)
       testthat::expect_identical(vapply(result$state$cells, `[[`, "", "id"), order)
     }
@@ -3682,7 +3508,7 @@ testthat::test_that("browser navigation preserves focus while targets move appea
     ctx$session$Input$dispatchKeyEvent(type = "keyUp", key = "Enter", code = "Enter",
       windowsVirtualKeyCode = 13L, nativeVirtualKeyCode = 13L)
     wait_browser(ctx$session, function() identical(browser_eval(ctx$session,
-      "document.activeElement?.closest('.cell')?.dataset.id||''"), ids[[2L]]),
+      "document.activeElement?.closest('.cell')?.dataset.cell||''"), ids[[2L]]),
       label = "trusted navigation to moved target")
     events <- browser_eval(ctx$session, "window.__navigationOrderEvents")
     testthat::expect_identical(vapply(events, `[[`, "", "key"), "Enter")

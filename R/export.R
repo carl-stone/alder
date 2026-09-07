@@ -442,56 +442,21 @@ export_cell_transcript <- function(cell) {
 }
 
 export_headless_session <- function(nb) {
-  artifact_dir <- tempfile("alder-export-artifacts-")
-  cache_dir <- tempfile("alder-export-cache-")
-  dir.create(artifact_dir, recursive = TRUE, showWarnings = FALSE)
-  dir.create(cache_dir, recursive = TRUE, showWarnings = FALSE)
-  worker <- NULL
-  session <- NULL
-  cleanup <- function() {
-    if (!is.null(session)) try(session$stop(), silent = TRUE)
-    if (!is.null(worker) && worker$alive()) try(worker$kill(), silent = TRUE)
-    if (dir.exists(artifact_dir)) unlink(artifact_dir, recursive = TRUE, force = TRUE)
-    if (dir.exists(cache_dir)) unlink(cache_dir, recursive = TRUE, force = TRUE)
+  server <- alder_start_host(nb$path, "127.0.0.1", httpuv::randomPort(), FALSE,
+                              "automatic", FALSE, NULL, FALSE, 0,
+                              base64enc::base64encode(charToRaw(serialize_notebook(nb))))
+  completed <- FALSE
+  on.exit(if (!completed) stop_alder(server), add = TRUE)
+  receipt <- server$session$run_all()
+  operation <- server$session$await_operation(receipt$operation$id)
+  if (!identical(operation$status, "done")) {
+    alder_abort(operation$error$code %||% "execution_cancelled",
+                operation$error$message %||% "Notebook execution did not complete")
   }
-  app_dir <- system.file("app", package = "alder", mustWork = TRUE)
-  worker_script <- system.file("worker", "worker.R", package = "alder", mustWork = TRUE)
-  worker_env <- if (!is.null(nb$path) && nzchar(nb$path)) {
-    c(
-      ALDER_NOTEBOOK_DIR = dirname(nb$path),
-      ALDER_PROJECT_LIB = file.path(dirname(nb$path), ALDER_PACKAGE_INSTALL_LIB)
-    )
-  } else {
-    character()
-  }
-  worker <- tryCatch(.spawn_worker(
-    worker_script, app_dir, artifact_dir, cache_dir, env = worker_env
-  ),
-                     error = function(e) {
-                       cleanup()
-                       stop(e)
-                     })
-  tryCatch(
-    .wait_for_worker(worker),
-    error = function(e) {
-      cleanup()
-      stop(e)
-    }
-  )
-  disk <- if (!is.null(nb$path) && is.character(nb$path) &&
-              length(nb$path) == 1L && file.exists(nb$path)) {
-    list(exists = TRUE,
-         bytes = readBin(nb$path, "raw", n = file.info(nb$path)$size))
-  } else list(exists = FALSE, bytes = raw())
-  session <- tryCatch(
-    Session$new(nb, worker, execution_mode = "automatic", run_on_startup = TRUE,
-                disk_version = disk),
-    error = function(e) {
-      cleanup()
-      stop(e)
-    })
-  list(session = session, worker = worker, artifact_dir = artifact_dir,
-       cache_dir = cache_dir, cleanup = cleanup)
+  completed <- TRUE
+  list(session = server$session, worker = NULL,
+       artifact_dir = server$host_process$ready$artifactDirectory,
+       cache_dir = NULL, cleanup = function() stop_alder(server))
 }
 
 export_wait_idle <- function(session, timeout = 300) {

@@ -3,6 +3,7 @@ RUNTIME$emit <- NULL
 RUNTIME$render <- NULL
 RUNTIME$cell_id <- function() NULL
 RUNTIME$artifact_dir <- NULL
+RUNTIME$register_artifact <- NULL
 RUNTIME$cache_dir <- NULL
 RUNTIME$lazy <- new.env(parent = emptyenv())
 RUNTIME$lazy_seq <- NULL
@@ -145,6 +146,9 @@ media_output <- function(path_or_raw, media_type, alt = NULL) {
     if (!file.copy(path_or_raw, dest, overwrite = TRUE)) {
       return(new_output("error", message = "could not copy media artifact"))
     }
+  }
+  if (is.function(RUNTIME$register_artifact)) {
+    RUNTIME$register_artifact(basename(dest))
   }
   new_output("media", media_type = media_type, artifact = basename(dest),
              mime = mime_type, alt = alt %||% "")

@@ -13,13 +13,6 @@ output_records <- function(s, id) {
   if (is.null(cell$outputs)) list() else cell$outputs
 }
 
-wait_output_session <- function(s, timeout = 10) {
-  wait_for(s, function() { # nolint: object_usage_linter
-    !any(vapply(s$state()$cells,
-      function(cell) identical(cell$status, "running"), logical(1)))
-  }, timeout)
-}
-
 test_that("out constructors produce sanitized wire records", {
   md <- out$md(c("**bold**", "line"))
   expect_equal(md$kind, "markdown")
@@ -63,11 +56,10 @@ test_that("base graphics and media records precede the final value", {
   m <- make_test_session(c(
     "# %%", "library(alder)",
     "# %%", "plot(1:10); out$md('tail')"
-  ))
+  ), execution_mode = "lazy")
   s <- m$session
-  withr::defer(s$stop())
-  s$run_all()
-  wait_output_session(s)
+  withr::defer(m$close())
+  expect_identical(s$await_operation(s$run_all()$run_id)$status, "done")
   outputs <- output_records(s, "cell-2")
   expect_true(any(vapply(outputs, function(x) identical(x$kind, "image"),
     logical(1))))
@@ -76,34 +68,16 @@ test_that("base graphics and media records precede the final value", {
   image_index <- which(vapply(outputs,
     function(x) identical(x$kind, "image"), logical(1)))
   old_artifact <- outputs[[image_index[[1L]]]]$artifact
-  expect_true(file.exists(file.path(m$worker$artifact_dir, old_artifact)))
-  s$run_cell("cell-2")
-  wait_output_session(s)
+  artifact_dir <- m$boot$ready$artifactDirectory
+  expect_true(file.exists(file.path(artifact_dir, old_artifact)))
+  expect_identical(s$await_operation(s$run_cell("cell-2")$run_id)$status,
+                   "done")
   current_outputs <- output_records(s, "cell-2")
   current_index <- which(vapply(current_outputs,
     function(x) identical(x$kind, "image"), logical(1)))[[1L]]
   current_artifact <- current_outputs[[current_index]]$artifact
   expect_false(identical(current_artifact, old_artifact))
-  expect_true(file.exists(file.path(m$worker$artifact_dir, current_artifact)))
-
-  # A state response can publish the old immutable URL immediately before the
-  # new commit. Keep it fetchable for a bounded grace, then retire only it.
-  expect_true(file.exists(file.path(m$worker$artifact_dir, old_artifact)))
-  expect_equal(m$worker$sweep_artifacts(Sys.time()), 0L)
-
-  media_artifact <- "retirement-check.wav"
-  media_path <- file.path(m$worker$artifact_dir, media_artifact)
-  writeBin(as.raw(c(82L, 73L, 70L, 70L)), media_path)
-  expect_true(m$worker$release_artifact(media_artifact))
-  expect_true(m$worker$release_artifact(media_artifact))
-  expect_false(m$worker$release_artifact(file.path("..", media_artifact)))
-  expect_false(m$worker$release_artifact("not-rendered.txt"))
-  expect_true(file.exists(media_path))
-
-  expect_equal(m$worker$sweep_artifacts(Sys.time() + 10), 2L)
-  expect_false(file.exists(file.path(m$worker$artifact_dir, old_artifact)))
-  expect_false(file.exists(media_path))
-  expect_true(file.exists(file.path(m$worker$artifact_dir, current_artifact)))
+  expect_true(file.exists(file.path(artifact_dir, current_artifact)))
 })
 
 test_that("lazy output expands once and expires after a rerun", {
@@ -112,23 +86,22 @@ test_that("lazy output expands once and expires after a rerun", {
     "# %%", "out$lazy(function() 1 + 1)"
   ), execution_mode = "lazy")
   s <- m$session
-  withr::defer(s$stop())
-  s$run_all()
-  wait_output_session(s)
+  withr::defer(m$close())
+  expect_identical(s$await_operation(s$run_all()$run_id)$status, "done")
   key <- output_records(s, "cell-2")[[1L]]$key
-  s$request_lazy(key)
-  wait_for(s, function() {
-    output <- output_records(s, "cell-2")[[1L]]
-    identical(output$state, "loaded") && !is.null(output$child)
-  }, timeout = 10)
+  expect_identical(s$await_operation(s$request_lazy(key))$status, "done")
   expanded <- output_records(s, "cell-2")[[1L]]
   expect_equal(expanded$state, "loaded")
   expect_equal(expanded$child$kind, "text")
   expect_match(expanded$child$text, "2")
 
-  s$run_cell("cell-2")
-  wait_output_session(s)
-  err <- tryCatch(s$request_lazy(key), error = identity)
+  expect_identical(s$await_operation(s$run_cell("cell-2")$run_id)$status,
+                   "done")
+  err <- tryCatch({
+    operation <- s$request_lazy(key)
+    s$await_operation(operation)
+    NULL
+  }, error = identity)
   expect_s3_class(err, "alder_error")
   expect_equal(err$code, "lazy_expired")
   expect_match(conditionMessage(err), "earlier run")
@@ -139,11 +112,10 @@ test_that("table pages sort, filter, and expire with the source", {
     "# %%", "library(alder)",
     "# %%", "df <- data.frame(x = 1:500, group = paste0('g', 1:500))",
     "# %%", "df"
-  ))
+  ), execution_mode = "lazy")
   s <- m$session
-  withr::defer(s$stop())
-  s$run_all()
-  wait_output_session(s)
+  withr::defer(m$close())
+  expect_identical(s$await_operation(s$run_all()$run_id)$status, "done")
   wait_for(s, function() {
     vars <- s$state()$variables
     if (is.null(vars)) vars <- list()
@@ -163,30 +135,25 @@ test_that("table pages sort, filter, and expire with the source", {
   expect_length(output$preview, 25)
   handle <- output$handle
 
-  s$request_table_page(handle, offset = 100, limit = 10,
-                       sort_by = "x", sort_desc = TRUE)
-  wait_for(s, function() {
-    page <- tail(output_records(s, "cell-3"), 1L)[[1L]]$page
-    !is.null(page) && isTRUE(page$offset == 100)
-  })
+  operation <- s$request_table_page(handle, offset = 100, limit = 10,
+                                    sort_by = "x", sort_desc = TRUE)
+  expect_identical(s$await_operation(operation)$status, "done")
   page <- tail(output_records(s, "cell-3"), 1L)[[1L]]$page
   expect_equal(page$limit, 10)
   expect_equal(page$preview[[1L]][[1L]], "400")
 
-  s$request_table_page(handle, filter = "g3")
-  wait_for(s, function() {
-    page <- tail(output_records(s, "cell-3"), 1L)[[1L]]$page
-    !is.null(page) && identical(page$filter, "g3")
-  })
+  operation <- s$request_table_page(handle, filter = "g3")
+  expect_identical(s$await_operation(operation)$status, "done")
   page <- tail(output_records(s, "cell-3"), 1L)[[1L]]$page
   expect_true(all(grepl("g3", vapply(page$preview,
                                      function(row) row[[2L]], ""), fixed = TRUE)))
 
   s$delete_cell("cell-2", expected_revision = 0)
-  s$request_table_page(handle)
-  wait_for(s, function() {
-    err <- s$state()$last_action_error
-    !is.null(err) && identical(err$code, "table_unavailable")
-  })
-  expect_equal(s$state()$last_action_error$code, "table_unavailable")
+  error <- tryCatch({
+    operation <- s$request_table_page(handle)
+    s$await_operation(operation)
+    NULL
+  }, alder_error = identity)
+  expect_s3_class(error, "alder_error")
+  expect_identical(error$code, "table_unavailable")
 })

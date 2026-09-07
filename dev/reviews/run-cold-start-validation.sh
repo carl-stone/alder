@@ -8,10 +8,11 @@ usage: run-cold-start-validation.sh --artifact PATH --sha256 HEX64 \
 
 Run in codex-universal below one long-lived `tini -s`, after the caller has
 independently restarted the container. The default runs static validation,
-exact source verification, all 22 installed audit phases, and exact R CMD check
-(including the complete installed test/browser suite). --source-suite also runs
-the unfiltered source suite. Both baseline and final process audits require zero
-zombies. This driver never restarts the container or stops unrelated processes.
+exact source verification, the host suite against the frozen installed package,
+and exact R CMD check (including the installed R/browser suite). --source-suite
+also runs the unfiltered source suite. Both baseline and final process audits
+require zero zombies. This driver never restarts the container or stops unrelated
+processes.
 USAGE
 }
 
@@ -84,8 +85,7 @@ sha256sum -- \
   "$script_dir/run-cold-start-validation.sh" \
   "$script_dir/audit-cold-start-processes.py" \
   "$script_dir/run-static-gate.sh" "$script_dir/run-full-suite.R" \
-  "$script_dir/verify-source-artifact.R" "$script_dir/run-cycle4-final-audit.sh" \
-  "$script_dir/run-package-check.sh" \
+  "$script_dir/verify-source-artifact.R" "$script_dir/run-package-check.sh" \
   > "$evidence/00-driver-sha256.txt"
 printf 'phase\tstarted_utc\tfinished_utc\texit_code\n' > "$evidence/00-phases.tsv"
 
@@ -145,7 +145,12 @@ run_step 00-process-baseline python3 "$script_dir/audit-cold-start-processes.py"
   --phase baseline --evidence-dir "$evidence" --audit-root "$audit_root"
 run_step 01-static bash "$script_dir/run-static-gate.sh"
 if [[ "$source_suite" == true ]]; then
-  run_step 02-source-suite env ALDER_SUITE_EVIDENCE="$evidence/02-source-totals.json" \
+  run_step 02-source-suite env \
+    ALDER_SUITE_EVIDENCE="$evidence/02-source-totals.json" \
+    NOT_CRAN=true \
+    ALDER_TEST_HOST=1 \
+    ALDER_NODE="$repo/host/node_modules/node/bin/node" \
+    ALDER_ARK="$repo/host/.runtime/ark" \
     Rscript --vanilla "$script_dir/run-full-suite.R"
   run_step 02b-source-totals python3 - "$evidence/02-source-totals.json" <<'PY'
 import json, sys
@@ -159,23 +164,22 @@ PY
 fi
 run_step 03-source-verification Rscript --vanilla "$script_dir/verify-source-artifact.R" \
   "$pinned_artifact" "$repo"
-run_step 04-installed-audit bash "$script_dir/run-cycle4-final-audit.sh" \
-  --artifact "$pinned_artifact" --sha256 "$expected_sha" \
-  --audit-root "$audit_root/installed-audit" --evidence-dir "$evidence/installed-audit"
-run_step 04b-audit-completeness python3 - "$evidence/installed-audit" <<'PY'
-from pathlib import Path
-import sys
-root = Path(sys.argv[1])
-for phase in range(1, 23):
-    matches = list(root.glob(f"{phase:02}-*.log"))
-    if len(matches) != 1 or matches[0].stat().st_size == 0:
-        raise RuntimeError(f"missing or ambiguous audit phase {phase}: {matches}")
-if "SUMMARY failures=0" not in (root / "99-cleanup.log").read_text():
-    raise RuntimeError("installed audit cleanup did not pass")
-if "FINAL EVIDENCE INVENTORY COMPLETE" not in (root / "100-finalize-evidence.log").read_text():
-    raise RuntimeError("installed audit evidence was not finalized")
-print("All 22 installed audit phases, cleanup, and evidence finalization completed.")
-PY
+host_library="$audit_root/host-library"
+mkdir -- "$host_library"
+run_step 04-install-host-candidate R CMD INSTALL --library="$host_library" \
+  "$pinned_artifact"
+host_package="$host_library/alder"
+host_node="$repo/host/node_modules/node/bin/node"
+host_tsx="$repo/host/node_modules/tsx/dist/loader.mjs"
+run_step 04a-stage-host-native "$host_node" "$repo/host/scripts/stage-native.mjs" \
+  "$host_package/host"
+run_step 04b-installed-host-suite env \
+  ALDER_R_PACKAGE="$host_package" \
+  ALDER_NODE="$host_node" \
+  ALDER_ARK="$repo/host/.runtime/ark" \
+  ALDER_BROWSER_TEST=1 \
+  R_LIBS="$host_library" R_LIBS_USER="$host_library" \
+  "$host_node" --import "$host_tsx" --test host/test/*.test.ts
 run_step 05-package-check env ALDER_CHECK_ARTIFACT="$pinned_artifact" \
   ALDER_CHECK_EVIDENCE="$evidence/package-check" bash "$script_dir/run-package-check.sh"
 run_step 06-source-verification-final Rscript --vanilla "$script_dir/verify-source-artifact.R" \

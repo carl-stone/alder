@@ -1,10 +1,5 @@
 # Package-internal helpers shared across R/ modules.
 #
-# `%||%` is defined once here; other R/ files import it from utils without
-# redefining it. The standalone mirrored widget module
-# (inst/worker/ui-widgets.R) must NEVER use `%||%` from this file — it is
-# sourced in a private worker environment and must stay self-contained.
-
 `%||%` <- function(a, b) if (is.null(a)) b else a
 
 # A source revision is deliberately narrower than an arbitrary R number.  It
@@ -232,6 +227,45 @@ render_markdown_cell_output <- function(body) {
   list(kind = "markdown",
        html = render_markdown_fragment(body),
        text = paste(body, collapse = "\n"))
+}
+
+# Keep the original LSP payload intact while providing safely rendered help
+# for its standard Markdown, plaintext, and MarkedString content shapes.
+lsp_hover_html <- function(contents) {
+  render <- function(value) {
+    if (is.null(value)) return("")
+    if (is.character(value)) {
+      return(commonmark::markdown_html(paste(value, collapse = "\n"),
+                                       extensions = "table"))
+    }
+    if (!is.list(value)) return("")
+    if (is.character(value$value)) {
+      text <- paste(value$value, collapse = "\n")
+      if (identical(value$kind, "plaintext") || !is.null(value$language)) {
+        return(paste0("<pre><code>", export_html_escape(text), "</code></pre>"))
+      }
+      return(commonmark::markdown_html(text, extensions = "table"))
+    }
+    paste(vapply(value, render, ""), collapse = "\n")
+  }
+  html <- sanitize_markdown_html(render(contents),
+    allowed_tags = c(MD_ALLOWED_TAGS, "div", "span", "table", "thead",
+                     "tbody", "tfoot", "tr", "th", "td"),
+    unwrap_unknown = TRUE)
+  if (!nzchar(html)) return("")
+  doc <- xml2::read_html(paste0("<div>", html, "</div>"),
+                         options = c("RECOVER", "NOERROR", "NONET"))
+  # R's native help uses relative links such as sum.html. Alder does not serve
+  # that help tree; retain their labels without creating a misleading 404 link.
+  for (link in xml2::xml_find_all(doc, "//a[@href]")) {
+    href <- xml2::xml_attr(link, "href")
+    if (!grepl("^(https?|mailto):", href, ignore.case = TRUE)) {
+      xml2::xml_set_name(link, "span")
+      xml2::xml_set_attr(link, "href", NULL)
+    }
+  }
+  nodes <- xml2::xml_contents(xml2::xml_find_first(doc, "//div"))
+  paste0(vapply(nodes, as.character, ""), collapse = "")
 }
 
 # Client-visible md5 change token over the exact serialized notebook.

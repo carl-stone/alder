@@ -50,6 +50,10 @@ po/*~
 # RStudio Connect folder
 rsconnect/
 js/node_modules/
+host/node_modules/
+host/dist/
+host/.runtime/
+host/.release/
 .alder/
 
 # Local review runs: generated notebooks, logs, screenshots, traces and caches.

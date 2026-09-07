@@ -1,0 +1,2733 @@
+import type { AnalysisDiagnostic, CommandResult, HostEvent, HostSnapshot } from "../protocol.js";
+import { dependencyLevels, reachableNodes } from "../graph.js";
+import { BrowserNotebookClient } from "./client.js";
+import type { BrowserDocument, EditorSelection, LocalCell } from "./document.js";
+import { OutputRenderer } from "./output.js";
+import { notebookUrl, notebookViewUrl } from "./url.js";
+
+import type {
+  EditorHandle, EditorCompletionContext, EditorCompletion, EditorDiagnostic, EditorHover, EditorSignature,
+} from "./editor.js";
+
+declare global {
+  interface Window {
+    __alderEditors?: Map<string, EditorHandle>;
+    __alderHost?: { client: BrowserNotebookClient; view: NotebookView };
+    __alderObserveRender?: (phase: "start" | "end", version: number) => void;
+  }
+}
+
+interface CellView {
+  element: HTMLElement;
+  editor: EditorHandle | null;
+  fallback: HTMLTextAreaElement | null;
+  language: "r" | "markdown";
+  keymap: string;
+  diagnosticsVisibleAt: number;
+  diagnosticsTimer: number | null;
+  rendered: {
+    desiredBody: readonly string[];
+    desiredType: LocalCell["desiredType"];
+    server: LocalCell["server"];
+    id: string | null;
+    revision: number;
+    conflict: boolean;
+    tombstone: boolean;
+    index: number;
+    cellCount: number;
+    config: HostSnapshot["config"];
+    editorProjection: string;
+  } | null;
+}
+
+type DataflowPanelTab = "variables" | "dependencies" | "graph" | "outline";
+
+export class NotebookView {
+  private readonly notebook: HTMLElement;
+  private readonly status: HTMLElement | null;
+  private readonly path: HTMLElement | null;
+  private readonly views = new Map<string, CellView>();
+  private readonly keyByElement = new WeakMap<Element, string>();
+  private readonly editors = new Map<string, EditorHandle>();
+  private readonly editTimers = new Map<string, number>();
+  private autosaveTimer: number | null = null;
+  private readonly visibleKeys = new Set<string>();
+  private readonly observer: IntersectionObserver | null;
+  private readonly output: OutputRenderer;
+  private documentValue: BrowserDocument | null = null;
+  private actionError: string | null = null;
+  private actionNotice: string | null = null;
+  private transportError: string | null = null;
+  private editorHelpError: string | null = null;
+  private editorHelpRestarting = false;
+  private actionCount = 0;
+  private emptyBar: HTMLElement | null = null;
+  private appView = false;
+  private variableFilter = "";
+  private graphOrientation: "vertical" | "horizontal" = "vertical";
+  private graphZoom = 1;
+  private graphExpanded = false;
+  private panelOpen = true;
+  private panelTab: DataflowPanelTab = "variables";
+  private dataflowSignature = "";
+  private variablesSignature = "";
+  private variablesDirty = false;
+  private variablesProjectionFrame: number | null = null;
+  private variablesProjectionTimer: number | null = null;
+  private variableRows = new Map<string, HTMLButtonElement>();
+  private dependenciesSignature = "";
+  private outlineSignature = "";
+  private readonly outlineCells = new Map<string, string>();
+  private minimapSignature = "";
+  private configValue: HostSnapshot["config"] | null = null;
+  private editorDiagnosticsValue: HostSnapshot["editorDiagnostics"] | null = null;
+  private editorDiagnosticsVisible = false;
+  private editorDiagnosticsSourceCurrent = false;
+  private toolbarSignature = "";
+  private hostClosed = false;
+  private internalNavigation = false;
+  private statusSignature = "";
+  private cellActionsSignature = "";
+  private readonly dataflowStatuses = new Map<string, string>();
+  private readonly dataflowCells = new Map<string, string>();
+  private readonly graphNodes = new Map<string, SVGGElement>();
+  private minimapButtons = new Map<string, HTMLButtonElement>();
+  private minimapCurrent: string | null = null;
+  private minimapViewportFrame: number | null = null;
+  private readonly lspRequests = new Map<string, AbortController>();
+  private draggedKey: string | null = null;
+  private readonly resizeHandler = (): void => this.updateTopbarInset();
+  private readonly preserveRunFocus = (event: MouseEvent): void => {
+    if (event.button === 0 && event.target instanceof Element &&
+      event.target.closest("#run-all, .cell-head [data-act=run]")) event.preventDefault();
+  };
+  private readonly scrollHandler = (): void => this.scheduleMinimapViewport();
+
+  constructor(readonly client: BrowserNotebookClient, private readonly dom: Document = document) {
+    const notebook = dom.getElementById("notebook");
+    if (!notebook) throw new Error("Alder page is missing #notebook");
+    this.notebook = notebook;
+    this.status = dom.getElementById("status");
+    this.path = dom.getElementById("path");
+    this.appView = new URLSearchParams(location.search).get("view") === "app";
+    const panelPreference = loadPanelPreference(window);
+    this.panelOpen = panelPreference.open;
+    this.panelTab = panelPreference.tab;
+    const appLink = dom.getElementById("app-mode") as HTMLAnchorElement | null;
+    const editLink = dom.getElementById("edit-mode") as HTMLAnchorElement | null;
+    if (appLink) appLink.href = notebookViewUrl("app");
+    if (editLink) editLink.href = notebookViewUrl("editor");
+    dom.body.classList.toggle("app-view", this.appView);
+    window.__alderEditors = this.editors;
+    this.output = new OutputRenderer({
+      widget: (name, path, update) => client.setWidget(name, path, update, this.appView ? "app" : "editor"),
+      upload: async (name, path, files) => {
+        const encoded = await Promise.all(files.map(encodeFile));
+        await client.service("upload", {
+          name, path: [...path], files: encoded,
+          source: this.appView ? "app" : "editor",
+        });
+      },
+      lazy: (key) => client.requestLazy(key),
+      table: (request) => client.requestTable(request),
+      error: (error) => this.showError(error),
+      pageSize: () => configNumber(this.documentValue?.snapshot.config, ["table", "page_size"], 25),
+      widgetAvailable: (widget) => {
+        const owner = typeof widget.owner === "string" ? this.documentValue?.cell(widget.owner) : undefined;
+        const runtime = this.documentValue?.snapshot.runtime;
+        return owner?.server?.status === "done" && runtime?.executionReady === true && runtime.kernelAvailable === true;
+      },
+    });
+    this.observer = typeof IntersectionObserver === "function"
+      ? new IntersectionObserver((entries) => this.visibilityChanged(Array.from(entries)), {
+          root: null,
+          // Mount editors before a fast scroll makes them visible.
+          rootMargin: "1200px 0px",
+        })
+      : null;
+    this.bindToolbar();
+    // Pointer Run preserves the editor/caret; keyboard users can still focus it.
+    dom.addEventListener("mousedown", this.preserveRunFocus);
+    this.bindSettings();
+    this.bindNavigation();
+    this.bindDragAndDrop();
+    this.installServiceMenus();
+    this.applyPanelState();
+    this.updateTopbarInset();
+    window.requestAnimationFrame(() => this.updateTopbarInset());
+    window.addEventListener("resize", this.resizeHandler, { passive: true });
+  }
+
+  get document(): BrowserDocument | null { return this.documentValue; }
+  get allowsUnload(): boolean { return this.hostClosed || this.internalNavigation; }
+
+  setTransportState(state: "connecting" | "open" | "recovering" | "closed", error?: Error): void {
+    if (this.hostClosed) return;
+    this.transportError = state === "closed" && error ? error.message : state === "open" ? null : state === "connecting" ? "Connecting…" : "Recovering session…";
+    this.renderStatus();
+  }
+
+  render(
+    notebook: BrowserDocument,
+    event?: HostEvent,
+    localCellKeys?: readonly string[],
+  ): void {
+    this.documentValue = notebook;
+    const snapshot = notebook.snapshot;
+    if (event?.type === "service-errors" && snapshot.serviceErrors.lsp === undefined) {
+      this.editorHelpError = null;
+    }
+    window.__alderObserveRender?.("start", snapshot.version);
+    if (this.configValue !== snapshot.config) {
+      this.configValue = snapshot.config;
+      this.applyConfig(snapshot.config);
+    }
+    const path = snapshot.path || "untitled notebook";
+    if (this.path && this.path.textContent !== path) this.path.textContent = path;
+    const targetId = event && ["cell", "cell-started", "cell-output", "cell-completed", "diagnostics"].includes(event.type)
+      ? event.cellId : undefined;
+    const target = targetId ? notebook.cell(targetId) : undefined;
+    const deleted = event?.type === "cell" && isObject(event.payload) && event.payload.deleted === true;
+    const reconcileNotebook = event?.type === "notebook" && notebookRequiresCellReconcile(event.payload);
+    // Cell events carry a complete projection for one existing cell. Structural
+    // notebook events create/order views, so execution must not scan every view.
+    const canTarget = target !== undefined && this.views.has(target.key) && !deleted;
+    const localTargets = event === undefined && localCellKeys !== undefined
+      ? [...new Set(localCellKeys)].map((key) => notebook.cell(key))
+      : [];
+    const canTargetLocal = event === undefined && localCellKeys !== undefined
+      && localTargets.every((cell) => cell !== undefined && this.views.has(cell.key));
+    if (canTargetLocal) {
+      for (const cell of localTargets) {
+        if (cell !== undefined) this.renderCell(cell, notebook.cells.indexOf(cell), snapshot);
+      }
+    } else if (canTarget) {
+      this.renderCell(target, notebook.cells.indexOf(target), snapshot, event);
+    } else if (!event || event.type === "cell" || reconcileNotebook) {
+      const retained = new Set<string>();
+      notebook.cells.forEach((cell, index) => {
+        retained.add(cell.key);
+        this.renderCell(cell, index, snapshot, event);
+      });
+      for (const [key, view] of this.views) {
+        if (retained.has(key)) continue;
+        this.destroyCell(key, view);
+      }
+      this.reconcileOrder(notebook.cells);
+      this.renderEmpty(notebook.cells.length === 0);
+    }
+    this.renderControls(snapshot);
+    if (event?.type === "runtime") this.renderAllCellActions();
+    this.renderEditorDiagnostics(snapshot);
+    // Local editor input changes only desired source. Dataflow is authoritative
+    // server state and will be refreshed by the causally identified host cell
+    // event, so avoid serializing the whole graph on every keystroke.
+    if (!canTargetLocal) this.renderDataflow(snapshot, event);
+    this.renderStatus();
+    window.__alderObserveRender?.("end", snapshot.version);
+    if (event) {
+      window.dispatchEvent(new CustomEvent<HostEvent>("alder:host-event", { detail: event }));
+    }
+  }
+
+  destroy(): void {
+    for (const timer of this.editTimers.values()) window.clearTimeout(timer);
+    if (this.autosaveTimer !== null) window.clearTimeout(this.autosaveTimer);
+    for (const request of this.lspRequests.values()) request.abort();
+    this.lspRequests.clear();
+    for (const [key, view] of this.views) this.destroyCell(key, view);
+    this.views.clear();
+    this.observer?.disconnect();
+    window.removeEventListener("resize", this.resizeHandler);
+    this.dom.removeEventListener("mousedown", this.preserveRunFocus);
+    window.removeEventListener("scroll", this.scrollHandler);
+    if (this.minimapViewportFrame !== null) window.cancelAnimationFrame(this.minimapViewportFrame);
+    this.cancelVariablesProjection();
+  }
+
+  showError(error: unknown): void {
+    this.actionNotice = null;
+    this.actionError = error instanceof Error ? error.message : String(error);
+    this.renderStatus();
+  }
+
+  private createCell(cell: LocalCell): CellView {
+    const template = this.dom.getElementById("cell-tpl") as HTMLTemplateElement | null;
+    const element = template?.content.firstElementChild?.cloneNode(true) as HTMLElement | null ?? fallbackCell(this.dom);
+    if (this.appView) element.querySelectorAll<HTMLElement>("[data-editor-only]").forEach((node) => node.remove());
+    const view: CellView = {
+      element,
+      editor: null,
+      fallback: null,
+      language: cell.desiredType === "markdown" ? "markdown" : "r",
+      keymap: this.keymap(),
+      diagnosticsVisibleAt: 0,
+      diagnosticsTimer: null,
+      rendered: null,
+    };
+    this.views.set(cell.key, view);
+    this.keyByElement.set(element, cell.key);
+    this.bindCell(view, cell.key);
+    this.notebook.appendChild(element);
+    this.observer?.observe(element);
+    return view;
+  }
+
+  private renderCell(cell: LocalCell, index: number, snapshot: HostSnapshot, event?: HostEvent): void {
+    const view = this.views.get(cell.key) ?? this.createCell(cell);
+    this.stampOutputEvent(view.element, cell, event);
+    if (!this.cellNeedsRender(view, cell, snapshot, index)) return;
+    const editorProjection = JSON.stringify({
+      refs: cell.server?.refs ?? [],
+      diagnostics: this.visibleDiagnostics(cell.server?.diagnostics ?? [], cell),
+    });
+    const refreshEditor = view.rendered === null || view.rendered.desiredBody !== cell.desiredBody ||
+      view.rendered.desiredType !== cell.desiredType || view.rendered.id !== cell.id ||
+      view.rendered.config !== snapshot.config || view.rendered.editorProjection !== editorProjection;
+    this.updateCell(view, cell, refreshEditor);
+    view.rendered = {
+      desiredBody: cell.desiredBody, desiredType: cell.desiredType, server: cell.server,
+      id: cell.id, revision: cell.serverRevision, conflict: cell.conflict,
+      tombstone: cell.tombstone, index, cellCount: this.documentValue?.cells.length ?? 0,
+      config: snapshot.config, editorProjection,
+    };
+  }
+
+  private bindCell(view: CellView, key: string): void {
+    view.element.addEventListener("focusin", () => {
+      const previous = this.documentValue?.focusedKey;
+      if (previous && previous !== key) this.captureSelection(previous);
+      this.documentValue?.focus(key);
+      const cell = this.documentValue?.cell(key);
+      if (cell) this.renderCellActions(view.element, cell);
+      this.dependenciesSignature = "";
+      if (this.documentValue && this.panelActive("dependencies")) {
+        this.renderDependenciesProjection(this.documentValue.snapshot);
+      }
+    });
+    view.element.querySelector<HTMLSelectElement>("[data-role=type]")?.addEventListener("change", (event) => {
+      const type = (event.currentTarget as HTMLSelectElement).value === "markdown" ? "markdown" : "code";
+      const text = this.sourceText(key);
+      this.deferDiagnostics(key);
+      this.client.editCell(key, text, type);
+      this.scheduleEdit(key);
+    });
+    for (const button of Array.from(view.element.querySelectorAll<HTMLButtonElement>("button[data-act]"))) {
+      button.addEventListener("click", (event: MouseEvent) => {
+        event.preventDefault();
+        void this.cellAction(key, button, event).catch((error) => this.showError(error));
+      });
+    }
+  }
+
+  private cellNeedsRender(view: CellView, cell: LocalCell, snapshot: HostSnapshot, index: number): boolean {
+    const prior = view.rendered;
+    return prior === null || prior.desiredBody !== cell.desiredBody || prior.desiredType !== cell.desiredType ||
+      prior.server !== cell.server || prior.id !== cell.id || prior.revision !== cell.serverRevision ||
+      prior.conflict !== cell.conflict || prior.tombstone !== cell.tombstone || prior.index !== index ||
+      prior.cellCount !== this.documentValue?.cells.length || prior.config !== snapshot.config;
+  }
+
+  private async cellAction(key: string, button: HTMLButtonElement, input: MouseEvent): Promise<void> {
+    if (this.actionCount > 0) return;
+    const action = button.dataset.act;
+    if (action === "add") {
+      this.addCell(key, button.dataset.type === "markdown" ? "markdown" : "code");
+      return;
+    }
+    await this.action(async () => {
+      if (action === "run") {
+        this.cancelEditTimers();
+        await this.output.flush();
+        await this.client.runCell(key, input);
+        this.scheduleAutosave();
+      } else if (action === "delete") {
+        this.cancelEditTimer(key);
+        await this.client.deleteCell(key);
+        this.scheduleAutosave();
+      } else if (action === "disable") {
+        await this.client.commitEdits();
+        const cell = this.requireCell(key);
+        await this.client.setDisabled(key, cell.server?.status !== "disabled");
+        this.scheduleAutosave();
+      } else if (action === "move-up" || action === "move-down") {
+        await this.client.commitEdits();
+        const cells = [...this.requireDocument().cells];
+        const index = cells.findIndex((cell) => cell.key === key);
+        if (action === "move-up" && index > 0) await this.client.moveCell(key, index === 1 ? null : cells[index - 2]!.key);
+        if (action === "move-down" && index >= 0 && index < cells.length - 1) await this.client.moveCell(key, cells[index + 1]!.key);
+        this.scheduleAutosave();
+      } else if (action === "use-server") {
+        const cell = this.requireCell(key);
+        this.client.editCell(key, cell.serverBody, cell.serverType);
+      }
+    });
+  }
+
+  private addCell(after: string | null, type: "code" | "markdown"): void {
+    const cell = this.client.createCell(after, type, type === "markdown" ? ["# "] : []);
+    const focus = (): boolean => {
+      const view = this.views.get(cell.key);
+      if (view?.editor) { view.editor.focus(); return true; }
+      if (view?.fallback) { view.fallback.focus(); return true; }
+      return false;
+    };
+    if (!focus()) window.setTimeout(focus, 0);
+    this.scheduleEdit(cell.key);
+  }
+
+  private updateCell(view: CellView, cell: LocalCell, refreshEditor: boolean): void {
+    const server = cell.server;
+    const status = cell.tombstone ? "error" : server?.status ?? (cell.conflict ? "error" : "idle");
+    const element = view.element;
+    element.dataset.key = cell.key;
+    if (cell.id) element.dataset.cell = cell.id;
+    else delete element.dataset.cell;
+    element.dataset.revision = String(cell.serverRevision);
+    element.id = `cell-${safePart(cell.id ?? cell.key)}`;
+    element.className = `cell ${status}${cell.conflict ? " source-conflict" : ""}${cell.tombstone ? " tombstone" : ""}`;
+    element.style.contentVisibility = "auto";
+    element.style.containIntrinsicBlockSize = "300px";
+    const title = element.querySelector<HTMLElement>("[data-role=cell-title]");
+    const cellIndex = this.documentValue?.cells.findIndex((candidate) => candidate.key === cell.key) ?? -1;
+    if (title) {
+      const label = cell.tombstone ? `Deleted cell · ${cellName(server) || cell.id}`
+        : cell.id && server ? cellLabelAt(server, cellIndex) : "New cell";
+      if (title.textContent !== label) title.textContent = label;
+      title.title = cell.tombstone ? `Cell ${cell.id} was deleted on the server; this local draft is retained`
+        : cell.id ? `Stable ID ${cell.id}` : "Waiting to be saved";
+      title.id = `${element.id}-title`;
+      element.setAttribute("aria-labelledby", title.id);
+    }
+    element.dataset.cellIndex = String(cellIndex + 1);
+    element.dataset.cellName = cellName(server);
+    const badge = element.querySelector<HTMLElement>("[data-role=badge]");
+    if (badge) {
+      const label = cell.tombstone ? "deleted on server" : cell.conflict ? "source conflict" : status;
+      if (badge.textContent !== label) badge.textContent = label;
+      badge.className = `cell-badge ${cell.conflict ? "error" : status}`;
+    }
+    const type = element.querySelector<HTMLSelectElement>("[data-role=type]");
+    if (type && this.dom.activeElement !== type) type.value = cell.desiredType;
+    const sourceArea = element.querySelector<HTMLElement>("[data-role=source-area]");
+    sourceArea?.classList.toggle("md-area", cell.desiredType === "markdown");
+    sourceArea?.classList.toggle("code-area", cell.desiredType === "code");
+    if (this.shouldMountEditor(cell, view)) {
+      if (refreshEditor || (!view.editor && !view.fallback)) this.ensureEditor(view, cell);
+    } else if (refreshEditor || view.editor || view.fallback) {
+      this.unmountEditor(cell.key, view, cell);
+    }
+    const conflictChanged = !view.rendered || view.rendered.conflict !== cell.conflict || view.rendered.tombstone !== cell.tombstone;
+    if (refreshEditor || conflictChanged) this.renderDiagnostics(
+      element.querySelector<HTMLElement>("[data-role=diagnostics]"),
+      this.visibleDiagnostics(server?.diagnostics ?? [], cell),
+      cell,
+    );
+    const outputArea = this.outputArea(element);
+    this.output.render(outputArea, server?.outputs ?? [], server?.progress ?? null);
+    const retainedOutput = server?.outputsStale === true && Boolean(server.outputs.length);
+    outputArea.classList.toggle("retained-output", retainedOutput);
+    let retainedLabel = outputArea.querySelector<HTMLElement>(":scope > .retained-output-label");
+    if (retainedOutput && !retainedLabel) {
+      retainedLabel = elementNode(this.dom, "div", "retained-output-label", "Previous output — updating");
+      retainedLabel.setAttribute("role", "status");
+      outputArea.prepend(retainedLabel);
+    } else if (!retainedOutput) retainedLabel?.remove();
+    if (retainedOutput && retainedLabel) retainedLabel.textContent = server?.status === "running"
+      ? "Previous output — updating" : "Previous output — stale";
+    outputArea.hidden = !this.appView && !server?.outputs.length && !server?.progress;
+    outputArea.dataset.cell = cell.id ?? "";
+    outputArea.dataset.revision = String(cell.serverRevision);
+    this.renderLog(element.querySelector<HTMLElement>("[data-role=log]"), server?.log ?? [], server?.error);
+    this.renderCellActions(element, cell, status, undefined, true);
+    if (conflictChanged) this.renderConflict(element, cell);
+  }
+
+  private stampOutputEvent(element: HTMLElement, cell: LocalCell, event?: HostEvent): void {
+    if (!event || event.cellId !== cell.id || !["cell-output", "cell-completed", "cell-started"].includes(event.type)) return;
+    const output = this.outputArea(element);
+    output.dataset.eventCursor = String(event.cursor);
+    if (event.runId) output.dataset.runId = event.runId;
+    if (event.operationId) output.dataset.operationId = event.operationId;
+    if (typeof event.revision === "number") output.dataset.revision = String(event.revision);
+    if (typeof event.sequence === "number") output.dataset.sequence = String(event.sequence);
+  }
+
+  private renderCellActions(
+    element: HTMLElement,
+    cell: LocalCell,
+    status = cell.server?.status ?? "idle",
+    knownIndex?: number,
+    refreshLabels = false,
+  ): void {
+    const buttons = element.querySelectorAll<HTMLButtonElement>("button[data-act]");
+    const cells = this.documentValue?.cells ?? [];
+    const index = knownIndex ?? cells.findIndex((item) => item.key === cell.key);
+    buttons.forEach((button) => {
+      if (button.dataset.act === "run") setDisabled(button, this.actionCount > 0 || !this.executionAvailable() ||
+        this.documentValue?.snapshot.runtime.busy === true || this.documentValue?.snapshot.runtime.packageOperationActive === true);
+      else if (button.dataset.act === "move-up") setDisabled(button, this.actionCount > 0 || !cell.id || index <= 0);
+      else if (button.dataset.act === "move-down") setDisabled(button, this.actionCount > 0 || !cell.id || index < 0 || index >= cells.length - 1);
+      else if (button.dataset.act === "disable") {
+        setDisabled(button, this.actionCount > 0 || !cell.id);
+        const label = status === "disabled" ? "Enable" : "Disable";
+        if (button.textContent !== label) button.textContent = label;
+      } else setDisabled(button, this.actionCount > 0);
+    });
+    if (refreshLabels) {
+      const title = element.querySelector<HTMLElement>("[data-role=cell-title]");
+      const reorderHelp = element.querySelector<HTMLElement>("[data-role=reorder-help]");
+      if (reorderHelp) reorderHelp.id = `${element.id}-reorder-help`;
+      for (const direction of ["up", "down"] as const) {
+        const button = element.querySelector<HTMLButtonElement>(`[data-act=move-${direction}]`);
+        if (!button) continue;
+        button.setAttribute("aria-label", `Move ${title?.textContent || "cell"} ${direction}`);
+        if (reorderHelp) button.setAttribute("aria-describedby", reorderHelp.id);
+      }
+    }
+    const drag = element.querySelector<HTMLElement>("[data-role=drag-handle]");
+    if (drag) {
+      const available = this.actionCount === 0 && cell.id !== null && !cell.tombstone;
+      drag.draggable = available;
+      drag.classList.toggle("disabled", !available);
+    }
+  }
+
+  private renderAllCellActions(): void {
+    const runtime = this.documentValue?.snapshot.runtime;
+    const actionPending = this.actionCount > 0;
+    const signature = JSON.stringify({
+      actionPending,
+      runBlocked: actionPending || runtime?.busy === true || runtime?.packageOperationActive === true ||
+        runtime?.executionReady !== true || runtime?.kernelAvailable !== true,
+    });
+    if (signature === this.cellActionsSignature) return;
+    this.cellActionsSignature = signature;
+    const document = this.documentValue;
+    const cells = document?.cells ?? [];
+    const keys = this.observer
+      ? new Set([...this.visibleKeys, ...(document?.focusedKey ? [document.focusedKey] : [])])
+      : null;
+    cells.forEach((cell, index) => {
+      if (keys && !keys.has(cell.key)) return;
+      const view = this.views.get(cell.key);
+      if (!view) return;
+      const status = cell.tombstone ? "error" : cell.server?.status ?? (cell.conflict ? "error" : "idle");
+      this.renderCellActions(view.element, cell, status, index);
+    });
+  }
+
+  private ensureEditor(view: CellView, cell: LocalCell): void {
+    if (this.appView) return;
+    const source = view.element.querySelector<HTMLElement>("[data-role=source]");
+    if (!source) return;
+    const language = cell.desiredType === "markdown" ? "markdown" : "r";
+    const keymap = this.keymap();
+    if (view.editor && (view.language !== language || view.keymap !== keymap)) {
+      this.captureSelection(cell.key);
+      view.editor.destroy();
+      this.editors.delete(cell.key);
+      view.editor = null;
+      source.replaceChildren();
+    }
+    const text = cell.desiredBody.join("\n");
+    if (!view.editor && window.AlderEditor?.createEditor) {
+      source.replaceChildren();
+      view.editor = window.AlderEditor.createEditor({
+        parent: source,
+        doc: text,
+        language,
+        readOnly: false,
+        keymap,
+        completionsEnabled: this.preference("completions", true),
+        signatureHelpEnabled: this.preference("signature_help", true),
+        onChange: (next) => {
+          this.deferDiagnostics(cell.key);
+          this.client.editCell(cell.key, next);
+          this.captureSelection(cell.key);
+          this.scheduleEdit(cell.key);
+        },
+        onRun: (next) => {
+          this.cancelEditTimers();
+          void this.action(async () => {
+            if (this.requireCell(cell.key).tombstone) {
+              throw new Error("Restore this deleted cell as a new cell before running it");
+            }
+            await this.output.flush();
+            await this.client.runCell(cell.key);
+            this.scheduleAutosave();
+            if (next) this.focusAdjacentCell(cell.key, 1);
+          }).catch((error) => this.showError(error));
+        },
+        onRunAll: () => {
+          this.cancelEditTimers();
+          void this.action(async () => {
+            await this.output.flush();
+            await this.client.runAll(this.runScope());
+            this.scheduleAutosave();
+          }).catch((error) => this.showError(error));
+        },
+        onSave: () => void this.action(() => this.saveNotebook()).catch((error) => this.showError(error)),
+        onFormat: () => void this.action(() => this.client.formatCells([cell.key])).catch((error) => this.showError(error)),
+        onJump: (kind, value) => {
+          if (kind === "move") {
+            void this.action(() => this.moveCellBy(cell.key, value < 0 ? -1 : 1)).catch((error) => this.showError(error));
+          } else if (kind === "reference") this.jumpReactiveReference(cell, view.editor, value);
+        },
+        onHover: (_editor, position) => this.lspHover(cell, view.editor, position),
+        onSignature: (_editor, position, trigger) => this.lspSignature(cell, view.editor, position, trigger),
+      });
+      view.language = language;
+      view.keymap = keymap;
+      this.editors.set(cell.key, view.editor);
+      view.editor.setCompletionSource?.(language === "r"
+        ? (context) => this.lspCompletion(cell, view.editor, context)
+        : null);
+      if (cell.selection) {
+        const selection = cell.selection;
+        window.setTimeout(() => {
+          view.editor?.view?.dispatch?.({ selection: { anchor: selection.anchor, head: selection.head } });
+          if (selection.scrollTop !== undefined && view.editor?.view?.scrollDOM) {
+            view.editor.view.scrollDOM.scrollTop = selection.scrollTop;
+          }
+          if (this.documentValue?.focusedKey === cell.key) view.editor?.focus();
+        }, 0);
+      }
+    }
+    if (!view.editor && !view.fallback) {
+      source.replaceChildren();
+      const fallback = this.dom.createElement("textarea");
+      fallback.className = "source-fallback";
+      fallback.value = text;
+      fallback.setAttribute("aria-label", language === "r" ? "R source" : "Markdown source");
+      fallback.addEventListener("input", () => {
+        this.deferDiagnostics(cell.key);
+        this.client.editCell(cell.key, fallback.value);
+        this.scheduleEdit(cell.key);
+      });
+      source.appendChild(fallback);
+      view.fallback = fallback;
+      if (cell.selection) {
+        fallback.setSelectionRange(cell.selection.anchor, cell.selection.head);
+        fallback.scrollTop = cell.selection.scrollTop ?? 0;
+      }
+    }
+    const focused = source.contains(this.dom.activeElement);
+    if (view.editor && view.editor.getDoc() !== text) {
+      const previous = view.editor.getDoc();
+      const live = view.editor.view?.state?.selection?.main;
+      const selection = remapEditorSelection(previous, text, live ?? cell.selection);
+      const scrollTop = view.editor.view?.scrollDOM?.scrollTop ?? cell.selection?.scrollTop;
+      view.editor.setDoc(text, { silent: true });
+      if (selection && view.editor.view?.dispatch) {
+        view.editor.view.dispatch({ selection });
+        this.documentValue?.updateSelection(cell.key, { ...selection, scrollTop });
+      }
+      if (scrollTop !== undefined && view.editor.view?.scrollDOM) {
+        view.editor.view.scrollDOM.scrollTop = scrollTop;
+      }
+      if (focused) view.editor.focus();
+    }
+    if (view.fallback && view.fallback.value !== text) {
+      const backward = view.fallback.selectionDirection === "backward";
+      const selection = remapEditorSelection(view.fallback.value, text, {
+        anchor: backward ? view.fallback.selectionEnd : view.fallback.selectionStart,
+        head: backward ? view.fallback.selectionStart : view.fallback.selectionEnd,
+      });
+      const scrollTop = view.fallback.scrollTop;
+      view.fallback.value = text;
+      if (selection) {
+        view.fallback.setSelectionRange(
+          Math.min(selection.anchor, selection.head),
+          Math.max(selection.anchor, selection.head),
+          selection.anchor <= selection.head ? "forward" : "backward",
+        );
+        this.documentValue?.updateSelection(cell.key, { ...selection, scrollTop });
+      }
+      view.fallback.scrollTop = scrollTop;
+      if (focused) view.fallback.focus();
+    }
+    view.editor?.setCompletionsEnabled?.(this.preference("completions", true));
+    view.editor?.setSignatureHelpEnabled?.(this.preference("signature_help", true));
+    view.editor?.setReactiveRefs?.(reactiveReferenceRanges(cell, text, this.documentValue?.snapshot));
+    view.editor?.setDiagnostics?.(diagnosticsForEditor(this.visibleDiagnostics(cell.server?.diagnostics ?? [], cell), text));
+    view.element.style.removeProperty("min-height");
+  }
+
+  private shouldMountEditor(cell: LocalCell, view: CellView): boolean {
+    if (this.appView) return false;
+    if ((this.documentValue?.cells.length ?? 0) <= 40 || !this.observer) return true;
+    return this.visibleKeys.has(cell.key) || this.documentValue?.focusedKey === cell.key || view.element.contains(this.dom.activeElement);
+  }
+
+  private unmountEditor(key: string, view: CellView, cell: LocalCell): void {
+    if (this.appView) return;
+    if (!view.editor && !view.fallback) {
+      const source = view.element.querySelector<HTMLElement>("[data-role=source]");
+      const placeholder = source?.querySelector<HTMLElement>("[data-virtual-source]");
+      if (placeholder) placeholder.textContent = cell.desiredBody.join("\n");
+      else if (source) this.installPlaceholder(source, key, view, cell);
+      return;
+    }
+    if (this.documentValue?.focusedKey === key || view.element.contains(this.dom.activeElement)) return;
+    this.captureSelection(key);
+    // Retain the measured block height so destroying CodeMirror cannot move
+    // the page underneath a user who is scrolling a long notebook.
+    view.element.style.minHeight = `${Math.ceil(view.element.getBoundingClientRect().height)}px`;
+    view.editor?.destroy();
+    this.editors.delete(key);
+    view.editor = null;
+    view.fallback = null;
+    const source = view.element.querySelector<HTMLElement>("[data-role=source]");
+    if (source) this.installPlaceholder(source, key, view, cell);
+  }
+
+  private installPlaceholder(source: HTMLElement, key: string, view: CellView, cell: LocalCell): void {
+    const placeholder = element(this.dom, "pre", "source-placeholder", cell.desiredBody.join("\n"));
+    placeholder.dataset.virtualSource = "true";
+    placeholder.tabIndex = 0;
+    placeholder.setAttribute("aria-label", `${cell.desiredType === "markdown" ? "Markdown" : "R"} source; focus to edit`);
+    placeholder.addEventListener("focus", () => {
+      this.visibleKeys.add(key);
+      this.ensureEditor(view, cell);
+      window.setTimeout(() => {
+        if (view.editor) view.editor.focus();
+        else view.fallback?.focus();
+      }, 0);
+    }, { once: true });
+    source.replaceChildren(placeholder);
+  }
+
+  private visibilityChanged(entries: IntersectionObserverEntry[]): void {
+    const document = this.documentValue;
+    if (!document) return;
+    for (const entry of entries) {
+      const key = this.keyByElement.get(entry.target);
+      const view = key ? this.views.get(key) : undefined;
+      if (!key || !view) continue;
+      const cell = document.cell(key);
+      if (!cell) continue;
+      if (entry.isIntersecting) {
+        this.visibleKeys.add(key);
+        this.ensureEditor(view, cell);
+        this.renderCellActions(view.element, cell);
+      } else {
+        this.visibleKeys.delete(key);
+        if (document.cells.length > 40) this.unmountEditor(key, view, cell);
+      }
+    }
+  }
+
+  private outputArea(cell: HTMLElement): HTMLElement {
+    let output = cell.querySelector<HTMLElement>("[data-role=outputs]");
+    if (output) return output;
+    output = cell.querySelector<HTMLElement>("[data-role=output]");
+    if (!output) {
+      output = element(this.dom, "div", "output-area");
+      const log = cell.querySelector("[data-role=log]");
+      cell.insertBefore(output, log);
+    }
+    output.dataset.role = "outputs";
+    return output;
+  }
+
+  private visibleDiagnostics(diagnostics: readonly AnalysisDiagnostic[], cell?: LocalCell): AnalysisDiagnostic[] {
+    if (cell && !this.diagnosticsReady(cell)) return [];
+    if (this.preference("live_diagnostics", false)) return [...diagnostics];
+    return diagnostics.filter((diagnostic) => (diagnostic as AnalysisDiagnostic & { source?: string }).source !== "lsp");
+  }
+
+  private diagnosticsReady(cell: LocalCell): boolean {
+    const view = this.views.get(cell.key);
+    return this.diagnosticSourceCurrent(cell) && Date.now() >= (view?.diagnosticsVisibleAt ?? 0);
+  }
+
+  private diagnosticSourceCurrent(cell: LocalCell): boolean {
+    const server = cell.server;
+    if (!server || cell.conflict || cell.tombstone || cell.generation !== cell.acknowledgedGeneration ||
+      cell.serverRevision !== server.revision || cell.serverType !== server.type || cell.desiredType !== server.type) return false;
+    const source = server.body.join("\n");
+    if (cell.serverBody.join("\n") !== source || cell.desiredBody.join("\n") !== source) return false;
+    const editor = this.editors.get(cell.key);
+    return !editor || editor.getDoc() === source;
+  }
+
+  private deferDiagnostics(key: string): void {
+    const view = this.views.get(key);
+    if (!view) return;
+    view.diagnosticsVisibleAt = Date.now() + 1_000;
+    if (view.diagnosticsTimer !== null) window.clearTimeout(view.diagnosticsTimer);
+    view.rendered = null;
+    this.editorDiagnosticsValue = null;
+    view.diagnosticsTimer = window.setTimeout(() => {
+      view.diagnosticsTimer = null;
+      if (this.views.get(key) !== view || !this.documentValue?.cell(key)) return;
+      view.rendered = null;
+      this.editorDiagnosticsValue = null;
+      this.render(this.documentValue, undefined, [key]);
+    }, 1_000);
+  }
+
+  private renderDiagnostics(area: HTMLElement | null, diagnostics: readonly AnalysisDiagnostic[], cell: LocalCell): void {
+    if (!area) return;
+    area.replaceChildren();
+    if (cell.conflict && !cell.tombstone) area.appendChild(element(this.dom, "div", "diagnostic-error", "Source changed in another client. Review or use the server version."));
+    const list = this.dom.createElement("ul");
+    list.setAttribute("role", "status");
+    list.setAttribute("aria-live", "polite");
+    for (const diagnostic of diagnostics) {
+      const item = this.dom.createElement("li");
+      item.className = `diagnostic-${diagnostic.level ?? "error"}`;
+      item.textContent = `${diagnostic.code || diagnostic.level || "error"}: ${diagnostic.message}`;
+      list.appendChild(item);
+    }
+    area.appendChild(list);
+    area.hidden = diagnostics.length === 0 && (!cell.conflict || cell.tombstone);
+  }
+
+  private renderLog(area: HTMLElement | null, logs: readonly string[], rawError: unknown): void {
+    if (!area) return;
+    if (!logs.length && !rawError && area.childElementCount === 0) {
+      area.hidden = !this.appView;
+      return;
+    }
+    area.replaceChildren();
+    logs.forEach((line) => area.appendChild(element(this.dom, "div", /^Error\b/.test(line) ? "log-error" : "log-line", line)));
+    if (isObject(rawError)) {
+      const trace = Array.isArray(rawError.trace) ? rawError.trace.map(String) : [];
+      if (rawError.call || trace.length || rawError.class) {
+        const details = this.dom.createElement("details");
+        details.className = "error-details";
+        details.appendChild(element(this.dom, "summary", "", "Call and traceback"));
+        details.appendChild(element(this.dom, "pre", "error-trace", [
+          rawError.class ? `Condition: ${Array.isArray(rawError.class) ? rawError.class.join(", ") : String(rawError.class)}` : "",
+          rawError.call ? `Call: ${String(rawError.call)}` : "",
+          trace.length ? `Traceback:\n${trace.map((line, index) => `${index + 1}. ${line}`).join("\n")}` : "",
+        ].filter(Boolean).join("\n")));
+        area.appendChild(details);
+      }
+    }
+    area.hidden = !this.appView && area.childElementCount === 0;
+  }
+
+  private renderConflict(element: HTMLElement, cell: LocalCell): void {
+    const actions = element.querySelector<HTMLElement>("[data-role=cell-actions]");
+    actions?.querySelectorAll("[data-recovery]").forEach((node) => node.remove());
+    element.querySelector("[data-tombstone-message]")?.remove();
+    actions?.querySelectorAll<HTMLElement>("[data-act]").forEach((node) => { node.hidden = cell.tombstone; });
+    if (!actions) return;
+    if (cell.tombstone) {
+      const message = elementNode(this.dom, "div", "tombstone-message",
+        "This cell was deleted in another client. Your local draft is still here. Restore it as a new cell or discard it.");
+      message.dataset.tombstoneMessage = "true";
+      message.setAttribute("role", "alert");
+      const source = element.querySelector("[data-role=source-area]");
+      element.insertBefore(message, source);
+
+      const restore = elementNode(this.dom, "button", "btn mini", "Restore as new cell") as HTMLButtonElement;
+      restore.type = "button";
+      restore.dataset.recovery = "true";
+      restore.addEventListener("click", () => {
+        this.cancelEditTimer(cell.key);
+        void this.action(async () => {
+          await this.client.restoreDeletedCell(cell.key);
+          this.scheduleAutosave();
+        }).catch((error) => this.showError(error));
+      });
+      const discard = elementNode(this.dom, "button", "btn mini", "Discard local draft") as HTMLButtonElement;
+      discard.type = "button";
+      discard.dataset.recovery = "true";
+      discard.addEventListener("click", () => {
+        this.cancelEditTimer(cell.key);
+        this.client.discardLocalCell(cell.key);
+      });
+      actions.append(restore, discard);
+      return;
+    }
+    if (!cell.conflict) return;
+    const button = elementNode(this.dom, "button", "btn mini", "Use server version") as HTMLButtonElement;
+    button.type = "button";
+    button.dataset.recovery = "true";
+    button.addEventListener("click", () => {
+      this.client.useServerVersion(cell.key);
+    });
+    actions.appendChild(button);
+  }
+
+  private reconcileOrder(cells: readonly LocalCell[]): void {
+    let cursor = this.notebook.querySelector(":scope > .cell");
+    for (const cell of cells) {
+      const element = this.views.get(cell.key)?.element;
+      if (!element) continue;
+      if (cursor === element) cursor = element.nextElementSibling;
+      else {
+        this.notebook.insertBefore(element, cursor);
+        cursor = element.nextElementSibling;
+      }
+    }
+  }
+
+  private renderEmpty(empty: boolean): void {
+    if (!this.emptyBar) {
+      const template = this.dom.getElementById("empty-bar") as HTMLTemplateElement | null;
+      this.emptyBar = template?.content.firstElementChild?.cloneNode(true) as HTMLElement | null ?? element(this.dom, "div", "empty-bar");
+      for (const button of Array.from(this.emptyBar.querySelectorAll<HTMLButtonElement>("button[data-act=add]"))) {
+        button.addEventListener("click", () => this.addCell(null, button.dataset.type === "markdown" ? "markdown" : "code"));
+      }
+    }
+    if (this.appView) this.emptyBar.remove();
+    else if (!this.emptyBar.isConnected) this.notebook.appendChild(this.emptyBar);
+    const message = this.emptyBar.querySelector<HTMLElement>(".empty-message");
+    if (message) message.hidden = !empty;
+  }
+
+  private renderControls(snapshot: HostSnapshot): void {
+    const busy = snapshot.runtime.busy;
+    const available = !this.hostClosed && snapshot.runtime.executionReady && snapshot.runtime.kernelAvailable;
+    const signature = JSON.stringify({
+      actionCount: this.actionCount,
+      hostClosed: this.hostClosed,
+      busy,
+      available,
+      packageOperationActive: snapshot.runtime.packageOperationActive,
+      executionMode: snapshot.runtime.executionMode,
+      kernelAvailable: snapshot.runtime.kernelAvailable,
+      changed: snapshot.changed,
+    });
+    if (signature === this.toolbarSignature) return;
+    this.toolbarSignature = signature;
+    const runtime = this.dom.getElementById("runtime-select") as HTMLSelectElement | null;
+    if (runtime && this.dom.activeElement !== runtime && runtime.value !== snapshot.runtime.executionMode) runtime.value = snapshot.runtime.executionMode;
+    if (runtime) setDisabled(runtime, this.hostClosed || this.actionCount > 0);
+    const runAll = this.dom.getElementById("run-all") as HTMLButtonElement | null;
+    if (runAll) {
+      const label = snapshot.runtime.executionMode === "lazy" ? "Run stale" : "Run all";
+      if (runAll.textContent !== label) runAll.textContent = label;
+      setDisabled(runAll, this.actionCount > 0 || busy || snapshot.runtime.packageOperationActive || !available);
+    }
+    const stop = this.dom.getElementById("stop") as HTMLButtonElement | null;
+    if (stop) setDisabled(stop, this.hostClosed || this.actionCount > 0 || !busy);
+    const restart = this.dom.getElementById("restart") as HTMLButtonElement | null;
+    if (restart) {
+      restart.hidden = snapshot.runtime.kernelAvailable;
+      setDisabled(restart, this.hostClosed || this.actionCount > 0 || busy);
+    }
+    const save = this.dom.getElementById("save") as HTMLButtonElement | null;
+    if (save) setDisabled(save, this.hostClosed || this.actionCount > 0 || !snapshot.changed);
+    const shutdown = this.dom.getElementById("shutdown") as HTMLButtonElement | null;
+    if (shutdown) {
+      setDisabled(shutdown, this.hostClosed || this.actionCount > 0);
+      shutdown.title = "Shut down this notebook host";
+    }
+  }
+
+  private renderDataflow(snapshot: HostSnapshot, event?: HostEvent): void {
+    if (this.appView) return;
+    if (!event || event.cellId) this.patchDataflowStatuses(snapshot, event?.cellId);
+    // Notebook messages carry source/order/config state. Structural changes
+    // update the always-visible minimap immediately; graph layout still waits
+    // for the controller's separate full graph projection.
+    if (event?.type === "notebook") {
+      if (isObject(event.payload) && (
+        (Array.isArray(event.payload.created) && event.payload.created.length > 0)
+        || typeof event.payload.deleted === "string"
+        || typeof event.payload.moved === "string"
+      )) this.renderMinimapProjection(snapshot);
+      return;
+    }
+    if (event?.type === "variables") {
+      this.variablesDirty = true;
+      this.scheduleVariablesProjection();
+      return;
+    }
+    if (event?.type === "runtime") {
+      if (snapshot.runtime.busy) {
+        this.cancelVariablesProjection(false);
+        if (this.variablesDirty && this.panelActive("variables")) {
+          this.dom.getElementById("panel-variables")?.setAttribute("aria-busy", "true");
+        }
+      } else if (this.variablesDirty) {
+        this.scheduleVariablesProjection();
+      }
+      return;
+    }
+    if (event?.type === "cell" && event.cellId) {
+      this.patchDataflowCellLabel(snapshot, event.cellId);
+      this.renderOutlineProjection(snapshot, event.cellId);
+      if (snapshot.cells.length !== this.minimapButtons.size || !this.minimapButtons.has(event.cellId)) {
+        this.renderMinimapProjection(snapshot);
+      }
+      if (!this.dataflowCellChanged(snapshot, event.cellId)) return;
+      this.variablesDirty = true;
+      this.scheduleVariablesProjection();
+      if (this.panelActive("dependencies")) this.renderDependenciesProjection(snapshot);
+      return;
+    }
+    if (event && [
+      "receipt", "cell-started", "cell-output", "cell-completed", "diagnostics",
+      "editor-diagnostics", "service-errors", "operation", "service-error",
+    ].includes(event.type)) return;
+    if (!event) {
+      this.captureDataflowCells(snapshot);
+      this.renderVariablesProjection(snapshot);
+      this.renderDependenciesProjection(snapshot);
+      this.renderGraphProjection(snapshot);
+      this.renderOutlineProjection(snapshot);
+      this.renderMinimapProjection(snapshot);
+      return;
+    }
+    // Graph events follow source/structure transactions. Reconcile the always
+    // visible minimap, while expensive panel layouts stay lazy until visible.
+    if (event.type === "graph") {
+      this.variablesDirty = true;
+      this.scheduleVariablesProjection();
+    }
+    this.renderMinimapProjection(snapshot);
+    if (this.panelActive("dependencies")) this.renderDependenciesProjection(snapshot);
+    if (this.panelActive("graph")) this.renderGraphProjection(snapshot);
+    if (this.panelActive("outline")) this.renderOutlineProjection(snapshot);
+  }
+
+  private panelActive(tab: DataflowPanelTab): boolean {
+    return this.panelOpen && this.panelTab === tab;
+  }
+
+  private renderDependenciesProjection(snapshot: HostSnapshot): void {
+    const focused = this.documentValue?.focusedKey;
+    const focusedCell = focused ? this.documentValue?.cell(focused)?.server : snapshot.cells[0];
+    const dependenciesSignature = JSON.stringify({
+      graph: snapshot.graph,
+      focused,
+      cell: focusedCell ? {
+        id: focusedCell.id, defs: focusedCell.defs, refs: focusedCell.refs,
+        options: focusedCell.options,
+      } : null,
+      labels: snapshot.cells.map((cell) => ({ id: cell.id, name: cell.options.name, defs: cell.defs })),
+    });
+    if (dependenciesSignature !== this.dependenciesSignature) {
+      this.dependenciesSignature = dependenciesSignature;
+      this.renderDependencies(snapshot);
+    }
+  }
+
+  private renderGraphProjection(snapshot: HostSnapshot): void {
+    const signature = JSON.stringify({ graph: snapshot.graph, orientation: this.graphOrientation });
+    if (signature === this.dataflowSignature) return;
+    this.dataflowSignature = signature;
+    this.renderGraph(snapshot);
+    window.requestAnimationFrame(() => this.updateTopbarInset());
+  }
+
+  private renderOutlineProjection(snapshot: HostSnapshot, cellId?: string): void {
+    if (cellId !== undefined) {
+      const cell = snapshot.cells.find((candidate) => candidate.id === cellId);
+      const signature = cell ? outlineCellSignature(cell) : "";
+      if (this.outlineCells.get(cellId) === signature) return;
+      if (cell) this.outlineCells.set(cellId, signature);
+      else this.outlineCells.delete(cellId);
+    } else {
+      const signature = JSON.stringify(snapshot.cells.map((cell) => [cell.id, outlineCellSignature(cell)]));
+      if (signature === this.outlineSignature) return;
+      this.outlineSignature = signature;
+      this.outlineCells.clear();
+      for (const cell of snapshot.cells) this.outlineCells.set(cell.id, outlineCellSignature(cell));
+    }
+    this.renderOutline(snapshot);
+  }
+
+  private renderMinimapProjection(snapshot: HostSnapshot): void {
+    const signature = JSON.stringify(snapshot.cells.map((cell) => cell.id));
+    if (signature === this.minimapSignature) return;
+    this.minimapSignature = signature;
+    this.renderMinimap(snapshot);
+  }
+
+  private renderVariablesProjection(snapshot: HostSnapshot): void {
+    const signature = JSON.stringify({
+      variables: snapshot.variables,
+      labels: snapshot.cells.map((cell) => ({ id: cell.id, name: cell.options.name })),
+      filter: this.variableFilter,
+    });
+    this.variablesDirty = false;
+    this.dom.getElementById("panel-variables")?.removeAttribute("aria-busy");
+    if (signature !== this.variablesSignature) {
+      this.variablesSignature = signature;
+      this.renderVariables(snapshot);
+    }
+  }
+
+  private scheduleVariablesProjection(): void {
+    if (!this.variablesDirty || !this.panelActive("variables") || !this.documentValue
+      || this.documentValue.snapshot.runtime.busy) return;
+    this.cancelVariablesProjection(false);
+    this.dom.getElementById("panel-variables")?.setAttribute("aria-busy", "true");
+    // Let the rendered cell result and its assistive announcement reach a
+    // paint before the optional environment sidebar reconciles a large list.
+    this.variablesProjectionFrame = window.requestAnimationFrame(() => {
+      this.variablesProjectionFrame = window.requestAnimationFrame(() => {
+        this.variablesProjectionFrame = null;
+        this.variablesProjectionTimer = window.setTimeout(() => {
+          this.variablesProjectionTimer = null;
+          const document = this.documentValue;
+          if (!document || !this.panelActive("variables") || document.snapshot.runtime.busy) return;
+          this.renderVariablesProjection(document.snapshot);
+        }, 0);
+      });
+    });
+  }
+
+  private cancelVariablesProjection(clearBusy = true): void {
+    if (this.variablesProjectionFrame !== null) window.cancelAnimationFrame(this.variablesProjectionFrame);
+    if (this.variablesProjectionTimer !== null) window.clearTimeout(this.variablesProjectionTimer);
+    this.variablesProjectionFrame = null;
+    this.variablesProjectionTimer = null;
+    if (clearBusy) this.dom.getElementById("panel-variables")?.removeAttribute("aria-busy");
+  }
+
+  private dataflowCellChanged(snapshot: HostSnapshot, id: string): boolean {
+    const cell = snapshot.cells.find((candidate) => candidate.id === id);
+    if (cell === undefined) {
+      const existed = this.dataflowCells.delete(id);
+      this.dataflowStatuses.delete(id);
+      return existed;
+    }
+    const signature = dataflowCellSignature(cell);
+    const changed = this.dataflowCells.get(id) !== signature;
+    this.dataflowCells.set(id, signature);
+    return changed;
+  }
+
+  private captureDataflowCells(snapshot: HostSnapshot): void {
+    const retained = new Set(snapshot.cells.map((cell) => cell.id));
+    for (const id of this.dataflowCells.keys()) {
+      if (!retained.has(id)) this.dataflowCells.delete(id);
+    }
+    for (const cell of snapshot.cells) this.dataflowCells.set(cell.id, dataflowCellSignature(cell));
+  }
+
+  private patchDataflowStatuses(snapshot: HostSnapshot, cellId?: string): void {
+    if (cellId === undefined) {
+      const currentIds = new Set(snapshot.cells.map((cell) => cell.id));
+      for (const id of this.dataflowStatuses.keys()) {
+        if (!currentIds.has(id)) this.dataflowStatuses.delete(id);
+      }
+    }
+    const targeted = cellId === undefined
+      ? snapshot.cells
+      : [this.documentValue?.cell(cellId)?.server ?? snapshot.cells.find((cell) => cell.id === cellId)].filter((cell): cell is HostSnapshot["cells"][number] => cell !== undefined && cell !== null);
+    const cells = targeted.filter((cell) => this.dataflowStatuses.get(cell.id) !== cell.status);
+    for (const cell of cells) {
+      this.dataflowStatuses.set(cell.id, cell.status);
+      const graph = this.graphNodes.get(cell.id);
+      if (graph) {
+        graph.setAttribute("class", `dag-node status-${cell.status}${snapshot.graph.cycles.includes(cell.id) ? " cycle" : ""}`);
+        const status = graph.querySelector(".dag-node-status");
+        if (status) status.textContent = cell.status;
+      }
+      const minimap = this.minimapButtons.get(cell.id);
+      if (minimap) {
+        minimap.className = `minimap-cell status-${cell.status}${this.minimapCurrent === cell.id ? " in-viewport" : ""}`;
+        minimap.title = `${minimap.dataset.cellLabel ?? cell.id} — ${cell.status} — stable ID ${cell.id}`;
+        minimap.setAttribute("aria-label", minimap.title);
+      }
+    }
+  }
+
+  private patchDataflowCellLabel(snapshot: HostSnapshot, cellId: string): void {
+    const index = snapshot.cells.findIndex((candidate) => candidate.id === cellId);
+    const cell = snapshot.cells[index];
+    if (!cell) return;
+    const label = cellLabelAt(cell, index);
+    const graph = this.graphNodes.get(cellId);
+    const graphLabel = graph?.querySelector("text:not(.dag-node-status)");
+    if (graphLabel && graphLabel.textContent !== truncate(label, 18)) graphLabel.textContent = truncate(label, 18);
+    const graphAria = `Go to ${label}${snapshot.graph.cycles.includes(cellId) ? "; dependency cycle" : ""}`;
+    if (graph?.getAttribute("aria-label") !== graphAria) graph?.setAttribute("aria-label", graphAria);
+    const minimap = this.minimapButtons.get(cellId);
+    if (minimap && minimap.dataset.cellLabel !== label) {
+      minimap.dataset.cellLabel = label;
+      minimap.title = `${label} — ${cell.status} — stable ID ${cell.id}`;
+      minimap.setAttribute("aria-label", minimap.title);
+    }
+  }
+
+  private renderVariables(snapshot: HostSnapshot): void {
+    const panel = this.dom.getElementById("panel-variables");
+    if (!panel) return;
+    let filter = panel.querySelector<HTMLInputElement>(".panel-filter");
+    if (!filter) {
+      filter = this.dom.createElement("input");
+      filter.type = "search";
+      filter.className = "panel-filter";
+      filter.placeholder = "Filter variables";
+      filter.setAttribute("aria-label", "Filter variables");
+      filter.addEventListener("input", () => {
+        this.variableFilter = filter!.value;
+        this.variablesSignature = "";
+        this.variablesDirty = true;
+        this.scheduleVariablesProjection();
+      });
+      panel.appendChild(filter);
+    }
+    if (this.dom.activeElement !== filter) filter.value = this.variableFilter;
+    let list = panel.querySelector<HTMLElement>(".variable-list");
+    if (!list) {
+      list = element(this.dom, "div", "variable-list");
+      panel.appendChild(list);
+    }
+    const query = this.variableFilter.trim().toLocaleLowerCase();
+    const variables = snapshot.variables
+      .filter(({ name }) => !query || name.toLocaleLowerCase().includes(query));
+    const labels = new Map(snapshot.cells.map((cell, index) => [cell.id, cellLabelAt(cell, index)]));
+    const active = this.dom.activeElement;
+    const activeNavigationKey = active instanceof Element && list.contains(active)
+      ? active.closest<HTMLElement>("[data-navigation-key]")?.dataset.navigationKey
+      : undefined;
+    const retained = new Set<string>();
+    const rows = variables.map((variable) => {
+      const key = JSON.stringify([variable.name, variable.owner ?? ""]);
+      retained.add(key);
+      let row = this.variableRows.get(key);
+      if (!row) {
+        row = this.panelButton(variable.name, variable.owner ?? "", "variable-row", undefined, ["variable", variable.name]);
+        this.variableRows.set(key, row);
+      }
+      const dimensions = variable.dim?.length ? variable.dim.join("×") : "";
+      const ownerLabel = variable.owner ? labels.get(variable.owner) ?? variable.owner : "";
+      const signature = JSON.stringify({
+        name: variable.name,
+        owner: variable.owner,
+        class: variable.class,
+        dimensions,
+        size: variable.size,
+        ownerLabel,
+        valueSummary: variable.valueSummary,
+        widget: variable.widget,
+      });
+      if (row.dataset.variableSignature !== signature) {
+        row.dataset.variableSignature = signature;
+        if (variable.owner) row.dataset.targetCell = variable.owner;
+        else delete row.dataset.targetCell;
+        row.disabled = !variable.owner;
+        const title = element(this.dom, "span", "variable-name", variable.name);
+        const meta = element(this.dom, "span", "variable-meta", [
+          variable.class,
+          dimensions,
+          formatBytes(variable.size),
+          ownerLabel,
+        ].filter(Boolean).join(" · "));
+        row.replaceChildren(title, meta);
+        if (variable.valueSummary) row.appendChild(element(this.dom, "span", "variable-summary", variable.valueSummary));
+        if (variable.widget) row.appendChild(element(this.dom, "span", "panel-tag", "widget"));
+      }
+      return row;
+    });
+    for (const [key, row] of this.variableRows) {
+      if (retained.has(key)) continue;
+      row.remove();
+      this.variableRows.delete(key);
+    }
+    if (!rows.length) {
+      const message = query ? "No variables match this filter." : "Run a cell to inspect its variables.";
+      const empty = list.querySelector<HTMLElement>(":scope > .panel-empty");
+      if (empty && list.childElementCount === 1) {
+        if (empty.textContent !== message) empty.textContent = message;
+      } else {
+        list.replaceChildren(element(this.dom, "p", "panel-empty", message));
+      }
+      return;
+    }
+    rows.forEach((row, index) => {
+      const current = list.children.item(index);
+      if (current !== row) list.insertBefore(row, current);
+    });
+    while (list.childElementCount > rows.length) list.lastElementChild?.remove();
+    const currentActive = this.dom.activeElement;
+    if (activeNavigationKey && !(currentActive instanceof Element && list.contains(currentActive))) {
+      Array.from(list.querySelectorAll<HTMLButtonElement>("[data-navigation-key]"))
+        .find((row) => row.dataset.navigationKey === activeNavigationKey)
+        ?.focus({ preventScroll: true });
+    }
+  }
+
+  private renderEditorDiagnostics(snapshot: HostSnapshot): void {
+    const section = this.dom.getElementById("editor-diagnostics");
+    const area = this.dom.getElementById("editor-diagnostics-list");
+    if (!section || !area) return;
+    const visible = this.preference("live_diagnostics", false);
+    const sourceCurrent = visible && (this.documentValue?.cells.every((cell) => this.diagnosticsReady(cell)) ?? false);
+    if (this.editorDiagnosticsValue === snapshot.editorDiagnostics &&
+      this.editorDiagnosticsVisible === visible &&
+      this.editorDiagnosticsSourceCurrent === sourceCurrent) return;
+    this.editorDiagnosticsValue = snapshot.editorDiagnostics;
+    this.editorDiagnosticsVisible = visible;
+    this.editorDiagnosticsSourceCurrent = sourceCurrent;
+    const diagnostics = sourceCurrent ? this.visibleDiagnostics(snapshot.editorDiagnostics[".document"] ?? []) : [];
+    const list = this.dom.createElement("ul");
+    list.setAttribute("role", "status");
+    list.setAttribute("aria-live", "polite");
+    for (const diagnostic of diagnostics) {
+      const item = this.dom.createElement("li");
+      item.className = `diagnostic-${diagnostic.level ?? "error"}`;
+      const level = diagnostic.level ?? "error";
+      const label = `${level.charAt(0).toUpperCase()}${level.slice(1)}`;
+      item.textContent = `${label} · ${diagnostic.code || level}: ${diagnostic.message}`;
+      list.appendChild(item);
+    }
+    area.replaceChildren(list);
+    section.hidden = this.appView || diagnostics.length === 0;
+  }
+
+  private renderDependencies(snapshot: HostSnapshot): void {
+    const panel = this.dom.getElementById("panel-dependencies");
+    if (!panel) return;
+    const focused = this.documentValue?.focusedKey;
+    const cell = focused ? this.documentValue?.cell(focused)?.server : snapshot.cells[0];
+    if (!cell) {
+      this.replaceNavigationChildren(panel, [element(this.dom, "p", "panel-empty", "Focus a cell to inspect its dataflow.")]);
+      return;
+    }
+    const owner = new Map<string, string>();
+    const labels = new Map(snapshot.cells.map((candidate, index) => [candidate.id, cellLabelAt(candidate, index)]));
+    snapshot.cells.forEach((candidate) => candidate.defs.forEach((name) => { if (!owner.has(name)) owner.set(name, candidate.id); }));
+    const ancestors = reachableNodes(snapshot.graph.edges, cell.id);
+    const descendants = reachableNodes(snapshot.graph.reverseEdges, cell.id);
+    const title = element(this.dom, "div", "focused-cell", cellName(cell) || cell.id);
+    title.dataset.navigationKey = JSON.stringify(["focused-cell", cell.id]);
+    this.replaceNavigationChildren(panel, [
+      title,
+      this.dependencySection("References", cell.refs.map((name) => ({ id: owner.get(name) ?? null, label: owner.has(name) ? `${name} ← ${labels.get(owner.get(name)!) ?? owner.get(name)!}` : name })), "No direct references."),
+      this.dependencySection("Definitions", cell.defs.map((name) => ({ id: cell.id, label: name })), "No definitions."),
+      this.dependencySection("Ancestors", ancestors.map((id) => ({ id, label: labels.get(id) ?? id })), "No ancestors."),
+      this.dependencySection("Descendants", descendants.map((id) => ({ id, label: labels.get(id) ?? id })), "No descendants."),
+    ]);
+  }
+
+  private dependencySection(title: string, items: readonly { id: string | null; label: string }[], empty: string): HTMLElement {
+    const section = element(this.dom, "section", "dependency-section");
+    section.dataset.navigationKey = JSON.stringify(["dependency-section", title]);
+    section.appendChild(element(this.dom, "h3", "", title));
+    if (!items.length) section.appendChild(element(this.dom, "p", "panel-empty", empty));
+    else {
+      const list = element(this.dom, "div", "dependency-list");
+      list.append(...items.map((item) => {
+        if (item.id) return this.panelButton(item.label, item.id);
+        const unresolved = element(this.dom, "button", "panel-link", item.label) as HTMLButtonElement;
+        unresolved.type = "button";
+        unresolved.disabled = true;
+        unresolved.title = "No defining cell is available";
+        return unresolved;
+      }));
+      section.appendChild(list);
+    }
+    return section;
+  }
+
+  private renderGraph(snapshot: HostSnapshot): void {
+    const panel = this.dom.getElementById("panel-graph");
+    if (!panel) return;
+    this.graphNodes.clear();
+    const nodes = snapshot.graph.nodes;
+    const labels = new Map(snapshot.cells.map((cell, index) => [cell.id, cellLabelAt(cell, index)]));
+    const toolbar = element(this.dom, "div", "graph-toolbar");
+    toolbar.appendChild(element(this.dom, "span", "graph-direction-note", this.graphOrientation === "vertical" ? "Dependencies flow down" : "Dependencies flow right"));
+    const direction = this.graphButton(this.graphOrientation === "vertical" ? "Horizontal" : "Vertical", "orientation", () => {
+      this.graphOrientation = this.graphOrientation === "vertical" ? "horizontal" : "vertical";
+      this.dataflowSignature = "";
+      this.renderGraphProjection(snapshot);
+    }, this.graphOrientation === "vertical" ? "Switch to a left-to-right dependency layout" : "Switch to a top-to-bottom dependency layout");
+    direction.dataset.graphOrientation = this.graphOrientation;
+    const zoomOut = this.graphButton("−", "zoom-out", () => this.setGraphZoom(this.graphZoom - 0.2), "Zoom dependency graph out");
+    const zoomIn = this.graphButton("+", "zoom-in", () => this.setGraphZoom(this.graphZoom + 0.2), "Zoom dependency graph in");
+    const fit = this.graphButton("Fit", "fit", () => this.fitGraphCanvas(), "Fit the dependency graph in the viewport");
+    const reset = this.graphButton("100%", "reset", () => this.setGraphZoom(1), "Reset dependency graph to readable size");
+    const expand = this.graphButton(this.graphExpanded ? "Collapse" : "Expand", "expand", () => {
+      this.graphExpanded = !this.graphExpanded;
+      this.dom.getElementById("dataflow-panel")?.classList.toggle("graph-expanded", this.graphExpanded);
+      this.renderGraph(snapshot);
+    }, this.graphExpanded ? "Collapse the dependency graph panel" : "Expand the dependency graph panel");
+    expand.setAttribute("aria-pressed", String(this.graphExpanded));
+    const zoomStatus = element(this.dom, "span", "graph-zoom-status", `${Math.round(this.graphZoom * 100)}%`);
+    zoomStatus.dataset.navigationKey = "graph-zoom-status";
+    zoomStatus.dataset.graphZoomStatus = "true";
+    zoomStatus.setAttribute("role", "status");
+    zoomStatus.setAttribute("aria-live", "polite");
+    toolbar.dataset.navigationKey = "graph-toolbar";
+    toolbar.append(direction, zoomOut, zoomIn, fit, reset, expand, zoomStatus);
+    if (!nodes.length) {
+      this.replaceNavigationChildren(panel, [toolbar, element(this.dom, "p", "panel-empty", "No dependency graph is available.")]);
+      return;
+    }
+    const ranks = dependencyLevels(snapshot.graph.edges, nodes)
+      ?? new Map(nodes.map((id) => [id, 0]));
+    const grouped = new Map<number, string[]>();
+    nodes.forEach((id) => {
+      const rank = ranks.get(id) ?? 0;
+      const peers = grouped.get(rank) ?? [];
+      peers.push(id);
+      grouped.set(rank, peers);
+    });
+    const rankList = [...grouped.keys()].sort((a, b) => a - b);
+    const nodeWidth = 150;
+    const width = this.graphOrientation === "vertical" ? Math.max(180, Math.max(...rankList.map((rank) => grouped.get(rank)!.length)) * 180) : Math.max(220, rankList.length * 190);
+    const height = this.graphOrientation === "vertical" ? Math.max(100, rankList.length * 90) : Math.max(100, Math.max(...rankList.map((rank) => grouped.get(rank)!.length)) * 80);
+    const positions = new Map<string, { x: number; y: number }>();
+    rankList.forEach((rank, rankIndex) => grouped.get(rank)!.forEach((id, index, peers) => {
+      positions.set(id, this.graphOrientation === "vertical"
+        ? { x: (width - peers.length * 180) / 2 + index * 180 + 15, y: rankIndex * 90 + 15 }
+        : { x: rankIndex * 190 + 10, y: index * 80 + 15 });
+    }));
+    const svg = svgNode(this.dom, "svg", { class: "dag-graph", viewBox: `0 0 ${width} ${height}`, width: String(width * this.graphZoom), height: String(height * this.graphZoom), role: "img", "data-orientation": this.graphOrientation, "aria-label": "Notebook dependency graph. Arrows point from source cells to dependent cells." });
+    svg.dataset.navigationKey = "dag-graph";
+    svg.dataset.intrinsicWidth = String(width);
+    svg.dataset.intrinsicHeight = String(height);
+    svg.appendChild(svgNode(this.dom, "title", {}, "Notebook dependency graph"));
+    const definitions = svgNode(this.dom, "defs", {});
+    const arrow = svgNode(this.dom, "marker", { id: "dag-arrowhead", markerWidth: "8", markerHeight: "8", refX: "7", refY: "4", orient: "auto", markerUnits: "strokeWidth" });
+    arrow.appendChild(svgNode(this.dom, "path", { class: "dag-arrowhead", d: "M 0 0 L 8 4 L 0 8 z" }));
+    definitions.appendChild(arrow);
+    svg.appendChild(definitions);
+    const cycleNodes = new Set(snapshot.graph.cycles);
+    for (const [dependent, dependencies] of Object.entries(snapshot.graph.edges)) {
+      const to = positions.get(dependent);
+      if (!to) continue;
+      for (const dependency of dependencies) {
+        const from = positions.get(dependency);
+        if (!from) continue;
+        const path = this.graphOrientation === "vertical"
+          ? `M ${from.x + nodeWidth / 2} ${from.y + 45} L ${to.x + nodeWidth / 2} ${to.y}`
+          : `M ${from.x + nodeWidth} ${from.y + 22} L ${to.x} ${to.y + 22}`;
+        svg.appendChild(svgNode(this.dom, "path", {
+          d: path,
+          class: cycleNodes.has(dependency) && cycleNodes.has(dependent) ? "dag-edge cycle" : "dag-edge",
+          "data-from": dependency,
+          "data-to": dependent,
+          "marker-end": "url(#dag-arrowhead)",
+        }));
+      }
+    }
+    for (const id of nodes) {
+      const position = positions.get(id)!;
+      const cell = snapshot.cells.find((candidate) => candidate.id === id);
+      const label = labels.get(id) ?? id;
+      const group = svgNode(this.dom, "g", { class: `dag-node status-${cell?.status ?? "idle"}${cycleNodes.has(id) ? " cycle" : ""}`, role: "button", tabindex: "0", "data-target-cell": id, "data-rank": String(ranks.get(id) ?? 0), "data-navigation-key": JSON.stringify(["graph-node", id]), "aria-label": `Go to ${label}${cycleNodes.has(id) ? "; dependency cycle" : ""}` });
+      group.append(svgNode(this.dom, "rect", { x: position.x, y: position.y, width: String(nodeWidth), height: "45", rx: "5" }),
+        svgNode(this.dom, "text", { x: position.x + 8, y: position.y + 18 }, truncate(label, 18)),
+        svgNode(this.dom, "text", { class: "dag-node-status", x: position.x + 8, y: position.y + 35 }, cell?.status ?? "idle"));
+      svg.appendChild(group);
+      this.graphNodes.set(id, group);
+    }
+    const scroll = element(this.dom, "div", "graph-scroll");
+    scroll.dataset.navigationKey = "graph-scroll";
+    scroll.tabIndex = 0;
+    scroll.setAttribute("aria-label", "Scrollable dependency graph canvas");
+    scroll.appendChild(svg);
+    const children: HTMLElement[] = [toolbar];
+    if (cycleNodes.size) {
+      const warning = element(this.dom, "p", "panel-empty error", `Dependency cycle: ${[...cycleNodes].map((id) => labels.get(id) ?? id).join(", ")}`);
+      warning.setAttribute("role", "alert");
+      children.push(warning);
+    }
+    children.push(scroll);
+    this.replaceNavigationChildren(panel, children);
+  }
+
+  private renderOutline(snapshot: HostSnapshot): void {
+    const panel = this.dom.getElementById("panel-outline");
+    if (!panel) return;
+    const currentList = panel.querySelector<HTMLElement>(":scope > .outline-list");
+    const list = currentList ?? element(this.dom, "nav", "outline-list");
+    list.setAttribute("aria-label", "Notebook outline");
+    const currentButtons = new Map(Array.from(
+      list.querySelectorAll<HTMLButtonElement>(":scope > .panel-link[data-navigation-key]"),
+    ).map((button) => [button.dataset.navigationKey!, button]));
+    const buttons: HTMLButtonElement[] = [];
+    const retain = (next: HTMLButtonElement): void => {
+      const key = next.dataset.navigationKey!;
+      const button = currentButtons.get(key) ?? next;
+      if (button !== next) {
+        button.className = next.className;
+        button.textContent = next.textContent;
+        button.dataset.targetCell = next.dataset.targetCell!;
+        if (next.dataset.targetLine === undefined) delete button.dataset.targetLine;
+        else button.dataset.targetLine = next.dataset.targetLine;
+        button.style.cssText = next.style.cssText;
+      }
+      buttons.push(button);
+    };
+    for (const cell of snapshot.cells) {
+      const name = cellName(cell);
+      if (name) retain(this.panelButton(name, cell.id, "outline-cell", undefined, ["outline-cell", cell.id]));
+      if (cell.type === "markdown") {
+        markdownHeadings(cell.body).forEach((heading) => {
+          const button = this.panelButton(heading.text, cell.id, "outline-heading", heading.line, ["outline-heading", cell.id, heading.line]);
+          button.style.setProperty("--outline-level", String(heading.level - 1));
+          retain(button);
+        });
+      }
+    }
+    list.dataset.navigationKey = "outline-list";
+    if (!buttons.length) {
+      this.replaceNavigationChildren(panel, [element(this.dom, "p", "panel-empty", "Name a cell or add a Markdown heading to build an outline.")]);
+      return;
+    }
+    if (!currentList) panel.replaceChildren(list);
+    const retainedButtons = new Set(buttons);
+    const active = this.dom.activeElement;
+    const activeButton = active instanceof HTMLButtonElement && list.contains(active) && retainedButtons.has(active)
+      ? active
+      : null;
+    if (activeButton) {
+      const activeIndex = buttons.indexOf(activeButton);
+      for (const button of buttons.slice(0, activeIndex)) list.insertBefore(button, activeButton);
+      for (const button of buttons.slice(activeIndex + 1).reverse()) {
+        list.insertBefore(button, activeButton.nextSibling);
+      }
+    } else {
+      buttons.forEach((button, index) => {
+        const current = list.children.item(index);
+        if (current !== button) list.insertBefore(button, current);
+      });
+    }
+    for (const child of Array.from(list.children)) {
+      if (!retainedButtons.has(child as HTMLButtonElement)) child.remove();
+    }
+  }
+
+  private renderMinimap(snapshot: HostSnapshot): void {
+    const minimap = this.dom.getElementById("minimap");
+    if (!minimap) return;
+    const prior = this.minimapButtons;
+    const next = new Map<string, HTMLButtonElement>();
+    const nodes = snapshot.cells.map((cell, index) => {
+      const button = prior.get(cell.id) ?? this.dom.createElement("button");
+      const label = cellLabelAt(cell, index);
+      button.type = "button";
+      button.className = `minimap-cell status-${cell.status}`;
+      button.dataset.targetCell = cell.id;
+      button.dataset.cellLabel = label;
+      button.dataset.navigationKey = JSON.stringify(["minimap", cell.id]);
+      button.textContent = String(index + 1);
+      button.title = `${label} — ${cell.status} — stable ID ${cell.id}`;
+      button.setAttribute("aria-label", button.title);
+      next.set(cell.id, button);
+      return button;
+    });
+    this.replaceNavigationChildren(minimap, nodes);
+    this.minimapButtons = next;
+    this.minimapCurrent = null;
+    this.scheduleMinimapViewport();
+  }
+
+  private scheduleMinimapViewport(): void {
+    if (this.minimapViewportFrame !== null || this.appView || window.innerWidth <= 900) return;
+    this.minimapViewportFrame = window.requestAnimationFrame(() => {
+      this.minimapViewportFrame = null;
+      this.updateMinimapViewport();
+    });
+  }
+
+  private updateMinimapViewport(): void {
+    const minimap = this.dom.getElementById("minimap");
+    if (!minimap || this.appView || window.innerWidth <= 900 || !this.minimapButtons.size) return;
+    const middle = window.innerHeight / 2;
+    let current: string | null = null;
+    const bounds = this.notebook.getBoundingClientRect();
+    const x = Math.max(0, Math.min(window.innerWidth - 1, bounds.left + Math.min(40, Math.max(1, bounds.width / 2))));
+    if (typeof this.dom.elementFromPoint === "function") {
+      const ys = [middle, Math.max(0, Math.min(window.innerHeight - 1, bounds.top + 1)),
+        Math.max(0, Math.min(window.innerHeight - 1, bounds.bottom - 1))];
+      for (const y of ys) {
+        const hit = this.dom.elementFromPoint(x, y)?.closest<HTMLElement>(".cell[data-cell]");
+        if (hit && !this.notebook.contains(hit)) continue;
+        if (hit?.dataset.cell) { current = hit.dataset.cell; break; }
+      }
+    }
+    if (!current && bounds.top >= middle) current = this.documentValue?.cells[0]?.id ?? null;
+    if (!current && bounds.bottom <= middle) current = this.documentValue?.cells.at(-1)?.id ?? null;
+    if (!current || current === this.minimapCurrent) return;
+    const prior = this.minimapCurrent ? this.minimapButtons.get(this.minimapCurrent) : undefined;
+    prior?.classList.remove("in-viewport");
+    prior?.removeAttribute("aria-current");
+    const selected = this.minimapButtons.get(current);
+    if (selected) {
+      selected.classList.add("in-viewport");
+      selected.setAttribute("aria-current", "location");
+    }
+    this.minimapCurrent = current;
+  }
+
+  private replaceNavigationChildren(parent: HTMLElement, children: readonly HTMLElement[]): void {
+    const active = this.dom.activeElement;
+    const key = active instanceof Element && parent.contains(active)
+      ? active.closest<HTMLElement>("[data-navigation-key]")?.dataset.navigationKey
+      : undefined;
+    parent.replaceChildren(...children);
+    if (!key) return;
+    const replacement = Array.from(parent.querySelectorAll<HTMLElement>("[data-navigation-key]"))
+      .find((candidate) => candidate.dataset.navigationKey === key);
+    replacement?.focus({ preventScroll: true });
+  }
+
+  private panelButton(label: string, id: string, className = "", line?: number, key?: readonly unknown[]): HTMLButtonElement {
+    const button = element(this.dom, "button", `panel-link ${className}`.trim(), label) as HTMLButtonElement;
+    button.type = "button";
+    button.dataset.targetCell = id;
+    if (line !== undefined) button.dataset.targetLine = String(line);
+    button.dataset.navigationKey = JSON.stringify(key ?? ["cell", id, line ?? null, className, label]);
+    return button;
+  }
+
+  private graphButton(label: string, key: string, action: () => void, description: string): HTMLButtonElement {
+    const button = element(this.dom, "button", "panel-secondary graph-control", label) as HTMLButtonElement;
+    button.type = "button";
+    button.dataset.graphAction = key;
+    button.dataset.navigationKey = JSON.stringify(["graph-action", key]);
+    button.title = description;
+    button.setAttribute("aria-label", description);
+    button.addEventListener("click", action);
+    return button;
+  }
+
+  private setGraphZoom(value: number, fitted = false): void {
+    this.graphZoom = Math.max(0.2, Math.min(2.5, value));
+    const svg = this.dom.querySelector<SVGSVGElement>("#panel-graph .dag-graph");
+    if (!svg) return;
+    const box = svg.viewBox.baseVal;
+    svg.setAttribute("width", String(Math.round(box.width * this.graphZoom)));
+    svg.setAttribute("height", String(Math.round(box.height * this.graphZoom)));
+    const status = this.dom.querySelector<HTMLElement>("#panel-graph .graph-zoom-status");
+    if (status) status.textContent = `${Math.round(this.graphZoom * 100)}%${fitted ? " fit" : ""}`;
+    const zoomOut = this.dom.querySelector<HTMLButtonElement>("#panel-graph [data-graph-action=zoom-out]");
+    const zoomIn = this.dom.querySelector<HTMLButtonElement>("#panel-graph [data-graph-action=zoom-in]");
+    const reset = this.dom.querySelector<HTMLButtonElement>("#panel-graph [data-graph-action=reset]");
+    if (zoomOut) zoomOut.disabled = this.graphZoom <= 0.2;
+    if (zoomIn) zoomIn.disabled = this.graphZoom >= 2.5;
+    if (reset) reset.disabled = Math.abs(this.graphZoom - 1) < 0.001;
+  }
+
+  private fitGraphCanvas(): void {
+    const scroller = this.dom.querySelector<HTMLElement>("#panel-graph .graph-scroll");
+    const svg = scroller?.querySelector<SVGSVGElement>(".dag-graph");
+    if (!scroller || !svg) return;
+    const width = Number(svg.dataset.intrinsicWidth) || 1;
+    const height = Number(svg.dataset.intrinsicHeight) || 1;
+    this.setGraphZoom(Math.min(Math.max(1, scroller.clientWidth - 8) / width, Math.max(1, scroller.clientHeight - 8) / height), true);
+    scroller.scrollTo({ left: 0, top: 0, behavior: "auto" });
+  }
+
+  private navigateToCell(idOrKey: string, line?: number): void {
+    const cell = this.documentValue?.cell(idOrKey);
+    const view = cell ? this.views.get(cell.key) : undefined;
+    if (!cell || !view) return;
+    this.documentValue?.focus(cell.key);
+    this.visibleKeys.add(cell.key);
+    this.ensureEditor(view, cell);
+    view.element.scrollIntoView({ block: "center", behavior: "smooth" });
+    window.setTimeout(() => {
+      if (line !== undefined) {
+        const text = this.sourceText(cell.key);
+        const offset = sourceOffset(text, line, 0);
+        if (view.editor?.view?.dispatch) view.editor.view.dispatch({ selection: { anchor: offset, head: offset }, scrollIntoView: true });
+        else if (view.fallback) {
+          view.fallback.setSelectionRange(offset, offset);
+          const lineHeight = Number.parseFloat(getComputedStyle(view.fallback).lineHeight) || 16;
+          view.fallback.scrollTop = Math.max(0, line * lineHeight - view.fallback.clientHeight / 2);
+        }
+      }
+      if (view.editor) view.editor.focus();
+      else view.fallback?.focus();
+    }, 0);
+  }
+
+  private focusAdjacentCell(key: string, offset: -1 | 1): void {
+    const cells = this.documentValue?.cells ?? [];
+    const index = cells.findIndex((cell) => cell.key === key);
+    const target = index < 0 ? undefined : cells[index + offset];
+    if (target) this.navigateToCell(target.key);
+  }
+
+  private async moveCellBy(key: string, offset: -1 | 1): Promise<void> {
+    await this.client.commitEdits();
+    const cells = [...this.requireDocument().cells];
+    const index = cells.findIndex((cell) => cell.key === key);
+    if (index < 0) return;
+    if (offset < 0 && index > 0) {
+      await this.client.moveCell(key, index === 1 ? null : cells[index - 2]!.key);
+    } else if (offset > 0 && index < cells.length - 1) {
+      await this.client.moveCell(key, cells[index + 1]!.key);
+    }
+  }
+
+  private jumpReactiveReference(cell: LocalCell, editor: EditorHandle | null, position: number): void {
+    if (!cell.id || !editor) return;
+    const name = sourceWordAt(editor.getDoc(), position);
+    if (!name || !cell.server?.refs.includes(name)) return;
+    const owner = this.documentValue?.snapshot.cells.find((candidate) =>
+      candidate.id !== cell.id && candidate.defs.includes(name));
+    if (owner) this.navigateToCell(owner.id);
+  }
+
+  private bindNavigation(): void {
+    for (const root of [this.dom.getElementById("dataflow-panel"), this.dom.getElementById("minimap")]) {
+      root?.addEventListener("click", (event) => {
+        const target = (event.target as Element | null)?.closest("[data-target-cell]");
+        const id = (target as HTMLElement | null)?.dataset.targetCell;
+        const line = (target as HTMLElement | null)?.dataset.targetLine;
+        if (id) this.navigateToCell(id, line === undefined ? undefined : Number(line));
+      });
+      root?.addEventListener("keydown", (event) => {
+        if (!(event instanceof KeyboardEvent) || (event.key !== "Enter" && event.key !== " ")) return;
+        const target = (event.target as Element | null)?.closest("[data-target-cell]");
+        if (!target) return;
+        event.preventDefault();
+        const id = (target as HTMLElement).dataset.targetCell;
+        const line = (target as HTMLElement).dataset.targetLine;
+        if (id) this.navigateToCell(id, line === undefined ? undefined : Number(line));
+      });
+    }
+    window.addEventListener("scroll", this.scrollHandler, { passive: true });
+  }
+
+  private bindDragAndDrop(): void {
+    const clear = (): void => {
+      for (const view of this.views.values()) view.element.classList.remove("drop-before", "drop-after", "dragging");
+    };
+    const cellElement = (target: EventTarget | null): HTMLElement | null =>
+      target instanceof Element ? target.closest<HTMLElement>(".cell[data-key]") : null;
+    const placement = (target: HTMLElement, clientY: number): "before" | "after" => {
+      const bounds = target.getBoundingClientRect();
+      return clientY < bounds.top + bounds.height / 2 ? "before" : "after";
+    };
+    this.notebook.addEventListener("dragstart", (event) => {
+      const handle = event.target instanceof Element ? event.target.closest("[data-role=drag-handle]") : null;
+      const target = cellElement(handle);
+      const key = target?.dataset.key;
+      const cell = key ? this.documentValue?.cell(key) : undefined;
+      if (!target || !cell?.id || cell.tombstone || this.actionCount > 0) {
+        event.preventDefault();
+        return;
+      }
+      this.draggedKey = key!;
+      target.classList.add("dragging");
+      if (event.dataTransfer) {
+        event.dataTransfer.effectAllowed = "move";
+        event.dataTransfer.setData("text/plain", cell.id);
+      }
+    });
+    this.notebook.addEventListener("dragover", (event) => {
+      if (!this.draggedKey) return;
+      const target = cellElement(event.target);
+      if (!target || target.dataset.key === this.draggedKey) return;
+      event.preventDefault();
+      if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+      clear();
+      this.views.get(this.draggedKey)?.element.classList.add("dragging");
+      target.classList.add(placement(target, event.clientY) === "before" ? "drop-before" : "drop-after");
+    });
+    this.notebook.addEventListener("drop", (event) => {
+      const dragged = this.draggedKey;
+      const target = cellElement(event.target);
+      if (!dragged || !target || target.dataset.key === dragged) return;
+      event.preventDefault();
+      const cells = [...(this.documentValue?.cells ?? [])].filter((cell) => cell.key !== dragged);
+      const targetIndex = cells.findIndex((cell) => cell.key === target.dataset.key);
+      const insertion = targetIndex + (placement(target, event.clientY) === "after" ? 1 : 0);
+      const predecessor = targetIndex < 0 || insertion === 0 ? null : cells[insertion - 1]?.key ?? null;
+      this.draggedKey = null;
+      clear();
+      if (targetIndex >= 0) {
+        void this.action(async () => {
+          await this.client.commitEdits();
+          await this.client.moveCell(dragged, predecessor);
+          this.scheduleAutosave();
+        }).catch((error) => this.showError(error));
+      }
+    });
+    this.notebook.addEventListener("dragend", () => {
+      this.draggedKey = null;
+      clear();
+    });
+  }
+
+  private installServiceMenus(): void {
+    if (this.appView) return;
+    const topbar = this.dom.getElementById("topbar");
+    if (!topbar || topbar.querySelector("[data-host-service-menus]")) return;
+    const menus = element(this.dom, "div", "editor-only");
+    menus.dataset.hostServiceMenus = "true";
+    menus.style.display = "contents";
+
+    const exportMenu = this.menu("Export");
+    const include = this.dom.createElement("input");
+    include.type = "checkbox";
+    const includeLabel = element(this.dom, "label", "export-include-code");
+    includeLabel.append(include, this.dom.createTextNode(" Include code"));
+    exportMenu.panel.appendChild(includeLabel);
+    for (const [format, label] of [
+      ["html", "HTML"], ["md", "Markdown"], ["script", "R script"],
+      ["ipynb", "IPYNB"], ["qmd", "Quarto"], ["session", "Session JSON"],
+    ] as const) {
+      exportMenu.panel.appendChild(this.serviceButton(label, async () => {
+        const result = await this.runService("export", { format, include_code: include.checked });
+        this.downloadServiceResult(result);
+      }, { exportFormat: format }));
+    }
+    exportMenu.panel.appendChild(this.serviceButton("Publish with Pandoc", async () => {
+      const result = await this.runService("publish", { engine: "pandoc", include_code: include.checked });
+      this.downloadServiceResult(result);
+    }));
+    exportMenu.panel.appendChild(this.serviceButton("Publish with Quarto", async () => {
+      const result = await this.runService("publish", { engine: "quarto", include_code: include.checked });
+      this.downloadServiceResult(result);
+    }));
+    exportMenu.panel.appendChild(this.serviceButton("Check notebook", async () => {
+      const result = await this.runService("check", {});
+      const payload = isObject(result.result) ? result.result : {};
+      if (payload.ok === false) {
+        const count = Array.isArray(payload.issues) ? payload.issues.length : 1;
+        throw new Error(`${count} notebook validation ${count === 1 ? "issue" : "issues"}`);
+      }
+      this.actionNotice = "Notebook check passed";
+    }));
+
+    const packageMenu = this.menu("Packages");
+    const names = this.dom.createElement("input");
+    names.type = "text";
+    names.placeholder = "dplyr, ggplot2";
+    names.setAttribute("aria-label", "Package names");
+    const status = element(this.dom, "pre", "package-status", "Select Refresh to inspect packages.");
+    packageMenu.panel.append(names);
+    const packages = (): string[] => Array.from(new Set(names.value.split(/[\s,]+/).map((name) => name.trim()).filter(Boolean)));
+    const updateStatus = (result: CommandResult): void => {
+      const payload = operationPayload(result);
+      const state = isObject(payload.status) ? payload.status : payload;
+      status.textContent = packageStatusText(state);
+    };
+    packageMenu.panel.appendChild(this.serviceButton("Refresh", async () => updateStatus(await this.runService("packages.status", {}))));
+    packageMenu.panel.appendChild(this.serviceButton("Declare", async () => {
+      const selected = packages();
+      if (!selected.length) throw new Error("Enter one or more package names");
+      updateStatus(await this.runService("packages.declare", { packages: selected }));
+    }));
+    packageMenu.panel.appendChild(this.serviceButton("Install missing", async () => {
+      updateStatus(await this.runService("packages.install", { packages: packages() }));
+    }));
+    packageMenu.panel.appendChild(status);
+
+    menus.append(exportMenu.wrap, packageMenu.wrap);
+    const anchor = this.dom.getElementById("app-mode") ?? this.dom.getElementById("edit-mode");
+    if (anchor?.parentNode === topbar) topbar.insertBefore(menus, anchor);
+    else topbar.appendChild(menus);
+  }
+
+  private menu(label: string): { wrap: HTMLElement; panel: HTMLElement } {
+    const wrap = element(this.dom, "div", "export-menu");
+    const toggle = element(this.dom, "button", "btn", label) as HTMLButtonElement;
+    toggle.type = "button";
+    toggle.setAttribute("aria-expanded", "false");
+    const panel = element(this.dom, "div", "export-menu-panel");
+    panel.hidden = true;
+    toggle.addEventListener("click", () => {
+      panel.hidden = !panel.hidden;
+      toggle.setAttribute("aria-expanded", String(!panel.hidden));
+    });
+    panel.addEventListener("click", (event) => {
+      if ((event.target as Element | null)?.closest("button")) {
+        panel.hidden = true;
+        toggle.setAttribute("aria-expanded", "false");
+      }
+    });
+    wrap.append(toggle, panel);
+    return { wrap, panel };
+  }
+
+  private serviceButton(label: string, run: () => Promise<void>, dataset: Record<string, string> = {}): HTMLButtonElement {
+    const button = element(this.dom, "button", "btn mini", label) as HTMLButtonElement;
+    button.type = "button";
+    Object.assign(button.dataset, dataset);
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      void this.action(run).catch((error) => this.showError(error));
+    });
+    return button;
+  }
+
+  private async runService(command: "export" | "publish" | "check" | "packages.status" | "packages.declare" | "packages.install", payload: Record<string, unknown>): Promise<CommandResult> {
+    this.cancelEditTimers();
+    await this.client.commitEdits();
+    await this.output.flush();
+    return this.client.service(command, payload);
+  }
+
+  private downloadServiceResult(result: CommandResult): void {
+    const payload = operationPayload(result);
+    const url = typeof payload.url === "string" ? payload.url : typeof payload.download === "string" ? payload.download : "";
+    if (!url.startsWith("/download/")) throw new Error("service did not return a downloadable artifact");
+    const link = this.dom.createElement("a");
+    link.href = notebookUrl(url);
+    link.download = "";
+    link.target = "_blank";
+    link.rel = "noopener";
+    link.hidden = true;
+    this.dom.body.appendChild(link);
+    link.click();
+    link.remove();
+  }
+
+  private applyConfig(config: Record<string, unknown>): void {
+    const theme = ["light", "dark", "system"].includes(configString(config, ["theme"], "system"))
+      ? configString(config, ["theme"], "system") : "system";
+    const keymap = ["default", "vim"].includes(configString(config, ["keymap"], "default"))
+      ? configString(config, ["keymap"], "default") : "default";
+    this.dom.documentElement.dataset.theme = theme;
+    this.dom.documentElement.dataset.keymap = keymap;
+    this.dom.documentElement.style.setProperty("--alder-editor-font-size", `${boundedConfig(config, ["editor", "font_size"], 14, 10, 32)}px`);
+    this.dom.documentElement.style.setProperty("--alder-editor-tab-size", String(boundedConfig(config, ["editor", "tab_size"], 2, 1, 8)));
+    this.dom.body.classList.toggle("hide-line-numbers", nested(config, ["editor", "line_numbers"]) === false);
+    const vim = this.dom.getElementById("vim-mode-indicator");
+    if (vim) {
+      vim.hidden = keymap !== "vim";
+      vim.textContent = keymap === "vim" ? "Vim mode" : "";
+    }
+    const dialog = this.dom.getElementById("settings") as HTMLDialogElement | null;
+    if (!dialog?.open) this.fillSettings(config);
+  }
+
+  private fillSettings(config: Record<string, unknown>): void {
+    setSelect(this.dom, "settings-theme", configString(config, ["theme"], "system"), ["system", "light", "dark"]);
+    setSelect(this.dom, "settings-keymap", configString(config, ["keymap"], "default"), ["default", "vim"]);
+    setNumber(this.dom, "settings-font-size", boundedConfig(config, ["editor", "font_size"], 14, 10, 32));
+    setNumber(this.dom, "settings-tab-size", boundedConfig(config, ["editor", "tab_size"], 2, 1, 8));
+    setNumber(this.dom, "settings-table-page-size", boundedConfig(config, ["table", "page_size"], 25, 5, 200));
+    setChecked(this.dom, "settings-line-numbers", nested(config, ["editor", "line_numbers"]) !== false);
+    setChecked(this.dom, "settings-completions", nested(config, ["editor", "completions"]) !== false);
+    setChecked(this.dom, "settings-signature-help", nested(config, ["editor", "signature_help"]) !== false);
+    setChecked(this.dom, "settings-live-diagnostics", nested(config, ["editor", "live_diagnostics"]) === true);
+    setChecked(this.dom, "settings-autosave", config.autosave === true);
+    setChecked(this.dom, "settings-format-on-save", nested(config, ["format", "on_save"]) === true);
+  }
+
+  private settingsPatch(): Record<string, unknown> {
+    return {
+      theme: inputValue(this.dom, "settings-theme", "system"),
+      keymap: inputValue(this.dom, "settings-keymap", "default"),
+      autosave: inputChecked(this.dom, "settings-autosave"),
+      format: { on_save: inputChecked(this.dom, "settings-format-on-save") },
+      editor: {
+        font_size: inputInteger(this.dom, "settings-font-size", 14, 10, 32),
+        tab_size: inputInteger(this.dom, "settings-tab-size", 2, 1, 8),
+        line_numbers: inputChecked(this.dom, "settings-line-numbers"),
+        completions: inputChecked(this.dom, "settings-completions"),
+        signature_help: inputChecked(this.dom, "settings-signature-help"),
+        live_diagnostics: inputChecked(this.dom, "settings-live-diagnostics"),
+      },
+      table: { page_size: inputInteger(this.dom, "settings-table-page-size", 25, 5, 200) },
+    };
+  }
+
+  private bindSettings(): void {
+    const dialog = this.dom.getElementById("settings") as HTMLDialogElement | null;
+    const close = (): void => {
+      if (!dialog) return;
+      if (typeof dialog.close === "function" && dialog.open) dialog.close();
+      else dialog.removeAttribute("open");
+    };
+    this.dom.getElementById("settings-open")?.addEventListener("click", () => {
+      if (!dialog) return;
+      this.fillSettings(this.documentValue?.snapshot.config ?? {});
+      if (typeof dialog.showModal === "function") {
+        if (!dialog.open) dialog.showModal();
+      } else dialog.setAttribute("open", "");
+    });
+    this.dom.getElementById("settings-close")?.addEventListener("click", close);
+    this.dom.getElementById("settings-cancel")?.addEventListener("click", close);
+    dialog?.addEventListener("click", (event) => { if (event.target === dialog) close(); });
+    this.dom.getElementById("settings-form")?.addEventListener("submit", (event) => {
+      event.preventDefault();
+      void this.action(async () => {
+        const before = configNumber(this.documentValue?.snapshot.config, ["table", "page_size"], 25);
+        const patch = this.settingsPatch();
+        await this.client.setConfig(patch);
+        const after = Number(nested(patch, ["table", "page_size"]));
+        if (Number.isFinite(after) && after !== before) await this.repaginateTables(after);
+        close();
+      }).catch((error) => this.showError(error));
+    });
+  }
+
+  private async saveNotebook(): Promise<CommandResult> {
+    if (this.autosaveTimer !== null) window.clearTimeout(this.autosaveTimer);
+    this.autosaveTimer = null;
+    if (nested(this.documentValue?.snapshot.config, ["format", "on_save"]) === true) {
+      await this.client.formatCells();
+    }
+    return this.client.save();
+  }
+
+  private async repaginateTables(limit: number): Promise<void> {
+    const requests: Array<Promise<unknown>> = [];
+    visitTableOutputs(this.documentValue?.snapshot.cells ?? [], (output) => {
+      const page = isObject(output.page) ? output.page : {};
+      const oldOffset = Number(page.offset);
+      const offset = Number.isFinite(oldOffset) ? Math.floor(oldOffset / limit) * limit : 0;
+      requests.push(this.client.requestTable({
+        handle: String(output.handle), offset, limit,
+        sortBy: typeof page.sort_by === "string" ? page.sort_by : "",
+        sortDescending: page.sort_desc === true,
+        filter: typeof page.filter === "string" ? page.filter : "",
+      }));
+    });
+    await Promise.all(requests);
+  }
+
+  private async shutdownHost(): Promise<void> {
+    if (this.hostClosed) return;
+    const pending = this.documentValue?.pendingSource();
+    if ((this.documentValue?.snapshot.changed || pending?.edits.length || pending?.creations.length)
+      && !window.confirm("This notebook has unsaved changes. Shut down without saving?")) return;
+    await this.action(async () => {
+      const state = await fetch(notebookUrl("/api/state"));
+      if (!state.ok) throw new Error("Could not read notebook shutdown credentials");
+      const { shutdown_token: token } = await state.json() as { shutdown_token?: string };
+      if (!token) throw new Error("Notebook host did not provide a shutdown token");
+      const response = await fetch(notebookUrl("/api/shutdown"), {
+        method: "POST", headers: { "X-Alder-Shutdown-Token": token },
+      });
+      if (!response.ok) throw new Error("Notebook host rejected shutdown");
+      this.hostClosed = true;
+      this.cancelEditTimers();
+      if (this.autosaveTimer !== null) window.clearTimeout(this.autosaveTimer);
+      this.autosaveTimer = null;
+      this.client.close();
+      this.transportError = null;
+      this.editorHelpError = null;
+      this.actionNotice = "Notebook host shut down.";
+    });
+  }
+
+  private bindToolbar(): void {
+    this.dom.getElementById("shutdown")?.addEventListener("click", () => {
+      void this.shutdownHost().catch((error) => this.showError(error));
+    });
+    this.dom.getElementById("run-all")?.addEventListener("click", (event) => {
+      this.cancelEditTimers();
+      void this.action(async () => {
+        await this.output.flush();
+        await this.client.runAll(this.runScope(), event);
+        this.scheduleAutosave();
+      }).catch((error) => this.showError(error));
+    });
+    this.dom.getElementById("stop")?.addEventListener("click", () => void this.action(() => this.client.interrupt()).catch((error) => this.showError(error)));
+    this.dom.getElementById("restart")?.addEventListener("click", () => void this.action(() => this.client.restart()).catch((error) => this.showError(error)));
+    this.dom.getElementById("save")?.addEventListener("click", () => {
+      this.cancelEditTimers();
+      void this.action(() => this.saveNotebook()).catch((error) => this.showError(error));
+    });
+    this.dom.getElementById("runtime-select")?.addEventListener("change", (event) => {
+      const value = (event.currentTarget as HTMLSelectElement).value === "lazy" ? "lazy" : "automatic";
+      void this.action(() => this.client.setRuntime({ executionMode: value })).catch((error) => this.showError(error));
+    });
+    this.status?.addEventListener("click", (event) => {
+      const target = (event.target as Element | null)?.closest("[data-status-action=retry-editor-help]");
+      if (!target || this.editorHelpRestarting) return;
+      event.preventDefault();
+      this.editorHelpRestarting = true;
+      this.renderStatus();
+      void this.action(() => this.lsp("alder/restart", {})).catch((error) => this.showError(error)).finally(() => {
+        this.editorHelpRestarting = false;
+        this.renderStatus();
+      });
+    });
+    this.dom.getElementById("panel-toggle")?.addEventListener("click", () => this.togglePanel());
+    this.dom.getElementById("panel-close")?.addEventListener("click", () => {
+      this.togglePanel(false);
+      this.dom.getElementById("panel-toggle")?.focus();
+    });
+    const panelTabs = Array.from(this.dom.querySelectorAll<HTMLButtonElement>("[data-panel-tab]"));
+    for (const tab of panelTabs) {
+      tab.addEventListener("click", () => this.selectPanel(tab.dataset.panelTab ?? "variables"));
+      tab.addEventListener("keydown", (event) => {
+        if (!(["ArrowLeft", "ArrowRight", "Home", "End"] as string[]).includes(event.key)) return;
+        event.preventDefault();
+        const index = panelTabs.indexOf(tab);
+        const target = event.key === "Home" ? panelTabs[0]
+          : event.key === "End" ? panelTabs.at(-1)
+          : panelTabs[(index + (event.key === "ArrowRight" ? 1 : -1) + panelTabs.length) % panelTabs.length];
+        if (!target) return;
+        this.selectPanel(target.dataset.panelTab ?? "variables");
+        target.focus();
+      });
+    }
+    this.dom.getElementById("dataflow-panel")?.addEventListener("keydown", (event) => {
+      if (!(event instanceof KeyboardEvent) || event.key !== "Escape" || !this.graphExpanded) return;
+      event.preventDefault();
+      this.graphExpanded = false;
+      this.applyPanelState();
+      if (this.documentValue) this.renderGraph(this.documentValue.snapshot);
+    });
+    this.dom.getElementById("app-mode")?.addEventListener("click", (event) => {
+      event.preventDefault();
+      this.cancelEditTimers();
+      void this.action(async () => {
+        await this.client.commitEdits();
+        await this.output.flush();
+        this.internalNavigation = true;
+        try { location.assign(notebookViewUrl("app")); }
+        catch (error) { this.internalNavigation = false; throw error; }
+      }).catch((error) => this.showError(error));
+    });
+  }
+
+  private togglePanel(force?: boolean): void {
+    this.panelOpen = force ?? !this.panelOpen;
+    if (!this.panelOpen) {
+      this.graphExpanded = false;
+      this.cancelVariablesProjection();
+    }
+    savePanelPreference(window, { open: this.panelOpen, tab: this.panelTab });
+    this.applyPanelState();
+    if (this.panelOpen && this.documentValue) this.renderSelectedPanel(this.documentValue.snapshot);
+    window.requestAnimationFrame(() => this.updateTopbarInset());
+  }
+
+  private selectPanel(name: string): void {
+    if (!isPanelTab(name)) return;
+    if (name !== "variables") this.cancelVariablesProjection();
+    this.panelTab = name;
+    this.panelOpen = true;
+    savePanelPreference(window, { open: this.panelOpen, tab: this.panelTab });
+    this.applyPanelState();
+    if (this.documentValue) this.renderSelectedPanel(this.documentValue.snapshot);
+  }
+
+  private renderSelectedPanel(snapshot: HostSnapshot): void {
+    if (this.panelTab === "variables") {
+      this.variablesSignature = "";
+      this.variablesDirty = true;
+      this.scheduleVariablesProjection();
+    } else if (this.panelTab === "dependencies") {
+      this.dependenciesSignature = "";
+      this.renderDependenciesProjection(snapshot);
+    } else if (this.panelTab === "graph") {
+      this.dataflowSignature = "";
+      this.renderGraphProjection(snapshot);
+    } else {
+      this.outlineSignature = "";
+      this.renderOutlineProjection(snapshot);
+    }
+  }
+
+  private applyPanelState(): void {
+    const panel = this.dom.getElementById("dataflow-panel");
+    if (!panel || this.appView) return;
+    panel.hidden = !this.panelOpen;
+    this.dom.body.classList.toggle("panel-closed", !this.panelOpen);
+    this.dom.body.classList.toggle("mobile-panel-open", this.panelOpen && window.matchMedia?.("(max-width: 900px)").matches === true);
+    this.dom.getElementById("panel-toggle")?.setAttribute("aria-expanded", String(this.panelOpen));
+    for (const tab of Array.from(this.dom.querySelectorAll<HTMLButtonElement>("[data-panel-tab]"))) {
+      const selected = tab.dataset.panelTab === this.panelTab;
+      tab.setAttribute("aria-selected", String(selected));
+      tab.tabIndex = selected ? 0 : -1;
+    }
+    for (const value of ["variables", "dependencies", "graph", "outline"] as const) {
+      const panel = this.dom.getElementById(`panel-${value}`);
+      if (panel) panel.hidden = value !== this.panelTab;
+    }
+    if (this.panelTab !== "graph" && this.graphExpanded) {
+      this.graphExpanded = false;
+    }
+    panel.classList.toggle("graph-expanded", this.graphExpanded && this.panelTab === "graph");
+  }
+
+  private updateTopbarInset(): void {
+    const bottom = Math.max(0, this.dom.getElementById("topbar")?.getBoundingClientRect().bottom ?? 48);
+    this.dom.documentElement.style.setProperty("--alder-topbar-bottom", `${Math.ceil(bottom)}px`);
+  }
+
+  private scheduleEdit(key: string): void {
+    this.cancelEditTimer(key);
+    const timer = window.setTimeout(() => {
+      this.editTimers.delete(key);
+      void this.client.commitEdits().then(() => this.scheduleAutosave()).catch((error) => this.showError(error));
+    }, 400);
+    this.editTimers.set(key, timer);
+  }
+
+  private cancelEditTimer(key: string): void {
+    const timer = this.editTimers.get(key);
+    if (timer !== undefined) window.clearTimeout(timer);
+    this.editTimers.delete(key);
+  }
+
+  private cancelEditTimers(): void {
+    for (const key of this.editTimers.keys()) this.cancelEditTimer(key);
+    // Explicit source actions end the typing intent, including delayed help
+    // that would otherwise start after Run while the caret stays focused.
+    for (const editor of this.editors.values()) editor.closeCompletion?.();
+    for (const [key, request] of this.lspRequests) {
+      if (key.startsWith("completion:")) request.abort();
+    }
+  }
+
+  private scheduleAutosave(): void {
+    if (this.autosaveTimer !== null) window.clearTimeout(this.autosaveTimer);
+    this.autosaveTimer = null;
+    if (this.appView || this.documentValue?.snapshot.config.autosave !== true
+      || this.documentValue.snapshot.changed !== true) return;
+    this.autosaveTimer = window.setTimeout(() => {
+      this.autosaveTimer = null;
+      void this.saveNotebook().catch((error) => this.showError(error));
+    }, 2_000);
+  }
+
+  private captureSelection(key: string): void {
+    const view = this.views.get(key);
+    const main = view?.editor?.view?.state?.selection?.main;
+    if (main) {
+      const selection: EditorSelection = { anchor: main.anchor, head: main.head, scrollTop: view?.editor?.view?.scrollDOM?.scrollTop };
+      this.documentValue?.updateSelection(key, selection);
+    } else if (view?.fallback) {
+      this.documentValue?.updateSelection(key, { anchor: view.fallback.selectionStart, head: view.fallback.selectionEnd, scrollTop: view.fallback.scrollTop });
+    }
+  }
+
+  private sourceText(key: string): string {
+    const view = this.views.get(key);
+    return view?.editor?.getDoc() ?? view?.fallback?.value ?? this.requireCell(key).desiredBody.join("\n");
+  }
+
+  private async action<T>(operation: () => Promise<T>): Promise<T> {
+    this.actionCount += 1;
+    this.actionNotice = null;
+    // Guard input immediately, but avoid repainting every cell's buttons
+    // before the request can leave the browser. Reconcile them on acknowledgement.
+    this.cellActionsSignature = "";
+    if (this.documentValue) {
+      this.renderControls(this.documentValue.snapshot);
+    }
+    try {
+      const result = await operation();
+      this.actionError = null;
+      return result;
+    } finally {
+      this.actionCount -= 1;
+      if (this.documentValue) {
+        this.renderControls(this.documentValue.snapshot);
+        this.renderAllCellActions();
+      }
+      this.renderStatus();
+    }
+  }
+
+  private renderStatus(): void {
+    if (!this.status) return;
+    const stateError = this.documentValue?.snapshot.lastActionError?.message ?? null;
+    const editorHelpError = this.editorHelpError
+      ?? this.documentValue?.snapshot.serviceErrors.lsp?.message
+      ?? null;
+    const message = this.hostClosed ? "Notebook host shut down." : this.actionError ?? stateError ?? editorHelpError ?? this.transportError ?? this.actionNotice ?? "";
+    const signature = JSON.stringify({
+      message,
+      actionError: Boolean(this.actionError),
+      stateError: Boolean(stateError),
+      editorHelpError: Boolean(editorHelpError),
+      transportError: Boolean(this.transportError),
+      editorHelpRestarting: this.editorHelpRestarting,
+      actionCount: this.actionCount,
+    });
+    if (signature === this.statusSignature) return;
+    this.statusSignature = signature;
+    this.status.replaceChildren();
+    if (message) this.status.appendChild(elementNode(this.dom, "span", "status-message", message));
+    if (editorHelpError) {
+      const retry = elementNode(this.dom, "button", "btn mini status-action", "Retry editor help") as HTMLButtonElement;
+      retry.type = "button";
+      retry.dataset.statusAction = "retry-editor-help";
+      retry.disabled = this.editorHelpRestarting || this.actionCount > 0;
+      if (this.editorHelpRestarting) retry.setAttribute("aria-busy", "true");
+      this.status.appendChild(retry);
+    }
+    this.status.classList.toggle("error", Boolean(this.actionError || stateError || editorHelpError));
+    this.status.classList.toggle("poll-error", Boolean(!this.actionError && !stateError && !editorHelpError && this.transportError));
+  }
+
+  private executionAvailable(): boolean {
+    const runtime = this.documentValue?.snapshot.runtime;
+    return Boolean(runtime?.executionReady && runtime.kernelAvailable);
+  }
+
+  private runScope(): "all" | "stale" {
+    return this.documentValue?.snapshot.runtime.executionMode === "lazy" ? "stale" : "all";
+  }
+
+  private keymap(): string {
+    return configString(this.documentValue?.snapshot.config, ["keymap"], "default");
+  }
+
+  private preference(name: string, fallback: boolean): boolean {
+    const value = nested(this.documentValue?.snapshot.config, ["editor", name]);
+    return typeof value === "boolean" ? value : fallback;
+  }
+
+  private lspCompletion(
+    cell: LocalCell,
+    editor: EditorHandle | null,
+    context: EditorCompletionContext,
+  ): Promise<{ from: number; options: EditorCompletion[] } | null> | null {
+    if (!cell.id || !editor || editor.view?.hasFocus === false) return null;
+    const word = context.matchBefore(/[A-Za-z.][A-Za-z0-9_.]*|[A-Za-z0-9_]*/);
+    if (!word || (word.from === word.to && !context.explicit)) return null;
+    return this.lspRequest(`completion:${cell.key}`, "textDocument/completion", {
+      position: editorPosition(editor, cell, context.pos),
+    }).then((result) => {
+      const items = Array.isArray(result) ? result : isObject(result) && Array.isArray(result.items) ? result.items : [];
+      const options = items.flatMap((raw): EditorCompletion[] => {
+        if (!isObject(raw)) return [];
+        const textEdit = isObject(raw.textEdit) ? raw.textEdit : {};
+        const label = String(raw.label ?? raw.insertText ?? textEdit.newText ?? "");
+        if (!label) return [];
+        return [{
+          label,
+          type: lspKind(raw.kind),
+          detail: typeof raw.detail === "string" ? raw.detail : "",
+          info: lspText(raw.documentation),
+          apply: String(raw.insertText ?? textEdit.newText ?? raw.label ?? ""),
+        }];
+      });
+      return { from: word.from, options };
+    }).catch(() => null);
+  }
+
+  private lspHover(cell: LocalCell, editor: EditorHandle | null, position: number): Promise<EditorHover> {
+    if (!cell.id || !editor) return Promise.resolve(null);
+    return this.lspRequest(`hover:${cell.key}`, "textDocument/hover", {
+      position: editorPosition(editor, cell, position),
+    }).then((result) => isObject(result) ? {
+      text: lspText(result.contents),
+      html: typeof result.rendered === "string" ? result.rendered : "",
+    } : null, () => null);
+  }
+
+  private lspSignature(cell: LocalCell, editor: EditorHandle | null, position: number, trigger: string): Promise<EditorSignature | null> {
+    if (!cell.id || !editor) return Promise.resolve(null);
+    return this.lspRequest(`signature:${cell.key}`, "textDocument/signatureHelp", {
+      position: editorPosition(editor, cell, position),
+      context: { triggerKind: 2, triggerCharacter: trigger },
+    }).then(lspSignatureModel, () => null);
+  }
+
+  private async lspRequest(key: string, method: string, params: Record<string, unknown>): Promise<unknown> {
+    this.lspRequests.get(key)?.abort();
+    const controller = new AbortController();
+    this.lspRequests.set(key, controller);
+    try {
+      return await this.lsp(method, params, controller.signal);
+    } finally {
+      if (this.lspRequests.get(key) === controller) this.lspRequests.delete(key);
+    }
+  }
+
+  private async lsp(method: string, params: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
+    try {
+      await this.client.commitEdits();
+      signal?.throwIfAborted();
+      const response = await fetch(notebookUrl("/api/lsp"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ method, params }),
+        signal,
+      });
+      const result = await response.json() as { ok?: boolean; result?: unknown; error?: { message?: string } };
+      if (!response.ok || result.ok === false) throw new Error(result.error?.message ?? "language server request failed");
+      this.editorHelpError = null;
+      this.renderStatus();
+      return result.result;
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") throw error;
+      this.editorHelpError = error instanceof Error ? error.message : "Language assistance is unavailable";
+      this.renderStatus();
+      throw error;
+    }
+  }
+
+  private destroyCell(key: string, view: CellView): void {
+    this.cancelEditTimer(key);
+    if (view.diagnosticsTimer !== null) window.clearTimeout(view.diagnosticsTimer);
+    view.diagnosticsTimer = null;
+    view.editor?.destroy();
+    this.editors.delete(key);
+    this.visibleKeys.delete(key);
+    this.observer?.unobserve(view.element);
+    view.element.remove();
+    this.views.delete(key);
+  }
+
+  private requireDocument(): BrowserDocument {
+    if (!this.documentValue) throw new Error("notebook is not connected");
+    return this.documentValue;
+  }
+
+  private requireCell(key: string): LocalCell {
+    const cell = this.requireDocument().cell(key);
+    if (!cell) throw new Error(`no such cell: ${key}`);
+    return cell;
+  }
+}
+
+function fallbackCell(dom: Document): HTMLElement {
+  const cell = element(dom, "section", "cell idle");
+  cell.innerHTML = `<div class="cell-head" data-editor-only><div class="cell-meta"><strong data-role="cell-title"></strong><select data-role="type"><option value="code">Code</option><option value="markdown">Markdown</option></select><span data-role="badge"></span></div><div data-role="cell-actions"><button data-act="run">Run</button><button data-act="disable">Disable</button><button data-act="move-up">Up</button><button data-act="move-down">Down</button><button data-act="delete">Delete</button></div></div><div class="source-area code-area" data-role="source-area"><div class="cm-host" data-role="source"></div></div><div class="diagnostics-area" data-role="diagnostics"></div><div class="output-area" data-role="outputs"></div><div class="log-area" data-role="log"></div>`;
+  return cell;
+}
+
+function diagnosticsForEditor(diagnostics: readonly AnalysisDiagnostic[], source: string): EditorDiagnostic[] {
+  return diagnostics.map((diagnostic) => {
+    const raw = diagnostic as AnalysisDiagnostic & { range?: { start?: { line?: number; character?: number }; end?: { line?: number; character?: number } }; line?: number; column?: number };
+    const start = raw.range?.start ?? { line: Math.max(0, Number(raw.line ?? 1) - 1), character: Math.max(0, Number(raw.column ?? 1) - 1) };
+    const end = raw.range?.end ?? start;
+    return {
+      from: sourceOffset(source, Number(start.line ?? 0), Number(start.character ?? 0)),
+      to: sourceOffset(source, Number(end.line ?? start.line ?? 0), Number(end.character ?? start.character ?? 0)),
+      severity: diagnostic.level ?? "error",
+      message: diagnostic.message,
+    };
+  });
+}
+
+function sourceOffset(source: string, line: number, character: number): number {
+  const lines = source.split("\n");
+  const boundedLine = Math.max(0, Math.min(Math.floor(line), lines.length - 1));
+  let offset = 0;
+  for (let index = 0; index < boundedLine; index += 1) offset += (lines[index]?.length ?? 0) + 1;
+  return Math.min(source.length, offset + Math.max(0, Math.min(Math.floor(character), lines[boundedLine]?.length ?? 0)));
+}
+
+function editorPosition(editor: EditorHandle | null, cell: LocalCell, offset: number): Record<string, unknown> {
+  const text = editor?.getDoc() ?? cell.desiredBody.join("\n");
+  const before = text.slice(0, Math.max(0, Math.min(offset, text.length))).split("\n");
+  return { cell: cell.id, line: before.length - 1, character: before.at(-1)?.length ?? 0 };
+}
+
+function sourceWordAt(source: string, position: number): string | null {
+  const bounded = Math.max(0, Math.min(source.length, position));
+  const expression = /[A-Za-z.][A-Za-z0-9_.]*/g;
+  for (let match = expression.exec(source); match; match = expression.exec(source)) {
+    if (bounded >= match.index && bounded <= match.index + match[0].length) return match[0];
+  }
+  return null;
+}
+
+function reactiveReferenceRanges(
+  cell: LocalCell,
+  source: string,
+  snapshot: HostSnapshot | undefined,
+): Array<{ from: number; to: number }> {
+  const references = new Set(cell.server?.refs ?? []);
+  if (!references.size || !snapshot || !cell.id) return [];
+  const owners = new Map<string, string>();
+  for (const candidate of snapshot.cells) {
+    for (const name of candidate.defs) if (!owners.has(name)) owners.set(name, candidate.id);
+  }
+  const ranges: Array<{ from: number; to: number }> = [];
+  const expression = /[A-Za-z.][A-Za-z0-9_.]*/g;
+  for (let match = expression.exec(source); match; match = expression.exec(source)) {
+    const owner = owners.get(match[0]);
+    if (references.has(match[0]) && owner && owner !== cell.id) {
+      ranges.push({ from: match.index, to: match.index + match[0].length });
+    }
+  }
+  return ranges;
+}
+
+function lspText(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) return value.map(lspText).filter(Boolean).join("\n");
+  if (isObject(value)) {
+    if (typeof value.value === "string") return value.value;
+    if (value.contents !== undefined) return lspText(value.contents);
+  }
+  return value === null || value === undefined ? "" : String(value);
+}
+
+function lspKind(kind: unknown): string {
+  return ({
+    1: "text", 2: "method", 3: "function", 4: "constructor",
+    5: "class", 6: "method", 7: "property", 8: "variable",
+    9: "constant", 10: "struct", 11: "event", 12: "operator",
+    13: "type", 14: "namespace", 15: "keyword", 16: "modifier",
+    17: "number", 18: "string", 19: "regexp", 20: "class",
+    21: "interface", 22: "function", 23: "variable", 24: "value",
+    25: "unit", 26: "value", 27: "enum", 28: "interface",
+  } as Record<number, string>)[Number(kind)] ?? "variable";
+}
+
+function lspSignatureModel(value: unknown): EditorSignature | null {
+  if (!isObject(value) || !Array.isArray(value.signatures) || !value.signatures.length) return null;
+  const signatureIndex = Math.max(0, Math.min(value.signatures.length - 1, Math.floor(Number(value.activeSignature) || 0)));
+  const signature = value.signatures[signatureIndex];
+  if (!isObject(signature)) return null;
+  const parameters = Array.isArray(signature.parameters) ? signature.parameters : [];
+  const requestedParameter = value.activeParameter ?? signature.activeParameter;
+  const parameterIndex = Math.max(0, Math.min(Math.max(0, parameters.length - 1), Math.floor(Number(requestedParameter) || 0)));
+  const parameter = isObject(parameters[parameterIndex]) ? parameters[parameterIndex] : {};
+  let activeParameter: unknown = parameter.label;
+  if (Array.isArray(activeParameter) && activeParameter.length === 2) {
+    activeParameter = String(signature.label ?? "").slice(Number(activeParameter[0]) || 0, Number(activeParameter[1]) || 0);
+  }
+  return {
+    label: String(signature.label ?? ""),
+    activeParameter: String(activeParameter ?? ""),
+    documentation: lspText(parameter.documentation ?? signature.documentation),
+  };
+}
+
+function cellName(cell: unknown): string {
+  if (!isObject(cell)) return "";
+  const options = isObject(cell.options) ? cell.options : {};
+  return typeof options.name === "string" ? options.name : "";
+}
+
+function nested(root: unknown, path: readonly string[]): unknown {
+  let value = root;
+  for (const key of path) {
+    if (!isObject(value)) return undefined;
+    value = value[key];
+  }
+  return value;
+}
+
+function configString(root: unknown, path: readonly string[], fallback: string): string {
+  const value = nested(root, path);
+  return typeof value === "string" ? value : fallback;
+}
+
+function configNumber(root: unknown, path: readonly string[], fallback: number): number {
+  const value = Number(nested(root, path));
+  return Number.isFinite(value) ? value : fallback;
+}
+
+function boundedConfig(root: unknown, path: readonly string[], fallback: number, minimum: number, maximum: number): number {
+  const value = Math.round(configNumber(root, path, fallback));
+  return Math.max(minimum, Math.min(maximum, value));
+}
+
+function setSelect(dom: Document, id: string, value: string, allowed: readonly string[]): void {
+  const input = dom.getElementById(id) as HTMLSelectElement | null;
+  if (input) input.value = allowed.includes(value) ? value : allowed[0] ?? "";
+}
+
+function setNumber(dom: Document, id: string, value: number): void {
+  const input = dom.getElementById(id) as HTMLInputElement | null;
+  if (input) input.value = String(value);
+}
+
+function setChecked(dom: Document, id: string, value: boolean): void {
+  const input = dom.getElementById(id) as HTMLInputElement | null;
+  if (input) input.checked = value;
+}
+
+function inputValue(dom: Document, id: string, fallback: string): string {
+  const input = dom.getElementById(id) as HTMLInputElement | HTMLSelectElement | null;
+  return input?.value || fallback;
+}
+
+function inputChecked(dom: Document, id: string): boolean {
+  return (dom.getElementById(id) as HTMLInputElement | null)?.checked === true;
+}
+
+function inputInteger(dom: Document, id: string, fallback: number, minimum: number, maximum: number): number {
+  const value = Number((dom.getElementById(id) as HTMLInputElement | null)?.value);
+  return Math.max(minimum, Math.min(maximum, Number.isFinite(value) ? Math.round(value) : fallback));
+}
+
+function visitTableOutputs(cells: readonly HostSnapshot["cells"][number][], visit: (output: Record<string, unknown>) => void): void {
+  const walk = (value: unknown): void => {
+    if (!isObject(value)) return;
+    if (value.kind === "table" && typeof value.handle === "string") visit(value);
+    if (value.kind === "layout" && Array.isArray(value.children)) value.children.forEach(walk);
+    if (value.kind === "lazy") walk(value.child);
+  };
+  cells.forEach((cell) => cell.outputs.forEach(walk));
+}
+
+function operationPayload(result: CommandResult): Record<string, unknown> {
+  if (isObject(result.operation.result)) return result.operation.result;
+  return isObject(result.result) ? result.result : {};
+}
+
+function packageStatusText(value: Record<string, unknown>): string {
+  const lines: string[] = [];
+  for (const [label, field] of [["Declared", "declared"], ["Installed", "installed"], ["Missing", "missing"]] as const) {
+    const entries = Array.isArray(value[field]) ? value[field].map(String) : [];
+    lines.push(`${label}: ${entries.length ? entries.join(", ") : "none"}`);
+  }
+  return lines.join("\n");
+}
+
+function formatBytes(value: number): string {
+  if (!Number.isFinite(value) || value < 0) return "";
+  if (value < 1_024) return `${Math.round(value)} B`;
+  if (value < 1_048_576) return `${(value / 1_024).toFixed(1)} KB`;
+  return `${(value / 1_048_576).toFixed(1)} MB`;
+}
+
+function dataflowCellSignature(cell: HostSnapshot["cells"][number]): string {
+  return JSON.stringify({
+    type: cell.type,
+    body: cell.type === "markdown" ? cell.body : undefined,
+    options: cell.options,
+    defs: cell.defs,
+    refs: cell.refs,
+  });
+}
+
+function outlineCellSignature(cell: HostSnapshot["cells"][number]): string {
+  return JSON.stringify({
+    type: cell.type,
+    body: cell.type === "markdown" ? cell.body : undefined,
+    name: cell.options.name,
+  });
+}
+
+function cellLabelAt(cell: HostSnapshot["cells"][number], index: number): string {
+  const name = cellName(cell);
+  return name ? `Cell ${index + 1} · ${name}` : `Cell ${index + 1}`;
+}
+
+function cellLabel(snapshot: HostSnapshot, id: string): string {
+  const cell = snapshot.cells.find((candidate) => candidate.id === id);
+  if (!cell) return id;
+  return cellLabelAt(cell, snapshot.cells.indexOf(cell));
+}
+
+function markdownHeadings(body: readonly string[]): Array<{ level: number; text: string; line: number }> {
+  const result: Array<{ level: number; text: string; line: number }> = [];
+  for (const [line, raw] of body.entries()) {
+    const markdown = /^\s*#/.test(raw) ? raw.replace(/^(\s*)#+ ?/, "$1") : raw;
+    const match = /^ {0,3}(#{1,6})(?:[ \t]+(.*))?$/.exec(markdown);
+    if (!match) continue;
+    const text = (match[2] ?? "").replace(/[ \t]+#+[ \t]*$/, "").trim();
+    if (text) result.push({ level: match[1]!.length, text, line });
+  }
+  return result;
+}
+
+function isPanelTab(value: string): value is DataflowPanelTab {
+  return value === "variables" || value === "dependencies" || value === "graph" || value === "outline";
+}
+
+function loadPanelPreference(browser: Window): { open: boolean; tab: DataflowPanelTab } {
+  const fallback = {
+    open: browser.matchMedia?.("(max-width: 900px)").matches !== true,
+    tab: "variables" as DataflowPanelTab,
+  };
+  try {
+    const value: unknown = JSON.parse(browser.localStorage.getItem("alder.panel") ?? "null");
+    if (!isObject(value)) return fallback;
+    return {
+      open: value.open !== false,
+      tab: typeof value.tab === "string" && isPanelTab(value.tab) ? value.tab : fallback.tab,
+    };
+  } catch {
+    return fallback;
+  }
+}
+
+function savePanelPreference(browser: Window, preference: { open: boolean; tab: DataflowPanelTab }): void {
+  try {
+    browser.localStorage.setItem("alder.panel", JSON.stringify(preference));
+  } catch {
+    // Storage can be unavailable in a private or embedded browsing context.
+  }
+}
+
+function svgNode<K extends keyof SVGElementTagNameMap>(dom: Document, tag: K, attributes: Record<string, string | number>, text = ""): SVGElementTagNameMap[K] {
+  const node = dom.createElementNS("http://www.w3.org/2000/svg", tag);
+  for (const [name, value] of Object.entries(attributes)) node.setAttribute(name, String(value));
+  if (text) node.textContent = text;
+  return node;
+}
+
+function truncate(value: string, length: number): string {
+  return value.length <= length ? value : `${value.slice(0, Math.max(1, length - 1))}…`;
+}
+
+function remapEditorSelection(
+  previous: string,
+  next: string,
+  selection: { anchor: number; head: number } | null | undefined,
+): { anchor: number; head: number } | null {
+  if (!selection) return null;
+  const oldLength = previous.length;
+  const anchor = Math.max(0, Math.min(oldLength, selection.anchor));
+  const head = Math.max(0, Math.min(oldLength, selection.head));
+  let prefix = 0;
+  while (prefix < oldLength && prefix < next.length
+    && previous.charCodeAt(prefix) === next.charCodeAt(prefix)) prefix += 1;
+  let suffix = 0;
+  while (suffix < oldLength - prefix && suffix < next.length - prefix
+    && previous.charCodeAt(oldLength - suffix - 1) === next.charCodeAt(next.length - suffix - 1)) suffix += 1;
+  const mapOffset = (offset: number): number => {
+    if (offset <= prefix) return offset;
+    if (offset >= oldLength - suffix) return next.length - (oldLength - offset);
+    const oldMiddle = oldLength - prefix - suffix;
+    const nextMiddle = next.length - prefix - suffix;
+    return prefix + Math.round(((offset - prefix) / oldMiddle) * nextMiddle);
+  };
+  const from = Math.min(anchor, head);
+  const to = Math.max(anchor, head);
+  const selected = previous.slice(from, to);
+  if (selected.length > 0 && selected.length <= 65_536) {
+    const expected = mapOffset(from);
+    const before = next.lastIndexOf(selected, expected);
+    const after = next.indexOf(selected, expected);
+    const best = before < 0 ? after : after < 0 ? before
+      : expected - before <= after - expected ? before : after;
+    if (best >= 0) {
+      return anchor <= head
+        ? { anchor: best, head: best + selected.length }
+        : { anchor: best + selected.length, head: best };
+    }
+  }
+  return { anchor: mapOffset(anchor), head: mapOffset(head) };
+}
+
+function setDisabled(control: HTMLButtonElement | HTMLSelectElement, disabled: boolean): void {
+  // Reassigning the same boolean still mutates its reflected DOM attribute.
+  if (control.disabled !== disabled) control.disabled = disabled;
+}
+
+function safePart(value: string): string {
+  return encodeURIComponent(value).replaceAll("%", "_");
+}
+
+function element<K extends keyof HTMLElementTagNameMap>(dom: Document, tag: K, className = "", text = ""): HTMLElementTagNameMap[K] {
+  const result = dom.createElement(tag);
+  result.className = className;
+  if (text) result.textContent = text;
+  return result;
+}
+
+const elementNode = element;
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function notebookRequiresCellReconcile(payload: unknown): boolean {
+  if (!isObject(payload)) return true;
+  // Source transactions repeat the authoritative order even when only one
+  // existing cell changed. Creation/deletion/move carry an explicit structural
+  // discriminator, so order/edited alone must not turn every edit into a scan of
+  // every cell view.
+  return (Array.isArray(payload.created) && payload.created.length > 0) || typeof payload.deleted === "string"
+    || typeof payload.moved === "string" || isObject(payload.config);
+}
+
+async function encodeFile(file: File): Promise<{ name: string; content_base64: string }> {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  let binary = "";
+  for (let offset = 0; offset < bytes.length; offset += 0x8000) binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
+  return { name: file.name, content_base64: btoa(binary) };
+}

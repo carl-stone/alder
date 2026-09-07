@@ -24,6 +24,12 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: host/.node-version
+          cache: npm
+          cache-dependency-path: host/package-lock.json
+
       - uses: r-lib/actions/setup-r@v2
         with:
           r-version: ${{ matrix.r }}
@@ -39,6 +45,20 @@ jobs:
           extra-packages: |
             any::rcmdcheck
             any::lintr
+
+      - name: Prepare the matching application runtime
+        run: |
+          npm ci --prefix host
+          node host/scripts/fetch-ark.mjs
+          npm run build --prefix host
+          R CMD INSTALL .
+          installed=$(Rscript -e 'cat(find.package("alder"))')
+          node host/scripts/stage-native.mjs "$installed/host"
+          echo "ALDER_HOST=$installed/host/alder-host.mjs" >> "$GITHUB_ENV"
+          echo "ALDER_R_PACKAGE=$installed" >> "$GITHUB_ENV"
+          echo "ALDER_NODE=$(command -v node)" >> "$GITHUB_ENV"
+          echo "ALDER_ARK=$GITHUB_WORKSPACE/host/.runtime/ark" >> "$GITHUB_ENV"
+          echo "ALDER_TEST_HOST=1" >> "$GITHUB_ENV"
 
       - name: Verify required runtimes
         run: |
@@ -69,7 +89,11 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y tini
-          tini -s -- bash dev/reviews/run-input-latency.sh /tmp/alder-input-latency-ci 1 0 1
+          status=0
+          tini -s -- npm run latency --prefix host -- /tmp/alder-input-latency-ci 1 --profile || status=$?
+          # Instrumented smoke verifies correctness and complete profiles.
+          # Exit 3 records an unmet/unqualified latency budget, never acceptance.
+          test "$status" -eq 0 || test "$status" -eq 3
 
       - name: Retain input-to-result evidence
         if: always() && matrix.r == '4.6.1'
@@ -78,48 +102,3 @@ jobs:
           name: input-to-result-linux
           path: /tmp/alder-input-latency-ci
           if-no-files-found: ignore
-
-  windows-cli:
-    name: Windows R 4.6.1 launcher and MCP
-    runs-on: windows-latest
-    env:
-      GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
-      NOT_CRAN: "true"
-      R_KEEP_PKG_SOURCE: "yes"
-    steps:
-      - uses: actions/checkout@v6
-
-      - uses: r-lib/actions/setup-r@v2
-        with:
-          r-version: '4.6.1'
-          use-public-rspm: true
-
-      - uses: r-lib/actions/setup-r-dependencies@v2
-        with:
-          dependencies: '"all"'
-          extra-packages: |
-            any::devtools
-
-      - name: Verify Windows runtime and focused CLI contracts
-        shell: pwsh
-        run: |
-          Rscript -e 'stopifnot(getRversion() >= "4.6.1", .Platform$OS.type == "windows")'
-          Rscript -e 'devtools::load_all(quiet = TRUE); testthat::test_file("tests/testthat/test-cli.R", reporter = "summary", stop_on_failure = TRUE, stop_on_warning = TRUE)'
-
-      - name: Install package and exercise the packaged Windows command
-        shell: pwsh
-        run: |
-          R CMD INSTALL .
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          Rscript -e 'options(warn = 2); library(alder); descriptions <- c("MCP validates request identifiers before applying effects", "MCP initialize and simple methods require object-shaped params", "MCP lifecycle gates local requests until the initialized notification", "MCP tools/call validates its wire envelope before tool execution", "MCP lifecycle and tools/call schemas match over URL transport", "mcp_json preserves safe numeric precision for response correlation", "stdio MCP rejects duplicate JSON members and preserves the source", "stdio MCP reader bounds one line and recovers at the next frame", "stdio MCP dispatches a live pipe before EOF"); for (description in descriptions) testthat::test_file("tests/testthat/test-mcp.R", package = "alder", desc = description, reporter = "summary", stop_on_failure = TRUE, stop_on_warning = TRUE)'
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          Rscript -e 'dir.create(".ci-bin"); alder::alder_install_cli(".ci-bin")'
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & .\.ci-bin\alder.cmd --help
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & .\.ci-bin\alder.cmd --version
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & .\.ci-bin\alder.cmd
-          if ($LASTEXITCODE -ne 2) {
-            throw "expected usage exit 2, received $LASTEXITCODE"
-          }

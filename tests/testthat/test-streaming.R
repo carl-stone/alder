@@ -11,14 +11,6 @@ if (!exists("cell_of", mode = "function", inherits = TRUE)) {
     stop("no such cell: ", id)
   }
 }
-if (!exists("wait_until_settled", mode = "function", inherits = TRUE)) {
-  wait_until_settled <- function(s, timeout = 10) {
-    wait_for(s, function() {
-      !any(vapply(s$state()$cells, function(c) identical(c$status, "running"), FALSE))
-    }, timeout)
-  }
-}
-
 cell_outputs <- function(s, id) {
   outputs <- cell_of(s, id)$outputs # nolint: object_usage_linter
   if (is.null(outputs)) list() else outputs
@@ -33,15 +25,15 @@ test_that("progress notifications update state before the cell settles", {
   m <- make_test_session(c(
     "# %%", "library(alder)",
     "# %%", "p <- out$progress(3); for (i in 1:3) { p$update(i); Sys.sleep(0.2) }; \"done\""
-  ))
+  ), execution_mode = "lazy")
   s <- m$session
-  withr::defer(s$stop())
-  s$run_all()
+  withr::defer(m$close())
+  run <- s$run_all()
   wait_for(s, function() {
     progress <- cell_of(s, "cell-2")$progress
     !is.null(progress) && identical(as.numeric(progress$value), 3)
   }, timeout = 8)
-  wait_until_settled(s, timeout = 8)
+  expect_identical(s$await_operation(run$run_id)$status, "done")
   outputs <- cell_outputs(s, "cell-2")
   expect_equal(cell_of(s, "cell-2")$status, "done")
   expect_equal(tail(outputs, 1L)[[1L]]$kind, "text")
@@ -73,11 +65,10 @@ test_that("append output precedes the final visible value", {
   m <- make_test_session(c(
     "# %%", "library(alder)",
     "# %%", "out$append(1:3); \"tail\""
-  ))
+  ), execution_mode = "lazy")
   s <- m$session
-  withr::defer(s$stop())
-  s$run_all()
-  wait_until_settled(s)
+  withr::defer(m$close())
+  expect_identical(s$await_operation(s$run_all()$run_id)$status, "done")
   outputs <- cell_outputs(s, "cell-2")
   expect_length(outputs, 2)
   expect_equal(outputs[[1L]]$kind, "text")
@@ -90,11 +81,10 @@ test_that("out stop commits its output and leaves descendants idle", {
     "# %%", "library(alder)",
     "# %%", "out$stop(TRUE, \"halted\"); x <- 1",
     "# %%", "x + 1"
-  ))
+  ), execution_mode = "lazy")
   s <- m$session
-  withr::defer(s$stop())
-  s$run_all()
-  wait_until_settled(s)
+  withr::defer(m$close())
+  expect_identical(s$await_operation(s$run_all()$run_id)$status, "done")
   expect_equal(cell_of(s, "cell-2")$status, "stopped")
   expect_equal(cell_of(s, "cell-3")$status, "idle")
   outputs <- cell_outputs(s, "cell-2")
@@ -107,15 +97,14 @@ test_that("dot-prefixed definitions are private to their defining cell", {
   m <- make_test_session(c(
     "# %%", ".tmp <- 1; .tmp",
     "# %%", "assign('.tmp', 2); .tmp"
-  ))
+  ), execution_mode = "lazy")
   s <- m$session
-  withr::defer(s$stop())
+  withr::defer(m$close())
   st <- s$state()
   expect_equal(unclass(st$cells[[1L]]$defs), character())
   expect_equal(unclass(st$cells[[1L]]$locals), ".tmp")
   expect_equal(unclass(st$cells[[2L]]$locals), ".tmp")
-  s$run_all()
-  wait_until_settled(s)
+  expect_identical(s$await_operation(s$run_all()$run_id)$status, "done")
   expect_equal(cell_of(s, "cell-1")$status, "done")
   expect_equal(cell_of(s, "cell-2")$status, "done")
   expect_match(last_output(s, "cell-1")$text, "1")
@@ -126,25 +115,28 @@ test_that("literal assign drives dependencies and literal rm removes bindings", 
   m0 <- make_test_session(c(
     "# %%", "assigned_result <- assigned_value + 1L", "assigned_result",
     "# %%", "assign(value = 41L, x = 'assigned_value')"
-  ))
+  ), execution_mode = "lazy")
   s0 <- m0$session
-  withr::defer(s0$stop())
-  expect_identical(unclass(s0$state()$dag$edges$`cell-1`), "cell-2")
-  s0$run_all()
-  wait_until_settled(s0)
+  withr::defer(m0$close())
+  expect_identical(
+    unlist(s0$state()$dag$edges$`cell-1`, use.names = FALSE),
+    "cell-2"
+  )
+  expect_identical(s0$await_operation(s0$run_all()$run_id)$status, "done")
   expect_equal(cell_of(s0, "cell-1")$status, "done")
   expect_match(last_output(s0, "cell-1")$text, "42")
 
-  m <- make_test_session(c("# %%", "x <- 1; rm('x'); 2"))
+  m <- make_test_session(c("# %%", "x <- 1; rm('x'); 2"),
+                         execution_mode = "lazy")
   s <- m$session
-  withr::defer(s$stop())
-  s$run_all()
-  wait_until_settled(s)
+  withr::defer(m$close())
+  expect_identical(s$await_operation(s$run_all()$run_id)$status, "done")
   expect_equal(cell_of(s, "cell-1")$status, "done")
   expect_match(last_output(s, "cell-1")$text, "2")
 
-  m2 <- make_test_session(c("# %%", "target <- 'x'; rm(list = target)"))
+  m2 <- make_test_session(c("# %%", "target <- 'x'; rm(list = target)"),
+                          execution_mode = "lazy")
   s2 <- m2$session
-  withr::defer(s2$stop())
+  withr::defer(m2$close())
   expect_error(s2$run_all(), "rm\\(\\) requires bare names or scalar string literals")
 })

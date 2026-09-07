@@ -33,40 +33,34 @@ test_that("layout sidecars round-trip deterministically and atomically", {
   expect_match(rawToChar(first), '"cell-2"', fixed = TRUE)
 })
 
-test_that("malformed layout sidecars remain intact and visible in state", {
+test_that("production host rejects malformed layout without changing its sidecar", {
+  skip_if_not(identical(Sys.getenv("ALDER_TEST_HOST"), "1"))
   notebook <- layout_write_raw("# %%\nx <- 1\n")
   sidecar <- paste0(notebook, ".alder-layout.json")
   malformed <- charToRaw("{ this is deliberately malformed layout JSON\n")
   writeBin(malformed, sidecar)
 
-  nb <- alder:::read_notebook(notebook)
-  expect_message(
-    session <- alder:::Session$new(
-      nb, worker = NULL, run_on_startup = FALSE,
-      disk_version = list(exists = TRUE, bytes = readBin(
-        notebook, "raw", n = file.info(notebook)$size
-      ))
-    ),
-    "invalid layout JSON"
+  failure <- tryCatch(
+    start_alder(notebook, port = httpuv::randomPort(), run_on_startup = FALSE),
+    error = identity
   )
-  state <- session$state()
-  expect_null(state$layout)
-  expect_identical(state$layout_error$code, "invalid_layout")
-  expect_identical(state$last_action_error, state$layout_error)
-  expect_match(state$layout_error$message, basename(sidecar), fixed = TRUE)
+  expect_s3_class(failure, "alder_error")
+  expect_match(conditionMessage(failure), "invalid layout JSON")
   expect_identical(
     readBin(sidecar, "raw", n = file.info(sidecar)$size),
     malformed
   )
 
-  session$set_layout(list(
+  valid <- list(
     version = 1,
     cells = list(`cell-1` = list(x = 0, y = 0, w = 12, h = 1))
-  ))
-  recovered <- session$state()
-  expect_null(recovered$layout_error)
-  expect_null(recovered$last_action_error)
-  expect_identical(alder:::alder_layout_read(notebook), recovered$layout)
+  )
+  alder:::alder_layout_write(notebook, valid)
+  server <- start_alder(notebook, port = httpuv::randomPort(),
+                        run_on_startup = FALSE)
+  on.exit(stop_alder(server), add = TRUE)
+  expect_identical(server$session$state()$layout,
+                   alder:::alder_layout_validate(valid))
 })
 
 test_that("grid defaults follow document order and honor named cells", {
@@ -167,7 +161,8 @@ test_that("gallery index filters notebooks, sorts stably, and truncates descript
   )))
 })
 
-test_that("gallery index exposes malformed Alder files but ignores plain R", {
+test_that("production gallery exposes malformed Alder files but ignores plain R", {
+  skip_if_not(identical(Sys.getenv("ALDER_TEST_HOST"), "1"))
   dir <- tempfile("alder-gallery-invalid-")
   dir.create(dir)
   writeLines(c("# %%", "1 + 1"), file.path(dir, "good.R"))
@@ -183,12 +178,17 @@ test_that("gallery index exposes malformed Alder files but ignores plain R", {
   expect_match(index[[1L]]$error$message, "malformed YAML metadata")
   expect_null(index[[2L]]$error)
 
-  response <- alder:::alder_gallery_index_response(dir)
-  html <- rawToChar(response$body)
-  expect_identical(response$status, 200L)
-  expect_match(html, "gallery-card-error", fixed = TRUE)
+  server <- start_alder(dir, port = httpuv::randomPort())
+  on.exit(stop_alder(server), add = TRUE)
+  response <- curl::curl_fetch_memory(
+    paste0(server$host_process$ready$address$origin, "/")
+  )
+  html <- rawToChar(response$content)
+  expect_identical(response$status_code, 200L)
   expect_match(html, "role=\"alert\"", fixed = TRUE)
   expect_identical(lengths(regmatches(html, gregexpr("bad.R", html,
                                                      fixed = TRUE))), 1L)
+  expect_false(grepl("/n/bad.R", html, fixed = TRUE))
+  expect_match(html, "/n/good.R", fixed = TRUE)
   expect_false(grepl("plain.R", html, fixed = TRUE))
 })

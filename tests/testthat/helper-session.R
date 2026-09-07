@@ -1,8 +1,7 @@
-# Helper: install alder into a temp library and set up a live worker for
-# session/server integration tests.
+# Helper: locate or install Alder for production-host integration tests.
 #
-# The worker subprocess needs the installed package (Rscript --vanilla cannot
-# use pkgload::load_all), so we build and install once per testthat session.
+# The host's R subprocesses need the installed package (Rscript --vanilla
+# cannot use pkgload::load_all), so source-tree tests install it once.
 # The cached library path is stored in ALDER_TEST_LIB; subsequent tests reuse
 # it without rebuilding.
 
@@ -35,7 +34,7 @@ alder_cache_lib <- local({
     dir.create(build_root)
     # Keep the cached installation for the whole R process. R removes its
     # session temp directory at exit; a per-test teardown can delete this
-    # library while a real launcher or worker is still starting from it.
+    # library while the host or one of its R subprocesses is still starting.
     lib <- file.path(build_root, "lib")
     dir.create(lib)
     old <- setwd(build_root)
@@ -55,54 +54,77 @@ alder_cache_lib <- local({
     if (!identical(installed, 0L) || !dir.exists(file.path(lib, "alder"))) {
       stop("R CMD INSTALL failed for test installation")
     }
+    if (identical(Sys.getenv("ALDER_TEST_HOST"), "1")) {
+      node <- Sys.getenv("ALDER_NODE", unset = "")
+      if (!nzchar(node) || !file.exists(node) || dir.exists(node)) {
+        stop("ALDER_NODE must name the pinned Node executable for host tests")
+      }
+      stage_script <- file.path(repo, "host", "scripts", "stage-native.mjs")
+      if (!file.exists(stage_script)) {
+        stop("host/scripts/stage-native.mjs is required for host tests")
+      }
+      host <- file.path(lib, "alder", "host")
+      if (!file.exists(file.path(host, "alder-host.mjs"))) {
+        stop("installed Alder host is required for host tests")
+      }
+      staged <- system2(
+        normalizePath(node, mustWork = TRUE),
+        c(shQuote(stage_script), shQuote(host)),
+        stdout = FALSE, stderr = FALSE
+      )
+      if (!identical(staged, 0L) ||
+          !file.exists(file.path(host, "native-manifest.json"))) {
+        stop("native host transport staging failed for test installation")
+      }
+    }
     cached <<- lib
     lib
   }
 })
 
-# Spawn a real worker process and return a configured Worker R6 object.
-# The alder package must be installed (alder_cache_lib() ensures it). R_LIBS
-# stays set so source-loaded tests and their restarted workers use the cached
-# installation. Installed Alder propagates its own library during bootstrap.
-make_test_worker <- function(env = character()) {
-  lib <- alder_cache_lib()
-  if (nzchar(lib)) {
-    old_libs <- Sys.getenv("R_LIBS", unset = "")
-    old_paths <- if (nzchar(old_libs)) {
-      strsplit(old_libs, .Platform$path.sep, fixed = TRUE)[[1L]]
-    } else {
-      character()
-    }
-    if (!lib %in% old_paths) {
-      Sys.setenv(R_LIBS = paste(c(lib, old_paths),
-                                collapse = .Platform$path.sep))
-    }
-  }
-  art <- tempfile("alder-artifacts-")
-  dir.create(art)
-  ws <- system.file("worker", "worker.R", package = "alder", mustWork = TRUE)
-  ad <- system.file("app", package = "alder", mustWork = TRUE)
-  proc <- .spawn_worker_process(ws, ad, art, env = env)
-  worker <- Worker$new(proc, ws, ad, art, env = env)
-  tryCatch(
-    .wait_for_worker(worker),
-    error = function(e) {
-      if (worker$alive()) worker$kill()
-      stop(e)
-    }
-  )
-  worker
-}
-
-# Create a Session with a real worker for a notebook built from lines.
+# Start the installed production host and Ark kernel for a temporary notebook.
 make_test_session <- function(lines, execution_mode = "automatic",
                               run_on_startup = FALSE,
-                              worker_env = character()) {
-  nb <- parse_notebook_lines(path = NA_character_, lines = lines)
-  w <- make_test_worker(env = worker_env)
-  s <- Session$new(nb, worker = w, execution_mode = execution_mode,
-                   run_on_startup = run_on_startup)
-  list(session = s, worker = w)
+                              runtime_env = character()) {
+  testthat::skip_if_not(identical(Sys.getenv("ALDER_TEST_HOST"), "1"))
+  if (!is.character(lines) || anyNA(lines)) {
+    stop("`lines` must be a character vector without missing values")
+  }
+  if (!is.character(runtime_env) || anyNA(runtime_env) ||
+      (length(runtime_env) &&
+       (is.null(names(runtime_env)) || any(!nzchar(names(runtime_env)))))) {
+    stop("`runtime_env` must be a named character vector")
+  }
+
+  root <- tempfile("alder-host-session-")
+  dir.create(root)
+  path <- file.path(root, "notebook.R")
+  writeLines(lines, path, useBytes = TRUE)
+
+  server <- tryCatch(
+    withr::with_envvar(runtime_env, start_alder(
+      path,
+      port = httpuv::randomPort(),
+      execution_mode = execution_mode,
+      run_on_startup = run_on_startup
+    )),
+    error = function(error) {
+      unlink(root, recursive = TRUE, force = TRUE)
+      stop(error)
+    }
+  )
+  closed <- FALSE
+  close <- function() {
+    if (closed) return(invisible())
+    closed <<- TRUE
+    try(stop_alder(server), silent = TRUE)
+    unlink(root, recursive = TRUE, force = TRUE)
+    invisible()
+  }
+  session <- server$session
+  session$stop <- close
+  list(session = session, boot = server$host_process, notebook = path,
+       path = path, server = server, close = close)
 }
 
 # Pump the later event loop until a condition is met or timeout.
@@ -118,23 +140,39 @@ wait_for <- function(session, condition, timeout = 5) {
 
 # Pump until the session is not busy (no active eval request).
 wait_until_idle <- function(session, timeout = 5) {
-  wait_for(session, function() !session$state()$runtime$busy, timeout)
-}
-
-# Pump until every cell has reached a terminal state. Keep the default above
-# the cold-worker startup envelope so a single-file test run is as reliable as
-# the complete suite.
-wait_until_settled <- function(session, timeout = 15) {
   wait_for(session, function() {
-    !any(vapply(session$state()$cells,
-                function(cell) identical(cell$status, "running"),
-                logical(1)))
+    state <- session$state()
+    isTRUE(state$runtime$executionReady) && !isTRUE(state$runtime$busy) &&
+      !any(vapply(state$cells, function(cell)
+        isTRUE(cell$analysisPending), logical(1)))
   }, timeout)
 }
 
-# Compare two lists, ignoring any fields that differ by a single I() wrapper.
-expect_equal_ignoring_i <- function(actual, expected, ...) {
-  testthat::expect_equal(actual, expected, ...)
+# Pump until every cell has reached a terminal state. Keep the default above
+# the cold host/Ark startup envelope so a single-file test is reliable.
+wait_until_settled <- function(session, receipt_or_id = NULL, timeout = 15) {
+  operation_id <- if (is.character(receipt_or_id) &&
+                      length(receipt_or_id) == 1L) {
+    receipt_or_id
+  } else if (is.list(receipt_or_id)) {
+    receipt_or_id$run_id %||% receipt_or_id$operation$id %||%
+      receipt_or_id$id %||% NULL
+  } else {
+    NULL
+  }
+  settled <- NULL
+  wait_for(session, function() {
+    if (!is.null(operation_id)) {
+      settled <<- session$run_operation(operation_id)
+      return(settled$status %in% c("done", "error", "cancelled"))
+    }
+    state <- session$state()
+    isTRUE(state$runtime$executionReady) && !isTRUE(state$runtime$busy) &&
+      !any(vapply(state$cells, function(cell)
+        identical(cell$status, "running") || isTRUE(cell$analysisPending),
+        logical(1)))
+  }, timeout)
+  invisible(settled)
 }
 
 # Assert that a cell in the session state has a specific status.

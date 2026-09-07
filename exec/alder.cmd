@@ -7,6 +7,6 @@ if errorlevel 1 (
   exit /b 127
 )
 
-Rscript --vanilla -e "status <- alder::alder_cli(commandArgs(trailingOnly = TRUE)); quit(save = 'no', status = status, runLast = FALSE)" --args %*
+Rscript --vanilla -e "status <- alder::alder_cli(commandArgs(trailingOnly = TRUE)); quit(save = 'no', status = status, runLast = FALSE)" %*
 set "alder_status=%ERRORLEVEL%"
 exit /b %alder_status%

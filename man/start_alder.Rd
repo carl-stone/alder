@@ -55,8 +55,8 @@ packages. Requires a notebook \code{path}; \code{sandbox = TRUE} with a
 \code{NULL} path or a gallery directory is an error.}
 
 \item{idle_timeout}{Browser-idle shutdown timeout in seconds. After a browser
-has connected and polled state at least once, the server stops when no
-browser poll arrives for this duration. Dirty notebooks are atomically
+has connected at least once, the host stops when no
+browser activity arrives for this duration. Dirty notebooks are atomically
 saved first; a save failure or conflict pauses shutdown and is exposed in
 state rather than discarding work. \code{NULL} or zero disables the timer.
 The R API defaults to disabled; the command-line launcher defaults to 30
@@ -65,19 +65,20 @@ seconds.}
 \item{srv}{An \code{alder_server} object returned by \code{start_alder}.}
 }
 \value{
-An \code{alder_server} list wrapping the httpuv server, the
-notebook \code{Session}, and the worker.
+An \code{alder_server} list wrapping the application host process, the
+notebook controller facade, and shared lifecycle state.
 }
 \description{
 Start the local alder web app for a notebook: a derivation DAG over
 \code{# \%\%} cells is computed, cells execute in dependency order in a
-dedicated R worker process, and the UI supports editing, reactive
+dedicated Ark R kernel, and the UI supports editing, reactive
 execution, \code{ui$} widgets with explicit \code{$value}, and
 interruptible execution.
 }
 \details{
-Only the worker is executed as a separate process for isolation; it is
-not a security sandbox, so only trusted notebook code should be run.
+The application host, kernel, and R services run as separate processes.
+Process isolation is not a security sandbox, so only trusted notebook code
+should be run.
 With \code{sandbox = TRUE} the worker runs with the standard renv project
 library (\code{renv/library} under the notebook directory) and declared
 packages install into it.

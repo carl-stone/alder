@@ -128,11 +128,9 @@ run_review <- function(evidence) {
       strict_selection = sum(reference$de_results$FDR <= 0.05 & abs(reference$de_results$logFC) >= 2)
     ), "scientific-reference.json")
 
-    # Borrow only the established native-browser helper definitions, never tests.
-    helper <- new.env(parent = globalenv())
-    browser_lines <- readLines("tests/testthat/test-browser.R")
-    helper_end <- grep("^# 1 -+", browser_lines)[1] - 1L
-    eval(parse(text = browser_lines[seq_len(helper_end)]), helper)
+    js_json <- function(value) jsonlite::toJSON(
+      value, auto_unbox = TRUE, null = "null"
+    )
     project <- tempfile("bulk-de-", tmpdir = "/tmp")
     dir.create(project)
     notebook_path <- file.path(project, "bulk-de.R")
@@ -193,6 +191,29 @@ run_review <- function(evidence) {
       if (!is.null(result$exceptionDetails)) stop(jsonlite::toJSON(result$exceptionDetails, auto_unbox = TRUE))
       result$result$value
     }
+    pointer_click_selector <- function(selector) {
+      point <- js(sprintf(paste0(
+        "(()=>{const el=document.querySelector(%s);",
+        "if(!el||el.disabled)return null;",
+        "el.scrollIntoView({block:'center',inline:'center'});",
+        "const rect=el.getBoundingClientRect();",
+        "return{x:rect.left+rect.width/2,y:rect.top+rect.height/2}})()"
+      ), js_json(selector)))
+      if (is.null(point)) return(FALSE)
+      session$Page$bringToFront()
+      session$Input$dispatchMouseEvent(
+        type = "mouseMoved", x = point$x, y = point$y
+      )
+      session$Input$dispatchMouseEvent(
+        type = "mousePressed", x = point$x, y = point$y,
+        button = "left", buttons = 1L, clickCount = 1L
+      )
+      session$Input$dispatchMouseEvent(
+        type = "mouseReleased", x = point$x, y = point$y,
+        button = "left", buttons = 0L, clickCount = 1L
+      )
+      TRUE
+    }
     timed("browser_open_seconds", {
       session$go_to(url)
       await(function() identical(as.integer(js("document.querySelectorAll('.cell').length")), length(nb$cells)),
@@ -216,7 +237,7 @@ run_review <- function(evidence) {
         c$type == "markdown" || identical(c$status, "done")
       }, logical(1)))
     }
-    check("native_Run_all_click", helper$pointer_click_selector(session, "#run-all"))
+    check("native_Run_all_click", pointer_click_selector("#run-all"))
     timed("browser_full_run_seconds", await(settled, "full notebook execution"))
     before <- get_state()
     save_json(before, "state-before.json")
@@ -234,8 +255,8 @@ run_review <- function(evidence) {
     }, logical(1))))
     check("no_editor_or_runtime_errors", length(before$editor_diagnostics) == 0 && is.null(before$last_action_error))
     await(function() isTRUE(js(sprintf(
-      "document.querySelector('#cell-%s').innerText.includes(%s)",
-      cell(before, "final_summary")$id, helper$js_json(reference$summary_text)))),
+      "document.querySelector('[data-cell=%s]').innerText.includes(%s)",
+      js_json(cell(before, "final_summary")$id), js_json(reference$summary_text)))),
       "browser renders completed summary", 30)
     await(function() isTRUE(js("[...document.querySelectorAll('.cell img')].every(i=>i.complete&&i.naturalWidth>0)")),
       "plot image loading", 30)
@@ -247,13 +268,13 @@ run_review <- function(evidence) {
     save_json(list(seconds = state_latency), "state-request-timings.json")
     screenshot <- function(name, cell_name) {
       id <- cell(get_state(), cell_name)$id
-      plot_src <- js(sprintf("document.querySelector('#cell-%s img')?.getAttribute('src') || null", id))
+      plot_src <- js(sprintf("document.querySelector('[data-cell=%s] img')?.getAttribute('src') || null", js_json(id)))
       if (!is.null(plot_src)) {
         plot_response <- curl::curl_fetch_memory(paste0(url, sub("^/", "", plot_src)))
         if (plot_response$status_code != 200) stop("plot download failed")
         writeBin(plot_response$content, file.path(evidence, paste0(name, "-plot.png")))
       }
-      js(sprintf("(()=>{const target=document.querySelector('#cell-%s img')||document.querySelector('#cell-%s');target.scrollIntoView({block:'center'});return true})()", id, id))
+      js(sprintf("(()=>{const root=document.querySelector('[data-cell=%s]');const target=root.querySelector('img')||root;target.scrollIntoView({block:'center'});return true})()", js_json(id)))
       Sys.sleep(0.2)
       capture <- session$Page$captureScreenshot(format = "png")
       writeBin(base64enc::base64decode(capture$data), file.path(evidence, paste0(name, ".png")))
@@ -265,10 +286,10 @@ run_review <- function(evidence) {
     screenshot("05-final-summary", "final_summary")
 
     # Observe actual executed cells; unchanged values alone cannot prove no refit.
-    js("window.__bulkRunning=[];window.__bulkFetch=window.fetch;window.fetch=async function(...args){const r=await window.__bulkFetch(...args);if(String(args[0]).startsWith('/api/state')){const s=await r.clone().json();for(const c of s.cells)if(c.status==='running')window.__bulkRunning.push(c.id);}return r;};true")
+    js("window.__bulkRunning=[];window.__bulkUnsubscribe=window.__alderHost.client.subscribe((_document,event)=>{if(event?.type==='cell-started'&&event.cellId)window.__bulkRunning.push(event.cellId)});true")
     effect_cell <- cell(before, "effect_control")$id
-    selector <- paste0("#cell-", effect_cell, " input[type=range]")
-    check("native_effect_slider_focus", helper$pointer_click_selector(session, selector))
+    selector <- paste0('[data-cell="', effect_cell, '"] input[type=range]')
+    check("native_effect_slider_focus", pointer_click_selector(selector))
     # End selects the maximum (2) using native browser keyboard events.
     session$Input$dispatchKeyEvent(type = "rawKeyDown", key = "End", code = "End", windowsVirtualKeyCode = 35L)
     session$Input$dispatchKeyEvent(type = "keyUp", key = "End", code = "End", windowsVirtualKeyCode = 35L)
@@ -300,13 +321,20 @@ run_review <- function(evidence) {
     save_json(running, "threshold-running-cells.json")
     check("no_observed_model_refit", !fit_id %in% unlist(running))
     screenshot("06-volcano-strict", "volcano_plot")
-    http("api/widget", list(name = "effect_cutoff", value = 0.5, source = "editor"))
+    js("window.__alderHost.client.setWidget('effect_cutoff',[],{value:0.5},'editor')")
     await(function() settled() && grepl(reference$summary_text,
       text_output(cell(get_state(), "final_summary")), fixed = TRUE), "restore default threshold")
 
     # Edit near the end of the long source and save via a real keyboard shortcut.
     final_id <- cell(get_state(), "final_summary")$id
-    js(sprintf("window.__alderEditors.get('%s').focus();const e=window.__alderEditors.get('%s');e.view.dispatch({selection:{anchor:e.getDoc().length}});true", final_id, final_id))
+    final_selector <- paste0('[data-cell="', final_id, '"]')
+    check("native_final_source_focus", pointer_click_selector(paste0(
+      final_selector, " [data-virtual-source], ", final_selector, " .cm-content"
+    )))
+    await(function() isTRUE(js(sprintf(
+      "window.__alderEditors.has('cell:%s')", final_id
+    ))), "final editor mount", 30)
+    js(sprintf("window.__alderEditors.get('cell:%s').focus();const e=window.__alderEditors.get('cell:%s');e.view.dispatch({selection:{anchor:e.getDoc().length}});true", final_id, final_id))
     session$Input$insertText(text = "\n# Scale review: edited at the end of the notebook.\n")
     session$Input$dispatchKeyEvent(type = "rawKeyDown", key = "s", code = "KeyS", modifiers = 2L, windowsVirtualKeyCode = 83L)
     session$Input$dispatchKeyEvent(type = "keyUp", key = "s", code = "KeyS", modifiers = 2L, windowsVirtualKeyCode = 83L)
@@ -322,7 +350,12 @@ run_review <- function(evidence) {
     check("original_fixture_unchanged", identical(source_bytes,
       readBin(source_path, "raw", file.info(source_path)$size)))
     timed("save_acknowledged_seconds", await(function() {
-      isTRUE(js("!hasUnsavedWork() && !actionInFlight"))
+      isTRUE(js(paste0(
+        "!window.__alderHost.client.document.snapshot.changed&&",
+        "window.__alderHost.client.document.cells.every(c=>",
+        "!c.conflict&&!c.tombstone&&c.desiredType===c.serverType&&",
+        "JSON.stringify(c.desiredBody)===JSON.stringify(c.serverBody))"
+      )))
     }, "browser acknowledges completed save", 30))
     timed("reload_seconds", {
       loaded <- session$Page$loadEventFired(wait_ = FALSE)
@@ -331,9 +364,15 @@ run_review <- function(evidence) {
       check("reload_without_unsaved_changes_dialog", length(channels$dialogs) == 0)
       await(function() identical(as.integer(js("document.querySelectorAll('.cell').length")), length(nb$cells)), "reload all cells", 60)
     })
+    check("reloaded_final_source_focus", pointer_click_selector(paste0(
+      final_selector, " [data-virtual-source], ", final_selector, " .cm-content"
+    )))
+    await(function() isTRUE(js(sprintf(
+      "window.__alderEditors.has('cell:%s')", final_id
+    ))), "reloaded final editor mount", 30)
     check("reload_retains_saved_edit", grepl("Scale review: edited", js(sprintf(
-      "window.__alderEditors.get('%s').getDoc()", final_id)), fixed = TRUE))
-    check("reloaded_native_Run_all_click", helper$pointer_click_selector(session, "#run-all"))
+      "window.__alderEditors.get('cell:%s').getDoc()", final_id)), fixed = TRUE))
+    check("reloaded_native_Run_all_click", pointer_click_selector("#run-all"))
     timed("browser_repeat_run_seconds", await(function() {
       settled() && !identical(cell(before, "quasi_likelihood_fit")$outputs,
                              cell(get_state(), "quasi_likelihood_fit")$outputs)
@@ -345,7 +384,7 @@ run_review <- function(evidence) {
     check("no_browser_exceptions", length(channels$exceptions) == 0)
     check("no_browser_console_errors", !any(vapply(channels$console,
       function(e) e$type %in% c("error", "warning"), logical(1))))
-    check("native_Shutdown_click", helper$pointer_click_selector(session, "#shutdown"))
+    check("native_Shutdown_click", pointer_click_selector("#shutdown"))
     timed("shutdown_seconds", await(function() !cli$is_alive(), "CLI shutdown", 20))
     check("CLI_shutdown_exit_zero", identical(cli$get_exit_status(), 0L))
     cli_stderr <- readLines(file.path(evidence, "cli.stderr"), warn = FALSE)
