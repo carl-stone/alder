@@ -11,7 +11,7 @@ Edit files and use Git on the host. In this workspace, run the commands below
 inside `codex-universal` at `/workspace/alder`:
 
 ```sh
-docker exec -i -w /workspace/alder codex-universal bash -lc '<command>'
+sudo docker exec -i -w /workspace/alder codex-universal bash -lc '<command>'
 ```
 
 The full toolchain includes R 4.6.1, package Suggests, Node/npm, Chrome, Quarto,
@@ -98,6 +98,52 @@ repository. The caller owns any container restart. Screenshots still need
 visual inspection. Generated `reviews/evidence/` runs stay local and are ignored
 by Git; CI uploads latency evidence as a workflow artifact.
 
+## Local development container
+
+From the repository root, build and start the replacement Linux x64 environment:
+
+```sh
+sudo docker build --build-arg USER_UID="$(id -u)" --build-arg USER_GID="$(id -g)" \
+  -t alder-dev:local dev/container
+sudo docker run -d --name codex-universal --restart unless-stopped \
+  --network host --shm-size 1g \
+  --mount "type=bind,source=$PWD,target=/workspace/alder" alder-dev:local
+```
+
+Docker is managed by the host package manager; apt manages container system
+dependencies, npm manages JavaScript dependencies, and pak/BiocManager manage R
+dependencies. `sudo` is unnecessary if your session already has Docker access.
+The container runs as your host UID/GID and mounts only this checkout. Host
+networking makes Alder's loopback server accessible to the host browser. No
+Docker socket or host home directory is mounted.
+
+Install project dependencies inside the new container:
+
+```sh
+sudo docker exec -i -w /workspace/alder codex-universal Rscript - <<'RSCRIPT'
+pak::local_install_deps(dependencies = TRUE, ask = FALSE, lib = Sys.getenv("R_LIBS_USER"))
+BiocManager::install(c("edgeR", "statmod"), lib = Sys.getenv("R_LIBS_USER"),
+                     ask = FALSE, update = FALSE)
+RSCRIPT
+```
+
+Then run the JS/host build, Ark download, R install and native staging commands
+above, using `/opt/alder-library` instead of `/tmp/alder-host-library`.
+The image sets `R_LIBS_USER`, `ALDER_R_PACKAGE`, `ALDER_NODE`, `ALDER_ARK` and
+`CHROMOTE_CHROME`; enable browser tests explicitly with `ALDER_BROWSER_TEST=1`.
+For source R suites, also set
+`ALDER_HOST="$ALDER_R_PACKAGE/host/alder-host.mjs"`: `test_local()` otherwise
+resolves the source `inst/host` bundle, which has no staged native dependencies.
+R packages under `/opt/alder-library` survive container stops/restarts, but need
+reinstallation if the container is removed. Use `sudo docker start codex-universal`
+to restart it, or `sudo docker exec -it codex-universal bash` for a shell.
+
+This recreates the toolchain, not the missing original image. R and Node match
+the handoff; Quarto is pinned in `container/Dockerfile`, while Chrome and R
+dependencies resolve from their current repositories. The saved R package TSV
+is an inventory, not a dependency lockfile. Keep the original machine's latency
+results separate from this environment's measurements.
+
 ## Resume the latency work on another machine
 
 Optimization is paused at the user's request for migration from a 2-vCPU,
@@ -132,8 +178,8 @@ tini -s -- npm run latency --prefix host -- /tmp/alder-new-fresh 30 --fresh \
 ```
 
 Use empty evidence directories and one benchmark at a time. Run commands inside
-`codex-universal` when working under `/root/workspace`, as described above; its
-project path is `/workspace/alder`. Install paths under `/tmp` must be recreated.
+`codex-universal` with the checkout mounted at `/workspace/alder`, as described
+above. Install paths under `/tmp` must be recreated.
 For portable report links, use new directories under
 `dev/reviews/evidence/latency-optimization/` instead of `/tmp`. Both full sets update
 `reviews/latency-progress.html`. The plot now separates machine labels (falling

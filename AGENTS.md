@@ -5,8 +5,8 @@ Alder is a reactive notebook for R. The next implementation target is
 [dev/README.md](dev/README.md).
 
 - Edit files and use Git on the host. Run install, build, test, lint and app
-  commands in `codex-universal`, mapping `/root/workspace/` to `/workspace/`:
-  `docker exec -i -w /workspace/alder codex-universal bash -lc '<command>'`.
+  commands in `codex-universal`, with this checkout mounted at `/workspace/alder`:
+  `sudo docker exec -i -w /workspace/alder codex-universal bash -lc '<command>'`.
 - Edit widget constructors in `R/ui-widgets.R`. Ark loads the installed
   package implementation; there is no worker mirror.
 - After editing `js/src/editor.ts`, rebuild the committed CodeMirror bundle

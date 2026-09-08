@@ -1,5 +1,8 @@
 # ---
 # title: alder demo
+# runtime:
+#   execution_mode: automatic
+#   run_on_startup: yes
 # ---
 
 # %% [markdown]
@@ -14,7 +17,7 @@ library(ggplot2)
 # %%
 peng <- iris
 nrow(peng)
-
+peng
 # %%
 min_wt <- ui$slider(1, 8, value = 3, label = "min sepal length")
 min_wt
@@ -26,4 +29,5 @@ nrow(heavy)
 # %%
 ggplot(heavy, aes(x = .data$Sepal.Length, y = .data$Sepal.Width,
                   color = .data$Species)) +
-  geom_point()
+  geom_point() +
+  theme_classic()
