@@ -18,23 +18,8 @@ permissions:
 
 jobs:
   produce:
-    if: ${{ inputs.target == matrix.target }}
-    name: ${{ matrix.target }}
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: linux-x64
-            runner: ubuntu-24.04
-          - target: linux-arm64
-            runner: ubuntu-24.04-arm
-          - target: darwin-x64
-            runner: macos-15-intel
-          - target: darwin-arm64
-            runner: macos-15
-          - target: win32-x64
-            runner: windows-2025
+    name: ${{ inputs.target }}
+    runs-on: ${{ fromJSON('{"linux-x64":"ubuntu-24.04","linux-arm64":"ubuntu-24.04-arm","darwin-x64":"macos-15-intel","darwin-arm64":"macos-15","win32-x64":"windows-2025"}')[inputs.target] }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
@@ -72,7 +57,7 @@ jobs:
       - name: Produce patched Ark and provenance
         shell: bash
         run: |
-          node host/scripts/build-ark.mjs --target '${{ matrix.target }}'
+          node host/scripts/build-ark.mjs --target '${{ inputs.target }}'
 
       - name: Produce native containment helper
         shell: bash
@@ -81,10 +66,10 @@ jobs:
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: alder-runtimes-${{ matrix.target }}
+          name: alder-runtimes-${{ inputs.target }}
           if-no-files-found: error
           include-hidden-files: true
           path: |
-            host/.runtime/ark-build/${{ matrix.target }}/*.tar.gz
-            host/.runtime/ark-build/${{ matrix.target }}/ark-artifact.json
+            host/.runtime/ark-build/${{ inputs.target }}/*.tar.gz
+            host/.runtime/ark-build/${{ inputs.target }}/ark-artifact.json
             host/native/process-supervisor/target/release/alder-process-supervisor*
