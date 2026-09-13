@@ -140,16 +140,21 @@ jobs:
         with:
           r-version: '4.6.1'
           use-public-rspm: true
-      - name: Capture R 4.6.1
+      - name: Preserve R 4.6.1
         id: r461
         shell: bash
         run: |
-          path=$(Rscript -e 'cat(normalizePath(file.path(R.home("bin"), if (.Platform$OS.type == "windows") "Rscript.exe" else "Rscript"), winslash = "/", mustWork = TRUE))')
+          r_home=$(Rscript -e 'cat(normalizePath(R.home(), winslash = "/", mustWork = TRUE))')
+          snapshot="$RUNNER_TEMP/R-4.6.1"
+          rm -rf "$snapshot"
+          mkdir -p "$snapshot"
+          cp -R "$r_home/." "$snapshot/"
           if [ "${{ runner.os }}" = Windows ]; then
-            r_home=$(Rscript -e 'cat(normalizePath(R.home(), winslash = "/", mustWork = TRUE))')
-            rm -rf "$RUNNER_TEMP/R-4.6.1"
-            cp -R "$r_home" "$RUNNER_TEMP/R-4.6.1"
-            path="$RUNNER_TEMP/R-4.6.1/bin/Rscript.exe"
+            path="$snapshot/bin/Rscript.exe"
+          else
+            path="$RUNNER_TEMP/Rscript-4.6.1"
+            printf '#!/usr/bin/env bash\nexport R_HOME=%q\nexec %q "$@"\n' "$snapshot" "$snapshot/bin/Rscript" > "$path"
+            chmod +x "$path"
           fi
           echo "path=$path" >> "$GITHUB_OUTPUT"
       - uses: r-lib/actions/setup-r@465b7d8e732ca3921382b1674c59bada9cbf3399 # v2
@@ -271,10 +276,23 @@ jobs:
         with:
           r-version: '4.6.1'
           use-public-rspm: true
-      - name: Capture R 4.6.1
+      - name: Preserve R 4.6.1
         id: r461
         shell: bash
-        run: echo "path=$(command -v Rscript)" >> "$GITHUB_OUTPUT"
+        run: |
+          r_home=$(Rscript -e 'cat(normalizePath(R.home(), winslash = "/", mustWork = TRUE))')
+          snapshot="$RUNNER_TEMP/R-4.6.1"
+          rm -rf "$snapshot"
+          mkdir -p "$snapshot"
+          cp -R "$r_home/." "$snapshot/"
+          if [ "${{ runner.os }}" = Windows ]; then
+            path="$snapshot/bin/Rscript.exe"
+          else
+            path="$RUNNER_TEMP/Rscript-4.6.1"
+            printf '#!/usr/bin/env bash\nexport R_HOME=%q\nexec %q "$@"\n' "$snapshot" "$snapshot/bin/Rscript" > "$path"
+            chmod +x "$path"
+          fi
+          echo "path=$path" >> "$GITHUB_OUTPUT"
       - uses: r-lib/actions/setup-r@465b7d8e732ca3921382b1674c59bada9cbf3399 # v2
         with:
           r-version: '4.6.0'
