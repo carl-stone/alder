@@ -400,7 +400,7 @@ async function writeLaunchers(base, paths) {
 }
 
 async function arkQualificationPreflight(base, paths, candidates) {
-  const tsx = join(root, 'host/node_modules/.bin', process.platform === 'win32' ? 'tsx.cmd' : 'tsx');
+  const tsx = join(root, 'host/node_modules/tsx/dist/cli.mjs');
   const script = join(root, 'host/scripts/ark-preflight.ts');
   if (!await exists(tsx)) throw new Error('ark_preflight_missing: tsx is required for shared ArkKernel probe');
   for (const [index, candidate] of candidates.entries()) {
@@ -409,7 +409,7 @@ async function arkQualificationPreflight(base, paths, candidates) {
     await mkdir(probe, { recursive: true });
     await writeFile(join(probe, 'probe.R'), '# %%\n1 + 1\n');
     try {
-      execFileSync(tsx, [script, base, candidate, probe], { stdio: 'inherit', timeout: 180_000, env: cleanREnvironment() });
+      execFileSync(process.execPath, [tsx, script, base, candidate, probe], { stdio: 'inherit', timeout: 180_000, env: cleanREnvironment() });
     } catch (error) {
       throw new Error(`ark_preflight_failed: ${candidate}: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
