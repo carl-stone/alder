@@ -3827,6 +3827,28 @@ mod windows {
         }
         Ok(accounting.active_processes)
     }
+    impl WindowsTarget {
+        fn wait_for_job(&mut self, timeout_ms: u64) -> Result<bool, String> {
+            let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+            loop {
+                let root_exited = self.try_wait()?.is_some();
+                let active_processes = job_active_processes(self.job)?;
+                if root_exited && active_processes == 0 {
+                    return Ok(true);
+                }
+                if Instant::now() >= deadline {
+                    return Ok(false);
+                }
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                std::thread::sleep(if remaining < Duration::from_millis(10) {
+                    remaining
+                } else {
+                    Duration::from_millis(10)
+                });
+            }
+        }
+    }
+
     impl ManagedTarget for WindowsTarget {
         fn pid(&self) -> u32 {
             self.pid
@@ -3899,25 +3921,6 @@ mod windows {
             Ok(())
         }
 
-        fn wait_for_job(&mut self, timeout_ms: u64) -> Result<bool, String> {
-            let deadline = Instant::now() + Duration::from_millis(timeout_ms);
-            loop {
-                let root_exited = self.try_wait()?.is_some();
-                let active_processes = job_active_processes(self.job)?;
-                if root_exited && active_processes == 0 {
-                    return Ok(true);
-                }
-                if Instant::now() >= deadline {
-                    return Ok(false);
-                }
-                let remaining = deadline.saturating_duration_since(Instant::now());
-                std::thread::sleep(if remaining < Duration::from_millis(10) {
-                    remaining
-                } else {
-                    Duration::from_millis(10)
-                });
-            }
-        }
 
         fn terminate(&mut self, grace_ms: u64, kill_ms: u64) -> Result<(), String> {
             let process_group = self.pid;
@@ -4528,7 +4531,7 @@ mod windows {
             AddAccessAllowedAceEx(
                 acl,
                 ACL_REVISION,
-                ace_flags,
+                Dword::from(ace_flags),
                 FILE_ALL_ACCESS,
                 sid.as_ptr() as Handle,
             )
