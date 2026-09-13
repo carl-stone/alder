@@ -144,32 +144,41 @@ jobs:
         id: r461
         shell: bash
         run: |
+          set -euo pipefail
           r_home=$(Rscript -e 'cat(normalizePath(R.home(), winslash = "/", mustWork = TRUE))')
           if [ "${{ runner.os }}" = Linux ]; then
             path="$r_home/bin/Rscript"
+          elif [ "${{ runner.os }}" = macOS ]; then
+            brew tap r-lib/rig
+            brew install --cask rig
+            sudo rig add 4.6.1
+            sudo rig add 4.6.0
+            path=$(command -v Rscript-4.6.1)
           else
             snapshot="$RUNNER_TEMP/R-4.6.1"
             rm -rf "$snapshot"
             mkdir -p "$snapshot"
             cp -R "$r_home/." "$snapshot/"
-            if [ "${{ runner.os }}" = Windows ]; then
-              path="$snapshot/bin/Rscript.exe"
-            else
-              path="$RUNNER_TEMP/Rscript-4.6.1"
-              printf '#!/usr/bin/env bash\nexport RHOME=%q\nexec %q "$@"\n' "$snapshot" "$snapshot/bin/Rscript" > "$path"
-              chmod +x "$path"
-            fi
+            path="$snapshot/bin/Rscript.exe"
           fi
           echo "path=$path" >> "$GITHUB_OUTPUT"
       - uses: r-lib/actions/setup-r@465b7d8e732ca3921382b1674c59bada9cbf3399 # v2
         id: setup-r-460
+        if: runner.os != 'macOS'
         with:
           r-version: '4.6.0'
           use-public-rspm: true
       - name: Capture R 4.6.0
         id: r460
         shell: bash
-        run: echo "path=$(Rscript -e 'cat(normalizePath(file.path(R.home("bin"), if (.Platform$OS.type == "windows") "Rscript.exe" else "Rscript"), winslash = "/", mustWork = TRUE))')" >> "$GITHUB_OUTPUT"
+        run: |
+          set -euo pipefail
+          if [ "${{ runner.os }}" = macOS ]; then
+            path=$(command -v Rscript-4.6.0)
+          else
+            path=$(Rscript -e 'cat(normalizePath(file.path(R.home("bin"), if (.Platform$OS.type == "windows") "Rscript.exe" else "Rscript"), winslash = "/", mustWork = TRUE))')
+          fi
+          echo "path=$path" >> "$GITHUB_OUTPUT"
       - name: Install Chrome for Linux browser contracts
         if: runner.os == 'Linux'
         id: chrome
@@ -284,31 +293,40 @@ jobs:
         id: r461
         shell: bash
         run: |
+          set -euo pipefail
           r_home=$(Rscript -e 'cat(normalizePath(R.home(), winslash = "/", mustWork = TRUE))')
           if [ "${{ runner.os }}" = Linux ]; then
             path="$r_home/bin/Rscript"
+          elif [ "${{ runner.os }}" = macOS ]; then
+            brew tap r-lib/rig
+            brew install --cask rig
+            sudo rig add 4.6.1
+            sudo rig add 4.6.0
+            path=$(command -v Rscript-4.6.1)
           else
             snapshot="$RUNNER_TEMP/R-4.6.1"
             rm -rf "$snapshot"
             mkdir -p "$snapshot"
             cp -R "$r_home/." "$snapshot/"
-            if [ "${{ runner.os }}" = Windows ]; then
-              path="$snapshot/bin/Rscript.exe"
-            else
-              path="$RUNNER_TEMP/Rscript-4.6.1"
-              printf '#!/usr/bin/env bash\nexport RHOME=%q\nexec %q "$@"\n' "$snapshot" "$snapshot/bin/Rscript" > "$path"
-              chmod +x "$path"
-            fi
+            path="$snapshot/bin/Rscript.exe"
           fi
           echo "path=$path" >> "$GITHUB_OUTPUT"
       - uses: r-lib/actions/setup-r@465b7d8e732ca3921382b1674c59bada9cbf3399 # v2
+        if: runner.os != 'macOS'
         with:
           r-version: '4.6.0'
           use-public-rspm: true
       - name: Capture R 4.6.0
         id: r460
         shell: bash
-        run: echo "path=$(command -v Rscript)" >> "$GITHUB_OUTPUT"
+        run: |
+          set -euo pipefail
+          if [ "${{ runner.os }}" = macOS ]; then
+            path=$(command -v Rscript-4.6.0)
+          else
+            path=$(Rscript -e 'cat(normalizePath(file.path(R.home("bin"), if (.Platform$OS.type == "windows") "Rscript.exe" else "Rscript"), winslash = "/", mustWork = TRUE))')
+          fi
+          echo "path=$path" >> "$GITHUB_OUTPUT"
       - name: Install Chrome for desktop browser contracts
         if: runner.os == 'Linux'
         id: chrome
