@@ -72,7 +72,8 @@ async function loadLock() {
 
 async function extractSource(archive, destination) {
   await mkdir(destination, { recursive: true });
-  await run('tar', ['--extract', '--gzip', '--file', archive, '--directory', destination, '--strip-components=1', '--no-same-owner']);
+  const localArchive = process.platform === 'win32' ? ['--force-local'] : [];
+  await run('tar', ['--extract', '--gzip', ...localArchive, '--file', archive, '--directory', destination, '--strip-components=1', '--no-same-owner']);
 }
 
 async function packageArtifact(packageDir, artifactPath, executableName) {
