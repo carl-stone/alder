@@ -149,8 +149,18 @@ jobs:
           if [ "${{ runner.os }}" = Linux ]; then
             path="$r_home/bin/Rscript"
           elif [ "${{ runner.os }}" = macOS ]; then
-            brew install --cask r-lib/rig/rig
-            rig system user-mode --no-reinstall --keep-install --keep-links
+            if [ "${{ matrix.target-arch }}" = arm64 ]; then
+              rig_arch=arm64
+              rig_sha256=65a6cd859b22e8a0bd2a1e99ed8a7cab73460c1ef8b7ac27e4697961dcc1de74
+            else
+              rig_arch=x86_64
+              rig_sha256=fada7177d6c5aeb66353ade8cdb59f2905cfb982b8de9cdc2179f8220e010e25
+            fi
+            rig_pkg="$RUNNER_TEMP/rig-0.8.1.pkg"
+            curl --fail --location --silent --show-error "https://github.com/r-lib/rig/releases/download/v0.8.1/rig-0.8.1-macOS-$rig_arch.pkg" --output "$rig_pkg"
+            echo "$rig_sha256  $rig_pkg" | shasum -a 256 --check
+            sudo installer -pkg "$rig_pkg" -target /
+            export RIG_MODE=user
             rig add 4.6.1 --without-pak
             rig add 4.6.0 --without-pak
             path="$HOME/.local/share/rig/r/4.6.1/bin/Rscript"
@@ -298,8 +308,18 @@ jobs:
           if [ "${{ runner.os }}" = Linux ]; then
             path="$r_home/bin/Rscript"
           elif [ "${{ runner.os }}" = macOS ]; then
-            brew install --cask r-lib/rig/rig
-            rig system user-mode --no-reinstall --keep-install --keep-links
+            if [ "${{ matrix.target-arch }}" = arm64 ]; then
+              rig_arch=arm64
+              rig_sha256=65a6cd859b22e8a0bd2a1e99ed8a7cab73460c1ef8b7ac27e4697961dcc1de74
+            else
+              rig_arch=x86_64
+              rig_sha256=fada7177d6c5aeb66353ade8cdb59f2905cfb982b8de9cdc2179f8220e010e25
+            fi
+            rig_pkg="$RUNNER_TEMP/rig-0.8.1.pkg"
+            curl --fail --location --silent --show-error "https://github.com/r-lib/rig/releases/download/v0.8.1/rig-0.8.1-macOS-$rig_arch.pkg" --output "$rig_pkg"
+            echo "$rig_sha256  $rig_pkg" | shasum -a 256 --check
+            sudo installer -pkg "$rig_pkg" -target /
+            export RIG_MODE=user
             rig add 4.6.1 --without-pak
             rig add 4.6.0 --without-pak
             path="$HOME/.local/share/rig/r/4.6.1/bin/Rscript"
