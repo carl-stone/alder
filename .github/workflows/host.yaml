@@ -100,9 +100,23 @@ jobs:
             ${{ runner.temp }}/ark/process-supervisor-provenance.json
           if-no-files-found: error
 
+  r-sources:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: host/.node-version
+      - name: Fetch and verify locked R source archives
+        run: node host/scripts/fetch-r-sources.mjs "$RUNNER_TEMP/r-sources"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: r-sources
+          path: ${{ runner.temp }}/r-sources
+          if-no-files-found: error
 
   host:
-    needs: ark
+    needs: [ark, r-sources]
     strategy:
       fail-fast: false
       matrix:
@@ -160,6 +174,7 @@ jobs:
             curl --fail --location --silent --show-error "https://github.com/r-lib/rig/releases/download/v0.8.1/rig-0.8.1-macOS-$rig_arch.pkg" --output "$rig_pkg"
             echo "$rig_sha256  $rig_pkg" | shasum -a 256 --check
             sudo installer -pkg "$rig_pkg" -target /
+            mkdir -p "$HOME/.local/share/rig/r" "$HOME/.local/bin"
             export RIG_MODE=user
             rig add 4.6.1 --without-pak
             rig add 4.6.0 --without-pak
@@ -193,12 +208,21 @@ jobs:
         if: runner.os == 'Linux'
         id: chrome
         uses: browser-actions/setup-chrome@48ad923757ca74d66703209fe939badbdf80f2f4 # v2
+      - name: Install Linux R build dependencies
+        if: runner.os == 'Linux'
+        shell: bash
+        run: sudo apt-get update && sudo apt-get install -y libuv1-dev libfontconfig1-dev libfreetype6-dev libharfbuzz-dev libfribidi-dev libpng-dev libtiff-dev libjpeg-dev libwebp-dev libxml2-dev libicu-dev
 
       - name: Download target Ark producer artifact
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: ark-${{ matrix.name }}
           path: ${{ runner.temp }}/ark
+      - name: Download verified R source archives
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: r-sources
+          path: ${{ runner.temp }}/r-sources
       - name: Build bundled application
         shell: bash
         run: |
@@ -219,6 +243,7 @@ jobs:
             --output host/.application --kind headless \
             --rscript "$R461" --qualified-rscript "$R460" \
             --source-commit "$GITHUB_SHA" \
+            --r-source-cache "$RUNNER_TEMP/r-sources" \
             --supervisor "$RUNNER_TEMP/ark/alder-process-supervisor" --supervisor-provenance "$RUNNER_TEMP/ark/process-supervisor-provenance.json"
       - name: Protocol, controller, engine and transport contracts
         shell: bash
@@ -260,7 +285,7 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
   desktop:
-    needs: ark
+    needs: [ark, r-sources]
     strategy:
       fail-fast: false
       matrix:
@@ -319,6 +344,7 @@ jobs:
             curl --fail --location --silent --show-error "https://github.com/r-lib/rig/releases/download/v0.8.1/rig-0.8.1-macOS-$rig_arch.pkg" --output "$rig_pkg"
             echo "$rig_sha256  $rig_pkg" | shasum -a 256 --check
             sudo installer -pkg "$rig_pkg" -target /
+            mkdir -p "$HOME/.local/share/rig/r" "$HOME/.local/bin"
             export RIG_MODE=user
             rig add 4.6.1 --without-pak
             rig add 4.6.0 --without-pak
@@ -355,12 +381,17 @@ jobs:
       - name: Install Linux desktop packaging tools
         if: runner.os == 'Linux'
         shell: bash
-        run: sudo apt-get update && sudo apt-get install -y dpkg fakeroot rpm xvfb
+        run: sudo apt-get update && sudo apt-get install -y dpkg fakeroot rpm xvfb libuv1-dev libfontconfig1-dev libfreetype6-dev libharfbuzz-dev libfribidi-dev libpng-dev libtiff-dev libjpeg-dev libwebp-dev libxml2-dev libicu-dev
       - name: Download target Ark producer artifact
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: ark-${{ matrix.name }}
           path: ${{ runner.temp }}/ark
+      - name: Download verified R source archives
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: r-sources
+          path: ${{ runner.temp }}/r-sources
       - name: Build host and package Forge application
         shell: bash
         run: |
@@ -408,6 +439,7 @@ jobs:
             --forge-output "$FORGE_ROOT" --electron-entry "$FORGE_ENTRY" \
             --rscript "$R461" --qualified-rscript "$R460" \
             --source-commit "$GITHUB_SHA" \
+            --r-source-cache "$RUNNER_TEMP/r-sources" \
             --supervisor "$RUNNER_TEMP/ark/alder-process-supervisor" --supervisor-provenance "$RUNNER_TEMP/ark/process-supervisor-provenance.json"
       - name: Inject staged resources before Forge make
         shell: bash
@@ -431,6 +463,7 @@ jobs:
             --output host/.application --kind headless \
             --rscript "$R461" --qualified-rscript "$R460" \
             --source-commit "$GITHUB_SHA" \
+            --r-source-cache "$RUNNER_TEMP/r-sources" \
             --supervisor "$RUNNER_TEMP/ark/alder-process-supervisor" --supervisor-provenance "$RUNNER_TEMP/ark/process-supervisor-provenance.json"
       - name: Build frozen release qualification sidecars
         id: qualification

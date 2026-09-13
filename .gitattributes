@@ -1,1 +1,2 @@
 dev/ark/*.patch text eol=lf
+host/licenses/** text eol=lf
