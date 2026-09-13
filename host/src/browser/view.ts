@@ -1,8 +1,10 @@
-import type { AnalysisDiagnostic, CommandResult, HostEvent, HostSnapshot } from "../protocol.js";
+import { artifactHandleSchema } from "../protocol.js";
+import type { AnalysisDiagnostic, ArtifactHandle, CommandResult, HostEvent, HostQueryResult, HostSnapshot, OperationRecord } from "../protocol.js";
 import { dependencyLevels, reachableNodes } from "../graph.js";
+import { toLogicalCellBody } from "../cell-body.js";
 import { BrowserNotebookClient } from "./client.js";
 import type { BrowserDocument, EditorSelection, LocalCell } from "./document.js";
-import { OutputRenderer } from "./output.js";
+import { OutputRenderer } from "../output-renderer.js";
 import { notebookUrl, notebookViewUrl } from "./url.js";
 
 import type {
@@ -39,6 +41,20 @@ interface CellView {
     editorProjection: string;
   } | null;
 }
+type PackageServiceCommand = "packages.declare" | "packages.install";
+
+
+interface LspCompletionEdit {
+  cell: string;
+  start: { line: number; character: number };
+  end: { line: number; character: number };
+  newText: string;
+}
+interface PackageOperationTarget {
+  command: PackageServiceCommand;
+  operationId: string | null;
+  status: HTMLElement;
+}
 
 type DataflowPanelTab = "variables" | "dependencies" | "graph" | "outline";
 
@@ -61,6 +77,7 @@ export class NotebookView {
   private editorHelpError: string | null = null;
   private editorHelpRestarting = false;
   private actionCount = 0;
+  private explicitRunCount = 0;
   private emptyBar: HTMLElement | null = null;
   private appView = false;
   private variableFilter = "";
@@ -83,10 +100,12 @@ export class NotebookView {
   private editorDiagnosticsValue: HostSnapshot["editorDiagnostics"] | null = null;
   private editorDiagnosticsVisible = false;
   private editorDiagnosticsSourceCurrent = false;
+  private renderedOrder: string[] = [];
   private toolbarSignature = "";
   private hostClosed = false;
   private internalNavigation = false;
   private statusSignature = "";
+  private recoveryUnsubscribe: (() => void) | null = null;
   private cellActionsSignature = "";
   private readonly dataflowStatuses = new Map<string, string>();
   private readonly dataflowCells = new Map<string, string>();
@@ -95,6 +114,7 @@ export class NotebookView {
   private minimapCurrent: string | null = null;
   private minimapViewportFrame: number | null = null;
   private readonly lspRequests = new Map<string, AbortController>();
+  private readonly packageOperations = new Set<PackageOperationTarget>();
   private draggedKey: string | null = null;
   private readonly resizeHandler = (): void => this.updateTopbarInset();
   private readonly preserveRunFocus = (event: MouseEvent): void => {
@@ -120,22 +140,27 @@ export class NotebookView {
     dom.body.classList.toggle("app-view", this.appView);
     window.__alderEditors = this.editors;
     this.output = new OutputRenderer({
-      widget: (name, path, update) => client.setWidget(name, path, update, this.appView ? "app" : "editor"),
-      upload: async (name, path, files) => {
-        const encoded = await Promise.all(files.map(encodeFile));
-        await client.service("upload", {
-          name, path: [...path], files: encoded,
-          source: this.appView ? "app" : "editor",
-        });
-      },
-      lazy: (key) => client.requestLazy(key),
-      table: (request) => client.requestTable(request),
-      error: (error) => this.showError(error),
-      pageSize: () => configNumber(this.documentValue?.snapshot.config, ["table", "page_size"], 25),
-      widgetAvailable: (widget) => {
-        const owner = typeof widget.owner === "string" ? this.documentValue?.cell(widget.owner) : undefined;
-        const runtime = this.documentValue?.snapshot.runtime;
-        return owner?.server?.status === "done" && runtime?.executionReady === true && runtime.kernelAvailable === true;
+      document: dom,
+      resolveArtifact: async (descriptor) => ({ kind: "url", url: await client.resolveArtifact(descriptor) }),
+      mode: "interactive",
+      actions: {
+        widget: (name, path, update) => client.setWidget(name, path, update, this.appView ? "app" : "editor"),
+        upload: async (name, path, files) => {
+          const encoded = await Promise.all(files.map(encodeFile));
+          await client.service("upload", {
+            name, path: [...path], files: encoded,
+            source: this.appView ? "app" : "editor",
+          });
+        },
+        lazy: (key) => client.requestLazy(key),
+        table: (request) => client.requestTable(request),
+        error: (error) => this.showError(error),
+        pageSize: () => configNumber(this.documentValue?.snapshot.config, ["table", "page_size"], 25),
+        widgetAvailable: (widget) => {
+          const owner = typeof widget.owner === "string" ? this.documentValue?.cell(widget.owner) : undefined;
+          const runtime = this.documentValue?.snapshot.runtime;
+          return owner?.server?.status === "done" && runtime?.executionReady === true && runtime?.kernelState === "ready";
+        },
       },
     });
     this.observer = typeof IntersectionObserver === "function"
@@ -152,6 +177,7 @@ export class NotebookView {
     this.bindNavigation();
     this.bindDragAndDrop();
     this.installServiceMenus();
+    this.recoveryUnsubscribe = client.subscribeRecovery(() => this.renderStatus());
     this.applyPanelState();
     this.updateTopbarInset();
     window.requestAnimationFrame(() => this.updateTopbarInset());
@@ -160,6 +186,30 @@ export class NotebookView {
 
   get document(): BrowserDocument | null { return this.documentValue; }
   get allowsUnload(): boolean { return this.hostClosed || this.internalNavigation; }
+  get runPreparing(): boolean { return this.explicitRunCount > 0; }
+
+  async runExplicit<T>(operation: () => Promise<T>): Promise<T> {
+    this.cancelEditTimers();
+    this.explicitRunCount += 1;
+    if (this.documentValue) this.renderControls(this.documentValue.snapshot);
+    const pending = this.action(async () => {
+      await this.output.flush();
+      return operation();
+    });
+    // action() deliberately avoids repainting every cell action until the
+    // request is acknowledged. Explicit Run must still gate all mutations
+    // while its preparation/dispatch is in flight.
+    this.renderAllCellActions();
+    try {
+      return await pending;
+    } finally {
+      this.explicitRunCount -= 1;
+      if (this.documentValue) {
+        this.renderControls(this.documentValue.snapshot);
+        this.renderAllCellActions();
+      }
+    }
+  }
 
   setTransportState(state: "connecting" | "open" | "recovering" | "closed", error?: Error): void {
     if (this.hostClosed) return;
@@ -174,6 +224,7 @@ export class NotebookView {
   ): void {
     this.documentValue = notebook;
     const snapshot = notebook.snapshot;
+    if (event?.type === "operation" && isOperationRecord(event.payload)) this.renderPackageProgress(event.payload);
     if (event?.type === "service-errors" && snapshot.serviceErrors.lsp === undefined) {
       this.editorHelpError = null;
     }
@@ -184,17 +235,22 @@ export class NotebookView {
     }
     const path = snapshot.path || "untitled notebook";
     if (this.path && this.path.textContent !== path) this.path.textContent = path;
-    const targetId = event && ["cell", "cell-started", "cell-output", "cell-completed", "diagnostics"].includes(event.type)
+    const targetId = event && ['cell', 'cell-started', 'cell-output', 'cell-completed', 'diagnostics'].includes(event.type)
       ? event.cellId : undefined;
     const target = targetId ? notebook.cell(targetId) : undefined;
-    const deleted = event?.type === "cell" && isObject(event.payload) && event.payload.deleted === true;
-    const reconcileNotebook = event?.type === "notebook" && notebookRequiresCellReconcile(event.payload);
-    // Cell events carry a complete projection for one existing cell. Structural
+    const deleted = event?.type === 'cell' && isObject(event.payload) && event.payload.deleted === true;
+    const reconcileNotebook = (event?.type === 'notebook' || event?.type === 'transaction')
+      && notebookRequiresCellReconcile(event.payload, event.type === 'notebook');
     // notebook events create/order views, so execution must not scan every view.
     const canTarget = target !== undefined && this.views.has(target.key) && !deleted;
     const localTargets = event === undefined && localCellKeys !== undefined
       ? [...new Set(localCellKeys)].map((key) => notebook.cell(key))
       : [];
+    const transactionTargets = event?.type === 'transaction' && !reconcileNotebook && isObject(event.payload) && Array.isArray(event.payload.updated)
+      ? event.payload.updated.flatMap((value) => isObject(value) && typeof value.id === 'string' ? [notebook.cell(value.id)] : []).filter((cell): cell is LocalCell => cell !== undefined)
+      : [];
+    const canTargetTransaction = transactionTargets.length > 0
+      && transactionTargets.every((cell) => this.views.has(cell.key));
     const canTargetLocal = event === undefined && localCellKeys !== undefined
       && localTargets.every((cell) => cell !== undefined && this.views.has(cell.key));
     if (canTargetLocal) {
@@ -203,7 +259,15 @@ export class NotebookView {
       }
     } else if (canTarget) {
       this.renderCell(target, notebook.cells.indexOf(target), snapshot, event);
-    } else if (!event || event.type === "cell" || reconcileNotebook) {
+    } else if (canTargetTransaction) {
+      for (const cell of transactionTargets) this.renderCell(cell, notebook.cells.indexOf(cell), snapshot, event);
+      const orderChanged = notebook.cells.length !== this.renderedOrder.length
+        || notebook.cells.some((cell, index) => cell.key !== this.renderedOrder[index]);
+      if (orderChanged) {
+        this.reconcileOrder(notebook.cells);
+        this.renderedOrder = notebook.cells.map((cell) => cell.key);
+      }
+    } else if (!event || event.type === 'cell' || event.type === 'transaction' || reconcileNotebook) {
       const retained = new Set<string>();
       notebook.cells.forEach((cell, index) => {
         retained.add(cell.key);
@@ -214,6 +278,7 @@ export class NotebookView {
         this.destroyCell(key, view);
       }
       this.reconcileOrder(notebook.cells);
+      this.renderedOrder = notebook.cells.map((cell) => cell.key);
       this.renderEmpty(notebook.cells.length === 0);
     }
     this.renderControls(snapshot);
@@ -231,6 +296,8 @@ export class NotebookView {
   }
 
   destroy(): void {
+    this.recoveryUnsubscribe?.();
+    this.recoveryUnsubscribe = null;
     for (const timer of this.editTimers.values()) window.clearTimeout(timer);
     if (this.autosaveTimer !== null) window.clearTimeout(this.autosaveTimer);
     for (const request of this.lspRequests.values()) request.abort();
@@ -335,13 +402,18 @@ export class NotebookView {
       this.addCell(key, button.dataset.type === "markdown" ? "markdown" : "code");
       return;
     }
-    await this.action(async () => {
-      if (action === "run") {
-        this.cancelEditTimers();
-        await this.output.flush();
+    if (action === "run") {
+      await this.runExplicit(async () => {
+        if (this.requireCell(key).tombstone) {
+          throw new Error("Restore this deleted cell as a new cell before running it");
+        }
         await this.client.runCell(key, input);
         this.scheduleAutosave();
-      } else if (action === "delete") {
+      });
+      return;
+    }
+    await this.action(async () => {
+      if (action === "delete") {
         this.cancelEditTimer(key);
         await this.client.deleteCell(key);
         this.scheduleAutosave();
@@ -438,6 +510,9 @@ export class NotebookView {
     outputArea.hidden = !this.appView && !server?.outputs.length && !server?.progress;
     outputArea.dataset.cell = cell.id ?? "";
     outputArea.dataset.revision = String(cell.serverRevision);
+    const outputRunId = server?.outputs.at(-1)?.runId;
+    if (outputRunId) outputArea.dataset.runId = outputRunId;
+    else delete outputArea.dataset.runId;
     this.renderLog(element.querySelector<HTMLElement>("[data-role=log]"), server?.log ?? [], server?.error);
     this.renderCellActions(element, cell, status, undefined, true);
     if (conflictChanged) this.renderConflict(element, cell);
@@ -499,7 +574,7 @@ export class NotebookView {
     const signature = JSON.stringify({
       actionPending,
       runBlocked: actionPending || runtime?.busy === true || runtime?.packageOperationActive === true ||
-        runtime?.executionReady !== true || runtime?.kernelAvailable !== true,
+        runtime?.executionReady !== true || runtime?.kernelState !== "ready",
     });
     if (signature === this.cellActionsSignature) return;
     this.cellActionsSignature = signature;
@@ -548,21 +623,17 @@ export class NotebookView {
           this.scheduleEdit(cell.key);
         },
         onRun: (next) => {
-          this.cancelEditTimers();
-          void this.action(async () => {
+          void this.runExplicit(async () => {
             if (this.requireCell(cell.key).tombstone) {
               throw new Error("Restore this deleted cell as a new cell before running it");
             }
-            await this.output.flush();
             await this.client.runCell(cell.key);
             this.scheduleAutosave();
             if (next) this.focusAdjacentCell(cell.key, 1);
           }).catch((error) => this.showError(error));
         },
         onRunAll: () => {
-          this.cancelEditTimers();
-          void this.action(async () => {
-            await this.output.flush();
+          void this.runExplicit(async () => {
             await this.client.runAll(this.runScope());
             this.scheduleAutosave();
           }).catch((error) => this.showError(error));
@@ -746,7 +817,7 @@ export class NotebookView {
     const server = cell.server;
     if (!server || cell.conflict || cell.tombstone || cell.generation !== cell.acknowledgedGeneration ||
       cell.serverRevision !== server.revision || cell.serverType !== server.type || cell.desiredType !== server.type) return false;
-    const source = server.body.join("\n");
+    const source = toLogicalCellBody(server.type, server.body).join("\n");
     if (cell.serverBody.join("\n") !== source || cell.desiredBody.join("\n") !== source) return false;
     const editor = this.editors.get(cell.key);
     return !editor || editor.getDoc() === source;
@@ -794,15 +865,25 @@ export class NotebookView {
     area.replaceChildren();
     logs.forEach((line) => area.appendChild(element(this.dom, "div", /^Error\b/.test(line) ? "log-error" : "log-line", line)));
     if (isObject(rawError)) {
-      const trace = Array.isArray(rawError.trace) ? rawError.trace.map(String) : [];
-      if (rawError.call || trace.length || rawError.class) {
+      const errorDetails = isObject(rawError.details) ? rawError.details : undefined;
+      const condition = errorDetails && isObject(errorDetails.condition) ? errorDetails.condition : undefined;
+      const jupyter = errorDetails && isObject(errorDetails.jupyter) ? errorDetails.jupyter : undefined;
+      const classes = condition && Array.isArray(condition.class) ? condition.class.map(String) : [];
+      const call = condition && typeof condition.call === "string" ? condition.call : "";
+      const trace = condition && Array.isArray(condition.trace) ? condition.trace.map(String) : [];
+      const jupyterName = jupyter && typeof jupyter.ename === "string" ? jupyter.ename : "";
+      const jupyterValue = jupyter && typeof jupyter.evalue === "string" ? jupyter.evalue : "";
+      const jupyterTrace = jupyter && Array.isArray(jupyter.traceback) ? jupyter.traceback.map(String) : [];
+      if (call || trace.length || classes.length || jupyterName || jupyterValue || jupyterTrace.length) {
         const details = this.dom.createElement("details");
         details.className = "error-details";
         details.appendChild(element(this.dom, "summary", "", "Call and traceback"));
         details.appendChild(element(this.dom, "pre", "error-trace", [
-          rawError.class ? `Condition: ${Array.isArray(rawError.class) ? rawError.class.join(", ") : String(rawError.class)}` : "",
-          rawError.call ? `Call: ${String(rawError.call)}` : "",
+          classes.length ? `Condition: ${classes.join(", ")}` : "",
+          call ? `Call: ${call}` : "",
           trace.length ? `Traceback:\n${trace.map((line, index) => `${index + 1}. ${line}`).join("\n")}` : "",
+          jupyterName || jupyterValue ? `Jupyter: ${[jupyterName, jupyterValue].filter(Boolean).join(": ")}` : "",
+          jupyterTrace.length ? `Jupyter traceback:\n${jupyterTrace.map((line, index) => `${index + 1}. ${line}`).join("\n")}` : "",
         ].filter(Boolean).join("\n")));
         area.appendChild(details);
       }
@@ -883,15 +964,16 @@ export class NotebookView {
 
   private renderControls(snapshot: HostSnapshot): void {
     const busy = snapshot.runtime.busy;
-    const available = !this.hostClosed && snapshot.runtime.executionReady && snapshot.runtime.kernelAvailable;
+    const available = !this.hostClosed && snapshot.runtime.executionReady && snapshot.runtime.kernelState === "ready";
     const signature = JSON.stringify({
       actionCount: this.actionCount,
+      runPreparing: this.runPreparing,
       hostClosed: this.hostClosed,
       busy,
       available,
       packageOperationActive: snapshot.runtime.packageOperationActive,
       executionMode: snapshot.runtime.executionMode,
-      kernelAvailable: snapshot.runtime.kernelAvailable,
+      kernelReady: snapshot.runtime.kernelState === "ready",
       changed: snapshot.changed,
     });
     if (signature === this.toolbarSignature) return;
@@ -906,10 +988,10 @@ export class NotebookView {
       setDisabled(runAll, this.actionCount > 0 || busy || snapshot.runtime.packageOperationActive || !available);
     }
     const stop = this.dom.getElementById("stop") as HTMLButtonElement | null;
-    if (stop) setDisabled(stop, this.hostClosed || this.actionCount > 0 || !busy);
+    if (stop) setDisabled(stop, this.hostClosed || !(busy || this.runPreparing));
     const restart = this.dom.getElementById("restart") as HTMLButtonElement | null;
     if (restart) {
-      restart.hidden = snapshot.runtime.kernelAvailable;
+      restart.hidden = snapshot.runtime.kernelState === "ready";
       setDisabled(restart, this.hostClosed || this.actionCount > 0 || busy);
     }
     const save = this.dom.getElementById("save") as HTMLButtonElement | null;
@@ -928,11 +1010,7 @@ export class NotebookView {
     // update the always-visible minimap immediately; graph layout still waits
     // for the controller's separate full graph projection.
     if (event?.type === "notebook") {
-      if (isObject(event.payload) && (
-        (Array.isArray(event.payload.created) && event.payload.created.length > 0)
-        || typeof event.payload.deleted === "string"
-        || typeof event.payload.moved === "string"
-      )) this.renderMinimapProjection(snapshot);
+      if (notebookRequiresCellReconcile(event.payload, false)) this.renderMinimapProjection(snapshot);
       return;
     }
     if (event?.type === "variables") {
@@ -965,7 +1043,7 @@ export class NotebookView {
     }
     if (event && [
       "receipt", "cell-started", "cell-output", "cell-completed", "diagnostics",
-      "editor-diagnostics", "service-errors", "operation", "service-error",
+      "editor-diagnostics", "service-errors", "operation", "service-error", "active_clients_changed",
     ].includes(event.type)) return;
     if (!event) {
       this.captureDataflowCells(snapshot);
@@ -1459,7 +1537,7 @@ export class NotebookView {
       const name = cellName(cell);
       if (name) retain(this.panelButton(name, cell.id, "outline-cell", undefined, ["outline-cell", cell.id]));
       if (cell.type === "markdown") {
-        markdownHeadings(cell.body).forEach((heading) => {
+        markdownHeadings(toLogicalCellBody(cell.type, cell.body)).forEach((heading) => {
           const button = this.panelButton(heading.text, cell.id, "outline-heading", heading.line, ["outline-heading", cell.id, heading.line]);
           button.style.setProperty("--outline-level", String(heading.level - 1));
           retain(button);
@@ -1758,35 +1836,24 @@ export class NotebookView {
     menus.dataset.hostServiceMenus = "true";
     menus.style.display = "contents";
 
-    const exportMenu = this.menu("Export");
+    const actionMenu = this.menu("Actions");
     const include = this.dom.createElement("input");
     include.type = "checkbox";
-    const includeLabel = element(this.dom, "label", "export-include-code");
+    const includeLabel = element(this.dom, "label", "publish-include-code");
     includeLabel.append(include, this.dom.createTextNode(" Include code"));
-    exportMenu.panel.appendChild(includeLabel);
-    for (const [format, label] of [
-      ["html", "HTML"], ["md", "Markdown"], ["script", "R script"],
-      ["ipynb", "IPYNB"], ["qmd", "Quarto"], ["session", "Session JSON"],
-    ] as const) {
-      exportMenu.panel.appendChild(this.serviceButton(label, async () => {
-        const result = await this.runService("export", { format, include_code: include.checked });
-        this.downloadServiceResult(result);
-      }, { exportFormat: format }));
-    }
-    exportMenu.panel.appendChild(this.serviceButton("Publish with Pandoc", async () => {
-      const result = await this.runService("publish", { engine: "pandoc", include_code: include.checked });
-      this.downloadServiceResult(result);
+    actionMenu.panel.appendChild(includeLabel);
+    actionMenu.panel.appendChild(this.serviceButton("Publish HTML", async () => {
+      const result = await this.runService("publish", { include_code: include.checked });
+      await this.downloadServiceResult(result);
     }));
-    exportMenu.panel.appendChild(this.serviceButton("Publish with Quarto", async () => {
-      const result = await this.runService("publish", { engine: "quarto", include_code: include.checked });
-      this.downloadServiceResult(result);
-    }));
-    exportMenu.panel.appendChild(this.serviceButton("Check notebook", async () => {
+    actionMenu.panel.appendChild(this.serviceButton("Check notebook", async () => {
       const result = await this.runService("check", {});
       const payload = isObject(result.result) ? result.result : {};
-      if (payload.ok === false) {
-        const count = Array.isArray(payload.issues) ? payload.issues.length : 1;
-        throw new Error(`${count} notebook validation ${count === 1 ? "issue" : "issues"}`);
+      const issues = Array.isArray(payload.issues) ? payload.issues : [];
+      const blocked = isObject(payload.executionBlockedReason);
+      if (payload.ok === false || issues.length > 0 || blocked) {
+        if (issues.length > 0) throw new Error(issues.length + " notebook validation " + (issues.length === 1 ? "issue" : "issues"));
+        throw new Error("Notebook check failed");
       }
       this.actionNotice = "Notebook check passed";
     }));
@@ -1799,34 +1866,51 @@ export class NotebookView {
     const status = element(this.dom, "pre", "package-status", "Select Refresh to inspect packages.");
     packageMenu.panel.append(names);
     const packages = (): string[] => Array.from(new Set(names.value.split(/[\s,]+/).map((name) => name.trim()).filter(Boolean)));
-    const updateStatus = (result: CommandResult): void => {
+    const updateStatus = (result: CommandResult | HostQueryResult, command?: PackageServiceCommand): void => {
       const payload = operationPayload(result);
       const state = isObject(payload.status) ? payload.status : payload;
-      status.textContent = packageStatusText(state);
+      const output = command === "packages.install" && isObject(payload.result) && typeof payload.result.output === "string"
+        ? payload.result.output : "";
+      status.textContent = packageStatusText(state, output);
+    };
+    const runPackage = async (command: PackageServiceCommand, payload: Record<string, unknown>): Promise<void> => {
+      const target: PackageOperationTarget = { command, operationId: null, status };
+      this.packageOperations.add(target);
+      try {
+        const result = await this.runService(command, payload, (operationId) => {
+          target.operationId = operationId;
+          const current = this.documentValue?.snapshot.operations.find((candidate) => candidate.id === operationId);
+          if (current) this.renderPackageProgress(current, target);
+        });
+        if (command === "packages.declare") updateStatus(await this.client.service("packages.status"), command);
+        else updateStatus(result, command);
+      } finally {
+        this.packageOperations.delete(target);
+      }
     };
     packageMenu.panel.appendChild(this.serviceButton("Refresh", async () => updateStatus(await this.runService("packages.status", {}))));
     packageMenu.panel.appendChild(this.serviceButton("Declare", async () => {
       const selected = packages();
       if (!selected.length) throw new Error("Enter one or more package names");
-      updateStatus(await this.runService("packages.declare", { packages: selected }));
+      await runPackage("packages.declare", { packages: selected });
     }));
     packageMenu.panel.appendChild(this.serviceButton("Install missing", async () => {
-      updateStatus(await this.runService("packages.install", { packages: packages() }));
+      await runPackage("packages.install", { packages: packages() });
     }));
     packageMenu.panel.appendChild(status);
 
-    menus.append(exportMenu.wrap, packageMenu.wrap);
+    menus.append(actionMenu.wrap, packageMenu.wrap);
     const anchor = this.dom.getElementById("app-mode") ?? this.dom.getElementById("edit-mode");
     if (anchor?.parentNode === topbar) topbar.insertBefore(menus, anchor);
     else topbar.appendChild(menus);
   }
 
   private menu(label: string): { wrap: HTMLElement; panel: HTMLElement } {
-    const wrap = element(this.dom, "div", "export-menu");
+    const wrap = element(this.dom, "div", "service-menu");
     const toggle = element(this.dom, "button", "btn", label) as HTMLButtonElement;
     toggle.type = "button";
     toggle.setAttribute("aria-expanded", "false");
-    const panel = element(this.dom, "div", "export-menu-panel");
+    const panel = element(this.dom, "div", "service-menu-panel");
     panel.hidden = true;
     toggle.addEventListener("click", () => {
       panel.hidden = !panel.hidden;
@@ -1853,26 +1937,42 @@ export class NotebookView {
     return button;
   }
 
-  private async runService(command: "export" | "publish" | "check" | "packages.status" | "packages.declare" | "packages.install", payload: Record<string, unknown>): Promise<CommandResult> {
+  private async runService(command: "publish" | "check" | "packages.status" | "packages.declare" | "packages.install", payload: Record<string, unknown>, onAccepted?: (operationId: string) => void): Promise<CommandResult | HostQueryResult> {
     this.cancelEditTimers();
     await this.client.commitEdits();
     await this.output.flush();
-    return this.client.service(command, payload);
+    return this.client.service(command, payload, onAccepted);
   }
 
-  private downloadServiceResult(result: CommandResult): void {
-    const payload = operationPayload(result);
-    const url = typeof payload.url === "string" ? payload.url : typeof payload.download === "string" ? payload.download : "";
-    if (!url.startsWith("/download/")) throw new Error("service did not return a downloadable artifact");
-    const link = this.dom.createElement("a");
-    link.href = notebookUrl(url);
-    link.download = "";
-    link.target = "_blank";
-    link.rel = "noopener";
-    link.hidden = true;
-    this.dom.body.appendChild(link);
-    link.click();
-    link.remove();
+  private renderPackageProgress(operation: OperationRecord, target?: PackageOperationTarget): void {
+    const candidate = target ?? [...this.packageOperations].find((entry) => entry.operationId === operation.id);
+    if (!candidate || candidate.operationId !== operation.id) return;
+    const progress = operation.progress;
+    if (!progress) return;
+    const text = progress.text && progress.text.length > 0 ? progress.text
+      : progress.data === undefined ? packageProgressPhaseText(candidate.command, progress.phase) : packageProgressDataText(progress.data);
+    if (text) candidate.status.textContent = text;
+  }
+
+  private async downloadServiceResult(result: CommandResult | HostQueryResult): Promise<void> {
+    const descriptor = artifactHandleFromResult(result);
+    if (descriptor === null) throw new Error("publish did not return an artifact handle");
+    const scopedUrl = await this.client.resolveArtifact(descriptor);
+    const response = await fetch(scopedUrl, { credentials: "omit" });
+    if (!response.ok) throw new Error("published artifact download failed (" + response.status + ")");
+    const bytes = await response.blob();
+    const downloadUrl = URL.createObjectURL(bytes);
+    try {
+      const link = this.dom.createElement("a");
+      link.href = downloadUrl;
+      link.download = "notebook.html";
+      link.rel = "noopener";
+      link.click();
+    } finally {
+      globalThis.setTimeout(() => URL.revokeObjectURL(downloadUrl), 0);
+    }
+    this.actionNotice = "Published HTML downloaded.";
+    this.renderStatus();
   }
 
   private applyConfig(config: Record<string, unknown>): void {
@@ -1984,17 +2084,10 @@ export class NotebookView {
   private async shutdownHost(): Promise<void> {
     if (this.hostClosed) return;
     const pending = this.documentValue?.pendingSource();
-    if ((this.documentValue?.snapshot.changed || pending?.edits.length || pending?.creations.length)
+    if ((this.documentValue?.snapshot.changed || pending?.changes.length)
       && !window.confirm("This notebook has unsaved changes. Shut down without saving?")) return;
     await this.action(async () => {
-      const state = await fetch(notebookUrl("/api/state"));
-      if (!state.ok) throw new Error("Could not read notebook shutdown credentials");
-      const { shutdown_token: token } = await state.json() as { shutdown_token?: string };
-      if (!token) throw new Error("Notebook host did not provide a shutdown token");
-      const response = await fetch(notebookUrl("/api/shutdown"), {
-        method: "POST", headers: { "X-Alder-Shutdown-Token": token },
-      });
-      if (!response.ok) throw new Error("Notebook host rejected shutdown");
+      await this.client.shutdown();
       this.hostClosed = true;
       this.cancelEditTimers();
       if (this.autosaveTimer !== null) window.clearTimeout(this.autosaveTimer);
@@ -2011,14 +2104,14 @@ export class NotebookView {
       void this.shutdownHost().catch((error) => this.showError(error));
     });
     this.dom.getElementById("run-all")?.addEventListener("click", (event) => {
-      this.cancelEditTimers();
-      void this.action(async () => {
-        await this.output.flush();
+      void this.runExplicit(async () => {
         await this.client.runAll(this.runScope(), event);
         this.scheduleAutosave();
       }).catch((error) => this.showError(error));
     });
-    this.dom.getElementById("stop")?.addEventListener("click", () => void this.action(() => this.client.interrupt()).catch((error) => this.showError(error)));
+    this.dom.getElementById("stop")?.addEventListener("click", () => {
+      void this.client.interrupt().catch((error) => this.showError(error));
+    });
     this.dom.getElementById("restart")?.addEventListener("click", () => void this.action(() => this.client.restart()).catch((error) => this.showError(error)));
     this.dom.getElementById("save")?.addEventListener("click", () => {
       this.cancelEditTimers();
@@ -2029,8 +2122,14 @@ export class NotebookView {
       void this.action(() => this.client.setRuntime({ executionMode: value })).catch((error) => this.showError(error));
     });
     this.status?.addEventListener("click", (event) => {
-      const target = (event.target as Element | null)?.closest("[data-status-action=retry-editor-help]");
-      if (!target || this.editorHelpRestarting) return;
+      const target = (event.target as Element | null)?.closest("[data-status-action]");
+      const action = target?.getAttribute("data-status-action");
+      if (action === "restart-runtime") {
+        event.preventDefault();
+        void this.action(() => this.client.restart()).catch((error) => this.showError(error));
+        return;
+      }
+      if (action !== "retry-editor-help" || this.editorHelpRestarting) return;
       event.preventDefault();
       this.editorHelpRestarting = true;
       this.renderStatus();
@@ -2226,8 +2325,18 @@ export class NotebookView {
     const editorHelpError = this.editorHelpError
       ?? this.documentValue?.snapshot.serviceErrors.lsp?.message
       ?? null;
-    const message = this.hostClosed ? "Notebook host shut down." : this.actionError ?? stateError ?? editorHelpError ?? this.transportError ?? this.actionNotice ?? "";
+    const runtimeBlocked = this.documentValue?.snapshot.runtime.executionBlockedReason ?? null;
+    const runtimeMessage = runtimeBlocked === null ? null : "R execution is blocked: " + (runtimeBlocked.message || runtimeBlocked.code);
+    const recovery = this.client.recoveryState;
+    const recoveryConflict = recovery.status === "conflict" || recovery.branches.some((branch) => branch.state === "conflict") || recovery.corruption !== null;
+    const recoveryMessage = recovery.local !== null
+      ? recovery.status === "resubmitting" ? "Resubmitting recovered local edits…" : "Recovered local edits need your review."
+      : recovery.persistenceError ? "Local edit recovery is not durable."
+      : recovery.foreignDrafts > 0 ? "Another renderer retains a local recovery branch."
+      : recovery.pending ? "Recovering an interrupted local edit…" : recovery.corruption ? "Recovery data needs your review." : recoveryConflict ? "A recovery branch needs your review." : null;
+    const message = this.hostClosed ? "Notebook host shut down." : this.actionError ?? stateError ?? editorHelpError ?? runtimeMessage ?? this.transportError ?? this.actionNotice ?? recoveryMessage ?? "";
     const signature = JSON.stringify({
+      runtimeBlocked: runtimeBlocked === null ? null : [runtimeBlocked.code, runtimeBlocked.message],
       message,
       actionError: Boolean(this.actionError),
       stateError: Boolean(stateError),
@@ -2235,6 +2344,7 @@ export class NotebookView {
       transportError: Boolean(this.transportError),
       editorHelpRestarting: this.editorHelpRestarting,
       actionCount: this.actionCount,
+      recovery: { status: recovery.status, local: recovery.local !== null, branches: recovery.branches.map((branch) => [branch.id, branch.state, branch.documentRevision]), keptBranches: recovery.keptBranches.map((branch) => branch.id), foreignDrafts: recovery.foreignDrafts, pending: recovery.pending, corruption: recovery.corruption?.code ?? null, persistenceError: recovery.persistenceError?.code ?? null },
     });
     if (signature === this.statusSignature) return;
     this.statusSignature = signature;
@@ -2248,13 +2358,71 @@ export class NotebookView {
       if (this.editorHelpRestarting) retry.setAttribute("aria-busy", "true");
       this.status.appendChild(retry);
     }
-    this.status.classList.toggle("error", Boolean(this.actionError || stateError || editorHelpError));
-    this.status.classList.toggle("poll-error", Boolean(!this.actionError && !stateError && !editorHelpError && this.transportError));
+    this.renderRuntimeControls(runtimeBlocked);
+    this.renderRecoveryControls();
+    this.status.classList.toggle("error", Boolean(this.actionError || stateError || editorHelpError || runtimeBlocked || recoveryConflict));
+    this.status.classList.toggle("poll-error", Boolean(!this.actionError && !stateError && !editorHelpError && !runtimeBlocked && this.transportError));
+  }
+
+  private renderRuntimeControls(runtimeBlocked: HostSnapshot["runtime"]["executionBlockedReason"]): void {
+    if (!this.status || runtimeBlocked === null || this.hostClosed) return;
+    const panel = elementNode(this.dom, "div", "runtime-recovery-panel", "") as HTMLDivElement;
+    panel.dataset.runtimeRecovery = "true";
+    panel.setAttribute("role", "alert");
+    const detail = runtimeBlocked.message || runtimeBlocked.code;
+    panel.appendChild(elementNode(this.dom, "div", "runtime-message", "Execution remains blocked (" + runtimeBlocked.code + "): " + detail));
+    panel.appendChild(elementNode(this.dom, "div", "runtime-guidance", "Your edits and saves are preserved. Restart R to try again."));
+    const restart = elementNode(this.dom, "button", "btn mini status-action", "Restart R") as HTMLButtonElement;
+    restart.type = "button";
+    restart.dataset.statusAction = "restart-runtime";
+    restart.disabled = this.hostClosed || this.actionCount > 0 || this.documentValue?.snapshot.runtime.busy === true;
+    if (restart.disabled) restart.setAttribute("aria-disabled", "true");
+    panel.appendChild(restart);
+    this.status.appendChild(panel);
+  }
+
+  private renderRecoveryControls(): void {
+    if (!this.status) return;
+    const state = this.client.recoveryState;
+    const hasBranch = state.branches.length > 0;
+    if (state.local === null && state.keptBranches.length === 0 && state.foreignDrafts === 0 && !hasBranch && !state.pending && state.corruption === null && state.persistenceError === null) return;
+    const panel = elementNode(this.dom, "div", "recovery-panel", "") as HTMLDivElement;
+    panel.dataset.recovery = "true";
+    panel.dataset.recoveryPanel = "true";
+    panel.setAttribute("role", "alert");
+    const detail = state.local !== null
+      ? "The renderer retained an unacknowledged editing intent."
+      : state.keptBranches.length > 0
+        ? "The renderer retained a browser recovery branch."
+        : state.persistenceError?.message
+          ?? (state.foreignDrafts > 0 ? "Another open renderer retains a browser recovery branch." : state.corruption?.message ?? (hasBranch ? "The host retained a recovery branch. Save As to preserve the current document before resolving it." : "Recovery is in progress."));
+    panel.appendChild(elementNode(this.dom, "div", "recovery-message", detail));
+    const actions = elementNode(this.dom, "div", "recovery-actions", "") as HTMLDivElement;
+    const add = (label: string, action: () => void | Promise<void>): void => {
+      const button = elementNode(this.dom, "button", "btn mini", label) as HTMLButtonElement;
+      button.type = "button";
+      button.dataset.recovery = "true";
+      button.disabled = this.actionCount > 0 || state.status === "resubmitting";
+      button.addEventListener("click", () => { void this.action(async () => { await action(); }).catch((error) => this.showError(error)); });
+      actions.appendChild(button);
+    };
+    if (state.local !== null) {
+      add("Reload authoritative", () => this.client.reloadAuthoritativeRecovery());
+      add("Keep as recovery", () => this.client.keepAsRecovery());
+      add("Discard local branch", () => this.client.discardRecovery());
+      add("Cancel", () => this.client.cancelRecovery());
+    }
+    for (const branch of state.keptBranches) {
+      add("Restore kept branch", () => this.client.restoreKeptRecovery(branch.id));
+      add("Discard kept branch", () => this.client.discardKeptRecovery(branch.id));
+    }
+    if (actions.childElementCount > 0) panel.appendChild(actions);
+    this.status.appendChild(panel);
   }
 
   private executionAvailable(): boolean {
     const runtime = this.documentValue?.snapshot.runtime;
-    return Boolean(runtime?.executionReady && runtime.kernelAvailable);
+    return Boolean(runtime?.executionReady && runtime.kernelState === "ready");
   }
 
   private runScope(): "all" | "stale" {
@@ -2278,25 +2446,106 @@ export class NotebookView {
     if (!cell.id || !editor || editor.view?.hasFocus === false) return null;
     const word = context.matchBefore(/[A-Za-z.][A-Za-z0-9_.]*|[A-Za-z0-9_]*/);
     if (!word || (word.from === word.to && !context.explicit)) return null;
+    const requestedCells = new Map(
+      (this.documentValue?.cells ?? []).flatMap((candidate) => candidate.id
+        ? [[candidate.id, { key: candidate.key, source: this.sourceText(candidate.key) }] as const]
+        : []),
+    );
     return this.lspRequest(`completion:${cell.key}`, "textDocument/completion", {
       position: editorPosition(editor, cell, context.pos),
     }).then((result) => {
+      const currentCells = this.documentValue?.cells ?? [];
+      if (currentCells.some((candidate) => {
+        const requested = candidate.id === null ? undefined : requestedCells.get(candidate.id);
+        return requested !== undefined
+          && (requested.key !== candidate.key || requested.source !== this.sourceText(candidate.key));
+      })) return null;
       const items = Array.isArray(result) ? result : isObject(result) && Array.isArray(result.items) ? result.items : [];
       const options = items.flatMap((raw): EditorCompletion[] => {
         if (!isObject(raw)) return [];
-        const textEdit = isObject(raw.textEdit) ? raw.textEdit : {};
-        const label = String(raw.label ?? raw.insertText ?? textEdit.newText ?? "");
+        const textEdit = isObject(raw.textEdit) ? raw.textEdit : null;
+        const label = String(raw.label ?? raw.insertText ?? textEdit?.newText ?? "");
         if (!label) return [];
+        const newText = String(textEdit?.newText ?? raw.insertText ?? raw.label ?? "");
+        const edits: LspCompletionEdit[] = [];
+        if (textEdit) {
+          const edit = lspCompletionEdit(textEdit, newText);
+          if (!edit) return [];
+          edits.push(edit);
+        }
+        if (raw.additionalTextEdits !== undefined) {
+          if (!Array.isArray(raw.additionalTextEdits)) return [];
+          for (const additional of raw.additionalTextEdits) {
+            const edit = lspCompletionEdit(additional);
+            if (!edit) return [];
+            edits.push(edit);
+          }
+        }
+        if (!textEdit && edits.length > 0) {
+          const start = editorPosition(editor, cell, word.from);
+          const end = editorPosition(editor, cell, word.to);
+          if (!cell.id) return [];
+          edits.unshift({ cell: cell.id, start: lspPosition(start), end: lspPosition(end), newText });
+        }
+        const apply = edits.length > 0 ? this.completionApply(edits, requestedCells) : newText;
+        if (!apply) return [];
         return [{
           label,
           type: lspKind(raw.kind),
           detail: typeof raw.detail === "string" ? raw.detail : "",
           info: lspText(raw.documentation),
-          apply: String(raw.insertText ?? textEdit.newText ?? raw.label ?? ""),
+          apply,
         }];
       });
       return { from: word.from, options };
     }).catch(() => null);
+  }
+
+  private completionApply(
+    edits: readonly LspCompletionEdit[],
+    requestedCells: ReadonlyMap<string, { key: string; source: string }>,
+  ): (() => void) | null {
+    const document = this.documentValue;
+    if (!document) return null;
+    const groups = new Map<string, { source: string; changes: Array<{ from: number; to: number; insert: string }> }>();
+    for (const edit of edits) {
+      const requested = requestedCells.get(edit.cell);
+      if (!requested) return null;
+      const cell = document.cells.find((candidate) => candidate.id === edit.cell && candidate.key === requested.key);
+      if (!cell) return null;
+      const source = requested.source;
+      const from = exactSourceOffset(source, edit.start.line, edit.start.character);
+      const to = exactSourceOffset(source, edit.end.line, edit.end.character);
+      if (from === null || to === null || to < from) return null;
+      const group = groups.get(cell.key) ?? {
+        source,
+        changes: [] as Array<{ from: number; to: number; insert: string }>,
+      };
+      if (group.source !== source) return null;
+      group.changes.push({ from, to, insert: edit.newText });
+      groups.set(cell.key, group);
+    }
+    for (const group of groups.values()) {
+      const ascending = [...group.changes].sort((a, b) => a.from - b.from || a.to - b.to);
+      for (let index = 1; index < ascending.length; index += 1) {
+        if (ascending[index]!.from < ascending[index - 1]!.to) return null;
+      }
+    }
+    return () => {
+      window.queueMicrotask(() => {
+        if ([...groups].some(([key, group]) => this.sourceText(key) !== group.source)) return;
+        for (const [key, group] of groups) {
+          let next = group.source;
+          const descending = [...group.changes].sort((a, b) => b.from - a.from || b.to - a.to);
+          for (const change of descending) next = next.slice(0, change.from) + change.insert + next.slice(change.to);
+          const view = this.views.get(key);
+          view?.editor?.setDoc(next, { silent: true });
+          if (view?.fallback) view.fallback.value = next;
+          this.deferDiagnostics(key);
+          this.client.editCell(key, next);
+        }
+      });
+    };
   }
 
   private lspHover(cell: LocalCell, editor: EditorHandle | null, position: number): Promise<EditorHover> {
@@ -2334,12 +2583,24 @@ export class NotebookView {
       signal?.throwIfAborted();
       const response = await fetch(notebookUrl("/api/lsp"), {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json", "X-CSRF-Token": this.client.transport.csrf },
         body: JSON.stringify({ method, params }),
         signal,
       });
-      const result = await response.json() as { ok?: boolean; result?: unknown; error?: { message?: string } };
+      this.client.transport.assertResponseContinuity(response);
+      const result = await response.json() as {
+        ok?: boolean;
+        epoch?: string;
+        documentRevision?: number;
+        result?: unknown;
+        error?: { message?: string };
+      };
       if (!response.ok || result.ok === false) throw new Error(result.error?.message ?? "language server request failed");
+      const current = this.documentValue?.snapshot;
+      if (!current || result.epoch !== current.epoch || result.documentRevision !== current.documentRevision) {
+        throw new DOMException("stale language-server response", "AbortError");
+      }
       this.editorHelpError = null;
       this.renderStatus();
       return result.result;
@@ -2401,6 +2662,38 @@ function sourceOffset(source: string, line: number, character: number): number {
   let offset = 0;
   for (let index = 0; index < boundedLine; index += 1) offset += (lines[index]?.length ?? 0) + 1;
   return Math.min(source.length, offset + Math.max(0, Math.min(Math.floor(character), lines[boundedLine]?.length ?? 0)));
+}
+
+function exactSourceOffset(source: string, line: number, character: number): number | null {
+  if (!Number.isInteger(line) || !Number.isInteger(character) || line < 0 || character < 0) return null;
+  const lines = source.split("\n");
+  if (line >= lines.length || character > lines[line]!.length) return null;
+  let offset = character;
+  for (let index = 0; index < line; index += 1) offset += lines[index]!.length + 1;
+  return offset;
+}
+
+function lspPosition(value: Record<string, unknown>): { line: number; character: number } {
+  return { line: Number(value.line), character: Number(value.character) };
+}
+
+function lspCompletionEdit(raw: unknown, fallbackText?: string): LspCompletionEdit | null {
+  if (!isObject(raw)) return null;
+  const range = isObject(raw.range) ? raw.range : isObject(raw.replace) ? raw.replace : null;
+  if (!range || !isObject(range.start) || !isObject(range.end)) return null;
+  const start = range.start;
+  const end = range.end;
+  const cell = typeof start.cell === "string" && start.cell === end.cell ? start.cell : null;
+  const newText = typeof raw.newText === "string" ? raw.newText : fallbackText;
+  if (!cell || newText === undefined) return null;
+  const positions = [start.line, start.character, end.line, end.character];
+  if (!positions.every((value) => Number.isInteger(value) && Number(value) >= 0)) return null;
+  return {
+    cell,
+    start: { line: Number(start.line), character: Number(start.character) },
+    end: { line: Number(end.line), character: Number(end.character) },
+    newText,
+  };
 }
 
 function editorPosition(editor: EditorHandle | null, cell: LocalCell, offset: number): Record<string, unknown> {
@@ -2544,6 +2837,7 @@ function inputInteger(dom: Document, id: string, fallback: number, minimum: numb
 function visitTableOutputs(cells: readonly HostSnapshot["cells"][number][], visit: (output: Record<string, unknown>) => void): void {
   const walk = (value: unknown): void => {
     if (!isObject(value)) return;
+    if (isObject(value.data)) { walk(value.data); return; }
     if (value.kind === "table" && typeof value.handle === "string") visit(value);
     if (value.kind === "layout" && Array.isArray(value.children)) value.children.forEach(walk);
     if (value.kind === "lazy") walk(value.child);
@@ -2551,18 +2845,52 @@ function visitTableOutputs(cells: readonly HostSnapshot["cells"][number][], visi
   cells.forEach((cell) => cell.outputs.forEach(walk));
 }
 
-function operationPayload(result: CommandResult): Record<string, unknown> {
-  if (isObject(result.operation.result)) return result.operation.result;
+function operationPayload(result: CommandResult | HostQueryResult): Record<string, unknown> {
+  if ("operation" in result && isObject(result.operation.result)) return result.operation.result;
   return isObject(result.result) ? result.result : {};
 }
 
-function packageStatusText(value: Record<string, unknown>): string {
+function artifactHandleFromResult(result: CommandResult | HostQueryResult): ArtifactHandle | null {
+  const candidates: unknown[] = [];
+  if ("operation" in result) candidates.push(result.operation.result);
+  candidates.push(result.result);
+  for (const candidate of candidates) if (isArtifactHandle(candidate)) return candidate;
+  return null;
+}
+
+function isArtifactHandle(value: unknown): value is ArtifactHandle {
+  return artifactHandleSchema.safeParse(value).success;
+}
+
+function packageStatusText(value: Record<string, unknown>, output = ""): string {
   const lines: string[] = [];
-  for (const [label, field] of [["Declared", "declared"], ["Installed", "installed"], ["Missing", "missing"]] as const) {
+  for (const [label, field] of [["Declared", "packages"], ["Installed", "installed"], ["Missing", "missing"]] as const) {
     const entries = Array.isArray(value[field]) ? value[field].map(String) : [];
     lines.push(`${label}: ${entries.length ? entries.join(", ") : "none"}`);
   }
+  if (typeof value.mode === "string") lines.push(`Mode: ${value.mode}`);
+  if (typeof value.library === "string") lines.push(`Library: ${value.library}`);
+  if (output.length > 0) lines.push("Output:", output);
   return lines.join("\n");
+}
+
+function packageProgressPhaseText(command: PackageServiceCommand, phase: "started" | "output" | "finished"): string {
+  if (phase === "started") return command === "packages.install" ? "Installing packages…" : "Declaring packages…";
+  return phase === "finished" ? "Package operation finished" : "";
+}
+
+function packageProgressDataText(value: unknown): string {
+  if (typeof value === "string") return value;
+  try {
+    const text = JSON.stringify(value);
+    return typeof text === "string" ? text : "";
+  } catch {
+    return "";
+  }
+}
+
+function isOperationRecord(value: unknown): value is OperationRecord {
+  return isObject(value) && typeof value.id === "string" && typeof value.kind === "string" && typeof value.status === "string";
 }
 
 function formatBytes(value: number): string {
@@ -2575,7 +2903,7 @@ function formatBytes(value: number): string {
 function dataflowCellSignature(cell: HostSnapshot["cells"][number]): string {
   return JSON.stringify({
     type: cell.type,
-    body: cell.type === "markdown" ? cell.body : undefined,
+    body: cell.type === "markdown" ? toLogicalCellBody(cell.type, cell.body) : undefined,
     options: cell.options,
     defs: cell.defs,
     refs: cell.refs,
@@ -2585,7 +2913,7 @@ function dataflowCellSignature(cell: HostSnapshot["cells"][number]): string {
 function outlineCellSignature(cell: HostSnapshot["cells"][number]): string {
   return JSON.stringify({
     type: cell.type,
-    body: cell.type === "markdown" ? cell.body : undefined,
+    body: cell.type === "markdown" ? toLogicalCellBody(cell.type, cell.body) : undefined,
     name: cell.options.name,
   });
 }
@@ -2604,8 +2932,7 @@ function cellLabel(snapshot: HostSnapshot, id: string): string {
 function markdownHeadings(body: readonly string[]): Array<{ level: number; text: string; line: number }> {
   const result: Array<{ level: number; text: string; line: number }> = [];
   for (const [line, raw] of body.entries()) {
-    const markdown = /^\s*#/.test(raw) ? raw.replace(/^(\s*)#+ ?/, "$1") : raw;
-    const match = /^ {0,3}(#{1,6})(?:[ \t]+(.*))?$/.exec(markdown);
+    const match = /^ {0,3}(#{1,6})(?:[ \t]+(.*))?$/.exec(raw);
     if (!match) continue;
     const text = (match[2] ?? "").replace(/[ \t]+#+[ \t]*$/, "").trim();
     if (text) result.push({ level: match[1]!.length, text, line });
@@ -2715,14 +3042,16 @@ function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function notebookRequiresCellReconcile(payload: unknown): boolean {
+function notebookRequiresCellReconcile(payload: unknown, configCanChange: boolean): boolean {
   if (!isObject(payload)) return true;
-  // Source transactions repeat the authoritative order even when only one
-  // existing cell changed. Creation/deletion/move carry an explicit structural
-  // discriminator, so order/edited alone must not turn every edit into a scan of
-  // every cell view.
-  return (Array.isArray(payload.created) && payload.created.length > 0) || typeof payload.deleted === "string"
-    || typeof payload.moved === "string" || isObject(payload.config);
+  // Source transactions repeat authoritative order and config. Only actual
+  // structural deltas require scanning/reordering every cell view.
+  const created = isObject(payload.created) && Object.keys(payload.created).length > 0;
+  const deleted = Array.isArray(payload.deleted)
+    ? payload.deleted.length > 0
+    : typeof payload.deleted === 'string';
+  return created || deleted || typeof payload.moved === 'string'
+    || (configCanChange && isObject(payload.config));
 }
 
 async function encodeFile(file: File): Promise<{ name: string; content_base64: string }> {

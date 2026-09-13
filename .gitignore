@@ -51,12 +51,29 @@ po/*~
 rsconnect/
 js/node_modules/
 host/node_modules/
+desktop/node_modules/
+desktop/out/
+desktop/.vite/
 host/dist/
 host/.runtime/
+host/.runtime/ark-build/
+host/.application/
+host/.application-desktop/
 host/.release/
+host/.evidence*/
+host/.qualification/
+host/.staging*/
+host/native/process-supervisor/target/
 .alder/
 
 # Local review runs: generated notebooks, logs, screenshots, traces and caches.
 /dev/reviews/evidence/
 __pycache__/
 *.pyc
+/.tmp*/
+/host/.application-*/
+/host/.manual-*/
+/host/.tmp*
+/host/Rplots.pdf
+/dev/omp-restart-*.json
+/dev/reviews/prompts/

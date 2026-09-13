@@ -1,16 +1,18 @@
 import { build } from 'esbuild';
+import { createHash } from 'node:crypto';
 import { cp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
-import { resolve, dirname } from 'node:path';
+import { dirname, isAbsolute, relative, resolve } from 'node:path';
+import { normalizeHostBundleWhitespace } from './bundle-normalization.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const destination = resolve(root, '../inst/host');
-const ark = JSON.parse(await readFile(resolve(root, 'ark-lock.json'), 'utf8'));
 await mkdir(destination, { recursive: true });
+const hostBundle = resolve(destination, 'alder-host.mjs');
 const hostBuild = await build({
   absWorkingDir: root,
   entryPoints: ['src/main.ts'],
-  outfile: resolve(destination, 'alder-host.mjs'),
+  outfile: hostBundle,
   bundle: true, platform: 'node', format: 'esm', target: 'node24',
   packages: 'bundle', legalComments: 'linked',
   external: ['zeromq'],
@@ -27,6 +29,7 @@ const browserBuild = await build({
   legalComments: 'linked',
   metafile: true,
 });
+await normalizeHostBundleWhitespace(hostBundle);
 const licenses = resolve(destination, 'licenses');
 await rm(licenses, { recursive: true, force: true });
 await mkdir(licenses);
@@ -44,17 +47,82 @@ for (const input of [...Object.keys(hostBuild.metafile.inputs), ...Object.keys(b
   }
 }
 const notices = {};
+const pinnedLicenseRoot = resolve(root, 'licenses');
+const packageTarget = identity => identity.replaceAll('/', '__');
+const readPinnedLicense = async (identity, pkg) => {
+  const target = packageTarget(identity);
+  const metadataPath = resolve(pinnedLicenseRoot, target + '.json');
+  const metadata = await readFile(metadataPath, 'utf8').then(JSON.parse).catch(error => {
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  });
+  if (!metadata) return null;
+  if (metadata.name !== pkg.name || metadata.version !== pkg.version || metadata.license !== pkg.license || metadata.author !== pkg.author) {
+    throw new Error('Pinned license metadata does not match bundled dependency: ' + identity);
+  }
+  if (typeof metadata.packageSource !== 'string' || typeof metadata.packageSourceTag !== 'string' ||
+      !/^[0-9a-f]{40}$/.test(metadata.packageSourceCommit ?? '') ||
+      !/^[0-9a-f]{64}$/.test(metadata.packageSourceSha256 ?? '') ||
+      typeof metadata.licenseDeclaredIn !== 'string' ||
+      typeof metadata.noticeSource !== 'string' || typeof metadata.noticeSourceTag !== 'string' ||
+      !/^[0-9a-f]{40}$/.test(metadata.noticeSourceCommit ?? '') ||
+      typeof metadata.noticeSourcePath !== 'string' || typeof metadata.noticeScope !== 'string' ||
+      typeof metadata.noticeInheritance !== 'string' || typeof metadata.noticeOwnership !== 'string' ||
+      !/^[0-9a-f]{64}$/.test(metadata.sha256 ?? '') ||
+      typeof metadata.file !== 'string') {
+    throw new Error('Pinned license metadata is incomplete: ' + identity);
+  }
+  const sourceFile = resolve(pinnedLicenseRoot, metadata.file);
+  const sourceRelative = relative(pinnedLicenseRoot, sourceFile);
+  if (!sourceRelative || sourceRelative.startsWith('..') || isAbsolute(sourceRelative)) {
+    throw new Error('Pinned license path escapes input directory: ' + identity);
+  }
+  const contents = await readFile(sourceFile);
+  const sha256 = createHash('sha256').update(contents).digest('hex');
+  if (sha256 !== metadata.sha256) {
+    throw new Error('Pinned license hash mismatch: ' + identity);
+  }
+  return { metadata, sourceFile, fileName: sourceRelative.split(/[\\/]/).pop() };
+};
+const missing = [];
 for (const [identity, { directory, pkg }] of [...packages].sort(([a], [b]) => a.localeCompare(b))) {
-  const names = (await readdir(directory)).filter(name => /^(licen[cs]e|copying|notice)([.\-_]|$)/i.test(name));
-  if (!names.length) throw new Error(`Bundled dependency lacks license text: ${identity}`);
-  const target = identity.replaceAll('/', '__');
+  let names = (await readdir(directory)).filter(name => /^(licen[cs]e|copying|notice)([.\-_]|$)/i.test(name));
+  const pinned = names.length ? null : await readPinnedLicense(identity, pkg);
+  if (pinned) names = [pinned.fileName];
+  if (!names.length) {
+    missing.push(identity);
+    continue;
+  }
+  const target = packageTarget(identity);
   await mkdir(resolve(licenses, target));
-  for (const name of names) await cp(resolve(directory, name), resolve(licenses, target, name), { recursive: true });
-  notices[identity] = { license: pkg.license, files: names.map(name => `${target}/${name}`) };
+  if (pinned) {
+    await cp(pinned.sourceFile, resolve(licenses, target, pinned.fileName));
+  } else {
+    for (const name of names) await cp(resolve(directory, name), resolve(licenses, target, name), { recursive: true });
+  }
+  notices[identity] = {
+    license: pkg.license,
+    files: names.map(name => target + '/' + name),
+    ...(pinned ? {
+      source: pinned.metadata.noticeSource,
+      sourceTag: pinned.metadata.noticeSourceTag,
+      sourceCommit: pinned.metadata.noticeSourceCommit,
+      sourcePath: pinned.metadata.noticeSourcePath,
+      sourceScope: pinned.metadata.noticeScope,
+      sourceInheritance: pinned.metadata.noticeInheritance,
+      sourceOwnership: pinned.metadata.noticeOwnership,
+      packageSource: pinned.metadata.packageSource,
+      packageAuthor: pinned.metadata.author,
+      packageSourceTag: pinned.metadata.packageSourceTag,
+      packageSourceCommit: pinned.metadata.packageSourceCommit,
+      packageSourceSha256: pinned.metadata.packageSourceSha256,
+      npmTarball: pinned.metadata.npmTarball,
+      npmIntegrity: pinned.metadata.npmIntegrity,
+      npmShasum: pinned.metadata.npmShasum,
+      packageLicenseDeclaration: pinned.metadata.licenseDeclaredIn,
+      sha256: pinned.metadata.sha256,
+    } : {}),
+  };
 }
+if (missing.length) throw new Error('Bundled dependencies lack license text: ' + missing.join(', '));
 await writeFile(resolve(licenses, 'index.json'), `${JSON.stringify(notices, null, 2)}\n`);
-await writeFile(resolve(destination, 'manifest.json'), `${JSON.stringify({
-  hostVersion: '0.1.0', protocol: 1, packageVersion: '0.1.0',
-  minimumNodeVersion: '24.20.0', entrypoint: 'alder-host.mjs',
-  kernel: { name: 'ark', version: ark.version },
-}, null, 2)}\n`);

@@ -12,7 +12,7 @@ export interface GraphCellInput extends AnalysisCellResult {
 }
 
 export interface GraphValidationIssue {
-  code: "dependency-cycle" | "duplicate-definition" | "syntax-error" | "analysis-error" | "resource-limit";
+  code: "dependency-cycle" | "duplicate-definition" | "syntax-error" | "analysis-error" | "graph_blocked";
   message: string;
   cellId?: string;
   symbol?: string;
@@ -235,6 +235,19 @@ export class ReactiveGraph {
   get resourceLimited(): boolean {
     return this.complexityExceeded;
   }
+  refreshCellsIfTopologyUnchanged(cells: readonly GraphCellInput[]): boolean {
+    const normalized = cells.map(normalizeCell);
+    if (normalized.some((cell) => !sameGraphCell(this.cellById.get(cell.id), cell))) return false;
+    this.cellsValue = [...this.cellsValue];
+    for (const cell of normalized) {
+      const index = this.position.get(cell.id);
+      if (index === undefined) return false;
+      this.cellsValue[index] = cell;
+      this.cellById.set(cell.id, cell);
+    }
+    return true;
+  }
+
 
   update(cells: readonly GraphCellInput[]): this {
     const nextCells = cells.map(normalizeCell);
@@ -428,7 +441,7 @@ export class ReactiveGraph {
     const issues: GraphValidationIssue[] = [];
     if (this.complexityExceeded) {
       issues.push({
-        code: "resource-limit",
+        code: "graph_blocked",
         message: `cannot run: dependency graph exceeds ${MAX_DEPENDENCY_EDGES} edge limit`,
       });
     }

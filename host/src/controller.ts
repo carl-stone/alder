@@ -3,7 +3,8 @@ import { randomUUID } from "node:crypto";
 import {
   analysisDiagnosticSchema,
   analysisResultSchema,
-  cellEditSchema,
+  commandAdmissionSchema,
+  documentChangeSchema,
   engineEventSchema,
   engineHandshakeSchema,
   engineResponseSchema,
@@ -13,33 +14,56 @@ import {
   MAX_NOTEBOOK_SOURCE_BYTES,
   notebookInputSchema,
   notebookSourceByteLength,
+  operationProgressSchema,
+  rEnvironmentSchema,
   parseHostCommand,
   type AnalysisCellResult,
+  type AnalyzerIdentity,
   type AnalysisDiagnostic,
+  type CellRef,
   type CellSnapshot,
-  type CellCreation,
-  type CellEdit,
+  outputRecordSchema,
+  richOutputPayloadSchema,
   type CellStatus,
+  type CommandAdmission,
   type CommandResult,
   type ControllerServices,
+  type DocumentChange,
   type EngineAdapter,
   type EngineEvent,
   type EngineHandshake,
+  type EngineRestartOptions,
   type EngineResponse,
   type EvaluationPayload,
   type HostCellState,
   type HostCommand,
+  type HostConfiguration,
+  type JsonValue,
   type HostError,
   type HostEvent,
   type HostEventType,
+  type HostQuery,
+  type HostQueryResult,
   type HostSnapshot,
-  type NotebookInput,
   type OperationRecord,
-  type Recovery,
+  type WidgetOperation,
+  type OutputScope,
   type RuntimeVariable,
+  type Recovery,
+  type RecoveryState,
+  type OutputRecord,
 } from "./protocol.js";
+import type { ConfigResolution } from "./configuration.js";
+import {
+  reconcileNotebook,
+  stageDocumentChanges,
+  type NotebookDocument,
+} from "./notebook.js";
+import { toLogicalCellBody } from "./cell-body.js";
 import { ReactiveGraph, type GraphCellInput } from "./graph.js";
 import { tailLog } from "./output-log.js";
+import { OutputStore, OutputStoreError, OUTPUT_ARTIFACT_CHUNK_BYTES } from "./outputs.js";
+const INTERNAL_CLIENT_ID = "internal";
 
 const OPERATION_JOURNAL_LIMIT = 256;
 const COMMAND_DEDUPLICATION_LIMIT = 512;
@@ -52,19 +76,107 @@ const MAX_EDITOR_DIAGNOSTIC_BYTES = 1024 * 1024;
 const MAX_RUNTIME_VARIABLES = 2_000;
 const MAX_ANALYSIS_CACHE_ENTRIES = 256;
 const MAX_ANALYSIS_CACHE_BYTES = 32 * 1024 * 1024;
-
+const R_INTEGER_MAX = 2_147_483_647;
 export interface ControllerOptions {
   engine: EngineAdapter;
-  notebook: NotebookInput;
+  outputStore: OutputStore;
+  /**
+   * The complete in-memory source document. Semantic-only callers remain
+   * structurally compatible; physical records are retained when supplied.
+   */
+  notebook: NotebookDocument;
   services?: ControllerServices;
-  config?: Record<string, unknown>;
+  configResolution: ConfigResolution;
   layout?: unknown;
-  executionMode?: "automatic" | "lazy";
-  runOnStartup?: boolean;
   deferStartup?: boolean;
+  initialDirty?: boolean;
   epoch?: string;
   journalLimit?: number;
   journalByteLimit?: number;
+  disk?: HostSnapshot["disk"];
+  sidecars?: HostSnapshot["sidecars"];
+  rEnvironment?: HostSnapshot["runtime"]["rEnvironment"];
+  requestedRscript?: string;
+  initialDocumentRevision?: number;
+  durableCommit?: (input: DurableCommitInput) => Promise<void>;
+  sourceCommit?: SourceCommitHandler;
+  getRecoveryState?: () => Promise<RecoveryState>;
+}
+
+export interface DurableCommitInput {
+  readonly fromRevision: number;
+  readonly toRevision: number;
+  readonly delta: {
+    readonly document: NotebookDocument;
+    readonly created: Record<string, string>;
+    readonly edited: ReadonlyArray<{ id: string; revision: number }>;
+    readonly deleted: readonly string[];
+  };
+  readonly fingerprint: string;
+}
+export type SourceCommitKind = "transaction" | "runtime" | "sidecar" | "save" | "save-as" | "reload-source" | "watcher";
+
+export interface SourceDiskExpectation {
+  readonly digest: string | null;
+  readonly version: string | null;
+}
+
+export interface SourceCommitRequest {
+  readonly kind: SourceCommitKind;
+  readonly expectedDocumentRevision: number;
+  readonly expectedDisk?: SourceDiskExpectation;
+  readonly expectedSidecarVersion?: string | null;
+  readonly sidecar?: "config" | "layout" | "packages";
+  readonly operationId?: string;
+  readonly fingerprint?: string;
+  readonly path?: string;
+  readonly patch?: Record<string, unknown>;
+  readonly packages?: readonly string[];
+  readonly layout?: JsonValue;
+  readonly document?: NotebookDocument;
+  readonly delta?: DurableCommitInput["delta"];
+}
+export interface SourcePublication {
+  readonly document: NotebookDocument;
+  readonly path: string | null;
+  readonly configResolution: ConfigResolution;
+  readonly layout: JsonValue;
+  readonly disk: HostSnapshot["disk"];
+  readonly sidecars: HostSnapshot["sidecars"];
+  readonly dirty: boolean;
+  readonly advanceRevision: boolean;
+  readonly invalidateRuntime?: boolean;
+  readonly rEnvironment?: HostSnapshot["runtime"]["rEnvironment"];
+}
+
+export interface SourceCommitContext {
+  readonly kind: SourceCommitKind;
+  readonly fromRevision: number;
+  readonly expectedDocumentRevision: number;
+  readonly operationId?: string;
+  readonly document: NotebookDocument;
+  readonly path: string | null;
+  readonly configResolution: ConfigResolution;
+  readonly layout: JsonValue;
+  readonly disk: HostSnapshot["disk"];
+  readonly sidecars: HostSnapshot["sidecars"];
+  readonly dirty: boolean;
+  readonly preparePublication: (publication: SourcePublication) => SourcePublicationBinder;
+}
+
+/** Applies a prepared publication atomically for observable source state. */
+export type SourcePublicationBinder = () => void;
+export type SourceCommitHandler = (
+  request: SourceCommitRequest,
+  context: SourceCommitContext,
+) => Promise<unknown>;
+export interface RuntimeContextReservation {
+  readonly release: () => void;
+}
+
+interface PreparedSourcePublication {
+  readonly publication: SourcePublication;
+  readonly staged: ReturnType<typeof stageDocumentChanges>;
 }
 
 interface CellRecord {
@@ -74,7 +186,7 @@ interface CellRecord {
   options: Record<string, unknown>;
   revision: number;
   status: Exclude<CellStatus, "disabled">;
-  outputs: unknown[];
+  outputs: OutputRecord[];
   outputsStale?: boolean;
   progress: unknown | null;
   log: string[];
@@ -91,6 +203,7 @@ interface EvaluationJob {
   opaque: boolean;
   runId: string;
   operationId: string;
+  clientId: string;
 }
 
 interface ActiveEvaluation {
@@ -100,16 +213,19 @@ interface ActiveEvaluation {
   lastSequence: number;
   cancelMode: "source" | "widget" | "stop" | null;
   interruptSent: boolean;
-  streamedOutputs: unknown[];
+  streamedOutputs: OutputRecord[];
   completion?: EngineResponse;
   protocolFailure?: ControllerError;
 }
 
 interface CommandEntry {
+  operationId: string;
+  clientId: string;
+  commandSequence: number;
   fingerprint: string;
-  promise: Promise<CommandResult>;
+  admission: Promise<CommandAdmission>;
+  terminal: Promise<unknown>;
 }
-
 interface AnalysisCacheValue {
   defs: string[];
   refs: string[];
@@ -123,8 +239,9 @@ interface AnalysisCacheValue {
 
 interface ChangeResult {
   edited: Array<{ id: string; revision: number }>;
-  created: Array<{ clientOperationId: string; id: string; revision: number }>;
+  created: Array<{ creationId: string; id: string; revision: number }>;
 }
+
 
 interface PendingButtonReset {
   key: string;
@@ -132,8 +249,9 @@ interface PendingButtonReset {
   path: string[];
   owner: string;
   revision: number;
-  widget: Record<string, unknown>;
+  record: OutputRecord;
   triggerOperationId: string;
+  triggerClientId: string;
   directConsumers: string[];
   runId: string | null;
 }
@@ -165,12 +283,13 @@ export class ControllerError extends Error {
       message: this.message,
       ...(operationId === undefined ? {} : { operationId }),
       ...(this.details === undefined ? {} : { details: clone(this.details) }),
-    };
+    } as HostError;
   }
 }
 
 export class Controller {
   private readonly engine: EngineAdapter;
+  private readonly outputStore: OutputStore;
   private readonly services: ControllerServices;
   private readonly epochValue: string;
   private readonly eventJournalLimit: number;
@@ -183,7 +302,8 @@ export class Controller {
     Set<(operation: OperationRecord) => void>
   >();
   private readonly commandEntries = new Map<string, CommandEntry>();
-  private readonly creationIds = new Map<string, string>();
+  private readonly clientHighWater = new Map<string, number>();
+  private readonly activeClients = new Set<string>();
   private readonly analysisCache = new Map<string, AnalysisCacheValue>();
   private analysisCacheBytes = 0;
   private readonly analysisNeeded = new Set<string>();
@@ -201,17 +321,18 @@ export class Controller {
   private readonly pendingWidgets = new Map<string, string>();
   private pendingInspection: {
     operationId: string;
+    clientId: string;
     name: string;
     owner: string | null;
     revision: number | null;
   } | null = null;
   private readonly pendingLazyOutputs = new Map<
     string,
-    { operationId: string; owner: string }
+    { operationId: string; clientId: string; owner: string; recordId: string; revision: number; kernelEpoch: string }
   >();
   private readonly pendingTablePages = new Map<
     string,
-    { operationId: string; owner: string }
+    { operationId: string; clientId: string; owner: string; recordId: string; revision: number; kernelEpoch: string }
   >();
   private readonly pendingUploads = new Map<
     string,
@@ -221,32 +342,38 @@ export class Controller {
       key: string;
       owner: string;
       revision: number;
-      widget: Record<string, unknown>;
+      record: OutputRecord;
       uploadId: string | null;
       source: "editor" | "app" | "mcp" | "cli";
+      clientId: string;
     }
   >();
   private eventJournalBytes = 0;
-  private serviceMutationTail: Promise<void> = Promise.resolve();
+  private sourceCommitTail: Promise<void> = Promise.resolve();
+  private durableCommit?: ControllerOptions["durableCommit"];
+  private sourceCommit?: ControllerOptions["sourceCommit"];
+  private getRecoveryState?: ControllerOptions["getRecoveryState"];
   private readonly editorDiagnostics = new Map<string, AnalysisDiagnostic[]>();
   private readonly serviceErrors: HostSnapshot["serviceErrors"] = {};
-  private variables: RuntimeVariable[] = [];
   private variableGeneration = 0;
+  private variables: RuntimeVariable[] = [];
   private variableRefreshRequested = false;
   private variableRefreshInFlight = false;
   private variableRefreshTimer: NodeJS.Timeout | undefined;
 
+  private sourceDocument: NotebookDocument;
   private cells: CellRecord[];
   private graphValue = new ReactiveGraph([]);
   private pathValue: string | null;
   private metadata: Record<string, unknown>;
-  private config: Record<string, unknown>;
+  private configResolution: ConfigResolution;
   private layout: unknown;
   private executionMode: "automatic" | "lazy";
   private runOnStartup: boolean;
   private readonly deferStartup: boolean;
   private startupActivated = false;
-  private changed = false;
+  private changed: boolean;
+  private documentRevisionValue = 0;
   private version = 0;
   private cursorValue = 0;
   private runtimeSignature: string | undefined;
@@ -256,8 +383,20 @@ export class Controller {
   private analysisInFlight: Promise<void> | null = null;
   private analysisRestarting = false;
   private analyzerIdentity = "";
+  private analysisEnvironmentIdValue: string | null = null;
+  private kernelEpochValue: string | null = null;
+  private rEnvironmentValue: HostSnapshot["runtime"]["rEnvironment"] = null;
+  private readonly requestedRscript: string | undefined;
+  private diskValue: HostSnapshot["disk"] = { state: "untitled", digest: null, version: null, error: null };
+  private sidecarsValue: HostSnapshot["sidecars"] = {
+    config: { state: "absent", digest: null, version: null, error: null },
+    layout: { state: "absent", digest: null, version: null, error: null },
+    packages: { state: "absent", digest: null, version: null, error: null },
+  };
   private handshake: EngineHandshake | null = null;
+  private documentReady = false;
   private started = false;
+  private starting = false;
   private closed = false;
   private executionReady = false;
   private analyzerAvailable = false;
@@ -269,18 +408,29 @@ export class Controller {
   private pumpPromise: Promise<void> | null = null;
   private barrierRestartRequired = false;
   private packageOperationActive = false;
+  private packageOperationClientId: string | undefined;
   private runPreparationActive = false;
+  private runPreparationCancellation: {
+    operationId: string;
+    clientId: string;
+    cancelled: boolean;
+  } | null = null;
   private widgetReconciliationScheduled = false;
   private widgetReconciliationPreparing = false;
   private runtimeGeneration = 0;
   private lastValue: unknown | null = null;
+  private runtimeAvailabilityError: HostError | null = null;
   private lastActionError: HostError | null = null;
   private engineFailureUnsubscribe: (() => void) | null = null;
   private startPromise: Promise<HostSnapshot> | null = null;
+  private analyzerStartupAttempted = false;
+  private kernelStartupAttempted = false;
   private engineRestarting = false;
+  private runtimeContextReservation: string | undefined;
 
   constructor(options: ControllerOptions) {
     this.engine = options.engine;
+    this.outputStore = options.outputStore;
     this.services = options.services ?? {};
     this.epochValue = options.epoch ?? randomUUID();
     this.eventJournalLimit = boundedPositiveInteger(
@@ -292,22 +442,47 @@ export class Controller {
       4 * 1024 * 1024,
     );
     let notebook: ReturnType<typeof notebookInputSchema.parse>;
+    let sourceDocument: NotebookDocument;
     try {
-      notebook = notebookInputSchema.parse(options.notebook);
+      const semantic = {
+        ...(options.notebook.path === undefined ? {} : { path: options.notebook.path }),
+        ...(options.notebook.metadata === undefined ? {} : { metadata: options.notebook.metadata }),
+        cells: options.notebook.cells.map((cell) => ({
+          id: cell.id,
+          type: cell.type ?? "code",
+          body: [...cell.body],
+          options: cell.options === undefined ? {} : { ...cell.options },
+          revision: cell.revision,
+        })),
+      };
+      notebook = notebookInputSchema.parse(semantic);
+      sourceDocument = reconcileNotebook(options.notebook, notebook);
     } catch (error) {
       throw new ControllerError("invalid_notebook", messageOf(error), 400);
     }
+    this.sourceDocument = sourceDocument;
     this.pathValue = notebook.path ?? null;
+    const initialDocumentRevision = options.initialDocumentRevision ?? 0;
+    if (!Number.isSafeInteger(initialDocumentRevision) || initialDocumentRevision < 0) {
+      throw new ControllerError("invalid_request", "initial document revision must be a non-negative safe integer", 400);
+    }
+    this.documentRevisionValue = initialDocumentRevision;
+    this.durableCommit = options.durableCommit;
+    this.sourceCommit = options.sourceCommit;
+    this.getRecoveryState = options.getRecoveryState;
+    this.rEnvironmentValue = options.rEnvironment ?? null;
+    this.requestedRscript = options.requestedRscript;
+    this.diskValue = options.disk ?? {
+      state: this.pathValue === null ? "untitled" : "absent", digest: null, version: null, error: null,
+    };
+    this.sidecarsValue = options.sidecars ?? this.sidecarsValue;
     this.metadata = clone(notebook.metadata);
-    this.config = clone(options.config ?? {});
+    this.configResolution = clone(options.configResolution);
     this.layout = clone(options.layout ?? null);
-    this.executionMode = options.executionMode
-      ?? runtimeMode(this.metadata)
-      ?? "automatic";
-    this.runOnStartup = options.runOnStartup
-      ?? runtimeStartup(this.metadata)
-      ?? true;
+    this.executionMode = this.effectiveConfig.on_cell_change;
+    this.runOnStartup = this.effectiveConfig.on_startup;
     this.deferStartup = options.deferStartup ?? false;
+    this.changed = options.initialDirty ?? false;
     this.cells = notebook.cells.map((cell) => ({
       id: cell.id,
       type: cell.type,
@@ -325,8 +500,13 @@ export class Controller {
       if (cell.type === "code") this.analysisNeeded.add(cell.id);
     }
     this.graphValue = this.rebuildGraph();
+    this.installInitialMarkdownOutputs();
+    this.documentReady = true;
   }
 
+  private get effectiveConfig(): ConfigResolution["effective"] {
+    return this.configResolution.effective;
+  }
   get epoch(): string {
     return this.epochValue;
   }
@@ -335,17 +515,83 @@ export class Controller {
     return this.cursorValue;
   }
 
-  async start(): Promise<HostSnapshot> {
+  async startAnalyzer(): Promise<HostSnapshot> {
     this.assertNotClosed();
-    if (this.started) return this.snapshot();
-    if (this.startPromise !== null) return this.startPromise;
-    const promise = this.startOnce();
+    if (this.analyzerAvailable) return this.snapshot();
+    if (this.startPromise !== null) {
+      await this.startPromise;
+      if (this.analyzerAvailable) return this.snapshot();
+    }
+    this.starting = true;
+    const promise = this.startAnalyzerOnce();
     this.startPromise = promise;
+    this.emit("runtime", this.runtimeSnapshot());
     try {
       return await promise;
     } finally {
       if (this.startPromise === promise) this.startPromise = null;
+      if (!this.started) this.starting = false;
     }
+  }
+
+  async start(): Promise<HostSnapshot> {
+    this.assertNotClosed();
+    if (this.kernelAvailable && this.analyzerAvailable) return this.snapshot();
+    if (this.startPromise !== null) {
+      await this.startPromise;
+      if (this.kernelAvailable && this.analyzerAvailable) return this.snapshot();
+    }
+    this.starting = true;
+    const promise = this.startOnce();
+    this.startPromise = promise;
+    this.emit("runtime", this.runtimeSnapshot());
+    try {
+      return await promise;
+    } finally {
+      if (this.startPromise === promise) this.startPromise = null;
+      if (!this.started) this.starting = false;
+    }
+  }
+
+  private async startAnalyzerOnce(): Promise<HostSnapshot> {
+    const generation = this.runtimeGeneration;
+    if (this.engineFailureUnsubscribe === null && this.engine.onFailure !== undefined) {
+      this.engineFailureUnsubscribe = this.engine.onFailure((role, error) => {
+        this.handleEngineFailure(role, error);
+      });
+    }
+    this.analyzerStartupAttempted = true;
+    let analyzer: AnalyzerIdentity;
+    try {
+      if (this.engine.startAnalyzer === undefined) {
+        throw new Error("engine does not support analyzer-only startup");
+      }
+      analyzer = await this.engine.startAnalyzer();
+      if (this.engine.environment !== undefined) this.rEnvironmentValue = clone(this.engine.environment);
+    } catch (error) {
+      this.starting = false;
+      const failure = hostError("analysis_unavailable", messageOf(error));
+      this.recordRuntimeAvailabilityError(failure);
+      this.replaceLastActionError(failure);
+      throw new ControllerError(failure.code, failure.message, 503);
+    }
+    this.assertStartCurrent(generation);
+    this.starting = false;
+    this.started = true;
+    this.analyzerAvailable = true;
+    this.analysisEnvironmentIdValue = analyzer.analysisEnvironmentId;
+    this.clearRuntimeAvailabilityError();
+    try {
+      await this.ensureCurrentAnalysis();
+      if (!this.graphValue.resourceLimited) this.replaceLastActionError(null);
+    } catch (error) {
+      const failure = asControllerError(error, "analysis_unavailable", 503);
+      this.replaceLastActionError(failure.toJSON());
+    }
+    this.bump("notebook", { ready: false });
+    this.emit("runtime", this.runtimeSnapshot());
+    this.emitGraph();
+    return this.snapshot();
   }
 
   private async startOnce(): Promise<HostSnapshot> {
@@ -355,35 +601,46 @@ export class Controller {
         this.handleEngineFailure(role, error);
       });
     }
+    this.analyzerStartupAttempted = true;
+    this.kernelStartupAttempted = true;
     let handshake: EngineHandshake;
     try {
       handshake = engineHandshakeSchema.parse(await this.engine.start());
+      if (this.engine.environment !== undefined) this.rEnvironmentValue = clone(this.engine.environment);
     } catch (error) {
+      this.starting = false;
       if (this.closed || generation !== this.runtimeGeneration) {
         throw new ControllerError("session_stopped", "session is stopped", 409);
       }
       this.kernelAvailable = false;
       this.analyzerAvailable = false;
-      this.replaceLastActionError(hostError("engine_start_failed", messageOf(error)));
+      const failure = hostError("engine_start_failed", messageOf(error));
+      this.recordRuntimeAvailabilityError(failure);
+      this.replaceLastActionError(failure);
       throw new ControllerError("engine_start_failed", messageOf(error), 503);
     }
     if (this.closed || generation !== this.runtimeGeneration) {
       throw new ControllerError("session_stopped", "session is stopped", 409);
     }
+    this.starting = false;
     this.handshake = handshake;
+    this.kernelEpochValue = handshake.kernel?.kernelEpoch ?? (handshake.kernelReady ? randomUUID() : null);
+    this.outputStore.setIdentity({ documentRevision: this.documentRevisionValue, kernelEpoch: this.kernelEpochValue });
     this.started = true;
     this.kernelAvailable = handshake.kernelReady && handshake.captureReady;
     this.analyzerAvailable = handshake.analyzerReady;
     if (!this.kernelAvailable || !this.analyzerAvailable) {
-      this.replaceLastActionError(hostError(
+      const failure = hostError(
         "engine_not_ready",
         "R kernel, analyzer, and capture services must be ready before execution",
-      ));
+      );
+      this.recordRuntimeAvailabilityError(failure);
+      this.replaceLastActionError(failure);
       this.emit("runtime", this.runtimeSnapshot());
       return this.snapshot();
     }
 
-    await this.renderMarkdownCells();
+    this.clearRuntimeAvailabilityError();
     this.assertStartCurrent(generation);
     try {
       await this.ensureCurrentAnalysis();
@@ -402,6 +659,7 @@ export class Controller {
     return this.snapshot();
   }
 
+
   async activateStartup(): Promise<OperationRecord | null> {
     this.assertStarted();
     if (this.startupActivated) return null;
@@ -417,20 +675,24 @@ export class Controller {
       this.replaceLastActionError(failure, { operationId });
       this.failOperation(operationId, failure);
     }
-    return clone(this.operations.get(operationId) ?? null);
+    return clone(this.operationFor(operationId, INTERNAL_CLIENT_ID) ?? null);
   }
 
-  snapshot(): HostSnapshot {
+  snapshot(clientId?: string): HostSnapshot {
     const snapshot: HostSnapshot = {
       protocol: HOST_PROTOCOL,
       epoch: this.epochValue,
       cursor: this.cursorValue,
       version: this.version,
+      documentRevision: this.documentRevisionValue,
       path: this.pathValue,
-      metadata: clone(this.metadata),
-      config: clone(this.config),
-      layout: clone(this.layout),
+      metadata: clone(this.metadata) as HostSnapshot["metadata"],
+      config: clone(this.effectiveConfig) as HostSnapshot["config"],
+      layout: clone(this.layout) as HostSnapshot["layout"],
+      dirty: this.changed,
       changed: this.changed,
+      disk: clone(this.diskValue),
+      sidecars: clone(this.sidecarsValue),
       runtime: this.runtimeSnapshot(),
       cells: this.cells.map((cell) => this.publicCell(cell)),
       graph: clone(this.graphValue.state),
@@ -440,8 +702,11 @@ export class Controller {
       ),
       serviceErrors: clone(this.serviceErrors),
       operations: [...this.operations.values()].map(clone),
-      lastValue: clone(this.lastValue),
+      lastValue: clone(this.lastValue) as HostSnapshot["lastValue"],
       lastActionError: clone(this.lastActionError),
+      capabilities: [...(this.handshake?.capabilities ?? [])],
+      activeClientIds: [...this.activeClients],
+      ...(clientId === undefined ? {} : { nextCommandSequence: (this.clientHighWater.get(clientId) ?? 0) + 1 }),
     };
     return snapshot;
   }
@@ -552,9 +817,52 @@ export class Controller {
     };
   }
 
-  operation(id: string): OperationRecord | undefined {
-    const operation = this.operations.get(id);
+  private operationKey(clientId: string, operationId: string): string {
+    return commandKey(clientId, operationId);
+  }
+
+  private operationFor(operationId: string, clientId: string): OperationRecord | undefined {
+    return this.operations.get(this.operationKey(clientId, operationId));
+  }
+
+  private operationForKey(key: string): OperationRecord | undefined {
+    return this.operations.get(key);
+  }
+
+  configuration(): HostConfiguration {
+    return {
+      rscript: this.rEnvironmentValue?.rscript ?? this.requestedRscript ?? null,
+      executionMode: this.executionMode,
+      runOnStartup: this.runOnStartup,
+      deferStartup: this.deferStartup,
+    };
+  }
+
+  operation(id: string, clientId: string): OperationRecord | undefined {
+    const operation = this.operationFor(id, clientId);
     return operation === undefined ? undefined : clone(operation);
+  }
+
+  hasActiveOperations(): boolean {
+    for (const operation of this.operations.values()) if (!isTerminal(operation.status)) return true;
+    return false;
+  }
+
+  publishPackageProgress(operationId: string, progress: unknown, clientId?: string): void {
+    if (this.closed) return;
+    const owner = clientId ?? this.packageOperationClientId ?? INTERNAL_CLIENT_ID;
+    const operation = this.operationFor(operationId, owner);
+    if (operation === undefined || operation.kind !== "packages-install" || operation.status !== "running") return;
+    const parsed = operationProgressSchema.safeParse(progress);
+    if (!parsed.success) return;
+    const value = parsed.data;
+    operation.progress = {
+      phase: value.phase,
+      ...(value.stream === undefined ? {} : { stream: value.stream }),
+      ...(value.text === undefined ? {} : { text: value.text }),
+      ...(value.data === undefined ? {} : { data: value.data }),
+    };
+    this.rememberOperation(operation);
   }
 
   recordActionError(message: string, code = "internal_error"): void {
@@ -562,8 +870,26 @@ export class Controller {
     this.replaceLastActionError(hostError(code, message));
   }
 
-  awaitOperation(id: string, signal?: AbortSignal): Promise<OperationRecord> {
-    const current = this.operations.get(id);
+  recordRuntimeAvailabilityError(error: HostError): void {
+    this.assertNotClosed();
+    if (!this.setRuntimeAvailabilityError(error)) return;
+    this.bump("runtime", this.runtimeSnapshot());
+  }
+
+  private setRuntimeAvailabilityError(error: HostError): boolean {
+    const next = clone(error);
+    if (stableStringify(this.runtimeAvailabilityError) === stableStringify(next)) return false;
+    this.runtimeAvailabilityError = next;
+    return true;
+  }
+
+  private clearRuntimeAvailabilityError(): void {
+    this.runtimeAvailabilityError = null;
+  }
+
+  awaitOperation(id: string, clientId: string, signal?: AbortSignal): Promise<OperationRecord> {
+    const key = this.operationKey(clientId, id);
+    const current = this.operationFor(id, clientId);
     if (current === undefined) {
       return Promise.reject(new ControllerError("not_found", `no such operation: ${id}`, 404));
     }
@@ -573,23 +899,23 @@ export class Controller {
         reject(abortError());
         return;
       }
-      const waiters = this.operationWaiters.get(id) ?? new Set();
+      const waiters = this.operationWaiters.get(key) ?? new Set();
       const finish = (operation: OperationRecord): void => {
         signal?.removeEventListener("abort", abort);
         resolve(clone(operation));
       };
       const abort = (): void => {
         waiters.delete(finish);
-        if (waiters.size === 0) this.operationWaiters.delete(id);
+        if (waiters.size === 0) this.operationWaiters.delete(key);
         reject(abortError());
       };
       waiters.add(finish);
-      this.operationWaiters.set(id, waiters);
+      this.operationWaiters.set(key, waiters);
       signal?.addEventListener("abort", abort, { once: true });
     });
   }
 
-  dispatch(input: HostCommand | unknown): Promise<CommandResult> {
+  dispatch(input: HostCommand | unknown): Promise<CommandAdmission> {
     this.assertNotClosed();
     let command: HostCommand;
     try {
@@ -604,27 +930,288 @@ export class Controller {
         409,
       ));
     }
+    const key = commandKey(command.clientId, command.operationId);
     const fingerprint = stableStringify(command);
-    const prior = this.commandEntries.get(command.operationId);
+    const prior = this.commandEntries.get(key);
     if (prior !== undefined) {
-      if (prior.fingerprint !== fingerprint) {
-        return Promise.reject(new ControllerError(
+      if (prior.fingerprint !== fingerprint || prior.commandSequence !== command.commandSequence) {
+        return Promise.resolve(this.rejectedAdmission(command, hostError(
           "operation_id_conflict",
-          `operation ${command.operationId} was already used for a different command`,
-          409,
-        ));
+          "operation " + command.operationId + " was already used for a different command",
+          command.operationId,
+        )));
       }
-      return prior.promise;
+      return prior.admission;
     }
-    const promise = this.executeCommand(command);
-    this.commandEntries.set(command.operationId, { fingerprint, promise });
+    if (command.commandSequence >= Number.MAX_SAFE_INTEGER) {
+      return Promise.resolve(this.rejectedAdmission(command, hostError(
+        'command_sequence_exhausted', 'command sequence counter is exhausted', command.operationId,
+      )));
+    }
+    const previous = this.clientHighWater.get(command.clientId) ?? 0;
+    const expected = previous + 1;
+    if (command.commandSequence <= previous) {
+      return Promise.resolve(this.rejectedAdmission(command, hostError(
+        "operation_expired",
+        "command sequence " + command.commandSequence + " is no longer retained",
+        command.operationId,
+        { expectedCommandSequence: previous + 1, nextCommandSequence: command.commandSequence, sequenceConsumed: false },
+      )));
+    }
+    if (command.commandSequence !== expected) {
+      return Promise.resolve(this.rejectedAdmission(command, hostError(
+        "command_sequence_gap",
+        "expected command sequence " + expected + ", received " + command.commandSequence,
+        command.operationId,
+        { expectedCommandSequence: expected, nextCommandSequence: command.commandSequence, sequenceConsumed: false },
+      )));
+    }
+    if (!this.clientHighWater.has(command.clientId) && this.activeClients.size >= 128) {
+      return Promise.resolve(this.rejectedAdmission(command, hostError(
+        "client_limit", "too many active client sessions", command.operationId,
+      )));
+    }
+    this.registerClient(command.clientId);
+    this.clientHighWater.set(command.clientId, command.commandSequence);
+    if (command.type === "run" && command.startup === true && this.startupActivated) {
+      const admission = Promise.resolve(this.rejectedAdmission(command, hostError(
+        "startup_already_activated",
+        "startup activation was already claimed by another client",
+        command.operationId,
+        { sequenceConsumed: true },
+      ), true));
+      this.commandEntries.set(key, {
+        operationId: command.operationId,
+        clientId: command.clientId,
+        commandSequence: command.commandSequence,
+        fingerprint,
+        admission,
+        terminal: Promise.resolve(undefined),
+      });
+      this.trimCommandEntries();
+      return admission;
+    }
+    let operation: OperationRecord;
+    try {
+      operation = this.createOperation(command.operationId, command.type, command.clientId, command.commandSequence);
+    } catch (error) {
+      return Promise.reject(error);
+    }
+    if (command.type === "run" && !this.startupActivated) {
+      this.startupActivated = true;
+      this.emit("runtime", this.runtimeSnapshot(), { operationId: command.operationId, clientId: command.clientId, commandSequence: command.commandSequence });
+    }
+    this.emit("receipt", { operation: clone(operation), commandType: command.type }, {
+      operationId: command.operationId, clientId: command.clientId, commandSequence: command.commandSequence,
+    });
+    const terminal = Promise.resolve().then(() => this.executeCommand(command));
+    void terminal.catch(() => undefined);
+    const admission = Promise.resolve({
+      epoch: this.epochValue, clientId: command.clientId, operationId: command.operationId,
+      commandSequence: command.commandSequence, accepted: true, sequenceConsumed: true,
+      operation: clone(operation), error: null, nextCommandSequence: command.commandSequence + 1,
+    });
+    this.commandEntries.set(key, { operationId: command.operationId, clientId: command.clientId, commandSequence: command.commandSequence, fingerprint, admission, terminal });
     this.trimCommandEntries();
-    return promise;
+    return admission;
   }
+  /** Register an authenticated client lease exactly once. */
+  registerClient(clientId: string): void {
+    this.assertNotClosed();
+    if (this.activeClients.has(clientId)) return;
+    if (this.activeClients.size >= 128) {
+      throw new ControllerError("client_limit", "too many active client sessions", 429);
+    }
+    this.activeClients.add(clientId);
+    this.emitActiveClientsChanged(clientId);
+  }
+
+  /** Release an authenticated lease without rewinding its high-water mark. */
+  releaseClient(clientId: string): void {
+    if (!this.activeClients.delete(clientId)) return;
+    this.emitActiveClientsChanged(clientId);
+  }
+
+  async query(input: HostQuery, callerClientId?: string): Promise<HostQueryResult> {
+    this.assertNotClosed();
+    const query = input;
+    let result: unknown;
+    switch (query.type) {
+      case "notebook":
+        result = {
+          protocol: HOST_PROTOCOL,
+          epoch: this.epochValue,
+          cursor: this.cursorValue,
+          version: this.version,
+          documentRevision: this.documentRevisionValue,
+          path: this.pathValue,
+          metadata: clone(this.metadata),
+          config: clone(this.effectiveConfig),
+          dirty: this.changed,
+          changed: this.changed,
+          disk: clone(this.diskValue),
+          sidecars: clone(this.sidecarsValue),
+          runtime: this.runtimeSnapshot(),
+          capabilities: [...(this.handshake?.capabilities ?? [])],
+          nextCommandSequence: (this.clientHighWater.get(callerClientId ?? "internal") ?? 0) + 1,
+          activeClientIds: [...this.activeClients],
+          cells: this.cells.map((cell) => ({ id: cell.id, type: cell.type, options: clone(cell.options), revision: cell.revision })),
+        };
+        break;
+      case "cells": {
+        const offset = query.offset ?? 0;
+        const limit = query.limit ?? 100;
+        result = this.cells.slice(offset, offset + limit).map((cell) => this.publicCell(cell));
+        break;
+      }
+      case "cell": {
+        const cell = this.cellById(query.cellId);
+        if (cell === undefined) throw new ControllerError("not_found", "no such cell: " + query.cellId, 404);
+        result = this.publicCell(cell);
+        break;
+      }
+      case "graph": result = clone(this.graphValue.state); break;
+      case "outputs": {
+        const cells = query.cellId === undefined ? this.cells : [this.requireCell(query.cellId)];
+        result = cells.flatMap((cell) => clone(cell.outputs));
+        break;
+      }
+      case "output": result = await this.readOutputPage(query); break;
+      case "operation": {
+        if (callerClientId !== undefined && query.clientId !== undefined && query.clientId !== callerClientId) {
+          throw new ControllerError("not_found", "no such operation: " + query.operationId, 404);
+        }
+        const owner = callerClientId ?? query.clientId;
+        if (owner === undefined) throw new ControllerError("not_found", "operation owner is required", 404);
+        const operation = this.operations.get(commandKey(owner, query.operationId));
+        if (operation === undefined) throw new ControllerError("not_found", "no such operation: " + query.operationId, 404);
+        result = clone(operation);
+        break;
+      }
+      case "events": result = this.recover(query.epoch, query.cursor); break;
+      case "config": result = {
+        effective: clone(this.effectiveConfig),
+        layers: clone(this.configResolution.layers),
+        provenance: clone(this.configResolution.provenance),
+        sidecar: clone(this.sidecarsValue.config),
+      }; break;
+      case "layout": result = { layout: clone(this.layout), sidecar: clone(this.sidecarsValue.layout) }; break;
+      case "recovery": result = this.getRecoveryState === undefined
+        ? { branches: [], pending: false, corruption: null }
+        : await this.getRecoveryState(); break;
+      case "packages-status": result = await this.callService("packages.status", {}); break;
+      case "check":
+        await this.ensureCurrentAnalysis();
+        result = { documentRevision: this.documentRevisionValue, issues: this.graphValue.validate(), executionBlockedReason: this.runtimeSnapshot().executionBlockedReason };
+        break;
+      case "source": result = this.cells.map((cell) => ({ id: cell.id, type: cell.type, body: [...cell.body], revision: cell.revision, options: clone(cell.options) })); break;
+      case "help": result = await this.callService("help", { contents: query.contents }); break;
+      default: throw assertNever(query);
+    }
+    return { epoch: this.epochValue, documentRevision: this.documentRevisionValue, cursor: this.cursorValue, result: clone(result) as HostQueryResult["result"] };
+  }
+
+  private async readOutputPage(query: Extract<HostQuery, { type: "output" }>): Promise<Record<string, unknown>> {
+    const offset = query.offset ?? 0;
+    const limit = query.limit ?? OUTPUT_ARTIFACT_CHUNK_BYTES;
+    if (!Number.isSafeInteger(offset) || offset < 0) {
+      throw new ControllerError("invalid_request", "output offset must be a non-negative safe integer", 400);
+    }
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > OUTPUT_ARTIFACT_CHUNK_BYTES) {
+      throw new ControllerError("invalid_request", "output limit exceeds the bounded page size", 400);
+    }
+    let resource;
+    try {
+      resource = this.outputStore.openArtifactResource(query.handle);
+    } catch (error) {
+      if (!(error instanceof OutputStoreError)) throw error;
+      const code = error.code === "not_found" ? "not_found" : error.code === "output_expired" ? "output_expired" : "invalid_request";
+      const status = code === "not_found" ? 404 : code === "output_expired" ? 410 : 400;
+      throw new ControllerError(code, error.message, status);
+    }
+    try {
+      const descriptor = resource.descriptor;
+      const readLimit = Math.min(OUTPUT_ARTIFACT_CHUNK_BYTES, Math.max(7, limit + 6));
+      const essence = descriptor.mimeType.split(";", 1)[0]!.trim().toLowerCase();
+      const textual = essence.startsWith("text/")
+        || essence === "application/json"
+        || essence.endsWith("+json")
+        || essence === "application/javascript"
+        || essence === "application/xml";
+      const bytes = await resource.read(offset, readLimit);
+      const binaryPage = () => {
+        const page = bytes.subarray(0, limit);
+        return {
+          encoding: "base64",
+          offset,
+          nextOffset: offset + page.byteLength,
+          eof: offset + page.byteLength >= descriptor.byteLength,
+          data: Buffer.from(page).toString("base64"),
+        };
+      };
+      if (!textual) return binaryPage();
+      if (bytes.byteLength === 0) {
+        if (offset < descriptor.byteLength) {
+          throw new ControllerError("output_expired", "artifact reader returned no bytes before end of artifact", 410);
+        }
+        return { encoding: "utf8", offset, nextOffset: offset, eof: true, data: "" };
+      }
+      if ((bytes[0]! & 0xc0) === 0x80) return binaryPage();
+      const start = 0;
+      const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+      let end = Math.min(bytes.length, start + limit);
+      let data: string | undefined;
+      while (end > start) {
+        try {
+          data = decoder.decode(bytes.subarray(start, end));
+          break;
+        } catch {
+          end--;
+        }
+      }
+      if (data === undefined) {
+        for (let candidate = Math.max(start + limit, start + 1); candidate <= bytes.length; candidate++) {
+          try {
+            data = decoder.decode(bytes.subarray(start, candidate));
+            end = candidate;
+            break;
+          } catch {
+            // Extend a tiny requested page until its first complete code point fits.
+          }
+        }
+      }
+      if (data === undefined) return binaryPage();
+      const nextOffset = offset + end;
+      if (nextOffset <= offset && nextOffset < descriptor.byteLength) {
+        throw new ControllerError("output_expired", "artifact reader did not advance", 410);
+      }
+      return { encoding: "utf8", offset: offset + start, nextOffset, eof: nextOffset >= descriptor.byteLength, data };
+    } finally {
+      resource.close();
+    }
+  }
+
+  private rejectedAdmission(command: HostCommand, error: HostError, sequenceConsumed = false): CommandAdmission {
+    const previous = this.clientHighWater.get(command.clientId) ?? 0;
+    return {
+      epoch: this.epochValue,
+      clientId: command.clientId,
+      operationId: command.operationId,
+      commandSequence: command.commandSequence,
+      accepted: false,
+      sequenceConsumed,
+      operation: null,
+      error: clone(error),
+      nextCommandSequence: sequenceConsumed ? command.commandSequence + 1 : previous + 1,
+    };
+  }
+
 
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
+    this.activeClients.clear();
+    await this.sourceCommitTail;
     this.runtimeGeneration = nextRevision(this.runtimeGeneration);
     this.analysisGeneration = nextRevision(this.analysisGeneration);
     this.variableGeneration = nextRevision(this.variableGeneration);
@@ -638,6 +1225,8 @@ export class Controller {
     this.analyzerAvailable = false;
     this.packageOperationActive = false;
     this.runPreparationActive = false;
+    this.runPreparationCancellation = null;
+    this.runtimeContextReservation = undefined;
     this.queue = [];
     this.activeEvaluation = null;
     this.activeBatch = null;
@@ -662,6 +1251,7 @@ export class Controller {
         this.failOperation(
           operation.id,
           hostError("session_stopped", "session is stopped", operation.id),
+          operation.clientId,
         );
       }
     }
@@ -673,10 +1263,6 @@ export class Controller {
   }
 
   private async executeCommand(command: HostCommand): Promise<CommandResult> {
-    const operation = this.createOperation(command.operationId, command.type);
-    this.emit("receipt", { operation: clone(operation), commandType: command.type }, {
-      operationId: command.operationId,
-    });
     try {
       if (this.engineRestarting && command.type !== "restart") {
         throw new ControllerError(
@@ -685,354 +1271,638 @@ export class Controller {
           409,
         );
       }
+      if (!this.kernelAvailable && (command.type === 'run' || command.type === 'widget'
+        || command.type === 'inspect' || command.type === 'lazy-output' || command.type === 'table-page')) {
+        const availability = this.runtimeAvailabilityError;
+        if (availability?.code === 'kernel_state_invalid') throw new ControllerError(availability.code, availability.message, 409);
+        await this.start();
+      }
+      if (this.runtimeContextReservation !== undefined
+        && (command.type === "run" || command.type === "widget" || command.type === "restart")) {
+        this.assertNoRuntimeContextReservation();
+      }
       let result: unknown;
       let deferred = false;
       switch (command.type) {
-        case "edit":
-          result = await this.applySourceChanges(command.edits, [], false, command.operationId);
-          break;
-        case "create":
-          result = await this.applySourceChanges([], command.creations, false, command.operationId);
-          break;
-        case "delete":
-          result = this.deleteCell(command.cellId, command.expectedRevision, command.operationId);
-          break;
-        case "move":
-          result = this.moveCell(command.cellId, command.after, command.operationId);
-          break;
-        case "disable":
-          result = await this.setCellDisabled(
-            command.cellId,
-            command.disabled,
-            command.expectedRevision,
-            command.operationId,
-          );
-          deferred = isRecord(result) && typeof result.runId === "string";
+        case "transaction":
+          result = await this.applyTransaction(command.changes, command.expectedDocumentRevision, command.operationId, false);
           break;
         case "run":
-          result = await this.prepareRun(command);
-          deferred = true;
+          if (command.startup === true && !this.runOnStartup) {
+            result = { startupActivated: true, run: false };
+          } else {
+            result = await this.prepareRun(command);
+            deferred = true;
+          }
           break;
         case "interrupt":
-          result = await this.interruptActiveRun();
+          result = await this.interruptActiveRun(command.runId);
           break;
         case "restart":
-          result = await this.restartEngine(command.replay, command.operationId);
+          result = await this.restartEngine(undefined, command.replay, command.operationId, command.clientId, true);
           deferred = command.replay;
           break;
         case "widget":
+          this.assertKernelEpoch(command.kernelEpoch);
           result = this.startWidgetOperation(command);
           deferred = true;
           break;
         case "inspect":
-          result = this.startInspection(command.operationId, command.name);
+          this.assertKernelEpoch(command.kernelEpoch);
+          result = this.startInspection(command.operationId, command.name, command.clientId);
           deferred = true;
           break;
         case "lazy-output":
-          result = this.startLazyOutput(command.operationId, command.key);
+          this.assertKernelEpoch(command.kernelEpoch);
+          result = this.startLazyOutput(command.operationId, command.key, command.clientId);
           deferred = true;
           break;
         case "table-page":
+          this.assertKernelEpoch(command.kernelEpoch);
           result = this.startTablePage(command);
           deferred = true;
           break;
         case "save":
-          result = await this.saveNotebook();
+          result = await this.saveNotebook(command.expectedDocumentRevision, command.operationId);
+          break;
+        case "save-as":
+        case "reload-source":
+        case "select-r":
+        case "set-app":
+        case "packages-declare":
+        case "packages-install":
+        case "publish":
+          result = await this.executeTypedService(command);
+          break;
+        case "upload":
+          result = this.startUploadOperation(command);
+          deferred = true;
           break;
         case "format":
+          this.assertDocumentRevision(command.expectedDocumentRevision);
           result = await this.formatSource(command.cellIds, command.expectedRevisions, command.operationId);
           break;
         case "set-runtime":
-          result = this.setRuntime(command.executionMode, command.runOnStartup);
+          result = await this.setRuntime(command.on_cell_change, command.on_startup, command.expectedDocumentRevision, command.operationId);
           break;
         case "set-config":
-          result = await this.setConfig(command.patch);
+          result = await this.setConfig(command.patch, command.expectedDocumentRevision, command.expectedSidecarVersion, command.operationId);
           break;
         case "set-layout":
-          result = await this.setLayout(command.layout);
+          result = await this.setLayout(command.layout, command.expectedDocumentRevision, command.expectedSidecarVersion, command.operationId);
           break;
-        case "service":
-          if (isLongService(command.command)) {
-            result = this.startServiceOperation(command);
-            deferred = true;
-          } else {
-            result = await this.callService(command.command, command.payload);
+        case "shutdown":
+          this.assertDocumentRevision(command.expectedDocumentRevision);
+          const expectedClientIds = new Set(command.expectedClientIds);
+          const actualClientIds = new Set(this.activeClients);
+          if (!setEqual(expectedClientIds, actualClientIds)) {
+            throw new ControllerError("active_clients_changed", "active client set changed while shutdown was waiting", 409, {
+              expectedClientIds: [...expectedClientIds],
+              actualClientIds: [...actualClientIds],
+            });
           }
+          result = { closing: true, expectedClientIds: [...actualClientIds] };
           break;
         default:
           throw assertNever(command);
       }
-      if (!deferred) this.completeOperation(command.operationId, result);
+      if (deferred) {
+        const operation = this.operationFor(command.operationId, command.clientId);
+        if (operation !== undefined && result !== undefined) operation.result = clone(result) as OperationRecord["result"];
+      }
+      if (!deferred) this.completeOperation(command.operationId, result, command.clientId);
+      const settled = this.operationFor(command.operationId, command.clientId);
+      if (settled === undefined) throw new ControllerError("internal_error", "operation missing after execution", 500);
       return {
-        operation: clone(this.operations.get(command.operationId) ?? operation),
-        version: this.version,
-        cursor: this.cursorValue,
-        ...(result === undefined ? {} : { result: clone(result) }),
+        epoch: this.epochValue, operation: clone(settled), documentRevision: this.documentRevisionValue,
+        version: this.version, cursor: this.cursorValue, nextCommandSequence: (this.clientHighWater.get(command.clientId) ?? command.commandSequence) + 1,
+        result: result === undefined ? null : clone(result) as CommandResult["result"], error: settled.error,
       };
     } catch (error) {
       const failure = asControllerError(error);
       const hostFailure = failure.toJSON(command.operationId);
       if (!this.closed) {
         this.replaceLastActionError(hostFailure, { operationId: command.operationId });
-        this.failOperation(command.operationId, hostFailure);
+        this.failOperation(command.operationId, hostFailure, command.clientId);
       }
       throw failure;
     }
   }
 
-  private async applySourceChanges(
-    edits: readonly CellEdit[],
-    creations: readonly CellCreation[],
-    waitForAnalysis: boolean,
-    operationId?: string,
-  ): Promise<ChangeResult> {
-    this.assertStartedForMutation();
-    this.validateAtomicSourceChanges(edits, creations);
+  /** Return the authoritative physical document with current semantic state applied. */
+  notebookDocument(): NotebookDocument {
+    const source = {
+      path: this.pathValue,
+      metadata: clone(this.metadata),
+      cells: this.cells.map((cell) => ({
+        id: cell.id,
+        type: cell.type,
+        body: [...cell.body],
+        options: clone(cell.options),
+        revision: cell.revision,
+      })),
+    };
+    return reconcileNotebook(this.sourceDocument, source);
+  }
 
-    const changedEdits = edits.filter((edit) => {
-      const current = this.cellById(edit.cellId);
-      return current !== undefined
-        && (current.type !== edit.cellType || !arrayEqual(current.body, edit.body));
-    });
-    const oldGraph = this.graphValue;
-    const structureChanged = creations.length > 0
-      || changedEdits.some((edit) => this.requireCell(edit.cellId).type !== edit.cellType);
-    const oldAffected = new Set<string>();
-    const statusChanges = new Set<string>();
-    let touchesBarrier = false;
-    for (const edit of changedEdits) {
-      oldAffected.add(edit.cellId);
-      for (const descendant of oldGraph.descendants(edit.cellId)) oldAffected.add(descendant);
-      if (this.cellById(edit.cellId)?.analysis?.barrier) touchesBarrier = true;
+  private stageDocument(changes: readonly DocumentChange[]): ReturnType<typeof stageDocumentChanges> {
+    try {
+      return stageDocumentChanges(this.notebookDocument(), changes);
+    } catch (error) {
+      const code = error instanceof Error && 'code' in error && typeof (error as { code?: unknown }).code === 'string'
+        ? String((error as { code: string }).code)
+        : 'invalid_request';
+      const mappedCode = code === 'cell_not_found' ? 'not_found' : code === 'stale_revision' ? 'source_conflict' : code;
+      throw new ControllerError(mappedCode, messageOf(error), mappedCode === 'not_found' ? 404 : mappedCode === 'source_conflict' ? 409 : 400);
     }
-    if (oldGraph.resourceLimited && changedEdits.length > 0) {
-      for (const cell of this.cells) {
-        if (cell.type === "code") oldAffected.add(cell.id);
-      }
-    }
-    if (oldAffected.size > 0) {
-      for (const id of this.cancelRunRegion(oldAffected, "source")) statusChanges.add(id);
-    }
-    if (changedEdits.length > 0 || creations.length > 0) {
-      this.clearEditorDiagnostics();
-      this.clearVariables();
-    }
+  }
 
-    const edited: ChangeResult["edited"] = [];
-    for (const edit of edits) {
-      const cell = this.requireCell(edit.cellId);
-      if (cell.type === edit.cellType && arrayEqual(cell.body, edit.body)) {
-        edited.push({ id: cell.id, revision: cell.revision });
-        continue;
-      }
-      const previousType = cell.type;
-      if (previousType === "code") {
-        this.rememberInvalidatedDefinitions(cell);
-        this.clearBeforeEvaluation.add(cell.id);
-      }
-      const cancelledWidgets = this.cancelOwnedOperations(cell.id);
-      cell.revision = nextRevision(cell.revision);
-      cell.type = edit.cellType;
-      cell.body = [...edit.body];
-      cell.analysis = edit.cellType === "markdown"
-        ? emptyAnalysis(cell.id, cell.revision)
-        : null;
-      cell.progress = null;
-      cell.error = null;
-      if (edit.cellType === "markdown") {
-        this.analysisNeeded.delete(cell.id);
-        this.barrierAnalysisCandidates.delete(cell.id);
-        cell.status = "done";
-        cell.outputs = [markdownPlaceholder(cell.body)];
-        cell.log = [];
-      } else {
-        cell.status = staleStatus(cell.status);
-        if (previousType !== "code") cell.outputs = [];
-        this.analysisNeeded.add(cell.id);
-        this.barrierAnalysisCandidates.add(cell.id);
-      }
-      for (const operationId of cancelledWidgets) {
-        this.obsoleteWidgetRequests.set(operationId, cell.id);
-      }
-      if (this.widgetReconciliationRoots.has(cell.id)) {
-        this.widgetReconciliationRoots.set(cell.id, cell.revision);
-      }
-      edited.push({ id: cell.id, revision: cell.revision });
+  /** Serialize durable source, sidecar, save, reload, and watcher mutations. */
+  private assertExpectedDisk(expected: SourceDiskExpectation | undefined): void {
+    if (expected === undefined) return;
+    if (this.diskValue.digest !== expected.digest || this.diskValue.version !== expected.version) {
+      throw new ControllerError("source_conflict", "source changed on disk while the operation was waiting", 409, {
+        kind: "disk",
+        expectedDigest: expected.digest,
+        expectedVersion: expected.version,
+        actualDigest: this.diskValue.digest,
+        actualVersion: this.diskValue.version,
+      });
     }
+  }
 
-    const created: ChangeResult["created"] = [];
-    for (const creation of creations) {
-      const id = this.nextCellId();
-      const record: CellRecord = {
-        id,
-        type: creation.cellType,
-        body: [...creation.body],
-        options: clone(creation.options),
-        revision: 0,
-        status: creation.cellType === "markdown" ? "done" : "idle",
-        outputs: creation.cellType === "markdown"
-          ? [markdownPlaceholder(creation.body)]
-          : [],
-        progress: null,
-        log: [],
-        error: null,
-        analysis: creation.cellType === "markdown" ? emptyAnalysis(id, 0) : null,
-      };
-      const afterIndex = creation.after === null
-        ? this.cells.length - 1
-        : this.cells.findIndex((cell) => cell.id === creation.after);
-      this.cells.splice(afterIndex + 1, 0, record);
-      this.creationIds.set(creation.clientOperationId, id);
-      if (record.type === "code") {
-        this.analysisNeeded.add(id);
-        this.barrierAnalysisCandidates.add(id);
-      }
-      created.push({ clientOperationId: creation.clientOperationId, id, revision: 0 });
+  private assertExpectedSidecar(
+    kind: SourceCommitRequest["sidecar"],
+    expectedVersion: string | null | undefined,
+  ): void {
+    if (kind === undefined || expectedVersion === undefined) return;
+    const actual = this.sidecarsValue[kind].version;
+    if (actual !== expectedVersion) {
+      throw new ControllerError("source_conflict", String(kind) + " sidecar changed while the operation was waiting", 409, {
+        kind: "sidecar", sidecar: kind, expectedVersion, actualVersion: actual,
+      });
     }
+  }
 
-    if (changedEdits.length === 0 && created.length === 0) return { edited, created };
-    this.changed = true;
-    this.analysisGeneration = nextRevision(this.analysisGeneration);
-    // Keep the last validated dependency relation during body-only edits.
-    // Analysis readiness still gates execution of every new source revision.
-    if (structureChanged) this.graphValue = this.rebuildGraph();
-    for (const id of this.invalidateForGraphLimit()) statusChanges.add(id);
-    if (this.analysisNeeded.size === 0) this.refreshButtonResets();
-    for (const id of oldAffected) {
-      if (this.markStale(id)) statusChanges.add(id);
+  private prepareSourcePublication(
+    publication: SourcePublication,
+    request: SourceCommitRequest,
+  ): PreparedSourcePublication {
+    if (publication === null || typeof publication !== "object") {
+      throw new ControllerError("invalid_service_response", "source publication must be an object", 503);
     }
-    if (touchesBarrier) {
-      for (const id of this.invalidateForBarrier()) statusChanges.add(id);
+    if (typeof publication.path !== "string" && publication.path !== null) {
+      throw new ControllerError("invalid_service_response", "source publication path is invalid", 503);
     }
-    const sourceIdentity = operationId === undefined ? {} : { operationId };
-    this.bump("notebook", {
-      edited,
-      created,
-      order: this.cells.map((cell) => cell.id),
-    }, sourceIdentity);
-    if (structureChanged) this.emitGraph(sourceIdentity);
-    this.emitCells([
-      ...statusChanges,
-      ...changedEdits.map((edit) => edit.cellId),
-      ...created.map((item) => item.id),
-    ], sourceIdentity);
-    for (const id of [...changedEdits.map((edit) => edit.cellId), ...created.map((item) => item.id)]) {
+    if (!Array.isArray(publication.document?.cells)) {
+      throw new ControllerError("invalid_service_response", "source publication document is invalid", 503);
+    }
+    if (typeof publication.dirty !== "boolean" || typeof publication.advanceRevision !== "boolean") {
+      throw new ControllerError("invalid_service_response", "source publication flags are invalid", 503);
+    }
+    if (publication.advanceRevision && request.kind === "save-as" && !publication.dirty) {
+      throw new ControllerError("invalid_service_response", "Save As cannot advance a clean source revision", 503);
+    }
+    if (
+      publication.configResolution === null
+      || typeof publication.configResolution !== "object"
+      || !isRecord(publication.configResolution.effective)
+      || !isRecord(publication.configResolution.layers)
+      || !isRecord(publication.configResolution.provenance)
+    ) {
+      throw new ControllerError("invalid_service_response", "source publication config resolution is invalid", 503);
+    }
+    const document = clone({ ...publication.document, path: publication.path });
+    const configResolution = clone(publication.configResolution);
+    const layout = clone(publication.layout) as JsonValue;
+    const disk = clone(publication.disk);
+    const sidecars = clone(publication.sidecars);
+    const prepared: SourcePublication = {
+      document,
+      path: publication.path,
+      configResolution,
+      layout,
+      disk,
+      sidecars,
+      dirty: publication.dirty,
+      advanceRevision: publication.advanceRevision,
+      ...(publication.invalidateRuntime === undefined ? {} : { invalidateRuntime: publication.invalidateRuntime }),
+      ...(Object.hasOwn(publication, "rEnvironment") ? { rEnvironment: clone(publication.rEnvironment) } : {}),
+    };
+    return { publication: prepared, staged: this.publishedDocumentStage(prepared.document) };
+  }
+
+  private publishedDocumentStage(document: NotebookDocument): ReturnType<typeof stageDocumentChanges> {
+    const current = this.notebookDocument();
+    const prior = new Map(current.cells.map((cell) => [cell.id, cell]));
+    const next = new Map(document.cells.map((cell) => [cell.id, cell]));
+    const changed = new Set<string>();
+    const created = new Map<string, string>();
+    const deleted = new Set<string>();
+    for (const cell of document.cells) {
+      const old = prior.get(cell.id);
+      if (old === undefined) {
+        created.set(cell.id, cell.id);
+        changed.add(cell.id);
+      } else if (old.type !== cell.type || !arrayEqual(old.body, cell.body)
+        || stableStringify(old.options) !== stableStringify(cell.options)
+        || old.revision !== (cell.revision ?? old.revision)) {
+        changed.add(cell.id);
+      }
+    }
+    for (const cell of current.cells) if (!next.has(cell.id)) deleted.add(cell.id);
+    return { document, created, changed, deleted };
+  }
+
+  private applySourcePublication(
+    preparedPublication: PreparedSourcePublication,
+    request: SourceCommitRequest,
+  ): void {
+    const { publication, staged } = preparedPublication;
+    const operationId = request.operationId ?? randomUUID();
+    const currentOrder = this.cells.map((cell) => cell.id);
+    const currentGraph = this.graphValue.state;
+    const publishedOrder = publication.document.cells.map((cell) => cell.id);
+    const orderChanged = !arrayEqual(currentOrder, publishedOrder);
+    if (staged.changed.size > 0 || staged.created.size > 0 || staged.deleted.size > 0 || orderChanged) {
+      this.applyStagedDocument(publication.document, staged, operationId);
+    } else {
+      this.sourceDocument = publication.document;
+    }
+    this.pathValue = publication.path;
+    this.metadata = clone(publication.document.metadata ?? this.metadata);
+    this.configResolution = clone(publication.configResolution);
+    const graphChanged = this.graphValue.state !== currentGraph;
+    const configuredMode = this.effectiveConfig.on_cell_change;
+    if (configuredMode === "automatic" || configuredMode === "lazy") this.executionMode = configuredMode;
+    if (typeof this.effectiveConfig.on_startup === "boolean") this.runOnStartup = this.effectiveConfig.on_startup;
+    this.layout = clone(publication.layout);
+    this.diskValue = clone(publication.disk);
+    this.sidecarsValue = clone(publication.sidecars);
+    if (Object.hasOwn(publication, "rEnvironment")) this.rEnvironmentValue = clone(publication.rEnvironment ?? null);
+    if (publication.invalidateRuntime === true) {
+      const statusChanges = this.invalidateRuntimeView();
+      if (statusChanges.size > 0) this.emitCells(statusChanges, { operationId });
+      this.emit("runtime", this.runtimeSnapshot(), { operationId });
+    }
+    if (publication.advanceRevision) this.commitDocumentRevision();
+    for (const id of staged.changed) {
       const cell = this.cellById(id);
       if (cell?.type === "markdown") this.scheduleMarkdownRender(cell);
     }
-
-    if (this.analysisNeeded.size > 0) {
-      if (waitForAnalysis) {
-        await this.ensureCurrentAnalysis();
-      } else {
-        this.scheduleAnalysis();
-      }
-    }
-    return { edited, created };
-  }
-
-  private validateAtomicSourceChanges(
-    edits: readonly CellEdit[],
-    creations: readonly CellCreation[],
-  ): void {
-    if (this.cells.length + creations.length > MAX_NOTEBOOK_CELLS) {
-      throw new ControllerError(
-        "invalid_request",
-        `notebook exceeds ${MAX_NOTEBOOK_CELLS} cell limit`,
-        400,
-      );
-    }
-    const editedIds = new Set<string>();
-    for (const edit of edits) {
-      if (editedIds.has(edit.cellId)) {
-        throw new ControllerError("invalid_request", `cell ${edit.cellId} is edited more than once`, 400);
-      }
-      editedIds.add(edit.cellId);
-      const cell = this.cellById(edit.cellId);
-      if (cell === undefined) throw new ControllerError("not_found", `no such cell: ${edit.cellId}`, 404);
-      if (cell.revision !== edit.expectedRevision) {
-        throw new ControllerError(
-          "source_conflict",
-          `cell ${edit.cellId} changed on the server`,
-          409,
-          { expectedRevision: edit.expectedRevision, actualRevision: cell.revision },
-        );
-      }
-    }
-    const creationOperations = new Set<string>();
-    for (const creation of creations) {
-      if (creationOperations.has(creation.clientOperationId)) {
-        throw new ControllerError(
-          "invalid_request",
-          `creation operation ${creation.clientOperationId} occurs more than once`,
-          400,
-        );
-      }
-      creationOperations.add(creation.clientOperationId);
-      if (this.creationIds.has(creation.clientOperationId)) {
-        throw new ControllerError(
-          "operation_id_conflict",
-          `creation operation ${creation.clientOperationId} was already acknowledged`,
-          409,
-        );
-      }
-      if (creation.after !== null && this.cellById(creation.after) === undefined) {
-        throw new ControllerError("not_found", `no such cell: ${creation.after}`, 404);
-      }
-    }
-    const editedBodies = new Map(edits.map((edit) => [edit.cellId, edit.body]));
-    const projectedSource = [
-      ...this.cells.map((cell) => ({ body: editedBodies.get(cell.id) ?? cell.body })),
-      ...creations.map((creation) => ({ body: creation.body })),
-    ];
-    if (notebookSourceByteLength(projectedSource) > MAX_NOTEBOOK_SOURCE_BYTES) {
-      throw new ControllerError(
-        "invalid_request",
-        `notebook source exceeds ${MAX_NOTEBOOK_SOURCE_BYTES} byte limit`,
-        400,
-      );
+    this.changed = publication.dirty;
+    if (request.kind === "transaction") {
+      const delta = request.delta;
+      this.bump("transaction", {
+        documentRevision: this.documentRevisionValue,
+        created: delta?.created ?? {},
+        updated: (delta?.edited ?? []).flatMap(({ id }) => {
+          const cell = this.cellById(id);
+          return cell === undefined ? [] : [this.publicCell(cell)];
+        }),
+        deleted: delta?.deleted ?? [],
+        order: this.cells.map((cell) => cell.id),
+        metadata: clone(this.metadata),
+        config: clone(this.effectiveConfig),
+        layout: clone(this.layout),
+        analysisPending: this.analysisNeeded.size > 0,
+        ...(graphChanged ? { graph: clone(this.graphValue.state) } : {}),
+      }, { operationId });
+    } else {
+      const authoritativeReload = request.kind === "reload-source" || request.kind === "watcher";
+      this.bump("notebook", {
+        sourceCommit: request.kind,
+        documentRevision: this.documentRevisionValue,
+        path: this.pathValue,
+        config: clone(this.effectiveConfig),
+        layout: clone(this.layout),
+        disk: clone(this.diskValue),
+        sidecars: clone(this.sidecarsValue),
+        dirty: this.changed,
+        ...(authoritativeReload ? {
+          created: Object.fromEntries(staged.created),
+          updated: this.cells.map((cell) => this.publicCell(cell)),
+          deleted: [...staged.deleted],
+          order: this.cells.map((cell) => cell.id),
+          metadata: clone(this.metadata),
+          analysisPending: this.analysisNeeded.size > 0,
+        } : {}),
+        ...(graphChanged ? { graph: clone(this.graphValue.state) } : {}),
+      }, { operationId });
+      if (authoritativeReload && this.analysisNeeded.size > 0) this.scheduleAnalysis();
     }
   }
 
-  private deleteCell(id: string, expectedRevision: number, operationId: string): unknown {
+
+  public commitSource<T>(
+    request: SourceCommitRequest,
+    prepare?: (context: SourceCommitContext) => Promise<T>,
+  ): Promise<T> {
+    const work = prepare ?? (this.sourceCommit === undefined
+      ? undefined
+      : async (context: SourceCommitContext) => this.sourceCommit!(request, context) as T);
+    if (work === undefined) {
+      return Promise.reject(new ControllerError("service_unavailable", "durable source service is unavailable", 503));
+    }
+    const previous = this.sourceCommitTail;
+    const commit = previous.then(async () => {
+      this.assertStartedForMutation();
+      if (request.kind !== "watcher") this.assertDocumentRevision(request.expectedDocumentRevision);
+      if (request.kind !== "reload-source" && request.kind !== "watcher") {
+        this.assertExpectedDisk(request.expectedDisk);
+      }
+      this.assertExpectedSidecar(request.sidecar, request.expectedSidecarVersion);
+      let published = false;
+      const context: SourceCommitContext = {
+        kind: request.kind,
+        fromRevision: this.documentRevisionValue,
+        expectedDocumentRevision: this.documentRevisionValue,
+        operationId: request.operationId,
+        document: this.notebookDocument(),
+        path: this.pathValue,
+        configResolution: clone(this.configResolution),
+        layout: clone(this.layout) as JsonValue,
+        disk: clone(this.diskValue),
+        sidecars: clone(this.sidecarsValue),
+        dirty: this.changed,
+        preparePublication: (publication) => {
+          const prepared = this.prepareSourcePublication(publication, request);
+          let adopted = false;
+          return () => {
+            if (adopted || published) return;
+            // Save As publication can cross an ownership boundary. Restore the
+            // observable source state if a synchronous observer fails after a
+            // publication has begun but before it is adopted.
+            const previousSourceDocument = this.sourceDocument;
+            const previousCells = clone(this.cells);
+            const previousPath = this.pathValue;
+            const previousMetadata = this.metadata;
+            const previousConfigResolution = this.configResolution;
+            const previousLayout = this.layout;
+            const previousDisk = this.diskValue;
+            const previousSidecars = this.sidecarsValue;
+            const previousREnvironment = this.rEnvironmentValue;
+            const previousChanged = this.changed;
+            const previousDocumentRevision = this.documentRevisionValue;
+            const previousVersion = this.version;
+            const previousCursor = this.cursorValue;
+            const previousEventJournalLength = this.eventJournal.length;
+            const previousEventJournalBytes = this.eventJournalBytes;
+            const previousRuntimeSignature = this.runtimeSignature;
+            try {
+              this.applySourcePublication(prepared, request);
+            } catch (error) {
+              this.sourceDocument = previousSourceDocument;
+              this.cells = previousCells;
+              this.pathValue = previousPath;
+              this.metadata = previousMetadata;
+              this.configResolution = previousConfigResolution;
+              this.layout = previousLayout;
+              this.diskValue = previousDisk;
+              this.sidecarsValue = previousSidecars;
+              this.rEnvironmentValue = previousREnvironment;
+              this.changed = previousChanged;
+              this.documentRevisionValue = previousDocumentRevision;
+              this.outputStore.setIdentity({ documentRevision: this.documentRevisionValue, kernelEpoch: this.kernelEpochValue });
+              this.version = previousVersion;
+              this.cursorValue = previousCursor;
+              this.eventJournal.length = previousEventJournalLength;
+              this.eventJournalBytes = previousEventJournalBytes;
+              this.runtimeSignature = previousRuntimeSignature;
+              throw error;
+            }
+            adopted = true;
+            published = true;
+          };
+        },
+      };
+      const result = await work(context);
+      if (!published) {
+        throw new ControllerError("source_commit_incomplete", "durable source commit did not publish", 503);
+      }
+      return result;
+    });
+    this.sourceCommitTail = commit.then(() => undefined, () => undefined);
+    return commit;
+  }
+
+
+  private async applyTransaction(
+    changes: readonly DocumentChange[],
+    expectedDocumentRevision: number,
+    operationId: string,
+    waitForAnalysis: boolean,
+  ): Promise<{
+    created: Record<string, string>;
+    edited: Array<{ id: string; revision: number }>;
+    deleted: string[];
+    documentRevision: number;
+  }> {
     this.assertStartedForMutation();
-    const cell = this.requireCell(id);
-    if (cell.revision !== expectedRevision) {
-      throw new ControllerError("source_conflict", `cell ${id} changed on the server`, 409);
+    this.assertDocumentRevision(expectedDocumentRevision);
+    const staged = this.stageDocument(changes);
+    const changed = new Set(staged.changed);
+    const created: Record<string, string> = Object.fromEntries(staged.created);
+    const deleted = [...staged.deleted];
+    const edited = [...changed]
+      .filter((id) => !staged.deleted.has(id))
+      .map((id) => ({ id, revision: staged.document.cells.find((cell) => cell.id === id)?.revision ?? 0 }));
+    const hasSourceChange = changed.size > 0 || staged.created.size > 0 || staged.deleted.size > 0;
+    if (!hasSourceChange) {
+      this.assertDocumentRevision(expectedDocumentRevision);
+      return { created, edited, deleted, documentRevision: this.documentRevisionValue };
     }
-    const affected = this.graphValue.resourceLimited
-      ? new Set(this.cells.filter((candidate) => candidate.type === "code").map((candidate) => candidate.id))
-      : new Set([id, ...this.graphValue.descendants(id)]);
-    const statusChanges = this.cancelRunRegion(affected, "source");
-    const barrier = cell.analysis?.barrier === true;
-    this.rememberInvalidatedDefinitions(cell);
-    this.cancelOwnedOperations(id);
-    this.clearEditorDiagnostics();
-    this.clearVariables();
-    this.cells = this.cells.filter((candidate) => candidate.id !== id);
-    this.analysisNeeded.delete(id);
-    this.barrierAnalysisCandidates.delete(id);
-    this.clearBeforeEvaluation.add(id);
-    this.graphValue = this.rebuildGraph();
-    for (const changedId of this.invalidateForGraphLimit()) statusChanges.add(changedId);
-    this.refreshButtonResets();
-    for (const descendant of affected) {
-      if (this.markStale(descendant)) statusChanges.add(descendant);
+    const fingerprint = stableStringify({ expectedDocumentRevision, changes });
+    const request: SourceCommitRequest = {
+      kind: "transaction",
+      expectedDocumentRevision,
+      operationId,
+      fingerprint,
+      document: staged.document,
+      delta: { document: staged.document, created, edited, deleted },
+    };
+    let committed: {
+      created: Record<string, string>;
+      edited: Array<{ id: string; revision: number }>;
+      deleted: string[];
+      documentRevision: number;
+    };
+    try {
+      committed = await this.commitSource(request, async (context) => {
+      if (this.sourceCommit !== undefined) {
+        await this.sourceCommit(request, context);
+      } else if (this.durableCommit !== undefined) {
+        try {
+          await this.durableCommit({
+            fromRevision: context.fromRevision,
+            toRevision: nextRevision(context.fromRevision),
+            delta: { document: staged.document, created, edited, deleted },
+            fingerprint,
+          });
+        } catch (error) {
+          throw new ControllerError("recovery_write_failed", "durable recovery commit failed: " + messageOf(error), 503);
+        }
+        context.preparePublication({
+          document: staged.document,
+          path: staged.document.path ?? context.path,
+          configResolution: context.configResolution,
+          layout: context.layout,
+          disk: context.disk,
+          sidecars: context.sidecars,
+          dirty: true,
+          advanceRevision: true,
+        })();
+      } else {
+        context.preparePublication({
+          document: staged.document,
+          path: staged.document.path ?? context.path,
+          configResolution: context.configResolution,
+          layout: context.layout,
+          disk: context.disk,
+          sidecars: context.sidecars,
+          dirty: true,
+          advanceRevision: true,
+        })();
+      }
+      return { created, edited, deleted, documentRevision: this.documentRevisionValue };
+      });
+    } catch (error) {
+      throw error;
     }
-    if (barrier) {
-      for (const changedId of this.invalidateForBarrier()) statusChanges.add(changedId);
+    if (this.engineRestarting) {
+      if (waitForAnalysis) {
+        throw new ControllerError("operation_in_progress", "R engine restart is already in progress", 409);
+      }
+    } else if (waitForAnalysis) {
+      await this.ensureCurrentAnalysis();
+    } else if (this.analysisNeeded.size > 0) this.scheduleAnalysis();
+    return committed;
+  }
+
+  private applyStagedDocument(
+    document: NotebookDocument,
+    staged: ReturnType<typeof stageDocumentChanges>,
+    operationId: string,
+  ): void {
+    const nextIds = new Set(document.cells.map(cell => cell.id));
+    const priorIds = new Set(this.cells.map(cell => cell.id));
+    const priorRetainedOrder = this.cells.filter(cell => nextIds.has(cell.id)).map(cell => cell.id);
+    const nextRetainedOrder = document.cells.filter(cell => priorIds.has(cell.id)).map(cell => cell.id);
+    const orderChanged = !arrayEqual(priorRetainedOrder, nextRetainedOrder);
+    const priorOrder = new Map(priorRetainedOrder.map((id, index) => [id, index]));
+    const nextOrder = new Map(nextRetainedOrder.map((id, index) => [id, index]));
+    const movedIds = new Set(nextRetainedOrder.filter(id => priorOrder.get(id) !== nextOrder.get(id)));
+    const movedBarrier = [...movedIds].some(id => { const analysis = this.cellById(id)?.analysis; return analysis?.barrier === true || analysis?.opaque === true; });
+    const prior = new Map(this.cells.map((cell) => [cell.id, cell]));
+    const changedIds = new Set(staged.changed);
+    const affected = new Set<string>();
+    for (const id of changedIds) {
+      affected.add(id);
+      for (const descendant of this.graphValue.descendants(id)) affected.add(descendant);
+    }
+    for (const id of staged.deleted) {
+      const removed = this.cellById(id);
+      if (removed?.analysis?.barrier || removed?.analysis?.opaque) {
+        const removedIndex = this.cells.findIndex(cell => cell.id === id);
+        const successor = this.cells.slice(removedIndex + 1).find(cell => cell.type === "code");
+        if (successor !== undefined) for (const descendant of this.graphValue.descendants(successor.id)) affected.add(descendant);
+      } else {
+        for (const descendant of this.graphValue.descendants(id)) affected.add(descendant);
+      }
+    }
+    if (orderChanged && !movedBarrier) {
+      for (const id of movedIds) {
+        affected.add(id);
+        for (const descendant of this.graphValue.descendants(id)) affected.add(descendant);
+      }
+    }
+    for (const id of affected) this.cancelRunRegion(new Set([id]), "source");
+    this.clearEditorDiagnostics(true);
+    this.clearVariables(true);
+    for (const id of staged.deleted) {
+      const removed = prior.get(id);
+      if (removed === undefined) continue;
+      this.rememberInvalidatedDefinitions(removed);
+      for (const operation of this.cancelOwnedOperations(id)) this.obsoleteWidgetRequests.set(operation, id);
+      this.outputStore.discardExact(removed.outputs);
+      this.analysisNeeded.delete(id);
+      this.barrierAnalysisCandidates.delete(id);
+      this.clearBeforeEvaluation.add(id);
+    }
+    const nextCells: CellRecord[] = [];
+    for (const source of document.cells) {
+      const old = prior.get(source.id);
+      const changedCell = old === undefined || changedIds.has(source.id)
+        || old.type !== source.type
+        || !arrayEqual(old.body, source.body)
+        || stableStringify(old.options) !== stableStringify(source.options);
+      if (old !== undefined && !changedCell) {
+        nextCells.push(old);
+        continue;
+      }
+      if (old?.type === 'code') {
+        this.rememberInvalidatedDefinitions(old);
+        this.clearBeforeEvaluation.add(old.id);
+        for (const widgetOperation of this.cancelOwnedOperations(old.id)) this.obsoleteWidgetRequests.set(widgetOperation, old.id);
+      }
+      const type = source.type ?? 'code';
+      const body = [...source.body];
+      if (old !== undefined && old.type !== type) this.outputStore.discardExact(old.outputs);
+      nextCells.push({
+        id: source.id,
+        type,
+        body,
+        options: clone(source.options ?? {}),
+        revision: source.revision ?? 0,
+        status: type === 'markdown' ? 'stale' : staleStatus(old?.status ?? 'idle'),
+        outputs: type === 'markdown' ? (old?.type === 'markdown' ? old.outputs : []) : (old?.type === 'code' ? old.outputs : []),
+        outputsStale: type === 'code' && old?.type === 'code' && old.outputs.length > 0,
+        progress: null,
+        log: type === 'markdown' ? [] : (old?.log ?? []),
+        error: null,
+        analysis: type === 'markdown' ? emptyAnalysis(source.id, source.revision ?? 0) : null,
+      });
+    }
+    this.cells = nextCells;
+    for (const cell of this.cells) {
+      if (cell.type !== 'code') {
+        this.analysisNeeded.delete(cell.id);
+        this.barrierAnalysisCandidates.delete(cell.id);
+        continue;
+      }
+      const old = prior.get(cell.id);
+      if (old === undefined || changedIds.has(cell.id) || old.type !== 'code') {
+        this.analysisNeeded.add(cell.id);
+        this.barrierAnalysisCandidates.add(cell.id);
+      }
+    }
+    this.analysisGeneration = nextRevision(this.analysisGeneration);
+    const cellTypeChanged = this.cells.some((cell) => prior.get(cell.id)?.type !== cell.type);
+    if (staged.created.size > 0 || staged.deleted.size > 0 || orderChanged || cellTypeChanged) {
+      this.graphValue = this.rebuildGraph();
+    }
+    if (movedBarrier) this.invalidateForBarrier();
+    else {
+      if (orderChanged) for (const id of movedIds) for (const descendant of this.graphValue.descendants(id)) affected.add(descendant);
+      for (const id of affected) if (this.cellById(id) !== undefined) this.markStale(id);
     }
     this.changed = true;
-    this.analysisGeneration = nextRevision(this.analysisGeneration);
-    this.bump("notebook", {
-      deleted: id,
-      order: this.cells.map((cell) => cell.id),
-    }, { operationId });
-    this.emitGraph({ operationId });
-    this.emit("cell", { deleted: true }, { operationId, cellId: id, revision: expectedRevision });
-    statusChanges.delete(id);
-    this.emitCells(statusChanges, { operationId });
-    return { id };
+    this.refreshValueFreshness();
+    this.publishGraphResourceError({ operationId }, true);
+    this.sourceDocument = document;
+  }
+
+
+  private async applySourceChanges(
+    changes: readonly DocumentChange[],
+    waitForAnalysis: boolean,
+    operationId?: string,
+  ): Promise<ChangeResult> {
+    const result = await this.applyTransaction(changes, this.documentRevisionValue, operationId ?? randomUUID(), waitForAnalysis);
+    return {
+      edited: result.edited,
+      created: Object.entries(result.created).map(([creationId, id]) => ({ creationId, id, revision: 0 })),
+    };
   }
 
   private moveCell(id: string, after: string | null, operationId: string): unknown {
@@ -1146,6 +2016,7 @@ export class Controller {
   }
 
   private async prepareRun(command: Extract<HostCommand, { type: "run" }>): Promise<unknown> {
+    this.assertNoRuntimeContextReservation();
     this.assertNoPackageOperation();
     this.assertExecutionPossible();
     if (this.runPreparationActive
@@ -1157,52 +2028,89 @@ export class Controller {
         409,
       );
     }
-    this.runPreparationActive = true;
-    try {
-      let changes: ChangeResult | undefined;
-      if (command.edits.length > 0 || command.creations.length > 0) {
-        changes = await this.applySourceChanges(
-          command.edits,
-          command.creations,
-          true,
-          command.operationId,
-        );
+    this.assertDocumentRevision(command.expectedDocumentRevision);
+    let preflightTargetId: string | null = null;
+    if (command.scope === "cell") {
+      const target = command.target;
+      if (target === undefined) throw new ControllerError("invalid_request", "cell runs require a target", 400);
+      if ((command.changes?.length ?? 0) > 0) {
+        const staged = this.stageDocument(command.changes ?? []);
+        if ("cellId" in target) {
+          if (!staged.document.cells.some((cell) => cell.id === target.cellId)) throw new ControllerError("not_found", "no such cell: " + target.cellId, 404);
+          preflightTargetId = target.cellId;
+        } else {
+          const created = staged.created.get(target.creationId);
+          if (created === undefined || !staged.document.cells.some((cell) => cell.id === created)) throw new ControllerError("not_found", "no such transaction creation: " + target.creationId, 404);
+          preflightTargetId = created;
+        }
       } else {
+        preflightTargetId = this.resolveCellRef(target);
+      }
+    }
+    this.runPreparationActive = true;
+    const preparation = {
+      operationId: command.operationId,
+      clientId: command.clientId,
+      cancelled: false,
+    };
+    this.runPreparationCancellation = preparation;
+    try {
+      let changes: Record<string, unknown> | undefined;
+      if ((command.changes?.length ?? 0) > 0) {
+        changes = await this.applyTransaction(command.changes ?? [], command.expectedDocumentRevision, command.operationId, false) as Record<string, unknown>;
+        if (this.cancelRunPreparation(preparation)) return undefined;
+        const operation = this.operationFor(command.operationId, command.clientId);
+        if (operation !== undefined && !isTerminal(operation.status)) {
+          operation.result = clone(changes) as OperationRecord["result"];
+          this.rememberOperation(operation);
+        }
+        await this.ensureCurrentAnalysis();
+      } else {
+        this.assertDocumentRevision(command.expectedDocumentRevision);
         await this.ensureCurrentAnalysis();
       }
+      if (this.cancelRunPreparation(preparation)) return undefined;
       this.assertNoPackageOperation();
       this.assertExecutionPossible();
       this.assertGraphRunnable();
 
       let plan: string[];
       if (command.scope === "cell") {
-        const targetId = command.cellId
-          ?? (command.targetCreationId === undefined
-            ? undefined
-            : this.creationIds.get(command.targetCreationId));
-        if (targetId === undefined) {
-          throw new ControllerError(
-            "not_found",
-            `no acknowledged creation: ${command.targetCreationId ?? ""}`,
-            404,
-          );
-        }
-        plan = this.planCellRun(targetId, command.source);
+        if (preflightTargetId === null) throw new ControllerError("invalid_request", "cell runs require a target", 400);
+        plan = this.planCellRun(preflightTargetId, "app");
       } else if (command.scope === "all") {
         plan = this.allCodePlan();
       } else {
         plan = this.graphValue.planStale((id) => this.statusOf(id));
       }
-      const runId = this.launchRun(plan, command.operationId);
-      return {
-        runId,
-        plan: [...plan],
-        ...(changes === undefined ? {} : changes),
-      };
+      const runId = this.launchRun(plan, command.operationId, false, command.clientId);
+      const result = { runId, plan: [...plan], ...(changes === undefined ? {} : changes) };
+      const operation = this.operationFor(command.operationId, command.clientId);
+      if (operation !== undefined && !isTerminal(operation.status)) operation.result = clone(result) as OperationRecord["result"];
+      return result;
     } finally {
       this.runPreparationActive = false;
+      if (this.runPreparationCancellation === preparation) this.runPreparationCancellation = null;
       this.scheduleWidgetReconciliation();
     }
+  }
+
+  private cancelRunPreparation(preparation: {
+    operationId: string;
+    clientId: string;
+    cancelled: boolean;
+  }): boolean {
+    if (!preparation.cancelled) return false;
+    const operation = this.operationFor(preparation.operationId, preparation.clientId);
+    if (operation !== undefined && !isTerminal(operation.status)) {
+      operation.status = "cancelled";
+      operation.error = hostError("interrupted", "Interrupted", operation.id);
+      operation.documentRevision = this.documentRevisionValue;
+      operation.settledAt = Date.now();
+      this.rememberOperation(operation);
+      this.notifyOperationWaiters(operation);
+    }
+    return true;
   }
 
   private planCellRun(
@@ -1221,7 +2129,7 @@ export class Controller {
 
   private allCodePlan(): string[] {
     return (this.graphValue.state.topologicalOrder ?? []).filter(
-      (id) => this.cellById(id)?.type === "code",
+      (id) => this.cellById(id)?.type === "code" && this.cellById(id)?.options.disabled !== true,
     );
   }
 
@@ -1229,10 +2137,12 @@ export class Controller {
     plan: readonly string[],
     operationId: string,
     deferEmptySettlement = false,
+    clientId = "internal",
   ): string {
+    this.assertNoRuntimeContextReservation();
     this.assertNoPackageOperation();
     this.assertExecutionPossible();
-    const operation = this.operations.get(operationId);
+    const operation = this.operationFor(operationId, clientId);
     if (operation === undefined) throw new ControllerError("internal_error", "run operation missing", 500);
     this.runCounter += 1;
     const runId = `run-${this.runCounter}`;
@@ -1258,6 +2168,7 @@ export class Controller {
         opaque: analysis.opaque,
         runId,
         operationId,
+        clientId,
       });
     }
     operation.status = jobs.length === 0 && !deferEmptySettlement ? "done" : "accepted";
@@ -1267,7 +2178,7 @@ export class Controller {
     operation.resetOperationIds ??= [];
     if (jobs.length === 0 && !deferEmptySettlement) operation.settledAt = Date.now();
     this.rememberOperation(operation);
-    this.runOperationById.set(runId, operationId);
+    this.runOperationById.set(runId, this.operationKey(clientId, operationId));
     this.queue.push(...jobs);
     this.bump("runtime", this.runtimeSnapshot(), { operationId, runId });
     if (jobs.length === 0 && !deferEmptySettlement) this.notifyOperationWaiters(operation);
@@ -1299,11 +2210,14 @@ export class Controller {
         try {
           this.kernelAvailable = false;
           this.executionReady = false;
+          this.analysisEnvironmentIdValue = null;
           this.emit("runtime", this.runtimeSnapshot());
           const restarted = await this.engine.restart();
           if (this.closed || generation !== this.runtimeGeneration) return;
           const handshake = engineHandshakeSchema.parse(restarted);
           this.handshake = handshake;
+          this.kernelEpochValue = handshake.kernel?.kernelEpoch ?? (handshake.kernelReady ? randomUUID() : null);
+          this.outputStore.setIdentity({ documentRevision: this.documentRevisionValue, kernelEpoch: this.kernelEpochValue });
           this.kernelAvailable = handshake.kernelReady && handshake.captureReady;
           this.analyzerAvailable = handshake.analyzerReady;
           if (!this.kernelAvailable || !this.analyzerAvailable) {
@@ -1316,6 +2230,7 @@ export class Controller {
           this.barrierRestartRequired = false;
           this.clearBeforeEvaluation.clear();
           this.invalidatedDefinitionsByCell.clear();
+          this.clearRuntimeAvailabilityError();
           this.executionReady = true;
           this.emit("runtime", this.runtimeSnapshot());
         } catch (error) {
@@ -1345,7 +2260,13 @@ export class Controller {
             await this.engine.request("clear_cell", { ids }),
           );
           if (this.closed || generation !== this.runtimeGeneration) return;
-          if (!response.ok) throw new Error(response.error?.message ?? "clear_cell failed");
+          if (!response.ok) {
+            if (response.kernelStateInvalid !== undefined) {
+              this.failKernel(response.kernelStateInvalid.message, undefined, response.error, "kernel_state_invalid");
+              return;
+            }
+            throw new Error(response.error?.message ?? "clear_cell failed");
+          }
           for (const id of ids) {
             if (!this.clearBeforeEvaluation.has(id)) {
               this.invalidatedDefinitionsByCell.delete(id);
@@ -1399,24 +2320,24 @@ export class Controller {
       try {
         const result = await this.engine.evaluate(this.evaluationPayload(job),
           (event) => this.handleEngineEvent(event), this.activeEvaluation.queuedCancellation!.signal);
-        response = engineResponseSchema.parse(result);
+        response = this.canonicalEngineResponse(result, engineResponseSchema.parse(result), job);
       } catch (error) {
         this.failKernel(`R kernel transport failed: ${messageOf(error)}`, job.id);
         return;
       }
-
       await this.settleEvaluation(job, response);
     }
   }
 
   private evaluationPayload(job: EvaluationJob): EvaluationPayload {
+    const kernelEpoch = this.kernelEpochValue;
+    if (kernelEpoch === null) throw new ControllerError("stale_kernel", "R kernel incarnation is unavailable", 503);
     return {
-      sessionEpoch: this.epochValue, operationId: job.operationId, runId: job.runId,
-      cellId: job.id, revision: job.revision, source: job.source,
+      sessionEpoch: this.epochValue, kernelEpoch, operationId: job.operationId, runId: job.runId,
+      cellId: job.id, revision: job.revision, documentRevision: this.documentRevisionValue, source: job.source,
       definitions: [...job.definitions], locals: [...job.locals], opaque: job.opaque,
     };
   }
-
   private selectBatch(first: EvaluationJob): EvaluationJob[] {
     const jobs = [first];
     if (this.engine.evaluateBatch === undefined || this.engine.invalidateBatch === undefined ||
@@ -1463,7 +2384,7 @@ export class Controller {
         this.handleEngineEvent(event);
         if (active.protocolFailure !== undefined) throw active.protocolFailure;
         if (event.type === "completed") {
-          await this.settleEvaluation(active.job, event.result, true, deferred);
+          await this.settleEvaluation(active.job, active.completion ?? event.result, true, deferred);
         }
       });
       // Native cleanup requests queued by stale results must wait until the
@@ -1509,6 +2430,10 @@ export class Controller {
       this.failKernel(response.error.message, job.id);
       return;
     }
+    if (response.kernelStateInvalid !== undefined) {
+      this.failKernel(response.kernelStateInvalid.message, job.id, response.error, "kernel_state_invalid");
+      return;
+    }
     const current = this.cellById(job.id);
     const fresh = current !== undefined && current.revision === job.revision;
     if (active.cancelMode === "source" || active.cancelMode === "widget" || !fresh) {
@@ -1522,22 +2447,25 @@ export class Controller {
       this.commitSuccess(job, response, active.streamedOutputs);
     } else {
       this.commitFailure(job, response, active.cancelMode === null);
-      const operation = this.operations.get(job.operationId);
-      if (operation?.kind === "widget" || this.causalWidgetRunParents.has(job.operationId)) {
-        this.causalRunFailures.set(job.operationId, hostError(
+      const runOperationKey = this.operationKey(job.clientId, job.operationId);
+      if (!this.causalRunFailures.has(runOperationKey)) {
+        this.causalRunFailures.set(runOperationKey, hostError(
           "eval_error",
-          response.error?.message ?? "widget consumer evaluation failed",
+          response.error?.message ?? "cell evaluation failed",
           job.operationId,
         ));
       }
     }
-    if (active.cancelMode === "stop" && response.error?.interrupted === true) {
-      this.interruptedRuns.set(job.runId, clone(response.error));
-      const parentId = this.causalWidgetRunParents.get(job.operationId);
+    if (active.cancelMode === "stop" && !response.ok) {
+      const interruption = response.error?.interrupted === true
+        ? clone(response.error)
+        : { code: "interrupted", message: "Interrupted", interrupted: true };
+      this.interruptedRuns.set(job.runId, interruption);
+      const parentId = this.causalWidgetRunParents.get(this.operationKey(job.clientId, job.operationId));
       if (parentId !== undefined) {
         this.causalWidgetFailures.set(parentId, hostError(
-          response.error.code ?? "interrupted",
-          response.error.message,
+          interruption.code ?? "interrupted",
+          interruption.message,
           parentId,
         ));
       }
@@ -1586,71 +2514,123 @@ export class Controller {
     ) {
       return;
     }
-    if (event.type === "started") {
-      if (active.requestId !== undefined || event.sequence !== 0) {
-        active.protocolFailure = new ControllerError(
-          "invalid_engine_sequence",
-          "R kernel emitted more than one started event",
-          503,
-        );
+    try {
+      if (event.type === "started") {
+        if (active.requestId !== undefined || event.sequence !== 0) {
+          throw new ControllerError(
+            "invalid_engine_sequence",
+            "R kernel emitted more than one started event",
+            503,
+          );
+        }
+        active.requestId = event.requestId;
+        active.lastSequence = 0;
+        this.markRunRunning(job.runId);
+        const cell = this.cellById(job.id);
+        if (cell !== undefined && cell.revision === job.revision) {
+          this.bump("cell-started", this.publicCell(cell), {
+            operationId: job.operationId,
+            cellId: job.id,
+            runId: job.runId,
+            revision: job.revision,
+            sequence: 0,
+          });
+        }
+        this.emit("runtime", this.runtimeSnapshot(), {
+          operationId: job.operationId,
+          runId: job.runId,
+        });
+        if (active.cancelMode !== null && !active.interruptSent) this.signalActiveInterrupt();
         return;
       }
-      active.requestId = event.requestId;
-      active.lastSequence = 0;
-      this.markRunRunning(job.runId);
-      const cell = this.cellById(job.id);
-      if (cell !== undefined && cell.revision === job.revision) {
-        this.bump("cell-started", this.publicCell(cell), {
-          operationId: job.operationId,
-          cellId: job.id,
-          runId: job.runId,
-          revision: job.revision,
-          sequence: 0,
-        });
+      if (active.requestId !== event.requestId || event.sequence <= active.lastSequence) {
+        throw new ControllerError(
+          "invalid_engine_sequence",
+          "R kernel event sequence is not strictly increasing",
+          503,
+        );
       }
-      this.emit("runtime", this.runtimeSnapshot(), {
-        operationId: job.operationId,
-        runId: job.runId,
-      });
-      if (active.cancelMode !== null && !active.interruptSent) this.signalActiveInterrupt();
-      return;
+      active.lastSequence = event.sequence;
+      if (event.type === "completed") {
+        const rawResult = rawEvent.type === "completed" ? rawEvent.result : undefined;
+        active.completion = this.canonicalEngineResponse(rawResult, event.result, job);
+        return;
+      }
+      if (event.type !== "output") return;
+      const rawPayload = rawEvent.type === "output" ? rawEvent.payload : undefined;
+      const output = event.kind === "append"
+        ? this.canonicalEngineRecord(
+          isRecord(rawPayload) && "output" in rawPayload ? rawPayload.output : rawPayload,
+          job,
+        )
+        : undefined;
+      this.applyOutputEvent(event, active, output);
+    } catch (error) {
+      active.protocolFailure = asControllerError(error, "invalid_engine_event", 503);
     }
-    if (active.requestId !== event.requestId || event.sequence <= active.lastSequence) {
-      active.protocolFailure = new ControllerError(
-        "invalid_engine_sequence",
-        "R kernel event sequence is not strictly increasing",
-        503,
-      );
-      return;
+  }
+
+  private canonicalEngineRecord(value: unknown, job: EvaluationJob): OutputRecord {
+    const checked = outputRecordSchema.safeParse(value);
+    if (!checked.success) {
+      throw new ControllerError("invalid_engine_event", "R kernel returned a non-canonical output record", 503);
     }
-    active.lastSequence = event.sequence;
-    if (event.type === "completed") {
-      active.completion = event.result;
-      return;
+    const record = this.outputStore.getRecord(checked.data.id);
+    if (record === undefined || !Object.is(record, value)) {
+      throw new ControllerError("invalid_engine_event", "R kernel returned an output record not owned by the store", 503);
     }
-    this.applyOutputEvent(event, active);
+    if (
+      record.sessionEpoch !== this.epochValue
+      || record.kernelEpoch !== this.kernelEpochValue
+      || record.runId !== job.runId
+      || record.cellId !== job.id
+      || record.revision !== job.revision
+    ) {
+      throw new ControllerError("invalid_engine_event", "R kernel returned an output record with stale identity", 503);
+    }
+    return record;
+  }
+
+  private canonicalEngineResponse(
+    raw: unknown,
+    parsed: EngineResponse,
+    job: EvaluationJob,
+  ): EngineResponse {
+    if (!isRecord(raw) || raw.outputs === undefined) return parsed;
+    if (!Array.isArray(raw.outputs)) {
+      throw new ControllerError("invalid_engine_event", "R kernel returned invalid output records", 503);
+    }
+    return {
+      ...parsed,
+      outputs: raw.outputs.map((value) => this.canonicalEngineRecord(value, job)),
+    };
   }
 
   private applyOutputEvent(
     event: Extract<EngineEvent, { type: "output" }>,
     active: ActiveEvaluation,
+    canonicalOutput?: OutputRecord,
   ): void {
     const cell = this.cellById(active.job.id);
     if (cell === undefined || cell.revision !== active.job.revision) return;
     if (event.kind === "clear") {
       active.streamedOutputs.length = 0;
+      this.outputStore.discardExact(cell.outputs);
       cell.outputs = [];
       cell.outputsStale = false;
       cell.progress = null;
       cell.log = [];
     } else if (event.kind === "append") {
-      const payload = isRecord(event.payload) && "output" in event.payload
-        ? event.payload.output
-        : event.payload;
-      if (cell.outputsStale) cell.outputs = [];
+      if (canonicalOutput === undefined) {
+        throw new ControllerError("invalid_engine_event", "R kernel append omitted its canonical output", 503);
+      }
+      if (cell.outputsStale) {
+        this.outputStore.discardExact(cell.outputs);
+        cell.outputs = [];
+      }
       cell.outputsStale = false;
-      active.streamedOutputs.push(clone(payload));
-      cell.outputs.push(clone(payload));
+      active.streamedOutputs.push(canonicalOutput);
+      cell.outputs.push(canonicalOutput);
     } else if (event.kind === "progress") {
       cell.progress = isRecord(event.payload) && "progress" in event.payload
         ? clone(event.payload.progress)
@@ -1677,15 +2657,21 @@ export class Controller {
     });
   }
 
+
+
+
   private commitSuccess(
     job: EvaluationJob,
     response: EngineResponse,
-    streamedOutputs: readonly unknown[],
+    streamedOutputs: readonly OutputRecord[],
   ): void {
     const cell = this.cellById(job.id);
     if (cell === undefined || cell.revision !== job.revision) return;
+    const nextOutputs = (response.outputs ?? [...streamedOutputs]) as OutputRecord[];
+    const retainedIds = new Set(nextOutputs.map((record) => record.id));
+    this.outputStore.discardExact(cell.outputs.filter((record) => !retainedIds.has(record.id)));
+    cell.outputs = nextOutputs;
     cell.status = response.stopped ? "stopped" : "done";
-    cell.outputs = clone(response.outputs ?? [...streamedOutputs]);
     cell.outputsStale = false;
     if (response.log !== undefined) cell.log = completedLog(response.log);
     cell.error = null;
@@ -1703,6 +2689,7 @@ export class Controller {
     const cell = this.cellById(job.id);
     if (cell === undefined || cell.revision !== job.revision) return;
     const error = response.error ?? { message: "Unknown error" };
+    this.outputStore.discardExact(cell.outputs);
     cell.status = "error";
     cell.outputs = [];
     cell.outputsStale = false;
@@ -1782,11 +2769,43 @@ export class Controller {
     });
   }
 
-  private async interruptActiveRun(): Promise<unknown> {
+  private async interruptActiveRun(targetRunId?: string): Promise<unknown> {
     this.assertStarted();
+    const preparation = this.runPreparationCancellation;
+    if (preparation !== null && this.runPreparationActive) {
+      if (targetRunId !== undefined) {
+        throw new ControllerError("not_found", "no such active run: " + targetRunId, 404);
+      }
+      preparation.cancelled = true;
+      this.markOperationCancellationRequested(preparation.operationId, preparation.clientId);
+      this.bump("runtime", this.runtimeSnapshot(), { operationId: preparation.operationId });
+      return { runId: null, requested: true };
+    }
     const active = this.activeEvaluation;
-    if (active === null || active.cancelMode !== null) {
+    if (active === null) {
+      const queued = this.queue[0];
+      if (queued !== undefined) {
+        if (targetRunId !== undefined && targetRunId !== queued.runId) {
+          throw new ControllerError("not_found", "no such active run: " + targetRunId, 404);
+        }
+        const runId = queued.runId;
+        this.queue = this.queue.filter((job) => job.runId !== runId);
+        this.interruptedRuns.set(runId, { code: "interrupted", message: "Interrupted", interrupted: true });
+        this.markOperationCancellationRequested(queued.operationId, queued.clientId);
+        this.completeRunIfIdle(runId);
+        this.bump("runtime", this.runtimeSnapshot(), {
+          operationId: queued.operationId,
+          runId,
+        });
+        return { runId, requested: true };
+      }
       throw new ControllerError("no_run_in_progress", "no run in progress", 409);
+    }
+    if (active.cancelMode !== null) {
+      throw new ControllerError("no_run_in_progress", "no run in progress", 409);
+    }
+    if (targetRunId !== undefined && targetRunId !== active.job.runId) {
+      throw new ControllerError("not_found", "no such active run: " + targetRunId, 404);
     }
     active.cancelMode = "stop";
     this.engine.invalidateBatch?.();
@@ -1799,43 +2818,127 @@ export class Controller {
       operationId: active.job.operationId,
       runId,
     });
-    return { runId, requested: true, requestId: active.requestId };
+    return { runId, requested: true, ...(active.requestId === undefined ? {} : { requestId: active.requestId }) };
   }
-
-  private async restartEngine(replay: boolean, operationId: string): Promise<unknown> {
-    this.assertStarted();
+  public assertRuntimeContextTransitionReady(): void {
+    this.assertDocumentReady();
+    if (this.startPromise !== null) {
+      throw new ControllerError("operation_in_progress", "R engine startup is already in progress", 409);
+    }
     this.assertNoPackageOperation();
     if (this.engineRestarting) {
       throw new ControllerError("operation_in_progress", "R engine restart is already in progress", 409);
     }
+    if (this.pendingWidgets.size > 0 || this.activeButtonResets.size > 0
+      || this.widgetReconciliationScheduled || this.widgetReconciliationPreparing
+      || this.widgetReconciliationRoots.size > 0) {
+      throw new ControllerError("operation_in_progress", "cannot restart while a widget operation is active", 409);
+    }
+    if (this.pendingLazyOutputs.size > 0) {
+      throw new ControllerError("operation_in_progress", "cannot restart while a lazy output evaluation is active", 409);
+    }
     if (this.runPreparationActive || this.activeEvaluation !== null || this.queue.length > 0) {
       throw new ControllerError("run_in_progress", "cannot restart while a run is active", 409);
     }
+  }
+
+  public reserveRuntimeContext(): RuntimeContextReservation {
+    this.assertRuntimeContextTransitionReady();
+    if (this.runtimeContextReservation !== undefined) {
+      throw new ControllerError("operation_in_progress", "runtime context transition is already reserved", 409);
+    }
+    const token = randomUUID();
+    this.runtimeContextReservation = token;
+    let released = false;
+    return {
+      release: () => {
+        if (released) return;
+        released = true;
+        if (this.runtimeContextReservation === token) {
+          this.runtimeContextReservation = undefined;
+          this.scheduleWidgetReconciliation();
+        }
+      },
+    };
+  }
+
+  private assertNoRuntimeContextReservation(): void {
+    if (this.runtimeContextReservation !== undefined) {
+      throw new ControllerError("operation_in_progress", "runtime context transition is pending", 409);
+    }
+  }
+
+  public async restartRuntimeContext(
+    options: EngineRestartOptions,
+    operationId: string = randomUUID(),
+  ): Promise<unknown> {
+    this.assertRuntimeContextTransitionReady();
+    return this.restartEngine(options, false, operationId);
+  }
+
+  private async restartEngine(
+    options: EngineRestartOptions | undefined,
+    replay: boolean,
+    operationId: string,
+    clientId = "internal",
+    waitForSourceLane = false,
+  ): Promise<unknown> {
+    this.assertRuntimeContextTransitionReady();
     this.engineRestarting = true;
     try {
+      if (waitForSourceLane) await this.sourceCommitTail;
+      this.assertNotClosed();
+      const priorAnalysis = this.analysisInFlight;
       const statusChanges = this.invalidateRuntimeView();
+      const analysisResetIds: string[] = [];
+      if (options?.environment !== undefined) {
+        this.analysisGeneration = nextRevision(this.analysisGeneration);
+        this.clearAnalysisCache();
+        this.analyzerIdentity = "";
+        this.analysisNeeded.clear();
+        for (const cell of this.cells) {
+          if (cell.type !== "code") continue;
+          cell.analysis = null;
+          cell.status = "stale";
+          this.analysisNeeded.add(cell.id);
+          analysisResetIds.push(cell.id);
+        }
+        this.graphValue = this.rebuildGraph();
+      }
       const generation = this.runtimeGeneration;
       this.executionReady = false;
       this.bump("runtime", this.runtimeSnapshot(), { operationId });
-      this.emitCells(statusChanges, { operationId });
+      if (analysisResetIds.length > 0) this.emitGraph({ operationId });
+      this.emitCells([...statusChanges, ...analysisResetIds], { operationId });
       let handshake: EngineHandshake;
       try {
-        handshake = engineHandshakeSchema.parse(await this.engine.restart());
+        handshake = engineHandshakeSchema.parse(await this.engine.restart(options));
       } catch (error) {
         if (this.closed) throw new ControllerError("session_stopped", "session is stopped", 409);
         this.kernelAvailable = false;
-        throw new ControllerError("worker_unavailable", messageOf(error), 503);
+        const failure = hostError("worker_unavailable", messageOf(error));
+        this.recordRuntimeAvailabilityError(failure);
+        throw new ControllerError("worker_unavailable", failure.message, 503);
       }
+      await priorAnalysis?.catch(() => {});
       this.assertRuntimeGeneration(generation, "R runtime changed while restart was pending");
       this.handshake = handshake;
+      this.started = true;
+      if (options?.environment !== undefined) this.rEnvironmentValue = clone(options.environment);
+      this.kernelEpochValue = handshake.kernel?.kernelEpoch ?? (handshake.kernelReady ? randomUUID() : null);
+      this.outputStore.setIdentity({ documentRevision: this.documentRevisionValue, kernelEpoch: this.kernelEpochValue });
+      this.analysisEnvironmentIdValue = null;
       this.kernelAvailable = handshake.kernelReady && handshake.captureReady;
       this.analyzerAvailable = handshake.analyzerReady;
       if (!this.kernelAvailable || !this.analyzerAvailable) {
-        throw new ControllerError("engine_not_ready", "R engine did not become ready", 503);
+        const failure = hostError("engine_not_ready", "R engine did not become ready");
+        this.recordRuntimeAvailabilityError(failure);
+        throw new ControllerError("engine_not_ready", failure.message, 503);
       }
       this.barrierRestartRequired = false;
       this.clearBeforeEvaluation.clear();
       this.invalidatedDefinitionsByCell.clear();
+      this.clearRuntimeAvailabilityError();
       await this.ensureCurrentAnalysis();
       this.assertRuntimeGeneration(generation, "R runtime changed while restart analysis was pending");
       this.executionReady = true;
@@ -1845,14 +2948,19 @@ export class Controller {
       this.bump("runtime", this.runtimeSnapshot(), { operationId });
       if (!replay) return { runId: null };
       this.assertGraphRunnable();
-      const runId = this.launchRun(this.allCodePlan(), operationId);
+      const runId = this.launchRun(this.allCodePlan(), operationId, false, clientId);
       return { runId };
     } finally {
       this.engineRestarting = false;
     }
   }
 
-  private failKernel(message: string, activeCellId?: string): void {
+  private failKernel(
+    message: string,
+    activeCellId?: string,
+    cellError?: EngineResponse["error"],
+    failureCode: string = "worker_unavailable",
+  ): void {
     if (this.closed) return;
     if (!this.kernelAvailable && this.activeEvaluation === null && this.queue.length === 0) return;
     this.runtimeGeneration = nextRevision(this.runtimeGeneration);
@@ -1870,7 +2978,7 @@ export class Controller {
       if (cell.id === activeCellId) {
         cell.status = "error";
         cell.outputsStale = cell.outputs.length > 0;
-        cell.error = { message, code: "worker_unavailable", transport: true };
+        cell.error = cellError ?? { message, code: failureCode, transport: failureCode === "worker_unavailable" };
         cell.log = boundedLog([...cell.log, `Error: ${message}`]);
       } else {
         cell.status = "stale";
@@ -1882,9 +2990,11 @@ export class Controller {
     }
     for (const operation of this.operations.values()) {
       if (!isTerminal(operation.status) && operationDependsOnRuntime(operation.kind)) {
+        if (operation.kind === "run" && operation.runId === null && operation.result === null) continue;
         this.failOperation(
           operation.id,
-          hostError("worker_unavailable", message, operation.id),
+          hostError(failureCode, message, operation.id),
+          operation.clientId,
         );
       }
     }
@@ -1903,9 +3013,10 @@ export class Controller {
     this.pendingButtonResets.clear();
     this.activeButtonResets.clear();
     const failure = hostError(
-      "worker_unavailable",
+      failureCode,
       `${message}; outputs are stale. Restart R to replay the notebook`,
     );
+    this.setRuntimeAvailabilityError(failure);
     this.bump("runtime", this.runtimeSnapshot(), {
       operationId: active?.job.operationId,
       runId: active?.job.runId,
@@ -1932,13 +3043,26 @@ export class Controller {
     }
     this.analyzerAvailable = false;
     this.executionReady = false;
+    const failure = hostError("analysis_unavailable", error.message);
+    this.setRuntimeAvailabilityError(failure);
     this.bump("runtime", this.runtimeSnapshot());
-    this.replaceLastActionError(hostError("analysis_unavailable", error.message));
+    this.replaceLastActionError(failure);
   }
 
   private invalidateRuntimeView(): Set<string> {
     const changed = new Set<string>();
     this.runtimeGeneration = nextRevision(this.runtimeGeneration);
+    const preparation = this.runPreparationCancellation;
+    if (preparation !== null) {
+      preparation.cancelled = true;
+      this.markOperationCancellationRequested(preparation.operationId, preparation.clientId);
+    }
+    if (this.activeEvaluation !== null || this.activeBatch !== null || this.queue.length > 0) {
+      for (const id of this.cancelRunRegion(
+        new Set(this.cells.map((cell) => cell.id)),
+        "source",
+      )) changed.add(id);
+    }
     this.lastValue = null;
     this.clearVariables();
     for (const pending of this.pendingUploads.values()) {
@@ -1958,6 +3082,7 @@ export class Controller {
       if (cell.type !== "code") continue;
       const before = this.statusOf(cell.id);
       cell.status = "stale";
+      cell.outputsStale = cell.outputs.length > 0;
       if (this.statusOf(cell.id) !== before) changed.add(cell.id);
     }
     this.refreshValueFreshness();
@@ -1968,6 +3093,7 @@ export class Controller {
         this.failOperation(
           operation.id,
           hostError("worker_unavailable", "R runtime was restarted", operation.id),
+          operation.clientId,
         );
       }
     }
@@ -1986,9 +3112,9 @@ export class Controller {
   }
 
   private markRunRunning(runId: string): void {
-    const operationId = this.runOperationById.get(runId);
-    if (operationId === undefined) return;
-    const operation = this.operations.get(operationId);
+    const operationKey = this.runOperationById.get(runId);
+    if (operationKey === undefined) return;
+    const operation = this.operationForKey(operationKey);
     if (operation === undefined || operation.status === "running" || isTerminal(operation.status)) return;
     operation.status = "running";
     this.rememberOperation(operation);
@@ -1997,21 +3123,23 @@ export class Controller {
   private completeRunIfIdle(runId: string): void {
     if (this.activeEvaluation?.job.runId === runId) return;
     if (this.queue.some((job) => job.runId === runId)) return;
-    const operationId = this.runOperationById.get(runId);
-    if (operationId === undefined) return;
-    const operation = this.operations.get(operationId);
+    const operationKey = this.runOperationById.get(runId);
+    if (operationKey === undefined) return;
+    const operation = this.operationForKey(operationKey);
     if (operation === undefined || isTerminal(operation.status)) return;
     operation.executionDone = true;
+    const operationId = operation.id;
+    const operationClientId = operation.clientId;
     const resets = operation.resetOperationIds ?? [];
     const interruption = this.interruptedRuns.get(runId);
     if (interruption !== undefined) {
-      if (resets.some((id) => !isTerminal(this.operations.get(id)?.status ?? "accepted"))) {
+      if (resets.some((id) => !isTerminal(this.operationFor(id, operationClientId)?.status ?? "accepted"))) {
         this.rememberOperation(operation);
         return;
       }
       this.interruptedRuns.delete(runId);
-      this.causalRunFailures.delete(operationId);
-      this.causalWidgetRunParents.delete(operationId);
+      this.causalRunFailures.delete(operationKey);
+      this.causalWidgetRunParents.delete(operationKey);
       operation.status = "cancelled";
       operation.error = hostError(
         interruption.code ?? "interrupted",
@@ -2024,12 +3152,12 @@ export class Controller {
       return;
     }
     const failedReset = resets
-      .map((id) => this.operations.get(id))
+      .map((id) => this.operationFor(id, operationClientId))
       .find((candidate) => candidate !== undefined && candidate.status !== "done" && isTerminal(candidate.status));
     if (failedReset !== undefined) {
       const error = failedReset.error;
-      this.causalWidgetRunParents.delete(operationId);
-      this.causalRunFailures.delete(operationId);
+      this.causalWidgetRunParents.delete(operationKey);
+      this.causalRunFailures.delete(operationKey);
       this.failOperation(
         operationId,
         hostError(
@@ -2038,40 +3166,52 @@ export class Controller {
           operationId,
           error?.details,
         ),
+        operationClientId,
       );
       return;
     }
-    if (resets.some((id) => !isTerminal(this.operations.get(id)?.status ?? "accepted"))) {
+    if (resets.some((id) => !isTerminal(this.operationFor(id, operationClientId)?.status ?? "accepted"))) {
       this.rememberOperation(operation);
       return;
     }
-    const causalFailure = this.causalRunFailures.get(operationId);
+    const causalFailure = this.causalRunFailures.get(operationKey);
     if (causalFailure !== undefined) {
-      this.causalRunFailures.delete(operationId);
-      const parentId = this.causalWidgetRunParents.get(operationId);
-      this.causalWidgetRunParents.delete(operationId);
-      this.failOperation(operationId, causalFailure);
+      this.causalRunFailures.delete(operationKey);
+      const parentId = this.causalWidgetRunParents.get(operationKey);
+      this.causalWidgetRunParents.delete(operationKey);
+      this.failOperation(operationId, causalFailure, operationClientId);
       if (parentId !== undefined) {
-        this.causalWidgetFailures.set(parentId, hostError(
-          causalFailure.code,
-          causalFailure.message,
-          parentId,
-          causalFailure.details,
-        ));
+        const parent = this.operationForKey(parentId);
+        if (parent !== undefined) {
+          this.causalWidgetFailures.set(parentId, hostError(
+            causalFailure.code,
+            causalFailure.message,
+            parent.id,
+            causalFailure.details,
+          ));
+        }
       }
       return;
     }
-    this.causalWidgetRunParents.delete(operationId);
+    this.causalWidgetRunParents.delete(operationKey);
     this.completeOperation(operationId, {
+      ...(isRecord(operation.result) ? operation.result : {}),
       runId,
       ...(operation.kind === "widget" && operation.token !== undefined
         ? { token: operation.token }
         : {}),
-    });
+    }, operationClientId);
   }
 
   private scheduleAnalysis(): void {
-    if (this.analysisRestarting || this.closed) return;
+    if (this.analysisRestarting || this.engineRestarting || this.closed) return;
+    if (!this.started || !this.analyzerAvailable) {
+      this.replaceLastActionError({
+        code: "analysis_unavailable",
+        message: "R analyzer is unavailable",
+      });
+      return;
+    }
     void this.ensureCurrentAnalysis().catch((error: unknown) => {
       const failure = asControllerError(error, "analysis_unavailable", 503);
       this.replaceLastActionError(failure.toJSON());
@@ -2109,7 +3249,10 @@ export class Controller {
     }
   }
 
-  private async analyzeBatch(cells: readonly CellRecord[], generation: number): Promise<void> {
+  private async analyzeBatch(
+    cells: readonly Pick<CellRecord, "id" | "revision" | "type" | "body">[],
+    generation: number,
+  ): Promise<void> {
     if (!this.analyzerAvailable) {
       throw new ControllerError("analysis_unavailable", "R analyzer is unavailable", 503);
     }
@@ -2132,14 +3275,18 @@ export class Controller {
           id: snapshot.id,
           revision: snapshot.revision,
           ...clone(cached),
-        });
+        } as AnalysisCellResult);
       }
     }
 
     if (uncached.length > 0) {
       let parsed: ReturnType<typeof analysisResultSchema.parse>;
       try {
-        parsed = analysisResultSchema.parse(await this.engine.analyze(uncached, generation));
+        parsed = analysisResultSchema.parse(await this.engine.analyze(
+          uncached,
+          generation,
+          this.analysisEnvironmentIdValue ?? undefined,
+        ));
       } catch (error) {
         this.analyzerAvailable = false;
         throw new ControllerError(
@@ -2155,7 +3302,16 @@ export class Controller {
           503,
         );
       }
+      if (parsed.analyzer.analysisEnvironmentId !== parsed.analysisEnvironmentId) {
+        throw new ControllerError(
+          "invalid_analysis_response",
+          "analyzer identity does not match the analysis environment",
+          503,
+        );
+      }
+      this.analysisEnvironmentIdValue = parsed.analysisEnvironmentId;
       const identity = [
+        parsed.analysisEnvironmentId,
         parsed.analyzer.packageVersion,
         parsed.analyzer.rVersion,
         parsed.analyzer.policy,
@@ -2209,7 +3365,17 @@ export class Controller {
     }
     this.analyzerAvailable = true;
     const previousGraphState = this.graphValue.state;
-    this.graphValue = this.rebuildGraph();
+    const refreshedCells = invalidationRoots.flatMap((id): GraphCellInput[] => {
+      const cell = this.cellById(id);
+      return cell === undefined ? [] : [{
+        ...(cell.analysis ?? emptyAnalysis(cell.id, cell.revision)),
+        type: cell.type,
+        disabled: cell.options.disabled === true,
+      }];
+    });
+    if (!this.graphValue.refreshCellsIfTopologyUnchanged(refreshedCells)) {
+      this.graphValue = this.rebuildGraph();
+    }
     const statusChanges = new Set<string>();
     for (const changedId of this.invalidateForGraphLimit()) statusChanges.add(changedId);
     for (const root of invalidationRoots) {
@@ -2237,7 +3403,6 @@ export class Controller {
     this.emitCells([...statusChanges, ...invalidationRoots]);
     this.scheduleWidgetReconciliation();
   }
-
   private analysisCacheKey(type: string, source: string): string {
     return `${this.analyzerIdentity}\0${type}\0${source}`;
   }
@@ -2299,8 +3464,9 @@ export class Controller {
     }
     const issues = this.graphValue.validate();
     if (issues.length > 0) {
+      const blocked = issues.some((issue) => issue.code === "graph_blocked");
       throw new ControllerError(
-        "graph_invalid",
+        blocked ? "graph_blocked" : "graph_invalid",
         issues.map((issue) => issue.message).join("\n"),
         409,
         { issues },
@@ -2346,6 +3512,7 @@ export class Controller {
       this.failOperation(
         pending.operationId,
         hostError("stale_value", staleValueMessage(pending.name), pending.operationId),
+        pending.clientId,
       );
     }
     this.refreshValueFreshness();
@@ -2359,88 +3526,87 @@ export class Controller {
     this.assertExecutionPossible();
     const location = this.findWidget(command.name);
     if (location === null) {
-      throw new ControllerError("invalid_request", `no such widget: ${command.name}`, 400);
+      throw new ControllerError("invalid_request", "no such widget: " + command.name, 400);
     }
     const owner = this.requireCell(location.owner);
     if (this.statusOf(owner.id) !== "done") {
-      throw new ControllerError("widget_not_current", `widget ${command.name} is not current`, 409);
+      throw new ControllerError("widget_not_current", "widget " + command.name + " is not current", 409);
     }
-    // Source edits make the owning cell stale synchronously, while dependency
-    // analysis completes in the background. Report the invalid widget identity
-    // before the broader graph readiness error so clients can discard it.
+    this.assertLiveOutput(owner, location.record, "widget_not_current");
     this.assertGraphRunnable();
     const spec = isRecord(location.widget.spec) ? location.widget.spec : null;
     let target = spec === null ? null : widgetSpecAt(spec, command.path);
-    if (target === null) {
-      throw new ControllerError("invalid_request", "widget path does not exist", 400);
-    }
-    if (target.kind === "form" && command.update.submit !== true && isRecord(target.child)) {
-      target = target.child;
-    }
+    if (target === null) throw new ControllerError("invalid_request", "widget path does not exist", 400);
+    if (target.kind === "form" && command.update.submit !== true && isRecord(target.child)) target = target.child;
     const kind = String(target.kind ?? "");
     const update = validateWidgetUpdate(kind, command.update);
     const draft = widgetPathHasForm(spec ?? {}, command.path) && command.update.submit !== true;
     const key = widgetKey(command.name, command.path);
-    const reservedUpload = [...this.pendingUploads.entries()].find(
-      ([, pending]) => pending.key === key,
-    );
+    const reservedUpload = [...this.pendingUploads.entries()].find(([, pending]) => pending.key === key);
+    const operationKey = this.operationKey(command.clientId, command.operationId);
     if (this.pendingWidgets.has(key)
-      || (reservedUpload !== undefined && reservedUpload[0] !== command.operationId)) {
-      throw new ControllerError(
-        "operation_in_progress",
-        `widget ${command.name} already has a pending update`,
-        409,
-      );
+      || (reservedUpload !== undefined && reservedUpload[0] !== operationKey)) {
+      throw new ControllerError("operation_in_progress", "widget " + command.name + " already has a pending update", 409);
     }
-    this.pendingWidgets.set(key, command.operationId);
+    this.pendingWidgets.set(key, this.operationKey(command.clientId, command.operationId));
     this.widgetToken += 1;
-    const operation = this.operations.get(command.operationId);
+    const operation = this.operationFor(command.operationId, command.clientId);
     if (operation !== undefined) {
       operation.status = "running";
       operation.token = this.widgetToken;
       operation.cellIds = [owner.id];
       this.rememberOperation(operation);
     }
-    setWidgetOperation(location.widget, key, {
-      token: this.widgetToken,
-      draft,
-      operationId: command.operationId,
-      status: "pending",
-      error: null,
-    });
-    this.bump("cell", this.publicCell(owner), {
-      operationId: command.operationId,
-      cellId: owner.id,
-      revision: owner.revision,
-    });
     const identity = {
       owner: owner.id,
       revision: owner.revision,
-      widget: location.widget,
+      record: location.record,
+      recordId: location.record.id,
+      name: command.name,
       kind,
       key,
       token: this.widgetToken,
       draft,
       generation: this.runtimeGeneration,
     };
-    void this.engine.request("set_widget", {
-      name: command.name,
-      path: [...command.path],
-      op_id: identity.token,
-      ...update,
-    }).then(
-      (response) => this.finishWidgetOperation(command, identity, response, update),
-      (error: unknown) => this.failWidgetOperation(command, identity, "worker_unavailable", messageOf(error)),
-    );
+    void this.updateOutputRecord(owner, location.record, (data) => {
+      const widget = findRichOutputRecord(data, (output) => output.kind === "widget" && output.name === command.name);
+      if (widget === null) throw new ControllerError("widget_not_current", "widget is no longer current", 409);
+      setWidgetOperation(widget, key, {
+        token: identity.token,
+        draft,
+        operationId: command.operationId,
+        status: "pending",
+        error: null,
+      });
+    }).then((record) => {
+      identity.record = record;
+      this.bump("cell", this.publicCell(owner), {
+        operationId: command.operationId,
+        cellId: owner.id,
+        revision: owner.revision,
+      });
+      return this.engine.request("set_widget", {
+        name: command.name,
+        path: [...command.path],
+        op_id: identity.token,
+        ...update,
+      });
+    }).then((response) => this.finishWidgetOperation(command, identity, response, update)).catch((error: unknown) => {
+      const failure = asControllerError(error, "widget_update_failed");
+      void this.failWidgetOperation(command, identity, failure.code, failure.message);
+    });
     return { token: identity.token, owner: owner.id };
   }
 
-  private finishWidgetOperation(
+  private async finishWidgetOperation(
     command: Extract<HostCommand, { type: "widget" }>,
     identity: {
       owner: string;
       revision: number;
-      widget: Record<string, unknown>;
+      record: OutputRecord;
+      recordId: string;
+      name: string;
       kind: string;
       key: string;
       token: number;
@@ -2449,7 +3615,7 @@ export class Controller {
     },
     rawResponse: EngineResponse,
     update: Record<string, unknown>,
-  ): void {
+  ): Promise<void> {
     const reconciliationOwner = this.obsoleteWidgetRequests.get(command.operationId);
     this.obsoleteWidgetRequests.delete(command.operationId);
     if (this.closed || identity.generation !== this.runtimeGeneration) return;
@@ -2457,32 +3623,29 @@ export class Controller {
     try {
       response = engineResponseSchema.parse(rawResponse);
     } catch (error) {
-      this.failKernel(`invalid widget response: ${messageOf(error)}`);
+      await this.failWidgetOperation(command, identity, "invalid_engine_response", messageOf(error));
       return;
     }
     if (reconciliationOwner !== undefined) {
-      // The update was already submitted to the serialized kernel before its
-      // owner changed. A successful obsolete request mutated live R state, so
-      // replay the owner's current source after that request settles. Failed
-      // requests made no state change and must not turn a source edit into an
-      // evaluation.
       if (response.ok) this.queueWidgetReconciliation(reconciliationOwner);
       return;
     }
     const current = this.findWidget(command.name);
     const owner = this.cellById(identity.owner);
     if (
-      this.pendingWidgets.get(identity.key) !== command.operationId
+      this.pendingWidgets.get(identity.key) !== this.operationKey(command.clientId, command.operationId)
       || current === null
       || current.owner !== identity.owner
+      || current.record.id !== identity.recordId
       || owner === undefined
       || owner.revision !== identity.revision
-      || current.widget !== identity.widget
+      || this.statusOf(owner.id) !== "done"
     ) {
+      await this.failWidgetOperation(command, identity, "widget_not_current", "widget is no longer current");
       return;
     }
     if (!response.ok) {
-      this.failWidgetOperation(
+      await this.failWidgetOperation(
         command,
         identity,
         response.error?.transport ? "worker_unavailable" : "widget_update_failed",
@@ -2490,26 +3653,32 @@ export class Controller {
       );
       return;
     }
-    const selected = isRecord(response.selected)
-      ? response.selected
-      : update;
-    if (isRecord(identity.widget.spec)) {
-      identity.widget.spec = patchWidgetSpec(
-        identity.widget.spec,
-        command.path,
-        selected,
-        identity.kind,
-        update,
-      );
-    }
-    setWidgetOperation(identity.widget, identity.key, {
-      token: identity.token,
-      operationId: command.operationId,
-      status: "done",
-      error: null,
+    identity.record = current.record;
+    const responsePayload = response as unknown as Record<string, unknown>;
+    const selected = isRecord(responsePayload.selected) ? responsePayload.selected : update;
+    const next = await this.updateOutputRecord(owner, identity.record, (data) => {
+      const widget = findRichOutputRecord(data, (output) => output.kind === "widget" && output.name === command.name);
+      if (widget === null) throw new ControllerError("widget_not_current", "widget is no longer current", 409);
+      if (isRecord(widget.spec)) {
+        widget.spec = patchWidgetSpec(widget.spec, command.path, selected, identity.kind, update);
+      }
+      setWidgetOperation(widget, identity.key, {
+        token: identity.token,
+        operationId: command.operationId,
+        status: "done",
+        error: null,
+      });
     });
+    identity.record = next;
     this.pendingWidgets.delete(identity.key);
-    this.pendingUploads.delete(command.operationId);
+    const operationKey = this.operationKey(command.clientId, command.operationId);
+    const pendingUpload = this.pendingUploads.get(operationKey);
+    this.pendingUploads.delete(operationKey);
+    if (pendingUpload !== undefined && pendingUpload.uploadId !== null) {
+      const uploadId = pendingUpload.uploadId;
+      pendingUpload.uploadId = null;
+      await this.removeUpload(uploadId);
+    }
     this.scheduleVariableRefresh();
     this.bump("cell", this.publicCell(owner), {
       operationId: command.operationId,
@@ -2517,64 +3686,72 @@ export class Controller {
       revision: owner.revision,
     });
     if (identity.draft) {
-      this.completeOperation(command.operationId, { token: identity.token, draft: true });
+      this.completeOperation(command.operationId, { token: identity.token, draft: true }, command.clientId);
     } else if (identity.kind === "run_button" && update.value === true) {
-      this.scheduleRunButton(command, identity.owner, identity.revision, identity.widget);
+      this.scheduleRunButton(command, identity.owner, identity.revision, identity.record);
     } else {
-      const scheduled = this.scheduleWidgetConsumers(
-        command.name,
-        identity.owner,
-        command.source,
-        command.operationId,
-      );
-      if (!scheduled) this.completeOperation(command.operationId, { token: identity.token });
+      const scheduled = this.scheduleWidgetConsumers(command.name, identity.owner, command.source, command.operationId, command.clientId);
+      if (!scheduled) this.completeOperation(command.operationId, { token: identity.token }, command.clientId);
     }
   }
 
-  private failWidgetOperation(
+  private async failWidgetOperation(
     command: Extract<HostCommand, { type: "widget" }>,
     identity: {
       owner: string;
+      revision: number;
+      record: OutputRecord;
+      recordId: string;
+      name: string;
       key: string;
       token: number;
-      widget: Record<string, unknown>;
       generation: number;
     },
     code: string,
     message: string,
-  ): void {
+  ): Promise<void> {
     if (this.obsoleteWidgetRequests.delete(command.operationId)) return;
     if (this.closed || identity.generation !== this.runtimeGeneration) return;
-    if (this.pendingWidgets.get(identity.key) !== command.operationId) return;
+    if (this.pendingWidgets.get(identity.key) !== this.operationKey(command.clientId, command.operationId)) return;
     this.pendingWidgets.delete(identity.key);
-    this.discardUpload(command.operationId);
-    setWidgetOperation(identity.widget, identity.key, {
-      token: identity.token,
-      operationId: command.operationId,
-      status: "error",
-      error: { code, message },
-    });
-    const failure = hostError(code, message, command.operationId);
-    this.replaceLastActionError(failure, {
-      operationId: command.operationId,
-      cellId: identity.owner,
-    });
-    this.failOperation(command.operationId, failure);
+    this.discardUpload(this.operationKey(command.clientId, command.operationId));
     const owner = this.cellById(identity.owner);
-    if (owner !== undefined) {
-      this.bump("cell", this.publicCell(owner), {
-        operationId: command.operationId,
-        cellId: owner.id,
-        revision: owner.revision,
-      });
+    if (owner !== undefined && owner.revision === identity.revision && this.statusOf(owner.id) === "done") {
+      const current = this.findWidget(identity.name);
+      if (current !== null && current.record.id === identity.recordId) {
+        identity.record = current.record;
+        try {
+          identity.record = await this.updateOutputRecord(owner, current.record, (data) => {
+            const widget = findRichOutputRecord(data, (output) => output.kind === "widget" && output.name === identity.name);
+            if (widget !== null) setWidgetOperation(widget, identity.key, {
+              token: identity.token,
+              operationId: command.operationId,
+              status: "error",
+              error: { code, message },
+            });
+          });
+          this.bump("cell", this.publicCell(owner), {
+            operationId: command.operationId,
+            cellId: owner.id,
+            revision: owner.revision,
+          });
+        } catch {
+          // The owning output was replaced while reporting the failure.
+        }
+      }
     }
+    const failure = hostError(code, message, command.operationId);
+    this.replaceLastActionError(failure, { operationId: command.operationId, cellId: identity.owner });
+    this.failOperation(command.operationId, failure, command.clientId);
   }
+
 
   private scheduleWidgetConsumers(
     name: string,
     owner: string,
     source: "editor" | "app" | "mcp" | "cli",
     operationId: string,
+    clientId: string,
   ): boolean {
     const references = this.cellsReferencing(name, owner);
     if (references.length === 0) return false;
@@ -2587,10 +3764,10 @@ export class Controller {
       this.emitCells(statusChanges, { operationId });
       try {
         const plan = this.widgetClosure(references, owner);
-        const runId = this.launchRun(plan, operationId, true);
+        const runId = this.launchRun(plan, operationId, true, clientId);
         if (!this.runHasPendingJobs(runId)) this.completeRunIfIdle(runId);
       } catch (error) {
-        this.failOperation(operationId, asControllerError(error).toJSON(operationId));
+        this.failOperation(operationId, asControllerError(error).toJSON(operationId), clientId);
       }
       return true;
     } else {
@@ -2618,7 +3795,7 @@ export class Controller {
     command: Extract<HostCommand, { type: "widget" }>,
     owner: string,
     revision: number,
-    widget: Record<string, unknown>,
+    record: OutputRecord,
   ): void {
     const directConsumers = this.cellsReferencing(command.name, owner);
     const key = widgetKey(command.name, command.path);
@@ -2629,8 +3806,9 @@ export class Controller {
         path: [...command.path],
         owner,
         revision,
-        widget,
+        record,
         triggerOperationId: command.operationId,
+        triggerClientId: command.clientId,
         directConsumers,
         runId: null,
       });
@@ -2644,22 +3822,18 @@ export class Controller {
       }
       const statusChanges = this.cancelRunRegion(region, "widget");
       this.emitCells(statusChanges, { operationId: command.operationId });
-      const runOperationId = `run-button-${command.operationId}`;
-      this.createOperation(runOperationId, "run");
-      this.causalWidgetRunParents.set(runOperationId, command.operationId);
+      const runOperationId = "run-button-" + command.operationId;
+      this.createOperation(runOperationId, "run", command.clientId);
+      this.causalWidgetRunParents.set(
+        this.operationKey(command.clientId, runOperationId),
+        this.operationKey(command.clientId, command.operationId),
+      );
       try {
-        runId = this.launchRun(
-          this.widgetClosure(directConsumers, owner),
-          runOperationId,
-          true,
-        );
+        runId = this.launchRun(this.widgetClosure(directConsumers, owner), runOperationId, true, command.clientId);
       } catch (error) {
-        this.causalWidgetRunParents.delete(runOperationId);
-        this.failOperation(runOperationId, asControllerError(error).toJSON(runOperationId));
-        this.failOperation(
-          command.operationId,
-          hostError("widget_update_failed", "run button could not schedule consumers", command.operationId),
-        );
+        this.causalWidgetRunParents.delete(this.operationKey(command.clientId, runOperationId));
+        this.failOperation(runOperationId, asControllerError(error).toJSON(runOperationId), command.clientId);
+        this.failOperation(command.operationId, hostError("widget_update_failed", "run button could not schedule consumers", command.operationId), command.clientId);
         return;
       }
     } else {
@@ -2686,8 +3860,9 @@ export class Controller {
       path: [...command.path],
       owner,
       revision,
-      widget,
+      record,
       triggerOperationId: command.operationId,
+      triggerClientId: command.clientId,
       directConsumers,
       runId,
     });
@@ -2702,15 +3877,11 @@ export class Controller {
       if (reset.runId !== null) {
         if (reset.runId !== completedRunId || this.runHasPendingJobs(reset.runId)) continue;
       } else {
-        const settled = reset.directConsumers.every((id) =>
-          ["done", "error", "stopped"].includes(this.statusOf(id)),
-        );
+        const settled = reset.directConsumers.every((id) => ["done", "error", "stopped"].includes(this.statusOf(id)));
         if (!settled) continue;
       }
       this.pendingButtonResets.delete(reset.key);
-      this.sendButtonReset(reset.runId === null
-        ? { ...reset, runId: completedRunId }
-        : reset);
+      this.sendButtonReset(reset.runId === null ? { ...reset, runId: completedRunId } : reset);
     }
   }
 
@@ -2720,13 +3891,14 @@ export class Controller {
       const owner = this.cellById(reset.owner);
       if (location === null
         || location.owner !== reset.owner
-        || location.widget !== reset.widget
+        || location.record.id !== reset.record.id
         || owner === undefined
         || owner.revision !== reset.revision) {
         this.pendingButtonResets.delete(key);
         this.failButtonResetParents(reset, "widget_not_current", "run button is no longer current");
         continue;
       }
+      reset.record = location.record;
       const directConsumers = this.cellsReferencing(reset.name, reset.owner);
       if (directConsumers.length === 0) {
         this.pendingButtonResets.delete(key);
@@ -2745,7 +3917,7 @@ export class Controller {
       : null;
     if (location === null
       || location.owner !== reset.owner
-      || location.widget !== reset.widget
+      || location.record.id !== reset.record.id
       || owner === undefined
       || owner.revision !== reset.revision
       || this.statusOf(owner.id) !== "done"
@@ -2753,58 +3925,48 @@ export class Controller {
       this.failButtonResetParents(reset, "widget_not_current", "run button is no longer current");
       return;
     }
-    const resetOperationId = `${reset.triggerOperationId}:reset:${randomUUID()}`;
-    const resetOperation = this.createOperation(resetOperationId, "widget-reset");
+    reset.record = location.record;
+    const resetOperationId = reset.triggerOperationId + ":reset:" + randomUUID();
+    const resetOperation = this.createOperation(resetOperationId, "widget-reset", reset.triggerClientId);
     resetOperation.status = "running";
     resetOperation.cellIds = [reset.owner];
     this.rememberOperation(resetOperation);
-    const triggerOperation = this.operations.get(reset.triggerOperationId);
+    const triggerOperation = this.operationFor(reset.triggerOperationId, reset.triggerClientId);
     if (triggerOperation !== undefined && !isTerminal(triggerOperation.status)) {
-      triggerOperation.resetOperationIds = uniqueStrings([
-        ...(triggerOperation.resetOperationIds ?? []),
-        resetOperationId,
-      ]);
+      triggerOperation.resetOperationIds = uniqueStrings([...(triggerOperation.resetOperationIds ?? []), resetOperationId]);
       this.rememberOperation(triggerOperation);
     }
-    const runOperationId = reset.runId === null
-      ? undefined
-      : this.runOperationById.get(reset.runId);
+    const runOperationId = reset.runId === null ? undefined : this.runOperationById.get(reset.runId);
     if (runOperationId !== undefined) {
-      const runOperation = this.operations.get(runOperationId);
+      const runOperation = this.operationForKey(runOperationId);
       if (runOperation !== undefined && !isTerminal(runOperation.status)) {
-        runOperation.resetOperationIds = uniqueStrings([
-          ...(runOperation.resetOperationIds ?? []),
-          resetOperationId,
-        ]);
+        runOperation.resetOperationIds = uniqueStrings([...(runOperation.resetOperationIds ?? []), resetOperationId]);
         this.rememberOperation(runOperation);
       }
     }
     const token = ++this.widgetToken;
     const generation = this.runtimeGeneration;
-    this.pendingWidgets.set(reset.key, resetOperationId);
-    this.activeButtonResets.set(resetOperationId, {
-      operationId: resetOperationId,
-      token,
-      reset,
-    });
-    setWidgetOperation(reset.widget, reset.key, {
-      token,
-      operationId: resetOperationId,
-      status: "pending",
-      error: null,
-    });
-    this.bump("cell", this.publicCell(owner), {
-      operationId: resetOperationId,
-      cellId: owner.id,
-      revision: owner.revision,
-    });
-    void this.engine.request("set_widget", {
-      name: reset.name,
-      path: [...reset.path],
-      value: false,
-      op_id: token,
-    }).then((raw) => {
-      if (!this.runtimeRequestCurrent(resetOperationId, generation)) return;
+    this.pendingWidgets.set(reset.key, this.operationKey(reset.triggerClientId, resetOperationId));
+    this.activeButtonResets.set(resetOperationId, { operationId: resetOperationId, token, reset });
+    void this.updateOutputRecord(owner, reset.record, (data) => {
+      const widget = findRichOutputRecord(data, (output) => output.kind === "widget" && output.name === reset.name);
+      if (widget === null) throw new ControllerError("widget_not_current", "run button is no longer current", 409);
+      setWidgetOperation(widget, reset.key, { token, operationId: resetOperationId, status: "pending", error: null });
+    }).then((record) => {
+      reset.record = record;
+      this.bump("cell", this.publicCell(owner), {
+        operationId: resetOperationId,
+        cellId: owner.id,
+        revision: owner.revision,
+      });
+      return this.engine.request("set_widget", {
+        name: reset.name,
+        path: [...reset.path],
+        value: false,
+        op_id: token,
+      });
+    }).then(async (raw) => {
+      if (!this.runtimeRequestCurrent(resetOperationId, generation, reset.triggerClientId)) return;
       const response = engineResponseSchema.parse(raw);
       if (!response.ok) {
         throw new ControllerError(
@@ -2815,97 +3977,85 @@ export class Controller {
       }
       const current = this.findWidget(reset.name);
       const currentOwner = this.cellById(reset.owner);
-      if (this.pendingWidgets.get(reset.key) !== resetOperationId
+      if (this.pendingWidgets.get(reset.key) !== this.operationKey(reset.triggerClientId, resetOperationId)
         || this.activeButtonResets.get(resetOperationId)?.token !== token
         || current === null
         || current.owner !== reset.owner
-        || current.widget !== reset.widget
+        || current.record.id !== reset.record.id
         || currentOwner === undefined
         || currentOwner.revision !== reset.revision
         || this.statusOf(currentOwner.id) !== "done") {
         throw new ControllerError("widget_not_current", "run button is no longer current", 409);
       }
-      if (isRecord(reset.widget.spec)) {
-        reset.widget.spec = patchWidgetSpec(
-          reset.widget.spec,
-          reset.path,
-          { value: false },
-          "run_button",
-          { value: false },
-        );
-      }
-      setWidgetOperation(reset.widget, reset.key, {
-        token,
-        operationId: resetOperationId,
-        status: "done",
-        error: null,
+      const next = await this.updateOutputRecord(currentOwner, current.record, (data) => {
+        const widget = findRichOutputRecord(data, (output) => output.kind === "widget" && output.name === reset.name);
+        if (widget === null) throw new ControllerError("widget_not_current", "run button is no longer current", 409);
+        if (isRecord(widget.spec)) widget.spec = patchWidgetSpec(widget.spec, reset.path, { value: false }, "run_button", { value: false });
+        setWidgetOperation(widget, reset.key, { token, operationId: resetOperationId, status: "done", error: null });
       });
+      reset.record = next;
       this.pendingWidgets.delete(reset.key);
       this.activeButtonResets.delete(resetOperationId);
       this.scheduleVariableRefresh();
-      this.completeOperation(resetOperationId, { token });
-      const causalFailure = this.causalWidgetFailures.get(reset.triggerOperationId);
-      this.causalWidgetFailures.delete(reset.triggerOperationId);
+      this.completeOperation(resetOperationId, { token }, reset.triggerClientId);
+      const triggerKey = this.operationKey(reset.triggerClientId, reset.triggerOperationId);
+      const causalFailure = this.causalWidgetFailures.get(triggerKey);
+      this.causalWidgetFailures.delete(triggerKey);
       if (causalFailure === undefined) {
-        this.completeOperation(reset.triggerOperationId, {
-          token: this.operations.get(reset.triggerOperationId)?.token,
-          resetOperationId,
-        });
+        this.completeOperation(reset.triggerOperationId, { token: this.operationForKey(triggerKey)?.token, resetOperationId }, reset.triggerClientId);
       } else {
-        this.failOperation(reset.triggerOperationId, causalFailure);
+        this.failOperation(reset.triggerOperationId, causalFailure, reset.triggerClientId);
       }
       if (reset.runId !== null) this.completeRunIfIdle(reset.runId);
-      this.bump("cell", this.publicCell(currentOwner), {
-        operationId: resetOperationId,
-        cellId: currentOwner.id,
-        revision: currentOwner.revision,
-      });
-    }).catch((error: unknown) => {
-      if (!this.runtimeRequestCurrent(resetOperationId, generation)) return;
+      this.bump("cell", this.publicCell(currentOwner), { operationId: resetOperationId, cellId: currentOwner.id, revision: currentOwner.revision });
+    }).catch(async (error: unknown) => {
+      if (!this.runtimeRequestCurrent(resetOperationId, generation, reset.triggerClientId)) return;
       const failure = asControllerError(error, "widget_update_failed", 400);
-      this.pendingWidgets.delete(reset.key);
+      const ownsPending = this.pendingWidgets.get(reset.key) === this.operationKey(reset.triggerClientId, resetOperationId);
+      if (ownsPending) this.pendingWidgets.delete(reset.key);
       this.activeButtonResets.delete(resetOperationId);
-      setWidgetOperation(reset.widget, reset.key, {
-        token,
-        operationId: resetOperationId,
-        status: "error",
-        error: { code: failure.code, message: failure.message },
-      });
-      this.failOperation(
-        resetOperationId,
-        hostError(failure.code, failure.message, resetOperationId),
-      );
+      const currentOwner = this.cellById(reset.owner);
+      const current = this.findWidget(reset.name);
+      if (ownsPending && currentOwner !== undefined && currentOwner.revision === reset.revision
+        && current !== null && current.record.id === reset.record.id) {
+        try {
+          reset.record = await this.updateOutputRecord(currentOwner, current.record, (data) => {
+            const widget = findRichOutputRecord(data, (output) => output.kind === "widget" && output.name === reset.name);
+            if (widget !== null) setWidgetOperation(widget, reset.key, { token, operationId: resetOperationId, status: "error", error: { code: failure.code, message: failure.message } });
+          });
+          this.bump("cell", this.publicCell(currentOwner), { operationId: resetOperationId, cellId: currentOwner.id, revision: currentOwner.revision });
+        } catch {
+          // The reset target was replaced while reporting the failure.
+        }
+      }
+      this.failOperation(resetOperationId, hostError(failure.code, failure.message, resetOperationId), reset.triggerClientId);
       this.failButtonResetParents(reset, failure.code, failure.message);
       if (reset.runId !== null) this.completeRunIfIdle(reset.runId);
-      const currentOwner = this.cellById(reset.owner);
-      if (currentOwner !== undefined
-        && currentOwner.revision === reset.revision
-        && this.findWidget(reset.name)?.widget === reset.widget) {
-        this.bump("cell", this.publicCell(currentOwner), {
-          operationId: resetOperationId,
-          cellId: currentOwner.id,
-          revision: currentOwner.revision,
-        });
-      }
     });
   }
+
 
   private failButtonResetParents(
     reset: PendingButtonReset,
     code: string,
     message: string,
   ): void {
-    this.causalWidgetFailures.delete(reset.triggerOperationId);
+    const triggerKey = this.operationKey(reset.triggerClientId, reset.triggerOperationId);
+    this.causalWidgetFailures.delete(triggerKey);
     this.failOperation(
       reset.triggerOperationId,
       hostError(code, message, reset.triggerOperationId),
+      reset.triggerClientId,
     );
     if (reset.runId === null) return;
-    const runOperationId = this.runOperationById.get(reset.runId);
-    if (runOperationId !== undefined) {
-      this.causalWidgetRunParents.delete(runOperationId);
-      this.causalRunFailures.delete(runOperationId);
-      this.failOperation(runOperationId, hostError(code, message, runOperationId));
+    const runKey = this.runOperationById.get(reset.runId);
+    if (runKey !== undefined) {
+      this.causalWidgetRunParents.delete(runKey);
+      this.causalRunFailures.delete(runKey);
+      const runOperation = this.operationForKey(runKey);
+      if (runOperation !== undefined) {
+        this.failOperation(runOperation.id, hostError(code, message, runOperation.id), runOperation.clientId);
+      }
     }
   }
 
@@ -2954,6 +4104,7 @@ export class Controller {
       || this.queue.length > 0
       || this.runPreparationActive
       || this.packageOperationActive
+      || this.runtimeContextReservation !== undefined
     ) return;
     this.widgetReconciliationScheduled = true;
     queueMicrotask(() => {
@@ -2971,6 +4122,7 @@ export class Controller {
       || this.queue.length > 0
       || this.runPreparationActive
       || this.packageOperationActive
+      || this.runtimeContextReservation !== undefined
     ) return;
     this.widgetReconciliationPreparing = true;
     try {
@@ -2981,6 +4133,7 @@ export class Controller {
         || this.queue.length > 0
         || this.runPreparationActive
         || this.packageOperationActive
+        || this.runtimeContextReservation !== undefined
       ) return;
 
       const roots = [...this.widgetReconciliationRoots].filter(([id, revision]) => {
@@ -3000,7 +4153,7 @@ export class Controller {
       const operationId = `widget-reconcile-${randomUUID()}`;
       this.createOperation(operationId, "run");
       const runId = this.launchRun(this.graphValue.orderOf(plan), operationId);
-      const scheduled = new Set(this.operations.get(operationId)?.cellIds ?? []);
+      const scheduled = new Set(this.operationFor(operationId, INTERNAL_CLIENT_ID)?.cellIds ?? []);
       for (const [id, revision] of roots) {
         if (!scheduled.has(id) && this.widgetReconciliationRoots.get(id) === revision) {
           this.widgetReconciliationRoots.delete(id);
@@ -3024,7 +4177,7 @@ export class Controller {
       || this.queue.some((job) => job.runId === runId);
   }
 
-  private startInspection(operationId: string, name: string): unknown {
+  private startInspection(operationId: string, name: string, clientId: string): unknown {
     this.assertStarted();
     if (this.barrierRestartRequired) {
       throw new ControllerError(
@@ -3051,6 +4204,7 @@ export class Controller {
       && this.runtimeRequestCurrent(
         this.pendingInspection.operationId,
         this.runtimeGeneration,
+        this.pendingInspection.clientId,
       )) {
       throw new ControllerError(
         "operation_in_progress",
@@ -3058,7 +4212,7 @@ export class Controller {
         409,
       );
     }
-    const operation = this.operations.get(operationId);
+    const operation = this.operationFor(operationId, clientId);
     if (operation !== undefined) {
       operation.status = "running";
       operation.cellIds = owner === undefined ? [] : [owner.id];
@@ -3069,14 +4223,27 @@ export class Controller {
       : { id: owner.id, revision: owner.revision };
     this.pendingInspection = {
       operationId,
+      clientId,
       name,
       owner: identity?.id ?? null,
       revision: identity?.revision ?? null,
     };
+    const outputScope: OutputScope = {
+      sessionEpoch: this.epochValue,
+      documentRevision: this.documentRevisionValue,
+      kernelEpoch: this.runtimeSnapshot().kernelEpoch,
+      runId: null,
+      cellId: identity?.id ?? null,
+      revision: identity?.revision ?? null,
+    };
     const generation = this.runtimeGeneration;
-    void this.engine.request("get_value", { name, token: operationId }).then((raw) => {
-      if (!this.runtimeRequestCurrent(operationId, generation)) return;
+    void this.engine.request("get_value", {
+      name,
+      token: operationId,
+    }, { outputScope }).then((raw) => {
+      if (!this.runtimeRequestCurrent(operationId, generation, clientId)) return;
       const response = engineResponseSchema.parse(raw);
+      const responsePayload = response as unknown as Record<string, unknown>;
       const currentOwner = this.graphValue.definitionOwner(name);
       const fresh = identity === null
         ? currentOwner === undefined
@@ -3094,40 +4261,32 @@ export class Controller {
       this.lastValue = {
         operationId,
         name,
-        value: clone(response.value),
+        value: clone(responsePayload.value as JsonValue),
         owner: identity?.id ?? null,
         revision: identity?.revision ?? null,
       };
       this.pendingInspection = null;
-      this.completeOperation(operationId, this.lastValue);
+      this.completeOperation(operationId, this.lastValue, clientId);
       this.bump("notebook", { lastValue: clone(this.lastValue) }, { operationId });
     }).catch((error: unknown) => {
-      if (!this.runtimeRequestCurrent(operationId, generation)) return;
+      if (!this.runtimeRequestCurrent(operationId, generation, clientId)) return;
       this.pendingInspection = null;
       const failure = asControllerError(error, "value_request_failed");
-      this.failOperation(operationId, failure.toJSON(operationId));
+      this.failOperation(operationId, failure.toJSON(operationId), clientId);
     });
     return { name, owner: owner?.id ?? null, revision: owner?.revision ?? null };
   }
 
-  private startLazyOutput(operationId: string, key: string): unknown {
+  private startLazyOutput(operationId: string, key: string, clientId: string): unknown {
     this.assertExecutionPossible();
     if (this.pendingLazyOutputs.has(key)) {
-      throw new ControllerError(
-        "operation_in_progress",
-        "lazy output already has a pending evaluation",
-        409,
-      );
+      throw new ControllerError("operation_in_progress", "lazy output already has a pending evaluation", 409);
     }
     const location = this.findOutput((output) => output.kind === "lazy" && output.key === key);
     if (location === null) {
-      throw new ControllerError(
-        "lazy_expired",
-        "this lazy output belongs to an earlier run of the cell",
-        409,
-      );
+      throw new ControllerError("lazy_expired", "this lazy output belongs to an earlier run of the cell", 409);
     }
-    const operation = this.operations.get(operationId);
+    const operation = this.operationFor(operationId, clientId);
     if (operation !== undefined) {
       operation.status = "running";
       operation.cellIds = [location.owner];
@@ -3137,60 +4296,85 @@ export class Controller {
     if (this.statusOf(owner.id) !== "done") {
       throw new ControllerError("lazy_expired", "lazy output is no longer current", 409);
     }
+    this.assertLiveOutput(owner, location.record, "lazy_expired");
     const revision = owner.revision;
-    const original = location.output;
+    const kernelEpoch = this.runtimeSnapshot().kernelEpoch;
+    if (kernelEpoch === null) throw new ControllerError("stale_kernel", "R kernel incarnation is unavailable", 503);
+    const runId = typeof location.record.runId === "string" ? location.record.runId : null;
+    const outputScope: OutputScope = {
+      sessionEpoch: this.epochValue,
+      documentRevision: this.documentRevisionValue,
+      kernelEpoch,
+      runId,
+      cellId: owner.id,
+      revision,
+    };
     const generation = this.runtimeGeneration;
-    this.pendingLazyOutputs.set(key, { operationId, owner: owner.id });
+    this.pendingLazyOutputs.set(key, {
+      operationId,
+      clientId,
+      owner: owner.id,
+      recordId: location.record.id,
+      revision,
+      kernelEpoch,
+    });
     void this.engine.request("lazy_eval", {
       key,
       id: owner.id,
       token: operationId,
-    }).then((raw) => {
-      if (!this.runtimeRequestCurrent(operationId, generation)) return;
+    }, { outputScope }).then(async (raw) => {
+      if (!this.runtimeRequestCurrent(operationId, generation, clientId)) return;
       const response = engineResponseSchema.parse(raw);
+      const pending = this.pendingLazyOutputs.get(key);
       const current = this.findOutput((output) => output.kind === "lazy" && output.key === key);
       if (
-        current === null
+        pending === undefined
+        || pending.operationId !== operationId
+        || pending.owner !== owner.id
+        || pending.recordId !== location.record.id
+        || pending.revision !== revision
+        || pending.kernelEpoch !== kernelEpoch
+        || current === null
         || current.owner !== owner.id
-        || current.output !== original
+        || current.record.id !== location.record.id
         || this.cellById(owner.id)?.revision !== revision
+        || this.runtimeSnapshot().kernelEpoch !== kernelEpoch
         || this.statusOf(owner.id) !== "done"
       ) {
         throw new ControllerError("lazy_expired", "lazy output is no longer current", 409);
       }
       owner.log = boundedLog([...owner.log, ...(response.log ?? [])]);
       if (!response.ok) {
-        original.state = "error";
-        original.child = {
-          kind: "error",
-          message: response.error?.message ?? "lazy output failed",
-        };
-        this.bump("cell", this.publicCell(owner), {
-          operationId,
-          cellId: owner.id,
-          revision,
+        await this.updateOutputRecord(owner, current.record, (data) => {
+          const lazy = findRichOutputRecord(data, (output) => output.kind === "lazy" && output.key === key);
+          if (lazy === null) throw new ControllerError("lazy_expired", "lazy output is no longer current", 409);
+          lazy.state = "error";
+          lazy.child = { kind: "error", message: response.error?.message ?? "lazy output failed" };
         });
+        this.pendingLazyOutputs.delete(key);
+        this.bump("cell", this.publicCell(owner), { operationId, cellId: owner.id, revision });
         throw new ControllerError(
           response.error?.transport ? "worker_unavailable" : "lazy_eval_failed",
           response.error?.message ?? "lazy output failed",
           response.error?.transport ? 503 : 400,
         );
       }
-      original.child = clone(response.output ?? response.value ?? null);
-      original.state = "loaded";
-      this.pendingLazyOutputs.delete(key);
-      this.scheduleVariableRefresh();
-      this.completeOperation(operationId, { key, output: clone(original.child) });
-      this.bump("cell", this.publicCell(owner), {
-        operationId,
-        cellId: owner.id,
-        revision,
+      const child = clone(response.output ?? null);
+      await this.updateOutputRecord(owner, current.record, (data) => {
+        const lazy = findRichOutputRecord(data, (output) => output.kind === "lazy" && output.key === key);
+        if (lazy === null) throw new ControllerError("lazy_expired", "lazy output is no longer current", 409);
+        lazy.child = child;
+        lazy.state = "ready";
       });
-    }).catch((error: unknown) => {
-      if (!this.runtimeRequestCurrent(operationId, generation)) return;
       this.pendingLazyOutputs.delete(key);
       this.scheduleVariableRefresh();
-      this.failOperation(operationId, asControllerError(error, "lazy_eval_failed").toJSON(operationId));
+      this.completeOperation(operationId, { key, output: clone(child) }, clientId);
+      this.bump("cell", this.publicCell(owner), { operationId, cellId: owner.id, revision });
+    }).catch((error: unknown) => {
+      if (!this.runtimeRequestCurrent(operationId, generation, clientId)) return;
+      if (this.pendingLazyOutputs.get(key)?.operationId === operationId) this.pendingLazyOutputs.delete(key);
+      this.scheduleVariableRefresh();
+      this.failOperation(operationId, asControllerError(error, "lazy_eval_failed").toJSON(operationId), clientId);
     });
     return { key, cellId: owner.id };
   }
@@ -3200,30 +4384,28 @@ export class Controller {
   ): unknown {
     this.assertExecutionPossible();
     if (this.pendingTablePages.has(command.handle)) {
-      throw new ControllerError(
-        "operation_in_progress",
-        "table paging request already pending",
-        409,
-      );
+      throw new ControllerError("operation_in_progress", "table paging request already pending", 409);
     }
-    const location = this.findOutput(
-      (output) => output.kind === "table" && output.handle === command.handle,
-    );
-    if (location === null) {
-      throw new ControllerError("table_unavailable", "table is unavailable", 404);
-    }
+    const location = this.findOutput((output) => output.kind === "table" && output.handle === command.handle);
+    if (location === null) throw new ControllerError("table_unavailable", "table is unavailable", 404);
     const owner = this.requireCell(location.owner);
     if (this.statusOf(owner.id) !== "done") {
       throw new ControllerError("table_unavailable", "table is no longer current", 409);
     }
+    this.assertLiveOutput(owner, location.record, "table_unavailable");
     const revision = owner.revision;
-    const original = location.output;
+    const kernelEpoch = this.runtimeSnapshot().kernelEpoch;
+    if (kernelEpoch === null) throw new ControllerError("stale_kernel", "R kernel incarnation is unavailable", 503);
     const generation = this.runtimeGeneration;
     this.pendingTablePages.set(command.handle, {
       operationId: command.operationId,
+      clientId: command.clientId,
       owner: owner.id,
+      recordId: location.record.id,
+      revision,
+      kernelEpoch,
     });
-    const operation = this.operations.get(command.operationId);
+    const operation = this.operationFor(command.operationId, command.clientId);
     if (operation !== undefined) {
       operation.status = "running";
       operation.cellIds = [owner.id];
@@ -3237,17 +4419,24 @@ export class Controller {
       sort_desc: command.sortDescending,
       filter: command.filter,
       token: command.operationId,
-    }).then((raw) => {
-      if (!this.runtimeRequestCurrent(command.operationId, generation)) return;
+    }).then(async (raw) => {
+      if (!this.runtimeRequestCurrent(command.operationId, generation, command.clientId)) return;
       const response = engineResponseSchema.parse(raw);
-      const current = this.findOutput(
-        (output) => output.kind === "table" && output.handle === command.handle,
-      );
+      const responsePayload = response as unknown as Record<string, unknown>;
+      const pending = this.pendingTablePages.get(command.handle);
+      const current = this.findOutput((output) => output.kind === "table" && output.handle === command.handle);
       if (
-        current === null
+        pending === undefined
+        || pending.operationId !== command.operationId
+        || pending.owner !== owner.id
+        || pending.recordId !== location.record.id
+        || pending.revision !== revision
+        || pending.kernelEpoch !== kernelEpoch
+        || current === null
         || current.owner !== owner.id
-        || current.output !== original
+        || current.record.id !== location.record.id
         || this.cellById(owner.id)?.revision !== revision
+        || this.runtimeSnapshot().kernelEpoch !== kernelEpoch
         || this.statusOf(owner.id) !== "done"
       ) {
         throw new ControllerError("table_unavailable", "table is no longer current", 409);
@@ -3259,45 +4448,45 @@ export class Controller {
           response.error?.transport ? 503 : 400,
         );
       }
-      original.page = clone(response.page ?? response.value ?? null);
+      const page = clone(responsePayload.page ?? responsePayload.value ?? null);
+      await this.updateOutputRecord(owner, current.record, (data) => {
+        const table = findRichOutputRecord(data, (output) => output.kind === "table" && output.handle === command.handle);
+        if (table === null) throw new ControllerError("table_unavailable", "table is no longer current", 409);
+        table.page = page;
+      });
       this.pendingTablePages.delete(command.handle);
-      this.completeOperation(command.operationId, {
-        handle: command.handle,
-        page: clone(original.page),
-      });
-      this.bump("cell", this.publicCell(owner), {
-        operationId: command.operationId,
-        cellId: owner.id,
-        revision,
-      });
+      this.completeOperation(command.operationId, { handle: command.handle, page: clone(page) }, command.clientId);
+      this.bump("cell", this.publicCell(owner), { operationId: command.operationId, cellId: owner.id, revision });
     }).catch((error: unknown) => {
-      if (!this.runtimeRequestCurrent(command.operationId, generation)) return;
-      this.pendingTablePages.delete(command.handle);
-      this.failOperation(
-        command.operationId,
-        asControllerError(error, "table_request_failed").toJSON(command.operationId),
-      );
+      if (!this.runtimeRequestCurrent(command.operationId, generation, command.clientId)) return;
+      if (this.pendingTablePages.get(command.handle)?.operationId === command.operationId) {
+        this.pendingTablePages.delete(command.handle);
+      }
+      this.failOperation(command.operationId, asControllerError(error, "table_request_failed").toJSON(command.operationId), command.clientId);
     });
     return { handle: command.handle, cellId: owner.id };
   }
 
-  private async saveNotebook(): Promise<unknown> {
+
+  private async saveNotebook(expectedDocumentRevision: number, operationId: string): Promise<unknown> {
     this.assertStartedForMutation();
-    if (this.services.save === undefined) {
-      throw new ControllerError("service_unavailable", "notebook save service is unavailable", 503);
-    }
     if (this.pathValue === null || this.pathValue.length === 0) {
       throw new ControllerError("notebook_has_no_path", "notebook has no path", 400);
     }
-    const savedVersion = this.version;
-    const result = await this.services.save(this.snapshot());
+    const request: SourceCommitRequest = {
+      kind: "save",
+      expectedDocumentRevision,
+      operationId,
+    };
+    if (this.sourceCommit === undefined) {
+      throw new ControllerError("service_unavailable", "durable notebook save service is unavailable", 503);
+    }
+    const result = await this.commitSource(request);
     this.assertNotClosed();
-    if (this.version === savedVersion) this.changed = false;
     this.replaceLastActionError(null);
-    this.bump("notebook", { saved: true, result: clone(result) });
+    this.bump("notebook", { saved: true, result: clone(result) }, { operationId });
     return result;
   }
-
   private async formatSource(
     requestedIds: readonly string[] | undefined,
     expectedRevisions: Readonly<Record<string, number>>,
@@ -3322,27 +4511,35 @@ export class Controller {
         throw new ControllerError("source_conflict", `cell ${id} changed on the server`, 409);
       }
     }
-    const formatted = await this.services.format(ids.map((id) => {
+    const selected = ids.map((id) => {
       const cell = this.requireCell(id);
       return { id: cell.id, type: cell.type, body: [...cell.body], revision: cell.revision };
-    }));
+    });
+    const codeCells = selected.filter((cell) => cell.type === "code");
+    if (codeCells.length === 0) return { changed: 0, edited: [], created: [] };
+    const formatted = await this.services.format(codeCells);
     this.assertNotClosed();
+    for (const selectedCell of selected) {
+      const current = this.requireCell(selectedCell.id);
+      if (current.revision !== expectedRevisions[selectedCell.id]) {
+        throw new ControllerError("source_conflict", "cell " + selectedCell.id + " changed while formatting", 409);
+      }
+    }
     if (!isRecord(formatted)
-      || !setEqual(new Set(Object.keys(formatted)), new Set(ids))) {
+      || !setEqual(new Set(Object.keys(formatted)), new Set(codeCells.map((cell) => cell.id)))) {
       throw new ControllerError(
         "invalid_service_response",
-        "formatter must return every selected cell exactly once",
+        "formatter must return every selected code cell exactly once",
         503,
       );
     }
-    const edits: CellEdit[] = [];
-    for (const id of Object.keys(formatted)) {
+    const changes: DocumentChange[] = [];
+    for (const selectedCell of codeCells) {
+      const id = selectedCell.id;
       const cell = this.requireCell(id);
-      if (cell.revision !== expectedRevisions[id]) {
-        throw new ControllerError("source_conflict", `cell ${id} changed while formatting`, 409);
-      }
-      const parsed = cellEditSchema.safeParse({
-        cellId: id,
+      const parsed = documentChangeSchema.safeParse({
+        type: "edit",
+        cell: { cellId: id },
         body: formatted[id],
         cellType: cell.type,
         expectedRevision: cell.revision,
@@ -3355,101 +4552,82 @@ export class Controller {
           parsed.error.issues,
         );
       }
-      edits.push(parsed.data);
+      changes.push(parsed.data);
     }
-    const result = await this.applySourceChanges(edits, [], false, operationId);
+    const result = await this.applySourceChanges(changes, false, operationId);
     return { changed: result.edited.filter((entry) => entry.revision !== expectedRevisions[entry.id]).length, ...result };
   }
 
-  private setRuntime(
+  private async setRuntime(
     executionMode: "automatic" | "lazy" | undefined,
     runOnStartup: boolean | undefined,
-  ): unknown {
+    expectedDocumentRevision: number,
+    operationId: string,
+  ): Promise<unknown> {
     this.assertStartedForMutation();
-    if (executionMode !== undefined) this.executionMode = executionMode;
-    if (runOnStartup !== undefined) this.runOnStartup = runOnStartup;
-    this.metadata = {
-      ...this.metadata,
-      runtime: {
-        ...(isRecord(this.metadata.runtime) ? this.metadata.runtime : {}),
-        execution_mode: this.executionMode,
-        run_on_startup: this.runOnStartup,
-      },
-    };
-    this.config = {
-      ...this.config,
-      on_cell_change: this.executionMode,
-      on_startup: this.runOnStartup,
-    };
-    this.changed = true;
-    this.bump("notebook", { metadata: clone(this.metadata) });
-    this.emit("runtime", this.runtimeSnapshot());
-    return clone(this.runtimeSnapshot());
-  }
-
-  private async setConfig(patch: Record<string, unknown>): Promise<unknown> {
-    this.assertStartedForMutation();
-    if (this.services.service === undefined) {
-      throw new ControllerError("service_unavailable", "config update service is unavailable", 503);
+    const patch: Record<string, unknown> = {};
+    if (executionMode !== undefined) patch.on_cell_change = executionMode;
+    if (runOnStartup !== undefined) patch.on_startup = runOnStartup;
+    if (Object.keys(patch).length === 0) {
+      throw new ControllerError("invalid_request", "runtime update is empty", 400);
     }
-    return this.withServiceMutation(async () => {
-      const proposed = deepMerge(this.config, patch);
-      const response = await this.services.service?.("config.update", { config: proposed });
-      this.assertNotClosed();
-      if (!isRecord(response) || !isRecord(response.config)) {
-        throw new ControllerError("invalid_service_response", "config service returned invalid data", 503);
-      }
-      const mode = response.config.on_cell_change;
-      const startup = response.config.on_startup;
-      if (mode !== undefined && mode !== "automatic" && mode !== "lazy") {
-        throw new ControllerError("invalid_service_response", "config service returned an invalid execution mode", 503);
-      }
-      if (startup !== undefined && typeof startup !== "boolean") {
-        throw new ControllerError("invalid_service_response", "config service returned an invalid startup policy", 503);
-      }
-      const runtimeChanged = mode !== undefined || startup !== undefined;
-      if (mode !== undefined) this.executionMode = mode;
-      if (startup !== undefined) this.runOnStartup = startup;
-      if (runtimeChanged) {
-        this.metadata = {
-          ...this.metadata,
-          runtime: {
-            ...(isRecord(this.metadata.runtime) ? this.metadata.runtime : {}),
-            execution_mode: this.executionMode,
-            run_on_startup: this.runOnStartup,
-          },
-        };
-      }
-      this.config = clone(response.config);
-      this.changed = true;
-      this.bump("notebook", {
-        config: clone(this.config),
-        ...(runtimeChanged ? { metadata: clone(this.metadata) } : {}),
-      });
-      if (runtimeChanged) this.emit("runtime", this.runtimeSnapshot());
-      return { config: clone(this.config) };
+    if (this.sourceCommit === undefined) {
+      throw new ControllerError("service_unavailable", "durable runtime service is unavailable", 503);
+    }
+    return this.commitSource({
+      kind: "runtime",
+      expectedDocumentRevision,
+      operationId,
+      patch,
     });
   }
 
-  private async setLayout(layout: unknown): Promise<unknown> {
+  private async setConfig(
+    patch: Record<string, unknown>,
+    expectedDocumentRevision: number,
+    expectedSidecarVersion: string | null,
+    operationId: string,
+  ): Promise<unknown> {
     this.assertStartedForMutation();
-    if (this.services.service === undefined) {
-      throw new ControllerError("service_unavailable", "layout update service is unavailable", 503);
+    const request: SourceCommitRequest = {
+      kind: "sidecar",
+      sidecar: "config",
+      expectedDocumentRevision,
+      expectedSidecarVersion,
+      operationId,
+      patch,
+    };
+    if (this.sourceCommit === undefined) {
+      throw new ControllerError("service_unavailable", "durable config service is unavailable", 503);
     }
-    return this.withServiceMutation(async () => {
-      const response = await this.services.service?.("layout.update", { layout: clone(layout) });
-      this.assertNotClosed();
-      if (!isRecord(response) || !("layout" in response)) {
-        throw new ControllerError("invalid_service_response", "layout service returned invalid data", 503);
-      }
-      this.layout = clone(response.layout);
-      this.bump("notebook", { layout: clone(this.layout) });
-      return { layout: clone(this.layout) };
-    });
+    return this.commitSource(request);
+  }
+
+  private async setLayout(
+    layout: unknown,
+    expectedDocumentRevision: number,
+    expectedSidecarVersion: string | null,
+    operationId: string,
+  ): Promise<unknown> {
+    this.assertStartedForMutation();
+    const request: SourceCommitRequest = {
+      kind: "sidecar",
+      sidecar: "layout",
+      expectedDocumentRevision,
+      expectedSidecarVersion,
+      operationId,
+      layout: layout as JsonValue,
+    };
+    if (this.sourceCommit === undefined) {
+      throw new ControllerError("service_unavailable", "durable layout service is unavailable", 503);
+    }
+    return this.commitSource(request);
   }
 
   private async callService(command: string, payload: Record<string, unknown>): Promise<unknown> {
-    this.assertStarted();
+    if (command === "check" || command === "packages.install") this.assertStarted();
+    else this.assertDocumentReady();
+    if (command === "r.select") this.assertNoRuntimeContextReservation();
     if (command === "rename-cell") return this.renameCell(payload);
     if (command === "check") {
       await this.ensureCurrentAnalysis();
@@ -3463,7 +4641,7 @@ export class Controller {
         })),
       };
     }
-    if (command === "set-app") return this.setApp(payload);
+    if (command === "set-app") return this.setApp(payload, this.documentRevisionValue, randomUUID());
     if (command === "source") {
       if (Object.keys(payload).length > 0) {
         throw new ControllerError("invalid_request", "source does not accept arguments", 400);
@@ -3487,6 +4665,7 @@ export class Controller {
       this.assertNotClosed();
       return result;
     }
+    this.assertStarted();
     const response = engineResponseSchema.parse(await this.engine.request(command, clone(payload)));
     if (!response.ok) {
       throw new ControllerError(
@@ -3496,170 +4675,6 @@ export class Controller {
       );
     }
     return response;
-  }
-
-  private startServiceOperation(
-    command: Extract<HostCommand, { type: "service" }>,
-  ): unknown {
-    const normalized = this.normalizeLongService(command.command, command.payload);
-    if (normalized.command === "upload") {
-      return this.startUploadOperation(command, normalized.payload);
-    }
-    if (normalized.command === "packages.install") {
-      this.assertPackageInstallCanStart();
-      this.packageOperationActive = true;
-      this.bump("runtime", this.runtimeSnapshot(), { operationId: command.operationId });
-    }
-    const operation = this.operations.get(command.operationId);
-    if (operation !== undefined) {
-      operation.status = "running";
-      this.rememberOperation(operation);
-    }
-    void this.runLongService(normalized.command, normalized.payload, command.operationId)
-      .then((result) => {
-        if (this.closed) return;
-        if (normalized.command === "packages.install") {
-          this.packageOperationActive = false;
-          this.bump("runtime", this.runtimeSnapshot(), { operationId: command.operationId });
-          this.scheduleWidgetReconciliation();
-        }
-        this.completeOperation(command.operationId, result);
-      }).catch((error: unknown) => {
-        if (this.closed) return;
-        if (normalized.command === "packages.install") {
-          this.packageOperationActive = false;
-          this.bump("runtime", this.runtimeSnapshot(), { operationId: command.operationId });
-          this.scheduleWidgetReconciliation();
-        }
-        const failure = asControllerError(error, "service_error");
-        const hostFailure = failure.toJSON(command.operationId);
-        this.replaceLastActionError(hostFailure, { operationId: command.operationId });
-        this.failOperation(command.operationId, hostFailure);
-      });
-    return { accepted: true, command: normalized.command };
-  }
-
-  private startUploadOperation(
-    command: Extract<HostCommand, { type: "service" }>,
-    payload: Record<string, unknown>,
-  ): unknown {
-    this.assertExecutionPossible();
-    this.assertGraphRunnable();
-    if (this.services.service === undefined) {
-      throw new ControllerError("service_unavailable", "upload service is unavailable", 503);
-    }
-    const name = payload.name;
-    const path = payload.path ?? [];
-    const files = payload.files;
-    const source = payload.source ?? "editor";
-    if (typeof name !== "string" || name.length === 0 || name.length > 256) {
-      throw new ControllerError("invalid_request", "upload widget name is required", 400);
-    }
-    if (!Array.isArray(path)
-      || path.some((part) => typeof part !== "string" || part.length === 0 || part.length > 256)) {
-      throw new ControllerError("invalid_request", "upload widget path is invalid", 400);
-    }
-    if (!Array.isArray(files)) {
-      throw new ControllerError("invalid_request", "upload files must be an array", 400);
-    }
-    if (source !== "editor" && source !== "app" && source !== "mcp" && source !== "cli") {
-      throw new ControllerError("invalid_request", "upload source is invalid", 400);
-    }
-    const location = this.findWidget(name);
-    if (location === null) {
-      throw new ControllerError("invalid_request", `no such widget: ${name}`, 400);
-    }
-    const owner = this.requireCell(location.owner);
-    if (this.statusOf(owner.id) !== "done") {
-      throw new ControllerError("widget_not_current", `widget ${name} is not current`, 409);
-    }
-    const spec = isRecord(location.widget.spec) ? location.widget.spec : null;
-    const target = spec === null ? null : widgetSpecAt(spec, path as string[]);
-    if (target === null || target.kind !== "file") {
-      throw new ControllerError("invalid_request", "upload path is not a file widget", 400);
-    }
-    const key = widgetKey(name, path as string[]);
-    if (this.pendingWidgets.has(key)
-      || [...this.pendingUploads.values()].some((pending) => pending.key === key)) {
-      throw new ControllerError(
-        "operation_in_progress",
-        `widget ${name} already has a pending update`,
-        409,
-      );
-    }
-    const operation = this.operations.get(command.operationId);
-    if (operation !== undefined) {
-      operation.kind = "widget";
-      operation.status = "running";
-      operation.cellIds = [owner.id];
-      this.rememberOperation(operation);
-    }
-    this.pendingUploads.set(command.operationId, {
-      name,
-      path: [...path as string[]],
-      key,
-      owner: owner.id,
-      revision: owner.revision,
-      widget: location.widget,
-      uploadId: null,
-      source,
-    });
-    void this.storeAndApplyUpload(command, files).catch((error: unknown) => {
-      if (this.closed) return;
-      const failure = asControllerError(error, "upload_failed");
-      const hostFailure = failure.toJSON(command.operationId);
-      this.replaceLastActionError(hostFailure, { operationId: command.operationId });
-      this.discardUpload(command.operationId);
-      this.failOperation(command.operationId, hostFailure);
-    });
-    return { accepted: true, command: "upload", owner: owner.id };
-  }
-
-  private async storeAndApplyUpload(
-    command: Extract<HostCommand, { type: "service" }>,
-    files: unknown[],
-  ): Promise<void> {
-    const raw = await this.services.service?.("upload.store", { files: clone(files) });
-    let response: { uploadId: string; value: Array<Record<string, unknown>> };
-    try {
-      response = parseStoredUpload(raw);
-    } catch (error) {
-      if (isRecord(raw) && typeof raw.uploadId === "string") {
-        await this.removeUpload(raw.uploadId);
-      }
-      throw error;
-    }
-    const pending = this.pendingUploads.get(command.operationId);
-    if (pending === undefined || this.closed || isTerminal(
-      this.operations.get(command.operationId)?.status ?? "error",
-    )) {
-      await this.removeUpload(response.uploadId);
-      return;
-    }
-    pending.uploadId = response.uploadId;
-    const current = this.findWidget(pending.name);
-    const owner = this.cellById(pending.owner);
-    const target = current !== null && isRecord(current.widget.spec)
-      ? widgetSpecAt(current.widget.spec, pending.path)
-      : null;
-    if (current === null
-      || current.owner !== pending.owner
-      || current.widget !== pending.widget
-      || owner === undefined
-      || owner.revision !== pending.revision
-      || this.statusOf(owner.id) !== "done"
-      || target?.kind !== "file") {
-      throw new ControllerError("widget_not_current", "file widget is no longer current", 409);
-    }
-    this.startWidgetOperation({
-      type: "widget",
-      operationId: command.operationId,
-      sessionEpoch: command.sessionEpoch,
-      name: pending.name,
-      path: [...pending.path],
-      update: { value: clone(response.value) },
-      source: pending.source,
-    });
   }
 
   private discardUpload(operationId: string): void {
@@ -3677,33 +4692,10 @@ export class Controller {
     }
   }
 
-  private normalizeLongService(
-    command: string,
-    payload: Record<string, unknown>,
-  ): { command: string; payload: Record<string, unknown> } {
-    if (command !== "packages" && !command.startsWith("packages.")) {
-      return { command, payload: clone(payload) };
-    }
-    let operation = command === "packages" ? payload.op : command.slice("packages.".length);
-    if (operation !== "status" && operation !== "declare" && operation !== "install") {
-      throw new ControllerError(
-        "invalid_request",
-        "package operation must be status, declare, or install",
-        400,
-      );
-    }
-    if (operation === "status") {
-      if (payload.package !== undefined || payload.packages !== undefined) {
-        throw new ControllerError("invalid_request", "status does not accept package names", 400);
-      }
-      return { command: "packages.status", payload: {} };
-    }
-    const packages = packageNames(payload, operation === "install");
-    return { command: `packages.${operation}`, payload: { packages } };
-  }
 
   private assertPackageInstallCanStart(): void {
     this.assertStarted();
+    this.assertNoRuntimeContextReservation();
     if (this.packageOperationActive) {
       throw new ControllerError(
         "operation_in_progress",
@@ -3731,45 +4723,72 @@ export class Controller {
     command: string,
     payload: Record<string, unknown>,
     operationId: string,
+    clientId: string,
   ): Promise<unknown> {
-    if (command === "packages.declare") {
-      const declaration = await this.callService(command, payload);
-      const status = await this.callService("packages.status", {});
-      return { declaration: clone(declaration), status: clone(status) };
+    if (command !== "packages.install") {
+      throw new ControllerError("invalid_request", "unsupported long-running service", 400);
     }
-    if (command === "packages.install") {
-      return this.runPackageInstall(payload, operationId);
+    const operation = this.operationFor(operationId, clientId);
+    if (operation !== undefined && operation.status === "accepted") operation.status = "running";
+    if (operation !== undefined) this.rememberOperation(operation);
+    this.packageOperationActive = true;
+    this.packageOperationClientId = clientId;
+    this.bump("runtime", this.runtimeSnapshot(), { operationId });
+    try {
+      return await this.runPackageInstall(payload, operationId, clientId);
+    } finally {
+      this.packageOperationActive = false;
+      this.packageOperationClientId = undefined;
+      this.bump("runtime", this.runtimeSnapshot(), { operationId });
     }
-    return this.callService(command, payload);
   }
 
   private async runPackageInstall(
     payload: Record<string, unknown>,
     operationId: string,
+    clientId: string,
   ): Promise<unknown> {
     let packages = Array.isArray(payload.packages) ? [...payload.packages] as string[] : [];
     if (packages.length === 0) {
-      const before = await this.callService("packages.status", {});
+      const before = await this.callService("packages.status", { operationId });
       packages = packageMissing(before);
     }
-
     let result: unknown;
     let installFailure: unknown;
     try {
-      result = await this.callService("packages.install", { packages });
+      result = await this.callService("packages.install", { ...payload, packages, operationId });
       const failure = serviceResultError(result, operationId);
       if (failure !== null) installFailure = failure;
     } catch (error) {
       installFailure = error;
     }
 
-    await this.restartAfterPackageInstall(operationId);
-    if (installFailure !== undefined) throw installFailure;
-    const status = await this.callService("packages.status", {});
+    let restartFailure: ControllerError | undefined;
+    const restartRequired = !isRecord(result) || result.mutatedLibrary !== false;
+    if (restartRequired) {
+      try {
+        await this.restartAfterPackageInstall(operationId, clientId);
+      } catch (error) {
+        restartFailure = asControllerError(error, "worker_unavailable", 503);
+      }
+    }
+    if (installFailure !== undefined) {
+      if (restartFailure !== undefined) {
+        const installError = asControllerError(installFailure, "install_failed", 500);
+        const restartDetails = restartFailure.toJSON(operationId);
+        const details = isRecord(installError.details)
+          ? { ...installError.details, restartFailure: restartDetails }
+          : { installFailure: installError.details ?? null, restartFailure: restartDetails };
+        throw new ControllerError(installError.code, installError.message, installError.status, details);
+      }
+      throw installFailure;
+    }
+    if (restartFailure !== undefined) throw restartFailure;
+    const status = await this.callService("packages.status", { operationId });
     return { result: clone(result), status: clone(status) };
   }
 
-  private async restartAfterPackageInstall(operationId: string): Promise<void> {
+  private async restartAfterPackageInstall(operationId: string, clientId: string): Promise<void> {
     this.analysisRestarting = true;
     try {
       const pendingAnalysis = this.analysisInFlight;
@@ -3802,26 +4821,39 @@ export class Controller {
       ], { operationId });
 
       let handshake: EngineHandshake;
+      let refreshedEnvironment = this.rEnvironmentValue;
       try {
-        handshake = engineHandshakeSchema.parse(await this.engine.restart());
+        if (this.services.refreshPackageEnvironment !== undefined) {
+          refreshedEnvironment = rEnvironmentSchema.parse(await this.services.refreshPackageEnvironment());
+        }
+        handshake = engineHandshakeSchema.parse(await this.engine.restart(
+          refreshedEnvironment === null ? undefined : { environment: refreshedEnvironment },
+        ));
       } catch (error) {
-        throw new ControllerError(
+        const restartFailure = asControllerError(error, "worker_unavailable", 503);
+        const failure = hostError(
           "worker_unavailable",
-          `R engine restart after package installation failed: ${messageOf(error)}`,
-          503,
+          `R engine restart after package installation failed: ${restartFailure.message}`,
         );
+        this.setRuntimeAvailabilityError(failure);
+        this.bump("runtime", this.runtimeSnapshot(), { operationId });
+        throw new ControllerError("worker_unavailable", failure.message, 503, restartFailure.toJSON(operationId));
       }
       this.assertNotClosed();
       this.handshake = handshake;
+      this.kernelEpochValue = handshake.kernel?.kernelEpoch ?? (handshake.kernelReady ? randomUUID() : null);
+      this.outputStore.setIdentity({ documentRevision: this.documentRevisionValue, kernelEpoch: this.kernelEpochValue });
+      this.analysisEnvironmentIdValue = null;
       this.kernelAvailable = handshake.kernelReady && handshake.captureReady;
       this.analyzerAvailable = handshake.analyzerReady;
       if (!this.kernelAvailable || !this.analyzerAvailable) {
-        throw new ControllerError(
-          "engine_not_ready",
-          "R engine did not become ready after package installation",
-          503,
-        );
+        const failure = hostError("engine_not_ready", "R engine did not become ready after package installation");
+        this.setRuntimeAvailabilityError(failure);
+        this.bump("runtime", this.runtimeSnapshot(), { operationId });
+        throw new ControllerError("engine_not_ready", failure.message, 503);
       }
+      if (refreshedEnvironment !== null) this.rEnvironmentValue = clone(refreshedEnvironment);
+      this.clearRuntimeAvailabilityError();
       await this.ensureCurrentAnalysis();
       this.executionReady = true;
       if (!this.graphValue.resourceLimited) {
@@ -3875,38 +4907,18 @@ export class Controller {
     return { id, name: name ?? null };
   }
 
-  private async setApp(payload: Record<string, unknown>): Promise<unknown> {
-    if (this.services.service === undefined) {
-      throw new ControllerError("service_unavailable", "app update service is unavailable", 503);
+  private async setApp(payload: Record<string, unknown>, expectedDocumentRevision: number, operationId: string): Promise<unknown> {
+    this.assertStartedForMutation();
+    const request: SourceCommitRequest = {
+      kind: "sidecar",
+      expectedDocumentRevision,
+      operationId,
+      patch: payload,
+    };
+    if (this.sourceCommit === undefined) {
+      throw new ControllerError("service_unavailable", "durable app service is unavailable", 503);
     }
-    return this.withServiceMutation(async () => {
-      const current = isRecord(this.metadata.app) ? this.metadata.app : {};
-      const proposed = deepMerge(current, payload);
-      const response = await this.services.service?.("app.update", { app: proposed });
-      this.assertNotClosed();
-      if (!isRecord(response) || !isRecord(response.app)) {
-        throw new ControllerError("invalid_service_response", "app service returned invalid data", 503);
-      }
-      this.metadata = { ...this.metadata, app: clone(response.app) };
-      this.changed = true;
-      this.bump("notebook", { app: clone(response.app) });
-      return { app: clone(response.app) };
-    });
-  }
-
-  private async withServiceMutation<T>(work: () => Promise<T>): Promise<T> {
-    const previous = this.serviceMutationTail;
-    let release!: () => void;
-    this.serviceMutationTail = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    await previous;
-    this.assertNotClosed();
-    try {
-      return await work();
-    } finally {
-      release();
-    }
+    return this.commitSource(request);
   }
 
   private publicCell(cell: CellRecord): HostCellState {
@@ -3915,14 +4927,14 @@ export class Controller {
       id: cell.id,
       type: cell.type,
       body: [...cell.body],
-      options: clone(cell.options),
+      options: clone(cell.options) as unknown as HostCellState["options"],
       revision: cell.revision,
       status: this.statusOf(cell.id),
-      outputs: clone(cell.outputs),
+      outputs: clone(cell.outputs) as unknown as HostCellState["outputs"],
       ...(cell.type === "code" && cell.outputsStale && cell.outputs.length ? { outputsStale: true } : {}),
-      progress: clone(cell.progress),
+      progress: clone(cell.progress) as HostCellState["progress"],
       log: [...cell.log],
-      error: clone(cell.error),
+      error: clone(cell.error) as unknown as HostCellState["error"],
       defs: [...analysis.defs],
       refs: [...analysis.refs],
       selfRefs: [...analysis.selfRefs],
@@ -3937,6 +4949,16 @@ export class Controller {
 
   private cellDiagnostics(cell: CellRecord): AnalysisDiagnostic[] {
     const diagnostics: AnalysisDiagnostic[] = [];
+    if (cell.type === "code" && this.graphValue.resourceLimited) {
+      diagnostics.push({
+        source: "alder",
+        level: "error",
+        code: "graph_blocked",
+        message: `cannot run: dependency graph exceeds ${MAX_DEPENDENCY_EDGES} edge limit`,
+        symbol: null,
+        range: null,
+      });
+    }
     const analysis = cell.analysis;
     if (analysis?.error !== null && analysis?.error !== undefined) {
       diagnostics.push({
@@ -3945,6 +4967,7 @@ export class Controller {
         code: "syntax-error",
         message: analysis.error,
         symbol: null,
+        range: null,
       });
     }
     for (const raw of analysis?.diagnostics ?? []) {
@@ -3958,6 +4981,7 @@ export class Controller {
         code: "dependency-cycle",
         message: `dependency cycle: ${this.graphValue.state.cycles.join(", ")}`,
         symbol: null,
+        range: null,
       });
     }
     const duplicateDefinitions = Object.keys(this.graphValue.state.duplicates)
@@ -3969,6 +4993,7 @@ export class Controller {
         code: "duplicate-definition",
         message: `duplicate definition: ${duplicateDefinitions.join(", ")}`,
         symbol: null,
+        range: null,
       });
     }
     const name = typeof cell.options.name === "string" ? cell.options.name : null;
@@ -3980,6 +5005,7 @@ export class Controller {
           code: "invalid-cell-name",
           message: "cell name must match ^[A-Za-z][A-Za-z0-9_.]*$",
           symbol: null,
+          range: null,
         });
       } else if (this.cells.filter((candidate) => candidate.options.name === name).length > 1) {
         diagnostics.push({
@@ -3988,6 +5014,7 @@ export class Controller {
           code: "duplicate-cell-name",
           message: `duplicate cell name: ${name}`,
           symbol: null,
+          range: null,
         });
       }
     }
@@ -4064,11 +5091,12 @@ export class Controller {
     }
   }
 
-  private clearEditorDiagnostics(): void {
+  private clearEditorDiagnostics(silent = false): void {
     if (this.editorDiagnostics.size === 0) return;
     const affected = [...this.editorDiagnostics.keys()];
     this.editorDiagnostics.clear();
-    this.bump("editor-diagnostics", {});
+    if (!silent) this.bump("editor-diagnostics", {});
+    if (silent) return;
     for (const id of affected) {
       if (id === ".document") continue;
       const cell = this.cellById(id);
@@ -4080,14 +5108,14 @@ export class Controller {
     }
   }
 
-  private clearVariables(): void {
+  private clearVariables(silent = false): void {
     clearTimeout(this.variableRefreshTimer);
     this.variableRefreshTimer = undefined;
     this.variableGeneration = nextRevision(this.variableGeneration);
     this.variableRefreshRequested = false;
     if (this.variables.length === 0) return;
     this.variables = [];
-    this.bump("variables", []);
+    if (!silent) this.bump("variables", []);
   }
 
   private scheduleVariableRefresh(): void {
@@ -4139,25 +5167,39 @@ export class Controller {
   private cancelOwnedOperations(id: string): string[] {
     const cancelledWidgetRequests: string[] = [];
     this.cancelRuntimeRequestsOwnedBy(id, "stale_value");
-    for (const [key, operationId] of [...this.pendingWidgets]) {
-      const operation = this.operations.get(operationId);
+    for (const [key, operationKey] of [...this.pendingWidgets]) {
+      const operation = this.operationForKey(operationKey);
       if (operation?.cellIds?.includes(id)) {
+        const operationId = operation.id;
         if (operation.kind === "widget") cancelledWidgetRequests.push(operationId);
         this.pendingWidgets.delete(key);
-        this.discardUpload(operationId);
+        this.discardUpload(operationKey);
         const activeReset = this.activeButtonResets.get(operationId);
         if (activeReset !== undefined) {
           this.activeButtonResets.delete(operationId);
-          setWidgetOperation(activeReset.reset.widget, activeReset.reset.key, {
-            token: activeReset.token,
-            operationId,
-            status: "cancelled",
-            error: { code: "widget_not_current", message: "widget owner changed" },
-          });
+          const reset = activeReset.reset;
+          const owner = this.cellById(reset.owner);
+          const current = this.findWidget(reset.name);
+          if (owner !== undefined && owner.revision === reset.revision
+            && current !== null && current.record.id === reset.record.id
+            && this.pendingWidgets.get(reset.key) === undefined) {
+            void this.updateOutputRecord(owner, current.record, (data) => {
+              const widget = findRichOutputRecord(data, (output) => output.kind === "widget" && output.name === reset.name);
+              if (widget !== null) setWidgetOperation(widget, reset.key, {
+                token: activeReset.token,
+                operationId,
+                status: "cancelled",
+                error: { code: "widget_not_current", message: "widget owner changed" },
+              });
+            }).then((record) => {
+              reset.record = record;
+              this.bump("cell", this.publicCell(owner), { operationId, cellId: owner.id, revision: owner.revision });
+            }).catch(() => undefined);
+          }
         }
         if (!isTerminal(operation.status)) {
           operation.status = "cancelled";
-          operation.error = hostError("widget_not_current", "widget owner changed", operationId);
+          operation.error = hostError("widget_not_current", "widget owner changed", operation.id);
           operation.settledAt = Date.now();
           this.rememberOperation(operation);
           this.notifyOperationWaiters(operation);
@@ -4174,13 +5216,13 @@ export class Controller {
         }
       }
     }
-    for (const [operationId, pending] of [...this.pendingUploads]) {
+    for (const [operationKey, pending] of [...this.pendingUploads]) {
       if (pending.owner !== id) continue;
-      this.discardUpload(operationId);
-      const operation = this.operations.get(operationId);
+      this.discardUpload(operationKey);
+      const operation = this.operationForKey(operationKey);
       if (operation !== undefined && !isTerminal(operation.status)) {
         operation.status = "cancelled";
-        operation.error = hostError("widget_not_current", "widget owner changed", operationId);
+        operation.error = hostError("widget_not_current", "widget owner changed", operation.id);
         operation.settledAt = Date.now();
         this.rememberOperation(operation);
         this.notifyOperationWaiters(operation);
@@ -4224,6 +5266,7 @@ export class Controller {
     this.failOperation(
       pending.operationId,
       hostError("stale_value", staleValueMessage(pending.name), pending.operationId),
+      pending.clientId,
     );
   }
 
@@ -4234,6 +5277,7 @@ export class Controller {
       this.failOperation(
         pending.operationId,
         hostError(inspectionCode, staleValueMessage(pending.name), pending.operationId),
+        pending.clientId,
       );
     }
     for (const [key, pending] of [...this.pendingLazyOutputs]) {
@@ -4242,6 +5286,7 @@ export class Controller {
       this.failOperation(
         pending.operationId,
         hostError("lazy_expired", "lazy output is no longer current", pending.operationId),
+        pending.clientId,
       );
     }
     for (const [handle, pending] of [...this.pendingTablePages]) {
@@ -4250,17 +5295,20 @@ export class Controller {
       this.failOperation(
         pending.operationId,
         hostError("table_unavailable", "table is no longer current", pending.operationId),
+        pending.clientId,
       );
     }
   }
 
-  private findWidget(name: string): { owner: string; widget: Record<string, unknown> } | null {
+  private findWidget(name: string): { owner: string; widget: Record<string, unknown>; record: OutputRecord } | null {
     for (const cell of this.cells) {
       for (let index = cell.outputs.length - 1; index >= 0; index -= 1) {
-        const widget = findOutputRecord(cell.outputs[index], (output) =>
+        const record = cell.outputs[index]!;
+        if (this.outputStore.getRecord(record.id) !== record) continue;
+        const widget = findRichOutputRecord(record.data, (output) =>
           output.kind === "widget" && output.name === name,
         );
-        if (widget !== null) return { owner: cell.id, widget };
+        if (widget !== null) return { owner: cell.id, widget, record };
       }
     }
     return null;
@@ -4268,71 +5316,135 @@ export class Controller {
 
   private findOutput(
     predicate: (output: Record<string, unknown>) => boolean,
-  ): { owner: string; output: Record<string, unknown> } | null {
+  ): { owner: string; output: Record<string, unknown>; record: OutputRecord } | null {
     for (const cell of this.cells) {
-      for (const output of cell.outputs) {
-        const found = findOutputRecord(output, predicate);
-        if (found !== null) return { owner: cell.id, output: found };
+      for (const record of cell.outputs) {
+        if (this.outputStore.getRecord(record.id) !== record) continue;
+        const found = findRichOutputRecord(record.data, predicate);
+
+        if (found !== null) return { owner: cell.id, output: found, record };
       }
     }
     return null;
   }
+  private findCanonicalOutputById(id: string): OutputRecord | null {
+    for (const cell of this.cells) {
+      const record = cell.outputs.find((candidate) => candidate.id === id);
+      if (record !== undefined && this.outputStore.getRecord(record.id) === record) return record;
+    }
+    return null;
+  }
 
-  private createOperation(id: string, kind: OperationRecord["kind"]): OperationRecord {
-    if (this.operations.has(id)) {
-      throw new ControllerError("operation_id_conflict", `operation ${id} already exists`, 409);
+
+  private async updateOutputRecord(
+    owner: CellRecord,
+    expected: OutputRecord,
+    update: (data: Record<string, unknown>) => void,
+  ): Promise<OutputRecord> {
+    if (this.outputStore.getRecord(expected.id) !== expected) {
+      throw new ControllerError("stale_value", "output is no longer current", 409);
+    }
+    const data = clone(expected.data);
+    if (!isRecord(data)) throw new ControllerError("invalid_engine_response", "output data is invalid", 503);
+    update(data);
+    const checked = richOutputPayloadSchema.safeParse(data);
+    if (!checked.success) {
+      throw new ControllerError("invalid_engine_response", "output data is invalid", 503);
+    }
+    const next = await this.outputStore.updateRecord(expected, checked.data);
+    const index = owner.outputs.findIndex((record) => record === expected);
+    if (index < 0 || this.outputStore.getRecord(expected.id) !== next) {
+      this.outputStore.discardExact([next]);
+      throw new ControllerError("stale_value", "output is no longer current", 409);
+    }
+    owner.outputs[index] = next;
+    return next;
+  }
+
+  private assertLiveOutput(owner: CellRecord, record: OutputRecord, error: string): void {
+    if (
+      this.outputStore.getRecord(record.id) !== record
+      || record.sessionEpoch !== this.epochValue
+      || record.kernelEpoch !== this.kernelEpochValue
+      || record.runId === null
+      || record.cellId !== owner.id
+      || record.revision !== owner.revision
+      || this.statusOf(owner.id) !== "done"
+    ) {
+      throw new ControllerError(error, "output is no longer current", 409);
+    }
+  }
+
+
+  private createOperation(
+    id: string,
+    kind: OperationRecord["kind"],
+    clientId = "internal",
+    commandSequence = 1,
+  ): OperationRecord {
+    if (this.operations.has(this.operationKey(clientId, id))) {
+      throw new ControllerError("operation_id_conflict", "operation " + id + " already exists", 409);
     }
     const operation: OperationRecord = {
       id,
+      clientId,
+      commandSequence,
       kind,
       status: "accepted",
-      acceptedAt: Date.now(),
+      documentRevision: this.documentRevisionValue,
+      runId: null,
+      result: null,
       error: null,
+      acceptedAt: Date.now(),
     };
-    this.operations.set(operation.id, operation);
+    this.operations.set(this.operationKey(operation.clientId, operation.id), operation);
     this.trimOperations();
     return operation;
   }
 
   private rememberOperation(operation: OperationRecord): void {
-    this.operations.set(operation.id, operation);
-    this.emit("operation", clone(operation), { operationId: operation.id, runId: operation.runId });
+    this.operations.set(this.operationKey(operation.clientId, operation.id), operation);
+    this.emit("operation", clone(operation), { operationId: operation.id, runId: operation.runId ?? undefined });
     this.trimOperations();
   }
 
-  private completeOperation(id: string, result?: unknown): void {
-    const operation = this.operations.get(id);
+  private completeOperation(id: string, result?: unknown, clientId = "internal"): void {
+    const operation = this.operationFor(id, clientId);
     if (operation === undefined || isTerminal(operation.status)) return;
     operation.status = "done";
-    operation.result = clone(result);
+    operation.result = (result === undefined ? null : clone(result)) as OperationRecord["result"];
     operation.error = null;
+    operation.documentRevision = this.documentRevisionValue;
     operation.settledAt = Date.now();
     this.rememberOperation(operation);
     this.notifyOperationWaiters(operation);
   }
 
-  private failOperation(id: string, error: HostError): void {
-    const operation = this.operations.get(id);
+  private failOperation(id: string, error: HostError, clientId = "internal"): void {
+    const operation = this.operationFor(id, clientId);
     if (operation === undefined || isTerminal(operation.status)) return;
     operation.status = "error";
+    if (operation.kind !== "run") operation.result = null;
     operation.error = clone(error);
+    operation.documentRevision = this.documentRevisionValue;
     operation.settledAt = Date.now();
     this.rememberOperation(operation);
     this.notifyOperationWaiters(operation);
   }
 
-  private markOperationCancellationRequested(id: string): void {
-    const operation = this.operations.get(id);
+  private markOperationCancellationRequested(id: string, clientId = "internal"): void {
+    const operation = this.operationFor(id, clientId);
     if (operation === undefined || isTerminal(operation.status)) return;
-    operation.status = "cancellation-requested";
+    if (operation.status === "accepted") operation.status = "running";
     this.rememberOperation(operation);
   }
 
   private notifyOperationWaiters(operation: OperationRecord): void {
     if (!isTerminal(operation.status)) return;
-    const waiters = this.operationWaiters.get(operation.id);
+    const key = this.operationKey(operation.clientId, operation.id);
+    const waiters = this.operationWaiters.get(key);
     if (waiters === undefined) return;
-    this.operationWaiters.delete(operation.id);
+    this.operationWaiters.delete(key);
     for (const waiter of waiters) waiter(operation);
   }
 
@@ -4343,12 +5455,202 @@ export class Controller {
       if (isTerminal(operation.status)) this.operations.delete(id);
     }
   }
+  private assertDocumentRevision(expected: number): void {
+    if (expected !== this.documentRevisionValue) {
+      throw new ControllerError("source_conflict", "document revision is stale", 409, {
+        kind: "document", expectedDocumentRevision: expected, actualDocumentRevision: this.documentRevisionValue,
+      });
+    }
+  }
 
+  private assertKernelEpoch(expected: string | null): void {
+    if (expected === null || this.kernelEpochValue === null || expected !== this.kernelEpochValue) {
+      throw new ControllerError("stale_kernel", "kernel incarnation is stale", 409, {
+        expectedKernelEpoch: expected, actualKernelEpoch: this.kernelEpochValue,
+      });
+    }
+  }
+
+  private resolveCellRef(ref: CellRef, transaction?: unknown): string {
+    if (ref !== null && typeof ref === "object" && "cellId" in ref && typeof ref.cellId === "string") {
+      if (this.cellById(ref.cellId) === undefined) throw new ControllerError("not_found", "no such cell: " + ref.cellId, 404);
+      return ref.cellId;
+    }
+    if (ref !== null && typeof ref === "object" && "creationId" in ref && typeof ref.creationId === "string") {
+      const mapping = isRecord(transaction) && isRecord(transaction.created) ? transaction.created : null;
+      const candidate = mapping === null ? undefined : mapping[ref.creationId];
+      const created = typeof candidate === "string" ? candidate : undefined;
+      if (created === undefined || this.cellById(created) === undefined) throw new ControllerError("not_found", "no such transaction creation: " + ref.creationId, 404);
+      return created;
+    }
+    throw new ControllerError("invalid_request", "cell reference is invalid", 400);
+  }
+
+  private startUploadOperation(command: Extract<HostCommand, { type: "upload" }>): unknown {
+    this.assertExecutionPossible();
+    this.assertGraphRunnable();
+    this.assertKernelEpoch(command.kernelEpoch);
+    if (this.services.service === undefined) {
+      throw new ControllerError("service_unavailable", "upload service is unavailable", 503);
+    }
+    const location = this.findWidget(command.name);
+    if (location === null) throw new ControllerError("invalid_request", "no such widget: " + command.name, 400);
+    const owner = this.requireCell(location.owner);
+    if (this.statusOf(owner.id) !== "done") {
+      throw new ControllerError("widget_not_current", "widget " + command.name + " is not current", 409);
+    }
+    this.assertLiveOutput(owner, location.record, "widget_not_current");
+    const spec = isRecord(location.widget.spec) ? location.widget.spec : null;
+    const target = spec === null ? null : widgetSpecAt(spec, command.path);
+    if (target === null || target.kind !== "file") {
+      throw new ControllerError("invalid_request", "upload path is not a file widget", 400);
+    }
+    const key = widgetKey(command.name, command.path);
+    if (this.pendingWidgets.has(key) || [...this.pendingUploads.values()].some((pending) => pending.key === key)) {
+      throw new ControllerError("operation_in_progress", "widget " + command.name + " already has a pending update", 409);
+    }
+    const operation = this.operationFor(command.operationId, command.clientId);
+    if (operation !== undefined) {
+      operation.kind = "widget";
+      operation.status = "running";
+      operation.cellIds = [owner.id];
+      this.rememberOperation(operation);
+    }
+    this.pendingUploads.set(this.operationKey(command.clientId, command.operationId), {
+      clientId: command.clientId,
+      name: command.name,
+      path: [...command.path],
+      key,
+      owner: owner.id,
+      revision: owner.revision,
+      record: location.record,
+      uploadId: null,
+      source: "app",
+    });
+    void this.storeAndApplyUpload(command).catch((error: unknown) => {
+      if (this.closed) return;
+      const failure = asControllerError(error, "upload_failed");
+      const hostFailure = failure.toJSON(command.operationId);
+      this.replaceLastActionError(hostFailure, { operationId: command.operationId });
+      this.discardUpload(this.operationKey(command.clientId, command.operationId));
+      this.failOperation(command.operationId, hostFailure, command.clientId);
+    });
+    return { accepted: true, command: "upload", owner: owner.id };
+  }
+
+  private async storeAndApplyUpload(command: Extract<HostCommand, { type: "upload" }>): Promise<void> {
+    const raw = await this.services.service?.("upload.store", { files: clone(command.files) });
+    const response = parseStoredUpload(raw);
+    const pending = this.pendingUploads.get(this.operationKey(command.clientId, command.operationId));
+    if (pending === undefined || this.closed || isTerminal(this.operationFor(command.operationId, command.clientId)?.status ?? "error")) {
+      await this.removeUpload(response.uploadId);
+      return;
+    }
+    pending.uploadId = response.uploadId;
+    const current = this.findWidget(pending.name);
+    const owner = this.cellById(pending.owner);
+    const target = current !== null && isRecord(current.widget.spec) ? widgetSpecAt(current.widget.spec, pending.path) : null;
+    if (current === null || current.owner !== pending.owner || current.record.id !== pending.record.id
+      || owner === undefined || owner.revision !== pending.revision || this.statusOf(owner.id) !== "done"
+      || target?.kind !== "file") {
+      throw new ControllerError("widget_not_current", "file widget is no longer current", 409);
+    }
+    pending.record = current.record;
+    this.startWidgetOperation({
+      type: "widget",
+      operationId: command.operationId,
+      clientId: command.clientId,
+      commandSequence: command.commandSequence,
+      sessionEpoch: command.sessionEpoch,
+      name: pending.name,
+      path: [...pending.path],
+      update: { value: clone(response.value) as JsonValue },
+      source: pending.source,
+      kernelEpoch: command.kernelEpoch,
+      expectedRevision: pending.revision,
+    });
+  }
+
+
+  private executeSourceService(request: SourceCommitRequest): Promise<unknown> {
+    if (this.sourceCommit === undefined) {
+      return Promise.reject(new ControllerError("service_unavailable", "durable source service is unavailable", 503));
+    }
+    return this.commitSource(request);
+  }
+
+  private async declarePackages(
+    packages: readonly string[],
+    expectedDocumentRevision: number,
+    expectedSidecarVersion: string | null,
+    operationId: string,
+  ): Promise<unknown> {
+    const request: SourceCommitRequest = {
+      kind: "sidecar",
+      sidecar: "packages",
+      expectedDocumentRevision,
+      expectedSidecarVersion,
+      operationId,
+      packages,
+    };
+    if (this.sourceCommit === undefined) {
+      throw new ControllerError("service_unavailable", "durable package declaration service is unavailable", 503);
+    }
+    return this.commitSource(request);
+  }
+
+  private async executeTypedService(command: Extract<HostCommand, { type: "save-as" | "reload-source" | "select-r" | "set-app" | "packages-declare" | "packages-install" | "publish" | "upload" }>): Promise<unknown> {
+    switch (command.type) {
+      case "select-r":
+        this.assertDocumentRevision(command.expectedDocumentRevision);
+        return this.callService("r.select", { rscript: command.rscript, persistDefault: command.persistDefault });
+      case "set-app":
+        return this.setApp(command.patch, command.expectedDocumentRevision, command.operationId);
+      case "packages-declare":
+        return this.declarePackages(command.packages, command.expectedDocumentRevision, command.expectedSidecarVersion, command.operationId);
+      case "packages-install":
+        this.assertDocumentRevision(command.expectedDocumentRevision);
+        this.assertKernelEpoch(command.kernelEpoch);
+        this.assertPackageInstallCanStart();
+        this.assertExecutionPossible();
+        return this.runLongService("packages.install", { packages: command.packages }, command.operationId, command.clientId);
+      case "publish": {
+        this.assertDocumentRevision(command.expectedDocumentRevision);
+        const reservation = this.reserveRuntimeContext();
+        try {
+          return await this.callService("publish", { includeCode: command.includeCode, outputPath: command.outputPath });
+        } finally {
+          reservation.release();
+        }
+      }
+      case "save-as":
+        return this.executeSourceService({
+          kind: "save-as",
+          expectedDocumentRevision: command.expectedDocumentRevision,
+          operationId: command.operationId,
+          path: command.path,
+          fingerprint: stableStringify({ path: command.path, expectedDestination: command.expectedDestination }),
+        });
+      case "reload-source":
+        return this.executeSourceService({
+          kind: "reload-source",
+          expectedDocumentRevision: command.expectedDocumentRevision,
+          expectedDisk: { digest: command.expectedDiskDigest, version: command.expectedDiskVersion },
+          operationId: command.operationId,
+          fingerprint: stableStringify({ expectedDiskDigest: command.expectedDiskDigest, expectedDiskVersion: command.expectedDiskVersion }),
+        });
+      case "upload":
+        this.assertKernelEpoch(command.kernelEpoch);
+        return this.callService("upload", { name: command.name, path: command.path, files: command.files });
+      default:
+        throw assertNever(command);
+    }
+  }
   private trimCommandEntries(): void {
     if (this.commandEntries.size <= COMMAND_DEDUPLICATION_LIMIT) return;
-    for (const [id] of this.commandEntries) {
+    for (const [key, entry] of this.commandEntries) {
       if (this.commandEntries.size <= COMMAND_DEDUPLICATION_LIMIT) break;
-      if (isTerminal(this.operations.get(id)?.status ?? "done")) this.commandEntries.delete(id);
+      if (isTerminal(this.operationForKey(this.operationKey(entry.clientId, entry.operationId))?.status ?? "done")) this.commandEntries.delete(key);
     }
   }
 
@@ -4362,6 +5664,11 @@ export class Controller {
     this.bump("service-error", clone(next), identity);
   }
 
+  private commitDocumentRevision(): number {
+    this.documentRevisionValue = nextRevision(this.documentRevisionValue);
+    this.outputStore.setIdentity({ documentRevision: this.documentRevisionValue, kernelEpoch: this.kernelEpochValue });
+    return this.documentRevisionValue;
+  }
   private bump(
     type: HostEventType,
     payload: unknown,
@@ -4380,24 +5687,25 @@ export class Controller {
 
   private publishGraphResourceError(
     identity: Partial<Pick<HostEvent, "operationId" | "runId">> = {},
+    silent = false,
   ): void {
     if (this.graphValue.resourceLimited) {
-      this.replaceLastActionError(hostError(
-        "graph_too_complex",
-        `dependency graph exceeds the ${MAX_DEPENDENCY_EDGES} edge limit`,
-      ), identity);
-    } else if (
-      this.lastActionError?.code === "graph_too_complex"
-      && this.analysisNeeded.size === 0
-    ) {
-      this.replaceLastActionError(null, identity);
+      const error = hostError("graph_blocked", "dependency graph exceeds the " + MAX_DEPENDENCY_EDGES + " edge limit");
+      if (silent) this.lastActionError = error;
+      else this.replaceLastActionError(error, identity);
+    } else if (this.lastActionError?.code === "graph_blocked" && this.analysisNeeded.size === 0) {
+      if (silent) this.lastActionError = null;
+      else this.replaceLastActionError(null, identity);
     }
+  }
+  private emitActiveClientsChanged(clientId: string): void {
+    this.emit("active_clients_changed", { activeClientIds: [...this.activeClients] }, { clientId });
   }
 
   private emit(
     type: HostEventType,
     payload: unknown,
-    identity: Partial<Pick<HostEvent, "operationId" | "cellId" | "runId" | "revision" | "sequence">> = {},
+    identity: Partial<Pick<HostEvent, "operationId" | "clientId" | "commandSequence" | "cellId" | "runId" | "kernelEpoch" | "revision" | "sequence">> = {},
   ): void {
     if (this.closed && type !== "runtime") return;
     if (type === "runtime") {
@@ -4411,11 +5719,19 @@ export class Controller {
       epoch: this.epochValue,
       cursor: this.cursorValue,
       version: this.version,
+      documentRevision: this.documentRevisionValue,
       timestamp: Date.now(),
       type,
-      ...identity,
-      payload: clone(payload),
+      payload: clone(payload) as HostEvent["payload"],
     };
+    if (identity.operationId !== undefined) event.operationId = identity.operationId;
+    if (identity.clientId !== undefined) event.clientId = identity.clientId;
+    if (identity.commandSequence !== undefined) event.commandSequence = identity.commandSequence;
+    if (identity.cellId !== undefined) event.cellId = identity.cellId;
+    if (identity.runId !== undefined) event.runId = identity.runId;
+    if (identity.kernelEpoch !== undefined) event.kernelEpoch = identity.kernelEpoch;
+    if (identity.revision !== undefined) event.revision = identity.revision;
+    if (identity.sequence !== undefined) event.sequence = identity.sequence;
     const bytes = jsonBytes(event);
     this.eventJournal.push(event);
     this.eventJournalBytes += bytes;
@@ -4448,31 +5764,72 @@ export class Controller {
   }
 
   private runtimeSnapshot(): HostSnapshot["runtime"] {
+    const queuedRunId = this.queue[0]?.runId ?? null;
     return {
+      documentReady: this.documentReady,
+      analyzerState: this.starting && !this.analyzerAvailable ? "starting" : this.analyzerAvailable ? "ready" : (this.analyzerStartupAttempted ? "failed" : "stopped"),
+      kernelState: this.starting && !this.kernelAvailable ? "starting" : this.kernelAvailable ? "ready" : (this.kernelStartupAttempted ? "failed" : "stopped"),
+      executionReady: this.executionReady,
+      startupActivated: this.startupActivated,
+      executionBlockedReason: this.runtimeAvailabilityError,
+      kernelEpoch: this.kernelEpochValue,
+      rEnvironment: this.rEnvironmentValue,
+      analysisEnvironmentId: this.analysisEnvironmentIdValue,
       executionMode: this.executionMode,
       runOnStartup: this.runOnStartup,
-      executionReady: this.executionReady,
-      analyzerAvailable: this.analyzerAvailable,
-      kernelAvailable: this.kernelAvailable,
       packageOperationActive: this.packageOperationActive,
-      busy: this.activeEvaluation !== null,
-      activeRunId: this.activeEvaluation?.job.runId ?? null,
+      busy: this.activeEvaluation !== null || this.queue.length > 0 || this.runPreparationActive,
+      activeRunId: this.activeEvaluation?.job.runId ?? queuedRunId,
     };
   }
 
-  private async renderMarkdownCells(): Promise<void> {
+  private markdownPayload(cell: CellRecord): unknown {
+    return {
+      kind: "markdown",
+      text: toLogicalCellBody("markdown", cell.body).join("\n"),
+    };
+  }
+
+  private ingestMarkdown(cell: CellRecord): OutputRecord | Promise<OutputRecord> {
+    return this.outputStore.ingestAlder(this.markdownPayload(cell), {
+      sessionEpoch: this.epochValue,
+      documentRevision: this.documentRevisionValue,
+      kernelEpoch: null,
+      runId: null,
+      cellId: cell.id,
+      revision: cell.revision,
+    });
+  }
+
+  private installInitialMarkdownOutputs(): void {
     for (const cell of this.cells) {
       if (cell.type !== "markdown") continue;
-      const output = await this.renderMarkdown(cell.body);
-      this.assertNotClosed();
-      cell.outputs = [output];
+      const result = this.ingestMarkdown(cell);
+      if (result instanceof Promise) {
+        void result.then((record) => {
+          const current = this.cellById(cell.id);
+          if (current === undefined || current !== cell || current.type !== "markdown") {
+            this.outputStore.discardExact([record]);
+            return;
+          }
+          current.outputs = [record];
+          current.status = "done";
+        }).catch((error: unknown) => {
+          this.replaceLastActionError(hostError("markdown_render_failed", messageOf(error)), {
+            cellId: cell.id,
+            revision: cell.revision,
+          });
+        });
+      } else {
+        cell.outputs = [result];
+      }
     }
   }
 
   private scheduleMarkdownRender(cell: CellRecord): void {
     const revision = cell.revision;
     const body = [...cell.body];
-    void this.renderMarkdown(body).then((output) => {
+    const install = (record: OutputRecord): void => {
       const current = this.cellById(cell.id);
       if (
         this.closed
@@ -4480,27 +5837,37 @@ export class Controller {
         || current.type !== "markdown"
         || current.revision !== revision
         || !arrayEqual(current.body, body)
-      ) return;
-      current.outputs = [output];
+      ) {
+        this.outputStore.discardExact([record]);
+        return;
+      }
+      const previous = current.outputs;
+      current.outputs = [record];
+      current.status = "done";
+      current.outputsStale = false;
+      this.outputStore.discardExact(previous);
       this.bump("cell", this.publicCell(current), {
         cellId: current.id,
         revision: current.revision,
       });
-    }).catch((error: unknown) => {
+    };
+    const fail = (error: unknown): void => {
       if (this.closed) return;
       this.replaceLastActionError(hostError("markdown_render_failed", messageOf(error)), {
         cellId: cell.id,
         revision,
       });
-    });
+    };
+    try {
+      const result = this.ingestMarkdown(cell);
+      if (result instanceof Promise) void result.then(install).catch(fail);
+      else install(result);
+    } catch (error) {
+      fail(error);
+    }
   }
 
-  private async renderMarkdown(lines: readonly string[]): Promise<unknown> {
-    if (this.services.renderMarkdown !== undefined) {
-      return clone(await this.services.renderMarkdown(lines));
-    }
-    return { kind: "markdown", source: [...lines] };
-  }
+
 
   private assertNotClosed(): void {
     if (this.closed) throw new ControllerError("session_stopped", "session is stopped", 409);
@@ -4519,13 +5886,20 @@ export class Controller {
     }
   }
 
-  private assertStarted(): void {
+  private assertDocumentReady(): void {
     this.assertNotClosed();
+    if (!this.documentReady) {
+      throw new ControllerError("session_not_started", "document is not ready", 409);
+    }
+  }
+
+  private assertStarted(): void {
+    this.assertDocumentReady();
     if (!this.started) throw new ControllerError("session_not_started", "session is not started", 409);
   }
 
   private assertStartedForMutation(): void {
-    this.assertStarted();
+    this.assertDocumentReady();
     if (this.engineRestarting) {
       throw new ControllerError(
         "operation_in_progress",
@@ -4535,8 +5909,13 @@ export class Controller {
     }
   }
 
+
   private assertExecutionPossible(): void {
     this.assertStarted();
+    const availability = this.runtimeAvailabilityError;
+    if (availability?.code === "kernel_state_invalid") {
+      throw new ControllerError(availability.code, availability.message, 409);
+    }
     if (!this.executionReady || !this.kernelAvailable) {
       throw new ControllerError("worker_unavailable", "R kernel is not ready", 503);
     }
@@ -4555,8 +5934,8 @@ export class Controller {
     }
   }
 
-  private runtimeRequestCurrent(operationId: string, generation: number): boolean {
-    const operation = this.operations.get(operationId);
+  private runtimeRequestCurrent(operationId: string, generation: number, clientId = "internal"): boolean {
+    const operation = this.operationFor(operationId, clientId);
     return !this.closed
       && generation === this.runtimeGeneration
       && operation !== undefined
@@ -4600,25 +5979,11 @@ function analysisCacheEntryBytes(key: string, value: AnalysisCacheValue): number
     : keyBytes + valueBytes;
 }
 
-function runtimeMode(metadata: Record<string, unknown>): "automatic" | "lazy" | undefined {
-  const runtime = isRecord(metadata.runtime) ? metadata.runtime : null;
-  const value = runtime?.execution_mode ?? runtime?.executionMode;
-  return value === "automatic" || value === "lazy" ? value : undefined;
-}
-
-function runtimeStartup(metadata: Record<string, unknown>): boolean | undefined {
-  const runtime = isRecord(metadata.runtime) ? metadata.runtime : null;
-  const value = runtime?.run_on_startup ?? runtime?.runOnStartup;
-  return typeof value === "boolean" ? value : undefined;
-}
 
 function joinSource(lines: readonly string[]): string {
   return lines.join("\n");
 }
 
-function markdownPlaceholder(lines: readonly string[]): unknown {
-  return { kind: "markdown", source: [...lines], pending: true };
-}
 
 function nextRevision(value: number): number {
   if (!Number.isInteger(value) || value < 0 || value >= 2_147_483_647) {
@@ -4655,7 +6020,11 @@ function hostError(
     message,
     ...(operationId === undefined ? {} : { operationId }),
     ...(details === undefined ? {} : { details: clone(details) }),
-  };
+  } as HostError;
+}
+
+function commandKey(clientId: string, operationId: string): string {
+  return clientId + "\u0000" + operationId;
 }
 
 function errorStatus(code: string): number {
@@ -4663,6 +6032,7 @@ function errorStatus(code: string): number {
   if (code === "worker_unavailable" || code === "analysis_unavailable") return 503;
   if (
     code === "source_conflict"
+    || code === "config_shadowed"
     || code === "run_in_progress"
     || code === "operation_in_progress"
     || code === "package_operation_in_progress"
@@ -4679,7 +6049,8 @@ function asControllerError(
 ): ControllerError {
   if (error instanceof ControllerError) return error;
   if (isRecord(error) && typeof error.code === "string" && error instanceof Error) {
-    return new ControllerError(error.code, error.message, errorStatus(error.code));
+    const details = Object.hasOwn(error, "details") ? error.details : undefined;
+    return new ControllerError(error.code, error.message, errorStatus(error.code), details);
   }
   return new ControllerError(fallbackCode, messageOf(error), fallbackStatus);
 }
@@ -4696,7 +6067,7 @@ function abortError(): Error {
 }
 
 function isTerminal(status: OperationRecord["status"]): boolean {
-  return status === "done" || status === "error" || status === "cancelled";
+  return status === "done" || status === "error" || status === "interrupted" || status === "cancelled";
 }
 
 function boundedPositiveInteger(value: number | undefined, fallback: number): number {
@@ -4801,8 +6172,7 @@ function hasUnpairedSurrogate(value: string): boolean {
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
-
-function findOutputRecord(
+function findRichOutputRecord(
   value: unknown,
   predicate: (output: Record<string, unknown>) => boolean,
 ): Record<string, unknown> | null {
@@ -4810,12 +6180,12 @@ function findOutputRecord(
   if (predicate(value)) return value;
   if (value.kind === "layout" && Array.isArray(value.children)) {
     for (const child of value.children) {
-      const found = findOutputRecord(child, predicate);
+      const found = findRichOutputRecord(child, predicate);
       if (found !== null) return found;
     }
   }
-  if (value.kind === "lazy" && value.child !== undefined) {
-    return findOutputRecord(value.child, predicate);
+  if (value.kind === "lazy" && value.child !== null && value.child !== undefined) {
+    return findRichOutputRecord(value.child, predicate);
   }
   return null;
 }
@@ -4906,8 +6276,14 @@ function validateWidgetUpdate(kind: string, update: Record<string, unknown>): Re
       : /^\d{4}-\d{2}-\d{2}$/;
     if (values.length !== expected || values.some((value) =>
       typeof value !== "string" || !pattern.test(value)
+      || ((kind === "date" || kind === "date_range") && !canonicalCalendarDate(value))
       || (kind === "datetime" && !canonicalUtcSecond(value)))) {
       throw new ControllerError("invalid_request", "temporal widget value required", 400);
+    }
+    const first = values[0] as string;
+    const last = values[1] as string;
+    if (kind === "date_range" && first > last) {
+      throw new ControllerError("invalid_request", "date range must be non-decreasing", 400);
     }
     return { value: values };
   }
@@ -4948,6 +6324,12 @@ function validateWidgetUpdate(kind: string, update: Record<string, unknown>): Re
     return { value: clone(update.value) };
   }
   throw new ControllerError("invalid_request", "unknown widget kind", 400);
+}
+
+function canonicalCalendarDate(value: string): boolean {
+  const milliseconds = Date.parse(value + "T00:00:00Z");
+  return Number.isFinite(milliseconds)
+    && new Date(milliseconds).toISOString().slice(0, 10) === value;
 }
 
 function canonicalUtcSecond(value: string): boolean {
@@ -5005,7 +6387,7 @@ function patchWidgetSpec(
 function setWidgetOperation(
   widget: Record<string, unknown>,
   key: string,
-  operation: Record<string, unknown>,
+  operation: WidgetOperation,
 ): void {
   const operations = isRecord(widget.operations) ? widget.operations : {};
   operations[key] = clone(operation);
@@ -5019,7 +6401,7 @@ function positiveInteger(value: unknown): value is number {
 }
 
 function nonnegativeInteger(value: unknown): value is number {
-  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && value <= R_INTEGER_MAX;
 }
 
 function integerArray(value: unknown, positive: boolean): value is number[] {
@@ -5028,25 +6410,11 @@ function integerArray(value: unknown, positive: boolean): value is number[] {
     && new Set(value).size === value.length;
 }
 
-function deepMerge(
-  base: Record<string, unknown>,
-  patch: Record<string, unknown>,
-): Record<string, unknown> {
-  const output = clone(base);
-  for (const [key, value] of Object.entries(patch)) {
-    output[key] = isRecord(value) && isRecord(output[key])
-      ? deepMerge(output[key], value)
-      : clone(value);
-  }
-  return output;
-}
 
 function isLongService(command: string): boolean {
-  return command === "export"
-    || command === "publish"
+  return command === "publish"
     || command === "upload"
-    || command === "packages"
-    || command.startsWith("packages.");
+    || command === "packages.install";
 }
 
 function packageNames(payload: Record<string, unknown>, allowEmpty: boolean): string[] {

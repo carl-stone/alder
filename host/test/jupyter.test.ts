@@ -1,18 +1,26 @@
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
-import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join, resolve } from "node:path";
 import test from "node:test";
-
 import { FrameProtocolError } from "../src/framing.js";
 import { ArkKernel, decodeMessage, type ArkKernelOptions } from "../src/jupyter.js";
+import { createProcessScope, type ProcessScope } from "../src/processes.js";
+import type { ApplicationResources } from "../src/resources.js";
 
 const DELIMITER = Buffer.from("<IDS|MSG>");
 const KEY = "independent-test-key";
-const ARK = fileURLToPath(new URL("../.runtime/ark", import.meta.url));
+const APPLICATION_ROOT = process.env.ALDER_APPLICATION_ROOT;
+const SELECTED_APPLICATION_ROOT = APPLICATION_ROOT === undefined ? undefined : resolve(APPLICATION_ROOT);
+const ARK = SELECTED_APPLICATION_ROOT === undefined
+  ? "alder-application-root-not-selected"
+  : join(SELECTED_APPLICATION_ROOT, "resources", "runtime", "ark");
+const NO_SPAWN_SCOPE = {
+  spawn: async (): Promise<never> => { throw new Error("spawn not expected"); },
+  close: async (): Promise<void> => {},
+} satisfies ProcessScope;
+const integration = { skip: APPLICATION_ROOT === undefined, timeout: 60_000 };
 
 interface WireParts {
   header?: Buffer;
@@ -48,7 +56,7 @@ function wire(parts: WireParts = {}): Buffer[] {
   ];
 }
 
-function baseOptions(directory = tmpdir()): ArkKernelOptions {
+function baseOptions(directory = tmpdir(), processScope: ProcessScope = NO_SPAWN_SCOPE): ArkKernelOptions {
   return {
     executable: ARK,
     startupFile: join(directory, "start.R"),
@@ -57,6 +65,23 @@ function baseOptions(directory = tmpdir()): ArkKernelOptions {
     environment: process.env,
     startupTimeoutMs: 15_000,
     shutdownTimeoutMs: 1_000,
+    processScope,
+  };
+}
+
+function resourcesFor(root: string): ApplicationResources {
+  return {
+    root,
+    cliLauncher: join(root, "bin", "alder"),
+    hostEntry: join(root, "resources", "host", "alder-host.mjs"),
+    rendererDirectory: join(root, "resources", "app"),
+    workerDirectory: join(root, "resources", "worker"),
+    rLibraryDirectory: join(root, "resources", "r-library"),
+    arkExecutable: join(root, "resources", "runtime", "ark"),
+    airExecutable: join(root, "resources", "runtime", "air"),
+    nodeExecutable: join(root, "resources", "runtime", "node"),
+    processSupervisorExecutable: join(root, "resources", "runtime", "alder-process-supervisor"),
+    electronEntry: null,
   };
 }
 
@@ -99,6 +124,30 @@ test("Jupyter decoder rejects unauthenticated, malformed, and over-limit message
   );
 });
 
+test("Jupyter decoder accepts bounded execute_input source and rejects physical oversize", () => {
+  const source = "x".repeat(9 * 1024 * 1024);
+  const content = Buffer.from(JSON.stringify({ code: source }), "utf8");
+  const header = Buffer.from(JSON.stringify({
+    msg_id: "message-large-source",
+    username: "ark",
+    session: "kernel-session",
+    date: "2026-09-06T00:00:00.000Z",
+    msg_type: "execute_input",
+    version: "5.4",
+  }), "utf8");
+  const frames = wire({ header, content });
+  const physicalLimit = 16 * 1024 * 1024;
+  const decoded = decodeMessage(frames, KEY, physicalLimit);
+  assert.equal(decoded.header.msg_type, "execute_input");
+  assert.equal(decoded.content.code, source);
+  const total = frames.reduce((sum, frame) => sum + frame.length, 0);
+  assert.equal(total <= physicalLimit, true);
+  assert.throws(
+    () => decodeMessage(frames, KEY, total - 1),
+    /configured byte limit/,
+  );
+});
+
 test("Ark options and preflight reject unsafe resource settings before spawning", async () => {
   assert.throws(
     () => new ArkKernel({ ...baseOptions(), startupTimeoutMs: 0 }),
@@ -125,23 +174,33 @@ test("Ark options and preflight reject unsafe resource settings before spawning"
 });
 
 test("live Ark cancellation settles the request and cannot poison the next execution", {
-  skip: !existsSync(ARK) && "bundled Ark is unavailable",
-  timeout: 45_000,
+  ...integration,
 }, async () => {
   const directory = await mkdtemp(join(tmpdir(), "alder-jupyter-live-"));
   const connections = join(directory, "connections");
   await mkdir(connections);
   await writeFile(join(directory, "start.R"), "options(ark.error_entrace=FALSE)\n", { mode: 0o600 });
-  const kernel = new ArkKernel(baseOptions(directory));
+  const ownerScope = await createProcessScope(resourcesFor(SELECTED_APPLICATION_ROOT!));
+  let ownedProcess: Awaited<ReturnType<ProcessScope["spawn"]>> | undefined;
+  const processScope: ProcessScope = {
+    spawn: async options => {
+      const process = await ownerScope.spawn(options);
+      ownedProcess = process;
+      return process;
+    },
+    close: () => ownerScope.close(),
+  };
+  const kernel = new ArkKernel(baseOptions(directory, processScope));
   try {
     const [firstInfo, secondInfo] = await Promise.all([kernel.start(), kernel.start()]);
     assert.equal(firstInfo.implementation.toLowerCase(), "ark");
+    assert.equal(firstInfo.buildVersion, "0.1.252-alder.1");
+    assert.equal(firstInfo.mimePublisher, "alder-json-v1");
     assert.deepEqual(secondInfo, firstInfo);
     assert.equal(kernel.ready, true);
-    const pid = kernel.processId;
-    assert.ok(pid !== undefined);
+    assert.ok(ownedProcess !== undefined);
 
-    const files = await readdir(connections);
+    const files = (await readdir(connections)).filter((file) => file.endsWith(".json"));
     assert.equal(files.length, 1);
     const connectionPath = join(connections, files[0]!);
     assert.equal((await stat(connectionPath)).mode & 0o777, 0o600);
@@ -197,10 +256,11 @@ test("live Ark cancellation settles the request and cannot poison the next execu
       kernel.execute("x".repeat(8 * 1024 * 1024 + 1)),
       /source exceeds message limit/,
     );
+    assert.equal((await kernel.execute("marker <- 42L")).reply.content.status, "ok");
     assert.equal((await kernel.execute("6 * 7")).reply.content.status, "ok");
 
     const auxiliary = kernel.execute("Sys.sleep(0.05); inspected <- TRUE", {}, { auxiliary: true });
-    const afterInspection = kernel.execute("stopifnot(inspected, identical(.Last.value, 42)); 43L");
+    const afterInspection = kernel.execute("stopifnot(inspected, identical(marker, 42L)); 43L");
     assert.equal((await auxiliary).reply.content.status, "ok");
     assert.equal((await afterInspection).reply.content.status, "ok");
     const auxiliaryError = await kernel.execute("stop('inspection failed')", {}, { auxiliary: true });
@@ -209,16 +269,20 @@ test("live Ark cancellation settles the request and cannot poison the next execu
     await assert.rejects(kernel.execute("NULL", {
       onMessage: () => { throw new Error("inspection consumer failed"); },
     }, { auxiliary: true }), /inspection consumer failed/);
-    assert.equal((await kernel.execute("stopifnot(identical(.Last.value, 43L)); 44L")).reply.content.status, "ok");
+    assert.equal((await kernel.execute("stopifnot(identical(marker, 42L)); 44L")).reply.content.status, "ok");
 
     await kernel.terminate();
     assert.equal(kernel.ready, false);
     assert.deepEqual(await readdir(connections), []);
-    assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
     await assert.rejects(kernel.execute("1"), /unavailable/);
     await assert.rejects(kernel.start(), /closed/);
+    await processScope.close();
+    const owned = ownedProcess;
+    assert.ok(owned !== undefined);
+    await owned.exited;
   } finally {
     await kernel.terminate().catch(() => {});
+    await processScope.close().catch(() => {});
     await rm(directory, { recursive: true, force: true });
   }
 });

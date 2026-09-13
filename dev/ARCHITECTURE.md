@@ -44,17 +44,6 @@ entry separately; a blocked main thread's input delay must not disappear from
 the result merely because JavaScript could not start its own timer sooner.
 
 ## Ownership and processes
-
-```mermaid
-flowchart LR
-  Browser[TypeScript browser editor] <-->|Versioned commands and events| Host[TypeScript application host]
-  CLI[CLI, MCP and R entry points] --> Host
-  Host <-->|Engine requests and output events| Kernel[One warm serial Ark R kernel per notebook]
-  Host <-->|Source snapshots and analysis| Analysis[Warm R analysis service]
-  Host <-->|Codec and pure services| Services[Warm R service process]
-  Host --> Jobs[Isolated R publishing and background jobs]
-```
-
 The TypeScript host owns source revisions, notebook structure, the dependency
 graph, execution plans, stale-state transitions, operation journals, persistence
 coordination, artifact lifetime, browser connections, HTTP and MCP adapters, and
@@ -62,16 +51,29 @@ the LSP client. One controller implements operations for every client. The
 browser maintains local editing intent and acknowledged revisions; it is not a
 second execution authority.
 
-The R package owns R parsing and semantic analysis, the byte-preserving notebook
-codec, evaluation, R objects and environments, widget constructors and R-side
-validation, condition/graphics capture, object rendering, package/renv work,
-and R publishing integrations. Interactive and Session-backed export entry points
-call the same host controller. File conversion and analysis helpers stay local.
-`alder_source(path, env)` retains its explicit in-process environment semantics,
-as does the one-shot `alder_test()` utility: each walks a fixed analyzed plan in
-R, with no reactive Session, transport or event loop. Port graph parity tests so
-these utilities and the host agree on ordering, disabled descendants and
-diagnostics. There must not be a second reactive controller for headless exports.
+The helper R package owns only the pure AST/scoping walk, widget constructors and
+R-side validation, raw rich-value constructors, explicit cache identity and
+atomic storage, performance helpers, and runtime-protocol utilities. Ordinary
+Rscript callers use the exported ui, out, and cache values directly; the package
+does not start a host, reactive Session, HTTP service, or file converter. The
+host owns notebook revisions, persistence, execution, graph scheduling,
+networking, publishing jobs, MCP, and LSP integration.
+The browser and static publisher share `host/src/output-renderer.ts`. Publishing
+injects its document and selects static mode; both paths resolve retained artifact
+handles through the canonical `OutputStore`, so rendering is not a second storage
+or capture authority.
+Browser consumers exchange the complete immutable artifact descriptor for a
+bounded, resource-scoped capability URL. Resource reads need no notebook cookie
+and work from opaque sandbox origins. Issuing a capability does not retain its
+output: removing the owning record revokes new public reads, independently of
+private publishing pins and already-acquired readers. Pathless publishing returns
+an artifact descriptor with a bounded result read lease; an explicitly requested
+destination returns only its path and captured document revision.
+HTML artifacts use opaque `allow-scripts` frames without `allow-same-origin`.
+PDFs instead use Chromium’s native viewer: their descriptor and response MIME
+must be exactly `application/pdf`, with `nosniff`, never HTML or `srcdoc`. Native
+PDF viewing cannot run under HTML iframe sandbox flags. Offline publication
+embeds the same PDF bytes in a `data:application/pdf` frame.
 
 The Ark kernel retains one notebook environment. Packages, closures,
 database connections, external pointers and large data remain in this process.
@@ -84,9 +86,9 @@ remain available during a long computation. It analyzes immutable source
 snapshots, never evaluates notebook code, and returns revision-tagged results.
 The host discards obsolete analysis and cannot dispatch against an unvalidated
 source revision. LSP assistance and optional lintr diagnostics are independent
-of the required dependency/syntax validation. Codec and other pure service
-requests use a separate warm R process, so document conversion cannot occupy
-the required analyzer while a Run waits for validation.
+of required dependency/syntax validation. There is no second R controller or
+codec/service process behind interactive operations.
+
 
 The current host uses Node and TypeScript, with shared browser/host types and
 runtime schemas. Use maintained MCP and JSON-RPC/LSP libraries, retaining Alder's
@@ -219,9 +221,13 @@ Keep the adapter thin. Alder retains notebook-specific R helpers for binding
 ownership/cleanup, widgets, cached values and specialized rendering. Reuse Ark's
 native capture, graphics, inspection and data-explorer features wherever they
 replace Alder code while preserving output bounds, conditions and ownership.
-Measure replacements through the complete browser path. Avoid a competing R frontend,
-custom kernel framing or platform interrupt supervisor. Required dependency
-analysis remains an independent warm R service so it works during evaluation.
+Measure replacements through the complete browser path. Avoid a competing R frontend
+or custom kernel transport. The bundled native process supervisor owns process
+containment and teardown; Ark owns execution, Jupyter interruption, and kernel
+semantics. On Unix, containment retains each leader's exact birth identity through
+group retirement, and a detached monitor drains the group after a natural root exit.
+Required dependency analysis remains an independent warm R service so it works
+during evaluation.
 Ark's optional language and debugging services can be integrated through its
 supported frontend interfaces without changing notebook execution ownership.
 
@@ -240,29 +246,30 @@ parallel cell semantics or a new public async-cell API.
 
 Ship a versioned application host and built browser assets; end users do not
 build JavaScript or install npm dependencies when opening a notebook. Platform
-release archives/installers include the supported Node runtime, Ark and required native transport libraries. The R package
-locates an explicitly configured or installed compatible host, reports a clear
-installation/version error, and never silently downloads executables while
-running notebook code. Support the existing CLI and R entry points; preserve
-R selection and private/project libraries. CI must validate Linux, macOS and
-Windows packages, startup, first/warm execution, interruption and cleanup.
+release archives/installers include the supported Node runtime, Ark and required native transport libraries. The installed
+application owns host launch, CLI entry points, and selected-R
+resolution. It requires a user-selected compatible installed R; it does not
+bundle or mutate that installation. The helper R package exposes only `ui`,
+`out`, and `cache` to ordinary Rscript callers and does not locate or launch the
+host. The application's private helper library is distinct from each project's
+library; project-library changes are explicit application operations. CI must
+validate Linux, macOS and Windows packages, startup, first/warm execution,
+interruption and cleanup.
 Source-development builds use a pinned Node toolchain and lockfile.
 
 ## Component migration inventory
 
 | Current component | Destination and concrete work | Regression coverage |
 | --- | --- | --- |
-| `R/session.R` | Port the reactive controller to TypeScript: revision transactions, invalidation, execution/run/widget journals, scheduling and freshness. First extract R-specific metadata/rendering calls behind the engine adapter. Keep the existing implementation selectable only during isolated parity tests, then remove it from production. | [test-session.R](../tests/testthat/test-session.R), [controller.test.ts](../host/test/controller.test.ts) |
-| `R/analysis.R`, `R/notebook.R` | Retain the R parser, scoping walk and lossless codec. Expose revision-tagged per-cell analysis and file-codec services. Move interactive ownership indexes and incremental graph maintenance to the host. Retain fixed-plan R graph helpers for `alder_source()`/`alder_test()` and compare their results with the host on the same analysis fixtures. | [test-analysis.R](../tests/testthat/test-analysis.R), [test-notebook.R](../tests/testthat/test-notebook.R), [graph.test.ts](../host/test/graph.test.ts), [services.test.ts](../host/test/services.test.ts) |
-| `R/worker.R`, `inst/worker/worker.R` | Replace the R process supervisor and 20-ms pipe polling with the host engine adapter. Retain and modularize R evaluation, environments, native output capture and request-scoped interruption. Implement the versioned handshake, framed messages, ordered events and true completion acknowledgments. | [test-ark-bootstrap.R](../tests/testthat/test-ark-bootstrap.R), [engine.test.ts](../host/test/engine.test.ts), [jupyter.test.ts](../host/test/jupyter.test.ts) |
-| `R/server.R`, `R/mcp.R`, `R/lsp.R` | Move networking, transport framing, connection lifecycle and dispatch into host libraries. Port origin/CSP/path/error and native LSP URI contracts. Local and URL MCP adapters call the same controller methods and operation journals. | [server-compat.test.ts](../host/test/server-compat.test.ts), [mcp-installed.test.ts](../host/test/mcp-installed.test.ts), [clients.test.ts](../host/test/clients.test.ts) |
-| `R/dataflow.R` | Put interactive graph/outline/status projections in the host and update affected records only. Keep R object summarization in the kernel. Preserve the public pure snapshot helpers and test compatibility with the new projections. | [test-dataflow.R](../tests/testthat/test-dataflow.R), [graph.test.ts](../host/test/graph.test.ts), [controller.test.ts](../host/test/controller.test.ts) |
-| `inst/app/static/app.js`, `js/src/editor.ts` | Split into typed document, command, event and view modules. Replace state polling with push/recovery, send pending edits with Run, create editors immediately, reconcile changed cells and virtualize offscreen editors. Keep trusted keyboard, focus, scroll, source-conflict and diagnostic behavior. | [test-browser.R](../tests/testthat/test-browser.R), [browser.test.ts](../host/test/browser.test.ts), [clients.test.ts](../host/test/clients.test.ts) |
-| `R/outputs.R`, `R/ui-widgets.R`, `R/cache.R` | Keep R APIs, validation, renderers and cached computation semantics. Reuse or lazily initialize capture infrastructure; return bounded metadata/artifact handles. Make one installed widget implementation accessible to the kernel, then remove the byte-mirrored module and its build step once bootstrap parity passes. | [test-widgets.R](../tests/testthat/test-widgets.R), [test-cache.R](../tests/testthat/test-cache.R), [test-host-outputs.R](../tests/testthat/test-host-outputs.R) |
-| `R/config.R`, `R/layout.R`, `R/app.R` | Move session configuration, layout persistence and app presentation coordination into the host; preserve the documented R configuration/construction APIs and sidecar formats. Avoid two independently mutating sources of configuration. | [test-config.R](../tests/testthat/test-config.R), [test-layout.R](../tests/testthat/test-layout.R), [test-app.R](../tests/testthat/test-app.R), [controller.test.ts](../host/test/controller.test.ts) |
-| `R/packages.R`, `R/format.R`, `R/convert.R`, `R/publish.R`, `R/export.R` | Retain R ecosystem work and pure converters. The host coordinates revision checks, file transactions, jobs and artifacts; Session-backed exports use its controller. Package changes invalidate relevant engine/analysis state. Preserve caller-environment behavior of the fixed-plan source/test utilities. | [test-export-conditions.R](../tests/testthat/test-export-conditions.R), [test-host-services.R](../tests/testthat/test-host-services.R), [jobs.test.ts](../host/test/jobs.test.ts), [host.test.ts](../host/test/host.test.ts) |
-| `R/cli.R`, `exec/`, `inst/worker/server.R` | Make R and shell entry points locate the packaged compatible host and selected R. Port exit codes, signals, library/bootstrap settings and shutdown ownership; retire the R HTTP launcher after installed parity. | [test-cli.R](../tests/testthat/test-cli.R), [test-host-launch.R](../tests/testthat/test-host-launch.R), [smoke-release.mjs](../host/scripts/smoke-release.mjs) |
-| `tests/testthat/`, `dev/reviews/` | Keep R semantics tests in R; port controller/transport contracts to TypeScript and retain installed browser/API/MCP acceptance. Adapt the latency observer to command/event receipts without moving its trusted-input or visible-result endpoints. Carry forward raw baseline artifacts for comparison. | [browser.test.ts](../host/test/browser.test.ts), [latency-observer.test.ts](../host/test/latency-observer.test.ts), [profile-evidence.test.ts](../host/test/profile-evidence.test.ts) |
+| R/analysis.R | Retain the AST parser and scoping walk only. The host owns notebook revisions, graph scheduling, execution, persistence, and diagnostics projection; no R graph builder or offline evaluator remains. | [test-analysis.R](../tests/testthat/test-analysis.R), host analyzer scenarios |
+| R/ui-widgets.R | Retain pure widget constructors and validation. Ark loads the installed implementation; there is no worker mirror or reactive controller in the helper package. | [test-widgets.R](../tests/testthat/test-widgets.R), helper-artifact scenario |
+| R/outputs.R | Retain raw rich-value and media/artifact constructors. Rendering, transport, and output journals are host responsibilities; constructors do not sanitize or publish HTML. | [test-outputs.R](../tests/testthat/test-outputs.R), helper-artifact scenario |
+| R/cache.R | Retain explicit memory/disk cache identity, reference guards, corrupt-entry recovery, and atomic RDS replacement. Do not add a cache framework as a compatibility substitute. | [test-cache.R](../tests/testthat/test-cache.R) |
+| R/performance.R, R/runtime-protocol.R, R/utils.R | Retain only genuinely R-specific performance, wire, and small internal helpers used by Ark/analyzer and ordinary Rscript callers. | [test-performance.R](../tests/testthat/test-performance.R) |
+| R/alder-package.R, DESCRIPTION | Describe the helper package only: public ui/out/cache exports, ordinary Rscript use, and exact runtime dependencies. The installed application owns host launch and selected-R resolution. | [helper-artifact scenario](../host/scripts/smoke-scenarios/helper-artifact.mjs) |
+| host/scripts/smoke-scenarios/, dev/reviews/run-bulk-de-scale.sh | Exercise the installed application and real browser/controller path against the bulk-DE fixture; do not invoke an R controller, offline evaluator, or fake engine. | bulk-DE application evidence |
+| dev/reviews/run-package-check.sh, dev/reviews/verify-source-artifact.R | Build, verify, install, and check only the helper source artifact. Reject application payloads, launchers, temporary evidence, and host resources. | helper-artifact scenario |
+| tests/testthat/, tests/testthat.R | Keep pure helper semantics in R; run the installed test_check runner from tests/ so testthat resolves the package test directory. Controller, browser, transport, and launch contracts live in host scenarios/tests. | [testthat.R](../tests/testthat.R) |
 
 Maintain a contract checklist as each component moves: original regression,
 new regression, old component removed, and installed evidence. Do not replace
@@ -276,8 +283,8 @@ semantics and public pure helpers have explicit owners above.
 | 0: measurement | Add trusted input-to-result fixtures, latency distributions, opt-in stage traces and CPU profiles. Record current baseline and unmet targets. | Exact results/source/run receipts, all samples retained, negative controls reject old/wrong results and missing traces; clean teardown. |
 | 1: contracts and host scaffold | Create TypeScript host/shared-schema packages, version handshake, engine adapter interface, event cursor/snapshot rules and packaged launchers. Specify commands above as executable schemas. | Schema/compatibility tests, no execution before readiness, installed host/R discovery on every platform. |
 | 2: complete vertical slice | Implement create/edit/analyze/run/stream/interrupt/recover using one persistent kernel and the new host. Adapt Ark using the same scenarios and remove duplicate kernel machinery. | Correct three-cell flow, immediate edit-and-Run, serial state/RNG, streamed output, late Stop, worker death and restart; benchmark includes all process hops. |
-| 3: single controller | Port Session's graph scheduling, invalidation, revision transactions, run/widget journals and value freshness. Extract remaining R-only helpers. | Existing Session, HTTP and MCP contracts through the new controller; no shadow execution of user code. Remove the old production scheduler after parity. |
-| 4: services and clients | Move HTTP, MCP and LSP transport to host libraries; make interactive R/CLI and Session-backed export entry points use the host; migrate save/format, config, packages, layout, publishing and artifacts. | Browser/API/MCP agreement, native paths/lint, conflicts, output fidelity, caller-environment source/test semantics, startup/shutdown and platform tests. Delete duplicated local/URL MCP dispatch and settlement logic. |
+| 3: single controller | Completed: the TypeScript host owns graph scheduling, invalidation, revision transactions, run/widget journals, persistence, and value freshness; the helper retains only pure R semantics. | Host/controller/browser/API/MCP evidence; no shadow execution of user code. |
+| 4: services and clients | Completed: HTTP, MCP, LSP, save, configuration, packages, layout, publishing, and artifact flows are host/application concerns; ordinary Rscript exposes only ui, out, and cache. | Browser/API/MCP agreement, native paths/lint, conflicts, output fidelity, startup/shutdown, and platform evidence. |
 | 5: latency and long notebooks | Push deltas, incremental analysis/projections, reusable/lazy capture, bounded previews, selective rendering and editor virtualization. Initialize internal machinery before execution readiness without executing notebook source. | Warm median <=50 ms/p95 <=100 ms for every scalar scenario, measured from real input; first-after-readiness interactions meet the same targets across fresh sessions. Unrelated cells do not dominate. Scientific/graphics and trusted browser flows still pass. |
 | 6: release | Remove transitional adapters and obsolete production code, revise ADRs/docs, ship host/runtime/R packages and run full installed/cold gates. | Exact artifact identities, all supported platforms, complete correctness/latency gates and no orphan processes. Historical release evidence is not reused as proof for changed artifacts. |
 

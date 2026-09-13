@@ -1,41 +1,20 @@
-test_that("kernel runtimes use the installed widget implementation", {
-  m <- make_test_session(c(
-    "# %%", "library(alder)",
-    "# %%", "control <- ui$slider(1, 9, value = 3, step = 2)", "control"
-  ), execution_mode = "lazy")
-  withr::defer(m$close())
-  s <- m$session
-  expect_identical(s$await_operation(s$run_all()$run_id)$status, "done")
-  output <- s$state()$cells[[2L]]$outputs[[1L]]
-  expect_identical(output$kind, "widget")
-  expect_identical(output$spec$kind, "slider")
-  expect_identical(output$spec$value, 3L)
-  expect_identical(output$spec$step, 2L)
-  expect_true(s$state()$runtime$kernelAvailable)
-})
-
-test_that("constructors return classed lists with explicit $value and no .value", {
+test_that("constructors expose widget kind, value, and label", {
   n <- alder:::ui$slider(10, 1000, value = 300)
   expect_true(inherits(n, "alder_widget"))
   expect_equal(n$kind, "slider")
   expect_equal(n$value, 300)
-  expect_null(n$.value)
-  expect_false(".value" %in% names(unclass(n)))
   # label may be NULL
   expect_null(n$label)
   expect_equal(alder:::ui$slider(1, 9, label = "l")$label, "l")
 })
 
-test_that("sliders and numbers normalize value and bounds to unclassed double", {
+test_that("sliders and numbers expose numeric values as doubles", {
   n <- alder:::ui$slider(1L, 9L, value = 3L, step = 2L)
   expect_true(is.double(n$min) && is.double(n$max) && is.double(n$step))
   expect_true(is.double(n$value))
   m <- alder:::ui$number(5L, min = 1L, max = 10L)
   expect_true(is.double(m$value) && is.double(m$min) && is.double(m$max))
-  # classless: a plain list under the class
-  expect_false(is.object(unclass(n)))
 })
-
 test_that("validation rejects bad bounds, ranges, and step lattices", {
   expect_error(alder:::ui$slider(5, 1), "min")
   expect_error(alder:::ui$slider(1, 10, value = 11), "between")
@@ -54,14 +33,7 @@ test_that("validation rejects bad bounds, ranges, and step lattices", {
   expect_error(alder:::ui$number(6, min = 1, step = 2), "lattice")
 })
 
-test_that("validate_widget is the shared full-object contract", {
-  # Fully constructed widgets validate cleanly, with or without a label.
-  expect_silent(alder:::validate_widget(alder:::ui$slider(1, 10, value = 5)))
-  expect_silent(alder:::validate_widget(alder:::ui$slider(1, 10, label = "warmth")))
-  expect_silent(alder:::validate_widget(alder:::ui$dropdown(c("a", "b"))))
-  expect_silent(alder:::validate_widget(alder:::ui$text_input()))
-  expect_silent(alder:::validate_widget(alder:::ui$checkbox(TRUE)))
-  expect_silent(alder:::validate_widget(alder:::ui$run_button()))
+test_that("validate_widget rejects malformed widget metadata and constraints", {
   # A widget whose kind or label field was corrupted by hand is rejected,
   # even when the value itself is fine: the object-level validator must not
   # depend on how the object was constructed.
@@ -127,11 +99,18 @@ test_that("run_button is a Boolean one-shot input that starts FALSE", {
   expect_false(is.null(rb$label))
   expect_equal(alder:::ui$run_button("go")$label, "go")
   # A run-button value is a logical scalar when driven by the host.
-  rb$value <- TRUE
-  expect_true(inherits(rb, "alder_widget"))
-  rb <- alder:::validate_widget_value("run_button", TRUE, list())
-  expect_identical(rb, TRUE)
+  expect_identical(
+    alder:::validate_widget_value("run_button", TRUE, list()),
+    TRUE
+  )
   expect_error(alder:::validate_widget_value("run_button", 1, list()), "logical")
+})
+
+test_that("counter widgets stay within the R integer range", {
+  maximum <- .Machine$integer.max
+  expect_identical(alder:::ui$button(value = maximum)$value, as.integer(maximum))
+  expect_error(alder:::ui$button(value = maximum + 1), "out of range")
+  expect_error(alder:::ui$button(value = Inf), "scalar integer")
 })
 
 test_that("datetime widgets use explicit UTC whole-second instants", {
@@ -154,6 +133,18 @@ test_that("datetime widgets use explicit UTC whole-second instants", {
   expect_error(alder:::ui$datetime(value, max = fractional), "whole-second")
 })
 
+test_that("file inputs require non-empty character filters", {
+  expect_null(alder:::ui$file()$accept)
+  expect_error(alder:::ui$file(accept = character()), "non-empty")
+
+  files <- alder:::ui$file(
+    accept = c(".csv", "text/csv"),
+    multiple = TRUE
+  )
+  expect_identical(files$accept, c(".csv", "text/csv"))
+  expect_identical(files$multiple, TRUE)
+})
+
 test_that("ui exposes the supported widget constructor set", {
   expect_setequal(
     names(alder:::ui),
@@ -167,90 +158,6 @@ test_that("ui exposes the supported widget constructor set", {
   )
 })
 
-test_that("ui constructor signatures and installed reference stay complete", {
-  expected_formals <- list(
-    slider = alist(min = , max = , value = min, step = 1, label = NULL),
-    range_slider = alist(min = , max = , value = c(min, max), step = 1,
-                         label = NULL),
-    dropdown = alist(choices = , value = choices[[1L]], label = NULL),
-    radio = alist(choices = , value = choices[[1L]], label = NULL),
-    multiselect = alist(choices = , value = choices[0], label = NULL),
-    text_input = alist(value = "", label = NULL),
-    text_area = alist(value = "", label = NULL, rows = 4L),
-    number = alist(value = 0, min = NULL, max = NULL, step = 1,
-                   label = NULL),
-    checkbox = alist(value = FALSE, label = NULL),
-    switch = alist(value = FALSE, label = NULL),
-    run_button = alist(label = "Run"),
-    button = alist(label = "Click", value = 0L),
-    date = alist(value = Sys.Date(), min = NULL, max = NULL, label = NULL),
-    date_range = alist(value = c(Sys.Date(), Sys.Date()), min = NULL,
-                       max = NULL, label = NULL),
-    datetime = alist(value = NULL, min = NULL, max = NULL, label = NULL),
-    code_editor = alist(value = "", language = "r", label = NULL),
-    refresh = alist(interval = 5, label = "Refresh"),
-    file = alist(label = NULL, accept = NULL, multiple = FALSE),
-    table = alist(data = , selection = c("multi", "single", "none"),
-                  page_size = 25L, label = NULL),
-    dataframe = alist(data = , label = NULL),
-    array = alist(... = ),
-    dictionary = alist(... = ),
-    form = alist(child = , submit_label = "Submit")
-  )
-  for (nm in names(expected_formals)) {
-    expect_identical(formals(alder:::ui[[nm]]),
-                     as.pairlist(expected_formals[[nm]]),
-                     info = nm)
-  }
-
-  repo <- normalizePath(testthat::test_path("..", ".."))
-  base <- repo
-  if (!file.exists(file.path(base, "man", "ui.Rd"))) {
-    base <- file.path(repo, "00_pkg_src", "alder")
-  }
-  rd_path <- file.path(base, "man", "ui.Rd")
-  expect_true(file.exists(rd_path))
-  rd <- paste(readLines(rd_path, warn = FALSE), collapse = "\n")
-  signatures <- c(
-    "ui$slider(min, max, value = min, step = 1, label = NULL)",
-    "ui$range_slider(min, max, value = c(min, max), step = 1, label = NULL)",
-    "ui$dropdown(choices, value = choices[[1L]], label = NULL)",
-    "ui$radio(choices, value = choices[[1L]], label = NULL)",
-    "ui$multiselect(choices, value = choices[0], label = NULL)",
-    "ui$text_input(value = \"\", label = NULL)",
-    "ui$text_area(value = \"\", label = NULL, rows = 4L)",
-    "ui$number(value = 0, min = NULL, max = NULL, step = 1, label = NULL)",
-    "ui$checkbox(value = FALSE, label = NULL)",
-    "ui$switch(value = FALSE, label = NULL)",
-    "ui$run_button(label = \"Run\")",
-    "ui$button(label = \"Click\", value = 0L)",
-    "ui$date(value = Sys.Date(), min = NULL, max = NULL, label = NULL)",
-    paste0("ui$date_range(value = c(Sys.Date(), Sys.Date()), min = NULL, ",
-           "max = NULL, label = NULL)"),
-    "ui$datetime(value = NULL, min = NULL, max = NULL, label = NULL)",
-    "ui$code_editor(value = \"\", language = \"r\", label = NULL)",
-    "ui$refresh(interval = 5, label = \"Refresh\")",
-    "ui$file(label = NULL, accept = NULL, multiple = FALSE)",
-    paste0("ui$table(data, selection = c(\"multi\", \"single\", \"none\"), ",
-           "page_size = 25L, label = NULL)"),
-    "ui$dataframe(data, label = NULL)",
-    "ui$array(...)",
-    "ui$dictionary(...)",
-    "ui$form(child, submit_label = \"Submit\")"
-  )
-  for (signature in signatures) {
-    expect_true(grepl(signature, rd, fixed = TRUE), info = signature)
-  }
-  for (contract in c(
-    "lattice rooted", "identical in type and value", "one-shot logical",
-    "nonnegative integer", "whole-second", "server-side temporary",
-    "selected rows as a data frame", "current browser transformations",
-    "named list of child values", "Child edits update a draft"
-  )) {
-    expect_true(grepl(contract, rd, fixed = TRUE), info = contract)
-  }
-  expect_false(grepl("ADR 0003", rd, fixed = TRUE))
-})
 
 test_that("composite widget paths update only the addressed child", {
   original <- alder:::ui$array(

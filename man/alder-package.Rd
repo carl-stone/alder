@@ -4,50 +4,44 @@
 \name{alder-package}
 \alias{alder}
 \alias{alder-package}
-\title{Reactive notebooks for R}
+\title{Reactive notebook helpers for R}
 \description{
-Alder keeps notebooks in ordinary \code{.R} files separated by \verb{# \%\%} comments.
-A local web editor runs cells in dependency order in a dedicated R process.
-Changing a widget reruns its dependents; lazy mode leaves those cells stale
-until requested. Read widget values explicitly with \verb{$value}.
+Alder's R package provides ordinary values for notebook controls, rich output
+records, and explicit computation caching. The same helpers work in a plain
+\code{Rscript} process; no application host is required to construct or inspect
+their values.
 }
-\section{Getting started}{
+\section{Public helpers}{
 
-Install the shell command with \code{\link[=alder_install_cli]{alder_install_cli()}}, then run
-\verb{alder analysis.R} in a terminal. The command owns the editor, server, and
-worker lifecycle. Copy the installed Iris example to a writable directory
-with the example below, then launch it with \verb{alder iris.R}.
-}
-
-\section{Working with notebooks}{
-
-\link{ui} supplies reactive controls and \link{out} supplies rich presentation.
-\link{cache} reuses computations when code and inputs still match.
-\code{\link[=alder_config]{alder_config()}} resolves editor and runtime settings, and \code{\link[=alder_env]{alder_env()}}
-manages standard renv environments. \code{\link[=alder_source]{alder_source()}} and \code{\link[=alder_test]{alder_test()}} run
-notebooks noninteractively. \code{\link[=alder_render]{alder_render()}} publishes through Quarto/knitr
-or Pandoc; \code{\link[=alder_export]{alder_export()}} and \code{\link[=alder_convert]{alder_convert()}} provide interchange formats.
-\code{\link[=alder_mcp]{alder_mcp()}} exposes notebook inspection, editing, and execution to agents.
+\link{ui} creates validated widgets whose current values are read explicitly with
+\verb{$value}. \link{out} creates text, table, media, layout, progress, lazy, and other
+rich output values. \link{cache} provides memory and disk-backed wrappers with
+dependency-aware invalidation and atomic RDS writes.
 }
 
-\section{Execution boundary}{
+\section{Notebook boundary}{
 
-Alder serves the local machine and runs trusted R with the user's permissions.
-Definitions must be unique across cells and the dependency graph must be
-acyclic. Dynamic environment operations that cannot be analyzed safely receive
-actionable diagnostics. Reference-object mutations and external side effects
-are not transactional. Warnings, messages, and errors remain visible.
+The application host owns notebook persistence, execution, rendering, and
+transport. These R helpers retain their value semantics independently of that
+host, including R dates, POSIXct instants, data frames, and composite widget
+values.
 }
 
 \examples{
 \dontrun{
-file.copy(system.file("examples", "iris.R", package = "alder"), "iris.R")
-alder_install_cli()
-# In a terminal: alder iris.R
+library(alder)
+control <- ui$slider(1, 5, value = 3)
+control$value
+out$md("A **rich** value")
 }
 }
 \seealso{
-\code{\link[=start_alder]{start_alder()}}, \code{\link[=stop_alder]{stop_alder()}}, \code{\link[=alder_cli]{alder_cli()}}, \code{\link[=alder_check]{alder_check()}}
+Useful links:
+\itemize{
+  \item \url{https://github.com/carl-stone/alder}
+  \item Report bugs at \url{https://github.com/carl-stone/alder/issues}
+}
+
 }
 \author{
 \strong{Maintainer}: Carl Stone \email{carl@alder.dev}

@@ -17,7 +17,6 @@ pandoc --version | sed -n '1p'
 google-chrome --version
 shellcheck --version | sed -n '1,2p'
 tini --version
-python3 --version
 
 npm ci --prefix js
 npm audit --prefix js
@@ -41,18 +40,15 @@ test "$host_bundle_before" = "$(sha256sum "$host_bundle" | cut -d ' ' -f 1)"
 test "$host_browser_before" = "$(sha256sum "$host_browser" | cut -d ' ' -f 1)"
 host/node_modules/.bin/node --check "$host_bundle"
 host/node_modules/.bin/node --check "$host_browser"
+host/node_modules/.bin/node --check host/scripts/probe-bulk-de-scale.mjs
+host/node_modules/.bin/node --check host/scripts/smoke-application.mjs
+host/node_modules/.bin/node --check host/scripts/smoke-scenarios/_common.mjs
+host/node_modules/.bin/node --check host/scripts/smoke-scenarios/process-observer.mjs
+host/node_modules/.bin/node --check host/scripts/smoke-scenarios/process-lifecycle.mjs
 
 node --check "$bundle"
-sh -n exec/alder
 bash -n dev/reviews/run-static-gate.sh dev/reviews/run-package-check.sh \
   dev/reviews/run-cold-start-validation.sh dev/reviews/run-bulk-de-scale.sh
-shellcheck \
-  exec/alder \
-  dev/reviews/run-static-gate.sh \
-  dev/reviews/run-package-check.sh \
-  dev/reviews/run-cold-start-validation.sh \
-  dev/reviews/run-bulk-de-scale.sh
-python3 -c 'import ast, pathlib; ast.parse(pathlib.Path("dev/reviews/audit-cold-start-processes.py").read_text())'
 
 Rscript --vanilla - <<'RSCRIPT'
 r_files <- c(
@@ -81,17 +77,6 @@ workflow_files <- list.files(
 invisible(lapply(workflow_files, yaml::read_yaml))
 cat("parsed ", length(workflow_files), " workflow files\n", sep = "")
 
-batch <- readLines("exec/alder.cmd", warn = FALSE)
-stopifnot(
-  identical(batch[[1L]], "@echo off"),
-  any(grepl("where Rscript", batch, fixed = TRUE)),
-  any(grepl("exit /b 127", batch, fixed = TRUE)),
-  any(grepl("alder::alder_cli", batch, fixed = TRUE)),
-  any(grepl('runLast = FALSE)" %*', batch, fixed = TRUE)),
-  !any(grepl("--args %*", batch, fixed = TRUE)),
-  any(grepl("exit /b %alder_status%", batch, fixed = TRUE))
-)
-cat("Windows launcher static contract: OK\n")
 
 # Resolve the source namespace before linting. A clean checkout must not rely
 # on an unrelated globally installed Alder package for object-usage analysis.

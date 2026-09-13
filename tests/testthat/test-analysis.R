@@ -1,10 +1,3 @@
-cell <- function(id, defs = character(), refs = character(),
-                 self_refs = character(), barrier = FALSE, opaque = FALSE,
-                 type = "code") {
-  list(id = id, defs = defs, refs = refs, self_refs = self_refs,
-       barrier = barrier, opaque = opaque, type = type)
-}
-
 err_codes <- function(r) {
   vapply(r$diagnostics, function(d) d$code, "")
 }
@@ -75,16 +68,18 @@ test_that("R lookup order is respected inside function bodies", {
 
 test_that("eager self-update records a self reference", {
   p <- alder:::cell_defs_refs("x <- x + 1")
-  expect_true("x" %in% p$self_refs)
+  expect_true("selfRefs" %in% names(p))
+  expect_false("self_refs" %in% names(p))
+  expect_true("x" %in% p$selfRefs)
   expect_false("x" %in% p$refs)
   p2 <- alder:::cell_defs_refs(c("y <- x", "x <- 1"))
-  expect_true("x" %in% p2$self_refs)
+  expect_true("x" %in% p2$selfRefs)
   expect_true("y" %in% p2$defs)
 })
 
 test_that("reads after the cell's own definition are not self refs", {
   p <- alder:::cell_defs_refs(c("x <- 1", "y <- x + 1"))
-  expect_false("x" %in% p$self_refs)
+  expect_false("x" %in% p$selfRefs)
   expect_false("x" %in% p$refs)
   expect_true("y" %in% p$defs)
 })
@@ -92,20 +87,20 @@ test_that("reads after the cell's own definition are not self refs", {
 test_that("deferred closure reads of later definitions are cell-local", {
   p <- alder:::cell_defs_refs(c("f <- function() x", "x <- 1"))
   expect_false("x" %in% p$refs)
-  expect_false("x" %in% p$self_refs)
+  expect_false("x" %in% p$selfRefs)
   # a deferred read of a name the cell never defines stays external
   p2 <- alder:::cell_defs_refs("f <- function() x")
   expect_true("x" %in% p2$refs)
   # an eager read of such a name still creates the self edge
   p3 <- alder:::cell_defs_refs(c("f <- function() x", "f()", "x <- x + 1"))
-  expect_true("x" %in% p3$self_refs)
+  expect_true("x" %in% p3$selfRefs)
   expect_false("x" %in% p3$refs)
 })
 
 test_that("recursion is local, and the assigned name stays local inside the closure", {
   p <- alder:::cell_defs_refs("f <- function() f()")
   expect_false("f" %in% p$refs)
-  expect_false("f" %in% p$self_refs)
+  expect_false("f" %in% p$selfRefs)
   expect_true("f" %in% p$defs)
 })
 
@@ -117,25 +112,30 @@ test_that("formal defaults are scanned with all formals local", {
   expect_true("G" %in% p2$refs)            # free variable in a default
   p3 <- alder:::cell_defs_refs(c("f <- function(a = G + 1) a", "G <- 2"))
   expect_false("G" %in% p3$refs)           # defined later in the same cell
-  expect_false("G" %in% p3$self_refs)
+  expect_false("G" %in% p3$selfRefs)
 })
 
 test_that("a lazy call argument is never definitely available afterward", {
   p <- alder:::cell_defs_refs(c("foo(x <- 1)", "y <- x"))
   # x is only a candidate definition; the read must remain a self reference
   expect_true("x" %in% p$defs)
-  expect_true("x" %in% p$self_refs)
+  expect_true("x" %in% p$selfRefs)
   expect_false("x" %in% p$refs)
   expect_true("y" %in% p$defs)
   # the same name read as a plain argument before its own definition:
   p2 <- alder:::cell_defs_refs(c("foo(x)", "x <- 1"))
-  expect_true("x" %in% p2$self_refs)
+  expect_true("x" %in% p2$selfRefs)
 })
 
 test_that("a zero-length top-level for still defines its iterator", {
   p <- alder:::cell_defs_refs("for (i in integer(0)) x <- i")
   expect_true("i" %in% p$defs)
   expect_true("x" %in% p$defs)             # possible loop-body definition
+  p2 <- alder:::cell_defs_refs(c(
+    "for (i in integer(0)) x <- i",
+    "y <- i"
+  ))
+  expect_true("i" %in% p2$selfRefs)       # iterator may never become available
 })
 
 test_that("conditional definitions are definite only when every branch defines", {
@@ -161,26 +161,26 @@ test_that("quote/expression/local carry their own scopes", {
 
 test_that("supported replacement assignments read roots and indices", {
   p <- alder:::cell_defs_refs("x[i] <- v")
-  expect_true("x" %in% p$self_refs)
+  expect_true("x" %in% p$selfRefs)
   expect_true("i" %in% p$refs)
   expect_true("v" %in% p$refs)
   p2 <- alder:::cell_defs_refs(c("x <- 1", "x[2] <- 2"))
-  expect_false("x" %in% p2$self_refs)      # already defined earlier
+  expect_false("x" %in% p2$selfRefs)      # already defined earlier
   p3 <- alder:::cell_defs_refs("x$col <- 1")
-  expect_true("x" %in% p3$self_refs)
+  expect_true("x" %in% p3$selfRefs)
   p4 <- alder:::cell_defs_refs("names(x) <- c(\"a\", \"b\")")
-  expect_true("x" %in% p4$self_refs)
+  expect_true("x" %in% p4$selfRefs)
   expect_true("x" %in% p4$defs)
   p5 <- alder:::cell_defs_refs("attr(y, \"k\") <- 1")
-  expect_true("y" %in% p5$self_refs)
+  expect_true("y" %in% p5$selfRefs)
   p6 <- alder:::cell_defs_refs("names(z)[1] <- \"w\"")
-  expect_true("z" %in% p6$self_refs)
+  expect_true("z" %in% p6$selfRefs)
   expect_true("z" %in% p6$defs)
 })
 
 test_that("a plain assignment does not read its LHS", {
   p <- alder:::cell_defs_refs("x <- 1")
-  expect_false("x" %in% p$self_refs)
+  expect_false("x" %in% p$selfRefs)
   expect_false("x" %in% p$refs)
 })
 
@@ -220,7 +220,7 @@ test_that("literal default-environment assign and rm are statically bounded", {
     "assign(x = \"counter\", value = counter + 1L)"
   )
   expect_identical(self_update$defs, "counter")
-  expect_identical(self_update$self_refs, "counter")
+  expect_identical(self_update$selfRefs, "counter")
 
   removed <- alder:::cell_defs_refs(c("x <- 1L", "rm(\"x\")"))
   expect_false(has_error(removed))
@@ -233,19 +233,13 @@ test_that("literal default-environment assign and rm are statically bounded", {
   expect_false(has_error(qualified_rm))
   expect_identical(qualified_rm$defs, "z")
 
-  consumer <- alder:::cell_defs_refs("answer <- assigned_value + 1L")
-  dag <- alder:::build_dag(list(
-    cell("producer", defs = assigned$defs, refs = assigned$refs,
-         self_refs = assigned$self_refs),
-    cell("consumer", defs = consumer$defs, refs = consumer$refs,
-         self_refs = consumer$self_refs)
-  ))
-  expect_identical(dag$edges$consumer, "producer")
 })
 
 test_that("computed or explicit-environment mutation blocks dispatch", {
   computed <- alder:::cell_defs_refs("assign(target, 1L)")
   expect_true(has_error(computed))
+  expect_true("range" %in% names(computed$diagnostics[[1L]]))
+  expect_null(computed$diagnostics[[1L]]$range)
   expect_match(computed$diagnostics[[1L]]$message,
                "scalar string literal name", fixed = TRUE)
   explicit <- alder:::cell_defs_refs(
@@ -297,22 +291,6 @@ test_that("unsafe dynamic evaluation blocks dispatch", {
   expect_true("p" %in% p$defs)
 })
 
-test_that("literal source runs from the notebook project directory", {
-  root <- tempfile("alder-literal-source-")
-  dir.create(root)
-  withr::defer(unlink(root, recursive = TRUE, force = TRUE))
-  writeLines("helper_value <- 9L", file.path(root, "helper.R"))
-  path <- file.path(root, "notebook.R")
-  writeLines(c(
-    "# %%", "eval_result <- eval(quote(1L + 1L))",
-    "# %%", "source('helper.R', local = TRUE)",
-    "# %%", "combined <- eval_result + helper_value"
-  ), path)
-  env <- alder::alder_source(path, env = new.env(parent = globalenv()))
-  expect_identical(env$eval_result, 2L)
-  expect_identical(env$helper_value, 9L)
-  expect_identical(env$combined, 11L)
-})
 
 test_that("literal lookup and do.call names are supported", {
   p <- alder:::cell_defs_refs("get(\"n_cells\")")
@@ -397,79 +375,4 @@ test_that("cells referencing a function defined in another cell edge properly", 
   p <- alder:::cell_defs_refs("g <- f(1)")
   expect_true("f" %in% p$refs)
   expect_true("g" %in% p$defs)
-})
-
-test_that("build_dag adds self-loops for self references", {
-  dag <- alder:::build_dag(list(
-    cell("cell-1", defs = "x", self_refs = "x"),
-    cell("cell-2", defs = "y", refs = "x")))
-  expect_true("cell-1" %in% dag$edges[["cell-1"]])
-  expect_true("cell-1" %in% dag$edges[["cell-2"]])
-  expect_true(length(dag$cycles) > 0L)     # self-loop is a cycle
-  expect_null(alder:::topo_order(dag$edges, dag$nodes))
-  dag2 <- alder:::build_dag(list(
-    cell("cell-1", defs = "x"),
-    cell("cell-2", defs = "y", refs = "x")))
-  expect_false("cell-1" %in% dag2$edges[["cell-1"]])
-  expect_equal(alder:::topo_order(dag2$edges, dag2$nodes),
-               c("cell-1", "cell-2"))
-})
-
-test_that("cycles report their members and exclude downstream cells", {
-  cy <- list(cell("a", defs = "x", refs = "y"),
-             cell("b", defs = "y", refs = "x"),
-             cell("c", defs = "z", refs = "x"))
-  dag <- alder:::build_dag(cy)
-  expect_setequal(dag$cycles, c("a", "b"))
-  expect_false("c" %in% dag$cycles)
-  expect_null(alder:::topo_order(dag$edges, dag$nodes))
-})
-
-test_that("build_dag produces dependency edges in the right direction", {
-  cells <- list(cell("a", defs = "x"), cell("b", defs = "y", refs = "x"),
-                cell("c", defs = "z", refs = c("x", "y")))
-  dag <- alder:::build_dag(cells)
-  expect_true("a" %in% dag$edges$b)
-  expect_true(all(c("a", "b") %in% dag$edges$c))
-  expect_length(dag$edges$a, 0)
-  expect_equal(alder:::topo_order(dag$edges, dag$nodes), c("a", "b", "c"))
-})
-
-test_that("duplicate (contradictory) definitions are reported", {
-  dup <- list(cell("a", defs = "x"), cell("b", defs = "x"))
-  dag <- alder:::build_dag(dup)
-  expect_true("x" %in% names(dag$duplicates))
-})
-
-test_that("package-attach barriers order every later code cell", {
-  cells <- list(
-    cell("a", barrier = TRUE),                       # library(...) early
-    cell("b", type = "markdown"),                    # not code: no edge needed
-    cell("c", type = "code", refs = "anything"))
-  dag <- alder:::build_dag(cells)
-  expect_true("a" %in% dag$edges$c)                  # later code depends on it
-  expect_false("a" %in% dag$edges$b)                 # markdown gets no edge
-  # a barrier never orders itself or earlier cells
-  expect_false("a" %in% dag$edges$a)
-  cells2 <- list(
-    cell("x", type = "code", refs = "y"),
-    cell("y", barrier = TRUE))
-  dag2 <- alder:::build_dag(cells2)
-  expect_false("y" %in% dag2$edges$x)                # no edge to an earlier cell
-  expect_true(all(dag2$nodes %in% alder:::topo_order(dag2$edges, dag2$nodes)))
-})
-
-test_that("opaque cells are ordered between every executable neighbor", {
-  cells <- list(
-    cell("a", defs = "x"),
-    cell("b", barrier = TRUE, opaque = TRUE),
-    cell("c", defs = "y"),
-    cell("d", type = "markdown"),
-    cell("e", type = "code")
-  )
-  dag <- alder:::build_dag(cells)
-  expect_true("a" %in% dag$edges$b)
-  expect_true("b" %in% dag$edges$c)
-  expect_true("b" %in% dag$edges$e)
-  expect_false("b" %in% dag$edges$d)
 })

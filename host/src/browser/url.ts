@@ -1,10 +1,8 @@
-/** Keep the gallery notebook identity on every notebook-scoped request. */
+/** Build a URL for the current notebook host; notebook selection is session-scoped. */
 export function notebookUrl(path: string, href = location.href): string {
   const current = new URL(href);
   const target = new URL(path, current.origin);
-  const notebook = notebookIdentity(current);
-  if (notebook !== null) target.searchParams.set("nb", notebook);
-  return `${target.pathname}${target.search}${target.hash}`;
+  return target.pathname + target.search + target.hash;
 }
 
 export function notebookSocketUrl(href = location.href): string {
@@ -16,17 +14,18 @@ export function notebookSocketUrl(href = location.href): string {
 
 export function notebookViewUrl(view: "app" | "editor", href = location.href): string {
   const current = new URL(href);
-  const notebook = notebookIdentity(current);
   current.hash = "";
-  if (notebook !== null) current.searchParams.set("nb", notebook);
   current.searchParams.set("view", view);
-  return `${current.pathname}${current.search}`;
+  return current.pathname + current.search;
 }
 
-function notebookIdentity(url: URL): string | null {
-  const explicit = url.searchParams.get("nb");
-  if (explicit !== null) return explicit;
-  const match = /^\/n\/([^/]+)$/.exec(url.pathname);
-  if (!match) return null;
-  try { return decodeURIComponent(match[1]!); } catch { return null; }
+/** Same-host cross-origin navigation would disclose host-scoped session cookies across ports. */
+export function blocksNotebookNavigation(destination: string, href = location.href): boolean {
+  try {
+    const current = new URL(href);
+    const target = new URL(destination, current.href);
+    return target.hostname === current.hostname && target.origin !== current.origin;
+  } catch {
+    return true;
+  }
 }

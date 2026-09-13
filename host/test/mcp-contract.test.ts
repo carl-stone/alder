@@ -1,128 +1,1112 @@
-import test from 'node:test';
-import assert from 'node:assert/strict';
-import { PassThrough } from 'node:stream';
-import { connectMcpStdio, createMcpServer, drainMcpServer, type McpControllerAdapter } from '../src/mcp.js';
-import type { HostSnapshot, OperationRecord } from '../src/protocol.js';
+import assert from "node:assert/strict";
+import { PassThrough } from "node:stream";
+import test from "node:test";
 
-async function wire(adapter: McpControllerAdapter) {
-  const input = new PassThrough(), output = new PassThrough();
-  const messages: any[] = [];
-  let buffered = '';
-  output.on('data', bytes => {
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { ResourceUpdatedNotificationSchema } from "@modelcontextprotocol/sdk/types.js";
+import { z } from "zod/v4";
+
+import { createMcpServer, type AlderMcpOptions, type McpControllerAdapter } from "../src/mcp.js";
+import { connectMcpStdio, drainMcpStdio } from "../src/mcp-stdio.js";
+import type { CommandAdmission, HostCommand, HostQueryResult, HostSnapshot, OperationRecord } from "../src/protocol.js";
+
+const cell = {
+  id: "cell-1",
+  type: "code",
+  body: ["answer <- 42"],
+  options: {},
+  revision: 0,
+  status: "done",
+  outputs: [],
+  progress: null,
+  log: [],
+  error: null,
+  defs: [],
+  refs: [],
+  selfRefs: [],
+  locals: [],
+  barrier: false,
+  opaque: false,
+  diagnostics: [],
+  analysisPending: false,
+} as unknown as HostSnapshot["cells"][number];
+
+const snapshot = {
+  epoch: "epoch-1",
+  cursor: 7,
+  version: 0,
+  documentRevision: 3,
+  cells: [cell],
+  runtime: { kernelEpoch: "kernel-1" },
+} as unknown as HostSnapshot;
+const CANONICAL_TOOL_NAMES = [
+  "add_cell",
+  "apply_transaction",
+  "check",
+  "delete_cell",
+  "disable_cell",
+  "edit_cell",
+  "edit_cell_ranges",
+  "format",
+  "get_config",
+  "get_help",
+  "get_layout",
+  "get_value",
+  "interrupt",
+  "list_cells",
+  "materialize_output",
+  "move_cell",
+  "notebook_state",
+  "operation_status",
+  "packages_declare",
+  "packages_install",
+  "packages_status",
+  "publish",
+  "read_cell",
+  "read_events",
+  "read_output",
+  "recovery_state",
+  "reload_source",
+  "rename_cell",
+  "restart",
+  "run_all",
+  "run_cell",
+  "run_stale",
+  "save",
+  "save_as",
+  "select_r",
+  "set_app",
+  "set_config",
+  "set_layout",
+  "set_runtime",
+  "set_widget",
+  "shutdown",
+  "table_page",
+  "upload_file",
+] as const;
+
+const REQUIRED_EFFECT_IDENTITY_FIELDS: Record<string, readonly string[]> = {
+  add_cell: ["operationId", "commandSequence", "expectedDocumentRevision"],
+  edit_cell: ["operationId", "commandSequence", "expectedDocumentRevision", "expectedRevision"],
+  delete_cell: ["operationId", "commandSequence", "expectedDocumentRevision", "expectedRevision"],
+  move_cell: ["operationId", "commandSequence", "expectedDocumentRevision"],
+  rename_cell: ["operationId", "commandSequence", "expectedDocumentRevision", "expectedRevision"],
+  disable_cell: ["operationId", "commandSequence", "expectedDocumentRevision", "expectedRevision"],
+  run_cell: ["operationId", "commandSequence", "expectedDocumentRevision"],
+  run_all: ["operationId", "commandSequence", "expectedDocumentRevision"],
+  run_stale: ["operationId", "commandSequence", "expectedDocumentRevision"],
+  interrupt: ["operationId", "commandSequence"],
+  get_value: ["operationId", "commandSequence"],
+  set_widget: ["operationId", "commandSequence", "expectedRevision"],
+  save: ["operationId", "commandSequence", "expectedDocumentRevision"],
+  apply_transaction: ["operationId", "commandSequence", "expectedDocumentRevision"],
+  edit_cell_ranges: ["operationId", "commandSequence", "expectedDocumentRevision", "expectedRevision"],
+  select_r: ["operationId", "commandSequence", "expectedDocumentRevision"],
+  set_runtime: ["operationId", "commandSequence", "expectedDocumentRevision"],
+  reload_source: ["operationId", "commandSequence", "expectedDocumentRevision"],
+  shutdown: ["operationId", "commandSequence", "expectedDocumentRevision"],
+  restart: ["operationId", "commandSequence"],
+  format: ["operationId", "commandSequence", "expectedDocumentRevision"],
+  save_as: ["operationId", "commandSequence", "expectedDocumentRevision"],
+  table_page: ["operationId", "commandSequence"],
+  materialize_output: ["operationId", "commandSequence"],
+  set_config: ["operationId", "commandSequence", "expectedDocumentRevision"],
+  set_layout: ["operationId", "commandSequence", "expectedDocumentRevision"],
+  set_app: ["operationId", "commandSequence", "expectedDocumentRevision"],
+  packages_declare: ["operationId", "commandSequence", "expectedDocumentRevision"],
+  packages_install: ["operationId", "commandSequence", "expectedDocumentRevision"],
+  publish: ["operationId", "commandSequence", "expectedDocumentRevision"],
+  upload_file: ["operationId", "commandSequence"],
+};
+
+function assertToolCatalog(tools: Array<{ name: string; inputSchema: { properties?: Record<string, unknown>; required?: string[] } }>): void {
+  assert.deepEqual(tools.map(tool => tool.name).sort(), CANONICAL_TOOL_NAMES);
+  const byName = new Map(tools.map(tool => [tool.name, tool]));
+  for (const [name, fields] of Object.entries(REQUIRED_EFFECT_IDENTITY_FIELDS)) {
+    const tool = byName.get(name);
+    assert.ok(tool, "missing effect tool " + name);
+    const properties = tool.inputSchema.properties ?? {};
+    const required = new Set(tool.inputSchema.required ?? []);
+    for (const field of fields) {
+      assert.ok(Object.hasOwn(properties, field), name + " schema missing " + field + " property");
+      assert.ok(required.has(field), name + " schema must require " + field);
+    }
+  }
+}
+
+const artifactStore: AlderMcpOptions["artifactStore"] = {
+  writeArtifact: async () => { throw new Error("artifact store is not used by this contract test"); },
+  retainArtifactRead: () => undefined,
+  openArtifactResource: () => { throw new Error("artifact store is not used by this contract test"); },
+  release: () => undefined,
+};
+
+function makeController(overrides: Partial<McpControllerAdapter> = {}): McpControllerAdapter {
+  return {
+    snapshot: () => snapshot,
+    recover: () => { throw new Error("recovery is not used by this contract test"); },
+    query: query => ({
+      epoch: snapshot.epoch,
+      documentRevision: snapshot.documentRevision,
+      cursor: snapshot.cursor,
+      result: query.type === "notebook"
+        ? {
+          protocol: "alder-host-v2",
+          epoch: snapshot.epoch,
+          cursor: snapshot.cursor,
+          version: snapshot.version,
+          documentRevision: snapshot.documentRevision,
+          path: null,
+          metadata: {},
+          config: {},
+          dirty: false,
+          changed: false,
+          disk: {},
+          sidecars: {},
+          runtime: snapshot.runtime,
+          capabilities: [],
+          nextCommandSequence: 1,
+          activeClientIds: ["client-1"],
+          cells: snapshot.cells.map(candidate => ({ id: candidate.id, type: candidate.type, options: candidate.options, revision: candidate.revision })),
+        }
+        : query.type === "cells"
+          ? snapshot.cells.slice(query.offset ?? 0, (query.offset ?? 0) + (query.limit ?? snapshot.cells.length))
+          : null,
+    } as unknown as HostQueryResult),
+    subscribe: () => () => undefined,
+    dispatch: async (command) => {
+      const operation: OperationRecord = {
+        id: command.operationId,
+        clientId: command.clientId,
+        commandSequence: command.commandSequence,
+        kind: command.type === "save" ? "save" : "transaction",
+        status: "accepted",
+        documentRevision: snapshot.documentRevision,
+        runId: null,
+        result: null,
+        error: null,
+        acceptedAt: 10,
+      };
+      return {
+        epoch: snapshot.epoch,
+        clientId: command.clientId,
+        operationId: command.operationId,
+        commandSequence: command.commandSequence,
+        accepted: true,
+        sequenceConsumed: true,
+        operation,
+        error: null,
+        nextCommandSequence: command.commandSequence + 1,
+      };
+    },
+    awaitOperation: async (id) => ({
+      id,
+      clientId: "client-1",
+      commandSequence: 1,
+      kind: "save",
+      status: "done",
+      documentRevision: snapshot.documentRevision,
+      runId: null,
+      result: { saved: true },
+      error: null,
+      acceptedAt: 10,
+      settledAt: 11,
+    }),
+    ...overrides,
+  };
+}
+
+function catalogOptions(controller: McpControllerAdapter, store: AlderMcpOptions["artifactStore"] = artifactStore, extras: Partial<AlderMcpOptions> = {}): AlderMcpOptions {
+  return {
+    controller,
+    artifactStore: store,
+    clientId: "client-1",
+    sessionEpoch: snapshot.epoch,
+    ...extras,
+  };
+}
+interface PromiseResolvers<T> {
+  promise: Promise<T>;
+  resolve(value?: T | PromiseLike<T>): void;
+  reject(reason?: unknown): void;
+}
+
+const withResolvers = <T>(): PromiseResolvers<T> =>
+  (Promise as unknown as { withResolvers: <Value>() => PromiseResolvers<Value> }).withResolvers<T>();
+
+interface InMemoryConnection {
+  client: Client;
+  server: McpServer;
+  clientTransport: InMemoryTransport;
+  serverTransport: InMemoryTransport;
+}
+
+interface CatalogProxyConnection {
+  client: Client;
+  clientTransport: StdioServerTransport;
+  transport: StdioServerTransport;
+  input: PassThrough;
+  output: PassThrough;
+  upstreamServers: McpServer[];
+  upstreamClients: Client[];
+  factoryCalls: number;
+}
+
+async function connectInMemory(controller: McpControllerAdapter = makeController(), store: AlderMcpOptions["artifactStore"] = artifactStore, extras: Partial<AlderMcpOptions> = {}): Promise<InMemoryConnection> {
+  const server = createMcpServer(catalogOptions(controller, store, extras));
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: "mcp-contract", version: "1" }, { capabilities: {} });
+  await server.connect(serverTransport);
+  await client.connect(clientTransport);
+  return { client, server, clientTransport, serverTransport };
+}
+async function closeInMemory(connection: InMemoryConnection): Promise<void> {
+  await connection.client.close();
+  await connection.server.close();
+}
+
+async function waitForMessage(output: PassThrough): Promise<Record<string, unknown>> {
+  let buffered = "";
+  const { promise, resolve, reject } = withResolvers<Record<string, unknown>>();
+  const onData = (bytes: Buffer) => {
     buffered += String(bytes);
-    for (;;) {
-      const at = buffered.indexOf('\n');
-      if (at < 0) break;
-      messages.push(JSON.parse(buffered.slice(0, at)));
-      buffered = buffered.slice(at + 1);
-    }
-  });
-  const server = createMcpServer({ controller: adapter });
-  const transport = await connectMcpStdio(server, { input, output });
-  const send = (method: string, params: unknown, id?: number) => input.write(JSON.stringify({ jsonrpc: '2.0', ...(id === undefined ? {} : { id }), method, params }) + '\n');
-  const response = async (id: number) => {
-    const deadline = Date.now() + 2000;
-    while (!messages.some(message => message.id === id)) {
-      if (Date.now() > deadline) throw new Error(`Missing MCP response ${id}`);
-      await new Promise(resolve => setTimeout(resolve, 2));
-    }
-    return messages.find(message => message.id === id);
+    const at = buffered.indexOf("\n");
+    if (at < 0) return;
+    output.off("data", onData);
+    output.off("error", onError);
+    try { resolve(JSON.parse(buffered.slice(0, at)) as Record<string, unknown>); }
+    catch (error) { reject(error); }
   };
-  send('initialize', { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'contract', version: '1' } }, 1);
-  await response(1);
-  send('notifications/initialized', {});
-  return { send, response, messages, transport, drain: () => drainMcpServer(server), close: async () => { await server.close(); input.destroy(); output.destroy(); } };
+  const onError = (error: Error) => {
+    output.off("data", onData);
+    reject(error);
+  };
+  output.on("data", onData);
+  output.on("error", onError);
+  return promise;
 }
 
-function adapter(): McpControllerAdapter {
-  return { snapshot: () => ({ epoch: 'epoch', cells: [], version: 0 } as unknown as HostSnapshot),
-    dispatch: async command => ({ operation: { id: command.operationId, kind: 'run', status: 'done', acceptedAt: 0, settledAt: 1 }, version: 0, cursor: 0 }),
-    awaitOperation: async id => ({ id, kind: 'run', status: 'done', acceptedAt: 0, settledAt: 1 }) };
+async function connectCatalogProxy(controller: McpControllerAdapter = makeController()): Promise<CatalogProxyConnection> {
+  const input = new PassThrough();
+  const output = new PassThrough();
+  const upstreamServers: McpServer[] = [];
+  const upstreamClients: Client[] = [];
+  let factoryCalls = 0;
+  const transport = await connectMcpStdio(async initialization => {
+    factoryCalls++;
+    const server = createMcpServer(catalogOptions(controller));
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    const client = new Client(initialization.clientInfo, { capabilities: initialization.capabilities });
+    upstreamServers.push(server);
+    upstreamClients.push(client);
+    return { client, transport: clientTransport };
+  }, { input, output });
+  const clientTransport = new StdioServerTransport(output, input);
+  const client = new Client({ name: "stdio-contract", version: "1" }, { capabilities: {} });
+  await client.connect(clientTransport);
+  return { client, clientTransport, transport, input, output, upstreamServers, upstreamClients, factoryCalls };
 }
 
-test('MCP preserves pipelined action settlement and effectful notification ordering', { timeout: 5000 }, async () => {
-  const controller = adapter();
-  let effects = 0;
-  controller.snapshot = () => ({ epoch: 'epoch', cells: [], version: effects } as unknown as HostSnapshot);
-  controller.dispatch = async command => {
-    await new Promise(resolve => setImmediate(resolve));
-    effects++;
-    return { operation: { id: command.operationId, kind: 'run', status: 'done', acceptedAt: 0, settledAt: 1 }, version: effects, cursor: 0 };
-  };
-  const client = await wire(controller);
-  try {
-    client.send('tools/call', { name: 'run_all', arguments: {} }, 2);
-    client.send('tools/call', { name: 'notebook_state', arguments: {} }, 3);
-    assert.equal(JSON.parse((await client.response(3)).result.content[0].text).version, 1);
-    client.send('tools/call', { name: 'run_all', arguments: {} });
-    client.send('tools/call', { name: 'notebook_state', arguments: {} }, 4);
-    assert.equal(JSON.parse((await client.response(4)).result.content[0].text).version, 2);
-    assert.deepEqual(client.messages.map(message => message.id), [1, 2, 3, 4]);
-  } finally { await client.close(); }
-});
+async function closeCatalogProxy(connection: CatalogProxyConnection): Promise<void> {
+  await connection.client.close();
+  await connection.transport.close();
+  await drainMcpStdio(connection.transport);
+  await Promise.all(connection.upstreamClients.map(client => client.close()));
+  await Promise.all(connection.upstreamServers.map(server => server.close()));
+  connection.input.destroy();
+  connection.output.destroy();
+}
 
-test('MCP waits for configured startup settlement before accepting normal requests', { timeout: 5000 }, async () => {
-  const controller = adapter();
-  let settled = false;
-  controller.activateStartup = async () => ({ id: 'startup', kind: 'run', status: 'accepted', acceptedAt: 0 });
-  controller.awaitOperation = async id => {
-    await new Promise(resolve => setImmediate(resolve));
-    settled = true;
-    return { id, kind: 'run', status: 'done', acceptedAt: 0, settledAt: 1 };
-  };
-  controller.snapshot = () => ({ epoch: 'epoch', cells: [], version: Number(settled) } as unknown as HostSnapshot);
-  const client = await wire(controller);
+test("createMcpServer initializes over the official in-memory transport and lists the catalog", async () => {
+  const connection = await connectInMemory();
   try {
-    client.send('tools/call', { name: 'notebook_state', arguments: {} }, 2);
-    await client.drain();
-    assert.equal(JSON.parse((await client.response(2)).result.content[0].text).version, 1);
-  } finally { await client.close(); }
-});
+    const tools = await connection.client.listTools();
+    assertToolCatalog(tools.tools);
 
-test('MCP rejects malformed tool envelopes before effects and handles shutdown', { timeout: 5000 }, async () => {
-  let effects = 0;
-  const controller = adapter();
-  const dispatch = controller.dispatch;
-  controller.dispatch = command => { effects++; return dispatch(command); };
-  const client = await wire(controller);
-  try {
-    let id = 2;
-    for (const params of [{ name: 'absent', arguments: {} }, { name: '', arguments: {} },
-      { name: 'run_all', arguments: [] }, { name: 'run_all', arguments: null },
-      { name: 'run_all', arguments: 1 }, { arguments: {} }]) {
-      client.send('tools/call', params, id);
-      assert.equal((await client.response(id++)).error?.code, -32602);
-    }
-    assert.equal(effects, 0);
-    for (const params of [[], false, null, { unexpected: true }]) {
-      client.send('ping', params, id);
-      assert.equal((await client.response(id++)).error?.code, -32602);
-    }
-    client.send('shutdown', {}, 21);
-    assert.deepEqual((await client.response(21)).result, {});
-  } finally { await client.close(); }
-});
-
-test('MCP Stop can interrupt an earlier action awaiting kernel settlement', { timeout: 5000 }, async () => {
-  const controller = adapter();
-  let finish!: (value: OperationRecord) => void;
-  let runningId = '';
-  const running = new Promise<OperationRecord>(resolve => { finish = resolve; });
-  controller.dispatch = async command => {
-    if (command.type === 'run') runningId = command.operationId;
-    if (command.type === 'interrupt') finish({ id: runningId, kind: 'run', status: 'cancelled', acceptedAt: 0, settledAt: 1 });
-    return { operation: { id: command.operationId, kind: command.type === 'run' ? 'run' : 'interrupt', status: 'running', acceptedAt: 0 }, version: 0, cursor: 0 };
-  };
-  controller.awaitOperation = async id => id === runningId ? running : ({ id, kind: 'interrupt', status: 'done', acceptedAt: 0, settledAt: 1 });
-  const client = await wire(controller);
-  try {
-    client.send('tools/call', { name: 'run_all', arguments: {} }, 2);
-    await new Promise(resolve => setImmediate(resolve));
-    client.send('tools/call', { name: 'interrupt', arguments: {} }, 3);
-    assert.equal((await client.response(3)).result.isError, false);
-    assert.equal((await client.response(2)).result.isError, true);
+    const resources = await connection.client.listResources();
+    assert.deepEqual(resources.resources.map(resource => resource.uri).sort(), [
+      "alder://cell/cell-1/outputs",
+      "alder://notebook/dag",
+      "alder://notebook/source",
+      "alder://notebook/state",
+    ]);
+    const templates = await connection.client.listResourceTemplates();
+    assert.deepEqual(templates.resourceTemplates.map(template => template.uriTemplate).sort(), [
+      "alder://cell/{cell}/outputs",
+      "alder://operations/{operation}",
+      "alder://outputs/{output}",
+    ]);
   } finally {
-    finish({ id: runningId, kind: 'run', status: 'cancelled', acceptedAt: 0, settledAt: 1 });
+    await closeInMemory(connection);
+  }
+});
+test("MCP reads and interrupt remain live during startup and resource updates require subscriptions", async () => {
+  let listener: ((event: unknown) => void) | undefined;
+  const connection = await connectInMemory(makeController({
+    subscribe: next => { listener = next as (event: unknown) => void; return () => { listener = undefined; }; },
+  }));
+  try {
+    const updates: string[] = [];
+    connection.client.setNotificationHandler(ResourceUpdatedNotificationSchema, notification => { updates.push(notification.params.uri); });
+    await connection.client.subscribeResource({ uri: "alder://notebook/state" });
+    listener?.({ type: "transaction" });
+    await new Promise(resolve => setTimeout(resolve, 10));
+    assert.deepEqual(updates, ["alder://notebook/state"]);
+
+    const state = await Promise.race([
+      connection.client.callTool({ name: "notebook_state", arguments: {} }),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("read blocked on startup")), 250)),
+    ]);
+    assert.equal(state.isError, false);
+    const stateResult = (state.structuredContent as { result?: Record<string, unknown> } | undefined)?.result;
+    assert.equal(stateResult?.protocol, "alder-host-v2");
+    assert.equal(Object.hasOwn(stateResult ?? {}, "snapshot"), false);
+    assert.deepEqual(stateResult?.cells, [{ id: "cell-1", type: "code", options: {}, revision: 0 }]);
+    const interrupted = await Promise.race([
+      connection.client.callTool({ name: "interrupt", arguments: { operationId: "interrupt-startup", commandSequence: 1 } }),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("interrupt blocked on startup")), 250)),
+    ]);
+    assert.equal(interrupted.isError, false);
+    await connection.client.unsubscribeResource({ uri: "alder://notebook/state" });
+    listener?.({ type: "transaction" });
+    await new Promise(resolve => setTimeout(resolve, 10));
+    for (let index = 0; index < 256; index++) await connection.client.subscribeResource({ uri: `alder://outputs/output-${index}` });
+    await assert.rejects(connection.client.subscribeResource({ uri: "alder://outputs/overflow" }));
+    assert.deepEqual(updates, ["alder://notebook/state"]);
+  } finally {
+    await closeInMemory(connection);
+  }
+});
+
+test("MCP check waits for runtime readiness", async () => {
+  const runtimeReady = withResolvers<void>();
+  const connection = await connectInMemory(makeController(), artifactStore, { runtimeReady: () => runtimeReady.promise });
+  try {
+    let settled = false;
+    const pending = connection.client.callTool({ name: "check", arguments: {} }).then(result => {
+      settled = true;
+      return result;
+    });
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.equal(settled, false);
+    runtimeReady.resolve();
+    const result = await pending;
+    assert.equal(result.isError, false);
+  } finally {
+    runtimeReady.resolve();
+    await closeInMemory(connection);
+  }
+});
+
+test("MCP resource reads remain available during runtime startup", async () => {
+  const startup = withResolvers<void>();
+  const connection = await connectInMemory(makeController(), artifactStore, { startup: startup.promise });
+  try {
+    const result = await Promise.race([
+      connection.client.readResource({ uri: "alder://notebook/state" }),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("resource read blocked on runtime startup")), 250)),
+    ]);
+    assert.equal(result.contents[0]?.uri, "alder://notebook/state");
+  } finally {
+    startup.resolve();
+    await closeInMemory(connection);
+  }
+});
+test("MCP host-only mutations bypass pending runtime startup", async () => {
+  const startup = withResolvers<void>();
+  const connection = await connectInMemory(makeController(), artifactStore, { startup: startup.promise });
+  try {
+    const result = await Promise.race([
+      connection.client.callTool({
+        name: "add_cell",
+        arguments: {
+          operationId: "add-while-starting",
+          commandSequence: 1,
+          expectedDocumentRevision: snapshot.documentRevision,
+          after: null,
+          body: ["x <- 1"],
+          type: "code",
+          options: {},
+        },
+      }),
+      new Promise<never>((_, reject) => { const timer = setTimeout(() => reject(new Error("host-only mutation blocked on runtime startup")), 250); timer.unref(); }),
+    ]);
+    assert.equal(result.isError, false);
+  } finally {
+    startup.resolve();
+    await closeInMemory(connection);
+  }
+});
+
+test("MCP runtime mutations follow the current readiness generation", async () => {
+  let readiness = withResolvers<void>();
+  const connection = await connectInMemory(makeController(), artifactStore, { runtimeReady: () => readiness.promise });
+  try {
+    const pending = connection.client.callTool({
+      name: "run_all",
+      arguments: { operationId: "wait-runtime", commandSequence: 1, expectedDocumentRevision: snapshot.documentRevision, wait: false },
+    });
+    const remainsPending = await Promise.race([
+      pending.then(() => false),
+      new Promise<boolean>(resolve => { const timer = setTimeout(() => resolve(true), 25); timer.unref(); }),
+    ]);
+    assert.equal(remainsPending, true);
+    readiness.resolve();
+    assert.equal((await pending).isError, false);
+
+    readiness = withResolvers<void>();
+    readiness.promise.catch(() => undefined);
+    readiness.reject(new Error("replacement runtime failed"));
+    const failed = await connection.client.callTool({
+      name: "run_all",
+      arguments: { operationId: "failed-runtime", commandSequence: 2, expectedDocumentRevision: snapshot.documentRevision, wait: false },
+    });
+    assert.equal(failed.isError, true);
+    assert.equal(failed.content[0]?.text, "replacement runtime failed");
+
+    readiness = withResolvers<void>();
+    readiness.resolve();
+    const recovered = await connection.client.callTool({
+      name: "run_all",
+      arguments: { operationId: "recovered-runtime", commandSequence: 3, expectedDocumentRevision: snapshot.documentRevision, wait: false },
+    });
+    assert.equal(recovered.isError, false);
+  } finally {
+    await closeInMemory(connection);
+  }
+});
+
+test("MCP select_r remains callable when initial runtime startup fails", async () => {
+  let selected: HostCommand | undefined;
+  const connection = await connectInMemory(makeController({
+    dispatch: async command => {
+      selected = command;
+      return await makeController().dispatch(command);
+    },
+  }), artifactStore, { startup: async () => { throw new Error("initial R environment unavailable"); } });
+  try {
+    const result = await connection.client.callTool({
+      name: "select_r",
+      arguments: {
+        operationId: "select-r-1",
+        commandSequence: 1,
+        rscript: "/usr/bin/Rscript",
+        persistDefault: false,
+        expectedDocumentRevision: snapshot.documentRevision,
+      },
+    });
+    assert.equal(result.isError, false);
+    assert.equal(selected?.type, "select-r");
+    if (selected?.type !== "select-r") throw new Error("expected select-r command");
+    assert.equal(selected.rscript, "/usr/bin/Rscript");
+  } finally {
+    await closeInMemory(connection);
+  }
+});
+
+test("MCP revocation after progress prevents dispatch", async () => {
+  const progressSent = withResolvers<void>();
+  const releaseProgress = withResolvers<void>();
+  const dispatched: HostCommand[] = [];
+  const controller = makeController({
+    dispatch: async command => {
+      dispatched.push(command);
+      return await makeController().dispatch(command);
+    },
+  });
+  const connection = await connectInMemory(controller);
+  const send = connection.serverTransport.send.bind(connection.serverTransport);
+  connection.serverTransport.send = async (message, options) => {
+    if ("method" in message && message.method === "notifications/progress") {
+      progressSent.resolve();
+      await releaseProgress.promise;
+    }
+    return send(message, options);
+  };
+  let closed = false;
+  try {
+    const pending = connection.client.callTool({
+      name: "run_all",
+      arguments: { operationId: "revoked-run", commandSequence: 1, expectedDocumentRevision: snapshot.documentRevision, wait: false },
+    }, undefined, { onprogress: () => undefined });
+    await progressSent.promise;
+    const closing = connection.server.close().then(() => { closed = true; });
+    releaseProgress.resolve();
+    await closing;
+    await pending.catch(() => undefined);
+    assert.equal(dispatched.length, 0);
+  } finally {
+    if (!closed) await closeInMemory(connection);
+  }
+});
+test("MCP lease revocation after progress prevents dispatch", async () => {
+  const progressSent = withResolvers<void>();
+  const releaseProgress = withResolvers<void>();
+  const dispatched: HostCommand[] = [];
+  let leaseActive = true;
+  let activeChecks = 0;
+  const connection = await connectInMemory(makeController({
+    dispatch: async command => {
+      dispatched.push(command);
+      return await makeController().dispatch(command);
+    },
+  }), artifactStore, {
+    assertActive: () => {
+      activeChecks++;
+      if (!leaseActive) throw Object.assign(new Error("session lease has ended"), { code: "forbidden" });
+    },
+  });
+  const send = connection.serverTransport.send.bind(connection.serverTransport);
+  connection.serverTransport.send = async (message, options) => {
+    if ("method" in message && message.method === "notifications/progress") {
+      progressSent.resolve();
+      await releaseProgress.promise;
+    }
+    return send(message, options);
+  };
+  try {
+    const pending = connection.client.callTool({
+      name: "run_all",
+      arguments: { operationId: "revoked-run-authoritative", commandSequence: 1, expectedDocumentRevision: snapshot.documentRevision, wait: false },
+      _meta: { progressToken: "revocation-barrier" },
+    }, undefined, { onprogress: () => undefined });
+    await progressSent.promise;
+    // Model the lease registry removing this generation while progress is in flight.
+    leaseActive = false;
+    releaseProgress.resolve();
+    await pending.catch(() => undefined);
+    assert.equal(activeChecks >= 2, true);
+    assert.equal(dispatched.length, 0);
+  } finally {
+    await closeInMemory(connection);
+  }
+});
+
+test("MCP shutdown sends its settled response before closing the transport", async () => {
+  let connection: InMemoryConnection | undefined;
+  let shutdownCalled = false;
+  const controller = makeController({
+    awaitOperation: async id => ({
+      id,
+      clientId: "client-1",
+      commandSequence: 1,
+      kind: "shutdown",
+      status: "done",
+      documentRevision: snapshot.documentRevision,
+      runId: null,
+      result: { closing: true },
+      error: null,
+      acceptedAt: 10,
+      settledAt: 11,
+    }),
+  });
+  connection = await connectInMemory(controller, artifactStore, {
+    onShutdown: () => {
+      shutdownCalled = true;
+      if (connection !== undefined) void connection.server.server.close().catch(() => undefined);
+    },
+  });
+  try {
+    const result = await connection.client.callTool({
+      name: "shutdown",
+      arguments: {
+        operationId: "shutdown-1",
+        commandSequence: 1,
+        expectedDocumentRevision: snapshot.documentRevision,
+        expectedClientIds: [],
+        confirmed: true,
+      },
+    });
+    assert.equal(result.isError, false);
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.equal(shutdownCalled, true);
+  } finally {
+    await closeInMemory(connection);
+  }
+});
+
+test("MCP cancellation interrupts the matching controller run", async () => {
+  const commands: HostCommand[] = [];
+  const settled = withResolvers<OperationRecord>();
+  let current: OperationRecord | undefined;
+  const controller = makeController({
+    operation: id => current?.id === id ? current : undefined,
+    dispatch: async command => {
+      commands.push(command);
+      const operation = {
+        id: command.operationId,
+        clientId: command.clientId,
+        commandSequence: command.commandSequence,
+        kind: command.type === "interrupt" ? "interrupt" : "run",
+        status: command.type === "interrupt" ? "done" : "running",
+        documentRevision: snapshot.documentRevision,
+        runId: command.type === "interrupt" ? null : "run-1",
+        result: null,
+        error: null,
+        acceptedAt: 10,
+        ...(command.type === "interrupt" ? { settledAt: 11 } : {}),
+      } as unknown as OperationRecord;
+      if (command.type !== "interrupt") {
+        current = { ...operation, id: command.operationId, status: "running", runId: "run-1" };
+        return { epoch: snapshot.epoch, clientId: command.clientId, operationId: command.operationId, commandSequence: command.commandSequence, accepted: true, sequenceConsumed: true, operation: current, error: null, nextCommandSequence: command.commandSequence + 1 };
+      }
+      current = { ...current!, status: "interrupted", error: { code: "interrupted", message: "run interrupted" }, settledAt: 11 } as unknown as OperationRecord;
+      settled.resolve(current);
+      return { epoch: snapshot.epoch, clientId: command.clientId, operationId: command.operationId, commandSequence: command.commandSequence, accepted: true, sequenceConsumed: true, operation, error: null, nextCommandSequence: command.commandSequence + 1 };
+    },
+    awaitOperation: async () => settled.promise,
+  });
+  const connection = await connectInMemory(controller);
+  const abort = new AbortController();
+  try {
+    const pending = connection.client.callTool({ name: "run_all", arguments: { operationId: "run-op", commandSequence: 1, expectedDocumentRevision: 3 } }, undefined, { signal: abort.signal });
+    await new Promise(resolve => setImmediate(resolve));
+    abort.abort();
+    await assert.rejects(pending);
+    await new Promise(resolve => setTimeout(resolve, 20));
+    const interrupt = commands.find(command => command.type === "interrupt");
+    assert.equal(interrupt?.runId, "run-1");
+  } finally {
+    await closeInMemory(connection);
+  }
+});
+test("MCP cancellation interrupts a run during preparation without waiting for a run id", async () => {
+  const commands: HostCommand[] = [];
+  const settled = withResolvers<OperationRecord>();
+  let current: OperationRecord | undefined;
+  const controller = makeController({
+    operation: id => current?.id === id ? current : undefined,
+    dispatch: async command => {
+      commands.push(command);
+      if (command.type !== "interrupt") {
+        current = {
+          id: command.operationId,
+          clientId: command.clientId,
+          commandSequence: command.commandSequence,
+          kind: "run",
+          status: "running",
+          documentRevision: snapshot.documentRevision,
+          runId: null,
+          result: null,
+          error: null,
+          acceptedAt: 10,
+        } as unknown as OperationRecord;
+        return { epoch: snapshot.epoch, clientId: command.clientId, operationId: command.operationId, commandSequence: command.commandSequence, accepted: true, sequenceConsumed: true, operation: current!, error: null, nextCommandSequence: command.commandSequence + 1 };
+      }
+      assert.equal(command.runId, undefined);
+      current = { ...current!, status: "interrupted", error: { code: "interrupted", message: "run interrupted" }, settledAt: 11 } as unknown as OperationRecord;
+      settled.resolve(current);
+      return { epoch: snapshot.epoch, clientId: command.clientId, operationId: command.operationId, commandSequence: command.commandSequence, accepted: true, sequenceConsumed: true, operation: current, error: null, nextCommandSequence: command.commandSequence + 1 };
+    },
+    awaitOperation: async () => settled.promise,
+  });
+  const connection = await connectInMemory(controller);
+  const abort = new AbortController();
+  try {
+    const pending = connection.client.callTool({ name: "run_all", arguments: { operationId: "prepare-run", commandSequence: 1, expectedDocumentRevision: 3 } }, undefined, { signal: abort.signal });
+    await new Promise<void>(resolve => setImmediate(resolve));
+    abort.abort();
+    await assert.rejects(pending);
+    await new Promise<void>(resolve => setImmediate(resolve));
+    const interrupt = commands.find(command => command.type === "interrupt");
+    assert.ok(interrupt);
+    assert.equal(interrupt?.runId, undefined);
+  } finally {
+    await closeInMemory(connection);
+  }
+});
+test("MCP forwards logical Markdown range edits without re-encoding them", async () => {
+  const markdownCell = { ...cell, type: "markdown", body: ["# # Heading", "#", "# Body text", ""] } as unknown as HostSnapshot["cells"][number];
+  let dispatched: HostCommand | undefined;
+  const controller = makeController({
+    snapshot: () => ({ ...snapshot, cells: [markdownCell] }),
+    dispatch: async command => { dispatched = command; return await makeController().dispatch(command); },
+  });
+  const connection = await connectInMemory(controller);
+  const edits = [{ start: { line: 0, character: 2 }, end: { line: 0, character: 9 }, text: "Renamed" }];
+  try {
+    const result = await connection.client.callTool({ name: "edit_cell_ranges", arguments: { operationId: "range-1", commandSequence: 1, expectedDocumentRevision: 3, cell: "cell-1", expectedRevision: 0, edits } });
+    assert.equal(result.isError, false);
+    assert.equal(dispatched?.type, "transaction");
+    if (dispatched?.type !== "transaction") throw new Error("expected transaction command");
+    assert.deepEqual(dispatched.changes, [{ type: "text-edit", cell: { cellId: "cell-1" }, expectedRevision: 0, edits }]);
+  } finally { await closeInMemory(connection); }
+});
+
+test("createMcpServer maps query and effect tools to exact structured envelopes", async () => {
+  let dispatched: HostCommand | undefined;
+  let queried: unknown;
+  const acceptedOperation: OperationRecord = {
+    id: "op-save",
+    clientId: "client-1",
+    commandSequence: 1,
+    kind: "save",
+    status: "accepted",
+    documentRevision: snapshot.documentRevision,
+    runId: null,
+    result: null,
+    error: null,
+    acceptedAt: 10,
+  };
+  const admission: CommandAdmission = {
+    epoch: snapshot.epoch,
+    clientId: acceptedOperation.clientId,
+    operationId: acceptedOperation.id,
+    commandSequence: acceptedOperation.commandSequence,
+    accepted: true,
+    sequenceConsumed: true,
+    operation: acceptedOperation,
+    error: null,
+    nextCommandSequence: 2,
+  };
+  const settledOperation: OperationRecord = {
+    ...acceptedOperation,
+    status: "done",
+    result: { saved: true },
+    settledAt: 11,
+  };
+  const controller = makeController({
+    query: query => {
+      queried = query;
+      return {
+        epoch: snapshot.epoch,
+        documentRevision: snapshot.documentRevision,
+        cursor: snapshot.cursor,
+        result: query.type === "notebook"
+          ? { protocol: "alder-host-v2", epoch: snapshot.epoch, documentRevision: snapshot.documentRevision, cursor: snapshot.cursor, cells: [{ id: "cell-1", type: "code", options: {}, revision: 0 }] }
+          : { cells: [cell] },
+      } as unknown as HostQueryResult;
+    },
+    dispatch: async command => {
+      dispatched = command;
+      return admission;
+    },
+    awaitOperation: async id => {
+      assert.equal(id, acceptedOperation.id);
+      return settledOperation;
+    },
+  });
+  const connection = await connectInMemory(controller);
+  try {
+    const queryResult = await connection.client.callTool({ name: "list_cells", arguments: {} });
+    const queryEnvelope = { epoch: snapshot.epoch, documentRevision: snapshot.documentRevision, cursor: snapshot.cursor, result: { cells: [cell] } };
+    assert.deepEqual(queryResult.structuredContent, queryEnvelope);
+    assert.equal(queryResult.isError, false);
+    assert.deepEqual(queried, { type: "cells" });
+    const stateResult = await connection.client.callTool({ name: "notebook_state", arguments: {} });
+    assert.deepEqual(stateResult.structuredContent, {
+      epoch: snapshot.epoch,
+      documentRevision: snapshot.documentRevision,
+      cursor: snapshot.cursor,
+      result: { protocol: "alder-host-v2", epoch: snapshot.epoch, documentRevision: snapshot.documentRevision, cursor: snapshot.cursor, cells: [{ id: "cell-1", type: "code", options: {}, revision: 0 }] },
+    });
+    assert.deepEqual(queried, { type: "notebook" });
+
+    const effectResult = await connection.client.callTool({
+      name: "save",
+      arguments: { operationId: acceptedOperation.id, commandSequence: 1, expectedDocumentRevision: snapshot.documentRevision },
+    });
+    const effectEnvelope = {
+      epoch: snapshot.epoch,
+      documentRevision: snapshot.documentRevision,
+      cursor: snapshot.cursor,
+      operation: settledOperation,
+      result: { admission, value: settledOperation.result },
+      error: settledOperation.error,
+    };
+    assert.deepEqual(dispatched, {
+      operationId: acceptedOperation.id,
+      clientId: acceptedOperation.clientId,
+      commandSequence: acceptedOperation.commandSequence,
+      sessionEpoch: snapshot.epoch,
+      type: "save",
+      expectedDocumentRevision: snapshot.documentRevision,
+    });
+    assert.deepEqual(effectResult.structuredContent, effectEnvelope);
+    assert.equal(effectResult.isError, false);
+  } finally {
+    await closeInMemory(connection);
+  }
+});
+
+test("MCP recovery and event queries expose logical Markdown bodies", async () => {
+  const physicalMarkdown = { ...cell, type: "markdown", body: ["# Heading", "#", "# Body"] };
+  const controller = makeController({
+    query: query => ({
+      epoch: snapshot.epoch,
+      documentRevision: snapshot.documentRevision,
+      cursor: snapshot.cursor,
+      result: query.type === "events"
+        ? { kind: "replay", epoch: snapshot.epoch, cursor: 9, events: [{ payload: { cell: physicalMarkdown } }] }
+        : { kind: "snapshot", epoch: snapshot.epoch, cursor: 9, snapshot: { ...snapshot, cells: [physicalMarkdown] } },
+    } as unknown as HostQueryResult),
+  });
+  const connection = await connectInMemory(controller);
+  try {
+    const events = await connection.client.callTool({ name: "read_events", arguments: { epoch: null, cursor: null } });
+    const eventBody = ((events.structuredContent as { result: { events: Array<{ payload: { cell: { body: string[] } } }> } }).result.events[0]!.payload.cell.body);
+    assert.deepEqual(eventBody, ["Heading", "", "Body"]);
+
+    const recovery = await connection.client.callTool({ name: "recovery_state", arguments: {} });
+    const recoveryBody = ((recovery.structuredContent as { result: { snapshot: { cells: Array<{ body: string[] }> } } }).result.snapshot.cells[0]!.body);
+    assert.deepEqual(recoveryBody, ["Heading", "", "Body"]);
+  } finally {
+    await closeInMemory(connection);
+  }
+});
+
+test("connectMcpStdio forwards official SDK initialization, catalog listing, and queries", async () => {
+  const connection = await connectCatalogProxy();
+  try {
+    assert.equal(connection.factoryCalls, 1);
+    const tools = await connection.client.listTools();
+    assertToolCatalog(tools.tools);
+    const resources = await connection.client.listResources();
+    assert.equal(resources.resources.length, 4);
+    const result = await connection.client.callTool({ name: "list_cells", arguments: {} });
+    assert.equal(result.isError, false);
+    assert.deepEqual(result.structuredContent, {
+      epoch: snapshot.epoch,
+      documentRevision: snapshot.documentRevision,
+      cursor: snapshot.cursor,
+      result: [cell],
+    });
+  } finally {
+    await closeCatalogProxy(connection);
+  }
+});
+
+test("connectMcpStdio rejects malformed pre-initialize frames without invoking the upstream", async () => {
+  const input = new PassThrough();
+  const output = new PassThrough();
+  let factoryCalls = 0;
+  const transport = await connectMcpStdio(async () => {
+    factoryCalls++;
+    throw new Error("upstream must not be created");
+  }, { input, output });
+  try {
+    input.write("not-json\n");
+    assert.deepEqual(await waitForMessage(output), {
+      jsonrpc: "2.0",
+      id: null,
+      error: { code: -32700, message: "parse error" },
+    });
+    assert.equal(factoryCalls, 0);
+  } finally {
+    await transport.close();
+    input.destroy();
+    output.destroy();
+  }
+});
+
+test("connectMcpStdio forwards cancellation to an in-flight official SDK request", async () => {
+  const input = new PassThrough();
+  const output = new PassThrough();
+  const upstreamServer = new McpServer({ name: "cancellation-server", version: "1" });
+  const startedGate = withResolvers<void>();
+  const cancelledGate = withResolvers<void>();
+  const started = startedGate.promise;
+  const cancelled = cancelledGate.promise;
+  upstreamServer.registerTool("slow", { description: "waits until cancelled", inputSchema: z.object({}) }, async (_args, extra) => {
+    startedGate.resolve();
+    const request = withResolvers<never>();
+    extra.signal.addEventListener("abort", () => {
+      cancelledGate.resolve();
+      request.reject(new Error("upstream request cancelled"));
+    }, { once: true });
+    await request.promise;
+    throw new Error("unreachable");
+  });
+  const [upstreamClientTransport, upstreamServerTransport] = InMemoryTransport.createLinkedPair();
+  await upstreamServer.connect(upstreamServerTransport);
+  const upstreamClients: Client[] = [];
+  const transport = await connectMcpStdio(async initialization => {
+    const client = new Client(initialization.clientInfo, { capabilities: initialization.capabilities });
+    upstreamClients.push(client);
+    return { client, transport: upstreamClientTransport };
+  }, { input, output });
+  const clientTransport = new StdioServerTransport(output, input);
+  const client = new Client({ name: "cancellation-client", version: "1" }, { capabilities: {} });
+  await client.connect(clientTransport);
+  try {
+    const controller = new AbortController();
+    const pending = client.callTool({ name: "slow", arguments: {} }, undefined, { signal: controller.signal });
+    await started;
+    controller.abort();
+    await assert.rejects(pending);
+    await cancelled;
+  } finally {
     await client.close();
+    await transport.close();
+    await drainMcpStdio(transport);
+    await Promise.all(upstreamClients.map(upstreamClient => upstreamClient.close()));
+    await upstreamServer.close();
+    input.destroy();
+    output.destroy();
+  }
+});
+
+test("large structured results become immutable artifacts while output tools use HostQuery", async () => {
+  let captured = new Uint8Array();
+  const released: string[] = [];
+  const outputQueries: Array<{ type: "output"; handle: string; offset: number; limit: number }> = [];
+  const descriptor = {
+    handle: "large-result",
+    mimeType: "application/json",
+    byteLength: 0,
+    chunkBytes: 256 * 1024,
+    epoch: snapshot.epoch,
+    documentRevision: snapshot.documentRevision,
+    kernelEpoch: snapshot.runtime.kernelEpoch,
+  };
+  const store: AlderMcpOptions["artifactStore"] = {
+    writeArtifact: async bytes => {
+      captured = Uint8Array.from(bytes);
+      return { ...descriptor, byteLength: captured.byteLength };
+    },
+    retainArtifactRead: () => undefined,
+    openArtifactResource: () => ({
+      descriptor: { ...descriptor, byteLength: captured.byteLength },
+      read: async (offset, limit) => captured.slice(offset, offset + limit),
+      close: () => undefined,
+    }),
+    release: handles => { released.push(...handles.map(handle => handle.handle)); },
+  };
+  const controller = makeController({
+    snapshot: () => ({ ...snapshot, cells: [{ ...cell, body: ["😀".repeat(300_000)] }] }),
+    query: query => {
+      if (query.type === "cells") {
+        return { epoch: snapshot.epoch, documentRevision: snapshot.documentRevision, cursor: snapshot.cursor, result: { cells: [{ ...cell, body: ["😀".repeat(300_000)] }] } } as unknown as HostQueryResult;
+      }
+      if (query.type === "output") {
+        outputQueries.push({ type: "output", handle: query.handle, offset: query.offset ?? 0, limit: query.limit ?? 0 });
+        const offset = query.offset ?? 0;
+        return {
+          epoch: snapshot.epoch,
+          documentRevision: snapshot.documentRevision,
+          cursor: snapshot.cursor,
+          result: { encoding: "utf8", offset, nextOffset: offset + 4, eof: false, data: "delegated" },
+        } as unknown as HostQueryResult;
+      }
+      return { epoch: snapshot.epoch, documentRevision: snapshot.documentRevision, cursor: snapshot.cursor, result: null } as unknown as HostQueryResult;
+    },
+  });
+  const connection = await connectInMemory(controller, store);
+  try {
+    const result = await connection.client.callTool({ name: "list_cells", arguments: {} });
+    assert.ok(Buffer.byteLength(JSON.stringify(result.structuredContent)) < 1_048_576);
+    assert.equal((result.structuredContent as { result?: { artifact?: { handle?: string } } }).result?.artifact?.handle, descriptor.handle);
+    assert.ok(captured.byteLength > 1_048_576);
+
+    const page = await connection.client.callTool({ name: "read_output", arguments: { handle: descriptor.handle, offset: 4, limit: 5 } });
+    assert.deepEqual((page.structuredContent as { result?: unknown }).result, { encoding: "utf8", offset: 4, nextOffset: 8, eof: false, data: "delegated" });
+    const tinyPage = await connection.client.callTool({ name: "read_output", arguments: { handle: descriptor.handle, offset: 8, limit: 1 } });
+    assert.deepEqual((tinyPage.structuredContent as { result?: unknown }).result, { encoding: "utf8", offset: 8, nextOffset: 12, eof: false, data: "delegated" });
+    assert.deepEqual(outputQueries, [
+      { type: "output", handle: descriptor.handle, offset: 4, limit: 5 },
+      { type: "output", handle: descriptor.handle, offset: 8, limit: 1 },
+    ]);
+
+    const stateResource = await connection.client.readResource({ uri: "alder://notebook/state" });
+    const stateContent = stateResource.contents[0]!;
+    assert.equal(stateContent.mimeType, "application/vnd.alder.artifact-handle+json");
+    assert.equal((stateContent._meta as { alderArtifactHandle?: { handle?: string } }).alderArtifactHandle?.handle, descriptor.handle);
+    assert.equal((JSON.parse((stateContent as { text: string }).text) as { artifact: { handle: string } }).artifact.handle, descriptor.handle);
+  } finally {
+    await closeInMemory(connection);
+  }
+  assert.deepEqual(released, [descriptor.handle]);
+});
+
+test("MCP runtime startup timeout is bounded and ignores a late startup result", async () => {
+  const startup = withResolvers<void>();
+  const connection = await connectInMemory(makeController(), artifactStore, { startup: startup.promise, startupTimeoutMs: 20 });
+  try {
+    const result = await Promise.race([
+      connection.client.callTool({ name: "run_all", arguments: { operationId: "timed-out-startup", commandSequence: 1, expectedDocumentRevision: snapshot.documentRevision, wait: false } }),
+      new Promise<never>((_, reject) => { const timer = setTimeout(() => reject(new Error("runtime startup timeout was not enforced")), 500); timer.unref(); }),
+    ]);
+    assert.equal(result.isError, true);
+    assert.equal(result.content[0]?.text, "MCP action timed out");
+
+    startup.resolve();
+    await new Promise<void>(resolve => setImmediate(resolve));
+    const late = await connection.client.callTool({ name: "run_all", arguments: { operationId: "late-startup", commandSequence: 2, expectedDocumentRevision: snapshot.documentRevision, wait: false } });
+    assert.equal(late.isError, true);
+    assert.equal(late.content[0]?.text, "MCP action timed out");
+  } finally {
+    startup.resolve();
+    await closeInMemory(connection);
+  }
+});
+
+test("connectMcpStdio bounds a never-settling upstream factory and drains", async () => {
+  const input = new PassThrough();
+  const output = new PassThrough();
+  const factory = withResolvers<{ client: Client; transport: Transport }>();
+  let lateCloseCalls = 0;
+  const lateClient = new Client({ name: "late-factory-client", version: "1" }, { capabilities: {} });
+  const lateTransport: Transport = {
+    start: async () => undefined,
+    send: async () => undefined,
+    close: async () => { lateCloseCalls++; },
+  };
+  const transport = await connectMcpStdio(() => factory.promise, { input, output, upstreamTimeoutMs: 20 });
+  try {
+    input.write(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "factory-timeout", version: "1" } } }) + "\n");
+    const response = await Promise.race([
+      waitForMessage(output),
+      new Promise<never>((_, reject) => { const timer = setTimeout(() => reject(new Error("upstream factory timeout was not enforced")), 500); timer.unref(); }),
+    ]);
+    assert.deepEqual(response, { jsonrpc: "2.0", id: 1, error: { code: -32603, message: "MCP upstream connection timed out" } });
+    factory.resolve({ client: lateClient, transport: lateTransport });
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.ok(lateCloseCalls > 0);
+    await Promise.race([
+      drainMcpStdio(transport),
+      new Promise<never>((_, reject) => { const timer = setTimeout(() => reject(new Error("stdio drain remained blocked after factory timeout")), 500); timer.unref(); }),
+    ]);
+  } finally {
+    await transport.close();
+    await drainMcpStdio(transport);
+    input.destroy();
+    output.destroy();
+  }
+});
+
+test("connectMcpStdio bounds client.connect and closes the abandoned upstream", async () => {
+  const input = new PassThrough();
+  const output = new PassThrough();
+  let closeCalls = 0;
+  const hangingTransport: Transport = {
+    start: () => new Promise<void>(() => {}),
+    send: async () => undefined,
+    close: async () => { closeCalls++; },
+  };
+  const upstreamClient = new Client({ name: "connect-timeout", version: "1" }, { capabilities: {} });
+  const transport = await connectMcpStdio(async () => ({ client: upstreamClient, transport: hangingTransport }), { input, output, upstreamTimeoutMs: 20 });
+  try {
+    input.write(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "connect-timeout-client", version: "1" } } }) + "\n");
+    const response = await Promise.race([
+      waitForMessage(output),
+      new Promise<never>((_, reject) => { const timer = setTimeout(() => reject(new Error("client.connect timeout was not enforced")), 500); timer.unref(); }),
+    ]);
+    assert.deepEqual(response, { jsonrpc: "2.0", id: 1, error: { code: -32603, message: "MCP upstream connection timed out" } });
+    assert.ok(closeCalls > 0);
+    await Promise.race([
+      drainMcpStdio(transport),
+      new Promise<never>((_, reject) => { const timer = setTimeout(() => reject(new Error("stdio drain remained blocked after connect timeout")), 500); timer.unref(); }),
+    ]);
+  } finally {
+    await transport.close();
+    await drainMcpStdio(transport);
+    await upstreamClient.close().catch(() => undefined);
+    input.destroy();
+    output.destroy();
   }
 });

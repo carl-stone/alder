@@ -1,10 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import test from "node:test";
 
-import { Engine } from "../src/engine.js";
 import {
   ReactiveGraph,
   buildDependencyGraph,
@@ -17,11 +13,8 @@ import {
 import {
   MAX_DEPENDENCY_EDGES,
   MAX_NOTEBOOK_CELLS,
-  type CellType,
 } from "../src/protocol.js";
 
-const installedPackage = process.env.ALDER_R_PACKAGE;
-const integration = { skip: installedPackage === undefined, timeout: 60_000 };
 
 function cell(
   id: string,
@@ -43,6 +36,15 @@ function cell(
     ...values,
   };
 }
+
+test('metadata-only graph refresh preserves topology and updates validation', () => {
+  const graph = new ReactiveGraph([cell('a', { defs: ['x'] }), cell('b', { refs: ['x'] })]);
+  const state = graph.state;
+  assert.equal(graph.refreshCellsIfTopologyUnchanged([cell('a', { defs: ['x'], error: 'invalid source' })]), true);
+  assert.strictEqual(graph.state, state);
+  assert.equal(graph.validate().some((issue) => issue.code === 'syntax-error'), true);
+  assert.equal(graph.refreshCellsIfTopologyUnchanged([cell('a', { defs: ['other'] })]), false);
+});
 
 test("graph reproduces definition edges, duplicate owners, cycles, and deterministic order", () => {
   const graph = buildDependencyGraph([
@@ -248,7 +250,7 @@ test("aggregate edge admission is coherent and recovers transactionally", () => 
   assert.equal(graph.resourceLimited, true);
   assert.equal(graph.state.topologicalOrder, null);
   assert.ok(Object.values(graph.state.edges).every((dependencies) => dependencies.length === 0));
-  assert.deepEqual(graph.validate().map((issue) => issue.code), ["resource-limit"]);
+  assert.deepEqual(graph.validate().map((issue) => issue.code), ["graph_blocked"]);
 
   const sparse = dense.map((item) => ({ ...item, barrier: false }));
   graph.update(sparse);
@@ -265,129 +267,3 @@ test("prototype-shaped R symbols remain ordinary duplicate-definition keys", () 
   assert.equal(Object.hasOwn(graph.duplicates, "__proto__"), true);
   assert.deepEqual(graph.duplicates["__proto__"], ["a", "b"]);
 });
-
-interface SharedGraphCell {
-  id: string;
-  type: CellType;
-  body: string[];
-}
-
-test("host graph exactly matches the retained R fixed-plan graph on shared fixtures", integration,
-  async () => {
-    const directory = await mkdtemp(join(tmpdir(), "alder-graph-parity-"));
-    const engine = new Engine({
-      packagePath: installedPackage,
-      notebookDirectory: directory,
-      startupTimeoutMs: 30_000,
-    });
-    const fixtures: Array<{ name: string; cells: SharedGraphCell[] }> = [
-      {
-        name: "dependency-chain",
-        cells: [
-          { id: "cell-1", type: "code", body: ["x <- 1"] },
-          { id: "cell-2", type: "code", body: ["y <- x + 1"] },
-          { id: "cell-3", type: "code", body: ["z <- x + y"] },
-        ],
-      },
-      {
-        name: "duplicates-and-cycle",
-        cells: [
-          { id: "cell-1", type: "code", body: ["x <- y"] },
-          { id: "cell-2", type: "code", body: ["y <- x"] },
-          { id: "cell-3", type: "code", body: ["x <- 3"] },
-        ],
-      },
-      {
-        name: "package-barrier",
-        cells: [
-          { id: "cell-1", type: "code", body: ["library(stats)"] },
-          { id: "cell-2", type: "markdown", body: ["# Notes"] },
-          { id: "cell-3", type: "code", body: ["sample <- rnorm(1)"] },
-        ],
-      },
-      {
-        name: "opaque-source",
-        cells: [
-          { id: "cell-1", type: "code", body: ["x <- 1"] },
-          { id: "cell-2", type: "code", body: ["source('helpers.R')"] },
-          { id: "cell-3", type: "code", body: ["y <- 2"] },
-          { id: "cell-4", type: "markdown", body: ["# End"] },
-        ],
-      },
-      {
-        name: "multiple-opaque-barriers",
-        cells: [
-          { id: "cell-1", type: "code", body: ["x <- 1"] },
-          { id: "cell-2", type: "code", body: ["source('first.R')"] },
-          { id: "cell-3", type: "code", body: ["y <- x + 1"] },
-          { id: "cell-4", type: "code", body: ["source('second.R')"] },
-          { id: "cell-5", type: "code", body: ["z <- y + 1"] },
-        ],
-      },
-    ];
-    try {
-      await engine.start();
-      for (let index = 0; index < fixtures.length; index += 1) {
-        const fixture = fixtures[index]!;
-        const snapshots = fixture.cells.map((value) => ({
-          id: value.id,
-          revision: 0,
-          type: value.type,
-          source: value.body.join("\n"),
-        }));
-        const analyzed = await engine.analyze(snapshots, index + 1);
-        const host = buildDependencyGraph(analyzed.cells.map((analysis) => ({
-          ...analysis,
-          type: fixture.cells.find((value) => value.id === analysis.id)!.type,
-        })));
-        const bytes = Buffer.from(
-          fixture.cells.flatMap((value) => ["# %%", ...value.body]).join("\n") + "\n",
-          "utf8",
-        ).toString("base64");
-        const raw = await engine.service("graph", {
-          path: join(directory, `${fixture.name}.R`),
-          bytes,
-          metadata: {},
-          cells: fixture.cells.map((value) => ({
-            id: value.id,
-            type: value.type,
-            body: [...value.body],
-            options: {},
-            revision: 0,
-          })),
-        });
-        assert.ok(raw && typeof raw === "object" && !Array.isArray(raw), fixture.name);
-        const graph = raw as Record<string, unknown>;
-        assert.deepEqual(host.edges, stringArrayRecord(graph.edges), `${fixture.name}: edges`);
-        assert.deepEqual(
-          host.duplicates,
-          stringArrayRecord(graph.duplicates),
-          `${fixture.name}: duplicates`,
-        );
-        assert.deepEqual(host.cycles, stringArray(graph.cycles), `${fixture.name}: cycles`);
-        assert.deepEqual(
-          host.topologicalOrder,
-          graph.topo === null ? null : stringArray(graph.topo),
-          `${fixture.name}: topological order`,
-        );
-      }
-    } finally {
-      await engine.close();
-      await rm(directory, { recursive: true, force: true });
-    }
-  });
-
-function stringArray(value: unknown): string[] {
-  if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
-    throw new TypeError("expected an array of strings from R graph service");
-  }
-  return [...value] as string[];
-}
-
-function stringArrayRecord(value: unknown): Record<string, string[]> {
-  if (Array.isArray(value) && value.length === 0) return {};
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    throw new TypeError("expected a string-array record from R graph service");
-  }
-  return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, stringArray(item)]));
-}

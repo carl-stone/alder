@@ -1,503 +1,560 @@
-import { mkdir, mkdtemp, open, realpath, rm, stat } from 'node:fs/promises';
-import { delimiter, dirname, join, resolve } from 'node:path';
-import { tmpdir } from 'node:os';
-import { fileURLToPath } from 'node:url';
-import { parseArgs } from 'node:util';
-import { randomUUID } from 'node:crypto';
-import { z } from 'zod';
-import { Controller } from './controller.js';
-import { Engine } from './engine.js';
-import { createAlderServer } from './server.js';
-import { DocumentStore, FileConflict } from './services.js';
-import { RJobs } from './jobs.js';
-import { LspClient, type NotebookDocument } from './lsp.js';
-import type { CellSnapshot, HostSnapshot } from './protocol.js';
-import { createMcpServer, connectMcpStdio, drainMcpServer } from './mcp.js';
-import { connectRemoteController } from './remote.js';
-import { UploadStore } from './uploads.js';
-import { startGallery } from './gallery.js';
-import { DEFAULT_MAX_FRAME_BYTES, parseStrictJson } from './framing.js';
+import { spawn } from "node:child_process";
+import { constants } from "node:fs";
+import { chmod, mkdtemp, open, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { readPrivateFile } from "./private-paths.js";
+import { parseArgs } from "node:util";
+import { randomUUID } from "node:crypto";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
-export const HOST_IDENTITY = Object.freeze({
-  protocol: 1, hostVersion: '0.1.0', packageVersion: '0.1.0',
-});
+import { parseStrictJson } from "./strict-json.js";
 
-function reportFailure(error: unknown): void {
-  process.stderr.write(`alder: ${error instanceof Error ? error.message : String(error)}\n`);
-  process.exitCode = 1;
+import { connectMcpStdio, drainMcpStdio, type McpInitializationMetadata } from "./mcp-stdio.js";
+import { startHost, type HostReady } from "./application.js";
+import { resolveApplicationResources, type ApplicationResources } from "./resources.js";
+import { acquireNotebookSession, isUntitledRecoveryId, listUntitledRecoveryDescriptors, selectUntitledRecoveryDescriptor, SessionAuthError } from "./sessions.js";
+import {
+  artifactHandleSchema,
+  commandAdmissionSchema,
+  decodeHostQueryResultWire,
+  encodeHostCommandWire,
+  encodeHostQueryWire,
+  hostQueryResultSchema,
+  ENGINE_PROTOCOL,
+  HOST_PROTOCOL,
+  hostSnapshotSchema,
+  operationRecordSchema,
+  parseHostCommand,
+  SNAPSHOT_ENVELOPE_LIMIT,
+  type SessionConnection,
+  type HostQuery,
+  type HostQueryResult,
+  type HostSnapshot,
+  type OperationRecord,
+} from "./protocol.js";
+
+export const HOST_IDENTITY = Object.freeze({ protocol: HOST_PROTOCOL, engineProtocol: ENGINE_PROTOCOL, hostVersion: "0.1.0", packageVersion: "0.1.0" });
+const PRIVATE_NONCE = "ALDER_PRIVATE_READY_NONCE";
+const PRIVATE_NONCE_PATTERN = /^[0-9a-f]{64}$/;
+const AUTH_TOKEN_PATTERN = /^[0-9a-f]{64}$/;
+const TOKEN_FILE_MAX_BYTES = 65;
+const RUNTIME_READY_TIMEOUT_MS = 120_000;
+const RUNTIME_READY_POLL_MS = 100;
+
+export interface RuntimeReadinessWaitOptions {
+  readonly timeoutMs?: number;
+  readonly pollIntervalMs?: number;
+  readonly readiness?: "document" | "analyzer" | "execution";
 }
 
-function runDetached(operation: () => unknown): void {
-  void Promise.resolve().then(operation).catch(reportFailure);
-}
-
-const optionsSchema = z.object({
-  path: z.string().min(1).nullable().default(null),
-  host: z.enum(['127.0.0.1', 'localhost', '::1']).default('127.0.0.1'),
-  port: z.number().int().min(0).max(65535).default(8899),
-  executionMode: z.enum(['automatic', 'lazy']).optional(),
-  runOnStartup: z.boolean().optional(),
-  sandbox: z.boolean().default(false),
-  idleTimeout: z.number().nonnegative().finite().default(0),
-  deferStartup: z.boolean().default(false),
-  expectedSource: z.string().optional(),
-  allowedOrigins: z.array(z.string()).optional(),
-  packagePath: z.string().optional(),
-  rscript: z.string().optional(),
-  environment: z.record(z.string(), z.string()).optional(),
-}).strict();
-export type HostOptions = z.input<typeof optionsSchema>;
-
-export async function startHost(input: HostOptions) {
-  const options = optionsSchema.parse(input);
-  if (options.path !== null) return startNotebookHost({ ...options, path: options.path });
-  if (options.sandbox) throw new Error('sandbox mode requires a notebook file path');
-  const temporary = await mkdtemp(join(tmpdir(), 'alder-unsaved-'));
-  try {
-    const app = await startNotebookHost({ ...options, path: join(temporary, 'Untitled.R') }, true);
-    const closed = app.closed.then(() => rm(temporary, { recursive: true, force: true }));
-    return { ...app, closed, close: async () => {
-      try { await app.close(); } finally { await closed; }
-    } };
-  } catch (error) { await rm(temporary, { recursive: true, force: true }); throw error; }
-}
-
-async function startNotebookHost(input: HostOptions & { path: string }, unsaved = false) {
-  const options = optionsSchema.parse(input);
-  const packagePath = options.packagePath ?? process.env.ALDER_R_PACKAGE ??
-    resolve(dirname(fileURLToPath(import.meta.url)), '..');
-  const notebookPath = await realpath(input.path).catch(async (error: NodeJS.ErrnoException) => {
-    if (error.code !== 'ENOENT') throw error;
-    return join(await realpath(dirname(resolve(input.path))), input.path.split(/[\\/]/).at(-1)!);
-  });
-  const notebookDirectory = unsaved ? process.cwd() : dirname(notebookPath);
-  const projectLibrary = join(notebookDirectory, '.alder', 'library');
-  const environment: NodeJS.ProcessEnv = { ...options.environment, ALDER_PROJECT_LIB: projectLibrary };
-  if (options.sandbox) {
-    const bootstrap = new RJobs({ rscript: options.rscript ?? process.env.ALDER_RSCRIPT ?? 'Rscript',
-      packagePath, environment: options.environment });
-    try {
-      const sandbox = await bootstrap.run('sandbox.resolve', { path: notebookPath }) as { lib: string };
-      delete environment.ALDER_PROJECT_LIB;
-      environment.ALDER_SANDBOX_LIB = z.string().min(1).parse(sandbox.lib);
-    } finally { await bootstrap.close(); }
+/**
+ * Wait for the host's authoritative runtime state before issuing a CLI
+ * operation. Session acquisition only proves that the HTTP host is ready;
+ * runtime bootstrap can still be resolving (or can have reached a terminal
+ * blocked state) after the lease is issued.
+ */
+export async function waitForRuntimeReadiness(
+  readSnapshot: () => Promise<HostSnapshot>,
+  options: RuntimeReadinessWaitOptions = {},
+): Promise<HostSnapshot> {
+  const timeoutMs = options.timeoutMs ?? RUNTIME_READY_TIMEOUT_MS;
+  const pollIntervalMs = options.pollIntervalMs ?? RUNTIME_READY_POLL_MS;
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) throw new RangeError("runtime readiness timeout must be a positive safe integer");
+  if (!Number.isSafeInteger(pollIntervalMs) || pollIntervalMs < 0) throw new RangeError("runtime readiness poll interval must be a non-negative safe integer");
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const snapshot = await readSnapshot();
+    const ready = options.readiness === "document"
+      ? snapshot.runtime.documentReady
+      : options.readiness === "analyzer"
+        ? snapshot.runtime.analyzerState === "ready"
+        : snapshot.runtime.executionReady;
+    if (ready || snapshot.runtime.executionBlockedReason !== null) return snapshot;
+    if (Date.now() >= deadline) throw new Error("runtime_ready_timeout");
+    await new Promise<void>(resolveDelay => setTimeout(resolveDelay, Math.min(pollIntervalMs, Math.max(1, deadline - Date.now()))));
   }
-  const work = await mkdtemp(join(tmpdir(), 'alder-host-'));
-  const uploads = new UploadStore(join(work, 'uploads'));
-  const cacheDirectory = unsaved ? join(work, 'cache') : join(notebookDirectory, '.alder', 'cache');
-  let engine: Engine;
+}
+
+interface CliOptions {
+  command: "desktop" | "check" | "run" | "publish" | "mcp";
+  path: string | null;
+  recover?: string;
+  listRecoveries: boolean;
+  browser: boolean;
+  headless: boolean;
+  rscript?: string;
+  sandbox: boolean;
+  lazy: boolean;
+  noRun: boolean;
+  deferStartup: boolean;
+  host: string;
+  port: number;
+  allowedOrigins: string[];
+  externalOrigin?: string;
+  tokenFile?: string;
+  output?: string;
+  includeCode: boolean;
+  internalHost: boolean;
+}
+
+function usageError(message: string): Error { return Object.assign(new Error(message), { exitCode: 2 }); }
+export function desktopUnavailableError(): Error & { readonly code: string } { return Object.assign(new Error("desktop runtime is unavailable; use --browser or --headless"), { code: "desktop_unavailable" }); }
+function writeJson(value: unknown): void { process.stdout.write(JSON.stringify(value) + "\n"); }
+function errorText(error: unknown): string {
+  if (!(error instanceof Error)) return String(error);
+  const code = (error as { code?: unknown }).code;
+  return typeof code === "string" && code.length > 0 ? code + ": " + error.message : error.message;
+}
+
+async function readExternalBearer(path: string, processSupervisorExecutable?: string | null): Promise<string> {
   try {
-    engine = new Engine({ rscript: options.rscript, packagePath, notebookDirectory,
-      artifactDirectory: work, cacheDirectory, environment });
-  } catch (error) { await rm(work, { recursive: true, force: true }); throw error; }
-  const jobs = new RJobs({ rscript: options.rscript ?? process.env.ALDER_RSCRIPT ?? 'Rscript',
-    packagePath, environment });
-  let controller: Controller | undefined;
-  let lsp: LspClient | undefined;
-  let lspStarting: Promise<LspClient> | undefined;
-  let lspRestarting: Promise<LspClient> | undefined;
-  let lspGeneration = 0;
-  let server: ReturnType<typeof createAlderServer> | undefined;
-  let closing: Promise<void> | undefined;
-  let idleTimer: NodeJS.Timeout | undefined;
-  let lspSyncTimer: NodeJS.Timeout | undefined;
-  let stopLspSync: (() => void) | undefined;
-  let lspSyncRunning: Promise<void> | undefined;
-  let everConnected = false;
-  let clientCount = 0;
-  let browserActivity = 0;
-  let resolveClosed!: () => void;
-  const closed = new Promise<void>(resolve => { resolveClosed = resolve; });
-  const close = () => closing ??= (async () => {
-    clearTimeout(idleTimer);
-    clearTimeout(lspSyncTimer);
-    stopLspSync?.();
-    const errors: unknown[] = [];
-    const attempt = async (operation: () => unknown) => {
-      try { await operation(); } catch (error) { errors.push(error); }
-    };
-    // Stop admission and settle controller waits together: draining HTTP first
-    // would wait forever on a request whose active R run is being shut down.
-    const retiring = [attempt(() => server?.close()),
-      attempt(() => controller ? controller.close() : engine.close()),
-      attempt(() => jobs.close()),
-      // Interrupt a language-server initialize/request before waiting for the
-      // promise that owns it. Initialize otherwise carries a 30 second timeout.
-      attempt(() => lsp?.stop())];
-    await lspSyncRunning?.catch(() => {});
-    await lspStarting?.catch(() => {});
-    // getLsp may have passed its pre-construction closing check immediately
-    // before shutdown began, so cover a client created after the first stop.
-    await attempt(() => lsp?.stop());
-    await Promise.all(retiring);
-    await attempt(() => rm(work, { recursive: true, force: true }));
-    if (errors.length) throw new AggregateError(errors, 'Alder shutdown failed');
-  })().finally(resolveClosed);
-  try {
-    await mkdir(cacheDirectory, { recursive: true, mode: 0o700 });
-    const engineIdentity = await engine.start();
-    const { store, notebook } = await DocumentStore.open(input.path, engine);
-    if (unsaved) notebook.path = null;
-    if (options.expectedSource !== undefined && !store.matchesSource(options.expectedSource)) throw new FileConflict();
-    const config = await engine.service('config.resolve', {
-      path: unsaved ? null : store.path, metadata: notebook.metadata,
-    }) as Record<string, unknown>;
-    const layout = await engine.service('layout.read', { path: store.path });
-    controller = new Controller({
-      engine, notebook, config, layout,
-      deferStartup: options.deferStartup,
-      executionMode: options.executionMode ?? config.on_cell_change as 'automatic' | 'lazy' | undefined,
-      runOnStartup: options.runOnStartup ?? config.on_startup as boolean | undefined,
-      services: {
-        renderMarkdown: lines => store.renderMarkdown([...lines]),
-        save: snapshot => {
-          if (unsaved) throw Object.assign(new Error('notebook has no path'), { code: 'notebook_has_no_path' });
-          return store.save(snapshot);
-        },
-        format: cells => store.format(cells.map(cell => ({ ...cell, body: [...cell.body] }))),
-        service: (command, payload) => {
-          if (command === 'source') return store.document(controller!.snapshot()).then(document => ({ text: (document as { text: string }).text }));
-          if (command === 'upload.store') return uploads.store(payload.files);
-          if (command === 'upload.remove') return uploads.remove(z.string().parse(payload.uploadId));
-          if (unsaved && ['config.update', 'layout.update'].includes(command)) {
-            throw Object.assign(new Error('configuration requires a notebook path'), { code: 'notebook_has_no_path' });
-          }
-          if (command === 'config.update') return store.updateConfig(payload.config as Record<string, unknown>);
-          if (command === 'layout.update') return store.updateLayout(payload.layout);
-          if (command === 'app.update') return engine.service('app.validate', payload).then(app => ({ app }));
-          if (['packages.status', 'packages.declare', 'packages.install'].includes(command)) {
-            const packages = payload.packages === undefined ? [] : z.array(z.string()).parse(payload.packages);
-            return jobs.run(command, { packages, path: unsaved ? notebookDirectory : store.path, metadata: controller!.snapshot().metadata });
-          }
-          if (command === 'publish') {
-            const engineName = z.enum(['pandoc', 'quarto']).parse(payload.engine);
-            const filename = `publish-${randomUUID()}.html`;
-            return jobs.run('publish', { engine: engineName, state: controller!.snapshot(),
-              include_code: payload.include_code === true, artifact_dir: work, out: join(work, filename),
-            }).then(() => ({ engine: engineName, artifact: filename, url: `/download/${filename}` }));
-          }
-          if (command === 'export') {
-            const format = z.enum(['html', 'md', 'script', 'ipynb', 'qmd', 'session']).parse(payload.format);
-            const extension = format === 'script' ? 'R' : format === 'session' ? 'json' : format;
-            const filename = `export-${randomUUID()}.${extension}`;
-            return jobs.run('export', { format, state: controller!.snapshot(),
-              include_code: payload.include_code === true, artifact_dir: work,
-              out: join(work, filename),
-            }).then(() => ({ format, artifact: filename, url: `/download/${filename}` }));
-          }
-          return engine.service(command, payload);
-        },
-      },
-    });
-    await controller.start();
-    const documentSources = (document: NotebookDocument): CellSnapshot[] => document.cells.map(cell => ({
-      id: cell.id, revision: cell.revision!, type: cell.type ?? 'code', source: cell.body.join('\n'),
-    }));
-    const documentFor = async (snapshot: HostSnapshot): Promise<NotebookDocument> => {
-      const document = await store.document(snapshot) as NotebookDocument;
-      const cells = new Map(snapshot.cells.map(cell => [cell.id, cell]));
-      if (unsaved) document.path = null;
-      document.cells = document.cells.map(cell => ({ ...cell,
-        revision: cells.get(cell.id)!.revision, type: cells.get(cell.id)!.type,
-      }));
-      return document;
-    };
-    let liveDiagnostics = (config.editor as Record<string, unknown> | undefined)?.live_diagnostics === true;
-    const diagnosticsEnabled = () => liveDiagnostics;
-    const createLsp = async (generation: number): Promise<LspClient> => {
-        if (closing) throw new Error('Application host is closing');
-        const document = await documentFor(controller!.snapshot());
-        if (closing || generation !== lspGeneration) throw new Error('Language assistance startup was superseded');
-        const lspEnvironment = { ...process.env, ...environment };
-        lspEnvironment.R_LIBS = [dirname(packagePath), lspEnvironment.R_LIBS]
-          .filter(Boolean).join(delimiter);
-        delete lspEnvironment.R_HOME;
-        const client = new LspClient({
-          command: options.rscript ?? process.env.ALDER_RSCRIPT ?? 'Rscript',
-          args: ['--vanilla', '-e',
-            'suppressPackageStartupMessages(library(alder)); invisible(loadNamespace("languageserver")); invisible(alder:::alder_host_apply_library_policy()); languageserver::run()'],
-          cwd: notebookDirectory, env: lspEnvironment, document,
-          diagnostics: diagnosticsEnabled(),
-          onFailure: message => {
-            if (!closing && generation === lspGeneration && lsp === client) {
-              controller!.publishServiceError('lsp', { code: 'lsp_unavailable', message });
-            }
-          },
-          onDiagnostics: (document, diagnostics) => {
-            if (!closing && generation === lspGeneration && lsp === client) {
-              controller!.publishEditorDiagnostics(documentSources(document), diagnostics);
-            }
-          },
-        });
-        lsp = client;
-        try {
-          const started = await client.start();
-          if (closing || generation !== lspGeneration || lsp !== client) {
-            await client.stop();
-            throw new Error('Language assistance startup was superseded');
-          }
-          controller!.publishServiceError('lsp', null);
-          return started;
-        } catch (error) {
-          if (!closing && generation === lspGeneration && lsp === client) {
-            controller!.publishServiceError('lsp', {
-              code: 'lsp_unavailable',
-              message: error instanceof Error ? error.message : String(error),
-            });
-          }
-          throw error;
-        }
-    };
-    const getLsp = () => {
-      if (lspStarting) return lspStarting;
-      const generation = ++lspGeneration;
-      lspStarting = createLsp(generation);
-      return lspStarting;
-    };
-    // Optional linting follows source edits independently and stays off the
-    // required analysis/Run path. Coalesce typing before asking the R codec.
-    const scheduleLspSync = () => {
-      clearTimeout(lspSyncTimer);
-      if (closing || (!lspStarting && !diagnosticsEnabled())) return;
-      lspSyncTimer = setTimeout(() => {
-        const previous = lspSyncRunning ?? Promise.resolve();
-        lspSyncRunning = previous.catch(() => {}).then(async () => {
-          if (closing) return;
-          const client = await getLsp();
-          if (closing) return;
-          // Explicit help synchronizes its own exact source. Background source
-          // work is needed only for live diagnostics, not an abandoned popup.
-          if (diagnosticsEnabled()) {
-            const document = await documentFor(controller!.snapshot());
-            if (closing) return;
-            await client.syncDocument(document);
-          }
-          await client.setDiagnostics(diagnosticsEnabled());
-        }).catch(error => {
-          if (!closing) process.stderr.write(`Language assistance unavailable: ${String(error)}\n`);
-        });
-      }, 150);
-    };
-    const knownRevisions = new Map(controller.snapshot().cells.map(cell => [cell.id, cell.revision]));
-    stopLspSync = controller.subscribe(event => {
-      if (event.type === 'cell' && event.cellId && event.revision !== undefined) {
-        if (knownRevisions.get(event.cellId) === event.revision) return;
-        knownRevisions.set(event.cellId, event.revision);
-        scheduleLspSync();
-      } else if (event.type === 'notebook') {
-        const change = event.payload as Record<string, unknown>;
-        if (typeof change.deleted === 'string') knownRevisions.delete(change.deleted);
-        if (change.config) {
-          const editor = (change.config as Record<string, unknown>).editor as Record<string, unknown> | undefined;
-          liveDiagnostics = editor?.live_diagnostics === true;
-        }
-        if (['order', 'metadata', 'saved', 'app', 'config'].some(key => key in change)) scheduleLspSync();
-      }
-    }, ["cell", "notebook"]);
-    scheduleLspSync();
-    const scheduleIdle = () => {
-      clearTimeout(idleTimer);
-      if (clientCount !== 0 || !everConnected || options.idleTimeout === 0 || closing) return;
-      const activity = browserActivity;
-      idleTimer = setTimeout(() => {
-        void (async () => {
-          if (controller!.snapshot().changed) {
-            await controller!.dispatch({ type: 'save', operationId: randomUUID(), sessionEpoch: controller!.epoch });
-          }
-          // Saving is asynchronous. A reconnect or newer acknowledged edit
-          // during that save must get another full idle period.
-          if (activity !== browserActivity || clientCount !== 0 || closing) return;
-          if (controller!.snapshot().changed) { scheduleIdle(); return; }
-          await close();
-        })().catch(error => {
-          const message = `Automatic idle shutdown is paused because Alder could not save notebook: ${String(error)}`;
-          controller!.recordActionError(message, 'idle_save_failed');
-          process.stderr.write(`${message}\n`);
-        });
-      }, options.idleTimeout * 1000);
-    };
-    server = createAlderServer({
-      controller, host: options.host, port: options.port,
-      staticDir: join(packagePath, 'app', 'static'), artifactDir: work,
-      allowedOrigins: options.allowedOrigins,
-      onClientCount: count => {
-        clientCount = count;
-        browserActivity++;
-        if (count > 0) everConnected = true;
-        scheduleIdle();
-      },
-      onBrowserActivity: () => {
-        everConnected = true;
-        browserActivity++;
-        scheduleIdle();
-      },
-      lsp: {
-        requestDocument: async (method, params, snapshot) => {
-          const client = await getLsp();
-          const document = await documentFor(snapshot as HostSnapshot);
-          try {
-            const result = await client.requestDocument(method, params, document);
-            if (method === 'textDocument/hover' && result && typeof result === 'object' && !Array.isArray(result)) {
-              const hover: Record<string, unknown> = { ...result as Record<string, unknown>, rendered: '' };
-              const maxHoverBytes = 8 * 1024 * 1024;
-              if (Buffer.byteLength(JSON.stringify(hover)) > maxHoverBytes) {
-                throw new Error('R documentation exceeds the 8 MiB display limit');
-              }
-              // Render with the package sanitizer independently of a busy kernel.
-              const rendered = await engine.service('help.render', { contents: hover.contents })
-                .then(value => z.string().parse(value))
-                .catch(() => '');
-              const response = { ...hover, rendered };
-              return Buffer.byteLength(JSON.stringify(response)) <= maxHoverBytes ? response : hover;
-            }
-            return result;
-          }
-          finally { scheduleLspSync(); }
-        },
-        restart: async () => {
-          if (lspRestarting) {
-            await lspRestarting;
-            return { ok: true };
-          }
-          const previous = lsp;
-          const pending = lspStarting;
-          const generation = ++lspGeneration;
-          lsp = undefined;
-          const replacement = (async () => {
-            await previous?.stop();
-            await pending?.catch(() => {});
-            if (closing || generation !== lspGeneration) {
-              throw new Error('Language assistance restart was superseded');
-            }
-            return createLsp(generation);
-          })();
-          lspStarting = replacement;
-          lspRestarting = replacement;
-          try {
-            await replacement;
-            return { ok: true };
-          } finally {
-            if (lspRestarting === replacement) lspRestarting = undefined;
-          }
-        },
-      },
-      onShutdown: close,
-    });
-    await server.start();
-    return { controller, engine, engineIdentity, server, close, closed, artifactDirectory: work };
+    const bytes = await readPrivateFile(path, { maxBytes: TOKEN_FILE_MAX_BYTES, processSupervisorExecutable });
+    let contents = bytes.toString("utf8");
+    if (contents.endsWith("\n")) contents = contents.slice(0, -1);
+    if (contents.includes("\n") || !AUTH_TOKEN_PATTERN.test(contents)) throw new SessionAuthError("token file must contain exactly one lowercase 64-hex bearer token");
+    return contents;
   } catch (error) {
-    try { await close(); } catch (cleanup) {
-      throw new AggregateError([error, cleanup], 'Alder startup and cleanup failed');
-    }
-    throw error;
+    if (error instanceof SessionAuthError) throw error;
+    throw new SessionAuthError("token file is unavailable or insecure");
   }
 }
 
-export async function readHostConfiguration(path: string): Promise<unknown> {
-  const file = await open(path, 'r');
+async function readSessionJson(response: Response): Promise<unknown> {
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  let value: unknown = null;
+  if (bytes.byteLength > 0) value = parseStrictJson(bytes, { maxBytes: SNAPSHOT_ENVELOPE_LIMIT, maxDepth: 64 });
+  if (!response.ok) {
+    const detail = isRecord(value) ? value : {};
+    throw new Error(typeof detail.message === "string" ? detail.message : "session request failed (" + response.status + ")");
+  }
+  return value;
+}
+
+function validateExternalOrigin(value: string): void {
+  let parsed: URL;
   try {
-    const info = await file.stat();
-    if (!info.isFile() || info.size > DEFAULT_MAX_FRAME_BYTES) {
-      throw new Error('Host configuration must be a regular file of at most 8 MiB');
-    }
-    // Read a bounded extra byte, so a file growing after stat cannot evade the cap.
-    const bytes = Buffer.alloc(DEFAULT_MAX_FRAME_BYTES + 1);
-    let length = 0;
-    while (length < bytes.length) {
-      const { bytesRead } = await file.read(bytes, length, bytes.length - length, null);
-      if (!bytesRead) break;
-      length += bytesRead;
-    }
-    if (length > DEFAULT_MAX_FRAME_BYTES) throw new Error('Host configuration exceeds 8 MiB');
-    return parseStrictJson(new TextDecoder('utf-8', { fatal: true }).decode(bytes.subarray(0, length)));
-  } finally { await file.close(); }
-}
-
-async function main(): Promise<void> {
-  const [major, minor] = process.versions.node.split('.').map(Number);
-  if (major! < 24 || (major === 24 && minor! < 20)) {
-    throw new Error('Alder requires Node 24.20.0 or newer; use the packaged runtime or set ALDER_NODE');
+    parsed = new URL(value);
+  } catch {
+    throw usageError("--external-origin must be an exact HTTPS origin");
   }
-  const { values } = parseArgs({ options: {
-    'host-info': { type: 'boolean' }, config: { type: 'string' },
-    notebook: { type: 'string' }, port: { type: 'string' },
-    host: { type: 'string' }, lazy: { type: 'boolean' },
-    mcp: { type: 'boolean' },
-    url: { type: 'string' },
-    'no-run': { type: 'boolean' },
-  } });
-  if (values['host-info']) {
-    process.stdout.write(`${JSON.stringify(HOST_IDENTITY)}\n`);
-    return;
-  }
-  if (values.url) {
-    if (!values.mcp || values.notebook || values.config) throw new Error('--url requires --mcp and cannot be combined with a local notebook');
-    const remote = await connectRemoteController(values.url);
-    const mcp = createMcpServer({ controller: remote });
-    const transport = await connectMcpStdio(mcp);
-    const onclose = transport.onclose;
-    transport.onclose = () => runDetached(async () => {
-      try { onclose?.(); } finally { await remote.close(); }
-    });
-    process.once('SIGTERM', () => runDetached(() => mcp.close().finally(() => remote.close())));
-    process.once('SIGINT', () => runDetached(() => mcp.close().finally(() => remote.close())));
-    process.stdin.once('end', () => runDetached(() =>
-      drainMcpServer(mcp).finally(() => mcp.close()).finally(() => remote.close())));
-    return;
-  }
-  let input: unknown;
-  if (values.config) input = await readHostConfiguration(values.config);
-  else input = {
-    path: values.notebook, host: values.host,
-    port: values.port === undefined ? undefined : Number(values.port),
-    executionMode: values.lazy ? 'lazy' : undefined,
-    runOnStartup: values['no-run'] ? false : undefined,
-    deferStartup: values.mcp === true,
-  };
-  const parsed = optionsSchema.parse(input);
-  if (parsed.path && await stat(parsed.path).then(info => info.isDirectory(), () => false)) {
-    if (values.mcp) throw new Error('MCP requires a notebook file path');
-    const gallery = await startGallery({ ...parsed, path: parsed.path,
-      packagePath: parsed.packagePath ?? process.env.ALDER_R_PACKAGE ?? resolve(dirname(fileURLToPath(import.meta.url)), '..'),
-    }, startHost);
-    const shutdown = () => runDetached(() => gallery.close());
-    process.once('SIGINT', shutdown); process.once('SIGTERM', shutdown);
-    if (values.config) { process.stdin.resume(); process.stdin.once('end', shutdown); }
-    runDetached(() => gallery.closed.then(() => process.stdin.pause()));
-    process.stdout.write(`${JSON.stringify({ type: 'host.ready', ...HOST_IDENTITY,
-      address: gallery.server.address(), epoch: gallery.epoch, gallery: true,
-    })}\n`);
-    return;
-  }
-  const app = await startHost({ ...parsed, deferStartup: values.mcp === true || parsed.deferStartup });
-  runDetached(() => app.closed.then(() => process.stdin.pause()));
-  const shutdown = () => runDetached(() => app.close());
-  // R owns its child through stdin. A parent crash must retire the notebook processes.
-  if (values.config && !values.mcp) {
-    process.stdin.resume();
-    process.stdin.once('end', shutdown);
-  }
-  if (values.mcp) {
-    const mcp = createMcpServer({ controller: app.controller });
-    const transport = await connectMcpStdio(mcp);
-    const onclose = transport.onclose;
-    transport.onclose = () => runDetached(async () => {
-      try { onclose?.(); } finally { await app.close(); }
-    });
-    const shutdownMcp = () => runDetached(() => mcp.close().finally(() => app.close()));
-    process.once('SIGINT', shutdownMcp);
-    process.once('SIGTERM', shutdownMcp);
-    process.stdin.once('end', () => runDetached(() =>
-      drainMcpServer(mcp).finally(() => mcp.close()).finally(() => app.close())));
-  } else {
-    process.once('SIGINT', shutdown);
-    process.once('SIGTERM', shutdown);
-    process.stdout.write(`${JSON.stringify({ type: 'host.ready', ...HOST_IDENTITY,
-      address: app.server.address(), epoch: app.controller.snapshot().epoch,
-      artifactDirectory: app.artifactDirectory, engine: app.engineIdentity,
-    })}\n`);
+  if (parsed.protocol !== "https:" || parsed.username !== "" || parsed.password !== ""
+    || parsed.pathname !== "/" || parsed.search !== "" || parsed.hash !== "" || parsed.origin !== value) {
+    throw usageError("--external-origin must be an exact HTTPS origin");
   }
 }
 
-const isEntry = process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
-if (isEntry) void main().catch(reportFailure);
+function validateExternalAuthOptions(externalOrigin: string | undefined, tokenFile: string | undefined): void {
+  if ((externalOrigin === undefined) !== (tokenFile === undefined)) {
+    throw usageError("--external-origin and --token-file must be supplied together");
+  }
+  if (externalOrigin !== undefined) validateExternalOrigin(externalOrigin);
+  if (tokenFile !== undefined && (tokenFile.length === 0 || tokenFile.includes("\0"))) {
+    throw usageError("--token-file must be a non-empty path");
+  }
+}
+
+
+export function parseCli(argv: readonly string[]): CliOptions {
+  let parsed;
+  try {
+    parsed = parseArgs({
+      args: [...argv],
+      allowPositionals: true,
+      strict: true,
+      options: {
+        help: { type: "boolean" }, version: { type: "boolean" }, "host-info": { type: "boolean" },
+        browser: { type: "boolean" }, headless: { type: "boolean" }, lazy: { type: "boolean" }, "no-run": { type: "boolean" }, "defer-startup": { type: "boolean" },
+        sandbox: { type: "boolean" }, rscript: { type: "string" }, host: { type: "string" }, port: { type: "string" },
+        "allowed-origin": { type: "string", multiple: true }, "external-origin": { type: "string" }, "token-file": { type: "string" },
+        output: { type: "string" }, "include-code": { type: "boolean" }, "internal-host": { type: "boolean" }, "list-recoveries": { type: "boolean" }, recover: { type: "string" },
+      },
+    });
+  } catch (error) { throw usageError(errorText(error)); }
+  const values = parsed.values as Record<string, unknown>;
+  if (values.help === true) return { command: "desktop", path: null, recover: undefined, listRecoveries: false, browser: false, headless: false, rscript: undefined, sandbox: false, lazy: false, noRun: false, deferStartup: false, host: "127.0.0.1", port: 0, allowedOrigins: [], externalOrigin: undefined, tokenFile: undefined, output: undefined, includeCode: false, internalHost: false };
+  const positionals = parsed.positionals;
+  const first = positionals[0];
+  const command = first === "check" || first === "run" || first === "publish" || first === "mcp" ? first : "desktop";
+  const path = command === "desktop" ? (first ?? null) : (positionals[1] ?? null);
+  if (positionals.length > (command === "desktop" ? 1 : 2)) throw usageError("too many positional arguments");
+  const browser = values.browser === true;
+  const headless = values.headless === true;
+  const internalHost = values["internal-host"] === true;
+  const deferStartup = values["defer-startup"] === true;
+  if (deferStartup && !internalHost) throw usageError("--defer-startup is reserved for internal hosts");
+  const listRecoveries = values["list-recoveries"] === true;
+  const recover = values.recover === undefined ? undefined : String(values.recover);
+  if (browser && headless) throw usageError("--browser and --headless are mutually exclusive");
+  if (listRecoveries) {
+    if (positionals.length > 0 || recover !== undefined || browser || headless || values.lazy === true || values["no-run"] === true || deferStartup || values.sandbox === true || values.rscript !== undefined || values.host !== undefined || values.port !== undefined || values["allowed-origin"] !== undefined || values["external-origin"] !== undefined || values["token-file"] !== undefined || values.output !== undefined || values["include-code"] === true || values["host-info"] === true || internalHost) {
+      throw usageError("--list-recoveries cannot be combined with other command or session options");
+    }
+  }
+  if (recover !== undefined) {
+    if (!isUntitledRecoveryId(recover)) throw usageError("--recover requires a UUID");
+    if (command !== "desktop") throw usageError("--recover is only valid for a desktop session");
+    if (path !== null) throw usageError("--recover cannot be combined with NOTEBOOK.R");
+    if (values.sandbox === true) throw usageError("--recover cannot be combined with --sandbox");
+  }
+  const externalOrigin = typeof values["external-origin"] === "string" ? values["external-origin"] : undefined;
+  const tokenFile = typeof values["token-file"] === "string" ? values["token-file"] : undefined;
+  validateExternalAuthOptions(externalOrigin, tokenFile);
+  const sessionOnly = browser || headless || values.lazy === true || values["no-run"] === true || deferStartup || values.host !== undefined || values.port !== undefined || values["allowed-origin"] !== undefined || values["external-origin"] !== undefined || values["token-file"] !== undefined;
+  if (command !== "desktop" && sessionOnly) throw usageError("session flags are not valid for " + command);
+  if (command === "desktop" && !internalHost && !browser && !headless && (values.sandbox === true || values.host !== undefined || values.port !== undefined || values["allowed-origin"] !== undefined || values["external-origin"] !== undefined || values["token-file"] !== undefined)) {
+    throw usageError("native desktop launch does not accept headless session flags");
+  }
+  if (command !== "publish" && (values.output !== undefined || values["include-code"] === true)) throw usageError("publish flags are only valid for publish");
+  if (command === "publish" && typeof values.output !== "string") throw usageError("publish requires --output FILE.html");
+  if ((command === "check" || command === "run" || command === "publish" || command === "mcp") && path === null) throw usageError(command + " requires NOTEBOOK.R");
+  if (command === "mcp" && (browser || headless)) throw usageError("mcp does not accept --browser or --headless");
+  const portText = values.port === undefined ? "0" : String(values.port);
+  const port = Number(portText);
+  if (!Number.isInteger(port) || port < 0 || port > 65535) throw usageError("--port must be an integer between 0 and 65535");
+  const host = values.host === undefined ? "127.0.0.1" : String(values.host);
+  if (!["127.0.0.1", "::1"].includes(host)) throw usageError("--host must be 127.0.0.1 or ::1");
+  return { command, path, recover, listRecoveries, browser, headless, rscript: typeof values.rscript === "string" ? values.rscript : undefined, sandbox: values.sandbox === true, lazy: values.lazy === true, noRun: values["no-run"] === true, deferStartup, host, port, allowedOrigins: Array.isArray(values["allowed-origin"]) ? values["allowed-origin"].map(String) : [], externalOrigin, tokenFile, output: typeof values.output === "string" ? values.output : undefined, includeCode: values["include-code"] === true, internalHost };
+}
+
+async function applicationResources(): Promise<ApplicationResources> {
+  const root = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
+  return resolveApplicationResources(root);
+}
+function appOptions(cli: CliOptions, resources: ApplicationResources): Record<string, unknown> {
+  return { path: cli.path, host: cli.host, port: cli.port, rscript: cli.rscript, sandbox: cli.sandbox, executionMode: cli.lazy ? "lazy" : undefined, runOnStartup: cli.noRun ? false : undefined, deferStartup: cli.deferStartup, allowedOrigins: cli.allowedOrigins.length === 0 ? undefined : cli.allowedOrigins, externalOrigin: cli.externalOrigin, tokenFile: cli.tokenFile, resources };
+}
+
+async function runInternalHost(cli: CliOptions, resources: ApplicationResources): Promise<number> {
+  const nonce = process.env[PRIVATE_NONCE];
+  delete process.env[PRIVATE_NONCE];
+  if (nonce === undefined || !PRIVATE_NONCE_PATTERN.test(nonce)) throw new Error("internal host readiness nonce is missing or invalid");
+  const token = cli.tokenFile === undefined ? undefined : await readExternalBearer(cli.tokenFile, resources.processSupervisorExecutable);
+  const session = { runtimeDirectory: process.env.ALDER_RUNTIME_DIRECTORY, sessionKey: process.env.ALDER_SESSION_KEY, epoch: process.env.ALDER_EPOCH, processNonce: process.env.ALDER_PROCESS_NONCE, continuityProof: process.env.ALDER_CONTINUITY_PROOF, startIdentity: undefined, untitledRecoveryId: cli.recover, projectDirectory: process.env.ALDER_UNTITLED_PROJECT_DIRECTORY };
+  // Consume the token file before ownership. Passing the bearer as the
+  // existing session token avoids a second server-side file read; omit the
+  // path from downstream options so it cannot be read after ownership.
+  const app = await startHost({ ...appOptions(cli, resources), tokenFile: undefined, externalBearerValidated: token !== undefined, internalHost: true, session: { ...session, token } } as never);
+  writeJson({ type: "alder.private.ready", version: 1, nonce, pid: process.pid, processNonce: app.ownership.processNonce, ready: app.ready });
+  const stop = () => { void app.close(); };
+  process.once("SIGINT", stop);
+  process.once("SIGTERM", stop);
+  await app.closed;
+  return 0;
+}
+
+function publicReady(origin: string, epoch: string, capabilities: readonly string[]): HostReady { return { type: "host.ready", origin, epoch, capabilities: [...capabilities] }; }
+export async function browserUrl(connection: SessionConnection): Promise<string> {
+  const response = await connection.request("/api/ticket", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ origin: connection.browserOrigin }),
+  });
+  const value = await readSessionJson(response);
+  if (!isRecord(value) || typeof value.ticket !== "string" || !AUTH_TOKEN_PATTERN.test(value.ticket)) {
+    throw new Error("host returned an invalid browser bootstrap ticket");
+  }
+  const url = new URL("/index.html", connection.browserOrigin);
+  url.hash = `ticket=${encodeURIComponent(value.ticket)}`;
+  return url.href;
+}
+
+interface BrowserOpenerChild {
+  once(event: "error", listener: (error: Error) => void): this;
+  once(event: "spawn", listener: () => void): this;
+  unref(): void;
+}
+
+export interface SystemBrowserOpenOptions {
+  /** Test-only platform override; production callers should omit it. */
+  readonly platform?: "linux" | "darwin" | "win32";
+  /** Test-only parent for the freshly created private launcher directory. */
+  readonly temporaryRoot?: string;
+  /** Test seam which must not invoke a real OS opener. */
+  readonly spawn?: (command: string, args: readonly string[], options: { detached: true; stdio: "ignore" }) => BrowserOpenerChild;
+  /** Test-only cleanup delay override. */
+  readonly cleanupDelayMs?: number;
+}
+
+const BROWSER_LAUNCHER_CLEANUP_MS = 30_000;
+const BROWSER_LAUNCHER_MAX_CLEANUP_MS = 60_000;
+
+function browserLauncherHtml(url: string): string {
+  const escapedUrl = JSON.stringify(url)
+    .replaceAll("<", "\\u003c")
+    .replaceAll("\u2028", "\\u2028")
+    .replaceAll("\u2029", "\\u2029");
+  return `<!doctype html><meta charset="utf-8"><meta name="referrer" content="no-referrer"><script>location.replace(${escapedUrl})</script>
+`;
+}
+
+export async function openSystemBrowser(url: string, options: SystemBrowserOpenOptions = {}): Promise<void> {
+  const platform = options.platform ?? process.platform;
+  if (platform !== "linux" && platform !== "darwin" && platform !== "win32") throw new Error("could not open system browser");
+  const cleanupDelayMs = options.cleanupDelayMs ?? BROWSER_LAUNCHER_CLEANUP_MS;
+  if (!Number.isSafeInteger(cleanupDelayMs) || cleanupDelayMs < 0 || cleanupDelayMs > BROWSER_LAUNCHER_MAX_CLEANUP_MS) {
+    throw new RangeError("browser launcher cleanup delay is invalid");
+  }
+
+  let directory: string | undefined;
+  let handle: Awaited<ReturnType<typeof open>> | undefined;
+  try {
+    directory = await mkdtemp(join(options.temporaryRoot ?? tmpdir(), "alder-browser-launch-"));
+    await chmod(directory, 0o700);
+    const launcherPath = join(directory, "launch.html");
+    const flags = constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0);
+    handle = await open(launcherPath, flags, 0o600);
+    await handle.chmod(0o600);
+    await handle.writeFile(browserLauncherHtml(url), { encoding: "utf8" });
+    await handle.sync();
+    await handle.close();
+    handle = undefined;
+
+    const command = platform === "darwin" ? "open" : platform === "win32" ? "rundll32.exe" : "xdg-open";
+    const launcherUrl = pathToFileURL(launcherPath).href;
+    const args = platform === "win32" ? ["url.dll,FileProtocolHandler", launcherUrl] : [launcherUrl];
+    const spawnOpener = options.spawn ?? ((executable, openerArgs, spawnOptions) => spawn(executable, [...openerArgs], spawnOptions));
+    await new Promise<void>((resolveOpen, rejectOpen) => {
+      const child = spawnOpener(command, args, { detached: true, stdio: "ignore" });
+      child.once("error", rejectOpen);
+      child.once("spawn", () => { child.unref(); resolveOpen(); });
+    });
+
+    const cleanupDirectory = directory;
+    const cleanup = setTimeout(() => { void rm(cleanupDirectory, { recursive: true, force: true }); }, cleanupDelayMs);
+    cleanup.unref();
+  } catch {
+    await handle?.close().catch(() => undefined);
+    if (directory !== undefined) await rm(directory, { recursive: true, force: true }).catch(() => undefined);
+    throw new Error("could not open system browser");
+  }
+}
+
+async function holdSession(connection: SessionConnection): Promise<number> {
+  const ready = publicReady(connection.browserOrigin, connection.epoch, connection.capabilities);
+  writeJson(ready);
+  const keepAlive = setInterval(() => undefined, 60_000);
+  try {
+    await new Promise<void>(resolve => { const stop = () => { void connection.release().finally(resolve); }; process.once("SIGINT", stop); process.once("SIGTERM", stop); });
+  } finally {
+    clearInterval(keepAlive);
+  }
+  return 0;
+}
+
+const TERMINAL_OPERATION_STATUSES = new Set(["done", "error", "interrupted", "cancelled"]);
+
+async function readOwnerArtifact(connection: SessionConnection, artifact: { handle: string; byteLength: number; chunkBytes: number }): Promise<unknown> {
+  const chunks: Buffer[] = [];
+  let offset = 0;
+  for (;;) {
+    const pageQuery: HostQuery = { type: "output", handle: artifact.handle, offset, limit: artifact.chunkBytes };
+    const pageEnvelope = await ownerQuery(connection, pageQuery);
+    if (!isRecord(pageEnvelope.result)) throw new Error("owner artifact page is not an object");
+    const page = pageEnvelope.result as unknown as { encoding: string; data: string; offset: number; nextOffset: number; eof: boolean };
+    if (page.encoding !== "base64" || typeof page.data !== "string" || !Number.isSafeInteger(page.offset) || !Number.isSafeInteger(page.nextOffset) || typeof page.eof !== "boolean") throw new Error("owner artifact page has an invalid shape");
+    const bytes = Buffer.from(page.data, "base64");
+    if (bytes.toString("base64") !== page.data || page.offset !== offset || page.nextOffset !== offset + bytes.byteLength || page.nextOffset > artifact.byteLength || bytes.byteLength > artifact.chunkBytes) throw new Error("owner artifact page is not canonical");
+    chunks.push(bytes);
+    offset = page.nextOffset;
+    if (page.eof) break;
+    if (bytes.byteLength === 0) throw new Error("owner artifact page made no progress");
+  }
+  if (offset !== artifact.byteLength) throw new Error("owner artifact length is inconsistent");
+  return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+}
+
+async function ownerQuery(connection: SessionConnection, query: HostQuery): Promise<HostQueryResult> {
+  const raw = await readSessionJson(await connection.request("/api/query", { method: "POST", body: JSON.stringify(encodeHostQueryWire(query)) }));
+  const decoded = hostQueryResultSchema.parse(decodeHostQueryResultWire(query, raw)) as HostQueryResult;
+  const artifact = artifactHandleSchema.safeParse(decoded.result);
+  if (!artifact.success) return decoded;
+  const hydrated = { ...decoded, result: await readOwnerArtifact(connection, artifact.data) };
+  return hostQueryResultSchema.parse(decodeHostQueryResultWire(query, hydrated)) as HostQueryResult;
+}
+
+async function ownerSnapshot(connection: SessionConnection): Promise<HostSnapshot> {
+  const query: HostQuery = { type: "events", epoch: null, cursor: null };
+  const result = (await ownerQuery(connection, query)).result;
+  if (!isRecord(result)) throw new Error("owner recovery query did not return an object");
+  const recovery = result as Record<string, unknown>;
+  if (recovery.kind !== "snapshot") throw new Error("owner recovery query did not return a snapshot");
+  return hostSnapshotSchema.parse(recovery.snapshot) as HostSnapshot;
+}
+
+async function commandOnOwner(connection: SessionConnection, command: Record<string, unknown>): Promise<{ snapshot: HostSnapshot; operation: OperationRecord | null; result: unknown; error: unknown }> {
+  const notebookResult = await ownerQuery(connection, { type: "notebook" });
+  const documentRevision = notebookResult.documentRevision;
+  if (!Number.isSafeInteger(documentRevision) || documentRevision < 0) throw new Error("owner notebook metadata has no document revision");
+  const commandSequence = connection.nextCommandSequence;
+  const body = parseHostCommand({ ...command, operationId: randomUUID(), clientId: connection.clientId, commandSequence, sessionEpoch: connection.epoch, expectedDocumentRevision: documentRevision });
+  const admission = commandAdmissionSchema.parse(await readSessionJson(await connection.request("/api/command", { method: "POST", body: JSON.stringify(encodeHostCommandWire(body)) })));
+  connection.nextCommandSequence = Math.max(connection.nextCommandSequence, admission.nextCommandSequence);
+  const operation = admission.accepted && admission.operation !== null ? await waitOwnerOperation(connection, admission.operationId) : null;
+  const finalSnapshot = await ownerSnapshot(connection);
+  return { snapshot: finalSnapshot, operation, result: operation?.result ?? null, error: operation?.error ?? admission.error };
+}
+
+async function waitOwnerOperation(connection: SessionConnection, operationId: string): Promise<OperationRecord> {
+  const deadline = Date.now() + 120_000;
+  for (;;) {
+    const query: HostQuery = { type: "operation", operationId, clientId: connection.clientId };
+    const result = (await ownerQuery(connection, query)).result;
+    const operation = operationRecordSchema.parse(result) as OperationRecord;
+    if (TERMINAL_OPERATION_STATUSES.has(operation.status)) return operation;
+    if (Date.now() >= deadline) throw new Error("operation_timeout: " + operationId);
+    await new Promise(resolveDelay => setTimeout(resolveDelay, 100));
+  }
+}
+
+async function activateHeadlessStartup(connection: SessionConnection): Promise<void> {
+  const snapshot = await waitForRuntimeReadiness(() => ownerSnapshot(connection), { readiness: "analyzer" });
+  if (snapshot.runtime.startupActivated || snapshot.runtime.executionBlockedReason !== null) return;
+  await commandOnOwner(connection, { type: "run", scope: "all", startup: true });
+}
+
+async function runTool(cli: CliOptions, resources: ApplicationResources): Promise<number> {
+  const connection = await acquireNotebookSession({ path: cli.path, resources, rscript: cli.rscript, runtimeDirectory: process.env.ALDER_RUNTIME_DIRECTORY, executionMode: cli.lazy ? "lazy" : undefined, runOnStartup: cli.noRun ? false : undefined, deferStartup: true });
+  try {
+    const runtimeSnapshot = await waitForRuntimeReadiness(() => ownerSnapshot(connection), {
+      readiness: cli.command === "publish" ? "document" : "analyzer",
+    });
+    if (cli.command === "check") {
+      const query: HostQuery = { type: "check" };
+      const result = (await ownerQuery(connection, query)).result;
+      if (!isRecord(result)) throw new Error("owner check query did not return an object");
+      const check = result as Record<string, unknown>;
+      writeJson({ epoch: connection.epoch, documentRevision: runtimeSnapshot.documentRevision, dirty: runtimeSnapshot.dirty, disk: runtimeSnapshot.disk, operation: null, result: check, error: null });
+      return Array.isArray(check.issues) && check.issues.length > 0 || runtimeSnapshot.runtime.executionBlockedReason !== null ? 1 : 0;
+    }
+    const command = cli.command === "run" ? { type: "run", scope: "all" } : { type: "publish", includeCode: cli.includeCode, outputPath: cli.output };
+    const completed = await commandOnOwner(connection, command);
+    writeJson({ epoch: connection.epoch, documentRevision: completed.snapshot.documentRevision, dirty: completed.snapshot.dirty, disk: completed.snapshot.disk, operation: completed.operation, result: completed.result, error: completed.error });
+    const interrupted = completed.operation?.status === "interrupted" || (completed.operation?.status === "cancelled" && isRecord(completed.error) && completed.error.code === "interrupted");
+    if (interrupted) return 130;
+    return completed.error !== null || completed.operation?.status === "error" || completed.operation?.status === "cancelled" ? 1 : 0;
+  } finally { await connection.release(); }
+}
+
+async function runMcp(cli: CliOptions, resources: ApplicationResources): Promise<number> {
+  const connection = await acquireNotebookSession({
+    path: cli.path,
+    resources,
+    rscript: cli.rscript,
+    runtimeDirectory: process.env.ALDER_RUNTIME_DIRECTORY,
+    executionMode: cli.lazy ? "lazy" : undefined,
+    runOnStartup: cli.noRun ? false : undefined,
+    deferStartup: true,
+  });
+  let stdio: Awaited<ReturnType<typeof connectMcpStdio>> | undefined;
+  let upstreamClient: Client | undefined;
+  try {
+    const notebook = await ownerQuery(connection, { type: "notebook" });
+    if (!Number.isSafeInteger(notebook.documentRevision) || notebook.documentRevision < 0) throw new Error("owner notebook metadata has no document revision");
+    const alder: McpInitializationMetadata = {
+      clientId: connection.clientId,
+      sessionEpoch: connection.epoch,
+      nextCommandSequence: connection.nextCommandSequence,
+      documentRevision: notebook.documentRevision,
+      capabilities: [...connection.capabilities],
+    };
+    stdio = await connectMcpStdio(async ({ clientInfo, capabilities }) => {
+      const client = new Client(clientInfo, { capabilities, enforceStrictCapabilities: false });
+      const transport = new StreamableHTTPClientTransport(new URL("/mcp", connection.origin), {
+        fetch: async (url, init) => {
+          const target = new URL(url);
+          const origin = new URL(connection.origin);
+          if (target.origin !== origin.origin) throw new Error("MCP upstream request changed origin");
+          return connection.request(target.pathname + target.search, init);
+        },
+      });
+      upstreamClient = client;
+      return { client, transport };
+    }, { input: process.stdin, output: process.stdout, alder });
+    await new Promise<void>(resolve => process.stdin.once("end", resolve));
+    await stdio.close();
+    await drainMcpStdio(stdio);
+    return 0;
+  } finally {
+    await stdio?.close().catch(() => undefined);
+    await upstreamClient?.close().catch(() => undefined);
+    await connection.release();
+  }
+}
+
+async function runDesktop(cli: CliOptions, resources: ApplicationResources): Promise<number> {
+  if (cli.browser || cli.headless) {
+    const connection = await acquireNotebookSession({
+      path: cli.path,
+      untitledRecoveryId: cli.recover,
+      resources,
+      rscript: cli.rscript,
+      executionMode: cli.lazy ? "lazy" : undefined,
+      runOnStartup: cli.noRun ? false : undefined,
+      deferStartup: true,
+      requestedConfiguration: cli.deferStartup ? { deferStartup: true } : undefined,
+      externalOrigin: cli.externalOrigin,
+      tokenFile: cli.tokenFile,
+    });
+    try {
+      if (cli.headless) {
+        void activateHeadlessStartup(connection)
+          .catch(error => { process.stderr.write("alder: " + errorText(error) + "\n"); });
+      }
+      if (cli.browser) await openSystemBrowser(await browserUrl(connection));
+      return await holdSession(connection);
+    } catch (error) {
+      await connection.release().catch(() => undefined);
+      throw error;
+    }
+  }
+  if (resources.electronEntry === null) throw desktopUnavailableError();
+  if (cli.recover !== undefined) await selectUntitledRecoveryDescriptor(cli.recover, undefined, { processSupervisorExecutable: resources.processSupervisorExecutable });
+  const desktopArgs = [
+    ...(cli.path === null ? (cli.recover === undefined ? [] : ["--recover", cli.recover]) : [cli.path]),
+    ...(cli.rscript === undefined ? [] : ["--rscript", cli.rscript]),
+    ...(cli.lazy ? ["--lazy"] : []),
+    ...(cli.noRun ? ["--no-run"] : []),
+  ];
+  const child = spawn(resources.electronEntry, desktopArgs, { stdio: "inherit" });
+  return await new Promise(resolveCode => { child.once("error", error => { process.stderr.write(errorText(error) + "\n"); resolveCode(1); }); child.once("exit", code => resolveCode(code ?? 1)); });
+}
+
+export async function runCli(argv = process.argv.slice(2)): Promise<number> {
+  const cli = parseCli(argv);
+  if (argv.includes("--help")) {
+    process.stdout.write("Usage: alder [NOTEBOOK.R] [--browser|--headless]\n");
+    process.stdout.write("       alder --recover UUID [--browser|--headless]\n");
+    process.stdout.write("       alder --list-recoveries\n");
+    process.stdout.write("       alder check|run|publish|mcp NOTEBOOK.R\n");
+    return 0;
+  }
+  if (argv.includes("--version")) { process.stdout.write(HOST_IDENTITY.packageVersion + "\n"); return 0; }
+  if (cli.listRecoveries) {
+    const resources = await applicationResources();
+    writeJson(await listUntitledRecoveryDescriptors(undefined, { processSupervisorExecutable: resources.processSupervisorExecutable }));
+    return 0;
+  }
+  const resources = await applicationResources();
+  if (argv.includes("--host-info")) { writeJson({ type: "host.info", ...HOST_IDENTITY, resources: { root: resources.root, cliLauncher: resources.cliLauncher, hostEntry: resources.hostEntry, rendererDirectory: resources.rendererDirectory, workerDirectory: resources.workerDirectory, rLibraryDirectory: resources.rLibraryDirectory, arkExecutable: resources.arkExecutable, airExecutable: resources.airExecutable, nodeExecutable: resources.nodeExecutable, processSupervisorExecutable: resources.processSupervisorExecutable, electronEntry: resources.electronEntry } }); return 0; }
+  if (cli.internalHost) return runInternalHost(cli, resources);
+  if (cli.command === "check" || cli.command === "run" || cli.command === "publish") return runTool(cli, resources);
+  if (cli.command === "mcp") return runMcp(cli, resources);
+  return runDesktop(cli, resources);
+}
+export { artifactHandleSchema, decodeHostQueryResultWire, encodeHostCommandWire, encodeHostQueryWire, hostQueryResultSchema, hostSnapshotSchema };
+
+const entry = process.argv[1] === fileURLToPath(import.meta.url);
+if (entry) {
+  void runCli().then(
+    code => { process.exitCode = code; },
+    error => {
+      process.stderr.write("alder: " + errorText(error) + "\n");
+      process.exitCode = typeof (error as { exitCode?: unknown }).exitCode === "number" ? Number((error as { exitCode: number }).exitCode) : 1;
+    },
+  );
+}
+
+function isRecord(value: unknown): value is Record<string, any> { return value !== null && typeof value === "object" && !Array.isArray(value); }

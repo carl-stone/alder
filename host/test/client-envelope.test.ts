@@ -3,10 +3,13 @@ import test from "node:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { request as httpRequest } from "node:http";
+import { WebSocket } from "ws";
 
 import { BrowserTransport, type WebSocketLike } from "../src/browser/transport.js";
 import {
   HOST_PROTOCOL,
+  HOST_CLIENT_PROTOCOL_VERSION,
   ProtocolError,
   SNAPSHOT_ENVELOPE_LIMIT,
   decodeJsonFrame,
@@ -17,12 +20,12 @@ import {
   type HostSnapshot,
   type Recovery,
 } from "../src/protocol.js";
-import { connectRemoteController } from "../src/remote.js";
 import { createAlderServer, type ControllerAdapter } from "../src/server.js";
+import { OutputStore } from "../src/outputs.js";
 
 const MIB = 1024 * 1024;
 
-test("browser and remote clients receive a worst-case escaped 32 MiB notebook snapshot", async () => {
+test("browser clients receive a worst-case escaped 32 MiB notebook snapshot", async () => {
   const source = sourceLines(32 * MIB);
   const state = snapshot(source);
   const recovery: Recovery = {
@@ -31,33 +34,37 @@ test("browser and remote clients receive a worst-case escaped 32 MiB notebook sn
     cursor: state.cursor,
     snapshot: state,
   };
-  const envelope = JSON.stringify({ type: "recovery", protocolVersion: 1, recovery });
+  const envelope = JSON.stringify({ type: "recovery", protocolVersion: HOST_CLIENT_PROTOCOL_VERSION, recovery });
   const envelopeBytes = Buffer.byteLength(envelope);
   assert.ok(envelopeBytes > 64 * MIB, "escaped source must exercise more than twice the old 8 MiB frame cap");
   assert.ok(envelopeBytes < SNAPSHOT_ENVELOPE_LIMIT, "worst-case source must fit the authoritative envelope cap");
 
-  await receiveInBrowser(envelope, source.length);
-
   const directory = await mkdtemp(join(tmpdir(), "alder-large-envelope-"));
   const controller = new SnapshotController(state);
+  const serverToken = "a".repeat(64);
+  const artifactStore = new OutputStore({
+    artifactDirectory: join(directory, "artifacts"),
+    sessionEpoch: state.epoch,
+    documentRevision: state.documentRevision,
+    kernelEpoch: state.runtime.kernelEpoch ?? null,
+  });
   const server = createAlderServer({
     controller,
     host: "127.0.0.1",
     port: 0,
     staticDir: directory,
+    artifactStore,
+    session: {
+      sessionKey: "large-envelope-session", canonicalPath: null, epoch: state.epoch,
+      processNonce: "large-envelope-process", token: serverToken, documentReady: true,
+    },
   });
-  let remote: Awaited<ReturnType<typeof connectRemoteController>> | undefined;
   try {
     const address = await server.start();
-    remote = await connectRemoteController(address.origin);
-    await waitUntil(() => remote?.snapshot().cursor === 1);
-    const received = remote.snapshot().cells[0]?.body;
-    assert.equal(received?.length, source.length);
-    assert.equal(received?.[0]?.length, source[0]?.length);
-    assert.equal(received?.at(-1)?.length, source.at(-1)?.length);
+    await receiveInBrowser(address.origin, serverToken, source.length);
   } finally {
-    await remote?.close();
     await server.close();
+    await artifactStore.close();
     await rm(directory, { recursive: true, force: true });
   }
 });
@@ -74,7 +81,7 @@ class SnapshotController implements ControllerAdapter {
 
   constructor(private readonly state: HostSnapshot) {}
 
-  snapshot(): HostSnapshot { return this.state; }
+  snapshot(_clientId?: string): HostSnapshot { return this.state; }
   recover(): Recovery {
     return { kind: "snapshot", epoch: this.state.epoch, cursor: this.state.cursor, snapshot: this.state };
   }
@@ -87,6 +94,7 @@ class SnapshotController implements ControllerAdapter {
         epoch: this.state.epoch,
         cursor: 1,
         version: this.state.version,
+        documentRevision: this.state.documentRevision,
         timestamp: 1,
         type: "runtime",
         payload: this.state.runtime,
@@ -99,36 +107,140 @@ class SnapshotController implements ControllerAdapter {
   }
 }
 
-class FixtureSocket implements WebSocketLike {
-  readyState = 0;
-  binaryType: BinaryType = "blob";
+class AuthenticatedSocket implements WebSocketLike {
+  private readonly socket: WebSocket;
+  binaryType: BinaryType = "arraybuffer";
   onopen: ((event: Event) => void) | null = null;
   onmessage: ((event: MessageEvent) => void) | null = null;
   onerror: ((event: Event) => void) | null = null;
   onclose: ((event: CloseEvent) => void) | null = null;
 
-  send(_data: string): void {}
-  close(): void { this.readyState = 3; }
-  open(): void {
-    this.readyState = 1;
-    this.onopen?.({} as Event);
+  constructor(url: string, origin: string, host: string, cookie: string) {
+    this.socket = new WebSocket(url, { origin, headers: { Cookie: cookie, Host: host } });
+    this.socket.on("open", () => this.onopen?.({} as Event));
+    this.socket.on("message", data => {
+      let value: string | Uint8Array;
+      if (typeof data === "string") value = data;
+      else if (Buffer.isBuffer(data)) value = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+      else if (data instanceof ArrayBuffer) value = new Uint8Array(data);
+      else {
+        const joined = Buffer.concat(data);
+        value = new Uint8Array(joined.buffer, joined.byteOffset, joined.byteLength);
+      }
+      this.onmessage?.({ data: value } as MessageEvent);
+    });
+    this.socket.on("error", () => this.onerror?.({} as Event));
+    this.socket.on("close", (code, reason) => this.onclose?.({ code, reason } as unknown as CloseEvent));
   }
-  receive(data: string): void { this.onmessage?.({ data } as MessageEvent); }
+
+  get readyState(): number { return this.socket.readyState; }
+  send(data: string): void { this.socket.send(data); }
+  close(): void { this.socket.close(); }
 }
 
-async function receiveInBrowser(envelope: string, expectedLines: number): Promise<void> {
-  const socket = new FixtureSocket();
+async function requestBrowser(
+  input: RequestInfo | URL,
+  init: RequestInit | undefined,
+  connectionOrigin: string,
+  browserOrigin: string,
+  browserHost: string,
+): Promise<Response> {
+  const request = input instanceof Request ? input : null;
+  const rawUrl = request?.url ?? (input instanceof URL ? input.href : String(input));
+  const url = new URL(rawUrl, connectionOrigin);
+  const headers = new Headers(request?.headers);
+  for (const [key, value] of new Headers(init?.headers)) headers.set(key, value);
+  headers.set("Host", browserHost);
+  headers.set("Origin", browserOrigin);
+  const requestHeaders: Record<string, string> = {};
+  headers.forEach((value, key) => { requestHeaders[key] = value; });
+  const body = typeof init?.body === "string" ? init.body : undefined;
+  const method = init?.method ?? request?.method ?? "GET";
+  return await new Promise<Response>((resolve, reject) => {
+    const pending = httpRequest({
+      hostname: "127.0.0.1",
+      port: url.port,
+      path: url.pathname + url.search,
+      method,
+      headers: requestHeaders,
+    }, response => {
+      const chunks: Buffer[] = [];
+      response.on("data", chunk => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
+      response.on("error", reject);
+      response.on("end", () => {
+        const responseHeaders = new Headers();
+        for (const [key, value] of Object.entries(response.headers)) {
+          if (value !== undefined) responseHeaders.set(key, Array.isArray(value) ? value.join(", ") : value);
+        }
+        resolve(new Response(Buffer.concat(chunks), {
+          status: response.statusCode ?? 500,
+          statusText: response.statusMessage,
+          headers: responseHeaders,
+        }));
+      });
+    });
+    pending.on("error", reject);
+    pending.end(body);
+  });
+}
+
+async function receiveInBrowser(browserOrigin: string, token: string, expectedLines: number): Promise<void> {
+  const browser = new URL(browserOrigin);
+  const connectionOrigin = "http://127.0.0.1:" + browser.port;
+  const browserHost = browser.host;
+  const ticketResponse = await requestBrowser(connectionOrigin + "/api/ticket", {
+    method: "POST",
+    headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
+    body: JSON.stringify({ origin: browserOrigin }),
+  }, connectionOrigin, browserOrigin, browserHost);
+  assert.equal(ticketResponse.ok, true, "browser ticket issuance must succeed");
+  const ticketValue = await ticketResponse.json() as { ticket?: unknown };
+  assert.equal(typeof ticketValue.ticket, "string");
+
+  const sessionResponse = await requestBrowser(connectionOrigin + "/api/session", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ticket: ticketValue.ticket }),
+  }, connectionOrigin, browserOrigin, browserHost);
+  assert.equal(sessionResponse.ok, true, "browser session exchange must succeed");
+  const session = await sessionResponse.json() as {
+    leaseId?: unknown; clientId?: unknown; nextCommandSequence?: unknown; epoch?: unknown; continuityProof?: unknown; csrf?: unknown;
+  };
+  assert.equal(typeof session.leaseId, "string");
+  assert.equal(typeof session.clientId, "string");
+  assert.equal(typeof session.nextCommandSequence, "number");
+  assert.equal(typeof session.epoch, "string");
+  assert.equal(typeof session.continuityProof, "string");
+  assert.equal(typeof session.csrf, "string");
+  const setCookie = typeof sessionResponse.headers.getSetCookie === "function"
+    ? sessionResponse.headers.getSetCookie()[0]
+    : sessionResponse.headers.get("set-cookie");
+  const cookie = setCookie?.split(";", 1)[0];
+  assert.ok(cookie, "browser session exchange must set a cookie");
+
   let receivedLines = -1;
   const transport = new BrowserTransport({
-    url: "ws://127.0.0.1/api/socket",
+    url: connectionOrigin.replace(/^http/, "ws") + "/api/socket",
     reconnect: false,
-    webSocketFactory: () => socket,
-    onSnapshot: (value) => { receivedLines = value.cells[0]?.body.length ?? -1; },
+    clientId: session.clientId as string,
+    leaseId: session.leaseId as string,
+    csrf: session.csrf as string,
+    continuityProof: session.continuityProof as string,
+    nextCommandSequence: session.nextCommandSequence as number,
+    webSocketFactory: url => new AuthenticatedSocket(url, browserOrigin, browserHost, cookie),
+    onSnapshot: value => { receivedLines = value.cells[0]?.body.length ?? -1; },
   });
-  const connected = transport.connect().then(() => undefined);
-  socket.open();
-  socket.receive(envelope);
-  await connected;
+  const nativeFetch = globalThis.fetch;
+  globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+    const headers = new Headers(init?.headers);
+    headers.set("Cookie", cookie);
+    return requestBrowser(input, { ...init, headers }, connectionOrigin, browserOrigin, browserHost);
+  }) as typeof fetch;
+  try {
+    await transport.connect();
+  } finally {
+    globalThis.fetch = nativeFetch;
+  }
   assert.equal(receivedLines, expectedLines);
   transport.close();
 }
@@ -171,17 +283,31 @@ function snapshot(body: string[]): HostSnapshot {
     epoch: "large-envelope-epoch",
     cursor: 0,
     version: 1,
+    documentRevision: 0,
     path: "/tmp/large.R",
     metadata: {},
     config: {},
     layout: null,
+    dirty: false,
     changed: false,
+    disk: { state: "untitled", digest: null, version: null, error: null },
+    sidecars: {
+      config: { state: "untitled", digest: null, version: null, error: null },
+      layout: { state: "untitled", digest: null, version: null, error: null },
+      packages: { state: "untitled", digest: null, version: null, error: null },
+    },
     runtime: {
+      documentReady: true,
+      analyzerState: "ready",
+      kernelState: "ready",
+      executionReady: true,
+      executionBlockedReason: null,
+      startupActivated: false,
+      kernelEpoch: "large-envelope-kernel",
+      rEnvironment: null,
+      analysisEnvironmentId: "large-envelope-analysis",
       executionMode: "automatic",
       runOnStartup: false,
-      executionReady: true,
-      analyzerAvailable: true,
-      kernelAvailable: true,
       packageOperationActive: false,
       busy: false,
       activeRunId: null,

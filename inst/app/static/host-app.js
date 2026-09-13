@@ -9,15 +9,58 @@ var __export = (target, all) => {
 var encoder = new TextEncoder();
 var decoder = new TextDecoder("utf-8", { ignoreBOM: true });
 function tailLog(lines, limit) {
-  let start = lines.length;
+  let start2 = lines.length;
   let bytes = 0;
-  while (start > 0) {
-    const addition = encoder.encode(lines[start - 1]).length + Number(start < lines.length);
+  while (start2 > 0) {
+    const addition = encoder.encode(lines[start2 - 1]).length + Number(start2 < lines.length);
     if (bytes + addition > limit) break;
     bytes += addition;
-    start--;
+    start2--;
   }
-  return lines.slice(start);
+  return lines.slice(start2);
+}
+
+// src/cell-body.ts
+function markdownLogicalLine(line) {
+  if (line.length === 0) return "";
+  const match = /^(\s*)#(?: ?)([\s\S]*)$/.exec(line);
+  return match === null ? line : match[1] + match[2];
+}
+function isMarkdownPhysicalLine(line) {
+  return line.trim().length === 0 || /^\s*#/.test(line);
+}
+function markdownPhysicalLinesEqual(left, right) {
+  return isMarkdownPhysicalLine(left) && isMarkdownPhysicalLine(right) && markdownLogicalLine(left) === markdownLogicalLine(right);
+}
+function canonicalMarkdownLine(logical) {
+  return logical.length === 0 ? "" : "# " + logical;
+}
+function toPhysicalCellBody(cellType, logicalBody, originalPhysicalBody) {
+  if (cellType === "code") return [...logicalBody];
+  const physicalBody = logicalBody.map((line) => canonicalMarkdownLine(line));
+  if (originalPhysicalBody === void 0) return physicalBody;
+  const shared = Math.min(originalPhysicalBody.length, physicalBody.length);
+  let prefix = 0;
+  let suffix = 0;
+  while (prefix < shared && markdownPhysicalLinesEqual(originalPhysicalBody[prefix], physicalBody[prefix])) prefix += 1;
+  while (suffix < shared - prefix && markdownPhysicalLinesEqual(
+    originalPhysicalBody[originalPhysicalBody.length - suffix - 1],
+    physicalBody[physicalBody.length - suffix - 1]
+  )) suffix += 1;
+  for (let index = 0; index < prefix; index += 1) physicalBody[index] = originalPhysicalBody[index];
+  for (let index = prefix; index < shared - suffix; index += 1) {
+    if (markdownPhysicalLinesEqual(originalPhysicalBody[index], physicalBody[index])) {
+      physicalBody[index] = originalPhysicalBody[index];
+    }
+  }
+  for (let index = 0; index < suffix; index += 1) {
+    physicalBody[physicalBody.length - suffix + index] = originalPhysicalBody[originalPhysicalBody.length - suffix + index];
+  }
+  return physicalBody;
+}
+function toLogicalCellBody(cellType, physicalBody) {
+  if (cellType === "code") return [...physicalBody];
+  return physicalBody.map((line) => markdownLogicalLine(line));
 }
 
 // src/browser/document.ts
@@ -33,6 +76,9 @@ var BrowserDocument = class {
   cursorValue;
   snapshotValue;
   serverOrder;
+  draftBaseValue = null;
+  recoveredStructural = [];
+  recoveredStructuralConflict = false;
   constructor(snapshot) {
     this.epochValue = snapshot.epoch;
     this.cursorValue = snapshot.cursor;
@@ -56,7 +102,7 @@ var BrowserDocument = class {
     return this.focused;
   }
   get hasSourceConflicts() {
-    return this.ordered.some((cell) => cell.conflict || cell.tombstone);
+    return this.recoveredStructuralConflict || this.ordered.some((cell) => cell.conflict || cell.tombstone);
   }
   cell(keyOrId) {
     return this.byKey.get(keyOrId) ?? this.byKey.get(this.keyByServerId.get(keyOrId) ?? "");
@@ -73,17 +119,18 @@ var BrowserDocument = class {
     const cell = this.requireCell(key);
     cell.selection = { ...selection };
   }
-  create(clientOperationId, afterKey, type = "code", body = []) {
-    if (!clientOperationId || this.keyByCreationId.has(clientOperationId)) {
-      throw new Error("clientOperationId must be unique and nonempty");
+  create(creationId, afterKey, type = "code", body = []) {
+    if (!creationId || this.keyByCreationId.has(creationId)) {
+      throw new Error("creationId must be unique and nonempty");
     }
-    const key = `creation:${clientOperationId}`;
+    const key = `creation:${creationId}`;
     const after = afterKey === null ? this.ordered.length - 1 : this.ordered.findIndex((cell2) => cell2.key === afterKey);
     if (afterKey !== null && after < 0) throw new Error(`no such predecessor: ${afterKey}`);
+    this.captureDraftBase();
     const cell = {
       key,
       id: null,
-      clientOperationId,
+      creationId,
       desiredBody: [...body],
       desiredType: type,
       serverBody: [],
@@ -99,12 +146,13 @@ var BrowserDocument = class {
     };
     this.ordered.splice(after + 1, 0, cell);
     this.byKey.set(key, cell);
-    this.keyByCreationId.set(clientOperationId, key);
+    this.keyByCreationId.set(creationId, key);
     this.snapshotValue = { ...this.snapshotValue, changed: true };
     return cell;
   }
   edit(key, body, type) {
     const cell = this.requireCell(key);
+    this.captureDraftBase();
     cell.desiredBody = [...body];
     if (type) cell.desiredType = type;
     cell.generation += 1;
@@ -129,15 +177,16 @@ var BrowserDocument = class {
     if (cell.id !== null && !cell.tombstone) throw new Error("cannot discard an authoritative cell locally");
     this.removeCell(cell);
   }
-  restoreDeleted(key, clientOperationId) {
+  restoreDeleted(key, creationId) {
     const cell = this.requireCell(key);
     if (!cell.tombstone || cell.id === null) throw new Error("cell is not a deleted-source conflict");
-    if (!clientOperationId || this.keyByCreationId.has(clientOperationId)) {
-      throw new Error("clientOperationId must be unique and nonempty");
+    if (!creationId || this.keyByCreationId.has(creationId)) {
+      throw new Error("creationId must be unique and nonempty");
     }
+    this.captureDraftBase();
     this.keyByServerId.delete(cell.id);
     cell.id = null;
-    cell.clientOperationId = clientOperationId;
+    cell.creationId = creationId;
     cell.serverBody = [];
     cell.serverType = cell.desiredType;
     cell.serverRevision = 0;
@@ -145,118 +194,224 @@ var BrowserDocument = class {
     cell.conflict = false;
     cell.tombstone = false;
     cell.server = null;
-    this.keyByCreationId.set(clientOperationId, cell.key);
+    this.keyByCreationId.set(creationId, cell.key);
     this.snapshotValue = { ...this.snapshotValue, changed: true };
     return cell;
   }
   pendingSource() {
-    const edits = [];
-    const creations = [];
-    const creationGroups = /* @__PURE__ */ new Map();
+    const changes = [];
     for (const cell of this.ordered) {
       if (cell.tombstone) continue;
       if (cell.id === null) {
-        const predecessor = this.predecessorServerId(cell.key);
-        const creation = {
-          clientOperationId: cell.clientOperationId,
+        const predecessor = this.predecessorReference(cell.key);
+        changes.push({
+          type: "create",
+          creationId: cell.creationId,
           after: predecessor,
-          body: [...cell.desiredBody],
+          body: toPhysicalCellBody(cell.desiredType, cell.desiredBody),
           cellType: cell.desiredType,
           options: {}
-        };
-        const group = creationGroups.get(predecessor) ?? [];
-        group.unshift(creation);
-        creationGroups.set(predecessor, group);
+        });
       } else if (cell.generation > cell.acknowledgedGeneration || cell.desiredType !== cell.serverType || !sameLines(cell.desiredBody, cell.serverBody)) {
-        edits.push({
-          cellId: cell.id,
-          body: [...cell.desiredBody],
+        changes.push({
+          type: "edit",
+          cell: { cellId: cell.id },
+          body: toPhysicalCellBody(cell.desiredType, cell.desiredBody, cell.server?.body),
           cellType: cell.desiredType,
           expectedRevision: cell.serverRevision
         });
       }
     }
-    for (const group of creationGroups.values()) creations.push(...group);
-    return { edits, creations };
+    changes.push(...this.recoveredStructural.map((change) => cloneChange(change)));
+    return { changes };
   }
-  buildEditCommand(operationId2, clientId) {
-    this.assertNoSourceConflicts();
-    const pending = this.pendingSource();
-    if (pending.edits.length && pending.creations.length) {
-      throw new Error("mixed source changes must be submitted atomically with Run");
+  stageRecoveryIntent(changes) {
+    const structural = changes.filter((change) => change.type !== "create" && change.type !== "edit");
+    if (structural.length === 0) return;
+    this.captureDraftBase();
+    this.recoveredStructural = structural.map((change) => cloneChange(change));
+    this.recoveredStructuralConflict = false;
+  }
+  markStructuralRecoveryConflict() {
+    if (this.recoveredStructural.length > 0) this.recoveredStructuralConflict = true;
+  }
+  recoveryDraft(clientId, operation = null) {
+    const changes = this.recoveryChanges();
+    if (changes.length === 0) {
+      this.draftBaseValue = null;
+      return null;
     }
-    if (pending.edits.length) return {
-      type: "edit",
+    const base = this.draftBaseValue ?? this.snapshotBase();
+    return {
+      schemaVersion: 1,
+      clientId,
+      base: cloneDraftBase(base),
+      changes,
+      operation
+    };
+  }
+  restoreDraft(draft, conflict) {
+    this.draftBaseValue = cloneDraftBase(draft.base);
+    for (const change of draft.changes) {
+      if (change.type === "create") {
+        const existing = this.cell(this.keyByCreationId.get(change.creationId) ?? "");
+        if (existing) {
+          existing.desiredBody = toLogicalCellBody(change.cellType, change.body);
+          existing.desiredType = change.cellType;
+          existing.conflict = conflict;
+          continue;
+        }
+        const after = change.after === null ? null : "cellId" in change.after ? this.cell(change.after.cellId)?.key ?? null : this.cell(this.keyByCreationId.get(change.after.creationId) ?? "")?.key ?? null;
+        const cell = this.create(change.creationId, after, change.cellType, toLogicalCellBody(change.cellType, change.body));
+        cell.conflict = conflict;
+      } else if (change.type === "edit") {
+        const key = "cellId" in change.cell ? this.cell(change.cell.cellId)?.key ?? "" : this.keyByCreationId.get(change.cell.creationId) ?? "";
+        const cell = this.cell(key) ?? this.restoreMissingEdit(change, draft);
+        cell.desiredBody = toLogicalCellBody(change.cellType, change.body);
+        cell.desiredType = change.cellType;
+        cell.generation = Math.max(1, cell.generation + 1);
+        cell.acknowledgedGeneration = cell.generation - 1;
+        cell.conflict = conflict || cell.tombstone;
+        this.snapshotValue = { ...this.snapshotValue, changed: true };
+      } else {
+        this.recoveredStructural.push(cloneChange(change));
+        this.recoveredStructuralConflict ||= conflict;
+      }
+    }
+    this.snapshotValue = { ...this.snapshotValue, changed: true };
+  }
+  recoveryChanges() {
+    const changes = [];
+    for (const cell of this.ordered) {
+      if (cell.id === null) {
+        changes.push({
+          type: "create",
+          creationId: cell.creationId,
+          after: this.predecessorReference(cell.key),
+          body: toPhysicalCellBody(cell.desiredType, cell.desiredBody),
+          cellType: cell.desiredType,
+          options: {}
+        });
+      } else if (cell.tombstone || cell.generation > cell.acknowledgedGeneration || cell.desiredType !== cell.serverType || !sameLines(cell.desiredBody, cell.serverBody)) {
+        changes.push({
+          type: "edit",
+          cell: { cellId: cell.id },
+          body: toPhysicalCellBody(cell.desiredType, cell.desiredBody),
+          cellType: cell.desiredType,
+          expectedRevision: cell.serverRevision
+        });
+      }
+    }
+    changes.push(...this.recoveredStructural.map((change) => cloneChange(change)));
+    return changes;
+  }
+  snapshotBase() {
+    return {
+      epoch: this.snapshotValue.epoch,
+      cursor: this.snapshotValue.cursor,
+      version: this.snapshotValue.version,
+      documentRevision: this.snapshotValue.documentRevision,
+      cells: this.snapshotValue.cells.map((cell) => ({ id: cell.id, revision: cell.revision, type: cell.type, body: [...cell.body] }))
+    };
+  }
+  captureDraftBase() {
+    this.draftBaseValue ??= this.snapshotBase();
+  }
+  rebaseDraftToSnapshot() {
+    this.draftBaseValue = this.recoveryChanges().length === 0 ? null : this.snapshotBase();
+  }
+  restoreMissingEdit(change, draft) {
+    const id = "cellId" in change.cell ? change.cell.cellId : null;
+    const creationId = "creationId" in change.cell ? change.cell.creationId : null;
+    const baseIndex = id === null ? -1 : draft.base.cells.findIndex((cell2) => cell2.id === id);
+    const baseCell = baseIndex < 0 ? null : draft.base.cells[baseIndex];
+    const key = id === null ? "recovery-created:" + creationId : "recovery-deleted:" + id;
+    const preceding = baseIndex <= 0 ? null : draft.base.cells.slice(0, baseIndex).reverse().find((candidate) => this.cell(candidate.id))?.id ?? null;
+    const cell = {
+      key,
+      id,
+      creationId,
+      desiredBody: toLogicalCellBody(change.cellType, change.body),
+      desiredType: change.cellType,
+      serverBody: baseCell ? toLogicalCellBody(baseCell.type, baseCell.body) : [],
+      serverType: baseCell?.type ?? change.cellType,
+      serverRevision: baseCell?.revision ?? change.expectedRevision ?? 0,
+      generation: 0,
+      acknowledgedGeneration: 0,
+      conflict: true,
+      tombstone: id !== null,
+      restoreAfter: preceding,
+      server: null,
+      selection: null
+    };
+    const insertion = preceding === null ? 0 : Math.max(0, this.ordered.findIndex((candidate) => candidate.id === preceding) + 1);
+    this.ordered.splice(insertion, 0, cell);
+    this.byKey.set(key, cell);
+    if (id !== null) this.keyByServerId.set(id, key);
+    if (creationId !== null) this.keyByCreationId.set(creationId, key);
+    return cell;
+  }
+  buildTransactionCommand(operationId2, clientId) {
+    this.assertNoSourceConflicts();
+    const changes = this.pendingSource().changes;
+    if (changes.length === 0) return null;
+    return {
+      type: "transaction",
       operationId: operationId2,
       clientId,
       sessionEpoch: this.epochValue,
-      edits: pending.edits
+      expectedDocumentRevision: this.snapshotValue.documentRevision,
+      changes
     };
-    if (pending.creations.length) return {
-      type: "create",
-      operationId: operationId2,
-      clientId,
-      sessionEpoch: this.epochValue,
-      creations: pending.creations
-    };
-    return null;
   }
   buildRunCommand(options) {
     this.assertNoSourceConflicts();
-    const pending = this.pendingSource();
+    const changes = this.pendingSource().changes;
     const target = options.targetKey ? this.requireCell(options.targetKey) : null;
     if (options.scope === "cell" && !target) throw new Error("a target cell is required");
     if (options.scope !== "cell" && target) throw new Error("a target cell is valid only for a cell run");
-    if (target?.id === null) {
-      return {
-        type: "run",
-        operationId: options.operationId,
-        clientId: options.clientId,
-        sessionEpoch: this.epochValue,
-        scope: "cell",
-        targetCreationId: target.clientOperationId,
-        edits: pending.edits,
-        creations: pending.creations,
-        source: options.source ?? "editor"
-      };
-    }
     if (target?.tombstone) throw new Error("deleted cells must be restored or discarded before running");
+    const targetRef = target?.id !== null && target?.id !== void 0 ? { cellId: target.id } : target?.creationId !== null && target?.creationId !== void 0 ? { creationId: target.creationId } : void 0;
     return {
       type: "run",
       operationId: options.operationId,
       clientId: options.clientId,
       sessionEpoch: this.epochValue,
       scope: options.scope,
-      ...target?.id ? { cellId: target.id } : {},
-      edits: pending.edits,
-      creations: pending.creations,
-      source: options.source ?? "editor"
+      ...targetRef === void 0 ? {} : { target: targetRef },
+      ...changes.length === 0 ? {} : { changes },
+      expectedDocumentRevision: this.snapshotValue.documentRevision
     };
   }
   noteSubmitted(operationId2, command) {
-    const operation = { cells: /* @__PURE__ */ new Map(), creations: /* @__PURE__ */ new Map() };
-    const edits = command.type === "run" || command.type === "edit" ? command.edits : [];
-    const creations = command.type === "run" || command.type === "create" ? command.creations : [];
-    for (const edit of edits) {
-      const cell = this.cell(edit.cellId);
-      if (cell) operation.cells.set(cell.key, {
-        generation: cell.generation,
-        body: [...edit.body],
-        type: edit.cellType,
-        expectedRevision: edit.expectedRevision,
-        changesSource: cell.serverType !== edit.cellType || !sameLines(cell.serverBody, edit.body)
-      });
-    }
-    for (const creation of creations) {
-      const key = this.keyByCreationId.get(creation.clientOperationId);
-      const cell = key ? this.byKey.get(key) : void 0;
-      if (cell) operation.creations.set(creation.clientOperationId, {
-        generation: cell.generation,
-        body: [...creation.body],
-        type: creation.cellType,
-        expectedRevision: null,
-        changesSource: true
-      });
+    const operation = { cells: /* @__PURE__ */ new Map(), creations: /* @__PURE__ */ new Map(), structural: [] };
+    const changes = command.type === "run" || command.type === "transaction" ? command.changes ?? [] : [];
+    for (const change of changes) {
+      if (change.type === "edit" || change.type === "text-edit") {
+        const cell = this.cellRef(change.cell);
+        if (cell && change.type === "edit") {
+          const body = toLogicalCellBody(change.cellType, change.body);
+          operation.cells.set(cell.key, {
+            generation: cell.generation,
+            body,
+            type: change.cellType,
+            expectedRevision: change.expectedRevision ?? cell.serverRevision,
+            changesSource: cell.serverType !== change.cellType || !sameLines(cell.serverBody, body)
+          });
+        }
+      } else if (change.type === "create") {
+        const key = this.keyByCreationId.get(change.creationId);
+        const cell = key ? this.byKey.get(key) : void 0;
+        if (cell) operation.creations.set(change.creationId, {
+          generation: cell.generation,
+          body: toLogicalCellBody(change.cellType, change.body),
+          type: change.cellType,
+          expectedRevision: null,
+          changesSource: true
+        });
+      } else {
+        operation.structural.push(cloneChange(change));
+      }
     }
     this.submitted.set(operationId2, operation);
   }
@@ -265,34 +420,49 @@ var BrowserDocument = class {
     this.snapshotValue = {
       ...this.snapshotValue,
       cursor: this.cursorValue,
-      version: Math.max(this.snapshotValue.version, result.version)
+      version: Math.max(this.snapshotValue.version, result.version),
+      documentRevision: Math.max(this.snapshotValue.documentRevision, result.documentRevision)
     };
     const submitted = this.submitted.get(result.operation.id);
     const change = isRecord(result.result) ? result.result : {};
     this.reconcileCreated(change.created);
     this.reconcileEdited(change.edited, submitted);
-    if (submitted) {
-      for (const [creationId, sent] of submitted.creations) {
-        const cell = this.cell(this.keyByCreationId.get(creationId) ?? "");
-        const created = Array.isArray(change.created) ? change.created.find((item) => isRecord(item) && item.clientOperationId === creationId && typeof item.revision === "number") : void 0;
-        if (!cell || cell.id === null || !isRecord(created) || typeof created.revision !== "number" || cell.serverRevision > created.revision) continue;
-        cell.serverBody = [...sent.body];
-        cell.serverType = sent.type;
-        cell.acknowledgedGeneration = Math.max(cell.acknowledgedGeneration, sent.generation);
-        cell.conflict = false;
-      }
-    }
+    if (submitted) this.reconcileSubmittedCreations(change.created, submitted);
+    if (submitted) this.recoveredStructuralConflict = false;
+    if (submitted) this.recoveredStructural = [];
     this.submitted.delete(result.operation.id);
+    this.reassertLocalDirty();
+    this.rebaseDraftToSnapshot();
+  }
+  acknowledgeSourceCommit(operationId2, outcome) {
+    const submitted = this.submitted.get(operationId2);
+    if (submitted === void 0 || !Number.isSafeInteger(outcome.documentRevision) || outcome.documentRevision < 0 || this.snapshotValue.documentRevision < outcome.documentRevision) return false;
+    this.snapshotValue = { ...this.snapshotValue, documentRevision: Math.max(this.snapshotValue.documentRevision, outcome.documentRevision) };
+    this.reconcileCreated(outcome.created);
+    this.reconcileEdited(outcome.edited, submitted);
+    this.reconcileSubmittedCreations(outcome.created, submitted);
+    return this.finishSourceCommit(operationId2, submitted);
+  }
+  finishSourceCommit(operationId2, submitted) {
+    if (!this.sourceSubmissionAcknowledged(submitted)) return false;
+    this.recoveredStructuralConflict = false;
+    this.recoveredStructural = [];
+    this.submitted.delete(operationId2);
+    this.reassertLocalDirty();
+    this.rebaseDraftToSnapshot();
+    return true;
   }
   reject(operationId2, code) {
     const submitted = this.submitted.get(operationId2);
     if (submitted && code === "source_conflict") {
       for (const [key, sent] of submitted.cells) {
         const cell = this.byKey.get(key);
-        if (cell && (cell.serverType !== sent.type || !sameLines(cell.serverBody, sent.body))) {
-          cell.conflict = true;
-        }
+        if (cell && (cell.serverType !== sent.type || !sameLines(cell.serverBody, sent.body))) cell.conflict = true;
       }
+    }
+    if (submitted && submitted.structural.length > 0) {
+      this.recoveredStructural = this.recoveredStructural.filter((candidate) => !submitted.structural.some((sent) => sameChange(candidate, sent)));
+      if (this.recoveredStructural.length === 0) this.recoveredStructuralConflict = false;
     }
     this.submitted.delete(operationId2);
   }
@@ -311,9 +481,15 @@ var BrowserDocument = class {
       this.applyOutput(event.cellId, event.payload);
     } else if (event.type === "diagnostics" && event.cellId && Array.isArray(event.payload)) {
       this.applyDiagnostics(event.cellId, event.payload);
-    } else if (event.type === "notebook" && isRecord(event.payload)) {
+    } else if ((event.type === "notebook" || event.type === "transaction") && isRecord(event.payload)) {
       this.reconcileCreated(event.payload.created);
+      if (Array.isArray(event.payload.updated)) {
+        for (const cell of event.payload.updated) if (isHostCell(cell)) this.mergeServerCell(cell, false, event.operationId);
+      }
       if (typeof event.payload.deleted === "string") this.removeServerCell(event.payload.deleted);
+      if (Array.isArray(event.payload.deleted)) {
+        for (const id of event.payload.deleted) if (typeof id === "string") this.removeServerCell(id);
+      }
       let orderChanged = false;
       if (Array.isArray(event.payload.order) && event.payload.order.every((id) => typeof id === "string")) {
         const order = event.payload.order;
@@ -329,9 +505,7 @@ var BrowserDocument = class {
     this.snapshotValue = patchSnapshot(this.snapshotValue, event, this.serverOrder);
     if (isRecord(event.payload) && event.type === "notebook" && event.payload.saved === true) {
       const pending = this.pendingSource();
-      if (pending.edits.length || pending.creations.length || this.ordered.some((cell) => cell.tombstone)) {
-        this.snapshotValue = { ...this.snapshotValue, changed: true };
-      }
+      if (pending.changes.length || this.ordered.some((cell) => cell.tombstone)) this.snapshotValue = { ...this.snapshotValue, changed: true };
     }
   }
   applySnapshot(snapshot) {
@@ -342,10 +516,16 @@ var BrowserDocument = class {
     const previousOrder = this.serverOrder;
     this.serverOrder = snapshot.cells.map((cell) => cell.id);
     if (epochChanged) {
+      for (const operation of this.submitted.values()) {
+        for (const change of operation.structural) {
+          if (!this.recoveredStructural.some((candidate) => sameChange(candidate, change))) this.recoveredStructural.push(cloneChange(change));
+        }
+      }
       this.submitted.clear();
       for (const cell of this.ordered) {
-        if (cell.id !== null && cell.generation > cell.acknowledgedGeneration) cell.conflict = true;
+        if (cell.creationId !== null || cell.generation > cell.acknowledgedGeneration || cell.tombstone) cell.conflict = true;
       }
+      if (this.recoveredStructural.length > 0) this.recoveredStructuralConflict = true;
     }
     const seen = /* @__PURE__ */ new Set();
     for (const serverCell of snapshot.cells) {
@@ -358,15 +538,14 @@ var BrowserDocument = class {
           cell.conflict = true;
           cell.tombstone = true;
           cell.restoreAfter ??= predecessorInOrder(previousOrder, cell.id, new Set(this.serverOrder));
-        } else {
-          this.removeCell(cell);
-        }
+        } else this.removeCell(cell);
       }
     }
     this.reorderFromServerOrderIfPossible();
     this.reassertLocalDirty();
   }
   mergeServerCell(serverCell, forceSource = false, operationId2) {
+    const logicalBody = toLogicalCellBody(serverCell.type, serverCell.body);
     let key = this.keyByServerId.get(serverCell.id);
     let cell = key ? this.byKey.get(key) : void 0;
     if (!cell) {
@@ -374,10 +553,10 @@ var BrowserDocument = class {
       cell = {
         key,
         id: serverCell.id,
-        clientOperationId: null,
-        desiredBody: [...serverCell.body],
+        creationId: null,
+        desiredBody: [...logicalBody],
         desiredType: serverCell.type,
-        serverBody: [...serverCell.body],
+        serverBody: [...logicalBody],
         serverType: serverCell.type,
         serverRevision: serverCell.revision,
         generation: 0,
@@ -394,25 +573,22 @@ var BrowserDocument = class {
       return cell;
     }
     const pending = cell.generation > cell.acknowledgedGeneration;
-    const sourceChanged = forceSource || cell.serverRevision !== serverCell.revision || cell.serverType !== serverCell.type || !sameLines(cell.serverBody, serverCell.body);
+    const sourceChanged = forceSource || cell.serverRevision !== serverCell.revision || cell.serverType !== serverCell.type || !sameLines(cell.serverBody, logicalBody);
     if (pending && sourceChanged) {
-      const desiredMatches = cell.desiredType === serverCell.type && sameLines(cell.desiredBody, serverCell.body);
+      const desiredMatches = cell.desiredType === serverCell.type && sameLines(cell.desiredBody, logicalBody);
       const sent = operationId2 === void 0 ? void 0 : this.matchingSubmittedCell(operationId2, cell, serverCell);
       cell.conflict = sent === void 0 && !desiredMatches;
-      if (sent !== void 0) {
-        cell.acknowledgedGeneration = Math.max(cell.acknowledgedGeneration, sent.generation);
-      } else if (desiredMatches) {
-        cell.acknowledgedGeneration = cell.generation;
-      }
+      if (sent !== void 0) cell.acknowledgedGeneration = Math.max(cell.acknowledgedGeneration, sent.generation);
+      else if (desiredMatches) cell.acknowledgedGeneration = cell.generation;
     } else if (!pending) {
       if (sourceChanged) {
-        cell.desiredBody = [...serverCell.body];
+        cell.desiredBody = [...logicalBody];
         cell.desiredType = serverCell.type;
       }
       cell.conflict = false;
     }
     cell.id = serverCell.id;
-    if (sourceChanged) cell.serverBody = [...serverCell.body];
+    if (sourceChanged) cell.serverBody = [...logicalBody];
     cell.serverType = serverCell.type;
     cell.serverRevision = serverCell.revision;
     cell.server = serverCell;
@@ -433,10 +609,9 @@ var BrowserDocument = class {
     }
   }
   reconcileCreated(value) {
-    if (!Array.isArray(value)) return;
-    for (const item of value) {
-      if (!isRecord(item) || typeof item.clientOperationId !== "string" || typeof item.id !== "string") continue;
-      const key = this.keyByCreationId.get(item.clientOperationId);
+    const entries = createdEntries(value);
+    for (const item of entries) {
+      const key = this.keyByCreationId.get(item.creationId);
       const cell = key ? this.byKey.get(key) : void 0;
       if (!cell) continue;
       const existingKey = this.keyByServerId.get(item.id);
@@ -454,7 +629,7 @@ var BrowserDocument = class {
         }
       }
       cell.id = item.id;
-      cell.serverRevision = Math.max(cell.serverRevision, typeof item.revision === "number" ? item.revision : 0);
+      cell.serverRevision = Math.max(cell.serverRevision, item.revision);
       this.keyByServerId.set(item.id, cell.key);
     }
   }
@@ -471,9 +646,10 @@ var BrowserDocument = class {
       const value = isRecord(payload.payload) && "output" in payload.payload ? payload.payload.output : payload.payload;
       if (next.outputsStale) next.outputs = [];
       next.outputsStale = false;
-      next.outputs.push(value);
+      if (isOutputRecord(value)) next.outputs.push(value);
     } else if (payload.kind === "progress") {
-      next.progress = isRecord(payload.payload) && "progress" in payload.payload ? payload.payload.progress : payload.payload;
+      const progress = isRecord(payload.payload) && "progress" in payload.payload ? payload.payload.progress : payload.payload;
+      next.progress = progress;
     } else if (payload.kind === "log") {
       const detail = isRecord(payload.payload) ? payload.payload : null;
       const value = detail ? detail.lines ?? detail.log ?? [] : payload.payload;
@@ -510,13 +686,48 @@ var BrowserDocument = class {
       cell.conflict = false;
     }
   }
+  reconcileSubmittedCreations(value, submitted) {
+    for (const [creationId, sent] of submitted.creations) {
+      const cell = this.cell(this.keyByCreationId.get(creationId) ?? "");
+      const created = createdEntry(value, creationId);
+      if (!cell || cell.id === null || created === null || cell.serverRevision > created.revision) continue;
+      cell.serverBody = [...sent.body];
+      cell.serverType = sent.type;
+      cell.serverRevision = created.revision;
+      cell.acknowledgedGeneration = Math.max(cell.acknowledgedGeneration, sent.generation);
+      cell.conflict = false;
+    }
+  }
+  sourceSubmissionAcknowledged(submitted) {
+    const acknowledgements = [];
+    for (const [key, sent] of submitted.cells) {
+      const cell = this.byKey.get(key);
+      const expectedRevision = sent.expectedRevision === null ? 0 : sent.expectedRevision + (sent.changesSource ? 1 : 0);
+      if (!cell || cell.id === null || cell.tombstone || cell.serverRevision < expectedRevision) return false;
+      if (cell.serverRevision === expectedRevision && (cell.serverType !== sent.type || !sameLines(cell.serverBody, sent.body))) return false;
+      acknowledgements.push({ cell, sent });
+    }
+    for (const [creationId, sent] of submitted.creations) {
+      const cell = this.cell(this.keyByCreationId.get(creationId) ?? "");
+      if (!cell || cell.id === null || cell.tombstone || cell.serverRevision < 0) return false;
+      if (cell.serverRevision === 0 && (cell.serverType !== sent.type || !sameLines(cell.serverBody, sent.body))) return false;
+      acknowledgements.push({ cell, sent });
+    }
+    for (const { cell, sent } of acknowledgements) {
+      cell.acknowledgedGeneration = Math.max(cell.acknowledgedGeneration, sent.generation);
+      if (cell.generation === sent.generation) {
+        cell.conflict = cell.serverType !== sent.type || !sameLines(cell.serverBody, sent.body);
+      } else if (cell.serverType === cell.desiredType && sameLines(cell.serverBody, cell.desiredBody)) {
+        cell.conflict = false;
+      }
+    }
+    return true;
+  }
   matchingSubmittedCell(operationId2, cell, serverCell) {
     const operation = this.submitted.get(operationId2);
     if (operation === void 0) return void 0;
-    const sent = operation.cells.get(cell.key) ?? (cell.clientOperationId === null ? void 0 : operation.creations.get(cell.clientOperationId));
-    if (sent === void 0 || sent.type !== serverCell.type || !sameLines(sent.body, serverCell.body)) {
-      return void 0;
-    }
+    const sent = operation.cells.get(cell.key) ?? (cell.creationId === null ? void 0 : operation.creations.get(cell.creationId));
+    if (sent === void 0 || sent.type !== serverCell.type || !sameLines(sent.body, toLogicalCellBody(serverCell.type, serverCell.body))) return void 0;
     const expectedRevision = sent.expectedRevision;
     if (expectedRevision === null) return serverCell.revision === 0 ? sent : void 0;
     const submittedRevision = sent.changesSource ? expectedRevision + 1 : expectedRevision;
@@ -524,17 +735,19 @@ var BrowserDocument = class {
   }
   reassertLocalDirty() {
     const pending = this.pendingSource();
-    if (pending.edits.length || pending.creations.length || this.ordered.some((cell) => cell.tombstone)) {
-      this.snapshotValue = { ...this.snapshotValue, changed: true };
-    }
+    if (pending.changes.length || this.ordered.some((cell) => cell.tombstone)) this.snapshotValue = { ...this.snapshotValue, changed: true };
   }
-  predecessorServerId(key) {
+  predecessorReference(key) {
     const index = this.ordered.findIndex((cell) => cell.key === key);
     for (let before = index - 1; before >= 0; before -= 1) {
-      const id = this.ordered[before].id;
-      if (id !== null) return id;
+      const prior = this.ordered[before];
+      if (prior.id !== null) return { cellId: prior.id };
+      if (prior.creationId !== null) return { creationId: prior.creationId };
     }
     return null;
+  }
+  cellRef(ref) {
+    return "cellId" in ref ? this.cell(ref.cellId) : this.cell(this.keyByCreationId.get(ref.creationId) ?? "");
   }
   removeServerCell(id) {
     const cell = this.cell(id);
@@ -554,7 +767,7 @@ var BrowserDocument = class {
     this.ordered = this.ordered.filter((candidate) => candidate !== cell);
     this.byKey.delete(cell.key);
     if (cell.id) this.keyByServerId.delete(cell.id);
-    if (cell.clientOperationId) this.keyByCreationId.delete(cell.clientOperationId);
+    if (cell.creationId) this.keyByCreationId.delete(cell.creationId);
     if (this.focused === cell.key) this.focused = null;
   }
   reorderFromServerOrderIfPossible() {
@@ -571,8 +784,7 @@ var BrowserDocument = class {
       this.serverOrder.splice(from, 0, id);
       return;
     }
-    const target = predecessor + 1;
-    this.serverOrder.splice(Math.max(0, target), 0, id);
+    this.serverOrder.splice(Math.max(0, predecessor + 1), 0, id);
   }
   requireCell(key) {
     const cell = this.cell(key);
@@ -580,52 +792,67 @@ var BrowserDocument = class {
     return cell;
   }
   assertNoSourceConflicts() {
-    if (this.hasSourceConflicts) {
-      throw new Error("resolve deleted or conflicting local source before continuing");
-    }
+    if (this.hasSourceConflicts) throw new Error("resolve deleted or conflicting local source before continuing");
   }
 };
+function cloneDraftBase(base) {
+  return {
+    epoch: base.epoch,
+    cursor: base.cursor,
+    version: base.version,
+    documentRevision: base.documentRevision,
+    cells: base.cells.map((cell) => ({ ...cell, body: [...cell.body] }))
+  };
+}
 function patchSnapshot(snapshot, event, order) {
-  const next = { ...snapshot, cursor: event.cursor, version: event.version };
+  const next = { ...snapshot, cursor: event.cursor, version: event.version, documentRevision: event.documentRevision };
   let addedCell = false;
+  if (event.type === "active_clients_changed" && isRecord(event.payload)) {
+    const activeClientIds = validActiveClientIds(event.payload.activeClientIds);
+    if (activeClientIds !== null) next.activeClientIds = activeClientIds;
+  }
   if (event.type === "runtime" && isRecord(event.payload)) next.runtime = event.payload;
   if (event.type === "graph" && isRecord(event.payload)) next.graph = event.payload;
-  if (event.type === "variables" && Array.isArray(event.payload)) {
-    next.variables = event.payload;
+  if (event.type === "variables" && Array.isArray(event.payload)) next.variables = event.payload;
+  if (event.type === "editor-diagnostics" && isRecord(event.payload)) next.editorDiagnostics = event.payload;
+  if (event.type === "service-errors" && isRecord(event.payload)) next.serviceErrors = event.payload;
+  if (event.type === "service-error") next.lastActionError = isRecord(event.payload) ? event.payload : null;
+  if (event.type === "receipt" || event.type === "operation") {
+    const operation = operationFromEventPayload(event.payload);
+    if (operation) next.operations = upsertOperation(next.operations, operation);
   }
-  if (event.type === "editor-diagnostics" && isRecord(event.payload)) {
-    next.editorDiagnostics = event.payload;
-  }
-  if (event.type === "service-errors" && isRecord(event.payload)) {
-    next.serviceErrors = event.payload;
-  }
-  if (event.type === "service-error") {
-    next.lastActionError = isRecord(event.payload) ? event.payload : null;
-  }
-  if (event.type === "receipt" && isRecord(event.payload) && isOperation(event.payload.operation)) {
-    next.operations = upsertOperation(next.operations, event.payload.operation);
-  }
-  if (event.type === "operation" && isOperation(event.payload)) {
-    next.operations = upsertOperation(next.operations, event.payload);
-  }
-  if (event.type === "notebook" && isRecord(event.payload)) {
+  if ((event.type === "notebook" || event.type === "transaction") && isRecord(event.payload)) {
     const payload = event.payload;
     if (isRecord(payload.config)) next.config = payload.config;
+    if (typeof payload.path === "string" || payload.path === null) next.path = payload.path;
+    if (isSidecarObservations(payload.sidecars)) next.sidecars = payload.sidecars;
     if ("layout" in payload) next.layout = payload.layout;
     if (isRecord(payload.metadata)) next.metadata = payload.metadata;
     if (isRecord(payload.app)) next.metadata = { ...next.metadata, app: payload.app };
+    if (isRecord(payload.graph)) next.graph = payload.graph;
     if ("lastValue" in payload) next.lastValue = payload.lastValue;
     if (payload.saved === true) next.changed = false;
-    const deleted = payload.deleted;
-    if (typeof deleted === "string") {
-      next.cells = next.cells.filter((cell) => cell.id !== deleted);
+    if (typeof payload.deleted === "string") next.cells = next.cells.filter((cell) => cell.id !== payload.deleted);
+    const deletedIds = payload.deleted;
+    if (Array.isArray(deletedIds)) next.cells = next.cells.filter((cell) => !deletedIds.includes(cell.id));
+    if (Array.isArray(payload.edited)) next.changed = true;
+    if ("updated" in payload) next.changed = true;
+    if (payload.created !== void 0 || payload.deleted !== void 0 || typeof payload.moved === "string" || isRecord(payload.config) || isRecord(payload.metadata) || isRecord(payload.app)) next.changed = true;
+    if (Array.isArray(payload.updated)) {
+      const updates = /* @__PURE__ */ new Map();
+      for (const value of payload.updated) if (isHostCell(value)) updates.set(value.id, value);
+      if (updates.size > 0) {
+        const present = new Set(next.cells.map((cell) => cell.id));
+        next.cells = next.cells.map((cell) => updates.get(cell.id) ?? cell);
+        for (const [id, cell] of updates) if (!present.has(id)) next.cells.push(cell);
+        addedCell ||= [...updates.keys()].some((id) => !present.has(id));
+      }
     }
-    if (Array.isArray(payload.edited) || Array.isArray(payload.created) || typeof payload.deleted === "string" || typeof payload.moved === "string" || isRecord(payload.config) || isRecord(payload.metadata) || isRecord(payload.app)) next.changed = true;
+    if (typeof payload.dirty === "boolean") next.changed = payload.dirty;
   }
   if (["cell", "cell-started", "cell-completed"].includes(event.type) && event.cellId) {
-    if (isRecord(event.payload) && event.payload.deleted === true) {
-      next.cells = next.cells.filter((cell) => cell.id !== event.cellId);
-    } else if (isHostCell(event.payload)) {
+    if (isRecord(event.payload) && event.payload.deleted === true) next.cells = next.cells.filter((cell) => cell.id !== event.cellId);
+    else if (isHostCell(event.payload)) {
       const payload = event.payload;
       const index = next.cells.findIndex((cell) => cell.id === payload.id);
       const prior = index < 0 ? null : next.cells[index];
@@ -644,12 +871,18 @@ function patchSnapshot(snapshot, event, order) {
       next.cells[index] = { ...next.cells[index], diagnostics: event.payload };
     }
   }
-  const reorderNotebook = event.type === "notebook" && order.length === next.cells.length && !next.cells.every((cell, index) => cell.id === order[index]);
+  const reorderNotebook = (event.type === "notebook" || event.type === "transaction") && order.length === next.cells.length && !next.cells.every((cell, index) => cell.id === order[index]);
   if (order.length && next.cells.length && (addedCell || reorderNotebook)) {
     const indexes = new Map(order.map((id, index) => [id, index]));
     next.cells = [...next.cells].sort((left, right) => (indexes.get(left.id) ?? Number.MAX_SAFE_INTEGER) - (indexes.get(right.id) ?? Number.MAX_SAFE_INTEGER));
   }
   return next;
+}
+function validActiveClientIds(value) {
+  if (!Array.isArray(value) || value.length > 128) return null;
+  const ids = value.filter((id) => typeof id === "string" && id.length > 0);
+  if (ids.length !== value.length || new Set(ids).size !== ids.length) return null;
+  return ids;
 }
 function upsertOperation(operations, operation) {
   const index = operations.findIndex((candidate) => candidate.id === operation.id);
@@ -666,14 +899,44 @@ function predecessorInOrder(order, id, retained) {
   }
   return null;
 }
+function createdEntries(value) {
+  if (!isRecord(value)) return [];
+  return Object.entries(value).flatMap(([creationId, id]) => typeof id === "string" ? [{ creationId, id, revision: 0 }] : []);
+}
+function sameChange(left, right) {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+function createdEntry(value, creationId) {
+  return createdEntries(value).find((item) => item.creationId === creationId) ?? null;
+}
+function cloneChange(change) {
+  return JSON.parse(JSON.stringify(change));
+}
 function isOperation(value) {
   return isRecord(value) && typeof value.id === "string" && typeof value.kind === "string" && typeof value.status === "string";
+}
+function operationFromEventPayload(value) {
+  if (isOperation(value)) return value;
+  if (isRecord(value) && isOperation(value.operation)) return value.operation;
+  return null;
 }
 function sourceRecordChanged(left, right) {
   return left.type !== right.type || !sameLines(left.body, right.body) || JSON.stringify(left.options) !== JSON.stringify(right.options);
 }
+function isSidecarObservations(value) {
+  return isRecord(value) && isDiskObservation(value.config) && isDiskObservation(value.layout) && isDiskObservation(value.packages);
+}
+function isDiskObservation(value) {
+  if (!isRecord(value)) return false;
+  const state = value.state;
+  const digest = value.digest;
+  return (state === "untitled" || state === "absent" || state === "present" || state === "unreadable") && (digest === null || typeof digest === "string" && /^[0-9a-f]{64}$/.test(digest)) && (value.version === null || typeof value.version === "string") && (value.error === null || isRecord(value.error));
+}
 function isHostCell(value) {
   return isRecord(value) && typeof value.id === "string" && Array.isArray(value.body) && typeof value.revision === "number" && (value.type === "code" || value.type === "markdown");
+}
+function isOutputRecord(value) {
+  return isRecord(value) && typeof value.id === "string" && typeof value.cellId === "string" && typeof value.sequence === "number" && "data" in value;
 }
 function isRecord(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -683,6 +946,209 @@ function sameLines(left, right) {
 }
 function boundedLog(lines) {
   return tailLog(lines, MAX_LOG_BYTES);
+}
+
+// src/strict-json.ts
+var DEFAULT_STRICT_JSON_LIMITS = Object.freeze({
+  maxBytes: 8 * 1024 * 1024,
+  maxDepth: 64
+});
+var StrictJsonError = class extends Error {
+  constructor(message2, offset) {
+    super(`${message2} at byte ${offset}`);
+    this.offset = offset;
+    this.name = "StrictJsonError";
+  }
+  offset;
+};
+var StrictJsonParser = class {
+  constructor(text, maxDepth) {
+    this.text = text;
+    this.maxDepth = maxDepth;
+  }
+  text;
+  maxDepth;
+  offset = 0;
+  encoder = new TextEncoder();
+  parse() {
+    this.whitespace();
+    const result = this.value(0);
+    this.whitespace();
+    if (this.offset !== this.text.length) this.fail("trailing content");
+    return result;
+  }
+  value(depth) {
+    const next = this.text[this.offset];
+    if (next === "{") return this.object(depth + 1);
+    if (next === "[") return this.array(depth + 1);
+    if (next === '"') return this.string();
+    if (next === "t") return this.literal("true", true);
+    if (next === "f") return this.literal("false", false);
+    if (next === "n") return this.literal("null", null);
+    if (next === "-" || next !== void 0 && next >= "0" && next <= "9") {
+      return this.number();
+    }
+    this.fail("expected a JSON value");
+  }
+  object(depth) {
+    this.checkDepth(depth);
+    this.offset += 1;
+    this.whitespace();
+    const result = {};
+    const keys = /* @__PURE__ */ new Set();
+    if (this.consume("}")) return result;
+    while (true) {
+      if (this.text[this.offset] !== '"') this.fail("expected an object key");
+      const key = this.string();
+      if (keys.has(key)) this.fail(`duplicate object key ${JSON.stringify(key)}`);
+      keys.add(key);
+      this.whitespace();
+      if (!this.consume(":")) this.fail("expected ':' after an object key");
+      this.whitespace();
+      const item = this.value(depth);
+      Object.defineProperty(result, key, {
+        configurable: true,
+        enumerable: true,
+        value: item,
+        writable: true
+      });
+      this.whitespace();
+      if (this.consume("}")) return result;
+      if (!this.consume(",")) this.fail("expected ',' or '}'");
+      this.whitespace();
+    }
+  }
+  array(depth) {
+    this.checkDepth(depth);
+    this.offset += 1;
+    this.whitespace();
+    const result = [];
+    if (this.consume("]")) return result;
+    while (true) {
+      result.push(this.value(depth));
+      this.whitespace();
+      if (this.consume("]")) return result;
+      if (!this.consume(",")) this.fail("expected ',' or ']'");
+      this.whitespace();
+    }
+  }
+  string() {
+    const start2 = this.offset;
+    this.offset += 1;
+    while (this.offset < this.text.length) {
+      const code = this.text.charCodeAt(this.offset);
+      if (code === 34) {
+        this.offset += 1;
+        let result;
+        try {
+          result = JSON.parse(this.text.slice(start2, this.offset));
+        } catch {
+          this.fail("invalid JSON string");
+        }
+        this.validateSurrogates(result);
+        return result;
+      }
+      if (code < 32) this.fail("unescaped control character in string");
+      if (code === 92) {
+        this.offset += 1;
+        if (this.offset >= this.text.length) this.fail("unterminated escape");
+        const escaped = this.text[this.offset];
+        if (escaped === "u") {
+          const digits = this.text.slice(this.offset + 1, this.offset + 5);
+          if (!/^[0-9a-fA-F]{4}$/.test(digits)) this.fail("invalid Unicode escape");
+          this.offset += 4;
+        } else if (!'"\\/bfnrt'.includes(escaped)) {
+          this.fail("invalid string escape");
+        }
+      }
+      this.offset += 1;
+    }
+    this.fail("unterminated JSON string");
+  }
+  validateSurrogates(value) {
+    for (let index = 0; index < value.length; index += 1) {
+      const code = value.charCodeAt(index);
+      if (code >= 55296 && code <= 56319) {
+        const low = value.charCodeAt(index + 1);
+        if (!(low >= 56320 && low <= 57343)) this.fail("unpaired surrogate");
+        index += 1;
+      } else if (code >= 56320 && code <= 57343) {
+        this.fail("unpaired surrogate");
+      }
+    }
+  }
+  number() {
+    const token = this.text.slice(this.offset).match(
+      /^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?/
+    )?.[0];
+    if (token === void 0) this.fail("invalid number");
+    this.offset += token.length;
+    const result = Number(token);
+    if (!Number.isFinite(result)) this.fail("non-finite number");
+    return result;
+  }
+  literal(token, result) {
+    if (!this.text.startsWith(token, this.offset)) this.fail("invalid literal");
+    this.offset += token.length;
+    return result;
+  }
+  whitespace() {
+    while (/\s/.test(this.text[this.offset] ?? "") && " 	\r\n".includes(this.text[this.offset])) {
+      this.offset += 1;
+    }
+  }
+  consume(token) {
+    if (this.text[this.offset] !== token) return false;
+    this.offset += 1;
+    return true;
+  }
+  checkDepth(depth) {
+    if (depth > this.maxDepth) this.fail("JSON nesting limit exceeded");
+  }
+  fail(message2) {
+    throw new StrictJsonError(message2, this.encoder.encode(this.text.slice(0, this.offset)).byteLength);
+  }
+};
+function parseStrictJson(input2, limits = DEFAULT_STRICT_JSON_LIMITS) {
+  validateLimits(limits);
+  let text;
+  if (typeof input2 === "string") {
+    if (hasUnpairedSurrogate(input2)) throw new StrictJsonError("unpaired surrogate", 0);
+    if (new TextEncoder().encode(input2).byteLength > limits.maxBytes) {
+      throw new RangeError(`JSON input exceeds ${limits.maxBytes} bytes`);
+    }
+    text = input2;
+  } else {
+    if (!(input2 instanceof Uint8Array)) throw new TypeError("JSON input must be text or bytes");
+    if (input2.byteLength > limits.maxBytes) throw new RangeError(`JSON input exceeds ${limits.maxBytes} bytes`);
+    try {
+      text = new TextDecoder("utf-8", { fatal: true }).decode(input2);
+    } catch {
+      throw new StrictJsonError("invalid UTF-8", 0);
+    }
+  }
+  return new StrictJsonParser(text, limits.maxDepth).parse();
+}
+function validateLimits(limits) {
+  if (!limits || !Number.isSafeInteger(limits.maxBytes) || limits.maxBytes < 1) {
+    throw new RangeError("maxBytes must be a positive safe integer");
+  }
+  if (!Number.isSafeInteger(limits.maxDepth) || limits.maxDepth < 1) {
+    throw new RangeError("maxDepth must be a positive safe integer");
+  }
+}
+function hasUnpairedSurrogate(value) {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code >= 55296 && code <= 56319) {
+      const low = value.charCodeAt(index + 1);
+      if (!(low >= 56320 && low <= 57343)) return true;
+      index += 1;
+    } else if (code >= 56320 && code <= 57343) {
+      return true;
+    }
+  }
+  return false;
 }
 
 // node_modules/zod/v4/classic/external.js
@@ -1372,9 +1838,9 @@ function nullish(input2) {
   return input2 === null || input2 === void 0;
 }
 function cleanRegex(source) {
-  const start = source.startsWith("^") ? 1 : 0;
+  const start2 = source.startsWith("^") ? 1 : 0;
   const end = source.endsWith("$") ? source.length - 1 : source.length;
-  return source.slice(start, end);
+  return source.slice(start2, end);
 }
 function floatSafeRemainder(val, step) {
   const ratio = val / step;
@@ -1855,9 +2321,9 @@ function prefixIssues(path, issues) {
 function unwrapMessage(message2) {
   return typeof message2 === "string" ? message2 : message2?.message;
 }
-function attachSchema(issues, start, inst) {
+function attachSchema(issues, start2, inst) {
   var _a3;
-  for (let i = start; i < issues.length; i++) {
+  for (let i = start2; i < issues.length; i++) {
     (_a3 = issues[i]).schema ?? (_a3.schema = inst);
   }
 }
@@ -5398,9 +5864,9 @@ var $ZodTemplateLiteral = /* @__PURE__ */ $constructor("$ZodTemplateLiteral", (i
       const source = part._zod.pattern instanceof RegExp ? part._zod.pattern.source : part._zod.pattern;
       if (!source)
         throw new Error(`Invalid template literal part: ${part._zod.traits}`);
-      const start = source.startsWith("^") ? 1 : 0;
+      const start2 = source.startsWith("^") ? 1 : 0;
       const end = source.endsWith("$") ? source.length - 1 : source.length;
-      regexParts.push(source.slice(start, end));
+      regexParts.push(source.slice(start2, end));
     } else if (part === null || primitiveTypes.has(typeof part)) {
       regexParts.push(escapeRegex(`${part}`));
     } else {
@@ -19552,12 +20018,13 @@ function date4(params) {
 }
 
 // src/protocol.ts
-var HOST_PROTOCOL = "alder-host-v1";
-var ENGINE_PROTOCOL = "alder-engine-v1";
+var HOST_PROTOCOL = "alder-host-v2";
+var ENGINE_PROTOCOL = "alder-engine-v2";
+var HOST_CLIENT_PROTOCOL_VERSION = 2;
 var MAX_FRAME_BYTES = 8 * 1024 * 1024;
+var DEFAULT_MAX_ENGINE_FRAME_BYTES = 128 * 1024 * 1024;
 var MAX_NOTEBOOK_SOURCE_BYTES = 32 * 1024 * 1024;
 var MAX_NOTEBOOK_CELLS = 1e4;
-var MAX_DEPENDENCY_EDGES = 1e6;
 var SNAPSHOT_ENVELOPE_LIMIT = 128 * 1024 * 1024;
 var MAX_JSON_DEPTH = 64;
 var MAX_SOURCE_LINES = 1e5;
@@ -19565,772 +20032,19 @@ var MAX_SOURCE_LINE_LENGTH = 1048576;
 var MAX_RUNTIME_VARIABLES = 2e3;
 var MAX_EDITOR_DIAGNOSTICS = 2e3;
 var MAX_PROTOCOL_COLLECTION_ITEMS = 1e5;
-var idSchema = external_exports.string().min(1).max(256);
-var revisionSchema = external_exports.number().int().nonnegative().max(2147483647);
-var sourceLineSchema = external_exports.string().max(MAX_SOURCE_LINE_LENGTH).superRefine((line, context) => {
-  if (line.includes("\n") || line.includes("\r")) {
-    context.addIssue({ code: "custom", message: "source lines cannot contain line breaks" });
-  }
-  if (line.includes("\0")) {
-    context.addIssue({ code: "custom", message: "source lines cannot contain NUL" });
-  }
-  if (hasUnpairedSurrogate(line)) {
-    context.addIssue({ code: "custom", message: "source lines must contain valid Unicode" });
-  }
-});
-var sourceLinesSchema = external_exports.array(sourceLineSchema).max(MAX_SOURCE_LINES);
-var recordSchema = safeStringRecordSchema(external_exports.unknown());
-var optionValueSchema = external_exports.union([external_exports.string(), external_exports.boolean(), external_exports.number().finite()]);
-var storedCellOptionsSchema = safeStringRecordSchema(optionValueSchema).superRefine((options, context) => {
-  for (const key of Object.keys(options)) {
-    if (key.trim().length === 0 || /[:\r\n]/.test(key)) {
-      context.addIssue({ code: "custom", path: [key], message: "cell option key is invalid" });
-    }
-  }
-  if (options.disabled !== void 0 && typeof options.disabled !== "boolean") {
-    context.addIssue({ code: "custom", path: ["disabled"], message: "disabled must be a boolean" });
-  }
-});
-var cellOptionsSchema = storedCellOptionsSchema.superRefine((options, context) => {
-  if (options.name !== void 0 && (typeof options.name !== "string" || !/^[A-Za-z][A-Za-z0-9_.]*$/.test(options.name))) {
-    context.addIssue({
-      code: "custom",
-      path: ["name"],
-      message: "cell name must match ^[A-Za-z][A-Za-z0-9_.]*$"
-    });
-  }
-});
-var cellTypeSchema = external_exports.enum(["code", "markdown"]);
-var cellSnapshotSchema = external_exports.object({
-  id: idSchema,
-  revision: revisionSchema,
-  type: cellTypeSchema,
-  source: external_exports.string()
-}).strict();
-var analysisDiagnosticSchema = external_exports.object({
-  level: external_exports.enum(["error", "warning", "info"]).default("error"),
-  code: external_exports.string().min(1).default("analysis"),
-  message: external_exports.string(),
-  symbol: external_exports.string().nullable().optional(),
-  source: external_exports.string().optional()
-}).passthrough();
-var analysisSymbolSchema = boundedUtf8StringSchema(1024, true);
-var analysisSymbolArraySchema = external_exports.array(analysisSymbolSchema).max(1e4);
-var analysisCellResultSchema = external_exports.object({
-  id: idSchema,
-  revision: revisionSchema,
-  defs: analysisSymbolArraySchema,
-  refs: analysisSymbolArraySchema,
-  selfRefs: analysisSymbolArraySchema,
-  locals: analysisSymbolArraySchema,
-  barrier: external_exports.boolean(),
-  opaque: external_exports.boolean(),
-  diagnostics: external_exports.array(external_exports.unknown()).max(MAX_EDITOR_DIAGNOSTICS),
-  error: external_exports.string().max(MAX_FRAME_BYTES).nullable()
-}).strict();
-var analysisResultSchema = external_exports.object({
-  revision: revisionSchema,
-  cells: external_exports.array(analysisCellResultSchema).max(MAX_NOTEBOOK_CELLS),
-  analyzer: external_exports.object({
-    packageVersion: external_exports.string(),
-    rVersion: external_exports.string(),
-    policy: external_exports.string()
-  }).strict()
-}).strict();
-var engineErrorSchema = external_exports.object({
-  message: external_exports.string(),
-  code: external_exports.string().optional(),
-  interrupted: external_exports.boolean().optional(),
-  transport: external_exports.boolean().optional()
-}).passthrough();
-var engineResponseSchema = external_exports.object({
-  ok: external_exports.boolean(),
-  outputs: external_exports.array(external_exports.unknown()).optional(),
-  stopped: external_exports.boolean().optional(),
-  log: external_exports.array(external_exports.string()).optional(),
-  truncated: external_exports.boolean().optional(),
-  error: engineErrorSchema.optional()
-}).passthrough();
-var evaluationPayloadSchema = external_exports.object({
-  sessionEpoch: idSchema,
-  operationId: idSchema,
-  runId: idSchema,
-  cellId: idSchema,
-  revision: revisionSchema,
-  source: external_exports.string(),
-  definitions: analysisSymbolArraySchema,
-  locals: analysisSymbolArraySchema,
-  opaque: external_exports.boolean()
-}).strict();
-var engineEventIdentitySchema = external_exports.object({
-  requestId: external_exports.number().int().positive().safe(),
-  sessionEpoch: idSchema,
-  operationId: idSchema,
-  runId: idSchema,
-  cellId: idSchema,
-  revision: revisionSchema
-});
-var engineStartedEventSchema = engineEventIdentitySchema.extend({
-  type: external_exports.literal("started"),
-  sequence: external_exports.literal(0)
-}).strict();
-var engineOutputEventSchema = engineEventIdentitySchema.extend({
-  type: external_exports.literal("output"),
-  sequence: external_exports.number().int().positive().safe(),
-  kind: external_exports.enum(["append", "progress", "log", "clear"]),
-  payload: external_exports.unknown()
-}).strict().superRefine((event, context) => {
-  if (event.kind === "clear" && (typeof event.payload !== "object" || event.payload === null || Array.isArray(event.payload) || Object.keys(event.payload).length !== 0)) {
-    context.addIssue({ code: "custom", path: ["payload"], message: "clear output payload must be an empty object" });
-  }
-});
-var engineCompletedEventSchema = engineEventIdentitySchema.extend({
-  type: external_exports.literal("completed"),
-  sequence: external_exports.number().int().positive().safe(),
-  result: engineResponseSchema
-}).strict();
-var engineEventSchema = external_exports.discriminatedUnion("type", [
-  engineStartedEventSchema,
-  engineOutputEventSchema,
-  engineCompletedEventSchema
-]);
-var engineHandshakeSchema = external_exports.object({
-  protocol: external_exports.literal(ENGINE_PROTOCOL),
-  packageVersion: external_exports.string(),
-  rVersion: external_exports.string(),
-  capabilities: external_exports.array(external_exports.string()),
-  kernel: external_exports.object({
-    name: external_exports.literal("ark"),
-    version: external_exports.string().min(1),
-    protocol: external_exports.string().min(1)
-  }).strict().optional(),
-  kernelReady: external_exports.boolean(),
-  analyzerReady: external_exports.boolean(),
-  captureReady: external_exports.boolean()
-}).strict();
-var notebookCellInputSchema = external_exports.object({
-  id: idSchema,
-  type: cellTypeSchema,
-  body: sourceLinesSchema,
-  // Existing source can use renderer-facing labels such as Quarto's
-  // hyphenated labels. Preserve them; create/rename inputs use the stricter
-  // mutable option schema below.
-  options: storedCellOptionsSchema.optional().default({}),
-  revision: revisionSchema.optional().default(0)
-}).strict();
-var notebookInputSchema = external_exports.object({
-  path: external_exports.string().nullable().optional(),
-  metadata: recordSchema.optional().default({}),
-  cells: external_exports.array(notebookCellInputSchema).max(MAX_NOTEBOOK_CELLS)
-}).strict().superRefine((notebook, context) => {
-  const ids = /* @__PURE__ */ new Set();
-  for (const [index, cell] of notebook.cells.entries()) {
-    if (ids.has(cell.id)) {
-      context.addIssue({
-        code: "custom",
-        path: ["cells", index, "id"],
-        message: `duplicate cell id: ${cell.id}`
-      });
-    }
-    ids.add(cell.id);
-    if (cell.type === "markdown" && !markdownLinesValid(cell.body)) {
-      context.addIssue({
-        code: "custom",
-        path: ["cells", index, "body"],
-        message: `markdown cell lines must be blank or R comments: ${cell.id}`
-      });
-    }
-  }
-  if (notebookSourceByteLength(notebook.cells) > MAX_NOTEBOOK_SOURCE_BYTES) {
-    context.addIssue({
-      code: "custom",
-      path: ["cells"],
-      message: `notebook source exceeds ${MAX_NOTEBOOK_SOURCE_BYTES} byte limit`
-    });
-  }
-});
-var cellEditSchema = external_exports.object({
-  cellId: idSchema,
-  body: sourceLinesSchema,
-  cellType: cellTypeSchema,
-  expectedRevision: revisionSchema
-}).strict().superRefine((edit, context) => {
-  if (edit.cellType === "markdown" && !markdownLinesValid(edit.body)) {
-    context.addIssue({
-      code: "custom",
-      path: ["body"],
-      message: `markdown cell lines must be blank or R comments: ${edit.cellId}`
-    });
-  }
-});
-var cellCreationSchema = external_exports.object({
-  clientOperationId: idSchema,
-  after: idSchema.nullable().optional().default(null),
-  body: sourceLinesSchema.optional().default([]),
-  cellType: cellTypeSchema.optional().default("code"),
-  options: cellOptionsSchema.optional().default({})
-}).strict().superRefine((creation, context) => {
-  if (creation.cellType === "markdown" && !markdownLinesValid(creation.body)) {
-    context.addIssue({
-      code: "custom",
-      path: ["body"],
-      message: "markdown cell lines must be blank or R comments: <new cell>"
-    });
-  }
-});
-var commandBase = {
-  operationId: idSchema,
-  clientId: idSchema.optional(),
-  sessionEpoch: idSchema
-};
-var editCommandSchema = external_exports.object({
-  ...commandBase,
-  type: external_exports.literal("edit"),
-  edits: external_exports.array(cellEditSchema).min(1).max(MAX_NOTEBOOK_CELLS)
-}).strict().superRefine((command, context) => {
-  if (notebookSourceByteLength(command.edits) > MAX_NOTEBOOK_SOURCE_BYTES) {
-    context.addIssue({
-      code: "custom",
-      path: ["edits"],
-      message: `source changes exceed ${MAX_NOTEBOOK_SOURCE_BYTES} byte limit`
-    });
-  }
-});
-var createCommandSchema = external_exports.object({
-  ...commandBase,
-  type: external_exports.literal("create"),
-  creations: external_exports.array(cellCreationSchema).min(1).max(MAX_NOTEBOOK_CELLS)
-}).strict().superRefine((command, context) => {
-  if (notebookSourceByteLength(command.creations) > MAX_NOTEBOOK_SOURCE_BYTES) {
-    context.addIssue({
-      code: "custom",
-      path: ["creations"],
-      message: `source changes exceed ${MAX_NOTEBOOK_SOURCE_BYTES} byte limit`
-    });
-  }
-});
-var deleteCommandSchema = external_exports.object({
-  ...commandBase,
-  type: external_exports.literal("delete"),
-  cellId: idSchema,
-  expectedRevision: revisionSchema
-}).strict();
-var moveCommandSchema = external_exports.object({
-  ...commandBase,
-  type: external_exports.literal("move"),
-  cellId: idSchema,
-  after: idSchema.nullable()
-}).strict();
-var disableCommandSchema = external_exports.object({
-  ...commandBase,
-  type: external_exports.literal("disable"),
-  cellId: idSchema,
-  disabled: external_exports.boolean(),
-  expectedRevision: revisionSchema.optional()
-}).strict();
-var runCommandSchema = external_exports.object({
-  ...commandBase,
-  type: external_exports.literal("run"),
-  scope: external_exports.enum(["cell", "all", "stale"]).default("cell"),
-  cellId: idSchema.optional(),
-  targetCreationId: idSchema.optional(),
-  edits: external_exports.array(cellEditSchema).max(MAX_NOTEBOOK_CELLS).optional().default([]),
-  creations: external_exports.array(cellCreationSchema).max(MAX_NOTEBOOK_CELLS).optional().default([]),
-  source: external_exports.enum(["editor", "app", "mcp", "cli"]).optional().default("editor")
-}).strict().superRefine((command, context) => {
-  const targetCount = Number(command.cellId !== void 0) + Number(command.targetCreationId !== void 0);
-  if (command.scope === "cell" && targetCount !== 1) {
-    context.addIssue({
-      code: "custom",
-      path: ["cellId"],
-      message: "exactly one of cellId or targetCreationId is required for a cell run"
-    });
-  }
-  if (command.scope !== "cell" && targetCount !== 0) {
-    context.addIssue({
-      code: "custom",
-      path: ["cellId"],
-      message: "cellId and targetCreationId are only valid for a cell run"
-    });
-  }
-  if (notebookSourceByteLength([...command.edits, ...command.creations]) > MAX_NOTEBOOK_SOURCE_BYTES) {
-    context.addIssue({
-      code: "custom",
-      path: ["edits"],
-      message: `source changes exceed ${MAX_NOTEBOOK_SOURCE_BYTES} byte limit`
-    });
-  }
-});
-var interruptCommandSchema = external_exports.object({
-  ...commandBase,
-  type: external_exports.literal("interrupt")
-}).strict();
-var restartCommandSchema = external_exports.object({
-  ...commandBase,
-  type: external_exports.literal("restart"),
-  replay: external_exports.boolean().optional().default(true)
-}).strict();
-var widgetCommandSchema = external_exports.object({
-  ...commandBase,
-  type: external_exports.literal("widget"),
-  name: idSchema,
-  path: external_exports.array(idSchema).optional().default([]),
-  update: recordSchema,
-  source: external_exports.enum(["editor", "app", "mcp", "cli"]).optional().default("editor")
-}).strict();
-var inspectCommandSchema = external_exports.object({
-  ...commandBase,
-  type: external_exports.literal("inspect"),
-  name: idSchema
-}).strict();
-var lazyOutputCommandSchema = external_exports.object({
-  ...commandBase,
-  type: external_exports.literal("lazy-output"),
-  key: idSchema
-}).strict();
-var tablePageCommandSchema = external_exports.object({
-  ...commandBase,
-  type: external_exports.literal("table-page"),
-  handle: idSchema,
-  offset: revisionSchema.optional().default(0),
-  limit: external_exports.number().int().min(1).max(1e3).safe().optional().default(25),
-  sortBy: external_exports.string().optional().default(""),
-  sortDescending: external_exports.boolean().optional().default(false),
-  filter: external_exports.string().optional().default("")
-}).strict();
-var saveCommandSchema = external_exports.object({
-  ...commandBase,
-  type: external_exports.literal("save")
-}).strict();
-var formatCommandSchema = external_exports.object({
-  ...commandBase,
-  type: external_exports.literal("format"),
-  cellIds: external_exports.array(idSchema).optional(),
-  expectedRevisions: safeStringRecordSchema(revisionSchema)
-}).strict();
-var runtimeCommandSchema = external_exports.object({
-  ...commandBase,
-  type: external_exports.literal("set-runtime"),
-  executionMode: external_exports.enum(["automatic", "lazy"]).optional(),
-  runOnStartup: external_exports.boolean().optional()
-}).strict().refine(
-  (value) => value.executionMode !== void 0 || value.runOnStartup !== void 0,
-  { message: "provide executionMode or runOnStartup" }
-);
-var configCommandSchema = external_exports.object({
-  ...commandBase,
-  type: external_exports.literal("set-config"),
-  patch: recordSchema
-}).strict();
-var layoutCommandSchema = external_exports.object({
-  ...commandBase,
-  type: external_exports.literal("set-layout"),
-  layout: external_exports.unknown()
-}).strict();
-var serviceCommandSchema = external_exports.object({
-  ...commandBase,
-  type: external_exports.literal("service"),
-  command: external_exports.enum([
-    "export",
-    "publish",
-    "check",
-    "packages",
-    "packages.status",
-    "packages.declare",
-    "packages.install",
-    "rename-cell",
-    "set-app",
-    "source",
-    "upload"
-  ]),
-  payload: recordSchema.optional().default({})
-}).strict();
-var hostCommandSchema = external_exports.discriminatedUnion("type", [
-  editCommandSchema,
-  createCommandSchema,
-  deleteCommandSchema,
-  moveCommandSchema,
-  disableCommandSchema,
-  runCommandSchema,
-  interruptCommandSchema,
-  restartCommandSchema,
-  widgetCommandSchema,
-  inspectCommandSchema,
-  lazyOutputCommandSchema,
-  tablePageCommandSchema,
-  saveCommandSchema,
-  formatCommandSchema,
-  runtimeCommandSchema,
-  configCommandSchema,
-  layoutCommandSchema,
-  serviceCommandSchema
-]);
-var protocolIntegerSchema = external_exports.number().int().nonnegative().safe();
-var protocolStringSchema = external_exports.string().max(MAX_FRAME_BYTES);
-var protocolStringArraySchema = external_exports.array(protocolStringSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS);
-var protocolIdArraySchema = external_exports.array(idSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS);
-var protocolJsonSchema = external_exports.json();
-var protocolJsonRecordSchema = safeStringRecordSchema(protocolJsonSchema);
-var cellStatusSchema = external_exports.enum([
-  "idle",
-  "stale",
-  "running",
-  "done",
-  "error",
-  "stopped",
-  "disabled"
-]);
-var hostErrorSchema = external_exports.object({
-  code: external_exports.string().min(1).max(256),
-  message: protocolStringSchema,
-  operationId: idSchema.nullable().optional(),
-  details: protocolJsonSchema.optional()
-}).strict();
-var operationStatusSchema = external_exports.enum([
-  "accepted",
-  "running",
-  "cancellation-requested",
-  "done",
-  "error",
-  "cancelled"
-]);
-var operationKindSchema = external_exports.enum([
-  "edit",
-  "create",
-  "delete",
-  "move",
-  "disable",
-  "run",
-  "interrupt",
-  "restart",
-  "widget",
-  "inspect",
-  "lazy-output",
-  "table-page",
-  "save",
-  "format",
-  "set-runtime",
-  "set-config",
-  "set-layout",
-  "service",
-  "widget-reset",
-  "analysis"
-]);
-var operationRecordSchema = external_exports.object({
-  id: idSchema,
-  kind: operationKindSchema,
-  status: operationStatusSchema,
-  acceptedAt: external_exports.number().finite().nonnegative(),
-  settledAt: external_exports.number().finite().nonnegative().optional(),
-  runId: idSchema.optional(),
-  cellIds: protocolIdArraySchema.optional(),
-  token: protocolIntegerSchema.optional(),
-  executionDone: external_exports.boolean().optional(),
-  resetOperationIds: protocolIdArraySchema.optional(),
-  error: hostErrorSchema.nullable().optional(),
-  result: protocolJsonSchema.optional()
-}).strict();
-var hostCellStateSchema = external_exports.object({
-  id: idSchema,
-  type: cellTypeSchema,
-  body: sourceLinesSchema,
-  options: storedCellOptionsSchema,
-  revision: revisionSchema,
-  status: cellStatusSchema,
-  outputs: external_exports.array(protocolJsonSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS),
-  outputsStale: external_exports.boolean().optional(),
-  progress: protocolJsonSchema.nullable(),
-  // One MiB of console bytes can be one MiB of empty lines. Leave room for
-  // the truncation marker and a terminal condition without capping source or
-  // other protocol collections at this larger console-specific size.
-  log: external_exports.array(protocolStringSchema).max(1048578),
-  error: engineErrorSchema.nullable(),
-  defs: protocolStringArraySchema,
-  refs: protocolStringArraySchema,
-  selfRefs: protocolStringArraySchema,
-  locals: protocolStringArraySchema,
-  barrier: external_exports.boolean(),
-  opaque: external_exports.boolean(),
-  diagnostics: external_exports.array(analysisDiagnosticSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS),
-  analysisPending: external_exports.boolean()
-}).strict();
-var graphCellIdArraySchema = external_exports.array(idSchema).max(MAX_NOTEBOOK_CELLS);
-var graphAdjacencySchema = safeStringRecordSchema(graphCellIdArraySchema).superRefine((value, context) => {
-  if (Object.keys(value).length > MAX_NOTEBOOK_CELLS) {
-    context.addIssue({ code: "custom", message: "graph mapping has too many entries" });
-  }
-});
-var graphDuplicatesSchema = safeStringRecordSchema(graphCellIdArraySchema).superRefine((value, context) => {
-  if (Object.keys(value).length > MAX_PROTOCOL_COLLECTION_ITEMS) {
-    context.addIssue({ code: "custom", message: "duplicate mapping has too many entries" });
-  }
-});
-var dependencyGraphStateSchema = external_exports.object({
-  nodes: graphCellIdArraySchema,
-  edges: graphAdjacencySchema,
-  reverseEdges: graphAdjacencySchema,
-  duplicates: graphDuplicatesSchema,
-  cycles: graphCellIdArraySchema,
-  topologicalOrder: graphCellIdArraySchema.nullable()
-}).strict().superRefine((graph, context) => {
-  const nodes = new Set(graph.nodes);
-  if (nodes.size !== graph.nodes.length) {
-    context.addIssue({ code: "custom", path: ["nodes"], message: "graph nodes must be unique" });
-  }
-  const edgeKeys = Object.keys(graph.edges);
-  const reverseKeys = Object.keys(graph.reverseEdges);
-  if (edgeKeys.length !== nodes.size || edgeKeys.some((id) => !nodes.has(id))) {
-    context.addIssue({ code: "custom", path: ["edges"], message: "graph edges must name every node exactly once" });
-  }
-  if (reverseKeys.length !== nodes.size || reverseKeys.some((id) => !nodes.has(id))) {
-    context.addIssue({ code: "custom", path: ["reverseEdges"], message: "graph reverse edges must name every node exactly once" });
-  }
-  let edgeCount = 0;
-  let reverseCount = 0;
-  const reverseSets = /* @__PURE__ */ new Map();
-  for (const [dependency, dependents] of Object.entries(graph.reverseEdges)) {
-    reverseCount += dependents.length;
-    reverseSets.set(dependency, new Set(dependents));
-    if (new Set(dependents).size !== dependents.length || dependents.some((dependent) => !nodes.has(dependent))) {
-      context.addIssue({ code: "custom", path: ["reverseEdges", dependency], message: "graph reverse edges contain duplicate or unknown nodes" });
-    }
-  }
-  for (const [dependent, dependencies] of Object.entries(graph.edges)) {
-    edgeCount += dependencies.length;
-    if (new Set(dependencies).size !== dependencies.length || dependencies.some((dependency) => !nodes.has(dependency))) {
-      context.addIssue({ code: "custom", path: ["edges", dependent], message: "graph edges contain duplicate or unknown nodes" });
-    }
-    for (const dependency of dependencies) {
-      if (!reverseSets.get(dependency)?.has(dependent)) {
-        context.addIssue({ code: "custom", path: ["reverseEdges", dependency], message: "graph edges and reverse edges disagree" });
-        break;
-      }
-    }
-  }
-  if (edgeCount > MAX_DEPENDENCY_EDGES) {
-    context.addIssue({ code: "custom", path: ["edges"], message: `dependency graph exceeds ${MAX_DEPENDENCY_EDGES} edge limit` });
-  }
-  if (reverseCount !== edgeCount) {
-    context.addIssue({ code: "custom", path: ["reverseEdges"], message: "graph edges and reverse edges have different sizes" });
-  }
-  for (const [symbol2, definitions] of Object.entries(graph.duplicates)) {
-    if (!analysisSymbolSchema.safeParse(symbol2).success) {
-      context.addIssue({ code: "custom", path: ["duplicates", symbol2], message: "duplicate symbol is invalid" });
-    }
-    if (definitions.length < 2 || new Set(definitions).size !== definitions.length || definitions.some((id) => !nodes.has(id))) {
-      context.addIssue({ code: "custom", path: ["duplicates", symbol2], message: "duplicate definitions must name at least two distinct graph nodes" });
-    }
-  }
-  if (graph.cycles.some((id) => !nodes.has(id))) {
-    context.addIssue({ code: "custom", path: ["cycles"], message: "graph cycles contain unknown nodes" });
-  }
-  if (graph.topologicalOrder !== null && (graph.topologicalOrder.length !== nodes.size || new Set(graph.topologicalOrder).size !== nodes.size || graph.topologicalOrder.some((id) => !nodes.has(id)))) {
-    context.addIssue({ code: "custom", path: ["topologicalOrder"], message: "graph topological order must contain every node exactly once" });
-  }
-});
-var runtimeVariableNameSchema = boundedUtf8StringSchema(1024, true);
-var runtimeVariableClassSchema = boundedUtf8StringSchema(1024, true);
-var runtimeVariableSummarySchema = boundedUtf8StringSchema(160, false);
-var runtimeVariableSchema = external_exports.object({
-  name: runtimeVariableNameSchema,
-  owner: idSchema.nullable(),
-  revision: revisionSchema.nullable(),
-  class: runtimeVariableClassSchema,
-  dim: external_exports.array(protocolIntegerSchema).max(64).nullable(),
-  size: protocolIntegerSchema,
-  widget: external_exports.boolean(),
-  valueSummary: runtimeVariableSummarySchema.optional()
-}).strict();
-var runtimeVariablesSchema = external_exports.array(runtimeVariableSchema).max(MAX_RUNTIME_VARIABLES);
-var editorDiagnosticsSchema = safeStringRecordSchema(
-  external_exports.array(analysisDiagnosticSchema).max(MAX_EDITOR_DIAGNOSTICS)
-).superRefine((value, context) => {
-  const count = Object.values(value).reduce(
-    (total, diagnostics) => total + diagnostics.length,
-    0
-  );
-  if (count > MAX_EDITOR_DIAGNOSTICS) {
-    context.addIssue({ code: "custom", message: "too many editor diagnostics" });
-  }
-});
-var serviceErrorsSchema = external_exports.object({
-  lsp: hostErrorSchema.optional()
-}).strict();
-var hostRuntimeSchema = external_exports.object({
-  executionMode: external_exports.enum(["automatic", "lazy"]),
-  runOnStartup: external_exports.boolean(),
-  executionReady: external_exports.boolean(),
-  analyzerAvailable: external_exports.boolean(),
-  kernelAvailable: external_exports.boolean(),
-  packageOperationActive: external_exports.boolean(),
-  busy: external_exports.boolean(),
-  activeRunId: idSchema.nullable()
-}).strict();
-var hostSnapshotSchema = external_exports.object({
-  protocol: external_exports.literal(HOST_PROTOCOL),
-  epoch: idSchema,
-  cursor: protocolIntegerSchema,
-  version: protocolIntegerSchema,
-  path: protocolStringSchema.nullable(),
-  metadata: protocolJsonRecordSchema,
-  config: protocolJsonRecordSchema,
-  layout: protocolJsonSchema,
-  changed: external_exports.boolean(),
-  runtime: hostRuntimeSchema,
-  cells: external_exports.array(hostCellStateSchema).max(MAX_NOTEBOOK_CELLS),
-  graph: dependencyGraphStateSchema,
-  variables: runtimeVariablesSchema,
-  editorDiagnostics: editorDiagnosticsSchema,
-  serviceErrors: serviceErrorsSchema,
-  operations: external_exports.array(operationRecordSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS),
-  lastValue: protocolJsonSchema.nullable(),
-  lastActionError: hostErrorSchema.nullable()
-}).strict().superRefine((snapshot, context) => {
-  const ids = /* @__PURE__ */ new Set();
-  for (const [index, cell] of snapshot.cells.entries()) {
-    if (ids.has(cell.id)) {
-      context.addIssue({
-        code: "custom",
-        path: ["cells", index, "id"],
-        message: `duplicate cell id: ${cell.id}`
-      });
-    }
-    ids.add(cell.id);
-  }
-  if (notebookSourceByteLength(snapshot.cells) > MAX_NOTEBOOK_SOURCE_BYTES) {
-    context.addIssue({
-      code: "custom",
-      path: ["cells"],
-      message: `notebook source exceeds ${MAX_NOTEBOOK_SOURCE_BYTES} byte limit`
-    });
-  }
-});
-var eventBase = {
-  protocol: external_exports.literal(HOST_PROTOCOL),
-  epoch: idSchema,
-  cursor: protocolIntegerSchema,
-  version: protocolIntegerSchema,
-  timestamp: external_exports.number().finite().nonnegative(),
-  operationId: idSchema.optional(),
-  cellId: idSchema.optional(),
-  runId: idSchema.optional(),
-  revision: revisionSchema.optional(),
-  sequence: protocolIntegerSchema.optional()
-};
-var deletedCellSchema = external_exports.object({ deleted: external_exports.literal(true) }).strict();
-var genericEventTypeSchema = external_exports.enum([
-  "receipt",
-  "notebook",
-  "cell-output"
-]);
-var hostEventTypeSchema = external_exports.enum([
-  "receipt",
-  "notebook",
-  "cell",
-  "cell-started",
-  "cell-output",
-  "cell-completed",
-  "diagnostics",
-  "editor-diagnostics",
-  "service-errors",
-  "graph",
-  "variables",
-  "runtime",
-  "operation",
-  "service-error"
-]);
-var hostEventSchema = external_exports.discriminatedUnion("type", [
-  external_exports.object({ ...eventBase, type: genericEventTypeSchema, payload: protocolJsonSchema }).strict(),
-  external_exports.object({ ...eventBase, type: external_exports.literal("cell"), payload: external_exports.union([
-    hostCellStateSchema,
-    deletedCellSchema
-  ]) }).strict(),
-  external_exports.object({ ...eventBase, type: external_exports.literal("cell-started"), payload: hostCellStateSchema }).strict(),
-  external_exports.object({ ...eventBase, type: external_exports.literal("cell-completed"), payload: external_exports.union([
-    hostCellStateSchema,
-    deletedCellSchema
-  ]) }).strict(),
-  external_exports.object({ ...eventBase, type: external_exports.literal("diagnostics"), payload: external_exports.array(
-    analysisDiagnosticSchema
-  ).max(MAX_PROTOCOL_COLLECTION_ITEMS) }).strict(),
-  external_exports.object({ ...eventBase, type: external_exports.literal("editor-diagnostics"), payload: editorDiagnosticsSchema }).strict(),
-  external_exports.object({ ...eventBase, type: external_exports.literal("service-errors"), payload: serviceErrorsSchema }).strict(),
-  external_exports.object({ ...eventBase, type: external_exports.literal("graph"), payload: dependencyGraphStateSchema }).strict(),
-  external_exports.object({ ...eventBase, type: external_exports.literal("variables"), payload: runtimeVariablesSchema }).strict(),
-  external_exports.object({ ...eventBase, type: external_exports.literal("runtime"), payload: hostRuntimeSchema }).strict(),
-  external_exports.object({ ...eventBase, type: external_exports.literal("operation"), payload: operationRecordSchema }).strict(),
-  external_exports.object({ ...eventBase, type: external_exports.literal("service-error"), payload: hostErrorSchema.nullable() }).strict()
-]);
-var recoverySchema = external_exports.discriminatedUnion("kind", [
-  external_exports.object({
-    kind: external_exports.literal("replay"),
-    epoch: idSchema,
-    cursor: protocolIntegerSchema,
-    events: external_exports.array(hostEventSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS)
-  }).strict(),
-  external_exports.object({
-    kind: external_exports.literal("snapshot"),
-    epoch: idSchema,
-    cursor: protocolIntegerSchema,
-    snapshot: hostSnapshotSchema
-  }).strict()
-]).superRefine((recovery, context) => {
-  if (recovery.kind === "snapshot") {
-    if (recovery.snapshot.epoch !== recovery.epoch) {
-      context.addIssue({ code: "custom", path: ["snapshot", "epoch"], message: "snapshot epoch does not match recovery" });
-    }
-    if (recovery.snapshot.cursor !== recovery.cursor) {
-      context.addIssue({ code: "custom", path: ["snapshot", "cursor"], message: "snapshot cursor does not match recovery" });
-    }
-    return;
-  }
-  let prior = -1;
-  for (const [index, event] of recovery.events.entries()) {
-    if (event.epoch !== recovery.epoch) {
-      context.addIssue({ code: "custom", path: ["events", index, "epoch"], message: "event epoch does not match recovery" });
-    }
-    if (event.cursor <= prior) {
-      context.addIssue({ code: "custom", path: ["events", index, "cursor"], message: "replay cursors must increase" });
-    }
-    prior = event.cursor;
-  }
-  if (recovery.events.length > 0 && prior !== recovery.cursor) {
-    context.addIssue({ code: "custom", path: ["cursor"], message: "recovery cursor does not match its last event" });
-  }
-});
-var commandResultSchema = external_exports.object({
-  operation: operationRecordSchema,
-  version: protocolIntegerSchema,
-  cursor: protocolIntegerSchema,
-  result: protocolJsonSchema.optional()
-}).strict();
-var ProtocolError = class extends Error {
-  code;
-  constructor(code, message2) {
-    super(message2);
-    this.name = "ProtocolError";
-    this.code = code;
-  }
-};
-function decodeJsonFrame(input2, maxBytes = MAX_FRAME_BYTES) {
-  const byteLength = typeof input2 === "string" ? new TextEncoder().encode(input2).byteLength : input2.byteLength;
-  if (byteLength > maxBytes) {
-    throw new ProtocolError("frame_too_large", `frame exceeds ${maxBytes} bytes`);
-  }
-  let source;
-  try {
-    source = typeof input2 === "string" ? input2 : new TextDecoder("utf-8", { fatal: true }).decode(input2);
-  } catch {
-    throw new ProtocolError("invalid_utf8", "frame is not valid UTF-8");
-  }
-  inspectJsonStructure(source);
-  try {
-    return JSON.parse(source);
-  } catch {
-    throw new ProtocolError("invalid_json", "frame is not valid JSON");
-  }
-}
-function hasUnpairedSurrogate(value) {
+var MAX_MCP_REQUEST_BYTES = 16 * 1024 * 1024;
+var MAX_MCP_RESULT_BYTES = 1 * 1024 * 1024;
+var OUTPUT_CHUNK_BYTES = 262144;
+var MAX_ARTIFACT_BYTES = 512 * 1024 * 1024;
+var MAX_ARTIFACT_HANDLE_BYTES = 128;
+var MAX_RELEASE_ARTIFACTS = 4096;
+var LAYOUT_MAX_BYTES = 1 * 1024 * 1024;
+var MAX_ID_BYTES = 256;
+var MAX_ANALYSIS_SYMBOL_BYTES = 1024;
+var MAX_ANALYSIS_SYMBOLS = 1e4;
+var MAX_TABLE_COLUMNS = 50;
+var MAX_TABLE_PREVIEW_ROWS = 25;
+function hasUnpairedSurrogate2(value) {
   for (let index = 0; index < value.length; index += 1) {
     const code = value.charCodeAt(index);
     if (code >= 55296 && code <= 56319) {
@@ -20343,6 +20057,18 @@ function hasUnpairedSurrogate(value) {
   }
   return false;
 }
+function boundedUtf8StringSchema(maximumBytes, nonempty = false) {
+  const schema = nonempty ? external_exports.string().min(1) : external_exports.string();
+  return schema.superRefine((value, context) => {
+    if (hasUnpairedSurrogate2(value)) {
+      context.addIssue({ code: "custom", message: "string must contain valid Unicode" });
+      return;
+    }
+    if (new TextEncoder().encode(value).byteLength > maximumBytes) {
+      context.addIssue({ code: "custom", message: "string exceeds UTF-8 byte limit" });
+    }
+  });
+}
 function safeStringRecordSchema(valueSchema) {
   return external_exports.unknown().transform((value, context) => {
     if (typeof value !== "object" || value === null || Array.isArray(value)) {
@@ -20354,36 +20080,1132 @@ function safeStringRecordSchema(valueSchema) {
       context.addIssue({ code: "custom", message: "expected a plain object" });
       return external_exports.NEVER;
     }
-    const parsedEntries = [];
+    const entries = [];
     for (const [key, raw] of Object.entries(value)) {
       const parsed = valueSchema.safeParse(raw);
       if (!parsed.success) {
         for (const issue2 of parsed.error.issues) {
-          context.addIssue({
-            code: "custom",
-            path: [key, ...issue2.path],
-            message: issue2.message
-          });
+          context.addIssue({ code: "custom", path: [key, ...issue2.path], message: issue2.message });
         }
-        continue;
+      } else entries.push([key, parsed.data]);
+    }
+    return Object.fromEntries(entries);
+  });
+}
+var protocolIdSchema = boundedUtf8StringSchema(MAX_ID_BYTES, true).refine((value) => !/[\u0000\r\n\u0001-\u001f\u007f]/.test(value), "identifier contains a control character");
+var idSchema = protocolIdSchema;
+var pathSchema = boundedUtf8StringSchema(32 * 1024, true);
+var protocolIntegerSchema = external_exports.number().int().nonnegative().safe();
+var positiveIntegerSchema = external_exports.number().int().positive().safe();
+var revisionSchema = protocolIntegerSchema;
+var finiteNumberSchema = external_exports.number().finite();
+function isFiniteNumberPair(value) {
+  return Array.isArray(value) && value.length === 2 && value.every((entry) => typeof entry === "number" && Number.isFinite(entry));
+}
+var ProtocolJsonError = class extends Error {
+};
+function cloneProtocolJson(value, depth = 0, active = /* @__PURE__ */ new WeakSet()) {
+  if (value === null) return null;
+  if (typeof value === "string" || typeof value === "boolean") return value;
+  if (typeof value === "number") {
+    if (Number.isFinite(value)) return value;
+    throw new ProtocolJsonError("JSON numbers must be finite");
+  }
+  if (typeof value !== "object") throw new ProtocolJsonError("value is not JSON-compatible");
+  if (depth >= MAX_JSON_DEPTH) throw new ProtocolJsonError("JSON nesting limit exceeded");
+  if (active.has(value)) throw new ProtocolJsonError("JSON value contains a cycle");
+  active.add(value);
+  try {
+    if (Array.isArray(value)) {
+      if (Object.getPrototypeOf(value) !== Array.prototype) throw new ProtocolJsonError("arrays must use the standard prototype");
+      if (Object.getOwnPropertySymbols(value).length > 0) throw new ProtocolJsonError("JSON arrays cannot contain symbol properties");
+      const names = Object.getOwnPropertyNames(value);
+      for (const name of names) {
+        if (name === "length") continue;
+        if (!/^(?:0|[1-9]\d*)$/.test(name) || Number(name) >= value.length) throw new ProtocolJsonError("JSON arrays cannot contain extra properties");
+        const descriptor = Object.getOwnPropertyDescriptor(value, name);
+        if (descriptor === void 0 || !descriptor.enumerable || !("value" in descriptor)) throw new ProtocolJsonError("JSON arrays cannot contain accessors or holes");
       }
-      parsedEntries.push([key, parsed.data]);
+      const copy2 = [];
+      for (let index = 0; index < value.length; index += 1) {
+        if (!Object.prototype.hasOwnProperty.call(value, String(index))) throw new ProtocolJsonError("JSON arrays cannot contain holes");
+        copy2.push(cloneProtocolJson(value[index], depth + 1, active));
+      }
+      return copy2;
     }
-    return Object.fromEntries(parsedEntries);
-  });
-}
-function boundedUtf8StringSchema(maximumBytes, nonempty) {
-  const schema = nonempty ? external_exports.string().min(1).max(maximumBytes) : external_exports.string().max(maximumBytes);
-  return schema.superRefine((value, context) => {
-    if (hasUnpairedSurrogate(value)) {
-      context.addIssue({ code: "custom", message: "string must contain valid Unicode" });
-    } else if (new TextEncoder().encode(value).byteLength > maximumBytes) {
-      context.addIssue({ code: "custom", message: `string exceeds ${maximumBytes} UTF-8 bytes` });
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) throw new ProtocolJsonError("JSON objects must be plain objects");
+    if (Object.getOwnPropertySymbols(value).length > 0) throw new ProtocolJsonError("JSON objects cannot contain symbol properties");
+    const copy = Object.create(prototype);
+    for (const name of Object.getOwnPropertyNames(value)) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, name);
+      if (descriptor === void 0 || !descriptor.enumerable || !("value" in descriptor)) throw new ProtocolJsonError("JSON objects cannot contain accessors or non-enumerable properties");
+      Object.defineProperty(copy, name, {
+        value: cloneProtocolJson(descriptor.value, depth + 1, active),
+        enumerable: true,
+        configurable: true,
+        writable: true
+      });
     }
-  });
+    return copy;
+  } finally {
+    active.delete(value);
+  }
 }
+var protocolJsonSchema = external_exports.any().transform((value, context) => {
+  try {
+    return cloneProtocolJson(value);
+  } catch (error61) {
+    context.addIssue({ code: "custom", message: error61 instanceof Error ? error61.message : "value is not JSON-compatible" });
+    return external_exports.NEVER;
+  }
+});
+function strictProtocolJsonSchema(schema) {
+  return external_exports.preprocess((value, context) => {
+    const parsed = protocolJsonSchema.safeParse(value);
+    if (!parsed.success) {
+      context.addIssue({ code: "custom", message: "value is not JSON-compatible" });
+      return external_exports.NEVER;
+    }
+    return parsed.data;
+  }, schema);
+}
+var protocolJsonRecordSchema = safeStringRecordSchema(protocolJsonSchema);
+var sourceLineSchema = boundedUtf8StringSchema(MAX_SOURCE_LINE_LENGTH).superRefine((line, context) => {
+  if (line.includes("\n") || line.includes("\r")) {
+    context.addIssue({ code: "custom", message: "source lines cannot contain line breaks" });
+  }
+  if (line.includes("\0")) {
+    context.addIssue({ code: "custom", message: "source lines cannot contain NUL" });
+  }
+});
+var sourceLinesSchema = external_exports.array(sourceLineSchema).max(MAX_SOURCE_LINES);
+var sourceTextSchema = boundedUtf8StringSchema(MAX_NOTEBOOK_SOURCE_BYTES).refine((value) => !value.includes("\0"), "source text cannot contain NUL");
+function canonicalBase64ByteLength(value) {
+  if (value.length === 0) return 0;
+  if (value.length % 4 !== 0) return null;
+  let padding = 0;
+  if (value.endsWith("==")) padding = 2;
+  else if (value.endsWith("=")) padding = 1;
+  const contentLength = value.length - padding;
+  let lastSextet = 0;
+  for (let index = 0; index < contentLength; index += 1) {
+    const code = value.charCodeAt(index);
+    const sextet = code >= 65 && code <= 90 ? code - 65 : code >= 97 && code <= 122 ? code - 97 + 26 : code >= 48 && code <= 57 ? code - 48 + 52 : code === 43 ? 62 : code === 47 ? 63 : -1;
+    if (sextet < 0) return null;
+    lastSextet = sextet;
+  }
+  for (let index = contentLength; index < value.length; index += 1) {
+    if (value.charCodeAt(index) !== 61) return null;
+  }
+  if (padding === 2 && (lastSextet & 15) !== 0) return null;
+  if (padding === 1 && (lastSextet & 3) !== 0) return null;
+  return value.length / 4 * 3 - padding;
+}
+var wireSourceSchema = external_exports.object({
+  encoding: external_exports.literal("base64"),
+  data: external_exports.string().refine((value) => canonicalBase64ByteLength(value) !== null, "must be canonical padded base64"),
+  lines: external_exports.union([external_exports.number().int().nonnegative().safe(), external_exports.null()])
+}).strict();
+var BASE64_QUANTUM_BYTES = 3 * 16384;
+var BASE64_BTOA_CHUNK_BYTES = 32768;
+function encodeBase64(bytes) {
+  const parts = [];
+  for (let start2 = 0; start2 < bytes.byteLength; start2 += BASE64_QUANTUM_BYTES) {
+    const end = Math.min(bytes.byteLength, start2 + BASE64_QUANTUM_BYTES);
+    let binary = "";
+    for (let offset = start2; offset < end; offset += BASE64_BTOA_CHUNK_BYTES) {
+      binary += String.fromCharCode(...bytes.subarray(offset, Math.min(end, offset + BASE64_BTOA_CHUNK_BYTES)));
+    }
+    parts.push(btoa(binary));
+  }
+  return parts.join("");
+}
+function decodeBase64(value) {
+  if (!wireSourceSchema.shape.data.safeParse(value).success) throw new ProtocolError("invalid_request", "source transfer data is not padded base64");
+  const decodedLength = canonicalBase64ByteLength(value);
+  if (decodedLength > MAX_NOTEBOOK_SOURCE_BYTES) throw new ProtocolError("invalid_request", "source transfer data exceeds the 32 MiB notebook limit");
+  let binary;
+  try {
+    binary = atob(value);
+  } catch {
+    throw new ProtocolError("invalid_request", "source transfer data is not valid base64");
+  }
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  return bytes;
+}
+function decodeUtf8(bytes) {
+  try {
+    return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+  } catch {
+    throw new ProtocolError("invalid_request", "source transfer data is not valid UTF-8");
+  }
+}
+function encodeWireSource(value) {
+  const lines = typeof value === "string" ? null : value.length;
+  const text = typeof value === "string" ? value : value.join("\n");
+  if (hasUnpairedSurrogate2(text)) throw new ProtocolError("invalid_request", "source transfer text contains an unpaired surrogate");
+  return { encoding: "base64", data: encodeBase64(new TextEncoder().encode(text)), lines };
+}
+function decodeWireSource(value) {
+  const parsed = wireSourceSchema.safeParse(value);
+  if (!parsed.success) throw new ProtocolError("invalid_request", "invalid source transfer value");
+  const text = decodeUtf8(decodeBase64(parsed.data.data));
+  if (hasUnpairedSurrogate2(text)) throw new ProtocolError("invalid_request", "source transfer text contains an unpaired surrogate");
+  if (parsed.data.lines === null) return text;
+  if (parsed.data.lines === 0) {
+    if (text !== "") throw new ProtocolError("invalid_request", "empty source line array must have empty data");
+    return [];
+  }
+  const lines = text.split("\n");
+  if (lines.length !== parsed.data.lines || lines.some((line) => line.includes("\r"))) {
+    throw new ProtocolError("invalid_request", "source transfer line count is inconsistent");
+  }
+  return lines;
+}
+var cellTypeSchema = external_exports.enum(["code", "markdown"]);
+var sourcePositionSchema = external_exports.object({
+  line: protocolIntegerSchema,
+  character: protocolIntegerSchema
+}).strict();
+var sourceRangeSchema = external_exports.object({
+  start: sourcePositionSchema,
+  end: sourcePositionSchema
+}).strict();
+var cellSnapshotSchema = external_exports.object({
+  id: idSchema,
+  revision: revisionSchema,
+  type: cellTypeSchema,
+  source: sourceTextSchema
+}).strict();
+var analysisDiagnosticSchema = external_exports.object({
+  level: external_exports.enum(["error", "warning", "info"]).default("error"),
+  code: boundedUtf8StringSchema(256, true).default("analysis"),
+  message: boundedUtf8StringSchema(MAX_FRAME_BYTES),
+  symbol: boundedUtf8StringSchema(MAX_ANALYSIS_SYMBOL_BYTES).nullable().optional(),
+  source: boundedUtf8StringSchema(256, true).optional(),
+  range: sourceRangeSchema.nullable(),
+  fileRange: sourceRangeSchema.optional(),
+  occurrences: external_exports.array(sourceRangeSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS).optional()
+}).strict();
+var analysisSymbolSchema = boundedUtf8StringSchema(MAX_ANALYSIS_SYMBOL_BYTES, true);
+var analysisSymbolArraySchema = external_exports.array(analysisSymbolSchema).max(MAX_ANALYSIS_SYMBOLS);
+var analysisCellResultSchema = external_exports.object({
+  id: idSchema,
+  revision: revisionSchema,
+  defs: analysisSymbolArraySchema,
+  refs: analysisSymbolArraySchema,
+  selfRefs: analysisSymbolArraySchema,
+  locals: analysisSymbolArraySchema,
+  barrier: external_exports.boolean(),
+  opaque: external_exports.boolean(),
+  diagnostics: external_exports.array(analysisDiagnosticSchema).max(MAX_EDITOR_DIAGNOSTICS),
+  error: boundedUtf8StringSchema(MAX_FRAME_BYTES).nullable(),
+  ranges: safeStringRecordSchema(external_exports.array(sourceRangeSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS)).optional()
+}).strict();
+var analysisEnvironmentIdSchema = idSchema;
+var analysisResultSchema = external_exports.object({
+  revision: revisionSchema,
+  analysisEnvironmentId: analysisEnvironmentIdSchema,
+  cells: external_exports.array(analysisCellResultSchema).max(MAX_NOTEBOOK_CELLS),
+  analyzer: external_exports.object({
+    packageVersion: boundedUtf8StringSchema(256, true),
+    rVersion: boundedUtf8StringSchema(256, true),
+    policy: boundedUtf8StringSchema(256, true),
+    analysisEnvironmentId: analysisEnvironmentIdSchema
+  }).strict()
+}).strict();
+var engineErrorSchema = external_exports.object({
+  message: boundedUtf8StringSchema(MAX_FRAME_BYTES),
+  code: boundedUtf8StringSchema(256).optional(),
+  interrupted: external_exports.boolean().optional(),
+  transport: external_exports.boolean().optional(),
+  details: protocolJsonSchema.optional()
+}).strict();
+var clearCellIdsSchema = external_exports.array(idSchema).min(1).max(MAX_NOTEBOOK_CELLS).superRefine((ids, context) => {
+  if (new Set(ids).size !== ids.length) context.addIssue({ code: "custom", message: "clear_cell ids must be unique" });
+});
+var clearCellRequestShape = external_exports.object({ ids: clearCellIdsSchema }).strict();
+var rawConditionMessageSchema = boundedUtf8StringSchema(16384);
+var rawConditionClassSchema = external_exports.array(boundedUtf8StringSchema(256)).min(1).max(MAX_PROTOCOL_COLLECTION_ITEMS);
+var rawConditionCallSchema = boundedUtf8StringSchema(2048).nullable();
+var rawConditionTraceSchema = external_exports.array(boundedUtf8StringSchema(2048)).max(40);
+var rawErrorCommonShape = {
+  code: boundedUtf8StringSchema(256).optional(),
+  interrupted: external_exports.boolean().optional(),
+  details: protocolJsonSchema.optional()
+};
+var rawConditionErrorSchema = external_exports.object({
+  message: rawConditionMessageSchema,
+  class: rawConditionClassSchema,
+  call: rawConditionCallSchema,
+  trace: rawConditionTraceSchema,
+  ...rawErrorCommonShape
+}).strict();
+var rawValidationErrorSchema = external_exports.object({
+  message: boundedUtf8StringSchema(MAX_FRAME_BYTES),
+  ...rawErrorCommonShape
+}).strict();
+var rawEngineErrorSchema = external_exports.union([
+  rawConditionErrorSchema,
+  rawValidationErrorSchema
+]);
+var clearCellRequestSchema = protocolJsonSchema.pipe(clearCellRequestShape);
+var releaseArtifactNameSchema = boundedUtf8StringSchema(1024, true).refine(
+  (value) => !value.startsWith(".") && !/[\\/]/.test(value),
+  "invalid artifact handle"
+);
+var releaseArtifactNamesSchema = external_exports.array(releaseArtifactNameSchema).max(MAX_RELEASE_ARTIFACTS);
+var releaseOutputsResponseSchema = external_exports.object({
+  ok: external_exports.boolean(),
+  released: releaseArtifactNamesSchema.optional(),
+  missing: releaseArtifactNamesSchema.optional(),
+  failed: releaseArtifactNamesSchema.optional(),
+  error: engineErrorSchema.optional()
+}).strict().superRefine((response, context) => {
+  if (response.ok && (response.released === void 0 || response.missing === void 0 || response.failed === void 0)) {
+    context.addIssue({ code: "custom", message: "successful release_outputs responses require released, missing, and failed arrays" });
+  }
+});
+var tablePageSchema = external_exports.lazy(() => tablePageShape);
+var richOutputPayloadSchema = external_exports.lazy(() => richOutputShape);
+var arkCleanupFailureSchema = external_exports.object({
+  name: idSchema,
+  action: boundedUtf8StringSchema(256, true),
+  active: external_exports.boolean().nullable(),
+  locked: external_exports.boolean().nullable(),
+  message: boundedUtf8StringSchema(2048)
+}).strict();
+var arkRuntimeVariableSchema = external_exports.object({
+  name: boundedUtf8StringSchema(MAX_ANALYSIS_SYMBOL_BYTES, true),
+  class: boundedUtf8StringSchema(MAX_ANALYSIS_SYMBOL_BYTES, true),
+  dim: external_exports.array(protocolIntegerSchema).max(64).nullable(),
+  size: protocolIntegerSchema,
+  widget: external_exports.boolean(),
+  value_summary: boundedUtf8StringSchema(160)
+}).strict();
+var engineResponseSchema = external_exports.object({
+  ok: external_exports.boolean(),
+  cancelledBeforeStart: external_exports.literal(true).optional(),
+  outputs: external_exports.array(external_exports.lazy(() => outputRecordSchema)).max(MAX_PROTOCOL_COLLECTION_ITEMS).optional(),
+  stopped: external_exports.boolean().optional(),
+  page: tablePageSchema.nullable().optional(),
+  output: richOutputPayloadSchema.optional(),
+  package_version: boundedUtf8StringSchema(256, true).optional(),
+  r_version: boundedUtf8StringSchema(256, true).optional(),
+  value: richOutputPayloadSchema.optional(),
+  selected: external_exports.lazy(() => widgetSelectedSchema).optional(),
+  log: external_exports.array(boundedUtf8StringSchema(MAX_FRAME_BYTES)).max(1048578).optional(),
+  truncated: external_exports.boolean().optional(),
+  error: engineErrorSchema.optional(),
+  kernelStateInvalid: engineErrorSchema.optional(),
+  variables: external_exports.array(arkRuntimeVariableSchema).max(MAX_RUNTIME_VARIABLES).optional(),
+  failures: external_exports.array(arkCleanupFailureSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS).optional(),
+  released: releaseArtifactNamesSchema.optional(),
+  missing: releaseArtifactNamesSchema.optional(),
+  failed: releaseArtifactNamesSchema.optional()
+}).strict();
+var R_ENVIRONMENT_PLATFORMS = [
+  "aix",
+  "android",
+  "darwin",
+  "freebsd",
+  "haiku",
+  "linux",
+  "openbsd",
+  "sunos",
+  "win32"
+];
+var rEnvironmentSchema = external_exports.object({
+  rscript: pathSchema,
+  rHome: pathSchema,
+  version: boundedUtf8StringSchema(256, true),
+  platform: external_exports.enum(R_ENVIRONMENT_PLATFORMS),
+  arch: boundedUtf8StringSchema(64, true),
+  libraryPaths: external_exports.array(pathSchema).max(256).readonly(),
+  identity: external_exports.string().regex(/^[0-9a-f]{64}$/)
+}).strict();
+var evaluationPayloadSchema = external_exports.object({
+  sessionEpoch: idSchema,
+  kernelEpoch: idSchema,
+  operationId: idSchema,
+  runId: idSchema,
+  cellId: idSchema,
+  revision: revisionSchema,
+  documentRevision: revisionSchema,
+  source: sourceTextSchema,
+  definitions: analysisSymbolArraySchema,
+  locals: analysisSymbolArraySchema,
+  opaque: external_exports.boolean()
+}).strict();
+var engineEventIdentitySchema = external_exports.object({
+  requestId: positiveIntegerSchema,
+  sessionEpoch: idSchema,
+  kernelEpoch: idSchema,
+  operationId: idSchema,
+  runId: idSchema,
+  cellId: idSchema,
+  revision: revisionSchema,
+  documentRevision: revisionSchema
+});
+var engineStartedEventSchema = engineEventIdentitySchema.extend({
+  type: external_exports.literal("started"),
+  sequence: external_exports.literal(0)
+}).strict();
+var engineProgressPayloadSchema = strictProtocolJsonSchema(external_exports.object({ progress: external_exports.lazy(() => progressOutputSchema) }).strict());
+var engineAppendPayloadSchema = strictProtocolJsonSchema(external_exports.object({ output: external_exports.lazy(() => outputRecordSchema) }).strict());
+var engineClearPayloadSchema = strictProtocolJsonSchema(external_exports.object({}).strict());
+var engineAppendOutputEventSchema = engineEventIdentitySchema.extend({
+  type: external_exports.literal("output"),
+  sequence: positiveIntegerSchema,
+  kind: external_exports.literal("append"),
+  payload: engineAppendPayloadSchema
+}).strict();
+var engineProgressOutputEventSchema = engineEventIdentitySchema.extend({
+  type: external_exports.literal("output"),
+  sequence: positiveIntegerSchema,
+  kind: external_exports.literal("progress"),
+  payload: engineProgressPayloadSchema
+}).strict();
+var engineLogOutputEventSchema = engineEventIdentitySchema.extend({
+  type: external_exports.literal("output"),
+  sequence: positiveIntegerSchema,
+  kind: external_exports.literal("log"),
+  payload: protocolJsonSchema
+}).strict();
+var engineClearOutputEventSchema = engineEventIdentitySchema.extend({
+  type: external_exports.literal("output"),
+  sequence: positiveIntegerSchema,
+  kind: external_exports.literal("clear"),
+  payload: engineClearPayloadSchema
+}).strict();
+var engineOutputEventSchema = external_exports.discriminatedUnion("kind", [
+  engineAppendOutputEventSchema,
+  engineProgressOutputEventSchema,
+  engineLogOutputEventSchema,
+  engineClearOutputEventSchema
+]);
+var engineCompletedEventSchema = engineEventIdentitySchema.extend({
+  type: external_exports.literal("completed"),
+  sequence: positiveIntegerSchema,
+  result: engineResponseSchema
+}).strict();
+var engineEventSchema = external_exports.discriminatedUnion("type", [
+  engineStartedEventSchema,
+  engineOutputEventSchema,
+  engineCompletedEventSchema
+]);
+var engineHandshakeSchema = external_exports.object({
+  protocol: external_exports.literal(ENGINE_PROTOCOL),
+  packageVersion: boundedUtf8StringSchema(256, true),
+  rVersion: boundedUtf8StringSchema(256, true),
+  capabilities: external_exports.array(boundedUtf8StringSchema(256, true)).max(MAX_PROTOCOL_COLLECTION_ITEMS),
+  kernel: external_exports.object({
+    name: external_exports.literal("ark"),
+    version: boundedUtf8StringSchema(256, true),
+    buildVersion: external_exports.literal("0.1.252-alder.1"),
+    mimePublisher: external_exports.literal("alder-json-v1"),
+    protocol: boundedUtf8StringSchema(256, true),
+    kernelEpoch: idSchema
+  }).strict().optional(),
+  kernelReady: external_exports.boolean(),
+  analyzerReady: external_exports.boolean(),
+  captureReady: external_exports.boolean()
+}).strict();
+var storedCellOptionsSchema = safeStringRecordSchema(external_exports.union([external_exports.string(), external_exports.boolean(), finiteNumberSchema]));
+var cellOptionSchema = external_exports.union([external_exports.string(), external_exports.boolean(), finiteNumberSchema]);
+var cellOptionsSchema = storedCellOptionsSchema.superRefine((options, context) => {
+  for (const key of Object.keys(options)) {
+    if (key.trim().length === 0 || /[:\r\n]/.test(key)) {
+      context.addIssue({ code: "custom", path: [key], message: "cell option key is invalid" });
+    }
+  }
+  if (options.disabled !== void 0 && typeof options.disabled !== "boolean") {
+    context.addIssue({ code: "custom", path: ["disabled"], message: "disabled must be a boolean" });
+  }
+  if (options.name !== void 0 && (typeof options.name !== "string" || !/^[A-Za-z][A-Za-z0-9_.]*$/.test(options.name))) {
+    context.addIssue({ code: "custom", path: ["name"], message: "cell name is invalid" });
+  }
+});
+var markdownPhysicalBodySchema = sourceLinesSchema;
+var markdownSemanticBodySchema = external_exports.array(sourceLineSchema).max(MAX_SOURCE_LINES);
 function markdownLinesValid(lines) {
   return lines.every((line) => line.trim().length === 0 || /^\s*#/.test(line));
+}
+function validateCellBody(cellType, body, context, path) {
+  if (cellType === "markdown" && !markdownLinesValid(body)) {
+    context.addIssue({ code: "custom", path, message: "markdown host bodies must be blank or R comments" });
+  }
+}
+var notebookCellInputSchema = external_exports.object({
+  id: idSchema,
+  type: cellTypeSchema,
+  body: markdownPhysicalBodySchema,
+  options: cellOptionsSchema.optional().default({}),
+  revision: revisionSchema.optional().default(0)
+}).strict().superRefine((cell, context) => validateCellBody(cell.type, cell.body, context, ["body"]));
+var notebookInputSchema = external_exports.object({
+  path: pathSchema.nullable().optional(),
+  metadata: protocolJsonRecordSchema.optional().default({}),
+  cells: external_exports.array(notebookCellInputSchema).max(MAX_NOTEBOOK_CELLS)
+}).strict().superRefine((notebook, context) => {
+  const ids = /* @__PURE__ */ new Set();
+  for (const [index, cell] of notebook.cells.entries()) {
+    if (ids.has(cell.id)) context.addIssue({ code: "custom", path: ["cells", index, "id"], message: "duplicate cell id" });
+    ids.add(cell.id);
+  }
+  if (notebookSourceByteLength(notebook.cells) > MAX_NOTEBOOK_SOURCE_BYTES) {
+    context.addIssue({ code: "custom", path: ["cells"], message: "notebook source exceeds byte limit" });
+  }
+});
+var cellRefSchema = external_exports.union([
+  external_exports.object({ cellId: idSchema }).strict(),
+  external_exports.object({ creationId: idSchema }).strict()
+]);
+var textEditSchema = external_exports.object({
+  start: sourcePositionSchema,
+  end: sourcePositionSchema,
+  text: boundedUtf8StringSchema(MAX_NOTEBOOK_SOURCE_BYTES).superRefine((text, context) => {
+    if (text.includes("\0")) context.addIssue({ code: "custom", message: "text edit contains NUL" });
+  })
+}).strict();
+var documentChangeBase = external_exports.object({ type: external_exports.string() });
+var createDocumentChangeSchema = external_exports.object({
+  type: external_exports.literal("create"),
+  creationId: idSchema,
+  after: cellRefSchema.nullable(),
+  cellType: cellTypeSchema,
+  body: markdownPhysicalBodySchema,
+  options: cellOptionsSchema
+}).strict().superRefine((change, context) => validateCellBody(change.cellType, change.body, context, ["body"]));
+var editDocumentChangeSchema = external_exports.object({
+  type: external_exports.literal("edit"),
+  cell: cellRefSchema,
+  expectedRevision: revisionSchema.optional(),
+  body: markdownPhysicalBodySchema,
+  cellType: cellTypeSchema
+}).strict().superRefine((change, context) => validateCellBody(change.cellType, change.body, context, ["body"]));
+var optionsDocumentChangeSchema = external_exports.object({
+  type: external_exports.literal("options"),
+  cell: cellRefSchema,
+  expectedRevision: revisionSchema.optional(),
+  patch: safeStringRecordSchema(cellOptionSchema.nullable())
+}).strict();
+var moveDocumentChangeSchema = external_exports.object({ type: external_exports.literal("move"), cell: cellRefSchema, after: cellRefSchema.nullable() }).strict();
+var deleteDocumentChangeSchema = external_exports.object({ type: external_exports.literal("delete"), cell: cellRefSchema, expectedRevision: revisionSchema.optional() }).strict();
+var textEditDocumentChangeSchema = external_exports.object({
+  type: external_exports.literal("text-edit"),
+  cell: cellRefSchema,
+  expectedRevision: revisionSchema,
+  edits: external_exports.array(textEditSchema).min(1).max(MAX_SOURCE_LINES)
+}).strict();
+var documentChangeSchema = external_exports.discriminatedUnion("type", [
+  createDocumentChangeSchema,
+  editDocumentChangeSchema,
+  optionsDocumentChangeSchema,
+  moveDocumentChangeSchema,
+  deleteDocumentChangeSchema,
+  textEditDocumentChangeSchema
+]);
+var mcpDocumentChangeSchema = external_exports.discriminatedUnion("type", [
+  external_exports.object({ type: external_exports.literal("create"), creationId: idSchema, after: cellRefSchema.nullable(), cellType: cellTypeSchema, body: markdownSemanticBodySchema, options: cellOptionsSchema }).strict(),
+  external_exports.object({ type: external_exports.literal("edit"), cell: cellRefSchema, expectedRevision: revisionSchema.optional(), body: markdownSemanticBodySchema, cellType: cellTypeSchema }).strict(),
+  optionsDocumentChangeSchema,
+  moveDocumentChangeSchema,
+  deleteDocumentChangeSchema,
+  textEditDocumentChangeSchema
+]);
+var commandIdentityShape = {
+  operationId: idSchema,
+  clientId: idSchema,
+  commandSequence: positiveIntegerSchema,
+  sessionEpoch: idSchema
+};
+var commandIdentitySchema = external_exports.object(commandIdentityShape).strict();
+var sourceChangeArraySchema = external_exports.array(documentChangeSchema).max(MAX_NOTEBOOK_CELLS);
+function sourceChangeBytes(changes) {
+  let bytes = 0;
+  for (const change of changes) {
+    if ("body" in change) bytes += sourceLinesByteLength(change.body);
+    if (change.type === "text-edit") for (const edit of change.edits) bytes += new TextEncoder().encode(edit.text).byteLength;
+  }
+  return bytes > Number.MAX_SAFE_INTEGER ? Number.MAX_SAFE_INTEGER : bytes;
+}
+function sourceChangeLimit(changes, context) {
+  if (sourceChangeBytes(changes) > MAX_NOTEBOOK_SOURCE_BYTES) context.addIssue({ code: "custom", path: ["changes"], message: "source changes exceed byte limit" });
+}
+var transactionCommandSchema = external_exports.object({
+  ...commandIdentityShape,
+  type: external_exports.literal("transaction"),
+  expectedDocumentRevision: revisionSchema,
+  changes: sourceChangeArraySchema
+}).strict().superRefine((command, context) => sourceChangeLimit(command.changes, context));
+var runCommandSchema = external_exports.object({
+  ...commandIdentityShape,
+  type: external_exports.literal("run"),
+  scope: external_exports.enum(["cell", "all", "stale"]),
+  target: cellRefSchema.optional(),
+  startup: external_exports.boolean().optional(),
+  changes: sourceChangeArraySchema.optional(),
+  expectedDocumentRevision: revisionSchema
+}).strict().superRefine((command, context) => {
+  if (command.scope === "cell" && command.target === void 0) context.addIssue({ code: "custom", path: ["target"], message: "cell runs require one target" });
+  if (command.scope !== "cell" && command.target !== void 0) context.addIssue({ code: "custom", path: ["target"], message: "target is only valid for cell runs" });
+  sourceChangeLimit(command.changes ?? [], context);
+});
+var selectRCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("select-r"), rscript: pathSchema, persistDefault: external_exports.boolean(), expectedDocumentRevision: revisionSchema }).strict();
+var setAppCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("set-app"), patch: external_exports.object({ layout: external_exports.enum(["vertical", "grid", "slides"]).optional(), width: external_exports.enum(["compact", "medium", "full"]).optional(), include_code: external_exports.boolean().optional() }).strict(), expectedDocumentRevision: revisionSchema }).strict();
+var packagesDeclareCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("packages-declare"), packages: external_exports.array(boundedUtf8StringSchema(256, true)).max(MAX_PROTOCOL_COLLECTION_ITEMS), expectedSidecarVersion: boundedUtf8StringSchema(MAX_ID_BYTES).nullable(), expectedDocumentRevision: revisionSchema }).strict();
+var packagesInstallCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("packages-install"), packages: external_exports.array(boundedUtf8StringSchema(256, true)).max(MAX_PROTOCOL_COLLECTION_ITEMS), expectedDocumentRevision: revisionSchema, kernelEpoch: idSchema.nullable() }).strict();
+var publishCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("publish"), includeCode: external_exports.boolean(), outputPath: pathSchema.optional(), expectedDocumentRevision: revisionSchema }).strict();
+var uploadFileSchema = external_exports.object({ name: pathSchema, content_base64: boundedUtf8StringSchema(16 * 1024 * 1024, true) }).strict();
+var uploadCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("upload"), name: idSchema, path: external_exports.array(idSchema).max(256), files: external_exports.array(uploadFileSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS), kernelEpoch: idSchema }).strict();
+var saveCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("save"), expectedDocumentRevision: revisionSchema }).strict();
+var saveAsCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("save-as"), path: pathSchema, expectedDestination: external_exports.literal("absent"), expectedDocumentRevision: revisionSchema }).strict();
+var reloadSourceCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("reload-source"), expectedDocumentRevision: revisionSchema, expectedDiskDigest: external_exports.string().regex(/^[0-9a-f]{64}$/), expectedDiskVersion: boundedUtf8StringSchema(MAX_ID_BYTES, true) }).strict();
+var formatCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("format"), cellIds: external_exports.array(idSchema).max(MAX_NOTEBOOK_CELLS).optional(), expectedRevisions: safeStringRecordSchema(revisionSchema), expectedDocumentRevision: revisionSchema }).strict();
+var setConfigCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("set-config"), patch: protocolJsonRecordSchema, expectedSidecarVersion: boundedUtf8StringSchema(MAX_ID_BYTES).nullable(), expectedDocumentRevision: revisionSchema }).strict();
+var layoutKey = boundedUtf8StringSchema(MAX_ID_BYTES, true).refine((key) => !key.includes("/") && !key.includes("\\") && key !== "." && key !== "..", "invalid layout cell key");
+var layoutGeometrySchema = external_exports.object({ x: external_exports.number().int().min(0).max(11).safe(), y: external_exports.number().int().min(0).max(1e6).safe(), w: external_exports.number().int().min(1).max(12).safe(), h: external_exports.number().int().min(1).max(1e6).safe() }).strict().superRefine((geometry, context) => {
+  if (geometry.x + geometry.w > 12) context.addIssue({ code: "custom", path: ["w"], message: "geometry extends beyond the 12-column grid" });
+});
+var layoutCellsSchema = safeStringRecordSchema(layoutGeometrySchema);
+var slideObjectSchema = external_exports.object({ cells: external_exports.array(layoutKey).min(1).max(MAX_NOTEBOOK_CELLS), title: boundedUtf8StringSchema(MAX_FRAME_BYTES, true).optional() }).strict();
+var slideGroupSchema = external_exports.union([external_exports.array(layoutKey).min(1).max(MAX_NOTEBOOK_CELLS), slideObjectSchema]);
+var layoutSchema = external_exports.object({ version: external_exports.literal(1), cells: layoutCellsSchema, layout: external_exports.enum(["grid", "slides"]).optional(), slides: external_exports.array(slideGroupSchema).max(MAX_NOTEBOOK_CELLS).optional() }).strict().superRefine((value, context) => {
+  const members2 = [];
+  for (const [key] of Object.entries(value.cells)) if (!layoutKey.safeParse(key).success) context.addIssue({ code: "custom", path: ["cells", key], message: "invalid layout cell key" });
+  for (const [index, group] of (value.slides ?? []).entries()) {
+    const keys = Array.isArray(group) ? group : group.cells;
+    if (new Set(keys).size !== keys.length) context.addIssue({ code: "custom", path: ["slides", index], message: "slide group contains duplicate cell keys" });
+    members2.push(...keys);
+  }
+  if (new Set(members2).size !== members2.length) context.addIssue({ code: "custom", path: ["slides"], message: "a cell key occurs in more than one slide" });
+  try {
+    if (new TextEncoder().encode(JSON.stringify(value)).byteLength > LAYOUT_MAX_BYTES) {
+      context.addIssue({ code: "custom", path: [], message: "layout exceeds byte limit" });
+    }
+  } catch {
+    context.addIssue({ code: "custom", path: [], message: "layout is not serializable" });
+  }
+});
+var setLayoutCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("set-layout"), layout: layoutSchema, expectedSidecarVersion: boundedUtf8StringSchema(MAX_ID_BYTES).nullable(), expectedDocumentRevision: revisionSchema }).strict();
+var setRuntimeCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("set-runtime"), on_cell_change: external_exports.enum(["automatic", "lazy"]).optional(), on_startup: external_exports.boolean().optional(), expectedDocumentRevision: revisionSchema }).strict().refine((value) => value.on_cell_change !== void 0 || value.on_startup !== void 0, "at least one runtime setting is required");
+var restartCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("restart"), replay: external_exports.boolean().default(false), expectedDocumentRevision: revisionSchema.optional() }).strict().superRefine((value, context) => {
+  if (value.replay && value.expectedDocumentRevision === void 0) context.addIssue({ code: "custom", path: ["expectedDocumentRevision"], message: "replay restart requires document revision" });
+});
+var widgetIndexArraySchema = external_exports.array(positiveIntegerSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS).superRefine((values, context) => {
+  if (new Set(values).size !== values.length) context.addIssue({ code: "custom", message: "widget indices must be unique" });
+});
+var widgetJsonValueSchema = protocolJsonSchema.superRefine((value, context) => {
+  try {
+    if (new TextEncoder().encode(JSON.stringify(value)).byteLength > MAX_FRAME_BYTES) context.addIssue({ code: "custom", message: "widget value exceeds the event limit" });
+  } catch {
+    context.addIssue({ code: "custom", message: "widget value is not serializable" });
+  }
+});
+var selectedIsoDateSchema = external_exports.string().regex(/^\d{4}-\d{2}-\d{2}$/);
+var selectedUtcDateTimeSchema = external_exports.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/);
+var widgetSelectedScalarSchema = external_exports.object({
+  type: external_exports.enum(["logical", "integer", "double", "character", "NULL"]),
+  value: widgetJsonValueSchema
+}).strict();
+var widgetSelectedSchema = external_exports.discriminatedUnion("type", [
+  external_exports.object({ type: external_exports.literal("date"), value: selectedIsoDateSchema }).strict(),
+  external_exports.object({ type: external_exports.literal("date_range"), value: external_exports.array(selectedIsoDateSchema).length(2) }).strict(),
+  external_exports.object({ type: external_exports.literal("datetime"), value: selectedUtcDateTimeSchema }).strict(),
+  external_exports.object({ type: external_exports.literal("data.frame"), value: external_exports.array(safeStringRecordSchema(widgetJsonValueSchema)).max(MAX_PROTOCOL_COLLECTION_ITEMS) }).strict(),
+  external_exports.object({ type: external_exports.literal("list"), value: external_exports.union([external_exports.array(widgetJsonValueSchema), safeStringRecordSchema(widgetJsonValueSchema)]) }).strict(),
+  widgetSelectedScalarSchema
+]);
+var widgetUpdateSchema = external_exports.object({
+  value: widgetJsonValueSchema.optional(),
+  index: positiveIntegerSchema.optional(),
+  indices: widgetIndexArraySchema.optional(),
+  selected: widgetIndexArraySchema.optional(),
+  ops: external_exports.array(widgetJsonValueSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS).optional(),
+  submit: external_exports.boolean().optional(),
+  paused: external_exports.boolean().optional()
+}).strict().superRefine((update, context) => {
+  const primary = ["value", "index", "indices", "selected", "ops", "submit"].filter((key) => Object.prototype.hasOwnProperty.call(update, key));
+  if (primary.length !== 1) context.addIssue({ code: "custom", message: "widget update requires exactly one primary field" });
+  if (update.paused !== void 0 && primary.length !== 1) context.addIssue({ code: "custom", message: "paused is only valid with a primary update" });
+});
+var widgetCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("widget"), name: idSchema, path: external_exports.array(idSchema).max(256), update: widgetUpdateSchema, source: external_exports.enum(["editor", "app", "mcp", "cli"]), kernelEpoch: idSchema, expectedRevision: revisionSchema }).strict();
+var inspectCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("inspect"), name: idSchema, kernelEpoch: idSchema }).strict();
+var lazyOutputCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("lazy-output"), key: idSchema, kernelEpoch: idSchema }).strict();
+var tablePageCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("table-page"), handle: idSchema, offset: protocolIntegerSchema, limit: external_exports.number().int().min(1).max(200).safe(), sortBy: boundedUtf8StringSchema(256), sortDescending: external_exports.boolean(), filter: boundedUtf8StringSchema(MAX_FRAME_BYTES), kernelEpoch: idSchema }).strict();
+var interruptCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("interrupt"), runId: idSchema.optional() }).strict();
+var activeClientIdsSchema = external_exports.array(idSchema).max(128).refine(
+  (clientIds) => new Set(clientIds).size === clientIds.length,
+  "expectedClientIds must not contain duplicates"
+);
+var shutdownCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("shutdown"), expectedDocumentRevision: revisionSchema, expectedClientIds: activeClientIdsSchema }).strict();
+var hostCommandSchema = external_exports.discriminatedUnion("type", [
+  transactionCommandSchema,
+  runCommandSchema,
+  selectRCommandSchema,
+  setAppCommandSchema,
+  packagesDeclareCommandSchema,
+  packagesInstallCommandSchema,
+  publishCommandSchema,
+  uploadCommandSchema,
+  saveCommandSchema,
+  saveAsCommandSchema,
+  reloadSourceCommandSchema,
+  formatCommandSchema,
+  setConfigCommandSchema,
+  setLayoutCommandSchema,
+  setRuntimeCommandSchema,
+  restartCommandSchema,
+  widgetCommandSchema,
+  inspectCommandSchema,
+  lazyOutputCommandSchema,
+  tablePageCommandSchema,
+  interruptCommandSchema,
+  shutdownCommandSchema
+]);
+var cellStatusSchema = external_exports.enum(["idle", "stale", "running", "done", "error", "stopped", "disabled"]);
+var operationStatusSchema = external_exports.enum(["accepted", "running", "done", "error", "interrupted", "cancelled"]);
+var operationKindSchema = external_exports.enum(["transaction", "run", "select-r", "set-app", "packages-declare", "packages-install", "publish", "upload", "save", "save-as", "reload-source", "format", "set-config", "set-layout", "set-runtime", "restart", "widget", "inspect", "lazy-output", "table-page", "interrupt", "shutdown", "widget-reset", "analysis"]);
+var hostErrorSchema = external_exports.object({ code: boundedUtf8StringSchema(256, true), message: boundedUtf8StringSchema(MAX_FRAME_BYTES), operationId: idSchema.nullable().optional(), details: protocolJsonSchema.optional() }).strict();
+var MAX_OPERATION_PROGRESS_BYTES = 64 * 1024;
+var operationProgressDataSchema = protocolJsonSchema.superRefine((value, context) => {
+  try {
+    if (new TextEncoder().encode(JSON.stringify(value)).byteLength > MAX_OPERATION_PROGRESS_BYTES) {
+      context.addIssue({ code: "custom", message: "operation progress data exceeds 64 KiB" });
+    }
+  } catch {
+    context.addIssue({ code: "custom", message: "operation progress data is not serializable" });
+  }
+});
+var operationProgressSchema = external_exports.object({
+  phase: external_exports.enum(["started", "output", "finished"]),
+  stream: external_exports.enum(["stdout", "stderr"]).optional(),
+  text: boundedUtf8StringSchema(MAX_OPERATION_PROGRESS_BYTES).optional(),
+  data: operationProgressDataSchema.optional()
+}).strict();
+var operationRecordSchema = external_exports.object({
+  id: idSchema,
+  clientId: idSchema,
+  commandSequence: positiveIntegerSchema,
+  kind: operationKindSchema,
+  status: operationStatusSchema,
+  documentRevision: revisionSchema,
+  runId: idSchema.nullable(),
+  result: protocolJsonSchema.nullable(),
+  error: hostErrorSchema.nullable(),
+  acceptedAt: external_exports.number().finite().nonnegative().optional(),
+  settledAt: external_exports.number().finite().nonnegative().optional(),
+  cellIds: external_exports.array(idSchema).max(MAX_NOTEBOOK_CELLS).optional(),
+  token: protocolIntegerSchema.optional(),
+  executionDone: external_exports.boolean().optional(),
+  resetOperationIds: external_exports.array(idSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS).optional(),
+  progress: operationProgressSchema.optional()
+}).strict();
+var commandAdmissionSchema = external_exports.object({
+  epoch: idSchema,
+  clientId: idSchema,
+  operationId: idSchema,
+  commandSequence: positiveIntegerSchema,
+  accepted: external_exports.boolean(),
+  sequenceConsumed: external_exports.boolean(),
+  operation: operationRecordSchema.nullable(),
+  error: hostErrorSchema.nullable(),
+  nextCommandSequence: positiveIntegerSchema
+}).strict();
+var runtimeStateSchema = external_exports.object({
+  documentReady: external_exports.boolean(),
+  analyzerState: external_exports.enum(["stopped", "starting", "ready", "failed"]),
+  kernelState: external_exports.enum(["stopped", "starting", "ready", "failed"]),
+  executionReady: external_exports.boolean(),
+  startupActivated: external_exports.boolean(),
+  executionBlockedReason: hostErrorSchema.nullable(),
+  kernelEpoch: idSchema.nullable(),
+  rEnvironment: rEnvironmentSchema.nullable(),
+  analysisEnvironmentId: analysisEnvironmentIdSchema.nullable()
+}).strict();
+var runtimeModeSchema = external_exports.enum(["automatic", "lazy"]);
+var hostRuntimeSchema = runtimeStateSchema.extend({ executionMode: runtimeModeSchema, runOnStartup: external_exports.boolean(), packageOperationActive: external_exports.boolean(), busy: external_exports.boolean(), activeRunId: idSchema.nullable() }).strict();
+var diskObservationSchema = external_exports.object({ state: external_exports.enum(["untitled", "absent", "present", "unreadable"]), digest: external_exports.string().regex(/^[0-9a-f]{64}$/).nullable(), version: boundedUtf8StringSchema(MAX_ID_BYTES).nullable(), error: hostErrorSchema.nullable() }).strict();
+var sidecarObservationsSchema = external_exports.object({ config: diskObservationSchema, layout: diskObservationSchema, packages: diskObservationSchema }).strict();
+var hostConfigurationSchema = external_exports.object({
+  rscript: pathSchema.nullable(),
+  executionMode: runtimeModeSchema,
+  runOnStartup: external_exports.boolean(),
+  deferStartup: external_exports.boolean()
+}).strict();
+var protocolStringArraySchema = external_exports.array(boundedUtf8StringSchema(MAX_FRAME_BYTES)).max(MAX_PROTOCOL_COLLECTION_ITEMS);
+var hostCellStateSchema = external_exports.object({ id: idSchema, type: cellTypeSchema, body: sourceLinesSchema, options: storedCellOptionsSchema, revision: revisionSchema, status: cellStatusSchema, outputs: external_exports.array(external_exports.lazy(() => outputRecordSchema)).max(MAX_PROTOCOL_COLLECTION_ITEMS), outputsStale: external_exports.boolean().optional(), progress: protocolJsonSchema.nullable(), log: external_exports.array(boundedUtf8StringSchema(MAX_FRAME_BYTES)).max(1048578), error: engineErrorSchema.nullable(), defs: protocolStringArraySchema, refs: protocolStringArraySchema, selfRefs: protocolStringArraySchema, locals: protocolStringArraySchema, barrier: external_exports.boolean(), opaque: external_exports.boolean(), diagnostics: external_exports.array(analysisDiagnosticSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS), analysisPending: external_exports.boolean() }).strict();
+var graphCellIds = external_exports.array(idSchema).max(MAX_NOTEBOOK_CELLS);
+var graphMap = safeStringRecordSchema(graphCellIds);
+var dependencyGraphStateSchema = external_exports.object({ nodes: graphCellIds, edges: graphMap, reverseEdges: graphMap, duplicates: graphMap, cycles: graphCellIds, topologicalOrder: graphCellIds.nullable() }).strict();
+var runtimeVariableSchema = external_exports.object({ name: boundedUtf8StringSchema(MAX_ANALYSIS_SYMBOL_BYTES, true), owner: idSchema.nullable(), revision: revisionSchema.nullable(), class: boundedUtf8StringSchema(MAX_ANALYSIS_SYMBOL_BYTES, true), dim: external_exports.array(protocolIntegerSchema).max(64).nullable(), size: protocolIntegerSchema, widget: external_exports.boolean(), valueSummary: boundedUtf8StringSchema(160).optional() }).strict();
+var runtimeVariablesSchema = external_exports.array(runtimeVariableSchema).max(MAX_RUNTIME_VARIABLES);
+var editorDiagnosticsSchema = safeStringRecordSchema(external_exports.array(analysisDiagnosticSchema).max(MAX_EDITOR_DIAGNOSTICS));
+var serviceErrorsSchema = external_exports.object({ lsp: hostErrorSchema.optional() }).strict();
+var hostSnapshotSchema = external_exports.object({ protocol: external_exports.literal(HOST_PROTOCOL), epoch: idSchema, cursor: protocolIntegerSchema, version: protocolIntegerSchema, documentRevision: revisionSchema, path: pathSchema.nullable(), metadata: protocolJsonRecordSchema, config: protocolJsonRecordSchema, layout: protocolJsonSchema, dirty: external_exports.boolean(), changed: external_exports.boolean().optional(), disk: diskObservationSchema, sidecars: sidecarObservationsSchema, runtime: hostRuntimeSchema, cells: external_exports.array(hostCellStateSchema).max(MAX_NOTEBOOK_CELLS), graph: dependencyGraphStateSchema, variables: runtimeVariablesSchema, editorDiagnostics: editorDiagnosticsSchema, serviceErrors: serviceErrorsSchema, operations: external_exports.array(operationRecordSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS), lastValue: protocolJsonSchema.nullable(), lastActionError: hostErrorSchema.nullable(), capabilities: external_exports.array(boundedUtf8StringSchema(256)).max(MAX_PROTOCOL_COLLECTION_ITEMS).optional(), nextCommandSequence: positiveIntegerSchema.optional(), activeClientIds: external_exports.array(idSchema).max(128).optional() }).strict();
+var hostEventTypeSchema = external_exports.enum(["receipt", "transaction", "notebook", "cell", "cell-started", "cell-output", "cell-completed", "diagnostics", "editor-diagnostics", "service-errors", "graph", "variables", "runtime", "operation", "service-error", "active_clients_changed"]);
+var eventBase = { protocol: external_exports.literal(HOST_PROTOCOL), epoch: idSchema, cursor: protocolIntegerSchema, version: protocolIntegerSchema, documentRevision: revisionSchema, timestamp: external_exports.number().finite().nonnegative(), operationId: idSchema.optional(), clientId: idSchema.optional(), commandSequence: positiveIntegerSchema.optional(), cellId: idSchema.optional(), runId: idSchema.optional(), kernelEpoch: idSchema.nullable().optional(), revision: revisionSchema.optional(), sequence: protocolIntegerSchema.optional() };
+var hostEventSchema = external_exports.object({ ...eventBase, type: hostEventTypeSchema, payload: protocolJsonSchema }).strict();
+var recoveryBranchSchema = external_exports.object({ id: idSchema, documentRevision: revisionSchema, baseDisk: diskObservationSchema, sourceHandle: external_exports.lazy(() => artifactHandleSchema), state: external_exports.enum(["clean", "dirty", "conflict"]), conflict: hostErrorSchema.nullable() }).strict();
+var recoveryStateSchema = external_exports.object({ branches: external_exports.array(recoveryBranchSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS), pending: external_exports.boolean(), corruption: hostErrorSchema.nullable() }).strict();
+var recoverySchema = external_exports.discriminatedUnion("kind", [external_exports.object({ kind: external_exports.literal("replay"), epoch: idSchema, cursor: protocolIntegerSchema, events: external_exports.array(hostEventSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS) }).strict(), external_exports.object({ kind: external_exports.literal("snapshot"), epoch: idSchema, cursor: protocolIntegerSchema, snapshot: hostSnapshotSchema }).strict()]);
+var commandResultSchema = external_exports.object({ epoch: idSchema, operation: operationRecordSchema, documentRevision: revisionSchema, version: protocolIntegerSchema, cursor: protocolIntegerSchema, nextCommandSequence: positiveIntegerSchema, result: protocolJsonSchema.nullable(), error: hostErrorSchema.nullable() }).strict();
+var queryOffset = protocolIntegerSchema.optional();
+var cellQueryLimit = external_exports.number().int().min(1).max(1e3).safe().optional();
+var outputQueryLimit = external_exports.number().int().min(1).max(262144).safe().optional();
+var artifactHandleIdSchema = idSchema.pipe(boundedUtf8StringSchema(MAX_ARTIFACT_HANDLE_BYTES, true)).refine((value) => !/[\\/]/.test(value) && !value.includes("..") && !value.startsWith("."), "invalid artifact handle");
+var hostQuerySchema = external_exports.discriminatedUnion("type", [
+  external_exports.object({ type: external_exports.literal("notebook") }).strict(),
+  external_exports.object({ type: external_exports.literal("cells"), offset: queryOffset, limit: cellQueryLimit }).strict(),
+  external_exports.object({ type: external_exports.literal("cell"), cellId: idSchema }).strict(),
+  external_exports.object({ type: external_exports.literal("graph") }).strict(),
+  external_exports.object({ type: external_exports.literal("outputs"), cellId: idSchema.optional() }).strict(),
+  external_exports.object({ type: external_exports.literal("output"), handle: artifactHandleIdSchema, offset: queryOffset, limit: outputQueryLimit }).strict(),
+  external_exports.object({ type: external_exports.literal("operation"), operationId: idSchema, clientId: idSchema.optional() }).strict(),
+  external_exports.object({ type: external_exports.literal("events"), epoch: idSchema.nullable(), cursor: protocolIntegerSchema.nullable() }).strict(),
+  external_exports.object({ type: external_exports.literal("config") }).strict(),
+  external_exports.object({ type: external_exports.literal("layout") }).strict(),
+  external_exports.object({ type: external_exports.literal("packages-status") }).strict(),
+  external_exports.object({ type: external_exports.literal("check") }).strict(),
+  external_exports.object({ type: external_exports.literal("source") }).strict(),
+  external_exports.object({ type: external_exports.literal("help"), contents: protocolJsonSchema }).strict(),
+  external_exports.object({ type: external_exports.literal("recovery") }).strict()
+]);
+var notebookCellDescriptorSchema = external_exports.object({ id: idSchema, type: cellTypeSchema, options: storedCellOptionsSchema, revision: revisionSchema }).strict();
+var notebookQueryResultSchema = external_exports.object({
+  protocol: external_exports.literal(HOST_PROTOCOL),
+  epoch: idSchema,
+  cursor: protocolIntegerSchema,
+  version: protocolIntegerSchema,
+  documentRevision: revisionSchema,
+  path: pathSchema.nullable(),
+  metadata: protocolJsonRecordSchema,
+  config: protocolJsonRecordSchema,
+  dirty: external_exports.boolean(),
+  changed: external_exports.boolean().optional(),
+  disk: diskObservationSchema,
+  sidecars: sidecarObservationsSchema,
+  runtime: hostRuntimeSchema,
+  capabilities: external_exports.array(boundedUtf8StringSchema(256, true)).max(MAX_PROTOCOL_COLLECTION_ITEMS),
+  nextCommandSequence: positiveIntegerSchema,
+  activeClientIds: external_exports.array(idSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS),
+  cells: external_exports.array(notebookCellDescriptorSchema).max(MAX_NOTEBOOK_CELLS)
+}).strict();
+var hostQueryResultSchema = external_exports.object({ epoch: idSchema, documentRevision: revisionSchema, cursor: protocolIntegerSchema, result: external_exports.union([protocolJsonSchema, external_exports.lazy(() => artifactHandleSchema)]) }).strict();
+function mimeEssence(value) {
+  const separator = value.indexOf(";");
+  return value.slice(0, separator < 0 ? value.length : separator).trim().toLowerCase();
+}
+function mediaMimeCompatible(mediaType, mimeType) {
+  const essence = mimeEssence(mimeType);
+  if (essence.length === 0) return false;
+  if (mediaType === "pdf") return mimeType === "application/pdf";
+  if (mediaType === "image") return essence.startsWith("image/");
+  if (mediaType === "audio") return essence.startsWith("audio/");
+  if (mediaType === "video") return essence.startsWith("video/");
+  return false;
+}
+function htmlMimeCompatible(mimeType) {
+  const essence = mimeEssence(mimeType);
+  return essence === "text/html" || essence === "application/xhtml+xml";
+}
+function sameMimeEssence(left, right) {
+  return mimeEssence(left) === mimeEssence(right);
+}
+var widgetOperationStatusSchema = external_exports.enum(["pending", "done", "error", "cancelled"]);
+var widgetOperationErrorSchema = external_exports.object({
+  code: boundedUtf8StringSchema(256, true),
+  message: boundedUtf8StringSchema(MAX_FRAME_BYTES)
+}).strict();
+var widgetOperationSchema = external_exports.object({
+  token: protocolIntegerSchema,
+  operationId: idSchema,
+  draft: external_exports.boolean().optional(),
+  status: widgetOperationStatusSchema,
+  error: widgetOperationErrorSchema.nullable()
+}).strict();
+var outputHandleIdSchema = idSchema.refine((value) => !/[\\/]/.test(value) && !value.includes("..") && !value.startsWith("."), "invalid output handle");
+var tableCellSchema = protocolJsonSchema;
+var tablePreviewSchema = external_exports.array(external_exports.array(tableCellSchema).max(MAX_TABLE_COLUMNS)).max(MAX_TABLE_PREVIEW_ROWS);
+var tablePagePreviewSchema = external_exports.array(external_exports.array(tableCellSchema).max(MAX_TABLE_COLUMNS)).max(200);
+var tablePageShape = external_exports.object({
+  nrow: protocolIntegerSchema,
+  ncol: protocolIntegerSchema,
+  columns: external_exports.array(boundedUtf8StringSchema(256)).max(MAX_TABLE_COLUMNS),
+  preview: tablePagePreviewSchema,
+  offset: protocolIntegerSchema,
+  limit: external_exports.number().int().min(1).max(200).safe(),
+  sort_by: boundedUtf8StringSchema(256),
+  sort_desc: external_exports.boolean(),
+  filter: boundedUtf8StringSchema(MAX_FRAME_BYTES),
+  truncated_rows: external_exports.boolean(),
+  truncated_columns: external_exports.boolean()
+}).strict().superRefine((page, context) => {
+  if (page.ncol !== 0 && page.columns.length > page.ncol) context.addIssue({ code: "custom", path: ["columns"], message: "too many table columns" });
+  if (page.preview.some((row) => row.length > page.columns.length && page.columns.length > 0)) context.addIssue({ code: "custom", path: ["preview"], message: "table row exceeds visible columns" });
+});
+var outputChildSchema = external_exports.lazy(() => richOutputPayloadSchema);
+var textOutputSchema = protocolJsonSchema.pipe(external_exports.object({ kind: external_exports.literal("text"), text: boundedUtf8StringSchema(MAX_FRAME_BYTES), truncated: external_exports.boolean() }).strict());
+var tableOutputShape = external_exports.object({
+  kind: external_exports.literal("table"),
+  nrow: protocolIntegerSchema,
+  ncol: protocolIntegerSchema,
+  columns: external_exports.array(boundedUtf8StringSchema(256)).max(MAX_TABLE_COLUMNS),
+  preview: tablePreviewSchema,
+  offset: protocolIntegerSchema,
+  limit: external_exports.number().int().min(1).max(200).safe(),
+  sort_by: boundedUtf8StringSchema(256),
+  sort_desc: external_exports.boolean(),
+  filter: boundedUtf8StringSchema(MAX_FRAME_BYTES),
+  truncated_rows: external_exports.boolean(),
+  truncated_columns: external_exports.boolean(),
+  handle: outputHandleIdSchema,
+  page: tablePageSchema.nullable().optional()
+}).strict().superRefine((table, context) => {
+  if (table.ncol !== 0 && table.columns.length > table.ncol) context.addIssue({ code: "custom", path: ["columns"], message: "too many table columns" });
+});
+var tableOutputSchema = protocolJsonSchema.pipe(tableOutputShape);
+var imageOutputSchema = protocolJsonSchema.pipe(
+  external_exports.object({ kind: external_exports.literal("image"), artifact: external_exports.lazy(() => artifactHandleSchema), mime: boundedUtf8StringSchema(256).optional(), alt: boundedUtf8StringSchema(4096).optional() }).strict().superRefine((value, context) => {
+    const declaredMime = value.mime ?? value.artifact.mimeType;
+    if (!mediaMimeCompatible("image", declaredMime)) {
+      context.addIssue({ code: "custom", path: ["artifact", "mimeType"], message: "image output MIME type is incompatible with image output" });
+    }
+    if (value.mime !== void 0 && !sameMimeEssence(value.mime, value.artifact.mimeType)) {
+      context.addIssue({ code: "custom", path: ["mime"], message: "image output MIME does not match its artifact" });
+    }
+  })
+);
+var inlineHtmlOutputSchema = external_exports.object({ kind: external_exports.literal("html"), html: boundedUtf8StringSchema(MAX_FRAME_BYTES), alt_text: boundedUtf8StringSchema(4096).optional() }).strict();
+var sandboxHtmlOutputSchema = external_exports.object({ kind: external_exports.literal("html"), artifact: external_exports.lazy(() => artifactHandleSchema), alt_text: boundedUtf8StringSchema(4096).optional() }).strict().superRefine((value, context) => {
+  if (!htmlMimeCompatible(value.artifact.mimeType)) {
+    context.addIssue({ code: "custom", path: ["artifact", "mimeType"], message: "HTML output artifact MIME type is not an HTML document" });
+  }
+});
+var htmlOutputSchema = protocolJsonSchema.pipe(external_exports.union([inlineHtmlOutputSchema, sandboxHtmlOutputSchema]));
+var markdownOutputSchema = protocolJsonSchema.pipe(external_exports.object({ kind: external_exports.literal("markdown"), html: boundedUtf8StringSchema(MAX_FRAME_BYTES), text: boundedUtf8StringSchema(MAX_FRAME_BYTES) }).strict());
+var mediaOutputSchema = protocolJsonSchema.pipe(
+  external_exports.object({ kind: external_exports.literal("media"), media_type: external_exports.enum(["image", "audio", "video", "pdf"]), artifact: external_exports.lazy(() => artifactHandleSchema), mime: boundedUtf8StringSchema(256, true), alt: boundedUtf8StringSchema(4096) }).strict().superRefine((value, context) => {
+    if (!mediaMimeCompatible(value.media_type, value.mime)) {
+      context.addIssue({ code: "custom", path: ["mime"], message: "media output MIME type is incompatible with media_type" });
+    }
+    if (!sameMimeEssence(value.mime, value.artifact.mimeType)) {
+      context.addIssue({ code: "custom", path: ["artifact", "mimeType"], message: "media output MIME does not match its artifact" });
+    }
+    if (!mediaMimeCompatible(value.media_type, value.artifact.mimeType)) {
+      context.addIssue({ code: "custom", path: ["artifact", "mimeType"], message: "artifact MIME type is incompatible with media_type" });
+    }
+  })
+);
+var widgetKindSchema = external_exports.enum(["slider", "range_slider", "number", "dropdown", "radio", "multiselect", "text_input", "text_area", "checkbox", "switch", "run_button", "button", "date", "date_range", "datetime", "code_editor", "refresh", "file", "table", "dataframe", "array", "dictionary", "form"]);
+var widgetLabelSchema = boundedUtf8StringSchema(4096).nullable().optional();
+var widgetNameSchema = boundedUtf8StringSchema(MAX_ID_BYTES).optional();
+var widgetChoiceSchema = external_exports.union([boundedUtf8StringSchema(4096), finiteNumberSchema, external_exports.boolean()]);
+var widgetChoicesSchema = external_exports.array(widgetChoiceSchema).min(1).max(MAX_PROTOCOL_COLLECTION_ITEMS).superRefine((choices, context) => {
+  if (choices.length === 0) return;
+  const type = typeof choices[0];
+  const seen = /* @__PURE__ */ new Set();
+  choices.forEach((choice, index) => {
+    if (typeof choice !== type) context.addIssue({ code: "custom", path: [index], message: "choices must have one scalar type" });
+    const key = JSON.stringify([typeof choice, choice]);
+    if (seen.has(key)) context.addIssue({ code: "custom", path: [index], message: "choices must be unique" });
+    seen.add(key);
+  });
+});
+var widgetBase = { label: widgetLabelSchema, name: widgetNameSchema };
+var sliderSpecSchema = external_exports.object({ ...widgetBase, kind: external_exports.literal("slider"), value: finiteNumberSchema, min: finiteNumberSchema, max: finiteNumberSchema, step: finiteNumberSchema.positive() }).strict().superRefine((spec, context) => {
+  if (spec.min > spec.max) context.addIssue({ code: "custom", path: ["max"], message: "min must not exceed max" });
+  if (spec.value < spec.min || spec.value > spec.max) context.addIssue({ code: "custom", path: ["value"], message: "value is outside slider bounds" });
+  if (Math.abs((spec.value - spec.min) / spec.step - Math.round((spec.value - spec.min) / spec.step)) > 1e-9) context.addIssue({ code: "custom", path: ["value"], message: "value is off the step lattice" });
+});
+var rangeSliderSpecSchema = external_exports.object({ ...widgetBase, kind: external_exports.literal("range_slider"), value: external_exports.tuple([finiteNumberSchema, finiteNumberSchema]), min: finiteNumberSchema, max: finiteNumberSchema, step: finiteNumberSchema.positive() }).strict().superRefine((spec, context) => {
+  if (spec.min > spec.max) context.addIssue({ code: "custom", path: ["max"], message: "min must not exceed max" });
+  const values = spec.value;
+  if (!isFiniteNumberPair(values)) return;
+  if (values[0] > values[1] || values.some((value) => value < spec.min || value > spec.max)) context.addIssue({ code: "custom", path: ["value"], message: "value is outside range slider bounds" });
+  for (const value of values) if (Math.abs((value - spec.min) / spec.step - Math.round((value - spec.min) / spec.step)) > 1e-9) context.addIssue({ code: "custom", path: ["value"], message: "value is off the step lattice" });
+});
+var numberSpecSchema = external_exports.object({ ...widgetBase, kind: external_exports.literal("number"), value: finiteNumberSchema, min: finiteNumberSchema.nullable().optional(), max: finiteNumberSchema.nullable().optional(), step: finiteNumberSchema.positive() }).strict().superRefine((spec, context) => {
+  if (spec.min !== void 0 && spec.min !== null && spec.max !== void 0 && spec.max !== null && spec.min > spec.max) context.addIssue({ code: "custom", path: ["max"], message: "min must not exceed max" });
+  if (spec.min !== void 0 && spec.min !== null && spec.value < spec.min) context.addIssue({ code: "custom", path: ["value"], message: "value is below min" });
+  if (spec.max !== void 0 && spec.max !== null && spec.value > spec.max) context.addIssue({ code: "custom", path: ["value"], message: "value exceeds max" });
+  const base = spec.min ?? 0;
+  if (Math.abs((spec.value - base) / spec.step - Math.round((spec.value - base) / spec.step)) > 1e-9) context.addIssue({ code: "custom", path: ["value"], message: "value is off the step lattice" });
+});
+function choiceSpecSchema(kind) {
+  const valueSchema = kind === "multiselect" ? external_exports.array(widgetChoiceSchema) : widgetChoiceSchema;
+  return external_exports.object({ ...widgetBase, kind: external_exports.literal(kind), value: valueSchema, choices: widgetChoicesSchema, ...kind === "multiselect" ? { indices: external_exports.array(positiveIntegerSchema).optional() } : { index: positiveIntegerSchema.optional() } }).strict().superRefine((spec, context) => {
+    const candidate = spec;
+    const choiceType = typeof candidate.choices[0];
+    if (kind === "multiselect") {
+      const values = candidate.value;
+      const seen = /* @__PURE__ */ new Set();
+      let previous = 0;
+      values.forEach((value, index) => {
+        if (typeof value !== choiceType) context.addIssue({ code: "custom", path: ["value", index], message: "value type differs from choices" });
+        const choiceIndex = candidate.choices.findIndex((choice) => typeof choice === typeof value && Object.is(choice, value));
+        if (choiceIndex < 0) context.addIssue({ code: "custom", path: ["value", index], message: "value is not a choice" });
+        const valueKey = JSON.stringify([typeof value, value]);
+        if (seen.has(valueKey)) context.addIssue({ code: "custom", path: ["value", index], message: "value contains duplicates" });
+        seen.add(valueKey);
+        if (choiceIndex >= 0 && choiceIndex < previous) context.addIssue({ code: "custom", path: ["value", index], message: "value must follow choice order" });
+        if (choiceIndex >= 0) previous = choiceIndex;
+      });
+      if (candidate.indices !== void 0) {
+        if (candidate.indices.length !== values.length) context.addIssue({ code: "custom", path: ["indices"], message: "indices must match selected values" });
+        candidate.indices.forEach((index, position) => {
+          if (index > candidate.choices.length || position > 0 && index <= candidate.indices[position - 1]) context.addIssue({ code: "custom", path: ["indices", position], message: "invalid choice index" });
+        });
+      }
+    } else {
+      const value = candidate.value;
+      const choiceIndex = candidate.choices.findIndex((choice) => typeof choice === typeof value && Object.is(choice, value));
+      if (typeof value !== choiceType || choiceIndex < 0) context.addIssue({ code: "custom", path: ["value"], message: "value must be one of choices" });
+      if (candidate.index !== void 0 && (candidate.index > candidate.choices.length || candidate.index !== choiceIndex + 1)) context.addIssue({ code: "custom", path: ["index"], message: "index does not identify value" });
+    }
+  });
+}
+var dateValueSchema = boundedUtf8StringSchema(10).regex(/^\d{4}-\d{2}-\d{2}$/, "invalid date").refine((value) => {
+  const millis = Date.parse(value + "T00:00:00Z");
+  return Number.isFinite(millis) && new Date(millis).toISOString().slice(0, 10) === value;
+}, "invalid calendar date");
+var datetimeValueSchema = boundedUtf8StringSchema(32).regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/, "invalid UTC datetime").refine((value) => {
+  const millis = Date.parse(value);
+  return Number.isFinite(millis) && new Date(millis).toISOString().slice(0, 19) + "Z" === value;
+}, "invalid datetime");
+var fileRowSchema = external_exports.object({ name: boundedUtf8StringSchema(4096, true), size: finiteNumberSchema.nonnegative(), path: boundedUtf8StringSchema(32 * 1024, true) }).strict();
+var fileValueSchema = external_exports.array(fileRowSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS);
+var tableWidgetPageSchema = tablePageSchema.nullable().optional();
+var widgetSpecSchema = external_exports.lazy(() => widgetSpecUnion);
+var widgetCompositeChildrenSchema = external_exports.array(widgetSpecSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS);
+var widgetArraySpecSchema = external_exports.object({ ...widgetBase, kind: external_exports.literal("array"), value: protocolJsonSchema, children: widgetCompositeChildrenSchema }).strict().superRefine((spec, context) => {
+  const names = spec.children.map((child) => child.name).filter((name) => typeof name === "string");
+  if (new Set(names).size !== names.length) context.addIssue({ code: "custom", path: ["children"], message: "child names must be unique" });
+});
+var widgetDictionarySpecSchema = external_exports.object({ ...widgetBase, kind: external_exports.literal("dictionary"), value: protocolJsonSchema, children: external_exports.array(widgetSpecSchema).min(1).max(MAX_PROTOCOL_COLLECTION_ITEMS) }).strict().superRefine((spec, context) => {
+  const names = spec.children.map((child) => child.name);
+  if (names.some((name) => typeof name !== "string" || name.length === 0) || new Set(names).size !== names.length) context.addIssue({ code: "custom", path: ["children"], message: "dictionary child names must be unique and non-empty" });
+});
+var widgetFormSpecSchema = external_exports.object({ ...widgetBase, kind: external_exports.literal("form"), value: protocolJsonSchema.nullable(), submit_label: boundedUtf8StringSchema(4096), dirty: external_exports.boolean(), child: widgetSpecSchema }).strict();
+var widgetSpecUnion = external_exports.union([
+  sliderSpecSchema,
+  rangeSliderSpecSchema,
+  numberSpecSchema,
+  choiceSpecSchema("dropdown"),
+  choiceSpecSchema("radio"),
+  choiceSpecSchema("multiselect"),
+  external_exports.object({ ...widgetBase, kind: external_exports.literal("text_input"), value: boundedUtf8StringSchema(MAX_FRAME_BYTES) }).strict(),
+  external_exports.object({ ...widgetBase, kind: external_exports.literal("text_area"), value: boundedUtf8StringSchema(MAX_FRAME_BYTES), rows: positiveIntegerSchema }).strict(),
+  external_exports.object({ ...widgetBase, kind: external_exports.literal("code_editor"), value: boundedUtf8StringSchema(MAX_FRAME_BYTES), language: external_exports.enum(["r", "sql", "python", "markdown", "json"]) }).strict(),
+  external_exports.object({ ...widgetBase, kind: external_exports.literal("checkbox"), value: external_exports.boolean() }).strict(),
+  external_exports.object({ ...widgetBase, kind: external_exports.literal("switch"), value: external_exports.boolean() }).strict(),
+  external_exports.object({ ...widgetBase, kind: external_exports.literal("run_button"), value: external_exports.boolean() }).strict(),
+  external_exports.object({ ...widgetBase, kind: external_exports.literal("button"), value: protocolIntegerSchema }).strict(),
+  external_exports.object({ ...widgetBase, kind: external_exports.literal("date"), value: dateValueSchema, min: dateValueSchema.nullable().optional(), max: dateValueSchema.nullable().optional() }).strict().superRefine((spec, context) => {
+    if (spec.min && spec.max && spec.min > spec.max) context.addIssue({ code: "custom", path: ["max"], message: "min must not exceed max" });
+    if (spec.min && spec.value < spec.min) context.addIssue({ code: "custom", path: ["value"], message: "value is below min" });
+    if (spec.max && spec.value > spec.max) context.addIssue({ code: "custom", path: ["value"], message: "value exceeds max" });
+  }),
+  external_exports.object({ ...widgetBase, kind: external_exports.literal("date_range"), value: external_exports.tuple([dateValueSchema, dateValueSchema]), min: dateValueSchema.nullable().optional(), max: dateValueSchema.nullable().optional() }).strict().superRefine((spec, context) => {
+    if (spec.value[0] > spec.value[1]) context.addIssue({ code: "custom", path: ["value"], message: "date range must be ordered" });
+    if (spec.min && spec.max && spec.min > spec.max) context.addIssue({ code: "custom", path: ["max"], message: "min must not exceed max" });
+    if (spec.min && spec.value[0] < spec.min) context.addIssue({ code: "custom", path: ["value"], message: "value is below min" });
+    if (spec.max && spec.value[1] > spec.max) context.addIssue({ code: "custom", path: ["value"], message: "value exceeds max" });
+  }),
+  external_exports.object({ ...widgetBase, kind: external_exports.literal("datetime"), value: datetimeValueSchema, min: datetimeValueSchema.nullable().optional(), max: datetimeValueSchema.nullable().optional() }).strict().superRefine((spec, context) => {
+    if (spec.min && spec.max && spec.min > spec.max) context.addIssue({ code: "custom", path: ["max"], message: "min must not exceed max" });
+    if (spec.min && spec.value < spec.min) context.addIssue({ code: "custom", path: ["value"], message: "value is below min" });
+    if (spec.max && spec.value > spec.max) context.addIssue({ code: "custom", path: ["value"], message: "value exceeds max" });
+  }),
+  external_exports.object({ ...widgetBase, kind: external_exports.literal("refresh"), value: protocolIntegerSchema, interval: finiteNumberSchema.min(0.5), paused: external_exports.boolean() }).strict(),
+  external_exports.object({ ...widgetBase, kind: external_exports.literal("file"), value: fileValueSchema, accept: external_exports.array(boundedUtf8StringSchema(1024, true)).min(1).nullable().optional(), multiple: external_exports.boolean() }).strict(),
+  external_exports.object({ ...widgetBase, kind: external_exports.literal("table"), value: protocolJsonSchema, handle: outputHandleIdSchema, selection: external_exports.enum(["multi", "single", "none"]), page_size: external_exports.number().int().min(1).max(200).safe(), selected: external_exports.array(protocolIntegerSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS), page: tableWidgetPageSchema }).strict(),
+  external_exports.object({ ...widgetBase, kind: external_exports.literal("dataframe"), value: protocolJsonSchema, handle: outputHandleIdSchema, ops: protocolJsonSchema, page: tableWidgetPageSchema }).strict(),
+  widgetArraySpecSchema,
+  widgetDictionarySpecSchema,
+  widgetFormSpecSchema
+]);
+var widgetOutputShape = external_exports.object({ kind: external_exports.literal("widget"), name: idSchema, owner: idSchema, path: external_exports.array(idSchema).max(256), commit_token: protocolIntegerSchema.nullable(), operation: widgetOperationSchema.nullable(), operations: safeStringRecordSchema(widgetOperationSchema).optional(), spec: widgetSpecSchema }).strict();
+var widgetOutputSchema = protocolJsonSchema.pipe(widgetOutputShape);
+var calloutLayoutSchema = external_exports.object({ kind: external_exports.literal("layout"), layout: external_exports.literal("callout"), attrs: external_exports.object({ variant: external_exports.enum(["info", "warn", "danger", "success"]) }).strict(), children: external_exports.array(outputChildSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS) }).strict();
+var hstackLayoutSchema = external_exports.object({ kind: external_exports.literal("layout"), layout: external_exports.literal("hstack"), attrs: external_exports.object({ gap: finiteNumberSchema.nonnegative().max(4096), align: external_exports.enum(["start", "center", "end", "stretch"]), justify: external_exports.enum(["start", "center", "end", "space-between", "space-around", "space-evenly"]) }).strict(), children: external_exports.array(outputChildSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS) }).strict();
+var vstackLayoutSchema = external_exports.object({ kind: external_exports.literal("layout"), layout: external_exports.literal("vstack"), attrs: external_exports.object({ gap: finiteNumberSchema.nonnegative().max(4096) }).strict(), children: external_exports.array(outputChildSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS) }).strict();
+var titledLayoutSchema = external_exports.object({ kind: external_exports.literal("layout"), layout: external_exports.enum(["tabs", "accordion"]), attrs: external_exports.object({ titles: external_exports.array(boundedUtf8StringSchema(4096)).max(MAX_PROTOCOL_COLLECTION_ITEMS) }).strict(), children: external_exports.array(outputChildSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS) }).strict().superRefine((layout, context) => {
+  if (layout.attrs.titles.length !== 0 && layout.attrs.titles.length !== layout.children.length) context.addIssue({ code: "custom", path: ["attrs", "titles"], message: "titles must match children" });
+});
+var sidebarLayoutSchema = external_exports.object({ kind: external_exports.literal("layout"), layout: external_exports.literal("sidebar"), attrs: external_exports.object({}).strict(), children: external_exports.array(outputChildSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS) }).strict();
+var layoutOutputShape = external_exports.union([calloutLayoutSchema, hstackLayoutSchema, vstackLayoutSchema, titledLayoutSchema, sidebarLayoutSchema]);
+var layoutOutputSchema = protocolJsonSchema.pipe(layoutOutputShape);
+var lazyOutputSchema = protocolJsonSchema.pipe(external_exports.object({ kind: external_exports.literal("lazy"), key: outputHandleIdSchema, label: boundedUtf8StringSchema(4096), state: external_exports.enum(["collapsed", "pending", "ready", "error"]), child: outputChildSchema.nullable() }).strict());
+var progressOutputSchema = protocolJsonSchema.pipe(external_exports.object({ kind: external_exports.literal("progress"), value: finiteNumberSchema.nonnegative(), total: finiteNumberSchema.nonnegative().nullable(), label: boundedUtf8StringSchema(4096), done: external_exports.boolean() }).strict());
+var errorOutputSchema = protocolJsonSchema.pipe(external_exports.object({ kind: external_exports.literal("error"), code: boundedUtf8StringSchema(256).optional(), message: boundedUtf8StringSchema(MAX_FRAME_BYTES) }).strict());
+var richOutputShape = external_exports.union([textOutputSchema, tableOutputSchema, imageOutputSchema, htmlOutputSchema, markdownOutputSchema, mediaOutputSchema, widgetOutputSchema, layoutOutputSchema, lazyOutputSchema, progressOutputSchema, errorOutputSchema]);
+var artifactHandleShape = external_exports.object({ handle: artifactHandleIdSchema, mimeType: boundedUtf8StringSchema(256, true), byteLength: protocolIntegerSchema.max(MAX_ARTIFACT_BYTES), chunkBytes: external_exports.literal(OUTPUT_CHUNK_BYTES), epoch: idSchema, documentRevision: revisionSchema, kernelEpoch: idSchema.nullable() }).strict();
+var artifactHandleSchema = protocolJsonSchema.pipe(artifactHandleShape);
+var ARTIFACT_RESOLUTION_MEDIA_TYPE = "application/vnd.alder.artifact+json";
+var ARTIFACT_DESCRIPTOR_HEADER = "x-alder-artifact";
+var MAX_ARTIFACT_DESCRIPTOR_HEADER_BYTES = 4096;
+var artifactResourceNamePattern = "[A-Za-z0-9][A-Za-z0-9._-]{0,255}";
+var artifactResourceNameSchema = boundedUtf8StringSchema(256, true).regex(new RegExp("^" + artifactResourceNamePattern + "(?![\\s\\S])"));
+var artifactResolutionSchema = external_exports.object({
+  artifact: artifactHandleSchema,
+  url: boundedUtf8StringSchema(512, true).regex(new RegExp("^/artifacts/[A-Za-z0-9_-]{43}/" + artifactResourceNamePattern + "(?![\\s\\S])")),
+  expiresAt: positiveIntegerSchema
+}).strict();
+function encodeArtifactDescriptor(descriptor) {
+  const encoded = encodeURIComponent(JSON.stringify(artifactHandleSchema.parse(descriptor)));
+  if (encoded.length > MAX_ARTIFACT_DESCRIPTOR_HEADER_BYTES) throw new Error("artifact descriptor exceeds its header limit");
+  return encoded;
+}
+function sameArtifactHandle(left, right) {
+  return left.handle === right.handle && left.mimeType === right.mimeType && left.byteLength === right.byteLength && left.chunkBytes === right.chunkBytes && left.epoch === right.epoch && left.documentRevision === right.documentRevision && left.kernelEpoch === right.kernelEpoch;
+}
+var canonicalJsonOutputSchema = external_exports.object({ mime: external_exports.literal("application/json"), value: protocolJsonSchema, preview: boundedUtf8StringSchema(MAX_FRAME_BYTES) }).strict();
+var outputDataSchema = external_exports.union([external_exports.lazy(() => richOutputPayloadSchema), canonicalJsonOutputSchema]);
+var outputMetadataSchema = protocolJsonRecordSchema.superRefine((value, context) => {
+  if (value.presentation !== "inline" && value.presentation !== "sandbox") context.addIssue({ code: "custom", path: ["presentation"], message: "host output metadata must declare presentation" });
+});
+var outputRecordShape = external_exports.object({ id: idSchema, sessionEpoch: idSchema, kernelEpoch: idSchema.nullable(), runId: idSchema.nullable(), cellId: idSchema, revision: revisionSchema, sequence: positiveIntegerSchema, data: outputDataSchema, metadata: outputMetadataSchema, truncated: external_exports.boolean() }).strict().superRefine((record2, context) => {
+  if (record2.kernelEpoch === null !== (record2.runId === null)) {
+    context.addIssue({ code: "custom", path: ["kernelEpoch"], message: "kernelEpoch and runId must be paired" });
+    context.addIssue({ code: "custom", path: ["runId"], message: "kernelEpoch and runId must be paired" });
+  }
+});
+var outputRecordSchema = protocolJsonSchema.pipe(outputRecordShape);
+var sessionIdentitySchema = external_exports.object({ sessionKey: idSchema, canonicalPath: pathSchema.nullable(), origin: boundedUtf8StringSchema(2048, true), browserOrigin: boundedUtf8StringSchema(2048, true), epoch: idSchema, processNonce: idSchema }).strict();
+var sessionRegistryMetadataSchema = external_exports.object({ state: external_exports.enum(["starting", "ready", "stopping"]), pid: positiveIntegerSchema, processNonce: idSchema, continuityProof: idSchema, startIdentity: idSchema, canonicalPath: pathSchema.nullable(), origin: boundedUtf8StringSchema(2048, true), epoch: idSchema, token: external_exports.string().regex(/^[0-9a-f]{64}$/), protocol: external_exports.literal(HOST_PROTOCOL), address: external_exports.object({ host: boundedUtf8StringSchema(256, true), port: external_exports.number().int().min(0).max(65535).safe(), origin: boundedUtf8StringSchema(2048, true), browserOrigin: boundedUtf8StringSchema(2048, true) }).strict().optional() }).strict();
+var sessionLeaseSchema = external_exports.object({ leaseId: idSchema, clientId: idSchema, nextCommandSequence: positiveIntegerSchema, epoch: idSchema }).strict();
+var attachLeaseRequestSchema = external_exports.object({ action: external_exports.literal("attach") }).strict();
+var leaseActionRequestSchema = external_exports.object({ action: external_exports.enum(["heartbeat", "release"]), leaseId: idSchema }).strict();
+var ticketMintRequestSchema = external_exports.object({ origin: boundedUtf8StringSchema(2048, true) }).strict();
+var ticketMintResponseSchema = external_exports.object({ ticket: idSchema, expiresAt: boundedUtf8StringSchema(256, true) }).strict();
+var ticketExchangeRequestSchema = external_exports.object({ ticket: idSchema }).strict();
+var ticketExchangeResponseSchema = external_exports.object({ leaseId: idSchema, clientId: idSchema, nextCommandSequence: positiveIntegerSchema, epoch: idSchema, continuityProof: idSchema, csrf: idSchema, recoveryKey: external_exports.string().regex(/^[A-Za-z0-9_-]{43}$/).optional(), recoveryKeyId: external_exports.string().regex(/^[A-Za-z0-9_-]{43}$/).optional() }).strict();
+var hostIdentitySchema = external_exports.object({ protocol: external_exports.literal(HOST_PROTOCOL), epoch: idSchema, processNonce: idSchema, continuityProof: idSchema, sessionKey: idSchema, canonicalPath: pathSchema.nullable(), capabilities: external_exports.array(boundedUtf8StringSchema(256, true)).max(MAX_PROTOCOL_COLLECTION_ITEMS), origin: boundedUtf8StringSchema(2048, true), browserOrigin: boundedUtf8StringSchema(2048, true), address: external_exports.object({ host: boundedUtf8StringSchema(256, true), port: external_exports.number().int().min(0).max(65535).safe(), origin: boundedUtf8StringSchema(2048, true), browserOrigin: boundedUtf8StringSchema(2048, true) }).strict().optional(), documentReady: external_exports.boolean(), configuration: hostConfigurationSchema }).strict();
+var sessionConnectionSchema = external_exports.object({ sessionKey: idSchema, canonicalPath: pathSchema.nullable(), origin: boundedUtf8StringSchema(2048, true), browserOrigin: boundedUtf8StringSchema(2048, true), epoch: idSchema, processNonce: idSchema, continuityProof: idSchema, leaseId: idSchema, clientId: idSchema, nextCommandSequence: positiveIntegerSchema, capabilities: external_exports.array(boundedUtf8StringSchema(256, true)).max(MAX_PROTOCOL_COLLECTION_ITEMS) }).strict();
+var windowActionSchema = external_exports.enum(["new", "open", "save", "save-as", "publish", "run-cell", "run-all", "run-stale", "interrupt", "restart", "settings", "select-r", "close"]);
+var windowActionMessageSchema = external_exports.object({ action: windowActionSchema }).strict();
+var windowStateSchema = external_exports.object({ path: pathSchema.nullable(), dirty: external_exports.boolean(), platform: boundedUtf8StringSchema(64, true), sessionEpoch: idSchema }).strict();
+var ProtocolError = class extends Error {
+  code;
+  constructor(code, message2) {
+    super(message2);
+    this.name = "ProtocolError";
+    this.code = code;
+  }
+};
+function decodeJsonFrame(input2, maxBytes = MAX_FRAME_BYTES) {
+  try {
+    return parseStrictJson(input2, { maxBytes, maxDepth: MAX_JSON_DEPTH });
+  } catch (error61) {
+    const value = error61;
+    const message2 = typeof value.message === "string" ? value.message : "frame is not valid JSON";
+    const code = typeof value.code === "string" ? value.code : message2.startsWith("duplicate object key") ? "duplicate_key" : message2.startsWith("invalid UTF-8") ? "invalid_utf8" : message2.startsWith("JSON nesting limit exceeded") ? "nesting_too_deep" : message2.startsWith("JSON input exceeds") ? "frame_too_large" : "invalid_json";
+    throw new ProtocolError(code, message2);
+  }
 }
 function sourceLinesByteLength(lines) {
   let bytes = 0;
@@ -20401,45 +21223,139 @@ function notebookSourceByteLength(cells) {
   }
   return bytes;
 }
-function inspectJsonStructure(source) {
-  const tokens = /"(?:[^"\\]*\\[\s\S])*[^"\\]*"(\s*:)?|[{}\[\]]|[^\s{}\[\],:"]+/g;
-  const stack = [];
-  let match;
-  while ((match = tokens.exec(source)) !== null) {
-    const token = match[0];
-    if (token === "}" || token === "]") {
-      stack.pop();
-    } else if (match[1]) {
-      const quoted = token.slice(0, -match[1].length);
-      let key;
-      try {
-        key = quoted.includes("\\") ? JSON.parse(quoted) : quoted.slice(1, -1);
-      } catch {
-        throw new ProtocolError("invalid_json", "invalid JSON object key");
-      }
-      const keys = stack[stack.length - 1];
-      if (keys?.has(key)) {
-        throw new ProtocolError("duplicate_key", `duplicate JSON object key: ${key}`);
-      }
-      keys?.add(key);
-    } else {
-      if (stack.length > MAX_JSON_DEPTH) {
-        throw new ProtocolError("nesting_too_deep", `JSON nesting exceeds ${MAX_JSON_DEPTH}`);
-      }
-      if (token === "{" || token === "[") {
-        stack.push(token === "{" ? /* @__PURE__ */ new Set() : null);
-      }
-    }
+function wireRecord(value, label) {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) throw new ProtocolError("invalid_request", label + " must be an object");
+  return value;
+}
+function wireArray(value, label) {
+  if (!Array.isArray(value)) throw new ProtocolError("invalid_request", label + " must be an array");
+  return value;
+}
+function sourceLines(value, label) {
+  const decoded = decodeWireSource(value);
+  if (!Array.isArray(decoded)) throw new ProtocolError("invalid_request", label + " must use a line-array transfer value");
+  return decoded;
+}
+function stringLines(value, label) {
+  if (!Array.isArray(value) || value.some((line) => typeof line !== "string")) throw new ProtocolError("invalid_request", label + " must be an array of strings");
+  return value;
+}
+function stringValue(value, label) {
+  if (typeof value !== "string") throw new ProtocolError("invalid_request", label + " must be a string");
+  return value;
+}
+function encodeDocumentChangeWire(value) {
+  const change = wireRecord(value, "document change");
+  switch (change.type) {
+    case "create":
+    case "edit":
+      return { ...change, body: encodeWireSource(stringLines(change.body, "document change body")) };
+    case "text-edit":
+      return {
+        ...change,
+        edits: wireArray(change.edits, "text edits").map((edit) => {
+          const item = wireRecord(edit, "text edit");
+          return { ...item, text: encodeWireSource(stringValue(item.text, "text edit text")) };
+        })
+      };
+    default:
+      return { ...change };
   }
+}
+function encodeHostCommandWire(command) {
+  const value = wireRecord(command, "host command");
+  if ((value.type === "transaction" || value.type === "run") && value.changes !== void 0) {
+    return { ...value, changes: wireArray(value.changes, "command changes").map(encodeDocumentChangeWire) };
+  }
+  return { ...value };
+}
+function encodeCellWire(value) {
+  const cell = wireRecord(value, "cell");
+  if (cell.body === void 0) return { ...cell };
+  return { ...cell, body: encodeWireSource(stringLines(cell.body, "cell body")) };
+}
+function decodeCellWire(value) {
+  const cell = wireRecord(value, "cell");
+  if (cell.body === void 0) return { ...cell };
+  return { ...cell, body: sourceLines(cell.body, "cell body") };
+}
+function snapshotCellWire(value, encode3) {
+  const cell = wireRecord(value, "snapshot cell");
+  if (cell.body === void 0) throw new ProtocolError("invalid_request", "snapshot cell body is required");
+  return encode3 ? encodeCellWire(cell) : decodeCellWire(cell);
+}
+function encodeHostSnapshotWire(snapshot) {
+  return { ...snapshot, cells: wireArray(snapshot.cells, "snapshot cells").map((cell) => snapshotCellWire(cell, true)) };
+}
+function decodeHostSnapshotWire(value) {
+  const snapshot = wireRecord(value, "host snapshot");
+  const cells = wireArray(snapshot.cells, "snapshot cells").map((cell) => snapshotCellWire(cell, false));
+  const decoded = { ...snapshot, cells };
+  if (notebookSourceByteLength(decoded.cells) > MAX_NOTEBOOK_SOURCE_BYTES) throw new ProtocolError("invalid_request", "snapshot source exceeds the transfer budget");
+  return decoded;
+}
+function eventCellPayload(type) {
+  return type === "cell" || type === "cell-started" || type === "cell-completed";
+}
+function encodeHostEventWire(event) {
+  const value = wireRecord(event, "host event");
+  return eventCellPayload(value.type) ? { ...value, payload: encodeCellWire(value.payload) } : { ...value };
+}
+function decodeHostEventWire(value) {
+  const event = wireRecord(value, "host event");
+  return eventCellPayload(event.type) ? { ...event, payload: decodeCellWire(event.payload) } : { ...event };
+}
+function isArtifactHandle(value) {
+  return artifactHandleSchema.safeParse(value).success;
+}
+function encodeRecoveryWire(recovery) {
+  if (isArtifactHandle(recovery)) return recovery;
+  if (recovery.kind === "replay") return { ...recovery, events: recovery.events.map(encodeHostEventWire) };
+  return { ...recovery, snapshot: encodeHostSnapshotWire(recovery.snapshot) };
+}
+function decodeRecoveryWire(value) {
+  if (isArtifactHandle(value)) return value;
+  const recovery = wireRecord(value, "recovery");
+  if (recovery.kind === "replay") return { ...recovery, events: wireArray(recovery.events, "recovery events").map(decodeHostEventWire) };
+  if (recovery.kind === "snapshot") return { ...recovery, snapshot: decodeHostSnapshotWire(recovery.snapshot) };
+  throw new ProtocolError("invalid_request", "invalid recovery transfer");
+}
+function encodeHostQueryWire(query) {
+  const value = wireRecord(query, "host query");
+  return { ...value };
+}
+function isSnapshotPayload(value) {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const cells = value.cells;
+  return Array.isArray(cells) && cells.every((cell) => typeof cell === "object" && cell !== null && !Array.isArray(cell) && "body" in cell);
+}
+function mapQueryResultWire(queryType, result, encode3) {
+  if (isArtifactHandle(result)) return result;
+  switch (queryType) {
+    case "notebook":
+      return isSnapshotPayload(result) ? encode3 ? encodeHostSnapshotWire(result) : decodeHostSnapshotWire(result) : result;
+    case "cells":
+      return wireArray(result, "cells query result").map(encode3 ? encodeCellWire : decodeCellWire);
+    case "cell":
+      return encode3 ? encodeCellWire(result) : decodeCellWire(result);
+    case "source":
+      return wireArray(result, "source query result").map(encode3 ? encodeCellWire : decodeCellWire);
+    case "events":
+      return encode3 ? encodeRecoveryWire(result) : decodeRecoveryWire(result);
+    default:
+      return result;
+  }
+}
+function decodeHostQueryResultWire(query, value) {
+  const result = wireRecord(value, "host query result");
+  return { ...result, result: mapQueryResultWire(query.type, result.result, false) };
 }
 
 // src/browser/url.ts
 function notebookUrl(path, href = location.href) {
   const current = new URL(href);
   const target = new URL(path, current.origin);
-  const notebook = notebookIdentity(current);
-  if (notebook !== null) target.searchParams.set("nb", notebook);
-  return `${target.pathname}${target.search}${target.hash}`;
+  return target.pathname + target.search + target.hash;
 }
 function notebookSocketUrl(href = location.href) {
   const current = new URL(href);
@@ -20449,337 +21365,759 @@ function notebookSocketUrl(href = location.href) {
 }
 function notebookViewUrl(view2, href = location.href) {
   const current = new URL(href);
-  const notebook = notebookIdentity(current);
   current.hash = "";
-  if (notebook !== null) current.searchParams.set("nb", notebook);
   current.searchParams.set("view", view2);
-  return `${current.pathname}${current.search}`;
+  return current.pathname + current.search;
 }
-function notebookIdentity(url2) {
-  const explicit = url2.searchParams.get("nb");
-  if (explicit !== null) return explicit;
-  const match = /^\/n\/([^/]+)$/.exec(url2.pathname);
-  if (!match) return null;
+function blocksNotebookNavigation(destination, href = location.href) {
   try {
-    return decodeURIComponent(match[1]);
+    const current = new URL(href);
+    const target = new URL(destination, current.href);
+    return target.hostname === current.hostname && target.origin !== current.origin;
   } catch {
-    return null;
+    return true;
   }
 }
 
 // src/browser/transport.ts
 var BrowserTransportError = class extends Error {
-  constructor(code, message2) {
+  constructor(code, message2, definitive = false) {
     super(message2);
     this.code = code;
+    this.definitive = definitive;
     this.name = "BrowserTransportError";
   }
   code;
+  definitive;
 };
-var SessionRecoveryStore = class {
-  constructor(key = "alder.host.recovery") {
-    this.key = key;
+var MemoryRecoveryStore = class {
+  value = null;
+  drafts = /* @__PURE__ */ new Map();
+  branches = /* @__PURE__ */ new Map();
+  async load() {
+    return this.value === null ? null : { ...this.value };
   }
+  async save(epoch, cursor) {
+    this.value = { epoch, cursor };
+  }
+  async clear() {
+    this.value = null;
+  }
+  async loadDraft(clientId) {
+    const draft = clientId === void 0 ? this.drafts.values().next().value : this.drafts.get(clientId);
+    return draft === void 0 ? null : cloneDraft(draft);
+  }
+  async listDrafts() {
+    return [...this.drafts.values()].map(cloneDraft);
+  }
+  async saveDraft(draft) {
+    this.drafts.set(draft.clientId, cloneDraft(draft));
+  }
+  async clearDraft(clientId) {
+    this.drafts.delete(clientId);
+  }
+  async saveBranch(branchId, draft) {
+    this.branches.set(branchId, cloneDraft(draft));
+  }
+  async listBranches() {
+    return [...this.branches].map(([id, draft]) => ({ id, draft: cloneDraft(draft) }));
+  }
+  async deleteBranch(branchId) {
+    this.branches.delete(branchId);
+  }
+};
+var RECOVERY_ENVELOPE_VERSION = 1;
+var RECOVERY_ALGORITHM = "AES-256-GCM";
+var RECOVERY_IV_BYTES = 12;
+var RECOVERY_KEY_BYTES = 32;
+var RECOVERY_KEY_PATTERN = /^[A-Za-z0-9_-]{43}$/;
+function decodeRecoveryKey(value) {
+  if (value === void 0 || !RECOVERY_KEY_PATTERN.test(value)) return null;
+  try {
+    const normalized = value.replace(/-/g, "+").replace(/_/g, "/") + "=".repeat((4 - value.length % 4) % 4);
+    const binary = globalThis.atob(normalized);
+    if (binary.length !== RECOVERY_KEY_BYTES) return null;
+    return Uint8Array.from(binary, (character) => character.charCodeAt(0));
+  } catch {
+    return null;
+  }
+}
+function isEncryptedRecoveryValue(value) {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const record2 = value;
+  const keys = Object.keys(record2).sort();
+  return keys.length === 5 && keys[0] === "algorithm" && keys[1] === "ciphertext" && keys[2] === "iv" && keys[3] === "keyId" && keys[4] === "schemaVersion" && record2.schemaVersion === RECOVERY_ENVELOPE_VERSION && record2.algorithm === RECOVERY_ALGORITHM && typeof record2.keyId === "string" && RECOVERY_KEY_PATTERN.test(record2.keyId) && record2.iv instanceof Uint8Array && record2.iv.byteLength === RECOVERY_IV_BYTES && record2.ciphertext instanceof Uint8Array && record2.ciphertext.byteLength > 16;
+}
+function recoveryAad(recordKey) {
+  return new TextEncoder().encode("alder-browser-recovery:v1:" + recordKey);
+}
+var IndexedDBRecoveryStore = class _IndexedDBRecoveryStore {
+  static databaseName = "alder-browser-recovery";
+  static databaseVersion = 2;
+  static objectStoreName = "state";
+  memory = new MemoryRecoveryStore();
   key;
-  load() {
-    try {
-      const value = sessionStorage.getItem(this.key);
-      if (!value) return { epoch: null, cursor: null };
-      const parsed = JSON.parse(value);
-      return {
-        epoch: typeof parsed.epoch === "string" ? parsed.epoch : null,
-        cursor: Number.isSafeInteger(parsed.cursor) && parsed.cursor >= 0 ? parsed.cursor : null
+  recoveryKey;
+  recoveryKeyId;
+  databasePromise = null;
+  disabled;
+  cryptoKeyPromise = null;
+  constructor(key, recoveryKey, recoveryKeyId) {
+    this.key = key || "/";
+    this.recoveryKey = decodeRecoveryKey(recoveryKey);
+    this.recoveryKeyId = recoveryKey !== void 0 && recoveryKeyId !== void 0 && RECOVERY_KEY_PATTERN.test(recoveryKeyId) ? recoveryKeyId : null;
+    this.disabled = typeof globalThis.indexedDB === "undefined" || this.recoveryKey === null || this.recoveryKeyId === null || globalThis.crypto?.subtle === void 0;
+  }
+  async load() {
+    const stored = await this.read("cursor");
+    if (isCursorState(stored)) return stored;
+    return this.memory.load();
+  }
+  async save(epoch, cursor) {
+    await this.memory.save(epoch, cursor);
+    await this.write("cursor", { epoch, cursor });
+  }
+  async clear() {
+    await this.memory.clear();
+    await this.remove("cursor");
+  }
+  async loadDraft(clientId) {
+    if (clientId !== void 0) {
+      const stored = await this.read("draft:" + clientId);
+      if (isRecoveryDraft(stored)) return cloneDraft(stored);
+      return this.memory.loadDraft(clientId);
+    }
+    const drafts = await this.listDrafts();
+    return drafts[0] ?? null;
+  }
+  async listDrafts() {
+    const stored = await this.readDrafts();
+    return stored.length > 0 ? stored : this.memory.listDrafts();
+  }
+  async saveDraft(draft) {
+    await this.memory.saveDraft(draft);
+    await this.write("draft:" + draft.clientId, cloneDraft(draft));
+  }
+  async clearDraft(clientId) {
+    await this.memory.clearDraft(clientId);
+    await this.remove("draft:" + clientId);
+  }
+  async saveBranch(branchId, draft) {
+    if (!branchId) return;
+    await this.memory.saveBranch(branchId, draft);
+    await this.write("branch:" + branchId, cloneDraft(draft));
+  }
+  async listBranches() {
+    const stored = await this.readBranches();
+    return stored.length > 0 ? stored : this.memory.listBranches();
+  }
+  async deleteBranch(branchId) {
+    await this.memory.deleteBranch(branchId);
+    await this.remove("branch:" + branchId);
+  }
+  database() {
+    if (this.disabled) return Promise.resolve(null);
+    if (this.databasePromise !== null) return this.databasePromise;
+    this.databasePromise = new Promise((resolve) => {
+      let request;
+      try {
+        request = globalThis.indexedDB.open(_IndexedDBRecoveryStore.databaseName, _IndexedDBRecoveryStore.databaseVersion);
+      } catch {
+        this.disabled = true;
+        resolve(null);
+        return;
+      }
+      request.onupgradeneeded = (event) => {
+        if (!request.result.objectStoreNames.contains(_IndexedDBRecoveryStore.objectStoreName)) {
+          request.result.createObjectStore(_IndexedDBRecoveryStore.objectStoreName);
+        }
+        if (event.oldVersion < 2) request.transaction?.objectStore(_IndexedDBRecoveryStore.objectStoreName).clear();
       };
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => {
+        this.disabled = true;
+        resolve(null);
+      };
+      request.onblocked = () => {
+        this.disabled = true;
+        resolve(null);
+      };
+    });
+    return this.databasePromise;
+  }
+  cryptoKey() {
+    if (this.recoveryKey === null || this.recoveryKeyId === null || this.disabled) return Promise.resolve(null);
+    if (this.cryptoKeyPromise !== null) return this.cryptoKeyPromise;
+    this.cryptoKeyPromise = globalThis.crypto.subtle.importKey("raw", this.recoveryKey, { name: "AES-GCM" }, false, ["encrypt", "decrypt"]).catch(() => {
+      this.disabled = true;
+      return null;
+    });
+    return this.cryptoKeyPromise;
+  }
+  async encrypt(name, value) {
+    if (this.disabled || this.recoveryKeyId === null) return null;
+    const key = await this.cryptoKey();
+    if (key === null) return null;
+    try {
+      const iv = globalThis.crypto.getRandomValues(new Uint8Array(RECOVERY_IV_BYTES));
+      const plaintext = new TextEncoder().encode(JSON.stringify(value));
+      const ciphertext = await globalThis.crypto.subtle.encrypt({ name: "AES-GCM", iv, additionalData: recoveryAad(this.recordKey(name)), tagLength: 128 }, key, plaintext);
+      return { schemaVersion: RECOVERY_ENVELOPE_VERSION, keyId: this.recoveryKeyId, algorithm: RECOVERY_ALGORITHM, iv, ciphertext: new Uint8Array(ciphertext) };
     } catch {
-      return { epoch: null, cursor: null };
+      this.disabled = true;
+      return null;
     }
   }
-  save(epoch, cursor) {
+  async decrypt(name, value) {
+    if (!isEncryptedRecoveryValue(value) || this.recoveryKeyId === null || value.keyId !== this.recoveryKeyId) return null;
+    const key = await this.cryptoKey();
+    if (key === null) return null;
     try {
-      sessionStorage.setItem(this.key, JSON.stringify({ epoch, cursor }));
+      const plaintext = await globalThis.crypto.subtle.decrypt({ name: "AES-GCM", iv: value.iv, additionalData: recoveryAad(this.recordKey(name)), tagLength: 128 }, key, value.ciphertext);
+      return JSON.parse(new TextDecoder().decode(plaintext));
     } catch {
+      return null;
     }
   }
-  clear() {
-    try {
-      sessionStorage.removeItem(this.key);
-    } catch {
-    }
+  async read(name) {
+    const database = await this.database();
+    if (database === null) return null;
+    return new Promise((resolve) => {
+      try {
+        const transaction = database.transaction(_IndexedDBRecoveryStore.objectStoreName, "readonly");
+        const request = transaction.objectStore(_IndexedDBRecoveryStore.objectStoreName).get(this.recordKey(name));
+        request.onsuccess = () => {
+          const raw = request.result;
+          void this.decrypt(name, raw).then((value) => {
+            if (raw !== void 0 && value === null) void this.remove(name).catch(() => void 0);
+            resolve(value);
+          });
+        };
+        request.onerror = () => {
+          this.disabled = true;
+          resolve(null);
+        };
+      } catch {
+        this.disabled = true;
+        resolve(null);
+      }
+    });
+  }
+  async write(name, value) {
+    const encrypted = await this.encrypt(name, value);
+    if (encrypted === null) return;
+    const database = await this.database();
+    if (database === null) return;
+    await new Promise((resolve, reject) => {
+      try {
+        const transaction = database.transaction(_IndexedDBRecoveryStore.objectStoreName, "readwrite");
+        transaction.objectStore(_IndexedDBRecoveryStore.objectStoreName).put(encrypted, this.recordKey(name));
+        transaction.oncomplete = () => resolve();
+        transaction.onabort = () => reject(transaction.error ?? new Error("IndexedDB write transaction aborted"));
+        transaction.onerror = () => reject(transaction.error ?? new Error("IndexedDB write transaction failed"));
+      } catch (error61) {
+        reject(error61);
+      }
+    });
+  }
+  async remove(name) {
+    const database = await this.database();
+    if (database === null) return;
+    await new Promise((resolve, reject) => {
+      try {
+        const transaction = database.transaction(_IndexedDBRecoveryStore.objectStoreName, "readwrite");
+        transaction.objectStore(_IndexedDBRecoveryStore.objectStoreName).delete(this.recordKey(name));
+        transaction.oncomplete = () => resolve();
+        transaction.onabort = () => reject(transaction.error ?? new Error("IndexedDB delete transaction aborted"));
+        transaction.onerror = () => reject(transaction.error ?? new Error("IndexedDB delete transaction failed"));
+      } catch (error61) {
+        reject(error61);
+      }
+    });
+  }
+  async readDrafts() {
+    const database = await this.database();
+    if (database === null) return [];
+    return new Promise((resolve, reject) => {
+      try {
+        const transaction = database.transaction(_IndexedDBRecoveryStore.objectStoreName, "readonly");
+        const store = transaction.objectStore(_IndexedDBRecoveryStore.objectStoreName);
+        const keys = store.getAllKeys();
+        const values = store.getAll();
+        transaction.oncomplete = () => {
+          const entries = keys.result.map((key, index) => ({ key, value: values.result[index] }));
+          void Promise.all(entries.map(async (entry) => {
+            if (typeof entry.key !== "string") return null;
+            const name = this.recordName(entry.key);
+            if (name === null || !name.startsWith("draft:")) return null;
+            const decoded = await this.decrypt(name, entry.value);
+            if (decoded === null) {
+              void this.remove(name).catch(() => void 0);
+              return null;
+            }
+            return isRecoveryDraft(decoded) ? cloneDraft(decoded) : null;
+          })).then((drafts) => {
+            const unique = /* @__PURE__ */ new Map();
+            for (const draft of drafts) if (draft !== null) unique.set(draft.clientId, draft);
+            resolve([...unique.values()]);
+          }).catch(() => resolve([]));
+        };
+        transaction.onabort = () => reject(transaction.error ?? new Error("IndexedDB draft inventory transaction aborted"));
+        transaction.onerror = () => reject(transaction.error ?? new Error("IndexedDB draft inventory transaction failed"));
+      } catch (error61) {
+        reject(error61);
+      }
+    });
+  }
+  async readBranches() {
+    const database = await this.database();
+    if (database === null) return [];
+    return new Promise((resolve, reject) => {
+      try {
+        const transaction = database.transaction(_IndexedDBRecoveryStore.objectStoreName, "readonly");
+        const store = transaction.objectStore(_IndexedDBRecoveryStore.objectStoreName);
+        const keys = store.getAllKeys();
+        const values = store.getAll();
+        transaction.oncomplete = () => {
+          const entries = keys.result.map((key, index) => ({ key, value: values.result[index] }));
+          void Promise.all(entries.map(async (entry) => {
+            if (typeof entry.key !== "string") return null;
+            const name = this.recordName(entry.key);
+            if (name === null || !name.startsWith("branch:")) return null;
+            const decoded = await this.decrypt(name, entry.value);
+            if (decoded === null) {
+              void this.remove(name).catch(() => void 0);
+              return null;
+            }
+            return isRecoveryDraft(decoded) ? { id: name.slice("branch:".length), draft: cloneDraft(decoded) } : null;
+          })).then((branches) => resolve(branches.filter((branch) => branch !== null))).catch(() => resolve([]));
+        };
+        transaction.onabort = () => reject(transaction.error ?? new Error("IndexedDB branch inventory transaction aborted"));
+        transaction.onerror = () => reject(transaction.error ?? new Error("IndexedDB branch inventory transaction failed"));
+      } catch (error61) {
+        reject(error61);
+      }
+    });
+  }
+  recordKey(name) {
+    return this.key + ":" + name;
+  }
+  recordName(value) {
+    const prefix = this.key + ":";
+    return value.startsWith(prefix) ? value.slice(prefix.length) : null;
   }
 };
+function cloneDraft(draft) {
+  return JSON.parse(JSON.stringify(draft));
+}
+function isCursorState(value) {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const record2 = value;
+  return typeof record2.epoch === "string" && record2.epoch.length > 0 && Number.isSafeInteger(record2.cursor) && record2.cursor >= 0;
+}
+function isRecoveryDraft(value) {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const record2 = value;
+  const base = record2.base;
+  if (record2.schemaVersion !== 1 || typeof record2.clientId !== "string" || record2.clientId.length === 0 || !Array.isArray(record2.changes) || typeof base !== "object" || base === null || Array.isArray(base) || !Array.isArray(base.cells)) return false;
+  const identity = base;
+  if (typeof identity.epoch !== "string" || !Number.isSafeInteger(identity.cursor) || identity.cursor < 0 || !Number.isSafeInteger(identity.version) || identity.version < 0 || !Number.isSafeInteger(identity.documentRevision) || identity.documentRevision < 0) return false;
+  if (!identity.cells.every((cell) => {
+    if (typeof cell !== "object" || cell === null || Array.isArray(cell)) return false;
+    const item = cell;
+    return typeof item.id === "string" && item.id.length > 0 && Number.isSafeInteger(item.revision) && item.revision >= 0 && (item.type === "code" || item.type === "markdown") && Array.isArray(item.body) && item.body.every((line) => typeof line === "string");
+  })) return false;
+  if (!record2.changes.every((change) => documentChangeSchema.safeParse(change).success)) return false;
+  const operation = record2.operation;
+  if (operation !== null && operation !== void 0) {
+    if (typeof operation !== "object" || Array.isArray(operation)) return false;
+    const item = operation;
+    if (typeof item.operationId !== "string" || item.operationId.length === 0 || item.kind !== "transaction" && item.kind !== "run" || !Number.isSafeInteger(item.commandSequence) || item.commandSequence < 1 || !Number.isSafeInteger(item.expectedDocumentRevision) || item.expectedDocumentRevision < 0) return false;
+    if (item.clientId !== void 0 && (typeof item.clientId !== "string" || item.clientId.length === 0)) return false;
+    if (item.changes !== void 0 && (!Array.isArray(item.changes) || !item.changes.every((change) => documentChangeSchema.safeParse(change).success))) return false;
+  }
+  return true;
+}
+var OPEN = 1;
+var HANDSHAKE_TIMEOUT_MS = 1e4;
 var BrowserTransport = class {
   constructor(options = {}) {
     this.options = options;
-    this.store = options.recoveryStore ?? new SessionRecoveryStore();
-    this.persistRecovery = options.recoveryStore !== void 0 || options.resumeFromStore === true;
-    const saved = options.resumeFromStore ? this.store.load() : { epoch: null, cursor: null };
-    this.epoch = saved.epoch;
-    this.cursor = saved.cursor;
-    this.clientId = options.clientId ?? browserId();
-    this.webSocketFactory = options.webSocketFactory ?? ((url2) => new WebSocket(url2));
+    const sequence = options.nextCommandSequence ?? 1;
+    this.nextSequence = Number.isSafeInteger(sequence) && sequence > 0 ? sequence : 1;
+    this.recoveryStore = options.recoveryStore ?? new MemoryRecoveryStore();
   }
   options;
   socket = null;
   pending = /* @__PURE__ */ new Map();
-  sequence = 0;
-  openPromise = null;
-  resolveOpen = null;
-  rejectOpen = null;
-  stopped = false;
+  nextSequence;
+  epochValue = null;
+  cursorValue = null;
   recovered = false;
-  reconnectAttempts = 0;
+  stopped = true;
+  generation = 0;
+  attempt = null;
+  connectPromise = null;
+  resolveConnect = null;
+  rejectConnect = null;
   reconnectTimer = null;
-  epoch;
-  cursor;
-  clientId;
-  store;
-  persistRecovery;
-  webSocketFactory;
-  get sessionEpoch() {
-    return this.epoch;
-  }
-  get eventCursor() {
-    return this.cursor;
-  }
+  reconnectAttempts = 0;
+  heartbeatTimer = null;
+  lastRecovery = null;
+  recoveryStore;
   get id() {
-    return this.clientId;
+    return this.options.clientId ?? "";
+  }
+  get leaseId() {
+    return this.options.leaseId ?? "";
+  }
+  get csrf() {
+    return this.options.csrf ?? "";
+  }
+  get continuityProof() {
+    return this.options.continuityProof ?? "";
+  }
+  assertResponseContinuity(response) {
+    const expected = this.options.continuityProof;
+    if (expected !== void 0 && response.headers.get("X-Alder-Continuity-Proof") !== expected) {
+      throw new BrowserTransportError("host_identity_mismatch", "host HTTP continuity proof changed");
+    }
+  }
+  get epoch() {
+    return this.epochValue;
+  }
+  get cursor() {
+    return this.cursorValue;
+  }
+  get commandSequence() {
+    return this.nextSequence;
+  }
+  get url() {
+    return this.options.url ?? notebookSocketUrl();
   }
   connect() {
-    if (this.openPromise) return this.openPromise;
     this.stopped = false;
-    this.recovered = false;
-    this.options.onState?.("connecting");
-    this.openPromise = new Promise((resolve, reject) => {
-      this.resolveOpen = resolve;
-      this.rejectOpen = reject;
+    if (this.recovered && this.socket?.readyState === OPEN && this.lastRecovery !== null) return Promise.resolve(this.lastRecovery);
+    if (this.connectPromise !== null) return this.connectPromise;
+    if (!this.id || !this.leaseId || !this.csrf || !this.continuityProof && this.options.webSocketFactory === void 0) return Promise.reject(new BrowserTransportError("session_credentials_missing", "browser session credentials are missing"));
+    this.connectPromise = new Promise((resolve, reject) => {
+      this.resolveConnect = resolve;
+      this.rejectConnect = reject;
     });
-    this.openSocket();
-    return this.openPromise;
+    this.reconnectAttempts = 0;
+    this.startAttempt();
+    return this.connectPromise;
   }
   dispatch(command) {
-    if (this.stopped) return Promise.reject(new BrowserTransportError("transport_closed", "browser transport is closed"));
-    if (this.pending.size >= (this.options.maxQueuedCommands ?? 1e3)) {
-      return Promise.reject(new BrowserTransportError("client_backpressure", "too many browser commands are pending"));
-    }
-    const sequence = ++this.sequence;
+    if (this.stopped) return Promise.reject(new BrowserTransportError("transport_closed", "browser transport is closed", true));
+    if (this.pending.size >= (this.options.maxQueuedCommands ?? 1e3)) return Promise.reject(new BrowserTransportError("client_backpressure", "too many browser commands are pending", true));
+    if (!this.id || !this.leaseId || !this.csrf) return Promise.reject(new BrowserTransportError("session_credentials_missing", "browser session credentials are missing", true));
+    const sequence = this.nextSequence;
+    if (!Number.isSafeInteger(sequence) || sequence < 1) return Promise.reject(new BrowserTransportError("command_sequence_exhausted", "browser command sequence is exhausted", true));
+    const sessionEpoch = this.epochValue ?? command.sessionEpoch;
+    if (!sessionEpoch) return Promise.reject(new BrowserTransportError("not_ready", "browser session epoch is not known", true));
+    const wireCommand = {
+      ...command,
+      operationId: command.operationId,
+      clientId: this.id,
+      commandSequence: sequence,
+      sessionEpoch
+    };
+    this.nextSequence = sequence + 1;
     return new Promise((resolve, reject) => {
-      this.pending.set(sequence, { sequence, command, sent: false, resolve, reject });
-      this.flushCommands();
+      this.pending.set(sequence, { command: wireCommand, resolve, reject, sentGeneration: -1 });
+      this.flush();
     });
   }
   close() {
-    if (this.stopped) return;
     this.stopped = true;
-    if (this.reconnectTimer !== null) window.clearTimeout(this.reconnectTimer);
-    this.reconnectTimer = null;
-    this.socket?.close(1e3, "browser client closed");
+    this.generation += 1;
+    this.clearReconnectTimer();
+    this.clearHeartbeat();
+    if (this.attempt !== null) clearTimeout(this.attempt.handshakeTimer);
+    const socket = this.socket;
     this.socket = null;
+    this.attempt = null;
+    this.recovered = false;
+    this.lastRecovery = null;
+    if (socket !== null) socket.close();
     const error61 = new BrowserTransportError("transport_closed", "browser transport is closed");
-    this.rejectOpen?.(error61);
-    this.rejectOpen = null;
-    for (const pending of this.pending.values()) pending.reject(error61);
+    this.rejectConnect?.(error61);
+    this.clearConnectPromise();
+    for (const pending of this.pending.values()) pending.reject(new BrowserTransportError(error61.code, error61.message, pending.sentGeneration < 0));
     this.pending.clear();
-    this.options.onState?.("closed");
+    this.options.onState?.("closed", error61);
   }
-  openSocket() {
+  startAttempt() {
     if (this.stopped) return;
+    this.clearReconnectTimer();
+    const generation = ++this.generation;
     let socket;
     try {
-      socket = this.webSocketFactory(this.socketUrl());
+      const factory = this.options.webSocketFactory ?? ((url2) => new WebSocket(url2));
+      socket = factory(this.url);
     } catch (error61) {
-      this.scheduleReconnect(asError(error61));
+      this.handleAttemptFailure(generation, asError(error61, "browser WebSocket construction failed"));
       return;
     }
-    this.socket = socket;
     socket.binaryType = "arraybuffer";
+    let attempt;
+    const handshakeTimer = setTimeout(() => {
+      if (this.isCurrent(attempt)) this.handleAttemptFailure(generation, new BrowserTransportError("transport_closed", "host WebSocket recovery handshake timed out"));
+    }, this.options.handshakeTimeoutMs ?? HANDSHAKE_TIMEOUT_MS);
+    attempt = { generation, socket, receiveChain: Promise.resolve(), handshakeTimer };
+    this.attempt = attempt;
+    this.socket = socket;
+    this.recovered = false;
+    this.options.onState?.("connecting");
     socket.onopen = () => {
-      if (socket !== this.socket || this.stopped) return;
-      this.options.onState?.("recovering");
-      socket.send(JSON.stringify({
-        type: "connect",
-        protocolVersion: 1,
-        clientId: this.clientId,
-        epoch: this.epoch,
-        cursor: this.cursor
-      }));
+      if (!this.isCurrent(attempt)) return;
+      try {
+        socket.send(JSON.stringify({ type: "connect", protocolVersion: HOST_CLIENT_PROTOCOL_VERSION, leaseId: this.leaseId, clientId: this.id, csrf: this.csrf, epoch: this.epochValue, cursor: this.cursorValue }));
+        this.options.onState?.("recovering");
+      } catch (error61) {
+        this.handleAttemptFailure(generation, asError(error61, "browser WebSocket handshake failed"));
+      }
     };
     socket.onmessage = (event) => {
-      if (socket !== this.socket || this.stopped) return;
-      try {
-        this.receive(event.data);
-      } catch (error61) {
-        this.protocolFailure(error61 instanceof BrowserTransportError ? error61 : new BrowserTransportError("invalid_server_message", asError(error61).message));
+      if (!this.isCurrent(attempt)) return;
+      if (this.recovered) {
+        attempt.receiveChain = this.receive(event.data).catch((error61) => this.handleAttemptFailure(generation, asError(error61, "invalid host message")));
+        return;
       }
+      attempt.receiveChain = attempt.receiveChain.then(async () => {
+        if (this.isCurrent(attempt)) await this.receive(event.data);
+      }).catch((error61) => this.handleAttemptFailure(generation, asError(error61, "invalid host message")));
     };
     socket.onerror = () => {
     };
     socket.onclose = (event) => {
-      if (socket !== this.socket) return;
-      this.socket = null;
-      this.recovered = false;
-      for (const pending of this.pending.values()) pending.sent = false;
-      if (this.stopped) return;
-      this.scheduleReconnect(new BrowserTransportError(
-        "connection_lost",
-        event.reason || `WebSocket closed (${event.code})`
-      ));
+      if (!this.isCurrent(attempt)) return;
+      const error61 = new BrowserTransportError("transport_closed", event.reason || "host WebSocket closed");
+      this.handleAttemptFailure(generation, error61);
     };
   }
-  receive(raw) {
-    let message2;
-    try {
-      const encoded = typeof raw === "string" ? raw : raw instanceof ArrayBuffer ? new Uint8Array(raw) : null;
-      if (encoded === null) throw new Error("message is not UTF-8 JSON text");
-      const parsed = decodeJsonFrame(encoded, SNAPSHOT_ENVELOPE_LIMIT);
-      if (!isRecord2(parsed)) throw new Error("message is not an object");
-      message2 = parsed;
-    } catch (error61) {
-      this.protocolFailure(new BrowserTransportError("invalid_server_message", asError(error61).message));
+  isCurrent(attempt) {
+    return !this.stopped && this.attempt === attempt && this.generation === attempt.generation;
+  }
+  handleAttemptFailure(generation, error61) {
+    if (this.stopped || generation !== this.generation) return;
+    this.generation += 1;
+    const socket = this.socket;
+    if (this.attempt !== null) clearTimeout(this.attempt.handshakeTimer);
+    this.socket = null;
+    this.attempt = null;
+    this.recovered = false;
+    this.clearHeartbeat();
+    if (socket !== null) socket.close();
+    this.options.onState?.("closed", error61);
+    if (this.options.reconnect !== false) {
+      this.scheduleReconnect();
       return;
     }
+    const transportError = error61 instanceof BrowserTransportError ? error61 : new BrowserTransportError("transport_closed", error61.message);
+    this.rejectConnect?.(transportError);
+    this.clearConnectPromise();
+    for (const pending of this.pending.values()) pending.reject(transportError);
+    this.pending.clear();
+  }
+  scheduleReconnect() {
+    if (this.stopped || this.reconnectTimer !== null) return;
+    const base = this.options.reconnectDelayMs ?? 100;
+    const maximum = this.options.maxReconnectDelayMs ?? 5e3;
+    const delay = Math.min(maximum, base * 2 ** Math.min(this.reconnectAttempts++, 8));
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      if (!this.stopped) this.startAttempt();
+    }, delay);
+  }
+  clearReconnectTimer() {
+    if (this.reconnectTimer !== null) clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+  }
+  clearHeartbeat() {
+    if (this.heartbeatTimer !== null) clearInterval(this.heartbeatTimer);
+    this.heartbeatTimer = null;
+  }
+  clearConnectPromise() {
+    this.connectPromise = null;
+    this.resolveConnect = null;
+    this.rejectConnect = null;
+  }
+  async receive(raw) {
+    if (typeof raw !== "string" && !(raw instanceof Uint8Array)) throw new BrowserTransportError("invalid_server_message", "host message is not a JSON frame");
+    const message2 = decodeJsonFrame(raw, SNAPSHOT_ENVELOPE_LIMIT);
+    if (!this.recovered && message2.type !== "recovery") throw new BrowserTransportError("host_identity_mismatch", "host sent data before proving its process identity");
     if (message2.type === "recovery") {
-      if (message2.protocolVersion !== 1) {
-        throw new BrowserTransportError("protocol_mismatch", "browser and host protocol versions do not match");
-      }
-      const recovery = parseRecovery(message2.recovery);
-      this.applyRecovery(recovery);
+      if (message2.protocolVersion !== HOST_CLIENT_PROTOCOL_VERSION) throw new BrowserTransportError("protocol_mismatch", "host and browser protocol versions differ");
+      if (this.continuityProof && message2.continuityProof !== this.continuityProof) throw new BrowserTransportError("host_identity_mismatch", "browser reconnected to a different host process");
+      const recovery = await this.loadRecovery(message2.recovery);
+      await this.applyRecovery(recovery);
       this.recovered = true;
+      if (this.attempt !== null) clearTimeout(this.attempt.handshakeTimer);
+      this.lastRecovery = recovery;
       this.reconnectAttempts = 0;
-      this.resolveOpen?.(recovery);
-      this.resolveOpen = null;
-      this.rejectOpen = null;
       this.options.onState?.("open");
-      this.flushCommands();
-      return;
-    }
-    if (!this.recovered) {
-      this.protocolFailure(new BrowserTransportError("invalid_server_message", "server sent data before recovery"));
+      this.resolveConnect?.(recovery);
+      this.clearConnectPromise();
+      this.startHeartbeat();
+      this.flush();
       return;
     }
     if (message2.type === "event") {
-      const event = parseEvent(message2.event);
-      if (event.epoch !== this.epoch || this.cursor !== null && event.cursor <= this.cursor) return;
+      const event = hostEventSchema.parse(decodeHostEventWire(message2.event));
+      if (event.epoch !== this.epochValue || event.cursor <= (this.cursorValue ?? -1)) return;
       this.options.onEvent?.(event);
-      this.epoch = event.epoch;
-      this.cursor = event.cursor;
-      if (this.persistRecovery) this.store.save(this.epoch, this.cursor);
+      this.cursorValue = event.cursor;
+      await this.recoveryStore.save(event.epoch, event.cursor);
       return;
     }
     if (message2.type === "commandResult") {
+      if (!Number.isSafeInteger(message2.sequence)) throw new BrowserTransportError("invalid_server_message", "command result has no sequence");
       const sequence = message2.sequence;
-      if (!Number.isSafeInteger(sequence)) return this.protocolFailure(new BrowserTransportError("invalid_server_message", "invalid command sequence"));
       const pending = this.pending.get(sequence);
       if (!pending) return;
-      const result = parseCommandResult(message2.result);
+      const admission = commandAdmissionSchema.safeParse(message2.result);
+      if (!admission.success) throw new BrowserTransportError("invalid_server_message", "invalid command admission");
       this.pending.delete(sequence);
-      pending.resolve(result);
+      this.nextSequence = Math.max(this.nextSequence, admission.data.nextCommandSequence);
+      pending.resolve(admission.data);
       return;
     }
-    if (message2.type === "commandError") {
-      const sequence = message2.sequence;
-      const detail = isRecord2(message2.error) ? message2.error : {};
-      const error61 = new BrowserTransportError(
-        typeof detail.code === "string" ? detail.code : "internal_error",
-        typeof detail.message === "string" ? detail.message : "command failed"
-      );
-      if (Number.isSafeInteger(sequence)) {
-        const pending = this.pending.get(sequence);
-        if (pending) {
-          this.pending.delete(sequence);
-          pending.reject(error61);
-        }
+    if (message2.type === "error") {
+      const sequence = Number.isSafeInteger(message2.sequence) ? message2.sequence : null;
+      const detail = asErrorDetail(message2.error);
+      if (sequence === null) throw new BrowserTransportError(detail.code, detail.message);
+      const pending = this.pending.get(sequence);
+      if (pending) {
+        this.pending.delete(sequence);
+        pending.reject(new BrowserTransportError(detail.code, detail.message, message2.definitive === true));
       }
       return;
     }
-    if (message2.type !== "pong") this.protocolFailure(new BrowserTransportError("invalid_server_message", "unknown server message"));
+    if (message2.type === "heartbeat" || message2.type === "pong") return;
+    throw new BrowserTransportError("invalid_server_message", "unknown host WebSocket message");
   }
-  applyRecovery(recovery) {
+  async loadRecovery(value) {
+    const descriptor = artifactHandleSchema.safeParse(value);
+    if (descriptor.success) {
+      const bytes = await this.loadArtifact(descriptor.data);
+      const decoded = decodeJsonFrame(bytes, SNAPSHOT_ENVELOPE_LIMIT);
+      return recoverySchema.parse(decodeRecoveryWire(decoded));
+    }
+    return recoverySchema.parse(decodeRecoveryWire(value));
+  }
+  async loadArtifact(descriptor) {
+    if (descriptor.byteLength > SNAPSHOT_ENVELOPE_LIMIT) throw new BrowserTransportError("invalid_server_message", "recovery artifact exceeds the transfer bound");
+    const target = new Uint8Array(descriptor.byteLength);
+    let offset = 0;
+    while (offset < descriptor.byteLength || descriptor.byteLength === 0) {
+      const response = await fetch(this.artifactQueryUrl(), {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json", "X-Alder-CSRF": this.csrf },
+        body: JSON.stringify({ type: "output", handle: descriptor.handle, offset, limit: descriptor.chunkBytes })
+      });
+      this.assertResponseContinuity(response);
+      if (!response.ok) throw new BrowserTransportError("artifact_read_failed", "recovery artifact page request failed (" + response.status + ")");
+      const frame = decodeJsonFrame(await response.text(), SNAPSHOT_ENVELOPE_LIMIT);
+      if (typeof frame !== "object" || frame === null || Array.isArray(frame)) throw new BrowserTransportError("invalid_server_message", "recovery artifact page is not an object");
+      const result = frame.result;
+      if (typeof result !== "object" || result === null || Array.isArray(result)) throw new BrowserTransportError("invalid_server_message", "recovery artifact page is missing its result");
+      const page = result;
+      if (page.encoding !== "base64" || page.offset !== offset || typeof page.nextOffset !== "number" || !Number.isSafeInteger(page.nextOffset) || page.nextOffset < offset || typeof page.eof !== "boolean" || typeof page.data !== "string") throw new BrowserTransportError("invalid_server_message", "recovery artifact page is invalid");
+      if (canonicalBase64ByteLength(page.data) === null) throw new BrowserTransportError("invalid_server_message", "recovery artifact page is not canonical base64");
+      let binary;
+      try {
+        binary = atob(page.data);
+      } catch {
+        throw new BrowserTransportError("invalid_server_message", "recovery artifact page is not decodable base64");
+      }
+      if (binary.length > descriptor.chunkBytes || page.nextOffset !== offset + binary.length || page.nextOffset > descriptor.byteLength) throw new BrowserTransportError("invalid_server_message", "recovery artifact page length is invalid");
+      for (let index = 0; index < binary.length; index += 1) target[offset + index] = binary.charCodeAt(index);
+      offset = page.nextOffset;
+      if (page.eof) {
+        if (offset !== descriptor.byteLength) throw new BrowserTransportError("invalid_server_message", "recovery artifact ended before its descriptor length");
+        break;
+      }
+      if (binary.length === 0 || offset >= descriptor.byteLength) throw new BrowserTransportError("invalid_server_message", "recovery artifact page sequence is invalid");
+    }
+    return target;
+  }
+  artifactQueryUrl() {
+    try {
+      const current = new URL(this.url);
+      current.protocol = current.protocol === "wss:" ? "https:" : "http:";
+      current.pathname = "/api/query";
+      current.search = "";
+      current.hash = "";
+      return current.href;
+    } catch {
+      return notebookUrl("/api/query");
+    }
+  }
+  async applyRecovery(recovery) {
+    const priorEpoch = this.epochValue;
     if (recovery.kind === "snapshot") {
+      this.epochValue = recovery.epoch;
+      this.cursorValue = recovery.cursor;
+      if (priorEpoch !== null && priorEpoch !== recovery.epoch) {
+        const error61 = new BrowserTransportError("session_replaced", "notebook session was replaced while reconnecting");
+        for (const pending of this.pending.values()) pending.reject(error61);
+        this.pending.clear();
+      }
       this.options.onSnapshot?.(recovery.snapshot);
-    } else {
-      let cursor = this.cursor;
-      if (this.epoch !== recovery.epoch || cursor === null) {
-        throw new BrowserTransportError("invalid_server_message", "replay recovery has no matching base snapshot");
-      }
-      for (const event of recovery.events) {
-        if (event.epoch !== recovery.epoch || event.cursor !== cursor + 1) {
-          throw new BrowserTransportError("invalid_server_message", "recovery events are not contiguous with the saved cursor");
-        }
-        this.options.onEvent?.(event);
-        cursor = event.cursor;
-      }
-      if (cursor !== recovery.cursor) {
-        throw new BrowserTransportError("invalid_server_message", "recovery cursor does not match its events");
-      }
-    }
-    this.epoch = recovery.epoch;
-    this.cursor = recovery.cursor;
-    if (this.persistRecovery) this.store.save(recovery.epoch, recovery.cursor);
-  }
-  flushCommands() {
-    const socket = this.socket;
-    if (!socket || socket.readyState !== 1 || !this.recovered) return;
-    for (const pending of [...this.pending.values()].sort((a, b) => a.sequence - b.sequence)) {
-      if (pending.sent) continue;
-      socket.send(JSON.stringify({ type: "command", sequence: pending.sequence, command: pending.command }));
-      pending.sent = true;
-    }
-  }
-  protocolFailure(error61) {
-    this.options.onState?.("closed", error61);
-    this.socket?.close(1002, error61.message.slice(0, 120));
-  }
-  scheduleReconnect(error61) {
-    this.options.onState?.("closed", error61);
-    if (this.options.reconnect === false) {
-      this.rejectOpen?.(error61);
-      this.rejectOpen = null;
-      const failure = new BrowserTransportError("connection_lost", error61.message);
-      for (const pending of this.pending.values()) pending.reject(failure);
-      this.pending.clear();
+      await this.recoveryStore.save(recovery.epoch, recovery.cursor);
       return;
     }
-    const base = this.options.reconnectBaseMs ?? 100;
-    const maximum = this.options.reconnectMaxMs ?? 5e3;
-    const delay = Math.min(maximum, base * 2 ** Math.min(this.reconnectAttempts++, 8));
-    this.reconnectTimer = window.setTimeout(() => {
-      this.reconnectTimer = null;
-      this.openSocket();
-    }, delay);
+    if (this.epochValue !== null && recovery.epoch !== this.epochValue) throw new BrowserTransportError("recovery_base_mismatch", "replay recovery belongs to another session epoch");
+    const stored = this.options.resumeFromStore === false ? null : await this.recoveryStore.load();
+    if (stored !== null && (stored.epoch !== recovery.epoch || stored.cursor > recovery.cursor)) throw new BrowserTransportError("recovery_base_mismatch", "stored browser recovery cursor does not match host replay");
+    this.epochValue = recovery.epoch;
+    let cursor = this.cursorValue ?? -1;
+    for (const event of recovery.events) {
+      if (event.epoch !== this.epochValue || event.cursor <= cursor) continue;
+      this.options.onEvent?.(event);
+      cursor = event.cursor;
+      this.cursorValue = cursor;
+    }
+    this.cursorValue = Math.max(cursor, recovery.cursor);
+    await this.recoveryStore.save(this.epochValue, this.cursorValue);
   }
-  socketUrl() {
-    const supplied = typeof this.options.url === "function" ? this.options.url() : this.options.url;
-    if (supplied) return supplied;
-    return notebookSocketUrl();
+  flush() {
+    if (!this.recovered || this.socket?.readyState !== OPEN) return;
+    for (const [sequence, pending] of this.pending) {
+      if (pending.sentGeneration === this.generation) continue;
+      pending.sentGeneration = this.generation;
+      try {
+        this.socket.send(JSON.stringify({ type: "command", sequence, command: encodeHostCommandWire(pending.command) }));
+      } catch (error61) {
+        this.handleAttemptFailure(this.generation, asError(error61, "browser command send failed"));
+        return;
+      }
+    }
+  }
+  startHeartbeat() {
+    this.clearHeartbeat();
+    this.heartbeatTimer = setInterval(() => {
+      if (this.recovered && this.socket?.readyState === OPEN) {
+        try {
+          this.socket.send(JSON.stringify({ type: "heartbeat" }));
+        } catch {
+        }
+      }
+    }, 1e4);
   }
 };
-function parseRecovery(value) {
-  const parsed = recoverySchema.safeParse(value);
-  if (!parsed.success) throw new BrowserTransportError("invalid_server_message", "invalid recovery response");
-  return parsed.data;
+function asError(value, fallback) {
+  return value instanceof Error ? value : new Error(fallback);
 }
-function parseEvent(value) {
-  const parsed = hostEventSchema.safeParse(value);
-  if (!parsed.success) throw new BrowserTransportError("invalid_server_message", "invalid notebook event");
-  return parsed.data;
-}
-function parseCommandResult(value) {
-  const parsed = commandResultSchema.safeParse(value);
-  if (!parsed.success) throw new BrowserTransportError("invalid_server_message", "invalid command result");
-  return parsed.data;
-}
-function isRecord2(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-function asError(value) {
-  return value instanceof Error ? value : new Error(String(value));
-}
-function browserId() {
-  try {
-    return `browser-${crypto.randomUUID()}`;
-  } catch {
-    return `browser-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+function asErrorDetail(value) {
+  if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+    const record2 = value;
+    if (typeof record2.code === "string" && typeof record2.message === "string") return { code: record2.code, message: record2.message };
   }
+  return { code: "invalid_server_message", message: "host rejected the browser message" };
 }
 
 // src/browser/client.ts
@@ -20791,8 +22129,13 @@ var BrowserNotebookClient = class {
     this.transport = new BrowserTransport({
       ...options,
       onSnapshot: (snapshot) => this.receiveSnapshot(snapshot),
-      onEvent: (event) => this.receiveEvent(event)
+      onEvent: (event) => this.receiveEvent(event),
+      onState: (state, error61) => {
+        options.onState?.(state, error61);
+        if (state === "open" && this.recoveryAttempted) void this.refreshRecoveryState();
+      }
     });
+    this.draftOwnershipReady = this.holdDraftOwnership();
   }
   options;
   transport;
@@ -20801,42 +22144,176 @@ var BrowserNotebookClient = class {
   runs = /* @__PURE__ */ new Map();
   operations = /* @__PURE__ */ new Map();
   operationWaiters = /* @__PURE__ */ new Map();
+  sourceCommitWaiters = /* @__PURE__ */ new Map();
   sourceQueue = Promise.resolve();
   frame;
   now;
+  artifactCache = /* @__PURE__ */ new Map();
+  recoveryStateValue = { status: "none", local: null, branches: [], keptBranches: [], foreignDrafts: 0, pending: false, corruption: null, persistenceError: null };
+  recoveryListeners = /* @__PURE__ */ new Set();
+  draftOperation = null;
+  draftPersistence = Promise.resolve();
+  draftGeneration = 0;
+  draftPersistenceError = null;
+  recoveryAttempted = false;
+  releaseDraftOwnership = null;
+  browserRecoveryInspected = false;
+  hostRecoveryInspected = false;
+  keptRecoveryInspected = false;
+  startupActivated = false;
+  draftOwnershipReady = Promise.resolve();
   get document() {
     return this.documentValue;
   }
   async connect() {
     const recovery = await this.transport.connect();
     if (!this.documentValue && recovery.kind === "snapshot") this.receiveSnapshot(recovery.snapshot);
-    if (!this.documentValue) {
-      throw new BrowserTransportError("recovery_requires_snapshot", "browser has no base snapshot for replay recovery");
+    if (!this.documentValue) throw new BrowserTransportError("recovery_requires_snapshot", "browser has no base snapshot for replay recovery");
+    if (!this.recoveryAttempted) this.recoveryAttempted = true;
+    if (!this.browserRecoveryInspected) {
+      try {
+        await this.restoreBrowserRecovery();
+        this.browserRecoveryInspected = true;
+      } catch (error61) {
+        const failure = error61 instanceof Error ? error61 : new Error(String(error61));
+        this.recoveryStateValue = { ...this.recoveryStateValue, persistenceError: { code: "recovery_inventory_failed", message: failure.message } };
+        this.notifyRecovery();
+      }
     }
+    if (!this.hostRecoveryInspected) this.hostRecoveryInspected = await this.refreshRecoveryState();
+    if (!this.keptRecoveryInspected) this.keptRecoveryInspected = await this.refreshKeptBranches();
+    await this.activateStartupIfSafe();
     return this.documentValue;
   }
   close() {
     this.transport.close();
     this.rejectOperationWaiters(new BrowserTransportError("transport_closed", "browser transport is closed"));
+    this.rejectSourceCommitWaiters(new BrowserTransportError("transport_closed", "browser transport is closed"));
     this.operations.clear();
     this.runs.clear();
+    this.artifactCache.clear();
+    this.releaseDraftOwnership?.();
+    this.releaseDraftOwnership = null;
   }
   subscribe(listener) {
     this.listeners.add(listener);
     if (this.documentValue) listener(this.documentValue);
     return () => this.listeners.delete(listener);
   }
+  get recoveryState() {
+    return this.recoveryStateValue;
+  }
+  subscribeRecovery(listener) {
+    this.recoveryListeners.add(listener);
+    listener(this.recoveryStateValue);
+    return () => this.recoveryListeners.delete(listener);
+  }
+  async flushDraftPersistence() {
+    await this.draftPersistence;
+    this.queueDraftPersistence();
+    await this.draftPersistence;
+    if (this.draftPersistenceError) throw this.draftPersistenceError;
+  }
+  async keepAsRecovery() {
+    await this.beginDraftMutation();
+    const store = this.draftStore();
+    const draft = this.documentValue?.recoveryDraft(this.transport.id, null) ?? await store?.loadDraft(this.transport.id).catch(() => null) ?? null;
+    if (draft && store) {
+      await store.saveBranch("browser-" + operationId("branch"), draft);
+      await store.clearDraft(this.transport.id);
+    }
+    this.draftGeneration += 1;
+    this.resetAuthoritativeDocument();
+    await this.refreshKeptBranches();
+    this.recoveryStateValue = { ...this.recoveryStateValue, status: "kept", local: null };
+    this.notifyRecovery();
+    this.notify();
+    await this.activateStartupIfSafe();
+  }
+  async restoreKeptRecovery(branchId) {
+    await this.beginDraftMutation();
+    const store = this.draftStore();
+    const branch = this.recoveryStateValue.keptBranches.find((candidate) => candidate.id === branchId);
+    if (!store || !branch) return;
+    const active = this.documentValue?.recoveryDraft(this.transport.id, null) ?? null;
+    if (active) await store.saveBranch("browser-" + operationId("swap"), active);
+    let recovered = branch.draft;
+    let acknowledgedRevision = null;
+    if (recovered.operation) {
+      try {
+        const owner = recovered.operation.clientId ?? recovered.clientId;
+        const queried = await this.query({ type: "operation", operationId: recovered.operation.operationId, clientId: owner });
+        if (isOperation2(queried.result) && queried.result.clientId === owner && queried.result.status === "done") {
+          acknowledgedRevision = recovered.operation.expectedDocumentRevision;
+          recovered = this.reconcileAcknowledgedCreations(recovered, queried.result);
+        }
+      } catch {
+      }
+    }
+    this.draftGeneration += 1;
+    this.resetAuthoritativeDocument();
+    const conflict = acknowledgedRevision === null ? !this.recoveryBaseMatches(recovered) : this.requireDocument().snapshot.documentRevision > acknowledgedRevision + 1;
+    this.requireDocument().restoreDraft(recovered, conflict);
+    if (!conflict) this.requireDocument().rebaseDraftToSnapshot();
+    const local = this.requireDocument().recoveryDraft(this.transport.id, null);
+    if (local) await store.saveDraft(local);
+    else await store.clearDraft(this.transport.id);
+    await store.deleteBranch(branchId);
+    await this.refreshKeptBranches();
+    this.recoveryStateValue = { ...this.recoveryStateValue, status: local === null ? "none" : conflict ? "conflict" : "restored", local };
+    this.notifyRecovery();
+    this.notify();
+    await this.activateStartupIfSafe();
+  }
+  async discardKeptRecovery(branchId) {
+    const store = this.draftStore();
+    if (!store) return;
+    await store.deleteBranch(branchId);
+    await this.refreshKeptBranches();
+    await this.activateStartupIfSafe();
+  }
+  async discardRecovery() {
+    await this.beginDraftMutation();
+    await this.draftStore()?.clearDraft(this.transport.id);
+    this.draftGeneration += 1;
+    this.resetAuthoritativeDocument();
+    this.recoveryStateValue = { ...this.recoveryStateValue, status: "none", local: null };
+    this.notifyRecovery();
+    this.notify();
+    await this.activateStartupIfSafe();
+  }
+  async reloadAuthoritativeRecovery() {
+    const snapshot = this.requireDocument().snapshot;
+    if (snapshot.disk.digest === null || snapshot.disk.version === null) throw new Error("authoritative source is not reloadable");
+    const result = await this.dispatchSettled({
+      type: "reload-source",
+      ...this.base("reload-source"),
+      expectedDiskDigest: snapshot.disk.digest,
+      expectedDiskVersion: snapshot.disk.version
+    });
+    if (isRecord2(result.result) && result.result.conflict === true) {
+      throw new BrowserTransportError("document_conflict", "Authoritative reload was refused because the host document has unsaved changes", true);
+    }
+    await this.discardRecovery();
+  }
+  cancelRecovery() {
+    if (this.recoveryStateValue.local === null) return;
+    this.recoveryStateValue = { ...this.recoveryStateValue, status: this.recoveryStateValue.status === "resubmitting" ? "resubmitting" : "conflict" };
+    this.notifyRecovery();
+  }
   createCell(afterKey, type = "code", body = []) {
     const document2 = this.requireDocument();
     const cell = document2.create(operationId("create"), afterKey, type, body);
     document2.focus(cell.key);
     this.notify();
+    this.queueDraftPersistence();
     return cell;
   }
   editCell(key, source, type) {
     const lines = typeof source === "string" ? splitSource(source) : [...source];
     const cell = this.requireDocument().edit(key, lines, type);
     this.notify(void 0, [key]);
+    this.queueDraftPersistence();
     return cell;
   }
   async commitEdits() {
@@ -20844,32 +22321,10 @@ var BrowserNotebookClient = class {
   }
   async commitEditsUnlocked() {
     const document2 = this.requireDocument();
-    if (document2.hasSourceConflicts) {
-      throw new BrowserTransportError("source_conflict", "resolve deleted or conflicting local source before continuing");
-    }
-    const id = operationId("edit");
-    const pending = document2.pendingSource();
-    if (!pending.edits.length && !pending.creations.length) return null;
-    let last = null;
-    if (pending.edits.length) {
-      last = await this.dispatchSource({
-        type: "edit",
-        operationId: id,
-        clientId: this.transport.id,
-        sessionEpoch: document2.epoch,
-        edits: pending.edits
-      });
-    }
-    if (pending.creations.length) {
-      last = await this.dispatchSource({
-        type: "create",
-        operationId: operationId("create"),
-        clientId: this.transport.id,
-        sessionEpoch: document2.epoch,
-        creations: pending.creations
-      });
-    }
-    return last;
+    if (document2.hasSourceConflicts) throw new BrowserTransportError("source_conflict", "resolve deleted or conflicting local source before continuing");
+    const command = document2.buildTransactionCommand(operationId("transaction"), this.transport.id);
+    if (command === null) return null;
+    return this.dispatchSource(command, true);
   }
   async runCell(key, input2) {
     const id = operationId("run");
@@ -20881,13 +22336,8 @@ var BrowserNotebookClient = class {
     });
     try {
       return await this.withSourceLock(() => {
-        const command = this.requireDocument().buildRunCommand({
-          operationId: id,
-          clientId: this.transport.id,
-          scope: "cell",
-          targetKey: key
-        });
-        return this.dispatchSource(command);
+        const command = this.requireDocument().buildRunCommand({ operationId: id, clientId: this.transport.id, scope: "cell", targetKey: key });
+        return this.dispatchSource(command, false);
       });
     } catch (error61) {
       this.runs.delete(id);
@@ -20899,109 +22349,228 @@ var BrowserNotebookClient = class {
     void input2;
     return this.withSourceLock(() => {
       const command = this.requireDocument().buildRunCommand({ operationId: id, clientId: this.transport.id, scope });
-      return this.dispatchSource(command);
+      return this.dispatchSource(command, false);
     });
   }
-  async interrupt() {
-    return this.dispatch({ type: "interrupt", ...this.base("interrupt") });
+  async interrupt(runId) {
+    return this.dispatch({ type: "interrupt", ...this.base("interrupt", false), ...runId ? { runId } : {} });
   }
   async restart(replay = true) {
-    const command = { type: "restart", replay, ...this.base("restart") };
+    const command = { type: "restart", replay, ...this.base("restart"), ...replay ? { expectedDocumentRevision: this.requireDocument().snapshot.documentRevision } : {} };
     return replay ? this.dispatchSettled(command) : this.dispatch(command);
   }
   async save() {
     await this.commitEdits();
-    return this.dispatch({ type: "save", ...this.base("save") });
+    return this.dispatchSettled({ type: "save", ...this.base("save") });
   }
-  async deleteCell(key) {
-    const cell = this.requireCell(key);
-    if (!cell.id || cell.tombstone) {
-      this.requireDocument().discardLocal(key);
-      this.notify();
-      return null;
-    }
-    const result = await this.dispatch({
-      type: "delete",
-      ...this.base("delete"),
-      cellId: cell.id,
-      expectedRevision: cell.serverRevision
-    });
+  async saveAs(path) {
+    await this.commitEdits();
+    const result = await this.dispatchSettled({ type: "save-as", path, expectedDestination: "absent", ...this.base("save-as") });
+    await this.refreshRecoveryState();
     return result;
   }
+  async selectR(rscript, persistDefault = true) {
+    await this.commitEdits();
+    return this.dispatchSettled({
+      type: "select-r",
+      ...this.base("select-r"),
+      rscript,
+      persistDefault,
+      expectedDocumentRevision: this.requireDocument().snapshot.documentRevision
+    });
+  }
+  async shutdown() {
+    const document2 = this.requireDocument();
+    const expectedClientIds = document2.snapshot.activeClientIds ?? [this.transport.id];
+    return this.dispatchSettled({ type: "shutdown", ...this.base("shutdown"), expectedClientIds });
+  }
+  async deleteCell(key) {
+    return this.withSourceLock(async () => {
+      const document2 = this.requireDocument();
+      const cell = this.requireCell(key);
+      if (!cell.id || cell.tombstone) {
+        document2.discardLocal(key);
+        this.notify();
+        this.queueDraftPersistence();
+        return null;
+      }
+      const command = {
+        type: "transaction",
+        ...this.base("delete"),
+        changes: [{ type: "delete", cell: { cellId: cell.id }, expectedRevision: cell.serverRevision }]
+      };
+      return this.dispatchSource(command, true);
+    });
+  }
   async restoreDeletedCell(key) {
-    this.requireDocument().restoreDeleted(key, operationId("create"));
-    this.notify(void 0, [key]);
-    return this.commitEdits();
+    return this.withSourceLock(() => {
+      this.requireDocument().restoreDeleted(key, operationId("create"));
+      this.notify(void 0, [key]);
+      this.queueDraftPersistence();
+      return this.commitEditsUnlocked();
+    });
   }
   discardLocalCell(key) {
     this.requireDocument().discardLocal(key);
     this.notify();
+    this.queueDraftPersistence();
   }
   useServerVersion(key) {
     this.requireDocument().useServerVersion(key);
     this.notify(void 0, [key]);
+    this.queueDraftPersistence();
   }
   async moveCell(key, afterKey) {
-    const cell = this.requireCell(key);
-    const after = afterKey === null ? null : this.requireCell(afterKey).id;
-    if (!cell.id || afterKey !== null && !after) throw new BrowserTransportError("invalid_request", "cells must be acknowledged before moving");
-    return this.dispatch({ type: "move", ...this.base("move"), cellId: cell.id, after });
+    return this.withSourceLock(() => {
+      const cell = this.requireCell(key);
+      const after = afterKey === null ? null : this.requireCell(afterKey).id;
+      if (!cell.id || afterKey !== null && !after) throw new BrowserTransportError("invalid_request", "cells must be acknowledged before moving");
+      const command = {
+        type: "transaction",
+        ...this.base("move"),
+        changes: [{ type: "move", cell: { cellId: cell.id }, after: after ? { cellId: after } : null }]
+      };
+      return this.dispatchSource(command, true);
+    });
   }
   async setDisabled(key, disabled) {
-    const cell = this.requireCell(key);
-    if (!cell.id) throw new BrowserTransportError("invalid_request", "cell must be acknowledged before changing disabled state");
-    return this.dispatch({
-      type: "disable",
-      ...this.base("disable"),
-      cellId: cell.id,
-      expectedRevision: cell.serverRevision,
-      disabled
+    return this.withSourceLock(() => {
+      const cell = this.requireCell(key);
+      if (!cell.id) throw new BrowserTransportError("invalid_request", "cell must be acknowledged before changing disabled state");
+      const command = {
+        type: "transaction",
+        ...this.base("options"),
+        changes: [{ type: "options", cell: { cellId: cell.id }, expectedRevision: cell.serverRevision, patch: { disabled } }]
+      };
+      return this.dispatchSource(command, true);
     });
   }
   async setWidget(name, path, update, source = "editor") {
-    return this.dispatchSettled({ type: "widget", ...this.base("widget"), name, path: [...path], update, source });
+    const owner = this.findWidgetOwner(name);
+    if (!owner) throw new BrowserTransportError("not_found", `widget owner is unavailable: ${name}`);
+    const kernelEpoch = this.kernelEpoch();
+    return this.dispatchSettled({ type: "widget", ...this.base("widget", false), name, path: [...path], update, source, kernelEpoch, expectedRevision: owner.serverRevision });
   }
   async requestLazy(key) {
-    return this.dispatchSettled({ type: "lazy-output", ...this.base("lazy"), key });
+    return this.dispatchSettled({ type: "lazy-output", ...this.base("lazy", false), key, kernelEpoch: this.kernelEpoch() });
   }
   async requestTable(options) {
-    return this.dispatchSettled({
-      type: "table-page",
-      ...this.base("table"),
-      handle: options.handle,
-      offset: options.offset ?? 0,
-      limit: options.limit ?? 25,
-      sortBy: options.sortBy ?? "",
-      sortDescending: options.sortDescending ?? false,
-      filter: options.filter ?? ""
-    });
+    return this.dispatchSettled({ type: "table-page", ...this.base("table", false), handle: options.handle, offset: options.offset ?? 0, limit: options.limit ?? 25, sortBy: options.sortBy ?? "", sortDescending: options.sortDescending ?? false, filter: options.filter ?? "", kernelEpoch: this.kernelEpoch() });
   }
   async inspect(name) {
-    return this.dispatchSettled({ type: "inspect", ...this.base("inspect"), name });
+    return this.dispatchSettled({ type: "inspect", ...this.base("inspect", false), name, kernelEpoch: this.kernelEpoch() });
   }
   async setRuntime(update) {
-    return this.dispatch({ type: "set-runtime", ...this.base("runtime"), ...update });
+    const change = {};
+    if (update.executionMode !== void 0) change.on_cell_change = update.executionMode;
+    if (update.runOnStartup !== void 0) change.on_startup = update.runOnStartup;
+    if (change.on_cell_change === void 0 && change.on_startup === void 0) throw new BrowserTransportError("invalid_request", "runtime update is empty");
+    return this.dispatch({ type: "set-runtime", ...this.base("runtime"), ...change });
   }
   async setConfig(patch) {
-    return this.dispatch({ type: "set-config", ...this.base("config"), patch });
+    return this.dispatch({ type: "set-config", ...this.base("config"), patch: jsonRecord(patch), expectedSidecarVersion: this.requireDocument().snapshot.sidecars.config.version });
   }
   async setLayout(layout) {
-    return this.dispatch({ type: "set-layout", ...this.base("layout"), layout });
+    return this.dispatch({ type: "set-layout", ...this.base("layout"), layout, expectedSidecarVersion: this.requireDocument().snapshot.sidecars.layout.version });
   }
   async formatCells(keys) {
     await this.commitEdits();
     const cells = keys?.map((key) => this.requireCell(key)) ?? [...this.requireDocument().cells];
     const acknowledged = cells.filter((cell) => cell.id !== null);
-    return this.dispatch({
-      type: "format",
-      ...this.base("format"),
-      ...keys ? { cellIds: acknowledged.map((cell) => cell.id) } : {},
-      expectedRevisions: Object.fromEntries(acknowledged.map((cell) => [cell.id, cell.serverRevision]))
-    });
+    return this.dispatchSettled({ type: "format", ...this.base("format"), ...keys ? { cellIds: acknowledged.map((cell) => cell.id) } : {}, expectedRevisions: Object.fromEntries(acknowledged.map((cell) => [cell.id, cell.serverRevision])) });
   }
-  async service(command, payload = {}) {
-    const request = { type: "service", ...this.base(command), command, payload };
-    return ["export", "publish", "packages", "packages.status", "packages.declare", "packages.install", "upload"].includes(command) ? this.dispatchSettled(request) : this.dispatch(request);
+  async resolveArtifact(descriptor) {
+    const parsedDescriptor = artifactHandleSchema.safeParse(descriptor);
+    if (!parsedDescriptor.success) throw new BrowserTransportError("output_invalid", "artifact descriptor is invalid");
+    const requested = parsedDescriptor.data;
+    const cacheKey = encodeArtifactDescriptor(requested);
+    const cached2 = this.artifactCache.get(cacheKey);
+    if (cached2 !== void 0) {
+      if (cached2.expiresAt > Date.now()) return cached2.url;
+      this.artifactCache.delete(cacheKey);
+    }
+    if (typeof fetch !== "function" || typeof location === "undefined") throw new BrowserTransportError("artifact_unavailable", "artifact loading is unavailable");
+    const descriptorHeader = cacheKey;
+    const query = { type: "output", handle: requested.handle, offset: 0, limit: requested.chunkBytes };
+    const response = await fetch(notebookUrl("/api/query"), {
+      method: "POST",
+      credentials: "same-origin",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: ARTIFACT_RESOLUTION_MEDIA_TYPE,
+        [ARTIFACT_DESCRIPTOR_HEADER]: descriptorHeader,
+        "X-CSRF-Token": this.transport.csrf
+      },
+      body: JSON.stringify(encodeHostQueryWire(query))
+    });
+    this.transport.assertResponseContinuity(response);
+    if (!response.ok) throw new BrowserTransportError("output_expired", "artifact resolution failed (" + response.status + ")");
+    if (response.headers.get("Content-Type") !== ARTIFACT_RESOLUTION_MEDIA_TYPE) {
+      throw new BrowserTransportError("output_invalid", "artifact resolution returned an unexpected content type");
+    }
+    let value;
+    try {
+      value = decodeJsonFrame(await response.text(), MAX_ARTIFACT_DESCRIPTOR_HEADER_BYTES);
+    } catch {
+      throw new BrowserTransportError("output_invalid", "artifact resolution is not valid bounded JSON");
+    }
+    let resolution;
+    try {
+      resolution = artifactResolutionSchema.parse(value);
+    } catch {
+      throw new BrowserTransportError("output_invalid", "artifact resolution is invalid");
+    }
+    if (!sameArtifactHandle(resolution.artifact, requested)) {
+      throw new BrowserTransportError("stale_value", "artifact resolution identity is stale");
+    }
+    const url2 = safeArtifactPath(resolution.url);
+    if (resolution.expiresAt <= Date.now()) throw new BrowserTransportError("output_expired", "artifact capability has expired");
+    this.artifactCache.set(cacheKey, { url: url2, expiresAt: resolution.expiresAt });
+    return url2;
+  }
+  async service(command, payload = {}, onAccepted) {
+    switch (command) {
+      case "publish":
+        return this.dispatchSettled({ type: "publish", ...this.base("publish"), includeCode: payload.include_code === true, ...typeof payload.output_path === "string" ? { outputPath: payload.output_path } : {} }, onAccepted);
+      case "packages.declare":
+        return this.dispatchSettled({ type: "packages-declare", ...this.base("packages-declare"), packages: stringArray(payload.packages), expectedSidecarVersion: this.requireDocument().snapshot.sidecars.packages.version }, onAccepted);
+      case "packages.install":
+        return this.dispatchSettled({ type: "packages-install", ...this.base("packages-install"), packages: stringArray(payload.packages), kernelEpoch: this.kernelEpoch() }, onAccepted);
+      case "upload":
+        return this.dispatchSettled({ type: "upload", ...this.base("upload", false), name: stringValue2(payload.name), path: stringArray(payload.path), files: fileArray(payload.files), kernelEpoch: this.kernelEpoch() }, onAccepted);
+      case "packages.status":
+        return this.query({ type: "packages-status" });
+      case "check":
+        return this.query({ type: "check" });
+    }
+  }
+  async query(query) {
+    if (typeof fetch !== "function" || typeof location === "undefined") throw new BrowserTransportError("query_unavailable", "typed host queries are unavailable");
+    const response = await fetch(notebookUrl("/api/query"), { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json", "X-Alder-CSRF": this.transport.csrf }, body: JSON.stringify(encodeHostQueryWire(query)) });
+    this.transport.assertResponseContinuity(response);
+    const value = await response.json().catch(() => null);
+    if (!response.ok) throw new BrowserTransportError(response.status === 404 && query.type === "operation" ? "query_not_found" : "query_failed", "typed host query failed (" + response.status + ")");
+    return hostQueryResultSchema.parse(decodeHostQueryResultWire(query, value));
+  }
+  async activateStartupIfSafe() {
+    if (this.startupActivated) return;
+    const state = this.recoveryStateValue;
+    if (!this.browserRecoveryInspected || !this.hostRecoveryInspected || !this.keptRecoveryInspected) return;
+    if (state.local !== null || state.keptBranches.length > 0 && state.status !== "kept" || state.foreignDrafts > 0 || state.branches.some((branch) => branch.state !== "clean") || state.pending || state.corruption !== null) return;
+    const snapshot = this.requireDocument().snapshot;
+    if (snapshot.runtime.startupActivated) {
+      this.startupActivated = true;
+      return;
+    }
+    if (!snapshot.runtime.documentReady || snapshot.runtime.rEnvironment === null) return;
+    this.startupActivated = true;
+    try {
+      await this.dispatchSettled({ type: "run", ...this.base("startup"), scope: "all", startup: true });
+    } catch (error61) {
+      if (error61 instanceof BrowserTransportError && error61.code === "startup_already_activated") return;
+      this.startupActivated = false;
+      throw error61;
+    }
   }
   awaitOperation(id, timeoutMs = 12e4) {
     const current = this.operations.get(id);
@@ -21020,58 +22589,417 @@ var BrowserNotebookClient = class {
       this.operationWaiters.set(id, waiters);
     });
   }
-  async dispatchSource(command) {
+  holdDraftOwnership() {
+    const locks = typeof navigator === "undefined" ? void 0 : navigator.locks;
+    if (!locks) return Promise.resolve();
+    return new Promise((ready) => {
+      void locks.request("alder-draft:" + this.transport.id, async () => {
+        await new Promise((release) => {
+          this.releaseDraftOwnership = release;
+          ready();
+        });
+      }).catch(() => ready());
+    });
+  }
+  tryClaimDraftOwnership(clientId) {
+    const locks = typeof navigator === "undefined" ? void 0 : navigator.locks;
+    if (!locks) return Promise.resolve(null);
+    return new Promise((resolve) => {
+      let settled = false;
+      void locks.request("alder-draft:" + clientId, { ifAvailable: true }, async (lock) => {
+        if (lock === null) {
+          settled = true;
+          resolve(null);
+          return;
+        }
+        await new Promise((release) => {
+          settled = true;
+          resolve(release);
+        });
+      }).catch(() => {
+        if (!settled) resolve(null);
+      });
+    });
+  }
+  draftStore() {
+    const store = this.transport.recoveryStore;
+    return isBrowserDraftStore(store) ? store : null;
+  }
+  queueDraftPersistence() {
+    const store = this.draftStore();
+    if (!store) return;
+    const generation = this.draftGeneration;
+    this.draftPersistence = this.draftPersistence.catch(() => void 0).then(async () => {
+      if (generation !== this.draftGeneration) return;
+      const draft = this.documentValue?.recoveryDraft(this.transport.id, this.draftOperation) ?? null;
+      if (draft) await store.saveDraft(draft);
+      else await store.clearDraft(this.transport.id);
+      this.draftPersistenceError = null;
+      if (this.recoveryStateValue.persistenceError !== null) {
+        this.recoveryStateValue = { ...this.recoveryStateValue, persistenceError: null };
+        this.notifyRecovery();
+      }
+    }).catch((error61) => {
+      this.draftPersistenceError = error61 instanceof Error ? error61 : new Error(String(error61));
+      this.recoveryStateValue = { ...this.recoveryStateValue, persistenceError: { code: "draft_persistence_failed", message: this.draftPersistenceError.message } };
+      this.notifyRecovery();
+    });
+  }
+  async beginDraftMutation() {
+    this.draftGeneration += 1;
+    await this.draftPersistence.catch(() => void 0);
+  }
+  async restoreBrowserRecovery() {
+    const store = this.draftStore();
+    if (!store || !this.documentValue) throw new BrowserTransportError("recovery_store_unavailable", "browser recovery store is unavailable");
+    await this.draftOwnershipReady;
+    const drafts = await store.listDrafts();
+    let draft = drafts.find((candidate) => candidate.clientId === this.transport.id) ?? null;
+    let selectedOriginalId = this.transport.id;
+    if (draft === null) {
+      for (const candidate of drafts) {
+        const release = await this.tryClaimDraftOwnership(candidate.clientId);
+        if (release === null) continue;
+        try {
+          selectedOriginalId = candidate.clientId;
+          draft = { ...candidate, clientId: this.transport.id };
+          await store.saveDraft(draft);
+          await store.clearDraft(candidate.clientId);
+        } finally {
+          release();
+        }
+        break;
+      }
+    }
+    if (!draft) {
+      this.recoveryStateValue = { ...this.recoveryStateValue, foreignDrafts: drafts.length };
+      this.notifyRecovery();
+      return;
+    }
+    for (const candidate of drafts) {
+      if (candidate.clientId === selectedOriginalId || candidate.clientId === this.transport.id) continue;
+      const release = await this.tryClaimDraftOwnership(candidate.clientId);
+      if (release === null) continue;
+      try {
+        await store.saveBranch("browser-" + operationId("orphan"), candidate);
+        await store.clearDraft(candidate.clientId);
+      } finally {
+        release();
+      }
+    }
+    const remainingDrafts = await store.listDrafts();
+    this.recoveryStateValue = { ...this.recoveryStateValue, foreignDrafts: remainingDrafts.filter((candidate) => candidate.clientId !== this.transport.id).length };
+    this.notifyRecovery();
+    let receipt = null;
+    if (draft.operation) {
+      try {
+        const receiptClientId = draft.operation.clientId ?? selectedOriginalId;
+        const queryResult = await this.query({ type: "operation", operationId: draft.operation.operationId, clientId: receiptClientId });
+        receipt = isOperation2(queryResult.result) && queryResult.result.clientId === receiptClientId ? queryResult.result : null;
+      } catch (error61) {
+        if (!(error61 instanceof BrowserTransportError) || error61.code !== "query_not_found") {
+          await this.restoreLocalDraft(store, draft, true, "conflict");
+          return;
+        }
+      }
+      if (receipt !== null) {
+        if (receipt.status === "done") {
+          const submitted = draft.operation.changes;
+          if (submitted !== void 0 && sameChanges(draft.changes, submitted)) {
+            await store.clearDraft(draft.clientId);
+            this.resetAuthoritativeDocument();
+            this.recoveryStateValue = { ...this.recoveryStateValue, status: "none", local: null };
+            this.notifyRecovery();
+            this.notify();
+            return;
+          }
+          this.resetAuthoritativeDocument();
+          const recovered = this.reconcileAcknowledgedCreations(draft, receipt);
+          const conflict2 = submitted === void 0 || this.requireDocument().snapshot.documentRevision > draft.operation.expectedDocumentRevision + 1;
+          await this.restoreLocalDraft(store, recovered, conflict2, conflict2 ? "conflict" : "restored");
+          return;
+        }
+        await this.restoreLocalDraft(store, draft, true, "conflict");
+        return;
+      }
+    }
+    const conflict = !this.recoveryBaseMatches(draft);
+    await this.restoreLocalDraft(store, draft, conflict, conflict ? "conflict" : draft.operation ? "resubmitting" : "restored");
+    if (draft.operation && !conflict) await this.resubmitRecoveredDraft();
+  }
+  reconcileAcknowledgedCreations(draft, receipt) {
+    const result = isRecord2(receipt.result) ? receipt.result : {};
+    const created = isRecord2(result.created) ? result.created : {};
+    const submitted = draft.operation?.changes ?? [];
+    const changes = [];
+    for (const change of draft.changes) {
+      if (change.type === "create") {
+        const cellId = created[change.creationId];
+        if (typeof cellId === "string") {
+          changes.push({
+            type: "edit",
+            cell: { cellId },
+            body: [...change.body],
+            cellType: change.cellType,
+            expectedRevision: this.requireDocument().cell(cellId)?.serverRevision ?? 0
+          });
+        } else {
+          changes.push(cloneChange2(change));
+        }
+        continue;
+      }
+      if (submitted.some((sent) => sameChanges([change], [sent]))) continue;
+      changes.push(cloneChange2(change));
+    }
+    return { ...draft, changes, operation: null };
+  }
+  async restoreLocalDraft(store, draft, conflict, status) {
+    this.requireDocument().restoreDraft(draft, conflict);
+    if (!conflict) this.requireDocument().rebaseDraftToSnapshot();
+    const local = this.requireDocument().recoveryDraft(this.transport.id, null);
+    if (local) await store.saveDraft(local);
+    else await store.clearDraft(this.transport.id);
+    if (draft.clientId !== this.transport.id) await store.clearDraft(draft.clientId);
+    this.recoveryStateValue = { ...this.recoveryStateValue, status: local === null ? "none" : status, local };
+    this.notifyRecovery();
+    this.notify();
+  }
+  recoveryBaseMatches(draft) {
+    const snapshot = this.requireDocument().snapshot;
+    if (snapshot.epoch !== draft.base.epoch || snapshot.documentRevision !== draft.base.documentRevision || snapshot.cells.length !== draft.base.cells.length) return false;
+    return draft.base.cells.every((baseCell, index) => {
+      const current = snapshot.cells[index];
+      return current !== void 0 && current.id === baseCell.id && current.revision === baseCell.revision && current.type === baseCell.type && sameLines2(current.body, baseCell.body);
+    });
+  }
+  async resubmitRecoveredDraft() {
     const document2 = this.requireDocument();
-    const edits = command.type === "create" ? [] : command.edits;
-    const creations = command.type === "edit" ? [] : command.creations;
-    const affectedKeys = edits.map((edit) => document2.cell(edit.cellId)?.key).filter((key) => key !== void 0);
-    document2.noteSubmitted(command.operationId, command);
+    let command;
     try {
-      const result = await this.dispatch(command);
+      command = document2.buildTransactionCommand(operationId("recovery"), this.transport.id);
+    } catch {
+      this.recoveryStateValue = { ...this.recoveryStateValue, status: "conflict" };
+      this.notifyRecovery();
+      return;
+    }
+    if (command === null) {
+      await this.draftStore()?.clearDraft(this.transport.id);
+      this.recoveryStateValue = { ...this.recoveryStateValue, status: "none", local: null };
+      this.notifyRecovery();
+      return;
+    }
+    const submitted = { ...command, commandSequence: this.transport.commandSequence };
+    this.draftOperation = {
+      operationId: command.operationId,
+      clientId: this.transport.id,
+      kind: "transaction",
+      commandSequence: this.transport.commandSequence,
+      expectedDocumentRevision: command.expectedDocumentRevision,
+      changes: document2.recoveryDraft(this.transport.id, null)?.changes ?? []
+    };
+    document2.noteSubmitted(command.operationId, submitted);
+    this.queueDraftPersistence();
+    let accepted;
+    try {
+      accepted = await this.dispatch(command);
+    } catch (error61) {
+      this.handleSourceFailure(command, error61);
+      return;
+    }
+    this.recoveryStateValue = { ...this.recoveryStateValue, status: "resubmitting", local: document2.recoveryDraft(this.transport.id, this.draftOperation) };
+    this.notifyRecovery();
+    void this.finishRecoveredDraft(command, accepted);
+  }
+  async finishRecoveredDraft(command, accepted) {
+    const document2 = this.requireDocument();
+    try {
+      const operation = operationSettled(accepted.operation) ? accepted.operation : await this.awaitOperation(accepted.operation.id);
+      if (operation.status === "error" || operation.status === "cancelled") throw new BrowserTransportError(operation.error?.code ?? "recovery_failed", operation.error?.message ?? "recovered source could not be committed", true);
+      document2.acknowledge(settledCommandResult(accepted, operation));
+      this.draftOperation = null;
+      this.queueDraftPersistence();
+      this.recoveryStateValue = { ...this.recoveryStateValue, status: "none", local: null };
+      this.notifyRecovery();
+      this.notify(void 0, sourceCellKeys(command, document2));
+    } catch (error61) {
+      this.handleSourceFailure(command, error61);
+    }
+  }
+  resetAuthoritativeDocument() {
+    if (!this.documentValue) return;
+    this.documentValue = new BrowserDocument(this.documentValue.snapshot);
+    this.draftOperation = null;
+  }
+  async refreshRecoveryState() {
+    try {
+      const result = await this.query({ type: "recovery" });
+      const parsed = recoveryStateSchema.safeParse(result.result);
+      if (!parsed.success) {
+        this.recoveryStateValue = { ...this.recoveryStateValue, corruption: { code: "invalid_recovery_state", message: parsed.error.issues.map((issue2) => issue2.path.join(".") + ": " + issue2.message).join("; ") } };
+        this.notifyRecovery();
+        return false;
+      }
+      const state = parsed.data;
+      this.recoveryStateValue = { ...this.recoveryStateValue, branches: state.branches, pending: state.pending, corruption: state.corruption };
+      this.notifyRecovery();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  async refreshKeptBranches() {
+    const store = this.draftStore();
+    if (!store) return false;
+    try {
+      const keptBranches = await store.listBranches();
+      this.recoveryStateValue = { ...this.recoveryStateValue, keptBranches };
+      this.notifyRecovery();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  notifyRecovery() {
+    for (const listener of this.recoveryListeners) listener(this.recoveryStateValue);
+  }
+  async dispatchSource(command, waitForSettlement) {
+    if (this.draftOperation !== null) {
+      throw new BrowserTransportError("recovery_receipt_pending", "source changes are blocked until the previous operation receipt is reconciled");
+    }
+    const document2 = this.requireDocument();
+    const submitted = { ...command, commandSequence: this.transport.commandSequence };
+    const commandChanges = command.changes ?? [];
+    document2.stageRecoveryIntent(commandChanges);
+    const draftOperation = {
+      operationId: command.operationId,
+      clientId: this.transport.id,
+      kind: command.type,
+      commandSequence: this.transport.commandSequence,
+      expectedDocumentRevision: command.expectedDocumentRevision,
+      changes: commandChanges.map((change) => cloneChange2(change))
+    };
+    this.draftOperation = draftOperation;
+    const recoveryDraft = document2.recoveryDraft(this.transport.id, draftOperation);
+    if (recoveryDraft) {
+      const store = this.draftStore();
+      if (!store) throw new BrowserTransportError("recovery_store_unavailable", "source intent cannot be sent without durable browser recovery storage");
+      try {
+        await store.saveDraft(recoveryDraft);
+      } catch (error61) {
+        document2.markStructuralRecoveryConflict();
+        this.draftOperation = null;
+        const failure = error61 instanceof Error ? error61 : new Error(String(error61));
+        this.draftPersistenceError = failure;
+        this.recoveryStateValue = { ...this.recoveryStateValue, status: "conflict", local: document2.recoveryDraft(this.transport.id, null), persistenceError: { code: "draft_persistence_failed", message: failure.message } };
+        this.notifyRecovery();
+        this.notify();
+        throw failure;
+      }
+    }
+    document2.noteSubmitted(command.operationId, submitted);
+    const sourceCommit = command.type === "run" && (command.changes?.length ?? 0) > 0 ? this.awaitSourceCommit(command.operationId) : null;
+    try {
+      const accepted = await this.dispatch(command);
+      if (sourceCommit !== null) {
+        await sourceCommit;
+        this.draftOperation = null;
+        this.queueDraftPersistence();
+        this.notify(void 0, sourceCellKeys(command, document2));
+        return { ...accepted, documentRevision: document2.snapshot.documentRevision, version: document2.snapshot.version, cursor: document2.cursor };
+      }
+      const operation = waitForSettlement && !operationSettled(accepted.operation) ? await this.awaitOperation(accepted.operation.id) : accepted.operation;
+      if (operation.status === "error" || operation.status === "cancelled") {
+        throw new BrowserTransportError(operation.error?.code ?? command.type + "_failed", operation.error?.message ?? command.type + " operation failed", true);
+      }
+      const result = settledCommandResult(accepted, operation);
       document2.acknowledge(result);
-      this.notify(void 0, creations.length > 0 ? void 0 : affectedKeys);
+      this.draftOperation = null;
+      this.queueDraftPersistence();
+      this.notify(void 0, sourceCellKeys(command, document2));
       return result;
     } catch (error61) {
-      document2.reject(command.operationId, error61 instanceof BrowserTransportError ? error61.code : "internal_error");
-      this.notify(void 0, creations.length > 0 ? void 0 : affectedKeys);
+      this.removeSourceCommitWaiter(command.operationId);
+      this.handleSourceFailure(command, error61);
       throw error61;
     }
   }
-  dispatch(command) {
-    return this.transport.dispatch(command).then((result) => {
-      this.captureOperation(result.operation);
-      this.options.onCommand?.(command, result);
-      return result;
-    });
-  }
-  async dispatchSettled(command) {
-    const accepted = await this.dispatch(command);
-    const operation = operationSettled(accepted.operation) ? accepted.operation : await this.awaitOperation(accepted.operation.id);
-    if (operation.status === "error" || operation.status === "cancelled") {
-      throw new BrowserTransportError(operation.error?.code ?? `${command.type}_failed`, operation.error?.message ?? `${command.type} operation failed`);
+  handleSourceFailure(command, error61) {
+    const document2 = this.requireDocument();
+    if (this.draftOperation === null) {
+      this.queueDraftPersistence();
+      const local = document2.recoveryDraft(this.transport.id, null);
+      this.recoveryStateValue = { ...this.recoveryStateValue, status: local === null ? "none" : "conflict", local };
+      this.notifyRecovery();
+      this.notify();
+      return;
     }
-    return { ...accepted, operation };
+    const definitive = error61 instanceof BrowserTransportError && error61.definitive;
+    if (definitive) {
+      document2.reject(command.operationId, error61.code);
+      this.draftOperation = null;
+    } else if ((command.changes ?? []).some((change) => !["create", "edit", "text-edit"].includes(change.type))) {
+      document2.markStructuralRecoveryConflict();
+    }
+    this.queueDraftPersistence();
+    this.recoveryStateValue = {
+      ...this.recoveryStateValue,
+      status: "conflict",
+      local: document2.recoveryDraft(this.transport.id, this.draftOperation)
+    };
+    this.notifyRecovery();
+    this.notify();
+  }
+  async dispatch(command) {
+    const admission = await this.transport.dispatch(command);
+    const commandWithSequence = { ...command, clientId: this.transport.id, sessionEpoch: this.requireDocument().epoch, commandSequence: admission.commandSequence };
+    const admitted = admission.operation;
+    if (admitted && !this.operations.has(admitted.id)) this.captureOperation(admitted);
+    const retained = admitted ? this.operations.get(admitted.id) ?? admitted : null;
+    const result = admissionResult(admission, this.requireDocument().snapshot, this.transport.cursor, commandWithSequence, retained);
+    this.options.onCommand?.(commandWithSequence, result);
+    if (!admission.accepted || admission.operation === null) {
+      throw new BrowserTransportError(admission.error?.code ?? "command_rejected", admission.error?.message ?? command.type + " command was rejected", true);
+    }
+    return result;
+  }
+  async dispatchSettled(command, onAccepted) {
+    const accepted = await this.dispatch(command);
+    onAccepted?.(accepted.operation.id);
+    const operation = operationSettled(accepted.operation) ? accepted.operation : await this.awaitOperation(accepted.operation.id);
+    if (operation.status === "error" || operation.status === "cancelled") throw new BrowserTransportError(operation.error?.code ?? command.type + "_failed", operation.error?.message ?? command.type + " operation failed");
+    return settledCommandResult(accepted, operation);
   }
   receiveSnapshot(snapshot) {
     if (this.documentValue !== null && this.documentValue.epoch !== snapshot.epoch) {
-      this.rejectOperationWaiters(new BrowserTransportError(
-        "session_replaced",
-        "notebook session was replaced while the operation was pending"
-      ));
+      const error61 = new BrowserTransportError("session_replaced", "notebook session was replaced while the operation was pending");
+      this.rejectOperationWaiters(error61);
+      this.rejectSourceCommitWaiters(error61);
       this.operations.clear();
       this.runs.clear();
+      this.artifactCache.clear();
+      this.draftOperation = null;
+      this.queueDraftPersistence();
     }
-    snapshot.operations.forEach((operation) => this.captureOperation(operation));
     if (this.documentValue) this.documentValue.applySnapshot(snapshot);
     else this.documentValue = new BrowserDocument(snapshot);
+    snapshot.operations.forEach((operation) => this.captureOperation(operation));
     this.notify();
   }
   receiveEvent(event) {
     const document2 = this.documentValue;
     if (!document2) throw new BrowserTransportError("invalid_server_message", "received event without a notebook snapshot");
     document2.applyEvent(event);
-    if (event.type === "operation" && isOperation2(event.payload)) this.captureOperation(event.payload);
+    if (event.type === "transaction" && event.operationId) {
+      const outcome = sourceCommitOutcome(event.payload);
+      if (outcome !== null) this.acknowledgeSourceCommit(event.operationId, outcome);
+    }
+    if (event.type === "receipt" || event.type === "operation") {
+      const operation = operationFromEventPayload2(event.payload);
+      if (operation) this.captureOperation(operation);
+    }
     this.notify(event);
+    if (event.type === "runtime") void this.activateStartupIfSafe().catch(() => {
+    });
     if (event.type === "cell-completed" && event.operationId) this.observeCompletion(event);
   }
   observeCompletion(event) {
@@ -21081,21 +23009,25 @@ var BrowserNotebookClient = class {
     if (!cell || cell.id !== event.cellId || cell.serverRevision !== event.revision || !sameLines2(cell.desiredBody, cell.serverBody)) return;
     this.runs.delete(intent.operationId);
     this.frame(() => this.frame(() => {
-      this.options.onVisibleResult?.({
-        operationId: intent.operationId,
-        runId: event.runId ?? null,
-        cellId: event.cellId,
-        revision: event.revision,
-        inputTimestamp: intent.inputTimestamp,
-        handlerTimestamp: intent.handlerTimestamp,
-        presentedTimestamp: this.now(),
-        proxy: "two-animation-frames"
-      });
+      this.options.onVisibleResult?.({ operationId: intent.operationId, runId: event.runId ?? null, cellId: event.cellId, revision: event.revision, inputTimestamp: intent.inputTimestamp, handlerTimestamp: intent.handlerTimestamp, presentedTimestamp: this.now(), proxy: "two-animation-frames" });
     }));
   }
-  base(label) {
+  base(label, documentRevision = true) {
     const document2 = this.requireDocument();
-    return { operationId: operationId(label), clientId: this.transport.id, sessionEpoch: document2.epoch };
+    return { operationId: operationId(label), clientId: this.transport.id, sessionEpoch: document2.epoch, ...documentRevision ? { expectedDocumentRevision: document2.snapshot.documentRevision } : {} };
+  }
+  kernelEpoch() {
+    const epoch = this.requireDocument().snapshot.runtime.kernelEpoch;
+    if (!epoch) throw new BrowserTransportError("stale_kernel", "kernel is not ready");
+    return epoch;
+  }
+  findWidgetOwner(name) {
+    const document2 = this.requireDocument();
+    for (const cell of document2.cells) {
+      if (!cell.id || !cell.server) continue;
+      if (cell.server.outputs.some((record2) => containsNamedWidget(record2.data, name))) return cell;
+    }
+    return null;
   }
   requireCell(key) {
     const cell = this.requireDocument().cell(key);
@@ -21113,6 +23045,7 @@ var BrowserNotebookClient = class {
   }
   captureOperation(operation) {
     this.operations.set(operation.id, operation);
+    this.trySourceCommitFromOperation(operation);
     if (!operationSettled(operation)) return;
     const waiters = this.operationWaiters.get(operation.id);
     if (!waiters) return;
@@ -21136,6 +23069,58 @@ var BrowserNotebookClient = class {
     }
     this.operationWaiters.clear();
   }
+  acknowledgeSourceCommit(operationId2, outcome) {
+    const document2 = this.documentValue;
+    if (!document2 || !this.sourceCommitWaiters.has(operationId2)) return;
+    if (document2.acknowledgeSourceCommit(operationId2, outcome)) this.resolveSourceCommit(operationId2);
+  }
+  trySourceCommitFromOperation(operation) {
+    const document2 = this.documentValue;
+    const waiter = this.sourceCommitWaiters.get(operation.id);
+    if (!document2 || !waiter) return;
+    const outcome = sourceCommitOutcome(operation.result);
+    if (outcome !== null) {
+      if (document2.acknowledgeSourceCommit(operation.id, outcome)) this.resolveSourceCommit(operation.id);
+      return;
+    }
+    if (operationSettled(operation)) {
+      this.rejectSourceCommit(operation.id, new BrowserTransportError(operation.error?.code ?? "source_commit_unconfirmed", operation.error?.message ?? "run source changes were not committed"));
+    }
+  }
+  awaitSourceCommit(operationId2) {
+    return new Promise((resolve, reject) => {
+      const timer = globalThis.setTimeout(() => {
+        this.removeSourceCommitWaiter(operationId2);
+        reject(new BrowserTransportError("source_commit_timeout", "run source changes did not receive a commit acknowledgement in time"));
+      }, 12e4);
+      this.sourceCommitWaiters.set(operationId2, { resolve, reject, timer });
+    });
+  }
+  removeSourceCommitWaiter(operationId2) {
+    const waiter = this.sourceCommitWaiters.get(operationId2);
+    if (!waiter) return;
+    globalThis.clearTimeout(waiter.timer);
+    this.sourceCommitWaiters.delete(operationId2);
+  }
+  resolveSourceCommit(operationId2) {
+    const waiter = this.sourceCommitWaiters.get(operationId2);
+    if (!waiter) return;
+    this.removeSourceCommitWaiter(operationId2);
+    waiter.resolve();
+  }
+  rejectSourceCommit(operationId2, error61) {
+    const waiter = this.sourceCommitWaiters.get(operationId2);
+    if (!waiter) return;
+    this.removeSourceCommitWaiter(operationId2);
+    waiter.reject(error61);
+  }
+  rejectSourceCommitWaiters(error61) {
+    for (const [operationId2, waiter] of this.sourceCommitWaiters) {
+      globalThis.clearTimeout(waiter.timer);
+      waiter.reject(error61);
+      this.sourceCommitWaiters.delete(operationId2);
+    }
+  }
   async withSourceLock(operation) {
     const predecessor = this.sourceQueue;
     let release;
@@ -21150,6 +23135,72 @@ var BrowserNotebookClient = class {
     }
   }
 };
+function admissionResult(admission, snapshot, cursor, command, operation = admission.operation) {
+  if (operation === null) throw new BrowserTransportError(admission.error?.code ?? "command_rejected", admission.error?.message ?? `${command.type} command was rejected`, true);
+  return {
+    epoch: admission.epoch,
+    operation,
+    documentRevision: operation.documentRevision,
+    version: snapshot.version,
+    cursor: cursor ?? snapshot.cursor,
+    nextCommandSequence: admission.nextCommandSequence,
+    result: operation.result,
+    error: operation.error
+  };
+}
+function settledCommandResult(accepted, operation) {
+  return { ...accepted, operation, documentRevision: operation.documentRevision, result: operation.result, error: operation.error };
+}
+function sourceCellKeys(command, document2) {
+  const changes = command.changes ?? [];
+  return changes.flatMap((change) => {
+    if (!((change.type === "edit" || change.type === "text-edit") && "cellId" in change.cell)) return [];
+    const cell = document2.cell(change.cell.cellId);
+    return cell ? [cell.key] : [];
+  });
+}
+function sourceCommitOutcome(value) {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const record2 = value;
+  const edited = "edited" in record2 ? record2.edited : record2.updated;
+  if (!("created" in record2) || !("deleted" in record2) || !("edited" in record2) && !("updated" in record2) || !Number.isSafeInteger(record2.documentRevision) || record2.documentRevision < 0) return null;
+  return {
+    created: record2.created,
+    edited,
+    deleted: record2.deleted,
+    documentRevision: record2.documentRevision
+  };
+}
+function containsNamedWidget(value, name) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const record2 = value;
+  if (record2.kind === "widget" && record2.name === name) return true;
+  if (record2.kind === "layout" && Array.isArray(record2.children)) return record2.children.some((child) => containsNamedWidget(child, name));
+  if (record2.kind === "lazy" && record2.child !== null && record2.child !== void 0) return containsNamedWidget(record2.child, name);
+  return false;
+}
+function stringArray(value) {
+  return Array.isArray(value) ? value.filter((item) => typeof item === "string") : [];
+}
+function stringValue2(value) {
+  return typeof value === "string" ? value : "";
+}
+function fileArray(value) {
+  return Array.isArray(value) ? value.filter((item) => typeof item === "object" && item !== null && !Array.isArray(item) && typeof item.name === "string" && typeof item.content_base64 === "string") : [];
+}
+function jsonRecord(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+function safeArtifactPath(path) {
+  try {
+    const current = new URL(location.href);
+    const target = new URL(path, current.origin);
+    if (target.origin !== current.origin || target.pathname !== path || target.search !== "" || target.hash !== "") throw new Error("unsafe artifact path");
+  } catch {
+    throw new BrowserTransportError("output_invalid", "artifact resolution returned an unsafe URL");
+  }
+  return path;
+}
 function splitSource(source) {
   const normalized = source.replaceAll("\r\n", "\n").replaceAll("\r", "\n");
   return normalized === "" ? [] : normalized.split("\n");
@@ -21158,6 +23209,9 @@ function normalizeInputTimestamp(timestamp, now) {
   if (!Number.isFinite(timestamp)) return now;
   if (timestamp > 1e12 && typeof performance.timeOrigin === "number") return timestamp - performance.timeOrigin;
   return timestamp;
+}
+function cloneChange2(change) {
+  return JSON.parse(JSON.stringify(change));
 }
 function operationId(label) {
   try {
@@ -21170,10 +23224,25 @@ function sameLines2(left, right) {
   return left.length === right.length && left.every((line, index) => line === right[index]);
 }
 function operationSettled(operation) {
-  return operation.status === "done" || operation.status === "error" || operation.status === "cancelled";
+  return operation.status === "done" || operation.status === "error" || operation.status === "interrupted" || operation.status === "cancelled";
+}
+function isRecord2(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function isOperation2(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value) && typeof value.id === "string" && typeof value.status === "string";
+}
+function operationFromEventPayload2(value) {
+  if (isOperation2(value)) return value;
+  if (isRecord2(value) && isOperation2(value.operation)) return value.operation;
+  return null;
+}
+function isBrowserDraftStore(value) {
+  const candidate = value;
+  return typeof candidate.loadDraft === "function" && typeof candidate.listDrafts === "function" && typeof candidate.saveDraft === "function" && typeof candidate.clearDraft === "function" && typeof candidate.saveBranch === "function" && typeof candidate.listBranches === "function" && typeof candidate.deleteBranch === "function";
+}
+function sameChanges(left, right) {
+  return JSON.stringify(left) === JSON.stringify(right);
 }
 
 // src/graph.ts
@@ -21205,9 +23274,9 @@ function dependencyLevels(edges, nodes) {
   }
   return queue.length === nodes.length ? levels : null;
 }
-function reachableNodes(adjacency, start) {
+function reachableNodes(adjacency, start2) {
   const seen = /* @__PURE__ */ new Set();
-  const queue = [...adjacency[start] ?? []];
+  const queue = [...adjacency[start2] ?? []];
   let head = 0;
   while (head < queue.length) {
     const current = queue[head++];
@@ -21218,7 +23287,7 @@ function reachableNodes(adjacency, start) {
   return [...seen];
 }
 
-// src/browser/output.ts
+// src/output-renderer.ts
 var MUTABLE_WIDGET_FIELDS = /* @__PURE__ */ new Set([
   "value",
   "index",
@@ -21230,17 +23299,29 @@ var MUTABLE_WIDGET_FIELDS = /* @__PURE__ */ new Set([
   "dirty"
 ]);
 var OutputRenderer = class {
-  constructor(actions) {
-    this.actions = actions;
-  }
-  actions;
   signatures = /* @__PURE__ */ new WeakMap();
   structures = /* @__PURE__ */ new WeakMap();
   pendingWidgets = /* @__PURE__ */ new Map();
   pendingForms = /* @__PURE__ */ new Map();
   pendingUploads = /* @__PURE__ */ new Set();
+  pendingArtifacts = /* @__PURE__ */ new Set();
+  artifactFailure = null;
   lastFailure = null;
   layoutSequence = 0;
+  document;
+  mode;
+  actions;
+  resolveArtifact;
+  constructor(options) {
+    this.document = options.document;
+    this.mode = options.mode;
+    this.actions = options.mode === "interactive" ? options.actions : null;
+    this.resolveArtifact = options.resolveArtifact;
+  }
+  interactiveActions() {
+    if (this.actions === null) throw new Error("interactive output actions are unavailable in static mode");
+    return this.actions;
+  }
   async flush() {
     const previousFailure = this.lastFailure;
     while (this.pendingWidgets.size || this.pendingForms.size || this.pendingUploads.size) {
@@ -21252,6 +23333,12 @@ var OutputRenderer = class {
     }
     if (this.lastFailure !== previousFailure) throw this.lastFailure.error;
   }
+  async flushArtifacts() {
+    while (this.pendingArtifacts.size) await Promise.all([...this.pendingArtifacts]);
+    const failure = this.artifactFailure;
+    this.artifactFailure = null;
+    if (this.mode === "static" && failure !== null) throw failure;
+  }
   render(container, outputs, progress) {
     container.classList.add("out-stack");
     const retained = /* @__PURE__ */ new Set();
@@ -21259,32 +23346,37 @@ var OutputRenderer = class {
       this.updateSlot(container, `output-${index}`, output2, index, false, retained);
     });
     if (isObject2(progress)) {
-      this.updateSlot(container, "progress", { kind: "progress", ...progress }, null, true, retained);
+      this.updateProgressSlot(container, "progress", progress, retained);
     }
     for (const child of Array.from(container.children)) {
       if (child.classList.contains("out-record") && !retained.has(child)) child.remove();
     }
   }
   updateSlot(container, key, output2, index, progress, retained) {
+    this.updateValueSlot(container, key, outputData(output2), index, progress, retained, stableJson(output2));
+  }
+  updateProgressSlot(container, key, progress, retained) {
+    this.updateValueSlot(container, key, { kind: "progress", ...progress }, null, true, retained, stableJson(progress));
+  }
+  updateValueSlot(container, key, value, index, progress, retained, signature) {
     let slot = Array.from(container.children).find(
-      (child) => child.classList.contains("out-record") && child.dataset.recordKey === key
+      (child) => isElement(child) && child.classList.contains("out-record") && child.dataset.recordKey === key
     );
     if (!slot) {
-      slot = document.createElement("div");
+      slot = this.document.createElement("div");
       slot.className = "out-record";
       slot.dataset.recordKey = key;
     }
     if (index === null) delete slot.dataset.index;
     else slot.dataset.index = String(index);
     slot.classList.toggle("out-progress", progress);
-    const kind = isObject2(output2) ? string4(output2.kind) : "";
-    const signature = stableJson(output2);
-    const structure = stableJson(outputStructure(output2));
-    const hasWidgets = containsWidget(output2);
-    const canPatch = hasWidgets && slot.dataset.outputKind === kind && this.structures.get(slot) === structure && this.patchWidgets(slot, output2);
+    const kind = isObject2(value) ? string4(value.kind) : "";
+    const structure = stableJson(outputStructure(value));
+    const hasWidgets = containsWidget(value);
+    const canPatch = this.mode === "interactive" && hasWidgets && slot.dataset.outputKind === kind && this.structures.get(slot) === structure && this.patchWidgets(slot, value);
     if (!canPatch && (this.signatures.get(slot) !== signature || slot.dataset.outputKind !== kind)) {
       slot.replaceChildren();
-      this.renderRecord(slot, output2);
+      this.renderRecord(slot, value);
     }
     this.signatures.set(slot, signature);
     this.structures.set(slot, structure);
@@ -21294,16 +23386,28 @@ var OutputRenderer = class {
   }
   renderRecord(container, value) {
     if (!isObject2(value)) return;
+    if (value.mime === "application/json" && "preview" in value) {
+      const preview = element(this.document, "pre", "value-json", string4(value.preview));
+      preview.dataset.outputMime = "application/json";
+      container.appendChild(preview);
+      return;
+    }
     const kind = string4(value.kind);
     if (kind === "widget") {
       container.appendChild(this.createWidget(value, object2(value.spec), []));
-      this.patchWidget(container.firstElementChild, value, object2(value.spec), []);
+      const widgetNode = container.firstElementChild;
+      if (isElement(widgetNode)) this.patchWidget(widgetNode, value, object2(value.spec), []);
+      if (this.mode === "static") {
+        const notice = element(this.document, "p", "widget-snapshot-note", "Published snapshot (noninteractive).");
+        notice.setAttribute("role", "note");
+        container.appendChild(notice);
+      }
       return;
     }
     if (kind === "text") {
-      const pre = element("pre", "value-text", string4(value.text));
+      const pre = element(this.document, "pre", "value-text", string4(value.text));
       container.appendChild(pre);
-      if (value.truncated === true) container.appendChild(element("div", "truncation-note", "Output truncated."));
+      if (value.truncated === true) container.appendChild(element(this.document, "div", "truncation-note", "Output truncated."));
       return;
     }
     if (kind === "table") {
@@ -21311,27 +23415,39 @@ var OutputRenderer = class {
       return;
     }
     if (kind === "image") {
-      const image = document.createElement("img");
+      const image = this.document.createElement("img");
       image.className = "plot";
-      image.alt = string4(value.alt_text) || "Plot";
-      image.src = artifactUrl(value.artifact);
+      image.alt = string4(value.alt) || "Plot";
+      image.setAttribute("alt", image.alt);
+      this.loadArtifact(image, value.artifact);
       container.appendChild(image);
       return;
     }
     if (kind === "html") {
-      const frame = document.createElement("iframe");
+      const frame = this.document.createElement("iframe");
       frame.className = "html-widget";
       frame.title = string4(value.alt_text) || "HTML widget";
-      frame.sandbox.add("allow-scripts");
-      frame.referrerPolicy = "no-referrer";
-      frame.src = artifactUrl(value.artifact);
+      frame.setAttribute("title", frame.title);
+      if (value.artifact !== void 0) {
+        this.isolateArtifactFrame(frame, "html");
+        this.loadArtifact(frame, value.artifact);
+      } else if (value.html !== void 0) {
+        frame.remove();
+        const inline = element(this.document, "div", "html-inline");
+        inline.innerHTML = string4(value.html);
+        container.appendChild(inline);
+        return;
+      }
       const height = number4(value.height);
-      if (height !== null) frame.height = String(Math.max(100, height));
+      if (height !== null) {
+        frame.height = String(Math.max(100, height));
+        frame.setAttribute("height", frame.height);
+      }
       container.appendChild(frame);
       return;
     }
     if (kind === "markdown") {
-      const markdown = element("div", "markdown-output");
+      const markdown = element(this.document, "div", "markdown-output");
       markdown.innerHTML = string4(value.html);
       container.appendChild(markdown);
       return;
@@ -21340,21 +23456,27 @@ var OutputRenderer = class {
       const mediaKind = string4(value.media_type) || "image";
       let media;
       if (mediaKind === "audio") {
-        media = document.createElement("audio");
+        media = this.document.createElement("audio");
         media.controls = true;
+        media.setAttribute("controls", "");
       } else if (mediaKind === "video") {
-        media = document.createElement("video");
+        media = this.document.createElement("video");
         media.controls = true;
+        media.setAttribute("controls", "");
       } else if (mediaKind === "pdf") {
-        media = document.createElement("iframe");
-        media.title = string4(value.alt) || "PDF";
-        media.className = "media-pdf";
+        const frame = this.document.createElement("iframe");
+        frame.title = string4(value.alt) || "PDF";
+        frame.setAttribute("title", frame.title);
+        frame.className = "media-pdf";
+        this.isolateArtifactFrame(frame, "pdf");
+        media = frame;
       } else {
-        media = document.createElement("img");
+        media = this.document.createElement("img");
         media.alt = string4(value.alt);
+        media.setAttribute("alt", media.alt);
       }
       media.classList.add("out-media");
-      media.src = artifactUrl(value.artifact);
+      this.loadArtifact(media, value.artifact);
       container.appendChild(media);
       return;
     }
@@ -21364,15 +23486,17 @@ var OutputRenderer = class {
     }
     if (kind === "lazy") {
       if (value.child) this.renderRecord(container, value.child);
-      else {
-        const button = element("button", "out-lazy", string4(value.label) || "Show");
+      else if (this.mode === "static") {
+        container.appendChild(element(this.document, "span", "out-lazy", string4(value.label) || "Output not materialized"));
+      } else {
+        const button = element(this.document, "button", "out-lazy", string4(value.label) || "Show");
         button.type = "button";
         button.addEventListener("click", () => {
           button.disabled = true;
-          void this.actions.lazy(string4(value.key)).catch((error61) => {
+          void this.interactiveActions().lazy(string4(value.key)).catch((error61) => {
             button.disabled = false;
-            container.appendChild(element("div", "output-error", message(error61, "Lazy output failed")));
-            this.actions.error(error61);
+            container.appendChild(element(this.document, "div", "output-error", message(error61, "Lazy output failed")));
+            this.interactiveActions().error(error61);
           });
         });
         container.appendChild(button);
@@ -21380,36 +23504,78 @@ var OutputRenderer = class {
       return;
     }
     if (kind === "progress") {
-      const row = element("div", "progress-row");
-      const progress = document.createElement("progress");
+      const row = element(this.document, "div", "progress-row");
+      const progress = this.document.createElement("progress");
       const total = number4(value.total);
-      if (total !== null) progress.max = total;
+      if (total !== null) {
+        progress.max = total;
+        progress.setAttribute("max", String(total));
+      }
       progress.value = number4(value.value) ?? 0;
-      row.append(progress, element("div", "progress-label", string4(value.label)));
+      progress.setAttribute("value", String(progress.value));
+      row.append(progress, element(this.document, "div", "progress-label", string4(value.label)));
       container.appendChild(row);
       return;
     }
     if (kind === "error") {
-      container.appendChild(element("div", "output-error", string4(value.message) || "Evaluation failed"));
+      container.appendChild(element(this.document, "div", "output-error", string4(value.message) || "Evaluation failed"));
     }
+  }
+  isolateArtifactFrame(frame, kind) {
+    frame.setAttribute("data-alder-artifact-frame", kind);
+    if (kind === "html") frame.setAttribute("sandbox", "allow-scripts");
+    frame.referrerPolicy = "no-referrer";
+    frame.setAttribute("referrerpolicy", "no-referrer");
+  }
+  loadArtifact(element3, descriptor) {
+    if (!isArtifactDescriptor(descriptor)) return;
+    const pending = Promise.resolve().then(() => this.resolveArtifact(descriptor)).then((source) => {
+      if (source.kind === "url") {
+        element3.setAttribute("src", source.url);
+        element3.src = source.url;
+        return;
+      }
+      if (!isTag(element3, "iframe")) throw new Error("HTML artifact source requires an iframe");
+      const frame = element3;
+      frame.setAttribute("srcdoc", source.html);
+      frame.srcdoc = source.html;
+    }).catch((error61) => {
+      if (this.mode === "interactive") this.interactiveActions().error(error61);
+      else if (this.artifactFailure === null) this.artifactFailure = error61;
+    });
+    this.pendingArtifacts.add(pending);
+    void pending.then(() => this.pendingArtifacts.delete(pending));
   }
   renderLayout(container, output2) {
     const layout = string4(output2.layout) || "vstack";
-    const wrap = element("div", `out-layout out-${safeClass(layout)}`);
+    const wrap = element(this.document, "div", `out-layout out-${safeClass(layout)}`);
     const attrs = object2(output2.attrs);
     if (layout === "callout") wrap.classList.add(`out-callout-${safeClass(string4(attrs.variant) || "info")}`);
     const children = array2(output2.children);
     const slots = children.map((child, index) => {
-      const slot = element("div", "out-layout-child");
+      const slot = element(this.document, "div", "out-layout-child");
       slot.dataset.index = String(index);
       this.renderRecord(slot, child);
       wrap.appendChild(slot);
       return slot;
     });
+    if (this.mode === "static") {
+      if (layout === "tabs" || layout === "accordion") {
+        const titles = array2(attrs.titles);
+        slots.forEach((slot, index) => {
+          slot.hidden = false;
+          slot.removeAttribute("hidden");
+          const title = string4(titles[index]);
+          if (title) slot.prepend(element(this.document, "div", "out-layout-title", title));
+        });
+      }
+      container.appendChild(wrap);
+      return;
+    }
     if ((layout === "tabs" || layout === "accordion") && slots.length) {
       const titles = array2(attrs.titles);
       const prefix = `alder-output-${layout}-${++this.layoutSequence}`;
-      const controls = element("div", layout === "tabs" ? "out-tabs" : "out-accordion");
+      const controls = element(this.document, "div", layout === "tabs" ? "out-tabs" : "out-accordion");
       if (layout === "tabs") {
         controls.setAttribute("role", "tablist");
         controls.setAttribute("aria-label", "Output tabs");
@@ -21428,6 +23594,7 @@ var OutputRenderer = class {
       };
       slots.forEach((slot, index) => {
         const button = element(
+          this.document,
           "button",
           layout === "tabs" ? "out-tab-btn" : "out-accordion-btn",
           string4(titles[index]) || `Item ${index + 1}`
@@ -21467,11 +23634,15 @@ var OutputRenderer = class {
     container.appendChild(wrap);
   }
   renderTable(container, output2) {
+    if (this.mode === "static") {
+      this.renderStaticTable(container, output2);
+      return;
+    }
     const page = object2(output2.page);
     const columns = list(page.columns ?? output2.columns).map(string4);
     const rows = array2(page.preview ?? output2.preview);
     const offset = number4(page.offset) ?? 0;
-    const configured = this.actions.pageSize();
+    const configured = this.interactiveActions().pageSize();
     const limit = Number.isInteger(configured) && configured >= 5 ? configured : number4(page.limit) ?? Math.max(1, rows.length || 25);
     const total = number4(page.nrow) ?? number4(output2.nrow) ?? 0;
     const sortBy = string4(page.sort_by);
@@ -21480,18 +23651,18 @@ var OutputRenderer = class {
     const handle = string4(output2.handle);
     const request = (update, control) => {
       control.disabled = true;
-      void this.actions.table({ handle, offset, limit, sortBy, sortDescending, filter, ...update }).catch((error61) => {
+      void this.interactiveActions().table({ handle, offset, limit, sortBy, sortDescending, filter, ...update }).catch((error61) => {
         control.disabled = false;
-        this.actions.error(error61);
+        this.interactiveActions().error(error61);
       });
     };
-    const wrap = element("div", "table-preview");
-    const table = document.createElement("table");
-    const head = document.createElement("thead");
-    const headRow = document.createElement("tr");
+    const wrap = element(this.document, "div", "table-preview");
+    const table = this.document.createElement("table");
+    const head = this.document.createElement("thead");
+    const headRow = this.document.createElement("tr");
     columns.forEach((column) => {
-      const th = document.createElement("th");
-      const sort = element("button", "table-sort", `${column}${sortBy === column ? sortDescending ? " (desc)" : " (asc)" : ""}`);
+      const th = this.document.createElement("th");
+      const sort = element(this.document, "button", "table-sort", `${column}${sortBy === column ? sortDescending ? " (desc)" : " (asc)" : ""}`);
       sort.type = "button";
       sort.dataset.role = "table-sort";
       sort.dataset.column = column;
@@ -21501,18 +23672,18 @@ var OutputRenderer = class {
     });
     head.appendChild(headRow);
     table.appendChild(head);
-    const body = document.createElement("tbody");
+    const body = this.document.createElement("tbody");
     rows.forEach((raw) => {
-      const row = document.createElement("tr");
+      const row = this.document.createElement("tr");
       const values = Array.isArray(raw) ? raw : isObject2(raw) ? columns.map((column) => raw[column]) : [];
-      columns.forEach((_column, index) => row.appendChild(element("td", "", string4(values[index]))));
+      columns.forEach((_column, index) => row.appendChild(element(this.document, "td", "", string4(values[index]))));
       body.appendChild(row);
     });
     table.appendChild(body);
     wrap.appendChild(table);
     container.appendChild(wrap);
-    const toolbar = element("div", "table-toolbar");
-    const input2 = document.createElement("input");
+    const toolbar = element(this.document, "div", "table-toolbar");
+    const input2 = this.document.createElement("input");
     input2.type = "search";
     input2.className = "table-filter";
     input2.dataset.role = "table-filter";
@@ -21520,40 +23691,67 @@ var OutputRenderer = class {
     input2.setAttribute("aria-label", "Filter table");
     input2.value = filter;
     let timer = null;
+    const view2 = this.document.defaultView;
     input2.addEventListener("input", () => {
-      if (timer !== null) window.clearTimeout(timer);
-      timer = window.setTimeout(() => request({ offset: 0, filter: input2.value }, input2), 250);
+      if (timer !== null) view2?.clearTimeout(timer);
+      timer = view2?.setTimeout(() => request({ offset: 0, filter: input2.value }, input2), 250) ?? null;
     });
     toolbar.appendChild(input2);
-    const copy = element("button", "table-copy", "Copy TSV");
+    const copy = element(this.document, "button", "table-copy", "Copy TSV");
     copy.type = "button";
     copy.dataset.role = "table-copy";
-    copy.addEventListener("click", () => void copyTsv(columns, rows).then(() => {
+    copy.addEventListener("click", () => void copyTsv(this.document, columns, rows).then(() => {
       copy.textContent = "Copied";
-      window.setTimeout(() => {
+      view2?.setTimeout(() => {
         copy.textContent = "Copy TSV";
       }, 1e3);
-    }).catch((error61) => this.actions.error(error61)));
+    }).catch((error61) => this.interactiveActions().error(error61)));
     toolbar.appendChild(copy);
     container.appendChild(toolbar);
-    const pager = element("div", "table-pager");
-    const previous = element("button", "", "Prev");
+    const pager = element(this.document, "div", "table-pager");
+    const previous = element(this.document, "button", "", "Prev");
     previous.type = "button";
     previous.disabled = offset <= 0;
     previous.addEventListener("click", () => request({ offset: Math.max(0, offset - limit) }, previous));
-    const next = element("button", "", "Next");
+    const next = element(this.document, "button", "", "Next");
     next.type = "button";
     next.disabled = offset + rows.length >= total;
     next.addEventListener("click", () => request({ offset: offset + limit }, next));
-    pager.append(previous, element("div", "table-page-label", `${total === 0 ? 0 : offset + 1}..${Math.min(total, offset + rows.length)} of ${total}`), next);
+    pager.append(previous, element(this.document, "div", "table-page-label", `${total === 0 ? 0 : offset + 1}..${Math.min(total, offset + rows.length)} of ${total}`), next);
     container.appendChild(pager);
-    container.appendChild(element("div", "table-meta", `${number4(output2.nrow) ?? total} rows \xD7 ${number4(output2.ncol) ?? columns.length} columns`));
+    container.appendChild(element(this.document, "div", "table-meta", `${number4(output2.nrow) ?? total} rows \xD7 ${number4(output2.ncol) ?? columns.length} columns`));
     const truncated = [output2.truncated_rows ? "rows truncated" : "", output2.truncated_columns ? "columns truncated" : ""].filter(Boolean);
-    if (truncated.length) container.appendChild(element("div", "truncation-note", truncated.join("; ")));
+    if (truncated.length) container.appendChild(element(this.document, "div", "truncation-note", truncated.join("; ")));
+  }
+  renderStaticTable(container, output2) {
+    const page = object2(output2.page);
+    const columns = list(page.columns ?? output2.columns).map(string4);
+    const rows = array2(page.preview ?? output2.preview);
+    const wrap = element(this.document, "div", "table-preview");
+    const table = this.document.createElement("table");
+    const head = this.document.createElement("thead");
+    const headRow = this.document.createElement("tr");
+    columns.forEach((column) => headRow.appendChild(element(this.document, "th", "", column)));
+    head.appendChild(headRow);
+    table.appendChild(head);
+    const body = this.document.createElement("tbody");
+    rows.forEach((raw) => {
+      const row = this.document.createElement("tr");
+      const values = Array.isArray(raw) ? raw : isObject2(raw) ? columns.map((column) => raw[column]) : [];
+      columns.forEach((_column, index) => row.appendChild(element(this.document, "td", "", string4(values[index]))));
+      body.appendChild(row);
+    });
+    table.appendChild(body);
+    wrap.appendChild(table);
+    container.appendChild(wrap);
+    const total = number4(page.nrow) ?? number4(output2.nrow) ?? 0;
+    container.appendChild(element(this.document, "div", "table-meta", `${number4(output2.nrow) ?? total} rows \xD7 ${number4(output2.ncol) ?? columns.length} columns`));
+    const truncated = [output2.truncated_rows ? "rows truncated" : "", output2.truncated_columns ? "columns truncated" : ""].filter(Boolean);
+    if (truncated.length) container.appendChild(element(this.document, "div", "truncation-note", truncated.join("; ")));
   }
   createWidget(widget, spec, path) {
     const kind = string4(spec.kind);
-    const node2 = element("div", ["array", "dictionary", "form"].includes(kind) ? "widget-group" : "widget-container");
+    const node2 = element(this.document, "div", ["array", "dictionary", "form"].includes(kind) ? "widget-group" : "widget-container");
     node2.dataset.widgetKey = widgetKey(widget, kind, path);
     node2.dataset.kind = kind;
     node2.dataset.name = string4(widget.name);
@@ -21569,11 +23767,12 @@ var OutputRenderer = class {
     if (kind === "form") {
       this.appendLabel(node2, spec, null);
       node2.appendChild(this.createWidget(widget, object2(spec.child), path));
-      const submit = this.control(document.createElement("button"), widget, spec, kind, path);
+      const submit = this.control(this.document.createElement("button"), widget, spec, kind, path);
       submit.type = "button";
+      submit.setAttribute("type", "button");
       submit.textContent = string4(spec.submit_label) || "Submit";
       submit.dataset.formSubmit = "true";
-      submit.addEventListener("click", () => this.submitForm(node2, widget, spec, path, submit));
+      if (this.mode === "interactive") submit.addEventListener("click", () => this.submitForm(node2, widget, spec, path, submit));
       node2.appendChild(submit);
       return node2;
     }
@@ -21583,16 +23782,19 @@ var OutputRenderer = class {
       return node2;
     }
     if (kind === "radio") {
-      const fieldset = document.createElement("fieldset");
+      const fieldset = this.document.createElement("fieldset");
       this.appendLabel(fieldset, spec, null, "legend");
       array2(spec.choices).forEach((choice, index) => {
-        const label = document.createElement("label");
-        const input2 = this.control(document.createElement("input"), widget, spec, kind, path);
+        const label = this.document.createElement("label");
+        const input2 = this.control(this.document.createElement("input"), widget, spec, kind, path);
         input2.type = "radio";
+        input2.setAttribute("type", "radio");
         input2.name = `${string4(widget.name)}-${path.join("-")}`;
+        input2.setAttribute("name", input2.name);
         input2.value = String(index + 1);
-        input2.addEventListener("change", () => this.sendWidget(widget, path, { index: index + 1 }, input2));
-        label.append(input2, document.createTextNode(string4(choice)));
+        input2.setAttribute("value", input2.value);
+        if (this.mode === "interactive") input2.addEventListener("change", () => this.sendWidget(widget, path, { index: index + 1 }, input2));
+        label.append(input2, this.document.createTextNode(string4(choice)));
         fieldset.appendChild(label);
       });
       node2.appendChild(fieldset);
@@ -21600,74 +23802,87 @@ var OutputRenderer = class {
     }
     let control;
     if (kind === "dropdown" || kind === "multiselect") {
-      const select = document.createElement("select");
+      const select = this.document.createElement("select");
       select.multiple = kind === "multiselect";
+      if (select.multiple) select.setAttribute("multiple", "");
       array2(spec.choices).forEach((choice, index) => {
-        const option = document.createElement("option");
+        const option = this.document.createElement("option");
         option.value = String(index + 1);
+        option.setAttribute("value", option.value);
         option.textContent = string4(choice);
         select.appendChild(option);
       });
       control = this.control(select, widget, spec, kind, path);
     } else if (["run_button", "button", "refresh"].includes(kind)) {
-      const button = document.createElement("button");
+      const button = this.document.createElement("button");
       button.type = "button";
+      button.setAttribute("type", "button");
       button.textContent = string4(spec.label) || (kind === "run_button" ? "Run" : kind);
       control = this.control(button, widget, spec, kind, path);
     } else if (kind === "text_area" || kind === "code_editor") {
-      const area = document.createElement("textarea");
+      const area = this.document.createElement("textarea");
       const rows = number4(spec.rows);
-      if (rows !== null) area.rows = rows;
+      if (rows !== null) {
+        area.rows = rows;
+        area.setAttribute("rows", String(rows));
+      }
       control = this.control(area, widget, spec, kind, path);
     } else if (kind === "range_slider" || kind === "date_range") {
-      control = document.createElement("div");
+      control = this.document.createElement("div");
       [0, 1].forEach((part) => {
-        const input2 = this.control(document.createElement("input"), widget, spec, kind, path);
+        const input2 = this.control(this.document.createElement("input"), widget, spec, kind, path);
         input2.type = kind === "range_slider" ? "range" : "date";
+        input2.setAttribute("type", input2.type);
         input2.dataset.rangePart = String(part);
         control.appendChild(input2);
       });
     } else {
-      const input2 = document.createElement("input");
+      const input2 = this.document.createElement("input");
       input2.type = kind === "file" ? "file" : kind === "date" ? "date" : kind === "datetime" ? "datetime-local" : kind === "checkbox" || kind === "switch" ? "checkbox" : kind === "slider" ? "range" : kind === "number" ? "number" : "text";
+      input2.setAttribute("type", input2.type);
       if (kind === "file") {
         input2.multiple = spec.multiple === true;
-        if (spec.accept) input2.accept = Array.isArray(spec.accept) ? spec.accept.map(string4).join(",") : string4(spec.accept);
+        if (input2.multiple) input2.setAttribute("multiple", "");
+        if (spec.accept) {
+          input2.accept = Array.isArray(spec.accept) ? spec.accept.map(string4).join(",") : string4(spec.accept);
+          input2.setAttribute("accept", input2.accept);
+        }
       }
       control = this.control(input2, widget, spec, kind, path);
     }
-    const labelled = control.matches("input,select,textarea,button") ? control : null;
+    const labelled = isTag(control, "input") || isTag(control, "select") || isTag(control, "textarea") || isTag(control, "button") ? control : null;
     this.appendLabel(node2, spec, labelled);
     node2.appendChild(control);
     if (kind === "datetime") {
-      const timezone = element("span", "widget-timezone", "UTC");
+      const timezone = element(this.document, "span", "widget-timezone", "UTC");
       timezone.id = `${labelled?.id ?? "widget"}-timezone`;
       labelled?.setAttribute("aria-describedby", timezone.id);
       labelled?.setAttribute("title", "UTC date and time");
       node2.appendChild(timezone);
     }
-    if (kind === "slider" || kind === "number") node2.appendChild(element("span", "widget-value"));
+    if (kind === "slider" || kind === "number") node2.appendChild(element(this.document, "span", "widget-value"));
     this.bindWidgetControls(node2, widget, kind, path);
     return node2;
   }
   bindWidgetControls(node2, widget, kind, path) {
+    if (this.mode === "static") return;
     const controls = this.widgetControls(node2, kind, path);
     const send = (update, control) => {
       void this.sendWidget(widget, path, update, control);
     };
     for (const control of controls) {
-      if (!(control instanceof HTMLInputElement || control instanceof HTMLSelectElement || control instanceof HTMLTextAreaElement || control instanceof HTMLButtonElement)) continue;
+      if (!isWidgetControl(control)) continue;
       if (kind === "run_button") control.addEventListener("click", () => send({ value: true }, control));
       else if (kind === "button" || kind === "refresh") control.addEventListener("click", () => {
         const current = Number(control.dataset.value ?? 0);
         send({ value: Number.isFinite(current) ? Math.floor(current) + 1 : 1, ...kind === "refresh" ? { paused: false } : {} }, control);
       });
-      else if (kind === "file" && control instanceof HTMLInputElement) control.addEventListener("change", () => {
+      else if (kind === "file" && isTag(control, "input")) control.addEventListener("change", () => {
         control.disabled = true;
         let upload;
-        upload = this.actions.upload(string4(widget.name), path, Array.from(control.files ?? [])).then(() => void 0, (error61) => {
+        upload = this.interactiveActions().upload(string4(widget.name), path, Array.from(control.files ?? [])).then(() => void 0, (error61) => {
           this.lastFailure = { error: error61 };
-          this.actions.error(error61);
+          this.interactiveActions().error(error61);
         }).finally(() => {
           control.disabled = false;
           this.pendingUploads.delete(upload);
@@ -21678,8 +23893,8 @@ var OutputRenderer = class {
         const event = ["slider", "number", "range_slider", "text_input", "text_area", "code_editor"].includes(kind) ? "input" : "change";
         control.addEventListener(event, () => {
           if (kind === "dropdown" || kind === "radio") send({ index: Number(control.value) }, control);
-          else if (kind === "multiselect" && control instanceof HTMLSelectElement) send({ indices: Array.from(control.selectedOptions).map((option) => Number(option.value)) }, control);
-          else if (kind === "checkbox" || kind === "switch") send({ value: control.checked }, control);
+          else if (kind === "multiselect" && isTag(control, "select")) send({ indices: Array.from(control.selectedOptions).map((option) => Number(option.value)) }, control);
+          else if ((kind === "checkbox" || kind === "switch") && isTag(control, "input")) send({ value: control.checked }, control);
           else if (kind === "slider" || kind === "number") {
             const value = Number(control.value);
             const label = node2.querySelector(".widget-value");
@@ -21723,12 +23938,12 @@ var OutputRenderer = class {
         while (pending.update) {
           const next = pending.update;
           pending.update = null;
-          await this.actions.widget(string4(pending.widget.name), pending.path, next);
+          await this.interactiveActions().widget(string4(pending.widget.name), pending.path, next);
         }
       } catch (error61) {
         pending.failure = error61;
         this.lastFailure = { error: error61 };
-        this.actions.error(error61);
+        this.interactiveActions().error(error61);
       } finally {
         this.pendingWidgets.delete(key);
         if (pending.failure !== null && pending.authoritative) {
@@ -21772,31 +23987,36 @@ var OutputRenderer = class {
     const page = object2(spec.page);
     const columns = list(page.columns).map(string4);
     const selected = new Set(array2(spec.selected).map(Number));
-    const table = document.createElement("table");
+    const table = this.document.createElement("table");
     table.className = "widget-table";
-    const head = document.createElement("thead");
-    const row = document.createElement("tr");
-    if (kind === "table") row.appendChild(document.createElement("th"));
-    columns.forEach((column) => row.appendChild(element("th", "", column)));
+    const head = this.document.createElement("thead");
+    const row = this.document.createElement("tr");
+    if (kind === "table") row.appendChild(this.document.createElement("th"));
+    columns.forEach((column) => row.appendChild(element(this.document, "th", "", column)));
     head.appendChild(row);
     table.appendChild(head);
-    const body = document.createElement("tbody");
+    const body = this.document.createElement("tbody");
     array2(page.preview).forEach((raw, index) => {
-      const tr = document.createElement("tr");
+      const tr = this.document.createElement("tr");
       if (kind === "table") {
-        const td = document.createElement("td");
-        const input2 = this.control(document.createElement("input"), widget, spec, kind, path);
+        const td = this.document.createElement("td");
+        const input2 = this.control(this.document.createElement("input"), widget, spec, kind, path);
+        if (!isTag(input2, "input")) return;
         input2.type = "checkbox";
+        input2.setAttribute("type", "checkbox");
         input2.value = String(index + 1);
-        input2.checked = selected.has(index + 1);
-        input2.addEventListener("change", () => {
-          const values = this.widgetControls(node2, kind, path).filter((entry) => entry instanceof HTMLInputElement && entry.checked).map((entry) => Number(entry.value));
+        input2.setAttribute("value", String(index + 1));
+        const checked = selected.has(index + 1);
+        if (this.mode === "static") input2.toggleAttribute("checked", checked);
+        else input2.checked = checked;
+        if (this.mode === "interactive") input2.addEventListener("change", () => {
+          const values = this.widgetControls(node2, kind, path).filter((entry) => isTag(entry, "input") && entry.checked).map((entry) => Number(entry.value));
           this.sendWidget(widget, path, { selected: values }, input2);
         });
         td.appendChild(input2);
         tr.appendChild(td);
       }
-      array2(raw).forEach((value) => tr.appendChild(element("td", "", string4(value))));
+      array2(raw).forEach((value) => tr.appendChild(element(this.document, "td", "", string4(value))));
       body.appendChild(tr);
     });
     table.appendChild(body);
@@ -21823,33 +24043,36 @@ var OutputRenderer = class {
     const operation = this.pendingWidgets.get(key);
     const pending = operation !== void 0;
     if (operation) operation.authoritative = { node: node2, widget, spec, path: [...path] };
-    const current = this.actions.widgetAvailable(widget);
+    const current = this.mode === "static" ? false : this.interactiveActions().widgetAvailable(widget);
     node2.dataset.current = String(current);
     node2.dataset.pending = String(pending);
     node2.toggleAttribute("aria-busy", pending);
     if (kind === "array" || kind === "dictionary") {
       for (const child of array2(spec.children).filter(isObject2)) {
         const childPath = [...path, string4(child.name)];
-        const found = Array.from(node2.children).find((item) => item.dataset?.widgetKey === widgetKey(widget, string4(child.kind), childPath));
-        if (found instanceof HTMLElement) this.patchWidget(found, widget, child, childPath, force);
+        const found = Array.from(node2.children).find((item) => isElement(item) && item.dataset?.widgetKey === widgetKey(widget, string4(child.kind), childPath));
+        if (isElement(found)) this.patchWidget(found, widget, child, childPath, force);
       }
       return;
     }
     if (kind === "form") {
       const child = object2(spec.child);
-      const found = Array.from(node2.children).find((item) => item.dataset?.widgetKey === widgetKey(widget, string4(child.kind), path));
-      if (found instanceof HTMLElement) this.patchWidget(found, widget, child, path, force);
+      const found = Array.from(node2.children).find((item) => isElement(item) && item.dataset?.widgetKey === widgetKey(widget, string4(child.kind), path));
+      if (isElement(found)) this.patchWidget(found, widget, child, path, force);
       const submit = node2.querySelector("[data-form-submit=true]");
       const submitting = this.pendingForms.has(key);
-      if (submit) submit.disabled = !current || pending || submitting || spec.dirty !== true;
-      if (submitting && found instanceof HTMLElement) {
+      if (submit) {
+        submit.disabled = !current || pending || submitting || spec.dirty !== true;
+        submit.toggleAttribute("disabled", submit.disabled);
+      }
+      if (submitting && isElement(found)) {
         for (const child2 of Array.from(found.querySelectorAll("[data-role=widget]"))) {
           child2.disabled = true;
         }
       }
       return;
     }
-    if ((kind === "table" || kind === "dataframe") && (force || !node2.contains(document.activeElement) && !pending)) {
+    if ((kind === "table" || kind === "dataframe") && (force || this.mode === "static" || !node2.contains(this.document.activeElement) && !pending)) {
       const replacement = this.createWidget(widget, spec, path);
       node2.replaceChildren(...Array.from(replacement.childNodes));
       return;
@@ -21857,52 +24080,105 @@ var OutputRenderer = class {
     const controls = this.widgetControls(node2, kind, path);
     const oneShot = ["run_button", "button", "refresh", "file"].includes(kind);
     controls.forEach((control2) => {
-      control2.disabled = !current || pending && oneShot;
+      const disabled = !current || pending && oneShot;
+      control2.disabled = disabled;
+      control2.toggleAttribute("disabled", disabled);
       if (spec.value !== void 0 && !Array.isArray(spec.value)) control2.dataset.value = string4(spec.value);
     });
-    if (!force && (node2.contains(document.activeElement) || pending)) return;
+    if (!force && this.mode !== "static" && (node2.contains(this.document.activeElement) || pending)) return;
     const control = controls[0];
     if (!control) return;
-    if (kind === "dropdown") control.value = String(Number.isInteger(spec.index) ? spec.index : 1);
-    else if (kind === "multiselect" && control instanceof HTMLSelectElement) {
+    if (kind === "dropdown" && isTag(control, "select")) {
+      const selected = String(Number.isInteger(spec.index) ? spec.index : 1);
+      if (this.mode === "static") Array.from(control.options).forEach((option) => option.toggleAttribute("selected", option.value === selected));
+      else control.value = selected;
+    } else if (kind === "multiselect" && isTag(control, "select")) {
       const selected = new Set(array2(spec.indices).map(Number));
       Array.from(control.options).forEach((option) => {
-        option.selected = selected.has(Number(option.value));
+        const isSelected = selected.has(Number(option.value));
+        if (this.mode === "static") option.toggleAttribute("selected", isSelected);
+        else option.selected = isSelected;
       });
     } else if (kind === "radio") {
       const selected = Number.isInteger(spec.index) ? Number(spec.index) : 1;
       controls.forEach((item) => {
-        item.checked = Number(item.value) === selected;
+        if (!isTag(item, "input")) return;
+        const isSelected = Number(item.value) === selected;
+        if (this.mode === "static") item.toggleAttribute("checked", isSelected);
+        else item.checked = isSelected;
       });
-    } else if (kind === "checkbox" || kind === "switch") control.checked = spec.value === true;
-    else if (kind === "range_slider" || kind === "date_range") {
+    } else if ((kind === "checkbox" || kind === "switch") && isTag(control, "input")) {
+      const checked = spec.value === true;
+      if (this.mode === "static") control.toggleAttribute("checked", checked);
+      else control.checked = checked;
+    } else if (kind === "range_slider" || kind === "date_range") {
       const values = array2(spec.value);
-      controls.forEach((item, index) => this.patchBounded(item, spec, values[index], kind === "date_range"));
+      controls.forEach((item, index) => {
+        if (isTag(item, "input")) this.patchBounded(item, spec, values[index], kind === "date_range");
+      });
     } else if (kind === "datetime") {
-      this.patchBounded(control, spec, spec.value, true, datetimeLocal);
-      control.step = "1";
-    } else if (kind === "date") this.patchBounded(control, spec, spec.value, true);
+      if (isTag(control, "input")) {
+        this.patchBounded(control, spec, spec.value, true, datetimeLocal);
+        if (this.mode === "static") control.setAttribute("step", "1");
+        else control.step = "1";
+      }
+    } else if (kind === "date" && isTag(control, "input")) this.patchBounded(control, spec, spec.value, true);
     else if (kind === "file") {
-    } else if (kind === "slider" || kind === "number") this.patchBounded(control, spec, array2(spec.value).length ? array2(spec.value)[0] : spec.value);
-    else if (spec.value !== void 0) control.value = string4(array2(spec.value).length ? array2(spec.value)[0] : spec.value);
+    } else if ((kind === "slider" || kind === "number") && isTag(control, "input")) this.patchBounded(control, spec, array2(spec.value).length ? array2(spec.value)[0] : spec.value);
+    else if (spec.value !== void 0) {
+      const value = string4(array2(spec.value).length ? array2(spec.value)[0] : spec.value);
+      if (this.mode === "static") {
+        if (isTag(control, "textarea")) control.textContent = value;
+        else control.setAttribute("value", value);
+      } else control.value = value;
+    }
     if (kind === "slider" || kind === "number") {
       const label = node2.querySelector(".widget-value");
       if (label) label.textContent = control.value;
+    }
+    if (this.mode === "static") this.reflectStaticControls(controls);
+  }
+  reflectStaticControls(controls) {
+    for (const control of controls) {
+      control.setAttribute("disabled", "");
+      if (isTag(control, "input")) {
+        const input2 = control;
+        control.setAttribute("type", input2.type);
+        if (input2.name) control.setAttribute("name", input2.name);
+        if (input2.multiple) control.setAttribute("multiple", "");
+        if (input2.accept) control.setAttribute("accept", input2.accept);
+      } else if (isTag(control, "select")) {
+        const select = control;
+        if (select.multiple) control.setAttribute("multiple", "");
+        for (const option of Array.from(select.options)) option.setAttribute("value", option.value);
+      } else if (isTag(control, "textarea")) {
+        const area = control;
+        if (area.rows) control.setAttribute("rows", String(area.rows));
+      }
     }
   }
   patchBounded(control, spec, value, noStep = false, convert = string4) {
     for (const field of ["min", "max"]) {
       if (spec[field] == null) control.removeAttribute(field);
-      else control[field] = convert(spec[field]);
+      else {
+        const converted2 = convert(spec[field]);
+        if (this.mode === "static") control.setAttribute(field, converted2);
+        else control[field] = converted2;
+      }
     }
-    if (!noStep && spec.step != null) control.step = string4(spec.step);
-    else if (!noStep) control.removeAttribute("step");
-    control.value = convert(value);
+    if (!noStep && spec.step != null) {
+      const step = string4(spec.step);
+      if (this.mode === "static") control.setAttribute("step", step);
+      else control.step = step;
+    } else if (!noStep) control.removeAttribute("step");
+    const converted = convert(value);
+    if (this.mode === "static") control.setAttribute("value", converted);
+    else control.value = converted;
   }
   widgetControls(node2, kind, path) {
     const encoded = JSON.stringify(path);
     return Array.from(node2.querySelectorAll("[data-role=widget]")).filter(
-      (item) => item.dataset.kind === kind && item.dataset.path === encoded
+      (item) => isWidgetControl(item) && item.dataset.kind === kind && item.dataset.path === encoded
     );
   }
   control(control, widget, _spec, kind, path) {
@@ -21912,18 +24188,30 @@ var OutputRenderer = class {
     control.dataset.owner = string4(widget.owner);
     control.dataset.path = JSON.stringify(path);
     control.id = `widget-${safePart(widget.owner)}-${safePart(kind)}${path.length ? `-${safePart(path.join("-"))}` : ""}`;
+    if (this.mode === "static") control.setAttribute("disabled", "");
     return control;
   }
   appendLabel(parent, spec, control, tag = "label") {
     const labelText = string4(spec.label);
     if (!labelText) return;
-    const label = document.createElement(tag);
+    const label = this.document.createElement(tag);
     label.dataset.role = "widget-label";
     label.textContent = labelText;
-    if (tag === "label" && control) label.htmlFor = control.id;
+    if (tag === "label" && control && isTag(label, "label")) label.htmlFor = control.id;
     parent.appendChild(label);
   }
 };
+function outputData(record2) {
+  const data = record2.data;
+  if (!isObject2(data)) return data;
+  if (data.kind === "html" && data.html !== void 0 && record2.metadata.presentation !== "inline") {
+    return { kind: "html", artifact: data.artifact, alt_text: data.alt_text };
+  }
+  return data;
+}
+function isArtifactDescriptor(value) {
+  return isObject2(value) && typeof value.handle === "string" && typeof value.mimeType === "string" && Number.isSafeInteger(value.byteLength) && value.chunkBytes === OUTPUT_CHUNK_BYTES && typeof value.epoch === "string" && typeof value.documentRevision === "number" && (value.kernelEpoch === null || typeof value.kernelEpoch === "string");
+}
 function outputStructure(value) {
   if (Array.isArray(value)) return value.map(outputStructure);
   if (!isObject2(value)) return value;
@@ -21960,9 +24248,6 @@ function visitWidgets(value, visit2) {
 function widgetKey(widget, kind, path) {
   return `${string4(widget.name)}\0${kind}\0${path.join("")}`;
 }
-function artifactUrl(value) {
-  return notebookUrl(`/plot/${encodeURIComponent(string4(value))}`);
-}
 function safePart(value) {
   return encodeURIComponent(string4(value)).replaceAll("%", "_");
 }
@@ -21978,18 +24263,19 @@ function datetimeWire(value) {
   if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(text)) text += ":00";
   return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/.test(text) ? `${text}Z` : text;
 }
-async function copyTsv(columns, rows) {
+async function copyTsv(document2, columns, rows) {
   const text = [columns.join("	"), ...rows.map((raw) => {
     const values = Array.isArray(raw) ? raw : isObject2(raw) ? columns.map((column) => raw[column]) : [];
     return values.map(string4).join("	");
   })].join("\n");
-  if (navigator.clipboard?.writeText) return navigator.clipboard.writeText(text);
-  const area = document.createElement("textarea");
+  const view2 = document2.defaultView;
+  if (view2?.navigator.clipboard?.writeText) return view2.navigator.clipboard.writeText(text);
+  const area = document2.createElement("textarea");
   area.value = text;
   area.style.cssText = "position:fixed;opacity:0";
-  document.body.appendChild(area);
+  document2.body.appendChild(area);
   area.select();
-  if (!document.execCommand("copy")) throw new Error("browser rejected clipboard copy");
+  if (!document2.execCommand("copy")) throw new Error("browser rejected clipboard copy");
   area.remove();
 }
 function stableJson(value) {
@@ -21999,14 +24285,23 @@ function stableJson(value) {
     return "";
   }
 }
-function element(tag, className = "", text = "") {
-  const result = document.createElement(tag);
+function element(document2, tag, className = "", text = "") {
+  const result = document2.createElement(tag);
   result.className = className;
   if (text) result.textContent = text;
   return result;
 }
 function message(error61, fallback) {
   return error61 instanceof Error ? error61.message : fallback;
+}
+function isElement(value) {
+  return typeof value === "object" && value !== null && value.nodeType === 1;
+}
+function isTag(value, tag) {
+  return isElement(value) && string4(value.tagName).toLowerCase() === tag;
+}
+function isWidgetControl(value) {
+  return isTag(value, "input") || isTag(value, "select") || isTag(value, "textarea") || isTag(value, "button");
 }
 function isObject2(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -22049,24 +24344,29 @@ var NotebookView = class {
     dom.body.classList.toggle("app-view", this.appView);
     window.__alderEditors = this.editors;
     this.output = new OutputRenderer({
-      widget: (name, path, update) => client2.setWidget(name, path, update, this.appView ? "app" : "editor"),
-      upload: async (name, path, files) => {
-        const encoded = await Promise.all(files.map(encodeFile));
-        await client2.service("upload", {
-          name,
-          path: [...path],
-          files: encoded,
-          source: this.appView ? "app" : "editor"
-        });
-      },
-      lazy: (key) => client2.requestLazy(key),
-      table: (request) => client2.requestTable(request),
-      error: (error61) => this.showError(error61),
-      pageSize: () => configNumber(this.documentValue?.snapshot.config, ["table", "page_size"], 25),
-      widgetAvailable: (widget) => {
-        const owner = typeof widget.owner === "string" ? this.documentValue?.cell(widget.owner) : void 0;
-        const runtime = this.documentValue?.snapshot.runtime;
-        return owner?.server?.status === "done" && runtime?.executionReady === true && runtime.kernelAvailable === true;
+      document: dom,
+      resolveArtifact: async (descriptor) => ({ kind: "url", url: await client2.resolveArtifact(descriptor) }),
+      mode: "interactive",
+      actions: {
+        widget: (name, path, update) => client2.setWidget(name, path, update, this.appView ? "app" : "editor"),
+        upload: async (name, path, files) => {
+          const encoded = await Promise.all(files.map(encodeFile));
+          await client2.service("upload", {
+            name,
+            path: [...path],
+            files: encoded,
+            source: this.appView ? "app" : "editor"
+          });
+        },
+        lazy: (key) => client2.requestLazy(key),
+        table: (request) => client2.requestTable(request),
+        error: (error61) => this.showError(error61),
+        pageSize: () => configNumber(this.documentValue?.snapshot.config, ["table", "page_size"], 25),
+        widgetAvailable: (widget) => {
+          const owner = typeof widget.owner === "string" ? this.documentValue?.cell(widget.owner) : void 0;
+          const runtime = this.documentValue?.snapshot.runtime;
+          return owner?.server?.status === "done" && runtime?.executionReady === true && runtime?.kernelState === "ready";
+        }
       }
     });
     this.observer = typeof IntersectionObserver === "function" ? new IntersectionObserver((entries) => this.visibilityChanged(Array.from(entries)), {
@@ -22080,6 +24380,7 @@ var NotebookView = class {
     this.bindNavigation();
     this.bindDragAndDrop();
     this.installServiceMenus();
+    this.recoveryUnsubscribe = client2.subscribeRecovery(() => this.renderStatus());
     this.applyPanelState();
     this.updateTopbarInset();
     window.requestAnimationFrame(() => this.updateTopbarInset());
@@ -22105,6 +24406,7 @@ var NotebookView = class {
   editorHelpError = null;
   editorHelpRestarting = false;
   actionCount = 0;
+  explicitRunCount = 0;
   emptyBar = null;
   appView = false;
   variableFilter = "";
@@ -22127,10 +24429,12 @@ var NotebookView = class {
   editorDiagnosticsValue = null;
   editorDiagnosticsVisible = false;
   editorDiagnosticsSourceCurrent = false;
+  renderedOrder = [];
   toolbarSignature = "";
   hostClosed = false;
   internalNavigation = false;
   statusSignature = "";
+  recoveryUnsubscribe = null;
   cellActionsSignature = "";
   dataflowStatuses = /* @__PURE__ */ new Map();
   dataflowCells = /* @__PURE__ */ new Map();
@@ -22139,6 +24443,7 @@ var NotebookView = class {
   minimapCurrent = null;
   minimapViewportFrame = null;
   lspRequests = /* @__PURE__ */ new Map();
+  packageOperations = /* @__PURE__ */ new Set();
   draggedKey = null;
   resizeHandler = () => this.updateTopbarInset();
   preserveRunFocus = (event) => {
@@ -22151,6 +24456,28 @@ var NotebookView = class {
   get allowsUnload() {
     return this.hostClosed || this.internalNavigation;
   }
+  get runPreparing() {
+    return this.explicitRunCount > 0;
+  }
+  async runExplicit(operation) {
+    this.cancelEditTimers();
+    this.explicitRunCount += 1;
+    if (this.documentValue) this.renderControls(this.documentValue.snapshot);
+    const pending = this.action(async () => {
+      await this.output.flush();
+      return operation();
+    });
+    this.renderAllCellActions();
+    try {
+      return await pending;
+    } finally {
+      this.explicitRunCount -= 1;
+      if (this.documentValue) {
+        this.renderControls(this.documentValue.snapshot);
+        this.renderAllCellActions();
+      }
+    }
+  }
   setTransportState(state, error61) {
     if (this.hostClosed) return;
     this.transportError = state === "closed" && error61 ? error61.message : state === "open" ? null : state === "connecting" ? "Connecting\u2026" : "Recovering session\u2026";
@@ -22159,6 +24486,7 @@ var NotebookView = class {
   render(notebook, event, localCellKeys) {
     this.documentValue = notebook;
     const snapshot = notebook.snapshot;
+    if (event?.type === "operation" && isOperationRecord(event.payload)) this.renderPackageProgress(event.payload);
     if (event?.type === "service-errors" && snapshot.serviceErrors.lsp === void 0) {
       this.editorHelpError = null;
     }
@@ -22172,9 +24500,11 @@ var NotebookView = class {
     const targetId = event && ["cell", "cell-started", "cell-output", "cell-completed", "diagnostics"].includes(event.type) ? event.cellId : void 0;
     const target = targetId ? notebook.cell(targetId) : void 0;
     const deleted = event?.type === "cell" && isObject3(event.payload) && event.payload.deleted === true;
-    const reconcileNotebook = event?.type === "notebook" && notebookRequiresCellReconcile(event.payload);
+    const reconcileNotebook = (event?.type === "notebook" || event?.type === "transaction") && notebookRequiresCellReconcile(event.payload, event.type === "notebook");
     const canTarget = target !== void 0 && this.views.has(target.key) && !deleted;
     const localTargets = event === void 0 && localCellKeys !== void 0 ? [...new Set(localCellKeys)].map((key) => notebook.cell(key)) : [];
+    const transactionTargets = event?.type === "transaction" && !reconcileNotebook && isObject3(event.payload) && Array.isArray(event.payload.updated) ? event.payload.updated.flatMap((value) => isObject3(value) && typeof value.id === "string" ? [notebook.cell(value.id)] : []).filter((cell) => cell !== void 0) : [];
+    const canTargetTransaction = transactionTargets.length > 0 && transactionTargets.every((cell) => this.views.has(cell.key));
     const canTargetLocal = event === void 0 && localCellKeys !== void 0 && localTargets.every((cell) => cell !== void 0 && this.views.has(cell.key));
     if (canTargetLocal) {
       for (const cell of localTargets) {
@@ -22182,7 +24512,14 @@ var NotebookView = class {
       }
     } else if (canTarget) {
       this.renderCell(target, notebook.cells.indexOf(target), snapshot, event);
-    } else if (!event || event.type === "cell" || reconcileNotebook) {
+    } else if (canTargetTransaction) {
+      for (const cell of transactionTargets) this.renderCell(cell, notebook.cells.indexOf(cell), snapshot, event);
+      const orderChanged = notebook.cells.length !== this.renderedOrder.length || notebook.cells.some((cell, index) => cell.key !== this.renderedOrder[index]);
+      if (orderChanged) {
+        this.reconcileOrder(notebook.cells);
+        this.renderedOrder = notebook.cells.map((cell) => cell.key);
+      }
+    } else if (!event || event.type === "cell" || event.type === "transaction" || reconcileNotebook) {
       const retained = /* @__PURE__ */ new Set();
       notebook.cells.forEach((cell, index) => {
         retained.add(cell.key);
@@ -22193,6 +24530,7 @@ var NotebookView = class {
         this.destroyCell(key, view2);
       }
       this.reconcileOrder(notebook.cells);
+      this.renderedOrder = notebook.cells.map((cell) => cell.key);
       this.renderEmpty(notebook.cells.length === 0);
     }
     this.renderControls(snapshot);
@@ -22206,6 +24544,8 @@ var NotebookView = class {
     }
   }
   destroy() {
+    this.recoveryUnsubscribe?.();
+    this.recoveryUnsubscribe = null;
     for (const timer of this.editTimers.values()) window.clearTimeout(timer);
     if (this.autosaveTimer !== null) window.clearTimeout(this.autosaveTimer);
     for (const request of this.lspRequests.values()) request.abort();
@@ -22306,13 +24646,18 @@ var NotebookView = class {
       this.addCell(key, button.dataset.type === "markdown" ? "markdown" : "code");
       return;
     }
-    await this.action(async () => {
-      if (action === "run") {
-        this.cancelEditTimers();
-        await this.output.flush();
+    if (action === "run") {
+      await this.runExplicit(async () => {
+        if (this.requireCell(key).tombstone) {
+          throw new Error("Restore this deleted cell as a new cell before running it");
+        }
         await this.client.runCell(key, input2);
         this.scheduleAutosave();
-      } else if (action === "delete") {
+      });
+      return;
+    }
+    await this.action(async () => {
+      if (action === "delete") {
         this.cancelEditTimer(key);
         await this.client.deleteCell(key);
         this.scheduleAutosave();
@@ -22410,6 +24755,9 @@ var NotebookView = class {
     outputArea.hidden = !this.appView && !server?.outputs.length && !server?.progress;
     outputArea.dataset.cell = cell.id ?? "";
     outputArea.dataset.revision = String(cell.serverRevision);
+    const outputRunId = server?.outputs.at(-1)?.runId;
+    if (outputRunId) outputArea.dataset.runId = outputRunId;
+    else delete outputArea.dataset.runId;
     this.renderLog(element3.querySelector("[data-role=log]"), server?.log ?? [], server?.error);
     this.renderCellActions(element3, cell, status, void 0, true);
     if (conflictChanged) this.renderConflict(element3, cell);
@@ -22460,7 +24808,7 @@ var NotebookView = class {
     const actionPending = this.actionCount > 0;
     const signature = JSON.stringify({
       actionPending,
-      runBlocked: actionPending || runtime?.busy === true || runtime?.packageOperationActive === true || runtime?.executionReady !== true || runtime?.kernelAvailable !== true
+      runBlocked: actionPending || runtime?.busy === true || runtime?.packageOperationActive === true || runtime?.executionReady !== true || runtime?.kernelState !== "ready"
     });
     if (signature === this.cellActionsSignature) return;
     this.cellActionsSignature = signature;
@@ -22506,21 +24854,17 @@ var NotebookView = class {
           this.scheduleEdit(cell.key);
         },
         onRun: (next) => {
-          this.cancelEditTimers();
-          void this.action(async () => {
+          void this.runExplicit(async () => {
             if (this.requireCell(cell.key).tombstone) {
               throw new Error("Restore this deleted cell as a new cell before running it");
             }
-            await this.output.flush();
             await this.client.runCell(cell.key);
             this.scheduleAutosave();
             if (next) this.focusAdjacentCell(cell.key, 1);
           }).catch((error61) => this.showError(error61));
         },
         onRunAll: () => {
-          this.cancelEditTimers();
-          void this.action(async () => {
-            await this.output.flush();
+          void this.runExplicit(async () => {
             await this.client.runAll(this.runScope());
             this.scheduleAutosave();
           }).catch((error61) => this.showError(error61));
@@ -22691,7 +25035,7 @@ var NotebookView = class {
   diagnosticSourceCurrent(cell) {
     const server = cell.server;
     if (!server || cell.conflict || cell.tombstone || cell.generation !== cell.acknowledgedGeneration || cell.serverRevision !== server.revision || cell.serverType !== server.type || cell.desiredType !== server.type) return false;
-    const source = server.body.join("\n");
+    const source = toLogicalCellBody(server.type, server.body).join("\n");
     if (cell.serverBody.join("\n") !== source || cell.desiredBody.join("\n") !== source) return false;
     const editor = this.editors.get(cell.key);
     return !editor || editor.getDoc() === source;
@@ -22736,16 +25080,27 @@ var NotebookView = class {
     area.replaceChildren();
     logs.forEach((line) => area.appendChild(element2(this.dom, "div", /^Error\b/.test(line) ? "log-error" : "log-line", line)));
     if (isObject3(rawError)) {
-      const trace = Array.isArray(rawError.trace) ? rawError.trace.map(String) : [];
-      if (rawError.call || trace.length || rawError.class) {
+      const errorDetails = isObject3(rawError.details) ? rawError.details : void 0;
+      const condition = errorDetails && isObject3(errorDetails.condition) ? errorDetails.condition : void 0;
+      const jupyter = errorDetails && isObject3(errorDetails.jupyter) ? errorDetails.jupyter : void 0;
+      const classes = condition && Array.isArray(condition.class) ? condition.class.map(String) : [];
+      const call = condition && typeof condition.call === "string" ? condition.call : "";
+      const trace = condition && Array.isArray(condition.trace) ? condition.trace.map(String) : [];
+      const jupyterName = jupyter && typeof jupyter.ename === "string" ? jupyter.ename : "";
+      const jupyterValue = jupyter && typeof jupyter.evalue === "string" ? jupyter.evalue : "";
+      const jupyterTrace = jupyter && Array.isArray(jupyter.traceback) ? jupyter.traceback.map(String) : [];
+      if (call || trace.length || classes.length || jupyterName || jupyterValue || jupyterTrace.length) {
         const details = this.dom.createElement("details");
         details.className = "error-details";
         details.appendChild(element2(this.dom, "summary", "", "Call and traceback"));
         details.appendChild(element2(this.dom, "pre", "error-trace", [
-          rawError.class ? `Condition: ${Array.isArray(rawError.class) ? rawError.class.join(", ") : String(rawError.class)}` : "",
-          rawError.call ? `Call: ${String(rawError.call)}` : "",
+          classes.length ? `Condition: ${classes.join(", ")}` : "",
+          call ? `Call: ${call}` : "",
           trace.length ? `Traceback:
-${trace.map((line, index) => `${index + 1}. ${line}`).join("\n")}` : ""
+${trace.map((line, index) => `${index + 1}. ${line}`).join("\n")}` : "",
+          jupyterName || jupyterValue ? `Jupyter: ${[jupyterName, jupyterValue].filter(Boolean).join(": ")}` : "",
+          jupyterTrace.length ? `Jupyter traceback:
+${jupyterTrace.map((line, index) => `${index + 1}. ${line}`).join("\n")}` : ""
         ].filter(Boolean).join("\n")));
         area.appendChild(details);
       }
@@ -22827,15 +25182,16 @@ ${trace.map((line, index) => `${index + 1}. ${line}`).join("\n")}` : ""
   }
   renderControls(snapshot) {
     const busy = snapshot.runtime.busy;
-    const available = !this.hostClosed && snapshot.runtime.executionReady && snapshot.runtime.kernelAvailable;
+    const available = !this.hostClosed && snapshot.runtime.executionReady && snapshot.runtime.kernelState === "ready";
     const signature = JSON.stringify({
       actionCount: this.actionCount,
+      runPreparing: this.runPreparing,
       hostClosed: this.hostClosed,
       busy,
       available,
       packageOperationActive: snapshot.runtime.packageOperationActive,
       executionMode: snapshot.runtime.executionMode,
-      kernelAvailable: snapshot.runtime.kernelAvailable,
+      kernelReady: snapshot.runtime.kernelState === "ready",
       changed: snapshot.changed
     });
     if (signature === this.toolbarSignature) return;
@@ -22850,10 +25206,10 @@ ${trace.map((line, index) => `${index + 1}. ${line}`).join("\n")}` : ""
       setDisabled(runAll, this.actionCount > 0 || busy || snapshot.runtime.packageOperationActive || !available);
     }
     const stop = this.dom.getElementById("stop");
-    if (stop) setDisabled(stop, this.hostClosed || this.actionCount > 0 || !busy);
+    if (stop) setDisabled(stop, this.hostClosed || !(busy || this.runPreparing));
     const restart = this.dom.getElementById("restart");
     if (restart) {
-      restart.hidden = snapshot.runtime.kernelAvailable;
+      restart.hidden = snapshot.runtime.kernelState === "ready";
       setDisabled(restart, this.hostClosed || this.actionCount > 0 || busy);
     }
     const save = this.dom.getElementById("save");
@@ -22868,7 +25224,7 @@ ${trace.map((line, index) => `${index + 1}. ${line}`).join("\n")}` : ""
     if (this.appView) return;
     if (!event || event.cellId) this.patchDataflowStatuses(snapshot, event?.cellId);
     if (event?.type === "notebook") {
-      if (isObject3(event.payload) && (Array.isArray(event.payload.created) && event.payload.created.length > 0 || typeof event.payload.deleted === "string" || typeof event.payload.moved === "string")) this.renderMinimapProjection(snapshot);
+      if (notebookRequiresCellReconcile(event.payload, false)) this.renderMinimapProjection(snapshot);
       return;
     }
     if (event?.type === "variables") {
@@ -22908,7 +25264,8 @@ ${trace.map((line, index) => `${index + 1}. ${line}`).join("\n")}` : ""
       "editor-diagnostics",
       "service-errors",
       "operation",
-      "service-error"
+      "service-error",
+      "active_clients_changed"
     ].includes(event.type)) return;
     if (!event) {
       this.captureDataflowCells(snapshot);
@@ -23371,7 +25728,7 @@ ${trace.map((line, index) => `${index + 1}. ${line}`).join("\n")}` : ""
       const name = cellName(cell);
       if (name) retain(this.panelButton(name, cell.id, "outline-cell", void 0, ["outline-cell", cell.id]));
       if (cell.type === "markdown") {
-        markdownHeadings(cell.body).forEach((heading) => {
+        markdownHeadings(toLogicalCellBody(cell.type, cell.body)).forEach((heading) => {
           const button = this.panelButton(heading.text, cell.id, "outline-heading", heading.line, ["outline-heading", cell.id, heading.line]);
           button.style.setProperty("--outline-level", String(heading.level - 1));
           retain(button);
@@ -23653,39 +26010,24 @@ ${trace.map((line, index) => `${index + 1}. ${line}`).join("\n")}` : ""
     const menus = element2(this.dom, "div", "editor-only");
     menus.dataset.hostServiceMenus = "true";
     menus.style.display = "contents";
-    const exportMenu = this.menu("Export");
+    const actionMenu = this.menu("Actions");
     const include = this.dom.createElement("input");
     include.type = "checkbox";
-    const includeLabel = element2(this.dom, "label", "export-include-code");
+    const includeLabel = element2(this.dom, "label", "publish-include-code");
     includeLabel.append(include, this.dom.createTextNode(" Include code"));
-    exportMenu.panel.appendChild(includeLabel);
-    for (const [format, label] of [
-      ["html", "HTML"],
-      ["md", "Markdown"],
-      ["script", "R script"],
-      ["ipynb", "IPYNB"],
-      ["qmd", "Quarto"],
-      ["session", "Session JSON"]
-    ]) {
-      exportMenu.panel.appendChild(this.serviceButton(label, async () => {
-        const result = await this.runService("export", { format, include_code: include.checked });
-        this.downloadServiceResult(result);
-      }, { exportFormat: format }));
-    }
-    exportMenu.panel.appendChild(this.serviceButton("Publish with Pandoc", async () => {
-      const result = await this.runService("publish", { engine: "pandoc", include_code: include.checked });
-      this.downloadServiceResult(result);
+    actionMenu.panel.appendChild(includeLabel);
+    actionMenu.panel.appendChild(this.serviceButton("Publish HTML", async () => {
+      const result = await this.runService("publish", { include_code: include.checked });
+      await this.downloadServiceResult(result);
     }));
-    exportMenu.panel.appendChild(this.serviceButton("Publish with Quarto", async () => {
-      const result = await this.runService("publish", { engine: "quarto", include_code: include.checked });
-      this.downloadServiceResult(result);
-    }));
-    exportMenu.panel.appendChild(this.serviceButton("Check notebook", async () => {
+    actionMenu.panel.appendChild(this.serviceButton("Check notebook", async () => {
       const result = await this.runService("check", {});
       const payload = isObject3(result.result) ? result.result : {};
-      if (payload.ok === false) {
-        const count = Array.isArray(payload.issues) ? payload.issues.length : 1;
-        throw new Error(`${count} notebook validation ${count === 1 ? "issue" : "issues"}`);
+      const issues = Array.isArray(payload.issues) ? payload.issues : [];
+      const blocked = isObject3(payload.executionBlockedReason);
+      if (payload.ok === false || issues.length > 0 || blocked) {
+        if (issues.length > 0) throw new Error(issues.length + " notebook validation " + (issues.length === 1 ? "issue" : "issues"));
+        throw new Error("Notebook check failed");
       }
       this.actionNotice = "Notebook check passed";
     }));
@@ -23697,32 +26039,48 @@ ${trace.map((line, index) => `${index + 1}. ${line}`).join("\n")}` : ""
     const status = element2(this.dom, "pre", "package-status", "Select Refresh to inspect packages.");
     packageMenu.panel.append(names);
     const packages = () => Array.from(new Set(names.value.split(/[\s,]+/).map((name) => name.trim()).filter(Boolean)));
-    const updateStatus = (result) => {
+    const updateStatus = (result, command) => {
       const payload = operationPayload(result);
       const state = isObject3(payload.status) ? payload.status : payload;
-      status.textContent = packageStatusText(state);
+      const output2 = command === "packages.install" && isObject3(payload.result) && typeof payload.result.output === "string" ? payload.result.output : "";
+      status.textContent = packageStatusText(state, output2);
+    };
+    const runPackage = async (command, payload) => {
+      const target = { command, operationId: null, status };
+      this.packageOperations.add(target);
+      try {
+        const result = await this.runService(command, payload, (operationId2) => {
+          target.operationId = operationId2;
+          const current = this.documentValue?.snapshot.operations.find((candidate) => candidate.id === operationId2);
+          if (current) this.renderPackageProgress(current, target);
+        });
+        if (command === "packages.declare") updateStatus(await this.client.service("packages.status"), command);
+        else updateStatus(result, command);
+      } finally {
+        this.packageOperations.delete(target);
+      }
     };
     packageMenu.panel.appendChild(this.serviceButton("Refresh", async () => updateStatus(await this.runService("packages.status", {}))));
     packageMenu.panel.appendChild(this.serviceButton("Declare", async () => {
       const selected = packages();
       if (!selected.length) throw new Error("Enter one or more package names");
-      updateStatus(await this.runService("packages.declare", { packages: selected }));
+      await runPackage("packages.declare", { packages: selected });
     }));
     packageMenu.panel.appendChild(this.serviceButton("Install missing", async () => {
-      updateStatus(await this.runService("packages.install", { packages: packages() }));
+      await runPackage("packages.install", { packages: packages() });
     }));
     packageMenu.panel.appendChild(status);
-    menus.append(exportMenu.wrap, packageMenu.wrap);
+    menus.append(actionMenu.wrap, packageMenu.wrap);
     const anchor2 = this.dom.getElementById("app-mode") ?? this.dom.getElementById("edit-mode");
     if (anchor2?.parentNode === topbar) topbar.insertBefore(menus, anchor2);
     else topbar.appendChild(menus);
   }
   menu(label) {
-    const wrap = element2(this.dom, "div", "export-menu");
+    const wrap = element2(this.dom, "div", "service-menu");
     const toggle = element2(this.dom, "button", "btn", label);
     toggle.type = "button";
     toggle.setAttribute("aria-expanded", "false");
-    const panel = element2(this.dom, "div", "export-menu-panel");
+    const panel = element2(this.dom, "div", "service-menu-panel");
     panel.hidden = true;
     toggle.addEventListener("click", () => {
       panel.hidden = !panel.hidden;
@@ -23747,25 +26105,39 @@ ${trace.map((line, index) => `${index + 1}. ${line}`).join("\n")}` : ""
     });
     return button;
   }
-  async runService(command, payload) {
+  async runService(command, payload, onAccepted) {
     this.cancelEditTimers();
     await this.client.commitEdits();
     await this.output.flush();
-    return this.client.service(command, payload);
+    return this.client.service(command, payload, onAccepted);
   }
-  downloadServiceResult(result) {
-    const payload = operationPayload(result);
-    const url2 = typeof payload.url === "string" ? payload.url : typeof payload.download === "string" ? payload.download : "";
-    if (!url2.startsWith("/download/")) throw new Error("service did not return a downloadable artifact");
-    const link = this.dom.createElement("a");
-    link.href = notebookUrl(url2);
-    link.download = "";
-    link.target = "_blank";
-    link.rel = "noopener";
-    link.hidden = true;
-    this.dom.body.appendChild(link);
-    link.click();
-    link.remove();
+  renderPackageProgress(operation, target) {
+    const candidate = target ?? [...this.packageOperations].find((entry) => entry.operationId === operation.id);
+    if (!candidate || candidate.operationId !== operation.id) return;
+    const progress = operation.progress;
+    if (!progress) return;
+    const text = progress.text && progress.text.length > 0 ? progress.text : progress.data === void 0 ? packageProgressPhaseText(candidate.command, progress.phase) : packageProgressDataText(progress.data);
+    if (text) candidate.status.textContent = text;
+  }
+  async downloadServiceResult(result) {
+    const descriptor = artifactHandleFromResult(result);
+    if (descriptor === null) throw new Error("publish did not return an artifact handle");
+    const scopedUrl = await this.client.resolveArtifact(descriptor);
+    const response = await fetch(scopedUrl, { credentials: "omit" });
+    if (!response.ok) throw new Error("published artifact download failed (" + response.status + ")");
+    const bytes = await response.blob();
+    const downloadUrl = URL.createObjectURL(bytes);
+    try {
+      const link = this.dom.createElement("a");
+      link.href = downloadUrl;
+      link.download = "notebook.html";
+      link.rel = "noopener";
+      link.click();
+    } finally {
+      globalThis.setTimeout(() => URL.revokeObjectURL(downloadUrl), 0);
+    }
+    this.actionNotice = "Published HTML downloaded.";
+    this.renderStatus();
   }
   applyConfig(config2) {
     const theme = ["light", "dark", "system"].includes(configString(config2, ["theme"], "system")) ? configString(config2, ["theme"], "system") : "system";
@@ -23872,17 +26244,9 @@ ${trace.map((line, index) => `${index + 1}. ${line}`).join("\n")}` : ""
   async shutdownHost() {
     if (this.hostClosed) return;
     const pending = this.documentValue?.pendingSource();
-    if ((this.documentValue?.snapshot.changed || pending?.edits.length || pending?.creations.length) && !window.confirm("This notebook has unsaved changes. Shut down without saving?")) return;
+    if ((this.documentValue?.snapshot.changed || pending?.changes.length) && !window.confirm("This notebook has unsaved changes. Shut down without saving?")) return;
     await this.action(async () => {
-      const state = await fetch(notebookUrl("/api/state"));
-      if (!state.ok) throw new Error("Could not read notebook shutdown credentials");
-      const { shutdown_token: token } = await state.json();
-      if (!token) throw new Error("Notebook host did not provide a shutdown token");
-      const response = await fetch(notebookUrl("/api/shutdown"), {
-        method: "POST",
-        headers: { "X-Alder-Shutdown-Token": token }
-      });
-      if (!response.ok) throw new Error("Notebook host rejected shutdown");
+      await this.client.shutdown();
       this.hostClosed = true;
       this.cancelEditTimers();
       if (this.autosaveTimer !== null) window.clearTimeout(this.autosaveTimer);
@@ -23898,14 +26262,14 @@ ${trace.map((line, index) => `${index + 1}. ${line}`).join("\n")}` : ""
       void this.shutdownHost().catch((error61) => this.showError(error61));
     });
     this.dom.getElementById("run-all")?.addEventListener("click", (event) => {
-      this.cancelEditTimers();
-      void this.action(async () => {
-        await this.output.flush();
+      void this.runExplicit(async () => {
         await this.client.runAll(this.runScope(), event);
         this.scheduleAutosave();
       }).catch((error61) => this.showError(error61));
     });
-    this.dom.getElementById("stop")?.addEventListener("click", () => void this.action(() => this.client.interrupt()).catch((error61) => this.showError(error61)));
+    this.dom.getElementById("stop")?.addEventListener("click", () => {
+      void this.client.interrupt().catch((error61) => this.showError(error61));
+    });
     this.dom.getElementById("restart")?.addEventListener("click", () => void this.action(() => this.client.restart()).catch((error61) => this.showError(error61)));
     this.dom.getElementById("save")?.addEventListener("click", () => {
       this.cancelEditTimers();
@@ -23916,8 +26280,14 @@ ${trace.map((line, index) => `${index + 1}. ${line}`).join("\n")}` : ""
       void this.action(() => this.client.setRuntime({ executionMode: value })).catch((error61) => this.showError(error61));
     });
     this.status?.addEventListener("click", (event) => {
-      const target = event.target?.closest("[data-status-action=retry-editor-help]");
-      if (!target || this.editorHelpRestarting) return;
+      const target = event.target?.closest("[data-status-action]");
+      const action = target?.getAttribute("data-status-action");
+      if (action === "restart-runtime") {
+        event.preventDefault();
+        void this.action(() => this.client.restart()).catch((error61) => this.showError(error61));
+        return;
+      }
+      if (action !== "retry-editor-help" || this.editorHelpRestarting) return;
       event.preventDefault();
       this.editorHelpRestarting = true;
       this.renderStatus();
@@ -24095,15 +26465,22 @@ ${trace.map((line, index) => `${index + 1}. ${line}`).join("\n")}` : ""
     if (!this.status) return;
     const stateError = this.documentValue?.snapshot.lastActionError?.message ?? null;
     const editorHelpError = this.editorHelpError ?? this.documentValue?.snapshot.serviceErrors.lsp?.message ?? null;
-    const message2 = this.hostClosed ? "Notebook host shut down." : this.actionError ?? stateError ?? editorHelpError ?? this.transportError ?? this.actionNotice ?? "";
+    const runtimeBlocked = this.documentValue?.snapshot.runtime.executionBlockedReason ?? null;
+    const runtimeMessage = runtimeBlocked === null ? null : "R execution is blocked: " + (runtimeBlocked.message || runtimeBlocked.code);
+    const recovery = this.client.recoveryState;
+    const recoveryConflict = recovery.status === "conflict" || recovery.branches.some((branch) => branch.state === "conflict") || recovery.corruption !== null;
+    const recoveryMessage = recovery.local !== null ? recovery.status === "resubmitting" ? "Resubmitting recovered local edits\u2026" : "Recovered local edits need your review." : recovery.persistenceError ? "Local edit recovery is not durable." : recovery.foreignDrafts > 0 ? "Another renderer retains a local recovery branch." : recovery.pending ? "Recovering an interrupted local edit\u2026" : recovery.corruption ? "Recovery data needs your review." : recoveryConflict ? "A recovery branch needs your review." : null;
+    const message2 = this.hostClosed ? "Notebook host shut down." : this.actionError ?? stateError ?? editorHelpError ?? runtimeMessage ?? this.transportError ?? this.actionNotice ?? recoveryMessage ?? "";
     const signature = JSON.stringify({
+      runtimeBlocked: runtimeBlocked === null ? null : [runtimeBlocked.code, runtimeBlocked.message],
       message: message2,
       actionError: Boolean(this.actionError),
       stateError: Boolean(stateError),
       editorHelpError: Boolean(editorHelpError),
       transportError: Boolean(this.transportError),
       editorHelpRestarting: this.editorHelpRestarting,
-      actionCount: this.actionCount
+      actionCount: this.actionCount,
+      recovery: { status: recovery.status, local: recovery.local !== null, branches: recovery.branches.map((branch) => [branch.id, branch.state, branch.documentRevision]), keptBranches: recovery.keptBranches.map((branch) => branch.id), foreignDrafts: recovery.foreignDrafts, pending: recovery.pending, corruption: recovery.corruption?.code ?? null, persistenceError: recovery.persistenceError?.code ?? null }
     });
     if (signature === this.statusSignature) return;
     this.statusSignature = signature;
@@ -24117,12 +26494,67 @@ ${trace.map((line, index) => `${index + 1}. ${line}`).join("\n")}` : ""
       if (this.editorHelpRestarting) retry.setAttribute("aria-busy", "true");
       this.status.appendChild(retry);
     }
-    this.status.classList.toggle("error", Boolean(this.actionError || stateError || editorHelpError));
-    this.status.classList.toggle("poll-error", Boolean(!this.actionError && !stateError && !editorHelpError && this.transportError));
+    this.renderRuntimeControls(runtimeBlocked);
+    this.renderRecoveryControls();
+    this.status.classList.toggle("error", Boolean(this.actionError || stateError || editorHelpError || runtimeBlocked || recoveryConflict));
+    this.status.classList.toggle("poll-error", Boolean(!this.actionError && !stateError && !editorHelpError && !runtimeBlocked && this.transportError));
+  }
+  renderRuntimeControls(runtimeBlocked) {
+    if (!this.status || runtimeBlocked === null || this.hostClosed) return;
+    const panel = elementNode(this.dom, "div", "runtime-recovery-panel", "");
+    panel.dataset.runtimeRecovery = "true";
+    panel.setAttribute("role", "alert");
+    const detail = runtimeBlocked.message || runtimeBlocked.code;
+    panel.appendChild(elementNode(this.dom, "div", "runtime-message", "Execution remains blocked (" + runtimeBlocked.code + "): " + detail));
+    panel.appendChild(elementNode(this.dom, "div", "runtime-guidance", "Your edits and saves are preserved. Restart R to try again."));
+    const restart = elementNode(this.dom, "button", "btn mini status-action", "Restart R");
+    restart.type = "button";
+    restart.dataset.statusAction = "restart-runtime";
+    restart.disabled = this.hostClosed || this.actionCount > 0 || this.documentValue?.snapshot.runtime.busy === true;
+    if (restart.disabled) restart.setAttribute("aria-disabled", "true");
+    panel.appendChild(restart);
+    this.status.appendChild(panel);
+  }
+  renderRecoveryControls() {
+    if (!this.status) return;
+    const state = this.client.recoveryState;
+    const hasBranch = state.branches.length > 0;
+    if (state.local === null && state.keptBranches.length === 0 && state.foreignDrafts === 0 && !hasBranch && !state.pending && state.corruption === null && state.persistenceError === null) return;
+    const panel = elementNode(this.dom, "div", "recovery-panel", "");
+    panel.dataset.recovery = "true";
+    panel.dataset.recoveryPanel = "true";
+    panel.setAttribute("role", "alert");
+    const detail = state.local !== null ? "The renderer retained an unacknowledged editing intent." : state.keptBranches.length > 0 ? "The renderer retained a browser recovery branch." : state.persistenceError?.message ?? (state.foreignDrafts > 0 ? "Another open renderer retains a browser recovery branch." : state.corruption?.message ?? (hasBranch ? "The host retained a recovery branch. Save As to preserve the current document before resolving it." : "Recovery is in progress."));
+    panel.appendChild(elementNode(this.dom, "div", "recovery-message", detail));
+    const actions = elementNode(this.dom, "div", "recovery-actions", "");
+    const add = (label, action) => {
+      const button = elementNode(this.dom, "button", "btn mini", label);
+      button.type = "button";
+      button.dataset.recovery = "true";
+      button.disabled = this.actionCount > 0 || state.status === "resubmitting";
+      button.addEventListener("click", () => {
+        void this.action(async () => {
+          await action();
+        }).catch((error61) => this.showError(error61));
+      });
+      actions.appendChild(button);
+    };
+    if (state.local !== null) {
+      add("Reload authoritative", () => this.client.reloadAuthoritativeRecovery());
+      add("Keep as recovery", () => this.client.keepAsRecovery());
+      add("Discard local branch", () => this.client.discardRecovery());
+      add("Cancel", () => this.client.cancelRecovery());
+    }
+    for (const branch of state.keptBranches) {
+      add("Restore kept branch", () => this.client.restoreKeptRecovery(branch.id));
+      add("Discard kept branch", () => this.client.discardKeptRecovery(branch.id));
+    }
+    if (actions.childElementCount > 0) panel.appendChild(actions);
+    this.status.appendChild(panel);
   }
   executionAvailable() {
     const runtime = this.documentValue?.snapshot.runtime;
-    return Boolean(runtime?.executionReady && runtime.kernelAvailable);
+    return Boolean(runtime?.executionReady && runtime.kernelState === "ready");
   }
   runScope() {
     return this.documentValue?.snapshot.runtime.executionMode === "lazy" ? "stale" : "all";
@@ -24138,25 +26570,99 @@ ${trace.map((line, index) => `${index + 1}. ${line}`).join("\n")}` : ""
     if (!cell.id || !editor || editor.view?.hasFocus === false) return null;
     const word = context.matchBefore(/[A-Za-z.][A-Za-z0-9_.]*|[A-Za-z0-9_]*/);
     if (!word || word.from === word.to && !context.explicit) return null;
+    const requestedCells = new Map(
+      (this.documentValue?.cells ?? []).flatMap((candidate) => candidate.id ? [[candidate.id, { key: candidate.key, source: this.sourceText(candidate.key) }]] : [])
+    );
     return this.lspRequest(`completion:${cell.key}`, "textDocument/completion", {
       position: editorPosition(editor, cell, context.pos)
     }).then((result) => {
+      const currentCells = this.documentValue?.cells ?? [];
+      if (currentCells.some((candidate) => {
+        const requested = candidate.id === null ? void 0 : requestedCells.get(candidate.id);
+        return requested !== void 0 && (requested.key !== candidate.key || requested.source !== this.sourceText(candidate.key));
+      })) return null;
       const items = Array.isArray(result) ? result : isObject3(result) && Array.isArray(result.items) ? result.items : [];
       const options = items.flatMap((raw) => {
         if (!isObject3(raw)) return [];
-        const textEdit = isObject3(raw.textEdit) ? raw.textEdit : {};
-        const label = String(raw.label ?? raw.insertText ?? textEdit.newText ?? "");
+        const textEdit = isObject3(raw.textEdit) ? raw.textEdit : null;
+        const label = String(raw.label ?? raw.insertText ?? textEdit?.newText ?? "");
         if (!label) return [];
+        const newText = String(textEdit?.newText ?? raw.insertText ?? raw.label ?? "");
+        const edits = [];
+        if (textEdit) {
+          const edit = lspCompletionEdit(textEdit, newText);
+          if (!edit) return [];
+          edits.push(edit);
+        }
+        if (raw.additionalTextEdits !== void 0) {
+          if (!Array.isArray(raw.additionalTextEdits)) return [];
+          for (const additional of raw.additionalTextEdits) {
+            const edit = lspCompletionEdit(additional);
+            if (!edit) return [];
+            edits.push(edit);
+          }
+        }
+        if (!textEdit && edits.length > 0) {
+          const start2 = editorPosition(editor, cell, word.from);
+          const end = editorPosition(editor, cell, word.to);
+          if (!cell.id) return [];
+          edits.unshift({ cell: cell.id, start: lspPosition(start2), end: lspPosition(end), newText });
+        }
+        const apply = edits.length > 0 ? this.completionApply(edits, requestedCells) : newText;
+        if (!apply) return [];
         return [{
           label,
           type: lspKind(raw.kind),
           detail: typeof raw.detail === "string" ? raw.detail : "",
           info: lspText(raw.documentation),
-          apply: String(raw.insertText ?? textEdit.newText ?? raw.label ?? "")
+          apply
         }];
       });
       return { from: word.from, options };
     }).catch(() => null);
+  }
+  completionApply(edits, requestedCells) {
+    const document2 = this.documentValue;
+    if (!document2) return null;
+    const groups = /* @__PURE__ */ new Map();
+    for (const edit of edits) {
+      const requested = requestedCells.get(edit.cell);
+      if (!requested) return null;
+      const cell = document2.cells.find((candidate) => candidate.id === edit.cell && candidate.key === requested.key);
+      if (!cell) return null;
+      const source = requested.source;
+      const from = exactSourceOffset(source, edit.start.line, edit.start.character);
+      const to = exactSourceOffset(source, edit.end.line, edit.end.character);
+      if (from === null || to === null || to < from) return null;
+      const group = groups.get(cell.key) ?? {
+        source,
+        changes: []
+      };
+      if (group.source !== source) return null;
+      group.changes.push({ from, to, insert: edit.newText });
+      groups.set(cell.key, group);
+    }
+    for (const group of groups.values()) {
+      const ascending = [...group.changes].sort((a, b) => a.from - b.from || a.to - b.to);
+      for (let index = 1; index < ascending.length; index += 1) {
+        if (ascending[index].from < ascending[index - 1].to) return null;
+      }
+    }
+    return () => {
+      window.queueMicrotask(() => {
+        if ([...groups].some(([key, group]) => this.sourceText(key) !== group.source)) return;
+        for (const [key, group] of groups) {
+          let next = group.source;
+          const descending = [...group.changes].sort((a, b) => b.from - a.from || b.to - a.to);
+          for (const change of descending) next = next.slice(0, change.from) + change.insert + next.slice(change.to);
+          const view2 = this.views.get(key);
+          view2?.editor?.setDoc(next, { silent: true });
+          if (view2?.fallback) view2.fallback.value = next;
+          this.deferDiagnostics(key);
+          this.client.editCell(key, next);
+        }
+      });
+    };
   }
   lspHover(cell, editor, position) {
     if (!cell.id || !editor) return Promise.resolve(null);
@@ -24190,12 +26696,18 @@ ${trace.map((line, index) => `${index + 1}. ${line}`).join("\n")}` : ""
       signal?.throwIfAborted();
       const response = await fetch(notebookUrl("/api/lsp"), {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json", "X-CSRF-Token": this.client.transport.csrf },
         body: JSON.stringify({ method, params }),
         signal
       });
+      this.client.transport.assertResponseContinuity(response);
       const result = await response.json();
       if (!response.ok || result.ok === false) throw new Error(result.error?.message ?? "language server request failed");
+      const current = this.documentValue?.snapshot;
+      if (!current || result.epoch !== current.epoch || result.documentRevision !== current.documentRevision) {
+        throw new DOMException("stale language-server response", "AbortError");
+      }
       this.editorHelpError = null;
       this.renderStatus();
       return result.result;
@@ -24235,11 +26747,11 @@ function fallbackCell(dom) {
 function diagnosticsForEditor(diagnostics, source) {
   return diagnostics.map((diagnostic) => {
     const raw = diagnostic;
-    const start = raw.range?.start ?? { line: Math.max(0, Number(raw.line ?? 1) - 1), character: Math.max(0, Number(raw.column ?? 1) - 1) };
-    const end = raw.range?.end ?? start;
+    const start2 = raw.range?.start ?? { line: Math.max(0, Number(raw.line ?? 1) - 1), character: Math.max(0, Number(raw.column ?? 1) - 1) };
+    const end = raw.range?.end ?? start2;
     return {
-      from: sourceOffset(source, Number(start.line ?? 0), Number(start.character ?? 0)),
-      to: sourceOffset(source, Number(end.line ?? start.line ?? 0), Number(end.character ?? start.character ?? 0)),
+      from: sourceOffset(source, Number(start2.line ?? 0), Number(start2.character ?? 0)),
+      to: sourceOffset(source, Number(end.line ?? start2.line ?? 0), Number(end.character ?? start2.character ?? 0)),
       severity: diagnostic.level ?? "error",
       message: diagnostic.message
     };
@@ -24251,6 +26763,35 @@ function sourceOffset(source, line, character) {
   let offset = 0;
   for (let index = 0; index < boundedLine; index += 1) offset += (lines[index]?.length ?? 0) + 1;
   return Math.min(source.length, offset + Math.max(0, Math.min(Math.floor(character), lines[boundedLine]?.length ?? 0)));
+}
+function exactSourceOffset(source, line, character) {
+  if (!Number.isInteger(line) || !Number.isInteger(character) || line < 0 || character < 0) return null;
+  const lines = source.split("\n");
+  if (line >= lines.length || character > lines[line].length) return null;
+  let offset = character;
+  for (let index = 0; index < line; index += 1) offset += lines[index].length + 1;
+  return offset;
+}
+function lspPosition(value) {
+  return { line: Number(value.line), character: Number(value.character) };
+}
+function lspCompletionEdit(raw, fallbackText) {
+  if (!isObject3(raw)) return null;
+  const range = isObject3(raw.range) ? raw.range : isObject3(raw.replace) ? raw.replace : null;
+  if (!range || !isObject3(range.start) || !isObject3(range.end)) return null;
+  const start2 = range.start;
+  const end = range.end;
+  const cell = typeof start2.cell === "string" && start2.cell === end.cell ? start2.cell : null;
+  const newText = typeof raw.newText === "string" ? raw.newText : fallbackText;
+  if (!cell || newText === void 0) return null;
+  const positions = [start2.line, start2.character, end.line, end.character];
+  if (!positions.every((value) => Number.isInteger(value) && Number(value) >= 0)) return null;
+  return {
+    cell,
+    start: { line: Number(start2.line), character: Number(start2.character) },
+    end: { line: Number(end.line), character: Number(end.character) },
+    newText
+  };
 }
 function editorPosition(editor, cell, offset) {
   const text = editor?.getDoc() ?? cell.desiredBody.join("\n");
@@ -24393,6 +26934,10 @@ function inputInteger(dom, id, fallback, minimum, maximum) {
 function visitTableOutputs(cells, visit2) {
   const walk = (value) => {
     if (!isObject3(value)) return;
+    if (isObject3(value.data)) {
+      walk(value.data);
+      return;
+    }
     if (value.kind === "table" && typeof value.handle === "string") visit2(value);
     if (value.kind === "layout" && Array.isArray(value.children)) value.children.forEach(walk);
     if (value.kind === "lazy") walk(value.child);
@@ -24400,16 +26945,45 @@ function visitTableOutputs(cells, visit2) {
   cells.forEach((cell) => cell.outputs.forEach(walk));
 }
 function operationPayload(result) {
-  if (isObject3(result.operation.result)) return result.operation.result;
+  if ("operation" in result && isObject3(result.operation.result)) return result.operation.result;
   return isObject3(result.result) ? result.result : {};
 }
-function packageStatusText(value) {
+function artifactHandleFromResult(result) {
+  const candidates = [];
+  if ("operation" in result) candidates.push(result.operation.result);
+  candidates.push(result.result);
+  for (const candidate of candidates) if (isArtifactHandle2(candidate)) return candidate;
+  return null;
+}
+function isArtifactHandle2(value) {
+  return artifactHandleSchema.safeParse(value).success;
+}
+function packageStatusText(value, output2 = "") {
   const lines = [];
-  for (const [label, field] of [["Declared", "declared"], ["Installed", "installed"], ["Missing", "missing"]]) {
+  for (const [label, field] of [["Declared", "packages"], ["Installed", "installed"], ["Missing", "missing"]]) {
     const entries = Array.isArray(value[field]) ? value[field].map(String) : [];
     lines.push(`${label}: ${entries.length ? entries.join(", ") : "none"}`);
   }
+  if (typeof value.mode === "string") lines.push(`Mode: ${value.mode}`);
+  if (typeof value.library === "string") lines.push(`Library: ${value.library}`);
+  if (output2.length > 0) lines.push("Output:", output2);
   return lines.join("\n");
+}
+function packageProgressPhaseText(command, phase) {
+  if (phase === "started") return command === "packages.install" ? "Installing packages\u2026" : "Declaring packages\u2026";
+  return phase === "finished" ? "Package operation finished" : "";
+}
+function packageProgressDataText(value) {
+  if (typeof value === "string") return value;
+  try {
+    const text = JSON.stringify(value);
+    return typeof text === "string" ? text : "";
+  } catch {
+    return "";
+  }
+}
+function isOperationRecord(value) {
+  return isObject3(value) && typeof value.id === "string" && typeof value.kind === "string" && typeof value.status === "string";
 }
 function formatBytes(value) {
   if (!Number.isFinite(value) || value < 0) return "";
@@ -24420,7 +26994,7 @@ function formatBytes(value) {
 function dataflowCellSignature(cell) {
   return JSON.stringify({
     type: cell.type,
-    body: cell.type === "markdown" ? cell.body : void 0,
+    body: cell.type === "markdown" ? toLogicalCellBody(cell.type, cell.body) : void 0,
     options: cell.options,
     defs: cell.defs,
     refs: cell.refs
@@ -24429,7 +27003,7 @@ function dataflowCellSignature(cell) {
 function outlineCellSignature(cell) {
   return JSON.stringify({
     type: cell.type,
-    body: cell.type === "markdown" ? cell.body : void 0,
+    body: cell.type === "markdown" ? toLogicalCellBody(cell.type, cell.body) : void 0,
     name: cell.options.name
   });
 }
@@ -24440,8 +27014,7 @@ function cellLabelAt(cell, index) {
 function markdownHeadings(body) {
   const result = [];
   for (const [line, raw] of body.entries()) {
-    const markdown = /^\s*#/.test(raw) ? raw.replace(/^(\s*)#+ ?/, "$1") : raw;
-    const match = /^ {0,3}(#{1,6})(?:[ \t]+(.*))?$/.exec(markdown);
+    const match = /^ {0,3}(#{1,6})(?:[ \t]+(.*))?$/.exec(raw);
     if (!match) continue;
     const text = (match[2] ?? "").replace(/[ \t]+#+[ \t]*$/, "").trim();
     if (text) result.push({ level: match[1].length, text, line });
@@ -24528,9 +27101,11 @@ var elementNode = element2;
 function isObject3(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
-function notebookRequiresCellReconcile(payload) {
+function notebookRequiresCellReconcile(payload, configCanChange) {
   if (!isObject3(payload)) return true;
-  return Array.isArray(payload.created) && payload.created.length > 0 || typeof payload.deleted === "string" || typeof payload.moved === "string" || isObject3(payload.config);
+  const created = isObject3(payload.created) && Object.keys(payload.created).length > 0;
+  const deleted = Array.isArray(payload.deleted) ? payload.deleted.length > 0 : typeof payload.deleted === "string";
+  return created || deleted || typeof payload.moved === "string" || configCanChange && isObject3(payload.config);
 }
 async function encodeFile(file2) {
   const bytes = new Uint8Array(await file2.arrayBuffer());
@@ -24541,20 +27116,7 @@ async function encodeFile(file2) {
 
 // src/browser/app.ts
 var view = null;
-var client = new BrowserNotebookClient({
-  reconnect: true,
-  onState: (state, error61) => view?.setTransportState(state, error61),
-  onCommand: (command, result) => {
-    window.dispatchEvent(new CustomEvent("alder:host-command", {
-      detail: { command, result }
-    }));
-  },
-  onVisibleResult: (observation) => {
-    window.dispatchEvent(new CustomEvent("alder:visible-result", { detail: observation }));
-  }
-});
-view = new NotebookView(client);
-window.__alderHost = { client, view };
+var client = null;
 var pendingRenders = /* @__PURE__ */ new Map();
 var pendingStarts = /* @__PURE__ */ new Map();
 var renderFrame = null;
@@ -24563,43 +27125,141 @@ function flushRenders() {
   renderFrame = null;
   const events = [...pendingRenders.values()].sort((left, right) => left.cursor - right.cursor);
   pendingRenders.clear();
-  const document2 = client.document;
+  const document2 = client?.document;
   if (document2) for (const event of events) {
     if (event.epoch === document2.epoch) view?.render(document2, event);
   }
 }
 function queueRender(event) {
   const projection = ["cell-started", "cell-output", "cell-completed"].includes(event.type) ? "cell-result" : event.type;
-  pendingRenders.set(`${projection}:${event.cellId ?? ""}`, event);
+  const key = event.type === "transaction" || event.type === "notebook" ? projection + ":" + event.cursor : projection + ":" + (event.cellId ?? "");
+  pendingRenders.set(key, event);
   if (pendingRenders.size >= 64) return flushRenders();
   renderFrame ??= window.requestAnimationFrame(flushRenders);
 }
-client.subscribe((document2, event, localCellKeys) => {
-  if (!event) {
-    flushRenders();
-    view?.render(document2, event, localCellKeys);
-    return;
+var desktopUnsubscribe = null;
+var unsafeLinkObserver = new MutationObserver((records) => {
+  for (const record2 of records) {
+    if (record2.type === "attributes" && record2.target instanceof Element) neutralizeUnsafeNotebookLinks(record2.target);
+    for (const node2 of Array.from(record2.addedNodes)) if (node2 instanceof Element) neutralizeUnsafeNotebookLinks(node2);
   }
-  if (event.cellId) {
-    const cellId = event.cellId;
-    window.clearTimeout(pendingStarts.get(cellId));
-    pendingStarts.delete(cellId);
-    if (event.type === "cell-started") {
-      pendingStarts.set(cellId, window.setTimeout(() => {
-        pendingStarts.delete(cellId);
-        const current = client.document;
-        if (current?.epoch === event.epoch && current.snapshot.runtime.activeRunId === event.runId && current.cell(cellId)?.server?.status === "running") queueRender(event);
-      }, 100));
+});
+unsafeLinkObserver.observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ["href"] });
+neutralizeUnsafeNotebookLinks(document);
+function bindDesktopActions(next) {
+  const desktop = globalThis.alderDesktop;
+  if (!desktop) return;
+  desktopUnsubscribe = desktop.onWindowAction((action) => {
+    let operation;
+    if (action === "save-as") {
+      operation = desktop.chooseSavePath().then((path) => path === null ? void 0 : next.saveAs(path));
+    } else if (action === "run-all") {
+      operation = view?.runExplicit(() => next.runAll("all"));
+    } else if (action === "run-stale") {
+      operation = view?.runExplicit(() => next.runAll("stale"));
+    } else if (action === "select-r") {
+      operation = desktop.chooseRscript().then((path) => path === null ? void 0 : next.selectR(path, true));
+    }
+    void operation?.catch((error61) => view?.showError(error61));
+  });
+}
+window.addEventListener("pagehide", () => {
+  unsafeLinkObserver.disconnect();
+  desktopUnsubscribe?.();
+  desktopUnsubscribe = null;
+});
+function bindClient(next) {
+  client = next;
+  next.subscribe((document2, event, localCellKeys) => {
+    if (!event) {
+      flushRenders();
+      view?.render(document2, event, localCellKeys);
       return;
     }
+    if (event.cellId) {
+      const cellId = event.cellId;
+      window.clearTimeout(pendingStarts.get(cellId));
+      pendingStarts.delete(cellId);
+      if (event.type === "cell-started") {
+        pendingStarts.set(cellId, window.setTimeout(() => {
+          pendingStarts.delete(cellId);
+          const current = client?.document;
+          if (current?.epoch === event.epoch && current.snapshot.runtime.activeRunId === event.runId && current.cell(cellId)?.server?.status === "running") queueRender(event);
+        }, 100));
+        return;
+      }
+    }
+    queueRender(event);
+  });
+}
+function neutralizeUnsafeNotebookLinks(root) {
+  const links = root instanceof HTMLAnchorElement ? [root] : Array.from(root.querySelectorAll("a[href]"));
+  for (const link of links) {
+    const destination = link.getAttribute("href");
+    if (!destination || !blocksNotebookNavigation(destination)) continue;
+    link.removeAttribute("href");
+    link.setAttribute("aria-disabled", "true");
+    link.title = "Blocked because another port on this host could receive notebook session credentials";
   }
-  queueRender(event);
-});
+}
 window.addEventListener("beforeunload", (event) => {
+  void client?.flushDraftPersistence();
   if (view?.allowsUnload) return;
-  const document2 = client.document;
+  const document2 = client?.document;
   const pending = document2?.pendingSource();
-  if (!document2?.snapshot.changed && !pending?.edits.length && !pending?.creations.length) return;
+  if (!document2?.snapshot.changed && !pending?.changes.length) return;
   event.preventDefault();
 });
-void client.connect().catch((error61) => view?.showError(error61));
+async function bootstrapSession() {
+  const current = new URL(location.href);
+  const ticket = current.hash.startsWith("#ticket=") ? decodeURIComponent(current.hash.slice("#ticket=".length)) : "";
+  if (!ticket) throw new Error("browser session ticket is missing");
+  history.replaceState(null, "", `${current.pathname}${current.search}`);
+  const response = await fetch(notebookUrl("/api/session"), {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ticket })
+  });
+  const value = await response.json().catch(() => null);
+  if (!response.ok || !isSessionCredentials(value)) throw new Error("browser session ticket exchange was rejected");
+  return value;
+}
+async function start() {
+  const session = await bootstrapSession();
+  const options = {
+    recoveryStore: new IndexedDBRecoveryStore(recoveryIdentity(), session.recoveryKey, session.recoveryKeyId),
+    clientId: session.clientId,
+    leaseId: session.leaseId,
+    csrf: session.csrf,
+    continuityProof: session.continuityProof,
+    nextCommandSequence: session.nextCommandSequence,
+    reconnect: true,
+    onState: (state, error61) => view?.setTransportState(state, error61)
+  };
+  const next = new BrowserNotebookClient({
+    ...options,
+    onCommand: (command, result) => window.dispatchEvent(new CustomEvent("alder:host-command", { detail: { command, result } })),
+    onVisibleResult: (observation) => window.dispatchEvent(new CustomEvent("alder:visible-result", { detail: observation }))
+  });
+  bindClient(next);
+  view = new NotebookView(next);
+  bindDesktopActions(next);
+  window.__alderHost = { client: next, view };
+  await next.connect();
+}
+void start().catch((error61) => view?.showError(error61));
+function recoveryIdentity() {
+  const current = new URL(location.href);
+  current.hash = "";
+  current.searchParams.delete("view");
+  return current.origin + current.pathname + current.search;
+}
+function isSessionCredentials(value) {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const record2 = value;
+  const recoveryKey = record2.recoveryKey;
+  const recoveryKeyId = record2.recoveryKeyId;
+  const recoveryPairValid = recoveryKey === void 0 && recoveryKeyId === void 0 || typeof recoveryKey === "string" && /^[A-Za-z0-9_-]{43}$/.test(recoveryKey) && typeof recoveryKeyId === "string" && /^[A-Za-z0-9_-]{43}$/.test(recoveryKeyId);
+  return recoveryPairValid && typeof record2.leaseId === "string" && typeof record2.clientId === "string" && Number.isSafeInteger(record2.nextCommandSequence) && record2.nextCommandSequence > 0 && typeof record2.epoch === "string" && typeof record2.continuityProof === "string" && record2.continuityProof.length > 0 && typeof record2.csrf === "string";
+}

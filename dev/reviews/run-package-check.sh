@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-project_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
-cd "$project_root"
+project_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)
+cd -- "$project_root"
 export NOT_CRAN=true
+# R CMD check propagates R_LIBS, but not R_LIBS_USER, into its isolated test library.
+if [[ -z ${R_LIBS:-} && -n ${R_LIBS_USER:-} ]]; then
+  export R_LIBS=$R_LIBS_USER
+fi
 
 evidence=${ALDER_CHECK_EVIDENCE:-dev/reviews/evidence/package-check}
 if [[ -d "$evidence" ]] &&
@@ -11,11 +15,13 @@ if [[ -d "$evidence" ]] &&
   echo "refusing to mix package-check evidence in nonempty directory: $evidence" >&2
   exit 1
 fi
-mkdir -p "$evidence"
-evidence=$(realpath "$evidence")
+mkdir -p -- "$evidence"
+evidence=$(realpath -- "$evidence")
 check_root=$(mktemp -d /tmp/alder-check.XXXXXX)
 trap 'rm -rf -- "$check_root"' EXIT
 
+artifact_source=
+artifact=
 if [[ -n ${ALDER_CHECK_ARTIFACT:-} ]]; then
   if [[ ! -f "$ALDER_CHECK_ARTIFACT" ]]; then
     echo "ALDER_CHECK_ARTIFACT must name an existing file: $ALDER_CHECK_ARTIFACT" >&2
@@ -27,85 +33,48 @@ if [[ -n ${ALDER_CHECK_ARTIFACT:-} ]]; then
     echo "ALDER_CHECK_ARTIFACT must name an alder_*.tar.gz source artifact: $ALDER_CHECK_ARTIFACT" >&2
     exit 1
   fi
-fi
-
-Rscript --vanilla -e 'version <- as.character(getRversion()); cat("R ", version, "\n", sep = ""); stopifnot(identical(version, "4.6.1"))' \
-  | tee "$evidence/00-runtime.log"
-
-if [[ -n ${ALDER_CHECK_ARTIFACT:-} ]]; then
-  tarball=$artifact_source
-  artifact_sha_before=$(sha256sum "$tarball" | cut -d ' ' -f 1)
-  cp "$tarball" "$evidence/"
-  artifact_sha_after=$(sha256sum "$evidence/$artifact" | cut -d ' ' -f 1)
-  if [[ "$artifact_sha_before" != "$artifact_sha_after" ]]; then
-    echo "source artifact changed while copying: $ALDER_CHECK_ARTIFACT" >&2
-    exit 1
-  fi
-  {
-    printf 'before=%s\n' "$artifact_sha_before"
-    printf 'after=%s\n' "$artifact_sha_after"
-  } > "$evidence/02-artifact-sha256.txt"
 else
-  # R CMD build copies the tree before applying .Rbuildignore. Stage only
-  # package inputs so local dependencies and review evidence are never copied.
-  mkdir -p "$check_root/source"
-  Rscript --vanilla - "$project_root" "$check_root/source" <<'RSCRIPT'
-args <- commandArgs(TRUE)
-setwd(args[[1L]])
-entries <- c(".Rbuildignore", list.files())
-patterns <- readLines(".Rbuildignore", warn = FALSE)
-excluded <- vapply(entries, function(entry) {
-  any(vapply(patterns[nzchar(patterns)], grepl, logical(1),
-             x = entry, ignore.case = TRUE))
-}, logical(1))
-stopifnot(all(file.copy(entries[!excluded], args[[2L]], recursive = TRUE)))
-RSCRIPT
   (
-    cd "$check_root"
-    R CMD build --no-build-vignettes source
+    cd -- "$check_root"
+    R CMD build --no-build-vignettes --no-manual "$project_root"
   ) 2>&1 | tee "$evidence/01-build.log"
-
-  tarball=$(find "$check_root" -maxdepth 1 -type f -name 'alder_*.tar.gz' -print)
-  if [[ $(wc -l <<<"$tarball") -ne 1 ]]; then
+  artifact_source=$(find "$check_root" -maxdepth 1 -type f -name 'alder_*.tar.gz' -print)
+  if [[ $(wc -l <<<"$artifact_source") -ne 1 ]]; then
     echo "expected exactly one source tarball" >&2
     exit 1
   fi
-  cp "$tarball" "$evidence/"
-  artifact=$(basename "$tarball")
-  (
-    cd "$evidence"
-    sha256sum "$artifact"
-  ) > "$evidence/02-artifact-sha256.txt"
+  artifact=$(basename -- "$artifact_source")
 fi
-tar -tzf "$tarball" | sort > "$evidence/02-source-manifest.txt"
 
-grep -Fx 'alder/exec/alder' "$evidence/02-source-manifest.txt"
-grep -Fx 'alder/exec/alder.cmd' "$evidence/02-source-manifest.txt"
-grep -Fx 'alder/inst/publishing/alder.css' \
-  "$evidence/02-source-manifest.txt"
-if grep -Eq '^alder/(AGENTS\.md|ALDER_TASK\.md|TASK_STATE\.md|SUBAGENTS\.md|USER_FLOWS\.md|NORTH_STAR_RUBRIC\.md|tests/AGENTS\.md|dev/)' \
+tarball=$artifact_source
+artifact_sha_before=$(sha256sum -- "$tarball" | cut -d ' ' -f 1)
+cp -- "$tarball" "$evidence/$artifact"
+artifact_sha_after=$(sha256sum -- "$evidence/$artifact" | cut -d ' ' -f 1)
+if [[ "$artifact_sha_before" != "$artifact_sha_after" ]]; then
+  echo "source artifact changed while copying" >&2
+  exit 1
+fi
+printf 'before=%s\nafter=%s\n' "$artifact_sha_before" "$artifact_sha_after" \
+  > "$evidence/02-artifact-sha256.txt"
+
+tar -tzf "$tarball" | sort > "$evidence/02-source-manifest.txt"
+if grep -Eq '^alder/(exec/|inst/(app|host|worker|publishing)(/|$))' \
     "$evidence/02-source-manifest.txt"; then
-  echo "internal task or review files leaked into source package" >&2
+  echo "application payload leaked into helper source package" >&2
+  exit 1
+fi
+if grep -Eq '^alder/(AGENTS[.]md|ALDER_TASK[.]md|TASK_STATE[.]md|SUBAGENTS[.]md|USER_FLOWS[.]md|NORTH_STAR_RUBRIC[.]md|tests/AGENTS[.]md|dev/|js/|host/|[.]git/)' \
+    "$evidence/02-source-manifest.txt"; then
+  echo "internal task, review, or application files leaked into source package" >&2
   exit 1
 fi
 
-# R CMD check installs into its own private library. Give its subprocesses
-# the host from this exact archive, with explicitly staged native dependencies.
-runtime_root="$check_root/runtime"
-mkdir -p "$runtime_root"
-tar -xzf "$tarball" -C "$runtime_root" alder/inst/host
-export ALDER_NODE="${ALDER_NODE:-$project_root/host/node_modules/node/bin/node}"
-export ALDER_ARK="${ALDER_ARK:-$project_root/host/.runtime/ark}"
-export ALDER_HOST="$runtime_root/alder/inst/host/alder-host.mjs"
-export ALDER_TEST_HOST=1
-"$ALDER_NODE" "$project_root/host/scripts/stage-native.mjs" \
-  "$runtime_root/alder/inst/host" 2>&1 | tee "$evidence/02-native-runtime.log"
-"$ALDER_NODE" "$ALDER_HOST" --host-info > "$evidence/02-host-identity.json"
-"$ALDER_ARK" --version > "$evidence/02-ark-version.txt"
+Rscript --vanilla dev/reviews/verify-source-artifact.R "$tarball" "$project_root" \
+  "$evidence/source-correspondence.log"
 
 set +e
 (
-  cd "$check_root"
+  cd -- "$check_root"
   NOT_CRAN=true \
   _R_CHECK_CRAN_INCOMING_REMOTE_=false \
   _R_CHECK_FORCE_SUGGESTS_=true \
@@ -114,27 +83,20 @@ set +e
 check_status=${PIPESTATUS[0]}
 set -e
 
-if [[ -n ${ALDER_CHECK_ARTIFACT:-} ]]; then
-  artifact_sha_source_post_check=$(sha256sum "$tarball" | cut -d ' ' -f 1)
-  artifact_sha_copy_post_check=$(sha256sum "$evidence/$artifact" | cut -d ' ' -f 1)
-  {
-    printf 'source_post_check=%s\n' "$artifact_sha_source_post_check"
-    printf 'copy_post_check=%s\n' "$artifact_sha_copy_post_check"
-  } >> "$evidence/02-artifact-sha256.txt"
-  if [[ "$artifact_sha_source_post_check" != "$artifact_sha_before" ||
-    "$artifact_sha_copy_post_check" != "$artifact_sha_before" ]]; then
-    echo "source artifact changed during package check: $ALDER_CHECK_ARTIFACT" >&2
-    exit 1
-  fi
+artifact_sha_post_check=$(sha256sum -- "$tarball" | cut -d ' ' -f 1)
+printf 'post_check=%s\n' "$artifact_sha_post_check" >> "$evidence/02-artifact-sha256.txt"
+if [[ "$artifact_sha_post_check" != "$artifact_sha_before" ]]; then
+  echo "source artifact changed during package check" >&2
+  exit 1
 fi
 
 if [[ -f "$check_root/alder.Rcheck/00check.log" ]]; then
-  cp "$check_root/alder.Rcheck/00check.log" "$evidence/04-00check.log"
+  cp -- "$check_root/alder.Rcheck/00check.log" "$evidence/04-00check.log"
 fi
 for suffix in Rout Rout.fail; do
   test_log="$check_root/alder.Rcheck/tests/testthat.$suffix"
   if [[ -f "$test_log" ]]; then
-    cp "$test_log" "$evidence/05-testthat.$suffix"
+    cp -- "$test_log" "$evidence/05-testthat.$suffix"
   fi
 done
 if [[ $check_status -ne 0 ]]; then

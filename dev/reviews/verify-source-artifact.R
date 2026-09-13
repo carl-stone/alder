@@ -141,12 +141,12 @@ packaged <- sort(unique(packaged))
 show_value("PACKAGE_ROOT", if (dir.exists(file.path(extract_dir, "alder"))) "alder" else "<missing>")
 cat("PACKAGED_REGULAR_FILES=", length(packaged), "\n", sep = "")
 
-# These are the package-facing repository files.  tests/AGENTS.md is the one
-# package-facing-tree file intentionally excluded by .Rbuildignore.
+# These are the helper-facing repository files. Application payloads and the
+# R launch wrappers are excluded by .Rbuildignore and verified separately.
 repo_all <- relative_files(repo)
 expected <- repo_all[
   repo_all %in% c("DESCRIPTION", "NAMESPACE", "README.md", "NEWS.md") |
-    grepl("^(R|exec|inst|man|tests)/", repo_all)
+    grepl("^(R|man|tests|inst/examples)/", repo_all)
 ]
 expected <- expected[expected != "tests/AGENTS.md"]
 expected <- sort(unique(expected))
@@ -156,6 +156,27 @@ missing <- setdiff(expected, packaged)
 extra <- setdiff(packaged, expected)
 if (length(missing)) fail("required-files-present", paste(missing, collapse = ",")) else pass("required-files-present")
 if (length(extra)) fail("packaged-files-have-repository-source", paste(extra, collapse = ",")) else pass("packaged-files-have-repository-source")
+forbidden <- grep("(^|/)exec(/|$)|(^|/)inst/(app|host|worker|publishing)(/|$)",
+                  packaged, value = TRUE, perl = TRUE)
+show_value("APPLICATION_PAYLOAD_FILES", forbidden)
+if (length(forbidden)) {
+  fail("application-payload-excluded", paste(forbidden, collapse = ","))
+} else {
+  pass("application-payload-excluded")
+}
+root_temporary_pattern <- paste0(
+  "^(\\.tmp|\\.alder|\\.application|\\.cache|\\.coverage|coverage|",
+  "\\.pytest_cache|\\.mypy_cache|\\.ruff_cache|\\.quarto|\\.renv|",
+  "\\.pak|\\.air|evidence|handoff|artifacts?|cache|tmp|Rcheck|",
+  "\\.Rcheck|\\.Rhistory$|\\.RData$|Rplots[.]pdf$)"
+)
+root_temporary <- grep(root_temporary_pattern, packaged, value = TRUE, perl = TRUE)
+show_value("ROOT_TEMPORARY_OR_HANDOFF_FILES", root_temporary)
+if (length(root_temporary)) {
+  fail("root-temporary-files-excluded", paste(root_temporary, collapse = ","))
+} else {
+  pass("root-temporary-files-excluded")
+}
 
 internal_pattern <- paste0(
   "^(AGENTS[.]md|ALDER_TASK[.]md|TASK_STATE[.]md|SUBAGENTS[.]md|",
@@ -206,7 +227,7 @@ tryCatch({
   build_fields <- c("Packaged", "NeedsCompilation", "Author", "Maintainer")
   unexpected_added <- setdiff(added_fields, build_fields)
   unexpected_changed <- setdiff(changed_fields, build_fields)
-  expected_compile <- if (any(grepl("(^|/)src/[^/]+\\.(c|cc|cpp|cxx|f|f90|m)$",
+  expected_compile <- if (any(grepl("^src/[^/]+\\.(c|cc|cpp|cxx|f|f90|m)$",
                                     repo_all, ignore.case = TRUE))) "yes" else "no"
   if ("NeedsCompilation" %in% names(artifact_desc) &&
       !identical(artifact_desc[["NeedsCompilation"]], expected_compile)) {

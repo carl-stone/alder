@@ -1,4 +1,10 @@
 {
+  "@hono/node-server@2.1.1": {
+    "license": "MIT",
+    "files": [
+      "@hono__node-server@2.1.1/LICENSE"
+    ]
+  },
   "@modelcontextprotocol/sdk@1.30.0": {
     "license": "MIT",
     "files": [
@@ -17,6 +23,155 @@
       "ajv@8.20.0/LICENSE"
     ]
   },
+  "boolbase@1.0.0": {
+    "license": "ISC",
+    "files": [
+      "boolbase@1.0.0/LICENSE"
+    ],
+    "source": "https://raw.githubusercontent.com/fb55/boolbase/be0bcd8a4e917a0a5895e95b523fbbed05a64871/LICENSE",
+    "sourceTag": "boolbase@1.0.0",
+    "sourceCommit": "be0bcd8a4e917a0a5895e95b523fbbed05a64871",
+    "sourcePath": "LICENSE",
+    "sourceScope": "boolbase@1.0.0 package.json declares ISC for Felix Boehm <me@feedic.com>; the npm 1.0.0 tarball contains no License, COPYING, or NOTICE file. This is the exact ISC notice added to the upstream repository after the 1.0.0 release.",
+    "sourceInheritance": "https://github.com/fb55/boolbase/commit/be0bcd8a4e917a0a5895e95b523fbbed05a64871 (upstream added the ISC notice with Felix Boehm's name)",
+    "sourceOwnership": "https://github.com/fb55/boolbase/commit/be0bcd8a4e917a0a5895e95b523fbbed05a64871 (credits Felix Boehm)",
+    "packageSource": "https://raw.githubusercontent.com/fb55/boolbase/9837d5bf4f30390ac6384a6bc605ca2d69ade4bf/package.json",
+    "packageAuthor": "Felix Boehm <me@feedic.com>",
+    "packageSourceTag": "boolbase@1.0.0",
+    "packageSourceCommit": "9837d5bf4f30390ac6384a6bc605ca2d69ade4bf",
+    "packageSourceSha256": "ca09c0dccbfc43be6be0ac89e9ffa19b64b30f9c74c64da27f719a7244a25e30",
+    "npmTarball": "https://registry.npmjs.org/boolbase/-/boolbase-1.0.0.tgz",
+    "npmIntegrity": "sha512-JZOSA7Mo9sNGB8+UjSgzdLtokWAky1zbztM3WRLCbZ70/3cTANmQmOdR7y2g+J0e2WXywy1yS468tY+IruqEww==",
+    "npmShasum": "68dff5fbe60c51eb37725ea9e3ed310dcc1e776e",
+    "packageLicenseDeclaration": "package.json",
+    "sha256": "cdf4d87ae0a6c160227263bf4e39a0a10e30e89ae7256e0f7ac7bde0836552c6"
+  },
+  "chokidar@5.0.0": {
+    "license": "MIT",
+    "files": [
+      "chokidar@5.0.0/LICENSE"
+    ]
+  },
+  "content-type@1.0.5": {
+    "license": "MIT",
+    "files": [
+      "content-type@1.0.5/LICENSE"
+    ]
+  },
+  "css-select@5.2.2": {
+    "license": "BSD-2-Clause",
+    "files": [
+      "css-select@5.2.2/LICENSE"
+    ]
+  },
+  "css-what@6.2.2": {
+    "license": "BSD-2-Clause",
+    "files": [
+      "css-what@6.2.2/LICENSE"
+    ]
+  },
+  "cssom@0.5.0": {
+    "license": "MIT",
+    "files": [
+      "cssom@0.5.0/LICENSE.txt"
+    ]
+  },
+  "dayjs@1.11.23": {
+    "license": "MIT",
+    "files": [
+      "dayjs@1.11.23/LICENSE"
+    ]
+  },
+  "deepmerge@4.3.1": {
+    "license": "MIT",
+    "files": [
+      "deepmerge@4.3.1/license.txt"
+    ]
+  },
+  "dom-serializer@2.0.0": {
+    "license": "MIT",
+    "files": [
+      "dom-serializer@2.0.0/LICENSE"
+    ]
+  },
+  "dom-serializer@3.1.1": {
+    "license": "MIT",
+    "files": [
+      "dom-serializer@3.1.1/LICENSE"
+    ]
+  },
+  "domelementtype@2.3.0": {
+    "license": "BSD-2-Clause",
+    "files": [
+      "domelementtype@2.3.0/LICENSE"
+    ]
+  },
+  "domelementtype@3.0.0": {
+    "license": "BSD-2-Clause",
+    "files": [
+      "domelementtype@3.0.0/LICENSE"
+    ]
+  },
+  "domhandler@5.0.3": {
+    "license": "BSD-2-Clause",
+    "files": [
+      "domhandler@5.0.3/LICENSE"
+    ]
+  },
+  "domhandler@6.0.1": {
+    "license": "BSD-2-Clause",
+    "files": [
+      "domhandler@6.0.1/LICENSE"
+    ]
+  },
+  "domutils@3.2.2": {
+    "license": "BSD-2-Clause",
+    "files": [
+      "domutils@3.2.2/LICENSE"
+    ]
+  },
+  "domutils@4.0.2": {
+    "license": "BSD-2-Clause",
+    "files": [
+      "domutils@4.0.2/LICENSE"
+    ]
+  },
+  "entities@4.5.0": {
+    "license": "BSD-2-Clause",
+    "files": [
+      "entities@4.5.0/LICENSE"
+    ]
+  },
+  "entities@7.0.1": {
+    "license": "BSD-2-Clause",
+    "files": [
+      "entities@7.0.1/LICENSE"
+    ]
+  },
+  "entities@8.1.0": {
+    "license": "BSD-2-Clause",
+    "files": [
+      "entities@8.1.0/LICENSE"
+    ]
+  },
+  "env-paths@4.0.0": {
+    "license": "MIT",
+    "files": [
+      "env-paths@4.0.0/license"
+    ]
+  },
+  "escape-string-regexp@4.0.0": {
+    "license": "MIT",
+    "files": [
+      "escape-string-regexp@4.0.0/license"
+    ]
+  },
+  "eventsource-parser@3.1.1": {
+    "license": "MIT",
+    "files": [
+      "eventsource-parser@3.1.1/LICENSE"
+    ]
+  },
   "fast-deep-equal@3.1.3": {
     "license": "MIT",
     "files": [
@@ -29,10 +184,183 @@
       "fast-uri@3.1.7/LICENSE"
     ]
   },
+  "graceful-fs@4.2.11": {
+    "license": "ISC",
+    "files": [
+      "graceful-fs@4.2.11/LICENSE"
+    ]
+  },
+  "hono@4.13.7": {
+    "license": "MIT",
+    "files": [
+      "hono@4.13.7/LICENSE"
+    ]
+  },
+  "htmlparser2@10.1.0": {
+    "license": "MIT",
+    "files": [
+      "htmlparser2@10.1.0/LICENSE"
+    ]
+  },
+  "htmlparser2@12.0.0": {
+    "license": "MIT",
+    "files": [
+      "htmlparser2@12.0.0/LICENSE"
+    ]
+  },
+  "is-plain-object@5.1.0": {
+    "license": "MIT",
+    "files": [
+      "is-plain-object@5.1.0/LICENSE"
+    ]
+  },
+  "is-safe-filename@0.1.1": {
+    "license": "MIT",
+    "files": [
+      "is-safe-filename@0.1.1/license"
+    ]
+  },
   "json-schema-traverse@1.0.0": {
     "license": "MIT",
     "files": [
       "json-schema-traverse@1.0.0/LICENSE"
+    ]
+  },
+  "launder@1.7.1": {
+    "license": "MIT",
+    "files": [
+      "launder@1.7.1/LICENSE.md"
+    ],
+    "source": "https://raw.githubusercontent.com/apostrophecms/apostrophe/e9b0ab0849a5dfea0f75335fbdf99b5c6bf9e4b3/packages/apostrophe/LICENSE.md",
+    "sourceTag": "launder@1.7.1",
+    "sourceCommit": "e9b0ab0849a5dfea0f75335fbdf99b5c6bf9e4b3",
+    "sourcePath": "packages/apostrophe/LICENSE.md",
+    "sourceScope": "Upstream packages/launder/package.json declares MIT for Apostrophe Technologies, Inc.; this pinned file is the complete canonical Apostrophe monorepo MIT notice carried from repository LICENSE.md to packages/apostrophe/LICENSE.md, including the vue-color attribution. packages/launder has no published License, COPYING, or NOTICE file at this release.",
+    "sourceInheritance": "https://github.com/apostrophecms/apostrophe/commit/107bcd2427a4e6e8e41e5a48847cdc8548fcb242 (repository LICENSE.md renamed to packages/apostrophe/LICENSE.md during the monorepo move)",
+    "sourceOwnership": "https://github.com/apostrophecms/apostrophe/commit/921ea3279f32cf09fbd4b3e85b86cfca95523cfa (upstream changed the canonical MIT notice copyright from P'unk Avenue LLC to Apostrophe Technologies, Inc.)",
+    "packageSource": "https://raw.githubusercontent.com/apostrophecms/apostrophe/e9b0ab0849a5dfea0f75335fbdf99b5c6bf9e4b3/packages/launder/package.json",
+    "packageAuthor": "Apostrophe Technologies, Inc.",
+    "packageSourceTag": "launder@1.7.1",
+    "packageSourceCommit": "e9b0ab0849a5dfea0f75335fbdf99b5c6bf9e4b3",
+    "packageSourceSha256": "4884f29f744709cf95c360f35d0f388e3d26d67cccf6ae525a779ff924e7d06a",
+    "npmTarball": "https://registry.npmjs.org/launder/-/launder-1.7.1.tgz",
+    "npmIntegrity": "sha512-mU6WRz5EusL9ZZuiZ5SO4Y6C0P9PAUR9iwdb6bzj4KDihm28DiHFw+/yk9DBH4f+Pv1wuzQ4e2jV3oQ7mkIqvw==",
+    "npmShasum": "ef7155ab0c3ddec2323089c961d2e9a249aa5b0d",
+    "packageLicenseDeclaration": "packages/launder/package.json",
+    "sha256": "fd8fe2fc75626c3b35be2b78129503cf09df127449b07c5fbf4c1713e3418390"
+  },
+  "linkedom@0.18.12": {
+    "license": "ISC",
+    "files": [
+      "linkedom@0.18.12/LICENSE"
+    ]
+  },
+  "linkify-it@6.1.0": {
+    "license": "MIT",
+    "files": [
+      "linkify-it@6.1.0/LICENSE"
+    ]
+  },
+  "markdown-it@15.0.1": {
+    "license": "MIT",
+    "files": [
+      "markdown-it@15.0.1/LICENSE"
+    ]
+  },
+  "mdurl@2.1.0": {
+    "license": "MIT",
+    "files": [
+      "mdurl@2.1.0/LICENSE"
+    ]
+  },
+  "nanoid@3.3.18": {
+    "license": "MIT",
+    "files": [
+      "nanoid@3.3.18/LICENSE"
+    ]
+  },
+  "nth-check@2.1.1": {
+    "license": "BSD-2-Clause",
+    "files": [
+      "nth-check@2.1.1/LICENSE"
+    ]
+  },
+  "parse-srcset@1.0.2": {
+    "license": "MIT",
+    "files": [
+      "parse-srcset@1.0.2/LICENSE"
+    ]
+  },
+  "picocolors@1.1.1": {
+    "license": "ISC",
+    "files": [
+      "picocolors@1.1.1/LICENSE"
+    ]
+  },
+  "pkce-challenge@5.0.1": {
+    "license": "MIT",
+    "files": [
+      "pkce-challenge@5.0.1/LICENSE"
+    ]
+  },
+  "postcss@8.5.28": {
+    "license": "MIT",
+    "files": [
+      "postcss@8.5.28/LICENSE"
+    ]
+  },
+  "proper-lockfile@4.1.2": {
+    "license": "MIT",
+    "files": [
+      "proper-lockfile@4.1.2/LICENSE"
+    ]
+  },
+  "punycode.js@2.3.1": {
+    "license": "MIT",
+    "files": [
+      "punycode.js@2.3.1/LICENSE-MIT.txt"
+    ]
+  },
+  "readdirp@5.1.1": {
+    "license": "MIT",
+    "files": [
+      "readdirp@5.1.1/LICENSE"
+    ]
+  },
+  "retry@0.12.0": {
+    "license": "MIT",
+    "files": [
+      "retry@0.12.0/License"
+    ]
+  },
+  "sanitize-html@2.17.7": {
+    "license": "MIT",
+    "files": [
+      "sanitize-html@2.17.7/LICENSE"
+    ]
+  },
+  "signal-exit@3.0.7": {
+    "license": "ISC",
+    "files": [
+      "signal-exit@3.0.7/LICENSE.txt"
+    ]
+  },
+  "source-map-js@1.2.1": {
+    "license": "BSD-3-Clause",
+    "files": [
+      "source-map-js@1.2.1/LICENSE"
+    ]
+  },
+  "uc.micro@3.0.0": {
+    "license": "MIT",
+    "files": [
+      "uc.micro@3.0.0/LICENSE.txt"
+    ]
+  },
+  "uhyphen@0.2.0": {
+    "license": "ISC",
+    "files": [
+      "uhyphen@0.2.0/LICENSE"
     ]
   },
   "vscode-jsonrpc@9.0.2": {
@@ -57,6 +385,12 @@
     "license": "MIT",
     "files": [
       "ws@8.21.3/LICENSE"
+    ]
+  },
+  "yaml@2.9.0": {
+    "license": "ISC",
+    "files": [
+      "yaml@2.9.0/LICENSE"
     ]
   },
   "zod-to-json-schema@3.25.2": {

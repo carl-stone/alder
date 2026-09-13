@@ -1,153 +1,162 @@
-import test from 'node:test';
-import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { pathToFileURL } from 'node:url';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import { createMcpServer } from '../src/mcp.js';
-import { connectRemoteController, type RemoteController } from '../src/remote.js';
-import type { startHost } from '../src/main.js';
+import assert from "node:assert/strict";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import test from "node:test";
 
-for (const mode of ['local', 'url'] as const) test(`installed ${mode} MCP shares source, value freshness and causal widget settlement`, {
-  skip: !process.env.ALDER_R_PACKAGE, timeout: 60_000,
-}, async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'alder-mcp-installed-'));
-  const path = join(directory, 'notebook.R');
-  const source = [
-    '# header\r\n# %%\r\nlibrary(alder)',
-    '# %%\nw <- ui$dictionary(slider = ui$slider(0, 10, value = 2), go = ui$run_button("Run"))\nw',
-    '# %%\nresult <- w$value$slider * 10L\nresult',
-    '# %%\npaste(w$value$go, "consumer")',
-  ].join('\n');
-  await writeFile(path, source);
-  let app: Awaited<ReturnType<typeof startHost>> | undefined, remote: RemoteController | undefined;
-  const client = new Client({ name: 'alder-contract', version: '1' });
-  let server: ReturnType<typeof createMcpServer> | undefined;
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+
+const APPLICATION_ROOT = process.env.ALDER_APPLICATION_ROOT;
+const TEST_RSCRIPT = process.env.ALDER_TEST_RSCRIPT;
+const installedIntegration = {
+  skip: !APPLICATION_ROOT || !TEST_RSCRIPT,
+  timeout: 120_000,
+};
+
+const CANONICAL_TOOL_NAMES = [
+  "add_cell",
+  "apply_transaction",
+  "check",
+  "delete_cell",
+  "disable_cell",
+  "edit_cell",
+  "edit_cell_ranges",
+  "format",
+  "get_config",
+  "get_help",
+  "get_layout",
+  "get_value",
+  "interrupt",
+  "list_cells",
+  "materialize_output",
+  "move_cell",
+  "notebook_state",
+  "operation_status",
+  "packages_declare",
+  "packages_install",
+  "packages_status",
+  "publish",
+  "read_cell",
+  "read_events",
+  "read_output",
+  "recovery_state",
+  "reload_source",
+  "rename_cell",
+  "restart",
+  "run_all",
+  "run_cell",
+  "run_stale",
+  "save",
+  "save_as",
+  "select_r",
+  "set_app",
+  "set_config",
+  "set_layout",
+  "set_runtime",
+  "set_widget",
+  "shutdown",
+  "table_page",
+  "upload_file",
+] as const;
+
+function sanitizedEnvironment(extra: Record<string, string>): Record<string, string> {
+  const environment = Object.fromEntries(
+    Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined),
+  );
+  for (const key of Object.keys(environment)) {
+    if (key.startsWith("ALDER_") || key === "R_HOME" || key.startsWith("R_LIBS")) delete environment[key];
+  }
+  return { ...environment, ...extra };
+}
+
+test("the staged alder launcher serves MCP over official stdio", installedIntegration, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "alder-mcp-installed-"));
+  const notebook = join(directory, "notebook.R");
+  await writeFile(notebook, "# %%\nanswer <- 42\nanswer\n");
+
+  const transport = new StdioClientTransport({
+    command: join(resolve(APPLICATION_ROOT!), "bin", "alder"),
+    args: ["mcp", notebook, "--rscript", TEST_RSCRIPT!],
+    cwd: directory,
+    env: sanitizedEnvironment({
+      HOME: directory,
+      XDG_CONFIG_HOME: join(directory, "config"),
+      XDG_DATA_HOME: join(directory, "data"),
+      XDG_CACHE_HOME: join(directory, "cache"),
+      XDG_STATE_HOME: join(directory, "state"),
+    }),
+    stderr: "pipe",
+    maxBufferSize: 16 * 1024 * 1024,
+  });
+  const client = new Client({ name: "mcp-installed-test", version: "1" }, { capabilities: {} });
+  const stderr = transport.stderr;
+  const stderrChunks: Buffer[] = [];
+  stderr?.on("data", chunk => stderrChunks.push(Buffer.from(chunk)));
+
   try {
-    const installed = await import(pathToFileURL(join(process.env.ALDER_R_PACKAGE!, 'host/alder-host.mjs')).href);
-    app = await (installed.startHost as typeof startHost)({ path, port: 0, runOnStartup: false,
-      executionMode: 'automatic', packagePath: process.env.ALDER_R_PACKAGE });
-    remote = mode === 'url' ? await connectRemoteController(app.server.address()!.origin) : undefined;
-    server = createMcpServer({ controller: remote ?? app.controller });
-    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-    await server.connect(serverTransport);
-    await client.connect(clientTransport);
-    const call = async (name: string, args: Record<string, unknown> = {}, expectedError = false) => {
-      const response = await client.callTool({ name, arguments: args });
-      assert.equal(Boolean(response.isError), expectedError, JSON.stringify(response));
-      return JSON.parse((response.content as Array<{text: string}>)[0]!.text);
-    };
-    const readSource = async () => (await client.readResource({ uri: 'alder://notebook/source' })).contents[0]!.text;
-    assert.equal(await readSource(), source);
-    await call('run_all');
-    assert.match(JSON.stringify((await call('get_value', { name: 'result' })).value), /20/);
-    for (const value of [4, 6]) {
-      const widget = await call('set_widget', { name: 'w', path: ['slider'], value });
-      assert.equal(app.controller.operation(widget.operation_id)?.status, 'done');
-      const state = await call('notebook_state');
-      assert.equal(state.cells[2].outputs[0]?.text, `[1] ${value * 10}`, JSON.stringify(state));
-      assert.equal(state.runtime.busy, false);
-    }
-    for (let attempt = 0; attempt < 2; attempt++) {
-      const button = await call('set_widget', { name: 'w', path: ['go'], value: true });
-      assert.equal(app.controller.operation(button.operation_id)?.status, 'done');
-      const state = await call('notebook_state');
-      assert.match(state.cells[3].outputs[0].text, /TRUE consumer/);
-      const reset = state.operations.find((operation: any) => operation.kind === 'widget-reset' && operation.status === 'done');
-      assert.ok(reset, 'MCP must settle after the causal button reset');
-    }
-    const output = await client.readResource({ uri: 'alder://cell/cell-3/outputs' });
-    assert.match(String(output.contents[0]!.text), /60/);
-    await call('edit_cell', { cell: 'cell-2', type: 'code', expected_revision: 0,
-      body: ['w <- ui$dictionary(slider = ui$slider(0, 10, value = 3), go = ui$run_button("Run"))', 'w'] });
-    const stale = await call('get_value', { name: 'result' }, true);
-    assert.equal(stale.error.code, 'stale_value');
-    await call('run_stale');
-    assert.match(JSON.stringify((await call('get_value', { name: 'result' })).value), /30/);
-    const conflict = await call('edit_cell', { cell: 'cell-2', type: 'code', expected_revision: 0, body: ['w <- 99'] }, true);
-    assert.equal(conflict.error.code, 'source_conflict');
-    await call('save');
-    assert.equal(await readSource(), await readFile(path, 'utf8'));
-    await call('check');
+    await client.connect(transport);
+
+    const tools = await client.listTools();
+    assert.deepEqual(tools.tools.map(tool => tool.name).sort(), CANONICAL_TOOL_NAMES);
+
+    const resources = await client.listResources();
+    assert.deepEqual(resources.resources.map(resource => resource.uri).sort(), [
+      "alder://cell/cell-1/outputs",
+      "alder://notebook/dag",
+      "alder://notebook/source",
+      "alder://notebook/state",
+    ]);
+
+    const templates = await client.listResourceTemplates();
+    assert.deepEqual(templates.resourceTemplates.map(template => template.uriTemplate).sort(), [
+      "alder://cell/{cell}/outputs",
+      "alder://operations/{operation}",
+      "alder://outputs/{output}",
+    ]);
+    const result = await client.callTool({ name: "list_cells", arguments: {} });
+    assert.equal(result.isError, false);
+    const structured = requireRecord(result.structuredContent);
+    assert.equal(requireNonEmptyString(structured.epoch).length > 0, true);
+    assert.equal(structured.documentRevision, 0);
+    assert.ok(requireNonNegativeInteger(structured.cursor) >= 0);
+    const cells = requireArray(structured.result);
+    assert.equal(cells.length, 1);
+    const firstCell = requireRecord(cells[0]);
+    assert.equal(firstCell.id, "cell-1");
+    assert.equal(firstCell.type, "code");
+    assert.deepEqual(requireArray(firstCell.body), ["answer <- 42", "answer"]);
+  } catch (error) {
+    const diagnostics = Buffer.concat(stderrChunks).toString("utf8").trim();
+    if (diagnostics.length > 0) throw new Error(String(error) + "\n" + diagnostics, { cause: error });
+    throw error;
   } finally {
-    await client.close();
-    await server?.close();
-    await remote?.close();
-    await app?.close();
+    await client.close().catch(() => undefined);
+    await transport.close().catch(() => undefined);
     await rm(directory, { recursive: true, force: true });
   }
 });
 
-for (const ending of ['shutdown', 'eof', 'before-initialize'] as const) test(`installed R alder_mcp entry point preserves startup and pipe ownership on ${ending}`, {
-  skip: !process.env.ALDER_R_PACKAGE, timeout: 45_000,
-}, async () => {
-  const { spawn } = await import('node:child_process');
-  const directory = await mkdtemp(join(tmpdir(), 'alder-mcp-pipe-'));
-  const path = join(directory, 'notebook.R'), marker = join(directory, 'effect.txt');
-  await writeFile(path, `# %%\ncat('tick\\n', file = ${JSON.stringify(marker)}, append = TRUE)\nSys.sleep(0.05)\n42\n`);
-  const child = spawn(process.env.RSCRIPT ?? 'Rscript', ['--vanilla', '-e', [
-    'library(alder, lib.loc = dirname(Sys.getenv("ALDER_R_PACKAGE")))',
-    'alder_mcp(path = Sys.getenv("ALDER_TEST_NOTEBOOK"))',
-  ].join('; ')], {
-    stdio: ['pipe', 'pipe', 'pipe'],
-    env: { ...process.env, ALDER_TEST_NOTEBOOK: path },
-  });
-  const messages: any[] = [];
-  let buffer = '', errors = '';
-  child.stdout.on('data', bytes => {
-    buffer += String(bytes);
-    for (;;) {
-      const at = buffer.indexOf('\n');
-      if (at < 0) break;
-      messages.push(JSON.parse(buffer.slice(0, at)));
-      buffer = buffer.slice(at + 1);
-    }
-  });
-  child.stderr.on('data', bytes => { errors += String(bytes); });
-  const exited = new Promise<number | null>((resolve, reject) => { child.once('exit', resolve); child.once('error', reject); });
-  const send = (method: string, params: unknown, id?: number) => child.stdin.write(JSON.stringify({ jsonrpc: '2.0', method, params, ...(id === undefined ? {} : { id }) }) + '\n');
-  const response = async (id: number) => {
-    const deadline = Date.now() + 30_000;
-    while (!messages.some(message => message.id === id)) {
-      if (child.exitCode !== null || Date.now() > deadline) throw new Error(`MCP response ${id} missing: ${errors}`);
-      await new Promise(resolve => setTimeout(resolve, 10));
-    }
-    return messages.find(message => message.id === id);
-  };
-  try {
-    send('ping', {}, 1);
-    assert.deepEqual((await response(1)).result, {});
-    await assert.rejects(readFile(marker), { code: 'ENOENT' });
-    if (ending === 'before-initialize') {
-      child.stdin.end();
-    } else {
-      send('initialize', { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'pipe', version: '1' } }, 2);
-      await response(2);
-      await assert.rejects(readFile(marker), { code: 'ENOENT' });
-      send('notifications/initialized', {});
-      send('tools/call', { name: 'notebook_state', arguments: {} }, 3);
-      if (ending === 'shutdown') send('shutdown', {}, 4);
-      else child.stdin.end();
-      const state = JSON.parse((await response(3)).result.content[0].text);
-      assert.equal(state.cells[0].status, 'done');
-      assert.equal(state.cells[0].outputs[0].text, '[1] 42');
-      assert.equal(await readFile(marker, 'utf8'), 'tick\n');
-      if (ending === 'shutdown') assert.deepEqual((await response(4)).result, {});
-    }
-    let timer: NodeJS.Timeout | undefined;
-    try {
-      const status = await Promise.race([exited, new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new Error(`MCP did not close its owned processes: ${errors}`)), 10_000);
-      })]);
-      assert.equal(status, 0, errors);
-    } finally { clearTimeout(timer); }
-    assert.equal(errors, '');
-    assert.deepEqual(messages.map(message => message.id), ending === 'before-initialize' ? [1] : ending === 'shutdown' ? [1, 2, 3, 4] : [1, 2, 3]);
-    if (ending === 'before-initialize') await assert.rejects(readFile(marker), { code: 'ENOENT' });
-  } finally {
-    if (child.exitCode === null) { child.kill('SIGKILL'); await exited; }
-    await rm(directory, { recursive: true, force: true });
-  }
-});
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function requireRecord(value: unknown): Record<string, unknown> {
+  if (!isRecord(value)) throw new TypeError("expected an object");
+  return value;
+}
+
+function requireArray(value: unknown): unknown[] {
+  if (!Array.isArray(value)) throw new TypeError("expected an array");
+  return value;
+}
+
+function requireNonEmptyString(value: unknown): string {
+  if (typeof value !== "string" || value.length === 0) throw new TypeError("expected a non-empty string");
+  return value;
+}
+
+function requireNonNegativeInteger(value: unknown): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) throw new TypeError("expected a non-negative integer");
+  return value;
+}

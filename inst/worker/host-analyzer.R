@@ -1,52 +1,152 @@
-# Persistent static-analysis and pure R service adapter for the TypeScript host.
+# Persistent static-analysis adapter for the TypeScript host.
 # Notebook source is parsed and walked by Alder's analyzer; it is never evaluated.
 
-suppressPackageStartupMessages(library(alder))
-get("alder_host_apply_library_policy", asNamespace("alder"))()
+# The bootstrap path is selected only from the host-supplied worker directory.
+# The shared bootstrap owns the complete environment/path policy after load.
+path_is_absolute <- function(value) {
+  if (.Platform$OS.type == "windows") {
+    grepl("^(?:[A-Za-z]:[/\\\\]|[/\\\\]{2})", value, perl = TRUE)
+  } else startsWith(value, "/")
+}
+resolve_directory <- function(value, label) {
+  if (!is.character(value) || length(value) != 1L || is.na(value) ||
+      !nzchar(value) || !validUTF8(value) ||
+      nchar(value, type = "bytes") > 4096L || !path_is_absolute(value)) {
+    stop(label, " must be an absolute directory", call. = FALSE)
+  }
+  resolved <- tryCatch(normalizePath(value, mustWork = TRUE, winslash = "/"),
+                       error = function(error) NULL)
+  if (is.null(resolved) || !dir.exists(resolved) || file.access(resolved, 4L) != 0L) {
+    stop(label, " must be an existing readable directory", call. = FALSE)
+  }
+  resolved
+}
+trim_path <- function(value) {
+  if (identical(value, "/")) "/" else sub("/+$", "", value)
+}
+path_is_under <- function(path, root) {
+  path <- trim_path(path)
+  root <- trim_path(root)
+  if (.Platform$OS.type == "windows") {
+    path <- tolower(path)
+    root <- tolower(root)
+  }
+  prefix <- if (identical(root, "/")) "/" else paste0(root, "/")
+  identical(path, root) || startsWith(path, prefix)
+}
+
+resources_root <- resolve_directory(Sys.getenv("ALDER_RESOURCES_ROOT", unset = ""),
+                                    "ALDER_RESOURCES_ROOT")
+worker_dir <- resolve_directory(Sys.getenv("ALDER_WORKER_DIR", unset = ""),
+                                "ALDER_WORKER_DIR")
+if (!path_is_under(worker_dir, resources_root)) {
+  stop("ALDER_WORKER_DIR must be contained inside application resources", call. = FALSE)
+}
+
+bootstrap_path <- normalizePath(file.path(worker_dir, "host-bootstrap.R"),
+                                mustWork = FALSE, winslash = "/")
+if (!path_is_under(bootstrap_path, resources_root) ||
+    !identical(dirname(bootstrap_path), worker_dir) ||
+    !file.exists(bootstrap_path) || isTRUE(file.info(bootstrap_path)$isdir) ||
+    file.access(bootstrap_path, 4L) != 0L) {
+  stop("validated Alder host bootstrap is missing or outside resources", call. = FALSE)
+}
+bootstrap <- new.env(parent = baseenv())
+sys.source(bootstrap_path, envir = bootstrap, keep.source = FALSE)
+worker <- bootstrap$.alder_worker_bootstrap()
+Sys.unsetenv("ALDER_WORKER_DIR")
+if (!is.list(worker) || !is.character(worker$workerDirectory) ||
+    length(worker$workerDirectory) != 1L) {
+  stop("worker bootstrap returned no worker directory", call. = FALSE)
+}
+bootstrap_worker_dir <- resolve_directory(worker$workerDirectory,
+                                          "bootstrapped worker directory")
+if (!identical(bootstrap_worker_dir, worker_dir) ||
+    !path_is_under(bootstrap_worker_dir, resources_root)) {
+  stop("worker bootstrap returned a directory outside application resources", call. = FALSE)
+}
+worker_dir <- bootstrap_worker_dir
 
 # Initialize opt-in tracing before the readiness handshake so creation-only
 # profiles contain analyzer startup rather than beginning at the first request.
 get(".alder_perf_initialize", envir = asNamespace("alder"))()
 
 local({
-  `%||%` <- function(left, right) if (is.null(left)) right else left
-  peer_role <- Sys.getenv("ALDER_HOST_ROLE", unset = "")
-  Sys.unsetenv("ALDER_HOST_ROLE")
-  if (!(peer_role %in% c("analyzer", "service"))) {
-    stop("invalid Alder static peer role", call. = FALSE)
+  or_else <- function(left, right) if (is.null(left)) right else left
+  normalize_diagnostics <- function(value) {
+    diagnostics <- or_else(value, list())
+    if (!is.list(diagnostics) || !is.null(names(diagnostics))) {
+      stop("analysis diagnostics must be an unnamed array", call. = FALSE)
+    }
+    lapply(diagnostics, function(diagnostic) {
+      if (!is.list(diagnostic)) {
+        stop("analysis diagnostic must be an object", call. = FALSE)
+      }
+      if (!("range" %in% names(diagnostic))) {
+        diagnostic <- c(diagnostic, list(range = NULL))
+      }
+      diagnostic
+    })
   }
   perf_begin <- get(".alder_perf_begin", asNamespace("alder"))
   perf_end <- get(".alder_perf_end", asNamespace("alder"))
-  package_path <- find.package("alder", quiet = FALSE)
   package_version <- as.character(utils::packageVersion("alder"))
   r_version <- as.character(getRversion())
-  framing_path <- file.path(package_path, "worker", "host-framing.R")
-  if (!file.exists(framing_path)) {
-    stop("installed Alder host framing module not found", call. = FALSE)
+  framing_path <- tryCatch(normalizePath(file.path(worker_dir, "host-framing.R"),
+                                          mustWork = TRUE, winslash = "/"),
+                           error = function(error) NULL)
+  if (is.null(framing_path) || !path_is_under(framing_path, resources_root) ||
+      !identical(dirname(framing_path), worker_dir) ||
+      file.access(framing_path, 4L) != 0L) {
+    stop("validated Alder host framing module is missing or outside worker directory",
+         call. = FALSE)
   }
   framing <- new.env(parent = baseenv())
-  sys.source(framing_path, envir = framing)
+  sys.source(framing_path, envir = framing, keep.source = FALSE)
 
   input <- framing$open_input()
   output <- framing$open_output()
   on.exit(tryCatch(close(input), error = function(error) NULL), add = TRUE)
   on.exit(tryCatch(close(output), error = function(error) NULL), add = TRUE)
 
-  scalar_string <- function(value, allow_empty = FALSE,
-                            max_bytes = 32L * 1024L * 1024L) {
-    is.character(value) && length(value) == 1L && !is.na(value) &&
-      (allow_empty || nzchar(value)) &&
-      nchar(value, type = "bytes") <= max_bytes
+  safe_identity <- get(".alder_runtime_safe_identity", asNamespace("alder"))
+  has_control <- get(".alder_runtime_has_control", asNamespace("alder"))
+  decode_source <- get("alder_host_decode_source", asNamespace("alder"))
+  max_cells <- get("ALDER_HOST_MAX_CELLS", asNamespace("alder"))
+  max_source_bytes <- get("ALDER_HOST_MAX_SOURCE_BYTES", asNamespace("alder"))
+  analysis_environment_id <- worker$analysisEnvironmentId
+  policy <- worker$policy
+
+  scalar_text <- function(value, label, allow_empty = FALSE,
+                          max_bytes = 32L * 1024L * 1024L,
+                          reject_controls = FALSE) {
+    if (!is.character(value) || length(value) != 1L || is.na(value) ||
+        (!allow_empty && !nzchar(value)) || !validUTF8(value) ||
+        nchar(value, type = "bytes") > max_bytes ||
+        (reject_controls && has_control(value))) {
+      stop(label, " must be bounded valid UTF-8 text", call. = FALSE)
+    }
+    value
   }
-  scalar_integer <- function(value) {
-    is.numeric(value) && length(value) == 1L && !is.na(value) &&
-      is.finite(value) && value == floor(value) && value >= 0 &&
-      value <= 9007199254740991
+  scalar_integer <- function(value, label) {
+    if (!is.numeric(value) || length(value) != 1L || is.na(value) ||
+        !is.finite(value) || value != floor(value) || value < 0 ||
+        value > 9007199254740991) {
+      stop(label, " must be a non-negative safe integer", call. = FALSE)
+    }
+    value
   }
-  require_object <- function(value, label) {
-    if (!is.list(value) || is.null(names(value)) || any(!nzchar(names(value))) ||
-        anyDuplicated(names(value))) {
+  require_object <- function(value, label, fields = NULL) {
+    names_value <- names(value)
+    if (!is.list(value) || is.null(names_value) || anyNA(names_value) ||
+        any(!nzchar(names_value)) || anyDuplicated(names_value) ||
+        any(!vapply(names_value, function(name)
+          isTRUE(tryCatch({ safe_identity(name, "JSON field name", max_bytes = 256L); TRUE },
+                          error = function(error) FALSE)), logical(1)))) {
       stop(label, " must be a JSON object with unique fields", call. = FALSE)
+    }
+    if (!is.null(fields) && !setequal(names_value, fields)) {
+      stop(label, " contains unexpected or missing fields", call. = FALSE)
     }
     invisible(value)
   }
@@ -55,211 +155,150 @@ local({
     if (!identical(request[["protocol"]], framing$PROTOCOL)) {
       stop("incompatible Alder engine protocol", call. = FALSE)
     }
-    if (!scalar_integer(request[["req"]]) || request[["req"]] < 1 ||
-        !scalar_string(request[["cmd"]], max_bytes = 64L) ||
-        !grepl("^[a-z][a-z0-9_]*$", request[["cmd"]])) {
-      stop("invalid host request identity", call. = FALSE)
+    request_id <- scalar_integer(request[["req"]], "request id")
+    if (request_id < 1) stop("request id must be positive", call. = FALSE)
+    command <- scalar_text(request[["cmd"]], "request command", max_bytes = 64L,
+                           reject_controls = TRUE)
+    if (!grepl("^[a-z][a-z0-9_]*$", command)) {
+      stop("invalid host request command", call. = FALSE)
     }
+    fields <- switch(command,
+      ping = c("protocol", "req", "cmd"),
+      analyze = c("protocol", "req", "cmd", "revision",
+                  "analysisEnvironmentId", "cells"),
+      shutdown = c("protocol", "req", "cmd"),
+      c("protocol", "req", "cmd"))
+    require_object(request, "host request", fields)
     invisible(request)
   }
-  decode_source <- get("alder_host_decode_source", asNamespace("alder"))
-  max_cells <- get("ALDER_HOST_MAX_CELLS", asNamespace("alder"))
 
   empty_analysis <- function() {
-    list(
-      defs = I(character()), refs = I(character()),
-      self_refs = I(character()), locals = I(character()),
-      barrier = FALSE, opaque = FALSE, diagnostics = I(list()), error = NULL
-    )
+    list(defs = I(character()), refs = I(character()),
+         selfRefs = I(character()),
+         barrier = FALSE, opaque = FALSE, diagnostics = I(list()),
+         ranges = I(list()), error = NULL)
   }
 
   analyze_request <- function(request) {
-    if (!scalar_integer(request[["revision"]])) {
-      stop("analysis revision must be a non-negative integer", call. = FALSE)
+    revision <- scalar_integer(request[["revision"]], "analysis revision")
+    requested_environment_id <- safe_identity(
+      request[["analysisEnvironmentId"]], "analysisEnvironmentId", max_bytes = 256L)
+    if (!is.null(analysis_environment_id) &&
+        !identical(requested_environment_id, analysis_environment_id)) {
+      stop("analysisEnvironmentId does not match the worker environment", call. = FALSE)
     }
     cells <- request[["cells"]]
-    if (!is.list(cells) || length(cells) > max_cells) {
+    if (!is.list(cells) || !is.null(names(cells)) || length(cells) > max_cells) {
       stop("analysis cells must be a bounded JSON array", call. = FALSE)
     }
-    ids <- character()
-    results <- lapply(cells, function(cell) {
+    source_bytes <- 0
+    ids <- character(length(cells))
+    results <- lapply(seq_along(cells), function(index) {
+      cell <- cells[[index]]
       require_object(cell, "analysis cell")
-      source <- decode_source(cell, "source_base64", "source",
-                              "analysis source")
-      if (!scalar_string(cell[["id"]], max_bytes = 1024L) ||
-          !scalar_integer(cell[["revision"]]) ||
-          !scalar_string(cell[["type"]], max_bytes = 16L) ||
-          !(cell[["type"]] %in% c("code", "markdown")) ||
-          !scalar_string(source, allow_empty = TRUE)) {
+      cell_names <- names(cell)
+      if (!("source_base64" %in% cell_names) && !("source" %in% cell_names)) {
+        stop("analysis cell must contain source_base64 or source", call. = FALSE)
+      }
+      source_field <- if ("source_base64" %in% cell_names) "source_base64" else "source"
+      require_object(cell, "analysis cell",
+                     c("id", "revision", "type", source_field))
+      source <- decode_source(cell, "source_base64", "source", "analysis source")
+      cell_revision <- scalar_integer(cell[["revision"]], "cell revision")
+      cell_id <- safe_identity(cell[["id"]], "analysis cell id", max_bytes = 256L)
+      cell_type <- safe_identity(cell[["type"]], "analysis cell type", max_bytes = 16L)
+      scalar_text(source, "analysis source", allow_empty = TRUE,
+                  max_bytes = max_source_bytes)
+      if (!(cell_type %in% c("code", "markdown"))) {
         stop("invalid analysis cell snapshot", call. = FALSE)
       }
-      ids <<- c(ids, cell[["id"]])
-      analysis <- if (identical(cell[["type"]], "code")) {
+      source_bytes <<- source_bytes + nchar(source, type = "bytes")
+      if (source_bytes > max_source_bytes) {
+        stop("analysis source exceeds the 32 MiB notebook limit", call. = FALSE)
+      }
+      ids[[index]] <<- cell_id
+      analysis <- if (identical(cell_type, "code")) {
         analysis_span <- perf_begin("analyzer.cell_defs_refs", list(
-          req = request[["req"]], revision = request[["revision"]],
-          cell = cell[["id"]], cell_revision = cell[["revision"]]
-        ))
+          req = request[["req"]], revision = revision,
+          cell = cell_id, cell_revision = cell_revision))
         analysis_result <- list(ok = FALSE)
         on.exit(perf_end(analysis_span, analysis_result), add = TRUE)
         value <- get("cell_defs_refs", asNamespace("alder"))(source)
-        analysis_result <- list(
-          ok = TRUE,
-          defs = length(value$defs %||% character()),
-          refs = length(value$refs %||% character()),
-          diagnostics = length(value$diagnostics %||% list())
-        )
+        analysis_result <- list(ok = TRUE,
+          defs = length(or_else(value$defs, character())),
+          refs = length(or_else(value$refs, character())),
+          diagnostics = length(or_else(value$diagnostics, list())))
         value
-      } else {
-        empty_analysis()
-      }
-      list(
-        id = cell[["id"]],
-        revision = cell[["revision"]],
-        defs = I(analysis$defs %||% character()),
-        refs = I(analysis$refs %||% character()),
-        self_refs = I(analysis$self_refs %||% character()),
-        locals = I(analysis$locals %||% character()),
-        barrier = isTRUE(analysis$barrier),
-        opaque = isTRUE(analysis$opaque),
-        diagnostics = I(analysis$diagnostics %||% list()),
-        error = analysis$error %||% NULL
-      )
+      } else empty_analysis()
+      list(id = cell_id, revision = cell_revision,
+           defs = I(or_else(analysis$defs, character())),
+           refs = I(or_else(analysis$refs, character())),
+           selfRefs = I(or_else(analysis$selfRefs, character())),
+           locals = I(or_else(analysis$locals, character())),
+           barrier = isTRUE(analysis$barrier), opaque = isTRUE(analysis$opaque),
+           diagnostics = I(normalize_diagnostics(analysis$diagnostics)),
+           ranges = I(or_else(analysis$ranges, list())),
+           error = or_else(analysis$error, NULL))
     })
     if (anyDuplicated(ids)) stop("analysis cell ids must be unique", call. = FALSE)
-    policy <- Sys.getenv("ALDER_ANALYSIS_POLICY", unset = "alder-static-v1")
-    if (!scalar_string(policy, max_bytes = 256L)) {
-      stop("invalid analysis policy identity", call. = FALSE)
-    }
-    list(
-      ok = TRUE,
-      revision = request[["revision"]],
-      cells = I(results),
-      analyzer = list(
-        package_version = package_version,
-        r_version = r_version,
-        policy = policy
-      )
-    )
-  }
-
-  service_commands <- c(
-    "codec.decode", "codec.document", "codec.encode", "config.resolve", "config.validate",
-    "config.encode", "layout.validate", "layout.read", "layout.encode",
-    "markdown.render", "help.render", "app.validate", "format", "graph", "export.render"
-  )
-  service_request <- function(request) {
-    command <- request[["command"]]
-    if (!scalar_string(command, max_bytes = 64L) ||
-        !(command %in% service_commands)) {
-      stop("unknown Alder host service", call. = FALSE)
-    }
-    helper <- get("alder_host_service", asNamespace("alder"))
-    payload <- request[["payload"]]
-    require_object(payload, "service payload")
-    list(ok = TRUE, result = helper(command, payload))
+    list(ok = TRUE, revision = revision,
+         analysisEnvironmentId = requested_environment_id, cells = I(results),
+         analyzer = list(package_version = package_version,
+                         r_version = r_version, policy = policy,
+                         analysisEnvironmentId = requested_environment_id))
   }
 
   respond <- function(request, response) {
     response$req <- request[["req"]]
     response$cmd <- request[["cmd"]]
-    # Echo correlation fields even on request errors. The host validates these
-    # before exposing an R service error to its caller.
-    if (!is.null(request[["revision"]])) {
-      response$revision <- request[["revision"]]
+    if (!is.null(request[["revision"]])) response$revision <- request[["revision"]]
+    if (!is.null(request[["analysisEnvironmentId"]])) {
+      response$analysisEnvironmentId <- request[["analysisEnvironmentId"]]
     }
     framing$write_frame(output, response)
   }
-
   dispatch_request <- function(request) {
     fields <- list(req = request[["req"]], cmd = request[["cmd"]])
     if (!is.null(request[["revision"]])) fields$revision <- request[["revision"]]
-    if (identical(request[["cmd"]], "service") &&
-        !is.null(request[["command"]])) {
-      fields$service <- request[["command"]]
-    }
-    stage <- if (identical(peer_role, "analyzer")) {
-      "analyzer.request"
-    } else {
-      "services.request"
-    }
-    request_span <- perf_begin(stage, fields)
+    request_span <- perf_begin("analyzer.request", fields)
     request_result <- list(ok = FALSE)
     on.exit(perf_end(request_span, request_result), add = TRUE)
-    allowed <- if (identical(peer_role, "analyzer")) {
-      c("ping", "analyze", "shutdown")
-    } else {
-      c("ping", "service", "shutdown")
-    }
     response <- tryCatch(
-      if (!(request[["cmd"]] %in% allowed)) {
-        list(ok = FALSE, error = list(
-          code = "unknown_command",
-          message = paste0("unknown ", peer_role, " command: ",
-                           request[["cmd"]])
-        ))
-      } else {
-        switch(
-          request[["cmd"]],
-          ping = list(ok = TRUE),
-          analyze = analyze_request(request),
-          service = service_request(request),
-          shutdown = list(ok = TRUE)
-        )
-      },
+      if (!(request[["cmd"]] %in% c("ping", "analyze", "shutdown"))) {
+        list(ok = FALSE, error = list(code = "unknown_command",
+             message = paste0("unknown analyzer command: ", request[["cmd"]])))
+      } else switch(request[["cmd"]],
+        ping = list(ok = TRUE), analyze = analyze_request(request),
+        shutdown = list(ok = TRUE)),
       error = function(error) list(ok = FALSE, error = list(
-        code = "service_error", message = conditionMessage(error)
-      ))
-    )
+        code = "analysis_error", message = conditionMessage(error))))
     request_result <- list(ok = isTRUE(response$ok))
-    if (!is.null(response$error$code)) {
-      request_result$error_code <- response$error$code
-    }
+    if (!is.null(response$error$code)) request_result$error_code <- response$error$code
     respond(request, response)
     invisible()
   }
 
-  # This adapter is sourced at process startup and therefore bypasses the
-  # package byte compiler. Profiles showed R's JIT compiling framing and
-  # dispatch closures during the first real analysis request. Compile the
-  # bounded internal path before advertising readiness; no notebook source is
-  # parsed or evaluated here.
-  for (name in c(
-    "read_exact", "frame_length", "frame_header", "check_json_text",
-    "check_json_value", "read_frame", "write_frame"
-  )) {
+  # Compile the bounded internal path before advertising readiness; notebook
+  # source is parsed only in the analyze command and is never evaluated.
+  for (name in c("read_exact", "frame_length", "frame_header", "check_json_text",
+                 "check_json_value", "read_frame", "write_frame")) {
     assign(name, compiler::cmpfun(get(name, envir = framing, inherits = FALSE)),
            envir = framing)
   }
   target <- environment(dispatch_request)
-  hot_helpers <- c(
-    "scalar_string", "scalar_integer", "require_object", "require_request",
-    "respond", "dispatch_request",
-    if (identical(peer_role, "analyzer")) c("empty_analysis", "analyze_request")
-    else "service_request"
-  )
-  for (name in hot_helpers) {
+  for (name in c("scalar_text", "scalar_integer", "require_object",
+                 "require_request", "respond", "dispatch_request",
+                 "empty_analysis", "analyze_request")) {
     assign(name, compiler::cmpfun(get(name, envir = target, inherits = FALSE)),
            envir = target)
   }
 
   framing$write_frame(output, list(
-    kind = "handshake",
-    protocol = framing$PROTOCOL,
-    role = peer_role,
-    engine = list(name = paste0("alder-r-", peer_role), version = "1"),
-    package_version = package_version,
-    r_version = r_version,
-    capabilities = I(if (identical(peer_role, "analyzer")) {
-      "analysis"
-    } else {
-      "pure-services"
-    }),
-    readiness = list(
-      initialized = TRUE,
-      analysis = identical(peer_role, "analyzer"),
-      services = identical(peer_role, "service")
-    )
-  ))
+    kind = "handshake", protocol = framing$PROTOCOL, role = "analyzer",
+    engine = list(name = "alder-r-analyzer", version = "1"),
+    package_version = package_version, r_version = r_version,
+    capabilities = I(c("analysis", "analysis-policy:v1")),
+    readiness = list(initialized = TRUE, analysis = TRUE)))
 
   repeat {
     request <- framing$read_frame(input)

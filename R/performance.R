@@ -17,11 +17,7 @@
     stop("ALDER_PERF_TRACE_DIR must be an existing writable directory",
          call. = FALSE)
   }
-  if (!requireNamespace("microbenchmark", quietly = TRUE)) {
-    stop("Performance tracing requires the optional microbenchmark package",
-         call. = FALSE)
-  }
-  state$origin <- microbenchmark::get_nanotime()
+  state$origin_ms <- unname(proc.time()[["elapsed"]]) * 1000
   state$pid <- Sys.getpid()
   state$path <- file.path(dir, paste0("trace-", state$pid, ".jsonl"))
   if (identical(Sys.getenv("ALDER_PERF_RPROF"), "1")) {
@@ -47,8 +43,8 @@
   if (is.null(state$path)) return(NULL)
   state$counter <- state$counter + 1L
   span <- list(pid = state$pid, span = state$counter, stage = stage,
-               clock = "microbenchmark::get_nanotime",
-               start_ms = (microbenchmark::get_nanotime() - state$origin) / 1e6,
+               clock = "proc.time.elapsed",
+               start_ms = unname(proc.time()[["elapsed"]]) * 1000 - state$origin_ms,
                fields = fields)
   .alder_perf_write(c(list(event = "begin"), span))
   span
@@ -56,7 +52,7 @@
 
 .alder_perf_end <- function(span, fields = list()) {
   if (is.null(span)) return(invisible())
-  elapsed <- (microbenchmark::get_nanotime() - .alder_perf_state$origin) / 1e6 - span$start_ms
+  elapsed <- unname(proc.time()[["elapsed"]]) * 1000 - .alder_perf_state$origin_ms - span$start_ms
   .alder_perf_write(c(list(event = "end", duration_ms = elapsed),
                       span, list(result = fields)))
   invisible()

@@ -184,11 +184,11 @@ body {
 .btn:disabled, select:disabled, input:disabled { cursor: default; opacity: .45; }
 .btn.mini { font-size: 12px; padding: 3px 8px; }
 #topbar > .btn { flex-shrink: 0; white-space: nowrap; }
-.export-menu {
+.service-menu {
   position: relative;
   flex: 0 0 auto;
 }
-.export-menu-panel {
+.service-menu-panel {
   position: absolute;
   z-index: 40;
   top: calc(100% + 6px);
@@ -205,9 +205,9 @@ body {
   background: var(--panel);
   box-shadow: 0 10px 30px color-mix(in srgb, var(--text) 18%, transparent);
 }
-.export-menu-panel[hidden] { display: none; }
-.export-menu-panel > .btn { width: 100%; text-align: left; }
-.export-menu-panel input[type="text"] {
+.service-menu-panel[hidden] { display: none; }
+.service-menu-panel > .btn { width: 100%; text-align: left; }
+.service-menu-panel input[type="text"] {
   width: 100%;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
@@ -215,7 +215,7 @@ body {
   color: var(--text);
   padding: 6px 8px;
 }
-.export-include-code {
+.publish-include-code {
   display: flex;
   align-items: center;
   gap: 5px;

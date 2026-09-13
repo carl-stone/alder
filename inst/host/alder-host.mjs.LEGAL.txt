@@ -1,0 +1,22 @@
+Bundled license information:
+
+content-type/index.js:
+  /*!
+   * content-type
+   * Copyright(c) 2015 Douglas Christopher Wilson
+   * MIT Licensed
+   */
+
+is-plain-object/dist/is-plain-object.js:
+  /*!
+   * is-plain-object <https://github.com/jonschlinkert/is-plain-object>
+   *
+   * Copyright (c) 2014-2017, Jon Schlinkert.
+   * Released under the MIT License.
+   */
+
+chokidar/index.js:
+  /*! chokidar - MIT License (c) 2012 Paul Miller (paulmillr.com) */
+
+markdown-it/dist/markdown-it.mjs:
+  /*! markdown-it 15.0.1 https://github.com/markdown-it/markdown-it @license MIT */

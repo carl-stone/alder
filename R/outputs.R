@@ -117,6 +117,49 @@ render_layout_args <- function(exprs, env) {
 layout_output <- function(kind, args, attrs = list()) {
   new_output("layout", layout = kind, attrs = attrs, children = args)
 }
+validate_layout_gap <- function(gap) {
+  if (!is.numeric(gap) || length(gap) != 1L || is.na(gap) ||
+      !is.finite(gap) || gap < 0 || gap > 4096) {
+    stop("`gap` must be a finite non-negative number no greater than 4096", call. = FALSE)
+  }
+  gap
+}
+
+validate_layout_choice <- function(value, name, choices) {
+  if (!is.character(value) || length(value) != 1L || is.na(value) ||
+      !value %in% choices) {
+    stop(sprintf("`%s` must be one of: %s", name, paste(choices, collapse = ", ")),
+         call. = FALSE)
+  }
+  value
+}
+media_default_mime <- function(media_type) {
+  switch(media_type,
+    image = "image/png",
+    audio = "audio/wav",
+    video = "video/mp4",
+    pdf = "application/pdf",
+    "application/octet-stream"
+  )
+}
+
+media_mime_essence <- function(mime_type) {
+  sub(";.*$", "", tolower(trimws(mime_type)))
+}
+
+media_mime_compatible <- function(media_type, mime_type) {
+  if (!is.character(mime_type) || length(mime_type) != 1L || is.na(mime_type) || !nzchar(mime_type)) {
+    return(FALSE)
+  }
+  essence <- media_mime_essence(mime_type)
+  switch(media_type,
+    image = startsWith(essence, "image/"),
+    audio = startsWith(essence, "audio/"),
+    video = startsWith(essence, "video/"),
+    pdf = identical(essence, "application/pdf"),
+    FALSE
+  )
+}
 
 media_output <- function(path_or_raw, media_type, alt = NULL) {
   if (is.character(path_or_raw) && length(path_or_raw) == 1L &&
@@ -127,10 +170,8 @@ media_output <- function(path_or_raw, media_type, alt = NULL) {
                                               "artifacts")
   dir.create(dir, recursive = TRUE, showWarnings = FALSE)
   if (is.raw(path_or_raw)) {
-    mime_type <- switch(media_type, image = "image/png", audio = "audio/wav",
-                        video = "video/mp4", pdf = "application/pdf")
-    ext <- switch(mime_type, "image/png" = ".png", "audio/wav" = ".wav",
-                  "video/mp4" = ".mp4", "application/pdf" = ".pdf")
+    mime_type <- media_default_mime(media_type)
+    ext <- switch(media_type, image = ".png", audio = ".wav", video = ".mp4", pdf = ".pdf", ".bin")
     dest <- tempfile("alder-media-", tmpdir = dir, fileext = ext)
     writeBin(path_or_raw, dest)
   } else {
@@ -138,10 +179,19 @@ media_output <- function(path_or_raw, media_type, alt = NULL) {
         is.na(path_or_raw) || !file.exists(path_or_raw) || dir.exists(path_or_raw)) {
       return(new_output("error", message = "media input must be a local file or raw vector"))
     }
-    mime_type <- mime::guess_type(path_or_raw) %||% "application/octet-stream"
     ext <- tools::file_ext(path_or_raw)
-    if (!nzchar(ext)) ext <- switch(media_type, image = "png", audio = "wav",
-                                    video = "mp4", pdf = "pdf")
+    guessed <- tryCatch(mime::guess_type(path_or_raw), error = function(e) NULL)
+    guessed_ok <- is.character(guessed) && length(guessed) == 1L && !is.na(guessed) && nzchar(guessed)
+    known_mime <- switch(tolower(ext), html = "text/html", htm = "text/html", xhtml = "application/xhtml+xml", NULL)
+    if (!guessed_ok || identical(media_mime_essence(guessed), "application/octet-stream")) {
+      mime_type <- known_mime %||% media_default_mime(media_type)
+    } else {
+      mime_type <- as.character(guessed)
+    }
+    if (!media_mime_compatible(media_type, mime_type)) {
+      return(new_output("error", message = "media input MIME type does not match requested media type"))
+    }
+    if (!nzchar(ext)) ext <- sub("^\\.", "", switch(media_type, image = ".png", audio = ".wav", video = ".mp4", pdf = ".pdf", ".bin"))
     dest <- tempfile("alder-media-", tmpdir = dir, fileext = paste0(".", ext))
     if (!file.copy(path_or_raw, dest, overwrite = TRUE)) {
       return(new_output("error", message = "could not copy media artifact"))
@@ -165,6 +215,23 @@ progress_emit <- function(record) {
   invisible(record)
 }
 
+validate_progress_total <- function(total) {
+  if (is.null(total)) return(NULL)
+  if (!is.numeric(total) || length(total) != 1L || is.na(total) ||
+      !is.finite(total) || total < 0) {
+    stop("`total` must be a non-negative scalar", call. = FALSE)
+  }
+  as.double(total)
+}
+
+validate_progress_label <- function(label) {
+  if (is.null(label)) return(NULL)
+  if (!is.character(label) || length(label) != 1L || is.na(label) ||
+      !validUTF8(label) || nchar(label, type = "bytes") > 4096L) {
+    stop("`label` must be a scalar character", call. = FALSE)
+  }
+  label
+}
 #' Notebook output library
 #'
 #' \code{out$md()}, \code{out$html()}, \code{out$image()} and the media
@@ -194,13 +261,11 @@ out <- list(
     dots <- list(...)
     if (length(dots)) text <- tryCatch(do.call(sprintf, c(list(text), dots)),
                                        error = function(e) paste(c(text, dots), collapse = ""))
-    html <- sanitize_markdown_html(commonmark::markdown_html(text, extensions = FALSE))
-    new_output("markdown", html = html, text = text)
+    new_output("markdown", text = text)
   },
   html = function(html) {
     html <- paste(as.character(html), collapse = "\n")
-    clean <- sanitize_markdown_html(html)
-    new_output("markdown", html = clean, text = clean)
+    new_output("html", html = html)
   },
   image = function(path_or_raw, alt = NULL) media_output(path_or_raw, "image", alt),
   audio = function(path_or_raw, alt = NULL) media_output(path_or_raw, "audio", alt),
@@ -213,11 +278,17 @@ out <- list(
                   list(variant = variant))
   },
   hstack = function(..., gap = 8, align = "center", justify = "start") {
+    gap <- validate_layout_gap(gap)
+    align <- validate_layout_choice(align, "align", c("start", "center", "end", "stretch"))
+    justify <- validate_layout_choice(justify, "justify",
+                                      c("start", "center", "end", "space-between",
+                                        "space-around", "space-evenly"))
     exprs <- as.list(substitute(list(...)))[-1L]
     layout_output("hstack", render_layout_args(exprs, parent.frame()),
                   list(gap = gap, align = align, justify = justify))
   },
   vstack = function(..., gap = 8) {
+    gap <- validate_layout_gap(gap)
     exprs <- as.list(substitute(list(...)))[-1L]
     layout_output("vstack", render_layout_args(exprs, parent.frame()), list(gap = gap))
   },
@@ -237,13 +308,8 @@ out <- list(
     layout_output("sidebar", render_layout_args(exprs, parent.frame()), list())
   },
   progress = function(total = NULL, label = NULL) {
-    if (!is.null(total) && (!is.numeric(total) || length(total) != 1L ||
-                            is.na(total) || total < 0)) {
-      stop("`total` must be a non-negative scalar", call. = FALSE)
-    }
-    if (!is.null(label) && (!is.character(label) || length(label) != 1L || is.na(label))) {
-      stop("`label` must be a scalar character", call. = FALSE)
-    }
+    total <- validate_progress_total(total)
+    label <- validate_progress_label(label)
     at <- 0
     closed <- FALSE
     update <- function(value = NULL, label = NULL) {
@@ -257,7 +323,7 @@ out <- list(
         }
         at <<- as.numeric(value)
       }
-      if (!is.null(label)) label0 <<- as.character(label)
+      if (!is.null(label)) label0 <<- validate_progress_label(label)
       progress_emit(new_output("progress", value = at, total = total,
                                label = label0 %||% "", done = FALSE))
       invisible(at)
@@ -280,6 +346,7 @@ out <- list(
     invisible(x)
   },
   lazy = function(f, label = "Show") {
+    label <- validate_progress_label(label) %||% "Show"
     if (!is.function(f) || length(formals(f)) != 0L) {
       stop("out$lazy() needs a zero-argument function", call. = FALSE)
     }
@@ -289,15 +356,12 @@ out <- list(
       stop("lazy output runtime is unavailable", call. = FALSE)
     }
     assign(key, f, envir = RUNTIME$lazy)
-    new_output("lazy", key = key, label = as.character(label),
+    new_output("lazy", key = key, label = label,
                state = "collapsed", child = NULL)
   },
   inspect = function(x) {
     txt <- paste(utils::capture.output(utils::str(x)), collapse = "\n")
-    if (nchar(txt, type = "bytes") > 65536L) {
-      txt <- substr(txt, 1L, 65536L)
-    }
-    new_output("text", text = txt, truncated = nchar(txt, type = "bytes") >= 65536L)
+    output_text_record(txt, max_bytes = 65536L)
   },
   stop = function(condition = TRUE, output = NULL) {
     if (!isTRUE(condition)) return(invisible(NULL))

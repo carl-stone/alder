@@ -1,4 +1,4 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import type { OwnedProcess, ProcessScope } from "./processes.js";
 import { createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { access, chmod, mkdir, rm, stat, writeFile } from "node:fs/promises";
@@ -15,13 +15,16 @@ import type {
 import {
   DEFAULT_MAX_FRAME_BYTES,
   FrameProtocolError,
-  parseStrictJson,
 } from "./framing.js";
+import { DEFAULT_STRICT_JSON_LIMITS, parseStrictJson } from "./strict-json.js";
+
+const ARK_BUILD_VERSION = "0.1.252-alder.1" as const;
+const ARK_VERSION_PROBE_TIMEOUT_MS = 10_000;
+const MAX_ARK_VERSION_OUTPUT_BYTES = 64 * 1024;
 
 const MESSAGE_DELIMITER = Buffer.from("<IDS|MSG>");
 const JUPYTER_VERSION = "5.3";
 const MAX_PENDING_REQUESTS = 1_024;
-
 type Channel = "shell" | "control" | "iopub" | "stdin" | "registration";
 type ReceiveSocket = Pick<Socket, "close"> & {
   receive(): Promise<Buffer[]>;
@@ -51,8 +54,10 @@ export interface JupyterMessage {
 export interface ArkKernelInfo {
   implementation: string;
   implementationVersion: string;
+  buildVersion: typeof ARK_BUILD_VERSION;
   languageVersion: string;
   protocolVersion: string;
+  mimePublisher: "alder-json-v1";
 }
 
 export interface ArkExecution {
@@ -76,6 +81,7 @@ export interface ArkKernelOptions {
   startupTimeoutMs: number;
   shutdownTimeoutMs: number;
   maxMessageBytes?: number;
+  processScope: ProcessScope;
 }
 
 interface ConnectionPorts {
@@ -93,7 +99,6 @@ interface PendingReply {
 }
 
 interface PendingExecution extends PendingReply {
-  comm?: { id: string; open?: boolean };
   messages: JupyterMessage[];
   retainedBytes: number;
   callbacks: ArkExecuteCallbacks;
@@ -118,7 +123,7 @@ export class ArkKernel extends EventEmitter {
   private readonly maxMessageBytes: number;
   private readonly session = randomUUID();
   private readonly key = randomBytes(32).toString("hex");
-  private child: ChildProcessWithoutNullStreams | undefined;
+  private child: OwnedProcess | undefined;
   private shell: Dealer | undefined;
   private control: Dealer | undefined;
   private iopub: Subscriber | undefined;
@@ -127,19 +132,22 @@ export class ArkKernel extends EventEmitter {
   private readonly controlPending = new Map<string, PendingReply>();
   private readonly executions = new Map<string, PendingExecution>();
   private executeTail: Promise<void> = Promise.resolve();
-  private inspectionComm: string | undefined;
   private queuedExecutions = 0;
   private stopped = false;
   private intentionalExit = false;
   private stderr = Buffer.alloc(0);
   private connectionFile: string | undefined;
+  private logFile: string | undefined;
   private welcomed = false;
   private failure: Error | undefined;
   private exitPromise: Promise<void> = Promise.resolve();
   private exitResolve: (() => void) | undefined;
   private terminationPromise: Promise<void> | undefined;
+  private childSpawnPromise: Promise<OwnedProcess> | undefined;
   private startPromise: Promise<ArkKernelInfo> | undefined;
   private stopRequested = false;
+  private childExited = false;
+  private publisherReady = false;
 
   constructor(private readonly options: ArkKernelOptions) {
     super();
@@ -162,14 +170,16 @@ export class ArkKernel extends EventEmitter {
   }
 
   get ready(): boolean {
-    return !this.stopped && this.child !== undefined && childRunning(this.child) &&
+    return !this.stopped && this.child !== undefined && !this.childExited &&
       this.shell !== undefined && this.control !== undefined && this.iopub !== undefined;
   }
 
   get processId(): number | undefined {
     return this.child?.pid;
   }
-
+  get publicMimePublisherReady(): boolean {
+    return this.publisherReady;
+  }
   start(): Promise<ArkKernelInfo> {
     if (this.stopRequested || this.stopped) {
       return Promise.reject(new Error("Ark kernel is closed"));
@@ -189,6 +199,7 @@ export class ArkKernel extends EventEmitter {
         mkdir(this.options.connectionDirectory, { recursive: true }),
       ]);
       this.assertStartAllowed();
+      const buildVersion = await probeArkBuildVersion(this.options);
 
       let zmq: ZeroMqModule;
       try {
@@ -209,6 +220,8 @@ export class ArkKernel extends EventEmitter {
         this.options.connectionDirectory,
         `ark-${process.pid}-${randomUUID()}.json`,
       );
+      this.logFile = this.connectionFile + ".log";
+      await writeFile(this.logFile, "", { mode: 0o600 });
       await writeFile(this.connectionFile, `${JSON.stringify({
         ...ports,
         transport: "tcp",
@@ -219,7 +232,7 @@ export class ArkKernel extends EventEmitter {
       await chmod(this.connectionFile, 0o600).catch(() => {});
 
       this.assertStartAllowed();
-      this.spawnArk();
+      await this.spawnArk();
       this.assertStartAllowed();
       await this.connect(zmq, ports);
       const infoMessage = await this.requestShell(
@@ -239,13 +252,18 @@ export class ArkKernel extends EventEmitter {
           content.implementation_version,
           "kernel implementation version",
         ),
+        buildVersion,
         languageVersion: requiredString(
           asRecord(content.language_info, "kernel language info").version,
           "R language version",
         ),
         protocolVersion: requiredString(content.protocol_version, "Jupyter protocol version"),
+        mimePublisher: "alder-json-v1" as const,
       };
       this.assertStartAllowed();
+      await this.probePublicPublisher();
+      await this.initializeStartup();
+      this.publisherReady = true;
       return info;
     } catch (error) {
       await this.terminate().catch(() => {});
@@ -253,7 +271,52 @@ export class ArkKernel extends EventEmitter {
       throw new Error(`${detail.message}${this.diagnosticText()}`);
     }
   }
-
+  private async probePublicPublisher(): Promise<void> {
+    this.assertStartAllowed();
+    const nonce = randomUUID();
+    const dataJson = JSON.stringify({
+      "application/vnd.alder.probe+json": { nonce },
+    });
+    const code = 'get("ark_publish_mimebundle", envir=as.environment("tools:positron"), inherits=FALSE)' +
+      '(' + JSON.stringify(dataJson) + ')';
+    let matches = 0;
+    const execution = await withTimeout(this.executeOnce(code, {
+      onMessage: (message) => {
+        if (message.header.msg_type !== "display_data" &&
+            message.header.msg_type !== "update_display_data") return;
+        const data = message.content.data;
+        if (typeof data !== "object" || data === null || Array.isArray(data)) return;
+        const probe = (data as Record<string, unknown>)["application/vnd.alder.probe+json"];
+        if (probe === undefined) return;
+        matches += 1;
+        if (matches > 1) throw new FrameProtocolError("Ark publisher probe emitted duplicate replies");
+        if (typeof probe !== "object" || probe === null || Array.isArray(probe) ||
+            (probe as Record<string, unknown>).nonce !== nonce) {
+          throw new FrameProtocolError("Ark publisher probe nonce does not match");
+        }
+      },
+    }, { silent: false, storeHistory: false }), this.options.startupTimeoutMs,
+    "Ark public MIME publisher probe");
+    if (execution.reply.content.status !== "ok") {
+      throw new FrameProtocolError("Ark public MIME publisher probe failed");
+    }
+    if (matches !== 1) {
+      throw new FrameProtocolError("Ark public MIME publisher probe reply was missing");
+    }
+  }
+  private async initializeStartup(): Promise<void> {
+    this.assertStartAllowed();
+    const source = "base::sys.source(" + JSON.stringify(this.options.startupFile) +
+      ", envir=baseenv())";
+    const execution = await withTimeout(
+      this.execute(source, {}, { silent: true, storeHistory: false }),
+      this.options.startupTimeoutMs,
+      "Ark startup initialization",
+    );
+    if (execution.reply.content.status !== "ok") {
+      throw new FrameProtocolError("Ark startup initialization failed");
+    }
+  }
   execute(
     code: string,
     callbacks: ArkExecuteCallbacks = {},
@@ -283,14 +346,10 @@ export class ArkKernel extends EventEmitter {
       signal?.throwIfAborted();
       // Auxiliary RPCs use the same serial tail, including channel setup and
       // settlement hooks. They must never bypass an in-flight notebook cell.
-      if (options.auxiliary && this.inspectionComm === undefined) {
-        const id = randomUUID();
-        await this.executeOnce('', {}, { comm: { id, open: true } });
-        this.inspectionComm = id;
-      }
-      return this.executeOnce(code, callbacks, {
-        ...options, ...(options.auxiliary ? { comm: { id: this.inspectionComm! } } : {}),
-      });
+      // Auxiliary requests use the same serial tail and ordinary Jupyter
+      // execute_request path; private comm targets are intentionally absent.
+      return this.executeOnce(code, callbacks, options);
+
     });
     this.executeTail = queued.then(() => {}, () => {});
     const settled = queued.finally(() => {
@@ -302,14 +361,13 @@ export class ArkKernel extends EventEmitter {
 
   private async executeOnce(
     code: string, callbacks: ArkExecuteCallbacks,
-    options: { silent?: boolean; storeHistory?: boolean; comm?: { id: string; open?: boolean } },
+    options: { silent?: boolean; storeHistory?: boolean },
   ): Promise<ArkExecution> {
     if (!this.ready || this.shell === undefined) throw new Error("Ark kernel is unavailable");
     const id = newMessageId();
     const result = new Promise<ArkExecution>((resolve, reject) => {
       const pending: PendingExecution = {
         expectedType: "execute_reply",
-        comm: options.comm,
         messages: [],
         retainedBytes: 0,
         callbacks,
@@ -323,7 +381,7 @@ export class ArkKernel extends EventEmitter {
         reject,
       };
       this.executions.set(id, pending);
-      if (options.comm === undefined) this.shellPending.set(id, pending);
+      this.shellPending.set(id, pending);
     });
     // A native send can fail before this promise becomes the awaited branch.
     // Keep its rejection observed while preserving the result for callers.
@@ -333,15 +391,8 @@ export class ArkKernel extends EventEmitter {
         this.shell,
         this.key,
         this.session,
-        options.comm ? (options.comm.open ? "comm_open" : "comm_msg") : "execute_request",
-        options.comm ? (options.comm.open ? {
-          comm_id: options.comm.id, target_name: "positron.ui", data: {},
-        } : {
-          comm_id: options.comm.id,
-          // The private command emits its bounded result separately. Returning
-          // NULL avoids serializing .Last.value through Ark's JSON converter.
-          data: { id, method: "evaluate_code", params: { code: `${code}\nNULL` } },
-        }) : {
+        "execute_request",
+        {
           code,
           silent: options.silent ?? false,
           store_history: options.storeHistory ?? !(options.silent ?? false),
@@ -405,8 +456,13 @@ export class ArkKernel extends EventEmitter {
       return;
     }
     this.intentionalExit = true;
+    // A process scope spawn can be suspended in native startup. Wait for the
+    // ownership boundary to resolve before taking the child snapshot; taking
+    // it first would memoize a successful termination while the eventual Ark
+    // process remains unowned and alive.
+    await this.childSpawnPromise?.catch(() => {});
     const child = this.child;
-    if (child !== undefined && childRunning(child) && this.control !== undefined) {
+    if (child !== undefined && !this.childExited && this.control !== undefined) {
       await this.requestControl(
         "shutdown_request",
         { restart: false },
@@ -416,26 +472,22 @@ export class ArkKernel extends EventEmitter {
       ).catch(() => {});
     }
     await this.waitForExit(this.options.shutdownTimeoutMs);
-    if (child !== undefined && childRunning(child)) {
-      try { child.kill("SIGTERM"); } catch { /* process already exited */ }
-      await this.waitForExit(250);
-    }
-    if (child !== undefined && childRunning(child)) {
-      try { child.kill("SIGKILL"); } catch { /* process already exited */ }
+    if (child !== undefined && !this.childExited) {
+      await child.terminate().catch(() => {});
       await this.waitForExit(Math.max(250, this.options.shutdownTimeoutMs));
     }
-    const survived = child !== undefined && childRunning(child);
+    const survived = child !== undefined && !this.childExited;
     this.stopped = true;
     this.closeSockets();
     this.rejectAll(new Error("Ark kernel closed"));
     await this.removeConnectionFile();
-    if (survived) throw new Error("Ark kernel did not exit after SIGKILL");
+    if (survived) throw new Error("Ark kernel did not exit after supervisor termination");
   }
 
   private async finishProcessCleanup(): Promise<void> {
     const child = this.child;
-    if (child !== undefined && childRunning(child)) {
-      child.kill("SIGKILL");
+    if (child !== undefined && !this.childExited) {
+      await child.terminate().catch(() => {});
       await this.waitForExit(Math.max(250, this.options.shutdownTimeoutMs));
     }
     this.closeSockets();
@@ -447,16 +499,25 @@ export class ArkKernel extends EventEmitter {
       await rm(this.connectionFile, { force: true }).catch(() => {});
       this.connectionFile = undefined;
     }
+    if (this.logFile !== undefined) {
+      await rm(this.logFile, { force: true }).catch(() => {});
+      this.logFile = undefined;
+    }
   }
 
-  private spawnArk(): void {
+  private async spawnArk(): Promise<void> {
+    const processScope = this.options.processScope;
+    if (processScope === undefined) throw new Error("Ark process scope is required");
     const args = [
       "--connection_file", this.connectionFile!,
-      "--startup-file", this.options.startupFile,
+      "--log", this.logFile!,
       "--session-mode", "notebook",
       "--default-repos", "none",
       "--",
       "--interactive",
+      "--no-environ",
+      "--no-site-file",
+      "--no-init-file",
       "--no-save",
       "--no-restore-data",
       "--quiet",
@@ -464,27 +525,45 @@ export class ArkKernel extends EventEmitter {
     this.exitPromise = new Promise((resolveExit) => {
       this.exitResolve = resolveExit;
     });
-    const child = spawn(this.options.executable, args, {
+    const spawnPromise = processScope.spawn({
+      executable: this.options.executable,
+      args,
       cwd: this.options.cwd,
-      // Rust diagnostic filters inherited from a developer shell can print
-      // request source on IOPub. Alder never enables that channel implicitly.
-      env: { ...this.options.environment, RUST_LOG: "off", RUST_LOG_STYLE: "never" },
-      stdio: ["pipe", "pipe", "pipe"],
-      windowsHide: true,
+      environment: { ...this.options.environment, RUST_LOG: "off", RUST_LOG_STYLE: "never" },
+      stdio: "pipes",
     });
-    this.child = child;
-    child.stdout.on("data", (chunk: Buffer) => this.recordDiagnostic(chunk));
-    child.stderr.on("data", (chunk: Buffer) => this.recordDiagnostic(chunk));
-    child.once("error", (error) => this.fail(
-      new Error(`could not start Ark: ${error.message}${this.diagnosticText()}`),
-    ));
-    child.once("exit", (code, signal) => {
-      this.exitResolve?.();
-      if (!this.stopped && !this.intentionalExit) {
-        const reason = code === null ? `signal ${signal ?? "unknown"}` : `exit status ${code}`;
-        this.fail(new Error(`Ark exited (${reason})${this.diagnosticText()}`));
+    this.childSpawnPromise = spawnPromise;
+    try {
+      const child = await spawnPromise;
+      this.child = child;
+      this.childExited = false;
+      child.stdout?.on("data", (chunk: Buffer) => this.recordDiagnostic(chunk));
+      child.stderr?.on("data", (chunk: Buffer) => this.recordDiagnostic(chunk));
+      child.stdin?.on("error", (error) => this.fail(
+        new Error("could not write to Ark: " + error.message + this.diagnosticText()),
+      ));
+      void child.exited.then(({ code, signal }) => {
+        this.childExited = true;
+        this.exitResolve?.();
+        if (!this.stopped && !this.intentionalExit) {
+          const reason = code === null ? "signal " + (signal ?? "unknown") : "exit status " + code;
+          this.fail(new Error("Ark exited (" + reason + ")" + this.diagnosticText()));
+        }
+      }, (error) => {
+        this.childExited = true;
+        this.exitResolve?.();
+        if (!this.stopped && !this.intentionalExit) this.fail(asError(error));
+      });
+      // terminate() may have won while processScope.spawn was pending. The
+      // child must be terminated before startup returns it to the caller.
+      if (this.stopRequested || this.stopped) {
+        await child.terminate().catch(() => {});
+        await child.exited.catch(() => {});
+        throw new Error("Ark kernel is closed");
       }
-    });
+    } finally {
+      if (this.childSpawnPromise === spawnPromise) this.childSpawnPromise = undefined;
+    }
   }
 
   private async connect(zmq: ZeroMqModule, ports: ConnectionPorts): Promise<void> {
@@ -618,48 +697,41 @@ export class ArkKernel extends EventEmitter {
           this.shellPending.delete(parentId);
           return;
         }
-        // UI RPC replies share this ordered IOPub stream, so unlike a shell
-        // execute_reply they cannot legitimately arrive after idle.
-        if (pending.comm && pending.reply === undefined) {
-          if (!pending.comm.open) pending.callbackError ??= new FrameProtocolError("Ark inspection omitted its RPC reply");
-          pending.reply = message;
-        }
         pending.idle = true;
         this.finishExecution(parentId);
+      } else if (state !== "busy") {
+        pending.reject(new FrameProtocolError("Ark execution status is invalid"));
+        this.executions.delete(parentId);
+        this.shellPending.delete(parentId);
       }
       return;
     }
-    if (pending.comm && message.content.comm_id === pending.comm.id) {
-      if (type === "comm_close") {
-        pending.callbackError ??= new FrameProtocolError("Ark inspection channel closed");
-      } else if (type === "comm_msg" && !pending.comm.open) {
-        const data = message.content.data;
-        if (data !== null && typeof data === "object" && !Array.isArray(data)) {
-          const reply = data as Record<string, unknown>;
-          if (reply.method === "EvaluateCodeReply" || reply.error !== undefined) {
-            if (pending.reply !== undefined) pending.callbackError ??= new FrameProtocolError("duplicate Ark inspection reply");
-            const error = reply.error;
-            pending.reply = { ...message, content: {
-              ...message.content, status: error === undefined ? "ok" : "error",
-              ...(error === undefined ? {} : { ename: "Ark inspection error", evalue: JSON.stringify(error) }),
-            } };
-          }
-        }
-      }
-    }
-    const retainedBytes = messageSize(message);
+    const safeMessage = this.sanitizeMessage(message);
+    const retainedBytes = messageSize(safeMessage);
     if (pending.retainedBytes + retainedBytes <= this.maxMessageBytes) {
-      pending.messages.push(message);
+      pending.messages.push(safeMessage);
       pending.retainedBytes += retainedBytes;
     }
     if (pending.callbackError === undefined) {
       try {
-        pending.callbacks.onMessage?.(message);
+        pending.callbacks.onMessage?.(safeMessage);
       } catch (error) {
         pending.callbackError = asError(error);
       }
     }
   }
+  private sanitizeMessage(message: JupyterMessage): JupyterMessage {
+    const content: Record<string, unknown> = { ...message.content };
+    for (const field of ["text", "evalue", "ename"] as const) {
+      if (typeof content[field] === "string") content[field] = redactText(content[field] as string, [this.key]);
+    }
+    if (Array.isArray(content.traceback)) {
+      content.traceback = content.traceback.map((line) =>
+        typeof line === "string" ? redactText(line, [this.key]) : line);
+    }
+    return { ...message, content };
+  }
+
 
   private receiveStdin(message: JupyterMessage): void {
     if (message.header.msg_type !== "input_request" || this.stdin === undefined) return;
@@ -748,7 +820,7 @@ export class ArkKernel extends EventEmitter {
     this.stopped = true;
     this.rejectAll(error);
     this.closeSockets();
-    if (this.child !== undefined && childRunning(this.child)) this.child.kill("SIGKILL");
+
     if (!this.intentionalExit) this.emit("failed", error);
     this.terminationPromise ??= this.finishProcessCleanup();
   }
@@ -783,7 +855,7 @@ export class ArkKernel extends EventEmitter {
   }
 
   private async waitForExit(timeoutMs: number): Promise<void> {
-    if (this.child === undefined || !childRunning(this.child)) return;
+    if (this.child === undefined || this.childExited) return;
     await Promise.race([
       this.exitPromise,
       new Promise<void>((resolveTimeout) => setTimeout(resolveTimeout, timeoutMs)),
@@ -791,13 +863,23 @@ export class ArkKernel extends EventEmitter {
   }
 
   private recordDiagnostic(chunk: Buffer): void {
-    this.stderr = Buffer.concat([this.stderr, chunk]);
+    const combined = Buffer.concat([this.stderr, chunk]);
+    this.stderr = Buffer.from(redactText(combined.toString("utf8"), [this.key]), "utf8");
     if (this.stderr.length > 64 * 1024) this.stderr = this.stderr.subarray(-64 * 1024);
   }
 
   private diagnosticText(): string {
-    const text = this.stderr.toString("utf8").trim();
+    const text = redactText(this.stderr.toString("utf8").trim(), [this.key]);
     return text.length === 0 ? "" : `; Ark diagnostics: ${text}`;
+  }
+}
+
+export async function probeArkPublicPublisher(options: ArkKernelOptions): Promise<ArkKernelInfo> {
+  const kernel = new ArkKernel(options);
+  try {
+    return await kernel.start();
+  } finally {
+    await kernel.terminate();
   }
 }
 
@@ -826,7 +908,7 @@ export function decodeMessage(
   const parentHeaderValue = parseJsonFrame(parentBytes, "parent header");
   const parentHeader = asRecord(parentHeaderValue, "Jupyter parent header") as Partial<JupyterHeader>;
   const metadata = asRecord(parseJsonFrame(metadataBytes, "metadata"), "Jupyter metadata");
-  const content = asRecord(parseJsonFrame(contentBytes, "content"), "Jupyter content");
+  const content = asRecord(parseJsonFrame(contentBytes, "content", maxMessageBytes), "Jupyter content");
   return {
     identities: frames.slice(0, delimiter),
     header,
@@ -885,7 +967,11 @@ function verifySignature(
   }
 }
 
-function parseJsonFrame(frame: Buffer, label: string): unknown {
+function parseJsonFrame(
+  frame: Buffer,
+  label: string,
+  maxBytes = DEFAULT_MAX_FRAME_BYTES,
+): unknown {
   let text: string;
   try {
     text = new TextDecoder("utf-8", { fatal: true }).decode(frame);
@@ -893,7 +979,10 @@ function parseJsonFrame(frame: Buffer, label: string): unknown {
     throw new FrameProtocolError(`Jupyter ${label} is not valid UTF-8`);
   }
   try {
-    return parseStrictJson(text);
+    return parseStrictJson(text, {
+      maxBytes,
+      maxDepth: DEFAULT_STRICT_JSON_LIMITS.maxDepth,
+    });
   } catch (error) {
     throw new FrameProtocolError(`invalid Jupyter ${label}: ${messageOf(error)}`);
   }
@@ -929,6 +1018,65 @@ function requiredString(value: unknown, label: string): string {
   return value;
 }
 
+async function probeArkBuildVersion(options: ArkKernelOptions): Promise<typeof ARK_BUILD_VERSION> {
+  if (options.processScope === undefined) {
+    throw new FrameProtocolError("Ark build probe requires a process scope");
+  }
+  let child: OwnedProcess;
+  try {
+    child = await options.processScope.spawn({
+      executable: options.executable,
+      args: ["--version"],
+      cwd: options.cwd,
+      environment: childEnvironment(options.environment),
+      stdio: "pipes",
+    });
+  } catch (error) {
+    throw new FrameProtocolError("Ark build probe could not start: " + messageOf(error));
+  }
+  if (child.stdout === null || child.stderr === null) {
+    await child.terminate().catch(() => {});
+    throw new FrameProtocolError("Ark build probe did not provide output pipes");
+  }
+  let exit: { code: number | null; signal: string | null } | undefined;
+  try {
+    const stdout = readBoundedArkOutput(child.stdout);
+    const stderr = readBoundedArkOutput(child.stderr);
+    const result = await withTimeout(
+      Promise.all([stdout, stderr, child.exited]),
+      ARK_VERSION_PROBE_TIMEOUT_MS,
+      "Ark build probe",
+    );
+    exit = result[2];
+    if (exit.code !== 0) {
+      throw new FrameProtocolError("Ark build probe exited unsuccessfully");
+    }
+    const output = result[0].trim();
+    const match = /^Ark\s+([^\s,]+)(?:,\s+an R Kernel\.)?\s*$/.exec(output);
+    if (match === null || match[1] !== ARK_BUILD_VERSION) {
+      throw new FrameProtocolError("Ark build version is not the qualified Alder build");
+    }
+    return ARK_BUILD_VERSION;
+  } finally {
+    await child.terminate().catch(() => {});
+  }
+}
+
+async function readBoundedArkOutput(
+  stream: NonNullable<OwnedProcess["stdout"]>,
+): Promise<string> {
+  const chunks: Buffer[] = [];
+  let bytes = 0;
+  for await (const chunk of stream) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    bytes += buffer.byteLength;
+    if (bytes > MAX_ARK_VERSION_OUTPUT_BYTES) {
+      throw new FrameProtocolError("Ark build probe output exceeds the limit");
+    }
+    chunks.push(buffer);
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
 async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
   let timer: NodeJS.Timeout | undefined;
   try {
@@ -1008,18 +1156,30 @@ function validateTimeout(value: number, name: string): void {
 function newMessageId(): string {
   return randomUUID();
 }
+function redactText(value: string, secrets: readonly string[]): string {
+  let result = value;
+  for (const secret of secrets) {
+    if (secret.length > 0) result = result.split(secret).join("[REDACTED]");
+  }
+  return result;
+}
 
 function asError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
 }
 
+function childEnvironment(value: NodeJS.ProcessEnv): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const [key, entry] of Object.entries(value)) {
+    if (entry !== undefined) result[key] = entry;
+  }
+  return result;
+}
 function messageOf(error: unknown): string {
   return asError(error).message;
 }
 
-function childRunning(child: ChildProcessWithoutNullStreams): boolean {
-  return child.exitCode === null && child.signalCode === null;
-}
+
 
 function messageSize(message: JupyterMessage): number {
   return Buffer.byteLength(JSON.stringify({

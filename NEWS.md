@@ -10,7 +10,9 @@ First release of Alder, a reactive notebook for R.
   ordered conditions and progress.
 * Atomic saves with conflict detection, optional formatting, renv integration,
   dependency-aware caches, headless execution and notebook tests.
-* Quarto/knitr and direct Pandoc publishing, static exports, conversion and MCP.
+* Isolated Quarto publishing to one self-contained HTML artifact, plus authenticated MCP workflows.
+* Revocable, resource-scoped sandbox output delivery and bounded HTML downloads.
+  Static publishing preserves literal source without evaluating Quarto shortcodes.
 * Unix and Windows launchers and an installed base-R Iris tutorial.
 * Opt-in input-to-result benchmarks and process-local profiling. The planned
   architecture's latency targets remain unmet.

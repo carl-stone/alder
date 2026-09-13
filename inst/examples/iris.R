@@ -46,5 +46,5 @@ legend("topright", legend = levels(iris$Species), col = 1:3, pch = 19)
 # ## Keep and publish your work
 #
 # Save writes this ordinary R file. Use Lazy runtime when an expensive analysis
-# should wait for an explicit run. See `?ui`, `?out`, and `?alder_render` in R
-# for inputs, presentation, and Quarto or Pandoc publishing.
+# should wait for an explicit run. See `?ui`, `?out`, and `?cache` in R for
+# controls, rich values, and explicit computation caching.

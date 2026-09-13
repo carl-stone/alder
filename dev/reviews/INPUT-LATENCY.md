@@ -6,17 +6,14 @@ median/p95 plots. Every completed benchmark or full profile set updates it.
 Pass `--experiment="One-line description of this experiment"` to the latency
 command; the directory name is used if omitted. The page refreshes every minute.
 
-Build and install matching source as described in [the development guide](../README.md),
-then run the host observer against that installed package. Use an empty evidence
-directory for each mode:
+Stage one application tree as described in the development guide, and keep the selected Rscript paths explicit. Then run the observer against that staged tree. Use an empty evidence directory for each mode:
 
 ```sh
-ALDER_R_PACKAGE=/tmp/alder-host-library/alder R_LIBS_USER=/tmp/alder-host-library \
-  tini -s -- npm run latency --prefix host -- /tmp/alder-host-warm 30
-ALDER_R_PACKAGE=/tmp/alder-host-library/alder R_LIBS_USER=/tmp/alder-host-library \
-  tini -s -- npm run latency --prefix host -- /tmp/alder-host-first 30 --fresh
-ALDER_R_PACKAGE=/tmp/alder-host-library/alder R_LIBS_USER=/tmp/alder-host-library \
-  tini -s -- npm run latency --prefix host -- /tmp/alder-host-profiles 3 --profile
+application=host/.application
+rscript=/absolute/path/to/R-4.6.1/bin/Rscript
+tini -s -- npm run latency --prefix host -- --application "$application" /tmp/alder-host-warm 30 --rscript "$rscript"
+tini -s -- npm run latency --prefix host -- --application "$application" /tmp/alder-host-first 30 --fresh --rscript "$rscript"
+tini -s -- npm run latency --prefix host -- --application "$application" /tmp/alder-host-profiles 3 --profile --rscript "$rscript"
 ```
 
 Normal runs remove inherited profiling variables. `--profile` enables separate

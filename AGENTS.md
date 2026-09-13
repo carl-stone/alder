@@ -17,3 +17,29 @@ Alder is a reactive notebook for R. The next implementation target is
   non-obvious behavioral decisions. Update existing docs when behavior changes;
   do not accumulate task ledgers, review transcripts or duplicate specs.
 - Keep generated review evidence and Python caches out of Git.
+
+## Agent routing
+
+Prefer appropriate delegation, not maximum delegation.
+
+- Use `task` (Luna) for bounded implementation, regression tests and focused
+  investigation.
+- Use `reviewer` (Opus) for independent reviews of consequential cross-cutting
+  correctness: shared contracts, ownership boundaries and integrated changes.
+- Use `security-reviewer` (Opus) when authentication, capabilities, sandboxing
+  or trust boundaries change.
+- Select these agent types explicitly. Relabeling a generic `task` assignment
+  as a review does not select the stronger reviewer role.
+- Attach stronger reviews to coherent integration candidates, not every small
+  edit or worker handoff. Reuse valid reviews for unchanged identified scope.
+- If a worker repeatedly misses acceptance criteria or a focused correction
+  fails, reassess the assignment and escalate rather than sending it back
+  unchanged.
+- Main owns decomposition, shared decisions, integration and checking evidence.
+  Worker completion claims and reviewer approval do not replace verification.
+- Delegate only cohesive work with explicit scope, ownership and required
+  evidence; keep one writer per shared file or boundary. Handle trivial work
+  directly.
+- Apply the project-specific review gates in
+  [ALDER_ARCHITECTURE_PLAN.md](ALDER_ARCHITECTURE_PLAN.md#required-independent-review-gates)
+  at the named contract freezes and integration exits.

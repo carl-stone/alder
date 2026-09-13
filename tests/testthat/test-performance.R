@@ -23,19 +23,17 @@ test_that("performance tracing is inert without explicit configuration", {
 })
 
 test_that("performance spans correlate nested work and retain elapsed durations", {
-  skip_if_not_installed("microbenchmark")
   dir <- tempfile("alder-perf-")
   dir.create(dir)
   on.exit(unlink(dir, recursive = TRUE), add = TRUE)
   result <- perf_child(paste0(
     "library(alder); b <- getFromNamespace('.alder_perf_begin','alder');",
     "e <- getFromNamespace('.alder_perf_end','alder');",
-    "invisible(loadNamespace('microbenchmark'));",
     "testthat::with_mocked_bindings({",
     "outer <- b('http', list(route='/api/run'));",
     "inner <- b('kernel.evaluate', list(req=7,run_id=3));",
     "Sys.sleep(0.025); e(inner); e(outer); cat(42)",
-    "}, proc.time=function(...)stop('adjustable clock consulted'), .package='base')"
+    "}, Sys.time=function(...)stop('wall clock consulted'), .package='base')"
   ), dir)
   expect_identical(result$status, 0L)
   expect_identical(result$stdout, "42")

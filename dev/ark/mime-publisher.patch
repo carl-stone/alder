@@ -1,0 +1,307 @@
+diff --git a/crates/ark/src/console.rs b/crates/ark/src/console.rs
+index 4e22f93e..419c8925 100644
+--- a/crates/ark/src/console.rs
++++ b/crates/ark/src/console.rs
+@@ -50,6 +50,7 @@ use amalthea::wire::execute_reply::ExecuteReply;
+ use amalthea::wire::execute_request::CodeLocation;
+ use amalthea::wire::execute_request::ExecuteRequest;
+ use amalthea::wire::execute_result::ExecuteResult;
++use amalthea::wire::display_data::DisplayData;
+ use amalthea::wire::input_reply::InputReply;
+ use amalthea::wire::input_request::InputRequest;
+ use amalthea::wire::input_request::ShellInputRequest;
+@@ -360,3 +361,29 @@ pub struct Console {
+     /// Graphics device state (plot recording, rendering, comm management).
+     device_context: Rc<DeviceContext>,
+ }
++
++
++impl Console {
++    /// Publish a MIME bundle on the current execute request's IOPub channel.
++    ///
++    /// This is intentionally scoped to an active request. Callers must enter
++    /// through the R-thread callback registered by harp::register.
++    pub(crate) fn publish_mimebundle(
++        &self,
++        data: serde_json::Value,
++        metadata: serde_json::Value,
++        transient: serde_json::Value,
++    ) -> anyhow::Result<()> {
++        if self.active_request.is_none() {
++            bail!("ark_publish_mimebundle requires an active execute request");
++        }
++
++        self.iopub_tx
++            .send(IOPubMessage::DisplayData(DisplayData {
++                data,
++                metadata,
++                transient,
++            }))?;
++        Ok(())
++    }
++}
+diff --git a/crates/ark/src/json.rs b/crates/ark/src/json.rs
+index e8da052c..c114ecac 100644
+--- a/crates/ark/src/json.rs
++++ b/crates/ark/src/json.rs
+@@ -5,8 +5,18 @@
+ //
+ //
+ 
++use std::fmt;
++
++use anyhow::bail;
+ use harp::object::RObject;
+ use libr::SEXP;
++use serde::de::{self, DeserializeSeed, Deserializer, MapAccess, SeqAccess, Visitor};
++use serde_json::Value;
++
++use crate::console::Console;
++
++const MAX_MIMEBUNDLE_BYTES: usize = 8 * 1024 * 1024;
++const MAX_JSON_DEPTH: usize = 64;
+ 
+ /// Convenience method to convert a JSON object to a string
+ #[harp::register]
+@@ -23,3 +33,219 @@ pub unsafe extern "C-unwind" fn ps_to_json(obj: SEXP) -> anyhow::Result<SEXP> {
+     let robj = RObject::from(json);
+     Ok(robj.sexp)
+ }
++
++struct JsonValueSeed {
++    depth: usize,
++}
++
++struct JsonValueVisitor {
++    depth: usize,
++}
++
++impl<'de> DeserializeSeed<'de> for JsonValueSeed {
++    type Value = Value;
++
++    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
++    where
++        D: Deserializer<'de>,
++    {
++        deserializer.deserialize_any(JsonValueVisitor {
++            depth: self.depth,
++        })
++    }
++}
++
++impl<'de> Visitor<'de> for JsonValueVisitor {
++    type Value = Value;
++
++    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
++        formatter.write_str("a strict JSON value")
++    }
++
++    fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E>
++    where
++        E: de::Error,
++    {
++        Ok(Value::Bool(value))
++    }
++
++    fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
++    where
++        E: de::Error,
++    {
++        Ok(Value::Number(value.into()))
++    }
++
++    fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
++    where
++        E: de::Error,
++    {
++        Ok(Value::Number(value.into()))
++    }
++
++    fn visit_i128<E>(self, value: i128) -> Result<Self::Value, E>
++    where
++        E: de::Error,
++    {
++        let number = serde_json::Number::from_i128(value)
++            .ok_or_else(|| E::custom("JSON integer is outside the supported range"))?;
++        Ok(Value::Number(number))
++    }
++
++    fn visit_u128<E>(self, value: u128) -> Result<Self::Value, E>
++    where
++        E: de::Error,
++    {
++        let number = serde_json::Number::from_u128(value)
++            .ok_or_else(|| E::custom("JSON integer is outside the supported range"))?;
++        Ok(Value::Number(number))
++    }
++
++    fn visit_f64<E>(self, value: f64) -> Result<Self::Value, E>
++    where
++        E: de::Error,
++    {
++        if !value.is_finite() {
++            return Err(E::custom("JSON numbers must be finite"));
++        }
++        let number = serde_json::Number::from_f64(value)
++            .ok_or_else(|| E::custom("JSON number is not representable"))?;
++        Ok(Value::Number(number))
++    }
++
++    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
++    where
++        E: de::Error,
++    {
++        Ok(Value::String(value.to_owned()))
++    }
++
++    fn visit_borrowed_str<E>(self, value: &'de str) -> Result<Self::Value, E>
++    where
++        E: de::Error,
++    {
++        Ok(Value::String(value.to_owned()))
++    }
++
++    fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
++    where
++        E: de::Error,
++    {
++        Ok(Value::String(value))
++    }
++
++    fn visit_unit<E>(self) -> Result<Self::Value, E>
++    where
++        E: de::Error,
++    {
++        Ok(Value::Null)
++    }
++
++    fn visit_none<E>(self) -> Result<Self::Value, E>
++    where
++        E: de::Error,
++    {
++        Ok(Value::Null)
++    }
++
++    fn visit_seq<A>(self, mut access: A) -> Result<Self::Value, A::Error>
++    where
++        A: SeqAccess<'de>,
++    {
++        if self.depth >= MAX_JSON_DEPTH {
++            return Err(de::Error::custom(format!(
++                "JSON nesting exceeds the maximum depth of {MAX_JSON_DEPTH}"
++            )));
++        }
++
++        let mut values = Vec::new();
++        while let Some(value) = access.next_element_seed(JsonValueSeed {
++            depth: self.depth + 1,
++        })? {
++            values.push(value);
++        }
++        Ok(Value::Array(values))
++    }
++
++    fn visit_map<A>(self, mut access: A) -> Result<Self::Value, A::Error>
++    where
++        A: MapAccess<'de>,
++    {
++        if self.depth >= MAX_JSON_DEPTH {
++            return Err(de::Error::custom(format!(
++                "JSON nesting exceeds the maximum depth of {MAX_JSON_DEPTH}"
++            )));
++        }
++
++        let mut values = serde_json::Map::new();
++        while let Some(key) = access.next_key::<String>()? {
++            if values.contains_key(&key) {
++                return Err(de::Error::custom(format!(
++                    "JSON object contains duplicate key {key:?}"
++                )));
++            }
++            let value = access.next_value_seed(JsonValueSeed {
++                depth: self.depth + 1,
++            })?;
++            values.insert(key, value);
++        }
++        Ok(Value::Object(values))
++    }
++}
++
++fn scalar_json(input: SEXP, name: &str, used_bytes: &mut usize) -> anyhow::Result<Value> {
++    if harp::utils::r_typeof(input) != libr::STRSXP {
++        bail!("{name} must be a scalar UTF-8 JSON string");
++    }
++
++    let input = RObject::view(input);
++    if input.length() != 1 {
++        bail!("{name} must be a scalar UTF-8 JSON string");
++    }
++
++    let chars = unsafe { libr::STRING_ELT(input.sexp, 0) };
++    if chars == unsafe { libr::R_NaString } {
++        bail!("{name} must not be NA");
++    }
++    let bytes = unsafe { std::ffi::CStr::from_ptr(libr::R_CHAR(chars)) }.to_bytes();
++    if bytes.len() > MAX_MIMEBUNDLE_BYTES - *used_bytes {
++        bail!("MIME bundle exceeds {MAX_MIMEBUNDLE_BYTES} UTF-8 bytes");
++    }
++    *used_bytes += bytes.len();
++    let source = std::str::from_utf8(bytes)
++        .map_err(|error| anyhow::anyhow!("invalid {name} UTF-8: {error}"))?;
++
++    let mut deserializer = serde_json::Deserializer::from_str(source);
++    let value = JsonValueSeed { depth: 0 }
++        .deserialize(&mut deserializer)
++        .map_err(|error| anyhow::anyhow!("invalid {name} JSON: {error}"))?;
++    deserializer
++        .end()
++        .map_err(|error| anyhow::anyhow!("invalid {name} JSON: {error}"))?;
++    if !value.is_object() {
++        bail!("{name} JSON must be an object");
++    }
++    Ok(value)
++}
++
++/// Publish a MIME bundle using the current execute request's Jupyter context.
++///
++/// The three arguments are scalar UTF-8 JSON strings. Parsing is deliberately
++/// performed in Rust so R's list/vector coercions cannot change the wire shape.
++#[harp::register]
++pub unsafe extern "C-unwind" fn ark_publish_mimebundle(
++    data_json: SEXP,
++    metadata_json: SEXP,
++    transient_json: SEXP,
++) -> anyhow::Result<SEXP> {
++    if unsafe { harp::CONSOLE_THREAD_ID } != Some(std::thread::current().id()) {
++        bail!("ark_publish_mimebundle must run on the R thread");
++    }
++    let mut used_bytes = 0;
++    let data = scalar_json(data_json, "data_json", &mut used_bytes)?;
++    let metadata = scalar_json(metadata_json, "metadata_json", &mut used_bytes)?;
++    let transient = scalar_json(transient_json, "transient_json", &mut used_bytes)?;
++
++    Console::with(|console| console.publish_mimebundle(data, metadata, transient))?;
++    Ok(RObject::null().sexp)
++}
+diff --git a/crates/ark/src/modules/positron/display.R b/crates/ark/src/modules/positron/display.R
+new file mode 100644
+index 00000000..b47b273e
+--- /dev/null
++++ b/crates/ark/src/modules/positron/display.R
+@@ -0,0 +1,16 @@
++#
++# display.R
++#
++# Copyright (C) 2026 Posit Software, PBC. All rights reserved.
++#
++#
++
++#' Publish a MIME bundle through Ark's public Jupyter display hook.
++#'
++#' @param data_json Scalar UTF-8 JSON object containing MIME data.
++#' @param metadata_json Scalar UTF-8 JSON metadata object.
++#' @param transient_json Scalar UTF-8 JSON transient data object.
++#' @export
++ark_publish_mimebundle <- function(data_json, metadata_json = "{}", transient_json = "{}") {
++    invisible(.ps.Call("ark_publish_mimebundle", data_json, metadata_json, transient_json))
++}

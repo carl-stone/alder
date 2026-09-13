@@ -2,8 +2,57 @@
 # Ark owns Jupyter execution, native display, interruption, and lifecycle;
 # these private helpers add Alder ownership, rendering, widgets, and handles.
 
-suppressPackageStartupMessages(library(alder))
-get("alder_host_apply_library_policy", asNamespace("alder"))()
+path_is_absolute <- function(value) {
+  if (.Platform$OS.type == "windows") {
+    grepl("^(?:[A-Za-z]:[/\\\\]|[/\\\\]{2})", value, perl = TRUE)
+  } else startsWith(value, "/")
+}
+resolve_directory <- function(value, label) {
+  if (!is.character(value) || length(value) != 1L || is.na(value) ||
+      !nzchar(value) || !validUTF8(value) ||
+      nchar(value, type = "bytes") > 4096L || !path_is_absolute(value)) {
+    stop(label, " must be an absolute directory", call. = FALSE)
+  }
+  resolved <- tryCatch(normalizePath(value, mustWork = TRUE, winslash = "/"),
+                       error = function(error) NULL)
+  if (is.null(resolved) || !dir.exists(resolved) || file.access(resolved, 4L) != 0L) {
+    stop(label, " must be an existing readable directory", call. = FALSE)
+  }
+  resolved
+}
+trim_path <- function(value) {
+  if (identical(value, "/")) "/" else sub("/+$", "", value)
+}
+path_is_under <- function(path, root) {
+  path <- trim_path(path)
+  root <- trim_path(root)
+  if (.Platform$OS.type == "windows") {
+    path <- tolower(path)
+    root <- tolower(root)
+  }
+  prefix <- if (identical(root, "/")) "/" else paste0(root, "/")
+  identical(path, root) || startsWith(path, prefix)
+}
+
+resources_root <- resolve_directory(Sys.getenv("ALDER_RESOURCES_ROOT", unset = ""),
+                                    "ALDER_RESOURCES_ROOT")
+worker_dir <- resolve_directory(Sys.getenv("ALDER_WORKER_DIR", unset = ""),
+                                "ALDER_WORKER_DIR")
+if (!path_is_under(worker_dir, resources_root)) {
+  stop("ALDER_WORKER_DIR must be contained inside application resources", call. = FALSE)
+}
+
+bootstrap_path <- normalizePath(file.path(worker_dir, "host-bootstrap.R"),
+                                mustWork = FALSE, winslash = "/")
+if (!path_is_under(bootstrap_path, resources_root) ||
+    !identical(dirname(bootstrap_path), worker_dir) ||
+    !file.exists(bootstrap_path) || isTRUE(file.info(bootstrap_path)$isdir) ||
+    file.access(bootstrap_path, 4L) != 0L) {
+  stop("validated Alder host bootstrap is missing or outside resources", call. = FALSE)
+}
+sys.source(bootstrap_path, envir = environment(), keep.source = FALSE)
+.alder_worker_bootstrap()
+Sys.unsetenv("ALDER_WORKER_DIR")
 
 local({
 
@@ -30,6 +79,8 @@ local({
   Sys.unsetenv("ALDER_CAPTURE_DIR")
   cache_dir <- Sys.getenv("ALDER_CACHE_DIR", unset = "")
   Sys.unsetenv("ALDER_CACHE_DIR")
+  control_dir <- Sys.getenv("ALDER_CONTROL_DIR", unset = "")
+  Sys.unsetenv("ALDER_CONTROL_DIR")
   notebook_dir <- Sys.getenv("ALDER_NOTEBOOK_DIR", unset = "")
   Sys.unsetenv("ALDER_NOTEBOOK_DIR")
   if (!nzchar(artifact_dir) || !dir.exists(artifact_dir) ||
@@ -42,6 +93,10 @@ local({
     stop("ALDER_CACHE_DIR is missing or invalid: '", cache_dir,
          "' (must be an existing writable directory)")
   }
+  if (!nzchar(control_dir) || !dir.exists(control_dir) ||
+      file.access(control_dir, 2) != 0L) {
+    stop("ALDER_CONTROL_DIR is missing or invalid", call. = FALSE)
+  }
   if (!nzchar(capture_dir) || !dir.exists(capture_dir) ||
       file.access(capture_dir, 2) != 0L) {
     stop("ALDER_CAPTURE_DIR is missing or invalid", call. = FALSE)
@@ -51,6 +106,11 @@ local({
   if (!identical(dirname(capture_dir), artifact_root) ||
       !startsWith(basename(capture_dir), ".alder-capture-")) {
     stop("ALDER_CAPTURE_DIR is outside the artifact directory", call. = FALSE)
+  }
+  control_dir <- normalizePath(control_dir, winslash = "/", mustWork = TRUE)
+  if (!identical(dirname(control_dir), artifact_root) ||
+      !startsWith(basename(control_dir), ".alder-control-")) {
+    stop("ALDER_CONTROL_DIR is outside the artifact directory", call. = FALSE)
   }
   if (nzchar(notebook_dir)) {
     if (!dir.exists(notebook_dir)) {
@@ -79,6 +139,12 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
   CURRENT_REVISION <- NULL
   CURRENT_SESSION_EPOCH <- NULL
   CURRENT_OPERATION_ID <- NULL
+  CURRENT_KERNEL_EPOCH <- NULL
+  KERNEL_STATE <- new.env(parent = emptyenv())
+  KERNEL_STATE$invalid <- FALSE
+  KERNEL_STATE$cleanup_failures <- list()
+  WARMING <- new.env(parent = emptyenv())
+  WARMING$value <- FALSE
   LAZY_ENV <- new.env(parent = emptyenv())
   EMITTED_OUTPUTS <- new.env(parent = emptyenv())
   EMITTED_OUTPUTS$value <- list()
@@ -109,7 +175,10 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
 
   notify <- function(kind, payload) {
     if (is.null(CURRENT_REQ) || is.null(CURRENT_CELL)) return(invisible())
-    if (identical(kind, "append") && !is.null(payload$output)) {
+    if (identical(kind, "append") && is.list(payload) &&
+        !is.null(payload$output)) {
+      payload$output <- canonicalize_rendered_output(
+        payload$output, CURRENT_CELL, "", character())
       EMITTED_OUTPUTS$value <- c(EMITTED_OUTPUTS$value %||% list(),
                                  list(payload$output))
     }
@@ -138,31 +207,141 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
   tryCatch(setHook(packageEvent("alder", "attach"),
                    function(...) inject_runtime()), error = function(e) NULL)
 
-  # Alder-specific streamed records travel as private display data on Ark's
-  # native IOPub channel. The random per-kernel token prevents ordinary HTML
-  # or user-written console text from being mistaken for a control record.
-  ark_emit <- function(value) {
-    internal <- get(".ps.internal", envir = as.environment("tools:positron"),
-                    inherits = FALSE)
-    control <- identical(value, list(type = "started")) ||
-      identical(value, list(type = "finished")) || identical(value, list(type = "batch_end"))
-    output <- value$output
-    # Ark differs on missing values, forced arrays and numeric precision.
-    # Only these plain records have the same JSON semantics in both encoders.
-    text <- identical(names(value), c("type", "output")) && identical(value$type, "result") &&
-      is.list(output) && !is.object(output) &&
-      identical(attributes(output), list(names = c("kind", "text", "truncated"))) &&
-      identical(output$kind, "text") && is.character(output$text) && length(output$text) == 1L &&
-      is.null(attributes(output$text)) && !is.na(output$text) && validUTF8(output$text) &&
-      (identical(output$truncated, TRUE) || identical(output$truncated, FALSE))
-    json <- if (control || text) internal(.ps.Call("ps_to_json", value)) else {
-      jsonlite::toJSON(value, auto_unbox = TRUE, null = "null", na = "null", force = TRUE)
+  # Ark sources --startup-file before tools:positron is installed. Resolve the
+  # public publisher on the first actual execution instead of failing kernel
+  # startup while that integration environment is still being created.
+  ark_publish_mimebundle <- NULL
+  resolve_ark_publisher <- function() {
+    if (is.function(ark_publish_mimebundle)) return(ark_publish_mimebundle)
+    POSITRON_ENV <- tryCatch(as.environment("tools:positron"),
+                             error = function(error) NULL)
+    if (is.null(POSITRON_ENV) ||
+        !exists("ark_publish_mimebundle", envir = POSITRON_ENV,
+                inherits = FALSE)) {
+      stop("Ark public MIME publisher is unavailable after kernel startup",
+           call. = FALSE)
     }
-    encoded <- gsub("[\r\n]", "",
-                    jsonlite::base64_enc(charToRaw(enc2utf8(json))))
-    html <- paste0("<!--ALDER_EVENT_V1:", ark_event_token, ":",
-                   encoded, "-->")
-    internal(.ps.Call("ps_html_display_data", html, "alder-event"))
+    publisher <- get("ark_publish_mimebundle", envir = POSITRON_ENV,
+                     inherits = FALSE)
+    if (!is.function(publisher)) {
+      stop("Ark public MIME publisher is invalid", call. = FALSE)
+    }
+    ark_publish_mimebundle <<- publisher
+    publisher
+  }
+
+  mark_kernel_invalid <- function(failures) {
+    KERNEL_STATE$invalid <- TRUE
+    if (length(failures)) {
+      KERNEL_STATE$cleanup_failures <- c(
+        KERNEL_STATE$cleanup_failures %||% list(), failures)
+    }
+    invisible()
+  }
+
+  kernel_state_condition <- function() {
+    structure(list(
+      message = "Alder kernel state is invalid; restart the kernel",
+      code = "kernel_state_invalid",
+      details = list(cleanup = KERNEL_STATE$cleanup_failures)
+    ), class = c("alder_kernel_state_invalid", "error", "condition"))
+  }
+
+  ark_emit <- function(value) {
+    if (!is.list(value) || is.null(value$type) ||
+        !is.character(value$type) || length(value$type) != 1L ||
+        is.na(value$type) || !nzchar(value$type)) {
+      stop("invalid Alder Ark event", call. = FALSE)
+    }
+    event_type <- value$type
+    if (!event_type %in% c("started", "append", "progress", "log", "result",
+                          "condition", "finished", "cell_meta",
+                          "command_result", "batch_end")) {
+      stop("invalid Alder Ark event type", call. = FALSE)
+    }
+    request <- if (identical(value$type, "command_result"))
+      value$request %||% NULL else CURRENT_REQ %||% NULL
+    if (!is.character(request) || length(request) != 1L || is.na(request) ||
+        !nzchar(request)) {
+      # A malformed/no-active-request probe must never become a control event.
+      return(invisible())
+    }
+    sequence <- if (identical(event_type, "command_result") ||
+                    identical(event_type, "started")) {
+      0
+    } else if (!is.null(value$sequence)) {
+      value$sequence
+    } else if (identical(event_type, "batch_end")) {
+      SEQ$value %||% 0
+    } else {
+      (SEQ$value %||% 0) + 1
+    }
+    if (!is.numeric(sequence) || length(sequence) != 1L || is.na(sequence) ||
+        !is.finite(sequence) || sequence != floor(sequence) || sequence < 0 ||
+        sequence > .Machine$integer.max) {
+      stop("invalid Alder Ark event sequence", call. = FALSE)
+    }
+    if (identical(event_type, "started") ||
+        identical(event_type, "command_result")) {
+      sequence <- 0
+    } else if (!identical(event_type, "batch_end")) {
+      if (sequence < 1) sequence <- 1
+      SEQ$value <- as.integer(sequence)
+    }
+    payload <- value$payload
+    if (!is.null(payload) && !is.list(payload)) {
+      stop("invalid Alder Ark event payload", call. = FALSE)
+    }
+    if (is.null(payload)) {
+      payload <- value
+      payload$type <- NULL
+      payload$sequence <- NULL
+      payload$request <- NULL
+    }
+    if (identical(value$type, "command_result")) {
+      payload <- list(request = request, response = value$response %||% list())
+    }
+    event <- list(
+      token = ark_event_token,
+      request = request,
+      sequence = as.integer(sequence),
+      type = value$type,
+      session_epoch = CURRENT_SESSION_EPOCH %||% NULL,
+      kernel_epoch = CURRENT_KERNEL_EPOCH %||% NULL,
+      run_id = CURRENT_RUN_ID %||% NULL,
+      operation_id = CURRENT_OPERATION_ID %||% NULL,
+      cell_id = CURRENT_CELL %||% NULL,
+      revision = CURRENT_REVISION %||% NULL,
+      payload = payload
+    )
+    data <- list()
+    data[["application/vnd.alder.event+json"]] <- event
+    data_json <- jsonlite::toJSON(data, auto_unbox = TRUE, null = "null",
+                                  na = "null", force = TRUE)
+    publisher <- resolve_ark_publisher()
+    if (!isTRUE(WARMING$value)) publisher(data_json, "{}", "{}")
+    invisible()
+  }
+
+  set_event_identity <- function(req) {
+    CURRENT_REQ <<- req[["request"]] %||% NULL
+    CURRENT_RUN_ID <<- req[["run_id"]] %||% NULL
+    CURRENT_REVISION <<- req[["revision"]] %||% NULL
+    CURRENT_SESSION_EPOCH <<- req[["session_epoch"]] %||% NULL
+    CURRENT_KERNEL_EPOCH <<- req[["kernel_epoch"]] %||% NULL
+    CURRENT_OPERATION_ID <<- req[["operation_id"]] %||% NULL
+    CURRENT_CELL <<- req[["id"]] %||% NULL
+    invisible()
+  }
+
+  clear_event_identity <- function() {
+    CURRENT_CELL <<- NULL
+    CURRENT_REQ <<- NULL
+    CURRENT_RUN_ID <<- NULL
+    CURRENT_REVISION <<- NULL
+    CURRENT_SESSION_EPOCH <<- NULL
+    CURRENT_KERNEL_EPOCH <<- NULL
+    CURRENT_OPERATION_ID <<- NULL
     invisible()
   }
 
@@ -395,6 +574,8 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
     if (is.character(code) && length(code) == 1L && !is.na(code) && nzchar(code)) {
       result$code <- bounded_chr(code, 256L)[[1L]]
     }
+    details <- if (is.list(condition)) condition[["details"]] else NULL
+    if (is.list(details)) result$details <- details
     result
   }
 
@@ -651,12 +832,19 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
         length(value$kind) != 1L) {
       return(list(kind = "error", message = "invalid alder output record"))
     }
+    # Keep inline HTML raw until Engine OutputStore ingress can sanitize and
+    # materialize it; rendered artifact outputs still require ownership checks.
     kind <- value$kind
-    if (kind %in% c("image", "html", "media")) {
+    if (kind %in% c("image", "media") ||
+        (kind == "html" && !is.null(value$artifact))) {
       extensions <- if (kind == "image") "png" else if (kind == "html") "html" else NULL
       if (!artifact_name_ok(value$artifact, extensions)) {
         return(list(kind = "error", message = "alder output artifact is unavailable"))
       }
+    } else if (kind == "html" &&
+               (!is.character(value$html) || length(value$html) != 1L ||
+                is.na(value$html))) {
+      return(list(kind = "error", message = "alder HTML output is invalid"))
     }
     if (identical(kind, "layout")) {
       value$children <- lapply(value$children %||% list(), validate_rendered_output)
@@ -664,6 +852,56 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
       value$child <- validate_rendered_output(value$child)
     }
     value
+  }
+
+  # Alder's R output helpers intentionally keep widget construction lightweight.
+  # Before any output crosses the Ark boundary, recursively convert those raw
+  # widget lists through the same wire-spec builder used for top-level values.
+  canonicalize_rendered_output <- function(value, cell_id = CURRENT_CELL,
+                                            name = "", path = character()) {
+    if (!is.list(value) || !is.character(value$kind) ||
+        length(value$kind) != 1L) {
+      return(list(kind = "error", message = "invalid alder output record"))
+    }
+    kind <- value$kind
+    if (identical(kind, "widget")) {
+      spec <- value$spec
+      if (!is.list(spec) || !is.character(spec$kind) ||
+          length(spec$kind) != 1L || is.na(spec$kind) || !nzchar(spec$kind)) {
+        return(list(kind = "error", message = "invalid alder widget specification"))
+      }
+      output_name <- value$name %||% name
+      output_path <- value$path %||% path
+      if (!is.character(output_name) || length(output_name) != 1L ||
+          is.na(output_name) || !nzchar(output_name) ||
+          !is.character(output_path) || anyNA(output_path) ||
+          any(!nzchar(output_path))) {
+        return(list(kind = "error", message = "invalid alder widget identity"))
+      }
+      wire <- tryCatch(
+        widget_wire_spec(spec, cell_id, output_name, output_path),
+        error = function(error) NULL)
+      if (is.null(wire)) {
+        return(list(kind = "error", message = "invalid alder widget specification"))
+      }
+      value$name <- output_name
+      value$owner <- value$owner %||% cell_id
+      value$path <- output_path
+      value$commit_token <- value$commit_token %||% NULL
+      value$operation <- value$operation %||% NULL
+      value$spec <- wire
+    } else if (identical(kind, "layout")) {
+      children <- value$children %||% list()
+      if (!is.list(children)) {
+        return(list(kind = "error", message = "invalid alder layout children"))
+      }
+      value$children <- lapply(children, canonicalize_rendered_output,
+                                cell_id = cell_id, name = "", path = path)
+    } else if (identical(kind, "lazy") && !is.null(value$child)) {
+      value$child <- canonicalize_rendered_output(
+        value$child, cell_id = cell_id, name = name, path = path)
+    }
+    validate_rendered_output(value)
   }
 
   open_png_device <- function(f) {
@@ -730,7 +968,7 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
   render_kind <- function(x, cell_id = CURRENT_CELL, name = "",
                           path = character()) {
     if (inherits(x, "alder_output")) {
-      return(validate_rendered_output(unclass(x)))
+      return(canonicalize_rendered_output(unclass(x), cell_id, name, path))
     }
     if (inherits(x, "alder_progress")) {
       return(list(kind = "error", message = "a progress handle is not an output"))
@@ -792,7 +1030,9 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
   # is a bare global name owned by the defining cell; any other widget in
   # the visible slot is a structured error, not a control.
   render_visible <- function(x, vname, id, owned) {
-    if (inherits(x, "alder_output")) return(unclass(x))
+    if (inherits(x, "alder_output")) {
+      return(canonicalize_rendered_output(unclass(x), id, vname, character()))
+    }
     if (UI_ENV$is_widget(x)) {
       if (!nzchar(vname) || !(vname %in% owned)) {
         return(list(kind = "error",
@@ -800,7 +1040,8 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
                            "and end the cell with that name: ", vname)))
       }
       return(list(kind = "widget", name = vname, owner = id,
-                  commit_token = NULL, spec = widget_spec(x, id, vname)))
+                  path = character(), commit_token = NULL, operation = NULL,
+                  spec = widget_spec(x, id, vname)))
     }
     render_kind(x, cell_id = id, name = vname)
   }
@@ -910,6 +1151,10 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
     CURRENT_CELL <<- id
     CURRENT_REQ <<- NULL
     CURRENT_RUN_ID <<- NULL
+    CURRENT_REVISION <<- NULL
+    CURRENT_SESSION_EPOCH <<- NULL
+    CURRENT_KERNEL_EPOCH <<- NULL
+    CURRENT_OPERATION_ID <<- NULL
     EMITTED_OUTPUTS$value <- list()
     RENDER_LOG$value <- character()
     inject_runtime()
@@ -917,6 +1162,10 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
       CURRENT_CELL <<- NULL
       CURRENT_REQ <<- NULL
       CURRENT_RUN_ID <<- NULL
+      CURRENT_REVISION <<- NULL
+      CURRENT_SESSION_EPOCH <<- NULL
+      CURRENT_KERNEL_EPOCH <<- NULL
+      CURRENT_OPERATION_ID <<- NULL
       EMITTED_OUTPUTS$value <- list()
       RENDER_LOG$value <- character()
     }, add = TRUE)
@@ -1001,45 +1250,138 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
     list(ok = TRUE, page = page)
   }
 
+  binding_active <- function(name) {
+    if (!exists(name, envir = NB_ENV, inherits = FALSE)) return(FALSE)
+    tryCatch(isTRUE(bindingIsActive(name, NB_ENV)), error = function(error) {
+      mark_kernel_invalid(list(list(name = name, action = "inspect",
+                                     active = NA, locked = NA,
+                                     message = conditionMessage(error))))
+      FALSE
+    })
+  }
+
+  cleanup_failure <- function(name, action, error = NULL) {
+    active <- tryCatch(binding_active(name), error = function(e) NA)
+    locked <- tryCatch(
+      if (exists(name, envir = NB_ENV, inherits = FALSE))
+        isTRUE(bindingIsLocked(name, NB_ENV)) else FALSE,
+      error = function(e) NA
+    )
+    list(name = name, action = action, active = active, locked = locked,
+         message = bounded_chr(if (is.null(error)) "cleanup failed" else
+           conditionMessage(error), 2048L)[[1L]])
+  }
+
+  remove_binding <- function(name, action = "remove") {
+    if (!exists(name, envir = NB_ENV, inherits = FALSE)) return(NULL)
+    tryCatch({
+      rm(list = name, envir = NB_ENV)
+      NULL
+    }, error = function(error) cleanup_failure(name, action, error))
+  }
+
+  capture_binding_values <- function(names) {
+    values <- list()
+    failures <- list()
+    for (name in names) {
+      if (!exists(name, envir = NB_ENV, inherits = FALSE)) next
+      active <- tryCatch(bindingIsActive(name, NB_ENV), error = function(error) {
+        failures <<- c(failures, list(cleanup_failure(name, "snapshot", error)))
+        NA
+      })
+      if (isTRUE(active)) next
+      value_ok <- TRUE
+      value <- tryCatch(get(name, envir = NB_ENV, inherits = FALSE),
+                        error = function(error) {
+                          value_ok <<- FALSE
+                          failures <<- c(failures,
+                            list(cleanup_failure(name, "snapshot", error)))
+                          NULL
+                        })
+      if (isTRUE(value_ok)) values[name] <- list(value)
+    }
+    list(values = values, failures = failures)
+  }
+
   # Remove definitions and private locals a failed/interrupted cell created.
+  # Removal never invokes active-binding getters; locked/active cleanup errors
+  # are retained and invalidate this kernel without masking the cell error.
   cleanup_failed_defs <- function(defs, pre, local_names = character(), id = NULL,
                                   pre_values = NULL) {
+    failures <- list()
     current <- ls(NB_ENV, all.names = TRUE)
     for (nm in unique(c(setdiff(defs, pre), setdiff(current, pre)))) {
-      if (exists(nm, envir = NB_ENV, inherits = FALSE)) {
-        rm(list = nm, envir = NB_ENV)
-      }
+      failure <- remove_binding(nm)
+      if (!is.null(failure)) failures <- c(failures, list(failure))
     }
     if (!is.null(pre_values)) {
       for (nm in names(pre_values)) {
-        if (!exists(nm, envir = NB_ENV, inherits = FALSE) ||
-            !identical(get(nm, envir = NB_ENV, inherits = FALSE),
-                       pre_values[[nm]])) {
-          assign(nm, pre_values[[nm]], envir = NB_ENV)
+        if (!exists(nm, envir = NB_ENV, inherits = FALSE)) {
+          failure <- tryCatch({
+            assign(nm, pre_values[[nm]], envir = NB_ENV)
+            NULL
+          }, error = function(error) cleanup_failure(nm, "restore", error))
+          if (!is.null(failure)) failures <- c(failures, list(failure))
+          next
+        }
+        active <- tryCatch(bindingIsActive(nm, NB_ENV), error = function(error) {
+          failures <<- c(failures, list(cleanup_failure(nm, "restore", error)))
+          NA
+        })
+        # Never force an active binding while comparing/restoring a baseline.
+        if (isTRUE(active)) next
+        same <- tryCatch(identical(get(nm, envir = NB_ENV, inherits = FALSE),
+                                   pre_values[[nm]]),
+                         error = function(error) {
+                           failures <<- c(failures,
+                             list(cleanup_failure(nm, "restore", error)))
+                           TRUE
+                         })
+        if (!isTRUE(same)) {
+          failure <- tryCatch({
+            assign(nm, pre_values[[nm]], envir = NB_ENV)
+            NULL
+          }, error = function(error) cleanup_failure(nm, "restore", error))
+          if (!is.null(failure)) failures <- c(failures, list(failure))
         }
       }
     }
     for (nm in local_names) {
-      if (exists(nm, envir = NB_ENV, inherits = FALSE)) {
-        rm(list = nm, envir = NB_ENV)
-      }
+      failure <- remove_binding(nm, "remove_local")
+      if (!is.null(failure)) failures <- c(failures, list(failure))
     }
     if (!is.null(id)) CELL_LOCALS[[id]] <- NULL
-    invisible()
+    if (length(failures)) mark_kernel_invalid(failures)
+    list(ok = !length(failures), failures = failures)
+  }
+  clear_owned_bindings <- function(id, defs, locals) {
+    failures <- list()
+    for (nm in defs) {
+      if (!identical(NAME_OWNER[[nm]] %||% NULL, id)) next
+      failure <- remove_binding(nm, "clear_definition")
+      if (!is.null(failure)) failures <- c(failures, list(failure))
+      NAME_OWNER[[nm]] <- NULL
+    }
+    for (nm in locals) {
+      failure <- remove_binding(nm, "clear_local")
+      if (!is.null(failure)) failures <- c(failures, list(failure))
+    }
+    if (length(failures)) mark_kernel_invalid(failures)
+    list(ok = !length(failures), failures = failures)
   }
 
   clear_cell <- function(req) {
-    id <- req[["id"]]
+
     ids <- req[["ids"]]
-    scalar <- !is.null(id) && is.null(ids)
+
     valid_id <- function(value) {
       is.character(value) && length(value) == 1L && !is.na(value) &&
         nzchar(value) && nchar(value, type = "bytes") <= 1024L
     }
-    if (scalar) {
-      ids <- list(id)
-    }
-    valid <- (scalar || is.null(id)) && is.list(ids) &&
+
+
+
+    valid <- is.list(ids) &&
       is.null(names(ids)) && length(ids) >= 1L &&
       length(ids) <= max_notebook_cells &&
       all(vapply(ids, valid_id, logical(1)))
@@ -1047,26 +1389,32 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
     if (!isTRUE(valid) || anyDuplicated(ids)) {
       return(list(ok = FALSE, error = list(
         code = "invalid_request",
-        message = paste0("clear_cell requires one id or a unique ids array of at most ",
+        message = paste0("clear_cell requires a unique ids array of at most ",
                          max_notebook_cells, " entries")
       )))
     }
+    failures <- list()
     for (current_id in ids) {
       for (nm in CELL_DEFS[[current_id]] %||% character()) {
         if (identical(NAME_OWNER[[nm]] %||% NULL, current_id)) {
-          if (exists(nm, envir = NB_ENV, inherits = FALSE)) {
-            rm(list = nm, envir = NB_ENV)
-          }
+          failure <- remove_binding(nm, "clear_definition")
+          if (!is.null(failure)) failures <- c(failures, list(failure))
           NAME_OWNER[[nm]] <- NULL
         }
       }
       CELL_DEFS[[current_id]] <- NULL
       for (nm in CELL_LOCALS[[current_id]] %||% character()) {
-        if (exists(nm, envir = NB_ENV, inherits = FALSE)) {
-          rm(list = nm, envir = NB_ENV)
-        }
+        failure <- remove_binding(nm, "clear_local")
+        if (!is.null(failure)) failures <- c(failures, list(failure))
       }
       CELL_LOCALS[[current_id]] <- NULL
+    }
+    if (length(failures)) {
+      mark_kernel_invalid(failures)
+      return(list(ok = FALSE, error = list(
+        code = "kernel_state_invalid",
+        message = "cell cleanup failed; restart the kernel",
+        details = list(cleanup = failures))))
     }
     prefixes <- paste0(ids, ":")
     owned_handles <- function(envir) {
@@ -1079,7 +1427,7 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
     if (length(old_lazy)) rm(list = old_lazy, envir = LAZY_ENV)
     old_tables <- owned_handles(TABLE_HANDLES)
     if (length(old_tables)) rm(list = old_tables, envir = TABLE_HANDLES)
-    if (scalar) list(ok = TRUE, id = ids[[1L]]) else list(ok = TRUE, ids = I(ids))
+    list(ok = TRUE)
   }
 
   release_outputs <- function(req) {
@@ -1154,7 +1502,7 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
     if (identical(v$kind, "error")) {
       return(list(ok = FALSE, error = list(message = v$message)))
     }
-    list(ok = TRUE, name = name, value = v)
+    list(ok = TRUE, value = v)
   }
   env_snapshot <- function(req) {
     nms <- ls(NB_ENV, all.names = TRUE)
@@ -1326,7 +1674,7 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
 
   set_widget <- function(req) {
     name <- as.character(req[["name"]] %||% "")
-    op_id <- req[["op_id"]]
+
     if (length(name) != 1L || is.na(name) || !nzchar(name) ||
         !exists(name, envir = NB_ENV, inherits = FALSE)) {
       return(list(ok = FALSE, error = list(message = sprintf(
@@ -1494,8 +1842,8 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
       updated <- replace_widget_at(x, path, submitted)
       assign(name, updated, envir = NB_ENV)
       selected <- selected_payload("form", submitted$value)
-      return(list(ok = TRUE, name = name, path = I(path), op_id = op_id,
-                  selected = selected))
+      return(list(ok = TRUE, selected = selected))
+
     }
     if (identical(target$kind, "form")) {
       return(list(ok = FALSE, error = list(
@@ -1547,7 +1895,7 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
     } else if (kind %in% c("button", "refresh")) {
       val <- req[["value"]]
       if (!is.numeric(val) || length(val) != 1L || is.na(val) ||
-          !is.finite(val) || val < 0 || val != floor(val)) {
+          !is.finite(val) || val < 0 || val > .Machine$integer.max || val != floor(val)) {
         return(list(ok = FALSE, error = list(message = "counter value invalid")))
       }
       val <- as.integer(val)
@@ -1656,8 +2004,8 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
     if (!is.null(indices) && identical(kind, "multiselect")) {
       selected$indices <- I(as.integer(indices))
     }
-    list(ok = TRUE, name = name, path = I(path), op_id = op_id,
-         selected = selected)
+    list(ok = TRUE, selected = selected)
+
   }
 
   # Ark evaluates this single wrapper expression through its ordinary notebook
@@ -1675,17 +2023,34 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
     perf <- perf_begin("kernel.execute", list(req = req[["request"]], cell = req[["id"]],
       revision = req[["revision"]], run_id = req[["run_id"]]))
     on.exit(perf_end(perf), add = TRUE)
-    id <- as.character(req[["id"]] %||% "")
-    code <- as.character(req[["code"]] %||% "")
+    id_raw <- req[["id"]]
+    code_raw <- req[["code"]]
+    request_raw <- req[["request"]]
+    run_id_raw <- req[["run_id"]]
+    session_epoch_raw <- req[["session_epoch"]]
+    kernel_epoch_raw <- req[["kernel_epoch"]]
+    operation_id_raw <- req[["operation_id"]]
+    revision_raw <- req[["revision"]]
+    id <- if (is.character(id_raw) && length(id_raw) == 1L) id_raw else ""
+    code <- if (is.character(code_raw) && length(code_raw) == 1L) code_raw else ""
     defs <- normalize_defs(req[["defs"]])
     locals <- normalize_defs(req[["locals"]])
     opaque <- req[["opaque"]] %||% FALSE
-    if (length(id) != 1L || is.na(id) || !nzchar(id) ||
-        length(code) != 1L || is.na(code) || is.null(defs) ||
-        is.null(locals) || !is.logical(opaque) || length(opaque) != 1L ||
-        is.na(opaque)) {
+    scalar_identity <- function(value) {
+      is.character(value) && length(value) == 1L && !is.na(value) && nzchar(value)
+    }
+    valid_revision <- is.numeric(revision_raw) && length(revision_raw) == 1L &&
+      !is.na(revision_raw) && is.finite(revision_raw) &&
+      revision_raw == floor(revision_raw) && revision_raw >= 0
+    if (!scalar_identity(id_raw) || !scalar_identity(code_raw) ||
+        !scalar_identity(request_raw) || !scalar_identity(run_id_raw) ||
+        !scalar_identity(session_epoch_raw) || !scalar_identity(kernel_epoch_raw) ||
+        !scalar_identity(operation_id_raw) || !valid_revision ||
+        is.null(defs) || is.null(locals) || !is.logical(opaque) ||
+        length(opaque) != 1L || is.na(opaque)) {
       stop("invalid Alder Ark cell request", call. = FALSE)
     }
+    revision <- as.integer(revision_raw)
 
     local_map <- setNames(
       vapply(locals, function(nm) local_mangled_name(id, nm), character(1)),
@@ -1701,27 +2066,15 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
     on.exit({
       tryCatch({
         if (length(RENDER_LOG$value %||% character())) {
-          tryCatch(flush_ark_render_log(), error = function(error) NULL)
+          tryCatch(flush_ark_render_log(), error = function(error) {
+            mark_kernel_invalid(list(cleanup_failure(id, "flush", error)))
+          })
         }
         if (!completed) {
-          # An interrupt can land while the cell's prior bindings are being
-          # invalidated. Finish that idempotent work even though no safe
-          # baseline exists yet; only run failed-definition rollback after the
-          # full ordinary/opaque baseline was captured.
+          # An interrupt can land while prior bindings are being invalidated.
+          # Finish idempotent removal without forcing active-binding getters.
           if (!initial_clear_complete) {
-            for (nm in previous_defs) {
-              if (identical(NAME_OWNER[[nm]] %||% NULL, id)) {
-                if (exists(nm, envir = NB_ENV, inherits = FALSE)) {
-                  rm(list = nm, envir = NB_ENV)
-                }
-                NAME_OWNER[[nm]] <- NULL
-              }
-            }
-            for (nm in previous_locals) {
-              if (exists(nm, envir = NB_ENV, inherits = FALSE)) {
-                rm(list = nm, envir = NB_ENV)
-              }
-            }
+            clear_owned_bindings(id, previous_defs, previous_locals)
           }
           if (baseline_captured) {
             cleanup_failed_defs(defs, pre, local_names, id, pre_values)
@@ -1730,15 +2083,17 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
           }
           CELL_DEFS[[id]] <- NULL
         }
-      }, error = function(error) NULL, finally = {
-        # Cleanup is best effort after an evaluation error or interrupt. A
-        # locked/active binding must never mask that condition or leave request
-        # identity installed for the next Ark execution.
+      }, error = function(error) {
+        mark_kernel_invalid(list(cleanup_failure(id, "cleanup", error)))
+      }, finally = {
+        # Cleanup never masks the original condition. Request identity is
+        # cleared even when a locked/active binding made removal impossible.
         CURRENT_CELL <<- NULL
         CURRENT_REQ <<- NULL
         CURRENT_RUN_ID <<- NULL
         CURRENT_REVISION <<- NULL
         CURRENT_SESSION_EPOCH <<- NULL
+        CURRENT_KERNEL_EPOCH <<- NULL
         CURRENT_OPERATION_ID <<- NULL
         EMITTED_OUTPUTS$value <- list()
         RENDER_LOG$value <- character()
@@ -1750,7 +2105,14 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
     CURRENT_RUN_ID <<- req[["run_id"]] %||% NULL
     CURRENT_REVISION <<- req[["revision"]] %||% NULL
     CURRENT_SESSION_EPOCH <<- req[["session_epoch"]] %||% NULL
+    CURRENT_KERNEL_EPOCH <<- req[["kernel_epoch"]] %||% NULL
     CURRENT_OPERATION_ID <<- req[["operation_id"]] %||% NULL
+    if (isTRUE(KERNEL_STATE$invalid)) {
+      SEQ$value <- 0L
+      ark_emit(list(type = "started"))
+      completed <- TRUE
+      stop(kernel_state_condition())
+    }
     SEQ$value <- 0L
     EMITTED_OUTPUTS$value <- list()
     RENDER_LOG$value <- character()
@@ -1767,28 +2129,21 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
     old_tables <- ls(TABLE_HANDLES, all.names = TRUE)
     old_tables <- old_tables[startsWith(old_tables, paste0(id, ":"))]
     if (length(old_tables)) rm(list = old_tables, envir = TABLE_HANDLES)
-    for (nm in previous_defs) {
-      if (identical(NAME_OWNER[[nm]] %||% NULL, id)) {
-        if (exists(nm, envir = NB_ENV, inherits = FALSE)) {
-          rm(list = nm, envir = NB_ENV)
-        }
-        NAME_OWNER[[nm]] <- NULL
-      }
-    }
+    initial_clear <- clear_owned_bindings(id, previous_defs, previous_locals)
     CELL_DEFS[[id]] <- NULL
-    for (nm in previous_locals) {
-      if (exists(nm, envir = NB_ENV, inherits = FALSE)) {
-        rm(list = nm, envir = NB_ENV)
-      }
-    }
     CELL_LOCALS[[id]] <- local_names
     initial_clear_complete <- TRUE
+    if (!isTRUE(initial_clear$ok)) stop(kernel_state_condition())
 
     pre <- ls(NB_ENV, all.names = TRUE)
-    pre_values <- if (isTRUE(opaque) && length(pre)) {
-      mget(pre, envir = NB_ENV, inherits = FALSE)
-    } else {
-      NULL
+    pre_values <- NULL
+    if (isTRUE(opaque) && length(pre)) {
+      snapshot <- capture_binding_values(pre)
+      if (length(snapshot$failures)) {
+        mark_kernel_invalid(snapshot$failures)
+        stop(kernel_state_condition())
+      }
+      pre_values <- snapshot$values
     }
     baseline_captured <- TRUE
 
@@ -1816,7 +2171,11 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
     }, alder_stop = identity)
 
     if (inherits(stopped, "alder_stop")) {
-      cleanup_failed_defs(defs, pre, local_names, id, pre_values)
+      cleanup <- cleanup_failed_defs(defs, pre, local_names, id, pre_values)
+      if (!isTRUE(cleanup$ok)) {
+        ark_emit(list(type = "condition", error = condition_payload(
+          kernel_state_condition(), "kernel state invalid", sys.calls())))
+      }
       CELL_DEFS[[id]] <- NULL
       if (!is.null(stopped$output)) {
         output <- render_kind(stopped$output)
@@ -1834,8 +2193,16 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
       added <- setdiff(post, pre)
       common <- intersect(post, pre)
       changed <- common[vapply(common, function(nm) {
-        !identical(get(nm, envir = NB_ENV, inherits = FALSE), pre_values[[nm]])
+        if (binding_active(nm)) return(FALSE)
+        value <- tryCatch(get(nm, envir = NB_ENV, inherits = FALSE),
+                          error = function(error) {
+                            mark_kernel_invalid(list(cleanup_failure(nm, "compare", error)))
+                            NULL
+                          })
+        if (isTRUE(KERNEL_STATE$invalid)) return(FALSE)
+        !identical(value, pre_values[[nm]])
       }, logical(1))]
+      if (isTRUE(KERNEL_STATE$invalid)) stop(kernel_state_condition())
       defs <- unique(c(defs, setdiff(c(added, changed),
         c(".Random.seed", ".Last.value", ".Traceback"))))
     }
@@ -1914,23 +2281,30 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
       if (!is.character(permit) || length(permit) != 1L || is.na(permit) ||
           !grepl("^\\.alder-batch-[a-zA-Z0-9-]+$", basename(permit)) ||
           !identical(normalizePath(dirname(permit), winslash = "/", mustWork = TRUE),
-                     normalizePath(cache_dir, winslash = "/", mustWork = TRUE))) {
+                     normalizePath(control_dir, winslash = "/", mustWork = TRUE))) {
         stop("invalid Alder batch permit")
       }
-      BATCH <<- list(request = req[["request"]], index = 0L, count = count,
-                     permit = permit, completed = FALSE, stopped = FALSE)
+      BATCH <<- list(request = req[["request"]], identity = req,
+                     index = 0L, count = count, permit = permit,
+                     completed = FALSE, stopped = FALSE)
     } else if (is.null(BATCH) || !identical(BATCH$request, req[["request"]]) ||
                BATCH$index != index - 1L || BATCH$count != count) {
       stop("invalid Alder batch boundary")
     }
     # Entering the next top-level expression proves the prior native expression,
     # including user task callbacks and their output, has returned to Ark.
-    if (BATCH$completed) ark_emit(list(type = "finished"))
+    if (BATCH$completed) {
+      previous_req <- BATCH$identity
+      set_event_identity(previous_req)
+      ark_emit(list(type = "finished"))
+      set_event_identity(req)
+    }
     if ((index > 1L && !BATCH$completed) || BATCH$stopped ||
         !base::file.exists(BATCH$permit)) {
       ark_emit(list(type = "batch_end"))
       stop("Alder batch ended", call. = FALSE)
     }
+    BATCH$identity <<- req
     BATCH$index <<- index
     BATCH$completed <<- FALSE
     invisible()
@@ -1938,10 +2312,13 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
 
   ark_eval_wire <- function(encoded) {
     req <- ark_decode_request(encoded)
+    set_event_identity(req)
+    on.exit(clear_event_identity(), add = TRUE)
     prepare_ark_batch(req)
     withCallingHandlers(
       {
         value <- ark_eval_cell(req)
+        set_event_identity(req)
         # This marker is emitted only after ark_eval_cell's on.exit cleanup has
         # completed. Engine-side cancellation can therefore distinguish an
         # interrupt from a Stop request that arrived after successful R work.
@@ -1963,8 +2340,16 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
         # Ark's Jupyter error text is presentation-ready (and may include
         # cli styling). Keep the original condition alongside that terminal
         # message so all clients receive its code, message and bounded trace.
-        ark_emit(list(type = "condition", error = condition_payload(
-          condition, conditionMessage(condition), sys.calls())))
+        set_event_identity(req)
+        error_payload <- condition_payload(
+          condition, conditionMessage(condition), sys.calls())
+        if (isTRUE(KERNEL_STATE$invalid)) {
+          error_payload$details <- c(
+            error_payload$details %||% list(),
+            list(code = "kernel_state_invalid",
+                 cleanup = KERNEL_STATE$cleanup_failures))
+        }
+        ark_emit(list(type = "condition", error = error_payload))
       }
     )
   }
@@ -1980,8 +2365,13 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
       NULL
     }
     req <- ark_decode_request(encoded)
-    request <- as.character(req[["request"]] %||% "")
-    command <- as.character(req[["command"]] %||% "")
+    request <- req[["request"]] %||% NULL
+    command <- req[["command"]] %||% NULL
+    if (!is.character(request) || length(request) != 1L || is.na(request) ||
+        !nzchar(request) || !is.character(command) || length(command) != 1L ||
+        is.na(command) || !nzchar(command)) {
+      stop("invalid Alder Ark command request", call. = FALSE)
+    }
     payload <- req[["payload"]] %||% list()
     response <- tryCatch(
       switch(command,
@@ -2012,6 +2402,23 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
     inject_runtime()
     loadNamespace("graphics")
     loadNamespace("grDevices")
+    # R 4.6.1's dev.hold() validates a character-valued default device by
+    # looking in .GlobalEnv and grDevices, while Ark keeps its graphics entry
+    # point in tools:positron. Make the existing Ark function discoverable
+    # without replacing Ark's native device or publisher path.
+    positron <- tryCatch(as.environment("tools:positron"),
+                         error = function(error) NULL)
+    if (is.null(positron) ||
+        !exists(".ark.graphics.device", envir = positron,
+                inherits = FALSE)) {
+      stop("Ark graphics device entry point is unavailable", call. = FALSE)
+    }
+    device <- get(".ark.graphics.device", envir = positron,
+                  inherits = FALSE)
+    if (!is.function(device)) {
+      stop("Ark graphics device entry point is invalid", call. = FALSE)
+    }
+    assign(".ark.graphics.device", device, envir = globalenv())
     # The adapter is sourced at kernel startup, so these closures do not pass
     # through package installation's byte compiler. Compile our private helpers
     # before readiness, including inspection and cleanup: their first JIT can
@@ -2023,11 +2430,36 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
         assign(name, compiler::cmpfun(helper), envir = target)
       }
     }
-    # Open the common scalar-rendering scratch connection before readiness.
+    # Exercise the exact scalar evaluator before readiness. Byte-compiling the
+    # closures avoids compilation itself, but R and package lazy-load paths are
+    # still initialized on their first call and would otherwise delay the first
+    # user-visible Run. Events stay private and the reserved binding is removed
+    # before the runtime API is published.
     capture_connection(1L)
+    warm_id <- ".alder-runtime-warmup"
+    warm_name <- ".alder_runtime_warmup"
+    WARMING$value <- TRUE
+    on.exit(WARMING$value <- FALSE, add = TRUE)
+    ark_eval_cell(list(
+      id = warm_id, code = paste0(warm_name, " <- 1L\n", warm_name),
+      request = warm_id, run_id = warm_id, session_epoch = warm_id,
+      kernel_epoch = warm_id, operation_id = warm_id, revision = 0L,
+      defs = list(warm_name), locals = list(), opaque = FALSE))
+    cleanup <- clear_cell(list(ids = list(warm_id)))
+    WARMING$value <- FALSE
+    if (!isTRUE(cleanup$ok) || isTRUE(KERNEL_STATE$invalid)) {
+      stop("Alder runtime warmup cleanup failed", call. = FALSE)
+    }
     runtime <- get("RUNTIME", envir = asNamespace("alder"), inherits = FALSE)
-    runtime$ark_evaluate <- ark_eval_wire
-    runtime$ark_request <- ark_request_wire
+    if (!is.environment(runtime)) {
+      stop("Alder runtime API container is invalid", call. = FALSE)
+    }
+    assign("ark_evaluate", ark_eval_wire, envir = runtime)
+    assign("ark_request", ark_request_wire, envir = runtime)
+    if (!is.function(runtime$ark_evaluate) ||
+        !is.function(runtime$ark_request)) {
+      stop("Alder Ark runtime API exports are unavailable", call. = FALSE)
+    }
     invisible()
   }
 

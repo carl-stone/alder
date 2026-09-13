@@ -19,11 +19,11 @@ export function validateProfileEvidence(
       throw new Error('unterminated or invalid profile span');
     }
   }
-  if (!files.some(file => /^CPU\..*\.cpuprofile$/.test(file)) || !files.includes('browser.cpuprofile') || files.filter(file => file.endsWith('.Rprof')).length < 3) {
-    throw new Error('missing browser, Node, kernel, analyzer, or services CPU profile');
+  if (!files.some(file => /^CPU\..*\.cpuprofile$/.test(file)) || !files.includes('browser.cpuprofile') || files.filter(file => file.endsWith('.Rprof')).length < 2) {
+    throw new Error('missing browser, Node, kernel, or analyzer CPU profile');
   }
   const completed = records.filter(record => record.event === 'end');
-  for (const role of ['analyzer', 'services']) {
+  for (const role of ['analyzer']) {
     const trace = completed.find(record => record.stage === `${role}.request`);
     if (!trace) throw new Error(`missing ${role} trace`);
     if (!files.includes(`cpu-${trace.pid}.Rprof`)) throw new Error(`missing ${role} CPU profile`);

@@ -1,5 +1,5 @@
-# Keep this module base-R-only: the worker sources its byte-identical mirror
-# into a private environment without package helpers. Explicit $value avoids
+# Keep this module base-R-only. Ark loads these constructors from the installed
+# package namespace; no worker mirror is sourced. Explicit $value avoids
 # coercion promises that R's S3-bypassing operations cannot uphold.
 
 is_widget <- function(x) inherits(x, "alder_widget")
@@ -30,14 +30,18 @@ require_scalar_logical <- function(x, what, null_ok = FALSE) {
   invisible(x)
 }
 
-require_scalar_integer <- function(x, what, min = NULL) {
-  if (!is.numeric(x) || length(x) != 1L || is.na(x) ||
-      !is.finite(as.double(x)) || as.double(x) != floor(as.double(x))) {
+require_scalar_integer <- function(x, what, min = NULL, max = .Machine$integer.max) {
+  if (!is.numeric(x) || length(x) != 1L || is.na(x)) {
     stop(what, " must be a scalar integer", call. = FALSE)
   }
-  x <- as.integer(x)
-  if (!is.null(min) && x < min) stop(what, " is out of range", call. = FALSE)
-  x
+  x_double <- as.double(x)
+  if (!is.finite(x_double) || x_double != floor(x_double)) {
+    stop(what, " must be a scalar integer", call. = FALSE)
+  }
+  if ((!is.null(min) && x_double < min) || (!is.null(max) && x_double > max)) {
+    stop(what, " is out of range", call. = FALSE)
+  }
+  as.integer(x_double)
 }
 
 # Finite scalar number, normalized to unclassed double.
@@ -699,7 +703,8 @@ ui <- list(
   },
   file = function(label = NULL, accept = NULL, multiple = FALSE) {
     if (!is.null(accept)) {
-      if (!is.character(accept) || anyNA(accept) || any(!nzchar(accept))) {
+      if (!is.character(accept) || length(accept) == 0L ||
+          anyNA(accept) || any(!nzchar(accept))) {
         stop("`accept` must be NULL or a non-empty character vector", call. = FALSE)
       }
     }

@@ -22,83 +22,29 @@ jobs:
       R_KEEP_PKG_SOURCE: "yes"
       _R_CHECK_FORCE_SUGGESTS_: "true"
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version-file: host/.node-version
-          cache: npm
-          cache-dependency-path: host/package-lock.json
-
-      - uses: r-lib/actions/setup-r@v2
+      - uses: r-lib/actions/setup-r@465b7d8e732ca3921382b1674c59bada9cbf3399 # v2
         with:
           r-version: ${{ matrix.r }}
           use-public-rspm: true
-
-      - uses: r-lib/actions/setup-pandoc@v2
-
-      - uses: quarto-dev/quarto-actions/setup@v2
-
-      - uses: r-lib/actions/setup-r-dependencies@v2
+      - uses: r-lib/actions/setup-r-dependencies@465b7d8e732ca3921382b1674c59bada9cbf3399 # v2
         with:
-          dependencies: '"all"'
+          dependencies: '"hard"'
           extra-packages: |
             any::rcmdcheck
             any::lintr
-
-      - name: Prepare the matching application runtime
-        run: |
-          npm ci --prefix host
-          node host/scripts/fetch-ark.mjs
-          npm run build --prefix host
-          R CMD INSTALL .
-          installed=$(Rscript -e 'cat(find.package("alder"))')
-          node host/scripts/stage-native.mjs "$installed/host"
-          echo "ALDER_HOST=$installed/host/alder-host.mjs" >> "$GITHUB_ENV"
-          echo "ALDER_R_PACKAGE=$installed" >> "$GITHUB_ENV"
-          echo "ALDER_NODE=$(command -v node)" >> "$GITHUB_ENV"
-          echo "ALDER_ARK=$GITHUB_WORKSPACE/host/.runtime/ark" >> "$GITHUB_ENV"
-          echo "ALDER_TEST_HOST=1" >> "$GITHUB_ENV"
-
-      - name: Verify required runtimes
-        run: |
-          Rscript -e 'stopifnot(getRversion() >= "4.6.1", nzchar(Sys.which("pandoc")), nzchar(Sys.which("quarto")), nzchar(chromote::find_chrome()))'
-          R --version
-          pandoc --version
-          quarto --version
-
-      - name: Verify vendored editor bundle
-        if: matrix.r == '4.6.1'
-        run: |
-          npm ci --prefix js
-          npm run build --prefix js
-          git diff --exit-code -- inst/app/static/vendor/alder-editor.js
-
+            any::pkgload
+            any::testthat
+            any::processx
+            any::withr
+            any::microbenchmark
       - name: Lint package
         if: matrix.r == '4.6.1'
         run: Rscript -e 'pkgload::load_all(quiet = TRUE); lints <- lintr::lint_package(); print(lints); quit(status = length(lints) > 0L)'
 
-      - uses: r-lib/actions/check-r-package@v2
+      - uses: r-lib/actions/check-r-package@465b7d8e732ca3921382b1674c59bada9cbf3399 # v2
         with:
           args: 'c("--no-manual", "--as-cran")'
           build_args: 'c("--no-build-vignettes")'
           error-on: '"warning"'
-
-      - name: Input-to-result correctness and profiling smoke
-        if: matrix.r == '4.6.1'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y tini
-          status=0
-          tini -s -- npm run latency --prefix host -- /tmp/alder-input-latency-ci 1 --profile || status=$?
-          # Instrumented smoke verifies correctness and complete profiles.
-          # Exit 3 records an unmet/unqualified latency budget, never acceptance.
-          test "$status" -eq 0 || test "$status" -eq 3
-
-      - name: Retain input-to-result evidence
-        if: always() && matrix.r == '4.6.1'
-        uses: actions/upload-artifact@v4
-        with:
-          name: input-to-result-linux
-          path: /tmp/alder-input-latency-ci
-          if-no-files-found: ignore

@@ -1,56 +1,31 @@
 Package: alder
-Title: Reactive Notebook for R
+Title: Reactive Notebook Helpers for R
 Version: 0.1.0
 Authors@R:
     person("Carl", "Stone", role = c("aut", "cre"), email = "carl@alder.dev")
-Description: A modern reactive notebook environment for R. Plain-text .R
-    notebook files are statically analyzed into a dependency DAG and executed
-    in dependency order, with a marimo-inspired UX. Running a cell reruns its
-    dependencies and descendants automatically (with an optional lazy mode);
-    widgets are ordinary notebook values read through explicit $value; apps
-    are output-only views. R-specific limitations (reference-object and
-    external side effects, worker process isolation rather than a sandbox)
-    are explicit.
+Description: R helpers for reactive notebooks and ordinary Rscript programs.
+    Alder provides validated user-interface values, rich output records,
+    dependency-aware computation caches, and the static-analysis helpers used
+    by its application host. The public R surface remains usable without an
+    application process; interactive execution, persistence, and rendering are
+    owned by the application host.
 License: Apache License (>= 2)
 URL: https://github.com/carl-stone/alder
 BugReports: https://github.com/carl-stone/alder/issues
 Encoding: UTF-8
 Roxygen: list(markdown = TRUE)
-SystemRequirements: Alder application host (Node.js 24 and Ark 0.1.252),
-    Pandoc or Quarto (optional, for external report rendering)
 Depends:
     R (>= 4.6.0)
 Imports:
-    codetools,
-    commonmark,
-    curl,
-    fs,
-    httpuv,
-    jsonlite,
-    languageserver,
-    later,
-    processx (>= 3.9.0),
-    rlang,
     base64enc,
+    codetools,
+    jsonlite,
     mime,
-    xml2,
-    yaml
+    rlang
 Suggests:
-    R6,
-    testthat (>= 3.0.0),
-    ggplot2,
-    htmlwidgets,
-    chromote,
-    DBI,
-    styler,
-    lintr,
     microbenchmark,
-    knitr,
-    rmarkdown,
-    renv,
-    pak,
-    ragg,
-    ps,
+    processx,
+    testthat (>= 3.0.0),
     withr
 Config/testthat/edition: 3
 Config/roxygen2/version: 8.1.0

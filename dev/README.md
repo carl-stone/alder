@@ -32,69 +32,106 @@ archive supplied as `ALDER_CHECK_ARTIFACT`. Source workers and browser tests nee
 a matching installed package; installing in a private library and exporting
 `R_LIBS_USER` avoids accidentally testing another version.
 
-For a focused source test after installing that version:
+For source package tests after installing that version:
 
 ```sh
-tini -s -- Rscript -e 'testthat::test_local(filter = "notebook", stop_on_failure = TRUE)'
+tini -s -- Rscript -e 'testthat::test_local(stop_on_failure = TRUE)'
 ```
 
-The application host has its own pinned toolchain and lockfile:
+The application host has its own pinned toolchain and lockfile. Build one staged artifact in the prescribed container; the launcher, helper library, Ark/Air binaries, native supervisor, Node runtime and renderer are all relocated resources (no checkout discovery or first-use installation). Restore only `host/r-library.lock.json`; do not run a broad R dependency installer:
 
 ```sh
-npm ci --prefix host
-host/node_modules/.bin/node host/scripts/fetch-ark.mjs
-npm run build --prefix host
-R CMD INSTALL --library=/tmp/alder-host-library .
-host/node_modules/.bin/node host/scripts/stage-native.mjs /tmp/alder-host-library/alder/host
-export ALDER_ARK="$PWD/host/.runtime/ark"
-ALDER_R_PACKAGE=/tmp/alder-host-library/alder ALDER_BROWSER_TEST=1 \
-  R_LIBS_USER=/tmp/alder-host-library tini -s -- npm test --prefix host
-ALDER_NODE="$PWD/host/node_modules/node/bin/node" \
-  R_LIBS_USER=/tmp/alder-host-library Rscript -e 'alder::alder_cli()' notebook.R
+npm ci --prefix js && npm ci --prefix host
+npm run build --prefix js && npm run build --prefix host
+node host/scripts/fetch-ark.mjs --archive-output host/.runtime/ark.zip
+node host/scripts/fetch-air.mjs
+rscript461=/absolute/path/to/R-4.6.1/bin/Rscript
+rscript460=/absolute/path/to/R-4.6.0/bin/Rscript
+supervisor=/absolute/path/to/alder-process-supervisor
+supervisor_provenance=/absolute/path/to/process-supervisor-provenance.json
+node host/scripts/stage-application.mjs --output host/.application --kind headless \
+  --rscript "$rscript461" --qualified-rscript "$rscript460" \
+  --supervisor "$supervisor" --supervisor-provenance "$supervisor_provenance"
 ```
 
-Create the private library directory before installation. The host build updates
-the committed application and browser bundles under `inst/`. R interactive,
-MCP and headless export entry points use the same host. R semantics remain in
-the R suite; host, transport and browser contracts run against the TypeScript
-host and installed package.
-Native platform and latency qualification remain release gates.
-Set `ALDER_TEST_HOST=1` for installed R launch tests and `ALDER_BROWSER_TEST=1`
-for trusted Chrome tests. Opening notebooks never invokes npm or downloads Node
-or Ark. Use `ark.exe` in the `ALDER_ARK` setting on Windows.
+The stage command is strict: its output directory must be empty, both runtime locks and the application-only R lock must be present, the selected R helper closure must match `host/r-library.lock.json`, and every staged byte is recorded in `resources/manifest.json`. Use `--qualified-rscript` once per additional R 4.6.x interpreter.
 
-With a built R archive, platform packaging is:
+Run every acceptance scenario against the actual relocated launcher and authenticated browser/session surface:
 
 ```sh
-cd host
-node_modules/.bin/node scripts/package.mjs --output /tmp/alder-release \
-  --r-package /path/to/alder_0.1.0.tar.gz \
-  --ark-archive /path/to/ark-0.1.252-linux-x64.zip
+node host/scripts/smoke-application.mjs host/.application --scenario all \
+  --evidence /tmp/alder-v1a-evidence --rscript "$rscript461" --peer-rscript "$rscript460"
 ```
 
-The output directory must be empty. The package command copies the running Node
-executable and its pinned license, verifies the Ark archive, stages native transport modules,
-and records every release file's SHA-256; run it on each target
-platform. It rejects an R archive whose runtime source or browser/host assets
-do not match the build. Run `node scripts/smoke-release.mjs /tmp/alder-release`
-to install that archive into a temporary library and verify its packaged
-runtime, CLI status codes, Ark identity, first/warm execution and shutdown.
-Native platform acceptance is required in addition to these files.
-
-Keep one long-lived `tini -s` ancestor around suites and browser/host audits
-so their child processes are reaped. `reviews/run-full-suite.R` runs the
-unfiltered source suite. The cold-start driver additionally checks a frozen
-archive's hash, runs the host suite against that installed package, and checks
-resource cleanup:
+Desktop staging is a separate Electron lane. Run Forge make to produce the unpacked application and native installer artifacts, then stage that exact root (including `resources/app.asar`):
 
 ```sh
+npm run make --prefix desktop
+node host/scripts/stage-application.mjs --output host/.application-desktop --kind desktop \
+  --forge-output desktop/out/Alder-linux-x64 --electron-entry desktop/out/Alder-linux-x64/alder-desktop \
+  --rscript "$rscript461" --qualified-rscript "$rscript460" \
+  --supervisor "$supervisor" --supervisor-provenance "$supervisor_provenance"
+```
+
+Produce the required dual-variant release only after both staged trees qualify, then run the complete installed/relocated matrix for each variant:
+
+```sh
+node host/scripts/build-qualification-sidecar.mjs --output /tmp/alder-qualification \
+  --application host/.application --source "$PWD"
+node host/scripts/ci-package.mjs --output /tmp/alder-release --evidence /tmp/alder-package-evidence \
+  --rscript "$rscript461" --qualified-rscript "$rscript460" \
+  --forge-output desktop/out/Alder-linux-x64 --electron-entry desktop/out/Alder-linux-x64/alder-desktop \
+  --forge-make-output desktop/out/make
+node host/scripts/smoke-release.mjs /tmp/alder-release --evidence /tmp/alder-installed-evidence \
+  --rscript "$rscript461" --peer-rscript "$rscript460" \
+  --artifact-root "$artifact_root" \
+  --qualification-driver /opt/alder-qualification/driver/scripts/smoke-application.mjs \
+  --qualification-source /opt/alder-qualification/source \
+  --qualification-manifest-sha256 "$qualification_manifest_sha256" \
+  "${artifact_digest_args[@]}" "${native_identity_args[@]}" \
+  "${installed_application_args[@]}" "${installation_receipt_args[@]}" \
+  "${installation_receipt_digest_args[@]}"
+```
+
+The sidecar under `/opt` must be moved there and made recursively root-owned and
+non-writable after its manifest digest is captured; qualification itself runs as
+an unprivileged identity. Each native installable supplies repeated
+`--installed-application variant/artifact=absolute-root`,
+`--installation-receipt variant/artifact=absolute-json`, and
+`--expected-installation-receipt-sha256 variant/artifact=digest` arguments. The
+externally anchored receipt records the exact artifact name and SHA-256, native
+installer command and exit status, inventoried installer actions, runner
+identity, unique isolation identity, and unique resulting application root.
+Release qualification fails closed until every installer has been installed in
+its own fresh native target and that installed tree passes S(all).
+
+The release inventory includes the application manifest, native dependency
+locks, licensing and source-patch records, and every payload digest. Release
+smoke launches the canonical relocated archives and every independently
+installed native distributable, and fails closed on changed or unlisted
+resources and missing trust evidence.
+
+Keep one long-lived `tini -s` ancestor around suites and browser/host audits as
+the suite-runner subreaper for launcher/orphan cleanup; it is not the production
+containment implementation. `reviews/run-full-suite.R` remains the unfiltered
+pure R source suite. Actual application children are owned by the bundled native
+process supervisor. The cold-start driver accepts an already staged or installed
+application, validates its manifest and bundled process supervisor, runs the static
+gate, optionally runs the source suite, and then executes the canonical
+process-lifecycle smoke scenario, whose evidence checks exact process birth
+identity, whole-tree retirement, and pipe EOF. It does not inspect a checkout-wide
+process list or require a source archive:
+
+```sh
+rscript="$(realpath -e "$(command -v Rscript)")"
 tini -s -- bash dev/reviews/run-cold-start-validation.sh \
-  --artifact /path/to/alder_0.1.0.tar.gz --sha256 RECORDED_SHA256 \
-  --evidence-dir /tmp/alder-cold-start --audit-root /tmp/alder-audit --source-suite
+  --application host/.application \
+  --evidence-dir /tmp/alder-cold-start \
+  --rscript "$rscript" --source-suite
 ```
 
-Both directories must be empty and separate; the audit root is outside the
-repository. The caller owns any container restart. Screenshots still need
+The application and evidence directories are separate; the evidence destination
+must be empty. The caller owns any container restart. Screenshots still need
 visual inspection. Generated `reviews/evidence/` runs stay local and are ignored
 by Git; CI uploads latency evidence as a workflow artifact.
 
@@ -127,22 +164,16 @@ BiocManager::install(c("edgeR", "statmod"), lib = Sys.getenv("R_LIBS_USER"),
 RSCRIPT
 ```
 
-Then run the JS/host build, Ark download, R install and native staging commands
-above, using `/opt/alder-library` instead of `/tmp/alder-host-library`.
-The image sets `R_LIBS_USER`, `ALDER_R_PACKAGE`, `ALDER_NODE`, `ALDER_ARK` and
-`CHROMOTE_CHROME`; enable browser tests explicitly with `ALDER_BROWSER_TEST=1`.
-For source R suites, also set
-`ALDER_HOST="$ALDER_R_PACKAGE/host/alder-host.mjs"`: `test_local()` otherwise
-resolves the source `inst/host` bundle, which has no staged native dependencies.
-R packages under `/opt/alder-library` survive container stops/restarts, but need
-reinstallation if the container is removed. Use `sudo docker start codex-universal`
-to restart it, or `sudo docker exec -it codex-universal bash` for a shell.
+Then use the staged application commands above. The stage owns the selected R
+helper closure, native transport and pinned runtime bytes; it does not install or
+discover Node, Ark, Air or R on first use. Keep any package-library cache outside
+the application root and use a fresh evidence directory for each smoke run.
 
 This recreates the toolchain, not the missing original image. R and Node match
 the handoff; Quarto is pinned in `container/Dockerfile`, while Chrome and R
-dependencies resolve from their current repositories. The saved R package TSV
-is an inventory, not a dependency lockfile. Keep the original machine's latency
-results separate from this environment's measurements.
+dependencies resolve from their current repositories. The tracked R lock and
+staged manifest, not a handoff TSV, identify the shipped closure. Keep original
+latency results separate from this environment's measurements.
 
 ## Resume the latency work on another machine
 
@@ -151,29 +182,27 @@ approximately 4-GB droplet. The target is not achieved. Keep this code fixed unt
 the replacement machine has its own warm and first-after-readiness baselines;
 do not attribute differences between machines to product changes.
 
-Use the toolchain/build/install commands above. R 4.6.1, Node 24.20.0 and
-Ark 0.1.252 were used on Linux x64; Ark download URLs/checksums and npm dependency
-versions are pinned in the repository. Install the R Imports and Suggests from
-DESCRIPTION (for example with `pak::local_install_deps(dependencies = TRUE)`),
-plus Chrome and the external tools listed above. The evidence archive includes
-`handoff-r-packages.tsv` and `handoff-environment.txt` with the observed package
-versions and toolchain. The container itself is not part of the Git checkout.
+Use the pinned application toolchains and build commands above. R 4.6.1, bundled
+Node 24.20.0, Ark 0.1.252-alder.1, Air 0.11.0, Electron 44.2.0, and every npm
+dependency are frozen by repository locks. Restore the application-only dependency
+closure from `host/r-library.lock.json`; do not install DESCRIPTION Suggests or use
+`pak::local_install_deps(dependencies = TRUE)` for an application stage. The
+standalone R helper source package has its own build/check workflow and is not the
+application installer. The container itself is not part of the Git checkout.
 
-After creating a private R library, building both JS projects, installing Alder
-and running `stage-native.mjs`, use the same environment for tests and benchmarks:
+After building both JS projects and staging one application tree, use that tree for tests and benchmarks. Keep both qualified Rscript paths explicit:
 
 ```sh
-export ALDER_ARK="$PWD/host/.runtime/ark"
-export ALDER_R_PACKAGE=/tmp/alder-host-library/alder
-export R_LIBS_USER=/tmp/alder-host-library
-export ALDER_NODE="$PWD/host/node_modules/.bin/node"
+application="$PWD/host/.application"
+rscript461="$(realpath -e "$(command -v Rscript)")"
+rscript460="/absolute/path/to/R-4.6.0/bin/Rscript"
 export ALDER_BROWSER_TEST=1
 export ALDER_BENCHMARK_MACHINE=new-machine-baseline
 # Choose a stable, unique label for this hardware/configuration.
 tini -s -- npm test --prefix host
-tini -s -- npm run latency --prefix host -- /tmp/alder-new-warm 30 \
+tini -s -- npm run latency --prefix host -- --application "$application" /tmp/alder-new-warm 30 --rscript "$rscript461" \
   "--experiment=Unchanged migration checkpoint on replacement machine"
-tini -s -- npm run latency --prefix host -- /tmp/alder-new-fresh 30 --fresh \
+tini -s -- npm run latency --prefix host -- --application "$application" /tmp/alder-new-fresh 30 --fresh --rscript "$rscript461" \
   "--experiment=First-after-readiness baseline on replacement machine"
 ```
 
@@ -214,6 +243,40 @@ linked historical results, failed/reverted experiments and diagnostic scripts.
 Extract it at the repository root to restore report links. Source, tests,
 lockfiles, generated bundles, current statistics and the experiment plan are in
 Git; regenerable node_modules, downloaded Ark and Python caches are not required.
+## macOS release signing order
+
+The application manifest records every nested code object and nested
+`_CodeSignature` resource by its exact bytes. On macOS, stage with
+`--prepare-macos-signing`, sign every nested code object, then run the same stage
+command again against its non-empty `--output`; this manifest-only pass refreshes
+all exact hashes and records the signed supervisor identity while preserving its
+compiler provenance. Finally sign only the outer `.app` bundle. Do not recursively
+re-sign nested code after the manifest refresh.
+
+The two manifest-producing invocations are identical; the second intentionally
+accepts the non-empty stage created by the first:
+
+```sh
+node host/scripts/stage-application.mjs --output host/.application-desktop --kind desktop \
+  --prepare-macos-signing --forge-output "$forge_root" --electron-entry "$forge_entry" \
+  --rscript "$rscript461" --qualified-rscript "$rscript460" \
+  --supervisor "$supervisor" --supervisor-provenance "$supervisor_provenance"
+# Sign every nested code object in host/.application-desktop/Alder.app, then repeat:
+node host/scripts/stage-application.mjs --output host/.application-desktop --kind desktop \
+  --prepare-macos-signing --forge-output "$forge_root" --electron-entry "$forge_entry" \
+  --rscript "$rscript461" --qualified-rscript "$rscript460" \
+  --supervisor "$supervisor" --supervisor-provenance "$supervisor_provenance"
+# Now sign only host/.application-desktop/Alder.app itself.
+```
+Run `ci-package` only after the outer signature is complete. Final staging treats
+an already-signed Forge bundle as immutable: it verifies the bundle with
+`codesign --verify --deep --strict`, copies it verbatim, strictly re-inventories
+the copied manifest, and launches only its contained regular CLI. Runtime and
+packaging omit only the outer `Contents/_CodeSignature` envelope and the exact
+main executable named by `resources.electronEntry`, after successful bundle
+verification. Nested signatures remain exact-hashed, while the release manifest
+hashes both outer-owned paths.
+
 
 ## Performance and examples
 
@@ -228,11 +291,14 @@ command, measurement caveats and current baseline for the migration.
   edgeR with `BiocManager::install("edgeR")`. Threshold widgets are downstream
   of the model fit. This is a software-validation example, not a biological finding.
 
-The bulk-DE audit compares ordinary R and Alder results, then exercises the
-installed browser, save/reload and cleanup. It additionally needs chromote,
-Chrome, curl and digest, plus an archive matching the current source:
+The bulk-DE review runs the frozen `host/scripts/probe-bulk-de-scale.mjs`
+workload against an already staged or installed application, then verifies the
+probe result and clean, non-forced shutdown. It uses the same
+`examples/bulk-differential-expression.R` fixture described above and requires
+the fixture's R packages plus the staged application's browser prerequisites:
 
 ```sh
+rscript="$(realpath -e "$(command -v Rscript)")"
 tini -s -- bash dev/reviews/run-bulk-de-scale.sh \
-  /tmp/alder-bulk-de /path/to/alder_0.1.0.tar.gz
+  /tmp/alder-bulk-de host/.application "$rscript"
 ```

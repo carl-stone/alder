@@ -1,20 +1,57 @@
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { access, constants, mkdtemp, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import WebSocket from 'ws';
+const DEFAULT_CHROME_CANDIDATES: Record<string, string[]> = {
+  linux: ['/usr/bin/google-chrome-stable', '/usr/bin/google-chrome', '/usr/bin/chromium', '/usr/bin/chromium-browser'],
+  darwin: ['/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', '/Applications/Chromium.app/Contents/MacOS/Chromium'],
+  win32: [
+    join(process.env.PROGRAMFILES ?? 'C:/Program Files', 'Google/Chrome/Application/chrome.exe'),
+    join(process.env['PROGRAMFILES(X86)'] ?? 'C:/Program Files (x86)', 'Google/Chrome/Application/chrome.exe'),
+    join(process.env.LOCALAPPDATA ?? join(process.env.USERPROFILE ?? 'C:/Users/runneradmin', 'AppData/Local'), 'Google/Chrome/Application/chrome.exe'),
+  ],
+};
+
+export async function resolveChromeExecutable(): Promise<string> {
+  const configured = [process.env.CHROME_BIN, process.env.CHROME_PATH].filter((value): value is string => Boolean(value));
+  const candidates = [...configured, ...(DEFAULT_CHROME_CANDIDATES[process.platform] ?? [])];
+  for (const candidate of candidates) {
+    const info = await stat(candidate).catch(() => null);
+    if (info?.isFile()) {
+      if (process.platform !== 'win32') await access(candidate, constants.X_OK);
+      return candidate;
+    }
+  }
+  const command = process.platform === 'win32' ? 'where' : 'which';
+  const lookup = spawnSync(command, process.platform === 'win32' ? ['chrome'] : ['google-chrome'], { encoding: 'utf8', windowsHide: true });
+  const resolved = lookup.status === 0 ? String(lookup.stdout).split(/\\r?\\n/u).map(line => line.trim()).find(Boolean) : undefined;
+  if (resolved) return resolved;
+  throw new Error('No Chrome/Chromium executable was provisioned for ' + process.platform + '/' + process.arch + '; set CHROME_BIN or CHROME_PATH');
+}
 
 export class Chrome {
   private counter = 0;
   private readonly pending = new Map<number, { resolve: (value: any) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }>();
   readonly errors: unknown[] = [];
+  readonly events: unknown[] = [];
   stderr = "";
+  readonly cdpEndpoint: string;
+  readonly pid: number;
+  readonly executable: string;
   private constructor(private readonly child: ChildProcessWithoutNullStreams,
-    private readonly directory: string, private readonly socket: WebSocket, readonly session: string) {
+    private readonly directory: string, private readonly socket: WebSocket, readonly session: string,
+    cdpEndpoint: string, executable: string) {
+    this.cdpEndpoint = cdpEndpoint;
+    this.pid = child.pid ?? -1;
+    this.executable = executable;
     child.stderr.on('data', bytes => { this.stderr = (this.stderr + String(bytes)).slice(-65_536); });
     socket.on('message', data => {
       const message = JSON.parse(String(data));
       if (message.method === 'Runtime.exceptionThrown') this.errors.push(message.params);
+      if (message.method === 'Runtime.consoleAPICalled' || message.method === 'Log.entryAdded') {
+        this.events.push({ method: message.method, params: message.params });
+      }
       if (message.method === 'Inspector.targetCrashed' || message.method === 'Target.targetCrashed') {
         this.errors.push({ method: message.method, params: message.params });
       }
@@ -34,14 +71,15 @@ export class Chrome {
   }
 
   static async open(url: string): Promise<Chrome> {
+    const executable = await resolveChromeExecutable();
     const directory = await mkdtemp(join(tmpdir(), 'alder-chrome-'));
-    const child = spawn(process.env.CHROME_BIN ?? 'google-chrome', [
+    const child = spawn(executable, [
       '--headless=new', '--no-sandbox', '--disable-dev-shm-usage', '--no-first-run',
       '--disable-background-networking', '--disable-component-update',
       '--disable-extensions', '--disable-default-apps', '--disable-sync',
-      '--no-default-browser-check', '--remote-debugging-port=0', `--user-data-dir=${directory}`,
+      '--no-default-browser-check', '--remote-debugging-port=0', '--user-data-dir=' + directory,
       'about:blank',
-    ], { stdio: ['pipe', 'pipe', 'pipe'] });
+    ], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
     child.stdout.resume();
     let socket: WebSocket | undefined;
     try {
@@ -58,12 +96,20 @@ export class Chrome {
       });
       socket = new WebSocket(endpoint);
       await new Promise<void>((resolve, reject) => { socket!.once('open', resolve); socket!.once('error', reject); });
-      const browser = new Chrome(child, directory, socket, '');
+      const cdpEndpoint = endpoint.replace(/^ws:/, 'http:').replace(/\/devtools\/browser\/[^/]+$/, '');
+      const browser = new Chrome(child, directory, socket, '', cdpEndpoint, executable);
+      const browserVersion = await browser.send('Browser.getVersion', {}, '');
+      const product = String(browserVersion?.product ?? '');
+      if (!/Chrome|Chromium/u.test(product)) throw new Error('Provisioned browser is not Chromium: ' + product);
+      const expectedToken = process.platform === 'win32' ? 'Windows' : process.platform === 'darwin' ? 'Macintosh' : 'Linux';
+      if (!String(browserVersion?.userAgent ?? '').includes(expectedToken)) throw new Error('Provisioned browser platform identity mismatch');
+
       const target = await browser.send('Target.createTarget', { url: 'about:blank' }, '');
       const attached = await browser.send('Target.attachToTarget', { targetId: target.targetId, flatten: true }, '');
       Object.defineProperty(browser, 'session', { value: attached.sessionId });
       await browser.send('Page.enable');
       await browser.send('Runtime.enable');
+      await browser.send('Log.enable');
       await browser.send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 1000, deviceScaleFactor: 1, mobile: false });
       await browser.send('Page.navigate', { url });
       return browser;
@@ -78,7 +124,7 @@ export class Chrome {
   send(method: string, params: Record<string, unknown> = {}, sessionId = this.session): Promise<any> {
     const id = ++this.counter;
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => { this.pending.delete(id); reject(new Error(`CDP timed out: ${method}`)); }, 30_000);
+      const timer = setTimeout(() => { this.pending.delete(id); reject(new Error(`CDP timed out: ${method}`)); }, 120_000);
       this.pending.set(id, { resolve, reject, timer });
       this.socket.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }));
     });

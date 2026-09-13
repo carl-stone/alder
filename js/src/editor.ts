@@ -20,7 +20,8 @@ import {
   activateHover,
   closeHoverTooltips,
   hasHoverTooltips,
-  logException
+  logException,
+  tooltips
 } from "@codemirror/view";
 import {
   defaultKeymap,
@@ -30,6 +31,7 @@ import {
   toggleComment
 } from "@codemirror/commands";
 import {indentOnInput, bracketMatching, foldGutter, foldKeymap, StreamLanguage} from "@codemirror/language";
+import {markdown} from "@codemirror/lang-markdown";
 import {
   acceptCompletion,
   autocompletion,
@@ -61,8 +63,8 @@ const reactiveField = StateField.define<DecorationSet>({
   provide: field => EditorView.decorations.from(field)
 });
 
-function languageFor(_name: string) {
-  return StreamLanguage.define(r);
+export function languageFor(name: string) {
+  return name === "markdown" ? markdown() : StreamLanguage.define(r);
 }
 
 function makeSignatureTooltip(value: EditorSignature | null) {
@@ -165,9 +167,10 @@ export function createEditor({
 }: EditorFactoryOptions = {}) {
   const cspNonce = typeof document === "undefined" ? "" :
     (document.querySelector<HTMLMetaElement>('meta[name="alder-csp-nonce"]')?.content || "");
+  const isMarkdown = language === "markdown";
   const completionSource: {current: CompletionSource | null} = {current: null};
-  const completions = {enabled: completionsEnabled !== false};
-  const signature = {enabled: signatureHelpEnabled !== false, request: 0};
+  const completions = {enabled: !isMarkdown && completionsEnabled !== false};
+  const signature = {enabled: !isMarkdown && signatureHelpEnabled !== false, request: 0};
   const diagnostics: {current: readonly EditorDiagnostic[]} = {current: []};
   let signatureNode: HTMLElement | null = null;
   let suppressChanges = false;
@@ -181,7 +184,7 @@ export function createEditor({
     return {pos, end: pos, above: true,
       create: (editor) => makeHoverTooltip(value, editor, focusContent)};
   };
-  const helpHover: ReturnType<typeof hoverTooltip> | null = onHover ? hoverTooltip((view, pos) => {
+  const helpHover: ReturnType<typeof hoverTooltip> | null = !isMarkdown && onHover ? hoverTooltip((view, pos) => {
     if (preparedKeyboardHover?.pos === pos) {
       const prepared = preparedKeyboardHover;
       preparedKeyboardHover = null;
@@ -226,6 +229,7 @@ export function createEditor({
     return completionSource.current(context);
   };
   const extensions: Extension[] = [
+    tooltips({parent: document.body}),
     lineNumbers(),
     foldGutter(),
     highlightActiveLine(),
@@ -259,8 +263,8 @@ export function createEditor({
       {key: "Mod-Enter", run: () => { onRun?.(); return true; }},
       {key: "Shift-Enter", run: () => { onRun?.(true); return true; }},
       {key: "Mod-s", run: () => { onSave?.(); return true; }},
-      {key: "Mod-Shift-f", run: () => { onFormat?.(); return true; }},
-      {key: "Mod-Alt-f", run: () => { onFormat?.(); return true; }},
+      {key: "Mod-Shift-f", run: () => { if (!isMarkdown) onFormat?.(); return !isMarkdown; }},
+      {key: "Mod-Alt-f", run: () => { if (!isMarkdown) onFormat?.(); return !isMarkdown; }},
       {key: "Mod-/", run: toggleComment},
       {key: "Alt-ArrowUp", run: () => { onJump?.("move", -1); return true; }},
       {key: "Alt-ArrowDown", run: () => { onJump?.("move", 1); return true; }},

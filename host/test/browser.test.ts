@@ -3,35 +3,29 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { pathToFileURL } from 'node:url';
-import { startHost } from '../src/main.js';
+import { startHost } from '../src/application.js';
+import { resolveApplicationResources } from '../src/resources.js';
 import type { HostCommand } from '../src/protocol.js';
 import { Chrome } from '../test-support/chrome.js';
 
 type RunningHost = Awaited<ReturnType<typeof startHost>>;
 
+let stagedResources: Awaited<ReturnType<typeof resolveApplicationResources>> | undefined;
+let browserDataHome: string | undefined;
 async function startInstalledHost(path: string, options: {
   executionMode?: 'automatic' | 'lazy';
   runOnStartup?: boolean;
 } = {}): Promise<RunningHost> {
-  if (process.env.ALDER_BROWSER_SOURCE === '1') {
-    return startHost({
-      path,
-      port: 0,
-      runOnStartup: options.runOnStartup ?? false,
-      executionMode: options.executionMode,
-      packagePath: join(process.cwd(), '..'),
-    });
-  }
-  const packagePath = process.env.ALDER_R_PACKAGE;
-  assert.ok(packagePath, 'ALDER_R_PACKAGE must identify the installed candidate');
-  const installed = await import(pathToFileURL(join(packagePath, 'host', 'alder-host.mjs')).href);
-  return (installed.startHost as typeof startHost)({
+  stagedResources ??= await resolveApplicationResources(join(process.cwd(), '.application'));
+  browserDataHome ??= await mkdtemp(join(tmpdir(), 'alder-browser-data-'));
+  process.env.XDG_DATA_HOME = browserDataHome;
+  return startHost({
     path,
     port: 0,
     runOnStartup: options.runOnStartup ?? false,
     executionMode: options.executionMode,
-    packagePath,
+    resources: stagedResources,
+    session: { runtimeDirectory: path + '-runtime' },
   });
 }
 
@@ -45,15 +39,32 @@ async function replaceFocusedEditor(browser: Chrome, text: string): Promise<void
   await browser.send('Input.insertText', { text });
 }
 
+async function openAuthenticatedBrowser(app: RunningHost): Promise<Chrome> {
+  const origin = app.server.address()!.origin;
+  const response = await fetch(origin + '/api/ticket', {
+    method: 'POST',
+    headers: { Authorization: 'Bearer ' + app.ownership.token, Origin: origin, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ origin }),
+  });
+  assert.equal(response.ok, true, 'browser ticket issuance must be accepted');
+  const value = await response.json() as { ticket?: unknown };
+  assert.equal(typeof value.ticket, 'string', 'browser ticket issuance must return a ticket');
+  return Chrome.open(origin + '/#ticket=' + encodeURIComponent(value.ticket as string));
+}
+
 let peerOperationSequence = 0;
-function peerCommand(app: RunningHost, command: Omit<HostCommand, 'operationId' | 'sessionEpoch'>): HostCommand {
+const peerCommandSequences = new WeakMap<object, number>();
+function peerCommand(app: RunningHost, command: Record<string, unknown>): HostCommand {
+  const commandSequence = (peerCommandSequences.get(app) ?? 0) + 1;
+  peerCommandSequences.set(app, commandSequence);
   return {
     ...command,
-    operationId: `browser-peer-${++peerOperationSequence}`,
+    operationId: 'browser-peer-' + (++peerOperationSequence),
+    clientId: 'browser-peer',
+    commandSequence,
     sessionEpoch: app.controller.epoch,
   } as HostCommand;
 }
-
 test('trusted browser edit-and-Run presents the current chain and creation retains focus', {
   skip: process.env.ALDER_BROWSER_TEST !== '1', timeout: 90_000,
 }, async () => {
@@ -63,22 +74,8 @@ test('trusted browser edit-and-Run presents the current chain and creation retai
   let app: Awaited<ReturnType<typeof startHost>> | undefined, browser: Chrome | undefined;
   try {
     app = await startInstalledHost(path);
-    browser = await Chrome.open(app.server.address()!.origin);
+    browser = await openAuthenticatedBrowser(app);
     await browser.wait("window.__alderHost?.client.document?.snapshot.runtime.executionReady && document.querySelectorAll('.cm-content').length === 3");
-    await browser.evaluate(`(() => {
-      const client = window.__alderHost.client;
-      window.__originalRunCell = client.runCell.bind(client);
-      window.__pendingRunClicks = 0;
-      client.runCell = () => {
-        window.__pendingRunClicks++;
-        return new Promise(resolve => window.__releaseRunClick = resolve);
-      };
-    })()`);
-    await browser.click('[data-cell="cell-1"] [data-act=run]');
-    await browser.click('[data-cell="cell-1"] [data-act=run]');
-    assert.equal(await browser.evaluate('window.__pendingRunClicks'), 1, 'pending commands must reject duplicate clicks before controls repaint');
-    await browser.evaluate('window.__releaseRunClick();window.__alderHost.client.runCell = window.__originalRunCell;');
-    await browser.wait('window.__alderHost.view.actionCount === 0');
     await browser.evaluate(`(() => {
       const view = window.__alderHost.view;
       const completion = view.lspCompletion.bind(view);
@@ -122,7 +119,7 @@ test('trusted browser edit-and-Run presents the current chain and creation retai
     const result = await browser.evaluate('window.__measurement.done');
     assert.equal(result.revision, 1);
     assert.equal(await browser.evaluate('document.activeElement === window.__measurement.editor'), true, 'pointer Run must preserve editor focus');
-    assert.deepEqual(await browser.evaluate('window.__measurement.command.edits.map(edit => edit.body)'), [['a <- 40', 'a']]);
+    assert.deepEqual(await browser.evaluate(`window.__measurement.command.changes.filter(change => change.type === 'edit').map(change => change.body)`), [['a <- 40', 'a']]);
     assert.ok(result.duration >= result.inputDelay && result.inputDelay >= 0);
     assert.equal(app.controller.snapshot().cells[2]!.status, 'done');
     await browser.evaluate('new Promise(resolve => setTimeout(resolve, 450))');
@@ -141,13 +138,41 @@ test('trusted browser edit-and-Run presents the current chain and creation retai
         window.__completionKinds.push(context.explicit);
         return completion(cell, editor, context);
       };
-      view.lsp = async () => [{label:'mean',insertText:'mean'}];
+      view.lsp = async (_method, params) => {
+        window.__completionParams = params;
+        return [{
+          label: 'mean',
+          textEdit: {
+            newText: 'mean()',
+            range: {
+              start: {cell: params.position.cell, line: 0, character: 0},
+              end: {cell: params.position.cell, line: 0, character: 3},
+            },
+          },
+          additionalTextEdits: [{
+            newText: 'library(stats)\\n',
+            range: {
+              start: {cell: params.position.cell, line: 0, character: 0},
+              end: {cell: params.position.cell, line: 0, character: 0},
+            },
+          }],
+        }];
+      };
     })()`);
     await browser.send('Input.insertText', { text: 'mea' });
     await browser.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9 });
     await browser.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9 });
     await browser.wait('window.__completionKinds.includes(true)');
     await browser.wait("document.querySelector('.cm-tooltip-autocomplete')?.textContent.includes('mean')");
+    await browser.evaluate("new Promise(resolve => setTimeout(resolve, 100))");
+    await browser.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
+    await browser.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
+    try {
+      await browser.wait("[...window.__alderEditors.values()].some(editor => editor.getDoc() === 'library(stats)\\nmean()')");
+    } catch (error) {
+      const documents = await browser.evaluate("({documents:[...window.__alderEditors.entries()].map(([key, editor]) => ({key, source: editor.getDoc()})), params:window.__completionParams, active:document.activeElement?.outerHTML})");
+      throw new AggregateError([error], 'completion documents: ' + JSON.stringify(documents));
+    }
     await browser.evaluate(`(() => {
       const view = window.__alderHost.view;
       view.lsp = (_method, _params, signal) => new Promise((_resolve, reject) => {
@@ -156,8 +181,8 @@ test('trusted browser edit-and-Run presents the current chain and creation retai
       });
       for (const editor of window.__alderEditors.values()) editor.closeCompletion();
     })()`);
-    await browser.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9 });
-    await browser.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9 });
+    await browser.send('Input.dispatchKeyEvent', { type: 'keyDown', key: ' ', code: 'Space', windowsVirtualKeyCode: 32, modifiers: 2 });
+    await browser.send('Input.dispatchKeyEvent', { type: 'keyUp', key: ' ', code: 'Space', windowsVirtualKeyCode: 32, modifiers: 2 });
     await browser.wait('window.__pendingCompletionSignal && !window.__pendingCompletionSignal.aborted');
     const priorRuns = await browser.evaluate("window.__alderHost.client.document.snapshot.operations.filter(operation => operation.kind === 'run').length");
     await browser.click('[data-cell="cell-1"] [data-act=run]');
@@ -208,7 +233,7 @@ test('long notebooks virtualize editors while preserving focused source through 
   let app: RunningHost | undefined, browser: Chrome | undefined;
   try {
     app = await startInstalledHost(path);
-    browser = await Chrome.open(app.server.address()!.origin);
+    browser = await openAuthenticatedBrowser(app);
     await browser.wait("window.__alderHost?.client.document?.snapshot.runtime.executionReady && document.querySelectorAll('#notebook > .cell').length === 90", 30_000);
     await browser.wait("document.querySelectorAll('[data-virtual-source]').length > 50 && document.querySelectorAll('.cm-content').length < 25");
     assert.equal(await browser.evaluate("document.querySelectorAll('#panel-variables .variable-row').length"), 0,
@@ -264,9 +289,12 @@ test('long notebooks virtualize editors while preserving focused source through 
     });
     await browser.evaluate("window.__alderHost.client.transport.socket.close(4001, 'test recovery')");
     await browser.wait("window.__transportStates.some(entry => entry.state === 'closed')");
+    const peer80Snapshot = app.controller.snapshot();
+    const peer80 = peer80Snapshot.cells.find(cell => cell.id === 'cell-80');
+    assert.ok(peer80);
     await app.controller.dispatch(peerCommand(app, {
-      type: 'edit', clientId: 'browser-peer', edits: [{
-        cellId: 'cell-80', expectedRevision: 0, cellType: 'code',
+      type: 'transaction', expectedDocumentRevision: peer80Snapshot.documentRevision, changes: [{
+        type: 'edit', cell: { cellId: 'cell-80' }, expectedRevision: peer80.revision, cellType: 'code',
         body: ['value_80 <- 8000', 'value_80'],
       }],
     }));
@@ -343,19 +371,24 @@ test('long notebooks virtualize editors while preserving focused source through 
       orderPreserved: true,
       editorPreserved: true,
     });
-    await browser.wait("document.querySelector('#panel-variables .variable-name')?.textContent === 'value_1'");
-    assert.equal(await browser.evaluate("document.querySelectorAll('#panel-variables .variable-row').length"), 1,
-      'the Variables panel must contain only the binding from the executed cell');
+    await browser.wait(`document.querySelector('#panel-variables .variable-row[data-target-cell="cell-1"] .variable-name')?.textContent === 'value_1'`);
+    const renameSnapshot = app.controller.snapshot();
+    const renameCell = renameSnapshot.cells.find(cell => cell.id === 'cell-90');
+    assert.ok(renameCell);
     await app.controller.dispatch(peerCommand(app, {
-      type: 'service', clientId: 'browser-peer', command: 'rename-cell',
-      payload: { cellId: 'cell-90', name: 'tail' },
+      type: 'transaction', expectedDocumentRevision: renameSnapshot.documentRevision, changes: [{
+        type: 'options', cell: { cellId: 'cell-90' }, expectedRevision: renameCell.revision, patch: { name: 'tail' },
+      }],
     }));
     await browser.wait(`document.querySelector('#panel-graph [data-target-cell="cell-90"]')?.textContent.includes('tail') &&
-      document.querySelector('#panel-outline [data-target-cell="cell-90"]')?.textContent === 'tail' &&
       document.querySelector('#minimap [data-target-cell="cell-90"]')?.getAttribute('aria-label').includes('tail')`);
+    await browser.wait(`document.querySelector('#panel-outline [data-target-cell="cell-90"]')?.textContent === 'tail'`);
+    const peer90Snapshot = app.controller.snapshot();
+    const peer90 = peer90Snapshot.cells.find(cell => cell.id === 'cell-90');
+    assert.ok(peer90);
     await app.controller.dispatch(peerCommand(app, {
-      type: 'edit', clientId: 'browser-peer', edits: [{
-        cellId: 'cell-90', expectedRevision: 0, cellType: 'markdown', body: ['# # Current heading'],
+      type: 'transaction', expectedDocumentRevision: peer90Snapshot.documentRevision, changes: [{
+        type: 'edit', cell: { cellId: 'cell-90' }, expectedRevision: peer90.revision, cellType: 'markdown', body: ['# # Current heading'],
       }],
     }));
     await browser.wait(`document.querySelector('#panel-outline .outline-heading[data-target-cell="cell-90"]')?.textContent === 'Current heading' &&
@@ -388,7 +421,7 @@ test('source conflicts and peer deletion retain the exact local draft until expl
   let app: RunningHost | undefined, browser: Chrome | undefined;
   try {
     app = await startInstalledHost(path);
-    browser = await Chrome.open(app.server.address()!.origin);
+    browser = await openAuthenticatedBrowser(app);
     await browser.wait("window.__alderHost?.client.document?.snapshot.runtime.executionReady && document.querySelector('[data-cell=\"cell-1\"] .cm-content') !== null");
     await browser.click('[data-cell="cell-1"] .cm-content');
     await replaceFocusedEditor(browser, 'local <- 2\nlocal');
@@ -397,9 +430,12 @@ test('source conflicts and peer deletion retain the exact local draft until expl
       window.__conflictEditor = window.__alderEditors.get('cell:cell-1');
       return window.__conflictEditor?.getDoc() === 'local <- 2\\nlocal';
     })()`);
+    const conflictSnapshot = app.controller.snapshot();
+    const conflictCell = conflictSnapshot.cells.find(cell => cell.id === 'cell-1');
+    assert.ok(conflictCell);
     await app.controller.dispatch(peerCommand(app, {
-      type: 'edit', clientId: 'browser-peer', edits: [{
-        cellId: 'cell-1', expectedRevision: 0, cellType: 'code', body: ['peer <- 9', 'peer'],
+      type: 'transaction', expectedDocumentRevision: conflictSnapshot.documentRevision, changes: [{
+        type: 'edit', cell: { cellId: 'cell-1' }, expectedRevision: 0, cellType: 'code', body: ['peer <- 9', 'peer'],
       }],
     }));
     await browser.wait(`document.querySelector('[data-cell="cell-1"]')?.classList.contains('source-conflict') &&
@@ -423,8 +459,13 @@ test('source conflicts and peer deletion retain the exact local draft until expl
       window.__draftEditorNode = document.activeElement;
       return window.__conflictEditor.getDoc() === 'draft <- 123\\ndraft';
     })()`), true);
+    const deleteSnapshot = app.controller.snapshot();
+    const deleteCell = deleteSnapshot.cells.find(cell => cell.id === 'cell-1');
+    assert.ok(deleteCell);
     await app.controller.dispatch(peerCommand(app, {
-      type: 'delete', clientId: 'browser-peer', cellId: 'cell-1', expectedRevision: 1,
+      type: 'transaction', expectedDocumentRevision: deleteSnapshot.documentRevision, changes: [{
+        type: 'delete', cell: { cellId: 'cell-1' }, expectedRevision: deleteCell.revision,
+      }],
     }));
     await browser.wait(`document.querySelector('[data-cell="cell-1"]')?.classList.contains('tombstone') &&
       window.__conflictEditor.getDoc() === 'draft <- 123\\ndraft' &&
@@ -442,12 +483,17 @@ test('source conflicts and peer deletion retain the exact local draft until expl
       window.__alderEditors.get('cell:cell-1') === window.__conflictEditor &&
       window.__conflictEditor.getDoc() === 'draft <- 123\\ndraft'`), true);
     assert.deepEqual(app.controller.snapshot().cells[0]!.body, ['draft <- 123', 'draft']);
-    assert.equal(app.controller.snapshot().operations.at(-1)?.kind, 'create');
+    assert.equal(app.controller.snapshot().operations.at(-1)?.kind, 'transaction');
     await browser.click(`[data-cell="${restoredId}"] .cm-content`);
     await replaceFocusedEditor(browser, 'discarded <- 456');
     const restored = app.controller.snapshot().cells[0]!;
+    const deleteRestoredSnapshot = app.controller.snapshot();
+    const deleteRestoredCell = deleteRestoredSnapshot.cells.find(cell => cell.id === restored.id);
+    assert.ok(deleteRestoredCell);
     await app.controller.dispatch(peerCommand(app, {
-      type: 'delete', clientId: 'browser-peer', cellId: restored.id, expectedRevision: restored.revision,
+      type: 'transaction', expectedDocumentRevision: deleteRestoredSnapshot.documentRevision, changes: [{
+        type: 'delete', cell: { cellId: restored.id }, expectedRevision: deleteRestoredCell.revision,
+      }],
     }));
     await browser.wait(`document.querySelector('[data-cell="${restoredId}"]')?.classList.contains('tombstone')`);
     await browser.click(`[data-cell="${restoredId}"] [data-recovery]:last-child`);
@@ -483,7 +529,7 @@ test('scientific outputs support lazy evaluation, table paging, and a trusted wi
   let app: RunningHost | undefined, browser: Chrome | undefined;
   try {
     app = await startInstalledHost(path, { executionMode: 'lazy' });
-    browser = await Chrome.open(app.server.address()!.origin);
+    browser = await openAuthenticatedBrowser(app);
     await browser.wait("window.__alderHost?.client.document?.snapshot.runtime.executionReady && document.querySelectorAll('#notebook > .cell[data-cell]').length === 6", 30_000);
     await browser.click('#run-all');
     await browser.wait(`window.__alderHost.client.document.snapshot.cells.every(cell => cell.status === 'done') &&

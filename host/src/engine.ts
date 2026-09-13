@@ -1,51 +1,74 @@
 import { EventEmitter } from "node:events";
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { access, mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, extname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { TextDecoder } from "node:util";
+import type { ApplicationResources } from "./resources.js";
+
+import { rEnvironmentVariables } from "./r-environment.js";
+import type { OwnedProcess, ProcessScope } from "./processes.js";
+
 
 import {
+  artifactHandleSchema,
   analysisResultSchema,
+  clearCellRequestSchema,
   cellSnapshotSchema,
   engineErrorSchema,
+  rawEngineErrorSchema,
   engineEventSchema,
   engineHandshakeSchema,
   engineResponseSchema,
   evaluationPayloadSchema,
+  releaseOutputsResponseSchema,
+  protocolJsonSchema,
+  progressOutputSchema,
+  rEnvironmentSchema,
+  ENGINE_PROTOCOL,
+  DEFAULT_MAX_ENGINE_FRAME_BYTES,
   MAX_NOTEBOOK_CELLS,
   MAX_NOTEBOOK_SOURCE_BYTES,
+  MAX_RELEASE_ARTIFACTS,
   type AnalysisResult,
   type CellSnapshot,
+  type AnalyzerIdentity,
+  type KernelIdentity,
   type EngineAdapter,
   type EngineEvent,
   type EngineHandshake,
+  type EngineRestartOptions,
+  type REnvironment,
   type EngineResponse,
   type EvaluationPayload,
+  type ArtifactHandle,
+  type OutputRecord,
+  type EngineRequestOptions,
+  type OutputScope,
 } from "./protocol.js";
 import {
   DEFAULT_MAX_FRAME_BYTES,
-  DEFAULT_MAX_ENGINE_FRAME_BYTES,
-  ENGINE_PROTOCOL,
   FrameDecoder,
   FrameProtocolError,
   encodeFrame,
-  parseStrictJson,
 } from "./framing.js";
+
+import { parseStrictJson } from "./strict-json.js";
 import { PerformanceTrace, type PerformanceSpan, type TraceFields } from "./performance.js";
 import { OutputLog } from "./output-log.js";
+import { OutputStore } from "./outputs.js";
 import {
   ArkKernel,
+  type ArkKernelInfo,
   type ArkExecution,
   type JupyterMessage,
 } from "./jupyter.js";
+export type { EngineHandshake };
 
-type FailureRole = "kernel" | "analyzer" | "services";
-type RPeerRole = "analyzer" | "service";
-type PeerRole = FailureRole | "service";
+type FailureRole = "kernel" | "analyzer";
+type RPeerRole = "analyzer";
+type PeerRole = FailureRole;
 type EngineState = "new" | "starting" | "ready" | "degraded" | "restarting" | "closed";
 
 const KERNEL_COMMANDS = new Set([
@@ -59,44 +82,23 @@ const KERNEL_COMMANDS = new Set([
   "table_page",
 ]);
 
-const SERVICE_COMMANDS = new Set([
-  "codec.decode",
-  "codec.document",
-  "codec.encode",
-  "config.resolve",
-  "config.validate",
-  "config.encode",
-  "layout.validate",
-  "layout.read",
-  "layout.encode",
-  "markdown.render",
-  "help.render",
-  "app.validate",
-  "format",
-  "graph",
-  "export.render",
-]);
-
 const MAX_PENDING_REQUESTS = 1_024;
 const MAX_OUTPUT_RECORDS = 4_096;
 const MAX_LOG_BYTES = 1_048_576;
 const LOG_TRUNCATION_MARKER = "[output truncated at 1048576 bytes]";
-const ARK_EVENT_PREFIX = "<!--ALDER_EVENT_V1:";
-
 export interface EngineOptions {
-  rscript?: string;
-  packagePath?: string;
+  resources: ApplicationResources;
+  processScope: ProcessScope;
+  environment?: REnvironment;
   notebookDirectory?: string;
-  artifactDirectory?: string;
+  artifactDirectory: string;
   cacheDirectory?: string;
-  environment?: NodeJS.ProcessEnv;
   startupTimeoutMs?: number;
   shutdownTimeoutMs?: number;
   maxFrameBytes?: number;
-  arkExecutable?: string;
-  arkStartupScript?: string;
-  analyzerScript?: string;
 }
+
+
 
 export class EngineTransportError extends Error {
   constructor(
@@ -135,11 +137,11 @@ interface PendingRRequest {
   command: string;
   wire: Record<string, unknown>;
   resolve: (value: Record<string, unknown>) => void;
+  generation: number;
   reject: (error: Error) => void;
 }
 
 interface ResolvedPaths {
-  packagePath: string;
   arkExecutable: string;
   arkStartupScript: string;
   analyzerScript: string;
@@ -148,25 +150,25 @@ interface ResolvedPaths {
   artifactDirectory: string;
   cacheDirectory: string;
   ownedDirectories: string[];
-  analyzerEnvironment: NodeJS.ProcessEnv;
-  arkEnvironment: NodeJS.ProcessEnv;
+  analyzerEnvironment: Record<string, string>;
+  arkEnvironment: Record<string, string>;
 }
 
 interface RuntimePaths {
   captureDirectory: string;
+  controlDirectory: string;
   ownedDirectories: string[];
 }
-
 interface ActiveEvaluation {
   requestId: number;
   payload: EvaluationPayload;
   onEvent?: (event: EngineEvent) => void;
+  kernelGeneration: number;
   started: boolean;
   sequence: number;
   rSequence: number;
-  outputs: unknown[];
+  outputs: OutputRecord[];
   outputBytes: number;
-  displayOutputs: Map<string, number>;
   log: string[];
   console: OutputLog;
   truncated: boolean;
@@ -178,6 +180,7 @@ interface ActiveEvaluation {
   deferredArtifactReleases: Set<string>;
   error?: EngineResponse["error"];
   structuredError?: EngineResponse["error"];
+  kernelStateInvalid?: EngineResponse["kernelStateInvalid"],
   messageTail: Promise<void>;
   messageError?: Error;
   batch?: ActiveBatch;
@@ -194,8 +197,8 @@ interface ActiveBatch {
 }
 
 class RPeer {
-  private child: ChildProcessWithoutNullStreams | undefined;
-  private decoder: FrameDecoder;
+  private child: OwnedProcess | undefined;
+  private readonly decoder: FrameDecoder;
   private writeTail: Promise<void> = Promise.resolve();
   private handshakeResolve: ((value: RawHandshake) => void) | undefined;
   private handshakeReject: ((error: Error) => void) | undefined;
@@ -205,6 +208,7 @@ class RPeer {
   private handshake: RawHandshake | undefined;
   private failed = false;
   private intentionalExit = false;
+  private childExited = false;
   private stderr = Buffer.alloc(0);
 
   constructor(
@@ -212,7 +216,8 @@ class RPeer {
     private readonly rscript: string,
     private readonly script: string,
     private readonly cwd: string,
-    private readonly environment: NodeJS.ProcessEnv,
+    private readonly environment: Record<string, string>,
+    private readonly processScope: ProcessScope,
     private readonly maxFrameBytes: number,
     private readonly startupTimeoutMs: number,
     private readonly onFrame: (role: RPeerRole, frame: unknown) => void,
@@ -227,56 +232,70 @@ class RPeer {
 
   get ready(): boolean {
     return this.handshake !== undefined && !this.failed &&
-      this.child !== undefined && childRunning(this.child);
+      this.child !== undefined && !this.childExited;
   }
 
   get processId(): number | undefined {
     return this.child?.pid;
   }
-
+  get info(): RawHandshake | undefined { return this.handshake; }
   async start(): Promise<RawHandshake> {
-    if (this.child !== undefined) throw new Error(`${this.role} peer was already started`);
-    this.exitPromise = new Promise((resolveExit) => {
-      this.exitResolve = resolveExit;
-    });
-    const child = spawn(this.rscript, ["--vanilla", this.script], {
-      cwd: this.cwd,
-      env: this.environment,
-      stdio: ["pipe", "pipe", "pipe"],
-      windowsHide: true,
-    });
-    this.child = child;
-    child.stdout.on("data", (chunk: Buffer) => this.receive(chunk));
-    child.stderr.on("data", (chunk: Buffer) => this.recordStderr(chunk));
-    child.stdin.on("error", (error) => {
-      this.fail(new EngineTransportError(
-        `could not write to ${this.role}: ${error.message}`,
-        this.role,
-      ));
-    });
-    child.once("error", (error) => {
-      this.fail(new EngineTransportError(
-        `could not start ${this.role}: ${error.message}`,
-        this.role,
-      ));
-    });
-    child.once("exit", (code, signal) => {
-      this.exitResolve?.();
-      if (!this.failed) {
-        const reason = code === null ? `signal ${signal ?? "unknown"}` : `exit status ${code}`;
-        this.fail(new EngineTransportError(
-          `${this.role} exited (${reason})${this.stderrText()}`,
-          this.role,
-        ));
-      }
-    });
+    if (this.child !== undefined) throw new Error(this.role + " peer was already started");
     const startup = new Promise<RawHandshake>((resolveHandshake, rejectHandshake) => {
       this.handshakeResolve = resolveHandshake;
       this.handshakeReject = rejectHandshake;
     });
+    this.exitPromise = new Promise((resolveExit) => {
+      this.exitResolve = resolveExit;
+    });
+    let child: OwnedProcess;
+    try {
+      child = await this.processScope.spawn({
+        executable: this.rscript,
+        args: ["--vanilla", this.script],
+        cwd: this.cwd,
+        environment: this.environment,
+        stdio: "pipes",
+      });
+    } catch (error) {
+      const failure = new EngineTransportError(
+        "could not start " + this.role + ": " + asError(error).message,
+        this.role,
+      );
+      this.fail(failure);
+      return await startup;
+    }
+    this.child = child;
+    this.childExited = false;
+    child.stdout?.on("data", (chunk: Buffer) => this.receive(chunk));
+    child.stderr?.on("data", (chunk: Buffer) => this.recordStderr(chunk));
+    child.stdin?.on("error", (error) => this.fail(new EngineTransportError(
+      "could not write to " + this.role + ": " + error.message,
+      this.role,
+    )));
+    void child.exited.then(({ code, signal }) => {
+      this.childExited = true;
+      this.exitResolve?.();
+      if (!this.failed && !this.intentionalExit) {
+        const reason = code === null ? "signal " + (signal ?? "unknown") : "exit status " + code;
+        this.fail(new EngineTransportError(
+          this.role + " exited (" + reason + ")" + this.stderrText(),
+          this.role,
+        ));
+      }
+    }, (error) => {
+      this.childExited = true;
+      this.exitResolve?.();
+      if (!this.failed && !this.intentionalExit) {
+        this.fail(new EngineTransportError(
+          this.role + " process failed: " + asError(error).message,
+          this.role,
+        ));
+      }
+    });
     this.startupTimer = setTimeout(() => {
       this.fail(new EngineTransportError(
-        `${this.role} did not become ready within ${this.startupTimeoutMs} ms${this.stderrText()}`,
+        this.role + " did not become ready within " + this.startupTimeoutMs + " ms" + this.stderrText(),
         this.role,
       ));
     }, this.startupTimeoutMs);
@@ -285,7 +304,7 @@ class RPeer {
 
   send(value: unknown): Promise<void> {
     if (!this.ready || this.child === undefined) {
-      return Promise.reject(new EngineTransportError(`${this.role} is unavailable`, this.role));
+      return Promise.reject(new EngineTransportError(this.role + " is unavailable", this.role));
     }
     let frame: Buffer;
     try {
@@ -295,8 +314,8 @@ class RPeer {
     }
     const write = this.writeTail.then(async () => {
       const input = this.child?.stdin;
-      if (input === undefined || input.destroyed) {
-        throw new EngineTransportError(`${this.role} input is closed`, this.role);
+      if (input === undefined || input === null || input.destroyed) {
+        throw new EngineTransportError(this.role + " input is closed", this.role);
       }
       await new Promise<void>((resolveWrite, rejectWrite) => {
         input.write(frame, (error) => {
@@ -308,7 +327,7 @@ class RPeer {
     this.writeTail = write.catch(() => {});
     return write.catch((error) => {
       const transportError = new EngineTransportError(
-        `could not write to ${this.role}: ${asError(error).message}`,
+        "could not write to " + this.role + ": " + asError(error).message,
         this.role,
       );
       this.fail(transportError);
@@ -323,32 +342,26 @@ class RPeer {
   async terminate(timeoutMs: number): Promise<void> {
     this.intentionalExit = true;
     const child = this.child;
-    if (child === undefined || !childRunning(child)) return;
-    child.stdin.end();
+    if (child === undefined || this.childExited) return;
+    await this.waitForExit(timeoutMs);
+    if (!this.childExited) {
+      await child.terminate().catch(() => {});
+      await this.waitForExit(Math.max(250, timeoutMs));
+    }
+    if (!this.childExited) {
+      throw new EngineTransportError(
+        this.role + " did not exit after supervisor termination",
+        this.role,
+      );
+    }
+  }
+
+  private async waitForExit(timeoutMs: number): Promise<void> {
+    if (this.childExited) return;
     await Promise.race([
       this.exitPromise,
       new Promise<void>((resolveTimeout) => setTimeout(resolveTimeout, timeoutMs)),
     ]);
-    if (childRunning(child)) {
-      child.kill("SIGTERM");
-      await Promise.race([
-        this.exitPromise,
-        new Promise<void>((resolveTimeout) => setTimeout(resolveTimeout, 250)),
-      ]);
-    }
-    if (childRunning(child)) {
-      child.kill("SIGKILL");
-      await Promise.race([
-        this.exitPromise,
-        new Promise<void>((resolveTimeout) => setTimeout(resolveTimeout, 1_000)),
-      ]);
-    }
-    if (childRunning(child)) {
-      throw new EngineTransportError(
-        `${this.role} did not exit after SIGKILL`,
-        this.role,
-      );
-    }
   }
 
   private receive(chunk: Buffer): void {
@@ -358,7 +371,7 @@ class RPeer {
       frames = this.decoder.push(chunk);
     } catch (error) {
       this.fail(new EngineTransportError(
-        `invalid ${this.role} frame: ${asError(error).message}${this.stderrText()}`,
+        "invalid " + this.role + " frame: " + asError(error).message + this.stderrText(),
         this.role,
       ));
       return;
@@ -375,7 +388,7 @@ class RPeer {
           this.handshakeReject = undefined;
         } catch (error) {
           this.fail(new EngineTransportError(
-            `invalid ${this.role} handshake: ${asError(error).message}`,
+            "invalid " + this.role + " handshake: " + asError(error).message,
             this.role,
           ));
         }
@@ -384,7 +397,7 @@ class RPeer {
           this.onFrame(this.role, frame);
         } catch (error) {
           this.fail(new EngineTransportError(
-            `invalid ${this.role} response: ${asError(error).message}`,
+            "invalid " + this.role + " response: " + asError(error).message,
             this.role,
           ));
         }
@@ -400,8 +413,7 @@ class RPeer {
     this.handshakeReject?.(error);
     this.handshakeReject = undefined;
     this.handshakeResolve = undefined;
-    const child = this.child;
-    if (child !== undefined && childRunning(child)) child.kill("SIGKILL");
+    if (this.child !== undefined && !this.childExited) void this.child.terminate().catch(() => {});
     this.onFailure(this.role, error, this.intentionalExit);
   }
 
@@ -412,10 +424,9 @@ class RPeer {
 
   private stderrText(): string {
     const text = this.stderr.toString("utf8").trim();
-    return text.length === 0 ? "" : `; stderr: ${text}`;
+    return text.length === 0 ? "" : "; stderr: " + text;
   }
 }
-
 export class Engine extends EventEmitter implements EngineAdapter {
   private readonly trace: PerformanceTrace;
   private state: EngineState = "new";
@@ -426,9 +437,11 @@ export class Engine extends EventEmitter implements EngineAdapter {
   private startupAbort: AbortController | undefined;
   private handshake: EngineHandshake | undefined;
   private paths: ResolvedPaths | undefined;
+  private readonly retiredPathDirectories = new Set<string>();
   private kernel: ArkKernel | undefined;
   private analyzer: RPeer | undefined;
-  private servicePeer: RPeer | undefined;
+  private analyzerInfo: RawHandshake | undefined;
+  private kernelInfo: ArkKernelInfo | undefined;
   private requestCounter = 1;
   private readonly rPending = new Map<number, PendingRRequest>();
   private readonly evaluations = new Map<number, ActiveEvaluation>();
@@ -438,11 +451,22 @@ export class Engine extends EventEmitter implements EngineAdapter {
   private interruptRequested: number | undefined;
   private readonly interruptDeliveries = new Map<number, Promise<void>>();
   private arkEventToken = "";
-  private readonly nativeArtifacts = new Set<string>();
   private runtime: RuntimePaths | undefined;
+  private outputStoreValue: OutputStore | undefined;
+  private outputSessionEpoch: string | undefined;
+  private outputDocumentRevision: number | undefined;
+  private kernelEpoch: string | null = null;
   private peerGeneration = 0;
+  private analyzerGeneration = 0;
+  private kernelGeneration = 0;
+  private environmentValue: REnvironment | undefined;
+  get environment(): REnvironment | undefined { return this.environmentValue; }
+  private analysisEnvironmentId: string | undefined;
+  private analysisGeneration = 0;
+  private pathOptions: Pick<EngineOptions, "notebookDirectory" | "cacheDirectory">;
+  private restartContext: EngineRestartOptions | undefined;
 
-  constructor(private readonly options: EngineOptions = {}) {
+  constructor(private readonly options: EngineOptions) {
     super();
     validatePositiveTimeout(options.startupTimeoutMs, "startupTimeoutMs");
     validatePositiveTimeout(options.shutdownTimeoutMs, "shutdownTimeoutMs");
@@ -451,11 +475,73 @@ export class Engine extends EventEmitter implements EngineAdapter {
       options.maxFrameBytes > DEFAULT_MAX_ENGINE_FRAME_BYTES
     )) {
       throw new RangeError(
-        `maxFrameBytes must be an integer in 1..${DEFAULT_MAX_ENGINE_FRAME_BYTES}`,
+        "maxFrameBytes must be an integer in 1.." + DEFAULT_MAX_ENGINE_FRAME_BYTES,
       );
     }
-    this.trace = new PerformanceTrace({ ...process.env, ...options.environment });
+    this.environmentValue = options.environment === undefined ? undefined : freezeEnvironment(options.environment);
+    this.pathOptions = {
+      notebookDirectory: options.notebookDirectory,
+      cacheDirectory: options.cacheDirectory,
+    };
+
+    this.trace = new PerformanceTrace();
   }
+  get identity(): EngineHandshake | null { return this.handshake ?? null; }
+  get outputStore(): OutputStore | undefined { return this.outputStoreValue; }
+
+  /** Prepare the host-owned artifact store before server publication. */
+  prepareOutputStore(identity: Pick<OutputScope, "sessionEpoch" | "documentRevision">): OutputStore {
+    if (this.isClosed()) throw new EngineTransportError("engine is closed");
+    const artifactDirectory = this.options.artifactDirectory;
+    if (typeof artifactDirectory !== "string" || artifactDirectory.length === 0) throw new EngineTransportError("output artifact directory is unavailable");
+    const existing = this.outputStoreValue;
+    if (existing === undefined) {
+      const created = new OutputStore({
+        artifactDirectory,
+        sessionEpoch: identity.sessionEpoch,
+        documentRevision: identity.documentRevision,
+        kernelEpoch: this.kernelEpoch,
+      });
+      this.outputStoreValue = created;
+      this.outputSessionEpoch = identity.sessionEpoch;
+      this.outputDocumentRevision = identity.documentRevision;
+      return created;
+    }
+    if (this.outputSessionEpoch !== identity.sessionEpoch) {
+      throw new EngineTransportError("output store session epoch cannot change");
+    }
+    existing.setIdentity({ documentRevision: identity.documentRevision, kernelEpoch: this.kernelEpoch });
+    this.outputDocumentRevision = identity.documentRevision;
+    return existing;
+  }
+  setEnvironment(environment: REnvironment): void {
+    const validated = rEnvironmentSchema.parse(environment);
+    const fullyStopped = (this.state === "new" || this.state === "degraded") &&
+      this.analyzer === undefined && this.kernel === undefined &&
+      this.runtime === undefined && this.rPending.size === 0 &&
+      this.evaluations.size === 0 && this.pendingKernelRequests === 0;
+    if (!fullyStopped) {
+      throw new EngineTransportError("R environment can only change while Engine is fully stopped");
+    }
+    const previousPaths = this.paths;
+    this.paths = undefined;
+    this.retirePaths(previousPaths);
+    this.environmentValue = freezeEnvironment(validated);
+    this.analysisEnvironmentId = undefined;
+    this.analysisGeneration += 1;
+  }
+  private retirePaths(paths: ResolvedPaths | undefined): void {
+    if (paths === undefined) return;
+    for (const directory of paths.ownedDirectories) {
+      if (directory !== paths.artifactDirectory) this.retiredPathDirectories.add(directory);
+    }
+  }
+  private async drainRetiredPaths(): Promise<void> {
+    const directories = [...this.retiredPathDirectories];
+    this.retiredPathDirectories.clear();
+    await Promise.all(directories.map((directory) => rm(directory, { recursive: true, force: true }).catch(() => {})));
+  }
+
 
   onFailure(
     listener: (role: FailureRole, error: Error) => void,
@@ -481,12 +567,54 @@ export class Engine extends EventEmitter implements EngineAdapter {
     }).catch(() => {});
     return operation;
   }
+  startAnalyzer(): Promise<AnalyzerIdentity> {
+    if (this.state === "closed") return Promise.reject(new EngineTransportError("engine is closed"));
+    return this.enqueueLifecycle(async () => {
+      if (this.analyzer?.ready) return this.analyzerIdentity();
+      if (this.state === "restarting") throw new EngineTransportError("engine start was superseded by restart");
+      this.state = "starting";
+      try {
+        await this.startAnalyzerLocked();
+        if (this.kernel?.ready) this.state = "ready";
+        return this.analyzerIdentity();
+      } catch (error) {
+        if (!this.isClosed() && (this.state as EngineState) !== "restarting") this.state = "degraded";
+        throw error;
+      }
+    });
+  }
+
+  startKernel(): Promise<KernelIdentity> {
+    if (this.state === "closed") return Promise.reject(new EngineTransportError("engine is closed"));
+    return this.enqueueLifecycle(async () => {
+      if (this.kernel?.ready) return this.kernelIdentity();
+      if (this.state === "restarting") throw new EngineTransportError("engine start was superseded by restart");
+      this.state = "starting";
+      try {
+        await this.startKernelLocked();
+        if (this.analyzer?.ready) this.state = "ready";
+        return this.kernelIdentity();
+      } catch (error) {
+        if (!this.isClosed() && (this.state as EngineState) !== "restarting") this.state = "degraded";
+        throw error;
+      }
+    });
+  }
 
   async analyze(
     cells: readonly CellSnapshot[],
     revision: number,
+    analysisEnvironmentId?: string,
   ): Promise<AnalysisResult> {
-    await this.ensureStarted();
+    await this.ensureAnalyzer();
+    const selectedAnalysisEnvironmentId = analysisEnvironmentId ?? this.analysisEnvironmentId;
+    if (selectedAnalysisEnvironmentId === undefined) throw new EngineTransportError("analysis environment is unavailable", "analyzer");
+    if (selectedAnalysisEnvironmentId !== this.analysisEnvironmentId) {
+      throw new EngineTransportError("analysis targets a stale analyzer generation", "analyzer");
+    }
+    const analysisGeneration = this.analysisGeneration;
+    const analyzerGeneration = this.analyzerGeneration;
+
     if (!Number.isSafeInteger(revision) || revision < 0) {
       throw new TypeError("analysis revision must be a non-negative safe integer");
     }
@@ -510,31 +638,44 @@ export class Engine extends EventEmitter implements EngineAdapter {
     });
     const raw = await this.sendRRequest("analyzer", "analyze", {
       revision,
+      analysisEnvironmentId: selectedAnalysisEnvironmentId,
       cells: wireCells,
     });
     if (raw.ok !== true) throw requestError(raw, "analysis failed");
-    return analysisResultSchema.parse(mapAnalysisResult(raw));
+    if (analysisGeneration !== this.analysisGeneration ||
+        analyzerGeneration !== this.analyzerGeneration ||
+        selectedAnalysisEnvironmentId !== this.analysisEnvironmentId) {
+      throw new EngineTransportError("analysis result belongs to a stale analyzer generation", "analyzer");
+    }
+    return analysisResultSchema.parse(mapAnalysisResult(raw, new Map(
+      snapshots.map((cell) => [cell.id, cell.source]),
+    )));
   }
 
   async evaluate(
     payload: EvaluationPayload,
     onEvent?: (event: EngineEvent) => void,
     signal?: AbortSignal,
+    duringStartup = false,
   ): Promise<EngineResponse> {
-    await this.ensureStarted();
     const value = evaluationPayloadSchema.parse(payload);
+    await this.ensureKernel(duringStartup);
+    if (this.kernelEpoch === null || value.kernelEpoch !== this.kernelEpoch) {
+      throw new EngineTransportError("evaluation targets a stale kernel epoch", "kernel");
+    }
+    const kernelGeneration = this.kernelGeneration;
     if (this.evaluations.size + this.pendingKernelRequests >= MAX_PENDING_REQUESTS) {
       throw new EngineTransportError("engine request queue is full", "kernel");
     }
     const requestId = this.nextRequestId();
     const wire = evaluationWire(value);
-    const state = makeEvaluation(requestId, value, onEvent);
+    const state = makeEvaluation(requestId, value, onEvent, kernelGeneration);
     this.evaluations.set(requestId, state);
     const traceSpan = this.trace.begin("host.engine.request", requestTraceFields(
       "kernel", "eval_cell", { req: requestId, ...wire },
     ));
     try {
-      const encoded = encodeArkRequest({ request: requestId, ...wire }, this.maxArkPayloadBytes());
+      const encoded = encodeArkRequest({ request: String(requestId), ...wire }, this.maxArkPayloadBytes());
       const execution = await this.kernel!.execute(arkCall("evaluate", encoded), {
         onMessage: (message) => {
           state.messageTail = state.messageTail.then(
@@ -555,8 +696,8 @@ export class Engine extends EventEmitter implements EngineAdapter {
       if (state.messageError !== undefined) throw state.messageError;
       if (state.deferredArtifactReleases.size > 0) {
         const artifacts = [...state.deferredArtifactReleases];
+        await this.releaseDeferredArtifacts(artifacts);
         state.deferredArtifactReleases.clear();
-        void this.releaseOutputs({ artifacts }).catch(() => {});
       }
       this.finishLog(state);
       const response = this.finishEvaluationResponse(state, execution);
@@ -573,13 +714,25 @@ export class Engine extends EventEmitter implements EngineAdapter {
     } catch (error) {
       if (signal?.aborted && error === signal.reason && !state.started) {
         const response: EngineResponse = {
-          ok: false, cancelledBeforeStart: true,
+          ok: false,
+          cancelledBeforeStart: true,
           error: { code: "interrupted", message: "Cancelled before execution", interrupted: true },
         };
         this.trace.end(traceSpan, { outcome: "cancelled-before-start" });
         return response;
       }
       await state.messageTail;
+      if (state.deferredArtifactReleases.size > 0) {
+        const artifacts = [...state.deferredArtifactReleases];
+        try {
+          await this.releaseDeferredArtifacts(artifacts);
+          state.deferredArtifactReleases.clear();
+        } catch (cleanupError) {
+          this.emit("failure", "kernel", new EngineTransportError(
+            `deferred artifact release failed: ${asError(cleanupError).message}`, "kernel",
+          ));
+        }
+      }
       if (state.outputs.length > 0) await this.discardEvaluationOutputs(state.outputs);
       this.trace.end(traceSpan, { outcome: "failure", error: asError(error).name });
       throw error;
@@ -594,6 +747,8 @@ export class Engine extends EventEmitter implements EngineAdapter {
   async evaluateBatch(
     payloads: readonly EvaluationPayload[],
     onEvent?: (event: EngineEvent) => void | Promise<void>,
+    signal?: AbortSignal,
+    duringStartup = false,
   ): Promise<Array<EngineResponse | undefined>> {
     if (payloads.length < 2 || payloads.length > 4) throw new RangeError("a batch needs 2..4 cells");
     const values = payloads.map((value) => evaluationPayloadSchema.parse(value));
@@ -616,8 +771,13 @@ export class Engine extends EventEmitter implements EngineAdapter {
     let index = -1;
     let ended = false;
     try {
-      await this.ensureStarted();
+      if (signal?.aborted) throw signal.reason;
+      await this.ensureKernel(duringStartup);
       if (batch.cancelled) return responses;
+      const kernelGeneration = this.kernelGeneration;
+      if (this.kernelEpoch === null || values.some((value) => value.kernelEpoch !== this.kernelEpoch)) {
+        throw new EngineTransportError("evaluation targets a stale kernel epoch", "kernel");
+      }
       if (this.evaluations.size + this.pendingKernelRequests >= MAX_PENDING_REQUESTS) {
         throw new EngineTransportError("engine request queue is full", "kernel");
       }
@@ -627,14 +787,14 @@ export class Engine extends EventEmitter implements EngineAdapter {
         session_epoch: values[0]!.sessionEpoch,
         operation_id: values[0]!.operationId, run_id: values[0]!.runId,
       });
-      batch.permit = join(this.paths!.cacheDirectory, `.alder-batch-${randomUUID()}`);
+      batch.permit = join(this.runtime!.controlDirectory, ".alder-batch-" + randomUUID());
       writeFileSync(batch.permit, "", { flag: "wx", mode: 0o600 });
       batch.states = values.map((value) => ({ ...makeEvaluation(requestId!, value, (event) => {
         callbacks = callbacks.then(() => onEvent?.(event));
-      }), batch }));
+      }, kernelGeneration), batch }));
       this.evaluations.set(requestId, batch.states[0]!);
       const code = values.map((value, offset) => arkCall("evaluate", encodeArkRequest({
-        request: requestId, ...evaluationWire(value),
+        request: String(requestId), ...evaluationWire(value),
         batch: { index: offset + 1, count: values.length, permit: batch.permit },
       }, this.maxArkPayloadBytes()))).join("\n");
       const complete = async (state: ActiveEvaluation, execution: ArkExecution): Promise<void> => {
@@ -659,8 +819,10 @@ export class Engine extends EventEmitter implements EngineAdapter {
             }
             const state = batch.current;
             if (state === undefined) {
-              if (message.header.msg_type === "execute_input" || ended) return;
-              throw new FrameProtocolError("batch output arrived before its first cell");
+              const beforeFirstCell = message.header.msg_type === "execute_input" ||
+                (message.header.msg_type === "status" && message.content.execution_state === "busy");
+              if (beforeFirstCell || ended) return;
+              throw new FrameProtocolError(`batch output (${message.header.msg_type}) arrived before its first cell`);
             }
             if (ended && state.finished) return;
             if (event === undefined) await this.processEvaluationMessage(state, message);
@@ -684,7 +846,7 @@ export class Engine extends EventEmitter implements EngineAdapter {
           if (this.executingRequest === requestId) this.executingRequest = undefined;
           if (this.interruptRequested === requestId) this.interruptRequested = undefined;
         },
-      }, { storeHistory: true });
+      }, { storeHistory: true, signal });
       await tail;
       if (messageError !== undefined) throw messageError;
       for (const [offset, state] of batch.states.entries()) {
@@ -716,7 +878,15 @@ export class Engine extends EventEmitter implements EngineAdapter {
       }
       for (const state of batch.states) {
         if (state.deferredArtifactReleases.size > 0) {
-          void this.releaseOutputs({ artifacts: [...state.deferredArtifactReleases] }).catch(() => {});
+          const artifacts = [...state.deferredArtifactReleases];
+          try {
+            await this.releaseDeferredArtifacts(artifacts);
+            state.deferredArtifactReleases.clear();
+          } catch (cleanupError) {
+            this.emit("failure", "kernel", new EngineTransportError(
+              `deferred artifact release failed: ${asError(cleanupError).message}`, "kernel",
+            ));
+          }
         }
       }
     }
@@ -744,35 +914,31 @@ export class Engine extends EventEmitter implements EngineAdapter {
   async request(
     command: string,
     payload: Record<string, unknown> = {},
+    options?: EngineRequestOptions,
+    duringStartup = false,
   ): Promise<EngineResponse> {
-    await this.ensureStarted();
+    await this.ensureKernel(duringStartup);
     if (!KERNEL_COMMANDS.has(command)) {
       throw new TypeError(`unsupported kernel command: ${command}`);
     }
     if (command === "release_outputs") return this.releaseOutputs(payload);
-    return engineResponseSchema.parse(await this.runArkCommand(command, payload));
+    if (command === "clear_cell") {
+      const requestPayload = clearCellRequestSchema.parse(payload);
+      return engineResponseSchema.parse(await this.runArkCommand(command, requestPayload));
+    }
+    const outputScope = command === "get_value" || command === "lazy_eval"
+      ? requestOutputScope(options?.outputScope)
+      : undefined;
+    const response = await this.runArkCommand(command, payload);
+    return engineResponseSchema.parse(await this.normalizeRequestResult(command, outputScope, response));
   }
 
-  async service(
-    command: string,
-    payload: Record<string, unknown> = {},
-  ): Promise<unknown> {
-    await this.ensureStarted();
-    if (!SERVICE_COMMANDS.has(command)) {
-      throw new TypeError(`unsupported Alder host service: ${command}`);
-    }
-    const raw = await this.sendRRequest("service", "service", { command, payload });
-    if (raw.ok !== true) throw requestError(raw, `Alder host service ${command} failed`);
-    if (!("result" in raw)) {
-      throw new EngineTransportError("service response omitted its result", "service");
-    }
-    return raw.result;
-  }
+
 
   async interrupt(
     requestId?: number,
   ): Promise<{ requested: boolean; requestId?: number }> {
-    await this.ensureStarted();
+    await this.ensureKernel();
     const target = requestId ?? this.executingRequest ?? this.evaluations.keys().next().value;
     if (target === undefined) return { requested: false };
     if (!Number.isSafeInteger(target) || target < 1) return { requested: false };
@@ -792,9 +958,30 @@ export class Engine extends EventEmitter implements EngineAdapter {
     return { requested: true, requestId: target };
   }
 
-  async restart(): Promise<EngineHandshake> {
+  async restart(options?: EngineRestartOptions): Promise<EngineHandshake> {
     if (this.isClosed()) throw new EngineTransportError("engine is closed");
-    if (this.restartPromise !== undefined) return this.restartPromise;
+    const requestedContext: EngineRestartOptions = {
+      environment: options?.environment === undefined
+        ? this.environmentValue
+        : freezeEnvironment(options.environment),
+      notebookDirectory: options?.notebookDirectory === undefined
+        ? this.pathOptions.notebookDirectory
+        : options.notebookDirectory,
+      cacheDirectory: options?.cacheDirectory === undefined
+        ? this.pathOptions.cacheDirectory
+        : options.cacheDirectory,
+    };
+    if (this.restartPromise !== undefined) {
+      if (this.restartContext === undefined || !sameRestartContext(this.restartContext, requestedContext)) {
+        throw new EngineTransportError("an Engine restart is already in progress");
+      }
+      return this.restartPromise;
+    }
+    const contextChanged = !sameRestartContext({
+      environment: this.environmentValue,
+      notebookDirectory: this.pathOptions.notebookDirectory,
+      cacheDirectory: this.pathOptions.cacheDirectory,
+    }, requestedContext);
     this.state = "restarting";
     this.startupAbort?.abort();
     const immediateStop = this.stopPeers("Engine restarted");
@@ -803,8 +990,24 @@ export class Engine extends EventEmitter implements EngineAdapter {
       if (this.isClosed()) throw new EngineTransportError("engine is closed");
       try {
         await immediateStop;
+        if (contextChanged) {
+          const previousPaths = this.paths;
+          this.paths = undefined;
+          for (const directory of previousPaths?.ownedDirectories ?? []) {
+            if (directory === previousPaths?.artifactDirectory) continue;
+            await rm(directory, { recursive: true, force: true }).catch(() => {});
+          }
+        }
         await this.stopPeers("Engine restarted");
+        await this.outputStoreValue?.clear();
         if (this.isClosed()) throw new EngineTransportError("engine is closed");
+        this.environmentValue = requestedContext.environment;
+        this.pathOptions = {
+          notebookDirectory: requestedContext.notebookDirectory,
+          cacheDirectory: requestedContext.cacheDirectory,
+        };
+        this.analysisEnvironmentId = undefined;
+        this.analysisGeneration += 1;
         this.state = "new";
         this.handshake = undefined;
         return await this.startLocked();
@@ -814,8 +1017,12 @@ export class Engine extends EventEmitter implements EngineAdapter {
       }
     });
     this.restartPromise = operation;
+    this.restartContext = requestedContext;
     void operation.finally(() => {
-      if (this.restartPromise === operation) this.restartPromise = undefined;
+      if (this.restartPromise === operation) {
+        this.restartPromise = undefined;
+        if (this.restartContext === requestedContext) this.restartContext = undefined;
+      }
     }).catch(() => {});
     return operation;
   }
@@ -832,9 +1039,19 @@ export class Engine extends EventEmitter implements EngineAdapter {
       try { await immediateStop; } catch (error) { stopError = asError(error); }
       try { await this.stopPeers("Engine closed"); }
       catch (error) { stopError ??= asError(error); }
+      try {
+        await this.outputStoreValue?.close();
+      } catch (error) {
+        stopError ??= asError(error);
+      } finally {
+        this.outputStoreValue = undefined;
+        this.outputSessionEpoch = undefined;
+        this.outputDocumentRevision = undefined;
+      }
       for (const directory of this.paths?.ownedDirectories ?? []) {
         await rm(directory, { recursive: true, force: true }).catch(() => {});
       }
+      await this.drainRetiredPaths();
       this.handshake = undefined;
       if (stopError !== undefined) throw stopError;
     });
@@ -854,11 +1071,8 @@ export class Engine extends EventEmitter implements EngineAdapter {
 
   private async startLocked(): Promise<EngineHandshake> {
     if (this.isClosed()) throw new EngineTransportError("engine is closed");
-    if (this.state === "restarting") {
-      throw new EngineTransportError("engine start was superseded by restart");
-    }
-    if (this.state === "ready" && this.handshake !== undefined &&
-        this.kernel?.ready && this.analyzer?.ready) {
+    if (this.state === "restarting") throw new EngineTransportError("engine start was superseded by restart");
+    if (this.state === "ready" && this.handshake !== undefined && this.kernel?.ready && this.analyzer?.ready) {
       return this.handshake;
     }
     if (this.state === "degraded") await this.stopPeers("Engine recovering");
@@ -867,75 +1081,180 @@ export class Engine extends EventEmitter implements EngineAdapter {
     return this.startFresh();
   }
 
-  private async startFresh(): Promise<EngineHandshake> {
+  private requireEnvironment(role: FailureRole = "analyzer"): REnvironment {
+    if (this.environmentValue === undefined) {
+      throw new EngineTransportError("an R environment must be selected before starting the " + role, role);
+    }
+    return this.environmentValue;
+  }
+
+  private async startAnalyzerLocked(): Promise<void> {
+    const environment = this.requireEnvironment("analyzer");
     const startupAbort = new AbortController();
     this.startupAbort = startupAbort;
+    let peer: RPeer | undefined;
     try {
-      this.paths ??= await resolvePaths(this.options, startupAbort.signal);
-      if (startupAbort.signal.aborted || this.isClosed()) {
-        throw new EngineTransportError("engine startup was cancelled");
-      }
+      await this.drainRetiredPaths();
+      this.paths ??= await resolvePaths(this.options, environment, startupAbort.signal, this.pathOptions);
+      const startupTimeoutMs = this.options.startupTimeoutMs ?? 45_000;
+      const maxFrameBytes = this.options.maxFrameBytes ?? DEFAULT_MAX_ENGINE_FRAME_BYTES;
+      const generation = ++this.peerGeneration;
+      peer = this.makeRPeer("analyzer", startupTimeoutMs, maxFrameBytes, generation);
+      this.analyzer = peer;
+      this.analyzerGeneration = generation;
+      this.analyzerInfo = undefined;
+      this.analysisEnvironmentId = undefined;
+      this.analyzerInfo = await peer.start();
+      this.analysisEnvironmentId = makeAnalysisEnvironmentId(environment, ++this.analysisGeneration);
+    } catch (error) {
+      if (peer !== undefined) await peer.terminate(this.options.shutdownTimeoutMs ?? 1_000).catch(() => {});
+      if (this.analyzer === peer) this.analyzer = undefined;
+      this.analyzerInfo = undefined;
+      this.analysisEnvironmentId = undefined;
+      await this.drainRetiredPaths();
+      throw error;
+    } finally {
+      if (this.startupAbort === startupAbort) this.startupAbort = undefined;
+    }
+  }
+
+  private async startKernelLocked(): Promise<void> {
+    const environment = this.requireEnvironment("kernel");
+    const startupAbort = new AbortController();
+    this.startupAbort = startupAbort;
+    let kernel: ArkKernel | undefined;
+    try {
+      await this.drainRetiredPaths();
+      this.paths ??= await resolvePaths(this.options, environment, startupAbort.signal, this.pathOptions);
       const startupTimeoutMs = this.options.startupTimeoutMs ?? 45_000;
       const maxFrameBytes = this.options.maxFrameBytes ?? DEFAULT_MAX_ENGINE_FRAME_BYTES;
       this.arkEventToken = randomBytes(24).toString("base64url");
       const paths = this.paths;
-      const runtime = await prepareRuntime(paths);
-      if (startupAbort.signal.aborted || this.isClosed()) {
-        for (const directory of runtime.ownedDirectories) {
-          await rm(directory, { recursive: true, force: true }).catch(() => {});
-        }
-        throw new EngineTransportError("engine startup was cancelled");
-      }
-      this.runtime = runtime;
+      this.runtime ??= await prepareRuntime(paths);
       const generation = ++this.peerGeneration;
-      this.kernel = new ArkKernel({
+      this.kernelGeneration = generation;
+      this.kernelEpoch = randomUUID();
+      kernel = new ArkKernel({
         executable: paths.arkExecutable,
         startupFile: paths.arkStartupScript,
-        connectionDirectory: join(paths.cacheDirectory, "ark-connections"),
+        connectionDirectory: this.runtime.controlDirectory,
         cwd: paths.notebookDirectory,
         environment: {
           ...paths.arkEnvironment,
+          ...rEnvironmentVariables(environment, this.options.resources, this.analysisEnvironmentId),
           ALDER_ARK_KERNEL: "1",
           ALDER_ARK_EVENT_TOKEN: this.arkEventToken,
           ALDER_CAPTURE_DIR: this.runtime.captureDirectory,
+          ALDER_CONTROL_DIR: this.runtime.controlDirectory,
+          ALDER_KERNEL_EPOCH: this.kernelEpoch,
         },
         startupTimeoutMs,
         shutdownTimeoutMs: this.options.shutdownTimeoutMs ?? 1_000,
         maxMessageBytes: Math.ceil(maxFrameBytes * 4 / 3) + 65_536,
+        processScope: this.options.processScope,
       });
-      this.kernel.on("failed", (error: Error) => this.kernelFailed(generation, error));
-      this.analyzer = this.makeRPeer("analyzer", startupTimeoutMs, maxFrameBytes, generation);
-      this.servicePeer = this.makeRPeer("service", startupTimeoutMs, maxFrameBytes, generation);
-      const [kernel, analyzer, service] = await Promise.all([
-        this.kernel.start(),
-        this.analyzer.start(),
-        this.servicePeer.start(),
-      ]);
-      if (this.isClosed()) {
-        throw new EngineTransportError("engine was closed during startup");
+      this.kernel = kernel;
+      this.kernelInfo = undefined;
+      kernel.on("failed", (error: Error) => this.kernelFailed(generation, error));
+      const info = await kernel.start();
+      this.kernelInfo = info;
+      if (!kernel.publicMimePublisherReady) {
+        throw new EngineTransportError("Ark public MIME publisher probe did not complete", "kernel");
+      }
+    } catch (error) {
+      if (kernel !== undefined) await kernel.terminate().catch(() => {});
+      if (this.kernel === kernel) this.kernel = undefined;
+      this.kernelInfo = undefined;
+      this.kernelEpoch = null;
+      this.kernelGeneration = 0;
+      const runtime = this.runtime;
+      this.runtime = undefined;
+      for (const directory of runtime?.ownedDirectories ?? []) {
+        await rm(directory, { recursive: true, force: true }).catch(() => {});
+      }
+      await this.drainRetiredPaths();
+      throw error;
+    } finally {
+      if (this.startupAbort === startupAbort) this.startupAbort = undefined;
+    }
+  }
+
+  private async warmEvaluationPath(): Promise<void> {
+    const kernelEpoch = this.kernelEpoch;
+    if (kernelEpoch === null) throw new EngineTransportError("kernel epoch is unavailable during warmup", "kernel");
+    const identity = randomUUID();
+    const retainOutputs = this.outputStoreValue !== undefined && this.outputSessionEpoch !== undefined;
+    const makePayload = (index: number, source: string, definitions: string[] = []): EvaluationPayload => ({
+      sessionEpoch: this.outputSessionEpoch ?? `warmup-session-${identity}`, kernelEpoch,
+      operationId: `warmup-operation-${identity}`, runId: `warmup-run-${identity}`,
+      cellId: `cell-internal-warmup-${index}`, revision: 0, documentRevision: this.outputDocumentRevision ?? 0,
+      source, definitions, locals: [], opaque: false,
+    });
+    const valuePayload = (index: number): EvaluationPayload => {
+      if (retainOutputs) return makePayload(index, "1L");
+      const binding = `.alder_runtime_warmup_${index}`;
+      return makePayload(index, `${binding} <- if (exists(".Last.value", envir = baseenv(), inherits = FALSE)) get(".Last.value", envir = baseenv(), inherits = FALSE) else NULL\ninvisible(${binding})`, [binding]);
+    };
+    const single = valuePayload(0);
+    const batch = [valuePayload(1), valuePayload(2), valuePayload(3)];
+    const reset = retainOutputs ? makePayload(4, "invisible(NULL)") : undefined;
+    const outputs: OutputRecord[] = [];
+    const responses: Array<EngineResponse | undefined> = [];
+    let cleanup: EngineResponse | undefined;
+    const recordResponse = (response: EngineResponse | undefined): void => {
+      responses.push(response);
+      outputs.push(...(response?.outputs ?? []));
+    };
+    try {
+      recordResponse(await this.evaluate(single, undefined, undefined, true));
+      for (const response of await this.evaluateBatch(batch, undefined, undefined, true)) recordResponse(response);
+      if (reset !== undefined) recordResponse(await this.evaluate(reset, undefined, undefined, true));
+    } finally {
+      try {
+        cleanup = await this.request("clear_cell", {
+          ids: [single, ...batch, ...(reset === undefined ? [] : [reset])].map(value => value.cellId),
+        }, undefined, true);
+      } finally {
+        if (outputs.length > 0) await this.discardEvaluationOutputs(outputs);
+      }
+    }
+    const failed = responses.find(value => value?.ok !== true);
+    if (failed !== undefined || cleanup?.ok !== true) {
+      throw new EngineTransportError(
+        failed?.error?.message ?? cleanup?.error?.message ?? "kernel evaluation warmup failed", "kernel");
+    }
+  }
+  private async startFresh(): Promise<EngineHandshake> {
+    const startupAbort = new AbortController();
+    this.startupAbort = startupAbort;
+    try {
+      if (!this.analyzer?.ready) await this.startAnalyzerLocked();
+      if (!this.kernel?.ready) await this.startKernelLocked();
+      if (startupAbort.signal.aborted || this.isClosed()) {
+        throw new EngineTransportError("engine startup was cancelled");
+      }
+      const analyzer = this.analyzerInfo;
+      const kernel = this.kernelInfo;
+      if (analyzer === undefined || kernel === undefined || this.kernelEpoch === null) {
+        throw new EngineTransportError("Engine startup omitted a peer identity");
       }
       const ping = await this.runArkCommand("ping", {}, false);
       if (ping.ok !== true || ping.package_version !== analyzer.packageVersion ||
-          ping.r_version !== analyzer.rVersion ||
-          service.packageVersion !== analyzer.packageVersion ||
-          service.rVersion !== analyzer.rVersion ||
-          this.servicePeer?.ready !== true ||
-          !kernel.languageVersion.includes(analyzer.rVersion)) {
-        throw new EngineTransportError(
-          "kernel, analyzer, and service identities do not match",
-        );
+          ping.r_version !== analyzer.rVersion || !kernel.languageVersion.includes(analyzer.rVersion)) {
+        throw new EngineTransportError("kernel and analyzer identities do not match");
       }
+      await this.warmEvaluationPath();
       const capabilities = [...new Set([
         "ark",
         "evaluation",
         "jupyter-iopub",
         "jupyter-control-interrupt",
+        "mimePublisher:alder-json-v1",
         "native-graphics",
         "native-htmlwidgets",
         "variables",
         ...KERNEL_COMMANDS,
         ...analyzer.capabilities,
-        ...service.capabilities,
       ])].sort();
       this.handshake = engineHandshakeSchema.parse({
         protocol: ENGINE_PROTOCOL,
@@ -949,11 +1268,11 @@ export class Engine extends EventEmitter implements EngineAdapter {
           name: "ark",
           version: kernel.implementationVersion,
           protocol: kernel.protocolVersion,
+          kernelEpoch: this.kernelEpoch,
+          buildVersion: kernel.buildVersion,
+          mimePublisher: kernel.mimePublisher,
         },
       });
-      if (this.isClosed()) {
-        throw new EngineTransportError("engine was closed during startup");
-      }
       this.state = "ready";
       return this.handshake;
     } catch (error) {
@@ -964,7 +1283,26 @@ export class Engine extends EventEmitter implements EngineAdapter {
       if (this.startupAbort === startupAbort) this.startupAbort = undefined;
     }
   }
+  private analyzerIdentity(): AnalyzerIdentity {
+    const info = this.analyzerInfo;
+    if (info === undefined || this.analysisEnvironmentId === undefined) {
+      throw new EngineTransportError("analyzer identity is unavailable", "analyzer");
+    }
+    return {
+      packageVersion: info.packageVersion,
+      rVersion: info.rVersion,
+      policy: info.capabilities.includes("analysis-policy:v1") ? "strict" : "default",
+      analysisEnvironmentId: this.analysisEnvironmentId,
+    };
+  }
 
+  private kernelIdentity(): KernelIdentity {
+    const info = this.kernelInfo;
+    if (info === undefined || this.kernelEpoch === null) {
+      throw new EngineTransportError("kernel identity is unavailable", "kernel");
+    }
+    return { name: "ark", version: info.implementationVersion, protocol: info.protocolVersion, kernelEpoch: this.kernelEpoch };
+  }
   private makeRPeer(
     role: RPeerRole,
     startupTimeoutMs: number,
@@ -972,39 +1310,51 @@ export class Engine extends EventEmitter implements EngineAdapter {
     generation: number,
   ): RPeer {
     const paths = this.paths!;
+    const environment = this.requireEnvironment("analyzer");
     return new RPeer(
       role,
-      this.options.rscript ?? process.env.ALDER_RSCRIPT ?? "Rscript",
+      environment.rscript,
       paths.analyzerScript,
       paths.notebookDirectory,
-      { ...paths.analyzerEnvironment, ALDER_HOST_ROLE: role },
+      { ...paths.analyzerEnvironment, ...rEnvironmentVariables(environment, this.options.resources, this.analysisEnvironmentId), ALDER_HOST_ROLE: role },
+      this.options.processScope,
       maxFrameBytes,
       startupTimeoutMs,
-      (peerRole, frame) => this.handleRFrame(peerRole, frame),
+      (peerRole, frame) => this.handleRFrame(peerRole, frame, generation),
       (peerRole, error, intentional) => {
-        if (generation === this.peerGeneration) {
-          this.peerFailed(peerRole, error, intentional);
-        }
+        if (generation === this.peerGeneration) this.peerFailed(peerRole, error, intentional);
       },
     );
   }
 
   private async ensureStarted(): Promise<void> {
-    if (this.state === "closed") throw new EngineTransportError("engine is closed");
-    if (this.restartPromise !== undefined) await this.restartPromise;
-    if (this.state !== "ready") await this.start();
-    if (this.state !== "ready") throw new EngineTransportError("engine is unavailable");
+    await this.ensureAnalyzer();
+    await this.ensureKernel();
   }
 
+  private async ensureAnalyzer(): Promise<void> {
+    if (this.state === "closed") throw new EngineTransportError("engine is closed");
+    if (this.restartPromise !== undefined) await this.restartPromise;
+    if (this.analyzer?.ready !== true) await this.startAnalyzer();
+    if (this.analyzer?.ready !== true) throw new EngineTransportError("analyzer is unavailable", "analyzer");
+  }
+
+  private async ensureKernel(duringStartup = false): Promise<void> {
+    if (this.state === "closed") throw new EngineTransportError("engine is closed");
+    if (!duringStartup && this.restartPromise !== undefined) await this.restartPromise;
+    if (this.kernel?.ready !== true) await this.startKernel();
+    if (this.kernel?.ready !== true) throw new EngineTransportError("kernel is unavailable", "kernel");
+  }
   private sendRRequest(
     role: RPeerRole,
     command: string,
     payload: Record<string, unknown>,
   ): Promise<Record<string, unknown>> {
-    const peer = role === "analyzer" ? this.analyzer : this.servicePeer;
+    const peer = this.analyzer;
     if (peer?.ready !== true) {
       return Promise.reject(new EngineTransportError(`${role} is unavailable`, role));
     }
+    const generation = this.analyzerGeneration;
     let queuedForRole = 0;
     for (const pending of this.rPending.values()) {
       if (pending.role === role) queuedForRole += 1;
@@ -1047,6 +1397,7 @@ export class Engine extends EventEmitter implements EngineAdapter {
         role,
         command,
         wire,
+        generation,
         resolve: (value) => {
           const traceError = settle(terminalTraceFields(value));
           if (traceError === undefined) resolveRequest(value);
@@ -1067,12 +1418,15 @@ export class Engine extends EventEmitter implements EngineAdapter {
     });
   }
 
-  private handleRFrame(role: RPeerRole, input: unknown): void {
+  private handleRFrame(role: RPeerRole, input: unknown, generation: number): void {
     const frame = asRecord(input, "engine response");
     const requestId = positiveSafeInteger(frame.req, "response req");
     const pending = this.rPending.get(requestId);
     if (pending === undefined) {
       throw new FrameProtocolError("response does not identify a pending request");
+    }
+    if (pending.generation !== generation) {
+      throw new FrameProtocolError("response belongs to a stale analyzer generation");
     }
     if (pending.role !== role || frame.cmd !== pending.command) {
       throw new FrameProtocolError("response command identity does not match");
@@ -1110,20 +1464,12 @@ export class Engine extends EventEmitter implements EngineAdapter {
     intentional: boolean,
   ): void {
     this.rejectPending(role, error);
-    if (role === "service") {
-      if (!intentional && this.state !== "closed") {
-        this.emit("failure", "services", error);
-      }
-      return;
-    }
     if (this.state !== "closed") this.state = "degraded";
-    if (!intentional && this.state !== "closed") {
-      this.emit("failure", role, error);
-    }
+    if (!intentional && this.state !== "closed") this.emit("failure", role, error);
   }
 
   private rejectPending(role: PeerRole, error: Error): void {
-    if (role === "analyzer" || role === "service") {
+    if (role === "analyzer") {
       for (const [requestId, pending] of this.rPending) {
         if (pending.role !== role) continue;
         this.rPending.delete(requestId);
@@ -1139,29 +1485,28 @@ export class Engine extends EventEmitter implements EngineAdapter {
   private async stopPeers(reason: string): Promise<void> {
     const kernel = this.kernel;
     const analyzer = this.analyzer;
-    const service = this.servicePeer;
     const runtime = this.runtime;
+    const oldKernelEpoch = this.kernelEpoch;
     this.peerGeneration += 1;
     analyzer?.expectExit();
-    service?.expectExit();
     this.rejectPending("kernel", new EngineTransportError(reason, "kernel"));
     this.rejectPending("analyzer", new EngineTransportError(reason, "analyzer"));
-    this.rejectPending("service", new EngineTransportError(reason, "service"));
     const timeout = this.options.shutdownTimeoutMs ?? 1_000;
     try {
-      await Promise.all([
-        kernel?.terminate(),
-        analyzer?.terminate(timeout),
-        service?.terminate(timeout),
-      ]);
+      await Promise.all([kernel?.terminate(), analyzer?.terminate(timeout)]);
     } finally {
-      for (const directory of runtime?.ownedDirectories ?? []) {
-        await rm(directory, { recursive: true, force: true }).catch(() => {});
-      }
+      for (const directory of runtime?.ownedDirectories ?? []) await rm(directory, { recursive: true, force: true }).catch(() => {});
       if (this.runtime === runtime) this.runtime = undefined;
       if (this.kernel === kernel) this.kernel = undefined;
       if (this.analyzer === analyzer) this.analyzer = undefined;
-      if (this.servicePeer === service) this.servicePeer = undefined;
+      this.analyzerInfo = undefined;
+      this.kernelInfo = undefined;
+      this.kernelEpoch = null;
+      this.handshake = undefined;
+      this.analyzerGeneration = 0;
+      this.kernelGeneration = 0;
+      if (oldKernelEpoch !== null) this.outputStoreValue?.invalidateRequests({ kernelEpoch: oldKernelEpoch });
+      await this.drainRetiredPaths();
     }
   }
 
@@ -1172,7 +1517,14 @@ export class Engine extends EventEmitter implements EngineAdapter {
     return this.requestCounter++;
   }
 
+  private assertEvaluationCurrent(state: ActiveEvaluation): void {
+    if (state.kernelGeneration !== this.kernelGeneration ||
+        this.kernelEpoch === null || state.payload.kernelEpoch !== this.kernelEpoch) {
+      throw new EngineTransportError("evaluation belongs to a stale kernel generation", "kernel");
+    }
+  }
   private startEvaluation(state: ActiveEvaluation): void {
+    this.assertEvaluationCurrent(state);
     if (state.started || (this.executingRequest !== undefined &&
         (state.batch === undefined || this.executingRequest !== state.requestId))) {
       state.messageError ??= new FrameProtocolError("invalid Ark evaluation start state");
@@ -1193,6 +1545,7 @@ export class Engine extends EventEmitter implements EngineAdapter {
     state: ActiveEvaluation,
     message: JupyterMessage,
   ): Promise<void> {
+    this.assertEvaluationCurrent(state);
     const type = message.header.msg_type;
     if (type === "stream") {
       const text = message.content.text;
@@ -1211,121 +1564,144 @@ export class Engine extends EventEmitter implements EngineAdapter {
       else await this.clearEvaluationOutputs(state);
       return;
     }
-    if (type !== "execute_result" && type !== "display_data" &&
-        type !== "update_display_data") return;
+    if (type !== "execute_result" && type !== "display_data" && type !== "update_display_data") return;
     const event = decodeArkEvent(message, this.arkEventToken, this.maxArkPayloadBytes());
     if (event !== undefined) {
       await this.applyArkEvent(state, event);
       return;
     }
     await this.applyPendingClear(state);
-    const native = await this.nativeOutput(message);
-    if (native === undefined) return;
-    let output = { ...asRecord(native, "native output"), log_offset: state.console.characters };
-    const transient = optionalRecord(message.content.transient);
-    const displayId = typeof transient?.display_id === "string"
-      ? transient.display_id
-      : undefined;
-    if (type === "update_display_data" && displayId !== undefined) {
-      const index = state.displayOutputs.get(displayId);
-      if (index !== undefined) {
-        output = { ...output, log_offset: Number(asRecord(state.outputs[index], "display output").log_offset) };
-        const oldBytes = jsonByteSize(state.outputs[index]);
-        const newBytes = jsonByteSize(output);
-        if (state.outputBytes - oldBytes + newBytes <= this.maxOutputBytes()) {
-          await this.discardNativeOutput(state.outputs[index]);
-          state.outputs[index] = output;
-          state.outputBytes = state.outputBytes - oldBytes + newBytes;
-        } else {
-          state.truncated = true;
-          await this.discardNativeOutput(output);
-        }
-        return;
-      }
-    }
-    const index = this.addEvaluationOutput(state, output);
-    if (index === undefined) {
-      await this.discardNativeOutput(output);
-      return;
-    }
-    if (displayId !== undefined) state.displayOutputs.set(displayId, index);
-  }
-
-  private async applyArkEvent(
-    state: ActiveEvaluation,
-    input: Record<string, unknown>,
-  ): Promise<void> {
-    const type = input.type;
-    if (type === "started") {
-      this.startEvaluation(state);
-      return;
-    }
-    if (type === "append" || type === "progress" || type === "log") {
-      await this.applyPendingClear(state);
-      const sequence = positiveSafeInteger(input.sequence, "Alder Ark output sequence");
-      if (sequence <= state.rSequence) {
-        throw new FrameProtocolError("Alder Ark output sequence is not monotonic");
-      }
-      state.rSequence = sequence;
-      validateOutputPayload(type, input.payload);
-      let eventPayload = input.payload;
-      if (type === "append") {
-        const payload = asRecord(input.payload, "append output payload");
-        const output = { ...asRecord(payload.output, "append output"), log_offset: state.console.characters };
-        if (this.addEvaluationOutput(state, output) === undefined) {
-          await this.discardDuringEvaluation(state, [output]);
-          return;
-        }
-        eventPayload = { ...payload, output };
-      }
-      if (type === "log") {
-        const payload = asRecord(input.payload, "log output payload");
-        const lines = payload.lines;
-        this.appendLog(state, (Array.isArray(lines) ? lines.join("\n") : String(lines)) + "\n");
-        return;
+    const records = await this.ingestDisplay(state, message);
+    for (const record of records) {
+      if (this.addEvaluationOutput(state, record) === undefined) {
+        this.outputStoreValue?.discardExact([record]);
+        continue;
       }
       this.emitEvaluationEvent(state, {
         type: "output",
         sequence: ++state.sequence,
-        kind: type,
-        payload: eventPayload,
+        kind: "append",
+        payload: { output: record },
       });
+    }
+  }
+  private async ingestDisplay(state: ActiveEvaluation, message: JupyterMessage): Promise<OutputRecord[]> {
+    const paths = this.paths;
+    if (paths === undefined || this.kernelEpoch === null) throw new EngineTransportError("output store is unavailable", "kernel");
+    const store = this.prepareOutputStore({
+      sessionEpoch: state.payload.sessionEpoch,
+      documentRevision: state.payload.documentRevision,
+    });
+    const data = asRecord(message.content.data, "Ark display data");
+    const metadata = optionalRecord(message.content.metadata) ?? {};
+    return store.ingestDisplay(data as never, metadata as never, {
+      runId: state.payload.runId,
+      cellId: state.payload.cellId,
+      revision: state.payload.revision,
+      sessionEpoch: state.payload.sessionEpoch,
+      documentRevision: state.payload.documentRevision,
+      kernelEpoch: this.kernelEpoch,
+    });
+  }
+
+  private async ingestAlderOutput(state: ActiveEvaluation, value: unknown): Promise<OutputRecord> {
+    const paths = this.paths;
+    if (paths === undefined || this.kernelEpoch === null) throw new EngineTransportError("output store is unavailable", "kernel");
+    const store = this.prepareOutputStore({
+      sessionEpoch: state.payload.sessionEpoch,
+      documentRevision: state.payload.documentRevision,
+    });
+    return await Promise.resolve(store.ingestAlder(value as never, {
+      sessionEpoch: state.payload.sessionEpoch,
+      documentRevision: state.payload.documentRevision,
+      kernelEpoch: this.kernelEpoch,
+      runId: state.payload.runId,
+      cellId: state.payload.cellId,
+      revision: state.payload.revision,
+    }, {} as never)) as OutputRecord;
+  }
+
+  private async applyArkEvent(state: ActiveEvaluation, input: Record<string, unknown>): Promise<void> {
+    this.assertEvaluationCurrent(state);
+    const type = input.type;
+    const expectedRequest = String(state.requestId);
+    if (type !== "command_result" && input.request !== expectedRequest) throw new FrameProtocolError("Alder Ark event request identity does not match");
+    if (type !== "command_result" && (input.session_epoch !== state.payload.sessionEpoch || input.kernel_epoch !== this.kernelEpoch || input.run_id !== state.payload.runId || input.operation_id !== state.payload.operationId || input.cell_id !== state.payload.cellId || input.revision !== state.payload.revision)) {
+      throw new FrameProtocolError("Alder Ark event execution identity does not match");
+    }
+    if (type !== "started" && type !== "batch_end" && type !== "command_result") {
+      if (!state.started) throw new FrameProtocolError("Alder Ark event arrived before evaluation start");
+      const sequence = positiveSafeInteger(input.sequence, "Alder Ark output sequence");
+      if (sequence <= state.rSequence) throw new FrameProtocolError("Alder Ark output sequence is not monotonic");
+      state.rSequence = sequence;
+    }
+    if (type === "started") {
+      if (input.sequence !== 0) throw new FrameProtocolError("invalid Alder evaluation start sequence");
+      this.startEvaluation(state);
+      return;
+    }
+    if (type === "batch_end") return;
+    if (type === "append" || type === "progress" || type === "log") {
+      await this.applyPendingClear(state);
+      const payload = asRecord(input.payload, type + " output payload");
+      validateOutputPayload(type, payload);
+      if (type === "log") {
+        const lines = payload.lines;
+        if (!(typeof lines === "string" || (Array.isArray(lines) && lines.every((line) => typeof line === "string")))) throw new FrameProtocolError("invalid log output");
+        this.appendLog(state, (Array.isArray(lines) ? lines.join("\n") : lines) + "\n");
+        return;
+      }
+      if (type === "progress") {
+        this.emitEvaluationEvent(state, { type: "output", sequence: ++state.sequence, kind: "progress", payload });
+        return;
+      }
+      const record = await this.ingestAlderOutput(state, payload.output ?? payload);
+      if (this.addEvaluationOutput(state, record) === undefined) {
+        this.outputStoreValue?.discardExact([record]);
+        return;
+      }
+      this.emitEvaluationEvent(state, { type: "output", sequence: ++state.sequence, kind: "append", payload: { output: record } });
       return;
     }
     if (type === "result") {
       await this.applyPendingClear(state);
-      if (!("output" in input)) throw new FrameProtocolError("Alder result omitted output");
-      const output = {
-        ...asRecord(input.output, "result output"), log_offset: state.console.characters,
-      };
-      if (this.addEvaluationOutput(state, output) === undefined) {
-        await this.discardDuringEvaluation(state, [output]);
+      const payload = asRecord(input.payload, "result output payload");
+      const record = await this.ingestAlderOutput(state, payload.output ?? payload);
+      if (this.addEvaluationOutput(state, record) === undefined) {
+        this.outputStoreValue?.discardExact([record]);
+        return;
       }
+      this.emitEvaluationEvent(state, { type: "output", sequence: ++state.sequence, kind: "append", payload: { output: record } });
       return;
     }
     if (type === "condition") {
-      state.structuredError = engineErrorSchema.parse(input.error);
+      const payload = asRecord(input.payload, "condition payload");
+      const error = engineErrorSchema.parse(canonicalizeEngineError(payload.error));
+      const invalid = kernelStateInvalidMarker(error);
+      if (invalid !== null) {
+        state.kernelStateInvalid ??= invalid;
+        if (state.structuredError === undefined) state.structuredError = error;
+      } else {
+        state.structuredError = error;
+      }
       return;
     }
     if (type === "finished") {
-      if (!state.started || state.finished) {
-        throw new FrameProtocolError("invalid Alder evaluation completion marker");
-      }
+      if (!state.started || state.finished) throw new FrameProtocolError("invalid Alder evaluation completion marker");
       state.finished = true;
       return;
     }
     if (type === "cell_meta") {
-      if (input.stopped !== true) throw new FrameProtocolError("invalid Alder cell metadata");
+      const payload = asRecord(input.payload, "cell metadata payload");
+      if (payload.stopped !== true) throw new FrameProtocolError("invalid Alder cell metadata");
       state.stopped = true;
       return;
     }
-    if (type === "command_result") {
-      throw new FrameProtocolError("command result appeared during cell evaluation");
-    }
+    if (type === "command_result") throw new FrameProtocolError("command result appeared during cell evaluation");
     throw new FrameProtocolError("unknown Alder Ark event type");
   }
-
   private appendLog(state: ActiveEvaluation, text: string): void {
+    text = redactEngineSecrets(text, this.arkEventToken);
     const delta = state.console.append(text);
     state.log = state.console.lines;
     state.truncated ||= state.console.truncated;
@@ -1350,7 +1726,7 @@ export class Engine extends EventEmitter implements EngineAdapter {
     });
   }
 
-  private addEvaluationOutput(state: ActiveEvaluation, output: unknown): number | undefined {
+  private addEvaluationOutput(state: ActiveEvaluation, output: OutputRecord): number | undefined {
     const bytes = jsonByteSize(output);
     if (state.outputs.length >= MAX_OUTPUT_RECORDS ||
         state.outputBytes + bytes > this.maxOutputBytes()) {
@@ -1370,7 +1746,6 @@ export class Engine extends EventEmitter implements EngineAdapter {
     const outputs = state.outputs;
     state.outputs = [];
     state.outputBytes = 0;
-    state.displayOutputs.clear();
     state.console = new OutputLog(MAX_LOG_BYTES);
     state.log = [];
     state.truncated = false;
@@ -1403,13 +1778,14 @@ export class Engine extends EventEmitter implements EngineAdapter {
         throw new FrameProtocolError("Alder evaluation omitted its completion marker");
       }
     }
-    return engineResponseSchema.parse(error === undefined
+    const response = engineResponseSchema.parse(error === undefined
       ? {
           ok: true,
           outputs: state.outputs,
           stopped: state.stopped,
           log: state.log,
           truncated: state.truncated,
+          ...(state.kernelStateInvalid === undefined ? {} : { kernelStateInvalid: state.kernelStateInvalid }),
         }
       : {
           ok: false,
@@ -1418,95 +1794,98 @@ export class Engine extends EventEmitter implements EngineAdapter {
           log: state.log,
           truncated: state.truncated,
           error,
+          ...(state.kernelStateInvalid === undefined ? {} : { kernelStateInvalid: state.kernelStateInvalid }),
         });
+    return error === undefined && response.outputs !== undefined
+      ? { ...response, outputs: state.outputs.slice() }
+      : response;
   }
 
   private emitEvaluationEvent(
     state: ActiveEvaluation,
     event: Record<string, unknown>,
   ): void {
+    if (event.type === "output" && event.kind === "progress") {
+      validateOutputPayload("progress", event.payload);
+    }
+    let canonicalOutput: OutputRecord | undefined;
+    let canonicalResultOutputs: OutputRecord[] | undefined;
+    if (event.type === "output" && event.kind === "append") {
+      const appendPayload = asRecord(event.payload, "append output payload");
+      const appendOutput = asRecord(appendPayload.output, "append output");
+      const outputId = appendOutput.id;
+      if (typeof outputId === "string") canonicalOutput = state.outputs.find((output) => output.id === outputId);
+    }
+    const completedResult = event.type === "completed" ? asRecord(event.result, "completed result") : undefined;
+    const completedOutputs = completedResult?.outputs;
+    if (Array.isArray(completedOutputs)) {
+      const retained: OutputRecord[] = [];
+      let allCanonical = completedOutputs.length <= state.outputs.length;
+      if (allCanonical) {
+        for (let index = 0; index < completedOutputs.length; index += 1) {
+          const canonical = state.outputs[index];
+          if (canonical === undefined || canonical !== completedOutputs[index]) {
+            allCanonical = false;
+            break;
+          }
+          retained.push(canonical);
+        }
+      }
+      if (allCanonical) canonicalResultOutputs = retained;
+    }
     const parsed = engineEventSchema.parse({
       ...event,
       requestId: state.requestId,
       sessionEpoch: state.payload.sessionEpoch,
+      kernelEpoch: state.payload.kernelEpoch,
       operationId: state.payload.operationId,
       runId: state.payload.runId,
       cellId: state.payload.cellId,
       revision: state.payload.revision,
+      documentRevision: state.payload.documentRevision,
     });
+    if (canonicalOutput !== undefined && parsed.type === "output" && parsed.kind === "append") {
+      const canonicalEvent: EngineEvent = { ...parsed, payload: { output: canonicalOutput } };
+      state.onEvent?.(canonicalEvent);
+      return;
+    }
+    if (canonicalResultOutputs !== undefined && parsed.type === "completed" && parsed.result.outputs !== undefined) {
+      const canonicalEvent: EngineEvent = {
+        ...parsed,
+        result: { ...parsed.result, outputs: canonicalResultOutputs },
+      };
+      state.onEvent?.(canonicalEvent);
+      return;
+    }
     state.onEvent?.(parsed);
   }
 
-  private async nativeOutput(message: JupyterMessage): Promise<unknown | undefined> {
-    const data = asRecord(message.content.data, "Ark display data");
-    if (typeof data["image/png"] === "string") {
-      const bytes = decodeBase64(data["image/png"], this.maxArkPayloadBytes());
-      return { kind: "image", artifact: await this.writeNativeArtifact(bytes, ".png") };
-    }
-    if (typeof data["image/svg+xml"] === "string") {
-      return {
-        kind: "image",
-        artifact: await this.writeNativeArtifact(data["image/svg+xml"], ".svg"),
-      };
-    }
-    if (typeof data["text/html"] === "string") {
-      return {
-        kind: "html",
-        artifact: await this.writeNativeArtifact(data["text/html"], ".html"),
-      };
-    }
-    if (typeof data["text/plain"] === "string") {
-      return { kind: "text", text: data["text/plain"] };
-    }
-    return undefined;
+  private async discardEvaluationOutputs(outputs: readonly OutputRecord[]): Promise<void> {
+    this.outputStoreValue?.discardExact(outputs);
   }
 
-  private async writeNativeArtifact(
-    content: string | Buffer,
-    extension: ".png" | ".svg" | ".html",
-  ): Promise<string> {
-    const name = `ark-${randomUUID()}${extension}`;
-    await writeFile(join(this.paths!.artifactDirectory, name), content, {
-      flag: "wx",
-      mode: 0o600,
+  private async discardDuringEvaluation(_state: ActiveEvaluation, outputs: readonly OutputRecord[]): Promise<void> {
+    this.outputStoreValue?.discardExact(outputs);
+  }
+  private async normalizeRequestResult(
+    command: string,
+    scope: OutputScope | undefined,
+    response: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    if (response.ok !== true || (command !== "get_value" && command !== "lazy_eval")) return response;
+    const field = command === "get_value" ? "value" : "output";
+    if (!(field in response)) return response;
+    if (scope === undefined) throw new FrameProtocolError("request output scope is required");
+    const paths = this.paths;
+    if (paths === undefined || this.kernelEpoch === null) {
+      throw new EngineTransportError("output store is unavailable", "kernel");
+    }
+    const store = this.prepareOutputStore({
+      sessionEpoch: scope.sessionEpoch,
+      documentRevision: scope.documentRevision,
     });
-    this.nativeArtifacts.add(name);
-    return name;
-  }
-
-  private async discardNativeOutput(output: unknown): Promise<void> {
-    const record = optionalRecord(output);
-    const artifact = record?.artifact;
-    if (typeof artifact !== "string" || !this.nativeArtifacts.has(artifact)) return;
-    await rm(join(this.paths!.artifactDirectory, artifact), { force: true }).catch(() => {});
-    this.nativeArtifacts.delete(artifact);
-  }
-
-  private async discardEvaluationOutputs(outputs: readonly unknown[]): Promise<void> {
-    const artifacts = [...collectArtifactHandles(outputs)];
-    if (artifacts.length === 0) return;
-    await this.discardArtifactFiles(artifacts);
-    void this.releaseOutputs({ artifacts }).catch(() => {});
-  }
-
-  private async discardDuringEvaluation(
-    state: ActiveEvaluation,
-    outputs: readonly unknown[],
-  ): Promise<void> {
-    const artifacts = [...collectArtifactHandles(outputs)];
-    if (artifacts.length === 0) return;
-    for (const artifact of artifacts) state.deferredArtifactReleases.add(artifact);
-    await this.discardArtifactFiles(artifacts);
-  }
-
-  private async discardArtifactFiles(artifacts: readonly string[]): Promise<void> {
-    const directory = this.paths?.artifactDirectory;
-    if (directory === undefined) return;
-    await Promise.all(artifacts.map(async (artifact) => {
-      if (!artifactHandle(artifact)) return;
-      await rm(join(directory, artifact), { force: true }).catch(() => {});
-      this.nativeArtifacts.delete(artifact);
-    }));
+    const normalized = await store.normalizeAlder(response[field], scope);
+    return { ...response, [field]: normalized };
   }
 
   private async runArkCommand(
@@ -1540,7 +1919,15 @@ export class Engine extends EventEmitter implements EngineAdapter {
                 result !== undefined) {
               throw new FrameProtocolError("invalid Alder Ark command result");
             }
-            result = asRecord(event.response, "Alder Ark command response");
+            const payload = asRecord(event.payload, "Alder Ark command result payload");
+            const response = asRecord(payload.response, "Alder Ark command response");
+            result = Object.prototype.hasOwnProperty.call(response, "error") && response.error !== undefined
+              ? (() => {
+                  const error = canonicalizeEngineError(response.error);
+                  const marker = kernelStateInvalidMarker(engineErrorSchema.parse(error));
+                  return marker === null ? { ...response, error } : { ...response, error, kernelStateInvalid: marker };
+                })()
+              : response;
           }).catch((error) => { messageError ??= asError(error); });
         },
       }, { storeHistory: false, auxiliary: command === "env_snapshot" });
@@ -1563,48 +1950,69 @@ export class Engine extends EventEmitter implements EngineAdapter {
       this.pendingKernelRequests -= 1;
     }
   }
+  private async releaseDeferredArtifacts(artifacts: readonly string[]): Promise<void> {
+    for (const artifact of artifacts) {
+      if (!artifactHandle(artifact)) throw new FrameProtocolError("invalid deferred artifact handle");
+    }
+    for (let offset = 0; offset < artifacts.length; offset += MAX_RELEASE_ARTIFACTS) {
+      const response = await this.releaseOutputs({
+        artifacts: artifacts.slice(offset, offset + MAX_RELEASE_ARTIFACTS),
+      });
+      if (!response.ok) {
+        throw new FrameProtocolError(response.error?.message ?? "deferred artifact release failed");
+      }
+      if (response.failed !== undefined && response.failed.length > 0) {
+        throw new FrameProtocolError(
+          "deferred artifact release failed for " + response.failed.length + " artifact(s)",
+        );
+      }
+    }
+  }
 
   private async releaseOutputs(payload: Record<string, unknown>): Promise<EngineResponse> {
     const values = payload.artifacts;
-    if (!Array.isArray(values) || values.length > MAX_OUTPUT_RECORDS ||
-        values.some((value) => !artifactHandle(value)) ||
-        new Set(values).size !== values.length) {
-      return engineResponseSchema.parse(await this.runArkCommand("release_outputs", payload));
+    if (!Array.isArray(values)) {
+      const response = releaseOutputsResponseSchema.parse(
+        await this.runArkCommand("release_outputs", payload),
+      );
+      return engineResponseSchema.parse(response);
     }
-    const native = values.filter((value): value is string =>
-      typeof value === "string" && this.nativeArtifacts.has(value));
-    const worker = values.filter((value) => !native.includes(value as string));
-    const released: string[] = [];
-    const failed: string[] = [];
-    for (const artifact of native) {
-      try {
-        await rm(join(this.paths!.artifactDirectory, artifact), { force: true });
-        this.nativeArtifacts.delete(artifact);
-        released.push(artifact);
-      } catch {
-        failed.push(artifact);
+    if (values.length > MAX_RELEASE_ARTIFACTS) {
+      throw new FrameProtocolError("release_outputs batch exceeds the wire limit");
+    }
+    const descriptors: ArtifactHandle[] = [];
+    const worker: string[] = [];
+    const seen = new Set<string>();
+    for (const value of values) {
+      if (typeof value === "string") {
+        if (!artifactHandle(value)) throw new FrameProtocolError("invalid artifact handle");
+        if (seen.has(value)) throw new FrameProtocolError("release_outputs requires unique artifact handles");
+        seen.add(value);
+        worker.push(value);
+        continue;
       }
+      const jsonValue = protocolJsonSchema.safeParse(value);
+      if (!jsonValue.success) throw new FrameProtocolError("invalid artifact descriptor");
+      const parsed = artifactHandleSchema.safeParse(jsonValue.data);
+      if (!parsed.success) throw new FrameProtocolError("invalid artifact descriptor");
+      if (seen.has(parsed.data.handle)) throw new FrameProtocolError("release_outputs requires unique artifact handles");
+      seen.add(parsed.data.handle);
+      descriptors.push(parsed.data);
     }
-    const response = worker.length === 0
-      ? { ok: true, released: [], missing: [], failed: [] }
-      : await this.runArkCommand("release_outputs", { artifacts: worker });
-    const workerReleased = stringArray(response.released);
-    const missing = stringArray(response.missing);
-    const workerFailed = stringArray(response.failed);
-    const allFailed = [...failed, ...workerFailed];
+    const local = this.outputStoreValue?.release(descriptors) ?? { released: [], missing: descriptors.map(value => value.handle), failed: [] };
+    const response = releaseOutputsResponseSchema.parse(
+      worker.length === 0
+        ? { ok: true, released: [], missing: [], failed: [] }
+        : await this.runArkCommand("release_outputs", { artifacts: worker }),
+    );
+    if (!response.ok) return engineResponseSchema.parse(response);
     return engineResponseSchema.parse({
       ...response,
-      ok: response.ok === true && allFailed.length === 0,
-      released: [...released, ...workerReleased],
-      missing,
-      failed: allFailed,
-      ...(allFailed.length > 0 ? { error: {
-        code: "artifact_release_failed",
-        message: "one or more output artifacts could not be released",
-      } } : {}),
+      released: [...(response.released ?? []), ...local.released],
+      missing: [...(response.missing ?? []), ...local.missing],
+      failed: [...(response.failed ?? []), ...local.failed],
     });
   }
-
   private kernelFailed(generation: number, error: Error): void {
     if (generation !== this.peerGeneration) return;
     if (this.state !== "closed") this.state = "degraded";
@@ -1648,8 +2056,7 @@ function parseHandshake(role: RPeerRole, input: unknown): RawHandshake {
   }
   const readiness = asRecord(value.readiness, "handshake readiness");
   if (readiness.initialized !== true ||
-      (role === "analyzer" && readiness.analysis !== true) ||
-      (role === "service" && readiness.services !== true)) {
+      readiness.analysis !== true) {
     throw new FrameProtocolError(`${role} is not initialized`);
   }
   return {
@@ -1661,6 +2068,9 @@ function parseHandshake(role: RPeerRole, input: unknown): RawHandshake {
   };
 }
 
+function isTraceValue(value: unknown): value is TraceFields[string] {
+  return value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean";
+}
 function requestTraceFields(
   role: PeerRole,
   command: string,
@@ -1680,13 +2090,9 @@ function requestTraceFields(
   ] as const;
   for (const name of names) {
     const value = wire[name];
-    if (typeof value === "string" || typeof value === "number" ||
-        typeof value === "boolean" || value === null) {
+    if (isTraceValue(value)) {
       fields[name] = value;
     }
-  }
-  if (command === "service" && typeof wire.command === "string") {
-    fields.service = wire.command;
   }
   return fields;
 }
@@ -1704,39 +2110,142 @@ function terminalTraceFields(value: Record<string, unknown>): TraceFields {
   return fields;
 }
 
-function mapAnalysisResult(raw: Record<string, unknown>): unknown {
+function mapAnalysisResult(
+  raw: Record<string, unknown>,
+  sources: ReadonlyMap<string, string>,
+): unknown {
   if (!Array.isArray(raw.cells)) throw new FrameProtocolError("analysis cells are missing");
   const analyzer = asRecord(raw.analyzer, "analyzer identity");
+  const analysisEnvironmentId = raw.analysisEnvironmentId;
+  if (typeof analysisEnvironmentId !== "string" || analysisEnvironmentId.length === 0 ||
+      analyzer.analysisEnvironmentId !== analysisEnvironmentId) {
+    throw new FrameProtocolError("analysis environment identity is missing or inconsistent");
+  }
+  const cells = raw.cells.map((input) => {
+    const cell = asRecord(input, "analysis cell");
+    const source = typeof cell.id === "string" ? sources.get(cell.id) : undefined;
+    const diagnostics = Array.isArray(cell.diagnostics)
+      ? cell.diagnostics.map((diagnostic) => mapAnalysisDiagnostic(diagnostic, source))
+      : cell.diagnostics;
+    return {
+      id: cell.id,
+      revision: cell.revision,
+      defs: cell.defs,
+      refs: cell.refs,
+      selfRefs: cell.selfRefs,
+      locals: cell.locals,
+      barrier: cell.barrier,
+      opaque: cell.opaque,
+      diagnostics,
+      error: cell.error ?? null,
+      ...(cell.ranges === undefined ? {} : { ranges: mapAnalysisRanges(cell.ranges, source) }),
+    };
+  });
+  const packageVersion = analyzer.packageVersion ?? analyzer.package_version;
+  const rVersion = analyzer.rVersion ?? analyzer.r_version;
   return {
     revision: raw.revision,
-    cells: raw.cells.map((input) => {
-      const cell = asRecord(input, "analysis cell");
-      return {
-        id: cell.id,
-        revision: cell.revision,
-        defs: cell.defs,
-        refs: cell.refs,
-        selfRefs: cell.self_refs,
-        locals: cell.locals,
-        barrier: cell.barrier,
-        opaque: cell.opaque,
-        diagnostics: cell.diagnostics,
-        error: cell.error ?? null,
-      };
-    }),
+    analysisEnvironmentId,
+    cells,
     analyzer: {
-      packageVersion: analyzer.package_version,
-      rVersion: analyzer.r_version,
+      packageVersion,
+      rVersion,
       policy: analyzer.policy,
+      analysisEnvironmentId,
     },
   };
+}
+
+function mapAnalysisDiagnostic(value: unknown, source: string | undefined): unknown {
+  const diagnostic = asRecord(value, "analysis diagnostic");
+  const mapped: Record<string, unknown> = { ...diagnostic };
+  mapped.range = diagnostic.range === undefined || diagnostic.range === null
+    ? null
+    : mapRawRange(diagnostic.range, source);
+  if (Object.prototype.hasOwnProperty.call(diagnostic, "occurrences")) {
+    if (!Array.isArray(diagnostic.occurrences)) {
+      throw new FrameProtocolError("analysis diagnostic occurrences must be an array");
+    }
+    mapped.occurrences = diagnostic.occurrences
+      .map((range) => mapRawRange(range, source))
+      .filter((range): range is Record<string, unknown> => range !== null);
+  }
+  return mapped;
+}
+
+function mapAnalysisRanges(value: unknown, source: string | undefined): Record<string, unknown> {
+  const grouped: Record<string, unknown[]> = Object.create(null) as Record<string, unknown[]>;
+  const add = (entry: unknown, fallbackName?: string): void => {
+    const rawRange = asRecord(entry, "analysis source range");
+    const name = rawRange.name ?? fallbackName;
+    if (typeof name !== "string" || name.length === 0) {
+      throw new FrameProtocolError("analysis source range name is invalid");
+    }
+    const mapped = mapRawRange(rawRange, source);
+    if (mapped === null) return;
+    (grouped[name] ??= []).push(mapped);
+  };
+  if (Array.isArray(value)) {
+    for (const entry of value) add(entry);
+    return grouped;
+  }
+  const record = asRecord(value, "analysis ranges");
+  for (const [name, entries] of Object.entries(record)) {
+    if (!Array.isArray(entries)) throw new FrameProtocolError("analysis ranges must contain arrays");
+    for (const entry of entries) add(entry, name);
+  }
+  return grouped;
+}
+
+function mapRawRange(value: unknown, source: string | undefined): Record<string, unknown> | null {
+  const range = asRecord(value, "analysis source range");
+  const start = mapRawPosition(range.start, source, "start");
+  const end = mapRawPosition(range.end, source, "end");
+  if (start === null || end === null) return null;
+  return { start, end };
+}
+
+type RawPositionEndpoint = "start" | "end";
+
+function mapRawPosition(
+  value: unknown,
+  source: string | undefined,
+  endpoint: RawPositionEndpoint,
+): Record<string, number> | null {
+  const position = asRecord(value, "analysis source position");
+  const line = position.line;
+  const column = position.column;
+  if (typeof line !== "number" || typeof column !== "number" ||
+      !Number.isSafeInteger(line) || !Number.isSafeInteger(column) || line < 1 || column < 1) {
+    throw new FrameProtocolError("analysis source position is invalid");
+  }
+  if (source === undefined) return null;
+  const lines = source.split("\n");
+  const lineText = lines[line - 1];
+  if (lineText === undefined) return null;
+  const bytes = Buffer.byteLength(lineText, "utf8");
+  // The analyzer emits a one-based byte start and an end byte count. The end
+  // count is already the exclusive UTF-8 boundary; never round a split byte.
+  const byteOffset = endpoint === "end" ? column : column - 1;
+  if (byteOffset > bytes) return null;
+  let consumed = 0;
+  let utf16 = 0;
+  for (const character of lineText) {
+    const size = Buffer.byteLength(character, "utf8");
+    if (consumed === byteOffset) return { line: line - 1, character: utf16 };
+    if (consumed < byteOffset && byteOffset < consumed + size) return null;
+    consumed += size;
+    utf16 += character.length;
+  }
+  if (consumed !== byteOffset) return null;
+  return { line: line - 1, character: utf16 };
 }
 
 function assertAnalyzerIdentity(
   request: Record<string, unknown>,
   response: Record<string, unknown>,
 ): void {
-  for (const field of ["revision"] as const) {
+  for (const field of ["revision", "analysisEnvironmentId"] as const) {
     if (request[field] !== undefined && !Object.is(request[field], response[field])) {
       throw new FrameProtocolError(`response ${field} identity does not match`);
     }
@@ -1750,7 +2259,11 @@ function validateOutputPayload(kind: "append" | "progress" | "log", input: unkno
     if (Object.keys(output).length === 0) throw new FrameProtocolError("append output is empty");
   } else if (kind === "progress") {
     const progress = asRecord(payload.progress, "progress output");
-    if (progress.kind !== "progress") throw new FrameProtocolError("invalid progress output");
+    try {
+      progressOutputSchema.parse(progress);
+    } catch (error) {
+      throw new FrameProtocolError(`invalid progress output: ${asError(error).message}`);
+    }
   } else {
     const lines = payload.lines;
     if (!(typeof lines === "string" ||
@@ -1760,11 +2273,84 @@ function validateOutputPayload(kind: "append" | "progress" | "log", input: unkno
   }
 }
 
+function requestOutputScope(value: unknown): OutputScope {
+  const raw = asRecord(value, "request output scope");
+  const keys = ["sessionEpoch", "documentRevision", "kernelEpoch", "runId", "cellId", "revision"];
+  if (Object.keys(raw).length !== keys.length || keys.some((key) => !Object.prototype.hasOwnProperty.call(raw, key)) ||
+      !protocolJsonSchema.safeParse(raw).success) {
+    throw new FrameProtocolError("request output scope is invalid");
+  }
+  const scope = raw as OutputScope;
+  const validRevision = (entry: unknown): boolean => entry === null ||
+    (typeof entry === "number" && Number.isSafeInteger(entry) && entry >= 0);
+  const validId = (entry: unknown): boolean => typeof entry === "string" && entry.length > 0 && entry.length <= 256;
+  const validNullableId = (entry: unknown): boolean => entry === null || validId(entry);
+  if (!validId(scope.sessionEpoch) || typeof scope.documentRevision !== "number" ||
+      !Number.isSafeInteger(scope.documentRevision) || scope.documentRevision < 0 ||
+      !validNullableId(scope.kernelEpoch) || scope.kernelEpoch === null ||
+      !validNullableId(scope.runId) || !validNullableId(scope.cellId) ||
+      !validRevision(scope.revision) || (scope.cellId === null) !== (scope.revision === null) ||
+      (scope.kernelEpoch === null && scope.runId !== null)) {
+    throw new FrameProtocolError("request output scope is invalid");
+  }
+  return {
+    sessionEpoch: scope.sessionEpoch,
+    documentRevision: scope.documentRevision,
+    kernelEpoch: scope.kernelEpoch,
+    runId: scope.runId,
+    cellId: scope.cellId,
+    revision: scope.revision,
+  };
+}
+
 function asRecord(value: unknown, label: string): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw new FrameProtocolError(`${label} must be an object`);
   }
   return value as Record<string, unknown>;
+}
+function canonicalizeEngineError(value: unknown): Record<string, unknown> {
+  let raw: Record<string, unknown>;
+  try {
+    raw = asRecord(rawEngineErrorSchema.parse(value), "Alder Ark error");
+  } catch (error) {
+    throw new FrameProtocolError(`invalid Alder Ark error: ${asError(error).message}`);
+  }
+  const hasCondition = ["class", "call", "trace"].some((key) =>
+    Object.prototype.hasOwnProperty.call(raw, key),
+  );
+  if (!hasCondition) return raw;
+  const canonical: Record<string, unknown> = {};
+  for (const [key, entry] of Object.entries(raw)) {
+    if (key !== "class" && key !== "call" && key !== "trace" && key !== "details") {
+      canonical[key] = entry;
+    }
+  }
+  const details: Record<string, unknown> = {
+    condition: { class: raw.class, call: raw.call, trace: raw.trace },
+  };
+  if (Object.prototype.hasOwnProperty.call(raw, "details")) details.data = raw.details;
+  canonical.details = details;
+  return canonical;
+}
+function kernelStateInvalidMarker(
+  error: EngineResponse["error"],
+): NonNullable<EngineResponse["kernelStateInvalid"]> | null {
+  if (error === undefined) return null;
+  if (error.code === "kernel_state_invalid") return error;
+  const details = optionalRecord(error.details);
+  const data = optionalRecord(details?.data);
+  const marker = data?.code === "kernel_state_invalid"
+    ? data
+    : details?.code === "kernel_state_invalid" ? details : undefined;
+  if (marker === undefined) return null;
+  return {
+    code: "kernel_state_invalid",
+    message: "Alder kernel state is invalid; restart the kernel",
+  };
+}
+function redactEngineSecrets(value: string, secret: string): string {
+  return secret.length === 0 ? value : value.split(secret).join("[REDACTED]");
 }
 
 function positiveSafeInteger(value: unknown, label: string): number {
@@ -1786,18 +2372,22 @@ function arkCall(method: "evaluate" | "request", encoded: string): string {
 function evaluationWire(value: EvaluationPayload): Record<string, unknown> {
   return {
     id: value.cellId, revision: value.revision, run_id: value.runId,
-    session_epoch: value.sessionEpoch, operation_id: value.operationId,
+    session_epoch: value.sessionEpoch, kernel_epoch: value.kernelEpoch,
+    operation_id: value.operationId,
     code_base64: encodeSource(value.source, "evaluation source").base64,
     defs: value.definitions, locals: value.locals, opaque: value.opaque,
   };
 }
 
 function makeEvaluation(
-  requestId: number, payload: EvaluationPayload, onEvent?: (event: EngineEvent) => void,
+  requestId: number,
+  payload: EvaluationPayload,
+  onEvent: ((event: EngineEvent) => void) | undefined,
+  kernelGeneration: number,
 ): ActiveEvaluation {
   return {
-    requestId, payload, onEvent, started: false, sequence: 0, rSequence: 0,
-    outputs: [], outputBytes: 0, displayOutputs: new Map(), log: [],
+    requestId, payload, onEvent, kernelGeneration, started: false, sequence: 0, rSequence: 0,
+    outputs: [], outputBytes: 0, log: [],
     console: new OutputLog(MAX_LOG_BYTES), truncated: false, stopped: false,
     finished: false, kernelTerminal: false, interruptSent: false, clearPending: false,
     deferredArtifactReleases: new Set(), messageTail: Promise.resolve(),
@@ -1829,29 +2419,35 @@ function decodeArkEvent(
   token: string,
   maxBytes: number,
 ): Record<string, unknown> | undefined {
-  if (message.header.msg_type !== "display_data" &&
-      message.header.msg_type !== "update_display_data") return undefined;
+  if (message.header.msg_type !== "display_data" && message.header.msg_type !== "update_display_data") return undefined;
   const data = optionalRecord(message.content.data);
-  const html = data?.["text/html"];
-  if (typeof html !== "string") return undefined;
-  const prefix = `${ARK_EVENT_PREFIX}${token}:`;
-  if (!html.startsWith(prefix)) return undefined;
-  if (!html.endsWith("-->") || html.indexOf(prefix, prefix.length) >= 0) {
-    throw new FrameProtocolError("invalid Alder Ark event envelope");
+  const raw = data?.["application/vnd.alder.event+json"];
+  if (raw === undefined) return undefined;
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new FrameProtocolError("Alder Ark event MIME value must be an object");
   }
-  const encoded = html.slice(prefix.length, -3);
-  const bytes = decodeBase64(encoded, maxBytes);
-  let text: string;
+  let event: Record<string, unknown>;
   try {
-    text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-  } catch {
-    throw new FrameProtocolError("Alder Ark event is not valid UTF-8");
-  }
-  try {
-    return asRecord(parseStrictJson(text), "Alder Ark event");
+    const text = JSON.stringify(raw);
+    if (Buffer.byteLength(text, "utf8") > maxBytes) throw new Error("event exceeds the configured byte limit");
+    event = asRecord(parseStrictJson(text), "Alder Ark event");
   } catch (error) {
-    throw new FrameProtocolError(`invalid Alder Ark event: ${asError(error).message}`);
+    throw new FrameProtocolError("invalid Alder Ark event: " + asError(error).message);
   }
+  if (event.token !== token || typeof event.token !== "string") throw new FrameProtocolError("Alder Ark event token does not match");
+  if (!(typeof event.request === "string" || (typeof event.request === "number" && Number.isSafeInteger(event.request)))) throw new FrameProtocolError("Alder Ark event request is invalid");
+  if (typeof event.type !== "string" || !["started", "append", "progress", "log", "result", "condition", "finished", "cell_meta", "command_result", "batch_end"].includes(event.type)) throw new FrameProtocolError("Alder Ark event type is invalid");
+  if (typeof event.sequence !== "number" || !Number.isSafeInteger(event.sequence) || event.sequence < 0) throw new FrameProtocolError("Alder Ark event sequence is invalid");
+  for (const field of ["session_epoch", "kernel_epoch", "run_id", "operation_id", "cell_id"] as const) {
+    if (typeof event[field] !== "string" && event[field] !== null) throw new FrameProtocolError("Alder Ark event identity is invalid");
+  }
+  if (event.type === "command_result") {
+    if (event.revision !== null && (typeof event.revision !== "number" || !Number.isSafeInteger(event.revision) || event.revision < 0)) throw new FrameProtocolError("Alder command event revision is invalid");
+  } else if (typeof event.revision !== "number" || !Number.isSafeInteger(event.revision) || event.revision < 0) {
+    throw new FrameProtocolError("Alder Ark event revision is invalid");
+  }
+  if (typeof event.payload !== "object" || event.payload === null || Array.isArray(event.payload)) throw new FrameProtocolError("Alder Ark event payload is invalid");
+  return event;
 }
 
 function decodeBase64(value: string, maxBytes: number): Buffer {
@@ -1875,14 +2471,19 @@ function jupyterError(content: Record<string, unknown>): NonNullable<EngineRespo
   const value = typeof content.evalue === "string" && content.evalue.length > 0
     ? content.evalue
     : name;
-  const interrupted = /interrupt/i.test(`${name} ${value}`);
+  const interrupted = /interrupt/i.test([name, value].join(" "));
+  const jupyter: Record<string, unknown> = {};
+  for (const field of ["ename", "evalue", "traceback"] as const) {
+    if (Object.prototype.hasOwnProperty.call(content, field)) jupyter[field] = content[field];
+  }
+  const details = Object.keys(jupyter).length > 0
+    ? protocolJsonSchema.parse({ jupyter })
+    : undefined;
   return {
     message: interrupted ? "Interrupted" : value,
     code: interrupted ? "interrupted" : "evaluation_error",
     interrupted,
-    ...(Array.isArray(content.traceback) ? { traceback: content.traceback.filter(
-      (line): line is string => typeof line === "string",
-    ).slice(-40) } : {}),
+    ...(details === undefined ? {} : { details }),
   };
 }
 
@@ -1892,25 +2493,11 @@ function optionalRecord(value: unknown): Record<string, unknown> | undefined {
     : undefined;
 }
 
+
 function artifactHandle(value: unknown): value is string {
   return typeof value === "string" && value.length > 0 && value.length <= 1_024 &&
     basename(value) === value && !value.startsWith(".") && !/[\\/]/.test(value) &&
     extname(value).length > 1;
-}
-
-function collectArtifactHandles(
-  value: unknown,
-  result: Set<string> = new Set(),
-): Set<string> {
-  if (Array.isArray(value)) {
-    for (const entry of value) collectArtifactHandles(entry, result);
-    return result;
-  }
-  const record = optionalRecord(value);
-  if (record === undefined) return result;
-  if (artifactHandle(record.artifact)) result.add(record.artifact);
-  for (const entry of Object.values(record)) collectArtifactHandles(entry, result);
-  return result;
 }
 
 function stringArray(value: unknown): string[] {
@@ -1919,6 +2506,7 @@ function stringArray(value: unknown): string[] {
   }
   return [...value] as string[];
 }
+
 
 function jsonByteSize(value: unknown): number {
   const encoded = JSON.stringify(value);
@@ -1939,204 +2527,79 @@ function encodeSource(value: string, label: string): { base64: string; bytes: nu
 
 async function prepareRuntime(paths: ResolvedPaths): Promise<RuntimePaths> {
   const captureDirectory = await mkdtemp(join(paths.artifactDirectory, ".alder-capture-"));
-  return { captureDirectory, ownedDirectories: [captureDirectory] };
+  try {
+    const controlDirectory = await mkdtemp(join(paths.artifactDirectory, ".alder-control-"));
+    return { captureDirectory, controlDirectory, ownedDirectories: [captureDirectory, controlDirectory] };
+  } catch (error) {
+    await rm(captureDirectory, { recursive: true, force: true }).catch(() => {});
+    throw error;
+  }
 }
 
 async function resolvePaths(
   options: EngineOptions,
+  environment: REnvironment,
   signal?: AbortSignal,
+  pathOptions: Pick<EngineOptions, "notebookDirectory" | "cacheDirectory"> = options,
 ): Promise<ResolvedPaths> {
   throwIfAborted(signal);
-  const configured = options.packagePath ?? process.env.ALDER_R_PACKAGE;
-  const repository = resolve(fileURLToPath(new URL("../../", import.meta.url)));
-  const packagePath = await findPackagePath(configured ?? repository);
-  const workerDirectory = await findWorkerDirectory(packagePath);
-  const arkStartupScript = resolve(
-    options.arkStartupScript ?? join(workerDirectory, "host-ark.R"),
-  );
-  const analyzerScript = resolve(options.analyzerScript ?? join(workerDirectory, "host-analyzer.R"));
-  const framingScript = resolve(join(workerDirectory, "host-framing.R"));
-  const arkExecutable = await findArkExecutable(options, packagePath);
+  const resources = options.resources;
+  const workerDirectory = resolve(resources.workerDirectory);
+  const arkStartupScript = join(workerDirectory, "host-ark.R");
+  const analyzerScript = join(workerDirectory, "host-analyzer.R");
+  const framingScript = join(workerDirectory, "host-framing.R");
+  const arkExecutable = resolve(resources.arkExecutable);
   await Promise.all([
     requireFile(arkExecutable, "Ark executable"),
     requireFile(arkStartupScript, "Ark startup script"),
     requireFile(analyzerScript, "analyzer script"),
     requireFile(framingScript, "framing script"),
   ]);
-
-  const notebookDirectory = resolve(options.notebookDirectory ?? process.cwd());
+  const notebookDirectory = resolve(pathOptions.notebookDirectory ?? options.notebookDirectory ?? process.cwd());
   const notebookInfo = await stat(notebookDirectory);
   if (!notebookInfo.isDirectory()) throw new Error("notebookDirectory is not a directory");
-
-  const selectionBaseEnvironment: NodeJS.ProcessEnv = {
-    ...process.env,
-    ...options.environment,
-    ALDER_NOTEBOOK_DIR: notebookDirectory,
-  };
-  delete selectionBaseEnvironment.ALDER_ARTIFACT_DIR;
-  delete selectionBaseEnvironment.ALDER_CACHE_DIR;
-  delete selectionBaseEnvironment.ALDER_CAPTURE_DIR;
-  const installed = await isFile(join(packagePath, "Meta", "package.rds"));
-  if (installed) {
-    selectionBaseEnvironment.R_LIBS = prependPath(
-      dirname(packagePath),
-      selectionBaseEnvironment.R_LIBS,
-    );
-  }
-  const selectedRscript = options.rscript ?? process.env.ALDER_RSCRIPT ?? "Rscript";
-  // The selected executable owns the R installation. An inherited R_HOME can
-  // otherwise silently redirect both that executable and Ark to another R.
-  const selectionEnvironment = { ...selectionBaseEnvironment };
-  delete selectionEnvironment.R_HOME;
-  throwIfAborted(signal);
-  const rHome = await discoverRHome(selectedRscript, selectionEnvironment, signal);
-  let rHomeInfo;
-  try { rHomeInfo = await stat(rHome); }
-  catch { throw new Error(`selected R reported an invalid R_HOME: ${rHome}`); }
-  if (!rHomeInfo.isDirectory()) {
-    throw new Error(`selected R reported an invalid R_HOME: ${rHome}`);
-  }
-
   const ownedDirectories: string[] = [];
   let artifactDirectory: string;
   let cacheDirectory: string;
   try {
     throwIfAborted(signal);
-    artifactDirectory = options.artifactDirectory === undefined
-      ? await mkdtemp(join(tmpdir(), "alder-engine-artifacts-"))
-      : resolve(options.artifactDirectory);
-    if (options.artifactDirectory === undefined) ownedDirectories.push(artifactDirectory);
-    else await mkdir(artifactDirectory, { recursive: true });
+    artifactDirectory = resolve(options.artifactDirectory);
+    await mkdir(artifactDirectory, { recursive: true });
     throwIfAborted(signal);
-    cacheDirectory = options.cacheDirectory === undefined
+    cacheDirectory = pathOptions.cacheDirectory === undefined
       ? await mkdtemp(join(tmpdir(), "alder-engine-cache-"))
-      : resolve(options.cacheDirectory);
-    if (options.cacheDirectory === undefined) ownedDirectories.push(cacheDirectory);
+      : resolve(pathOptions.cacheDirectory);
+    if (pathOptions.cacheDirectory === undefined) ownedDirectories.push(cacheDirectory);
     else await mkdir(cacheDirectory, { recursive: true });
   } catch (error) {
-    for (const directory of ownedDirectories) {
-      await rm(directory, { recursive: true, force: true }).catch(() => {});
-    }
+    await Promise.all(ownedDirectories.map((directory) => rm(directory, { recursive: true, force: true }).catch(() => {})));
     throw error;
   }
-
-  const baseEnvironment: NodeJS.ProcessEnv = {
-    ...selectionBaseEnvironment,
+  const base = strictEnvironment({
+    ...process.env,
+    ...rEnvironmentVariables(environment, resources),
+    ALDER_NOTEBOOK_DIR: notebookDirectory,
     ALDER_ARTIFACT_DIR: artifactDirectory,
     ALDER_CACHE_DIR: cacheDirectory,
-    R_HOME: rHome,
-  };
+  });
   const analyzerEnvironment = {
-    ...baseEnvironment,
+    ...base,
     ALDER_HOST_FRAMING: framingScript,
-    ALDER_HOST_PROTOCOL: "framed-v1",
+    ALDER_HOST_PROTOCOL: "framed-v2",
+    ALDER_HOST_ROLE: "analyzer",
   };
-  const arkEnvironment: NodeJS.ProcessEnv = { ...baseEnvironment, R_HOME: rHome };
+  const arkEnvironment = { ...base };
   delete arkEnvironment.ALDER_HOST_FRAMING;
   delete arkEnvironment.ALDER_HOST_PROTOCOL;
   delete arkEnvironment.ALDER_HOST_ROLE;
   return {
-    packagePath,
-    arkExecutable,
-    arkStartupScript,
-    analyzerScript,
-    framingScript,
-    notebookDirectory,
-    artifactDirectory,
-    cacheDirectory,
-    ownedDirectories,
-    analyzerEnvironment,
-    arkEnvironment,
+    arkExecutable, arkStartupScript, analyzerScript, framingScript,
+    notebookDirectory, artifactDirectory, cacheDirectory, ownedDirectories,
+    analyzerEnvironment, arkEnvironment,
   };
 }
-
-async function findArkExecutable(
-  options: EngineOptions,
-  packagePath: string,
-): Promise<string> {
-  const explicit = options.arkExecutable ?? options.environment?.ALDER_ARK ??
-    process.env.ALDER_ARK;
-  if (explicit !== undefined && explicit.length > 0) return resolve(explicit);
-  const executable = process.platform === "win32" ? "ark.exe" : "ark";
-  const moduleDirectory = dirname(fileURLToPath(import.meta.url));
-  const candidates = [
-    join(moduleDirectory, "runtime", executable),
-    join(moduleDirectory, "..", "runtime", executable),
-    join(moduleDirectory, "..", ".runtime", executable),
-    join(packagePath, "host", "runtime", executable),
-    join(packagePath, "host", ".runtime", executable),
-  ];
-  for (const candidate of candidates) {
-    if (await isFile(candidate)) return resolve(candidate);
-  }
-  throw new Error(
-    `Ark executable not found; set ALDER_ARK or stage runtime/${executable} beside the host`,
-  );
-}
-
-async function discoverRHome(
-  rscript: string,
-  environment: NodeJS.ProcessEnv,
-  signal?: AbortSignal,
-): Promise<string> {
-  throwIfAborted(signal);
-  return new Promise<string>((resolveHome, rejectHome) => {
-    const child = spawn(rscript, ["--vanilla", "--slave", "-e", "cat(R.home())"], {
-      env: environment,
-      stdio: ["ignore", "pipe", "pipe"],
-      windowsHide: true,
-      signal,
-      killSignal: "SIGKILL",
-    });
-    let stdout = Buffer.alloc(0);
-    let stderr = Buffer.alloc(0);
-    const timer = setTimeout(() => {
-      child.kill("SIGKILL");
-      rejectHome(new Error("selected R did not report R_HOME within 10 seconds"));
-    }, 10_000);
-    child.stdout.on("data", (chunk: Buffer) => {
-      stdout = Buffer.concat([stdout, chunk]);
-      if (stdout.length > 65_536) child.kill("SIGKILL");
-    });
-    child.stderr.on("data", (chunk: Buffer) => {
-      stderr = Buffer.concat([stderr, chunk]);
-      if (stderr.length > 65_536) stderr = stderr.subarray(-65_536);
-    });
-    child.once("error", (error) => {
-      clearTimeout(timer);
-      rejectHome(new Error(`could not start selected R: ${error.message}`));
-    });
-    child.once("exit", (code) => {
-      clearTimeout(timer);
-      const value = stdout.toString("utf8").trim();
-      if (code === 0 && value.length > 0) resolveHome(value);
-      else rejectHome(new Error(
-        `selected R could not report R_HOME${stderr.length ? `: ${stderr.toString("utf8").trim()}` : ""}`,
-      ));
-    });
-  });
-}
-
 function throwIfAborted(signal?: AbortSignal): void {
   if (signal?.aborted) throw new EngineTransportError("engine startup was cancelled");
-}
-
-async function findPackagePath(configured: string): Promise<string> {
-  const direct = resolve(configured);
-  for (const candidate of [direct, join(direct, "alder")]) {
-    if (await isFile(join(candidate, "DESCRIPTION"))) return candidate;
-  }
-  throw new Error(`Alder package was not found at ${direct}`);
-}
-
-async function findWorkerDirectory(packagePath: string): Promise<string> {
-  for (const candidate of [
-    join(packagePath, "worker"),
-    join(packagePath, "inst", "worker"),
-  ]) {
-    if (await isFile(join(candidate, "host-framing.R"))) return candidate;
-  }
-  throw new Error(`Alder host worker files were not found under ${packagePath}`);
 }
 
 async function requireFile(path: string, label: string): Promise<void> {
@@ -2144,34 +2607,37 @@ async function requireFile(path: string, label: string): Promise<void> {
     await access(path);
     if (!(await stat(path)).isFile()) throw new Error();
   } catch {
-    throw new Error(`${label} not found: ${path}`);
+    throw new Error(label + " not found: " + path);
   }
 }
 
 async function isFile(path: string): Promise<boolean> {
-  try {
-    return (await stat(path)).isFile();
-  } catch {
-    return false;
-  }
+  try { return (await stat(path)).isFile(); } catch { return false; }
+}
+function strictEnvironment(value: NodeJS.ProcessEnv): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const [key, entry] of Object.entries(value)) if (entry !== undefined) result[key] = entry;
+  return result;
 }
 
-function prependPath(path: string, current: string | undefined): string {
-  return current === undefined || current.length === 0
-    ? path
-    : `${path}${process.platform === "win32" ? ";" : ":"}${current}`;
+function freezeEnvironment(environment: REnvironment): REnvironment {
+  return Object.freeze({ ...environment, libraryPaths: Object.freeze([...environment.libraryPaths]) });
+}
+
+function sameRestartContext(left: EngineRestartOptions, right: EngineRestartOptions): boolean {
+  return left.notebookDirectory === right.notebookDirectory &&
+    left.cacheDirectory === right.cacheDirectory &&
+    left.environment?.identity === right.environment?.identity;
+}
+
+function makeAnalysisEnvironmentId(environment: REnvironment, generation: number): string {
+  return createHash("sha256").update(environment.identity + "\\0" + String(generation)).digest("hex");
 }
 
 function validatePositiveTimeout(value: number | undefined, name: string): void {
-  if (value !== undefined && (!Number.isFinite(value) || value <= 0)) {
-    throw new RangeError(`${name} must be a positive finite number`);
-  }
+  if (value !== undefined && (!Number.isFinite(value) || value <= 0)) throw new RangeError(name + " must be a positive finite number");
 }
 
-function childRunning(child: ChildProcessWithoutNullStreams): boolean {
-  return child.exitCode === null && child.signalCode === null;
-}
-
-function asError(error: unknown): Error {
+ function asError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
 }

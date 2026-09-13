@@ -11,22 +11,41 @@
     "check": "tsc -p tsconfig.json --noEmit",
     "test": "tsx --test test/*.test.ts",
     "latency": "tsx scripts/latency.ts",
-    "start": "tsx src/main.ts"
+    "start": "tsx src/main.ts",
+    "stage": "node scripts/stage-application.mjs --output .application --kind headless",
+    "stage:desktop": "node scripts/stage-application.mjs --output .application-desktop --kind desktop",
+    "smoke": "node scripts/smoke-application.mjs .application --rscript \"${ALDER_RSCRIPT:?ALDER_RSCRIPT must be an absolute Rscript path}\"",
+    "smoke:release": "node scripts/smoke-release.mjs .release --scenario all --rscript \"${ALDER_RSCRIPT:?ALDER_RSCRIPT must be an absolute Rscript path}\" --qualification-driver \"${ALDER_QUALIFICATION_DRIVER:?ALDER_QUALIFICATION_DRIVER must be an absolute frozen helper path}\" --qualification-source \"${ALDER_QUALIFICATION_SOURCE:?ALDER_QUALIFICATION_SOURCE must be an absolute frozen source path}\" --artifact-root \"${ALDER_ARTIFACT_ROOT:?ALDER_ARTIFACT_ROOT must be an absolute qualification root}\"",
+    "package": "node scripts/package.mjs",
+    "ci:package": "node scripts/ci-package.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.30.0",
+    "chokidar": "5.0.0",
+    "dom-serializer": "2.0.0",
+    "domhandler": "5.0.3",
+    "env-paths": "4.0.0",
+    "linkedom": "0.18.12",
+    "markdown-it": "15.0.1",
+    "proper-lockfile": "4.1.2",
+    "sanitize-html": "2.17.7",
     "vscode-jsonrpc": "9.0.2",
     "vscode-languageserver-protocol": "3.18.3",
     "ws": "8.21.3",
+    "yaml": "2.9.0",
     "zeromq": "6.7.0",
     "zod": "4.5.4"
   },
   "devDependencies": {
+    "@types/markdown-it": "14.2.0",
     "@types/node": "22.19.15",
+    "@types/proper-lockfile": "4.1.4",
+    "@types/sanitize-html": "2.16.1",
     "@types/ws": "8.18.1",
     "esbuild": "0.28.2",
     "fflate": "0.8.3",
     "node": "24.20.0",
+    "parse5": "8.0.0",
     "tsx": "4.23.13",
     "typescript": "5.9.3"
   }

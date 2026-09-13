@@ -120,15 +120,197 @@ literal_assign_parts <- function(node) {
   list(name = target, value = args[[positions[["value"]]]])
 }
 
+# Source locations from R parse data.
+# R reports parse-data columns as display columns (tabs advance to the next
+# tab stop). The analyzer converts those prefixes to one-based UTF-8 byte
+# columns; the TypeScript engine maps them to UTF-16.
+
+.analysis_has_ancestor <- function(data, id, ancestor) {
+  current <- as.integer(id)
+  target <- as.integer(ancestor)
+  seen <- integer()
+  while (length(current) && !is.na(current) && current != 0L &&
+         isFALSE(current %in% seen)) {
+    if (identical(current, target)) return(TRUE)
+    seen <- c(seen, current)
+    idx <- match(current, data$id)
+    if (is.na(idx)) break
+    current <- as.integer(data$parent[[idx]])
+  }
+  FALSE
+}
+
+.analysis_before <- function(data, left, right) {
+  left_line <- as.integer(data$line1[[left]])
+  right_line <- as.integer(data$line1[[right]])
+  if (left_line != right_line) return(left_line < right_line)
+  as.integer(data$col1[[left]]) < as.integer(data$col1[[right]])
+}
+.analysis_prefix_bytes <- function(line, column) {
+  if (length(column) != 1L || is.na(column) || column < 0L) return(NULL)
+  if (!grepl("\t", line, fixed = TRUE)) {
+    characters <- nchar(line)
+    if (column > characters + 1L) return(NULL)
+    prefix <- if (column > 0L) substr(line, 1L, column) else ""
+    return(nchar(prefix, type = "bytes"))
+  }
+  characters <- strsplit(line, "", fixed = TRUE)[[1L]]
+  display <- 1L
+  bytes <- 0L
+  for (character in characters) {
+    width <- if (identical(character, "\t")) {
+      8L - ((display - 1L) %% 8L)
+    } else {
+      1L
+    }
+    end_display <- display + width - 1L
+    if (column < display) return(bytes)
+    if (column <= end_display) {
+      return(bytes + nchar(character, type = "bytes"))
+    }
+    display <- end_display + 1L
+    bytes <- bytes + nchar(character, type = "bytes")
+  }
+  if (column == display) return(bytes)
+  NULL
+}
+
+.analysis_token_range <- function(data, index, lines) {
+  line1 <- as.integer(data$line1[[index]])
+  line2 <- as.integer(data$line2[[index]])
+  col1 <- as.integer(data$col1[[index]])
+  col2 <- as.integer(data$col2[[index]])
+  if (anyNA(c(line1, line2, col1, col2)) || line1 < 1L || line2 < line1 ||
+      col1 < 1L || col2 < 1L || line1 > length(lines) || line2 > length(lines)) {
+    return(NULL)
+  }
+  first <- lines[[line1]]
+  last <- lines[[line2]]
+  start_prefix <- .analysis_prefix_bytes(first, col1 - 1L)
+  end_prefix <- .analysis_prefix_bytes(last, col2)
+  if (is.null(start_prefix) || is.null(end_prefix) || end_prefix < start_prefix) {
+    return(NULL)
+  }
+  list(start = list(line = line1, column = start_prefix + 1L),
+       end = list(line = line2, column = end_prefix))
+}
+
+.analysis_parse_ranges <- function(text, exprs, defs, refs, self_refs) {
+  data <- tryCatch(utils::getParseData(exprs, includeText = TRUE),
+                   error = function(e) NULL)
+  if (is.null(data) || !nrow(data) ||
+      all(c("id", "parent", "token", "terminal", "text",
+            "line1", "col1", "line2", "col2") %in% names(data)) == FALSE) {
+    return(list())
+  }
+  lines <- strsplit(text, "\n", fixed = TRUE)[[1L]]
+  terminals <- which(data$terminal & data$token %in%
+                     c("SYMBOL", "SYMBOL_FUNCTION_CALL"))
+  if (!length(terminals)) return(list())
+
+  # Identify the root symbol on the defining side of assignment operators.
+  definitions <- integer()
+  operators <- which(data$terminal &
+                     data$token %in% c("LEFT_ASSIGN", "EQ_ASSIGN",
+                                        "RIGHT_ASSIGN"))
+  for (op in operators) {
+    parent <- data$parent[[op]]
+    candidates <- terminals[vapply(terminals, function(i)
+      .analysis_has_ancestor(data, data$id[[i]], parent), logical(1))]
+    if (!length(candidates)) next
+    before <- vapply(candidates, function(i) .analysis_before(data, i, op),
+                     logical(1))
+    candidates <- if (data$token[[op]] == "RIGHT_ASSIGN") {
+      candidates[!before]
+    } else {
+      candidates[before]
+    }
+    candidates <- candidates[data$text[candidates] %in% defs &
+                             data$token[candidates] == "SYMBOL"]
+    if (length(candidates)) definitions <- c(definitions, data$id[[candidates[[1L]]]])
+  }
+
+  # A top-level for-loop iterator is also a definition.
+  for_rows <- which(data$terminal & data$token == "FOR")
+  for (for_row in for_rows) {
+    cond <- which(!data$terminal & data$token == "forcond" &
+                  data$parent == data$parent[[for_row]])
+    if (!length(cond)) next
+    cond_id <- data$id[[cond[[1L]]]]
+    candidates <- terminals[vapply(terminals, function(i)
+      .analysis_has_ancestor(data, data$id[[i]], cond_id), logical(1))]
+    candidates <- candidates[data$text[candidates] %in% defs &
+                             data$token[candidates] == "SYMBOL"]
+    if (length(candidates)) {
+      in_token <- which(data$terminal & data$token == "IN" &
+                        data$parent == cond_id)
+      if (length(in_token)) {
+        before_in <- vapply(candidates, function(i)
+          .analysis_before(data, i, in_token[[1L]]), logical(1))
+        candidates <- candidates[before_in]
+      }
+    }
+    if (length(candidates)) definitions <- c(definitions, data$id[[candidates[[1L]]]])
+  }
+  definitions <- unique(definitions)
+
+  result <- list()
+  append_range <- function(index, kind) {
+    range <- .analysis_token_range(data, index, lines)
+    if (is.null(range)) return(invisible())
+    result[[length(result) + 1L]] <<- list(
+      name = as.character(data$text[[index]]), kind = kind,
+      start = range$start, end = range$end)
+    invisible()
+  }
+  ref_names <- unique(c(refs, self_refs))
+  for (index in terminals) {
+    name <- as.character(data$text[[index]])
+    id <- data$id[[index]]
+    if (name %in% defs && id %in% definitions) {
+      append_range(index, "definition")
+      # Replacement assignments read the same root before defining it.
+      if (name %in% self_refs) append_range(index, "reference")
+    } else if (name %in% ref_names) {
+      append_range(index, "reference")
+    }
+  }
+  result
+}
+
+.analysis_diagnostic_ranges <- function(diagnostics, ranges) {
+  if (!length(diagnostics)) return(diagnostics)
+  for (i in seq_along(diagnostics)) {
+    diagnostic <- diagnostics[[i]]
+    if (!is.list(diagnostic)) {
+      stop("analysis diagnostics must be objects", call. = FALSE)
+    }
+    if (!("range" %in% names(diagnostic))) {
+      diagnostic <- c(diagnostic, list(range = NULL))
+    }
+    if (is.null(diagnostic$range)) {
+      name <- diagnostic$symbol
+      candidates <- if (length(name) && !is.na(name)) {
+        Filter(function(value) identical(value$name, name), ranges)
+      } else list()
+      if (length(candidates)) {
+        diagnostic$range <- list(start = candidates[[1L]]$start,
+                                 end = candidates[[1L]]$end)
+      }
+    }
+    diagnostics[[i]] <- diagnostic
+  }
+  diagnostics
+}
 cell_defs_refs <- function(code) {
-  # Returns list(defs, refs, self_refs, locals, barrier, diagnostics, error).
+  # Returns list(defs, refs, selfRefs, locals, barrier, diagnostics, error, ranges).
   empty <- list(defs = character(), refs = character(),
-                self_refs = character(), locals = character(),
+                selfRefs = character(), locals = character(),
                 barrier = FALSE, opaque = FALSE,
-                diagnostics = list(), error = NULL)
+                diagnostics = list(), error = NULL, ranges = list())
   if (length(code) == 0L) return(empty)
-  text <- paste(code, collapse = "\n")
-  exprs <- tryCatch(base::parse(text = text),
+  text <- enc2utf8(paste(code, collapse = "\n"))
+  exprs <- tryCatch(base::parse(text = text, keep.source = TRUE),
                     error = function(e) conditionMessage(e))
   if (is.character(exprs)) {
     empty$error <- exprs
@@ -144,7 +326,7 @@ cell_defs_refs <- function(code) {
   state <- new.env(parent = emptyenv())
   state$defs <- unique(p1$defs)
   state$refs <- character()
-  state$self_refs <- character()
+  state$selfRefs <- character()
   state$barrier <- FALSE
   state$opaque <- FALSE
   state$diagnostics <- list()
@@ -153,14 +335,15 @@ cell_defs_refs <- function(code) {
   top <- new_frame(character(), "top")
   for (i in seq_along(exprs)) walk_expr(exprs[[i]], top, new_ctx(), state)
   locals <- unique(state$defs[grepl("^\\.", state$defs)])
-  list(defs = setdiff(state$defs, locals),
-       refs = setdiff(unique(state$refs), locals),
-       self_refs = setdiff(unique(state$self_refs), locals),
-       locals = locals,
-       barrier = isTRUE(state$barrier),
-       opaque = isTRUE(state$opaque),
-       diagnostics = state$diagnostics,
-       error = NULL)
+  defs <- setdiff(state$defs, locals)
+  refs <- setdiff(unique(state$refs), locals)
+  self_refs <- setdiff(unique(state$selfRefs), locals)
+  ranges <- .analysis_parse_ranges(text, exprs, defs, refs, self_refs)
+  diagnostics <- .analysis_diagnostic_ranges(state$diagnostics, ranges)
+  list(defs = defs, refs = refs, selfRefs = self_refs,
+       locals = locals, barrier = isTRUE(state$barrier),
+       opaque = isTRUE(state$opaque), diagnostics = diagnostics,
+       error = NULL, ranges = ranges)
 }
 
 # Names assigned anywhere at the top level of this cell, in order. Function
@@ -299,7 +482,7 @@ record_read <- function(nm, frame, ctx, state) {
   } else {
     if (nm %in% state$defs) {
       if (nm %in% frame$defined) return(invisible())  # local read
-      state$self_refs <- c(state$self_refs, nm)
+      state$selfRefs <- c(state$selfRefs, nm)
     } else {
       state$refs <- c(state$refs, nm)
     }
@@ -498,10 +681,12 @@ walk_expr <- function(node, frame, ctx, state) {
   if (hn == "for") {
     walk_expr(node[[3L]], frame, ctx, state)
     ivar <- as.character(node[[2L]])
-    if (length(ivar) && !is_reserved(ivar)) define_name(ivar, frame)
-    # body definitions are never definitely available afterwards
-    walk_expr(node[[4L]], new_frame(frame$defined, frame$kind), ctx, state)
-    return(if (length(ivar) && !is_reserved(ivar)) ivar else character())
+    body_defined <- frame$defined
+    if (length(ivar) && !is_reserved(ivar)) body_defined <- c(body_defined, ivar)
+    # The iterator is definite inside the body, but a zero-length sequence
+    # means neither it nor body definitions are definite afterwards.
+    walk_expr(node[[4L]], new_frame(body_defined, frame$kind), ctx, state)
+    return(character())
   }
   if (hn == "while") {
     walk_expr(node[[2L]], frame, ctx, state)
@@ -802,143 +987,4 @@ literal_eval_nodes <- function(node, name) {
   if (identical(head, "quote") && length(arg) == 2L) return(list(arg[[2L]]))
   if (identical(head, "expression")) return(as.list(arg)[-1L])
   NULL
-}
-
-build_dag <- function(cells) {
-  # cells: list of cells with $id, $type, analyzed $defs/$refs/$self_refs,
-  # and $barrier. Returns list(nodes, edges, duplicates, cycles, error).
-  n <- length(cells)
-  if (n == 0L) {
-    return(list(nodes = list(), edges = list(), duplicates = list(),
-                cycles = list(), error = NULL))
-  }
-  ids <- vapply(cells, function(c) c$id, "")
-  defof <- new.env(parent = emptyenv())  # name -> character ids defining it
-  barrier_at <- which(vapply(cells, function(c) isTRUE(c$barrier), FALSE))
-  opaque_at <- which(vapply(cells, function(c) isTRUE(c$opaque), FALSE))
-
-  edges <- vector("list", n)
-  names(edges) <- ids
-  for (i in seq_along(cells)) edges[[ids[[i]]]] <- character()
-
-  for (i in seq_along(cells)) {
-    c <- cells[[i]]
-    for (d in c$defs) defof[[d]] <- c(defof[[d]], c$id)
-  }
-
-  # Edge A -> B when B references a name A defines; plus each cell's own
-  # self references (read-before-define) as a self-loop.
-  for (i in seq_along(cells)) {
-    ci <- cells[[i]]
-    deps <- character()
-    for (r in unique(ci$refs)) {
-      producers <- defof[[r]]
-      if (length(producers)) deps <- c(deps, producers)
-    }
-    deps <- unique(setdiff(deps, ci$id))
-    if (length(ci$self_refs)) deps <- c(deps, ci$id)
-    edges[[ci$id]] <- deps
-  }
-
-  # Package-attach barriers order every later code cell after the barrier:
-  # a successful barrier run invalidates/reruns code whose lookup can change.
-  for (i in barrier_at) {
-    for (j in seq_len(n)) {
-      if (j > i && identical(cells[[j]]$type, "code")) {
-        edges[[cells[[j]]$id]] <- c(edges[[cells[[j]]$id]], cells[[i]]$id)
-      }
-    }
-  }
-  # Literal external source cells may define or read names not present in the
-  # notebook AST. Treat them as opaque barriers: every earlier executable cell
-  # precedes them and every later executable cell follows them. This permits
-  # ordinary bounded R while preserving conservative invalidation.
-  executable <- vapply(cells, function(cell) identical(cell$type, "code"),
-                       logical(1))
-  for (i in opaque_at) {
-    prior <- which(seq_len(n) < i & executable)
-    if (length(prior)) {
-      edges[[cells[[i]]$id]] <- c(edges[[cells[[i]]$id]], ids[prior])
-    }
-    later_cells <- which(seq_len(n) > i & executable)
-    for (j in later_cells) {
-      edges[[cells[[j]]$id]] <- c(edges[[cells[[j]]$id]], cells[[i]]$id)
-    }
-  }
-  for (i in seq_along(cells)) edges[[ids[[i]]]] <- unique(edges[[ids[[i]]]])
-
-  duplicates <- list()
-  for (nm in ls(defof, all.names = TRUE)) {
-    defs <- defof[[nm]]
-    if (length(unique(defs)) > 1L) duplicates[[nm]] <- unique(defs)
-  }
-
-  cycles <- detect_cycles(edges, ids)
-  list(nodes = ids, edges = edges, duplicates = duplicates,
-       cycles = cycles, error = NULL)
-}
-
-# Topological order of cell execution: a cell before its dependents.
-# Repeatedly emit every cell whose remaining dependencies are already
-# emitted (Kahn's algorithm); deterministic in input order. Returns a
-# character vector, or NULL when the graph has a cycle (including self-loops,
-# whose cells can never satisfy their own dependency).
-topo_order <- function(edges, ids) {
-  remaining <- ids
-  order <- character()
-  while (length(remaining) > 0L) {
-    ready <- remaining[vapply(remaining, function(id)
-      length(intersect(edges[[id]], remaining)) == 0L, FALSE)]
-    if (length(ready) == 0L) break
-    order <- c(order, ready)
-    remaining <- setdiff(remaining, ready)
-  }
-  if (length(remaining) > 0L) return(NULL)
-  order
-}
-
-# Deterministic strongly connected components (Tarjan, input-order
-# iteration): returns a flat input-order vector of every cell in an SCC of
-# size > 1 plus every explicit self-loop.
-detect_cycles <- function(edges, ids) {
-  if (length(ids) == 0L) return(character())
-  idx <- setNames(rep(NA_integer_, length(ids)), ids)
-  low <- setNames(rep(NA_integer_, length(ids)), ids)
-  on_stack <- setNames(rep(FALSE, length(ids)), ids)
-  stack <- character()
-  counter <- 0L
-  members <- character()
-  visit <- function(v) {
-    counter <<- counter + 1L
-    idx[[v]] <<- counter
-    low[[v]] <<- counter
-    stack <<- c(stack, v)
-    on_stack[[v]] <<- TRUE
-    for (w in edges[[v]]) {
-      if (is.na(idx[[w]])) {
-        visit(w)
-        low[[v]] <<- min(low[[v]], low[[w]])
-      } else if (on_stack[[w]]) {
-        low[[v]] <<- min(low[[v]], idx[[w]])
-      }
-    }
-    if (identical(low[[v]], idx[[v]])) {
-      comp <- character()
-      repeat {
-        w <- stack[[length(stack)]]
-        stack <<- stack[-length(stack)]
-        on_stack[[w]] <<- FALSE
-        comp <- c(comp, w)
-        if (identical(w, v)) break
-      }
-      self_loop <- length(comp) == 1L && v %in% edges[[v]]
-      if (length(comp) > 1L || self_loop) members <<- c(members, comp)
-    }
-    invisible()
-  }
-  for (id in ids) {
-    if (is.na(idx[[id]])) visit(id)
-  }
-  u <- unique(members)
-  u[order(match(u, ids))]
 }

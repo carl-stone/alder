@@ -1,8 +1,8 @@
 # ---
 # title: alder demo
 # runtime:
-#   execution_mode: automatic
-#   run_on_startup: yes
+#   on_cell_change: automatic
+#   on_startup: true
 # ---
 
 # %% [markdown]

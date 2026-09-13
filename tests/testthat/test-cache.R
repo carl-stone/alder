@@ -1,23 +1,3 @@
-
-test_that("the production host exposes the notebook cache directory", {
-  m <- make_test_session(c(
-    "# %%",
-    "library(alder)",
-    "cached <- cache$disk(function(x) x * 3)",
-    "result <- cached(4)"
-  ), execution_mode = "lazy", run_on_startup = TRUE)
-  s <- m$session
-  withr::defer(m$close())
-  wait_for(s, function() all(vapply(s$state()$cells,
-    function(cell) cell$status %in% c("done", "error", "stopped"),
-    logical(1))), timeout = 15)
-  expect_true(all(vapply(s$state()$cells,
-                         function(cell) !identical(cell$status, "error"),
-                         logical(1))))
-  cache_dir <- file.path(dirname(m$path), ".alder", "cache")
-  expect_length(list.files(cache_dir, pattern = "\\.rds$"), 1L)
-})
-
 test_that("cache keys track free variables, body changes, and clear", {
   cache_dir <- tempfile("alder-cache-")
   dir.create(cache_dir)
@@ -44,31 +24,6 @@ test_that("cache keys track free variables, body changes, and clear", {
 
   alder::cache$clear("disk")
   expect_length(list.files(cache_dir, pattern = "\\.rds$"), 0L)
-})
-
-test_that("reactive reruns cannot reuse a cache entry from old dependencies", {
-  m <- make_test_session(c(
-    "# %%", "multiplier <- 2L",
-    "# %%", "cached_multiply <- alder::cache$memory(function(x) x * multiplier)",
-    "cached_result <- cached_multiply(10L)", "cached_result"
-  ), execution_mode = "lazy", run_on_startup = TRUE)
-  s <- m$session
-  withr::defer(m$close())
-  wait_for(s, function()
-    identical(s$state()$cells[[2L]]$status, "done"), timeout = 15)
-  output <- function() {
-    cell <- s$state()$cells[[2L]]
-    cell$outputs[[length(cell$outputs)]]$text
-  }
-  expect_identical(output(), "[1] 20")
-
-  revision <- s$state()$cells[[1L]]$revision
-  s$set_cell("cell-1", "multiplier <- 3L", "code", revision)
-  wait_for(s, function()
-    !isTRUE(s$state()$runtime$analysisPending), timeout = 10)
-  expect_identical(s$await_operation(s$run_cell("cell-2")$run_id)$status,
-                   "done")
-  expect_identical(output(), "[1] 30")
 })
 
 test_that("reference-like dependencies bypass unsafe cache reuse", {

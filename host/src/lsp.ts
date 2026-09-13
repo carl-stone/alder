@@ -1,5 +1,4 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { resolve as resolvePath, win32 } from "node:path";
+import { delimiter, join, resolve as resolvePath, win32 } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
   CancellationTokenSource,
@@ -31,6 +30,17 @@ import {
   type Position,
   type Range,
 } from "vscode-languageserver-protocol";
+import type { OwnedProcess, ProcessScope } from "./processes.js";
+import {
+  fromFilePosition,
+  layoutNotebook,
+  toFilePosition,
+  translateRange,
+  type CellPosition,
+  type CellRange,
+  type NotebookDocument,
+  type NotebookLayout,
+} from "./notebook.js";
 
 const REQUEST_TYPES = {
   "textDocument/completion": CompletionRequest.type,
@@ -42,42 +52,6 @@ const REQUEST_TYPES = {
 } as const;
 
 export type AlderLspMethod = keyof typeof REQUEST_TYPES;
-
-export interface NotebookRecord {
-  text: string;
-  eol?: string;
-  kind: "header" | "delimiter" | "option" | "body" | string;
-}
-
-export interface NotebookCellDocument {
-  id: string;
-  /** Authoritative source revision captured with this document, when available. */
-  revision?: number;
-  type?: "code" | "markdown";
-  body: readonly string[];
-  delim?: string;
-  options?: Readonly<Record<string, unknown>>;
-  records?: readonly NotebookRecord[];
-}
-
-export interface NotebookDocument {
-  path?: string | null;
-  text?: string;
-  cells: readonly NotebookCellDocument[];
-  header?: readonly string[];
-  headerRecords?: readonly NotebookRecord[];
-}
-
-export interface CellPosition {
-  cell: string;
-  line: number;
-  character: number;
-}
-
-export interface CellRange {
-  start: CellPosition;
-  end: CellPosition;
-}
 
 export interface CellDiagnostic {
   level: "error" | "warning" | "info";
@@ -94,12 +68,6 @@ export interface CellDiagnostic {
 
 export type DiagnosticsByCell = Record<string, CellDiagnostic[]>;
 
-interface DocumentLayout {
-  text: string;
-  lineMap: Array<{ cell: string; line: number } | null>;
-  cellLines: Map<string, number[]>;
-}
-
 export interface LspClientOptions {
   command: string;
   args?: readonly string[];
@@ -114,7 +82,8 @@ export interface LspClientOptions {
   onFailure?: (message: string) => void;
   /** A full replacement for diagnostics belonging to the supplied source snapshot. */
   onDiagnostics?: (document: NotebookDocument, diagnostics: DiagnosticsByCell) => void;
-  spawnProcess?: typeof spawn;
+  /** Spawn through the host containment boundary. */
+  processScope: Pick<ProcessScope, "spawn">;
 }
 
 const MAX_LSP_DIAGNOSTICS = 1_000;
@@ -152,81 +121,9 @@ export function fileUri(
   return encodeFilePathUri(absolute, platform);
 }
 
-function optionLine(key: string, value: unknown): string {
-  let rendered: string;
-  if (typeof value === "boolean") rendered = value ? "true" : "false";
-  else if (value === null) rendered = "null";
-  else if (Array.isArray(value)) rendered = value.join(",");
-  else rendered = String(value);
-  return `#| ${key}: ${rendered}`;
-}
-
-export function layoutNotebook(document: NotebookDocument): DocumentLayout {
-  if (!document || !Array.isArray(document.cells)) {
-    throw new LspClientError("invalid_request", "notebook document must contain cells");
-  }
-  const parts: string[] = [];
-  const lineMap: Array<{ cell: string; line: number } | null> = [];
-  const cellLines = new Map<string, number[]>();
-  const append = (text: string, eol: string, mapped: { cell: string; line: number } | null) => {
-    parts.push(text, eol);
-    lineMap.push(mapped);
-  };
-  if (document.headerRecords) {
-    for (const record of document.headerRecords) append(record.text, record.eol ?? "\n", null);
-  } else {
-    for (const line of document.header ?? []) append(line, "\n", null);
-  }
-  const ids = new Set<string>();
-  for (const cell of document.cells) {
-    if (!cell || typeof cell.id !== "string" || !cell.id || ids.has(cell.id) || !Array.isArray(cell.body)) {
-      throw new LspClientError("invalid_request", "notebook cells require unique nonempty ids and source arrays");
-    }
-    ids.add(cell.id);
-    const physical: number[] = [];
-    if (cell.records) {
-      let bodyLine = 0;
-      for (const record of cell.records) {
-        const mapped = record.kind === "body" ? { cell: cell.id, line: bodyLine++ } : null;
-        if (mapped) physical.push(lineMap.length);
-        append(record.text, record.eol ?? "\n", mapped);
-      }
-    } else {
-      append(cell.delim ?? (cell.type === "markdown" ? "# %% [markdown]" : "# %%"), "\n", null);
-      for (const [key, value] of Object.entries(cell.options ?? {})) append(optionLine(key, value), "\n", null);
-      cell.body.forEach((line: string, bodyLine: number) => {
-        physical.push(lineMap.length);
-        append(line, "\n", { cell: cell.id, line: bodyLine });
-      });
-    }
-    cellLines.set(cell.id, physical);
-  }
-  const serialized = parts.join("");
-  return { text: document.text ?? serialized, lineMap, cellLines };
-}
-
-export function toFilePosition(document: NotebookDocument, position: CellPosition): Position | null {
-  if (!validCoordinate(position.line) || !validCoordinate(position.character)) return null;
-  const lines = layoutNotebook(document).cellLines.get(position.cell);
-  const fileLine = lines?.[position.line];
-  return fileLine === undefined ? null : { line: fileLine, character: position.character };
-}
-
-export function fromFilePosition(document: NotebookDocument, position: Position): CellPosition | null {
-  if (!validCoordinate(position.line) || !validCoordinate(position.character)) return null;
-  const mapped = layoutNotebook(document).lineMap[position.line];
-  return mapped ? { cell: mapped.cell, line: mapped.line, character: position.character } : null;
-}
 
 function validCoordinate(value: unknown): value is number {
   return Number.isSafeInteger(value) && (value as number) >= 0 && (value as number) <= 2_147_483_647;
-}
-
-export function translateRange(range: unknown, document: NotebookDocument): CellRange | null {
-  if (!isRecord(range) || !isPosition(range.start) || !isPosition(range.end)) return null;
-  const start = fromFilePosition(document, range.start);
-  const end = fromFilePosition(document, range.end);
-  return start && end && start.cell === end.cell ? { start, end } : null;
 }
 
 function translateLocation(location: unknown, document: NotebookDocument, uri: string): unknown | null {
@@ -236,6 +133,50 @@ function translateLocation(location: unknown, document: NotebookDocument, uri: s
   return range ? { ...location, uri, range } : null;
 }
 
+function translateLocationLink(location: unknown, document: NotebookDocument, uri: string): unknown | null {
+  if (!isRecord(location) || location.targetUri !== uri) return null;
+  const targetRange = translateRange(location.targetRange, document);
+  const targetSelectionRange = translateRange(location.targetSelectionRange, document);
+  const originSelectionRange = location.originSelectionRange === undefined
+    ? undefined
+    : translateRange(location.originSelectionRange, document);
+  if (!targetRange || !targetSelectionRange
+    || (location.originSelectionRange !== undefined && !originSelectionRange)) return null;
+  return {
+    ...location, targetUri: uri, targetRange, targetSelectionRange,
+    ...(originSelectionRange ? { originSelectionRange } : {}),
+  };
+}
+
+function translateCompletionTextEdit(edit: unknown, document: NotebookDocument): unknown | null {
+  if (!isRecord(edit)) return null;
+  if (edit.range !== undefined) {
+    const range = translateRange(edit.range, document);
+    return range ? { ...edit, range } : null;
+  }
+  const insert = translateRange(edit.insert, document);
+  const replace = translateRange(edit.replace, document);
+  return insert && replace ? { ...edit, insert, replace } : null;
+}
+
+function translateDocumentSymbol(symbol: unknown, document: NotebookDocument, uri: string): unknown | null {
+  if (!isRecord(symbol)) return null;
+  if (isRecord(symbol.location)) {
+    const location = translateLocation(symbol.location, document, uri);
+    return location ? { ...symbol, location } : null;
+  }
+  const range = translateRange(symbol.range, document);
+  const selectionRange = symbol.selectionRange === undefined ? undefined : translateRange(symbol.selectionRange, document);
+  if (!range || (symbol.selectionRange !== undefined && !selectionRange)) return null;
+  const children = symbol.children === undefined ? undefined
+    : Array.isArray(symbol.children)
+      ? symbol.children.map((child) => translateDocumentSymbol(child, document, uri)).filter((child) => child !== null)
+      : null;
+  if (children === null) return null;
+  return { ...symbol, range, ...(selectionRange ? { selectionRange } : {}), ...(children ? { children } : {}) };
+}
+
+
 export function translateLspResult(
   result: unknown,
   method: AlderLspMethod,
@@ -244,21 +185,18 @@ export function translateLspResult(
 ): unknown {
   if (result === null || result === undefined) return null;
   if (method === "textDocument/definition" || method === "textDocument/references") {
-    if (isRecord(result) && "uri" in result) return translateLocation(result, document, uri);
+    const translate = (location: unknown) => isRecord(location) && "targetUri" in location
+      ? translateLocationLink(location, document, uri)
+      : translateLocation(location, document, uri);
+    if (isRecord(result)) return translate(result);
     if (!Array.isArray(result)) return [];
-    return result.map((location) => translateLocation(location, document, uri)).filter((item) => item !== null);
+    return result.map(translate).filter((item) => item !== null);
   }
   if (method === "textDocument/hover" && isRecord(result) && result.range !== undefined) {
     return { ...result, range: translateRange(result.range, document) };
   }
   if (method === "textDocument/documentSymbol" && Array.isArray(result)) {
-    return result.flatMap((symbol) => {
-      if (!isRecord(symbol)) return [];
-      const range = translateRange(symbol.range, document);
-      const selectionRange = symbol.selectionRange === undefined ? undefined : translateRange(symbol.selectionRange, document);
-      if (!range || (symbol.selectionRange !== undefined && !selectionRange)) return [];
-      return [{ ...symbol, range, ...(selectionRange ? { selectionRange } : {}) }];
-    });
+    return result.map((symbol) => translateDocumentSymbol(symbol, document, uri)).filter((symbol) => symbol !== null);
   }
   if (method === "textDocument/completion") {
     const container = isRecord(result) && Array.isArray(result.items) ? result : null;
@@ -268,12 +206,19 @@ export function translateLspResult(
     if (!items) return result;
     const translated = items.flatMap((item) => {
       if (!isRecord(item)) return [];
-      if (isRecord(item.textEdit) && item.textEdit.range !== undefined) {
-        const range = translateRange(item.textEdit.range, document);
-        if (!range) return [];
-        return [{ ...item, textEdit: { ...item.textEdit, range } }];
+      const textEdit = item.textEdit === undefined ? undefined : translateCompletionTextEdit(item.textEdit, document);
+      if (item.textEdit !== undefined && textEdit === null) return [];
+      let additionalTextEdits: unknown[] | undefined;
+      if (item.additionalTextEdits !== undefined) {
+        if (!Array.isArray(item.additionalTextEdits)) return [];
+        additionalTextEdits = item.additionalTextEdits.map((edit) => translateCompletionTextEdit(edit, document));
+        if (additionalTextEdits.some((edit) => edit === null)) return [];
       }
-      return [item];
+      return [{
+        ...item,
+        ...(textEdit === undefined ? {} : { textEdit }),
+        ...(additionalTextEdits === undefined ? {} : { additionalTextEdits }),
+      }];
     });
     return container ? { ...container, items: translated } : translated;
   }
@@ -281,10 +226,10 @@ export function translateLspResult(
 }
 
 export class LspClient {
-  private process: ChildProcessWithoutNullStreams | null = null;
+  private process: OwnedProcess | null = null;
   private connection: MessageConnection | null = null;
   private document: NotebookDocument;
-  private layout: DocumentLayout;
+  private layout: NotebookLayout;
   private documentPath: string;
   private documentUri: string;
   private rootUri: string;
@@ -297,7 +242,7 @@ export class LspClient {
   private failure: string | null = null;
   private failureReported = false;
   private stderrText = "";
-  private readonly spawnProcess: typeof spawn;
+  private processExited = false;
 
   constructor(private readonly options: LspClientOptions) {
     this.document = options.document;
@@ -306,7 +251,6 @@ export class LspClient {
     this.documentUri = fileUri(this.documentPath);
     this.rootUri = fileUri(resolvePath(this.documentPath, ".."));
     this.diagnosticsEnabled = options.diagnostics === true;
-    this.spawnProcess = options.spawnProcess ?? spawn;
   }
 
   get uri(): string { return this.documentUri; }
@@ -314,30 +258,37 @@ export class LspClient {
   get failureMessage(): string | null { return this.failure; }
 
   alive(): boolean {
-    return !this.closed && this.initialized && this.process !== null && this.process.exitCode === null && !this.process.killed;
+    return !this.closed && this.initialized && this.process !== null && this.processAlive(this.process);
   }
 
   async start(): Promise<this> {
     if (this.closed) throw new LspClientError("lsp_unavailable", "language server is stopped");
     if (this.connection) return this;
-    const child = this.spawnProcess(this.options.command, [...(this.options.args ?? [])], {
+    this.failure = null;
+    this.failureReported = false;
+    const child = await this.options.processScope.spawn({
+      executable: this.options.command,
+      args: [...(this.options.args ?? [])],
       cwd: this.options.cwd ?? resolvePath(this.documentPath, ".."),
-      env: this.options.env ?? process.env,
-      stdio: ["pipe", "pipe", "pipe"],
-      windowsHide: true,
+      environment: stringEnvironment(this.options.env ?? process.env),
+      stdio: "pipes",
     });
     this.process = child;
-    child.stderr.on("data", (chunk: Buffer) => this.retainStderr(chunk));
-    child.once("error", (error) => this.reportFailure(this.failureDetail(`language server failed to start: ${error.message}`)));
-    child.once("exit", (code, signal) => {
-      if (!this.closed) this.reportFailure(this.failureDetail(`language server exited${code === null ? "" : ` with status ${code}`}${signal ? ` (${signal})` : ""}`));
+    this.processExited = false;
+    child.stderr?.on("data", (chunk: Buffer) => this.retainStderr(chunk));
+    void child.exited.then(({ code, signal }) => {
+      this.processExited = true;
+      if (!this.closed) this.reportFailure(this.failureDetail(languageServerExitMessage(code, signal)));
+    }).catch(error => {
+      this.processExited = true;
+      if (!this.closed) this.reportFailure(this.failureDetail("language server failed: " + (error instanceof Error ? error.message : String(error))));
     });
     const connection = createMessageConnection(
-      new StreamMessageReader(child.stdout),
-      new StreamMessageWriter(child.stdin),
+      new StreamMessageReader(child.stdout!),
+      new StreamMessageWriter(child.stdin!),
     );
     this.connection = connection;
-    connection.onError(([error]) => this.reportFailure(this.failureDetail(`language server connection failed: ${error.message}`)));
+    connection.onError(([error]) => this.reportFailure(this.failureDetail("language server connection failed: " + error.message)));
     connection.onClose(() => {
       if (!this.closed) this.reportFailure(this.failureDetail("language server connection closed"));
     });
@@ -373,23 +324,36 @@ export class LspClient {
       },
       workspaceFolders: [{ uri: this.rootUri, name: basenameForUri(this.rootUri) }],
     };
-    await this.withTimeout(
-      connection.sendRequest(InitializeRequest.type, initialize),
-      this.options.initializeTimeoutMs ?? 30_000,
-      "initialize",
-    );
-    connection.sendNotification(InitializedNotification.type, {});
-    connection.sendNotification(DidChangeConfigurationNotification.type, { settings: { diagnostics: this.diagnosticsEnabled } });
-    connection.sendNotification(DidOpenTextDocumentNotification.type, {
-      textDocument: {
-        uri: this.documentUri,
-        languageId: "r",
-        version: this.version,
-        text: this.layout.text,
-      },
-    });
-    this.initialized = true;
-    return this;
+    try {
+      await this.withTimeout(
+        connection.sendRequest(InitializeRequest.type, initialize),
+        this.options.initializeTimeoutMs ?? 30_000,
+        "initialize",
+      );
+      connection.sendNotification(InitializedNotification.type, {});
+      connection.sendNotification(DidChangeConfigurationNotification.type, { settings: { diagnostics: this.diagnosticsEnabled } });
+      connection.sendNotification(DidOpenTextDocumentNotification.type, {
+        textDocument: {
+          uri: this.documentUri,
+          languageId: "r",
+          version: this.version,
+          text: this.layout.text,
+        },
+      });
+      this.initialized = true;
+      return this;
+    } catch (error) {
+      if (!this.closed && this.connection === connection) {
+        connection.dispose();
+        this.connection = null;
+        this.initialized = false;
+        const owned = this.process;
+        this.process = null;
+        this.processExited = true;
+        if (owned) await terminateOwnedProcess(owned, 2_000).catch(() => {});
+      }
+      throw error;
+    }
   }
 
   async syncDocument(document: NotebookDocument): Promise<boolean> {
@@ -531,7 +495,7 @@ export class LspClient {
     this.publishDiagnostics();
     const connection = this.connection;
     const child = this.process;
-    if (connection && this.initialized && child?.exitCode === null) {
+    if (connection && this.initialized && child !== null && this.processAlive(child)) {
       try {
         connection.sendNotification(DidCloseTextDocumentNotification.type, { textDocument: { uri: this.documentUri } });
         await this.withTimeout(connection.sendRequest(ShutdownRequest.type), 2_000, "shutdown");
@@ -541,11 +505,10 @@ export class LspClient {
       }
     }
     connection?.dispose();
-    if (child && child.exitCode === null) {
-      await terminateChild(child, 2_000);
-    }
+    if (child && this.processAlive(child)) await terminateOwnedProcess(child, 2_000);
     this.connection = null;
     this.process = null;
+    this.processExited = true;
     this.initialized = false;
   }
 
@@ -553,6 +516,10 @@ export class LspClient {
     if (!this.alive() || !this.connection) {
       throw new LspClientError("lsp_unavailable", this.failureDetail("language server is unavailable"));
     }
+  }
+
+  private processAlive(_child: OwnedProcess): boolean {
+    return !this.processExited;
   }
 
   private async withTimeout<T>(
@@ -642,21 +609,25 @@ function cloneRange(range: Range): Range {
 
 function cloneDocument(document: NotebookDocument): NotebookDocument {
   return {
-    ...(document.path === undefined ? {} : { path: document.path }),
-    ...(document.text === undefined ? {} : { text: document.text }),
+    ...document,
     ...(document.header === undefined ? {} : { header: [...document.header] }),
     ...(document.headerRecords === undefined ? {} : {
       headerRecords: document.headerRecords.map((record) => ({ ...record })),
     }),
+    ...(document.metadata === undefined ? {} : { metadata: structuredClone(document.metadata) }),
+    ...(document.bom instanceof Uint8Array ? { bom: new Uint8Array(document.bom) } : {}),
     cells: document.cells.map((cell) => ({
       ...cell,
       body: [...cell.body],
       ...(cell.options === undefined ? {} : { options: structuredClone(cell.options) }),
       ...(cell.records === undefined ? {} : { records: cell.records.map((record) => ({ ...record })) }),
+      ...(cell.raw === undefined ? {} : { raw: [...cell.raw] }),
+      ...(cell.optionDuplicates === undefined ? {} : {
+        optionDuplicates: Object.fromEntries(Object.entries(cell.optionDuplicates).map(([key, values]) => [key, [...values]])),
+      }),
     })),
   };
 }
-
 function boundedUtf8(value: string, maxBytes: number): string {
   if (Buffer.byteLength(value, "utf8") <= maxBytes) return value;
   let low = 0;
@@ -671,31 +642,69 @@ function boundedUtf8(value: string, maxBytes: number): string {
   return value.slice(0, low);
 }
 
-async function terminateChild(child: ChildProcessWithoutNullStreams, timeoutMs: number): Promise<void> {
-  const exited = new Promise<void>((resolveExit) => child.once("exit", () => resolveExit()));
-  child.kill("SIGTERM");
-  let timer: NodeJS.Timeout | undefined;
-  await Promise.race([
-    exited,
-    new Promise<void>((resolveTimeout) => {
-      timer = setTimeout(resolveTimeout, timeoutMs);
-      timer.unref?.();
-    }),
-  ]);
-  if (timer) clearTimeout(timer);
-  if (child.exitCode === null) child.kill("SIGKILL");
+function stringEnvironment(environment: NodeJS.ProcessEnv): Record<string, string> {
+  return Object.fromEntries(Object.entries(environment).filter((entry): entry is [string, string] => typeof entry[1] === "string"));
 }
 
-export function defaultRLanguageServerOptions(
+function languageServerExitMessage(code: number | null, signal: string | null): string {
+  return "language server exited" + (code === null ? "" : " with status " + code) + (signal ? " (" + signal + ")" : "");
+}
+
+async function terminateOwnedProcess(child: OwnedProcess, timeoutMs: number): Promise<void> {
+  let exited = false;
+  const done = child.exited.then(() => { exited = true; }).catch(() => { exited = true; });
+  await Promise.race([done, new Promise<void>(resolveTimeout => {
+    const timer = setTimeout(resolveTimeout, timeoutMs);
+    timer.unref?.();
+  })]);
+  if (!exited) await child.terminate();
+}
+
+function isAbsolutePath(value: string): boolean {
+  return typeof value === "string" && value.length > 0 && (value.startsWith("/") || /^[A-Za-z]:[\\/]/.test(value));
+}
+export function trustedRLanguageServerEnvironment(
+  environment: NodeJS.ProcessEnv,
+  trustedLibraryPaths: readonly string[],
+  trustedResourcesRoot: string,
+): Record<string, string> {
+  if (!isAbsolutePath(trustedResourcesRoot)) {
+    throw new LspClientError("invalid_request", "language server requires an absolute trusted resources root");
+  }
+  if (!Array.isArray(trustedLibraryPaths) || trustedLibraryPaths.length === 0 ||
+      trustedLibraryPaths.some(path => typeof path !== "string" || !isAbsolutePath(path)) ||
+      new Set(trustedLibraryPaths).size !== trustedLibraryPaths.length) {
+    throw new LspClientError("invalid_request", "language server requires unique absolute trusted R library paths");
+  }
+  const trusted = [...trustedLibraryPaths];
+  const result = stringEnvironment(environment);
+  for (const key of Object.keys(result)) if (/^R_LIBS(?:_|$)/.test(key)) delete result[key];
+  result.R_LIBS = trusted.join(delimiter);
+  result.R_LIBS_USER = "";
+  result.R_LIBS_SITE = "";
+  result.ALDER_RESOURCES_ROOT = trustedResourcesRoot;
+  result.ALDER_R_LIBRARIES = JSON.stringify(trusted);
+  return result;
+}
+export function validatedRLanguageServerOptions(
   document: NotebookDocument,
-  rscript = process.env.RSCRIPT ?? "Rscript",
+  rscript: string,
+  workerDirectory: string,
+  processScope: Pick<ProcessScope, "spawn">,
 ): LspClientOptions {
+  if (!isAbsolutePath(rscript) || !isAbsolutePath(workerDirectory)) {
+    throw new LspClientError("invalid_request", "Rscript and workerDirectory must be absolute paths");
+  }
+  if (!processScope || typeof processScope.spawn !== "function") {
+    throw new LspClientError("invalid_request", "language server requires the application ProcessScope");
+  }
   const path = resolveDocumentPath(document);
   return {
     command: rscript,
-    args: ["--vanilla", "-e", "languageserver::run()"],
+    args: ["--vanilla", join(workerDirectory, "host-lsp.R")],
     cwd: resolvePath(path, ".."),
     document,
+    processScope,
   };
 }
 

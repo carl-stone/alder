@@ -29,9 +29,8 @@ export interface EditorCompletion {
   type: string;
   detail: string;
   info: string;
-  apply: string;
+  apply: string | ((view: unknown, completion: unknown, from: number, to: number) => void);
 }
-
 export type EditorCompletionSource = (context: EditorCompletionContext) => Promise<{
   from: number;
   options: EditorCompletion[];

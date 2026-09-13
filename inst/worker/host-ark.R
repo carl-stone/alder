@@ -1,19 +1,59 @@
 # Alder's Ark startup hook. Ark remains the notebook evaluator and owns its
 # Jupyter lifecycle, streams, conditions, native graphics and interruption.
-# The sourced runtime only adds Alder's reactive ownership and output helpers.
-
-suppressPackageStartupMessages(library(alder))
-
-# Start opt-in profiling before Ark announces readiness. This records startup
-# work even when a profiling fixture creates a kernel without evaluating a
-# notebook cell; with tracing disabled this only flips private in-memory state.
-get(".alder_perf_initialize", envir = asNamespace("alder"))()
+# The sourced runtime performs the one common R bootstrap for this process.
 
 local({
-  package_path <- find.package("alder", quiet = FALSE)
-  runtime_path <- file.path(package_path, "worker", "host-ark-runtime.R")
-  if (!file.exists(runtime_path)) {
-    stop("installed Alder Ark runtime not found", call. = FALSE)
+  path_is_absolute <- function(value) {
+    if (.Platform$OS.type == "windows") {
+      grepl("^(?:[A-Za-z]:[/\\\\]|[/\\\\]{2})", value, perl = TRUE)
+    } else startsWith(value, "/")
+  }
+  resolve_directory <- function(value, label) {
+    if (!is.character(value) || length(value) != 1L || is.na(value) ||
+        !nzchar(value) || !validUTF8(value) ||
+        nchar(value, type = "bytes") > 4096L || !path_is_absolute(value)) {
+      stop(label, " must be an absolute directory", call. = FALSE)
+    }
+    resolved <- tryCatch(normalizePath(value, mustWork = TRUE, winslash = "/"),
+                         error = function(error) NULL)
+    if (is.null(resolved) || !dir.exists(resolved) || file.access(resolved, 4L) != 0L) {
+      stop(label, " must be an existing readable directory", call. = FALSE)
+    }
+    resolved
+  }
+  trim_path <- function(value) {
+    if (identical(value, "/")) "/" else sub("/+$", "", value)
+  }
+  path_is_under <- function(path, root) {
+    path <- trim_path(path)
+    root <- trim_path(root)
+    if (.Platform$OS.type == "windows") {
+      path <- tolower(path)
+      root <- tolower(root)
+    }
+    prefix <- if (identical(root, "/")) "/" else paste0(root, "/")
+    identical(path, root) || startsWith(path, prefix)
+  }
+  resources_root <- resolve_directory(Sys.getenv("ALDER_RESOURCES_ROOT", unset = ""),
+                                      "ALDER_RESOURCES_ROOT")
+  worker_dir <- resolve_directory(Sys.getenv("ALDER_WORKER_DIR", unset = ""),
+                                  "ALDER_WORKER_DIR")
+  if (!path_is_under(worker_dir, resources_root)) {
+    stop("ALDER_WORKER_DIR must be contained inside application resources", call. = FALSE)
+  }
+  bootstrap_path <- normalizePath(file.path(worker_dir, "host-bootstrap.R"),
+                                  mustWork = FALSE, winslash = "/")
+  runtime_path <- normalizePath(file.path(worker_dir, "host-ark-runtime.R"),
+                                mustWork = FALSE, winslash = "/")
+  if (!path_is_under(bootstrap_path, resources_root) ||
+      !path_is_under(runtime_path, resources_root) ||
+      !identical(dirname(bootstrap_path), worker_dir) ||
+      !identical(dirname(runtime_path), worker_dir) ||
+      !file.exists(bootstrap_path) || isTRUE(file.info(bootstrap_path)$isdir) ||
+      file.access(bootstrap_path, 4L) != 0L ||
+      !file.exists(runtime_path) || isTRUE(file.info(runtime_path)$isdir) ||
+      file.access(runtime_path, 4L) != 0L) {
+    stop("validated Alder Ark worker modules are missing or outside resources", call. = FALSE)
   }
 
   # These values are part of the persistent notebook runtime contract. Ark may
@@ -25,6 +65,7 @@ local({
 
   runtime <- new.env(parent = globalenv())
   sys.source(runtime_path, envir = runtime, keep.source = FALSE)
+  Sys.unsetenv("ALDER_WORKER_DIR")
   api <- get("RUNTIME", envir = asNamespace("alder"), inherits = FALSE)
   if (!is.environment(api) || !is.function(api$ark_evaluate) ||
       !is.function(api$ark_request)) {

@@ -10,77 +10,447 @@ permissions:
   contents: read
 
 jobs:
-  host:
+  ark:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-latest, windows-latest]
+        include:
+          - name: linux-x64
+            os: ubuntu-24.04
+            target-platform: linux
+            target-arch: x64
+          - name: linux-arm64
+            os: ubuntu-24.04-arm
+            target-platform: linux
+            target-arch: arm64
+          - name: macos-x64
+            os: macos-15-intel
+            target-platform: darwin
+            target-arch: x64
+          - name: macos-arm64
+            os: macos-14
+            target-platform: darwin
+            target-arch: arm64
+          - name: windows-x64
+            os: windows-2025
+            target-platform: win32
+            target-arch: x64
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version-file: host/.node-version
           cache: npm
           cache-dependency-path: host/package-lock.json
-      - uses: r-lib/actions/setup-r@v2
+      - uses: r-lib/actions/setup-r@465b7d8e732ca3921382b1674c59bada9cbf3399 # v2
         with:
           r-version: '4.6.1'
           use-public-rspm: true
-      - uses: r-lib/actions/setup-r-dependencies@v2
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
-          dependencies: '"all"'
+          toolchain: 1.95.0
+      - name: Build externally pinned Ark producer artifact
+        shell: bash
+        run: |
+          case "${{ matrix.target-platform }}-${{ matrix.target-arch }}" in
+            linux-x64) ;;
+            *) echo "::error::No verified Ark lock digest exists for ${{ matrix.target-platform }}-${{ matrix.target-arch }}; external producer prerequisite unavailable"; exit 2 ;;
+          esac
+          npm ci --prefix host
+          mkdir -p "$RUNNER_TEMP/ark"
+          node host/scripts/build-ark.mjs \
+            --target "${{ matrix.target-platform }}-${{ matrix.target-arch }}" \
+            --output "$RUNNER_TEMP/ark/build" \
+            --archive-output "$RUNNER_TEMP/ark/ark.tar.gz"
+          test -s "$RUNNER_TEMP/ark/ark.tar.gz"
+          curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+            https://static.rust-lang.org/dist/channel-rust-1.95.0.toml -o "$RUNNER_TEMP/channel-rust-1.95.0.toml"
+          if [[ '${{ runner.os }}' == 'macOS' ]]; then
+            printf '%s  %s\n' 821ff14e4c4a1cbe1e8915f35aff0a3fbbdf8d293ad48ab8f31e3b0440c581f9 "$RUNNER_TEMP/channel-rust-1.95.0.toml" | shasum -a 256 -c -
+          else
+            printf '%s  %s\n' 821ff14e4c4a1cbe1e8915f35aff0a3fbbdf8d293ad48ab8f31e3b0440c581f9 "$RUNNER_TEMP/channel-rust-1.95.0.toml" | sha256sum -c -
+          fi
+          cargo +1.95.0 build --locked --release --manifest-path host/native/process-supervisor/Cargo.toml
+          SUPERVISOR_BUILD=host/native/process-supervisor/target/release/alder-process-supervisor
+          if [ "${{ matrix.target-platform }}" = win32 ]; then SUPERVISOR_BUILD="$SUPERVISOR_BUILD.exe"; fi
+          test -s "$SUPERVISOR_BUILD"
+          cp "$SUPERVISOR_BUILD" "$RUNNER_TEMP/ark/alder-process-supervisor"
+          RUSTC_VERSION=$(rustc +1.95.0 --version)
+          CARGO_VERSION=$(cargo +1.95.0 --version)
+          RUSTC_VERSION="$RUSTC_VERSION" CARGO_VERSION="$CARGO_VERSION" node --input-type=module - <<'NODE'
+          import { createHash } from 'node:crypto';
+          import { readFile, writeFile } from 'node:fs/promises';
+          const path = process.env.RUNNER_TEMP + '/ark/alder-process-supervisor';
+          const digest = createHash('sha256').update(await readFile(path)).digest('hex');
+          await writeFile(process.env.RUNNER_TEMP + '/ark/process-supervisor-provenance.json', JSON.stringify({
+            schemaVersion: 1,
+            artifact: { sha256: digest },
+            producer: {
+              toolchain: 'rust-1.95.0',
+              rustc: process.env.RUSTC_VERSION,
+              cargo: process.env.CARGO_VERSION,
+              command: 'cargo +1.95.0 build --locked --release --manifest-path host/native/process-supervisor/Cargo.toml',
+            },
+          }, null, 2) + '\n');
+          NODE
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: ${{ success() }}
+        with:
+          name: ark-${{ matrix.name }}
+          path: |
+            ${{ runner.temp }}/ark/ark.tar.gz
+            ${{ runner.temp }}/ark/alder-process-supervisor
+            ${{ runner.temp }}/ark/process-supervisor-provenance.json
+          if-no-files-found: error
+
+
+  host:
+    needs: ark
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x64
+            os: ubuntu-24.04
+            target-platform: linux
+            target-arch: x64
+          - name: linux-arm64
+            os: ubuntu-24.04-arm
+            target-platform: linux
+            target-arch: arm64
+          - name: macos-x64
+            os: macos-15-intel
+            target-platform: darwin
+            target-arch: x64
+          - name: macos-arm64
+            os: macos-14
+            target-platform: darwin
+            target-arch: arm64
+          - name: windows-x64
+            os: windows-2025
+            target-platform: win32
+            target-arch: x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: host/.node-version
+          cache: npm
+          cache-dependency-path: host/package-lock.json
+      - uses: r-lib/actions/setup-r@465b7d8e732ca3921382b1674c59bada9cbf3399 # v2
+        id: setup-r-461
+        with:
+          r-version: '4.6.1'
+          use-public-rspm: true
+      - name: Capture R 4.6.1
+        id: r461
+        shell: bash
+        run: |
+          path=$(Rscript -e 'cat(normalizePath(file.path(R.home("bin"), if (.Platform$OS.type == "windows") "Rscript.exe" else "Rscript"), winslash = "/", mustWork = TRUE))')
+          if [ "${{ runner.os }}" = Windows ]; then
+            r_home=$(Rscript -e 'cat(normalizePath(R.home(), winslash = "/", mustWork = TRUE))')
+            rm -rf "$RUNNER_TEMP/R-4.6.1"
+            cp -R "$r_home" "$RUNNER_TEMP/R-4.6.1"
+            path="$RUNNER_TEMP/R-4.6.1/bin/Rscript.exe"
+          fi
+          echo "path=$path" >> "$GITHUB_OUTPUT"
+      - uses: r-lib/actions/setup-r@465b7d8e732ca3921382b1674c59bada9cbf3399 # v2
+        id: setup-r-460
+        with:
+          r-version: '4.6.0'
+          use-public-rspm: true
+      - name: Capture R 4.6.0
+        id: r460
+        shell: bash
+        run: echo "path=$(Rscript -e 'cat(normalizePath(file.path(R.home("bin"), if (.Platform$OS.type == "windows") "Rscript.exe" else "Rscript"), winslash = "/", mustWork = TRUE))')" >> "$GITHUB_OUTPUT"
       - name: Install Chrome for Linux browser contracts
         if: runner.os == 'Linux'
         id: chrome
-        uses: browser-actions/setup-chrome@v2
+        uses: browser-actions/setup-chrome@48ad923757ca74d66703209fe939badbdf80f2f4 # v2
+
+      - name: Download target Ark producer artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ark-${{ matrix.name }}
+          path: ${{ runner.temp }}/ark
       - name: Build bundled application
+        shell: bash
         run: |
           npm ci --prefix js
           npm run build --prefix js
           npm ci --prefix host
-          node host/scripts/fetch-ark.mjs --archive-output host/.runtime/ark.zip
+          node host/scripts/fetch-ark.mjs --archive "$RUNNER_TEMP/ark/ark.tar.gz" --archive-output host/.runtime/ark.tar.gz --platform ${{ matrix.target-platform }} --arch ${{ matrix.target-arch }}
+          node host/scripts/fetch-air.mjs
           npm run build --prefix host
-          R CMD INSTALL .
-      - name: Stage native transport and select packaged Ark
-        shell: Rscript {0}
+      - name: Stage one application tree
+        shell: bash
+        env:
+          R461: ${{ steps.r461.outputs.path }}
+          R460: ${{ steps.r460.outputs.path }}
+
         run: |
-          status <- system2("node", c("host/scripts/stage-native.mjs",
-            shQuote(file.path(find.package("alder"), "host"))))
-          stopifnot(status == 0L)
-          ark <- file.path(normalizePath("host/.runtime"),
-            if (.Platform$OS.type == "windows") "ark.exe" else "ark")
-          cat("ALDER_ARK=", ark, "\n", sep = "", file = Sys.getenv("GITHUB_ENV"), append = TRUE)
+          node host/scripts/stage-application.mjs \
+            --output host/.application --kind headless \
+            --rscript "$R461" --qualified-rscript "$R460" \
+            --source-commit "$GITHUB_SHA" \
+            --supervisor "$RUNNER_TEMP/ark/alder-process-supervisor" --supervisor-provenance "$RUNNER_TEMP/ark/process-supervisor-provenance.json"
       - name: Protocol, controller, engine and transport contracts
         shell: bash
         env:
+          R461: ${{ steps.r461.outputs.path }}
+          R460: ${{ steps.r460.outputs.path }}
           ALDER_BROWSER_TEST: ${{ runner.os == 'Linux' && '1' || '' }}
           CHROME_BIN: ${{ steps.chrome.outputs.chrome-path }}
         run: |
-          export ALDER_R_PACKAGE="$(Rscript -e 'cat(find.package("alder"))')"
+          export PATH="$(dirname "$R461"):$PATH"
+          export ALDER_RSCRIPT_461="$R461"
+          export ALDER_RSCRIPT_460="$R460"
           npm test --prefix host
       - name: Installed R API and notebook contracts
-        shell: Rscript {0}
+        shell: bash
         env:
+          R461: ${{ steps.r461.outputs.path }}
           CHROMOTE_CHROME: ${{ steps.chrome.outputs.chrome-path }}
         run: |
-          Sys.setenv(ALDER_TEST_HOST = "1", NOT_CRAN = "true")
-          stopifnot(alder:::alder_host_spec()$identity$protocol == 1L)
-          testthat::test_dir("tests/testthat",
-            package = "alder", load_package = "installed", stop_on_failure = TRUE)
-      - name: Package application runtime and R archive
+          export R_LIBS_USER="$PWD/host/.application/resources/r-library"
+          "$R461" --vanilla -e 'library(alder); Sys.setenv(NOT_CRAN = "true"); testthat::test_dir("tests/testthat", package = "alder", load_package = "installed", stop_on_failure = TRUE)'
+      - name: Run complete headless smoke matrix from staged resources
+        shell: bash
+        env:
+          R461: ${{ steps.r461.outputs.path }}
+          R460: ${{ steps.r460.outputs.path }}
         run: |
-          R CMD build --no-build-vignettes .
-          node host/scripts/ci-package.mjs
-          node host/scripts/smoke-release.mjs host/.release
-      - uses: actions/upload-artifact@v4
+          mkdir -p host/.evidence
+          node host/scripts/smoke-application.mjs host/.application --scenario all \
+            --evidence host/.evidence/application --rscript "$R461" --peer-rscript "$R460"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
-          name: host-${{ matrix.os }}
+          name: host-${{ matrix.name }}
           path: |
-            inst/host
-            inst/app/static/host-app.js
+            host/.application
             host/.runtime
+            host/.evidence
+          include-hidden-files: true
+          if-no-files-found: error
+  desktop:
+    needs: ark
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x64
+            os: ubuntu-24.04
+            target-platform: linux
+            target-arch: x64
+          - name: linux-arm64
+            os: ubuntu-24.04-arm
+            target-platform: linux
+            target-arch: arm64
+          - name: macos-x64
+            os: macos-15-intel
+            target-platform: darwin
+            target-arch: x64
+          - name: macos-arm64
+            os: macos-14
+            target-platform: darwin
+            target-arch: arm64
+          - name: windows-x64
+            os: windows-2025
+            target-platform: win32
+            target-arch: x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: host/.node-version
+          cache: npm
+          cache-dependency-path: |
+            host/package-lock.json
+            desktop/package-lock.json
+      - uses: r-lib/actions/setup-r@465b7d8e732ca3921382b1674c59bada9cbf3399 # v2
+        with:
+          r-version: '4.6.1'
+          use-public-rspm: true
+      - name: Capture R 4.6.1
+        id: r461
+        shell: bash
+        run: echo "path=$(command -v Rscript)" >> "$GITHUB_OUTPUT"
+      - uses: r-lib/actions/setup-r@465b7d8e732ca3921382b1674c59bada9cbf3399 # v2
+        with:
+          r-version: '4.6.0'
+          use-public-rspm: true
+      - name: Capture R 4.6.0
+        id: r460
+        shell: bash
+        run: echo "path=$(command -v Rscript)" >> "$GITHUB_OUTPUT"
+      - name: Install Chrome for desktop browser contracts
+        if: runner.os == 'Linux'
+        id: chrome
+        uses: browser-actions/setup-chrome@48ad923757ca74d66703209fe939badbdf80f2f4 # v2
+
+      - name: Install Linux desktop packaging tools
+        if: runner.os == 'Linux'
+        shell: bash
+        run: sudo apt-get update && sudo apt-get install -y dpkg fakeroot rpm xvfb
+      - name: Download target Ark producer artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ark-${{ matrix.name }}
+          path: ${{ runner.temp }}/ark
+      - name: Build host and package Forge application
+        shell: bash
+        run: |
+          npm ci --prefix js
+          npm run build --prefix js
+          npm ci --prefix host
+          npm ci --prefix desktop
+          node host/scripts/fetch-ark.mjs --archive "$RUNNER_TEMP/ark/ark.tar.gz" --archive-output host/.runtime/ark.tar.gz --platform ${{ matrix.target-platform }} --arch ${{ matrix.target-arch }}
+          node host/scripts/fetch-air.mjs
+          npm run build --prefix host
+          npm run package --prefix desktop
+      - name: Select unpacked Forge application
+        shell: bash
+        run: |
+          case "${{ matrix.target-platform }}" in
+            linux)
+              forge_root=$(find desktop/out -type d -name 'Alder-linux-*' -print -quit)
+              forge_entry="$forge_root/alder-desktop"
+              ;;
+            darwin)
+              forge_root=$(find desktop/out -type d -path '*/Alder.app/Contents' -print -quit)
+              forge_entry="$forge_root/MacOS/Alder"
+              ;;
+            win32)
+              forge_root=$(find desktop/out -type d -name 'Alder-win32-*' -print -quit)
+              forge_entry="$forge_root/Alder.exe"
+              if [[ ! -f "$forge_entry" ]]; then forge_entry="$forge_root/Alder"; fi
+              ;;
+          esac
+          test -n "$forge_root" && test -d "$forge_root"
+          test -f "$forge_entry"
+          {
+            echo "FORGE_ROOT=$forge_root"
+            echo "FORGE_ENTRY=$forge_entry"
+          } >> "$GITHUB_ENV"
+      - name: Stage desktop application with real Forge resources
+        shell: bash
+        env:
+          R461: ${{ steps.r461.outputs.path }}
+          R460: ${{ steps.r460.outputs.path }}
+
+        run: |
+          node host/scripts/stage-application.mjs \
+            --output host/.application-desktop --kind desktop \
+            --forge-output "$FORGE_ROOT" --electron-entry "$FORGE_ENTRY" \
+            --rscript "$R461" --qualified-rscript "$R460" \
+            --source-commit "$GITHUB_SHA" \
+            --supervisor "$RUNNER_TEMP/ark/alder-process-supervisor" --supervisor-provenance "$RUNNER_TEMP/ark/process-supervisor-provenance.json"
+      - name: Inject staged resources before Forge make
+        shell: bash
+        run: |
+          if [[ "${{ matrix.target-platform }}" == "darwin" ]]; then
+            staged_root="host/.application-desktop/Alder.app/Contents"
+          else
+            staged_root="host/.application-desktop"
+          fi
+          test -d "$staged_root"
+          cp -a "$staged_root/." "$FORGE_ROOT/"
+          npm run make --prefix desktop -- --skip-package
+      - name: Stage headless application for the dual release
+        shell: bash
+        env:
+          R461: ${{ steps.r461.outputs.path }}
+          R460: ${{ steps.r460.outputs.path }}
+
+        run: |
+          node host/scripts/stage-application.mjs \
+            --output host/.application --kind headless \
+            --rscript "$R461" --qualified-rscript "$R460" \
+            --source-commit "$GITHUB_SHA" \
+            --supervisor "$RUNNER_TEMP/ark/alder-process-supervisor" --supervisor-provenance "$RUNNER_TEMP/ark/process-supervisor-provenance.json"
+      - name: Build frozen release qualification sidecars
+        id: qualification
+        shell: bash
+        run: |
+          rm -rf host/.qualification
+          node host/scripts/build-qualification-sidecar.mjs \
+            --output "$PWD/host/.qualification" \
+            --application "$PWD/host/.application" | tee "$RUNNER_TEMP/qualification-sidecar.json"
+          test -f host/.qualification/driver/scripts/smoke-application.mjs
+          test -f host/.qualification/source/qualification-manifest.json
+          manifest_sha=$(node -e "const fs=require('fs'); process.stdout.write(JSON.parse(fs.readFileSync(process.argv[1], 'utf8')).manifestSha256)" "$RUNNER_TEMP/qualification-sidecar.json")
+          printf 'manifest_sha256=%s\n' "$manifest_sha" >> "$GITHUB_OUTPUT"
+          tar -czf "$RUNNER_TEMP/qualification-sidecar.tar.gz" -C host .qualification
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: qualification-${{ matrix.name }}-${{ steps.qualification.outputs.manifest_sha256 }}
+          path: ${{ runner.temp }}/qualification-sidecar.tar.gz
+          include-hidden-files: true
+          if-no-files-found: error
+      - name: Run complete desktop smoke matrix from staged resources
+        shell: bash
+        env:
+          R461: ${{ steps.r461.outputs.path }}
+          R460: ${{ steps.r460.outputs.path }}
+        run: |
+          mkdir -p host/.evidence-desktop
+          if [[ "$RUNNER_OS" == "Linux" ]]; then
+            xvfb-run -a -s "-screen 0 1920x1080x24" node host/scripts/smoke-application.mjs \
+              host/.application-desktop --scenario all --evidence host/.evidence-desktop/application \
+              --rscript "$R461" --peer-rscript "$R460"
+          else
+            node host/scripts/smoke-application.mjs host/.application-desktop --scenario all \
+              --evidence host/.evidence-desktop/application --rscript "$R461" --peer-rscript "$R460"
+          fi
+      - name: Package unsigned development variants
+        shell: bash
+        env:
+          R461: ${{ steps.r461.outputs.path }}
+          R460: ${{ steps.r460.outputs.path }}
+        run: |
+          node host/scripts/ci-package.mjs --output host/.release \
+            --rscript "$R461" --qualified-rscript "$R460" \
+            --target-platform "${{ matrix.target-platform }}" --target-arch "${{ matrix.target-arch }}" \
+            --forge-output "$FORGE_ROOT" --electron-entry "$FORGE_ENTRY" \
+            --forge-make-output desktop/out/make --evidence host/.evidence-desktop/release \
+            --source-commit "$GITHUB_SHA" \
+            --supervisor "$RUNNER_TEMP/ark/alder-process-supervisor" \
+            --supervisor-provenance "$RUNNER_TEMP/ark/process-supervisor-provenance.json"
+          set +e
+          node host/scripts/smoke-release.mjs host/.release \
+            --evidence "$PWD/host/.evidence-desktop/installed" \
+            --rscript "$R461" --peer-rscript "$R460" \
+            --qualification-driver "$PWD/host/.qualification/driver/scripts/smoke-application.mjs" \
+            --qualification-source "$PWD/host/.qualification/source" \
+            --qualification-manifest-sha256 '${{ steps.qualification.outputs.manifest_sha256 }}' \
+            --artifact-root "$PWD/host/.release"
+          release_status=$?
+          set -e
+          if [[ "$release_status" -ne 0 ]]; then
+            node --input-type=module - <<'NODE'
+          import { readFile } from 'node:fs/promises';
+          const report = JSON.parse(await readFile('host/.evidence-desktop/installed/release-smoke-report.json', 'utf8'));
+          if (report.summary.failed !== 0 || report.summary.blocked !== report.summary.total || report.summary.total !== 2
+              || report.variants.some(variant => variant.error?.code !== 'signature_trust_unavailable')) {
+            throw new Error('release smoke failed for a reason other than unavailable external trust');
+          }
+          NODE
+          fi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: desktop-${{ matrix.name }}
+          path: |
+            host/.application-desktop
+            host/.application
             host/.release
+            host/.release-headless-*
+            desktop/out/make
+            host/.runtime
+            host/.evidence-desktop
           include-hidden-files: true
           if-no-files-found: error

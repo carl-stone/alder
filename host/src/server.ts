@@ -1,39 +1,82 @@
-import { randomBytes, randomInt, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { lstat, realpath, stat } from "node:fs/promises";
 import { createServer as createHttpServer, type IncomingMessage, type Server as HttpServer, type ServerResponse } from "node:http";
-import { basename, extname, join, resolve, sep } from "node:path";
+import { lstat, readFile, realpath, stat } from "node:fs/promises";
+import { extname, join, resolve, sep } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { URL } from "node:url";
 import { WebSocket, WebSocketServer, type RawData } from "ws";
 import {
-  parseHostCommand,
+  ARTIFACT_DESCRIPTOR_HEADER,
+  ARTIFACT_RESOLUTION_MEDIA_TYPE,
+  HOST_CLIENT_PROTOCOL_VERSION,
+  HOST_PROTOCOL,
+  MAX_EVENT_BYTES,
   SNAPSHOT_ENVELOPE_LIMIT,
-  type CommandResult,
+  artifactResourceNameSchema,
+  artifactResolutionSchema,
+  commandAdmissionSchema,
+  decodeHostCommandWire,
+  decodeHostQueryWire,
+  encodeHostEventWire,
+  encodeHostQueryResultWire,
+  encodeRecoveryWire,
+  hostQueryResultSchema,
+  mimeEssence,
+  parseHostCommand,
+  parseArtifactDescriptor,
+  parseHostQuery,
+  sameArtifactHandle,
+  type ArtifactHandle,
+  type CommandAdmission,
   type HostCommand,
-  type HostCellState,
   type HostEvent,
+  type HostQuery,
+  type HostQueryResult,
   type HostSnapshot,
-  type OperationRecord,
+  type OutputScope,
   type Recovery,
+  type OperationRecord,
+  type HostConfiguration,
 } from "./protocol.js";
-
+import { parseStrictJson, StrictJsonError } from "./strict-json.js";
+import type { ArtifactManifest, ArtifactResourceRead } from "./outputs.js";
+import type { UploadStore } from "./uploads.js";
+import { readPrivateFile } from "./private-paths.js";
 export const HTTP_JSON_LIMIT = 1024 * 1024;
 export const HTTP_UPLOAD_LIMIT = 16 * 1024 * 1024;
-export const WEBSOCKET_MESSAGE_LIMIT = 1024 * 1024;
+export const HTTP_SOURCE_LIMIT = SNAPSHOT_ENVELOPE_LIMIT;
+export const WEBSOCKET_MESSAGE_LIMIT = SNAPSHOT_ENVELOPE_LIMIT;
 export const DEFAULT_OUTBOX_LIMIT = 2 * SNAPSHOT_ENVELOPE_LIMIT;
-export const BROWSER_PROTOCOL_VERSION = 1;
-
-const SHUTDOWN_TOKEN_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+export const BROWSER_PROTOCOL_VERSION = HOST_CLIENT_PROTOCOL_VERSION;
+export const TICKET_TTL_MS = 60_000;
+export const HEARTBEAT_INTERVAL_MS = 10_000;
+export const LEASE_EXPIRY_MS = 30_000;
+export const MAX_ACTIVE_LEASES = 128;
+export const MAX_LIVE_TICKETS = 128;
+export const MAX_ENVELOPE_BYTES = 1024 * 1024;
+export const OUTPUT_CHUNK_BYTES = 262_144;
+const ARTIFACT_LEASE_TTL_MS = 10 * 60_000;
 const CONNECTION_CLOSE_TIMEOUT_MS = 1_000;
+const SOCKET_COMMAND_QUEUE_LIMIT = 256;
+const SOCKET_EVENT_QUEUE_LIMIT = 1_024;
+const AUTH_TOKEN_PATTERN = /^[0-9a-f]{64}$/;
+const BEARER_PATTERN = /^Bearer ([0-9a-f]{64})$/;
+const LOOPBACK_HOSTS = new Set(["127.0.0.1"]);
+const ORIGIN_HOST_PATTERN = /^[0-9a-f]{32}\.localhost$/;
 
 export interface ControllerAdapter {
-  snapshot(): HostSnapshot;
+  snapshot(clientId?: string): HostSnapshot;
   recover(epoch: string | null, cursor: number | null): Recovery;
   subscribe(listener: (event: HostEvent) => void): () => void;
-  dispatch(command: HostCommand): Promise<CommandResult>;
-  operation?(id: string): OperationRecord | undefined;
-  awaitOperation?(id: string, signal?: AbortSignal): Promise<OperationRecord>;
+  dispatch(command: HostCommand): Promise<CommandAdmission>;
+  registerClient?(clientId: string): void;
+  releaseClient?(clientId: string): void;
+  query?(query: HostQuery, callerClientId?: string): Promise<HostQueryResult> | HostQueryResult;
+
+  operation?(id: string, clientId?: string): OperationRecord | undefined;
+  awaitOperation?(id: string, clientId?: string, signal?: AbortSignal): Promise<OperationRecord>;
+  configuration?(): HostConfiguration;
 }
 
 export interface LspAdapter {
@@ -41,33 +84,88 @@ export interface LspAdapter {
   restart?(notebook: unknown): Promise<unknown>;
 }
 
+export interface AlderServerSession {
+  readonly sessionKey: string;
+  readonly canonicalPath: string | null;
+  readonly epoch: string;
+  readonly processNonce: string;
+  readonly continuityProof?: string;
+  /** Owner-only 256-bit key identifier for authenticated browser recovery encryption. */
+  readonly recoveryKeyId?: string;
+  readonly recoveryKey?: string;
+  readonly token: string;
+  readonly documentReady?: boolean;
+}
+
+
+export interface AuthContext {
+  readonly kind: "bearer" | "cookie";
+  readonly leaseId: string | null;
+  readonly clientId: string | null;
+  readonly csrf: string | null;
+  readonly nextCommandSequence: number | null;
+  /** Authoritative registry check for work that crossed an async boundary. */
+  readonly assertActive?: () => void;
+  readonly updateNextCommandSequence?: (next: number) => void;
+}
+
+export interface McpHttpHandler {
+  (request: IncomingMessage, response: ServerResponse, auth: AuthContext): Promise<void> | void;
+  closeLease?: (leaseId: string) => Promise<void> | void;
+  closeAll?: () => Promise<void> | void;
+}
+
+export interface ArtifactStoreBinding {
+  writeArtifact(bytes: Uint8Array, mimeType: string, extension: string, scope: OutputScope): Promise<ArtifactHandle>;
+  artifactManifest(descriptor: ArtifactHandle | string): ArtifactManifest;
+  retainArtifactRead(descriptor: ArtifactHandle, expiresAt: number): void;
+  openArtifactResource(descriptor: ArtifactHandle | string, relative?: string): ArtifactResourceRead;
+  pin(handles: readonly ArtifactHandle[]): void;
+  unpin(handles: readonly ArtifactHandle[]): void;
+  release(handles: readonly ArtifactHandle[]): void;
+}
+
 export interface AlderServerOptions {
   controller: ControllerAdapter;
   host?: string;
+  /** Fresh per-incarnation hostname used for browser HTTP authority and origin checks. */
+  originHost?: string;
   port?: number;
   allowedOrigins?: readonly string[];
+  externalOrigin?: string;
+  tokenFile?: string;
+  processSupervisorExecutable?: string | null;
+  externalBearerValidated?: boolean;
+  session?: AlderServerSession;
   staticDir: string;
   indexFile?: string;
-  artifactDir?: string;
-  publicDir?: string;
-  shutdownToken?: string;
+
+  uploads?: UploadStore;
+  artifactStore: ArtifactStoreBinding;
   lsp?: LspAdapter;
+  mcpHandler?: McpHttpHandler;
   logger?: (level: "info" | "warn" | "error", message: string) => void;
   onClientCount?: (count: number) => void;
+  onLeaseCount?: (count: number) => void;
+  acceptingLeases?: () => boolean;
   onBrowserActivity?: () => void;
   onShutdown?: () => void | Promise<void>;
+  onCompromised?: (reason: string) => void | Promise<void>;
+  documentReady?: boolean;
   maxJsonBytes?: number;
   maxUploadBytes?: number;
+  maxSourceBytes?: number;
   maxWebSocketBytes?: number;
   maxOutboxBytes?: number;
   operationWaitTimeoutMs?: number;
+  leaseExpiryMs?: number;
+  leaseSweepIntervalMs?: number;
 }
 
 export interface AlderServerAddress {
-  host: string;
-  port: number;
-  origin: string;
-  shutdownToken: string;
+  readonly host: string;
+  readonly port: number;
+  readonly origin: string;
 }
 
 export interface AlderServer {
@@ -75,200 +173,29 @@ export interface AlderServer {
   start(): Promise<AlderServerAddress>;
   close(): Promise<void>;
   address(): AlderServerAddress | null;
+  retainArtifact(descriptor: ArtifactHandle): ArtifactHandle;
+  compromise(reason: string): Promise<void>;
 }
 
 export class HttpBoundaryError extends Error {
-  constructor(
-    readonly code: string,
-    message: string,
-    readonly status: number,
-  ) {
+  constructor(readonly code: string, message: string, readonly status: number) {
     super(message);
     this.name = "HttpBoundaryError";
   }
 }
 
-class StrictJsonParser {
-  private index = 0;
-  private containers = 0;
-  private separators = 0;
-
-  constructor(
-    private readonly source: string,
-    private readonly maxDepth = 128,
-    private readonly maxContainers = 10_000,
-    private readonly maxSeparators = 100_000,
-  ) {}
-
-  parseObjectRoot(): Record<string, unknown> {
-    this.space();
-    if (this.source[this.index] !== "{") this.fail("JSON body must be an object");
-    const value = this.object(1);
-    this.space();
-    if (this.index !== this.source.length) this.fail("invalid JSON body");
-    return value;
-  }
-
-  private value(depth: number): unknown {
-    if (depth > this.maxDepth) this.fail("JSON body exceeds structural complexity limits");
-    this.space();
-    const ch = this.source[this.index];
-    if (ch === "{") return this.object(depth);
-    if (ch === "[") return this.array(depth);
-    if (ch === '"') return this.string();
-    if (ch === "t") return this.literal("true", true);
-    if (ch === "f") return this.literal("false", false);
-    if (ch === "n") return this.literal("null", null);
-    return this.number();
-  }
-
-  private object(depth: number): Record<string, unknown> {
-    this.container();
-    this.index += 1;
-    const result: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
-    const keys = new Set<string>();
-    this.space();
-    if (this.source[this.index] === "}") {
-      this.index += 1;
-      return result;
+export function parseStrictJsonObject(bytes: Uint8Array | string, maxBytes = HTTP_JSON_LIMIT): Record<string, unknown> {
+  try {
+    const value = parseStrictJson(bytes, { maxBytes, maxDepth: 64 });
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+      throw new HttpBoundaryError("invalid_request", "JSON body must be an object", 400);
     }
-    while (true) {
-      this.space();
-      if (this.source[this.index] !== '"') this.fail("invalid JSON body");
-      const key = this.string();
-      if (keys.has(key)) this.fail(`duplicate object key: ${key}`);
-      keys.add(key);
-      this.space();
-      if (this.source[this.index] !== ":") this.fail("invalid JSON body");
-      this.index += 1;
-      result[key] = this.value(depth + 1);
-      this.space();
-      const next = this.source[this.index++];
-      if (next === "}") return result;
-      if (next !== ",") this.fail("invalid JSON body");
-      this.separator();
-    }
-  }
-
-  private array(depth: number): unknown[] {
-    this.container();
-    this.index += 1;
-    const result: unknown[] = [];
-    this.space();
-    if (this.source[this.index] === "]") {
-      this.index += 1;
-      return result;
-    }
-    while (true) {
-      result.push(this.value(depth + 1));
-      this.space();
-      const next = this.source[this.index++];
-      if (next === "]") return result;
-      if (next !== ",") this.fail("invalid JSON body");
-      this.separator();
-    }
-  }
-
-  private string(): string {
-    const start = this.index;
-    this.index += 1;
-    let escaped = false;
-    while (this.index < this.source.length) {
-      const code = this.source.charCodeAt(this.index);
-      if (!escaped && code === 0x22) {
-        this.index += 1;
-        let decoded: unknown;
-        try {
-          decoded = JSON.parse(this.source.slice(start, this.index));
-        } catch {
-          this.fail("invalid JSON body");
-        }
-        if (typeof decoded !== "string" || decoded.includes("\0") || hasUnpairedSurrogate(decoded)) {
-          this.fail("invalid JSON body");
-        }
-        return decoded;
-      }
-      if (!escaped && code < 0x20) this.fail("invalid JSON body");
-      if (!escaped && code === 0x5c) {
-        escaped = true;
-      } else {
-        escaped = false;
-      }
-      this.index += 1;
-    }
-    this.fail("invalid JSON body");
-  }
-
-  private number(): number {
-    const remaining = this.source.slice(this.index);
-    const match = /^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?/.exec(remaining);
-    if (!match) this.fail("invalid JSON body");
-    this.index += match[0].length;
-    const value = Number(match[0]);
-    if (!Number.isFinite(value)) this.fail("invalid JSON body");
-    return value;
-  }
-
-  private literal<T>(text: string, value: T): T {
-    if (!this.source.startsWith(text, this.index)) this.fail("invalid JSON body");
-    this.index += text.length;
-    return value;
-  }
-
-  private space(): void {
-    while (this.index < this.source.length && /[\x20\t\r\n]/.test(this.source[this.index]!)) {
-      this.index += 1;
-    }
-  }
-
-  private container(): void {
-    this.containers += 1;
-    if (this.containers > this.maxContainers) {
-      this.fail("JSON body exceeds structural complexity limits");
-    }
-  }
-
-  private separator(): void {
-    this.separators += 1;
-    if (this.separators > this.maxSeparators) {
-      this.fail("JSON body exceeds structural complexity limits");
-    }
-  }
-
-  private fail(message: string): never {
+    return value as Record<string, unknown>;
+  } catch (error) {
+    if (error instanceof HttpBoundaryError) throw error;
+    const message = error instanceof StrictJsonError ? error.message : error instanceof Error ? error.message : "invalid JSON body";
     throw new HttpBoundaryError("invalid_request", message, 400);
   }
-}
-
-function hasUnpairedSurrogate(value: string): boolean {
-  for (let index = 0; index < value.length; index += 1) {
-    const code = value.charCodeAt(index);
-    if (code >= 0xd800 && code <= 0xdbff) {
-      const low = value.charCodeAt(index + 1);
-      if (!(low >= 0xdc00 && low <= 0xdfff)) return true;
-      index += 1;
-    } else if (code >= 0xdc00 && code <= 0xdfff) {
-      return true;
-    }
-  }
-  return false;
-}
-
-export function parseStrictJsonObject(bytes: Uint8Array | string): Record<string, unknown> {
-  let source: string;
-  if (typeof bytes === "string") {
-    source = bytes;
-  } else {
-    try {
-      source = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-    } catch {
-      throw new HttpBoundaryError("invalid_request", "invalid JSON body", 400);
-    }
-  }
-  if (source.includes("\0")) {
-    throw new HttpBoundaryError("invalid_request", "request body contains NUL bytes", 400);
-  }
-  return new StrictJsonParser(source).parseObjectRoot();
 }
 
 export async function readJsonBody(
@@ -278,33 +205,37 @@ export async function readJsonBody(
   const contentType = String(request.headers["content-type"] ?? "")
     .split(";", 1)[0]!.trim().toLowerCase();
   if (contentType !== "application/json") {
-    throw new HttpBoundaryError(
-      "unsupported_media_type",
-      "Content-Type must be application/json",
-      415,
-    );
+    throw new HttpBoundaryError("unsupported_media_type", "Content-Type must be application/json", 415);
   }
   const declared = request.headers["content-length"];
   if (declared !== undefined) {
-    if (!/^[0-9]+$/.test(declared) || Number(declared) > maxBytes) {
+    if (typeof declared !== "string" || !/^[0-9]+$/.test(declared) || Number(declared) > maxBytes) {
+      request.resume();
       throw new HttpBoundaryError("payload_too_large", bodyLimitMessage(maxBytes), 413);
     }
   }
   const chunks: Buffer[] = [];
   let total = 0;
+  let oversized = false;
   for await (const chunk of request) {
+    if (oversized) continue;
     const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array);
     total += buffer.length;
     if (total > maxBytes) {
-      request.destroy();
-      throw new HttpBoundaryError("payload_too_large", bodyLimitMessage(maxBytes), 413);
+      oversized = true;
+      chunks.length = 0;
+      continue;
     }
     chunks.push(buffer);
   }
-  if (total === 0) {
-    throw new HttpBoundaryError("invalid_request", "empty request body", 400);
+  if (oversized) throw new HttpBoundaryError("payload_too_large", bodyLimitMessage(maxBytes), 413);
+  if (total === 0) throw new HttpBoundaryError("invalid_request", "empty request body", 400);
+  try {
+    return parseStrictJsonObject(Buffer.concat(chunks, total), maxBytes);
+  } catch (error) {
+    if (error instanceof HttpBoundaryError) throw error;
+    throw new HttpBoundaryError("invalid_request", "invalid JSON body", 400);
   }
-  return parseStrictJsonObject(Buffer.concat(chunks, total));
 }
 
 function bodyLimitMessage(maxBytes: number): string {
@@ -312,129 +243,85 @@ function bodyLimitMessage(maxBytes: number): string {
     ? `request body exceeds ${maxBytes / (1024 * 1024)} MiB`
     : `request body exceeds ${maxBytes} bytes`;
 }
-
-const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1"]);
-
-export function validateLoopbackHost(host: string): string {
-  if (!LOOPBACK_HOSTS.has(host)) {
-    throw new Error("host must be exactly 127.0.0.1, localhost, or ::1");
-  }
+export function validateOriginHost(host: string): string {
+  if (!ORIGIN_HOST_PATTERN.test(host)) throw new Error("origin host must be a 128-bit lowercase hex nonce under .localhost");
   return host;
 }
 
-export function buildAllowedOrigins(
-  port: number,
-  origins?: readonly string[],
-): readonly string[] {
-  if (!origins) {
-    return [
-      `http://127.0.0.1:${port}`,
-      `http://localhost:${port}`,
-      `http://[::1]:${port}`,
-    ];
-  }
-  if (origins.length === 0 || new Set(origins).size !== origins.length) {
-    throw new Error("allowedOrigins must be a nonempty unique array");
-  }
-  for (const origin of origins) {
-    let parsed: URL;
-    try {
-      parsed = new URL(origin);
-    } catch {
-      throw new Error(`invalid origin: ${origin}`);
-    }
-    if (
-      (parsed.protocol !== "http:" && parsed.protocol !== "https:") ||
-      parsed.username !== "" || parsed.password !== "" || parsed.pathname !== "/" ||
-      parsed.search !== "" || parsed.hash !== "" || parsed.origin !== origin
-    ) {
-      throw new Error(`invalid origin: ${origin}`);
-    }
-  }
-  return [...origins];
+export function createOriginHost(): string {
+  return randomBytes(16).toString("hex") + ".localhost";
 }
 
-export function validateRequestOrigin(
-  headers: IncomingMessage["headers"],
-  origins: readonly string[],
-): boolean {
+export function validateLoopbackHost(host: string): string {
+  if (!LOOPBACK_HOSTS.has(host)) throw new Error("host must be exactly 127.0.0.1");
+  return host;
+}
+
+export function buildAllowedOrigins(port: number, origins?: readonly string[], originHost?: string): readonly string[] {
+  if (!origins && originHost === undefined) return ["http://127.0.0.1:" + port, "http://[::1]:" + port];
+  if (origins !== undefined && (origins.length === 0 || new Set(origins).size !== origins.length)) throw new Error("allowedOrigins must be a nonempty unique array");
+  for (const origin of origins ?? []) validateOrigin(origin);
+  if (originHost === undefined) return [...(origins ?? [])];
+  const fresh = publicOrigin(validateOriginHost(originHost), port);
+  return origins === undefined ? [fresh] : [fresh, ...origins.filter(origin => origin !== fresh)];
+}
+
+export function validateRequestHost(headers: IncomingMessage["headers"], origins: readonly string[]): boolean {
   const host = singleHeader(headers.host);
-  if (!host) return false;
-  const authorities = new Set(origins.map((origin) => new URL(origin).host));
-  if (!authorities.has(host)) return false;
+  if (host === null) return false;
+  const authorities = new Set(origins.map(origin => new URL(origin).host));
+  return authorities.has(host);
+}
+
+export function validateRequestOrigin(headers: IncomingMessage["headers"], origins: readonly string[]): boolean {
+  if (!validateRequestHost(headers, origins)) return false;
   const origin = singleHeader(headers.origin);
   return origin === null || origins.includes(origin);
+}
+
+function validateOrigin(value: string): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error(`invalid origin: ${value}`);
+  }
+  if ((parsed.protocol !== "http:" && parsed.protocol !== "https:") || parsed.username !== "" || parsed.password !== ""
+    || parsed.pathname !== "/" || parsed.search !== "" || parsed.hash !== "" || parsed.origin !== value) {
+    throw new Error(`invalid origin: ${value}`);
+  }
+  return parsed.origin;
 }
 
 function singleHeader(value: string | readonly string[] | undefined): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
 }
 
-function isBrowserActivity(headers: IncomingMessage["headers"]): boolean {
-  const userAgent = singleHeader(headers["user-agent"]) ?? "";
-  const fetchSite = singleHeader(headers["sec-fetch-site"]) ?? "";
-  return userAgent.startsWith("Mozilla/")
-    || fetchSite === "same-origin"
-    || fetchSite === "same-site"
-    || fetchSite === "none";
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-export function editorContentSecurityPolicy(nonce: string): string {
-  return [
-    "default-src 'self'",
-    "connect-src 'self'",
-    "img-src 'self' data: http: https:",
-    "script-src 'self'",
-    "style-src 'self'",
-    `style-src-elem 'self' 'nonce-${nonce}'`,
-    "style-src-attr 'unsafe-inline'",
-    "frame-src 'self'",
-    "object-src 'none'",
-    "base-uri 'none'",
-    "form-action 'none'",
-    "frame-ancestors 'none'",
-  ].join("; ");
+function constantTimeEqual(left: string, right: string): boolean {
+  const a = Buffer.from(left);
+  const b = Buffer.from(right);
+  return a.length === b.length && timingSafeEqual(a, b);
 }
 
-const MIME_TYPES: Readonly<Record<string, string>> = {
-  css: "text/css; charset=utf-8",
-  gif: "image/gif",
-  html: "text/html; charset=utf-8",
-  ipynb: "application/json",
-  jpeg: "image/jpeg",
-  jpg: "image/jpeg",
-  js: "text/javascript; charset=utf-8",
-  json: "application/json",
-  md: "text/markdown; charset=utf-8",
-  mp3: "audio/mpeg",
-  mp4: "video/mp4",
-  ogg: "audio/ogg",
-  pdf: "application/pdf",
-  png: "image/png",
-  qmd: "text/plain; charset=utf-8",
-  r: "text/plain; charset=utf-8",
-  svg: "image/svg+xml",
-  txt: "text/plain; charset=utf-8",
-  wav: "audio/wav",
-  webm: "video/webm",
-  webp: "image/webp",
-  woff2: "font/woff2",
-};
+function requiredString(value: unknown, field: string, maxBytes = 4096): string {
+  if (typeof value !== "string" || value.length === 0 || value.includes("\0") || /[\r\n]/.test(value)
+    || Buffer.byteLength(value) > maxBytes) {
+    throw new HttpBoundaryError("invalid_request", `field ${field} must be a bounded nonempty string`, 400);
+  }
+  return value;
+}
 
-const ARTIFACT_CSP = [
-  "default-src 'none'",
-  "img-src 'self' data: blob: http: https:",
-  "media-src 'self' data: blob: http: https:",
-  "font-src 'self' data: http: https:",
-  "style-src 'self' 'unsafe-inline' http: https:",
-  "script-src 'self' 'unsafe-inline' http: https:",
-  "connect-src http: https:",
-  "frame-src http: https:",
-  "object-src 'none'",
-  "base-uri 'none'",
-  "form-action 'none'",
-  "sandbox allow-scripts",
-].join("; ");
+function assertExactFields(body: Record<string, unknown>, allowed: readonly string[], required: readonly string[] = []): void {
+  const permitted = new Set(allowed);
+  const extra = Object.keys(body).find(field => !permitted.has(field));
+  if (extra !== undefined) throw new HttpBoundaryError("invalid_request", `unknown field: ${extra}`, 400);
+  const missing = required.find(field => !(field in body));
+  if (missing !== undefined) throw new HttpBoundaryError("invalid_request", `missing required field: ${missing}`, 400);
+}
 
 export async function safeChildPath(
   root: string,
@@ -449,1031 +336,41 @@ export async function safeChildPath(
   } catch {
     return null;
   }
-  if (!relative || relative.includes("\0") || relative.includes("\\") || relative.startsWith("/")) {
-    return null;
-  }
+  if (!relative || relative.includes("\0") || relative.includes("\\") || relative.startsWith("/")) return null;
   const segments = relative.split("/");
-  if ((!allowNested && segments.length !== 1) || segments.some((item) => !item || item === "." || item === ".." || item.startsWith("."))) {
-    return null;
-  }
+  if ((!allowNested && segments.length !== 1)
+    || segments.some(segment => !segment || segment === "." || segment === ".." || segment.startsWith("."))) return null;
   const extension = extname(relative).slice(1).toLowerCase();
-  if (!allowedExtensions.map((item) => item.toLowerCase()).includes(extension)) return null;
+  const extensions = new Set(allowedExtensions.map(item => item.toLowerCase()));
+  if (!extensions.has("*") && !extensions.has(extension)) return null;
   try {
-    const [rootPath, candidatePath] = await Promise.all([
-      realpath(root),
-      realpath(resolve(root, relative)),
-    ]);
+    const rootPath = await realpath(root);
+    const candidatePath = await realpath(resolve(root, relative));
     if (candidatePath !== rootPath && !candidatePath.startsWith(`${rootPath}${sep}`)) return null;
     const info = await lstat(candidatePath);
-    if (!info.isFile()) return null;
-    return candidatePath;
+    return info.isFile() ? candidatePath : null;
   } catch {
     return null;
   }
 }
 
-function publicErrorStatus(code: string): number {
-  const statuses: Record<string, number> = {
-    invalid_request: 400,
-    invalid_notebook: 400,
-    config_invalid: 400,
-    invalid_layout: 400,
-    notebook_has_no_path: 400,
-    forbidden: 403,
-    forbidden_origin: 403,
-    not_found: 404,
-    method_not_allowed: 405,
-    source_conflict: 409,
-    save_conflict: 409,
-    graph_invalid: 409,
-    run_in_progress: 409,
-    operation_in_progress: 409,
-    operation_id_conflict: 409,
-    package_operation_in_progress: 409,
-    no_run_in_progress: 409,
-    stale_value: 409,
-    widget_not_current: 409,
-    table_unavailable: 409,
-    lazy_expired: 409,
-    analysis_pending: 409,
-    session_epoch_mismatch: 409,
-    alder_save_conflict: 409,
-    payload_too_large: 413,
-    unsupported_media_type: 415,
-    session_stopped: 410,
-    format_unavailable: 501,
-    worker_unavailable: 503,
-    engine_not_ready: 503,
-    service_unavailable: 503,
-    invalid_service_response: 503,
-    lsp_unavailable: 503,
-    lsp_timeout: 504,
-    operation_timeout: 504,
-  };
-  return statuses[code] ?? 500;
+export function editorContentSecurityPolicy(nonce: string): string {
+  return [
+    "default-src 'self'", "connect-src 'self'", "img-src 'self' data: blob:", "script-src 'self'",
+    "style-src 'self'", `style-src-elem 'self' 'nonce-${nonce}'`, "style-src-attr 'unsafe-inline'", "frame-src 'self'",
+    "object-src 'none'", "base-uri 'none'", "form-action 'none'", "frame-ancestors 'none'",
+  ].join("; ");
 }
 
-function errorPayload(error: unknown): { code: string; message: string; status: number } {
-  if (error instanceof HttpBoundaryError) return error;
-  if (typeof error === "object" && error !== null) {
-    const record = error as Record<string, unknown>;
-    const code = typeof record.code === "string" ? record.code : "internal_error";
-    const message = error instanceof Error ? error.message : typeof record.message === "string" ? record.message : "internal server error";
-    return { code, message, status: publicErrorStatus(code) };
-  }
-  return { code: "internal_error", message: "internal server error", status: 500 };
-}
+const MIME_TYPES: Readonly<Record<string, string>> = {
+  css: "text/css; charset=utf-8", gif: "image/gif", html: "text/html; charset=utf-8", js: "text/javascript; charset=utf-8",
+  json: "application/json", md: "text/markdown; charset=utf-8", jpeg: "image/jpeg", jpg: "image/jpeg", mp3: "audio/mpeg",
+  mp4: "video/mp4", ogg: "audio/ogg", pdf: "application/pdf", png: "image/png", qmd: "text/plain; charset=utf-8",
+  r: "text/plain; charset=utf-8", svg: "image/svg+xml", txt: "text/plain; charset=utf-8", wav: "audio/wav",
+  webm: "video/webm", webp: "image/webp", woff2: "font/woff2", ipynb: "application/json",
+};
 
-function jsonResponse(response: ServerResponse, status: number, value: unknown): void {
-  if (response.writableEnded || response.destroyed) return;
-  const body = Buffer.from(JSON.stringify(value));
-  response.writeHead(status, {
-    "Content-Type": "application/json; charset=utf-8",
-    "Content-Length": String(body.length),
-    "Cache-Control": "no-store",
-    "X-Content-Type-Options": "nosniff",
-    "Referrer-Policy": "no-referrer",
-  });
-  response.end(body);
-}
-
-function failResponse(response: ServerResponse, error: unknown): void {
-  const detail = errorPayload(error);
-  jsonResponse(response, detail.status, { ok: false, error: { code: detail.code, message: detail.message } });
-}
-
-function method(response: ServerResponse, actual: string, allowed: string): boolean {
-  if (actual === allowed) return true;
-  response.setHeader("Allow", allowed);
-  jsonResponse(response, 405, {
-    ok: false,
-    error: { code: "method_not_allowed", message: `method not allowed: ${actual}` },
-  });
-  return false;
-}
-
-function constantTimeEqual(left: string, right: string): boolean {
-  const a = Buffer.from(left);
-  const b = Buffer.from(right);
-  return a.length === b.length && timingSafeEqual(a, b);
-}
-
-function zeroByteBody(request: IncomingMessage, label: string): Promise<void> {
-  return new Promise((resolveBody, reject) => {
-    let length = 0;
-    request.on("data", (chunk: Buffer) => {
-      length += chunk.length;
-    });
-    request.on("end", () => length === 0
-      ? resolveBody()
-      : reject(new HttpBoundaryError("invalid_request", `${label} requires a zero-byte body`, 400)));
-    request.on("error", reject);
-  });
-}
-
-function commandBase(controller: ControllerAdapter, body: Record<string, unknown>): Pick<HostCommand, "operationId" | "clientId" | "sessionEpoch"> {
-  return {
-    operationId: typeof body.operationId === "string" ? body.operationId : randomUUID(),
-    clientId: typeof body.clientId === "string" ? body.clientId : "http",
-    sessionEpoch: typeof body.sessionEpoch === "string" ? body.sessionEpoch : controller.snapshot().epoch,
-  };
-}
-
-function assertExactFields(
-  body: Record<string, unknown>,
-  allowed: readonly string[],
-  required: readonly string[] = [],
-): void {
-  const fields = new Set(allowed);
-  const extra = Object.keys(body).find((field) => !fields.has(field));
-  if (extra !== undefined) {
-    throw new HttpBoundaryError("invalid_request", `unknown field: ${extra}`, 400);
-  }
-  const missing = required.find((field) => !(field in body));
-  if (missing !== undefined) {
-    throw new HttpBoundaryError("invalid_request", `missing required field: ${missing}`, 400);
-  }
-}
-
-function stringArray(value: unknown, field: string): string[] {
-  if (!Array.isArray(value)) {
-    throw new HttpBoundaryError("invalid_request", `field ${field} must be a string array`, 400);
-  }
-  if (value.some((item) => typeof item !== "string" || item.includes("\0") || /[\r\n]/.test(item))) {
-    throw new HttpBoundaryError("invalid_request", `field ${field} contains invalid strings`, 400);
-  }
-  return value as string[];
-}
-
-function stringArrayOrScalar(value: unknown, field: string): string[] {
-  return typeof value === "string" ? [requiredString(value, field)] : stringArray(value, field);
-}
-
-function requiredString(value: unknown, field: string, allowControls = false): string {
-  if (typeof value !== "string" || !value || value.includes("\0") || (!allowControls && /[\r\n]/.test(value))) {
-    throw new HttpBoundaryError("invalid_request", `field ${field} must be a nonempty string`, 400);
-  }
-  return value;
-}
-
-function optionalNullableString(value: unknown, field: string): string | null {
-  if (value === null) return null;
-  return requiredString(value, field);
-}
-
-function booleanField(value: unknown, field: string): boolean {
-  if (typeof value !== "boolean") {
-    throw new HttpBoundaryError("invalid_request", `field ${field} must be a boolean`, 400);
-  }
-  return value;
-}
-
-function finiteNumber(value: unknown, field: string): number {
-  if (typeof value !== "number" || !Number.isFinite(value)) {
-    throw new HttpBoundaryError("invalid_request", `field ${field} must be a number`, 400);
-  }
-  return value;
-}
-
-function integerField(value: unknown, field: string): number {
-  const number = finiteNumber(value, field);
-  if (!Number.isSafeInteger(number)) {
-    throw new HttpBoundaryError("invalid_request", `field ${field} must be an integer`, 400);
-  }
-  return number;
-}
-
-function revision(value: unknown, field = "expected_revision"): number {
-  if (!Number.isInteger(value) || (value as number) < 0 || (value as number) > 2_147_483_647) {
-    throw new HttpBoundaryError("invalid_request", `field ${field} must be a non-negative integer`, 400);
-  }
-  return value as number;
-}
-
-function cellType(value: unknown): "code" | "markdown" {
-  if (value !== "code" && value !== "markdown") {
-    throw new HttpBoundaryError("invalid_request", "cell type must be code or markdown", 400);
-  }
-  return value;
-}
-
-function legacyCommand(controller: ControllerAdapter, path: string, body: Record<string, unknown>): HostCommand {
-  const base = commandBase(controller, {});
-  if (path === "/api/cell") {
-    const op = requiredString(body.op, "op");
-    if (op === "add") {
-      assertExactFields(body, ["op", "after", "body", "type"], ["op", "after", "body", "type"]);
-      return parseHostCommand({ ...base, type: "create", creations: [{
-        clientOperationId: base.operationId,
-        after: optionalNullableString(body.after, "after"),
-        body: stringArray(body.body, "body"),
-        cellType: cellType(body.type),
-      }] });
-    }
-    if (op === "edit") {
-      assertExactFields(body, ["op", "id", "body", "type", "expected_revision"], ["op", "id", "body", "type", "expected_revision"]);
-      return parseHostCommand({ ...base, type: "edit", edits: [{
-        cellId: requiredString(body.id, "id"), body: stringArray(body.body, "body"),
-        cellType: cellType(body.type), expectedRevision: revision(body.expected_revision),
-      }] });
-    }
-    if (op === "delete") {
-      assertExactFields(body, ["op", "id", "expected_revision"], ["op", "id", "expected_revision"]);
-      return parseHostCommand({ ...base, type: "delete", cellId: requiredString(body.id, "id"), expectedRevision: revision(body.expected_revision) });
-    }
-    if (op === "move") {
-      assertExactFields(body, ["op", "cell", "after"], ["op", "cell", "after"]);
-      return parseHostCommand({ ...base, type: "move", cellId: requiredString(body.cell, "cell"), after: optionalNullableString(body.after, "after") });
-    }
-    if (op === "disable") {
-      assertExactFields(body, ["op", "cell", "disabled"], ["op", "cell", "disabled"]);
-      return parseHostCommand({ ...base, type: "disable", cellId: requiredString(body.cell, "cell"), disabled: booleanField(body.disabled, "disabled") });
-    }
-    if (op === "name") {
-      assertExactFields(body, ["op", "cell", "name"], ["op", "cell", "name"]);
-      return parseHostCommand({ ...base, type: "service", command: "rename-cell", payload: {
-        cellId: requiredString(body.cell, "cell"), name: optionalNullableString(body.name, "name"),
-      } });
-    }
-    throw new HttpBoundaryError("invalid_request", "field op must be one of edit, add, delete, move, disable, name", 400);
-  }
-  if (path === "/api/run") {
-    const hasCell = "cell" in body;
-    const hasAll = "all" in body;
-    if (hasCell === hasAll) {
-      throw new HttpBoundaryError("invalid_request", "must provide exactly one of `cell` or `all`", 400);
-    }
-    assertExactFields(body, hasCell ? ["cell", "scope"] : ["all", "scope"], hasCell ? ["cell"] : ["all"]);
-    if (hasCell && "scope" in body) {
-      throw new HttpBoundaryError("invalid_request", "scope is valid only with `all`", 400);
-    }
-    if (hasCell) {
-      return parseHostCommand({ ...base, type: "run", scope: "cell", cellId: requiredString(body.cell, "cell"), edits: [], creations: [], source: "editor" });
-    }
-    if (body.all !== true) {
-      if (typeof body.all !== "boolean") throw new HttpBoundaryError("invalid_request", "field all must be a boolean", 400);
-      throw new HttpBoundaryError("invalid_request", "field all must be exactly TRUE", 400);
-    }
-    if (body.scope !== undefined && body.scope !== "all" && body.scope !== "stale") {
-      throw new HttpBoundaryError("invalid_request", "field scope must be one of all, stale", 400);
-    }
-    const scope = body.scope === "stale"
-      || (body.scope === undefined && controller.snapshot().runtime.executionMode === "lazy")
-      ? "stale"
-      : "all";
-    return parseHostCommand({ ...base, type: "run", scope, edits: [], creations: [], source: "editor" });
-  }
-  if (path === "/api/interrupt") return parseHostCommand({ ...base, type: "interrupt" });
-  if (path === "/api/restart") return parseHostCommand({ ...base, type: "restart", replay: true });
-  if (path === "/api/save") return parseHostCommand({ ...base, type: "save" });
-  if (path === "/api/widget") {
-    assertExactFields(body, ["name", "path", "value", "index", "indices", "selected", "ops", "submit", "paused", "source"], ["name", "source"]);
-    const updateFields = ["value", "index", "indices", "selected", "ops", "submit"].filter((key) => key in body);
-    if (updateFields.length !== 1) throw new HttpBoundaryError("invalid_request", "provide exactly one widget update field", 400);
-    requiredString(body.name, "name");
-    if (body.path !== undefined) stringArray(body.path, "path").forEach((item) => requiredString(item, "path"));
-    if (updateFields[0] === "index") integerField(body.index, "index");
-    if (updateFields[0] === "submit") booleanField(body.submit, "submit");
-    if (body.paused !== undefined) booleanField(body.paused, "paused");
-    if (body.source !== "editor" && body.source !== "app") {
-      throw new HttpBoundaryError("invalid_request", "source must be editor or app", 400);
-    }
-    const update: Record<string, unknown> = { [updateFields[0]!]: body[updateFields[0]!] };
-    if ("paused" in body) update.paused = body.paused;
-    return parseHostCommand({ ...base, type: "widget", name: body.name, path: body.path ?? [], update, source: body.source });
-  }
-  if (path === "/api/value") {
-    assertExactFields(body, ["name"], ["name"]);
-    return parseHostCommand({ ...base, type: "inspect", name: requiredString(body.name, "name") });
-  }
-  if (path === "/api/lazy") {
-    assertExactFields(body, ["key"], ["key"]);
-    return parseHostCommand({ ...base, type: "lazy-output", key: requiredString(body.key, "key") });
-  }
-  if (path === "/api/table") {
-    assertExactFields(body, ["handle", "offset", "limit", "sort_by", "sort_desc", "filter"], ["handle"]);
-    const offset = body.offset === undefined ? 0 : finiteNumber(body.offset, "offset");
-    const limit = body.limit === undefined ? 25 : finiteNumber(body.limit, "limit");
-    if (body.sort_desc !== undefined) booleanField(body.sort_desc, "sort_desc");
-    return parseHostCommand({ ...base, type: "table-page", handle: requiredString(body.handle, "handle"),
-      offset, limit, sortBy: body.sort_by ?? "", sortDescending: body.sort_desc ?? false,
-      filter: body.filter ?? "" });
-  }
-  if (path === "/api/runtime") {
-    assertExactFields(body, ["execution_mode", "run_on_startup"]);
-    const executionMode = body.execution_mode === null ? undefined : body.execution_mode;
-    const runOnStartup = body.run_on_startup === null ? undefined : body.run_on_startup;
-    if (executionMode === undefined && runOnStartup === undefined) {
-      throw new HttpBoundaryError("invalid_request", "provide execution_mode or run_on_startup", 400);
-    }
-    if (executionMode !== undefined && executionMode !== "automatic" && executionMode !== "lazy") {
-      throw new HttpBoundaryError("invalid_request", "execution_mode must be automatic or lazy", 400);
-    }
-    if (runOnStartup !== undefined) booleanField(runOnStartup, "run_on_startup");
-    return parseHostCommand({ ...base, type: "set-runtime",
-      ...(executionMode === undefined ? {} : { executionMode }),
-      ...(runOnStartup === undefined ? {} : { runOnStartup }) });
-  }
-  if (path === "/api/config") return parseHostCommand({ ...base, type: "set-config", patch: body });
-  if (path === "/api/layout") {
-    assertExactFields(body, ["version", "layout", "cells", "slides"], ["cells"]);
-    if (body.version !== undefined) finiteNumber(body.version, "version");
-    if (body.layout !== undefined) requiredString(body.layout, "layout");
-    return parseHostCommand({ ...base, type: "set-layout", layout: {
-      version: body.version ?? 1,
-      cells: body.cells,
-      ...(body.layout === undefined ? {} : { layout: body.layout }),
-      ...(body.slides === undefined ? {} : { slides: body.slides }),
-    } });
-  }
-  if (path === "/api/format") {
-    assertExactFields(body, ["cell", "expected_revisions"]);
-    const cell = body.cell === undefined ? undefined : requiredString(body.cell, "cell");
-    const selected = cell === undefined
-      ? controller.snapshot().cells
-      : controller.snapshot().cells.filter((candidate) => candidate.id === cell);
-    if (cell !== undefined && selected.length === 0) {
-      throw new HttpBoundaryError("not_found", `no such cell: ${cell}`, 404);
-    }
-    const expectedRevisions = body.expected_revisions === undefined
-      ? Object.fromEntries(selected.map((candidate) => [candidate.id, candidate.revision]))
-      : body.expected_revisions;
-    if (!isPlainObject(expectedRevisions)) {
-      throw new HttpBoundaryError("invalid_request", "field expected_revisions must be an object", 400);
-    }
-    for (const [id, value] of Object.entries(expectedRevisions)) revision(value, `expected_revisions.${id}`);
-    return parseHostCommand({ ...base, type: "format", expectedRevisions,
-      ...(cell === undefined ? {} : { cellIds: [cell] }) });
-  }
-  if (path === "/api/app") {
-    assertExactFields(body, ["layout", "width", "include_code"]);
-    if (Object.keys(body).length === 0) throw new HttpBoundaryError("invalid_request", "app update is empty", 400);
-    if (body.layout !== undefined) requiredString(body.layout, "layout");
-    if (body.width !== undefined) requiredString(body.width, "width");
-    if (body.include_code !== undefined) booleanField(body.include_code, "include_code");
-    return parseHostCommand({ ...base, type: "service", command: "set-app", payload: body });
-  }
-  if (path === "/api/packages") {
-    assertExactFields(body, ["op", "package", "packages"], ["op"]);
-    const op = requiredString(body.op, "op");
-    if (!new Set(["status", "declare", "install"]).has(op)) {
-      throw new HttpBoundaryError("invalid_request", "op must be status, declare, or install", 400);
-    }
-    if (body.package !== undefined) requiredString(body.package, "package");
-    const packages = body.packages === undefined
-      ? undefined
-      : stringArrayOrScalar(body.packages, "packages");
-    packages?.forEach((item) => requiredString(item, "packages"));
-    if (op === "status" && (body.package !== undefined || body.packages !== undefined)) {
-      throw new HttpBoundaryError("invalid_request", "status does not accept package names", 400);
-    }
-    return parseHostCommand({ ...base, type: "service", command: "packages", payload: {
-      ...body,
-      ...(packages === undefined ? {} : { packages }),
-    } });
-  }
-  if (path === "/api/export") {
-    assertExactFields(body, ["format", "include_code"], ["format"]);
-    const format = requiredString(body.format, "format");
-    const formats = ["html", "md", "script", "ipynb", "qmd", "session"];
-    if (!formats.includes(format)) {
-      throw new HttpBoundaryError("invalid_request", `format must be one of ${formats.join(", ")}`, 400);
-    }
-    if (body.include_code !== undefined) booleanField(body.include_code, "include_code");
-    return parseHostCommand({ ...base, type: "service", command: "export", payload: {
-      format,
-      include_code: body.include_code ?? false,
-    } });
-  }
-  if (path === "/api/check") {
-    assertExactFields(body, []);
-    return parseHostCommand({ ...base, type: "service", command: "check", payload: {} });
-  }
-  if (path === "/api/upload") {
-    assertExactFields(body, ["name", "path", "files"], ["name", "files"]);
-    const name = requiredString(body.name, "name");
-    const widgetPath = body.path === undefined ? [] : stringArray(body.path, "path");
-    widgetPath.forEach((item) => requiredString(item, "path"));
-    if (!Array.isArray(body.files)) throw new HttpBoundaryError("invalid_request", "field files must be an array", 400);
-    return parseHostCommand({ ...base, type: "service", command: "upload", payload: {
-      name, path: widgetPath, files: body.files, source: "editor",
-    } });
-  }
-  throw new HttpBoundaryError("not_found", "not found", 404);
-}
-
-type LegacyAliasKind = "run" | "widget" | "value" | "lazy" | "table" | "upload" | "reset";
-
-interface LegacyOperationAlias {
-  publicId: number;
-  operationId: string;
-  kind: LegacyAliasKind;
-  request: Record<string, unknown>;
-  resetExpected: boolean;
-}
-
-/**
- * The host protocol deliberately uses opaque string operation identities. The
- * retired HTTP API exposed two independent positive-integer namespaces, so
- * this adapter retains bounded aliases instead of leaking or coercing host IDs.
- */
-class LegacyOperationAliases {
-  private nextRun = 0;
-  private nextToken = 0;
-  private readonly runs = new Map<number, LegacyOperationAlias>();
-  private readonly tokens = new Map<number, LegacyOperationAlias>();
-  private readonly byOperation = new Map<string, LegacyOperationAlias>();
-
-  addRun(operationId: string, request: Record<string, unknown> = {}): LegacyOperationAlias {
-    return this.add("run", operationId, request, false, true);
-  }
-
-  addToken(
-    kind: Exclude<LegacyAliasKind, "run">,
-    operationId: string,
-    request: Record<string, unknown> = {},
-    resetExpected = false,
-  ): LegacyOperationAlias {
-    return this.add(kind, operationId, request, resetExpected, false);
-  }
-
-  run(publicId: number): LegacyOperationAlias | undefined {
-    return this.runs.get(publicId);
-  }
-
-  token(publicId: number): LegacyOperationAlias | undefined {
-    return this.tokens.get(publicId);
-  }
-
-  forOperation(operationId: string): LegacyOperationAlias | undefined {
-    return this.byOperation.get(operationId);
-  }
-
-  forHostRun(runId: string): LegacyOperationAlias | undefined {
-    for (const alias of this.runs.values()) {
-      if (alias.request.runId === runId) return alias;
-    }
-    return undefined;
-  }
-
-  ensureReset(operationId: string): LegacyOperationAlias {
-    return this.byOperation.get(operationId)
-      ?? this.addToken("reset", operationId);
-  }
-
-  private add(
-    kind: LegacyAliasKind,
-    operationId: string,
-    request: Record<string, unknown>,
-    resetExpected: boolean,
-    run: boolean,
-  ): LegacyOperationAlias {
-    const existing = this.byOperation.get(operationId);
-    if (existing !== undefined) return existing;
-    const map = run ? this.runs : this.tokens;
-    let publicId = run ? ++this.nextRun : ++this.nextToken;
-    if (publicId > 2_147_483_647) {
-      if (run) this.nextRun = 1;
-      else this.nextToken = 1;
-      publicId = 1;
-      while (map.has(publicId)) publicId += 1;
-    }
-    const alias = { publicId, operationId, kind, request: structuredClone(request), resetExpected };
-    map.set(publicId, alias);
-    this.byOperation.set(operationId, alias);
-    while (map.size > 256) {
-      const oldest = map.keys().next().value as number | undefined;
-      if (oldest === undefined) break;
-      const removed = map.get(oldest);
-      map.delete(oldest);
-      if (removed !== undefined && this.byOperation.get(removed.operationId) === removed) {
-        this.byOperation.delete(removed.operationId);
-      }
-    }
-    return alias;
-  }
-}
-
-function positiveIntegerQuery(url: URL, key: "run_id" | "token"): number {
-  const message = `query must contain exactly one positive integer ${key}`;
-  const raw = url.search.startsWith("?") ? url.search.slice(1) : url.search;
-  if (!raw || /%(?![0-9a-f]{2})/i.test(raw)) {
-    throw new HttpBoundaryError("invalid_request", message, 400);
-  }
-  const parts = raw.split("&");
-  if (parts.length !== 1) throw new HttpBoundaryError("invalid_request", message, 400);
-  const pair = parts[0]!.split("=");
-  if (pair.length !== 2) throw new HttpBoundaryError("invalid_request", message, 400);
-  let decodedKey: string;
-  let decodedValue: string;
-  try {
-    decodedKey = decodeURIComponent(pair[0]!);
-    decodedValue = decodeURIComponent(pair[1]!);
-  } catch {
-    throw new HttpBoundaryError("invalid_request", message, 400);
-  }
-  if (decodedKey !== key || !/^[1-9][0-9]*$/.test(decodedValue)) {
-    throw new HttpBoundaryError("invalid_request", message, 400);
-  }
-  const value = Number(decodedValue);
-  if (!Number.isSafeInteger(value) || value > 2_147_483_647) {
-    throw new HttpBoundaryError("invalid_request", message, 400);
-  }
-  return value;
-}
-
-function commandPayload(result: CommandResult): Record<string, unknown> {
-  return isPlainObject(result.result) ? result.result : {};
-}
-
-function legacyOperationStatus(status: OperationRecord["status"]): "pending" | "done" | "error" {
-  if (status === "done") return "done";
-  if (status === "error" || status === "cancelled") return "error";
-  return "pending";
-}
-
-function isTerminalOperation(status: OperationRecord["status"]): boolean {
-  return status === "done" || status === "error" || status === "cancelled";
-}
-
-function legacyRunOperation(
-  alias: LegacyOperationAlias,
-  operation: OperationRecord,
-  aliases: LegacyOperationAliases,
-): Record<string, unknown> {
-  const resetTokens = (operation.resetOperationIds ?? []).map((id) => aliases.ensureReset(id).publicId);
-  return {
-    run_id: alias.publicId,
-    status: legacyOperationStatus(operation.status),
-    reset_tokens: resetTokens,
-    error: operation.error ?? null,
-  };
-}
-
-function legacyWidgetOperation(
-  alias: LegacyOperationAlias,
-  operation: OperationRecord,
-  aliases: LegacyOperationAliases,
-): Record<string, unknown> {
-  const resets = operation.resetOperationIds ?? [];
-  return {
-    token: alias.publicId,
-    status: legacyOperationStatus(operation.status),
-    error: operation.error ?? null,
-    reset_expected: alias.resetExpected || resets.length > 0,
-    ...(resets.length === 0
-      ? {}
-      : { reset_token: aliases.ensureReset(resets[resets.length - 1]!).publicId }),
-  };
-}
-
-function defaultLegacyApp(snapshot: HostSnapshot): Record<string, unknown> {
-  const configured = isPlainObject(snapshot.metadata.app) ? snapshot.metadata.app : {};
-  return {
-    layout: typeof configured.layout === "string" ? configured.layout : "vertical",
-    width: typeof configured.width === "string" ? configured.width : "medium",
-    include_code: configured.include_code === true,
-  };
-}
-
-function legacyOutline(snapshot: HostSnapshot): unknown[] {
-  return snapshot.cells.map((cell) => ({
-    id: cell.id,
-    name: typeof cell.options.name === "string" ? cell.options.name : null,
-    label: typeof cell.options.name === "string" ? cell.options.name : cell.id,
-    type: cell.type,
-    status: cell.status,
-    defs: [...cell.defs],
-    headings: cell.type === "markdown" ? cell.body.flatMap((line, index) => {
-      const source = line.replace(/^\s*#\s?/, "");
-      const match = /^ {0,3}(#{1,6})(?:[ \t]+(.*))?$/.exec(source);
-      if (!match || !(match[2] ?? "").trim()) return [];
-      return [{ cell: cell.id, level: match[1]!.length, text: match[2]!.replace(/[ \t]+#+[ \t]*$/, "").trim(), line: index }];
-    }) : [],
-    diagnostics: structuredClone(cell.diagnostics),
-  }));
-}
-
-function legacyOutputValue(
-  value: unknown,
-  aliases: LegacyOperationAliases,
-  operationKinds: ReadonlyMap<string, OperationRecord["kind"]>,
-): unknown {
-  if (Array.isArray(value)) {
-    return value.map((item) => legacyOutputValue(item, aliases, operationKinds));
-  }
-  if (!isPlainObject(value)) return structuredClone(value);
-  const projected: Record<string, unknown> = {};
-  for (const [key, child] of Object.entries(value)) {
-    projected[key] = legacyOutputValue(child, aliases, operationKinds);
-  }
-  if (typeof value.operationId === "string"
-    && typeof value.status === "string"
-    && typeof value.token === "number") {
-    let alias = aliases.forOperation(value.operationId);
-    if (alias === undefined && operationKinds.get(value.operationId) === "widget-reset") {
-      alias = aliases.ensureReset(value.operationId);
-    }
-    if (alias?.kind === "widget" || alias?.kind === "reset") {
-      projected.token = alias.publicId;
-      delete projected.operationId;
-    }
-  }
-  return projected;
-}
-
-function findLegacyWidget(value: unknown, name: string): Record<string, unknown> | null {
-  if (!isPlainObject(value)) return null;
-  if (value.kind === "widget" && value.name === name) return value;
-  if (value.kind === "layout" && Array.isArray(value.children)) {
-    for (const child of value.children) {
-      const widget = findLegacyWidget(child, name);
-      if (widget !== null) return widget;
-    }
-  }
-  if (value.kind === "lazy" && value.child !== undefined) {
-    return findLegacyWidget(value.child, name);
-  }
-  return null;
-}
-
-function legacyWidgetSpecAt(
-  spec: Record<string, unknown>,
-  path: readonly string[],
-): Record<string, unknown> | null {
-  if (path.length === 0) return spec;
-  if (spec.kind === "form" && isPlainObject(spec.child)) return legacyWidgetSpecAt(spec.child, path);
-  if ((spec.kind !== "array" && spec.kind !== "dictionary") || !Array.isArray(spec.children)) return null;
-  const child = spec.children.find((candidate) => isPlainObject(candidate) && candidate.name === path[0]);
-  return isPlainObject(child) ? legacyWidgetSpecAt(child, path.slice(1)) : null;
-}
-
-function legacyWidgetPathHasForm(spec: Record<string, unknown>, path: readonly string[]): boolean {
-  if (spec.kind === "form") return true;
-  if (path.length === 0
-    || (spec.kind !== "array" && spec.kind !== "dictionary")
-    || !Array.isArray(spec.children)) return false;
-  const child = spec.children.find((candidate) => isPlainObject(candidate) && candidate.name === path[0]);
-  return isPlainObject(child) && legacyWidgetPathHasForm(child, path.slice(1));
-}
-
-function legacyWidgetResetExpected(snapshot: HostSnapshot, body: Record<string, unknown>): boolean {
-  if (typeof body.name !== "string") return false;
-  let owner: HostCellState | undefined;
-  let widget: Record<string, unknown> | null = null;
-  for (const cell of snapshot.cells) {
-    for (let index = cell.outputs.length - 1; index >= 0; index -= 1) {
-      widget = findLegacyWidget(cell.outputs[index], body.name);
-      if (widget !== null) {
-        owner = cell;
-        break;
-      }
-    }
-    if (widget !== null) break;
-  }
-  if (owner === undefined || widget === null || !isPlainObject(widget.spec)) return false;
-  const path = Array.isArray(body.path) && body.path.every((item) => typeof item === "string")
-    ? body.path as string[]
-    : [];
-  const draft = legacyWidgetPathHasForm(widget.spec, path) && body.submit !== true;
-  let target = legacyWidgetSpecAt(widget.spec, path);
-  if (target?.kind === "form" && body.submit !== true && isPlainObject(target.child)) target = target.child;
-  if (target?.kind !== "run_button" || draft) return false;
-  const hasConsumers = snapshot.cells.some((cell) => cell.id !== owner.id
-    && [...cell.refs, ...cell.selfRefs].includes(body.name as string));
-  return body.source === "app" || snapshot.runtime.executionMode === "automatic" || !hasConsumers;
-}
-
-function legacyState(
-  snapshot: HostSnapshot,
-  aliases: LegacyOperationAliases,
-  shutdownToken: string,
-  packages: Record<string, unknown>,
-): Record<string, unknown> {
-  const edges: Record<string, string[]> = Object.fromEntries(snapshot.graph.nodes.map((id) => [id, [...(snapshot.graph.edges[id] ?? [])]]));
-  const reverseEdges = Object.fromEntries(snapshot.graph.nodes.map((id) => [id, [...(snapshot.graph.reverseEdges[id] ?? [])]]));
-  const nodeInfo = Object.fromEntries(snapshot.cells.map((cell) => [cell.id, {
-    id: cell.id,
-    name: typeof cell.options.name === "string" ? cell.options.name : null,
-    type: cell.type,
-    status: cell.status,
-    defs: [...cell.defs],
-    refs: [...cell.refs],
-    diagnostics: structuredClone(cell.diagnostics),
-    cycle: snapshot.graph.cycles.includes(cell.id),
-  }]));
-  const dag = {
-    nodes: [...snapshot.graph.nodes],
-    node_info: nodeInfo,
-    edges,
-    reverse_edges: reverseEdges,
-    edge_records: snapshot.graph.nodes.flatMap((to) => (edges[to] ?? []).map((from) => ({ from, to }))),
-    duplicates: structuredClone(snapshot.graph.duplicates),
-    cycles: [...snapshot.graph.cycles],
-    cycle_nodes: [...snapshot.graph.cycles],
-    topo: snapshot.graph.topologicalOrder === null ? null : [...snapshot.graph.topologicalOrder],
-  };
-  const cellStatus = new Map(snapshot.cells.map((cell) => [cell.id, cell.status]));
-  const variables = snapshot.variables.map((variable) => {
-    const summary = variable.valueSummary ?? `${variable.class}${variable.dim === null ? "" : `[${variable.dim.join("x")}]`}`;
-    return {
-      name: variable.name,
-      owner: variable.owner,
-      cell: variable.owner,
-      revision: variable.revision,
-      status: variable.owner === null ? "unbound" : cellStatus.get(variable.owner) ?? "unbound",
-      class: variable.class,
-      dim: variable.dim,
-      size: variable.size,
-      widget: variable.widget,
-      value_summary: summary,
-      summary,
-    };
-  });
-  const outline = legacyOutline(snapshot);
-  const reactiveRanges = Object.fromEntries(snapshot.cells.map((cell) => [cell.id, []]));
-  const lastValue = isPlainObject(snapshot.lastValue) && typeof snapshot.lastValue.operationId === "string"
-    ? {
-        ...structuredClone(snapshot.lastValue),
-        token: aliases.forOperation(snapshot.lastValue.operationId)?.publicId ?? null,
-      }
-    : structuredClone(snapshot.lastValue);
-  const valueAlias = [...snapshot.operations].reverse().map((operation) => ({
-    operation,
-    alias: aliases.forOperation(operation.id),
-  })).find(({ alias }) => alias?.kind === "value");
-  const valueOperation = valueAlias?.alias === undefined ? null : {
-    token: valueAlias.alias.publicId,
-    name: valueAlias.alias.request.name ?? null,
-    owner: commandResultField(valueAlias.operation, "owner") ?? null,
-    revision: commandResultField(valueAlias.operation, "revision") ?? null,
-    status: legacyOperationStatus(valueAlias.operation.status),
-    error: valueAlias.operation.error ?? null,
-  };
-  const activeRunAlias = snapshot.runtime.activeRunId === null
-    ? undefined
-    : aliases.forOperation(snapshot.operations.find((operation) => operation.runId === snapshot.runtime.activeRunId)?.id ?? "");
-  const activeRun = activeRunAlias?.kind === "run" ? activeRunAlias.publicId : null;
-  const operationKinds = new Map(snapshot.operations.map((operation) => [operation.id, operation.kind]));
-  const cells = snapshot.cells.map((cell) => ({
-    ...structuredClone(cell),
-    outputs: legacyOutputValue(cell.outputs, aliases, operationKinds),
-    // Keep ordinary host cells byte-for-byte compatible with the typed
-    // projection. The retired client only needs this alias for the true case.
-    ...(cell.options.disabled === true ? { disabled: true } : {}),
-  }));
-  return {
-    ...structuredClone(snapshot),
-    etag: null,
-    shutdown_token: shutdownToken,
-    runtime: {
-      ...structuredClone(snapshot.runtime),
-      execution_mode: snapshot.runtime.executionMode,
-      run_on_startup: snapshot.runtime.runOnStartup,
-      worker_available: snapshot.runtime.kernelAvailable,
-      active_run_id: activeRun,
-    },
-    cells,
-    app: defaultLegacyApp(snapshot),
-    packages: structuredClone(packages),
-    dag: {
-      nodes: [...snapshot.graph.nodes], edges,
-      duplicates: structuredClone(snapshot.graph.duplicates), cycles: [...snapshot.graph.cycles],
-    },
-    topo: snapshot.graph.topologicalOrder === null ? null : [...snapshot.graph.topologicalOrder],
-    variables,
-    editor_diagnostics: structuredClone(snapshot.editorDiagnostics[".document"] ?? []),
-    layout_error: null,
-    service_errors: structuredClone(snapshot.serviceErrors),
-    last_value: lastValue,
-    value_operation: valueOperation,
-    last_action_error: structuredClone(snapshot.lastActionError),
-    outline,
-    reactive_ranges: reactiveRanges,
-    dataflow: { variables, dag, outline, reactive_ranges: reactiveRanges },
-  };
-}
-
-function commandResultField(operation: OperationRecord, field: string): unknown {
-  return isPlainObject(operation.result) ? operation.result[field] : undefined;
-}
-
-function operationFailure(operation: OperationRecord): HttpBoundaryError {
-  const code = operation.error?.code ?? "internal_error";
-  return new HttpBoundaryError(
-    code,
-    operation.error?.message ?? "operation failed",
-    publicErrorStatus(code),
-  );
-}
-
-function defaultLegacyPackages(): Record<string, unknown> {
-  return {
-    declared: [],
-    missing: [],
-    installing: [],
-    installed: [],
-    log: "",
-    error: {},
-  };
-}
-
-function stringList(value: unknown): string[] {
-  return Array.isArray(value) && value.every((item) => typeof item === "string")
-    ? [...value]
-    : [];
-}
-
-function packageStateFrom(
-  value: unknown,
-  fallback: Record<string, unknown>,
-): Record<string, unknown> {
-  if (!isPlainObject(value)) return structuredClone(fallback);
-  const nested = isPlainObject(value.status)
-    ? value.status
-    : isPlainObject(value.packages)
-      ? value.packages
-      : value;
-  return {
-    declared: stringList(nested.declared ?? fallback.declared),
-    missing: stringList(nested.missing ?? fallback.missing),
-    installing: stringList(nested.installing ?? fallback.installing),
-    installed: stringList(nested.installed ?? fallback.installed),
-    log: typeof nested.log === "string" ? nested.log : typeof fallback.log === "string" ? fallback.log : "",
-    error: isPlainObject(nested.error) ? structuredClone(nested.error) : {},
-    ...(typeof nested.lib === "string" || Array.isArray(nested.lib) ? { lib: structuredClone(nested.lib) } : {}),
-  };
-}
-
-function byteBoundedString(
-  value: unknown,
-  field: string,
-  maxBytes: number,
-  options: { allowEmpty?: boolean; allowControls?: boolean } = {},
-): string {
-  if (typeof value !== "string"
-    || (!options.allowEmpty && value.length === 0)
-    || value.includes("\0")
-    || (!options.allowControls && /[\r\n]/.test(value))
-    || Buffer.byteLength(value) > maxBytes) {
-    throw new HttpBoundaryError("invalid_request", `field ${field} is invalid`, 400);
-  }
-  return value;
-}
-
-function sanitizeClientLogText(value: string): string {
-  return value.replace(/[\r\n]+/g, " ").replace(/\0/g, " ");
-}
-
-function legacyCheckResult(value: unknown): Record<string, unknown> {
-  if (!isPlainObject(value)) return { diagnostics: [] };
-  if (Array.isArray(value.diagnostics)) return { diagnostics: structuredClone(value.diagnostics) };
-  const diagnostics = Array.isArray(value.cells)
-    ? value.cells.flatMap((cell) => isPlainObject(cell) && Array.isArray(cell.diagnostics)
-      ? cell.diagnostics.map((diagnostic) => ({
-          ...(isPlainObject(diagnostic) ? structuredClone(diagnostic) : { message: String(diagnostic) }),
-          cell: typeof cell.id === "string" ? cell.id : null,
-        }))
-      : [])
-    : [];
-  return { diagnostics };
-}
-
-function eventCursor(event: unknown): number | null {
-  if (!event || typeof event !== "object") return null;
-  const cursor = (event as Record<string, unknown>).cursor;
-  return Number.isSafeInteger(cursor) && (cursor as number) >= 0 ? cursor as number : null;
-}
-
-function coalesceKey(value: unknown): string | null {
-  if (!value || typeof value !== "object") return null;
-  const event = value as Record<string, unknown>;
-  const type = typeof event.type === "string" ? event.type : "";
-  if (["state", "runtime", "graph", "outline", "variables", "editor-diagnostics", "service-errors"].includes(type)) return type;
-  if (type === "diagnostics") {
-    const cell = event.cellId;
-    return typeof cell === "string" ? `diagnostics:${cell}` : "diagnostics";
-  }
-  if (["cell", "cellChanged", "cellState", "cellOutputState"].includes(type)) {
-    const cell = event.cellId ?? event.id;
-    if (isPlainObject(event.payload) && event.payload.deleted === true) return null;
-    return typeof cell === "string" ? `${type}:${cell}` : null;
-  }
-  return null;
-}
-
-class SocketOutbox {
-  private queue: Array<{ text: string; bytes: number; coalesce: string | null }> = [];
-  private queuedBytes = 0;
-  private sendingBytes = 0;
-  private sending = false;
-  private closed = false;
-  private terminationTimer: NodeJS.Timeout | null = null;
-
-  constructor(private readonly socket: WebSocket, private readonly maxBytes: number) {}
-
-  send(value: unknown, coalesce: string | null = null): boolean {
-    if (this.closed || this.socket.readyState !== WebSocket.OPEN) return false;
-    const text = JSON.stringify(value);
-    const bytes = Buffer.byteLength(text);
-    if (bytes > SNAPSHOT_ENVELOPE_LIMIT || bytes > this.maxBytes) return this.fail();
-    if (coalesce) {
-      let prior = -1;
-      for (let index = this.queue.length - 1; index >= 0; index -= 1) {
-        if (this.queue[index]!.coalesce === null) break;
-        if (this.queue[index]!.coalesce === coalesce) {
-          prior = index;
-          break;
-        }
-      }
-      if (prior >= 0) {
-        this.queuedBytes -= this.queue[prior]!.bytes;
-        this.queue.splice(prior, 1);
-      }
-    }
-    if (this.sendingBytes + this.queuedBytes + bytes > this.maxBytes) return this.fail();
-    this.queue.push({ text, bytes, coalesce });
-    this.queuedBytes += bytes;
-    this.flush();
-    return true;
-  }
-
-  close(): void {
-    this.closed = true;
-    if (this.terminationTimer) clearTimeout(this.terminationTimer);
-    this.terminationTimer = null;
-    this.queue = [];
-    this.queuedBytes = 0;
-    this.sendingBytes = 0;
-  }
-
-  private fail(): false {
-    this.closed = true;
-    this.queue = [];
-    this.queuedBytes = 0;
-    this.sendingBytes = 0;
-    this.socket.close(1013, "client cannot keep up with notebook events");
-    this.terminationTimer = setTimeout(() => this.socket.terminate(), 500);
-    this.terminationTimer.unref();
-    return false;
-  }
-
-  private flush(): void {
-    if (this.sending || this.closed || this.queue.length === 0) return;
-    const next = this.queue.shift()!;
-    this.queuedBytes -= next.bytes;
-    this.sendingBytes = next.bytes;
-    this.sending = true;
-    this.socket.send(next.text, (error) => {
-      this.sending = false;
-      this.sendingBytes = 0;
-      if (error) {
-        this.closed = true;
-        this.socket.terminate();
-        return;
-      }
-      this.flush();
-    });
-  }
-}
-
-interface BrowserConnect {
-  type: "connect";
-  protocolVersion: number;
-  clientId: string;
-  epoch: string | null;
-  cursor: number | null;
-}
-
-function parseBrowserConnect(value: unknown): BrowserConnect {
-  if (!value || typeof value !== "object") throw new HttpBoundaryError("invalid_request", "first WebSocket message must be connect", 400);
-  const row = value as Record<string, unknown>;
-  if (
-    row.type !== "connect" || row.protocolVersion !== BROWSER_PROTOCOL_VERSION ||
-    typeof row.clientId !== "string" || row.clientId.length === 0 || row.clientId.length > 128 ||
-    !(row.epoch === null || typeof row.epoch === "string") ||
-    !(row.cursor === null || (Number.isSafeInteger(row.cursor) && (row.cursor as number) >= 0))
-  ) {
-    throw new HttpBoundaryError("invalid_request", "invalid WebSocket connect message", 400);
-  }
-  return row as unknown as BrowserConnect;
-}
-
-function parseSocketJson(data: RawData, isBinary: boolean, maxBytes: number): Record<string, unknown> {
-  if (isBinary) throw new HttpBoundaryError("invalid_request", "WebSocket messages must be UTF-8 JSON text", 400);
-  const buffer = Buffer.isBuffer(data) ? data : Array.isArray(data) ? Buffer.concat(data) : Buffer.from(data);
-  if (buffer.length > maxBytes) throw new HttpBoundaryError("payload_too_large", "WebSocket message is too large", 413);
-  return parseStrictJsonObject(buffer);
-}
-
-function socketError(outbox: SocketOutbox, sequence: unknown, error: unknown): void {
-  const detail = errorPayload(error);
-  outbox.send({
-    type: "commandError",
-    sequence: Number.isSafeInteger(sequence) ? sequence : null,
-    error: { code: detail.code, message: detail.message },
-  });
-}
+const STATIC_EXTENSIONS = Object.keys(MIME_TYPES);
 
 async function serveFile(response: ServerResponse, path: string, contentType: string, headers: Record<string, string> = {}): Promise<void> {
   const info = await stat(path);
@@ -1489,721 +386,1450 @@ async function serveFile(response: ServerResponse, path: string, contentType: st
   await pipeline(createReadStream(path), response);
 }
 
-function createShutdownToken(): string {
-  let token = "";
-  for (let index = 0; index < 48; index += 1) {
-    token += SHUTDOWN_TOKEN_ALPHABET[randomInt(SHUTDOWN_TOKEN_ALPHABET.length)];
+function errorStatus(code: string): number {
+  const statuses: Record<string, number> = {
+    invalid_request: 400, invalid_notebook: 400, config_invalid: 400, invalid_layout: 400, forbidden: 403,
+    forbidden_origin: 403, auth_configuration_invalid: 500, not_found: 404, method_not_allowed: 405,
+    source_conflict: 409, save_conflict: 409, graph_invalid: 409, graph_blocked: 409, kernel_state_invalid: 409, run_in_progress: 409, operation_in_progress: 409,
+    operation_id_conflict: 409, command_sequence_gap: 409, command_sequence_exhausted: 409, package_operation_in_progress: 409, no_run_in_progress: 409, stale_value: 409, active_clients_changed: 409,
+    operation_expired: 410, session_epoch_mismatch: 409, session_not_started: 409, session_stopped: 410, payload_too_large: 413, unsupported_media_type: 415,
+    client_limit: 429, ticket_limit: 429, operation_timeout: 504, lsp_unavailable: 503, service_unavailable: 503,
+    engine_not_ready: 503, output_expired: 410, output_invalid: 400, output_quota: 503,
+  };
+  return statuses[code] ?? 500;
+}
+
+function errorPayload(error: unknown): { code: string; message: string; status: number } {
+  if (error instanceof HttpBoundaryError) return error;
+  const errorWithCode = error instanceof Error ? error as Error & { readonly code?: unknown } : null;
+  const record = errorWithCode ?? (isPlainObject(error) ? error : null);
+  if (record !== null) {
+    const code = typeof record.code === "string" ? record.code : "internal_error";
+    const message = typeof record.message === "string" && !/[0-9a-f]{64}/i.test(record.message)
+      ? record.message
+      : "internal server error";
+    return { code, message, status: errorStatus(code) };
   }
+  return { code: "internal_error", message: "internal server error", status: 500 };
+}
+
+function jsonResponse(response: ServerResponse, status: number, value: unknown, extraHeaders: Record<string, string> = {}): void {
+  if (response.writableEnded || response.destroyed) return;
+  const body = Buffer.from(JSON.stringify(value));
+  response.writeHead(status, {
+    "Content-Type": "application/json; charset=utf-8", "Content-Length": String(body.length), "Cache-Control": "no-store",
+    "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer", ...extraHeaders,
+  });
+  response.end(body);
+}
+
+function failResponse(response: ServerResponse, error: unknown): void {
+  const detail = errorPayload(error);
+  jsonResponse(response, detail.status, { ok: false, error: { code: detail.code, message: detail.message } });
+}
+
+function method(response: ServerResponse, actual: string, expected: string): boolean {
+  if (actual === expected) return true;
+  response.setHeader("Allow", expected);
+  jsonResponse(response, 405, { ok: false, error: { code: "method_not_allowed", message: `method not allowed: ${actual}` } });
+  return false;
+}
+
+function parseBearer(headers: IncomingMessage["headers"]): string | null {
+  const value = singleHeader(headers.authorization);
+  if (!value) return null;
+  const match = BEARER_PATTERN.exec(value);
+  return match?.[1] ?? null;
+}
+
+function cookieValue(headers: IncomingMessage["headers"], name: string): string | null {
+  const value = singleHeader(headers.cookie);
+  if (!value) return null;
+  for (const item of value.split(";")) {
+    const index = item.indexOf("=");
+    if (index < 0) continue;
+    const key = item.slice(0, index).trim();
+    if (key === name) return item.slice(index + 1).trim() || null;
+  }
+  return null;
+}
+
+function csrfHeader(headers: IncomingMessage["headers"]): string | null {
+  return singleHeader(headers["x-alder-csrf"])
+    ?? singleHeader(headers["x-csrf-token"]);
+}
+
+function leaseHeader(headers: IncomingMessage["headers"]): string | null {
+  return singleHeader(headers["x-alder-lease-id"]);
+}
+
+function clientHeader(headers: IncomingMessage["headers"]): string | null {
+  return singleHeader(headers["x-alder-client-id"]);
+}
+
+function setDifference(value: unknown, allowed: readonly string[]): string | null {
+  if (!isPlainObject(value)) return "body must be an object";
+  const permitted = new Set(allowed);
+  return Object.keys(value).find(key => !permitted.has(key)) ?? null;
+}
+
+function eventCursor(value: unknown): number | null {
+  if (isPlainObject(value) && typeof value.cursor === "number" && Number.isSafeInteger(value.cursor)) return value.cursor;
+  return null;
+}
+
+function coalesceKey(event: HostEvent): string | null {
+  if (event.type === "runtime" || event.type === "graph") return event.type;
+  if ((event.type === "cell" || event.type === "diagnostics") && event.cellId !== undefined) return event.type + ":" + event.cellId;
+  return null;
+}
+
+function serializedEventBytes(event: HostEvent): number {
+  try { return Buffer.byteLength(JSON.stringify({ type: "event", event: encodeHostEventWire(event) })); }
+  catch { return MAX_EVENT_BYTES + 1; }
+}
+class SocketOutbox {
+  private queue: Array<{ text: string; bytes: number; key: string | null }> = [];
+  private queuedBytes = 0;
+  private sending = false;
+  private closed = false;
+  private terminationTimer: NodeJS.Timeout | null = null;
+
+  constructor(private readonly socket: WebSocket, private readonly maxBytes: number) {}
+
+  send(value: unknown, key: string | null = null): boolean {
+    if (this.closed || this.socket.readyState !== WebSocket.OPEN) return false;
+    const text = JSON.stringify(value);
+    const bytes = Buffer.byteLength(text);
+    if (bytes > SNAPSHOT_ENVELOPE_LIMIT || bytes > this.maxBytes) return this.fail();
+    if (key !== null) {
+      const prior = this.queue.findIndex(item => item.key === key);
+      if (prior >= 0) {
+        this.queuedBytes -= this.queue[prior]!.bytes;
+        this.queue.splice(prior, 1);
+      }
+    }
+    if (bytes + this.queuedBytes > this.maxBytes) return this.fail();
+    this.queue.push({ text, bytes, key });
+    this.queuedBytes += bytes;
+    this.flush();
+    return true;
+  }
+
+  close(): void {
+    this.closed = true;
+    this.queue = [];
+    this.queuedBytes = 0;
+    if (this.terminationTimer) clearTimeout(this.terminationTimer);
+    this.terminationTimer = null;
+  }
+
+  private fail(): false {
+    this.closed = true;
+    this.queue = [];
+    this.queuedBytes = 0;
+    this.socket.close(1013, "client cannot keep up with notebook events");
+    this.terminationTimer = setTimeout(() => this.socket.terminate(), 500);
+    this.terminationTimer.unref();
+    return false;
+  }
+
+  private flush(): void {
+    if (this.sending || this.closed || this.queue.length === 0) return;
+    const item = this.queue.shift()!;
+    this.queuedBytes -= item.bytes;
+    this.sending = true;
+    this.socket.send(item.text, error => {
+      this.sending = false;
+      if (error) {
+        this.closed = true;
+        this.socket.terminate();
+        return;
+      }
+      this.flush();
+    });
+  }
+}
+
+interface Lease {
+  readonly leaseId: string;
+  readonly clientId: string;
+  readonly csrf: string;
+  nextCommandSequence: number;
+  lastSeen: number;
+  reserved: boolean;
+}
+
+interface Ticket {
+  readonly ticket: string;
+  readonly origin: string;
+  readonly expiresAt: number;
+  readonly lease: Lease;
+}
+
+
+interface ArtifactCapabilityEntry {
+  readonly descriptor: ArtifactHandle;
+  readonly manifest: ArtifactManifest;
+  expiresAt: number;
+}
+
+const ARTIFACT_CAPABILITY_PATTERN = /^[A-Za-z0-9_-]{43}$/;
+function acceptsArtifactResolution(headers: IncomingMessage["headers"]): boolean {
+  const value = headers.accept;
+  const values = typeof value === "string" ? [value] : Array.isArray(value) ? value : [];
+  for (const header of values) {
+    for (const item of header.split(",")) {
+      const parts = item.split(";");
+      if (parts.shift()?.trim().toLowerCase() !== ARTIFACT_RESOLUTION_MEDIA_TYPE) continue;
+      let acceptable = true;
+      for (const parameter of parts) {
+        const [name, rawValue] = parameter.split("=", 2);
+        if (name?.trim().toLowerCase() !== "q" || rawValue === undefined) continue;
+        const quality = Number(rawValue.trim());
+        acceptable = Number.isFinite(quality) && quality > 0 && quality <= 1;
+      }
+      if (acceptable) return true;
+    }
+  }
+  return false;
+}
+
+function parseArtifactDescriptorHeader(headers: IncomingMessage["headers"]): ArtifactHandle {
+  const encoded = singleHeader(headers[ARTIFACT_DESCRIPTOR_HEADER]);
+  if (encoded === null) throw new HttpBoundaryError("invalid_request", "artifact descriptor header is required", 400);
+  try {
+    return parseArtifactDescriptor(encoded);
+  } catch {
+    throw new HttpBoundaryError("invalid_request", "artifact descriptor header is invalid", 400);
+  }
+}
+
+function manifestResource(manifest: ArtifactManifest, name: string): ArtifactHandle | undefined {
+  return Object.hasOwn(manifest.resources, name) ? manifest.resources[name] : undefined;
+}
+
+function parseArtifactTarget(target: string): { capability: string; resource: string } | null {
+  if (!target.startsWith("/artifacts/") || target.includes("?") || target.includes("#")) return null;
+  const segments = target.split("/");
+  if (segments.length !== 4 || segments[0] !== "" || segments[1] !== "artifacts") return null;
+  const capability = segments[2]!;
+  const resource = segments[3]!;
+  if (!ARTIFACT_CAPABILITY_PATTERN.test(capability)) return null;
+  if (!artifactResourceNameSchema.safeParse(resource).success) return null;
+  return { capability, resource };
+}
+
+function artifactChildContentSecurityPolicy(capability: string, origins: readonly string[]): string {
+  const resources = origins.map((origin) => origin + "/artifacts/" + capability + "/");
+  const scoped = resources.length === 0 ? "'none'" : resources.join(" ");
+  return [
+    "default-src 'none'",
+    "sandbox allow-scripts",
+    "script-src 'unsafe-inline' " + scoped,
+    "style-src 'unsafe-inline' " + scoped,
+    "style-src-attr 'unsafe-inline'",
+    "img-src " + scoped + " data: blob:",
+    "font-src " + scoped + " data:",
+    "media-src " + scoped + " blob:",
+    "connect-src 'none'",
+    "frame-src 'none'",
+    "child-src 'none'",
+    "worker-src 'none'",
+    "object-src 'none'",
+    "base-uri 'none'",
+    "form-action 'none'",
+    "navigate-to 'none'",
+  ].join("; ");
+}
+
+function artifactNeedsChildSandbox(mimeType: string): boolean {
+  const essence = mimeEssence(mimeType);
+  return essence === "text/html" || essence === "application/xhtml+xml" || essence === "text/xml" ||
+    essence === "application/xml" || essence.endsWith("+xml");
+}
+
+function waitForResponseDrain(response: ServerResponse): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const cleanup = (): void => {
+      response.off("drain", onDrain);
+      response.off("error", onError);
+      response.off("close", onClose);
+    };
+    const onDrain = (): void => { cleanup(); resolve(); };
+    const onError = (error: Error): void => { cleanup(); reject(error); };
+    const onClose = (): void => { cleanup(); reject(new Error("artifact response was aborted")); };
+    response.once("drain", onDrain);
+    response.once("error", onError);
+    response.once("close", onClose);
+  });
+}
+
+async function serveArtifactResource(
+  response: ServerResponse,
+  reader: ArtifactResourceRead,
+  headers: Record<string, string>,
+): Promise<void> {
+  try {
+    const descriptor = reader.descriptor;
+    if (response.destroyed) return;
+    response.writeHead(200, {
+      "Content-Type": descriptor.mimeType,
+      "Content-Length": String(descriptor.byteLength),
+      "Cache-Control": "no-store",
+      "X-Content-Type-Options": "nosniff",
+      "Referrer-Policy": "no-referrer",
+      ...headers,
+    });
+    let offset = 0;
+    while (offset < descriptor.byteLength) {
+      if (response.destroyed) return;
+      const limit = Math.min(descriptor.chunkBytes, descriptor.byteLength - offset);
+      const bytes = await reader.read(offset, limit);
+      if (!(bytes instanceof Uint8Array) || bytes.byteLength === 0 || bytes.byteLength > limit
+        || offset + bytes.byteLength > descriptor.byteLength) {
+        throw new HttpBoundaryError("service_unavailable", "artifact reader returned an invalid page", 503);
+      }
+      offset += bytes.byteLength;
+      if (!response.write(Buffer.from(bytes)) && !response.destroyed) await waitForResponseDrain(response);
+    }
+    if (offset !== descriptor.byteLength) throw new HttpBoundaryError("service_unavailable", "artifact reader ended before its descriptor", 503);
+    if (!response.destroyed && !response.writableEnded) response.end();
+  } finally {
+    reader.close();
+  }
+}
+
+type ArtifactPageRead = { readonly descriptor: ArtifactHandle; readonly bytes: Uint8Array };
+
+async function readPublicArtifactPage(
+  artifactStore: Pick<ArtifactStoreBinding, "openArtifactResource">,
+  handle: string,
+  offset: number,
+  limit: number,
+): Promise<ArtifactPageRead> {
+  const reader = artifactStore.openArtifactResource(handle);
+  try {
+    const descriptor = reader.descriptor;
+    if (offset > descriptor.byteLength) throw new HttpBoundaryError("stale_value", "artifact offset is outside the retained value", 409);
+    const bytes = await reader.read(offset, limit);
+    const remaining = descriptor.byteLength - offset;
+    if (!(bytes instanceof Uint8Array) || bytes.byteLength > limit || bytes.byteLength > remaining) {
+      throw new HttpBoundaryError("service_unavailable", "artifact reader returned an invalid page", 503);
+    }
+    return { descriptor, bytes };
+  } finally {
+    reader.close();
+  }
+}
+
+function tokenFileError(message: string): HttpBoundaryError {
+  return new HttpBoundaryError("auth_configuration_invalid", message, 500);
+}
+
+async function readTokenFile(path: string, processSupervisorExecutable?: string | null): Promise<string> {
+  try {
+    const bytes = await readPrivateFile(path, { maxBytes: 65, processSupervisorExecutable });
+    let contents = bytes.toString("utf8");
+    if (contents.endsWith("\n")) contents = contents.slice(0, -1);
+    if (contents.includes("\n") || !AUTH_TOKEN_PATTERN.test(contents)) {
+      throw tokenFileError("token file must contain exactly one lowercase 64-hex bearer token");
+    }
+    return contents;
+  } catch (error) {
+    if (error instanceof HttpBoundaryError) throw error;
+    throw tokenFileError("token file is unavailable or insecure");
+  }
+}
+
+function validateToken(token: string): string {
+  if (!AUTH_TOKEN_PATTERN.test(token)) throw tokenFileError("session bearer token must be a lowercase 64-hex value");
   return token;
+}
+function validateRecoveryCredentials(key: string | undefined, keyId: string | undefined): { key: string | null; keyId: string | null } {
+  if (key === undefined && keyId === undefined) return { key: null, keyId: null };
+  if (key === undefined || keyId === undefined || !/^[A-Za-z0-9_-]{43}$/.test(key) || !/^[A-Za-z0-9_-]{43}$/.test(keyId) || Buffer.from(key, "base64url").byteLength !== 32 || Buffer.from(keyId, "base64url").byteLength !== 32) {
+    throw tokenFileError("session recovery credentials must be 256-bit base64url values");
+  }
+  return { key, keyId };
+}
+function publicOrigin(host: string, port: number): string {
+  return `http://${host === "::1" ? "[::1]" : host}:${port}`;
+}
+
+function authFailure(message = "authentication failed"): HttpBoundaryError {
+  return new HttpBoundaryError("forbidden", message, 403);
+}
+
+function parseSocketObject(data: RawData, binary: boolean, maxBytes: number): Record<string, unknown> {
+  if (binary) throw new HttpBoundaryError("invalid_request", "WebSocket messages must be UTF-8 JSON text", 400);
+  const buffer = Buffer.isBuffer(data) ? data : Array.isArray(data) ? Buffer.concat(data) : Buffer.from(data);
+  if (buffer.length > maxBytes) throw new HttpBoundaryError("payload_too_large", "WebSocket message is too large", 413);
+  return parseStrictJsonObject(buffer, maxBytes);
+}
+
+function parseSocketConnect(value: Record<string, unknown>): { leaseId: string; clientId: string; csrf: string; epoch: string | null; cursor: number | null } {
+  assertExactFields(value, ["type", "protocolVersion", "leaseId", "clientId", "csrf", "epoch", "cursor"], ["type", "protocolVersion", "leaseId", "clientId", "csrf", "epoch", "cursor"]);
+  if (value.type !== "connect" || value.protocolVersion !== HOST_CLIENT_PROTOCOL_VERSION) throw new HttpBoundaryError("invalid_request", "invalid WebSocket connect message", 400);
+  if (typeof value.leaseId !== "string" || typeof value.clientId !== "string" || typeof value.csrf !== "string") throw new HttpBoundaryError("invalid_request", "invalid WebSocket lease identity", 400);
+  if (!(value.epoch === null || typeof value.epoch === "string") || !(value.cursor === null || (typeof value.cursor === "number" && Number.isSafeInteger(value.cursor) && value.cursor >= 0))) throw new HttpBoundaryError("invalid_request", "invalid WebSocket recovery cursor", 400);
+  return { leaseId: value.leaseId, clientId: value.clientId, csrf: value.csrf, epoch: value.epoch, cursor: value.cursor as number | null };
 }
 
 export function createAlderServer(options: AlderServerOptions): AlderServer {
   const host = validateLoopbackHost(options.host ?? "127.0.0.1");
+  const originHost = validateOriginHost(options.originHost ?? createOriginHost());
   const requestedPort = options.port ?? 8899;
-  if (!Number.isInteger(requestedPort) || requestedPort < 0 || requestedPort > 65_535) {
-    throw new Error("port must be an integer between 0 and 65535");
-  }
-  const shutdownToken = options.shutdownToken ?? createShutdownToken();
-  const nonce = randomBytes(24).toString("base64url");
+  if (!Number.isInteger(requestedPort) || requestedPort < 0 || requestedPort > 65_535) throw new Error("port must be an integer between 0 and 65535");
   const logger = options.logger ?? (() => undefined);
   const maxJson = options.maxJsonBytes ?? HTTP_JSON_LIMIT;
   const maxUpload = options.maxUploadBytes ?? HTTP_UPLOAD_LIMIT;
+  const maxSource = options.maxSourceBytes ?? HTTP_SOURCE_LIMIT;
   const maxSocket = options.maxWebSocketBytes ?? WEBSOCKET_MESSAGE_LIMIT;
   const maxOutbox = options.maxOutboxBytes ?? DEFAULT_OUTBOX_LIMIT;
-  const operationWaitTimeout = options.operationWaitTimeoutMs ?? 120_000;
-  if (!Number.isSafeInteger(operationWaitTimeout) || operationWaitTimeout <= 0 || operationWaitTimeout > 600_000) {
-    throw new Error("operationWaitTimeoutMs must be an integer between 1 and 600000");
-  }
+  const leaseExpiryMs = options.leaseExpiryMs ?? LEASE_EXPIRY_MS;
+  const leaseSweepIntervalMs = options.leaseSweepIntervalMs ?? HEARTBEAT_INTERVAL_MS;
+  if (![maxJson, maxUpload, maxSource, maxSocket, maxOutbox].every(value => Number.isSafeInteger(value) && value > 0)) throw new RangeError("server body and outbox limits must be positive safe integers");
+  if (maxJson > HTTP_JSON_LIMIT || maxUpload > HTTP_UPLOAD_LIMIT || maxSource > HTTP_SOURCE_LIMIT || maxSocket > WEBSOCKET_MESSAGE_LIMIT || maxOutbox > 256 * 1024 * 1024) throw new RangeError("server limits exceed their hard bounds");
+  if (![leaseExpiryMs, leaseSweepIntervalMs].every(value => Number.isSafeInteger(value) && value > 0)) throw new RangeError("lease timing limits must be positive safe integers");
+  const session = options.session ?? {
+    sessionKey: randomUUID(), canonicalPath: null, epoch: randomUUID(), processNonce: randomUUID(), token: randomBytes(32).toString("hex"),
+  };
+  const bearer = validateToken(session.token);
+  const cookieName = `alder_session_${session.processNonce}`;
+  const nonce = randomBytes(24).toString("base64url");
+  const continuityProof = session.continuityProof ?? randomBytes(32).toString("hex");
+  const shutdown = new AbortController();
   const sockets = new Set<WebSocket>();
-  const legacyAliases = new LegacyOperationAliases();
-  let legacyPackages = defaultLegacyPackages();
+  const socketsByLease = new Map<string, WebSocket>();
+  const recoveryCredentials = validateRecoveryCredentials(session.recoveryKey, session.recoveryKeyId);
+  const recoveryKey = recoveryCredentials.key;
+  const leases = new Map<string, Lease>();
+  const tickets = new Map<string, Ticket>();
+  const artifactLeases = new Map<string, { descriptor: ArtifactHandle; expiresAt: number }>();
+  const capabilities = new Map<string, ArtifactCapabilityEntry>();
+  let externalOrigin: string | null = options.externalOrigin === undefined ? null : validateOrigin(options.externalOrigin);
+  if (externalOrigin !== null && !externalOrigin.startsWith("https://")) throw tokenFileError("external-origin must use HTTPS");
+  if (externalOrigin !== null && options.tokenFile === undefined && options.externalBearerValidated !== true) throw tokenFileError("external-origin requires token-file");
+  let configuredBearer: string | null = null;
   let currentAddress: AlderServerAddress | null = null;
   let closing: Promise<void> | null = null;
-  const pendingApiResponses = new Set<ServerResponse>();
-  const shutdown = new AbortController();
+  let compromised = false;
+  const pendingResponses = new Set<ServerResponse>();
+  const activeMcpLeases = new Map<string, number>();
+  const leaseTimer = setInterval(() => {
+    const now = Date.now();
+    const cutoff = now - leaseExpiryMs;
+    for (const [id, lease] of leases) {
+      if (activeMcpLeases.has(id)) continue;
+      if (lease.lastSeen >= cutoff) continue;
+      // Re-read both identity and active-operation state immediately before eviction.
+      const current = leases.get(id);
+      if (current !== lease || activeMcpLeases.has(id) || current.lastSeen >= cutoff) continue;
+      removeLease(id);
+    }
+    for (const [id, ticket] of tickets) if (ticket.expiresAt <= now) tickets.delete(id);
+    for (const [id, lease] of artifactLeases) {
+      if (lease.expiresAt > now) continue;
+      artifactLeases.delete(id);
+      options.artifactStore.unpin([lease.descriptor]);
+      options.artifactStore.release([lease.descriptor]);
+    }
+    for (const [capability, entry] of capabilities) {
+      const lease = artifactLeases.get(entry.descriptor.handle);
+      if (entry.expiresAt <= now || (lease !== undefined && lease.expiresAt <= now)) capabilities.delete(capability);
+    }
+  }, leaseSweepIntervalMs);
+  leaseTimer.unref();
+
+  function retainArtifactLease(descriptor: ArtifactHandle, expiresAt: number): ArtifactHandle {
+    const existing = artifactLeases.get(descriptor.handle);
+    if (existing !== undefined && !sameArtifactHandle(existing.descriptor, descriptor)) {
+      throw new HttpBoundaryError("stale_value", "artifact handle identity is stale", 409);
+    }
+    options.artifactStore.retainArtifactRead(descriptor, expiresAt);
+    if (existing !== undefined) {
+      existing.expiresAt = Math.max(existing.expiresAt, expiresAt);
+      return existing.descriptor;
+    }
+    try {
+      options.artifactStore.pin([descriptor]);
+    } catch (error) {
+      options.artifactStore.release([descriptor]);
+      throw error;
+    }
+    artifactLeases.set(descriptor.handle, { descriptor, expiresAt });
+    return descriptor;
+  }
+
+  function retainArtifact(descriptor: ArtifactHandle): ArtifactHandle {
+    if (shutdown.signal.aborted) throw new HttpBoundaryError("session_stopped", "session has stopped", 410);
+    if (compromised) throw new HttpBoundaryError("session_stopped", "session is unavailable", 410);
+    retainArtifactLease(descriptor, Date.now() + ARTIFACT_LEASE_TTL_MS);
+    return descriptor;
+  }
+
+  function issueArtifactCapability(descriptor: ArtifactHandle, manifest: ArtifactManifest): { capability: string; expiresAt: number } {
+    const now = Date.now();
+    const retained = artifactLeases.get(descriptor.handle);
+    if (retained !== undefined && !sameArtifactHandle(retained.descriptor, descriptor)) {
+      throw new HttpBoundaryError("stale_value", "artifact handle identity is stale", 409);
+    }
+    if (retained !== undefined && retained.expiresAt <= now) {
+      throw new HttpBoundaryError("output_expired", "artifact result lease has expired", 410);
+    }
+    const expiresAt = retained === undefined ? now + ARTIFACT_LEASE_TTL_MS : Math.min(now + ARTIFACT_LEASE_TTL_MS, retained.expiresAt);
+    for (const [capability, entry] of capabilities) {
+      if (entry.expiresAt > now && sameArtifactHandle(entry.descriptor, descriptor)) return { capability, expiresAt: entry.expiresAt };
+    }
+    let capability: string;
+    do capability = randomBytes(32).toString("base64url"); while (capabilities.has(capability));
+    capabilities.set(capability, { descriptor, manifest, expiresAt });
+    return { capability, expiresAt };
+  }
+  function closeLeaseTransports(leaseId: string): void {
+    const socket = socketsByLease.get(leaseId);
+    if (socket !== undefined) {
+      socketsByLease.delete(leaseId);
+      socket.close(1008, "session lease ended");
+      socket.terminate();
+    }
+    try {
+      void Promise.resolve(options.mcpHandler?.closeLease?.(leaseId)).catch(() => logger("warn", "MCP lease cleanup failed"));
+    } catch {
+      logger("warn", "MCP lease cleanup failed");
+    }
+  }
+
+  function retainMcpLease(lease: Lease): () => void {
+    activeMcpLeases.set(lease.leaseId, (activeMcpLeases.get(lease.leaseId) ?? 0) + 1);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const count = activeMcpLeases.get(lease.leaseId) ?? 0;
+      if (count <= 1) activeMcpLeases.delete(lease.leaseId);
+      else activeMcpLeases.set(lease.leaseId, count - 1);
+      const current = leases.get(lease.leaseId);
+      if (current === lease) current.lastSeen = Date.now();
+    };
+  }
+
+  function leaseExpired(lease: Lease): boolean {
+    return !activeMcpLeases.has(lease.leaseId) && lease.lastSeen + leaseExpiryMs <= Date.now();
+  }
+
+  function removeLease(leaseId: string): Lease | undefined {
+    const lease = leases.get(leaseId);
+    if (lease === undefined) return undefined;
+    leases.delete(leaseId);
+    activeMcpLeases.delete(leaseId);
+    closeLeaseTransports(leaseId);
+    try {
+      options.controller.releaseClient?.(lease.clientId);
+    } catch {
+      logger("warn", "controller client lease cleanup failed");
+    }
+    options.onLeaseCount?.(leases.size);
+    return lease;
+  }
+  function assertCurrentHttpLease(lease: Lease): Lease {
+    const current = leases.get(lease.leaseId);
+    if (current !== lease || leaseExpired(lease)) {
+      if (current === lease) removeLease(lease.leaseId);
+      throw authFailure("session lease has expired or ended");
+    }
+    if (compromised) throw new HttpBoundaryError("session_stopped", "session is unavailable", 410);
+    return current;
+  }
+
+  async function readHttpLeaseBody(lease: Lease, request: IncomingMessage, maxBytes: number): Promise<Record<string, unknown>> {
+    try {
+      const body = await readJsonBody(request, maxBytes);
+      assertCurrentHttpLease(lease);
+      return body;
+    } catch (error) {
+      const current = leases.get(lease.leaseId);
+      if (current !== lease || leaseExpired(lease)) {
+        if (current === lease) removeLease(lease.leaseId);
+        throw authFailure("session lease has expired or ended");
+      }
+      throw error;
+    }
+  }
+  function releaseArtifacts(): void {
+    for (const { descriptor } of artifactLeases.values()) {
+      options.artifactStore.unpin([descriptor]);
+      options.artifactStore.release([descriptor]);
+    }
+    artifactLeases.clear();
+    capabilities.clear();
+  }
+
+
+  function origins(): readonly string[] {
+    if (!currentAddress) return [];
+    const local = buildAllowedOrigins(currentAddress.port, options.allowedOrigins, originHost);
+    return externalOrigin === null ? local : [...new Set([...local, externalOrigin])];
+  }
+
+  function connectionOrigin(): string {
+    return publicOrigin(host, currentAddress?.port ?? requestedPort);
+  }
+
+  function assertBrowserAuthority(request: IncomingMessage, requireOrigin = false): void {
+    const allowed = origins();
+    const origin = singleHeader(request.headers.origin);
+    const requestHost = singleHeader(request.headers.host);
+    const connectionHost = currentAddress === null ? null : new URL(connectionOrigin()).host;
+    if (!currentAddress || requestHost === connectionHost || !validateRequestHost(request.headers, allowed)
+      || (origin === null ? requireOrigin : !allowed.includes(origin))) {
+      throw new HttpBoundaryError("forbidden_origin", "browser origin not allowed", 403);
+    }
+  }
+
+  function assertAuthority(request: IncomingMessage, requireOrigin = false): void {
+    const allowed = origins();
+    const origin = singleHeader(request.headers.origin);
+    const requestHost = singleHeader(request.headers.host);
+    const native = currentAddress !== null && requestHost === new URL(connectionOrigin()).host && origin === null;
+    const browser = currentAddress !== null && !native && validateRequestHost(request.headers, allowed)
+      && (origin === null ? !requireOrigin : allowed.includes(origin));
+    if (!browser && !native) throw new HttpBoundaryError("forbidden_origin", "origin not allowed", 403);
+  }
+
+  function assertArtifactAuthority(request: IncomingMessage): void {
+    const allowed = origins();
+    const requestHost = singleHeader(request.headers.host);
+    const connectionHost = currentAddress === null ? null : new URL(connectionOrigin()).host;
+    if (!currentAddress || requestHost === connectionHost || !validateRequestHost(request.headers, allowed)) throw new HttpBoundaryError("forbidden_origin", "host authority is not allowed", 403);
+    const origin = singleHeader(request.headers.origin);
+    if (origin !== null && origin !== "null" && !allowed.includes(origin)) throw new HttpBoundaryError("forbidden_origin", "origin not allowed", 403);
+  }
+
+  function currentIdentity(lease: Lease | null): Record<string, unknown> {
+    const browserOrigin = currentAddress?.origin ?? externalOrigin ?? publicOrigin(originHost, 0);
+    const address = { host: currentAddress?.host ?? host, port: currentAddress?.port ?? 0, origin: connectionOrigin(), browserOrigin };
+    const snapshot = options.controller.snapshot(lease?.clientId);
+    const configuration = options.controller.configuration?.() ?? {
+      rscript: snapshot.runtime.rEnvironment?.rscript ?? null,
+      executionMode: snapshot.runtime.executionMode,
+      runOnStartup: snapshot.runtime.runOnStartup,
+      deferStartup: false,
+    };
+    return {
+      protocol: HOST_PROTOCOL, epoch: session.epoch, processNonce: session.processNonce, continuityProof, sessionKey: session.sessionKey,
+      canonicalPath: session.canonicalPath, capabilities: [...(snapshot.capabilities ?? [])], origin: address.origin,
+      browserOrigin: address.browserOrigin,
+      address: { host: address.host, port: address.port, origin: address.origin, browserOrigin: address.browserOrigin },
+      documentReady: options.documentReady !== false, configuration,
+      ...(lease === null ? {} : { leaseId: lease.leaseId, clientId: lease.clientId, nextCommandSequence: lease.nextCommandSequence }),
+    };
+  }
+
+  function findLease(request: IncomingMessage): { auth: AuthContext; lease: Lease | null } {
+    const suppliedBearer = parseBearer(request.headers);
+    const cookie = cookieValue(request.headers, cookieName);
+    let lease: Lease | null = null;
+    let kind: "bearer" | "cookie";
+    if (cookie !== null) {
+      lease = leases.get(cookie) ?? null;
+      if (lease === null || lease.reserved) throw authFailure();
+      kind = "cookie";
+      if (suppliedBearer !== null && !constantTimeEqual(suppliedBearer, bearer)) throw authFailure();
+    } else {
+      if (suppliedBearer === null || !constantTimeEqual(suppliedBearer, configuredBearer ?? bearer)) throw authFailure();
+      kind = "bearer";
+      const suppliedLease = leaseHeader(request.headers);
+      if (suppliedLease !== null) lease = leases.get(suppliedLease) ?? null;
+    }
+    if (lease !== null) {
+      const now = Date.now();
+      if (lease.lastSeen + leaseExpiryMs <= now) {
+        removeLease(lease.leaseId);
+        throw authFailure("session lease has expired");
+      }
+      if (clientHeader(request.headers) !== null && clientHeader(request.headers) !== lease.clientId) throw authFailure("client identity does not match lease");
+      lease.lastSeen = now;
+    }
+    const authenticatedLease = lease;
+    return {
+      auth: {
+        kind,
+        leaseId: authenticatedLease?.leaseId ?? null,
+        clientId: authenticatedLease?.clientId ?? null,
+        csrf: authenticatedLease?.csrf ?? null,
+        nextCommandSequence: authenticatedLease?.nextCommandSequence ?? null,
+        ...(authenticatedLease === null ? {} : {
+          assertActive: () => { assertCurrentHttpLease(authenticatedLease); },
+          updateNextCommandSequence: (next: number) => { authenticatedLease.nextCommandSequence = Math.max(authenticatedLease.nextCommandSequence, next); },
+        }),
+      },
+      lease: authenticatedLease,
+    };
+  }
+
+  function requireLease(request: IncomingMessage, csrf = true): { auth: AuthContext; lease: Lease } {
+    const resolved = findLease(request);
+    if (resolved.lease === null) throw authFailure("an active session lease is required");
+    if (resolved.auth.kind === "cookie" && csrf) {
+      const supplied = csrfHeader(request.headers);
+      if (supplied === null || !constantTimeEqual(supplied, resolved.lease.csrf)) throw authFailure("CSRF validation failed");
+    }
+    if (compromised) throw new HttpBoundaryError("session_stopped", "session is unavailable", 410);
+    return { auth: resolved.auth, lease: resolved.lease };
+  }
+
+  function createLease(reserved = false): Lease {
+    return { leaseId: randomUUID(), clientId: randomUUID(), csrf: randomBytes(32).toString("hex"), nextCommandSequence: 1, lastSeen: Date.now(), reserved };
+  }
+
+  function activateLease(lease: Lease): Lease {
+    if (leases.size >= MAX_ACTIVE_LEASES) throw new HttpBoundaryError("client_limit", "too many active client leases", 429);
+    options.controller.registerClient?.(lease.clientId);
+    lease.reserved = false;
+    lease.lastSeen = Date.now();
+    leases.set(lease.leaseId, lease);
+    options.onLeaseCount?.(leases.size);
+    return lease;
+  }
+  function cleanupTicket(ticket: string): void {
+    tickets.delete(ticket);
+  }
+
+  function mintTicket(origin: string): Ticket {
+    if (tickets.size >= MAX_LIVE_TICKETS) throw new HttpBoundaryError("ticket_limit", "too many live bootstrap tickets", 429);
+    const lease = createLease(true);
+    const ticket: Ticket = { ticket: randomBytes(32).toString("hex"), origin, expiresAt: Date.now() + TICKET_TTL_MS, lease };
+    tickets.set(ticket.ticket, ticket);
+    return ticket;
+  }
+
+  function exchangeTicket(ticketValue: string): { ticket: Ticket; lease: Lease } {
+    const ticket = tickets.get(ticketValue);
+    if (!ticket || ticket.expiresAt <= Date.now()) {
+      if (ticket) cleanupTicket(ticketValue);
+      throw authFailure("ticket is invalid or expired");
+    }
+    cleanupTicket(ticketValue);
+    const lease = activateLease(ticket.lease);
+    return { ticket, lease };
+  }
+
+  function scheduleShutdown(operationId: string, clientId: string): void {
+    const awaitOperation = options.controller.awaitOperation;
+    if (awaitOperation === undefined || options.onShutdown === undefined) return;
+    queueMicrotask(() => {
+      void Promise.resolve().then(() => awaitOperation.call(options.controller, operationId, clientId)).then(operation => {
+        if (operation.status !== "done" || !isPlainObject(operation.result) || operation.result.closing !== true) return;
+        return options.onShutdown?.();
+      }).catch(error => logger("error", "shutdown callback failed: " + (error instanceof Error ? error.message : "unknown")));
+    });
+  }
+
+  async function responseEnvelope(value: unknown, snapshot: HostSnapshot): Promise<unknown> {
+    const text = JSON.stringify(value);
+    const envelopeBytes = Buffer.byteLength(text);
+    if (envelopeBytes <= MAX_ENVELOPE_BYTES) return value;
+    if (envelopeBytes > SNAPSHOT_ENVELOPE_LIMIT) throw new HttpBoundaryError("payload_too_large", "response envelope exceeds 128 MiB", 413);
+    if (!isPlainObject(value)) throw new HttpBoundaryError("payload_too_large", "response envelope exceeds 1 MiB", 413);
+    const operation = isPlainObject(value.operation) ? value.operation : null;
+    const resultOwner = value.result !== undefined ? value : operation;
+    if (resultOwner === null || resultOwner.result === undefined) throw new HttpBoundaryError("payload_too_large", "response envelope exceeds 1 MiB", 413);
+    const bytes = Buffer.from(JSON.stringify(resultOwner.result));
+    const artifact = retainArtifact(await options.artifactStore.writeArtifact(bytes, "application/json", ".json", {
+      sessionEpoch: session.epoch,
+      documentRevision: snapshot.documentRevision,
+      kernelEpoch: null,
+      runId: null,
+      cellId: null,
+      revision: null,
+    }));
+    return resultOwner === value ? { ...value, result: artifact } : { ...value, operation: { ...operation, result: artifact } };
+  }
+
+  async function handleArtifact(request: IncomingMessage, response: ServerResponse, target: string): Promise<void> {
+    assertArtifactAuthority(request);
+    if (request.method !== "GET") { method(response, request.method ?? "", "GET"); return; }
+    const requested = parseArtifactTarget(target);
+    if (requested === null) throw new HttpBoundaryError("not_found", "not found", 404);
+    const entry = capabilities.get(requested.capability);
+    if (entry === undefined) throw new HttpBoundaryError("not_found", "not found", 404);
+    const now = Date.now();
+    const lease = artifactLeases.get(entry.descriptor.handle);
+    if (entry.expiresAt <= now || (lease !== undefined && (lease.expiresAt <= now || !sameArtifactHandle(lease.descriptor, entry.descriptor)))) {
+      capabilities.delete(requested.capability);
+      throw new HttpBoundaryError("output_expired", "artifact capability has expired", 404);
+    }
+    let currentManifest: ArtifactManifest;
+    try {
+      currentManifest = options.artifactStore.artifactManifest(entry.descriptor);
+    } catch (error) {
+      const code = errorPayload(error).code;
+      if (code !== "output_expired" && code !== "not_found" && code !== "stale_value") throw error;
+      capabilities.delete(requested.capability);
+      throw new HttpBoundaryError("output_expired", "artifact capability is no longer valid", 404);
+    }
+    if (!artifactResourceNameSchema.safeParse(currentManifest.entry).success) {
+      throw new HttpBoundaryError("not_found", "not found", 404);
+    }
+    const issuedRoot = manifestResource(entry.manifest, entry.manifest.entry);
+    const currentRoot = manifestResource(currentManifest, currentManifest.entry);
+    if (issuedRoot === undefined || currentRoot === undefined || !sameArtifactHandle(issuedRoot, entry.descriptor)
+      || !sameArtifactHandle(currentRoot, entry.descriptor)) {
+      throw new HttpBoundaryError("output_expired", "artifact capability is no longer valid", 404);
+    }
+    const issuedMember = manifestResource(entry.manifest, requested.resource);
+    const currentMember = manifestResource(currentManifest, requested.resource);
+    if (issuedMember === undefined || currentMember === undefined || !sameArtifactHandle(issuedMember, currentMember)) {
+      throw new HttpBoundaryError("not_found", "not found", 404);
+    }
+    let reader: ArtifactResourceRead;
+    try {
+      reader = options.artifactStore.openArtifactResource(entry.descriptor, requested.resource);
+    } catch (error) {
+      const code = errorPayload(error).code;
+      if (code !== "output_expired" && code !== "not_found" && code !== "stale_value") throw error;
+      capabilities.delete(requested.capability);
+      throw new HttpBoundaryError("output_expired", "artifact resource is no longer valid", 404);
+    }
+    if (!sameArtifactHandle(reader.descriptor, currentMember)) {
+      reader.close();
+      throw new HttpBoundaryError("output_expired", "artifact resource is no longer valid", 404);
+    }
+    const origin = singleHeader(request.headers.origin);
+    const headers: Record<string, string> = {
+      "Access-Control-Allow-Origin": origin === "null" ? "null" : (origin ?? "*"),
+      "Access-Control-Allow-Credentials": "false",
+      "Cache-Control": "no-store",
+    };
+    if (artifactNeedsChildSandbox(reader.descriptor.mimeType)) {
+      headers["Content-Security-Policy"] = artifactChildContentSecurityPolicy(requested.capability, origins());
+    }
+    await serveArtifactResource(response, reader, headers);
+  }
+
+  async function recoveryTransfer(recovery: Recovery, snapshot: HostSnapshot): Promise<Recovery | ArtifactHandle> {
+    const wire = encodeRecoveryWire(recovery);
+    const bytes = Buffer.from(JSON.stringify(wire));
+    if (bytes.byteLength <= MAX_EVENT_BYTES) return wire as Recovery;
+    if (bytes.byteLength > SNAPSHOT_ENVELOPE_LIMIT) throw new HttpBoundaryError("payload_too_large", "recovery exceeds 128 MiB", 413);
+    return retainArtifact(await options.artifactStore.writeArtifact(bytes, "application/json", ".json", {
+      sessionEpoch: session.epoch,
+      documentRevision: snapshot.documentRevision,
+      kernelEpoch: null,
+      runId: null,
+      cellId: null,
+      revision: null,
+    }));
+  }
+
+  async function handleHttp(request: IncomingMessage, response: ServerResponse): Promise<void> {
+    if (shutdown.signal.aborted) throw new HttpBoundaryError("session_stopped", "session has stopped", 410);
+    pendingResponses.add(response);
+    const target = request.url ?? "/";
+    const artifactRequest = target.startsWith("/artifacts/");
+    const suppliedBearer = parseBearer(request.headers);
+    if (!artifactRequest && suppliedBearer !== null
+      && constantTimeEqual(suppliedBearer, configuredBearer ?? bearer)) {
+      response.setHeader("X-Alder-Continuity-Proof", continuityProof);
+    }
+    const suppliedCookie = cookieValue(request.headers, cookieName);
+    // Artifact capabilities authenticate the resource independently. Keep
+    // opaque-origin artifact loads on that boundary without exposing session
+    // continuity material or requiring a browser Origin.
+    if (suppliedCookie !== null && !artifactRequest) {
+      assertBrowserAuthority(request, request.method !== "GET");
+    }
+    const cookieLease = suppliedCookie === null ? undefined : leases.get(suppliedCookie);
+    if (!artifactRequest && cookieLease !== undefined && !cookieLease.reserved) {
+      response.setHeader("X-Alder-Continuity-Proof", continuityProof);
+    }
+    const suppliedBootstrapTicket = singleHeader(request.headers["x-alder-bootstrap-ticket"]);
+    const bootstrapTicket = suppliedBootstrapTicket === null ? undefined : tickets.get(suppliedBootstrapTicket);
+    if (!artifactRequest && bootstrapTicket !== undefined && bootstrapTicket.expiresAt > Date.now()) {
+      response.setHeader("X-Alder-Continuity-Proof", continuityProof);
+    }
+    response.once("close", () => pendingResponses.delete(response));
+    if (artifactRequest) {
+      assertArtifactAuthority(request);
+      await handleArtifact(request, response, target);
+      return;
+    }
+    assertAuthority(request);
+    let url: URL;
+    try { url = new URL(target, currentAddress?.origin ?? publicOrigin(originHost, requestedPort)); }
+    catch { throw new HttpBoundaryError("not_found", "not found", 404); }
+    const path = url.pathname;
+    if (path.startsWith("/artifacts/")) {
+      assertArtifactAuthority(request);
+      await handleArtifact(request, response, target);
+      return;
+    }
+    if (path === "/" || path === "/index.html") {
+      assertBrowserAuthority(request);
+      if (!method(response, request.method ?? "", "GET")) return;
+      const index = options.indexFile ?? join(options.staticDir, "..", "index.html");
+      let html = await readFile(index, "utf8");
+      if (!html.includes("__ALDER_CSP_NONCE__")) throw new HttpBoundaryError("internal_error", "bootstrap shell is missing its CSP nonce marker", 500);
+      html = html.replaceAll("__ALDER_CSP_NONCE__", nonce);
+      const body = Buffer.from(html);
+      response.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Content-Length": String(body.length), "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer", "X-Frame-Options": "DENY", "Content-Security-Policy": editorContentSecurityPolicy(nonce) });
+      response.end(body);
+      return;
+    }
+    if (path.startsWith("/static/")) {
+      assertBrowserAuthority(request);
+      if (!method(response, request.method ?? "", "GET")) return;
+      const file = await safeChildPath(options.staticDir, path.slice("/static/".length), STATIC_EXTENSIONS, true);
+      if (!file) throw new HttpBoundaryError("not_found", "not found", 404);
+      await serveFile(response, file, MIME_TYPES[extname(file).slice(1).toLowerCase()]!);
+      return;
+    }
+    if (path === "/api/ticket") {
+      // Native SessionConnection requests use the bound numeric connection
+      // origin and bearer from their private request closure. The ticket is
+      // nevertheless reserved for the explicitly supplied browser origin.
+      assertAuthority(request, true);
+      if (!method(response, request.method ?? "", "POST")) return;
+      const supplied = parseBearer(request.headers);
+      if (supplied === null || !constantTimeEqual(supplied, configuredBearer ?? bearer)) throw authFailure();
+      const body = await readJsonBody(request, maxJson);
+      assertExactFields(body, ["origin"], ["origin"]);
+      const origin = requiredString(body.origin, "origin", 2048);
+      if (!origins().includes(origin)) throw new HttpBoundaryError("forbidden_origin", "ticket origin is not configured", 403);
+      const ticket = mintTicket(origin);
+      jsonResponse(response, 200, { ticket: ticket.ticket, expiresAt: new Date(ticket.expiresAt).toISOString() });
+      return;
+    }
+    if (path === "/api/session") {
+      assertBrowserAuthority(request, true);
+      if (!method(response, request.method ?? "", "POST")) return;
+      const requestOrigin = singleHeader(request.headers.origin);
+      if (requestOrigin === null || !origins().includes(requestOrigin)) throw new HttpBoundaryError("forbidden_origin", "exact session Origin is required", 403);
+      const body = await readJsonBody(request, maxJson);
+      assertExactFields(body, ["ticket"], ["ticket"]);
+      const ticketValue = requiredString(body.ticket, "ticket", 256);
+      const ticket = tickets.get(ticketValue);
+      if (!ticket || ticket.origin !== requestOrigin) throw authFailure("ticket is invalid or reserved for another origin");
+      if (options.acceptingLeases?.() === false) throw new HttpBoundaryError("session_stopping", "notebook host is stopping", 503);
+      const exchanged = exchangeTicket(ticketValue);
+      const secure = requestOrigin.startsWith("https://");
+      const cookie = `${cookieName}=${exchanged.lease.leaseId}; HttpOnly; SameSite=Strict; Path=/${secure ? "; Secure" : ""}`;
+      const credentials = {
+        leaseId: exchanged.lease.leaseId,
+        clientId: exchanged.lease.clientId,
+        nextCommandSequence: exchanged.lease.nextCommandSequence,
+        epoch: session.epoch,
+        continuityProof,
+        csrf: exchanged.lease.csrf,
+        ...(recoveryKey === null ? {} : { recoveryKey, recoveryKeyId: recoveryCredentials.keyId }),
+      };
+      jsonResponse(response, 200, credentials, { "Set-Cookie": cookie });
+      return;
+    }
+    if (path === "/api/identity") {
+      if (!method(response, request.method ?? "", "GET")) return;
+      const resolved = findLease(request);
+      if (resolved.auth.kind === "cookie") requireLease(request, true);
+      jsonResponse(response, 200, currentIdentity(resolved.lease));
+      return;
+    }
+    if (path === "/api/lease") {
+      if (!method(response, request.method ?? "", "POST")) return;
+      const body = await readJsonBody(request, maxJson);
+      const action = body.action;
+      if (action === "attach") {
+        assertExactFields(body, ["action"], ["action"]);
+        const supplied = parseBearer(request.headers);
+        if (options.acceptingLeases?.() === false) throw new HttpBoundaryError("session_stopping", "notebook host is stopping", 503);
+        if (supplied === null || !constantTimeEqual(supplied, configuredBearer ?? bearer)) throw authFailure();
+        const lease = activateLease(createLease());
+        jsonResponse(response, 200, { leaseId: lease.leaseId, clientId: lease.clientId, nextCommandSequence: lease.nextCommandSequence, epoch: session.epoch });
+        return;
+      }
+      if (action !== "heartbeat" && action !== "release") throw new HttpBoundaryError("invalid_request", "lease action must be attach, heartbeat, or release", 400);
+      assertExactFields(body, ["action", "leaseId"], ["action", "leaseId"]);
+      const resolved = requireLease(request, true);
+      if (body.leaseId !== resolved.lease.leaseId) throw authFailure("lease identity does not match request");
+      if (action === "release") {
+        removeLease(resolved.lease.leaseId);
+        jsonResponse(response, 200, { released: true });
+      } else {
+        resolved.lease.lastSeen = Date.now();
+        jsonResponse(response, 200, { leaseId: resolved.lease.leaseId, clientId: resolved.lease.clientId, nextCommandSequence: resolved.lease.nextCommandSequence, epoch: session.epoch });
+      }
+      return;
+    }
+
+    if (path === "/api/command") {
+      if (!method(response, request.method ?? "", "POST")) return;
+      const resolved = requireLease(request, true);
+      const body = await readHttpLeaseBody(resolved.lease, request, maxSource);
+      const command = parseHostCommand(decodeHostCommandWire(body));
+      if (command.clientId !== resolved.lease.clientId) throw authFailure("command clientId does not match lease");
+      if (command.sessionEpoch !== session.epoch) throw new HttpBoundaryError("session_epoch_mismatch", "command belongs to a different session epoch", 409);
+      assertCurrentHttpLease(resolved.lease);
+      const admission = commandAdmissionSchema.parse(await options.controller.dispatch(command));
+      resolved.lease.nextCommandSequence = Math.max(resolved.lease.nextCommandSequence, admission.nextCommandSequence);
+      if (command.type === "shutdown" && admission.accepted) scheduleShutdown(command.operationId, resolved.lease.clientId);
+      const snapshot = options.controller.snapshot(resolved.lease.clientId);
+      const bounded = await responseEnvelope(admission, snapshot);
+      jsonResponse(response, admission.accepted ? 200 : errorStatus(admission.error?.code ?? "invalid_request"), bounded);
+      return;
+    }
+    if (path === "/api/query") {
+      if (!method(response, request.method ?? "", "POST")) return;
+      const resolved = requireLease(request, true);
+      const body = await readHttpLeaseBody(resolved.lease, request, maxJson);
+      const query = parseHostQuery(decodeHostQueryWire(body));
+      // The notebook lease authorizes this lookup; the controller still requires any historical clientId to match the receipt owner.
+      if (query.type === "output") {
+        if (acceptsArtifactResolution(request.headers)) {
+          assertAuthority(request, true);
+          requireLease(request, true);
+          const requestedDescriptor = parseArtifactDescriptorHeader(request.headers);
+          if (requestedDescriptor.handle !== query.handle) {
+            throw new HttpBoundaryError("stale_value", "artifact descriptor does not match the requested handle", 409);
+          }
+          const manifest = options.artifactStore.artifactManifest(query.handle);
+          if (!artifactResourceNameSchema.safeParse(manifest.entry).success) {
+            throw new HttpBoundaryError("service_unavailable", "artifact manifest entry is invalid", 503);
+          }
+          const descriptor = manifestResource(manifest, manifest.entry);
+          if (descriptor === undefined || descriptor.handle !== query.handle || !sameArtifactHandle(requestedDescriptor, descriptor)) {
+            throw new HttpBoundaryError("stale_value", "artifact descriptor does not match the requested handle", 409);
+          }
+          assertCurrentHttpLease(resolved.lease);
+          const issued = issueArtifactCapability(descriptor, manifest);
+          const resolution = artifactResolutionSchema.parse({
+            artifact: descriptor,
+            url: "/artifacts/" + issued.capability + "/" + manifest.entry,
+            expiresAt: issued.expiresAt,
+          });
+          jsonResponse(response, 200, resolution, {
+            "Content-Type": ARTIFACT_RESOLUTION_MEDIA_TYPE,
+          });
+          return;
+        }
+        const offset = query.offset ?? 0;
+        const limit = query.limit ?? OUTPUT_CHUNK_BYTES;
+        assertCurrentHttpLease(resolved.lease);
+        const { descriptor, bytes } = await readPublicArtifactPage(options.artifactStore, query.handle, offset, limit);
+        assertCurrentHttpLease(resolved.lease);
+        const snapshot = options.controller.snapshot(resolved.lease.clientId);
+        jsonResponse(response, 200, {
+          epoch: session.epoch, documentRevision: snapshot.documentRevision, cursor: snapshot.cursor,
+          result: { encoding: "base64", offset, nextOffset: offset + bytes.byteLength, eof: offset + bytes.byteLength >= descriptor.byteLength, data: Buffer.from(bytes).toString("base64") },
+        });
+        return;
+      }
+      if (!options.controller.query) throw new HttpBoundaryError("service_unavailable", "typed host queries are unavailable", 503);
+      if (query.type === "operation" && query.clientId !== undefined && query.clientId !== resolved.lease.clientId) throw authFailure("operation query clientId does not match lease");
+      assertCurrentHttpLease(resolved.lease);
+      const result = hostQueryResultSchema.parse(await options.controller.query(query, resolved.lease.clientId));
+      assertCurrentHttpLease(resolved.lease);
+      const wireResult = encodeHostQueryResultWire(query, result);
+      const bounded = await responseEnvelope(wireResult, options.controller.snapshot(resolved.lease.clientId));
+      jsonResponse(response, 200, bounded);
+      return;
+    }
+
+    if (path === "/api/lsp") {
+      if (!method(response, request.method ?? "", "POST")) return;
+      const resolved = requireLease(request, true);
+      void resolved;
+      if (!options.lsp) throw new HttpBoundaryError("lsp_unavailable", "language server is unavailable", 503);
+      const body = await readHttpLeaseBody(resolved.lease, request, maxJson);
+      assertExactFields(body, ["method", "params"], ["method", "params"]);
+      const requestedMethod = requiredString(body.method, "method", 128);
+      const params = body.params;
+      if (!isPlainObject(params)) throw new HttpBoundaryError("invalid_request", "LSP params must be an object", 400);
+      const allowed = new Set(["textDocument/completion", "textDocument/hover", "textDocument/definition", "textDocument/references", "textDocument/documentSymbol", "textDocument/signatureHelp", "alder/restart"]);
+      if (!allowed.has(requestedMethod)) throw new HttpBoundaryError("invalid_request", "unsupported language-server request", 400);
+      const requestSnapshot = options.controller.snapshot();
+      assertCurrentHttpLease(resolved.lease);
+      const result = requestedMethod === "alder/restart" && options.lsp.restart
+        ? await options.lsp.restart(requestSnapshot)
+        : await options.lsp.requestDocument(requestedMethod, params, requestSnapshot);
+      if (options.controller.snapshot().documentRevision !== requestSnapshot.documentRevision) {
+        throw new HttpBoundaryError("document_conflict", "notebook changed during language-server request", 409);
+      }
+      assertCurrentHttpLease(resolved.lease);
+      jsonResponse(response, 200, {
+        ok: true,
+        epoch: session.epoch,
+        documentRevision: requestSnapshot.documentRevision,
+        result,
+      });
+      return;
+    }
+    if (path === "/api/log") {
+      if (!method(response, request.method ?? "", "POST")) return;
+      const resolved = requireLease(request, true);
+      const body = await readHttpLeaseBody(resolved.lease, request, Math.min(maxJson, 64 * 1024));
+      assertExactFields(body, ["level", "message"], ["level", "message"]);
+      const level = requiredString(body.level, "level", 32).replace(/[^a-zA-Z0-9_.-]/g, "_");
+      const message = requiredString(body.message, "message", 8_192).replace(/[\r\n\0]/g, " ").replace(/[0-9a-f]{64}/gi, "[redacted]");
+      assertCurrentHttpLease(resolved.lease);
+      logger("warn", `[client:${level}] ${message}`);
+      jsonResponse(response, 200, { ok: true });
+      return;
+    }
+    if (path === "/mcp") {
+      if (request.method !== "POST" && request.method !== "GET" && request.method !== "DELETE") {
+        response.setHeader("Allow", "POST, GET, DELETE");
+        jsonResponse(response, 405, { ok: false, error: { code: "method_not_allowed", message: `method not allowed: ${request.method ?? ""}` } });
+        return;
+      }
+      // Require exact host authority and validate an Origin when a client supplies one.
+      // Standard bearer Streamable HTTP clients may legitimately omit Origin.
+      assertAuthority(request);
+      const resolved = requireLease(request, request.method !== "GET");
+      if (resolved.auth.kind !== "bearer") throw authFailure("MCP requires bearer authentication");
+      if (!options.mcpHandler) throw new HttpBoundaryError("not_found", "not found", 404);
+      const releaseMcpLease = retainMcpLease(resolved.lease);
+      const release = (): void => {
+        response.off("finish", release);
+        response.off("close", release);
+        request.off("aborted", release);
+        releaseMcpLease();
+      };
+      response.once("finish", release);
+      response.once("close", release);
+      request.once("aborted", release);
+      try {
+        await options.mcpHandler(request, response, resolved.auth);
+      } finally {
+        if (response.writableEnded || response.destroyed) release();
+      }
+      return;
+    }
+    throw new HttpBoundaryError("not_found", "not found", 404);
+  }
 
   const server = createHttpServer((request, response) => {
-    if (request.url?.startsWith("/api/")) {
-      pendingApiResponses.add(response);
-      response.once("close", () => pendingApiResponses.delete(response));
-    }
-    void handleHttp(request, response).catch((error) => {
+    void handleHttp(request, response).catch(error => {
       if (response.writableEnded || response.destroyed) return;
-      logger("error", `HTTP request failed: ${error instanceof Error ? error.message : String(error)}`);
       if (!response.headersSent) failResponse(response, error);
       else response.destroy();
     });
   });
   const webSockets = new WebSocketServer({ noServer: true, maxPayload: maxSocket, perMessageDeflate: false });
 
-  function origins(): readonly string[] {
-    if (!currentAddress) return [];
-    return buildAllowedOrigins(currentAddress.port, options.allowedOrigins);
-  }
-
-  async function awaitLegacyOperation(result: CommandResult): Promise<OperationRecord> {
-    let operation = result.operation;
-    if (!isTerminalOperation(operation.status)) {
-      if (!options.controller.awaitOperation) {
-        throw new HttpBoundaryError("service_unavailable", "operation waiting is unavailable", 503);
-      }
-      const abort = new AbortController();
-      const timer = setTimeout(() => abort.abort(), operationWaitTimeout);
-      timer.unref();
-      try {
-        operation = await options.controller.awaitOperation(operation.id,
-          AbortSignal.any([abort.signal, shutdown.signal]));
-      } catch (error) {
-        if (shutdown.signal.aborted) throw stoppedError();
-        if (abort.signal.aborted) {
-          throw new HttpBoundaryError("operation_timeout", "operation wait timed out", 504);
-        }
-        throw error;
-      } finally {
-        clearTimeout(timer);
-      }
-    }
-    if (operation.status === "error" || operation.status === "cancelled") {
-      throw operationFailure(operation);
-    }
-    return operation;
-  }
-
-  function trackPackageSettlement(operationId: string): void {
-    if (!options.controller.awaitOperation) return;
-    void options.controller.awaitOperation(operationId).then((operation) => {
-      if (operation.status === "done") {
-        legacyPackages = packageStateFrom(operation.result, legacyPackages);
-      } else if (operation.error !== null && operation.error !== undefined) {
-        legacyPackages = {
-          ...legacyPackages,
-          installing: [],
-          error: structuredClone(operation.error),
-        };
-      }
-    }).catch(() => {});
-  }
-
-  async function handleHttp(request: IncomingMessage, response: ServerResponse): Promise<void> {
-    if (shutdown.signal.aborted) throw stoppedError();
-    if (!currentAddress || !validateRequestOrigin(request.headers, origins())) {
-      failResponse(response, new HttpBoundaryError("forbidden_origin", "origin not allowed", 403));
-      return;
-    }
-    const actualMethod = request.method ?? "";
-    let url: URL;
-    try {
-      url = new URL(request.url ?? "/", currentAddress.origin);
-    } catch {
-      failResponse(response, new HttpBoundaryError("not_found", "not found", 404));
-      return;
-    }
-    const path = url.pathname;
-    if (path === "/" || path === "/index.html") {
-      if (!method(response, actualMethod, "GET")) return;
-      const index = options.indexFile ?? join(options.staticDir, "..", "index.html");
-      let html = await import("node:fs/promises").then(({ readFile }) => readFile(index, "utf8"));
-      if (!html.includes("__ALDER_CSP_NONCE__")) {
-        throw new HttpBoundaryError("internal_error", "editor document is missing its CSP nonce marker", 500);
-      }
-      html = html.replaceAll("__ALDER_CSP_NONCE__", nonce);
-      const body = Buffer.from(html);
-      response.writeHead(200, {
-        "Content-Type": "text/html; charset=utf-8",
-        "Content-Length": String(body.length),
-        "Cache-Control": "no-store",
-        "X-Content-Type-Options": "nosniff",
-        "Referrer-Policy": "no-referrer",
-        "X-Frame-Options": "DENY",
-        "Content-Security-Policy": editorContentSecurityPolicy(nonce),
-      });
-      response.end(body);
-      return;
-    }
-    if (path.startsWith("/static/")) {
-      if (!method(response, actualMethod, "GET")) return;
-      const relative = path.slice("/static/".length);
-      const file = await safeChildPath(options.staticDir, relative, ["js", "css"], relative.startsWith("vendor/"));
-      if (!file) throw new HttpBoundaryError("not_found", "not found", 404);
-      await serveFile(response, file, MIME_TYPES[extname(file).slice(1).toLowerCase()]!);
-      return;
-    }
-    if (path.startsWith("/public/")) {
-      if (!method(response, actualMethod, "GET")) return;
-      const file = options.publicDir && await safeChildPath(options.publicDir, path.slice(8), ["png", "jpg", "jpeg", "gif", "webp", "svg", "mp3", "wav", "ogg", "mp4", "webm", "pdf", "css", "js", "json", "txt", "woff2"], true);
-      if (!file) throw new HttpBoundaryError("not_found", "not found", 404);
-      const extension = extname(file).toLowerCase();
-      await serveFile(response, file, MIME_TYPES[extension.slice(1)]!, {
-        ...(extension === ".svg" ? { "Content-Security-Policy": ARTIFACT_CSP, "X-Frame-Options": "SAMEORIGIN" } : {}),
-      });
-      return;
-    }
-    if (path.startsWith("/plot/")) {
-      if (!method(response, actualMethod, "GET")) return;
-      const file = options.artifactDir && await safeChildPath(options.artifactDir, path.slice(6), ["png", "jpg", "jpeg", "gif", "webp", "svg", "html", "mp3", "wav", "ogg", "mp4", "webm", "pdf"]);
-      if (!file) throw new HttpBoundaryError("not_found", "not found", 404);
-      const extension = extname(file).toLowerCase();
-      const activeArtifact = extension === ".html" || extension === ".svg";
-      await serveFile(response, file, MIME_TYPES[extension.slice(1)]!, {
-        ...(extension === ".svg" ? { "Content-Disposition": "inline" } : {}),
-        ...(activeArtifact ? { "Content-Security-Policy": ARTIFACT_CSP, "X-Frame-Options": "SAMEORIGIN" } : {}),
-      });
-      return;
-    }
-    if (path.startsWith("/download/")) {
-      if (!method(response, actualMethod, "GET")) return;
-      const file = options.artifactDir && await safeChildPath(options.artifactDir, path.slice(10), ["html", "md", "r", "ipynb", "qmd", "json"]);
-      if (!file) throw new HttpBoundaryError("not_found", "not found", 404);
-      await serveFile(response, file, MIME_TYPES[extname(file).slice(1).toLowerCase()]!, { "Content-Disposition": `attachment; filename="${basename(file).replace(/["\r\n]/g, "")}"` });
-      return;
-    }
-    if (path === "/api/state") {
-      if (!method(response, actualMethod, "GET")) return;
-      if (isBrowserActivity(request.headers)) options.onBrowserActivity?.();
-      jsonResponse(response, 200, legacyState(
-        options.controller.snapshot(),
-        legacyAliases,
-        shutdownToken,
-        legacyPackages,
-      ));
-      return;
-    }
-    if (path === "/api/version") {
-      if (!method(response, actualMethod, "GET")) return;
-      jsonResponse(response, 200, { ok: true, protocolVersion: BROWSER_PROTOCOL_VERSION, host: "0.1.0" });
-      return;
-    }
-    if (path === "/api/recover") {
-      if (!method(response, actualMethod, "GET")) return;
-      const epoch = url.searchParams.get("epoch");
-      const rawCursor = url.searchParams.get("cursor");
-      const cursor = rawCursor === null ? null : Number(rawCursor);
-      if (cursor !== null && (!Number.isSafeInteger(cursor) || cursor < 0)) {
-        throw new HttpBoundaryError("invalid_request", "cursor must be a non-negative safe integer", 400);
-      }
-      jsonResponse(response, 200, options.controller.recover(epoch, cursor));
-      return;
-    }
-    if (path === "/api/shutdown") {
-      if (!method(response, actualMethod, "POST")) return;
-      const supplied = singleHeader(request.headers["x-alder-shutdown-token"]);
-      if (!supplied || !constantTimeEqual(supplied, shutdownToken)) {
-        throw new HttpBoundaryError("forbidden", "shutdown token is invalid", 403);
-      }
-      await zeroByteBody(request, "shutdown");
-      if (shutdown.signal.aborted) throw stoppedError();
-      jsonResponse(response, 202, { ok: true, stopping: true });
-      queueMicrotask(() => {
-        // The acknowledgement must be flushed before teardown starts, while a
-        // rejected asynchronous callback must not become an unhandled process
-        // rejection after the response is already committed.
-        void Promise.resolve()
-          .then(() => options.onShutdown?.())
-          .catch((error: unknown) => logger(
-            "error",
-            `Shutdown callback failed: ${error instanceof Error ? error.message : String(error)}`,
-          ));
-      });
-      return;
-    }
-    if (path === "/api/operation/wait") {
-      if (!method(response, actualMethod, "GET")) return;
-      const id = url.searchParams.get("operation_id");
-      if (!id || url.searchParams.size !== 1 || !options.controller.awaitOperation) {
-        throw new HttpBoundaryError("invalid_request", "query must identify exactly one waitable operation", 400);
-      }
-      const abort = new AbortController();
-      let timeout = false;
-      let complete = false;
-      const cancel = () => { if (!complete) abort.abort(); };
-      request.once("aborted", cancel);
-      response.once("close", cancel);
-      const timer = setTimeout(() => { timeout = true; abort.abort(); }, operationWaitTimeout);
-      timer.unref();
-      try {
-        const operation = await options.controller.awaitOperation(id, abort.signal);
-        complete = true;
-        jsonResponse(response, 200, { ok: true, operation });
-      } catch (error) {
-        if (timeout) throw new HttpBoundaryError("operation_timeout", "operation wait timed out", 504);
-        throw error;
-      } finally {
-        complete = true;
-        clearTimeout(timer);
-        request.off("aborted", cancel);
-        response.off("close", cancel);
-      }
-      return;
-    }
-    if (path === "/api/run-operation") {
-      if (!method(response, actualMethod, "GET")) return;
-      const alias = legacyAliases.run(positiveIntegerQuery(url, "run_id"));
-      if (alias === undefined || !options.controller.operation) {
-        throw new HttpBoundaryError("not_found", "run operation id was not found", 404);
-      }
-      const operation = options.controller.operation(alias.operationId);
-      if (operation === undefined) throw new HttpBoundaryError("not_found", "run operation id was not found", 404);
-      jsonResponse(response, 200, { ok: true, operation: legacyRunOperation(alias, operation, legacyAliases) });
-      return;
-    }
-    if (path === "/api/widget-operation") {
-      if (!method(response, actualMethod, "GET")) return;
-      const alias = legacyAliases.token(positiveIntegerQuery(url, "token"));
-      if (alias === undefined
-        || (alias.kind !== "widget" && alias.kind !== "reset")
-        || !options.controller.operation) {
-        throw new HttpBoundaryError("not_found", "widget operation token was not found", 404);
-      }
-      const operation = options.controller.operation(alias.operationId);
-      if (operation === undefined) throw new HttpBoundaryError("not_found", "widget operation token was not found", 404);
-      jsonResponse(response, 200, { ok: true, operation: legacyWidgetOperation(alias, operation, legacyAliases) });
-      return;
-    }
-    if (path === "/api/operation") {
-      if (!method(response, actualMethod, "GET")) return;
-      const id = url.searchParams.get("operation_id");
-      if (!id || url.searchParams.size !== 1 || !options.controller.operation) {
-        throw new HttpBoundaryError("invalid_request", "query must identify exactly one operation", 400);
-      }
-      const operation = options.controller.operation(id);
-      if (!operation) throw new HttpBoundaryError("not_found", "operation was not found", 404);
-      jsonResponse(response, 200, { ok: true, operation });
-      return;
-    }
-    if (["/api/config", "/api/app", "/api/layout"].includes(path) && actualMethod === "GET") {
-      const key = path.slice(5);
-      const snapshot = options.controller.snapshot();
-      const value = key === "app" ? defaultLegacyApp(snapshot) : snapshot[key as "config" | "layout"];
-      jsonResponse(response, 200, { ok: true, [key]: value });
-      return;
-    }
-    if (path === "/api/interrupt" || path === "/api/restart" || path === "/api/save") {
-      if (!method(response, actualMethod, "POST")) return;
-      await zeroByteBody(request, path.slice(5));
-      if (shutdown.signal.aborted) throw stoppedError();
-      const result = await options.controller.dispatch(legacyCommand(options.controller, path, {}));
-      const payload = commandPayload(result);
-      if (path === "/api/save") {
-        jsonResponse(response, 200, { ok: true, ...payload, version: result.version });
-        return;
-      }
-      const hostRunId = typeof payload.runId === "string"
-        ? payload.runId
-        : result.operation.runId;
-      let alias = hostRunId === undefined ? undefined : legacyAliases.forHostRun(hostRunId);
-      if (alias === undefined && hostRunId !== undefined) {
-        const owner = options.controller.snapshot().operations.find((operation) => operation.runId === hostRunId);
-        alias = legacyAliases.addRun(owner?.id ?? result.operation.id, { runId: hostRunId });
-      }
-      jsonResponse(response, 202, { ok: true, run_id: alias?.publicId ?? null });
-      return;
-    }
-    if (path === "/api/lsp") {
-      if (!method(response, actualMethod, "POST")) return;
-      if (!options.lsp) throw new HttpBoundaryError("lsp_unavailable", "language server is unavailable", 503);
-      const body = await readJsonBody(request, maxJson);
-      if (shutdown.signal.aborted) throw stoppedError();
-      assertExactFields(body, ["method", "params"], ["method", "params"]);
-      const requestedMethod = body.method;
-      const params = body.params;
-      const allowed = new Set(["textDocument/completion", "textDocument/hover", "textDocument/definition", "textDocument/references", "textDocument/documentSymbol", "textDocument/signatureHelp", "alder/restart"]);
-      if (typeof requestedMethod !== "string" || !allowed.has(requestedMethod) || !isPlainObject(params)) {
-        throw new HttpBoundaryError("invalid_request", "unsupported language-server request", 400);
-      }
-      const result = requestedMethod === "alder/restart" && options.lsp.restart
-        ? await options.lsp.restart(options.controller.snapshot())
-        : await options.lsp.requestDocument(requestedMethod, params, options.controller.snapshot());
-      jsonResponse(response, 200, { ok: true, result });
-      return;
-    }
-    if (path === "/api/log") {
-      if (!method(response, actualMethod, "POST")) return;
-      const body = await readJsonBody(request, maxJson);
-      if (shutdown.signal.aborted) throw stoppedError();
-      assertExactFields(body, ["level", "message", "source", "code", "status", "url", "stack"], ["level", "message"]);
-      const level = byteBoundedString(body.level, "level", 32, { allowControls: true });
-      const message = byteBoundedString(body.message, "message", 8192, { allowControls: true });
-      const source = body.source === undefined
-        ? ""
-        : byteBoundedString(body.source, "source", 256, { allowEmpty: true, allowControls: true });
-      const code = body.code === undefined
-        ? null
-        : byteBoundedString(body.code, "code", 128);
-      const urlValue = body.url === undefined
-        ? ""
-        : byteBoundedString(body.url, "url", 4096, { allowEmpty: true, allowControls: true });
-      const stack = body.stack === undefined
-        ? ""
-        : byteBoundedString(body.stack, "stack", 16_384, { allowEmpty: true, allowControls: true });
-      let status: number | null = null;
-      if (body.status !== undefined) {
-        status = integerField(body.status, "status");
-        if (status !== 0 && (status < 100 || status > 599)) {
-          throw new HttpBoundaryError("invalid_request", "field status must be 0 or an HTTP status from 100 to 599", 400);
-        }
-      }
-      const attributes = [
-        ...(source ? [`source=${sanitizeClientLogText(source)}`] : []),
-        ...(code === null ? [] : [`code=${sanitizeClientLogText(code)}`]),
-        ...(status === null ? [] : [`status=${status}`]),
-        ...(urlValue ? [`url=${sanitizeClientLogText(urlValue)}`] : []),
-        ...(stack ? [`stack=${sanitizeClientLogText(stack)}`] : []),
-      ];
-      process.stderr.write(
-        `[client:${sanitizeClientLogText(level)}] ${sanitizeClientLogText(message)}`
-        + (attributes.length === 0 ? "" : ` | ${attributes.join(" ")}`)
-        + "\n",
-      );
-      jsonResponse(response, 200, { ok: true, logged: true });
-      return;
-    }
-    const postRoutes = new Set(["/api/command", "/api/run", "/api/lazy", "/api/table", "/api/cell", "/api/widget", "/api/upload", "/api/value", "/api/runtime", "/api/config", "/api/app", "/api/layout", "/api/packages", "/api/format", "/api/export", "/api/check"]);
-    if (!postRoutes.has(path)) throw new HttpBoundaryError("not_found", "not found", 404);
-    if (!method(response, actualMethod, "POST")) return;
-    const body = await readJsonBody(request, path === "/api/upload" ? maxUpload : maxJson);
-    if (shutdown.signal.aborted) throw stoppedError();
-    const command = path === "/api/command" ? parseHostCommand(body) : legacyCommand(options.controller, path, body);
-    const result = await options.controller.dispatch(command);
-    if (path === "/api/command") {
-      jsonResponse(response, acceptedStatus(result), { ok: true, ...result });
-      return;
-    }
-    const payload = commandPayload(result);
-    if (path === "/api/run") {
-      const runId = typeof payload.runId === "string" ? payload.runId : result.operation.runId;
-      if (runId === undefined) throw new HttpBoundaryError("internal_error", "run did not return an identity", 500);
-      const alias = legacyAliases.addRun(result.operation.id, { runId });
-      jsonResponse(response, 202, { ok: true, run_id: alias.publicId });
-      return;
-    }
-    if (["/api/widget", "/api/value", "/api/lazy", "/api/table", "/api/upload"].includes(path)) {
-      const kind: Exclude<LegacyAliasKind, "run" | "reset"> = path === "/api/widget"
-        ? "widget"
-        : path === "/api/value"
-          ? "value"
-          : path === "/api/lazy"
-            ? "lazy"
-            : path === "/api/table"
-              ? "table"
-              : "upload";
-      // Alias records outlive the request. Retain only the small identity
-      // fields needed by legacy state; upload contents can approach 16 MiB.
-      const aliasRequest = {
-        ...(typeof body.name === "string" ? { name: body.name } : {}),
-        ...(typeof body.key === "string" ? { key: body.key } : {}),
-        ...(typeof body.handle === "string" ? { handle: body.handle } : {}),
-        ...(typeof payload.owner === "string" ? { owner: payload.owner } : {}),
-        ...(typeof payload.revision === "number" ? { revision: payload.revision } : {}),
-      };
-      const resetExpected = kind === "widget"
-        && legacyWidgetResetExpected(options.controller.snapshot(), body);
-      const alias = legacyAliases.addToken(kind, result.operation.id, aliasRequest, resetExpected);
-      jsonResponse(response, 202, { ok: true, token: alias.publicId });
-      return;
-    }
-    if (path === "/api/cell") {
-      const op = body.op;
-      let projection: Record<string, unknown>;
-      if (op === "add") {
-        const created = Array.isArray(payload.created) && isPlainObject(payload.created[0]) ? payload.created[0] : {};
-        projection = { id: created.id, revision: created.revision };
-      } else if (op === "edit") {
-        const edited = Array.isArray(payload.edited) && isPlainObject(payload.edited[0]) ? payload.edited[0] : {};
-        projection = { id: edited.id, revision: edited.revision };
-      } else if (op === "disable") {
-        const runId = typeof payload.runId === "string" ? payload.runId : null;
-        const runAlias = runId === null
-          ? null
-          : legacyAliases.addRun(result.operation.id, { runId }).publicId;
-        projection = { id: payload.id, disabled: payload.disabled, run_id: runAlias };
-      } else {
-        projection = structuredClone(payload);
-      }
-      jsonResponse(response, 200, { ok: true, ...projection, version: result.version });
-      return;
-    }
-    if (path === "/api/runtime") {
-      jsonResponse(response, 200, {
-        ok: true,
-        execution_mode: payload.executionMode,
-        run_on_startup: payload.runOnStartup,
-        version: result.version,
-      });
-      return;
-    }
-    if (path === "/api/config" || path === "/api/app" || path === "/api/layout") {
-      const key = path.slice(5);
-      jsonResponse(response, 200, { ok: true, [key]: payload[key], version: result.version });
-      return;
-    }
-    if (path === "/api/format") {
-      jsonResponse(response, 200, {
-        ok: true,
-        changed: payload.changed ?? 0,
-        version: result.version,
-        cells: payload.cells ?? payload.edited ?? [],
-      });
-      return;
-    }
-    if (path === "/api/check") {
-      jsonResponse(response, 200, { ok: true, ...legacyCheckResult(payload) });
-      return;
-    }
-    if (path === "/api/export") {
-      const operation = await awaitLegacyOperation(result);
-      const completed = isPlainObject(operation.result) ? operation.result : {};
-      jsonResponse(response, 200, {
-        ok: true,
-        download: typeof completed.url === "string" ? completed.url : completed.download,
-        format: completed.format ?? body.format,
-      });
-      return;
-    }
-    if (path === "/api/packages") {
-      const packageOperation = body.op;
-      if (packageOperation === "install") {
-        const supplied = [
-          ...(typeof body.package === "string" ? [body.package] : []),
-          ...(typeof body.packages === "string" ? [body.packages] : stringList(body.packages)),
-        ];
-        const packages = [...new Set(supplied.length === 0 ? stringList(legacyPackages.missing) : supplied)].sort();
-        legacyPackages = { ...legacyPackages, installing: packages, error: {} };
-        trackPackageSettlement(result.operation.id);
-        jsonResponse(response, 202, {
-          ok: true,
-          packages,
-          installed: stringList(legacyPackages.installed),
-          missing: stringList(legacyPackages.missing),
-          installing: packages,
-          ...(legacyPackages.lib === undefined ? {} : { lib: structuredClone(legacyPackages.lib) }),
-        });
-        return;
-      }
-      const operation = await awaitLegacyOperation(result);
-      legacyPackages = packageStateFrom(operation.result, legacyPackages);
-      if (packageOperation === "status") {
-        jsonResponse(response, 200, { ok: true, packages: structuredClone(legacyPackages) });
-        return;
-      }
-      const settled = isPlainObject(operation.result) ? operation.result : {};
-      const declaration = isPlainObject(settled.declaration) ? settled.declaration : settled;
-      jsonResponse(response, 200, {
-        ok: true,
-        packages: stringList(declaration.declared ?? body.packages ?? (body.package === undefined ? [] : [body.package])),
-        path: declaration.metadata ?? null,
-      });
-      return;
-    }
-    throw new HttpBoundaryError("not_found", "not found", 404);
-  }
-
   server.on("upgrade", (request, socket, head) => {
-    if (shutdown.signal.aborted) {
-      socket.end("HTTP/1.1 410 Gone\r\nConnection: close\r\n\r\n");
-      return;
-    }
-    if (!currentAddress || !validateRequestOrigin(request.headers, origins())) {
-      socket.write("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n");
-      socket.destroy();
-      return;
-    }
-    let path = "";
-    try {
-      path = new URL(request.url ?? "/", currentAddress.origin).pathname;
-    } catch {
-      // handled below
-    }
-    if (path !== "/api/socket") {
-      socket.write("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n");
-      socket.destroy();
-      return;
-    }
-    webSockets.handleUpgrade(request, socket, head, (webSocket) => webSockets.emit("connection", webSocket, request));
+    if (shutdown.signal.aborted || !currentAddress) { socket.destroy(); return; }
+    try { assertBrowserAuthority(request, true); } catch { socket.destroy(); return; }
+    let url: URL;
+    try { url = new URL(request.url ?? "/", currentAddress.origin); } catch { socket.destroy(); return; }
+    if (url.pathname !== "/api/socket") { socket.destroy(); return; }
+    let resolved: { auth: AuthContext; lease: Lease };
+    try { resolved = requireLease(request, false); } catch { socket.destroy(); return; }
+    if (socketsByLease.has(resolved.lease.leaseId)) { socket.destroy(); return; }
+    webSockets.handleUpgrade(request, socket, head, webSocket => webSockets.emit("connection", webSocket, request, resolved));
   });
 
-  webSockets.on("connection", (socket) => {
+  webSockets.on("connection", (socket: WebSocket, request: IncomingMessage, resolved: { auth: AuthContext; lease: Lease }) => {
     sockets.add(socket);
+    socketsByLease.set(resolved.lease.leaseId, socket);
     options.onClientCount?.(sockets.size);
-    let forceCloseTimer: NodeJS.Timeout | null = null;
-    const closePeer = (code: number, reason: string): void => {
-      socket.close(code, reason);
-      if (forceCloseTimer) return;
-      forceCloseTimer = setTimeout(() => socket.terminate(), 500);
-      forceCloseTimer.unref();
-    };
+    options.onBrowserActivity?.();
     const outbox = new SocketOutbox(socket, maxOutbox);
     let connected = false;
-    let clientId = "";
-    let lastSequence = -1;
-    let commandChain = Promise.resolve();
+    let transportClosing = false;
+    let closeTimer: NodeJS.Timeout | null = null;
+    let unsubscribed = false;
     let unsubscribe: (() => void) | null = null;
+    let commandChain = Promise.resolve();
+    let commandPendingCount = 0;
+    let commandPendingBytes = 0;
     const pendingEvents: HostEvent[] = [];
     let pendingEventBytes = 0;
-    const handshakeTimer = setTimeout(() => {
-      if (!connected) closePeer(1008, "connection handshake timed out");
-    }, 5_000);
+    let eventChain = Promise.resolve();
+    let eventPendingCount = 0;
+    let eventPendingBytes = 0;
+    const handshakeTimer = setTimeout(() => { if (!connected) { socket.close(1008, "connection handshake timed out"); socket.terminate(); } }, 5_000);
     handshakeTimer.unref();
-    const listener = (event: HostEvent) => {
-      if (!connected) {
-        const key = coalesceKey(event);
-        if (key) {
-          for (let index = pendingEvents.length - 1; index >= 0; index -= 1) {
-            const candidateKey = coalesceKey(pendingEvents[index]);
-            if (candidateKey === null) break;
-            if (candidateKey === key) {
-              pendingEventBytes -= Buffer.byteLength(JSON.stringify(pendingEvents[index]));
-              pendingEvents.splice(index, 1);
-              break;
-            }
-          }
+    const closeForBackpressure = (): void => {
+      if (transportClosing) return;
+      transportClosing = true;
+      clearTimeout(handshakeTimer);
+      outbox.close();
+      if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) socket.close(1013, "transport backpressure");
+      closeTimer = setTimeout(() => socket.terminate(), CONNECTION_CLOSE_TIMEOUT_MS);
+      closeTimer.unref();
+    };
+    const requireCurrentLease = (): Lease => {
+      const current = leases.get(resolved.lease.leaseId);
+      if (current !== resolved.lease || leaseExpired(resolved.lease)) {
+        if (current === resolved.lease) {
+          removeLease(current.leaseId);
         }
-        pendingEvents.push(event);
-        pendingEventBytes += Buffer.byteLength(JSON.stringify(event));
-        if (pendingEventBytes > maxOutbox) {
+        throw authFailure("session lease has expired or ended");
+      }
+      return current;
+    };
+    const sendError = (sequence: unknown, error: unknown, definitive = false): void => {
+      const detail = error instanceof HttpBoundaryError ? error : errorPayload(error);
+      outbox.send({ type: "error", sequence: Number.isSafeInteger(sequence) ? sequence : null, definitive, error: { code: detail.code, message: detail.message } });
+    };
+    const sendCurrentError = (sequence: unknown, error: unknown, definitive = false): void => {
+      try {
+        requireCurrentLease();
+        sendError(sequence, error, definitive);
+      } catch {
+        // Lease revocation closes the socket; do not publish stale failures.
+      }
+    };
+    const sendEvent = (event: HostEvent): void => {
+      if (transportClosing) return;
+      const eventBytes = serializedEventBytes(event);
+      const accountedBytes = Math.min(eventBytes, maxOutbox);
+      if (eventPendingCount >= SOCKET_EVENT_QUEUE_LIMIT || eventPendingBytes + accountedBytes > maxOutbox) {
+        closeForBackpressure();
+        return;
+      }
+      eventPendingCount += 1;
+      eventPendingBytes += accountedBytes;
+      const releaseMcpLease = retainMcpLease(resolved.lease);
+      eventChain = eventChain.then(async () => {
+        try {
+          if (!connected || transportClosing) return;
+          requireCurrentLease();
+          if (eventBytes > MAX_EVENT_BYTES) {
+            const snapshot = options.controller.snapshot(resolved.lease.clientId);
+            requireCurrentLease();
+            const recovery = await recoveryTransfer(options.controller.recover(null, null), snapshot);
+            requireCurrentLease();
+            outbox.send({ type: "recovery", protocolVersion: HOST_CLIENT_PROTOCOL_VERSION, continuityProof, recovery });
+            return;
+          }
+          requireCurrentLease();
+          outbox.send({ type: "event", event: encodeHostEventWire(event) }, coalesceKey(event));
+        } finally {
+          eventPendingCount -= 1;
+          eventPendingBytes -= accountedBytes;
+          releaseMcpLease();
+        }
+      }).catch(error => sendCurrentError(null, error));
+    };
+    const listener = (event: HostEvent): void => {
+      if (transportClosing) return;
+      const eventBytes = serializedEventBytes(event);
+      if (!connected) {
+        if (eventBytes > MAX_EVENT_BYTES) {
           pendingEvents.length = 0;
           pendingEventBytes = 0;
-          unsubscribe?.();
-          unsubscribe = null;
-          closePeer(1013, "recovery event buffer exceeded");
+          return;
         }
+        if (pendingEvents.length >= SOCKET_EVENT_QUEUE_LIMIT || pendingEventBytes + eventBytes > maxOutbox) {
+          closeForBackpressure();
+          return;
+        }
+        pendingEvents.push(event);
+        pendingEventBytes += eventBytes;
         return;
       }
-      outbox.send({ type: "event", event }, coalesceKey(event));
+      sendEvent(event);
     };
-    unsubscribe = options.controller.subscribe(listener);
-    socket.on("message", (data, isBinary) => {
+    socket.on("message", (data, binary) => {
+      try { requireCurrentLease(); }
+      catch (error) { sendError(null, error); socket.close(1008, "session lease ended"); return; }
       let message: Record<string, unknown>;
-      try {
-        message = parseSocketJson(data, isBinary, maxSocket);
-      } catch (error) {
-        socketError(outbox, null, error);
-        closePeer(1007, "invalid WebSocket message");
-        return;
-      }
+      try { message = parseSocketObject(data, binary, maxSocket); }
+      catch (error) { sendError(null, error); socket.close(1007, "invalid WebSocket message"); return; }
       if (!connected) {
         try {
-          const connect = parseBrowserConnect(message);
-          clientId = connect.clientId;
+          const connect = parseSocketConnect(message);
+          if (connect.leaseId !== resolved.lease.leaseId || connect.clientId !== resolved.lease.clientId || !constantTimeEqual(connect.csrf, resolved.lease.csrf)) throw authFailure("WebSocket lease or CSRF identity mismatch");
+          requireCurrentLease().lastSeen = Date.now();
+          unsubscribe = options.controller.subscribe(listener);
           const recovery = options.controller.recover(connect.epoch, connect.cursor);
+          const snapshot = options.controller.snapshot(resolved.lease.clientId);
           connected = true;
           clearTimeout(handshakeTimer);
-          outbox.send({ type: "recovery", protocolVersion: BROWSER_PROTOCOL_VERSION, recovery });
-          const recoveredCursor = recovery && typeof recovery === "object" ? eventCursor(recovery) : null;
-          for (const event of pendingEvents.splice(0)) {
-            const cursor = eventCursor(event);
-            if (recoveredCursor === null || cursor === null || cursor > recoveredCursor) {
-              outbox.send({ type: "event", event }, coalesceKey(event));
+          const releaseMcpLease = retainMcpLease(resolved.lease);
+          eventChain = eventChain.then(async () => {
+            try {
+              requireCurrentLease();
+              const transfer = await recoveryTransfer(recovery, snapshot);
+              requireCurrentLease();
+              outbox.send({ type: "recovery", protocolVersion: HOST_CLIENT_PROTOCOL_VERSION, continuityProof, recovery: transfer });
+              const cursor = eventCursor(recovery);
+              requireCurrentLease();
+              for (const event of pendingEvents.splice(0)) {
+                pendingEventBytes -= serializedEventBytes(event);
+                if (cursor === null || event.cursor > cursor) {
+                  requireCurrentLease();
+                  outbox.send({ type: "event", event: encodeHostEventWire(event) }, coalesceKey(event));
+                }
+              }
+            } finally {
+              releaseMcpLease();
             }
-          }
-        } catch (error) {
-          socketError(outbox, null, error);
-          closePeer(1008, "connection handshake rejected");
-        }
+          }).catch(error => sendCurrentError(null, error));
+        } catch (error) { sendError(null, error); socket.close(1008, "connection handshake rejected"); }
         return;
       }
-      if (message.type === "ping") {
-        outbox.send({ type: "pong" });
-        return;
-      }
-      const sequence = message.sequence;
-      const command = message.command;
-      if (message.type !== "command" || !Number.isSafeInteger(sequence) || (sequence as number) <= lastSequence || !isPlainObject(command)) {
-        socketError(outbox, sequence, new HttpBoundaryError("invalid_request", "invalid or out-of-order WebSocket command", 400));
-        return;
-      }
-      lastSequence = sequence as number;
-      let enriched: HostCommand;
       try {
-        enriched = parseHostCommand({ ...command, clientId });
-      } catch (error) {
-        socketError(outbox, sequence, error);
-        return;
-      }
-      commandChain = commandChain.then(async () => {
-        try {
-          const result = await options.controller.dispatch(enriched);
-          outbox.send({ type: "commandResult", sequence, result });
-        } catch (error) {
-          socketError(outbox, sequence, error);
+        if (message.type === "ping") { outbox.send({ type: "pong" }); return; }
+        if (message.type === "heartbeat") { const lease = requireCurrentLease(); lease.lastSeen = Date.now(); outbox.send({ type: "heartbeat", leaseId: lease.leaseId, epoch: session.epoch }); return; }
+        if (message.type === "query") {
+          const query = parseHostQuery(decodeHostQueryWire(message.query));
+          if (query.type === "output") {
+            const offset = query.offset ?? 0;
+            const limit = query.limit ?? OUTPUT_CHUNK_BYTES;
+            const releaseMcpLease = retainMcpLease(resolved.lease);
+            void readPublicArtifactPage(options.artifactStore, query.handle, offset, limit).then(({ descriptor, bytes }) => {
+              requireCurrentLease();
+              const snapshot = options.controller.snapshot(resolved.lease.clientId);
+              requireCurrentLease();
+              outbox.send({ type: "queryResult", result: { epoch: session.epoch, documentRevision: snapshot.documentRevision, cursor: snapshot.cursor, result: { encoding: "base64", offset, nextOffset: offset + bytes.byteLength, eof: offset + bytes.byteLength >= descriptor.byteLength, data: Buffer.from(bytes).toString("base64") } } });
+            }).catch(error => sendCurrentError(null, error)).finally(releaseMcpLease);
+            return;
+          }
+          if (!options.controller.query) throw new HttpBoundaryError("service_unavailable", "typed host queries are unavailable", 503);
+          if (query.type === "operation" && query.clientId !== undefined && query.clientId !== resolved.lease.clientId) throw authFailure("operation query clientId does not match lease");
+          const queryHandler = options.controller.query;
+          if (queryHandler === undefined) throw new HttpBoundaryError("service_unavailable", "typed host queries are unavailable", 503);
+          const releaseMcpLease = retainMcpLease(resolved.lease);
+          void Promise.resolve().then(() => {
+            requireCurrentLease();
+            return queryHandler.call(options.controller, query, resolved.lease.clientId);
+          }).then(async result => {
+            requireCurrentLease();
+            const parsed = hostQueryResultSchema.parse(result);
+            const wireResult = encodeHostQueryResultWire(query, parsed);
+            requireCurrentLease();
+            const bounded = await responseEnvelope(wireResult, options.controller.snapshot(resolved.lease.clientId));
+            requireCurrentLease();
+            outbox.send({ type: "queryResult", result: bounded });
+          }).catch(error => sendCurrentError(null, error)).finally(releaseMcpLease);
+          return;
         }
-      });
+        if (message.type !== "command" || !isPlainObject(message.command)) throw new HttpBoundaryError("invalid_request", "invalid WebSocket message", 400);
+        const command = parseHostCommand(decodeHostCommandWire(message.command));
+        if (command.clientId !== resolved.lease.clientId || command.sessionEpoch !== session.epoch) throw authFailure("WebSocket command identity mismatch");
+        if (message.sequence !== undefined && message.sequence !== command.commandSequence) throw new HttpBoundaryError("invalid_request", "WebSocket sequence mismatch", 400);
+        const commandBytes = Buffer.byteLength(JSON.stringify(message.command));
+        if (commandPendingCount >= SOCKET_COMMAND_QUEUE_LIMIT || commandPendingBytes + commandBytes > maxOutbox) {
+          closeForBackpressure();
+          return;
+        }
+        commandPendingCount += 1;
+        commandPendingBytes += commandBytes;
+        const releaseMcpLease = retainMcpLease(resolved.lease);
+        commandChain = commandChain.then(async () => {
+          try {
+            if (transportClosing) return;
+            let admission: CommandAdmission;
+            try {
+              requireCurrentLease();
+              const dispatched = await options.controller.dispatch(command);
+              requireCurrentLease();
+              admission = commandAdmissionSchema.parse(dispatched);
+            } catch (error) {
+              sendCurrentError(command.commandSequence, error, true);
+              return;
+            }
+            requireCurrentLease();
+            resolved.lease.nextCommandSequence = Math.max(resolved.lease.nextCommandSequence, admission.nextCommandSequence);
+            const snapshot = options.controller.snapshot(resolved.lease.clientId);
+            requireCurrentLease();
+            const bounded = await responseEnvelope(admission, snapshot);
+            requireCurrentLease();
+            outbox.send({ type: "commandResult", sequence: command.commandSequence, result: bounded });
+          } catch (error) {
+            sendCurrentError(command.commandSequence, error);
+          } finally {
+            commandPendingCount -= 1;
+            commandPendingBytes -= commandBytes;
+            releaseMcpLease();
+          }
+        });
+      } catch (error) { sendError(message.sequence, error); }
     });
     socket.on("close", () => {
       clearTimeout(handshakeTimer);
-      if (forceCloseTimer) clearTimeout(forceCloseTimer);
-      forceCloseTimer = null;
-      const removed = sockets.delete(socket);
-      unsubscribe?.();
-      unsubscribe = null;
+      if (closeTimer !== null) { clearTimeout(closeTimer); closeTimer = null; }
+      transportClosing = true;
       outbox.close();
+      if (unsubscribe !== null && !unsubscribed) { unsubscribed = true; unsubscribe(); unsubscribe = null; }
+      const removed = sockets.delete(socket);
+      if (socketsByLease.get(resolved.lease.leaseId) === socket) socketsByLease.delete(resolved.lease.leaseId);
       if (removed) options.onClientCount?.(sockets.size);
     });
-    socket.on("error", (error) => logger("warn", `WebSocket error: ${error.message}`));
+    socket.on("error", error => logger("warn", `WebSocket error: ${error.message}`));
+    void request;
   });
+
+  async function loadAuthToken(): Promise<void> {
+    configuredBearer = options.session?.token !== undefined
+      ? validateToken(options.session.token)
+      : options.tokenFile === undefined
+        ? bearer
+        : await readTokenFile(options.tokenFile, options.processSupervisorExecutable);
+    if (externalOrigin !== null && options.tokenFile === undefined && options.externalBearerValidated === true && options.session?.token === undefined) throw tokenFileError("prevalidated external bearer is missing");
+  }
+
+  async function compromise(reason: string): Promise<void> {
+    if (compromised) return;
+    compromised = true;
+    releaseArtifacts();
+    try {
+      await options.onCompromised?.(reason);
+    } finally {
+      for (const lease of leases.values()) lease.lastSeen = 0;
+      for (const socket of sockets) socket.close(1011, "session compromised");
+    }
+  }
 
   return {
     httpServer: server,
-    start: async () => {
+    start: async (): Promise<AlderServerAddress> => {
       if (currentAddress) return currentAddress;
-      await new Promise<void>((resolveStart, reject) => {
-        const onError = (error: Error) => reject(error);
+      await loadAuthToken();
+      await new Promise<void>((resolveStart, rejectStart) => {
+        const onError = (error: Error) => rejectStart(error);
         server.once("error", onError);
-        server.listen(requestedPort, host, () => {
-          server.off("error", onError);
-          resolveStart();
-        });
+        server.listen(requestedPort, host, () => { server.off("error", onError); resolveStart(); });
       });
       const bound = server.address();
-      if (!bound || typeof bound === "string") throw new Error("server did not expose a TCP address");
-      const originHost = host === "::1" ? "[::1]" : host;
-      currentAddress = { host, port: bound.port, origin: `http://${originHost}:${bound.port}`, shutdownToken };
-      buildAllowedOrigins(bound.port, options.allowedOrigins);
+      if (!bound || typeof bound === "string") throw new Error("host server did not bind");
+      currentAddress = { host, port: bound.port, origin: publicOrigin(originHost, bound.port) };
+      buildAllowedOrigins(bound.port, options.allowedOrigins, originHost);
+      if (externalOrigin !== null) validateOrigin(externalOrigin);
       return currentAddress;
     },
-    close: async () => {
+    close: async (): Promise<void> => {
       if (closing) return closing;
-      shutdown.abort();
-      for (const response of pendingApiResponses) {
-        if (!response.headersSent) {
-          response.setHeader("Connection", "close");
-          failResponse(response, stoppedError());
-        }
-      }
       closing = (async () => {
-        for (const socket of sockets) socket.close(1001, "server shutting down");
-        await new Promise<void>((resolveClose) => {
-          let settled = false;
+        shutdown.abort();
+        try {
+          await options.mcpHandler?.closeAll?.();
+        } catch {
+          logger("warn", "MCP session cleanup failed");
+        }
+        clearInterval(leaseTimer);
+        for (const socket of sockets) { socket.close(1001, "server shutting down"); socket.terminate(); }
+        for (const response of pendingResponses) response.destroy();
+        releaseArtifacts();
+        tickets.clear();
+        activeMcpLeases.clear();
+        for (const lease of leases.values()) {
+          try {
+            options.controller.releaseClient?.(lease.clientId);
+          } catch {
+            logger("warn", "controller client lease cleanup failed");
+          }
+        }
+        leases.clear();
+        options.onLeaseCount?.(0);
+        if (server.listening) await new Promise<void>(resolveClose => {
           let timer: NodeJS.Timeout | undefined;
-          const done = () => {
-            if (settled) return;
-            settled = true;
-            if (timer) clearTimeout(timer);
-            resolveClose();
-          };
-          webSockets.close(done);
-          timer = setTimeout(() => {
-            for (const socket of sockets) socket.terminate();
-            done();
-          }, CONNECTION_CLOSE_TIMEOUT_MS);
-          timer.unref();
-        });
-        if (server.listening) await new Promise<void>((resolveClose, reject) => {
-          let settled = false;
-          let timer: NodeJS.Timeout | undefined;
-          const done = (error?: Error): void => {
-            if (settled) return;
-            settled = true;
-            if (timer) clearTimeout(timer);
-            if (error) reject(error);
-            else resolveClose();
-          };
-          // Stop accepting first, then force any client that is no longer
-          // reading a streamed artifact after the bounded drain interval.
-          server.close((error) => done(error ?? undefined));
-          timer = setTimeout(() => {
-            server.closeAllConnections();
-            done();
-          }, CONNECTION_CLOSE_TIMEOUT_MS);
+          const done = () => { if (timer) clearTimeout(timer); resolveClose(); };
+          server.close(() => done());
+          timer = setTimeout(() => { server.closeAllConnections(); done(); }, CONNECTION_CLOSE_TIMEOUT_MS);
           timer.unref();
         });
         currentAddress = null;
@@ -2211,19 +1837,7 @@ export function createAlderServer(options: AlderServerOptions): AlderServer {
       return closing;
     },
     address: () => currentAddress,
+    retainArtifact,
+    compromise,
   };
-}
-
-function stoppedError(): HttpBoundaryError {
-  return new HttpBoundaryError("session_stopped", "Alder session has stopped", 410);
-}
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function acceptedStatus(value: unknown): number {
-  if (!isPlainObject(value)) return 200;
-  const status = value.status;
-  return status === "accepted" || status === "pending" || status === 202 ? 202 : 200;
 }
