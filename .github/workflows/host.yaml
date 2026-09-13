@@ -28,7 +28,7 @@ jobs:
             target-platform: darwin
             target-arch: x64
           - name: macos-arm64
-            os: macos-14
+            os: macos-15
             target-platform: darwin
             target-arch: arm64
           - name: windows-x64
@@ -120,7 +120,7 @@ jobs:
             target-platform: darwin
             target-arch: x64
           - name: macos-arm64
-            os: macos-14
+            os: macos-15
             target-platform: darwin
             target-arch: arm64
           - name: windows-x64
@@ -250,7 +250,7 @@ jobs:
             target-platform: darwin
             target-arch: x64
           - name: macos-arm64
-            os: macos-14
+            os: macos-15
             target-platform: darwin
             target-arch: arm64
           - name: windows-x64
