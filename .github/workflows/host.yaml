@@ -174,7 +174,7 @@ jobs:
             curl --fail --location --silent --show-error "https://github.com/r-lib/rig/releases/download/v0.8.1/rig-0.8.1-macOS-$rig_arch.pkg" --output "$rig_pkg"
             echo "$rig_sha256  $rig_pkg" | shasum -a 256 --check
             sudo installer -pkg "$rig_pkg" -target /
-            mkdir -p "$HOME/.local/share/rig/r" "$HOME/.local/bin"
+            mkdir -p "$HOME/.local/share/rig/r"
             export RIG_MODE=user
             rig add 4.6.1 --without-pak
             rig add 4.6.0 --without-pak
@@ -211,7 +211,7 @@ jobs:
       - name: Install Linux R build dependencies
         if: runner.os == 'Linux'
         shell: bash
-        run: sudo apt-get update && sudo apt-get install -y libuv1-dev libfontconfig1-dev libfreetype6-dev libharfbuzz-dev libfribidi-dev libpng-dev libtiff-dev libjpeg-dev libwebp-dev libxml2-dev libicu-dev
+        run: sudo apt-get update && sudo apt-get install -y libuv1-dev libcurl4-openssl-dev libfontconfig1-dev libfreetype6-dev libharfbuzz-dev libfribidi-dev libpng-dev libtiff-dev libjpeg-dev libwebp-dev libxml2-dev libicu-dev
 
       - name: Download target Ark producer artifact
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
@@ -344,7 +344,7 @@ jobs:
             curl --fail --location --silent --show-error "https://github.com/r-lib/rig/releases/download/v0.8.1/rig-0.8.1-macOS-$rig_arch.pkg" --output "$rig_pkg"
             echo "$rig_sha256  $rig_pkg" | shasum -a 256 --check
             sudo installer -pkg "$rig_pkg" -target /
-            mkdir -p "$HOME/.local/share/rig/r" "$HOME/.local/bin"
+            mkdir -p "$HOME/.local/share/rig/r"
             export RIG_MODE=user
             rig add 4.6.1 --without-pak
             rig add 4.6.0 --without-pak
@@ -381,7 +381,7 @@ jobs:
       - name: Install Linux desktop packaging tools
         if: runner.os == 'Linux'
         shell: bash
-        run: sudo apt-get update && sudo apt-get install -y dpkg fakeroot rpm xvfb libuv1-dev libfontconfig1-dev libfreetype6-dev libharfbuzz-dev libfribidi-dev libpng-dev libtiff-dev libjpeg-dev libwebp-dev libxml2-dev libicu-dev
+        run: sudo apt-get update && sudo apt-get install -y dpkg fakeroot rpm xvfb libuv1-dev libcurl4-openssl-dev libfontconfig1-dev libfreetype6-dev libharfbuzz-dev libfribidi-dev libpng-dev libtiff-dev libjpeg-dev libwebp-dev libxml2-dev libicu-dev
       - name: Download target Ark producer artifact
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:

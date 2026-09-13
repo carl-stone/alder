@@ -208,6 +208,7 @@ export async function buildArk({
     '--remap-path-prefix=' + sourceDir + '=/alder/ark-source',
     '--remap-path-prefix=' + cargoHome + '=/alder/cargo',
     ...(target === 'win32-x64' ? ['-C', 'link-arg=/STACK:8000000', '-C', 'link-arg=/Brepro'] : []),
+    ...(target.startsWith('darwin-') ? ['-C', 'link-arg=-Wl,-no_uuid'] : []),
   ].join('\x1f');
   const nativePathRemaps = target === 'win32-x64'
     ? [
