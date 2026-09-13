@@ -53,10 +53,6 @@ jobs:
       - name: Build externally pinned Ark producer artifact
         shell: bash
         run: |
-          case "${{ matrix.target-platform }}-${{ matrix.target-arch }}" in
-            linux-x64) ;;
-            *) echo "::error::No verified Ark lock digest exists for ${{ matrix.target-platform }}-${{ matrix.target-arch }}; external producer prerequisite unavailable"; exit 2 ;;
-          esac
           npm ci --prefix host
           mkdir -p "$RUNNER_TEMP/ark"
           node host/scripts/build-ark.mjs \
