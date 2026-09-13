@@ -35,15 +35,15 @@
     },
     "darwin-x64": {
       "rustTarget": "x86_64-apple-darwin",
-      "artifactSha256": "7265e0bc909522120c479d834018a10e9b3a4155b2de75c9896e8781bc0e6b09",
+      "artifactSha256": "ac6fddc2141bd568bfc14a7280e63e8888e617bd801e3b9e987ea10c63374175",
       "artifactFile": "ark-0.1.252-alder.1-darwin-x64.tar.gz",
-      "executableSha256": "a948ab31274205b731ae73671163add4328d0b9a0c4da2e82ef63568955c6582"
+      "executableSha256": "eec6ee569357f753c2446377f83f8e4e88ed729123142b9fc863f94cd35acbdf"
     },
     "darwin-arm64": {
       "rustTarget": "aarch64-apple-darwin",
-      "artifactSha256": "a433bdec7838c9e560a33958e60d7bb0d0654d849bca08cb31fcbc99338c8c58",
+      "artifactSha256": "7a68848eb7d6582b886c599f8dd0167277f9ca3e62727f5a8f53eaaa5cbf3b44",
       "artifactFile": "ark-0.1.252-alder.1-darwin-arm64.tar.gz",
-      "executableSha256": "eddbc8736846ff4ca4e3c7fdd9e8bccf127d64d34829c532e02f33d2eb03420b"
+      "executableSha256": "7b965e57101d4ca6fdfd53237ca4357ac886826fb6db70a2cb380cdbdc09c63c"
     },
     "win32-x64": {
       "rustTarget": "x86_64-pc-windows-msvc",

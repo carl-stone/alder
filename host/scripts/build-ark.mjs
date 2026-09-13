@@ -122,7 +122,12 @@ async function packageArtifact(packageDir, artifactPath, executableName) {
     'LICENSE',
     'NOTICE',
     'ark-provenance.json',
-  ], { cwd: plan.cwd });
+  ], {
+    cwd: plan.cwd,
+    env: process.platform === 'darwin'
+      ? { ...process.env, GZIP: '-n' }
+      : process.env,
+  });
   return readFile(artifactPath);
 }
 
