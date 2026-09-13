@@ -3,10 +3,9 @@ import { spawn } from 'node:child_process';
 import { lstat, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { tmpdir } from 'node:os';
 import { parseArgs } from 'node:util';
 
-import { buildArk } from './build-ark.mjs';
+import { archiveExtractionPlan, buildArk } from './build-ark.mjs';
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(SCRIPT_DIR, '../..');
@@ -43,7 +42,8 @@ async function readLock() {
 
 async function extractArtifact(archive, destination) {
   await mkdir(destination, { recursive: true });
-  await run('tar', ['--extract', '--gzip', '--file', archive, '--directory', destination, '--no-same-owner']);
+  const plan = archiveExtractionPlan(archive, destination);
+  await run('tar', ['--extract', '--gzip', '--file', plan.archive, '--directory', plan.destination, '--no-same-owner'], { cwd: plan.cwd });
 }
 
 async function requireRegularFile(directory, name) {
@@ -96,7 +96,7 @@ export async function stageArk({
     await writeFile(resolve(archiveOutput), artifactBytes, { mode: 0o644 });
   }
 
-  const staging = await mkdtemp(join(tmpdir(), 'alder-ark-stage-'));
+  const staging = await mkdtemp(join(dirname(artifactPath), '.alder-ark-stage-'));
   try {
     await extractArtifact(artifactPath, staging);
     const executable = platform === 'win32' ? 'ark.exe' : 'ark';

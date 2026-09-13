@@ -16,10 +16,20 @@ test("Ark extraction keeps Windows drive paths out of tar operands", () => {
   assert.doesNotMatch(plan.archive + plan.destination, /[:\\\\]/);
 });
 
-test("Ark extraction rejects destinations outside the archive directory", () => {
+test("Ark extraction supports a separate CI staging directory", () => {
+  const plan = archiveExtractionPlan(
+    "D:\\a\\_temp\\ark\\ark.tar.gz",
+    "D:\\a\\_temp\\alder-ark-stage-123",
+    "win32",
+  );
+  assert.equal(plan.destination, "../alder-ark-stage-123");
+  assert.doesNotMatch(plan.archive + plan.destination, /[:\\\\]/);
+});
+
+test("Ark extraction rejects cross-drive Windows paths", () => {
   assert.throws(
-    () => archiveExtractionPlan("D:\\a\\source.tar.gz", "D:\\other\\source", "win32"),
-    /must share a parent/,
+    () => archiveExtractionPlan("C:\\build\\source.tar.gz", "D:\\stage\\source", "win32"),
+    /must be reachable/,
   );
 });
 

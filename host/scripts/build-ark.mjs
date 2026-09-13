@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { execFileSync, spawn } from 'node:child_process';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import { basename, dirname, join, posix, resolve, win32 } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
@@ -73,8 +74,15 @@ async function loadLock() {
 export function archiveExtractionPlan(archive, destination, platform = process.platform) {
   const path = platform === 'win32' ? win32 : posix;
   const cwd = path.dirname(archive);
-  if (path.dirname(destination) !== cwd) throw new Error('Ark source archive and extraction directory must share a parent');
-  return { cwd, archive: path.basename(archive), destination: path.basename(destination) };
+  const relativeDestination = path.relative(cwd, destination);
+  if (!relativeDestination || path.isAbsolute(relativeDestination)) {
+    throw new Error('Ark extraction directory must be reachable from the archive directory');
+  }
+  return {
+    cwd,
+    archive: path.basename(archive),
+    destination: relativeDestination.split(path.sep).join('/'),
+  };
 }
 
 async function extractSource(archive, destination) {
@@ -185,10 +193,37 @@ export async function buildArk({
 
   const environment = {
     ...process.env,
+    ALDER_ARK_GIT_HASH: lock.baseCommit.slice(0, 7),
     ARK_BUILD_VERSION: lock.version,
+    CARGO_INCREMENTAL: '0',
     CARGO_TARGET_DIR: join(outputDir, 'target'),
     R_HOME: findRHome(process.env),
+    SOURCE_DATE_EPOCH: '0',
   };
+  const cargoHome = resolve(environment.CARGO_HOME ?? join(homedir(), '.cargo'));
+  delete environment.RUSTFLAGS;
+  environment.CARGO_ENCODED_RUSTFLAGS = [
+    '--remap-path-prefix=' + ROOT + '=/alder/source',
+    '--remap-path-prefix=' + outputDir + '=/alder/build',
+    '--remap-path-prefix=' + sourceDir + '=/alder/ark-source',
+    '--remap-path-prefix=' + cargoHome + '=/alder/cargo',
+    ...(target === 'win32-x64' ? ['-C', 'link-arg=/STACK:8000000'] : []),
+  ].join('\x1f');
+  const nativePathRemaps = target === 'win32-x64'
+    ? [
+        '/d1trimfile:' + ROOT,
+        '/d1trimfile:' + outputDir,
+        '/d1trimfile:' + sourceDir,
+        '/d1trimfile:' + cargoHome,
+      ]
+    : [
+        '-ffile-prefix-map=' + ROOT + '=/alder/source',
+        '-ffile-prefix-map=' + outputDir + '=/alder/build',
+        '-ffile-prefix-map=' + sourceDir + '=/alder/ark-source',
+        '-ffile-prefix-map=' + cargoHome + '=/alder/cargo',
+      ];
+  environment.CFLAGS = [environment.CFLAGS, ...nativePathRemaps].filter(Boolean).join(' ');
+  environment.CXXFLAGS = [environment.CXXFLAGS, ...nativePathRemaps].filter(Boolean).join(' ');
   const rLib = join(environment.R_HOME, 'lib');
   environment.LD_LIBRARY_PATH = environment.LD_LIBRARY_PATH
     ? `${rLib}${process.platform === 'win32' ? ';' : ':'}${environment.LD_LIBRARY_PATH}`
