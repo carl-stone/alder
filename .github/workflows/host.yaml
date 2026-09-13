@@ -149,11 +149,11 @@ jobs:
           if [ "${{ runner.os }}" = Linux ]; then
             path="$r_home/bin/Rscript"
           elif [ "${{ runner.os }}" = macOS ]; then
-            brew tap r-lib/rig
-            brew install --cask rig
-            sudo rig add 4.6.1
-            sudo rig add 4.6.0
-            path=$(command -v Rscript-4.6.1)
+            brew install --cask r-lib/rig/rig
+            rig system user-mode --no-reinstall --keep-install --keep-links
+            rig add 4.6.1 --without-pak
+            rig add 4.6.0 --without-pak
+            path="$HOME/.local/share/rig/r/4.6.1/bin/Rscript"
           else
             snapshot="$RUNNER_TEMP/R-4.6.1"
             rm -rf "$snapshot"
@@ -174,7 +174,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ "${{ runner.os }}" = macOS ]; then
-            path=$(command -v Rscript-4.6.0)
+            path="$HOME/.local/share/rig/r/4.6.0/bin/Rscript"
           else
             path=$(Rscript -e 'cat(normalizePath(file.path(R.home("bin"), if (.Platform$OS.type == "windows") "Rscript.exe" else "Rscript"), winslash = "/", mustWork = TRUE))')
           fi
@@ -298,11 +298,11 @@ jobs:
           if [ "${{ runner.os }}" = Linux ]; then
             path="$r_home/bin/Rscript"
           elif [ "${{ runner.os }}" = macOS ]; then
-            brew tap r-lib/rig
-            brew install --cask rig
-            sudo rig add 4.6.1
-            sudo rig add 4.6.0
-            path=$(command -v Rscript-4.6.1)
+            brew install --cask r-lib/rig/rig
+            rig system user-mode --no-reinstall --keep-install --keep-links
+            rig add 4.6.1 --without-pak
+            rig add 4.6.0 --without-pak
+            path="$HOME/.local/share/rig/r/4.6.1/bin/Rscript"
           else
             snapshot="$RUNNER_TEMP/R-4.6.1"
             rm -rf "$snapshot"
@@ -322,7 +322,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ "${{ runner.os }}" = macOS ]; then
-            path=$(command -v Rscript-4.6.0)
+            path="$HOME/.local/share/rig/r/4.6.0/bin/Rscript"
           else
             path=$(Rscript -e 'cat(normalizePath(file.path(R.home("bin"), if (.Platform$OS.type == "windows") "Rscript.exe" else "Rscript"), winslash = "/", mustWork = TRUE))')
           fi
