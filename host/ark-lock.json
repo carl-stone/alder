@@ -47,9 +47,9 @@
     },
     "win32-x64": {
       "rustTarget": "x86_64-pc-windows-msvc",
-      "artifactSha256": "1aed68c2dbf8af61525639ed1cf84c0559895d272b320867d35a7558c344df51",
+      "artifactSha256": "08cdc8502bcd389158d7e008e5940df4cbe409d19cc560fcfcf50f444435b9c8",
       "artifactFile": "ark-0.1.252-alder.1-win32-x64.tar.gz",
-      "executableSha256": "c5cc6687f28bc88fa5bc5bb034809f0fa672d759f5b373049a42a6cd2a30b4e4"
+      "executableSha256": "46db2f8792d23b6eef592b9a952917b493047a87a0c2f4533a15e4fb2ea7595d"
     }
   }
 }
