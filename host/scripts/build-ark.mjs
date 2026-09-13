@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { execFileSync, spawn } from 'node:child_process';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
-import { basename, dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, posix, resolve, win32 } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 
@@ -70,20 +70,41 @@ async function loadLock() {
   return lock;
 }
 
+export function archiveExtractionPlan(archive, destination, platform = process.platform) {
+  const path = platform === 'win32' ? win32 : posix;
+  const cwd = path.dirname(archive);
+  if (path.dirname(destination) !== cwd) throw new Error('Ark source archive and extraction directory must share a parent');
+  return { cwd, archive: path.basename(archive), destination: path.basename(destination) };
+}
+
 async function extractSource(archive, destination) {
   await mkdir(destination, { recursive: true });
-  const localArchive = process.platform === 'win32' ? ['--force-local'] : [];
-  await run('tar', ['--extract', '--gzip', ...localArchive, '--file', archive, '--directory', destination, '--strip-components=1', '--no-same-owner']);
+  const plan = archiveExtractionPlan(archive, destination);
+  await run('tar', ['--extract', '--gzip', '--file', plan.archive, '--directory', plan.destination, '--strip-components=1', '--no-same-owner'], { cwd: plan.cwd });
+}
+export function archivePackagingPlan(packageDirectory, artifact, platform = process.platform) {
+  const path = platform === 'win32' ? win32 : posix;
+  const cwd = path.dirname(packageDirectory);
+  const relativeArtifact = path.relative(cwd, artifact);
+  if (!relativeArtifact || path.isAbsolute(relativeArtifact)) {
+    throw new Error('Ark artifact must be reachable from the package directory parent');
+  }
+  return {
+    cwd,
+    packageDirectory: path.basename(packageDirectory),
+    artifact: relativeArtifact.split(path.sep).join('/'),
+  };
 }
 
 async function packageArtifact(packageDir, artifactPath, executableName) {
   await mkdir(dirname(artifactPath), { recursive: true });
   const tarCommand = process.platform === 'darwin' ? 'gtar' : 'tar';
+  const plan = archivePackagingPlan(packageDir, artifactPath);
   await run(tarCommand, [
     '--create',
     '--gzip',
-    '--file', artifactPath,
-    '--directory', packageDir,
+    '--file', plan.artifact,
+    '--directory', plan.packageDirectory,
     '--sort=name',
     '--mtime=@0',
     '--owner=0',
@@ -93,8 +114,20 @@ async function packageArtifact(packageDir, artifactPath, executableName) {
     'LICENSE',
     'NOTICE',
     'ark-provenance.json',
-  ]);
+  ], { cwd: plan.cwd });
   return readFile(artifactPath);
+}
+
+export function patchApplicationPlan(sourceDirectory, patch, platform = process.platform) {
+  const path = platform === 'win32' ? win32 : posix;
+  const input = path.relative(sourceDirectory, patch);
+  if (!input || path.isAbsolute(input)) {
+    throw new Error('Ark patch must be reachable from the extracted source directory');
+  }
+  return {
+    cwd: sourceDirectory,
+    input: input.split(path.sep).join('/'),
+  };
 }
 
 /**
@@ -147,7 +180,8 @@ export async function buildArk({
     throw new Error(`Ark Cargo.lock SHA-256 mismatch: expected ${lock.cargoLockSha256}, got ${cargoLockSha256}`);
   }
 
-  await run('patch', ['--batch', '--forward', '--strip=1', '--directory', sourceDir, '--input', patchPath], { cwd: ROOT });
+  const patchPlan = patchApplicationPlan(sourceDir, patchPath);
+  await run('patch', ['--batch', '--forward', '--strip=1', '--input', patchPlan.input], { cwd: patchPlan.cwd });
 
   const environment = {
     ...process.env,
