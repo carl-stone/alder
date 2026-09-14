@@ -85301,10 +85301,10 @@ var Controller = class {
     this.sourceCommitTail = commit2.then(() => void 0, () => void 0);
     return commit2;
   }
-  async applyTransaction(changes, expectedDocumentRevision2, operationId, waitForAnalysis) {
+  async applyTransaction(changes, expectedDocumentRevision2, operationId, waitForAnalysis, prepared) {
     this.assertStartedForMutation();
     this.assertDocumentRevision(expectedDocumentRevision2);
-    const staged = this.stageDocument(changes);
+    const staged = prepared ?? this.stageDocument(changes);
     const changed = new Set(staged.changed);
     const created = Object.fromEntries(staged.created);
     const deleted = [...staged.deleted];
@@ -85591,11 +85591,13 @@ var Controller = class {
     }
     this.assertDocumentRevision(command.expectedDocumentRevision);
     let preflightTargetId = null;
+    let preflightStaged;
     if (command.scope === "cell") {
       const target = command.target;
       if (target === void 0) throw new ControllerError("invalid_request", "cell runs require a target", 400);
       if ((command.changes?.length ?? 0) > 0) {
         const staged = this.stageDocument(command.changes ?? []);
+        preflightStaged = staged;
         if ("cellId" in target) {
           if (!staged.document.cells.some((cell) => cell.id === target.cellId)) throw new ControllerError("not_found", "no such cell: " + target.cellId, 404);
           preflightTargetId = target.cellId;
@@ -85618,7 +85620,7 @@ var Controller = class {
     try {
       let changes;
       if ((command.changes?.length ?? 0) > 0) {
-        changes = await this.applyTransaction(command.changes ?? [], command.expectedDocumentRevision, command.operationId, false);
+        changes = await this.applyTransaction(command.changes ?? [], command.expectedDocumentRevision, command.operationId, false, preflightStaged);
         if (this.cancelRunPreparation(preparation)) return void 0;
         const operation2 = this.operationFor(command.operationId, command.clientId);
         if (operation2 !== void 0 && !isTerminal2(operation2.status)) {

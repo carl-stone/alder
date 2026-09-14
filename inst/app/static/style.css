@@ -255,6 +255,9 @@ main { max-width: 920px; margin: 24px auto; padding: 0 16px; }
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--panel);
+  /* Skip layout and paint for offscreen notebooks while retaining learned cell heights. */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 160px;
 }
 .cell.idle { border-left: 4px solid var(--border); }
 .cell.running { border-left: 4px solid var(--running); background: var(--surface-running); }

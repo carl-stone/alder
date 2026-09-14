@@ -1692,6 +1692,7 @@ export class Controller {
     expectedDocumentRevision: number,
     operationId: string,
     waitForAnalysis: boolean,
+    prepared?: ReturnType<typeof stageDocumentChanges>,
   ): Promise<{
     created: Record<string, string>;
     edited: Array<{ id: string; revision: number }>;
@@ -1700,7 +1701,7 @@ export class Controller {
   }> {
     this.assertStartedForMutation();
     this.assertDocumentRevision(expectedDocumentRevision);
-    const staged = this.stageDocument(changes);
+    const staged = prepared ?? this.stageDocument(changes);
     const changed = new Set(staged.changed);
     const created: Record<string, string> = Object.fromEntries(staged.created);
     const deleted = [...staged.deleted];
@@ -2030,11 +2031,13 @@ export class Controller {
     }
     this.assertDocumentRevision(command.expectedDocumentRevision);
     let preflightTargetId: string | null = null;
+    let preflightStaged: ReturnType<typeof stageDocumentChanges> | undefined;
     if (command.scope === "cell") {
       const target = command.target;
       if (target === undefined) throw new ControllerError("invalid_request", "cell runs require a target", 400);
       if ((command.changes?.length ?? 0) > 0) {
         const staged = this.stageDocument(command.changes ?? []);
+        preflightStaged = staged;
         if ("cellId" in target) {
           if (!staged.document.cells.some((cell) => cell.id === target.cellId)) throw new ControllerError("not_found", "no such cell: " + target.cellId, 404);
           preflightTargetId = target.cellId;
@@ -2057,7 +2060,7 @@ export class Controller {
     try {
       let changes: Record<string, unknown> | undefined;
       if ((command.changes?.length ?? 0) > 0) {
-        changes = await this.applyTransaction(command.changes ?? [], command.expectedDocumentRevision, command.operationId, false) as Record<string, unknown>;
+        changes = await this.applyTransaction(command.changes ?? [], command.expectedDocumentRevision, command.operationId, false, preflightStaged) as Record<string, unknown>;
         if (this.cancelRunPreparation(preparation)) return undefined;
         const operation = this.operationFor(command.operationId, command.clientId);
         if (operation !== undefined && !isTerminal(operation.status)) {
