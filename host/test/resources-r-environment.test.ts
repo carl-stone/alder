@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 import { chmod, link, mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -279,6 +281,31 @@ test("selected R rejects a bundled helper with the wrong package identity", asyn
       resolveREnvironment({ rscript: fixture.rscript, projectDirectory: fixture.root, resources: fixture.resources }),
       /helper package version or Built R ABI does not match/,
     );
+  } finally {
+    await removeFixture(fixture);
+  }
+});
+
+test("release inventory hashes file and directory symlink targets consistently", { skip: process.platform === "win32" }, async () => {
+  const fixture = await makeFixture();
+  try {
+    const manifestPath = join(fixture.root, "resources/manifest.json");
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+    await symlink("app", join(fixture.root, "resources/app-alias"));
+    await symlink("index.html", join(fixture.root, "resources/app/file-alias"));
+    const bytes = await readFile(join(fixture.root, "resources/app/index.html"));
+    manifest.symlinks.push({ path: "resources/app-alias", target: "app" });
+    manifest.files.push({ path: "resources/app/file-alias", bytes: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex") });
+    await writeFile(manifestPath, JSON.stringify(manifest));
+    const recordPath = join(fixture.supportRoot, "artifact-record.json");
+    execFileSync(process.execPath, [fileURLToPath(new URL("../scripts/package.mjs", import.meta.url)),
+      "--application", fixture.root, "--output", join(fixture.supportRoot, "release"),
+      "--rscript", fixture.rscript, "--archive", join(fixture.supportRoot, "release.tar.gz"),
+      "--artifact-record", recordPath], { stdio: "pipe" });
+    const record = JSON.parse(await readFile(recordPath, "utf8"));
+    assert.equal(record.releaseManifest.files["resources/app-alias"], createHash("sha256").update("app").digest("hex"));
+    assert.equal(record.releaseManifest.files["resources/app/file-alias"], createHash("sha256").update("index.html").digest("hex"));
+    assert.equal(record.releaseManifest.files["resources/app/index.html"], createHash("sha256").update(bytes).digest("hex"));
   } finally {
     await removeFixture(fixture);
   }

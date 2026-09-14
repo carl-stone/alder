@@ -467,7 +467,7 @@ jobs:
           ditto -c -k --sequesterRsrc --keepParent host/.application-desktop/Alder.app "$delivery/$archive"
           ditto -x -k "$delivery/$archive" "$relocated"
           for scenario in launch-slice rich-outputs save-as interrupt-native desktop-lifecycle; do
-            node host/scripts/smoke-application.mjs "$relocated/Alder.app" \
+            node host/scripts/smoke-application.mjs "$relocated/Alder.app/Contents" \
               --scenario "$scenario" --evidence "host/.evidence-desktop/mac-testing/$scenario" \
               --rscript "$R461" --peer-rscript "$R460" \
               --qualification-source "$PWD/host/.qualification/source"

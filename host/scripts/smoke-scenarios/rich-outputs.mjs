@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { cleanupScenarioResources, createHarness, delay, waitForExecutionReady } from './_common.mjs';
 import { prewarmInteractiveBrowser } from "../../test-support/live-browser.mjs";
 
@@ -235,7 +235,7 @@ Sys.sleep(3)
     return {
       id: "rich-outputs",
       identity: {
-        artifact: { manifestSha256: await manifestHash(ctx.applicationRoot), notebook: harness.canonical, tableHandle: table.payload.handle, html: htmlArtifact },
+        artifact: { manifestSha256: await manifestHash(ctx), notebook: harness.canonical, tableHandle: table.payload.handle, html: htmlArtifact },
         outputs: { kinds: [...kinds], records: records.length, tableRows: table.payload.nrow, lazy: lazy.payload.key, browser: "live-cdp" },
         reactivity: { widget: widgetResult.runId, resetOperationIds: buttonResult.resetOperationIds, replacement: replacedTableCode, restart: replacedLazyCode },
         runtime: { epoch: afterRestart.epoch, kernelEpoch: kernelEpoch(afterRestart) },
@@ -380,6 +380,7 @@ async function waitForSnapshot(harness, predicate, timeout = 120000) {
     await delay(100);
   }
 }
-async function manifestHash(root) {
-  return createHash("sha256").update(await readFile(join(root, "resources", "manifest.json"))).digest("hex");
+async function manifestHash(ctx) {
+  const resources = dirname(ctx.manifest.resources.rLibraryDirectory);
+  return createHash("sha256").update(await readFile(join(ctx.applicationRoot, resources, "manifest.json"))).digest("hex");
 }
