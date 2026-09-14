@@ -150,7 +150,7 @@ if (signedManifest && await exists(signedManifest)) {
   const copiedManifestPath = join(applicationRoot, 'Resources', 'manifest.json');
   const embeddedManifest = JSON.parse(await readFile(copiedManifestPath, 'utf8'));
   if (embeddedManifest?.schemaVersion !== 1 || embeddedManifest.kind !== 'desktop' || embeddedManifest.target?.platform !== 'darwin'
-    || embeddedManifest.resources?.cliLauncher !== 'MacOS/alder' || embeddedManifest.resources?.electronEntry !== entryRelative || !Array.isArray(embeddedManifest.files)) {
+    || embeddedManifest.resources?.cliLauncher !== 'MacOS/alder-cli' || embeddedManifest.resources?.electronEntry !== entryRelative || !Array.isArray(embeddedManifest.files)) {
     throw new Error('signed macOS application manifest identity is invalid');
   }
   const outerExecutable = join(applicationRoot, embeddedManifest.resources.electronEntry);
@@ -174,7 +174,7 @@ if (signedManifest && await exists(signedManifest)) {
 const electronEntry = kind === 'desktop' ? entryRelative.split(sep).join('/') : null;
 
 const paths = {
-  cliLauncher: process.platform === 'win32' ? 'bin/alder.cmd' : darwinDesktop ? 'MacOS/alder' : 'bin/alder',
+  cliLauncher: process.platform === 'win32' ? 'bin/alder.cmd' : darwinDesktop ? 'MacOS/alder-cli' : 'bin/alder',
   hostEntry: resourcePrefix + '/host/alder-host.mjs',
   rendererDirectory: resourcePrefix + '/app',
   workerDirectory: resourcePrefix + '/worker',

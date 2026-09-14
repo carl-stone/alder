@@ -128,9 +128,9 @@ test('Save As publishes exclusively to an absent destination', async () => {
     const published = await prepared.publish();
     assert.equal(published.result.changed, true);
     assert.equal(await readFile(destination, 'utf8'), '# %%\nsource\n');
-    if (process.platform !== 'win32') await chmod(destination, 0o640);
+    await writeFile(destination, '# %%\nexternal\n');
     await published.abort();
-    assert.equal(await readFile(destination, 'utf8'), '# %%\nsource\n');
+    assert.equal(await readFile(destination, 'utf8'), '# %%\nexternal\n');
     await rm(destination);
     const adopted = await (await store.prepareSaveAs(destination, store.currentDocument)).publish();
     adopted.adopt();

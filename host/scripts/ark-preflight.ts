@@ -15,7 +15,7 @@ const executableSuffix = process.platform === "win32" ? ".exe" : "";
 const resources = {
   root,
   cliLauncher: process.platform === "darwin"
-    ? join(root, "MacOS", "alder")
+    ? join(root, "MacOS", "alder-cli")
     : join(root, "bin", process.platform === "win32" ? "alder.cmd" : "alder"),
   hostEntry: join(resourceRoot, "host", "alder-host.mjs"),
   rendererDirectory: join(resourceRoot, "app"),

@@ -553,7 +553,9 @@ test("configured external auth refuses attaching to an existing owner", async ()
   }
 });
 
-test("configured external auth reaches detached candidates without exposing the bearer", async () => {
+test("configured external auth reaches detached candidates without exposing the bearer", {
+  skip: process.platform === "win32" ? "the JavaScript supervisor fixture cannot inherit Windows control descriptors" : false,
+}, async () => {
   const root = await temporaryDirectory("alder-session-auth-argv-");
   const runtimeDirectory = join(root, "runtime");
   const notebook = join(root, "notebook.R");

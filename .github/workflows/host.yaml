@@ -477,11 +477,11 @@ jobs:
           test -f host/.qualification/source/qualification-manifest.json
           manifest_sha=$(node -e "const fs=require('fs'); process.stdout.write(JSON.parse(fs.readFileSync(process.argv[1], 'utf8')).manifestSha256)" "$RUNNER_TEMP/qualification-sidecar.json")
           printf 'manifest_sha256=%s\n' "$manifest_sha" >> "$GITHUB_OUTPUT"
-          tar -czf "$RUNNER_TEMP/qualification-sidecar.tar.gz" -C host .qualification
+          tar -czf qualification-sidecar.tar.gz -C host .qualification
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: qualification-${{ matrix.name }}-${{ steps.qualification.outputs.manifest_sha256 }}
-          path: ${{ runner.temp }}/qualification-sidecar.tar.gz
+          path: qualification-sidecar.tar.gz
           include-hidden-files: true
           if-no-files-found: error
       - name: Run complete desktop smoke matrix from staged resources

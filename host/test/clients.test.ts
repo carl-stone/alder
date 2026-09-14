@@ -4,7 +4,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { delimiter, dirname, join } from "node:path";
+import { delimiter, dirname, join, resolve } from "node:path";
 import { PassThrough } from "node:stream";
 import { BrowserNotebookClient } from "../src/browser/client.js";
 import { BrowserDocument } from "../src/browser/document.js";
@@ -1302,7 +1302,7 @@ test("LSP mapping preserves native file URIs and excludes delimiter lines", () =
   });
   const options = validatedRLanguageServerOptions({ path: "/tmp/alder-project/unsaved.R", cells: [] }, "/opt/R/bin/Rscript", "/opt/alder/worker", { spawn: async () => { throw new Error("mapping test must not spawn"); } });
   assert.equal(options.command, "/opt/R/bin/Rscript");
-  assert.equal(options.cwd, "/tmp/alder-project");
+  assert.equal(options.cwd, dirname(resolve("/tmp/alder-project/unsaved.R")));
   assert.deepEqual(options.args, ["--vanilla", "/opt/alder/worker/host-lsp.R"]);
 });
 test("LSP child environment excludes project and user R libraries", () => {
