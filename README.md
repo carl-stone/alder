@@ -5,57 +5,23 @@ into `# %%` cells. The application host owns persistence, dependency execution,
 rendering, package operations, publishing, and the browser; the installed R
 package supplies notebook values and ordinary `Rscript` helpers.
 
-## Mac testing build
+## Mac development and testing
 
-These are private-use development builds, not signed/notarized releases. The
-Mac testing workflow checks a relocated copy of the exact app ZIP before making
-its testing kit available. Full release qualification and other platforms are
-not prerequisites for this testing milestone.
+GitHub Actions are disabled: builds and verification run locally. Pull `main`
+on the Mac and follow the development commands in [dev/README.md](dev/README.md).
+Native Mac packaging and the notebook launch/edit/save/reopen loop still need
+verification on that machine; there is no verified downloadable Mac testing kit.
 
-1. Download the `alder-mac-testing-arm64-<commit>` artifact for an Apple Silicon
-   Mac (M-series), or `alder-mac-testing-x64-<commit>` for an Intel Mac, from the
-   linked GitHub Actions run. Unzip the downloaded testing kit.
-2. In Terminal, change to that folder and run `shasum -a 256 -c SHA256SUMS`.
-   Then unzip the inner `Alder-0.1.0-…zip` and move `Alder.app` to Applications.
-3. Install **R 4.6.1** for the same architecture from
-   [CRAN](https://cran.r-project.org/bin/macosx/). The app also qualifies R 4.6.0;
-   other R versions are not accepted by this build. Node, Ark, Air, and Alder's
-   R helpers are bundled; do not install the source checkout to use the app.
-4. Open Alder. If macOS blocks this development app, use **System Settings →
-   Privacy & Security → Open Anyway** for this specific app after checking its
-   source and checksum. Do not disable Gatekeeper globally.
-5. Choose **Alder → Select R…** and select the installed `Rscript` executable.
-   In the file dialog, Command-Shift-G can open
-   `/Library/Frameworks/R.framework/Resources/bin`. This selection is saved.
-6. Copy the included `iris.R` to a working folder, open it with **File → Open…**,
-   and choose **Run → Run All**. Move the slider, inspect the table and plot,
-   edit a cell, save, quit, and reopen. Start with copies of your real notebooks.
+Use R 4.6.1 with the same architecture as the Mac. Packaged application
+qualification also requires an independent R 4.6.0 installation. Keep real
+notebooks outside the app bundle and test with copies. The runnable example is
+`inst/examples/iris.R`.
 
-If launch fails, quit Alder and capture a Terminal launch (adjust the R path if
-needed):
-
-```sh
-/Applications/Alder.app/Contents/MacOS/Alder \
-  --rscript /Library/Frameworks/R.framework/Resources/bin/Rscript \
-  > "$HOME/Desktop/alder-launch.log" 2>&1
-```
-
-For bug reports, include `BUILD.txt`, macOS version, Mac architecture, R version,
-reproduction steps, expected versus actual behavior, and a screenshot or relevant
-log excerpt. Review logs and notebooks for private data before sharing. Known
-limitations: development-app approval is manual, latency remains above the
-architecture targets, and this build has not passed full release qualification.
-Publishing additionally requires Quarto; extra notebook packages belong to the
-project's R environment.
-
-To produce a replacement kit from a reviewed commit:
-
-```sh
-gh workflow run host.yaml --ref <branch> -f mac-testing=true
-```
-
-Keep the previous ZIP for rollback. Quit Alder before replacing the app; keep
-notebooks outside the application bundle. Testing artifacts expire after 30 days.
+Builds are development builds, not signed/notarized releases. Latency remains
+above the architecture targets, and full release qualification is unfinished.
+When reporting a problem, include the commit, macOS version, architecture, R
+version, reproduction steps, and relevant logs or screenshots. Review these
+for private data before sharing.
 
 ## Install the R helpers
 

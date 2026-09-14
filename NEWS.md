@@ -14,8 +14,8 @@ First release of Alder, a reactive notebook for R.
 * Revocable, resource-scoped sandbox output delivery and bounded HTML downloads.
   Static publishing preserves literal source without evaluating Quarto shortcodes.
 * Unix and Windows launchers and an installed base-R Iris tutorial.
-* Architecture-matched Mac testing kits with checksums, an R notebook example,
-  and relocated-application launch, editing, save/reopen and output checks.
+* Mac framework directory-symlink inventory support and native save/reopen
+  verification tooling. Builds and verification run locally, without GitHub Actions.
 * Opt-in input-to-result benchmarks and process-local profiling. The planned
   architecture's latency targets remain unmet.
 
