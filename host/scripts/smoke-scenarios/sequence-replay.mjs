@@ -3,7 +3,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 
-import { command as sendCommand, createHarness, delay, openSession, query as querySession, redact, releaseLease, snapshot as fullSnapshot } from './_common.mjs';
+import { command as sendCommand, createHarness, delay, fetchLogicalOrigin, openSession, query as querySession, redact, releaseLease, snapshot as fullSnapshot } from './_common.mjs';
 
 export async function run(ctx) {
   let harness;
@@ -171,7 +171,7 @@ export async function run(ctx) {
 }
 
 async function commandAllowConflict(harness, command) {
-  const response = await fetch(new URL('/api/command', harness.origin), {
+  const response = await fetchLogicalOrigin(new URL('/api/command', harness.origin), {
     method: 'POST',
     redirect: 'error',
     headers: {

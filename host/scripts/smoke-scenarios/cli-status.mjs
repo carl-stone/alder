@@ -18,6 +18,7 @@ import {
   signalSmokeProcessGroup,
   stopChild,
   waitForExecutionReady,
+  fetchLogicalOrigin,
 } from './_common.mjs';
 
 /**
@@ -485,7 +486,7 @@ async function sendCommand(origin, session, value) {
 }
 
 async function fetchJson(origin, path, body, session) {
-  const response = await fetch(new URL(path, origin), {
+  const response = await fetchLogicalOrigin(new URL(path, origin), {
     method: 'POST',
     redirect: 'error',
     headers: { Origin: origin, 'Content-Type': 'application/json', Cookie: session.cookie, 'X-CSRF-Token': session.csrf },

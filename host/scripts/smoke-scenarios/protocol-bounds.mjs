@@ -4,7 +4,7 @@ import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { WebSocket } from 'ws';
 
-import { createHarness, redact } from './_common.mjs';
+import { createHarness, fetchLogicalOrigin, openLogicalWebSocket, redact } from './_common.mjs';
 
 const MAX_ID_BYTES = 256;
 const MAX_PATH_BYTES = 32 * 1024;
@@ -268,7 +268,7 @@ async function rawPost(harness, path, body, options = {}) {
 }
 
 async function rawPostBytes(harness, path, body, { contentType = 'application/json' } = {}) {
-  const response = await fetch(new URL(path, harness.origin), {
+  const response = await fetchLogicalOrigin(new URL(path, harness.origin), {
     method: 'POST',
     redirect: 'error',
     headers: {
@@ -333,7 +333,7 @@ async function websocketProbe(harness, sendPayload, done) {
   const target = new URL('/api/socket', harness.origin);
   target.protocol = target.protocol === 'https:' ? 'wss:' : 'ws:';
   return await new Promise((resolve, reject) => {
-    const socket = new WebSocket(target, { origin: harness.origin, headers: { Cookie: harness.session.cookie } });
+    const socket = openLogicalWebSocket(WebSocket, target, { origin: harness.origin, headers: { Cookie: harness.session.cookie } });
     const result = { messages: [], recovery: null, error: null, closeCode: null };
     let sent = false;
     let settled = false;
@@ -377,7 +377,7 @@ async function websocketOversizeProbe(harness) {
   const target = new URL('/api/socket', harness.origin);
   target.protocol = target.protocol === 'https:' ? 'wss:' : 'ws:';
   return await new Promise((resolve, reject) => {
-    const socket = new WebSocket(target, { origin: harness.origin, headers: { Cookie: harness.session.cookie } });
+    const socket = openLogicalWebSocket(WebSocket, target, { origin: harness.origin, headers: { Cookie: harness.session.cookie } });
     const timer = setTimeout(() => { socket.terminate(); reject(new Error('websocket_oversize_timeout')); }, 30_000);
     const fragment = Buffer.alloc(64 * 1024, 0x20);
     const memoryBefore = process.memoryUsage().rss;

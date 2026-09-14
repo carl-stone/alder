@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { createHarness, delay, waitForExecutionReady } from "./_common.mjs";
+import { createHarness, delay, openLogicalWebSocket, waitForExecutionReady } from "./_common.mjs";
 import { WebSocket } from "ws";
 
 const TERMINAL = new Set(["done", "error", "failed", "interrupted", "cancelled"]);
@@ -426,7 +426,7 @@ async function openOperationEventStream(harness, baseline) {
     wake = null;
     listener?.();
   };
-  const socket = new WebSocket(target, {
+  const socket = openLogicalWebSocket(WebSocket, target, {
     origin: harness.origin,
     headers: { Cookie: harness.session.cookie },
     perMessageDeflate: false,

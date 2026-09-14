@@ -1086,26 +1086,13 @@ export async function startElectronMain(options: ElectronMainOptions = {}): Prom
   return application;
 }
 
-// Electron loads the Forge main entry automatically. The version guard keeps
-// importing this module in host tests and typecheck environments side-effect
-// free, while a packaged desktop process starts exactly once.
-if (typeof process !== "undefined" && process.versions?.electron && !process.env.ALDER_ELECTRON_TEST) {
-  if (process.env.ALDER_DESKTOP_RUNTIME_PROBE === "1") {
-    process.stdout.write(JSON.stringify(process.versions));
-    process.exit(0);
-  }
+export async function startPackagedElectronMain(argv: readonly string[] = process.argv.slice(1)): Promise<ElectronMainApplication> {
   const runtime = loadElectronRuntime();
-  const argv = process.argv.slice(1);
   const rscript = parseRscriptArgument(argv);
-  void startElectronMain({
+  return startElectronMain({
     runtime,
     ...(rscript === undefined ? {} : { rscript }),
     ...(argv.includes("--lazy") ? { executionMode: "lazy" as const } : {}),
     ...(argv.includes("--no-run") ? { runOnStartup: false } : {}),
-  }).catch(error => {
-    const message = error instanceof Error ? error.message : "Electron startup failed";
-    process.stderr.write(`${message}\n`);
-    process.exitCode = 1;
-    runtime.app.quit();
   });
 }

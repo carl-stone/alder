@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
 import { mkdir, readFile, readdir, realpath, rm, stat, writeFile } from 'node:fs/promises';
+import { request as httpRequest } from 'node:http';
 import { isAbsolute, join, resolve, sep } from 'node:path';
 import { captureProcessTree, cleanupOwnedProcessTree, configureProcessObserver, mergeProcessTrees, ownerMatches, processStartIdentity, readProcess, startIdentityMatches, waitForOwnedProcessesGone, waitForOwnerExit } from './process-observer.mjs';
 export { captureProcessTree, cleanupOwnedProcessTree, configureProcessObserver, mergeProcessTrees, ownerMatches, processStartIdentity, readProcess, startIdentityMatches, waitForOwnedProcessesGone, waitForOwnerExit } from './process-observer.mjs';
@@ -12,7 +13,60 @@ const CLEANUP_STREAM_TIMEOUT_MS = 5_000;
 const PROCESS_GROUP_FLAG = '__alderSmokeProcessGroup';
 const wireCodecCache = new Map();
 const wireCodecByOrigin = new Map();
+export async function fetchLogicalOrigin(input, init = {}) {
+  const requestInput = input instanceof Request ? input : null;
+  const logical = new URL(requestInput?.url ?? input);
+  if (!logical.hostname.endsWith('.localhost')) return fetch(input, init);
+  const headers = new Headers(requestInput?.headers);
+  new Headers(init.headers).forEach((value, name) => headers.set(name, value));
+  headers.set('Host', logical.host);
+  const method = init.method ?? requestInput?.method ?? 'GET';
+  const body = init.body !== undefined
+    ? init.body
+    : requestInput?.body === null || requestInput === null
+      ? undefined
+      : Buffer.from(await requestInput.arrayBuffer());
+  return await new Promise((resolvePromise, rejectPromise) => {
+    const request = httpRequest({
+      hostname: '127.0.0.1',
+      port: Number(logical.port),
+      path: logical.pathname + logical.search,
+      method,
+      headers: Object.fromEntries(headers),
+    }, response => {
+      const chunks = [];
+      response.on('data', chunk => chunks.push(Buffer.from(chunk)));
+      response.once('error', rejectPromise);
+      response.once('end', () => {
+        const responseHeaders = new Headers();
+        for (const [name, value] of Object.entries(response.headers)) {
+          if (Array.isArray(value)) for (const item of value) responseHeaders.append(name, item);
+          else if (value !== undefined) responseHeaders.set(name, value);
+        }
+        resolvePromise(new Response(Buffer.concat(chunks), {
+          status: response.statusCode ?? 500,
+          statusText: response.statusMessage,
+          headers: responseHeaders,
+        }));
+      });
+    });
+    request.once('error', rejectPromise);
+    if (body === undefined || body === null) request.end();
+    else if (typeof body === 'string' || body instanceof Uint8Array) request.end(body);
+    else request.destroy(new TypeError('loopback smoke fetch accepts only string or byte bodies'));
+  });
+}
 
+export function openLogicalWebSocket(WebSocketImpl, input, options = {}) {
+  const logical = new URL(input);
+  if (!logical.hostname.endsWith('.localhost')) return new WebSocketImpl(input, options);
+  const target = new URL(logical);
+  target.hostname = '127.0.0.1';
+  return new WebSocketImpl(target.href, {
+    ...options,
+    headers: { ...options.headers, Host: logical.host },
+  });
+}
 /** Launch a smoke child in its own process group so timeouts cannot orphan descendants. */
 export function spawnSmokeProcess(command, args, options = {}) {
   const child = spawn(command, args, { ...options, detached: true });
@@ -309,7 +363,7 @@ export async function mintTicket(origin, token) {
   return value.ticket;
 }
 export async function exchangeTicket(origin, ticket) {
-  const response = await fetch(new URL('/api/session', origin), { method: 'POST', redirect: 'error', headers: { Origin: origin, 'Content-Type': 'application/json' }, body: JSON.stringify({ ticket }) });
+  const response = await fetchLogicalOrigin(new URL('/api/session', origin), { method: 'POST', redirect: 'error', headers: { Origin: origin, 'Content-Type': 'application/json' }, body: JSON.stringify({ ticket }) });
   const value = await parseResponse(response);
   assert.equal(response.ok, true, JSON.stringify(value));
   assert.deepEqual(Object.keys(value).sort(), ['clientId', 'continuityProof', 'csrf', 'epoch', 'leaseId', 'nextCommandSequence', 'recoveryKey', 'recoveryKeyId']);
@@ -362,7 +416,7 @@ export async function requestJson(origin, path, { method = 'GET', body, authoriz
   if (authorization) headers.Authorization = `Bearer ${authorization}`;
   if (cookie) headers.Cookie = cookie;
   if (csrf) headers['X-CSRF-Token'] = csrf;
-  const response = await fetch(new URL(path, origin), { method, redirect: 'error', headers, body: body === undefined ? undefined : JSON.stringify(body) });
+  const response = await fetchLogicalOrigin(new URL(path, origin), { method, redirect: 'error', headers, body: body === undefined ? undefined : JSON.stringify(body) });
   const value = await parseResponse(response);
   if (!response.ok) throw new Error(`HTTP ${response.status} ${path}: ${JSON.stringify(redact(value))}`);
   return value;

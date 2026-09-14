@@ -72593,7 +72593,7 @@ function recoverRequestId(input2) {
 
 // src/application.ts
 import { createHash as createHash9, randomUUID as randomUUID15 } from "node:crypto";
-import { mkdtemp as mkdtemp5, rm as rm10 } from "node:fs/promises";
+import { mkdtemp as mkdtemp5, realpath as realpath10, rm as rm10 } from "node:fs/promises";
 import { basename as basename9, dirname as dirname11, join as join21, resolve as resolve13 } from "node:path";
 import { tmpdir as tmpdir6 } from "node:os";
 
@@ -73631,7 +73631,7 @@ var NodeFsHandler = class {
    * @param realpath
    * @returns closer for the watcher instance.
    */
-  async _handleDir(dir, stats, initialAdd, depth, target, wh, realpath10) {
+  async _handleDir(dir, stats, initialAdd, depth, target, wh, realpath11) {
     const parentDir = this.fsw._getWatchedDir(sp.dirname(dir));
     const tracked = parentDir.has(sp.basename(dir));
     if (!(initialAdd && this.fsw.options.ignoreInitial) && !target && !tracked) {
@@ -73642,7 +73642,7 @@ var NodeFsHandler = class {
     let throttler;
     let closer;
     const oDepth = this.fsw.options.depth;
-    if ((oDepth == null || depth <= oDepth) && !this.fsw._symlinkPaths.has(realpath10)) {
+    if ((oDepth == null || depth <= oDepth) && !this.fsw._symlinkPaths.has(realpath11)) {
       if (!target) {
         await this._handleRead(dir, initialAdd, wh, target, dir, depth, throttler);
         if (this.fsw.closed)
@@ -117900,7 +117900,7 @@ async function startHost(input2) {
   if (options.internalHost && options.path === null && options.session?.sessionKey === void 0) throw new Error("untitled internal hosts require a parent session key");
   if (options.path !== null) return startNotebookHost(options, options.path, false, options.path);
   if (options.sandbox) throw new Error("sandbox mode requires a notebook file path");
-  const temporary = await mkdtemp5(join21(tmpdir6(), "alder-unsaved-"));
+  const temporary = await realpath10(await mkdtemp5(join21(tmpdir6(), "alder-unsaved-")));
   const storagePath = join21(temporary, "Untitled.R");
   try {
     const app = await startNotebookHost(options, storagePath, true, null);
@@ -118177,7 +118177,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
       lsp = value;
     };
     var setLsp = setLsp2;
-    work = await mkdtemp5(join21(tmpdir6(), "alder-host-"));
+    work = await realpath10(await mkdtemp5(join21(tmpdir6(), "alder-host-")));
     uploads = new UploadStore(join21(work, "uploads"));
     cacheDirectory = unsaved ? join21(work, "cache") : join21(notebookDirectory, ".alder", "cache");
     await ensurePrivateDirectory(cacheDirectory, { processSupervisorExecutable: options.resources.processSupervisorExecutable });

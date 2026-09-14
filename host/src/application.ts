@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import envPaths from "env-paths";
@@ -201,7 +201,7 @@ export async function startHost(input: HostOptions): Promise<RunningHost> {
   if (options.internalHost && options.path === null && options.session?.sessionKey === undefined) throw new Error("untitled internal hosts require a parent session key");
   if (options.path !== null) return startNotebookHost(options, options.path, false, options.path);
   if (options.sandbox) throw new Error("sandbox mode requires a notebook file path");
-  const temporary = await mkdtemp(join(tmpdir(), "alder-unsaved-"));
+  const temporary = await realpath(await mkdtemp(join(tmpdir(), "alder-unsaved-")));
   const storagePath = join(temporary, "Untitled.R");
   try {
     const app = await startNotebookHost(options, storagePath, true, null);
@@ -470,7 +470,7 @@ async function startNotebookHost(
     throw ownershipCompromise;
   }
   try {
-    work = await mkdtemp(join(tmpdir(), "alder-host-"));
+    work = await realpath(await mkdtemp(join(tmpdir(), "alder-host-")));
     uploads = new UploadStore(join(work, "uploads"));
     cacheDirectory = unsaved ? join(work, "cache") : join(notebookDirectory, ".alder", "cache");
     await ensurePrivateDirectory(cacheDirectory, { processSupervisorExecutable: options.resources.processSupervisorExecutable });

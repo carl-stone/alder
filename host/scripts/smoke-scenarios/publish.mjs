@@ -6,7 +6,7 @@ import { delimiter, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
 import { parse } from "parse5";
-import { cleanupScenarioResources, createHarness, delay, waitForExecutionReady } from './_common.mjs';
+import { cleanupScenarioResources, createHarness, delay, fetchLogicalOrigin, waitForExecutionReady } from './_common.mjs';
 import { prewarmInteractiveBrowser } from "../../test-support/live-browser.mjs";
 
 const TERMINAL = new Set(["done", "error", "failed", "interrupted", "cancelled"]);
@@ -235,7 +235,7 @@ count
     assert.deepEqual(downloadedBytes, outputBytes, "capability-only retrieval must equal the browser-downloaded bytes");
     const adjacentUrl = new URL(publishedUrl);
     adjacentUrl.pathname = publishedUrl.pathname.replace(/\/[^/]*$/, "/include-secret.txt");
-    const adjacentResponse = await fetch(adjacentUrl, { method: "GET", redirect: "error", credentials: "omit", headers: { Origin: "null" } });
+    const adjacentResponse = await fetchLogicalOrigin(adjacentUrl, { method: "GET", redirect: "error", credentials: "omit", headers: { Origin: "null" } });
     assert.equal(adjacentResponse.status, 404, "artifact capability must not expose adjacent fixture/project files");
     await adjacentResponse.arrayBuffer();
     await live.observe("published-download");
@@ -494,7 +494,7 @@ async function readArtifact(harness, artifact) {
   return Buffer.concat(chunks);
 }
 async function fetchPublishedArtifact(url) {
-  const response = await fetch(url, { method: "GET", redirect: "error", credentials: "omit", headers: { Origin: "null" } });
+  const response = await fetchLogicalOrigin(url, { method: "GET", redirect: "error", credentials: "omit", headers: { Origin: "null" } });
   assert.equal(response.status, 200, "authorized publish URL must be readable: " + response.status);
   assert.match(response.headers.get("content-type") ?? "", /^text\/html(?:;|$)/i, "publish URL must return HTML");
   return Buffer.from(await response.arrayBuffer());

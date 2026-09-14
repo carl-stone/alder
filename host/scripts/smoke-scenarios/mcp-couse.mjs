@@ -18,6 +18,7 @@ import {
   stopChild,
   waitForExecutionReady,
   requireAbsoluteRscript,
+  fetchLogicalOrigin,
 } from './_common.mjs';
 
 const EXPECTED_TOOLS = new Set([
@@ -404,7 +405,7 @@ async function openHttpAgent(origin, registry, name) {
       headers.set('Authorization', 'Bearer ' + registry.token);
       headers.set('X-Alder-Lease-Id', session.leaseId);
       headers.set('X-Alder-Client-Id', session.clientId);
-      return fetch(input, { ...init, headers });
+      return fetchLogicalOrigin(input, { ...init, headers });
     },
   });
   const client = new Client({ name, version: 'smoke' });
@@ -427,7 +428,7 @@ async function assertHttpSessionIsolation(origin, first, second) {
   assert.equal(typeof firstSessionId, 'string');
   assert.equal(typeof secondSessionId, 'string');
   assert.notEqual(firstSessionId, secondSessionId);
-  const response = await fetch(new URL('/mcp', origin), {
+  const response = await fetchLogicalOrigin(new URL('/mcp', origin), {
     method: 'POST',
     headers: {
       Origin: origin,

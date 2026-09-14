@@ -144,6 +144,49 @@ async function requestWithHost(target: string, host: string, extraHeaders: Recor
     request.end();
   });
 }
+async function fetch(input: string | URL, init: RequestInit = {}): Promise<Response> {
+  const logical = new URL(input.toString());
+  if (!logical.hostname.endsWith(".localhost")) return globalThis.fetch(input, init);
+  const headers = Object.fromEntries(new Headers(init.headers));
+  headers.Host = logical.host;
+  return await new Promise<Response>((resolve, reject) => {
+    const request = httpRequest({
+      hostname: "127.0.0.1",
+      port: Number(logical.port),
+      path: logical.pathname + logical.search,
+      method: init.method ?? "GET",
+      headers,
+    }, response => {
+      const chunks: Buffer[] = [];
+      response.on("data", chunk => chunks.push(Buffer.from(chunk)));
+      response.once("error", reject);
+      response.once("end", () => {
+        const responseHeaders = new Headers();
+        for (const [name, value] of Object.entries(response.headers)) {
+          if (Array.isArray(value)) for (const item of value) responseHeaders.append(name, item);
+          else if (value !== undefined) responseHeaders.set(name, value);
+        }
+        resolve(new Response(Buffer.concat(chunks), {
+          status: response.statusCode ?? 500,
+          statusText: response.statusMessage,
+          headers: responseHeaders,
+        }));
+      });
+    });
+    request.once("error", reject);
+    if (init.body === undefined || init.body === null) request.end();
+    else if (typeof init.body === "string" || init.body instanceof Uint8Array) request.end(init.body);
+    else reject(new TypeError("loopback test fetch accepts only string or byte bodies"));
+  });
+}
+
+function loopbackSocketTarget(origin: string): { url: string; host: string } {
+  const logical = new URL(origin.replace(/^http/, "ws") + "/api/socket");
+  const host = logical.host;
+  logical.hostname = "127.0.0.1";
+  return { url: logical.href, host };
+}
+
 type CookieSession = { leaseId: string; clientId: string; csrf: string; epoch: string; continuityProof: string; cookie: string };
 
 async function createCookieSession(origin: string): Promise<CookieSession> {
@@ -229,7 +272,8 @@ function waitForSocketMessage(socket: WebSocket, predicate: (value: Record<strin
 }
 
 async function openAuthenticatedSocket(origin: string, session: CookieSession): Promise<WebSocket> {
-  const socket = new WebSocket(origin.replace(/^http/, "ws") + "/api/socket", { origin, headers: { Cookie: session.cookie } });
+  const socketTarget = loopbackSocketTarget(origin);
+  const socket = new WebSocket(socketTarget.url, { origin, headers: { Cookie: session.cookie, Host: socketTarget.host } });
   await new Promise<void>((resolve, reject) => {
     const onOpen = (): void => { cleanup(); resolve(); };
     const onError = (error: Error): void => { cleanup(); reject(error); };
@@ -556,7 +600,8 @@ test("socket preserves ordered cell lifecycle events", { timeout: 30_000 }, asyn
   let socket: WebSocket | undefined;
   try {
     const session = await createCookieSession(origin);
-    socket = new WebSocket(origin.replace(/^http/, "ws") + "/api/socket", { origin, headers: { Cookie: session.cookie } });
+    const socketTarget = loopbackSocketTarget(origin);
+    socket = new WebSocket(socketTarget.url, { origin, headers: { Cookie: session.cookie, Host: socketTarget.host } });
     await new Promise<void>((resolve, reject) => {
       const onOpen = (): void => { cleanup(); resolve(); };
       const onError = (error: Error): void => { cleanup(); reject(error); };

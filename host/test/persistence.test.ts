@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmod, mkdtemp, readFile, writeFile, rm, symlink, link, rename, readdir, stat, mkdir, utimes, open as openFile } from 'node:fs/promises';
+import { chmod, mkdtemp, readFile, realpath, writeFile, rm, symlink, link, rename, readdir, stat, mkdir, utimes, open as openFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DocumentStore, FileConflict, sameFile, diskVersion } from '../src/persistence.js';
@@ -24,7 +24,7 @@ function recoveryDelta(
 }
 
 test('persists physical notebook bytes atomically and preserves no-op bytes/mode', { skip: process.platform === 'win32' }, async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'alder-store-'));
+  const dir = await realpath(await mkdtemp(join(tmpdir(), 'alder-store-')));
   try {
     const path = join(dir, 'notebook.R');
     const source = '# header\r\n# %% [markdown]\r\n# title';
@@ -43,7 +43,7 @@ test('persists physical notebook bytes atomically and preserves no-op bytes/mode
 });
 
 test('header-only no-op saves preserve missing final newline bytes', { skip: process.platform === 'win32' }, async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'alder-store-header-only-'));
+  const dir = await realpath(await mkdtemp(join(tmpdir(), 'alder-store-header-only-')));
   try {
     const path = join(dir, 'notebook.R');
     const source = '# header';
@@ -56,7 +56,7 @@ test('header-only no-op saves preserve missing final newline bytes', { skip: pro
 });
 
 test('deleting all cells still normalizes the deleted-cell boundary', { skip: process.platform === 'win32' }, async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'alder-store-delete-all-'));
+  const dir = await realpath(await mkdtemp(join(tmpdir(), 'alder-store-delete-all-')));
   try {
     const path = join(dir, 'notebook.R');
     const source = '# header\n# %%\nvalue';
@@ -68,7 +68,7 @@ test('deleting all cells still normalizes the deleted-cell boundary', { skip: pr
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 test('new source save and external replacement preserve source_conflict and dirty bytes', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'alder-store-new-'));
+  const dir = await realpath(await mkdtemp(join(tmpdir(), 'alder-store-new-')));
   try {
     const path = join(dir, 'notebook.R');
     const { store } = await DocumentStore.open(path);
@@ -83,7 +83,7 @@ test('new source save and external replacement preserve source_conflict and dirt
 });
 
 test('source symlink aliases are canonical and retargeting cannot replace another target', { skip: process.platform === 'win32' }, async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'alder-source-link-'));
+  const dir = await realpath(await mkdtemp(join(tmpdir(), 'alder-source-link-')));
   try {
     const first = join(dir, 'first.R'), second = join(dir, 'second.R'), alias = join(dir, 'notebook.R'), hard = join(dir, 'hard.R');
     await writeFile(first, '# %%\nfirst\n'); await writeFile(second, '# %%\nsecond\n'); await symlink(first, alias); await link(first, hard);
@@ -96,7 +96,7 @@ test('source symlink aliases are canonical and retargeting cannot replace anothe
 });
 
 test('sidecar staged write rechecks replacement and leaves external partial save intact', { skip: process.platform === 'win32' }, async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'alder-sidecar-'));
+  const dir = await realpath(await mkdtemp(join(tmpdir(), 'alder-sidecar-')));
   try {
     const sidecar = join(dir, '.alder', 'config.yaml');
     await mkdir(join(dir, '.alder')); await writeFile(sidecar, 'theme: dark\n');
@@ -108,7 +108,7 @@ test('sidecar staged write rechecks replacement and leaves external partial save
 });
 
 test('Save As publishes exclusively to an absent destination', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'alder-save-as-'));
+  const dir = await realpath(await mkdtemp(join(tmpdir(), 'alder-save-as-')));
   try {
     const path = join(dir, 'source.R'), destination = join(dir, 'copy.R'); await writeFile(path, '# %%\nsource\n');
     const { store } = await DocumentStore.open(path);
@@ -130,7 +130,7 @@ test('Save As publishes exclusively to an absent destination', async () => {
 });
 
 test('recovery keys are stable, private, and transferred only after Save As adoption', { skip: process.platform === 'win32' }, async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'alder-recovery-key-'));
+  const dir = await realpath(await mkdtemp(join(tmpdir(), 'alder-recovery-key-')));
   const base = recoveryBaseline(0, Buffer.from([0]));
   let source: RecoveryWriter | undefined;
   let reopened: RecoveryWriter | undefined;
@@ -191,7 +191,7 @@ test('recovery keys are stable, private, and transferred only after Save As adop
 
 test('missing or invalid recovery pointers fail on a corrupt newest generation', async () => {
   for (const pointerKind of ['missing', 'invalid'] as const) {
-    const dir = await mkdtemp(join(tmpdir(), 'alder-recovery-pointer-' + pointerKind + '-'));
+    const dir = await realpath(await mkdtemp(join(tmpdir(), 'alder-recovery-pointer-' + pointerKind + '-')));
     const baseBytes = Buffer.from([0]);
     const base = recoveryBaseline(0, baseBytes);
     try {
@@ -224,7 +224,7 @@ test('missing or invalid recovery pointers fail on a corrupt newest generation',
 });
 
 test('recovery source frames preserve exact bytes, cell identity, torn tails, and tampering', { skip: process.platform === 'win32' }, async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'alder-recovery-')); const dirs = [dir];
+  const dir = await realpath(await mkdtemp(join(tmpdir(), 'alder-recovery-'))); const dirs = [dir];
   const baseBytes = Buffer.from([0xef, 0xbb, 0xbf, 0x23, 0x20, 0x25, 0x25, 0x0d, 0x0a, 0x41, 0x0d, 0x0a, 0x42, 0x0d, 0x0a]);
   const nextBytes = Buffer.from([0xef, 0xbb, 0xbf, 0x23, 0x20, 0x25, 0x25, 0x0d, 0x0a, 0x42, 0x0d, 0x0a, 0x41, 0x0d, 0x0a]);
   const baseCells = [{ id: 'cell-1', revision: 0 }, { id: 'cell-2', revision: 0 }];
@@ -250,11 +250,11 @@ test('recovery source frames preserve exact bytes, cell identity, torn tails, an
     assert.equal(materialized.physicalBytes, next.physicalBytes);
     assert.deepEqual(materialized.cells, next.cells);
     await restored.close();
-    const tornDir = await mkdtemp(join(tmpdir(), 'alder-recovery-tail-')); dirs.push(tornDir);
+    const tornDir = await realpath(await mkdtemp(join(tmpdir(), 'alder-recovery-tail-'))); dirs.push(tornDir);
     const torn = await RecoveryWriter.open({ rootDir: tornDir, key: 'notebook', baseline: base }); const tornLog = torn.currentLogPath!; await torn.close();
     const tail = await openFile(tornLog, 'a'); await tail.write(Buffer.from([0, 0, 0, 20, 123, 34])); await tail.close();
     const tailState = await RecoveryWriter.open({ rootDir: tornDir, key: 'notebook', baseline: base }); assert.equal((await tailState.load()).status, 'tail-discarded'); await tailState.close();
-    const tamperDir = await mkdtemp(join(tmpdir(), 'alder-recovery-tamper-')); dirs.push(tamperDir);
+    const tamperDir = await realpath(await mkdtemp(join(tmpdir(), 'alder-recovery-tamper-'))); dirs.push(tamperDir);
     const tamper = await RecoveryWriter.open({ rootDir: tamperDir, key: 'notebook', baseline: base });
     const tamperRecord = await tamper.append({ schemaVersion: 1, fromRevision: 0, toRevision: 1, delta: recoveryDelta(baseBytes, nextBytes, nextCells, pieces) });
     const tamperLog = tamper.currentLogPath!; await tamper.close();
@@ -273,7 +273,7 @@ test('recovery source frames preserve exact bytes, cell identity, torn tails, an
     assert.deepEqual(tailTamperedBaseline.cells, base.cells);
     await tailTampered.close();
 
-    const interiorDir = await mkdtemp(join(tmpdir(), 'alder-recovery-interior-')); dirs.push(interiorDir);
+    const interiorDir = await realpath(await mkdtemp(join(tmpdir(), 'alder-recovery-interior-'))); dirs.push(interiorDir);
     const interior = await RecoveryWriter.open({ rootDir: interiorDir, key: 'notebook', baseline: base });
     const interiorFirst = await interior.append({ schemaVersion: 1, fromRevision: 0, toRevision: 1, delta: recoveryDelta(baseBytes, nextBytes, nextCells, pieces) });
     const secondBytes = Buffer.concat([nextBytes, Buffer.from([0x43])]);
@@ -292,7 +292,7 @@ test('recovery source frames preserve exact bytes, cell identity, torn tails, an
 });
 
 test('recovery rejects legacy schemas and incomplete sidecar maps', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'alder-recovery-sidecars-'));
+  const dir = await realpath(await mkdtemp(join(tmpdir(), 'alder-recovery-sidecars-')));
   const bytes = Buffer.from([0]);
   const base = recoveryBaseline(0, bytes);
   try {
@@ -306,7 +306,7 @@ test('recovery rejects legacy schemas and incomplete sidecar maps', async () => 
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 test('prepared package sidecars normalize declarations and reject stale versions', { skip: process.platform === 'win32' }, async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'alder-package-prepared-'));
+  const dir = await realpath(await mkdtemp(join(tmpdir(), 'alder-package-prepared-')));
   try {
     const path = join(dir, 'notebook.R');
     await writeFile(path, '# %%\nvalue <- 1\n');
@@ -328,10 +328,10 @@ test('prepared package sidecars normalize declarations and reject stale versions
 });
 
 test('recovery compacts source patches and retains the prior generation on failed publication', { skip: process.platform === 'win32' }, async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'alder-recovery-compaction-'));
-  const failureDir = await mkdtemp(join(tmpdir(), 'alder-recovery-compaction-failure-'));
-  const oversizedDir = await mkdtemp(join(tmpdir(), 'alder-recovery-compaction-oversized-'));
-  const initialFailureDir = await mkdtemp(join(tmpdir(), 'alder-recovery-initial-failure-'));
+  const dir = await realpath(await mkdtemp(join(tmpdir(), 'alder-recovery-compaction-')));
+  const failureDir = await realpath(await mkdtemp(join(tmpdir(), 'alder-recovery-compaction-failure-')));
+  const oversizedDir = await realpath(await mkdtemp(join(tmpdir(), 'alder-recovery-compaction-oversized-')));
+  const initialFailureDir = await realpath(await mkdtemp(join(tmpdir(), 'alder-recovery-initial-failure-')));
   const dirs = [dir, failureDir, oversizedDir, initialFailureDir];
   const baseBytes = Buffer.from([0]);
   const base = recoveryBaseline(0, baseBytes, [{ id: 'cell-0', revision: 0 }]);
@@ -450,7 +450,7 @@ test('recovery compacts source patches and retains the prior generation on faile
 });
 
 test('prepareReload requires bounded disk preconditions and preserves Controller document identities', { skip: process.platform === 'win32' }, async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'alder-reload-'));
+  const dir = await realpath(await mkdtemp(join(tmpdir(), 'alder-reload-')));
   try {
     const path = join(dir, 'notebook.R');
     const nl = String.fromCharCode(10);
@@ -483,8 +483,8 @@ test('prepareReload requires bounded disk preconditions and preserves Controller
 });
 
 test('recovery branches are bounded, durable, and prepared rebinds separate publication from adoption', { skip: process.platform === 'win32' }, async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'alder-branch-'));
-  let targetDir = await mkdtemp(join(tmpdir(), 'alder-rebind-target-'));
+  const dir = await realpath(await mkdtemp(join(tmpdir(), 'alder-branch-')));
+  let targetDir = await realpath(await mkdtemp(join(tmpdir(), 'alder-rebind-target-')));
   let targetOnSeparateDevice = false;
   if (process.platform === 'linux') {
     let candidate: string | undefined;
@@ -503,7 +503,7 @@ test('recovery branches are bounded, durable, and prepared rebinds separate publ
       if (candidate !== undefined) await rm(candidate, { recursive: true, force: true });
     }
   }
-  const abandonedDir = await mkdtemp(join(tmpdir(), 'alder-rebind-abandoned-'));
+  const abandonedDir = await realpath(await mkdtemp(join(tmpdir(), 'alder-rebind-abandoned-')));
   try {
     const nl = String.fromCharCode(10);
     if (targetOnSeparateDevice) assert.notEqual((await stat(dir)).dev, (await stat(targetDir)).dev);
@@ -550,7 +550,7 @@ test('recovery branches are bounded, durable, and prepared rebinds separate publ
 });
 
 test('refreshes external source observations without moving the save baseline', { skip: process.platform === 'win32' }, async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'alder-refresh-'));
+  const dir = await realpath(await mkdtemp(join(tmpdir(), 'alder-refresh-')));
   try {
     const path = join(dir, 'notebook.R');
     const external = join(dir, 'external.R');
@@ -575,7 +575,7 @@ test('refreshes external source observations without moving the save baseline', 
 });
 
 test('repairs a mode-only recovery root before discarding corrupt tails', { skip: process.platform === 'win32' }, async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'alder-recovery-root-'));
+  const dir = await realpath(await mkdtemp(join(tmpdir(), 'alder-recovery-root-')));
   try {
     const baseBytes = Buffer.from('# %%\nbase\n');
     const baseline = recoveryBaseline(0, baseBytes);

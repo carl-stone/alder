@@ -12,6 +12,7 @@ import {
   redact,
   sanitizedEnvironment,
   waitForExecutionReady,
+  fetchLogicalOrigin,
 } from './_common.mjs';
 
 export async function run(ctx) {
@@ -129,7 +130,7 @@ async function raw(origin, path, { method = 'GET', body, authorization, cookie, 
   if (authorization) headers.Authorization = `Bearer ${authorization}`;
   if (cookie) headers.Cookie = cookie;
   if (csrf) headers['X-CSRF-Token'] = csrf;
-  const response = await fetch(new URL(path, origin), {
+  const response = await fetchLogicalOrigin(new URL(path, origin), {
     method, redirect: 'error', headers,
     body: body === undefined ? undefined : JSON.stringify(body),
   });

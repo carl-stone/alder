@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { chmod, link, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, link, mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -121,7 +121,7 @@ test("application resources reject a tampered supervisor producer descriptor", a
 
 test("application resource symlinks cannot escape the application root", async () => {
   const fixture = await makeFixture();
-  const outside = await mkdtemp(join(tmpdir(), "alder-resources-outside-"));
+  const outside = await realpath(await mkdtemp(join(tmpdir(), "alder-resources-outside-")));
   try {
     const link = join(fixture.root, "resources/app/index.html");
     await rm(link);
@@ -256,8 +256,8 @@ test("selected R rejects a bundled helper with the wrong package identity", asyn
 });
 
 async function makeFixture(helperVersion = "0.1.0"): Promise<Fixture> {
-  const root = await mkdtemp(join(tmpdir(), "alder-resources-r-"));
-  const supportRoot = await mkdtemp(join(tmpdir(), "alder-resources-r-support-"));
+  const root = await realpath(await mkdtemp(join(tmpdir(), "alder-resources-r-")));
+  const supportRoot = await realpath(await mkdtemp(join(tmpdir(), "alder-resources-r-support-")));
   const paths = [
     "bin/alder",
     "chrome-sandbox",

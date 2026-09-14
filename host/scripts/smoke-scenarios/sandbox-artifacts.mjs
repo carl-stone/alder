@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { cleanupScenarioResources, createHarness, delay, waitForExecutionReady } from "./_common.mjs";
+import { cleanupScenarioResources, createHarness, delay, fetchLogicalOrigin, waitForExecutionReady } from "./_common.mjs";
 import { prewarmInteractiveBrowser } from "../../test-support/live-browser.mjs";
 
 const TERMINAL = new Set(["done", "error", "failed", "interrupted", "cancelled"]);
@@ -256,7 +256,7 @@ export async function run(ctx) {
 
     const resourceUrl = new URL(browserProof.src, harness.origin);
     const imageResourceUrl = new URL(await live.browser.evaluate("window.__alderHost.client.resolveArtifact(" + JSON.stringify(imageArtifact) + ")"), harness.origin);
-    const capabilityResponse = await fetch(resourceUrl, { credentials: "omit", headers: { Origin: "null" } });
+    const capabilityResponse = await fetchLogicalOrigin(resourceUrl, { credentials: "omit", headers: { Origin: "null" } });
     assert.equal(capabilityResponse.status, 200);
     assert.deepEqual(Buffer.from(await capabilityResponse.arrayBuffer()), htmlBytes);
     await live.close();
@@ -269,11 +269,11 @@ export async function run(ctx) {
     const afterDeletion = await waitForExecutionReady(harness);
     const revoked = await expectQueryFailure(harness, { type: "output", handle: htmlArtifact.handle, offset: 0, limit: 1 });
     assert.ok(STALE_ARTIFACT_CODES.has(revoked), "owner deletion must revoke public artifact reads, got " + revoked);
-    const revokedResource = await fetch(resourceUrl, { credentials: "omit", headers: { Origin: "null" } });
+    const revokedResource = await fetchLogicalOrigin(resourceUrl, { credentials: "omit", headers: { Origin: "null" } });
     assert.equal(revokedResource.status, 404, "previously issued capability must be revoked as missing with its owner");
     const revokedResourceBody = await revokedResource.json();
     assert.equal(revokedResourceBody?.error?.code, "output_expired", "revoked capabilities must report the typed expiry code");
-    const retainedImage = await fetch(imageResourceUrl, { credentials: "omit", headers: { Origin: "null" } });
+    const retainedImage = await fetchLogicalOrigin(imageResourceUrl, { credentials: "omit", headers: { Origin: "null" } });
     assert.equal(retainedImage.status, 200, "another cell's retained artifact remains readable before restart");
     assert.deepEqual(Buffer.from(await retainedImage.arrayBuffer()), imageBytes);
     const restartReceipt = await harness.nextCommand({ type: "restart", replay: false, expectedDocumentRevision: afterDeletion.documentRevision });
@@ -283,7 +283,7 @@ export async function run(ctx) {
     assert.notEqual(afterRestart.runtime.kernelEpoch, htmlArtifact.kernelEpoch, "restart replaces the kernel identity");
     const restartRevoked = await expectQueryFailure(harness, { type: "output", handle: imageArtifact.handle, offset: 0, limit: 1 });
     assert.ok(STALE_ARTIFACT_CODES.has(restartRevoked), "restart must revoke prior-kernel artifact reads, got " + restartRevoked);
-    const restartRevokedResource = await fetch(imageResourceUrl, { credentials: "omit", headers: { Origin: "null" } });
+    const restartRevokedResource = await fetchLogicalOrigin(imageResourceUrl, { credentials: "omit", headers: { Origin: "null" } });
     assert.equal(restartRevokedResource.status, 404, "restart must revoke previously issued artifact capabilities");
     const restartRevokedBody = await restartRevokedResource.json();
     assert.equal(restartRevokedBody?.error?.code, "output_expired", "restart-revoked capabilities must report the typed expiry code");
@@ -512,7 +512,7 @@ async function rawQuery(harness, query, authenticated = true) {
     headers.Cookie = harness.session.cookie;
     headers["X-CSRF-Token"] = harness.session.csrf;
   }
-  const response = await fetch(new URL("/api/query", harness.origin), {
+  const response = await fetchLogicalOrigin(new URL("/api/query", harness.origin), {
     method: "POST",
     redirect: "error",
     headers,

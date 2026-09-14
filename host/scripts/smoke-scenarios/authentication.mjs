@@ -12,6 +12,8 @@ import {
   redact,
   sanitizedEnvironment,
   spawnSmokeSync,
+  fetchLogicalOrigin,
+  openLogicalWebSocket,
 } from './_common.mjs';
 export async function run(ctx) {
   const harness = await createHarness(ctx, {
@@ -145,7 +147,7 @@ async function probe(origin, path, { method = 'GET', body, authorization, cookie
     if (host) {
       ({ status, bytes } = await rawProbe(new URL(path, origin), method, headers, payload));
     } else {
-      const response = await fetch(new URL(path, origin), { method, redirect: 'error', headers, body: payload });
+      const response = await fetchLogicalOrigin(new URL(path, origin), { method, redirect: 'error', headers, body: payload });
       status = response.status;
       bytes = new Uint8Array(await response.arrayBuffer());
     }
@@ -162,7 +164,13 @@ async function probe(origin, path, { method = 'GET', body, authorization, cookie
 
 function rawProbe(url, method, headers, body) {
   return new Promise((resolve, reject) => {
-    const request = httpRequest(url, { method, headers }, (response) => {
+    const request = httpRequest({
+      hostname: '127.0.0.1',
+      port: Number(url.port),
+      path: url.pathname + url.search,
+      method,
+      headers,
+    }, (response) => {
       const chunks = [];
       response.on('data', chunk => chunks.push(chunk));
       response.on('end', () => resolve({ status: response.statusCode ?? 0, bytes: new Uint8Array(Buffer.concat(chunks)) }));
@@ -177,7 +185,7 @@ async function unauthorizedWebSocket(origin) {
   target.protocol = target.protocol === 'https:' ? 'wss:' : 'ws:';
   return await new Promise((resolve) => {
     const result = { closeCode: null, recovery: false, commandResult: false };
-    const socket = new WebSocket(target, { origin });
+    const socket = openLogicalWebSocket(WebSocket, target, { origin });
     const timer = setTimeout(() => { socket.terminate(); resolve(result); }, 5_000);
     socket.on('open', () => {
       socket.send(JSON.stringify({ type: 'command', sequence: 1, command: { type: 'ping' } }));
@@ -203,7 +211,7 @@ async function forgedCsrfWebSocket(origin, session) {
   target.protocol = target.protocol === 'https:' ? 'wss:' : 'ws:';
   return await new Promise((resolve) => {
     const result = { closeCode: null, recovery: false };
-    const socket = new WebSocket(target, { origin, headers: { Cookie: session.cookie } });
+    const socket = openLogicalWebSocket(WebSocket, target, { origin, headers: { Cookie: session.cookie } });
     const timer = setTimeout(() => { socket.terminate(); resolve(result); }, 5_000);
     socket.on('open', () => {
       socket.send(JSON.stringify({ type: 'connect', protocolVersion: 2, leaseId: session.leaseId, clientId: session.clientId, csrf: 'forged', epoch: null, cursor: null }));

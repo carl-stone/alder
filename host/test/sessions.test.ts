@@ -3,7 +3,7 @@ import test from "node:test";
 import { createHash, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { chmod, link, lstat, mkdir, mkdtemp, readFile, rename, rm, utimes, writeFile } from "node:fs/promises";
+import { chmod, link, lstat, mkdir, mkdtemp, readFile, realpath, rename, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -80,7 +80,7 @@ function waitForChild(child: ReturnType<typeof spawn>): Promise<void> {
 }
 
 test("dead stale claim reclamation is serialized to one owner", async () => {
-  const root = await mkdtemp(join(tmpdir(), "alder-session-reclaim-race-"));
+  const root = await realpath(await mkdtemp(join(tmpdir(), "alder-session-reclaim-race-")));
   const runtimeDirectory = join(root, "runtime");
   const notebook = join(root, "notebook.R");
   const canonicalPath = resolve(notebook);
@@ -168,7 +168,7 @@ test("dead stale claim reclamation is serialized to one owner", async () => {
   }
 });
 test("hard-link aliases retain distinct canonical path ownership", { skip: process.platform === "win32" }, async () => {
-  const root = await mkdtemp(join(tmpdir(), "alder-session-hardlink-"));
+  const root = await realpath(await mkdtemp(join(tmpdir(), "alder-session-hardlink-")));
   const runtimeDirectory = join(root, "runtime");
   const firstPath = join(root, "first.R");
   const aliasPath = join(root, "alias.R");
@@ -191,7 +191,7 @@ test("hard-link aliases retain distinct canonical path ownership", { skip: proce
 });
 
 test("atomic notebook replacement cannot create a second owner", async () => {
-  const root = await mkdtemp(join(tmpdir(), "alder-session-replacement-"));
+  const root = await realpath(await mkdtemp(join(tmpdir(), "alder-session-replacement-")));
   const runtimeDirectory = join(root, "runtime");
   const notebook = join(root, "notebook.R");
   const staged = join(root, "staged.R");
@@ -214,7 +214,7 @@ test("atomic notebook replacement cannot create a second owner", async () => {
 });
 
 test("session lease release sends the release action exactly once", async () => {
-  const root = await mkdtemp(join(tmpdir(), "alder-session-release-"));
+  const root = await realpath(await mkdtemp(join(tmpdir(), "alder-session-release-")));
   const runtimeDirectory = join(root, "runtime");
   const notebook = join(root, "notebook.R");
   const canonicalPath = resolve(notebook);
@@ -287,7 +287,7 @@ test("session lease release sends the release action exactly once", async () => 
   }
 });
 test("prepared Save As reserves an absent target while preserving source authority and identity", async () => {
-  const root = await mkdtemp(join(tmpdir(), "alder-sessions-"));
+  const root = await realpath(await mkdtemp(join(tmpdir(), "alder-sessions-")));
   const runtimeDirectory = join(root, "runtime");
   const source = join(root, "source.R");
   const destination = join(root, "renamed.R");
@@ -355,7 +355,7 @@ test("prepared Save As reserves an absent target while preserving source authori
   }
 });
 test("failed Save As publication rolls back destination ownership and preserves the source", async () => {
-  const root = await mkdtemp(join(tmpdir(), "alder-sessions-publication-failure-"));
+  const root = await realpath(await mkdtemp(join(tmpdir(), "alder-sessions-publication-failure-")));
   const runtimeDirectory = join(root, "runtime");
   const source = join(root, "source.R");
   const destination = join(root, "renamed.R");
@@ -396,7 +396,7 @@ test("failed Save As publication rolls back destination ownership and preserves 
 });
 
 test("aborting prepared Save As removes only the exact reservation and preserves foreign artifacts", async () => {
-  const root = await mkdtemp(join(tmpdir(), "alder-sessions-"));
+  const root = await realpath(await mkdtemp(join(tmpdir(), "alder-sessions-")));
   const runtimeDirectory = join(root, "runtime");
   const source = join(root, "source.R");
   const destination = join(root, "renamed.R");
@@ -447,7 +447,7 @@ test("aborting prepared Save As removes only the exact reservation and preserves
 });
 
 test("untitled recovery descriptors are independent and retirement is identity-guarded", async () => {
-  const root = await mkdtemp(join(tmpdir(), "alder-untitled-recovery-"));
+  const root = await realpath(await mkdtemp(join(tmpdir(), "alder-untitled-recovery-")));
   const dataRoot = join(root, "data");
   const projectA = resolve(join(root, "project-a"));
   const projectB = resolve(join(root, "project-b"));
@@ -501,7 +501,7 @@ test("configured external auth requires a paired exact HTTPS origin and token fi
 });
 
 test("configured external auth refuses attaching to an existing owner", async () => {
-  const root = await mkdtemp(join(tmpdir(), "alder-session-auth-owner-"));
+  const root = await realpath(await mkdtemp(join(tmpdir(), "alder-session-auth-owner-")));
   const runtimeDirectory = join(root, "runtime");
   const notebook = join(root, "notebook.R");
   await writeFile(notebook, "notebook");
@@ -526,7 +526,7 @@ test("configured external auth refuses attaching to an existing owner", async ()
 });
 
 test("configured external auth reaches detached candidates without exposing the bearer", async () => {
-  const root = await mkdtemp(join(tmpdir(), "alder-session-auth-argv-"));
+  const root = await realpath(await mkdtemp(join(tmpdir(), "alder-session-auth-argv-")));
   const runtimeDirectory = join(root, "runtime");
   const notebook = join(root, "notebook.R");
   const tokenFile = join(root, "token");
