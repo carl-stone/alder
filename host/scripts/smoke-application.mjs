@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readFile, readlink, readdir, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -702,6 +702,7 @@ function safeManifestPath(value, label) {
 async function verifyManifest(base, manifest, manifestPath) {
   assert.equal(manifest.schemaVersion, 1, 'application manifest schema must be 1');
   assert.ok(Array.isArray(manifest.files), 'application manifest must inventory files');
+  assert.ok(Array.isArray(manifest.symlinks), 'application manifest must inventory directory symlinks');
   assert.ok(manifest.resources && typeof manifest.resources === 'object', 'application manifest must declare resources');
   const root = resolve(base);
   const physicalRoot = await realpath(root);
@@ -722,8 +723,25 @@ async function verifyManifest(base, manifest, manifestPath) {
     assert.equal(await sha256(physical), file.sha256, pathValue);
     declared.set(pathValue, file);
   }
+  const declaredSymlinks = new Map();
+  for (const link of manifest.symlinks) {
+    const pathValue = safeManifestPath(link?.path, 'manifest symlink path');
+    assert.equal(typeof link?.target, 'string', 'manifest symlink target must be a string');
+    assert.ok(link.target.length > 0 && !link.target.includes(String.fromCharCode(0)), 'manifest symlink target must be nonempty and NUL-free');
+    const path = resolve(root, pathValue);
+    assert.equal(isWithin(root, path), true, 'manifest symlink must stay inside application');
+    assert.equal(declared.has(pathValue), false, 'manifest symlink paths must not overlap files');
+    assert.equal(declaredSymlinks.has(pathValue), false, 'manifest symlink paths must be unique');
+    const info = await lstat(path);
+    assert.equal(info.isSymbolicLink(), true, 'manifest symlink path must be symbolic');
+    const physical = await realpath(path);
+    assert.equal(isWithin(physicalRoot, physical), true, 'manifest symlink must stay inside application');
+    assert.equal(await readlink(path), link.target, 'manifest symlink target changed: ' + pathValue);
+    assert.equal((await stat(path)).isDirectory(), true, 'manifest symlink target must be a directory');
+    declaredSymlinks.set(pathValue, link);
+  }
   const manifestRelative = safeManifestPath(relative(root, resolve(manifestPath)).split(sep).join('/'), 'manifest path');
-  assert.equal(declared.has(manifestRelative), false, 'manifest must not inventory itself');
+  assert.equal(declared.has(manifestRelative) || declaredSymlinks.has(manifestRelative), false, 'manifest must not inventory itself');
 
   const verifiedResources = {};
   for (const [name, kind, nullable] of MANIFEST_RESOURCES) {

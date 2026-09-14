@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { execFile } from 'node:child_process';
 import { createReadStream } from "node:fs";
-import { lstat, readFile, readdir, realpath, stat } from 'node:fs/promises';
+import { lstat, readFile, readdir, readlink, realpath, stat } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { platform as hostPlatform } from "node:os";
 
@@ -29,6 +29,11 @@ export interface ManifestFile {
   path: string;
   bytes: number;
   sha256: string;
+}
+
+export interface ManifestSymlink {
+  path: string;
+  target: string;
 }
 
 export interface ManifestRPackage {
@@ -76,6 +81,7 @@ export interface ApplicationManifest {
     electronNode: string | null;
   };
   files: ManifestFile[];
+  symlinks: ManifestSymlink[];
   rPackages: ManifestRPackage[];
 }
 
@@ -193,7 +199,7 @@ export function validateApplicationManifest(value: unknown): ApplicationManifest
   exactKeys(record, [
     "schemaVersion", "kind", "applicationVersion", "sourceCommit", "sourceTreeSha256",
     "hostProtocol", "engineProtocol", "target", "rVersionRange", "qualifiedRPatchVersions",
-    "rBuildVersion", "resources", "runtimes", "files", "rPackages",
+    "rBuildVersion", "resources", "runtimes", "files", "symlinks", "rPackages",
   ], "manifest");
   if (record.schemaVersion !== MANIFEST_SCHEMA_VERSION) throw invalid("manifest.schemaVersion must be 1");
   const kind = oneOf(record.kind, ["desktop", "headless"], "manifest.kind") as ManifestKind;
@@ -232,6 +238,7 @@ export function validateApplicationManifest(value: unknown): ApplicationManifest
     }
   }
   const files = manifestFiles(record.files);
+  const symlinks = manifestSymlinks(record.symlinks);
   const rPackages = manifestPackages(record.rPackages);
   return {
     schemaVersion: 1,
@@ -248,6 +255,7 @@ export function validateApplicationManifest(value: unknown): ApplicationManifest
     resources,
     runtimes,
     files,
+    symlinks,
     rPackages,
   };
 }
@@ -303,26 +311,42 @@ async function verifyInventory(root: string, baseDirectory: string, manifest: Ap
     if (declared.has(file.path)) throw invalid("manifest.files contains duplicate path " + file.path);
     declared.set(file.path, file);
   }
+  const declaredSymlinks = new Map<string, ManifestSymlink>();
+  for (const symlink of manifest.symlinks) {
+    if (declared.has(symlink.path)) throw invalid("manifest symlink path overlaps a file " + symlink.path);
+    if (declaredSymlinks.has(symlink.path)) throw invalid("manifest.symlinks contains duplicate path " + symlink.path);
+    declaredSymlinks.set(symlink.path, symlink);
+  }
   const manifestRelative = relativePath(root, join(baseDirectory, "manifest.json"));
-  if (declared.has(manifestRelative)) throw invalid("manifest.json must not be included in its own file inventory");
+  if (declared.has(manifestRelative) || declaredSymlinks.has(manifestRelative)) throw invalid("manifest.json must not be included in its own file inventory");
   const outerExecutable = allowOuterSignature ? manifest.resources.electronEntry ?? undefined : undefined;
   if (outerExecutable) {
-    if (declared.has(outerExecutable)) throw invalid('verified macOS outer executable must not be included in the application manifest');
+    if (declared.has(outerExecutable) || declaredSymlinks.has(outerExecutable)) throw invalid('verified macOS outer executable must not be included in the application manifest');
     const outerExecutablePath = join(root, outerExecutable);
     const outerExecutableInfo = await lstat(outerExecutablePath).catch(() => null);
     if (!outerExecutableInfo?.isFile() || outerExecutableInfo.isSymbolicLink() || outerExecutableInfo.nlink !== 1) throw invalid('verified macOS outer executable is not a regular, singly-linked file');
     await resolvePhysicalWithinRoot(root, outerExecutablePath, 'verified macOS outer executable');
   }
   const discovered = new Set<string>();
-  await collectFiles(root, root, discovered, new Set<string>(), manifestRelative, allowOuterSignature, outerExecutable);
+  const discoveredSymlinks = new Map<string, string>();
+  await collectFiles(root, root, discovered, discoveredSymlinks, new Set<string>(), manifestRelative, allowOuterSignature, outerExecutable);
   if (discovered.size !== declared.size || [...discovered].some((path) => !declared.has(path))) {
     const missing = [...discovered].filter((path) => !declared.has(path));
     const extra = [...declared.keys()].filter((path) => !discovered.has(path));
     throw invalid("manifest file inventory mismatch (missing declarations: " + (missing.join(", ") || "none") + "; extra declarations: " + (extra.join(", ") || "none") + ")");
   }
+  if (discoveredSymlinks.size !== declaredSymlinks.size || [...discoveredSymlinks].some(([path, target]) => declaredSymlinks.get(path)?.target !== target)) {
+    const missing = [...discoveredSymlinks].filter(([path, target]) => declaredSymlinks.get(path)?.target !== target).map(([path]) => path);
+    const extra = [...declaredSymlinks.keys()].filter((path) => discoveredSymlinks.get(path) !== declaredSymlinks.get(path)?.target);
+    throw invalid("manifest symlink inventory mismatch (missing declarations: " + (missing.join(", ") || "none") + "; extra declarations: " + (extra.join(", ") || "none") + ")");
+  }
   for (const [path, expected] of declared) {
     await resolveWithinRoot(root, path, "manifest file");
     await verifyFile(root, join(root, path), expected);
+  }
+  for (const [path, expected] of declaredSymlinks) {
+    await resolveWithinRoot(root, path, "manifest symlink");
+    await verifySymlink(root, join(root, path), expected);
   }
   await assertRootIdentity(root, expectedRoot);
 }
@@ -361,7 +385,7 @@ async function verifyMacOSBundleSignature(root: string): Promise<void> {
   }
 }
 
-async function collectFiles(root: string, directory: string, result: Set<string>, visited: Set<string>, excludedPath?: string, allowOuterSignature = false, outerExecutable?: string): Promise<void> {
+async function collectFiles(root: string, directory: string, result: Set<string>, symlinks: Map<string, string>, visited: Set<string>, excludedPath?: string, allowOuterSignature = false, outerExecutable?: string): Promise<void> {
   const physical = await resolvePhysicalWithinRoot(root, directory, 'manifest inventory directory');
   const directoryInfo = await lstat(directory).catch((error) => { throw invalid('manifest inventory directory is unavailable: ' + directory + ': ' + messageOf(error)); });
   if (directoryInfo.isSymbolicLink()) throw invalid('manifest inventory directory is a symbolic link: ' + relativePath(root, directory));
@@ -375,8 +399,11 @@ async function collectFiles(root: string, directory: string, result: Set<string>
     const info = await lstat(path).catch((error) => { throw invalid('manifest inventory entry is unavailable: ' + relativeEntry + ': ' + messageOf(error)); });
     if (info.isSymbolicLink()) {
       await resolvePhysicalWithinRoot(root, path, 'manifest inventory symlink');
-      if (relativeEntry !== excludedPath) result.add(relativeEntry);
-    } else if (info.isDirectory()) await collectFiles(root, path, result, visited, excludedPath, allowOuterSignature, outerExecutable);
+      const targetInfo = await stat(path).catch((error) => { throw invalid('manifest inventory symlink target is unavailable: ' + relativeEntry + ': ' + messageOf(error)); });
+      if (targetInfo.isDirectory()) {
+        if (relativeEntry !== excludedPath) symlinks.set(relativeEntry, await readlink(path));
+      } else if (relativeEntry !== excludedPath) result.add(relativeEntry);
+    } else if (info.isDirectory()) await collectFiles(root, path, result, symlinks, visited, excludedPath, allowOuterSignature, outerExecutable);
     else if (info.isFile()) {
       if (relativeEntry === excludedPath) continue;
       if (info.nlink > 1) throw invalid('manifest inventory entry is hard linked: ' + relativeEntry);
@@ -399,6 +426,16 @@ async function verifyFile(root: string, path: string, expected: ManifestFile): P
   let bytes = 0;
   try { for await (const chunk of createReadStream(path)) { bytes += chunk.length; digest.update(chunk); } } catch (error) { throw invalid('manifest file cannot be read: ' + expected.path + ': ' + messageOf(error)); }
   if (bytes !== expected.bytes || digest.digest('hex') !== expected.sha256) throw invalid('manifest file SHA-256 mismatch: ' + expected.path);
+}
+
+async function verifySymlink(root: string, path: string, expected: ManifestSymlink): Promise<void> {
+  const info = await lstat(path).catch((error) => { throw invalid('manifest symlink is unavailable: ' + expected.path + ': ' + messageOf(error)); });
+  if (!info.isSymbolicLink()) throw invalid('manifest symlink is not symbolic: ' + expected.path);
+  await resolvePhysicalWithinRoot(root, path, 'manifest symlink', expected.path);
+  const target = await readlink(path).catch((error) => { throw invalid('manifest symlink target is unavailable: ' + expected.path + ': ' + messageOf(error)); });
+  if (target !== expected.target) throw invalid('manifest symlink target mismatch: ' + expected.path);
+  const targetInfo = await stat(path).catch((error) => { throw invalid('manifest symlink target is unavailable: ' + expected.path + ': ' + messageOf(error)); });
+  if (!targetInfo.isDirectory()) throw invalid('manifest symlink target is not a directory: ' + expected.path);
 }
 
 async function resolveManifestFile(root: string, path: string, label: string): Promise<string> {
@@ -569,6 +606,18 @@ function manifestFiles(value: unknown): ManifestFile[] {
       path: relativeManifestPath(record.path, `manifest.files[${index}].path`),
       bytes: safeBytes(record.bytes, `manifest.files[${index}].bytes`),
       sha256: hash(record.sha256, `manifest.files[${index}].sha256`),
+    };
+  });
+}
+
+function manifestSymlinks(value: unknown): ManifestSymlink[] {
+  if (!Array.isArray(value)) throw invalid("manifest.symlinks must be an array");
+  return value.map((item, index) => {
+    const record = object(item, `manifest.symlinks[${index}]`);
+    exactKeys(record, ["path", "target"], `manifest.symlinks[${index}]`);
+    return {
+      path: relativeManifestPath(record.path, `manifest.symlinks[${index}].path`),
+      target: nonempty(record.target, `manifest.symlinks[${index}].target`),
     };
   });
 }

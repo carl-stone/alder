@@ -89473,7 +89473,7 @@ import { promisify as promisify2 } from "node:util";
 import { createHash as createHash2 } from "node:crypto";
 import { execFile } from "node:child_process";
 import { createReadStream } from "node:fs";
-import { lstat as lstat5, readFile as readFile2, readdir as readdir3, realpath as realpath3, stat as stat6 } from "node:fs/promises";
+import { lstat as lstat5, readFile as readFile2, readdir as readdir3, readlink, realpath as realpath3, stat as stat6 } from "node:fs/promises";
 import { basename as basename4, dirname as dirname5, isAbsolute as isAbsolute4, join as join6, relative as relative4, resolve as resolve5, sep as sep2 } from "node:path";
 import { platform as hostPlatform } from "node:os";
 import { promisify } from "node:util";
@@ -89574,6 +89574,7 @@ function validateApplicationManifest(value) {
     "resources",
     "runtimes",
     "files",
+    "symlinks",
     "rPackages"
   ], "manifest");
   if (record3.schemaVersion !== MANIFEST_SCHEMA_VERSION) throw invalid2("manifest.schemaVersion must be 1");
@@ -89613,6 +89614,7 @@ function validateApplicationManifest(value) {
     }
   }
   const files = manifestFiles(record3.files);
+  const symlinks = manifestSymlinks(record3.symlinks);
   const rPackages = manifestPackages(record3.rPackages);
   return {
     schemaVersion: 1,
@@ -89629,6 +89631,7 @@ function validateApplicationManifest(value) {
     resources: resources2,
     runtimes,
     files,
+    symlinks,
     rPackages
   };
 }
@@ -89677,26 +89680,42 @@ async function verifyInventory(root, baseDirectory, manifest, expectedRoot) {
     if (declared.has(file2.path)) throw invalid2("manifest.files contains duplicate path " + file2.path);
     declared.set(file2.path, file2);
   }
+  const declaredSymlinks = /* @__PURE__ */ new Map();
+  for (const symlink of manifest.symlinks) {
+    if (declared.has(symlink.path)) throw invalid2("manifest symlink path overlaps a file " + symlink.path);
+    if (declaredSymlinks.has(symlink.path)) throw invalid2("manifest.symlinks contains duplicate path " + symlink.path);
+    declaredSymlinks.set(symlink.path, symlink);
+  }
   const manifestRelative = relativePath(root, join6(baseDirectory, "manifest.json"));
-  if (declared.has(manifestRelative)) throw invalid2("manifest.json must not be included in its own file inventory");
+  if (declared.has(manifestRelative) || declaredSymlinks.has(manifestRelative)) throw invalid2("manifest.json must not be included in its own file inventory");
   const outerExecutable = allowOuterSignature ? manifest.resources.electronEntry ?? void 0 : void 0;
   if (outerExecutable) {
-    if (declared.has(outerExecutable)) throw invalid2("verified macOS outer executable must not be included in the application manifest");
+    if (declared.has(outerExecutable) || declaredSymlinks.has(outerExecutable)) throw invalid2("verified macOS outer executable must not be included in the application manifest");
     const outerExecutablePath = join6(root, outerExecutable);
     const outerExecutableInfo = await lstat5(outerExecutablePath).catch(() => null);
     if (!outerExecutableInfo?.isFile() || outerExecutableInfo.isSymbolicLink() || outerExecutableInfo.nlink !== 1) throw invalid2("verified macOS outer executable is not a regular, singly-linked file");
     await resolvePhysicalWithinRoot(root, outerExecutablePath, "verified macOS outer executable");
   }
   const discovered = /* @__PURE__ */ new Set();
-  await collectFiles(root, root, discovered, /* @__PURE__ */ new Set(), manifestRelative, allowOuterSignature, outerExecutable);
+  const discoveredSymlinks = /* @__PURE__ */ new Map();
+  await collectFiles(root, root, discovered, discoveredSymlinks, /* @__PURE__ */ new Set(), manifestRelative, allowOuterSignature, outerExecutable);
   if (discovered.size !== declared.size || [...discovered].some((path3) => !declared.has(path3))) {
     const missing2 = [...discovered].filter((path3) => !declared.has(path3));
     const extra = [...declared.keys()].filter((path3) => !discovered.has(path3));
     throw invalid2("manifest file inventory mismatch (missing declarations: " + (missing2.join(", ") || "none") + "; extra declarations: " + (extra.join(", ") || "none") + ")");
   }
+  if (discoveredSymlinks.size !== declaredSymlinks.size || [...discoveredSymlinks].some(([path3, target]) => declaredSymlinks.get(path3)?.target !== target)) {
+    const missing2 = [...discoveredSymlinks].filter(([path3, target]) => declaredSymlinks.get(path3)?.target !== target).map(([path3]) => path3);
+    const extra = [...declaredSymlinks.keys()].filter((path3) => discoveredSymlinks.get(path3) !== declaredSymlinks.get(path3)?.target);
+    throw invalid2("manifest symlink inventory mismatch (missing declarations: " + (missing2.join(", ") || "none") + "; extra declarations: " + (extra.join(", ") || "none") + ")");
+  }
   for (const [path3, expected] of declared) {
     await resolveWithinRoot(root, path3, "manifest file");
     await verifyFile(root, join6(root, path3), expected);
+  }
+  for (const [path3, expected] of declaredSymlinks) {
+    await resolveWithinRoot(root, path3, "manifest symlink");
+    await verifySymlink(root, join6(root, path3), expected);
   }
   await assertRootIdentity(root, expectedRoot);
 }
@@ -89735,7 +89754,7 @@ async function verifyMacOSBundleSignature(root) {
     throw invalid2("macOS application signature verification failed: " + messageOf3(error61));
   }
 }
-async function collectFiles(root, directory, result, visited, excludedPath, allowOuterSignature = false, outerExecutable) {
+async function collectFiles(root, directory, result, symlinks, visited, excludedPath, allowOuterSignature = false, outerExecutable) {
   const physical = await resolvePhysicalWithinRoot(root, directory, "manifest inventory directory");
   const directoryInfo = await lstat5(directory).catch((error61) => {
     throw invalid2("manifest inventory directory is unavailable: " + directory + ": " + messageOf3(error61));
@@ -89753,8 +89772,13 @@ async function collectFiles(root, directory, result, visited, excludedPath, allo
     });
     if (info.isSymbolicLink()) {
       await resolvePhysicalWithinRoot(root, path3, "manifest inventory symlink");
-      if (relativeEntry !== excludedPath) result.add(relativeEntry);
-    } else if (info.isDirectory()) await collectFiles(root, path3, result, visited, excludedPath, allowOuterSignature, outerExecutable);
+      const targetInfo = await stat6(path3).catch((error61) => {
+        throw invalid2("manifest inventory symlink target is unavailable: " + relativeEntry + ": " + messageOf3(error61));
+      });
+      if (targetInfo.isDirectory()) {
+        if (relativeEntry !== excludedPath) symlinks.set(relativeEntry, await readlink(path3));
+      } else if (relativeEntry !== excludedPath) result.add(relativeEntry);
+    } else if (info.isDirectory()) await collectFiles(root, path3, result, symlinks, visited, excludedPath, allowOuterSignature, outerExecutable);
     else if (info.isFile()) {
       if (relativeEntry === excludedPath) continue;
       if (info.nlink > 1) throw invalid2("manifest inventory entry is hard linked: " + relativeEntry);
@@ -89789,6 +89813,21 @@ async function verifyFile(root, path3, expected) {
     throw invalid2("manifest file cannot be read: " + expected.path + ": " + messageOf3(error61));
   }
   if (bytes !== expected.bytes || digest.digest("hex") !== expected.sha256) throw invalid2("manifest file SHA-256 mismatch: " + expected.path);
+}
+async function verifySymlink(root, path3, expected) {
+  const info = await lstat5(path3).catch((error61) => {
+    throw invalid2("manifest symlink is unavailable: " + expected.path + ": " + messageOf3(error61));
+  });
+  if (!info.isSymbolicLink()) throw invalid2("manifest symlink is not symbolic: " + expected.path);
+  await resolvePhysicalWithinRoot(root, path3, "manifest symlink", expected.path);
+  const target = await readlink(path3).catch((error61) => {
+    throw invalid2("manifest symlink target is unavailable: " + expected.path + ": " + messageOf3(error61));
+  });
+  if (target !== expected.target) throw invalid2("manifest symlink target mismatch: " + expected.path);
+  const targetInfo = await stat6(path3).catch((error61) => {
+    throw invalid2("manifest symlink target is unavailable: " + expected.path + ": " + messageOf3(error61));
+  });
+  if (!targetInfo.isDirectory()) throw invalid2("manifest symlink target is not a directory: " + expected.path);
 }
 async function resolveManifestFile(root, path3, label) {
   const resolved = await resolveWithinRoot(root, path3, label);
@@ -89945,6 +89984,17 @@ function manifestFiles(value) {
       path: relativeManifestPath(record3.path, `manifest.files[${index}].path`),
       bytes: safeBytes(record3.bytes, `manifest.files[${index}].bytes`),
       sha256: hash2(record3.sha256, `manifest.files[${index}].sha256`)
+    };
+  });
+}
+function manifestSymlinks(value) {
+  if (!Array.isArray(value)) throw invalid2("manifest.symlinks must be an array");
+  return value.map((item, index) => {
+    const record3 = object3(item, `manifest.symlinks[${index}]`);
+    exactKeys(record3, ["path", "target"], `manifest.symlinks[${index}]`);
+    return {
+      path: relativeManifestPath(record3.path, `manifest.symlinks[${index}].path`),
+      target: nonempty(record3.target, `manifest.symlinks[${index}].target`)
     };
   });
 }

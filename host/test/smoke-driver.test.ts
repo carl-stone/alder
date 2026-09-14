@@ -78,6 +78,7 @@ async function runDriverWithManifest(resources: Record<string, unknown>) {
     schemaVersion: 1,
     kind: 'headless',
     files: [],
+    symlinks: [],
     resources,
   }));
   try {
@@ -107,6 +108,7 @@ test('smoke manifest rejects resource symlinks escaping the staged root', async 
     schemaVersion: 1,
     kind: 'headless',
     files: [],
+    symlinks: [],
     resources: { cliLauncher: 'resources/launcher' },
   }));
   try {

@@ -159,6 +159,34 @@ test('application resource symlinks preserve contained framework-style identitie
     await removeFixture(fixture);
   }
 });
+test('application resource directory symlinks preserve contained framework identities', async () => {
+  const fixture = await makeFixture();
+  try {
+    const frameworkRoot = join(fixture.root, 'Frameworks/Electron Framework.framework');
+    const targetDirectory = join(frameworkRoot, 'Versions/A/Helpers');
+    const linkPath = join(frameworkRoot, 'Helpers');
+    const helperPath = join(targetDirectory, 'helper.txt');
+    const helperBytes = Buffer.from('framework helper');
+    await mkdir(targetDirectory, { recursive: true });
+    await writeFile(helperPath, helperBytes);
+    await symlink('Versions/A/Helpers', linkPath);
+    const manifestPath = join(fixture.root, 'resources/manifest.json');
+    const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
+    manifest.files.push({
+      path: 'Frameworks/Electron Framework.framework/Versions/A/Helpers/helper.txt',
+      bytes: helperBytes.byteLength,
+      sha256: createHash('sha256').update(helperBytes).digest('hex'),
+    });
+    manifest.symlinks.push({ path: 'Frameworks/Electron Framework.framework/Helpers', target: 'Versions/A/Helpers' });
+    await writeFile(manifestPath, JSON.stringify(manifest));
+    await resolveApplicationResources(fixture.root);
+    await rm(linkPath);
+    await symlink('Versions/A', linkPath);
+    await assert.rejects(resolveApplicationResources(fixture.root), /manifest symlink inventory mismatch/);
+  } finally {
+    await removeFixture(fixture);
+  }
+});
 
 
 
@@ -380,6 +408,7 @@ async function makeFixture(helperVersion = "0.1.0"): Promise<Fixture> {
       electronNode: null,
     },
     files: inventory,
+    symlinks: [],
     rPackages: [{ name: "alder", version: "0.1.0", builtR: "4.6.1", platform: process.platform, license: "MIT" }],
   };
   await mkdir(join(root, "resources"), { recursive: true });

@@ -1,7 +1,7 @@
 
 import { createHash } from 'node:crypto';
 import { execFileSync, spawn } from 'node:child_process';
-import { cp, chmod, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile } from 'node:fs/promises';
+import { cp, chmod, lstat, mkdir, mkdtemp, readFile, readdir, readlink, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -70,19 +70,23 @@ if (existingOutput.length !== 0) {
       || outerExecutable.split('/').some(part => !part || part === '.' || part === '..')) {
       throw new Error('existing macOS application manifest cannot be prepared for outer signing');
     }
-    const preSigningFiles = (await inventory(existingApplicationRoot, new Set(['Resources/manifest.json', outerExecutable])))
-      .filter(file => !file.path.startsWith('_CodeSignature/'));
+    const preSigningInventory = await inventory(existingApplicationRoot, new Set(['Resources/manifest.json', outerExecutable]));
+    const preSigningFiles = preSigningInventory.files.filter(file => !file.path.startsWith('_CodeSignature/'));
+    const preSigningSymlinks = preSigningInventory.symlinks.filter(link => !link.path.startsWith('_CodeSignature/'));
     const signedSupervisor = preSigningFiles.find(file => file.path === existingManifest.resources.processSupervisorExecutable);
     if (!signedSupervisor) throw new Error('signed process supervisor is missing from the refreshed application inventory');
+    if (JSON.stringify(preSigningSymlinks) !== JSON.stringify(existingManifest.symlinks)) throw new Error('signed macOS framework symlink inventory changed before signing');
     const descriptorPath = join(existingResources, SUPERVISOR_PROVENANCE_RELATIVE_PATH);
     await requireRegularContained(existingApplicationRoot, descriptorPath, 'process supervisor provenance');
     const descriptor = await readJsonRequired(descriptorPath, 'process supervisor provenance');
     descriptor.artifact.sha256 = signedSupervisor.sha256;
     await validateSupervisorProvenance(descriptor, join(existingApplicationRoot, existingManifest.resources.processSupervisorExecutable));
     await writeFile(descriptorPath, `${JSON.stringify(descriptor, null, 2)}\n`);
-    const refreshedFiles = (await inventory(existingApplicationRoot, new Set(['Resources/manifest.json', outerExecutable])))
-      .filter(file => !file.path.startsWith('_CodeSignature/'));
+    const refreshedInventory = await inventory(existingApplicationRoot, new Set(['Resources/manifest.json', outerExecutable]));
+    const refreshedFiles = refreshedInventory.files.filter(file => !file.path.startsWith('_CodeSignature/'));
+    const refreshedSymlinks = refreshedInventory.symlinks.filter(link => !link.path.startsWith('_CodeSignature/'));
     existingManifest.files = refreshedFiles;
+    existingManifest.symlinks = refreshedSymlinks;
     validateApplicationManifest(existingManifest);
     await writeFile(existingManifestPath, `${JSON.stringify(existingManifest, null, 2)}\n`);
     process.stdout.write(`${JSON.stringify({ kind: 'desktop', applicationRoot: existingApplicationRoot, manifest: existingManifestPath, preparedForOuterSigning: true })}\n`);
@@ -150,7 +154,7 @@ if (signedManifest && await exists(signedManifest)) {
   const copiedManifestPath = join(applicationRoot, 'Resources', 'manifest.json');
   const embeddedManifest = JSON.parse(await readFile(copiedManifestPath, 'utf8'));
   if (embeddedManifest?.schemaVersion !== 1 || embeddedManifest.kind !== 'desktop' || embeddedManifest.target?.platform !== 'darwin'
-    || embeddedManifest.resources?.cliLauncher !== 'MacOS/alder-cli' || embeddedManifest.resources?.electronEntry !== entryRelative || !Array.isArray(embeddedManifest.files)) {
+    || embeddedManifest.resources?.cliLauncher !== 'MacOS/alder-cli' || embeddedManifest.resources?.electronEntry !== entryRelative || !Array.isArray(embeddedManifest.files) || !Array.isArray(embeddedManifest.symlinks)) {
     throw new Error('signed macOS application manifest identity is invalid');
   }
   const outerExecutable = join(applicationRoot, embeddedManifest.resources.electronEntry);
@@ -159,8 +163,10 @@ if (signedManifest && await exists(signedManifest)) {
   const physicalOuterExecutable = outerExecutableInfo?.isFile() && !outerExecutableInfo.isSymbolicLink() && outerExecutableInfo.nlink === 1 ? await realpath(outerExecutable).catch(() => null) : null;
   if (!physicalOuterExecutable || !physicalOuterExecutable.startsWith(physicalApplicationRoot + sep)) throw new Error('signed macOS outer executable is not a contained regular, singly-linked file');
   const signedBoundary = new Set(['Resources/manifest.json', embeddedManifest.resources.electronEntry]);
-  const copiedFiles = (await inventory(applicationRoot, new Set(['Resources/manifest.json']))).filter(file => !file.path.startsWith('_CodeSignature/') && !signedBoundary.has(file.path));
-  if (JSON.stringify(copiedFiles) !== JSON.stringify(embeddedManifest.files)) throw new Error('signed macOS application manifest inventory mismatch');
+  const copiedInventory = await inventory(applicationRoot, new Set(['Resources/manifest.json']));
+  const copiedFiles = copiedInventory.files.filter(file => !file.path.startsWith('_CodeSignature/') && !signedBoundary.has(file.path));
+  const copiedSymlinks = copiedInventory.symlinks.filter(link => !link.path.startsWith('_CodeSignature/') && !signedBoundary.has(link.path));
+  if (JSON.stringify(copiedFiles) !== JSON.stringify(embeddedManifest.files) || JSON.stringify(copiedSymlinks) !== JSON.stringify(embeddedManifest.symlinks)) throw new Error('signed macOS application manifest inventory mismatch');
   const launcher = join(applicationRoot, embeddedManifest.resources.cliLauncher);
   const launcherInfo = await lstat(launcher).catch(() => null);
   const launcherPhysical = launcherInfo?.isFile() && !launcherInfo.isSymbolicLink() && launcherInfo.nlink === 1 ? await realpath(launcher).catch(() => null) : null;
@@ -429,6 +435,7 @@ async function makeManifest(base, paths, stageKind, sourceCommit, rIdentity, qua
     throw new Error('source_commit_invalid: staging requires a full lowercase 40-hex commit ID');
   }
   if (airLock.schemaVersion !== 1 || !airLock.version) throw new Error('runtime_lock_missing: Air lock metadata is required before staging');
+  const stagedInventory = await inventory(base, new Set([`${resourcePrefix}/manifest.json`, ...(excludeOuterExecutable ? [paths.electronEntry] : [])]));
   const manifest = {
     schemaVersion: 1,
     kind: stageKind,
@@ -450,8 +457,8 @@ async function makeManifest(base, paths, stageKind, sourceCommit, rIdentity, qua
       chromium: electronRuntime?.chrome ?? null,
       electronNode: electronRuntime?.node ?? null,
     },
-    files: (await inventory(base, new Set([`${resourcePrefix}/manifest.json`, ...(excludeOuterExecutable ? [paths.electronEntry] : [])])))
-      .filter(file => !excludeOuterExecutable || !file.path.startsWith('_CodeSignature/')),
+    files: stagedInventory.files.filter(file => !excludeOuterExecutable || !file.path.startsWith('_CodeSignature/')),
+    symlinks: stagedInventory.symlinks.filter(link => !excludeOuterExecutable || !link.path.startsWith('_CodeSignature/')),
     rPackages: await inventoryRPackages(join(base, paths.rLibraryDirectory)),
   };
   validateApplicationManifest(manifest);
@@ -502,6 +509,7 @@ async function sourceTreeSha256() {
 
 async function inventory(base, skip) {
   const files = [];
+  const symlinks = [];
   const seen = new Set();
   const absoluteBase = resolve(base);
   const onFile = async path => {
@@ -515,6 +523,10 @@ async function inventory(base, skip) {
       const target = await realpath(path).catch(() => null);
       if (!target || (target !== absoluteBase && !target.startsWith(absoluteBase + sep))) throw new Error('application inventory symlink escapes staged root: ' + rel);
       const targetInfo = await stat(path).catch(() => null);
+      if (targetInfo?.isDirectory()) {
+        if (!skipped) symlinks.push({ path: rel, target: await readlink(path) });
+        return;
+      }
       if (!targetInfo?.isFile() || targetInfo.nlink !== 1) throw new Error('application inventory rejects non-regular or hard-linked symlink target: ' + rel);
       if (skipped) return;
       const bytes = await readFile(path);
@@ -530,7 +542,10 @@ async function inventory(base, skip) {
     files.push({ path: rel, bytes: bytes.byteLength, sha256: createHash('sha256').update(bytes).digest('hex') });
   };
   await walkStrict(absoluteBase, onFile);
-  return files.sort((a, b) => a.path.localeCompare(b.path));
+  return {
+    files: files.sort((a, b) => a.path.localeCompare(b.path)),
+    symlinks: symlinks.sort((a, b) => a.path.localeCompare(b.path)),
+  };
 }
 
 async function walkStrict(directory, onFile) {

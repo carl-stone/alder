@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { cp, lstat, mkdir, readFile, readdir, realpath, stat, writeFile } from 'node:fs/promises';
+import { cp, lstat, mkdir, readFile, readdir, readlink, realpath, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
@@ -155,8 +155,12 @@ async function collectHashes(directory, prefix, result, root = directory) {
       const physical = await realpath(path).catch(() => null);
       if (!physical || (physical !== physicalRoot && !physical.startsWith(physicalRoot + sep))) throw new Error('packaged output symlink escapes root: ' + relativePath);
       const targetInfo = await stat(path).catch(() => null);
-      if (!targetInfo?.isFile() || targetInfo.nlink !== 1) throw new Error('packaged output symlink target is not a regular, singly-linked file: ' + relativePath);
-      result[relativePath.split(sep).join('/')] = await sha256(path);
+      if (targetInfo?.isDirectory()) {
+        result[relativePath.split(sep).join('/')] = sha256Text(await readlink(path));
+      } else {
+        if (!targetInfo?.isFile() || targetInfo.nlink !== 1) throw new Error('packaged output symlink target is not a regular, singly-linked file: ' + relativePath);
+        result[relativePath.split(sep).join('/')] = await sha256(path);
+      }
     } else if (info.isDirectory()) await collectHashes(path, relativePath + '/', result, root);
     else if (info.isFile()) {
       if (info.nlink !== 1) throw new Error('packaged output contains a hard-linked file: ' + relativePath);

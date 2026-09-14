@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, readFile, readlink, readdir, realpath, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
@@ -484,12 +484,28 @@ async function collectFiles(directory, result) {
   }
 }
 
-async function collectHashes(directory, prefix, result) {
+async function collectHashes(directory, prefix, result, root = directory) {
+  const physicalRoot = await realpath(root);
   for (const entry of (await readdir(directory, { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name))) {
     const path = join(directory, entry.name);
-    const relativePath = `${prefix}${entry.name}`;
-    if (entry.isDirectory()) await collectHashes(path, `${relativePath}/`, result);
-    else if (entry.isFile()) result[relativePath.split(sep).join('/')] = await sha256(path);
+    const relativePath = prefix + entry.name;
+    const info = await lstat(path);
+    if (info.isSymbolicLink()) {
+      const physical = await realpath(path).catch(() => null);
+      if (!physical || (physical !== physicalRoot && !physical.startsWith(physicalRoot + sep))) throw new Error('packaged output symlink escapes root: ' + relativePath);
+      const targetInfo = await stat(path).catch(() => null);
+      if (targetInfo?.isDirectory()) result[relativePath.split(sep).join('/')] = sha256Text(await readlink(path));
+      else {
+        if (!targetInfo?.isFile() || targetInfo.nlink !== 1) throw new Error('packaged output symlink target is not a regular, singly-linked file: ' + relativePath);
+        result[relativePath.split(sep).join('/')] = await sha256(path);
+      }
+    } else if (info.isDirectory()) await collectHashes(path, relativePath + '/', result, root);
+    else if (info.isFile()) {
+      if (info.nlink !== 1) throw new Error('packaged output contains a hard-linked file: ' + relativePath);
+      const physical = await realpath(path);
+      if (physical !== physicalRoot && !physical.startsWith(physicalRoot + sep)) throw new Error('packaged output file escapes root: ' + relativePath);
+      result[relativePath.split(sep).join('/')] = await sha256(path);
+    } else throw new Error('packaged output contains a non-regular entry: ' + relativePath);
   }
 }
 

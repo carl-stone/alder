@@ -233,6 +233,7 @@ interface WorkerPackageResponse {
 
 async function runPackageWorker(projectDirectory: string, request: unknown): Promise<WorkerPackageResponse> {
   const workerDirectory = join(projectDirectory, "worker");
+  const helperLibrary = fileURLToPath(new URL("../.application/resources/r-library", import.meta.url));
   await mkdir(workerDirectory, { recursive: true });
   const packageJob = fileURLToPath(new URL("../../inst/worker/package-job.R", import.meta.url));
   const framing = fileURLToPath(new URL("../../inst/worker/host-framing.R", import.meta.url));
@@ -250,6 +251,9 @@ async function runPackageWorker(projectDirectory: string, request: unknown): Pro
         ALDER_RESOURCES_ROOT: projectDirectory,
         ALDER_WORKER_DIR: workerDirectory,
         ALDER_R_PRIVATE_LIBRARY: join(projectDirectory, "r-library"),
+        R_LIBS: helperLibrary,
+        R_LIBS_USER: helperLibrary,
+        R_LIBS_SITE: helperLibrary,
         RENV_PATHS_CACHE: join(projectDirectory, "renv-cache"),
         RENV_CONFIG_AUTOLOADER_ENABLED: "FALSE",
         RENV_CONFIG_PAK_ENABLED: "FALSE",

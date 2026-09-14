@@ -5,6 +5,11 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      mac-testing:
+        description: Build verified Mac testing apps without full release qualification
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -14,27 +19,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - name: linux-x64
-            os: ubuntu-24.04
-            target-platform: linux
-            target-arch: x64
-          - name: linux-arm64
-            os: ubuntu-24.04-arm
-            target-platform: linux
-            target-arch: arm64
-          - name: macos-x64
-            os: macos-15-intel
-            target-platform: darwin
-            target-arch: x64
-          - name: macos-arm64
-            os: macos-15
-            target-platform: darwin
-            target-arch: arm64
-          - name: windows-x64
-            os: windows-2025
-            target-platform: win32
-            target-arch: x64
+        include: ${{ inputs.mac-testing && fromJSON('[{"name":"macos-x64","os":"macos-15-intel","target-platform":"darwin","target-arch":"x64"},{"name":"macos-arm64","os":"macos-15","target-platform":"darwin","target-arch":"arm64"}]') || fromJSON('[{"name":"linux-x64","os":"ubuntu-24.04","target-platform":"linux","target-arch":"x64"},{"name":"linux-arm64","os":"ubuntu-24.04-arm","target-platform":"linux","target-arch":"arm64"},{"name":"macos-x64","os":"macos-15-intel","target-platform":"darwin","target-arch":"x64"},{"name":"macos-arm64","os":"macos-15","target-platform":"darwin","target-arch":"arm64"},{"name":"windows-x64","os":"windows-2025","target-platform":"win32","target-arch":"x64"}]') }}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -116,6 +101,7 @@ jobs:
           if-no-files-found: error
 
   host:
+    if: ${{ !inputs.mac-testing }}
     needs: [ark, r-sources]
     strategy:
       fail-fast: false
@@ -289,27 +275,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - name: linux-x64
-            os: ubuntu-24.04
-            target-platform: linux
-            target-arch: x64
-          - name: linux-arm64
-            os: ubuntu-24.04-arm
-            target-platform: linux
-            target-arch: arm64
-          - name: macos-x64
-            os: macos-15-intel
-            target-platform: darwin
-            target-arch: x64
-          - name: macos-arm64
-            os: macos-15
-            target-platform: darwin
-            target-arch: arm64
-          - name: windows-x64
-            os: windows-2025
-            target-platform: win32
-            target-arch: x64
+        include: ${{ inputs.mac-testing && fromJSON('[{"name":"macos-x64","os":"macos-15-intel","target-platform":"darwin","target-arch":"x64"},{"name":"macos-arm64","os":"macos-15","target-platform":"darwin","target-arch":"arm64"}]') || fromJSON('[{"name":"linux-x64","os":"ubuntu-24.04","target-platform":"linux","target-arch":"x64"},{"name":"linux-arm64","os":"ubuntu-24.04-arm","target-platform":"linux","target-arch":"arm64"},{"name":"macos-x64","os":"macos-15-intel","target-platform":"darwin","target-arch":"x64"},{"name":"macos-arm64","os":"macos-15","target-platform":"darwin","target-arch":"arm64"},{"name":"windows-x64","os":"windows-2025","target-platform":"win32","target-arch":"x64"}]') }}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -486,7 +452,40 @@ jobs:
           path: ${{ runner.temp }}/qualification-sidecar.tar.gz
           include-hidden-files: true
           if-no-files-found: error
+      - name: Archive and verify Mac testing application
+        if: ${{ inputs.mac-testing }}
+        shell: bash
+        env:
+          R461: ${{ steps.r461.outputs.path }}
+          R460: ${{ steps.r460.outputs.path }}
+        run: |
+          set -euo pipefail
+          delivery="$RUNNER_TEMP/mac-testing"
+          relocated="$RUNNER_TEMP/mac-testing-relocated"
+          mkdir -p "$delivery" "$relocated"
+          archive="Alder-0.1.0-${{ matrix.target-arch }}-$GITHUB_SHA.zip"
+          ditto -c -k --sequesterRsrc --keepParent host/.application-desktop/Alder.app "$delivery/$archive"
+          ditto -x -k "$delivery/$archive" "$relocated"
+          for scenario in launch-slice rich-outputs save-as interrupt-native desktop-lifecycle; do
+            node host/scripts/smoke-application.mjs "$relocated/Alder.app" \
+              --scenario "$scenario" --evidence "host/.evidence-desktop/mac-testing/$scenario" \
+              --rscript "$R461" --peer-rscript "$R460" \
+              --qualification-source "$PWD/host/.qualification/source"
+          done
+          cp inst/examples/iris.R "$delivery/iris.R"
+          cp README.md "$delivery/README.md"
+          printf '%s\n' "$GITHUB_SHA" > "$delivery/BUILD.txt"
+          (cd "$delivery" && shasum -a 256 "$archive" iris.R README.md BUILD.txt > SHA256SUMS)
+      - name: Upload verified Mac testing kit
+        if: ${{ inputs.mac-testing }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: alder-mac-testing-${{ matrix.target-arch }}-${{ github.sha }}
+          path: ${{ runner.temp }}/mac-testing
+          if-no-files-found: error
+          retention-days: 30
       - name: Run complete desktop smoke matrix from staged resources
+        if: ${{ !inputs.mac-testing }}
         shell: bash
         env:
           R461: ${{ steps.r461.outputs.path }}
@@ -504,6 +503,7 @@ jobs:
               --qualification-source "$PWD/host/.qualification/source"
           fi
       - name: Package unsigned development variants
+        if: ${{ !inputs.mac-testing }}
         shell: bash
         env:
           R461: ${{ steps.r461.outputs.path }}

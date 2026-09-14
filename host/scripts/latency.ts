@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, readFile, readlink, readdir, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { arch, cpus, hostname, platform, release, totalmem } from 'node:os';
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -21,7 +21,7 @@ async function readStagedManifest(applicationPath: string) {
   }
   if (!manifestPath) throw new Error('Staged application manifest not found under resources/ or Resources/');
   const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as any;
-  if (manifest.schemaVersion !== 1 || !manifest.resources || !manifest.target || !['headless', 'desktop'].includes(manifest.kind)) throw new Error('Invalid staged application manifest');
+  if (manifest.schemaVersion !== 1 || !manifest.resources || !manifest.target || !['headless', 'desktop'].includes(manifest.kind) || !Array.isArray(manifest.symlinks)) throw new Error('Invalid staged application manifest');
   if (manifest.target.platform !== process.platform || manifest.target.arch !== process.arch) throw new Error('Staged application target does not match this host');
   if (!Array.isArray(manifest.qualifiedRPatchVersions) || manifest.qualifiedRPatchVersions.length === 0 || manifest.qualifiedRPatchVersions.some(version => !/^4\.6\.[01]$/.test(version))) throw new Error('Staged application must qualify a supported R 4.6.x patch version');
   if (manifest.kind === 'desktop' && typeof manifest.resources.electronEntry !== 'string') throw new Error('Desktop staged application has no Electron executable');
@@ -37,12 +37,29 @@ function inventoryDigest(files: any[]) {
 }
 async function verifyStagedInventory(root: string, manifest: any) {
   if (!Array.isArray(manifest.files) || manifest.files.length === 0) throw new Error('Staged application manifest has no file inventory');
+  const physicalRoot = await realpath(root);
+  const declaredFiles = new Set<string>();
   for (const expected of manifest.files) {
     if (typeof expected?.path !== 'string' || isAbsolute(expected.path)) throw new Error('Invalid staged inventory path');
     const path = resolve(root, expected.path);
-    if (!(path === root || path.startsWith(root + sep))) throw new Error(`Staged inventory escapes application root: ${expected.path}`);
+    if (!(path === root || path.startsWith(root + sep))) throw new Error('Staged inventory escapes application root: ' + expected.path);
+    declaredFiles.add(expected.path);
     const info = await stat(path);
-    if (!info.isFile() || info.size !== expected.bytes || await sha256(path) !== expected.sha256) throw new Error(`Staged resource integrity mismatch: ${expected.path}`);
+    if (!info.isFile() || info.size !== expected.bytes || await sha256(path) !== expected.sha256) throw new Error('Staged resource integrity mismatch: ' + expected.path);
+  }
+  const declaredSymlinks = new Set<string>();
+  for (const expected of manifest.symlinks) {
+    if (typeof expected?.path !== 'string' || isAbsolute(expected.path) || typeof expected?.target !== 'string' || expected.target.length === 0) throw new Error('Invalid staged symlink inventory entry');
+    const path = resolve(root, expected.path);
+    if (!(path === root || path.startsWith(root + sep))) throw new Error('Staged symlink inventory escapes application root: ' + expected.path);
+    if (declaredFiles.has(expected.path) || declaredSymlinks.has(expected.path)) throw new Error('Staged symlink inventory path is duplicated: ' + expected.path);
+    const info = await lstat(path);
+    if (!info.isSymbolicLink()) throw new Error('Staged symlink inventory path is not symbolic: ' + expected.path);
+    const physical = await realpath(path).catch(() => null);
+    if (!physical || !(physical === physicalRoot || physical.startsWith(physicalRoot + sep))) throw new Error('Staged symlink inventory escapes application root: ' + expected.path);
+    if (await readlink(path) !== expected.target) throw new Error('Staged symlink inventory target changed: ' + expected.path);
+    if (!(await stat(path)).isDirectory()) throw new Error('Staged symlink inventory target is not a directory: ' + expected.path);
+    declaredSymlinks.add(expected.path);
   }
   return manifest.files.length;
 }

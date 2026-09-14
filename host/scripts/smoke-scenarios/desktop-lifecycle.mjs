@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { access, mkdir, writeFile } from 'node:fs/promises';
+import { access, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { cleanupScenarioResources, delay, requireAbsoluteRscript, sanitizedEnvironment, spawnSmokeProcess, stopChild } from './_common.mjs';
 
@@ -73,8 +73,9 @@ export async function run(ctx) {
     })()`);
     await cdp.evaluate('window.focus()');
     await delay(100);
-    await cdp.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', key: 's', code: 'KeyS', modifiers: 2, windowsVirtualKeyCode: 83, nativeVirtualKeyCode: 83 });
-    await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 's', code: 'KeyS', modifiers: 2, windowsVirtualKeyCode: 83, nativeVirtualKeyCode: 83 });
+    const modifiers = process.platform === 'darwin' ? 4 : 2;
+    await cdp.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', key: 's', code: 'KeyS', modifiers, windowsVirtualKeyCode: 83 });
+    await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 's', code: 'KeyS', modifiers, windowsVirtualKeyCode: 83 });
     await delay(250);
     const actions = await cdp.evaluate('globalThis.__alderDesktopActions');
     assert.ok(actions.includes('save'), 'native Save accelerator must emit the exact save action');
@@ -100,6 +101,29 @@ export async function run(ctx) {
     assert.equal(app.child.exitCode, null, 'the first Electron instance must remain primary');
     const targets = await app.targets();
     assert.equal(targets.filter(value => value.type === 'page').length, 1, 'one notebook must map to one primary desktop window');
+
+    await cdp.evaluate(`(async () => {
+      const client = window.__alderHost.client;
+      client.editCell(client.document.cells[0].key, ['x <- 41', 'x + 2']);
+      await client.save();
+    })()`);
+    assert.equal(await readFile(notebook, 'utf8'), 'x <- 41\nx + 2\n', 'native Save must persist edited notebook bytes');
+    await cdp.close();
+    cdp = null;
+    await stopDesktop(app);
+    app = await launchDesktop(ctx, ID, { notebookPath: notebook });
+    const reopenedTarget = await app.pageTarget();
+    assert.ok(reopenedTarget, 'saved notebook must reopen in a fresh Electron process');
+    cdp = await CdpSession.connect(reopenedTarget.webSocketDebuggerUrl);
+    await cdp.send('Page.enable');
+    await cdp.send('Runtime.enable');
+    await waitForRenderer(cdp);
+    await waitForRuntimeIdentity(cdp, ctx.rscript);
+    const reopenedBody = await cdp.evaluate("window.__alderHost.client.document.snapshot.cells[0].body");
+    assert.deepEqual(reopenedBody, ['x <- 41', 'x + 2'], 'fresh desktop process must load the saved edit');
+    await writeFile(join(ctx.evidence, 'desktop-save-reopen.json'), JSON.stringify({ body: reopenedBody, bytes: await readFile(notebook, 'utf8') }, null, 2) + '\n');
+    const reopenedScreenshot = await cdp.send('Page.captureScreenshot', { format: 'png' });
+    await writeFile(join(ctx.evidence, 'desktop-reopened.png'), Buffer.from(reopenedScreenshot.data, 'base64'));
 
     const evidence = {
       platform: process.platform,
