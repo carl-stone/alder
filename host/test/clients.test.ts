@@ -1303,7 +1303,7 @@ test("LSP mapping preserves native file URIs and excludes delimiter lines", () =
   const options = validatedRLanguageServerOptions({ path: "/tmp/alder-project/unsaved.R", cells: [] }, "/opt/R/bin/Rscript", "/opt/alder/worker", { spawn: async () => { throw new Error("mapping test must not spawn"); } });
   assert.equal(options.command, "/opt/R/bin/Rscript");
   assert.equal(options.cwd, dirname(resolve("/tmp/alder-project/unsaved.R")));
-  assert.deepEqual(options.args, ["--vanilla", "/opt/alder/worker/host-lsp.R"]);
+  assert.deepEqual(options.args, ["--vanilla", join("/opt/alder/worker", "host-lsp.R")]);
 });
 test("LSP child environment excludes project and user R libraries", () => {
   const environment = trustedRLanguageServerEnvironment({
