@@ -116093,7 +116093,8 @@ async function createProcessScope(resources2) {
 }
 async function startSupervisor(executable, mode, stdioMode, cwd) {
   const stdio = stdioMode === "pipes" ? ["pipe", "pipe", "pipe", "pipe", "pipe"] : ["ignore", "ignore", "ignore", "pipe", "pipe"];
-  const child = spawn2(executable, [SUPERVISOR_MODES[mode], "--control-in=3", "--control-out=4"], {
+  const controlArguments = process.platform === "win32" ? [] : ["--control-in=3", "--control-out=4"];
+  const child = spawn2(executable, [SUPERVISOR_MODES[mode], ...controlArguments], {
     cwd,
     env: process.env,
     stdio,

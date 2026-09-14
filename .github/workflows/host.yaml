@@ -174,7 +174,7 @@ jobs:
             curl --fail --location --silent --show-error "https://github.com/r-lib/rig/releases/download/v0.8.1/rig-0.8.1-macOS-$rig_arch.pkg" --output "$rig_pkg"
             echo "$rig_sha256  $rig_pkg" | shasum -a 256 --check
             sudo installer -pkg "$rig_pkg" -target /
-            mkdir -p "$HOME/.local/share/rig/r"
+            mkdir -p "$HOME/.local/bin" "$HOME/.local/share/rig/r"
             export RIG_MODE=user
             rig add 4.6.1 --without-pak
             rig add 4.6.0 --without-pak
@@ -344,7 +344,7 @@ jobs:
             curl --fail --location --silent --show-error "https://github.com/r-lib/rig/releases/download/v0.8.1/rig-0.8.1-macOS-$rig_arch.pkg" --output "$rig_pkg"
             echo "$rig_sha256  $rig_pkg" | shasum -a 256 --check
             sudo installer -pkg "$rig_pkg" -target /
-            mkdir -p "$HOME/.local/share/rig/r"
+            mkdir -p "$HOME/.local/bin" "$HOME/.local/share/rig/r"
             export RIG_MODE=user
             rig add 4.6.1 --without-pak
             rig add 4.6.0 --without-pak

@@ -310,7 +310,10 @@ async function startSupervisor(
   const stdio: Array<"pipe" | "ignore" | "inherit"> = stdioMode === "pipes"
     ? ["pipe", "pipe", "pipe", "pipe", "pipe"]
     : ["ignore", "ignore", "ignore", "pipe", "pipe"];
-  const child = spawn(executable, [SUPERVISOR_MODES[mode], "--control-in=3", "--control-out=4"], {
+  const controlArguments = process.platform === "win32"
+    ? []
+    : ["--control-in=3", "--control-out=4"];
+  const child = spawn(executable, [SUPERVISOR_MODES[mode], ...controlArguments], {
     cwd,
     env: process.env,
     stdio,

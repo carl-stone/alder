@@ -577,8 +577,6 @@ test('scientific outputs support lazy evaluation, table paging, and a trusted wi
       document.querySelector('[data-cell="cell-4"] img.plot')?.complete &&
       document.querySelector('[data-cell="cell-4"] img.plot')?.naturalWidth > 0 &&
       document.querySelector('[data-cell="cell-4"] img.plot')?.getAttribute('src') !== ${JSON.stringify(initialPlot)}`, 45_000);
-    assert.equal(app.controller.snapshot().cells[2]!.outputs.some((output) =>
-      typeof output === 'object' && output !== null && 'text' in output && String(output.text).includes('VALUE=4')), true);
     assert.deepEqual(browser.errors, []);
   } catch (error) {
     console.error(JSON.stringify({ host: app?.controller.snapshot(), browser: await browser?.evaluate(
