@@ -161,7 +161,7 @@ if (signedManifest && await exists(signedManifest)) {
   const signedBoundary = new Set(['Resources/manifest.json', embeddedManifest.resources.electronEntry]);
   const copiedFiles = (await inventory(applicationRoot, new Set(['Resources/manifest.json']))).filter(file => !file.path.startsWith('_CodeSignature/') && !signedBoundary.has(file.path));
   if (JSON.stringify(copiedFiles) !== JSON.stringify(embeddedManifest.files)) throw new Error('signed macOS application manifest inventory mismatch');
-  const launcher = join(applicationRoot, 'MacOS', 'alder');
+  const launcher = join(applicationRoot, embeddedManifest.resources.cliLauncher);
   const launcherInfo = await lstat(launcher).catch(() => null);
   const launcherPhysical = launcherInfo?.isFile() && !launcherInfo.isSymbolicLink() && launcherInfo.nlink === 1 ? await realpath(launcher).catch(() => null) : null;
   if (!launcherPhysical || !launcherPhysical.startsWith(physicalApplicationRoot + sep)) throw new Error('signed macOS CLI launcher is not a contained regular file');
