@@ -477,11 +477,13 @@ jobs:
           test -f host/.qualification/source/qualification-manifest.json
           manifest_sha=$(node -e "const fs=require('fs'); process.stdout.write(JSON.parse(fs.readFileSync(process.argv[1], 'utf8')).manifestSha256)" "$RUNNER_TEMP/qualification-sidecar.json")
           printf 'manifest_sha256=%s\n' "$manifest_sha" >> "$GITHUB_OUTPUT"
-          tar -czf qualification-sidecar.tar.gz -C host .qualification
+          archive_path="$RUNNER_TEMP/qualification-sidecar.tar.gz"
+          if [[ "$RUNNER_OS" == "Windows" ]]; then archive_path=$(cygpath -u "$archive_path"); fi
+          tar -czf "$archive_path" -C host .qualification
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: qualification-${{ matrix.name }}-${{ steps.qualification.outputs.manifest_sha256 }}
-          path: qualification-sidecar.tar.gz
+          path: ${{ runner.temp }}/qualification-sidecar.tar.gz
           include-hidden-files: true
           if-no-files-found: error
       - name: Run complete desktop smoke matrix from staged resources
@@ -494,10 +496,12 @@ jobs:
           if [[ "$RUNNER_OS" == "Linux" ]]; then
             xvfb-run -a -s "-screen 0 1920x1080x24" node host/scripts/smoke-application.mjs \
               host/.application-desktop --scenario all --evidence host/.evidence-desktop/application \
-              --rscript "$R461" --peer-rscript "$R460"
+              --rscript "$R461" --peer-rscript "$R460" \
+              --qualification-source "$PWD/host/.qualification/source"
           else
             node host/scripts/smoke-application.mjs host/.application-desktop --scenario all \
-              --evidence host/.evidence-desktop/application --rscript "$R461" --peer-rscript "$R460"
+              --evidence host/.evidence-desktop/application --rscript "$R461" --peer-rscript "$R460" \
+              --qualification-source "$PWD/host/.qualification/source"
           fi
       - name: Package unsigned development variants
         shell: bash
