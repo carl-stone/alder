@@ -329,7 +329,7 @@ const RECOVERY_SCHEMA_VERSION = 1;
 
 async function inspectArtifact(ctx, harness, originalBytes) {
   const rootDir = join(ctx.evidence, 'runtime-data', harness.id, 'alder');
-  const sessionKey = digest(Buffer.from(harness.canonical));
+  const sessionKey = digest(Buffer.from('path:' + harness.canonical));
   const keyHash = digest(Buffer.from(JSON.stringify(sessionKey), 'utf8'));
   const directory = join(rootDir, 'recovery-' + keyHash);
   const pointerPath = join(directory, 'current.json');

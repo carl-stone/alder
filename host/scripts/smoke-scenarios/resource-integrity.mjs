@@ -52,6 +52,10 @@ export async function run(ctx) {
   assert.equal(processSupervisorExecutable.startsWith(pristineRoot + sep), true, 'process observer must resolve inside staged application');
   configureProcessObserver(processSupervisorExecutable);
   const processObserverOptions = { supervisorExecutable: processSupervisorExecutable };
+  const packageScript = ctx.qualificationRoot === undefined
+    ? PACKAGE_SCRIPT
+    : join(ctx.qualificationRoot, 'source', 'host', 'scripts', 'package.mjs');
+  assert.equal(await stat(packageScript).then(info => info.isFile()).catch(() => false), true, 'resource verifier package script is missing: ' + packageScript);
   const manifestPath = manifestPathFor(pristineRoot, manifest);
   const evidencePath = join(ctx.evidence, id + '.json');
   const launcherPath = normalizeRelative(manifest.resources.cliLauncher);
@@ -62,8 +66,8 @@ export async function run(ctx) {
   assert.equal(pristineLauncherIdentity.startsWith(pristineRoot + sep), true, 'launcher must resolve inside staged application');
   const pristineLauncherSha256 = await sha256File(pristineLauncher);
   const trustedVerifier = {
-    packageScript: PACKAGE_SCRIPT,
-    packageScriptSha256: await sha256File(PACKAGE_SCRIPT),
+    packageScript,
+    packageScriptSha256: await sha256File(packageScript),
     launcherPath,
     launcherSha256: pristineLauncherSha256,
   };
@@ -71,7 +75,7 @@ export async function run(ctx) {
   const pristinePackagePath = join(ctx.evidence, 'pristine-package');
   const pristineArchivePath = join(ctx.evidence, process.platform === 'win32' ? 'pristine-package.zip' : 'pristine-package.tar.gz');
   const pristineArtifactRecordPath = join(ctx.evidence, 'artifact-record.json');
-  const pristinePackage = await runPackageVerifier(pristineRoot, pristinePackagePath, manifest.sourceCommit, pristineArchivePath, selectedR);
+  const pristinePackage = await runPackageVerifier(pristineRoot, pristinePackagePath, manifest.sourceCommit, pristineArchivePath, selectedR, packageScript);
   assert.equal(pristinePackage.status, 0, 'unchanged package verifier rejected pristine stage: ' + pristinePackage.stderr);
   const pristineArtifactRecord = JSON.parse(await readFile(pristineArtifactRecordPath, 'utf8'));
   assert.deepEqual(pristineArtifactRecord.target, { platform: process.platform, arch: process.arch });
@@ -213,7 +217,7 @@ export async function run(ctx) {
       await copyRoot(pristineRoot, root);
       await spec.mutate(root);
       const packageOutput = join(mutationDirectory, 'package');
-      const packageResult = await runPackageVerifier(root, packageOutput, manifest.sourceCommit, null, selectedR);
+      const packageResult = await runPackageVerifier(root, packageOutput, manifest.sourceCommit, null, selectedR, packageScript);
       if (spec.externalReject) assert.notEqual(packageResult.status, 0, spec.kind + ' was accepted by unchanged external package verifier');
       const launchEvidence = join(mutationDirectory, 'launcher');
       const launch = await launchArtifact(root, launchEvidence, selectedR, manifest, false, processObserverOptions);
@@ -317,7 +321,7 @@ async function launchArtifact(applicationRoot, evidence, rscript, manifest, expe
     }
   }
   let ownedGraph = ownedGraphBeforeCleanup;
-  const registryPath = join(runtimeDirectory, createHash('sha256').update(canonical).digest('hex') + '.json');
+  const registryPath = join(runtimeDirectory, createHash('sha256').update('path:' + canonical).digest('hex') + '.json');
   let registry = null;
   let identity = null;
   let session = null;
@@ -327,9 +331,10 @@ async function launchArtifact(applicationRoot, evidence, rscript, manifest, expe
   if (ready !== null) {
     try {
       registry = await waitForRegistry(canonical, runtimeDirectory, 30_000);
-      assert.equal(registry.origin, ready.origin);
+      assert.equal(registry.address?.browserOrigin, ready.origin);
       const registryTree = await captureProcessTree(registry.pid, registry.startIdentity, processObserverOptions);
-      ownedGraph = mergeProcessTrees(ownedGraph, registryTree);
+      ownedGraphBeforeCleanup = mergeProcessTrees(ownedGraphBeforeCleanup, registryTree);
+      ownedGraph = ownedGraphBeforeCleanup;
       session = await openSession(ready.origin, registry);
       identity = await requestJson(ready.origin, '/api/identity', { cookie: session.cookie, csrf: session.csrf });
       assert.equal(identity.canonicalPath, canonical);
@@ -397,7 +402,7 @@ async function copyRoot(source, destination) {
 function manifestPathFor(root, manifest) { return join(root, resourcePrefix(manifest), 'manifest.json'); }
 function resourcePrefix(manifest) { return dirname(manifest.resources.hostEntry).split('/')[0]; }
 
-async function runPackageVerifier(applicationRoot, output, sourceCommit, archivePath = null, rscript) {
+async function runPackageVerifier(applicationRoot, output, sourceCommit, archivePath = null, rscript, packageScript = PACKAGE_SCRIPT) {
   await rm(output, { recursive: true, force: true });
   await mkdir(output, { recursive: true });
   const args = ['--application', applicationRoot, '--output', output, '--source-commit', sourceCommit, '--rscript', rscript];
@@ -406,7 +411,7 @@ async function runPackageVerifier(applicationRoot, output, sourceCommit, archive
     await rm(join(dirname(archivePath), 'artifact-record.json'), { force: true });
     args.push('--archive', archivePath);
   }
-  return runNode(PACKAGE_SCRIPT, args);
+  return runNode(packageScript, args);
 }
 function runNode(script, args) {
   const child = spawnSync(process.execPath, [script, ...args], { cwd: process.cwd(), env: sanitizedEnvironment(), encoding: 'utf8', timeout: DRIVER_TIMEOUT_MS, windowsHide: true });

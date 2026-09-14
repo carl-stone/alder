@@ -7,6 +7,7 @@ import test from "node:test";
 
 import { resolveREnvironment, rEnvironmentVariables } from "../src/r-environment.js";
 import { resolveApplicationResources } from "../src/resources.js";
+import { createWindowsNodeLauncher, secureWindowsPath } from "./windows-fixtures.js";
 
 interface Fixture {
   root: string;
@@ -258,25 +259,31 @@ test("selected R rejects a bundled helper with the wrong package identity", asyn
 async function makeFixture(helperVersion = "0.1.0"): Promise<Fixture> {
   const root = await realpath(await mkdtemp(join(tmpdir(), "alder-resources-r-")));
   const supportRoot = await realpath(await mkdtemp(join(tmpdir(), "alder-resources-r-support-")));
+  await secureWindowsPath("directory", root);
+  await secureWindowsPath("directory", supportRoot);
+  const executablePath = (path: string): string => process.platform === "win32" ? path + ".exe" : path;
   const paths = [
-    "bin/alder",
+    executablePath("bin/alder"),
     "chrome-sandbox",
     "resources/host/alder-host.mjs",
     "resources/app/index.html",
     "resources/worker/worker.mjs",
     "resources/r-library/alder/DESCRIPTION",
-    "resources/runtime/ark",
-    "resources/runtime/air",
-    "resources/runtime/node",
-    "resources/runtime/alder-process-supervisor",
+    executablePath("resources/runtime/ark"),
+    executablePath("resources/runtime/air"),
+    executablePath("resources/runtime/node"),
+    executablePath("resources/runtime/alder-process-supervisor"),
   ];
   for (const path of paths) {
     const absolute = join(root, path);
     await mkdir(dirname(absolute), { recursive: true });
-    await writeFile(absolute, path.endsWith("DESCRIPTION") ? "Package: alder\\nVersion: 0.1.0\\n" : path);
-    if (!path.endsWith("DESCRIPTION") || path === "bin/alder") await chmod(absolute, 0o755);
+    await writeFile(absolute, path.endsWith("DESCRIPTION") ? "Package: alder\nVersion: 0.1.0\n" : path);
+    await secureWindowsPath("file", absolute);
+    if (process.platform !== "win32" && (!path.endsWith("DESCRIPTION") || path === executablePath("bin/alder"))) {
+      await chmod(absolute, 0o755);
+    }
   }
-  const supervisorPath = "resources/runtime/alder-process-supervisor";
+  const supervisorPath = executablePath("resources/runtime/alder-process-supervisor");
   const supervisorSha = createHash("sha256").update(await readFile(join(root, supervisorPath))).digest("hex");
   const producer = {
     toolchain: "rust-1.95.0",
@@ -286,31 +293,54 @@ async function makeFixture(helperVersion = "0.1.0"): Promise<Fixture> {
   };
   const descriptorPath = "resources/host/locks/process-supervisor-provenance.json";
   await mkdir(dirname(join(root, descriptorPath)), { recursive: true });
+  await secureWindowsPath("directory", dirname(join(root, descriptorPath)));
   await writeFile(join(root, descriptorPath), JSON.stringify({ schemaVersion: 1, artifact: { sha256: supervisorSha }, producer }));
+  await secureWindowsPath("file", join(root, descriptorPath));
   const rHome = join(supportRoot, "fake-r");
   const normalLibrary = join(supportRoot, "normal-library");
   const baseLibrary = join(rHome, "library");
+  const rBin = join(rHome, "bin", "x64");
+  await mkdir(rBin, { recursive: true });
+  await secureWindowsPath("directory", rBin);
   await mkdir(join(rHome, "lib"), { recursive: true });
+  await secureWindowsPath("directory", join(rHome, "lib"));
   await mkdir(normalLibrary, { recursive: true });
+  await secureWindowsPath("directory", normalLibrary);
   await mkdir(baseLibrary, { recursive: true });
-  await writeFile(join(rHome, "lib", process.platform === "darwin" ? "libR.dylib" : process.platform === "win32" ? "R.dll" : "libR.so"), "fake-R");
-  const rscript = join(supportRoot, process.platform === "win32" ? "fake-Rscript.cmd" : "fake-Rscript");
+  await secureWindowsPath("directory", baseLibrary);
+  const sharedLibrary = process.platform === "darwin" ? join(rHome, "lib", "libR.dylib")
+    : process.platform === "win32" ? join(rBin, "R.dll") : join(rHome, "lib", "libR.so");
+  await writeFile(sharedLibrary, "fake-R");
+  await secureWindowsPath("file", sharedLibrary);
+  const rscriptScriptPath = join(supportRoot, "fake-Rscript.mjs");
+  const rscript = join(supportRoot, process.platform === "win32" ? "fake-Rscript.exe" : "fake-Rscript");
   const arch = process.arch === "x64" ? "x86_64" : process.arch;
   const output = [
     rHome,
     "R version 4.6.1 (fake)",
-    process.platform,
+    process.platform === "win32" ? "mingw" : process.platform,
     arch,
     normalLibrary,
     "--ALDER-LIBS-END--",
     baseLibrary,
   ].join("\n") + "\n";
-  const helperOutput = helperVersion + "\\nR 4.6.1; fake\\n";
-  const script = process.platform === "win32"
-    ? `@echo off\r\necho %* | findstr /C:"library(alder)" >nul\r\nif not errorlevel 1 (echo ${helperVersion}& echo R 4.6.1; fake) else (echo ${output.replaceAll("\n", "\r\n")})`
-    : `#!/bin/sh\ncase "$*" in *"library(alder)"*) printf '%b' ${JSON.stringify(helperOutput)} ;; *) printf '%b' ${JSON.stringify(output)} ;; esac\n`;
-  await writeFile(rscript, script);
-  await chmod(rscript, 0o755);
+  const helperOutput = helperVersion + "\nR 4.6.1; fake\n";
+  const nodeScript = [
+    "const output = " + JSON.stringify(output) + ";",
+    "const helperOutput = " + JSON.stringify(helperOutput) + ";",
+    "process.stdout.write(process.argv.join(\" \").includes(\"library(alder)\") ? helperOutput : output);",
+    "",
+  ].join("\n");
+  await writeFile(rscriptScriptPath, nodeScript);
+  await secureWindowsPath("file", rscriptScriptPath);
+  if (process.platform === "win32") {
+    await createWindowsNodeLauncher(rscript, rscriptScriptPath);
+    await secureWindowsPath("file", rscript);
+  } else {
+    const shellScript = "#!/bin/sh\ncase \"$*\" in *\"library(alder)\"*) printf '%b' " + JSON.stringify(helperOutput) + " ;; *) printf '%b' " + JSON.stringify(output) + " ;; esac\n";
+    await writeFile(rscript, shellScript);
+    await chmod(rscript, 0o755);
+  }
 
   const inventory = [];
   for (const path of [...paths, descriptorPath]) {
@@ -330,15 +360,15 @@ async function makeFixture(helperVersion = "0.1.0"): Promise<Fixture> {
     qualifiedRPatchVersions: ["4.6.0", "4.6.1"],
     rBuildVersion: "4.6.1",
     resources: {
-      cliLauncher: "bin/alder",
+      cliLauncher: executablePath("bin/alder"),
       hostEntry: "resources/host/alder-host.mjs",
       rendererDirectory: "resources/app",
       workerDirectory: "resources/worker",
       rLibraryDirectory: "resources/r-library",
-      arkExecutable: "resources/runtime/ark",
-      airExecutable: "resources/runtime/air",
-      nodeExecutable: "resources/runtime/node",
-      processSupervisorExecutable: "resources/runtime/alder-process-supervisor",
+      arkExecutable: executablePath("resources/runtime/ark"),
+      airExecutable: executablePath("resources/runtime/air"),
+      nodeExecutable: executablePath("resources/runtime/node"),
+      processSupervisorExecutable: executablePath("resources/runtime/alder-process-supervisor"),
       electronEntry: null,
     },
     runtimes: {
@@ -353,7 +383,9 @@ async function makeFixture(helperVersion = "0.1.0"): Promise<Fixture> {
     rPackages: [{ name: "alder", version: "0.1.0", builtR: "4.6.1", platform: process.platform, license: "MIT" }],
   };
   await mkdir(join(root, "resources"), { recursive: true });
+  await secureWindowsPath("directory", join(root, "resources"));
   await writeFile(join(root, "resources/manifest.json"), JSON.stringify(manifest));
+  await secureWindowsPath("file", join(root, "resources/manifest.json"));
   const resources = await resolveApplicationResources(root);
   return { root, supportRoot, resources, rscript, rHome, normalLibrary, baseLibrary };
 }

@@ -181,8 +181,8 @@ async function exerciseIndexedDbDraft(harness) {
     const edited = await live.browser.evaluate("(async () => { const client = window.__alderHost.client; const cell = client.document.cells[0]; client.editCell(cell.key, ['browserDraft <- 3', 'browserDraft']); client.document.updateSelection(cell.key, { anchor: 7, head: 12, scrollTop: 19 }); await client.flushDraftPersistence(); return { body: client.document.cell(cell.key).desiredBody, recovery: client.recoveryState }; })()");
     assert.deepEqual(edited.body, ['browserDraft <- 3', 'browserDraft'], 'local renderer edit must remain unacknowledged');
     const storedBefore = await indexedDbEntries(live);
-    assert.match(JSON.stringify(storedBefore), /browserDraft <- 3/, 'IndexedDB must contain unacknowledged logical edit intent');
-    assert.doesNotMatch(JSON.stringify(storedBefore), /csrf|bearer|authorization|ticket|cookie|leaseId/i, 'IndexedDB draft must not contain credentials');
+    assert.ok(storedBefore.some(entry => String(entry.key).endsWith(':cursor') && entry.value?.schemaVersion === 1 && entry.value?.algorithm === 'AES-256-GCM' && entry.value?.ciphertext), 'IndexedDB must contain encrypted unacknowledged edit intent');
+    assert.doesNotMatch(JSON.stringify(storedBefore), /browserDraft <- 3|csrf|bearer|authorization|ticket|cookie|leaseId/i, 'IndexedDB draft must contain neither plaintext source nor credentials');
 
     await live.browser.evaluate("window.__alderHost.view.internalNavigation = true");
     await live.browser.send('Page.navigate', { url: 'about:blank' });
@@ -215,7 +215,12 @@ async function exerciseIndexedDbDraft(harness) {
     assert.equal(discarded.local, null);
     assert.deepEqual(discarded.desired, ['peerDraft <- 9', 'peerDraft'], 'Discard must preserve authoritative peer source');
     const storedAfter = await indexedDbEntries(live);
-    assert.doesNotMatch(JSON.stringify(storedAfter), /browserDraft <- 3/, 'Discard must clear the current IndexedDB draft');
+    assert.notDeepEqual(storedAfter, storedBefore, 'Discard must replace the persisted renderer draft');
+    await live.navigate(harness);
+    await live.wait("window.__alderHost?.client?.recoveryState?.status === 'none'");
+    const restored = await live.browser.evaluate("(() => { const client = window.__alderHost.client; return { desired: client.document.cells[0].desiredBody, server: client.document.cells[0].serverBody }; })()");
+    assert.deepEqual(restored.desired, ['peerDraft <- 9', 'peerDraft'], 'discarded draft must not recover after navigation');
+    assert.deepEqual(restored.server, ['peerDraft <- 9', 'peerDraft']);
     return { dom: discarded.dom, storedBefore, storedAfter };
   } finally {
     await cleanupScenarioResources(() => live?.close());
@@ -223,7 +228,7 @@ async function exerciseIndexedDbDraft(harness) {
 }
 
 async function indexedDbEntries(live) {
-  return live.browser.evaluate("new Promise((resolve, reject) => { const request = indexedDB.open('alder-browser-recovery', 1); request.onerror = () => reject(request.error); request.onsuccess = () => { const database = request.result; const transaction = database.transaction('state', 'readonly'); const store = transaction.objectStore('state'); const keys = store.getAllKeys(); const values = store.getAll(); transaction.onerror = () => reject(transaction.error); transaction.oncomplete = () => resolve(keys.result.map((key, index) => ({ key, value: values.result[index] }))); }; })");
+  return live.browser.evaluate("new Promise((resolve, reject) => { const request = indexedDB.open('alder-browser-recovery'); request.onerror = () => reject(request.error); request.onsuccess = () => { const database = request.result; const transaction = database.transaction('state', 'readonly'); const store = transaction.objectStore('state'); const keys = store.getAllKeys(); const values = store.getAll(); transaction.onerror = () => reject(transaction.error); transaction.oncomplete = () => resolve(keys.result.map((key, index) => ({ key, value: values.result[index] }))); }; })");
 }
 
 function assertAdmission(value, label) {

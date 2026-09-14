@@ -5,6 +5,7 @@ import { randomUUID } from 'node:crypto';
 
 import {
   assertStrictReadyOutput,
+  cleanupPartialOwner,
   cleanupScenarioResources,
   createHarness,
   createStrictReadyParser,
@@ -14,6 +15,7 @@ import {
   requireAbsoluteRscript,
   sanitizedEnvironment,
   spawnSmokeProcess,
+  snapshot as fullSnapshot,
   spawnSmokeSync,
   signalSmokeProcessGroup,
   stopChild,
@@ -40,7 +42,13 @@ export async function run(ctx) {
   await mkdir(env.HOME, { recursive: true });
   await mkdir(env.XDG_CONFIG_HOME, { recursive: true });
   await mkdir(env.XDG_DATA_HOME, { recursive: true });
-  const cli = { launcher, cwd, env };
+  const cli = {
+    launcher,
+    cwd,
+    env,
+    runtimeDirectory: join(env.XDG_DATA_HOME, 'alder-nodejs', 'runtime'),
+    processObserverOptions: { supervisorExecutable: join(ctx.applicationRoot, ctx.manifest.resources.processSupervisorExecutable) },
+  };
 
   const documentFree = {};
   for (const [name, args] of [['help', ['--help']], ['version', ['--version']], ['hostInfo', ['--host-info']]]) {
@@ -419,21 +427,25 @@ function spawnCli(launcher, args, options) {
 
 
 async function startAndStop(cli, args, name, { expectFailure = false } = {}) {
-  const result = await launch(cli.launcher, args, cli);
-  if (result.ready) {
-    if (expectFailure) {
+  try {
+    const result = await launch(cli.launcher, args, cli);
+    if (result.ready) {
+      if (expectFailure) {
+        await stop(result.child, result.parser);
+        throw new Error(name + ' unexpectedly started a host');
+      }
       await stop(result.child, result.parser);
-      throw new Error(name + ' unexpectedly started a host');
+      return { started: true, ready: result.ready };
     }
-    await stop(result.child, result.parser);
-    return { started: true, ready: result.ready };
+    await result.parser.done;
+    assertStrictReadyOutput(result.parser, { requireReady: false });
+    if (!expectFailure) throw new Error(name + ' failed before host.ready: ' + result.stderr);
+    assert.notEqual(result.exit?.signal, 'timeout', name + ' must not be accepted after a launch timeout');
+    assert.ok((Number.isInteger(result.exit?.code) && result.exit.code !== 0) || (typeof result.exit?.signal === 'string' && result.exit.signal !== 'timeout'), name + ' must fail with a non-zero status');
+    return { started: false, exit: result.exit, stderr: result.stderr };
+  } finally {
+    await cleanupPartialOwner(null, cli.runtimeDirectory, cli.processObserverOptions);
   }
-  await result.parser.done;
-  assertStrictReadyOutput(result.parser, { requireReady: false });
-  if (!expectFailure) throw new Error(name + ' failed before host.ready: ' + result.stderr);
-  assert.notEqual(result.exit?.signal, 'timeout', name + ' must not be accepted after a launch timeout');
-  assert.ok((Number.isInteger(result.exit?.code) && result.exit.code !== 0) || (typeof result.exit?.signal === 'string' && result.exit.signal !== 'timeout'), name + ' must fail with a non-zero status');
-  return { started: false, exit: result.exit, stderr: result.stderr };
 }
 
 async function launch(launcher, args, { cwd, env }, timeout = 20_000) {

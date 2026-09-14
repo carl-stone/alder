@@ -1,4 +1,4 @@
-import { delimiter, join, resolve as resolvePath, win32 } from "node:path";
+import { delimiter, join, posix, resolve as resolvePath, win32 } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
   CancellationTokenSource,
@@ -98,7 +98,14 @@ export class LspClientError extends Error {
 }
 
 export function encodeFilePathUri(path: string, platform: NodeJS.Platform = process.platform): string {
-  if (platform !== "win32") return pathToFileURL(path).href;
+  if (platform !== "win32") {
+    // Keep the explicit platform override deterministic when a Windows host
+    // exercises the POSIX branch. pathToFileURL follows the native host
+    // parser, so it turns /tmp/... into a drive path on Windows.
+    if (platform === process.platform) return pathToFileURL(path).href;
+    const normalized = posix.normalize(posix.isAbsolute(path) ? path : posix.resolve(path));
+    return "file://" + normalized.split("/").map(encodeFilePathSegment).join("/");
+  }
   const normalized = path.replaceAll("\\", "/");
   const encoded = normalized
     .split("/")
@@ -110,6 +117,22 @@ export function encodeFilePathUri(path: string, platform: NodeJS.Platform = proc
   return normalized.startsWith("//") ? `file:///${encoded}` : `file:///${encoded}`;
 }
 
+function encodeFilePathSegment(segment: string): string {
+  // URL path segments permit the pchar punctuation below. Keep the same
+  // spelling as pathToFileURL while encoding delimiters such as %, #,
+  // and ? that would otherwise change the URI's meaning.
+  return encodeURIComponent(segment)
+    .replaceAll("%24", "$")
+    .replaceAll("%26", "&")
+    .replaceAll("%2B", "+")
+    .replaceAll("%2C", ",")
+    .replaceAll("%3A", ":")
+    .replaceAll("%3B", ";")
+    .replaceAll("%3D", "=")
+    .replaceAll("%40", "@")
+    .replaceAll("~", "%7E");
+}
+
 export function fileUri(
   path: string,
   cwd = process.cwd(),
@@ -117,10 +140,9 @@ export function fileUri(
 ): string {
   const absolute = platform === "win32"
     ? win32.resolve(cwd, path)
-    : resolvePath(cwd, path);
+    : platform === process.platform ? resolvePath(cwd, path) : posix.resolve(cwd, path);
   return encodeFilePathUri(absolute, platform);
 }
-
 
 function validCoordinate(value: unknown): value is number {
   return Number.isSafeInteger(value) && (value as number) >= 0 && (value as number) <= 2_147_483_647;

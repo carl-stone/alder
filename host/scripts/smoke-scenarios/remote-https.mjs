@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { once } from 'node:events';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { createServer as createNetServer } from 'node:net';
 import { join } from 'node:path';

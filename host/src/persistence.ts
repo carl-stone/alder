@@ -832,7 +832,7 @@ async function publishStagedNoClobber(
       throw error;
     }
     const committed = await diskVersion(target);
-    if (committed.identity === null || committed.mode !== expected.mode || !sameBytes(committed.bytes, bytes)) {
+    if (committed.identity === null || (process.platform !== "win32" && committed.mode !== expected.mode) || !sameBytes(committed.bytes, bytes)) {
       throw new FileConflict(conflictMessage);
     }
 
@@ -897,7 +897,8 @@ async function syncDirectory(path: string): Promise<void> {
     await directory.sync();
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
-    if (code !== "EINVAL" && code !== "ENOTSUP" && code !== "EBADF") throw error;
+    if (code !== "EINVAL" && code !== "ENOTSUP" && code !== "EBADF" &&
+            !(process.platform === "win32" && code === "EPERM")) throw error;
   } finally {
     await directory?.close().catch(() => undefined);
   }

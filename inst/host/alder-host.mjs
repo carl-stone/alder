@@ -41097,9 +41097,17 @@ async function readPrivateFile(path3, options = {}) {
   const inspection = await inspectPath(path3, "file");
   if (!inspection.exists) throw missing(inspection.path);
   if (platform === "win32") {
+    const before2 = await lstat(inspection.path);
+    validatePrivateStats(before2, "file", inspection.path, platform);
+    await options.beforeRead?.();
     const bytes = await invokeNative("read", null, inspection.path, options, maxBytes);
     if (bytes.byteLength > maxBytes) {
       throw new PrivatePathError("private_path_too_large", "private file exceeds " + maxBytes + " bytes: " + inspection.path);
+    }
+    const after2 = await lstat(inspection.path);
+    validatePrivateStats(after2, "file", inspection.path, platform);
+    if (after2.dev !== before2.dev || after2.ino !== before2.ino || after2.mode !== before2.mode || after2.nlink !== before2.nlink || after2.uid !== before2.uid || after2.gid !== before2.gid || after2.rdev !== before2.rdev || after2.size !== before2.size || after2.mtimeMs !== before2.mtimeMs || after2.ctimeMs !== before2.ctimeMs || after2.birthtimeMs !== before2.birthtimeMs) {
+      throw invalid("private file changed while being read: " + inspection.path);
     }
     return Buffer.from(bytes);
   }
@@ -101998,7 +102006,7 @@ async function publishStagedNoClobber(stage, target, expected, bytes, conflictMe
       throw error61;
     }
     const committed = await diskVersion(target);
-    if (committed.identity === null || committed.mode !== expected.mode || !sameBytes2(committed.bytes, bytes)) {
+    if (committed.identity === null || process.platform !== "win32" && committed.mode !== expected.mode || !sameBytes2(committed.bytes, bytes)) {
       throw new FileConflict(conflictMessage);
     }
     if (displaced !== null) {
@@ -102054,7 +102062,7 @@ async function syncDirectory2(path3) {
     await directory.sync();
   } catch (error61) {
     const code2 = error61.code;
-    if (code2 !== "EINVAL" && code2 !== "ENOTSUP" && code2 !== "EBADF") throw error61;
+    if (code2 !== "EINVAL" && code2 !== "ENOTSUP" && code2 !== "EBADF" && !(process.platform === "win32" && code2 === "EPERM")) throw error61;
   } finally {
     await directory?.close().catch(() => void 0);
   }
@@ -102580,7 +102588,7 @@ function isMissing2(error61) {
   return isRecord7(error61) && error61.code === "ENOENT";
 }
 function unsupportedDirectorySync(error61) {
-  return isRecord7(error61) && (error61.code === "EINVAL" || error61.code === "ENOTSUP" || error61.code === "EBADF");
+  return isRecord7(error61) && (error61.code === "EINVAL" || error61.code === "ENOTSUP" || error61.code === "EBADF" || process.platform === "win32" && error61.code === "EPERM");
 }
 async function syncDirectory3(directory) {
   let handle;
@@ -115252,7 +115260,7 @@ function isAbsoluteNonEmptyPath3(value) {
 // src/lsp.ts
 var import_node12 = __toESM(require_main(), 1);
 var import_vscode_languageserver_protocol = __toESM(require_api2(), 1);
-import { delimiter as delimiter3, join as join18, resolve as resolvePath, win32 } from "node:path";
+import { delimiter as delimiter3, join as join18, posix, resolve as resolvePath, win32 } from "node:path";
 import { pathToFileURL } from "node:url";
 var REQUEST_TYPES = {
   "textDocument/completion": import_vscode_languageserver_protocol.CompletionRequest.type,
@@ -115274,13 +115282,20 @@ var LspClientError = class extends Error {
   code;
 };
 function encodeFilePathUri(path3, platform = process.platform) {
-  if (platform !== "win32") return pathToFileURL(path3).href;
+  if (platform !== "win32") {
+    if (platform === process.platform) return pathToFileURL(path3).href;
+    const normalized2 = posix.normalize(posix.isAbsolute(path3) ? path3 : posix.resolve(path3));
+    return "file://" + normalized2.split("/").map(encodeFilePathSegment).join("/");
+  }
   const normalized = path3.replaceAll("\\", "/");
   const encoded = normalized.split("/").map((segment, index) => index === 0 && /^[A-Za-z]:$/.test(segment) ? `${segment[0]}:` : encodeURIComponent(segment)).join("/");
   return normalized.startsWith("//") ? `file:///${encoded}` : `file:///${encoded}`;
 }
+function encodeFilePathSegment(segment) {
+  return encodeURIComponent(segment).replaceAll("%24", "$").replaceAll("%26", "&").replaceAll("%2B", "+").replaceAll("%2C", ",").replaceAll("%3A", ":").replaceAll("%3B", ";").replaceAll("%3D", "=").replaceAll("%40", "@").replaceAll("~", "%7E");
+}
 function fileUri(path3, cwd = process.cwd(), platform = process.platform) {
-  const absolute = platform === "win32" ? win32.resolve(cwd, path3) : resolvePath(cwd, path3);
+  const absolute = platform === "win32" ? win32.resolve(cwd, path3) : platform === process.platform ? resolvePath(cwd, path3) : posix.resolve(cwd, path3);
   return encodeFilePathUri(absolute, platform);
 }
 function validCoordinate2(value) {

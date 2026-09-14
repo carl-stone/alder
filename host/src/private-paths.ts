@@ -323,9 +323,21 @@ export async function readPrivateFile(path: string, options: ReadPrivateFileOpti
   const inspection = await inspectPath(path, "file");
   if (!inspection.exists) throw missing(inspection.path);
   if (platform === "win32") {
+    const before = await lstat(inspection.path);
+    validatePrivateStats(before, "file", inspection.path, platform);
+    await options.beforeRead?.();
     const bytes = await invokeNative("read", null, inspection.path, options, maxBytes);
     if (bytes.byteLength > maxBytes) {
       throw new PrivatePathError("private_path_too_large", "private file exceeds " + maxBytes + " bytes: " + inspection.path);
+    }
+    const after = await lstat(inspection.path);
+    validatePrivateStats(after, "file", inspection.path, platform);
+    if (
+      after.dev !== before.dev || after.ino !== before.ino || after.mode !== before.mode || after.nlink !== before.nlink ||
+      after.uid !== before.uid || after.gid !== before.gid || after.rdev !== before.rdev || after.size !== before.size ||
+      after.mtimeMs !== before.mtimeMs || after.ctimeMs !== before.ctimeMs || after.birthtimeMs !== before.birthtimeMs
+    ) {
+      throw invalid("private file changed while being read: " + inspection.path);
     }
     return Buffer.from(bytes);
   }

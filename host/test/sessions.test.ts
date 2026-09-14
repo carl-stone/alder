@@ -6,6 +6,7 @@ import { readFileSync } from "node:fs";
 import { chmod, link, lstat, mkdir, mkdtemp, readFile, realpath, rename, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import {
   acquireNotebookOwnership,
@@ -21,11 +22,31 @@ import {
   type UntitledRecoveryDescriptor,
 } from "../src/sessions.js";
 import { HOST_PROTOCOL } from "../src/protocol.js";
+import { createWindowsNodeLauncher, secureWindowsPath, testNodeExecutable } from "./windows-fixtures.js";
+const windowsSupervisor = process.platform === "win32"
+  ? resolve(fileURLToPath(new URL("../.application/resources/runtime/alder-process-supervisor.exe", import.meta.url)))
+  : undefined;
+const sessionPrivateOptions = windowsSupervisor === undefined ? {} : { processSupervisorExecutable: windowsSupervisor };
+async function temporaryDirectory(prefix: string): Promise<string> {
+  const root = await realpath(await mkdtemp(join(tmpdir(), prefix)));
+  await secureWindowsPath("directory", root);
+  return root;
+}
+
+async function privateDirectory(path: string): Promise<void> {
+  await mkdir(path, { recursive: true, mode: 0o700 });
+  await secureWindowsPath("directory", path);
+}
+
+async function privateFile(path: string, content: string, mode = 0o600): Promise<void> {
+  await writeFile(path, content, { mode });
+  await secureWindowsPath("file", path);
+}
+
 
 function keyFor(canonicalPath: string): string {
   return createHash("sha256").update("path:" + canonicalPath).digest("hex");
 }
-
 function currentProcessStartIdentity(): string {
   try {
     const stat = readFileSync("/proc/" + process.pid + "/stat", "utf8");
@@ -80,7 +101,7 @@ function waitForChild(child: ReturnType<typeof spawn>): Promise<void> {
 }
 
 test("dead stale claim reclamation is serialized to one owner", async () => {
-  const root = await realpath(await mkdtemp(join(tmpdir(), "alder-session-reclaim-race-")));
+  const root = await temporaryDirectory("alder-session-reclaim-race-");
   const runtimeDirectory = join(root, "runtime");
   const notebook = join(root, "notebook.R");
   const canonicalPath = resolve(notebook);
@@ -89,8 +110,8 @@ test("dead stale claim reclamation is serialized to one owner", async () => {
   let lockPath!: string;
   const goPath = join(root, "go");
   const releasePath = join(root, "release");
-  const sourcePath = resolve(new URL("../src/sessions.ts", import.meta.url).pathname);
-  const hostDirectory = resolve(new URL("..", import.meta.url).pathname);
+  const sourcePath = fileURLToPath(new URL("../src/sessions.ts", import.meta.url));
+  const hostDirectory = fileURLToPath(new URL("..", import.meta.url));
   const stale = {
     state: "ready",
     pid: 2_000_000_000,
@@ -114,7 +135,7 @@ test("dead stale claim reclamation is serialized to one owner", async () => {
     "writeFileSync(readyPath, 'ready');",
     "while (!existsSync(process.env.ALDER_SESSION_GO)) await new Promise(resolveDelay => setTimeout(resolveDelay, 10));",
     "try {",
-    "  const owner = await acquireNotebookOwnership({ path: notebook, runtimeDirectory, origin: 'http://127.0.0.1:41780' });",
+    "  const owner = await acquireNotebookOwnership({ path: notebook, runtimeDirectory, origin: 'http://127.0.0.1:41780', ...JSON.parse(process.env.ALDER_SESSION_OPTIONS || '{}') });",
     "  writeFileSync(resultPath, JSON.stringify({ ok: true, pid: owner.pid, processNonce: owner.processNonce, epoch: owner.epoch }));",
     "  while (!existsSync(process.env.ALDER_SESSION_RELEASE)) await new Promise(resolveDelay => setTimeout(resolveDelay, 10));",
     "  await owner.close();",
@@ -122,19 +143,20 @@ test("dead stale claim reclamation is serialized to one owner", async () => {
     "  writeFileSync(resultPath, JSON.stringify({ ok: false, error: error instanceof Error ? error.message : String(error) }));",
     "}",
   ].join(String.fromCharCode(10));
-  await mkdir(runtimeDirectory, { recursive: true, mode: 0o700 });
-  await writeFile(notebook, "notebook" + String.fromCharCode(10));
+  await privateDirectory(runtimeDirectory);
+  await privateFile(notebook, "notebook" + String.fromCharCode(10));
   key = keyFor(canonicalPath);
   registry = registryPath(runtimeDirectory, canonicalPath);
   lockPath = join(runtimeDirectory, key + ".json.lock");
-  await writeFile(registry, JSON.stringify(stale), { mode: 0o600 });
-  await mkdir(lockPath, { recursive: true });
+  await privateFile(registry, JSON.stringify(stale));
+  await privateDirectory(lockPath);
   const old = new Date(Date.now() - 120_000);
   await utimes(lockPath, old, old);
-  const children = [0, 1].map(index => spawn(process.execPath, ["--import", "tsx/esm", "--input-type=module", "--eval", workerSource], {
+  const children = [0, 1].map(index => spawn(testNodeExecutable(), ["--import", "tsx/esm", "--input-type=module", "--eval", workerSource], {
     cwd: hostDirectory,
     env: {
       ...process.env,
+      ALDER_SESSION_OPTIONS: JSON.stringify(sessionPrivateOptions),
       ALDER_SESSION_SOURCE: sourcePath,
       ALDER_SESSION_RUNTIME: runtimeDirectory,
       ALDER_SESSION_NOTEBOOK: canonicalPath,
@@ -168,18 +190,18 @@ test("dead stale claim reclamation is serialized to one owner", async () => {
   }
 });
 test("hard-link aliases retain distinct canonical path ownership", { skip: process.platform === "win32" }, async () => {
-  const root = await realpath(await mkdtemp(join(tmpdir(), "alder-session-hardlink-")));
+  const root = await temporaryDirectory("alder-session-hardlink-");
   const runtimeDirectory = join(root, "runtime");
   const firstPath = join(root, "first.R");
   const aliasPath = join(root, "alias.R");
   let firstOwner: NotebookOwnership | undefined;
   let secondOwner: NotebookOwnership | undefined;
   try {
-    await mkdir(runtimeDirectory, { recursive: true, mode: 0o700 });
-    await writeFile(firstPath, "notebook" + String.fromCharCode(10));
+    await privateDirectory(runtimeDirectory);
+    await privateFile(firstPath, "notebook" + String.fromCharCode(10));
     await link(firstPath, aliasPath);
-    firstOwner = await acquireNotebookOwnership({ path: firstPath, runtimeDirectory, origin: "http://127.0.0.1:41782" });
-    secondOwner = await acquireNotebookOwnership({ path: aliasPath, runtimeDirectory, origin: "http://127.0.0.1:41783" });
+    firstOwner = await acquireNotebookOwnership({ path: firstPath, runtimeDirectory, origin: "http://127.0.0.1:41782", ...sessionPrivateOptions });
+    secondOwner = await acquireNotebookOwnership({ path: aliasPath, runtimeDirectory, origin: "http://127.0.0.1:41783", ...sessionPrivateOptions });
     assert.equal(firstOwner.sessionKey, keyFor(resolve(firstPath)));
     assert.equal(secondOwner.sessionKey, keyFor(resolve(aliasPath)));
     assert.notEqual(firstOwner.sessionKey, secondOwner.sessionKey);
@@ -191,19 +213,19 @@ test("hard-link aliases retain distinct canonical path ownership", { skip: proce
 });
 
 test("atomic notebook replacement cannot create a second owner", async () => {
-  const root = await realpath(await mkdtemp(join(tmpdir(), "alder-session-replacement-")));
+  const root = await temporaryDirectory("alder-session-replacement-");
   const runtimeDirectory = join(root, "runtime");
   const notebook = join(root, "notebook.R");
   const staged = join(root, "staged.R");
   let owner: NotebookOwnership | undefined;
   try {
-    await mkdir(runtimeDirectory, { recursive: true, mode: 0o700 });
-    await writeFile(notebook, "before\n");
-    owner = await acquireNotebookOwnership({ path: notebook, runtimeDirectory, origin: "http://127.0.0.1:41782" });
-    await writeFile(staged, "after\n");
+    await privateDirectory(runtimeDirectory);
+    await privateFile(notebook, "before\n");
+    owner = await acquireNotebookOwnership({ path: notebook, runtimeDirectory, origin: "http://127.0.0.1:41782", ...sessionPrivateOptions });
+    await privateFile(staged, "after\n");
     await rename(staged, notebook);
     await assert.rejects(
-      acquireNotebookOwnership({ path: notebook, runtimeDirectory, origin: "http://127.0.0.1:41783" }),
+      acquireNotebookOwnership({ path: notebook, runtimeDirectory, origin: "http://127.0.0.1:41783", ...sessionPrivateOptions }),
       error => error instanceof SessionUnavailableError && error.code === "session_unavailable",
     );
     assert.equal(owner.sessionKey, keyFor(resolve(notebook)));
@@ -214,11 +236,11 @@ test("atomic notebook replacement cannot create a second owner", async () => {
 });
 
 test("session lease release sends the release action exactly once", async () => {
-  const root = await realpath(await mkdtemp(join(tmpdir(), "alder-session-release-")));
+  const root = await temporaryDirectory("alder-session-release-");
   const runtimeDirectory = join(root, "runtime");
   const notebook = join(root, "notebook.R");
   const canonicalPath = resolve(notebook);
-  await writeFile(notebook, "notebook" + String.fromCharCode(10));
+  await privateFile(notebook, "notebook" + String.fromCharCode(10));
   const sessionKey = keyFor(canonicalPath);
   const origin = "http://127.0.0.1:41781";
   const browserOrigin = browserOriginFor(41781);
@@ -260,7 +282,7 @@ test("session lease release sends the release action exactly once", async () => 
     });
   }) as typeof fetch;
   try {
-    await mkdir(runtimeDirectory, { recursive: true, mode: 0o700 });
+    await privateDirectory(runtimeDirectory);
     await writeFile(registry, JSON.stringify({
       state: "ready",
       pid: process.pid,
@@ -274,7 +296,8 @@ test("session lease release sends the release action exactly once", async () => 
       token,
       protocol: HOST_PROTOCOL,
     }), { mode: 0o600 });
-    const connection = await acquireNotebookSession({ path: notebook, runtimeDirectory });
+    await secureWindowsPath("file", registry);
+    const connection = await acquireNotebookSession({ path: notebook, runtimeDirectory, resources: sessionPrivateOptions });
     await connection.release();
     await connection.release();
     assert.deepEqual(requests.filter(request => request.path === "/api/lease").map(request => request.body), [
@@ -287,11 +310,11 @@ test("session lease release sends the release action exactly once", async () => 
   }
 });
 test("prepared Save As reserves an absent target while preserving source authority and identity", async () => {
-  const root = await realpath(await mkdtemp(join(tmpdir(), "alder-sessions-")));
+  const root = await temporaryDirectory("alder-sessions-");
   const runtimeDirectory = join(root, "runtime");
   const source = join(root, "source.R");
   const destination = join(root, "renamed.R");
-  await writeFile(source, "source\n");
+  await privateFile(source, "source\n");
   const canonicalSource = resolve(source);
   const canonicalDestination = resolve(destination);
   const sourceRegistry = registryPath(runtimeDirectory, canonicalSource);
@@ -299,6 +322,7 @@ test("prepared Save As reserves an absent target while preserving source authori
   let owner: NotebookOwnership | undefined;
   try {
     owner = await acquireNotebookOwnership({
+      ...sessionPrivateOptions,
       path: source,
       runtimeDirectory,
       origin: "http://127.0.0.1:41777",
@@ -322,7 +346,7 @@ test("prepared Save As reserves an absent target while preserving source authori
     for (const field of Object.keys(identity)) assert.equal(destinationPending[field], identity[field as keyof typeof identity]);
 
     await assert.rejects(
-      acquireNotebookOwnership({ path: destination, runtimeDirectory }),
+      acquireNotebookOwnership({ path: destination, runtimeDirectory, ...sessionPrivateOptions }),
       (error: unknown) => error instanceof SessionUnavailableError && error.code === "session_unavailable",
     );
     assert.deepEqual(await readRegistry(sourceRegistry), sourceBefore);
@@ -355,11 +379,11 @@ test("prepared Save As reserves an absent target while preserving source authori
   }
 });
 test("failed Save As publication rolls back destination ownership and preserves the source", async () => {
-  const root = await realpath(await mkdtemp(join(tmpdir(), "alder-sessions-publication-failure-")));
+  const root = await temporaryDirectory("alder-sessions-publication-failure-");
   const runtimeDirectory = join(root, "runtime");
   const source = join(root, "source.R");
   const destination = join(root, "renamed.R");
-  await writeFile(source, "source\n");
+  await privateFile(source, "source\n");
   const canonicalSource = resolve(source);
   const canonicalDestination = resolve(destination);
   const sourceRegistry = registryPath(runtimeDirectory, canonicalSource);
@@ -368,7 +392,7 @@ test("failed Save As publication rolls back destination ownership and preserves 
   let owner: NotebookOwnership | undefined;
   let replacement: NotebookOwnership | undefined;
   try {
-    owner = await acquireNotebookOwnership({ path: source, runtimeDirectory, origin: "http://127.0.0.1:41779" });
+    owner = await acquireNotebookOwnership({ path: source, runtimeDirectory, origin: "http://127.0.0.1:41779", ...sessionPrivateOptions });
     await owner.publishReady("http://127.0.0.1:41779", addressFor(41779));
     const sourceBefore = await readRegistry(sourceRegistry);
     const prepared = await owner.prepareRekey(destination);
@@ -387,7 +411,7 @@ test("failed Save As publication rolls back destination ownership and preserves 
     await absent(destinationRegistry);
     await absent(destinationLock);
 
-    replacement = await acquireNotebookOwnership({ path: destination, runtimeDirectory, origin: "http://127.0.0.1:41780" });
+    replacement = await acquireNotebookOwnership({ path: destination, runtimeDirectory, origin: "http://127.0.0.1:41780", ...sessionPrivateOptions });
   } finally {
     await closeOwnership(replacement);
     await closeOwnership(owner);
@@ -396,22 +420,22 @@ test("failed Save As publication rolls back destination ownership and preserves 
 });
 
 test("aborting prepared Save As removes only the exact reservation and preserves foreign artifacts", async () => {
-  const root = await realpath(await mkdtemp(join(tmpdir(), "alder-sessions-")));
+  const root = await temporaryDirectory("alder-sessions-");
   const runtimeDirectory = join(root, "runtime");
   const source = join(root, "source.R");
   const destination = join(root, "renamed.R");
-  await writeFile(source, "source\n");
+  await privateFile(source, "source\n");
   const canonicalSource = resolve(source);
   const canonicalDestination = resolve(destination);
   const sourceRegistry = registryPath(runtimeDirectory, canonicalSource);
   const destinationRegistry = registryPath(runtimeDirectory, canonicalDestination);
   let owner: NotebookOwnership | undefined;
   try {
-    owner = await acquireNotebookOwnership({ path: source, runtimeDirectory, origin: "http://127.0.0.1:41778" });
+    owner = await acquireNotebookOwnership({ path: source, runtimeDirectory, origin: "http://127.0.0.1:41778", ...sessionPrivateOptions });
     await owner.publishReady("http://127.0.0.1:41778", addressFor(41778));
     const sourceBefore = await readRegistry(sourceRegistry);
     const occupied = join(root, "occupied.R");
-    await writeFile(occupied, "already here\n");
+    await privateFile(occupied, "already here\n");
     await assert.rejects(
       owner.prepareRekey(occupied),
       (error: unknown) => error instanceof SessionUnavailableError && error.code === "session_unavailable",
@@ -436,7 +460,7 @@ test("aborting prepared Save As removes only the exact reservation and preserves
     const second = await owner.prepareRekey(destination);
     const reservation = await readRegistry(destinationRegistry);
     const foreign = { ...reservation, processNonce: randomUUID(), token: "f".repeat(64) };
-    await writeFile(destinationRegistry, JSON.stringify(foreign), { mode: 0o600 });
+    await privateFile(destinationRegistry, JSON.stringify(foreign));
     await second.abort();
     assert.deepEqual(await readRegistry(destinationRegistry), foreign);
     await rm(destinationRegistry, { force: true });
@@ -447,46 +471,50 @@ test("aborting prepared Save As removes only the exact reservation and preserves
 });
 
 test("untitled recovery descriptors are independent and retirement is identity-guarded", async () => {
-  const root = await realpath(await mkdtemp(join(tmpdir(), "alder-untitled-recovery-")));
+  const root = await temporaryDirectory("alder-untitled-recovery-");
   const dataRoot = join(root, "data");
   const projectA = resolve(join(root, "project-a"));
   const projectB = resolve(join(root, "project-b"));
   const firstId = randomUUID();
   const secondId = randomUUID();
   try {
-    const first = await registerUntitledRecoveryDescriptor(firstId, projectA, dataRoot);
+    const first = await registerUntitledRecoveryDescriptor(firstId, projectA, dataRoot, sessionPrivateOptions);
     assert.deepEqual(Object.keys(first).sort(), ["createdAt", "id", "projectDirectory", "schemaVersion"]);
     assert.equal(first.schemaVersion, 1);
     assert.equal(first.id, firstId);
     assert.equal(first.projectDirectory, projectA);
     const directory = untitledRecoveryDescriptorDirectory(dataRoot);
-    assert.equal((await lstat(directory)).mode & 0o777, 0o700);
+    if (process.platform !== "win32") {
+      assert.equal((await lstat(directory)).mode & 0o777, 0o700);
+    }
     const descriptorPath = join(directory, firstId + ".json");
-    assert.equal((await lstat(descriptorPath)).mode & 0o777, 0o600);
-    assert.deepEqual(await selectUntitledRecoveryDescriptor(firstId, dataRoot), first);
-    assert.deepEqual(await registerUntitledRecoveryDescriptor(firstId, projectA, dataRoot), first);
+    if (process.platform !== "win32") {
+      assert.equal((await lstat(descriptorPath)).mode & 0o777, 0o600);
+    }
+    assert.deepEqual(await selectUntitledRecoveryDescriptor(firstId, dataRoot, sessionPrivateOptions), first);
+    assert.deepEqual(await registerUntitledRecoveryDescriptor(firstId, projectA, dataRoot, sessionPrivateOptions), first);
 
-    const second = await registerUntitledRecoveryDescriptor(secondId, projectB, dataRoot);
-    const listed = await listUntitledRecoveryDescriptors(dataRoot);
+    const second = await registerUntitledRecoveryDescriptor(secondId, projectB, dataRoot, sessionPrivateOptions);
+    const listed = await listUntitledRecoveryDescriptors(dataRoot, sessionPrivateOptions);
     assert.deepEqual(listed.map(value => value.id).sort(), [firstId, secondId].sort());
 
     const replacement: UntitledRecoveryDescriptor = { ...first, projectDirectory: projectB };
-    await writeFile(descriptorPath, JSON.stringify(replacement) + "\n");
+    await privateFile(descriptorPath, JSON.stringify(replacement) + "\n");
     await assert.rejects(
-      retireUntitledRecoveryDescriptor(first, dataRoot),
+      retireUntitledRecoveryDescriptor(first, dataRoot, sessionPrivateOptions),
       (error: unknown) => error instanceof SessionUnavailableError && /changed before retirement/.test(error.message),
     );
-    assert.deepEqual(await selectUntitledRecoveryDescriptor(firstId, dataRoot), replacement);
-    await retireUntitledRecoveryDescriptor(replacement, dataRoot);
-    await retireUntitledRecoveryDescriptor(second, dataRoot);
-    await assert.rejects(selectUntitledRecoveryDescriptor(firstId, dataRoot), SessionUnavailableError);
-    assert.deepEqual(await listUntitledRecoveryDescriptors(dataRoot), []);
+    assert.deepEqual(await selectUntitledRecoveryDescriptor(firstId, dataRoot, sessionPrivateOptions), replacement);
+    await retireUntitledRecoveryDescriptor(replacement, dataRoot, sessionPrivateOptions);
+    await retireUntitledRecoveryDescriptor(second, dataRoot, sessionPrivateOptions);
+    await assert.rejects(selectUntitledRecoveryDescriptor(firstId, dataRoot, sessionPrivateOptions), SessionUnavailableError);
+    assert.deepEqual(await listUntitledRecoveryDescriptors(dataRoot, sessionPrivateOptions), []);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
 test("configured external auth requires a paired exact HTTPS origin and token file", async () => {
-  const resources = {};
+  const resources = { ...sessionPrivateOptions };
   const cases = [
     { externalOrigin: "https://proxy.example" },
     { tokenFile: "/tmp/alder-token" },
@@ -501,19 +529,19 @@ test("configured external auth requires a paired exact HTTPS origin and token fi
 });
 
 test("configured external auth refuses attaching to an existing owner", async () => {
-  const root = await realpath(await mkdtemp(join(tmpdir(), "alder-session-auth-owner-")));
+  const root = await temporaryDirectory("alder-session-auth-owner-");
   const runtimeDirectory = join(root, "runtime");
   const notebook = join(root, "notebook.R");
-  await writeFile(notebook, "notebook");
+  await privateFile(notebook, "notebook");
   let owner: NotebookOwnership | undefined;
   try {
-    owner = await acquireNotebookOwnership({ path: notebook, runtimeDirectory });
+    owner = await acquireNotebookOwnership({ path: notebook, runtimeDirectory, ...sessionPrivateOptions });
     await owner.publishReady("http://127.0.0.1:41779", addressFor(41779));
     await assert.rejects(
       acquireNotebookSession({
         path: notebook,
         runtimeDirectory,
-        resources: {},
+        resources: sessionPrivateOptions,
         externalOrigin: "https://proxy.example",
         tokenFile: join(root, "missing-token"),
       }),
@@ -526,17 +554,19 @@ test("configured external auth refuses attaching to an existing owner", async ()
 });
 
 test("configured external auth reaches detached candidates without exposing the bearer", async () => {
-  const root = await realpath(await mkdtemp(join(tmpdir(), "alder-session-auth-argv-")));
+  const root = await temporaryDirectory("alder-session-auth-argv-");
   const runtimeDirectory = join(root, "runtime");
   const notebook = join(root, "notebook.R");
   const tokenFile = join(root, "token");
   const captureFile = join(root, "spawn-request.json");
-  const supervisor = join(root, "capture-supervisor.mjs");
+  const supervisorScriptPath = join(root, "capture-supervisor.mjs");
+  const supervisor = process.platform === "win32" ? join(root, "capture-supervisor.exe") : supervisorScriptPath;
+  await privateDirectory(runtimeDirectory);
   const hostEntry = join(root, "host-entry.mjs");
   const bearer = "0123456789abcdef".repeat(4);
-  await writeFile(notebook, "notebook");
-  await writeFile(tokenFile, bearer);
-  await chmod(tokenFile, 0o600);
+  await privateFile(notebook, "notebook");
+  await privateFile(tokenFile, bearer);
+  if (process.platform !== "win32") await chmod(tokenFile, 0o600);
   const supervisorScript = [
     "#!/usr/bin/env node",
     'import { createReadStream, createWriteStream, writeFileSync } from "node:fs";',
@@ -569,8 +599,13 @@ test("configured external auth reaches detached candidates without exposing the 
     "  }",
     "});",
   ].join("\n") + "\n";
-  await writeFile(supervisor, supervisorScript, { mode: 0o755 });
-  await chmod(supervisor, 0o755);
+  await privateFile(supervisorScriptPath, supervisorScript, 0o755);
+  if (process.platform === "win32") {
+    await createWindowsNodeLauncher(supervisor, supervisorScriptPath);
+    await secureWindowsPath("file", supervisor);
+  } else {
+    await chmod(supervisorScriptPath, 0o755);
+  }
   try {
     await assert.rejects(
       acquireNotebookSession({
@@ -578,7 +613,7 @@ test("configured external auth reaches detached candidates without exposing the 
         runtimeDirectory,
         resources: {
           root,
-          nodeExecutable: process.execPath,
+          nodeExecutable: testNodeExecutable(),
           hostEntry,
           processSupervisorExecutable: supervisor,
         },

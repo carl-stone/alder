@@ -6,6 +6,8 @@ import { isAbsolute, join } from 'node:path';
 
 import {
   assertStrictReadyOutput,
+  cleanupPartialOwner,
+  cleanupScenarioResources,
   createHarness,
   createStrictReadyParser,
   loadWireCodec,
@@ -25,7 +27,7 @@ async function resolveActualRExecutable(rscript, label) {
   assert.equal(typeof rscript, 'string', label + ' must report an Rscript path');
   const environment = { ...process.env };
   delete environment.R_HOME;
-  const result = spawnSync(rscript, ['RHOME'], {
+  const result = spawnSync(rscript, ['--vanilla', '-e', 'cat(R.home())'], {
     encoding: 'utf8',
     env: environment,
     shell: process.platform === 'win32',
@@ -268,6 +270,7 @@ async function startRaw(ctx, { id, path, source, rscript, extraEnv = {}, home, c
   await mkdir(cwd, { recursive: true });
   const env = sanitizedEnvironment({ HOME: actualHome, XDG_CONFIG_HOME: actualConfig, XDG_DATA_HOME: dataHome, ...extraEnv });
   const launcher = join(ctx.applicationRoot, ctx.manifest.resources.cliLauncher);
+  const processObserverOptions = { supervisorExecutable: join(ctx.applicationRoot, ctx.manifest.resources.processSupervisorExecutable) };
   const args = [path, '--headless', '--no-run', '--port', '0'];
   assert.equal(typeof rscript, 'string', id + ' Rscript must be explicit');
   assert.equal(rscript.includes('/') || rscript.includes('\\'), true, id + ' Rscript must be absolute');
@@ -297,7 +300,10 @@ async function startRaw(ctx, { id, path, source, rscript, extraEnv = {}, home, c
     assertStrictReadyOutput(parser, { requireReady: false });
     result = { child, parser, stdout: parser.stdout, stderr, exit: { code: child.exitCode, signal: child.signalCode } };
   }
-  if (!result.ready) return result;
+  if (!result.ready) {
+    await cleanupPartialOwner(null, runtimeDirectory, processObserverOptions);
+    return result;
+  }
   const canonical = await realpath(path);
   const registry = await waitForRegistry(canonical, runtimeDirectory, 120_000);
   const wire = await loadWireCodec(ctx.applicationRoot, ctx.manifest);
@@ -310,10 +316,12 @@ async function startRaw(ctx, { id, path, source, rscript, extraEnv = {}, home, c
     session,
     snapshot() { return fullSnapshot({ origin: this.origin, session: this.session, wire, query: value => canonicalQuery(this.origin, this.session, value, wire) }); },
     async close() {
-      await releaseLease(this.origin, this.session);
-      await stopChild(this.child);
-      await this.parser.done;
-      assertStrictReadyOutput(this.parser);
+      await cleanupScenarioResources(
+        () => releaseLease(this.origin, this.session),
+        () => stopChild(this.child),
+        async () => { await this.parser.done; assertStrictReadyOutput(this.parser); },
+        () => cleanupPartialOwner(this.canonical, runtimeDirectory, processObserverOptions),
+      );
     },
   };
 }

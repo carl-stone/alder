@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { stat } from 'node:fs/promises';
-import { createHarness, delay, waitForExecutionReady } from './_common.mjs';
+import { createHarness, delay } from './_common.mjs';
 
 async function waitTerminal(harness, operationId, timeout = 120_000) {
   assert.equal(typeof operationId, 'string');
@@ -35,6 +35,28 @@ async function issue(harness, value) {
 }
 
 
+async function waitForNotebookExecutionReady(harness, timeout = 120_000) {
+  const deadline = Date.now() + timeout;
+  for (;;) {
+    const envelope = await harness.query({ type: 'notebook' });
+    assert.deepEqual(Object.keys(envelope).sort(), ['cursor', 'documentRevision', 'epoch', 'result']);
+    assert.equal(envelope.epoch, harness.session.epoch);
+    const notebook = envelope.result;
+    assert.ok(notebook && typeof notebook === 'object' && !Array.isArray(notebook));
+    const runtime = notebook.runtime;
+    assert.ok(runtime && typeof runtime === 'object' && !Array.isArray(runtime));
+    if (runtime.kernelState === 'failed' || runtime.analyzerState === 'failed') {
+      throw new Error('runtime_not_ready: ' + JSON.stringify({ epoch: notebook.epoch, kernelState: runtime.kernelState, analyzerState: runtime.analyzerState, executionBlockedReason: runtime.executionBlockedReason }));
+    }
+    if (runtime.executionReady === true && runtime.documentReady === true
+      && runtime.kernelState === 'ready' && runtime.analyzerState === 'ready'
+      && typeof runtime.kernelEpoch === 'string' && runtime.kernelEpoch.length > 0) return notebook;
+    if (Date.now() >= deadline) {
+      throw new Error('runtime_ready_timeout: ' + JSON.stringify({ epoch: notebook.epoch, kernelState: runtime.kernelState, analyzerState: runtime.analyzerState, documentReady: runtime.documentReady, executionReady: runtime.executionReady, executionBlockedReason: runtime.executionBlockedReason, kernelEpoch: runtime.kernelEpoch }));
+    }
+    await delay(100);
+  }
+}
 export async function run(ctx) {
   const filler = '#\t' + 'x'.repeat(999_996) + 'λ';
   assert.equal(filler.includes('\t'), true, 'large legal source fixture must include a control byte');
@@ -47,8 +69,7 @@ export async function run(ctx) {
     const sourceBytes = (await stat(harness.notebook)).size;
     assert.equal(sourceBytes > 31 * 1024 * 1024, true);
     assert.equal(sourceBytes < 32 * 1024 * 1024, true);
-    await waitForExecutionReady(harness);
-    const initial = await harness.snapshot();
+    const initial = await waitForNotebookExecutionReady(harness);
     assert.equal(initial.runtime.analyzerState, 'ready');
     assert.equal(initial.runtime.kernelState, 'ready');
     assert.equal(initial.runtime.executionReady, true);
@@ -56,41 +77,46 @@ export async function run(ctx) {
     const first = initial.cells[0];
     const second = initial.cells[1];
     assert.ok(first && second);
-    assert.equal(first.body[0], 'value <- 40');
-    assert.deepEqual(first.defs, ['value']);
-    assert.deepEqual(second.refs, ['value']);
+    assert.equal(first.revision, 0);
+    assert.equal(second.revision, 0);
+    const graph = (await harness.query({ type: 'graph' })).result;
+    assert.ok(graph && typeof graph === 'object' && !Array.isArray(graph));
+    assert.deepEqual(graph.nodes, initial.cells.map(cell => cell.id));
+    assert.ok(Array.isArray(graph.edges?.[second.id]));
+    assert.equal(graph.edges[second.id].includes(first.id), true);
 
     const run = await issue(harness, {
       type: 'run', scope: 'all', expectedDocumentRevision: initial.documentRevision,
     });
     assert.equal(run.status, 'done', JSON.stringify(run));
-    let snapshot = await harness.snapshot();
-    const firstOutputs = snapshot.cells.flatMap(cell => cell.outputs).map(output => JSON.stringify(output)).join('\n');
-    assert.equal(firstOutputs.includes('40'), true);
-    assert.equal(firstOutputs.includes('42'), true, JSON.stringify(snapshot.cells.map(cell => ({ id: cell.id, status: cell.status, outputCount: cell.outputs.length, outputKeys: cell.outputs.map(output => Object.keys(output).sort()), log: cell.log.slice(0, 3), error: cell.error }))));
-    assert.equal(snapshot.cells[2].log.includes('[output truncated at 1048576 bytes]'), true, JSON.stringify({ status: snapshot.cells[2].status, log: snapshot.cells[2].log.slice(0, 20), logTail: snapshot.cells[2].log.slice(-3), logChars: snapshot.cells[2].log.join('\n').length, outputCount: snapshot.cells[2].outputs.length, outputKeys: snapshot.cells[2].outputs.map(output => Object.keys(output).sort()) }));
+    const firstOutputs = (await harness.query({ type: 'outputs' })).result;
+    const firstOutputsText = firstOutputs.map(output => JSON.stringify(output)).join('\n');
+    assert.equal(firstOutputsText.includes('40'), true, JSON.stringify(firstOutputs));
+    assert.equal(firstOutputsText.includes('42'), true, JSON.stringify(firstOutputs));
 
-    const oldLine = snapshot.cells[0].body[0];
+    const oldLine = 'value <- 40';
     const edited = await issue(harness, {
       type: 'transaction',
-      expectedDocumentRevision: snapshot.documentRevision,
+      expectedDocumentRevision: initial.documentRevision,
       changes: [{
-        type: 'text-edit', cell: { cellId: snapshot.cells[0].id },
-        expectedRevision: snapshot.cells[0].revision,
+        type: 'text-edit', cell: { cellId: first.id },
+        expectedRevision: first.revision,
         edits: [{ start: { line: 0, character: 0 }, end: { line: 0, character: oldLine.length }, text: 'value <- 41' }],
       }],
     });
     assert.equal(edited.status, 'done', JSON.stringify(edited));
-    snapshot = await harness.snapshot();
-    assert.equal(snapshot.cells[0].body[0], 'value <- 41');
-    assert.equal(snapshot.cells[0].revision, 1);
-    const rerun = await issue(harness, { type: 'run', scope: 'all', expectedDocumentRevision: snapshot.documentRevision });
+    const afterEdit = (await harness.query({ type: 'notebook' })).result;
+    assert.equal(afterEdit.documentRevision, initial.documentRevision + 1);
+    assert.equal(afterEdit.cells[0].revision, first.revision + 1);
+    const rerun = await issue(harness, { type: 'run', scope: 'all', expectedDocumentRevision: afterEdit.documentRevision });
     assert.equal(rerun.status, 'done', JSON.stringify(rerun));
-    snapshot = await harness.snapshot();
-    const rerunOutputs = snapshot.cells.flatMap(cell => cell.outputs).map(output => JSON.stringify(output)).join('\n');
-    assert.equal(rerunOutputs.includes('41'), true);
-    assert.equal(rerunOutputs.includes('43'), true);
+    const rerunOutputs = (await harness.query({ type: 'outputs' })).result;
+    const rerunOutputsText = rerunOutputs.map(output => JSON.stringify(output)).join('\n');
+    assert.equal(rerunOutputsText.includes('41'), true, JSON.stringify(rerunOutputs));
+    assert.equal(rerunOutputsText.includes('43'), true, JSON.stringify(rerunOutputs));
 
+    const snapshot = await harness.snapshot();
+    assert.equal(snapshot.cells[2].log.includes('[output truncated at 1048576 bytes]'), true, JSON.stringify({ status: snapshot.cells[2].status, logTail: snapshot.cells[2].log.slice(-3), logChars: snapshot.cells[2].log.join('\n').length }));
     const captured = snapshot;
     assert.equal(captured.cells[0].body[0], 'value <- 41');
     assert.equal(captured.cells[0].body.at(-1).includes('\t'), true);

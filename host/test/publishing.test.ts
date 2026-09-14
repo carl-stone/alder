@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { access, chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { parseHTML } from "linkedom";
 import { parse } from "parse5";
 import {
@@ -13,8 +13,8 @@ import {
   type PublishingProcessScope,
 } from "../src/publishing.js";
 import { OutputStore } from "../src/outputs.js";
+import { secureWindowsPath, testNodeExecutable } from "./windows-fixtures.js";
 import type { HostCellState, HostSnapshot, OutputRecord } from "../src/protocol.js";
-
 const epoch = "epoch-publish";
 const kernelEpoch = "kernel-publish";
 const pngBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
@@ -28,11 +28,16 @@ type ParsedHtmlNode = {
 function directProcessScope(): PublishingProcessScope {
   return {
     async spawn(options): Promise<PublishingOwnedProcess> {
-      const child = spawn(options.executable, [...options.args], {
-        cwd: options.cwd,
-        env: options.environment,
-        stdio: "pipe",
-      });
+      // Windows cannot execute an extensionless shebang fixture directly.
+      const child = spawn(
+        process.platform === "win32" ? testNodeExecutable() : options.executable,
+        process.platform === "win32" ? [options.executable, ...options.args] : [...options.args],
+        {
+          cwd: options.cwd,
+          env: options.environment,
+          stdio: "pipe",
+        },
+      );
       const { promise, resolve, reject } = Promise.withResolvers<{
         code: number | null;
         signal: NodeJS.Signals | null;
@@ -150,8 +155,10 @@ async function fakeQuarto(directory: string, mode: "normal" | "external" | "enti
                 : "fs.writeFileSync(path.join(process.cwd(), output), '<!doctype html><html><body><p>rendered</p></body></html>');",
   ].join("\n");
   await mkdir(directory, { recursive: true });
+  await secureWindowsPath("directory", directory);
   await writeFile(executable, source, { encoding: "utf8", mode: 0o755 });
-  await chmod(executable, 0o755);
+  await secureWindowsPath("file", executable);
+  if (process.platform !== "win32") await chmod(executable, 0o755);
   return executable;
 }
 
@@ -176,7 +183,7 @@ async function setupStore(
 }
 
 async function installedQuarto(): Promise<string | null> {
-  for (const directory of (process.env.PATH ?? "").split(process.platform === "win32" ? ";" : ":")) {
+  for (const directory of (process.env.PATH ?? "").split(delimiter)) {
     if (directory.length === 0) continue;
     const candidate = join(directory, "quarto");
     try {
@@ -234,7 +241,7 @@ test("keeps hostile CommonMark shortcodes inert in installed Quarto", { skip: in
       ],
     });
     const code = cell("code", htmlOutputs, { body: ["42"] });
-    process.env.PATH = dirname(installedQuartoPath) + (process.platform === "win32" ? ";" : ":") + (priorPath ?? "");
+    process.env.PATH = dirname(installedQuartoPath) + delimiter + (priorPath ?? "");
     const service = createPublishingService({ outputStore: store, processScope: directProcessScope() });
     const settled = { ...snapshot([markdown, code]), path: join(project, "notebook.R") };
     await service.publishSnapshot(settled, { outputPath, includeCode: true });
@@ -298,7 +305,7 @@ test("preserves complete, escaped, malformed, and nested shortcode literals", { 
       "",
       "probe",
     ].join("\n"), "utf8");
-    process.env.PATH = dirname(installedQuartoPath) + (process.platform === "win32" ? ";" : ":") + (priorPath ?? "");
+    process.env.PATH = dirname(installedQuartoPath) + delimiter + (priorPath ?? "");
     const probe = spawn(installedQuartoPath, ["render", "probe.qmd", "--to", "html", "--no-execute", "--output", "probe.html"], {
       cwd: project,
       env: process.env,
@@ -382,7 +389,7 @@ test("publishes a settled snapshot without inheriting project hooks", async () =
     await writeFile(join(project, "_quarto.yml"), `project:\n  pre-render: echo hook > ${marker}\n`, "utf8");
     const bin = join(directory, "bin");
     const quarto = await fakeQuarto(bin);
-    process.env.PATH = `${dirname(quarto)}${process.platform === "win32" ? ";" : ":"}${priorPath ?? ""}`;
+    process.env.PATH = `${dirname(quarto)}${delimiter}${priorPath ?? ""}`;
     const service = createPublishingService({ outputStore: store, processScope: directProcessScope() });
     const result = await service.publishSnapshot(snapshot([cell("cell-1", [record])]), {
       outputPath,
@@ -422,7 +429,7 @@ test("fails closed when Quarto leaves a sidecar asset", async () => {
   const outputPath = join(directory, "report.html");
   try {
     const quarto = await fakeQuarto(join(directory, "bin"), "external");
-    process.env.PATH = `${dirname(quarto)}${process.platform === "win32" ? ";" : ":"}${priorPath ?? ""}`;
+    process.env.PATH = `${dirname(quarto)}${delimiter}${priorPath ?? ""}`;
     const service = createPublishingService({ outputStore: store, processScope: directProcessScope() });
     await assert.rejects(
       service.publishSnapshot(snapshot([cell("cell-1", [record])]), { outputPath, includeCode: false }),
@@ -442,7 +449,7 @@ test("allows resource-looking inline script data text", async () => {
   const outputPath = join(directory, "report.html");
   try {
     const quarto = await fakeQuarto(join(directory, "bin"), "inline");
-    process.env.PATH = `${dirname(quarto)}${process.platform === "win32" ? ";" : ":"}${priorPath ?? ""}`;
+    process.env.PATH = `${dirname(quarto)}${delimiter}${priorPath ?? ""}`;
     const service = createPublishingService({ outputStore: store, processScope: directProcessScope() });
     await service.publishSnapshot(snapshot([cell("cell-1", [record])]), { outputPath, includeCode: false });
     assert.match(await readFile(outputPath, "utf8"), /JSON\.parse\(scriptData\.textContent/);
@@ -466,7 +473,7 @@ test("rejects decoded, secondary, and nested srcdoc assets", async () => {
     const outputPath = join(directory, "report.html");
     try {
       const quarto = await fakeQuarto(join(directory, "bin"), mode);
-      process.env.PATH = `${dirname(quarto)}${process.platform === "win32" ? ";" : ":"}${priorPath ?? ""}`;
+      process.env.PATH = `${dirname(quarto)}${delimiter}${priorPath ?? ""}`;
       const service = createPublishingService({ outputStore: store, processScope: directProcessScope() });
       await assert.rejects(
         service.publishSnapshot(snapshot([cell("cell-1", [record])]), { outputPath, includeCode: false }),
@@ -528,7 +535,7 @@ test("embeds canonical rich artifacts and inert lazy/widget output", { skip: ins
       spec: { kind: "checkbox", label: "Enabled", value: true },
     }, { sessionEpoch: epoch, documentRevision: 4, kernelEpoch, ...identity });
     const lazy = store.ingestAlder({ kind: "lazy", key: "lazy-1", label: "Deferred result", state: "collapsed", child: null }, { sessionEpoch: epoch, documentRevision: 4, kernelEpoch, ...identity });
-    process.env.PATH = dirname(installedQuartoPath) + (process.platform === "win32" ? ";" : ":") + (priorPath ?? "");
+    process.env.PATH = dirname(installedQuartoPath) + delimiter + (priorPath ?? "");
     const service = createPublishingService({ outputStore: store, processScope: directProcessScope() });
     await service.publishSnapshot(snapshot([cell("cell-1", [...image, html, pdf, widget, lazy])]), { outputPath, includeCode: false });
     const published = await readFile(outputPath, "utf8");
@@ -592,7 +599,7 @@ test("publishes canonical textarea text without closing-tag injection", { skip: 
       cellId: "cell-textarea",
       revision: 0,
     });
-    process.env.PATH = dirname(installedQuartoPath) + (process.platform === "win32" ? ";" : ":") + (priorPath ?? "");
+    process.env.PATH = dirname(installedQuartoPath) + delimiter + (priorPath ?? "");
     const service = createPublishingService({ outputStore: store, processScope: directProcessScope() });
     await service.publishSnapshot(snapshot([cell("cell-textarea", [widget])]), { outputPath, includeCode: false });
     const published = await readFile(outputPath, "utf8");
@@ -641,7 +648,7 @@ test("publishes canonical inline HTML without unsafe markup", { skip: installedQ
       cellId: "cell-inline-html",
       revision: 0,
     });
-    process.env.PATH = dirname(installedQuartoPath) + (process.platform === "win32" ? ";" : ":") + (priorPath ?? "");
+    process.env.PATH = dirname(installedQuartoPath) + delimiter + (priorPath ?? "");
     const service = createPublishingService({ outputStore: store, processScope: directProcessScope() });
     await service.publishSnapshot(snapshot([cell("cell-inline-html", [inline])]), { outputPath, includeCode: false });
     const published = await readFile(outputPath, "utf8");
@@ -673,7 +680,7 @@ test("does not treat artifact-shaped JSON values as retained artifacts", { skip:
       { runId: "run-json", cellId: "cell-json", revision: 0 },
     );
     assert.ok(record);
-    process.env.PATH = dirname(installedQuartoPath) + (process.platform === "win32" ? ";" : ":") + (priorPath ?? "");
+    process.env.PATH = dirname(installedQuartoPath) + delimiter + (priorPath ?? "");
     const service = createPublishingService({ outputStore: store, processScope: directProcessScope() });
     await service.publishSnapshot(snapshot([cell("cell-json", [record])]), { outputPath, includeCode: false });
     const published = await readFile(outputPath, "utf8");
@@ -692,7 +699,7 @@ test("reports a missing Quarto output as publish_failed", async () => {
   const outputPath = join(directory, "report.html");
   try {
     const quarto = await fakeQuarto(join(directory, "bin"), "missing");
-    process.env.PATH = dirname(quarto) + (process.platform === "win32" ? ";" : ":") + (priorPath ?? "");
+    process.env.PATH = dirname(quarto) + delimiter + (priorPath ?? "");
     const service = createPublishingService({ outputStore: store, processScope: directProcessScope() });
     await assert.rejects(
       service.publishSnapshot(snapshot([cell("cell-1", [record])]), { outputPath, includeCode: false }),
@@ -713,7 +720,7 @@ test("rejects a store identity change during rendering", async () => {
   const outputPath = join(directory, "report.html");
   try {
     const quarto = await fakeQuarto(join(directory, "bin"));
-    process.env.PATH = dirname(quarto) + (process.platform === "win32" ? ";" : ":") + (priorPath ?? "");
+    process.env.PATH = dirname(quarto) + delimiter + (priorPath ?? "");
     const baseScope = directProcessScope();
     const processScope: PublishingProcessScope = {
       spawn: async (options) => {

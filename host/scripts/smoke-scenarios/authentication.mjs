@@ -88,7 +88,7 @@ export async function run(ctx) {
 
     const after = await harness.query({ type: 'notebook' });
     assert.deepEqual(withoutTransportProgress(after), withoutTransportProgress(baseline));
-    const registryPath = join(harness.dataHome, 'alder-nodejs', 'runtime', `${createHash('sha256').update(harness.canonical).digest('hex')}.json`);
+    const registryPath = join(harness.dataHome, 'alder-nodejs', 'runtime', `${createHash('sha256').update('path:' + harness.canonical).digest('hex')}.json`);
     const registryInfo = await lstat(registryPath);
     assert.equal(registryInfo.isSymbolicLink(), false);
     assert.equal(registryInfo.mode & 0o777, 0o600);

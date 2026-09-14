@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "description": "Alder's thin sandboxed Electron desktop shell",
+  "author": "Alder contributors",
   "main": ".vite/build/main.cjs",
   "type": "commonjs",
   "scripts": {

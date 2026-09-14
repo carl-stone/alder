@@ -104,6 +104,7 @@ const SOURCE = [
 export async function run(ctx) {
   const harness = await createHarness(ctx, { id: 'mcp-catalog', source: SOURCE });
   let agent;
+  let shutdownCompleted = false;
 
   try {
     agent = await openAgent(ctx, harness, 'mcp-catalog-agent');
@@ -397,9 +398,9 @@ export async function run(ctx) {
       kernelEpoch: tracker.kernelEpoch,
       expectedRevision: controlCell.revision,
     });
-    await callEffect('run_stale', { wait: true });
+    await callEffect('run_all', { wait: true });
 
-    const outputState = await state();
+    const outputState = { cells: await cells() };
     const outputs = outputState.cells.flatMap((candidate) => candidate.outputs ?? []);
     assert.ok(outputs.length > 0, 'run_all produced no output records');
     const tableOutput = outputs.find((output) => output.data?.kind === 'table');
@@ -501,6 +502,7 @@ export async function run(ctx) {
       pid: harness.registry.pid,
     }, null, 2)}\n`);
     await callEffect('shutdown', { expectedClientIds, confirmed: true });
+    shutdownCompleted = true;
 
     await closeAgent(agent);
     agent = undefined;
@@ -517,8 +519,23 @@ export async function run(ctx) {
       },
     };
   } finally {
-    await cleanupScenarioResources(() => agent && closeAgent(agent), () => harness.close());
+    await cleanupScenarioResources(() => agent && closeAgent(agent), () => closeCatalogHarness(harness, shutdownCompleted));
   }
+}
+
+async function closeCatalogHarness(harness, shutdownCompleted) {
+  try {
+    return await harness.close();
+  } catch (error) {
+    if (!shutdownCompleted || !onlyConnectionRefused(error)) throw error;
+  }
+}
+
+function onlyConnectionRefused(error) {
+  if (error instanceof AggregateError) {
+    return error.errors.length > 0 && error.errors.every((cause) => onlyConnectionRefused(cause));
+  }
+  return isRecord(error) && error.code === 'ECONNREFUSED';
 }
 
 async function openAgent(ctx, harness, name) {

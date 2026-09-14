@@ -262,6 +262,28 @@ async function runPackageWorker(projectDirectory: string, request: unknown): Pro
   const result = JSON.parse(await readFile(resultPath, "utf8")) as WorkerPackageResponse;
   return result;
 }
+test("package worker accepts ordinary JSON object keys", async () => {
+  const projectDirectory = await mkdtemp(join(tmpdir(), "alder-package-worker-json-"));
+  try {
+    const response = await runPackageWorker(projectDirectory, {
+      command: "status",
+      payload: {
+        projectDirectory,
+        packages: [],
+        mode: "pak",
+        lockfilePath: null,
+        libraryPath: null,
+        libraryPaths: [],
+      },
+    });
+    assert.equal(response.ok, true);
+    assert.equal(response.result.ok, true);
+    assert.equal(response.result.status, "installed");
+  } finally {
+    await rm(projectDirectory, { recursive: true, force: true });
+  }
+});
+
 async function packageFixture(): Promise<{
   directory: string;
   options: {

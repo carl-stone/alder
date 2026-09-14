@@ -461,7 +461,10 @@ async function makeManifest(base, paths, stageKind, sourceCommit, rIdentity, qua
 function probeElectronRuntime(entry) {
   let raw;
   try {
-    raw = execFileSync(entry, process.platform === 'linux' ? ['--no-sandbox'] : [], {
+    raw = execFileSync(entry, [
+      '--alder-runtime-probe',
+      ...(process.platform === 'linux' ? ['--no-sandbox'] : []),
+    ], {
       encoding: 'utf8',
       timeout: 30_000,
       env: { ...process.env, ALDER_DESKTOP_RUNTIME_PROBE: '1' },

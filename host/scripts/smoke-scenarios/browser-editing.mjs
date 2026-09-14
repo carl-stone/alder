@@ -55,12 +55,13 @@ export async function run(ctx) {
     const initialDom = await live.browser.evaluate("document.documentElement.outerHTML");
     assertDomControls(initialDom);
 
+    await live.wait("document.querySelectorAll('#notebook > .cell[data-cell]').length === 90 && document.querySelectorAll('#notebook .cm-editor').length > 0 && document.querySelectorAll('#notebook .cm-editor').length < 90", 30_000);
     const virtualization = await live.browser.evaluate(`(() => ({
       cells: document.querySelectorAll('#notebook > .cell[data-cell]').length,
       editors: document.querySelectorAll('#notebook .cm-editor').length
     }))()`);
     assert.equal(virtualization.cells, 90, 'every long-notebook cell must remain addressable');
-    assert.ok(virtualization.editors < virtualization.cells, 'long notebook must virtualize CodeMirror editors');
+    assert.ok(virtualization.editors > 0 && virtualization.editors < virtualization.cells, 'long notebook must virtualize CodeMirror editors');
 
     await live.replaceEditor('[data-cell="cell-1"] .cm-content', 'answer <- 41\nanswer + 1');
     await live.wait("window.__alderHost.client.document.cell('cell-1').desiredBody.join('\\n').includes('41')");
@@ -94,7 +95,7 @@ export async function run(ctx) {
 
     let notebook = await harness.snapshot();
     assert.equal(notebook.cells.length, 91, 'renderer create and delete must leave one created Markdown cell');
-    assert.ok(notebook.cells.some(cell => cell.type === 'markdown' && cell.body?.[0] === '# Created from the browser smoke'));
+    assert.ok(notebook.cells.some(cell => cell.type === 'markdown' && cell.body?.[0] === '# # Created from the browser smoke'), 'created Markdown cell must preserve its physical R source');
     const disk = await readFile(harness.notebook, 'utf8');
     assert.match(disk, /answer\s*<-\s*40/, 'renderer Save must write edited executable source');
     assert.match(disk, /Created from the browser smoke/, 'renderer Save must retain created Markdown source');

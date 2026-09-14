@@ -38,7 +38,7 @@ test('visible-result observer rejects stale identities, wrong DOM values, and un
       assert.match(outcome.error, mode === 'stale' ? /timeout/ : mode === 'wrong-output' ? /wrong visible result/ : /untrusted input/,
         JSON.stringify(await browser.evaluate('({clicks:window.__clicks,visibility:document.visibilityState,html:document.body.innerHTML})')));
     }
-    await browser.evaluate(`window.__alderHost.client.document.cells=[];document.querySelector('button').dataset.act='add';window.__frames=0;window.__originalFrame=requestAnimationFrame;window.requestAnimationFrame=callback=>{window.__frames++;return window.__originalFrame(callback);};`);
+    await browser.evaluate(`window.__alderHost.client.document.cells=[];document.querySelector('button').dataset.act='add';window.__frames=0;window.__originalFrame=requestAnimationFrame;window.__originalCancelFrame=cancelAnimationFrame;window.requestAnimationFrame=callback=>{window.__frames++;return setTimeout(()=>callback(performance.now()),0);};window.cancelAnimationFrame=id=>clearTimeout(id);`);
     await browser.evaluate(observerSource(500));
     await browser.evaluate(`window.__observeCreate();window.__observation=window.__observation.catch(error=>({error:error.message}));void 0;`);
     await browser.click('[data-act=add]');

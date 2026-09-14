@@ -81,17 +81,17 @@ export async function run(ctx) {
     const canonical = await realpath(notebook);
     primaryRegistry = await waitForRegistry(canonical, runtimeDirectory, STARTUP_TIMEOUT_MS);
     assertRegistry(primaryRegistry, canonical);
-    const firstSession = await openSession(primaryRegistry.address.origin, primaryRegistry);
+    const firstSession = await openSession(primaryRegistry.address.browserOrigin, primaryRegistry);
     firstSession.wire = wire;
-    sessions.push({ origin: primaryRegistry.address.origin, session: firstSession, active: true });
+    sessions.push({ origin: primaryRegistry.address.browserOrigin, session: firstSession, active: true });
 
     const second = startClient({ launcher, notebook, cwd: fixtureDirectory, dataHome, selectedR, id: 'second' });
     clients.push(second);
     const readySecond = await second.ready;
     assertCanonicalReady(readySecond);
-    const secondSession = await openSession(primaryRegistry.address.origin, primaryRegistry);
+    const secondSession = await openSession(primaryRegistry.address.browserOrigin, primaryRegistry);
     secondSession.wire = wire;
-    sessions.push({ origin: primaryRegistry.address.origin, session: secondSession, active: true });
+    sessions.push({ origin: primaryRegistry.address.browserOrigin, session: secondSession, active: true });
     assert.equal(readySecond.origin, readyFirst.origin);
     assert.equal(secondSession.epoch, firstSession.epoch);
     assert.equal(secondSession.processNonce, firstSession.processNonce);
@@ -99,10 +99,10 @@ export async function run(ctx) {
     assert.notEqual(secondSession.leaseId, firstSession.leaseId);
 
     const sessionIdentity = await waitForExecutionReady({
-      origin: primaryRegistry.address.origin,
+      origin: primaryRegistry.address.browserOrigin,
       session: secondSession,
       wire,
-      query: value => query(primaryRegistry.address.origin, secondSession, value, wire),
+      query: value => query(primaryRegistry.address.browserOrigin, secondSession, value, wire),
     });
     assert.equal(sessionIdentity.runtime?.executionReady, true, 'selected R runtime was not ready');
     const runtimeRscript = await realpath(sessionIdentity.runtime?.rEnvironment?.rscript ?? '');
@@ -113,7 +113,7 @@ export async function run(ctx) {
     const analyzerGraph = await waitForProcessMatch(primaryRegistry.pid, primaryRegistry.startIdentity, process => /host-analyzer\.R|analyzer/i.test(process.command), PROCESS_TIMEOUT_MS, processObserverOptions);
     observed.analyzer = true;
 
-    const lspResponse = await requestJson(primaryRegistry.address.origin, '/api/lsp', {
+    const lspResponse = await requestJson(primaryRegistry.address.browserOrigin, '/api/lsp', {
       method: 'POST',
       cookie: secondSession.cookie,
       csrf: secondSession.csrf,
@@ -126,8 +126,8 @@ export async function run(ctx) {
     const lspGraph = await waitForProcessMatch(primaryRegistry.pid, primaryRegistry.startIdentity, process => /host-lsp\.R|languageserver|lsp/i.test(process.command), PROCESS_TIMEOUT_MS, processObserverOptions);
     observed.lsp = true;
 
-    const packageBefore = await snapshotOf(primaryRegistry.address.origin, secondSession);
-    const packageReceipt = await issue(secondSession, primaryRegistry.address.origin, {
+    const packageBefore = await snapshotOf(primaryRegistry.address.browserOrigin, secondSession);
+    const packageReceipt = await issue(secondSession, primaryRegistry.address.browserOrigin, {
       type: 'packages-install',
       packages: ['AlderSmokeNoSuchPackage'],
       expectedDocumentRevision: packageBefore.documentRevision,
@@ -135,24 +135,24 @@ export async function run(ctx) {
     });
     const packageGraph = await waitForProcessMatch(primaryRegistry.pid, primaryRegistry.startIdentity, process => /package-job\.R|packages/i.test(process.command), PROCESS_TIMEOUT_MS, processObserverOptions);
     observed.package = true;
-    const packageOperation = await waitOperation(primaryRegistry.address.origin, secondSession, operationId(packageReceipt));
+    const packageOperation = await waitOperation(primaryRegistry.address.browserOrigin, secondSession, operationId(packageReceipt));
     assert.ok(TERMINAL.has(packageOperation.status), 'package child did not settle');
 
     // Release the first client lease before its process exits. The second
     // client must keep the same detached host alive and retain its identity.
-    await releaseStrict(primaryRegistry.address.origin, firstSession);
+    await releaseStrict(primaryRegistry.address.browserOrigin, firstSession);
     sessions[0].active = false;
     await stopOwnedClient(first);
     assertProcessIdentity(await readProcess(primaryRegistry.pid, processObserverOptions), primaryRegistry, 'host survived first-spawner exit');
-    const attachedAfterExit = await snapshotOf(primaryRegistry.address.origin, secondSession);
+    const attachedAfterExit = await snapshotOf(primaryRegistry.address.browserOrigin, secondSession);
     assert.equal(attachedAfterExit.epoch, primaryRegistry.epoch);
 
     const firstCell = attachedAfterExit.cells[0];
-    const longReceipt = await issue(secondSession, primaryRegistry.address.origin, {
+    const longReceipt = await issue(secondSession, primaryRegistry.address.browserOrigin, {
       type: 'run', scope: 'cell', target: { cellId: firstCell.id }, expectedDocumentRevision: attachedAfterExit.documentRevision,
     });
     const longId = operationId(longReceipt);
-    const runningOperation = await waitForRunning(primaryRegistry.address.origin, secondSession, longId, firstCell.id);
+    const runningOperation = await waitForRunning(primaryRegistry.address.browserOrigin, secondSession, longId, firstCell.id);
     assert.equal(typeof runningOperation.runId, 'string', 'running operation did not expose a run identity');
     const activeGraph = await waitForProcessMatch(primaryRegistry.pid, primaryRegistry.startIdentity, process => processMatches(process, selectedRHome, arkExecutable, applicationRoot), PROCESS_TIMEOUT_MS, processObserverOptions);
     observed.r = activeGraph.some(process => processMatchesR(process, selectedRHome));
@@ -165,20 +165,20 @@ export async function run(ctx) {
     assert.equal(observed.monitor, true, 'active staged host graph has no native monitor child');
     primaryGraph = activeGraph;
 
-    const interrupted = await issue(secondSession, primaryRegistry.address.origin, { type: 'interrupt', runId: runningOperation.runId });
-    const interruptOperation = await waitOperation(primaryRegistry.address.origin, secondSession, operationId(interrupted));
+    const interrupted = await issue(secondSession, primaryRegistry.address.browserOrigin, { type: 'interrupt', runId: runningOperation.runId });
+    const interruptOperation = await waitOperation(primaryRegistry.address.browserOrigin, secondSession, operationId(interrupted));
     assert.ok(['done', 'error'].includes(interruptOperation.status), 'cross-client interrupt command did not settle');
-    const longOperation = await waitOperation(primaryRegistry.address.origin, secondSession, longId);
+    const longOperation = await waitOperation(primaryRegistry.address.browserOrigin, secondSession, longId);
     assert.ok(['cancelled', 'interrupted'].includes(longOperation.status), 'host did not settle the targeted run after peer interrupt');
 
-    const afterInterrupt = await snapshotOf(primaryRegistry.address.origin, secondSession);
+    const afterInterrupt = await snapshotOf(primaryRegistry.address.browserOrigin, secondSession);
     const secondCell = afterInterrupt.cells[1];
-    const successor = await issue(secondSession, primaryRegistry.address.origin, {
+    const successor = await issue(secondSession, primaryRegistry.address.browserOrigin, {
       type: 'run', scope: 'cell', target: { cellId: secondCell.id }, expectedDocumentRevision: afterInterrupt.documentRevision,
     });
-    const successorOperation = await waitOperation(primaryRegistry.address.origin, secondSession, operationId(successor));
+    const successorOperation = await waitOperation(primaryRegistry.address.browserOrigin, secondSession, operationId(successor));
     assert.equal(successorOperation.status, 'done', 'successor run did not settle on the same host');
-    const afterSuccessor = await snapshotOf(primaryRegistry.address.origin, secondSession);
+    const afterSuccessor = await snapshotOf(primaryRegistry.address.browserOrigin, secondSession);
     assert.match(JSON.stringify(afterSuccessor.cells[1].outputs), /\[1\] 2/);
     assert.equal(afterSuccessor.runtime.kernelEpoch, afterInterrupt.runtime.kernelEpoch);
     const successorGraph = await readProcessGraph(primaryRegistry.pid, primaryRegistry.startIdentity, processObserverOptions);
@@ -190,28 +190,28 @@ export async function run(ctx) {
     const quarto = process.env.QUARTO_PATH ?? 'quarto';
     const quartoVersion = spawnSync(quarto, ['--version'], { encoding: 'utf8', timeout: 30_000, env: sanitizedEnvironment(), windowsHide: true });
     assert.equal(quartoVersion.status, 0, 'Quarto is required to qualify the application-owned Quarto child');
-    const beforePublish = await snapshotOf(primaryRegistry.address.origin, secondSession);
-    const settleReceipt = await issue(secondSession, primaryRegistry.address.origin, {
+    const beforePublish = await snapshotOf(primaryRegistry.address.browserOrigin, secondSession);
+    const settleReceipt = await issue(secondSession, primaryRegistry.address.browserOrigin, {
       type: 'run', scope: 'all', expectedDocumentRevision: beforePublish.documentRevision,
     });
-    const settleOperation = await waitOperation(primaryRegistry.address.origin, secondSession, operationId(settleReceipt));
+    const settleOperation = await waitOperation(primaryRegistry.address.browserOrigin, secondSession, operationId(settleReceipt));
     assert.equal(settleOperation.status, 'done', 'all cells did not settle before publish');
     const publishSnapshot = await waitForExecutionReady({
-      origin: primaryRegistry.address.origin,
+      origin: primaryRegistry.address.browserOrigin,
       session: secondSession,
       wire,
-      query: value => query(primaryRegistry.address.origin, secondSession, value, wire),
+      query: value => query(primaryRegistry.address.browserOrigin, secondSession, value, wire),
     });
     const publishGraphPromise = waitForProcessMatch(primaryRegistry.pid, primaryRegistry.startIdentity, process => /quarto/i.test(process.command), PROCESS_TIMEOUT_MS, processObserverOptions);
-    const publishReceipt = await issue(secondSession, primaryRegistry.address.origin, {
+    const publishReceipt = await issue(secondSession, primaryRegistry.address.browserOrigin, {
       type: 'publish', includeCode: false, outputPath: join(ctx.evidence, 'process-lifecycle-published.html'), expectedDocumentRevision: publishSnapshot.documentRevision,
     });
     const publishGraph = await publishGraphPromise;
     observed.quarto = true;
-    const publishOperation = await waitOperation(primaryRegistry.address.origin, secondSession, operationId(publishReceipt));
+    const publishOperation = await waitOperation(primaryRegistry.address.browserOrigin, secondSession, operationId(publishReceipt));
     assert.ok(TERMINAL.has(publishOperation.status), 'Quarto child did not settle');
 
-    await releaseStrict(primaryRegistry.address.origin, secondSession);
+    await releaseStrict(primaryRegistry.address.browserOrigin, secondSession);
     sessions[1].active = false;
     await stopOwnedClient(second);
     await terminateIfOwned(primaryRegistry, processObserverOptions);
@@ -232,19 +232,19 @@ export async function run(ctx) {
     await hardClient.ready;
     hardRegistry = await waitForRegistry(await realpath(hardNotebook), hardRuntime, STARTUP_TIMEOUT_MS);
     assertRegistry(hardRegistry, await realpath(hardNotebook));
-    const hardSession = await openSession(hardRegistry.address.origin, hardRegistry);
+    const hardSession = await openSession(hardRegistry.address.browserOrigin, hardRegistry);
     hardSession.wire = wire;
     const hardSnapshot = await waitForExecutionReady({
-      origin: hardRegistry.address.origin,
+      origin: hardRegistry.address.browserOrigin,
       session: hardSession,
       wire,
-      query: value => query(hardRegistry.address.origin, hardSession, value, wire),
+      query: value => query(hardRegistry.address.browserOrigin, hardSession, value, wire),
     });
     assert.equal(hardSnapshot.runtime?.executionReady, true, 'hard-kill selected R runtime was not ready');
     const hardRscript = await realpath(hardSnapshot.runtime?.rEnvironment?.rscript ?? '');
     if (requestedR !== undefined) assert.equal(hardRscript, await resolveRequestedRscript(requestedR), 'hard host changed explicit Rscript selection');
-    const hardRun = await issue(hardSession, hardRegistry.address.origin, { type: 'run', scope: 'all', expectedDocumentRevision: hardSnapshot.documentRevision });
-    await waitForRunning(hardRegistry.address.origin, hardSession, operationId(hardRun), hardSnapshot.cells[0].id);
+    const hardRun = await issue(hardSession, hardRegistry.address.browserOrigin, { type: 'run', scope: 'all', expectedDocumentRevision: hardSnapshot.documentRevision });
+    await waitForRunning(hardRegistry.address.browserOrigin, hardSession, operationId(hardRun), hardSnapshot.cells[0].id);
     hardGraph = await readProcessGraph(hardRegistry.pid, hardRegistry.startIdentity, processObserverOptions);
     assert.equal(hardGraph.some(process => processMatchesR(process, selectedRHome)), true, 'hard-kill graph omitted the owned R child');
     await killOwnedHost(hardRegistry, processObserverOptions);
@@ -473,6 +473,7 @@ function assertRegistry(registry, canonical) {
   assert.equal(typeof registry.processNonce, 'string');
   assert.equal(typeof registry.epoch, 'string');
   assert.equal(typeof registry.address?.origin, 'string');
+  assert.equal(typeof registry.address?.browserOrigin, 'string');
 }
 
 async function waitForSpawnIdentity(pid, options, timeout = 5_000) {
@@ -492,7 +493,7 @@ async function exerciseStartupFailure(launcher, cwd, dataHome, evidence, process
   const startupNotebook = join(cwd, 'sample.R');
   const startupCanonical = await realpath(startupNotebook);
   const startupDataHome = join(dataHome, 'startup-failure');
-  const startupRegistryPath = join(startupDataHome, 'alder-nodejs', 'runtime', createHash('sha256').update(startupCanonical).digest('hex') + '.json');
+  const startupRegistryPath = join(startupDataHome, 'alder-nodejs', 'runtime', createHash('sha256').update('path:' + startupCanonical).digest('hex') + '.json');
   const invalid = spawnSmokeProcess(launcher, [startupNotebook, '--headless', '--no-run', '--port', '0', '--rscript', join(evidence, 'missing-rscript')], {
     cwd, env: sanitizedEnvironment({ XDG_DATA_HOME: startupDataHome }), stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
   });
@@ -531,7 +532,7 @@ async function exerciseCompromisedLock(launcher, cwd, dataHome, runtimeDirectory
   await writeFile(notebook, '# %%\n1 + 1\n', 'utf8');
   const canonical = await realpath(notebook);
   await mkdir(runtimeDirectory, { recursive: true, mode: 0o700 });
-  const registryPath = join(runtimeDirectory, createHash('sha256').update(canonical).digest('hex') + '.json');
+  const registryPath = join(runtimeDirectory, createHash('sha256').update('path:' + canonical).digest('hex') + '.json');
   const forged = {
     ...template,
     state: 'ready',

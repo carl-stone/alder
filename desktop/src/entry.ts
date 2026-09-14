@@ -1,5 +1,6 @@
 async function launch(): Promise<void> {
-  if (process.env.ALDER_DESKTOP_RUNTIME_PROBE === "1") {
+  if (process.env.ALDER_DESKTOP_RUNTIME_PROBE === "1" ||
+      process.argv.includes("--alder-runtime-probe")) {
     process.stdout.write(JSON.stringify(process.versions));
     process.exit(0);
   }

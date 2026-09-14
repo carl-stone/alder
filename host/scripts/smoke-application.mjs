@@ -10,7 +10,8 @@ import { createHarness, spawnSmokeSync, waitForExecutionReady } from './smoke-sc
 import { captureProcessTree, configureProcessObserver } from './smoke-scenarios/process-observer.mjs';
 import { openInteractiveBrowser } from '../test-support/live-browser.mjs';
 
-const SCENARIO_WATCHDOG_TIMEOUT_MS = 15 * 60 * 1000;
+const DEFAULT_SCENARIO_WATCHDOG_TIMEOUT_MS = 15 * 60 * 1000;
+const PERFORMANCE_SCENARIO_WATCHDOG_TIMEOUT_MS = 60 * 60 * 1000;
 const SCENARIOS = Object.freeze([
   ['launch-slice', ['artifact', 'UI', 'runtime', 'unavailable-R edit/save']],
   ['cli-status', ['artifact', 'runtime', 'argv/exit/stdout']],
@@ -175,12 +176,13 @@ async function main() {
     try {
       let result;
       if (scenario.id === 'launch-slice') {
-        result = await runScenarioWithWatchdog(scenario.id, () => runLaunchSlice({
+        result = await runScenarioWithWatchdog(scenario.id, signal => runLaunchSlice({
           applicationRoot,
           manifest,
           evidence: scenarioEvidence,
           rscript: values.rscript,
           peerRscript: values['peer-rscript'],
+          signal,
         }));
       } else {
         const module = await loadScenarioModule(scenario.id);
@@ -189,7 +191,7 @@ async function main() {
           unavailable.code = 'scenario_unavailable';
           throw unavailable;
         }
-        result = await runScenarioWithWatchdog(scenario.id, () => module.run({
+        result = await runScenarioWithWatchdog(scenario.id, signal => module.run({
           applicationRoot,
           manifest,
           evidence: scenarioEvidence,
@@ -202,6 +204,7 @@ async function main() {
           peerRscript: values['peer-rscript'],
           sourceRoot: qualificationSource,
           matrix: scenario,
+          signal,
         }));
       }
       if (!result || result.id !== scenario.id || result.identity === undefined) {
@@ -252,15 +255,23 @@ async function main() {
 }
 
 async function runScenarioWithWatchdog(id, operation) {
+  const controller = new AbortController();
+  const watchdogTimeout = id === 'performance' ? PERFORMANCE_SCENARIO_WATCHDOG_TIMEOUT_MS : DEFAULT_SCENARIO_WATCHDOG_TIMEOUT_MS;
   let timer;
+  const work = Promise.resolve().then(() => operation(controller.signal));
   const timeout = new Promise((_, reject) => {
     timer = setTimeout(() => {
-      reject(new Error(`scenario_timeout:${id}`));
-    }, SCENARIO_WATCHDOG_TIMEOUT_MS);
+      const error = new Error(`scenario_timeout:${id}`);
+      controller.abort(error);
+      reject(error);
+    }, watchdogTimeout);
     timer.unref?.();
   });
   try {
-    return await Promise.race([Promise.resolve().then(operation), timeout]);
+    return await Promise.race([work, timeout]);
+  } catch (error) {
+    if (controller.signal.aborted) await work.catch(() => {});
+    throw error;
   } finally {
     if (timer !== undefined) clearTimeout(timer);
   }

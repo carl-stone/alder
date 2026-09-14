@@ -125,8 +125,14 @@ test("external browser launch keeps its bearer out of opener arguments", async (
 
     const directoryInfo = await stat(dirname(launcherPath!));
     const launcherInfo = await stat(launcherPath!);
-    assert.equal(directoryInfo.mode & 0o777, 0o700);
-    assert.equal(launcherInfo.mode & 0o777, 0o600);
+    if (process.platform === "win32") {
+      // Windows does not expose POSIX permission bits through stat().
+      assert.equal(directoryInfo.isDirectory(), true);
+      assert.equal(launcherInfo.isFile(), true);
+    } else {
+      assert.equal(directoryInfo.mode & 0o777, 0o700);
+      assert.equal(launcherInfo.mode & 0o777, 0o600);
+    }
     const contents = await readFile(launcherPath!, "utf8");
     assert.match(contents, /^<!doctype html>/);
     assert.match(contents, /<meta name="referrer" content="no-referrer">/);

@@ -2,11 +2,22 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { chmod, mkdtemp, readFile, realpath, writeFile, rm, symlink, link, rename, readdir, stat, mkdir, utimes, open as openFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { DocumentStore, FileConflict, sameFile, diskVersion } from '../src/persistence.js';
 import { observeFile, writeAtomicText } from '../src/configuration.js';
 import { RecoveryError, RecoveryWriter } from '../src/recovery.js';
 import { createHash } from 'node:crypto';
+import { secureWindowsPath } from './windows-fixtures.js';
+
+const recoveryOptions = process.platform === 'win32'
+  ? { processSupervisorExecutable: resolve(fileURLToPath(new URL('../.application/resources/runtime/alder-process-supervisor.exe', import.meta.url))) }
+  : {};
+async function temporaryDirectory(prefix: string): Promise<string> {
+  const directory = await realpath(await mkdtemp(join(tmpdir(), prefix)));
+  await secureWindowsPath("directory", directory);
+  return directory;
+}
 
 const recoveryObservation = { state: 'absent' as const, digest: null, version: null, error: null };
 const recoverySidecars = { config: recoveryObservation, layout: recoveryObservation, packages: recoveryObservation };
@@ -24,7 +35,7 @@ function recoveryDelta(
 }
 
 test('persists physical notebook bytes atomically and preserves no-op bytes/mode', { skip: process.platform === 'win32' }, async () => {
-  const dir = await realpath(await mkdtemp(join(tmpdir(), 'alder-store-')));
+  const dir = await temporaryDirectory('alder-store-');
   try {
     const path = join(dir, 'notebook.R');
     const source = '# header\r\n# %% [markdown]\r\n# title';
@@ -43,7 +54,7 @@ test('persists physical notebook bytes atomically and preserves no-op bytes/mode
 });
 
 test('header-only no-op saves preserve missing final newline bytes', { skip: process.platform === 'win32' }, async () => {
-  const dir = await realpath(await mkdtemp(join(tmpdir(), 'alder-store-header-only-')));
+  const dir = await temporaryDirectory('alder-store-header-only-');
   try {
     const path = join(dir, 'notebook.R');
     const source = '# header';
@@ -56,7 +67,7 @@ test('header-only no-op saves preserve missing final newline bytes', { skip: pro
 });
 
 test('deleting all cells still normalizes the deleted-cell boundary', { skip: process.platform === 'win32' }, async () => {
-  const dir = await realpath(await mkdtemp(join(tmpdir(), 'alder-store-delete-all-')));
+  const dir = await temporaryDirectory('alder-store-delete-all-');
   try {
     const path = join(dir, 'notebook.R');
     const source = '# header\n# %%\nvalue';
@@ -68,7 +79,7 @@ test('deleting all cells still normalizes the deleted-cell boundary', { skip: pr
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 test('new source save and external replacement preserve source_conflict and dirty bytes', async () => {
-  const dir = await realpath(await mkdtemp(join(tmpdir(), 'alder-store-new-')));
+  const dir = await temporaryDirectory('alder-store-new-');
   try {
     const path = join(dir, 'notebook.R');
     const { store } = await DocumentStore.open(path);
@@ -83,7 +94,7 @@ test('new source save and external replacement preserve source_conflict and dirt
 });
 
 test('source symlink aliases are canonical and retargeting cannot replace another target', { skip: process.platform === 'win32' }, async () => {
-  const dir = await realpath(await mkdtemp(join(tmpdir(), 'alder-source-link-')));
+  const dir = await temporaryDirectory('alder-source-link-');
   try {
     const first = join(dir, 'first.R'), second = join(dir, 'second.R'), alias = join(dir, 'notebook.R'), hard = join(dir, 'hard.R');
     await writeFile(first, '# %%\nfirst\n'); await writeFile(second, '# %%\nsecond\n'); await symlink(first, alias); await link(first, hard);
@@ -96,7 +107,7 @@ test('source symlink aliases are canonical and retargeting cannot replace anothe
 });
 
 test('sidecar staged write rechecks replacement and leaves external partial save intact', { skip: process.platform === 'win32' }, async () => {
-  const dir = await realpath(await mkdtemp(join(tmpdir(), 'alder-sidecar-')));
+  const dir = await temporaryDirectory('alder-sidecar-');
   try {
     const sidecar = join(dir, '.alder', 'config.yaml');
     await mkdir(join(dir, '.alder')); await writeFile(sidecar, 'theme: dark\n');
@@ -108,7 +119,7 @@ test('sidecar staged write rechecks replacement and leaves external partial save
 });
 
 test('Save As publishes exclusively to an absent destination', async () => {
-  const dir = await realpath(await mkdtemp(join(tmpdir(), 'alder-save-as-')));
+  const dir = await temporaryDirectory('alder-save-as-');
   try {
     const path = join(dir, 'source.R'), destination = join(dir, 'copy.R'); await writeFile(path, '# %%\nsource\n');
     const { store } = await DocumentStore.open(path);
@@ -117,7 +128,7 @@ test('Save As publishes exclusively to an absent destination', async () => {
     const published = await prepared.publish();
     assert.equal(published.result.changed, true);
     assert.equal(await readFile(destination, 'utf8'), '# %%\nsource\n');
-    await chmod(destination, 0o640);
+    if (process.platform !== 'win32') await chmod(destination, 0o640);
     await published.abort();
     assert.equal(await readFile(destination, 'utf8'), '# %%\nsource\n');
     await rm(destination);
@@ -130,13 +141,13 @@ test('Save As publishes exclusively to an absent destination', async () => {
 });
 
 test('recovery keys are stable, private, and transferred only after Save As adoption', { skip: process.platform === 'win32' }, async () => {
-  const dir = await realpath(await mkdtemp(join(tmpdir(), 'alder-recovery-key-')));
+  const dir = await temporaryDirectory('alder-recovery-key-');
   const base = recoveryBaseline(0, Buffer.from([0]));
   let source: RecoveryWriter | undefined;
   let reopened: RecoveryWriter | undefined;
   let target: RecoveryWriter | undefined;
   try {
-    source = await RecoveryWriter.open({ rootDir: dir, key: 'source', baseline: base });
+    source = await RecoveryWriter.open({ ...recoveryOptions, rootDir: dir, key: 'source', baseline: base });
     const sourceKeyPath = join(source.directory, 'recovery.key');
     const sourceKeyBytes = await readFile(sourceKeyPath);
     assert.equal(sourceKeyBytes.byteLength, 32);
@@ -145,23 +156,23 @@ test('recovery keys are stable, private, and transferred only after Save As adop
     const sourceKey = source.recoveryKey;
     await source.close();
     source = undefined;
-    reopened = await RecoveryWriter.open({ rootDir: dir, key: 'source', baseline: base });
+    reopened = await RecoveryWriter.open({ ...recoveryOptions, rootDir: dir, key: 'source', baseline: base });
     assert.equal(reopened.recoveryKey, sourceKey);
     await reopened.close();
     reopened = undefined;
     await writeFile(sourceKeyPath, Buffer.from('malformed'), { mode: 0o600 });
     await assert.rejects(
-      RecoveryWriter.open({ rootDir: dir, key: 'source', baseline: base }),
+      RecoveryWriter.open({ ...recoveryOptions, rootDir: dir, key: 'source', baseline: base }),
       error => error instanceof RecoveryError && error.code === 'recovery_corrupt',
     );
     await writeFile(sourceKeyPath, sourceKeyBytes, { mode: 0o600 });
     await chmod(sourceKeyPath, 0o640);
     await assert.rejects(
-      RecoveryWriter.open({ rootDir: dir, key: 'source', baseline: base }),
+      RecoveryWriter.open({ ...recoveryOptions, rootDir: dir, key: 'source', baseline: base }),
       error => error instanceof RecoveryError && error.code === 'recovery_corrupt',
     );
     await chmod(sourceKeyPath, 0o600);
-    source = await RecoveryWriter.open({ rootDir: dir, key: 'source', baseline: base });
+    source = await RecoveryWriter.open({ ...recoveryOptions, rootDir: dir, key: 'source', baseline: base });
     const prepared = await source.prepareRebind({ rootDir: dir, key: 'destination', baseline: base });
     const targetKeyPath = join(prepared.writer.directory, 'recovery.key');
     await assert.rejects(readFile(targetKeyPath), { code: 'ENOENT' });
@@ -179,7 +190,7 @@ test('recovery keys are stable, private, and transferred only after Save As adop
       if (attempt === 99) assert.fail('source recovery key was not retired after adoption');
       await new Promise(resolveDelay => setTimeout(resolveDelay, 5));
     }
-    target = await RecoveryWriter.open({ rootDir: dir, key: 'destination', baseline: base });
+    target = await RecoveryWriter.open({ ...recoveryOptions, rootDir: dir, key: 'destination', baseline: base });
     assert.equal(target.recoveryKey, sourceKey);
   } finally {
     await target?.close().catch(() => undefined);
@@ -191,11 +202,11 @@ test('recovery keys are stable, private, and transferred only after Save As adop
 
 test('missing or invalid recovery pointers fail on a corrupt newest generation', async () => {
   for (const pointerKind of ['missing', 'invalid'] as const) {
-    const dir = await realpath(await mkdtemp(join(tmpdir(), 'alder-recovery-pointer-' + pointerKind + '-')));
+    const dir = await temporaryDirectory('alder-recovery-pointer-' + pointerKind + '-');
     const baseBytes = Buffer.from([0]);
     const base = recoveryBaseline(0, baseBytes);
     try {
-      const writer = await RecoveryWriter.open({ rootDir: dir, key: 'pointer-' + pointerKind, baseline: base });
+      const writer = await RecoveryWriter.open({ ...recoveryOptions, rootDir: dir, key: 'pointer-' + pointerKind, baseline: base });
       const directory = writer.directory;
       const baselinePath = writer.currentBaselinePath!;
       const logPath = writer.currentLogPath!;
@@ -206,15 +217,19 @@ test('missing or invalid recovery pointers fail on a corrupt newest generation',
       const newestBaselinePath = join(directory, 'baseline-' + newest + '.json');
       const newestLogPath = join(directory, 'log-' + newest + '.bin');
       await writeFile(newestBaselinePath, baselineBytes, { mode: 0o600 });
+      await secureWindowsPath('file', newestBaselinePath);
       await writeFile(newestLogPath, logBytes, { mode: 0o600 });
+      await secureWindowsPath('file', newestLogPath);
       await writeFile(newestBaselinePath, Buffer.from('{'), { mode: 0o600 });
+      await secureWindowsPath('file', newestBaselinePath);
       const newestTime = new Date(Date.now() + 1000);
       await utimes(newestBaselinePath, newestTime, newestTime);
       const pointerPath = join(directory, 'current.json');
       if (pointerKind === 'missing') await rm(pointerPath);
       else await writeFile(pointerPath, Buffer.from('{not-json'), { mode: 0o600 });
+      await secureWindowsPath('file', pointerPath);
       await assert.rejects(
-        RecoveryWriter.open({ rootDir: dir, key: 'pointer-' + pointerKind, baseline: base }),
+        RecoveryWriter.open({ ...recoveryOptions, rootDir: dir, key: 'pointer-' + pointerKind, baseline: base }),
         error => error instanceof RecoveryError && error.code === 'recovery_corrupt',
       );
     } finally {
@@ -224,7 +239,7 @@ test('missing or invalid recovery pointers fail on a corrupt newest generation',
 });
 
 test('recovery source frames preserve exact bytes, cell identity, torn tails, and tampering', { skip: process.platform === 'win32' }, async () => {
-  const dir = await realpath(await mkdtemp(join(tmpdir(), 'alder-recovery-'))); const dirs = [dir];
+  const dir = await temporaryDirectory('alder-recovery-'); const dirs = [dir];
   const baseBytes = Buffer.from([0xef, 0xbb, 0xbf, 0x23, 0x20, 0x25, 0x25, 0x0d, 0x0a, 0x41, 0x0d, 0x0a, 0x42, 0x0d, 0x0a]);
   const nextBytes = Buffer.from([0xef, 0xbb, 0xbf, 0x23, 0x20, 0x25, 0x25, 0x0d, 0x0a, 0x42, 0x0d, 0x0a, 0x41, 0x0d, 0x0a]);
   const baseCells = [{ id: 'cell-1', revision: 0 }, { id: 'cell-2', revision: 0 }];
@@ -236,7 +251,7 @@ test('recovery source frames preserve exact bytes, cell identity, torn tails, an
   ];
   try {
     const base = recoveryBaseline(0, baseBytes, baseCells);
-    const writer = await RecoveryWriter.open({ rootDir: dir, key: 'notebook', baseline: base });
+    const writer = await RecoveryWriter.open({ ...recoveryOptions, rootDir: dir, key: 'notebook', baseline: base });
     const next = recoveryBaseline(1, nextBytes, nextCells);
     const record = await writer.append({ schemaVersion: 1, fromRevision: 0, toRevision: 1, delta: recoveryDelta(baseBytes, nextBytes, nextCells, pieces) });
     assert.deepEqual(record.delta.pieces, pieces);
@@ -245,17 +260,17 @@ test('recovery source frames preserve exact bytes, cell identity, torn tails, an
       error => error instanceof RecoveryError && error.code === 'recovery_write_failed',
     );
     const log = writer.currentLogPath!; await writer.close();
-    const restored = await RecoveryWriter.open({ rootDir: dir, key: 'notebook', baseline: base });
+    const restored = await RecoveryWriter.open({ ...recoveryOptions, rootDir: dir, key: 'notebook', baseline: base });
     const materialized = await restored.materializedBaseline();
     assert.equal(materialized.physicalBytes, next.physicalBytes);
     assert.deepEqual(materialized.cells, next.cells);
     await restored.close();
-    const tornDir = await realpath(await mkdtemp(join(tmpdir(), 'alder-recovery-tail-'))); dirs.push(tornDir);
-    const torn = await RecoveryWriter.open({ rootDir: tornDir, key: 'notebook', baseline: base }); const tornLog = torn.currentLogPath!; await torn.close();
+    const tornDir = await temporaryDirectory('alder-recovery-tail-'); dirs.push(tornDir);
+    const torn = await RecoveryWriter.open({ ...recoveryOptions, rootDir: tornDir, key: 'notebook', baseline: base }); const tornLog = torn.currentLogPath!; await torn.close();
     const tail = await openFile(tornLog, 'a'); await tail.write(Buffer.from([0, 0, 0, 20, 123, 34])); await tail.close();
-    const tailState = await RecoveryWriter.open({ rootDir: tornDir, key: 'notebook', baseline: base }); assert.equal((await tailState.load()).status, 'tail-discarded'); await tailState.close();
-    const tamperDir = await realpath(await mkdtemp(join(tmpdir(), 'alder-recovery-tamper-'))); dirs.push(tamperDir);
-    const tamper = await RecoveryWriter.open({ rootDir: tamperDir, key: 'notebook', baseline: base });
+    const tailState = await RecoveryWriter.open({ ...recoveryOptions, rootDir: tornDir, key: 'notebook', baseline: base }); assert.equal((await tailState.load()).status, 'tail-discarded'); await tailState.close();
+    const tamperDir = await temporaryDirectory('alder-recovery-tamper-'); dirs.push(tamperDir);
+    const tamper = await RecoveryWriter.open({ ...recoveryOptions, rootDir: tamperDir, key: 'notebook', baseline: base });
     const tamperRecord = await tamper.append({ schemaVersion: 1, fromRevision: 0, toRevision: 1, delta: recoveryDelta(baseBytes, nextBytes, nextCells, pieces) });
     const tamperLog = tamper.currentLogPath!; await tamper.close();
     const tampered = Buffer.from(await readFile(tamperLog));
@@ -264,7 +279,7 @@ test('recovery source frames preserve exact bytes, cell identity, torn tails, an
     assert.notEqual(tamperHashOffset, -1);
     tampered[tamperHashOffset] = tampered[tamperHashOffset] === 0x30 ? 0x31 : 0x30;
     await writeFile(tamperLog, tampered);
-    const tailTampered = await RecoveryWriter.open({ rootDir: tamperDir, key: 'notebook', baseline: base });
+    const tailTampered = await RecoveryWriter.open({ ...recoveryOptions, rootDir: tamperDir, key: 'notebook', baseline: base });
     const tailTamperedState = await tailTampered.load();
     assert.equal(tailTamperedState.status, 'tail-discarded');
     assert.equal((await readFile(tamperLog)).byteLength, 0);
@@ -273,8 +288,8 @@ test('recovery source frames preserve exact bytes, cell identity, torn tails, an
     assert.deepEqual(tailTamperedBaseline.cells, base.cells);
     await tailTampered.close();
 
-    const interiorDir = await realpath(await mkdtemp(join(tmpdir(), 'alder-recovery-interior-'))); dirs.push(interiorDir);
-    const interior = await RecoveryWriter.open({ rootDir: interiorDir, key: 'notebook', baseline: base });
+    const interiorDir = await temporaryDirectory('alder-recovery-interior-'); dirs.push(interiorDir);
+    const interior = await RecoveryWriter.open({ ...recoveryOptions, rootDir: interiorDir, key: 'notebook', baseline: base });
     const interiorFirst = await interior.append({ schemaVersion: 1, fromRevision: 0, toRevision: 1, delta: recoveryDelta(baseBytes, nextBytes, nextCells, pieces) });
     const secondBytes = Buffer.concat([nextBytes, Buffer.from([0x43])]);
     await interior.append({ schemaVersion: 1, fromRevision: 1, toRevision: 2, delta: recoveryDelta(nextBytes, secondBytes, nextCells) });
@@ -285,28 +300,28 @@ test('recovery source frames preserve exact bytes, cell identity, torn tails, an
     assert.notEqual(interiorHashOffset, -1);
     interiorBytes[interiorHashOffset] = interiorBytes[interiorHashOffset] === 0x30 ? 0x31 : 0x30;
     await writeFile(interiorLog, interiorBytes);
-    await assert.rejects(RecoveryWriter.open({ rootDir: interiorDir, key: 'notebook', baseline: base }), error => error instanceof RecoveryError && error.code === 'recovery_corrupt');
+    await assert.rejects(RecoveryWriter.open({ ...recoveryOptions, rootDir: interiorDir, key: 'notebook', baseline: base }), error => error instanceof RecoveryError && error.code === 'recovery_corrupt');
 
     assert.equal(record.toRevision, 1); assert.equal(tamperRecord.toRevision, 1); assert.equal(log.endsWith('.bin'), true);
   } finally { for (const item of dirs) await rm(item, { recursive: true, force: true }); }
 });
 
 test('recovery rejects legacy schemas and incomplete sidecar maps', async () => {
-  const dir = await realpath(await mkdtemp(join(tmpdir(), 'alder-recovery-sidecars-')));
+  const dir = await temporaryDirectory('alder-recovery-sidecars-');
   const bytes = Buffer.from([0]);
   const base = recoveryBaseline(0, bytes);
   try {
-    const writer = await RecoveryWriter.open({ rootDir: dir, key: 'notebook', baseline: base }); await writer.close();
-    await assert.rejects(RecoveryWriter.open({ rootDir: dir, key: 'legacy', baseline: { ...base, schemaVersion: 2 } as never }), error => error instanceof RecoveryError && error.code === 'recovery_invalid');
-    await assert.rejects(RecoveryWriter.open({ rootDir: dir, key: 'missing', baseline: { ...base, sidecarObservations: { config: recoveryObservation, layout: recoveryObservation } } as never }), error => error instanceof RecoveryError && error.code === 'recovery_invalid');
-    await assert.rejects(RecoveryWriter.open({ rootDir: dir, key: 'alias', baseline: { ...base, sidecarDiskObservation: { config: recoveryObservation } } as never }), error => error instanceof RecoveryError && error.code === 'recovery_invalid');
-    await assert.rejects(RecoveryWriter.open({ rootDir: dir, key: 'notebook-alias', baseline: { ...base, notebookObservation: recoveryObservation } as never }), error => error instanceof RecoveryError && error.code === 'recovery_invalid');
-    await assert.rejects(RecoveryWriter.open({ rootDir: dir, key: 'present-without-identity', baseline: { ...base, notebookDiskObservation: { state: 'present', digest: null, version: null, error: null } } as never }), error => error instanceof RecoveryError && error.code === 'recovery_invalid');
-    await assert.rejects(RecoveryWriter.open({ rootDir: dir, key: 'unreadable-without-error', baseline: { ...base, notebookDiskObservation: { state: 'unreadable', digest: null, version: null, error: null } } as never }), error => error instanceof RecoveryError && error.code === 'recovery_invalid');
+    const writer = await RecoveryWriter.open({ ...recoveryOptions, rootDir: dir, key: 'notebook', baseline: base }); await writer.close();
+    await assert.rejects(RecoveryWriter.open({ ...recoveryOptions, rootDir: dir, key: 'legacy', baseline: { ...base, schemaVersion: 2 } as never }), error => error instanceof RecoveryError && error.code === 'recovery_invalid');
+    await assert.rejects(RecoveryWriter.open({ ...recoveryOptions, rootDir: dir, key: 'missing', baseline: { ...base, sidecarObservations: { config: recoveryObservation, layout: recoveryObservation } } as never }), error => error instanceof RecoveryError && error.code === 'recovery_invalid');
+    await assert.rejects(RecoveryWriter.open({ ...recoveryOptions, rootDir: dir, key: 'alias', baseline: { ...base, sidecarDiskObservation: { config: recoveryObservation } } as never }), error => error instanceof RecoveryError && error.code === 'recovery_invalid');
+    await assert.rejects(RecoveryWriter.open({ ...recoveryOptions, rootDir: dir, key: 'notebook-alias', baseline: { ...base, notebookObservation: recoveryObservation } as never }), error => error instanceof RecoveryError && error.code === 'recovery_invalid');
+    await assert.rejects(RecoveryWriter.open({ ...recoveryOptions, rootDir: dir, key: 'present-without-identity', baseline: { ...base, notebookDiskObservation: { state: 'present', digest: null, version: null, error: null } } as never }), error => error instanceof RecoveryError && error.code === 'recovery_invalid');
+    await assert.rejects(RecoveryWriter.open({ ...recoveryOptions, rootDir: dir, key: 'unreadable-without-error', baseline: { ...base, notebookDiskObservation: { state: 'unreadable', digest: null, version: null, error: null } } as never }), error => error instanceof RecoveryError && error.code === 'recovery_invalid');
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 test('prepared package sidecars normalize declarations and reject stale versions', { skip: process.platform === 'win32' }, async () => {
-  const dir = await realpath(await mkdtemp(join(tmpdir(), 'alder-package-prepared-')));
+  const dir = await temporaryDirectory('alder-package-prepared-');
   try {
     const path = join(dir, 'notebook.R');
     await writeFile(path, '# %%\nvalue <- 1\n');
@@ -328,10 +343,10 @@ test('prepared package sidecars normalize declarations and reject stale versions
 });
 
 test('recovery compacts source patches and retains the prior generation on failed publication', { skip: process.platform === 'win32' }, async () => {
-  const dir = await realpath(await mkdtemp(join(tmpdir(), 'alder-recovery-compaction-')));
-  const failureDir = await realpath(await mkdtemp(join(tmpdir(), 'alder-recovery-compaction-failure-')));
-  const oversizedDir = await realpath(await mkdtemp(join(tmpdir(), 'alder-recovery-compaction-oversized-')));
-  const initialFailureDir = await realpath(await mkdtemp(join(tmpdir(), 'alder-recovery-initial-failure-')));
+  const dir = await temporaryDirectory('alder-recovery-compaction-');
+  const failureDir = await temporaryDirectory('alder-recovery-compaction-failure-');
+  const oversizedDir = await temporaryDirectory('alder-recovery-compaction-oversized-');
+  const initialFailureDir = await temporaryDirectory('alder-initial-failure-');
   const dirs = [dir, failureDir, oversizedDir, initialFailureDir];
   const baseBytes = Buffer.from([0]);
   const base = recoveryBaseline(0, baseBytes, [{ id: 'cell-0', revision: 0 }]);
@@ -339,7 +354,7 @@ test('recovery compacts source patches and retains the prior generation on faile
   const revisionBytes = (revision: number) => Buffer.from('revision-' + revision);
   const revisionCells = (revision: number) => [{ id: 'cell-' + revision, revision }];
   try {
-    const oversized = await RecoveryWriter.open({ rootDir: oversizedDir, key: 'oversized-notebook', baseline: base, limits: { ...limits, maxLogBytes: 64 } });
+    const oversized = await RecoveryWriter.open({ ...recoveryOptions, rootDir: oversizedDir, key: 'oversized-notebook', baseline: base, limits: { ...limits, maxLogBytes: 64 } });
     const oversizedGeneration = oversized.currentGeneration;
     const oversizedFiles = await readdir(oversized.directory);
     await assert.rejects(
@@ -350,7 +365,7 @@ test('recovery compacts source patches and retains the prior generation on faile
     assert.deepEqual(await readdir(oversized.directory), oversizedFiles);
     await oversized.close();
 
-    const initialProbe = await RecoveryWriter.open({ rootDir: initialFailureDir, key: 'initial-failure', baseline: base, limits });
+    const initialProbe = await RecoveryWriter.open({ ...recoveryOptions, rootDir: initialFailureDir, key: 'initial-failure', baseline: base, limits });
     const initialRecoveryDir = initialProbe.directory;
     const initialState = await initialProbe.load();
     assert.notEqual(initialState.generation, null);
@@ -371,14 +386,14 @@ test('recovery compacts source patches and retains the prior generation on faile
     assert.equal(stagedInitialFiles.length, 2);
     await initialProbe.close();
     await rm(initialPointerPath, { recursive: true, force: true });
-    const initialRestored = await RecoveryWriter.open({ rootDir: initialFailureDir, key: 'initial-failure', baseline: base, limits });
+    const initialRestored = await RecoveryWriter.open({ ...recoveryOptions, rootDir: initialFailureDir, key: 'initial-failure', baseline: base, limits });
     const initialBaseline = await initialRestored.materializedBaseline();
     assert.equal(initialBaseline.documentRevision, 0);
     assert.equal(initialBaseline.physicalBytes, base.physicalBytes);
     assert.deepEqual(initialBaseline.cells, base.cells);
     await initialRestored.close();
 
-    const writer = await RecoveryWriter.open({ rootDir: dir, key: 'notebook', baseline: base, limits });
+    const writer = await RecoveryWriter.open({ ...recoveryOptions, rootDir: dir, key: 'notebook', baseline: base, limits });
     const initialGeneration = writer.currentGeneration;
     assert.notEqual(initialGeneration, null);
     let priorBytes = baseBytes;
@@ -405,7 +420,7 @@ test('recovery compacts source patches and retains the prior generation on faile
     assert.deepEqual(generationFiles, ['baseline-' + rolledGeneration + '.json', 'log-' + rolledGeneration + '.bin'].sort());
     await writer.close();
 
-    const restored = await RecoveryWriter.open({ rootDir: dir, key: 'notebook', baseline: base, limits });
+    const restored = await RecoveryWriter.open({ ...recoveryOptions, rootDir: dir, key: 'notebook', baseline: base, limits });
     const restoredBaseline = await restored.materializedBaseline();
     assert.equal(restored.currentGeneration, rolledGeneration);
     assert.equal(restoredBaseline.documentRevision, expected.documentRevision);
@@ -413,7 +428,7 @@ test('recovery compacts source patches and retains the prior generation on faile
     assert.deepEqual(restoredBaseline.cells, expected.cells);
     await restored.close();
 
-    const failed = await RecoveryWriter.open({ rootDir: failureDir, key: 'failed-notebook', baseline: base, limits: { ...limits, maxRecords: 1 } });
+    const failed = await RecoveryWriter.open({ ...recoveryOptions, rootDir: failureDir, key: 'failed-notebook', baseline: base, limits: { ...limits, maxRecords: 1 } });
     await failed.append({ schemaVersion: 1, fromRevision: 0, toRevision: 1, delta: recoveryDelta(baseBytes, revisionBytes(1), revisionCells(1)) });
     const priorGeneration = failed.currentGeneration;
     const priorBaselinePath = failed.currentBaselinePath;
@@ -438,7 +453,7 @@ test('recovery compacts source patches and retains the prior generation on faile
     await failed.close();
     await rm(pointerPath, { recursive: true, force: true });
     await writeFile(pointerPath, pointerBytes, { mode: 0o600 });
-    const failedRestored = await RecoveryWriter.open({ rootDir: failureDir, key: 'failed-notebook', baseline: base, limits: { ...limits, maxRecords: 1 } });
+    const failedRestored = await RecoveryWriter.open({ ...recoveryOptions, rootDir: failureDir, key: 'failed-notebook', baseline: base, limits: { ...limits, maxRecords: 1 } });
     const failedBaseline = await failedRestored.materializedBaseline();
     assert.equal(failedBaseline.documentRevision, 1);
     assert.equal(failedBaseline.physicalBytes, recoveryBaseline(1, revisionBytes(1), revisionCells(1)).physicalBytes);
@@ -450,7 +465,7 @@ test('recovery compacts source patches and retains the prior generation on faile
 });
 
 test('prepareReload requires bounded disk preconditions and preserves Controller document identities', { skip: process.platform === 'win32' }, async () => {
-  const dir = await realpath(await mkdtemp(join(tmpdir(), 'alder-reload-')));
+  const dir = await temporaryDirectory('alder-reload-');
   try {
     const path = join(dir, 'notebook.R');
     const nl = String.fromCharCode(10);
@@ -483,8 +498,8 @@ test('prepareReload requires bounded disk preconditions and preserves Controller
 });
 
 test('recovery branches are bounded, durable, and prepared rebinds separate publication from adoption', { skip: process.platform === 'win32' }, async () => {
-  const dir = await realpath(await mkdtemp(join(tmpdir(), 'alder-branch-')));
-  let targetDir = await realpath(await mkdtemp(join(tmpdir(), 'alder-rebind-target-')));
+  const dir = await temporaryDirectory('alder-branch-');
+  let targetDir = await temporaryDirectory('alder-rebind-target-');
   let targetOnSeparateDevice = false;
   if (process.platform === 'linux') {
     let candidate: string | undefined;
@@ -510,12 +525,12 @@ test('recovery branches are bounded, durable, and prepared rebinds separate publ
     const baseBytes = Buffer.from(['# %%', 'base', ''].join(nl));
     const nextBytes = Buffer.from(['# %%', 'next', ''].join(nl));
     const base = recoveryBaseline(0, baseBytes);
-    let writer = await RecoveryWriter.open({ rootDir: dir, key: 'notebook', baseline: base });
+    let writer = await RecoveryWriter.open({ ...recoveryOptions, rootDir: dir, key: 'notebook', baseline: base });
     await writer.append({ schemaVersion: 1, fromRevision: 0, toRevision: 1, delta: recoveryDelta(baseBytes, nextBytes, [{ id: 'cell-1', revision: 1 }]) });
     const branch = await writer.forkBranch({ id: 'draft' });
     assert.deepEqual(Object.keys(branch).sort(), ['documentRevision', 'fingerprint', 'id', 'status']);
     await writer.close();
-    writer = await RecoveryWriter.open({ rootDir: dir, key: 'notebook', baseline: base });
+    writer = await RecoveryWriter.open({ ...recoveryOptions, rootDir: dir, key: 'notebook', baseline: base });
     assert.deepEqual(await writer.listBranches(), [branch]);
     const loaded = await writer.load();
     assert.deepEqual(loaded.branches, [branch]);
@@ -529,7 +544,7 @@ test('recovery branches are bounded, durable, and prepared rebinds separate publ
     const abandoned = await writer.prepareRebind({ rootDir: abandonedDir, key: 'notebook-abandoned', baseline: materialized });
     await assert.rejects(readFile(abandoned.writer.pointerPath), { code: 'ENOENT' });
     await abandoned.writer.close();
-    const abandonedRestored = await RecoveryWriter.open({ rootDir: abandonedDir, key: 'notebook-abandoned', baseline: base });
+    const abandonedRestored = await RecoveryWriter.open({ ...recoveryOptions, rootDir: abandonedDir, key: 'notebook-abandoned', baseline: base });
     assert.equal((await abandonedRestored.materializedBaseline()).physicalBytes, base.physicalBytes);
     await abandonedRestored.close();
     const prepared = await writer.prepareRebind({ rootDir: targetDir, key: 'notebook-copy', baseline: materialized });
@@ -537,10 +552,11 @@ test('recovery branches are bounded, durable, and prepared rebinds separate publ
     await assert.rejects(readFile(prepared.writer.branchIndexPath), { code: 'ENOENT' });
     await prepared.publish();
     await prepared.adopt();
+        assert.equal((await prepared.writer.materializedBaseline()).documentRevision, 1);
     assert.deepEqual(await writer.listBranches(), []);
     await prepared.abort();
     await prepared.writer.close();
-    const restored = await RecoveryWriter.open({ rootDir: targetDir, key: 'notebook-copy', baseline: base });
+    const restored = await RecoveryWriter.open({ ...recoveryOptions, rootDir: targetDir, key: 'notebook-copy', baseline: base });
     assert.deepEqual(await restored.listBranches(), [transferred]);
     assert.equal((await restored.materializeBranch('draft-transfer')).physicalBytes, materialized.physicalBytes);
     assert.equal((await restored.materializedBaseline()).physicalBytes, materialized.physicalBytes);
@@ -550,7 +566,7 @@ test('recovery branches are bounded, durable, and prepared rebinds separate publ
 });
 
 test('refreshes external source observations without moving the save baseline', { skip: process.platform === 'win32' }, async () => {
-  const dir = await realpath(await mkdtemp(join(tmpdir(), 'alder-refresh-')));
+  const dir = await temporaryDirectory('alder-refresh-');
   try {
     const path = join(dir, 'notebook.R');
     const external = join(dir, 'external.R');
@@ -575,12 +591,12 @@ test('refreshes external source observations without moving the save baseline', 
 });
 
 test('repairs a mode-only recovery root before discarding corrupt tails', { skip: process.platform === 'win32' }, async () => {
-  const dir = await realpath(await mkdtemp(join(tmpdir(), 'alder-recovery-root-')));
+  const dir = await temporaryDirectory('alder-recovery-root-');
   try {
     const baseBytes = Buffer.from('# %%\nbase\n');
     const baseline = recoveryBaseline(0, baseBytes);
     await chmod(dir, 0o755);
-    const writer = await RecoveryWriter.open({ rootDir: dir, key: 'root-repair', baseline });
+    const writer = await RecoveryWriter.open({ ...recoveryOptions, rootDir: dir, key: 'root-repair', baseline });
     assert.equal((await stat(dir)).mode & 0o777, 0o700);
     const log = writer.currentLogPath!;
     await writer.close();
@@ -590,7 +606,7 @@ test('repairs a mode-only recovery root before discarding corrupt tails', { skip
     invalidPayload.copy(invalidFrame, 4);
     await writeFile(log, invalidFrame);
     await chmod(dir, 0o755);
-    const recovered = await RecoveryWriter.open({ rootDir: dir, key: 'root-repair', baseline });
+    const recovered = await RecoveryWriter.open({ ...recoveryOptions, rootDir: dir, key: 'root-repair', baseline });
     assert.equal((await recovered.load()).status, 'tail-discarded');
     assert.equal((await readFile(log)).byteLength, 0);
     await recovered.close();

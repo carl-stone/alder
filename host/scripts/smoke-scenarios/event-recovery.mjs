@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { createHarness, delay } from './_common.mjs';
+import { cleanupScenarioResources, createHarness, delay } from './_common.mjs';
+import { openInteractiveBrowser } from '../../test-support/live-browser.mjs';
 
 async function waitTerminal(harness, operationId, timeout = 120_000) {
   assert.equal(typeof operationId, 'string');
@@ -50,6 +51,7 @@ export async function run(ctx) {
     "# %%", "message <- 'event recovery'", "message",
   ].join("\n") + "\n";
   const harness = await createHarness(ctx, { id: "event-recovery", source, rscript: requireRscript(ctx) });
+  let live;
   try {
     const baseline = await harness.snapshot();
     const first = baseline.cells[0];
@@ -77,7 +79,11 @@ export async function run(ctx) {
     assert.equal(transactionEvent.payload.updated.length, 2);
     assert.equal(transactionEvent.payload.order.length, current.cells.length);
 
-    const browserHtml = await harness.browser(await harness.mintTicket());
+    // Use the canonical browser driver so its sandbox flags and applicability
+    // handling stay identical to the other browser smoke scenarios.
+    live = await openInteractiveBrowser(harness, { name: 'event-recovery', evidence: ctx.evidence });
+    await live.wait("window.__alderHost?.client?.document?.snapshot != null", 30_000);
+    const browserHtml = await live.browser.evaluate("document.documentElement.outerHTML");
     assert.equal(browserHtml.includes('event recovery'), true);
     assert.equal(browserHtml.includes('x + 3'), true);
 
@@ -115,7 +121,7 @@ export async function run(ctx) {
       },
     };
   } finally {
-    await harness.close();
+    await cleanupScenarioResources(() => live?.close(), () => harness.close());
   }
 }
 

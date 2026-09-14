@@ -323,7 +323,7 @@ async function cleanupOwnerRecord(registryPath, canonicalPath, processObserverOp
   }
   if (metadata === null || typeof metadata !== 'object' || Array.isArray(metadata)
       || !['starting', 'ready', 'stopping'].includes(metadata.state)
-      || metadata.canonicalPath !== canonicalPath
+      || (canonicalPath !== null && metadata.canonicalPath !== canonicalPath)
       || !Number.isSafeInteger(metadata.pid) || metadata.pid <= 0
       || typeof metadata.startIdentity !== 'string') return;
   const pid = metadata.pid;

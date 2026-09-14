@@ -827,7 +827,8 @@ function isMissing(error: unknown): boolean {
 }
 
 function unsupportedDirectorySync(error: unknown): boolean {
-  return isRecord(error) && (error.code === "EINVAL" || error.code === "ENOTSUP" || error.code === "EBADF");
+  return isRecord(error) && (error.code === "EINVAL" || error.code === "ENOTSUP" || error.code === "EBADF" ||
+      (process.platform === "win32" && error.code === "EPERM"));
 }
 
 async function syncDirectory(directory: string): Promise<void> {

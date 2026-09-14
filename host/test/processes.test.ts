@@ -5,14 +5,13 @@ import type { Readable, Writable } from "node:stream";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
-
 import {
   createProcessScope,
   type OwnedProcess,
   type ProcessScope,
 } from "../src/processes.js";
+import { createWindowsNodeLauncher, secureWindowsPath, testNodeExecutable } from "./windows-fixtures.js";
 import { resolveApplicationResources, type ApplicationResources } from "../src/resources.js";
-
 interface NativeProcess {
   pid: number;
   ppid: number;
@@ -95,6 +94,26 @@ function testEnvironment(extra: Record<string, string> = {}): Record<string, str
     environment[key] = value;
   }
   return { ...environment, ...extra };
+}
+
+async function writeSupervisorFixture(basePath: string, mode: "overflow" | "healthy", exitPath: string): Promise<string> {
+  const scriptPath = process.platform === "win32" ? basePath + ".cjs" : basePath;
+  const executablePath = process.platform === "win32" ? basePath + ".exe" : basePath;
+  await writeFile(scriptPath, supervisorFixtureScript(mode, exitPath), { mode: 0o755 });
+  if (process.platform === "win32") {
+    await secureWindowsPath("file", scriptPath);
+    await createWindowsNodeLauncher(executablePath, scriptPath);
+    await secureWindowsPath("file", executablePath);
+  } else {
+    await chmod(scriptPath, 0o755);
+  }
+  return executablePath;
+}
+
+async function fixtureDirectory(prefix: string): Promise<string> {
+  const directory = await mkdtemp(join(tmpdir(), prefix));
+  await secureWindowsPath("directory", directory);
+  return directory;
 }
 
 function sleep(milliseconds: number): Promise<void> {
@@ -260,7 +279,7 @@ function leaderScript(exitCode: number, retirePath?: string): string {
     ].join("\n");
   return [
     "const { spawn } = require(\"node:child_process\");",
-    "const child = spawn(process.execPath, [\"-e\", " + childScript + "], { stdio: \"ignore\" });",
+    "const child = spawn(" + JSON.stringify(testNodeExecutable()) + ", [\"-e\", " + childScript + "], { stdio: \"ignore\" });",
     "child.unref();",
     "process.stdout.write(\"child-ready:\" + child.pid + String.fromCharCode(10));",
     retirement,
@@ -278,7 +297,7 @@ async function spawnOwned(
   cwd: string,
 ): Promise<OwnedProcess> {
   return scope.spawn({
-    executable: process.execPath,
+    executable: testNodeExecutable(),
     args: ["-e", script],
     cwd,
     environment: testEnvironment(),
@@ -288,7 +307,7 @@ async function spawnOwned(
 
 test("normal owned process exit retires supervisor and contained descendants", integration, async () => {
   const resources = await installedResources();
-  const directory = await mkdtemp(join(tmpdir(), "alder-process-leader-"));
+  const directory = await fixtureDirectory("alder-process-leader-");
   const retirePath = join(directory, "retire");
   let scope: ProcessScope | undefined;
   const observer = await processObserver();
@@ -347,7 +366,7 @@ test("normal owned process exit retires supervisor and contained descendants", i
 
 test("live scope close resolves OwnedProcess.exited with the native exit result", integration, async () => {
   const resources = await installedResources();
-  const directory = await mkdtemp(join(tmpdir(), "alder-process-close-"));
+  const directory = await fixtureDirectory("alder-process-close-");
   let scope: ProcessScope | undefined;
   let owned: OwnedProcess | undefined;
   let output: CapturedOutput | undefined;
@@ -635,9 +654,9 @@ function detachedTargetScript(
     "const retirePath = " + JSON.stringify(retirePath) + ";",
     "const childReadyPath = " + JSON.stringify(childReadyPath) + ";",
     "const exitPath = " + JSON.stringify(exitPath) + ";",
-    "const child = spawn(process.execPath, [\"-e\", " + JSON.stringify(childScript) + "], { stdio: \"ignore\" });",
-    "child.unref();",
+    "const child = spawn(" + JSON.stringify(testNodeExecutable()) + ", [\"-e\", " + JSON.stringify(childScript) + "], { stdio: \"ignore\" });",
     "process.on(\"exit\", () => { fs.writeFileSync(exitPath, JSON.stringify({ type: \"target-exit\", pid: process.pid, code: process.exitCode, childPid: child.pid }) + String.fromCharCode(10)); });",
+    "child.unref();",
     "process.stdout.write(JSON.stringify({ type: \"target-ready\", pid: process.pid, childPid: child.pid }) + String.fromCharCode(10));",
     "const waitForChild = setInterval(() => { if (fs.existsSync(childReadyPath)) { clearInterval(waitForChild); process.exitCode = 17; } }, 5);",
   ].join("\n");
@@ -696,7 +715,7 @@ async function cleanupDetached(
 
 test("detached handoff survives wrapper exit and drains a same-group child after natural root exit", integration, async () => {
   const resources = await installedResources();
-  const directory = await mkdtemp(join(tmpdir(), "alder-process-detached-"));
+  const directory = await fixtureDirectory("alder-process-detached-");
   const retirePath = join(directory, "retire");
   const childReadyPath = join(directory, "child-ready");
   const exitPath = join(directory, "target-exit");
@@ -711,7 +730,7 @@ test("detached handoff survives wrapper exit and drains a same-group child after
       v: 1,
       op: "spawn",
       id: 1,
-      executable: process.execPath,
+      executable: testNodeExecutable(),
       args: ["-e", detachedTargetScript(retirePath, childReadyPath, exitPath, childTermPath)],
       cwd: directory,
       environment: testEnvironment(),
@@ -769,7 +788,7 @@ test("detached handoff survives wrapper exit and drains a same-group child after
 
 function supervisorFixtureScript(mode: "overflow" | "healthy", exitPath: string): string {
   return [
-    "#!" + process.execPath,
+    "#!" + testNodeExecutable(),
     "const fs = require(\"node:fs\");",
     "const mode = " + JSON.stringify(mode) + ";",
     "const exitPath = " + JSON.stringify(exitPath) + ";",
@@ -824,18 +843,17 @@ function supervisorFixtureScript(mode: "overflow" | "healthy", exitPath: string)
 }
 
 test("normal exits retire supervisors and descriptors without scope close", { timeout: 30_000 }, async () => {
-  const directory = await mkdtemp(join(tmpdir(), "alder-process-retire-"));
-  const supervisorPath = join(directory, "healthy-supervisor.cjs");
+  const directory = await fixtureDirectory("alder-process-retire-");
+  const supervisorBasePath = join(directory, "healthy-supervisor");
   const exitPath = join(directory, "healthy-exits");
   const iterations = 16;
   let scope: ProcessScope | undefined;
   try {
-    await writeFile(supervisorPath, supervisorFixtureScript("healthy", exitPath));
-    await chmod(supervisorPath, 0o755);
+    const supervisorPath = await writeSupervisorFixture(supervisorBasePath, "healthy", exitPath);
     scope = await createProcessScope({ processSupervisorExecutable: supervisorPath } as ApplicationResources);
     for (let index = 0; index < iterations; index += 1) {
       const owned = await scope.spawn({
-        executable: process.execPath,
+        executable: testNodeExecutable(),
         args: ["-e", ""],
         cwd: directory,
         environment: testEnvironment(),
@@ -869,23 +887,22 @@ test("normal exits retire supervisors and descriptors without scope close", { ti
   }
 });
 test("supervisor event queue overflow fails and permits clean recovery", { timeout: 30_000 }, async () => {
-  const directory = await mkdtemp(join(tmpdir(), "alder-process-queue-"));
-  const overflowPath = join(directory, "overflow-supervisor.cjs");
+  const directory = await fixtureDirectory("alder-process-queue-");
+  const overflowBasePath = join(directory, "overflow-supervisor");
   const overflowExitPath = join(directory, "overflow-exit");
-  const healthyPath = join(directory, "healthy-supervisor.cjs");
+  const healthyBasePath = join(directory, "healthy-supervisor");
   const healthyExitPath = join(directory, "healthy-exit");
   let overflowScope: ProcessScope | undefined;
   let healthyScope: ProcessScope | undefined;
   const spawnOptions = {
-    executable: process.execPath,
+    executable: testNodeExecutable(),
     args: ["-e", ""],
     cwd: directory,
     environment: testEnvironment(),
     stdio: "ignore" as const,
   };
   try {
-    await writeFile(overflowPath, supervisorFixtureScript("overflow", overflowExitPath));
-    await chmod(overflowPath, 0o755);
+    const overflowPath = await writeSupervisorFixture(overflowBasePath, "overflow", overflowExitPath);
     overflowScope = await createProcessScope({ processSupervisorExecutable: overflowPath } as ApplicationResources);
     await assert.rejects(
       overflowScope.spawn(spawnOptions),
@@ -901,8 +918,7 @@ test("supervisor event queue overflow fails and permits clean recovery", { timeo
       }
     }, 5_000);
 
-    await writeFile(healthyPath, supervisorFixtureScript("healthy", healthyExitPath));
-    await chmod(healthyPath, 0o755);
+    const healthyPath = await writeSupervisorFixture(healthyBasePath, "healthy", healthyExitPath);
     healthyScope = await createProcessScope({ processSupervisorExecutable: healthyPath } as ApplicationResources);
     const owned = await healthyScope.spawn(spawnOptions);
     assert.deepEqual(

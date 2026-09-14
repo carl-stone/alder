@@ -55,6 +55,7 @@ export async function run(ctx) {
   let firstAgents = [];
   let firstHttpAgents = [];
   let firstDesktop;
+  let firstClosed = false;
   let second;
   let secondAgents = [];
   let secondHttpAgents = [];
@@ -244,6 +245,7 @@ export async function run(ctx) {
     await closeDesktop(firstDesktop);
     firstDesktop = undefined;
     await first.close();
+    firstClosed = true;
     process.stderr.write('[mcp-couse] GUI-first agents and Electron closed\n');
 
     second = await createHarness(ctx, {
@@ -361,7 +363,7 @@ export async function run(ctx) {
       () => closeHttpAgents(first.origin, firstHttpAgents),
       () => closeDesktop(firstDesktop),
       () => closeAgents(firstAgents),
-      () => first.close(),
+      () => !firstClosed ? first.close() : undefined,
       () => second ? closeHttpAgents(second.origin, secondHttpAgents) : undefined,
       () => closeDesktop(secondDesktop),
       () => closeAgents(secondAgents),

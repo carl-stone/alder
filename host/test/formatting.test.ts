@@ -4,24 +4,32 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { chmod, mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { secureWindowsPath, testNodeExecutable } from "./windows-fixtures.js";
 import { createFormattingService, FormattingError } from "../src/formatting.js";
 import type { OwnedProcess, ProcessScope } from "../src/processes.js";
 
 async function fakeAir(source: string): Promise<{ directory: string; executable: string }> {
   const directory = await mkdtemp(join(tmpdir(), "alder-format-test-"));
+  await secureWindowsPath("directory", directory);
   const executable = join(directory, "air");
   await writeFile(executable, source, { encoding: "utf8", mode: 0o755 });
-  await chmod(executable, 0o755);
+  await secureWindowsPath("file", executable);
+  if (process.platform !== "win32") await chmod(executable, 0o755);
   return { directory, executable };
 }
 function directProcessScope(): ProcessScope {
   const children = new Set<ChildProcessWithoutNullStreams>();
   const spawnOwned = async (options: Parameters<ProcessScope["spawn"]>[0]): Promise<OwnedProcess> => {
-    const child = spawn(options.executable, [...options.args], {
-      cwd: options.cwd,
-      env: options.environment,
-      stdio: ["pipe", "pipe", "pipe"],
-    });
+    // Windows cannot execute an extensionless shebang fixture directly.
+    const child = spawn(
+      process.platform === "win32" ? testNodeExecutable() : options.executable,
+      process.platform === "win32" ? [options.executable, ...options.args] : [...options.args],
+      {
+        cwd: options.cwd,
+        env: options.environment,
+        stdio: ["pipe", "pipe", "pipe"],
+      },
+    );
     children.add(child);
     const exited = new Promise<{ code: number | null; signal: string | null }>(resolve => {
       child.once("close", (code, signal) => {

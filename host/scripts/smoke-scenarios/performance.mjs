@@ -1,14 +1,15 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { access, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { access, mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import { arch, cpus, hostname, platform, release, totalmem } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { spawnSmokeProcess } from './_common.mjs';
+import { captureProcessTree, cleanupOwnedProcessTree, cleanupPartialOwner, cleanupScenarioResources, readProcess, signalSmokeProcessGroup, spawnSmokeProcess } from './_common.mjs';
 
 const DEFAULT_REPETITIONS = 30;
 
 export async function run(ctx) {
+  throwIfAborted(ctx.signal);
   const id = 'performance';
   const repetitions = Number(process.env.ALDER_SMOKE_PERFORMANCE_REPETITIONS ?? DEFAULT_REPETITIONS);
   assert.equal(Number.isSafeInteger(repetitions) && repetitions >= DEFAULT_REPETITIONS, true, `performance requires at least ${DEFAULT_REPETITIONS} repetitions`);
@@ -44,11 +45,12 @@ export async function run(ctx) {
     selectedRscript,
   };
   const dependencyRoot = resolve(ctx.qualificationRoot ?? join(sourceRoot, 'host'));
+  const processObserverOptions = { supervisorExecutable: join(applicationRoot, ctx.manifest.resources.processSupervisorExecutable) };
   assert.notEqual(baseline.machine.hostname, '', 'performance requires a machine identity');
   await writeFile(join(evidenceDirectory, 'baseline.json'), `${JSON.stringify(redact(baseline), null, 2)}\n`, 'utf8');
 
-  const warm = await runLatency({ sourceRoot, dependencyRoot, applicationRoot, selectedRscript, frontend, repetitions, evidence: join(evidenceDirectory, 'warm') });
-  const fresh = await runLatency({ sourceRoot, dependencyRoot, applicationRoot, selectedRscript, frontend, repetitions, fresh: true, evidence: join(evidenceDirectory, 'fresh') });
+  const warm = await runLatency({ sourceRoot, dependencyRoot, applicationRoot, selectedRscript, frontend, repetitions, evidence: join(evidenceDirectory, 'warm'), signal: ctx.signal, processObserverOptions });
+  const fresh = await runLatency({ sourceRoot, dependencyRoot, applicationRoot, selectedRscript, frontend, repetitions, fresh: true, evidence: join(evidenceDirectory, 'fresh'), signal: ctx.signal, processObserverOptions });
   assert.equal(fresh.identity.frontend, frontend);
   assert.equal(warm.identity.repetitions, repetitions);
   assert.equal(fresh.identity.repetitions, repetitions);
@@ -112,14 +114,20 @@ export async function run(ctx) {
   return { id, identity };
 }
 
-async function runLatency({ sourceRoot, dependencyRoot, applicationRoot, selectedRscript, frontend, repetitions, fresh = false, evidence }) {
+async function runLatency({ sourceRoot, dependencyRoot, applicationRoot, selectedRscript, frontend, repetitions, fresh = false, evidence, signal, processObserverOptions }) {
+  throwIfAborted(signal);
   await mkdir(evidence, { recursive: true });
   const tsx = join(dependencyRoot, 'node_modules', '.bin', process.platform === 'win32' ? 'tsx.cmd' : 'tsx');
   const script = join(sourceRoot, 'host', 'scripts', 'latency.ts');
   if (!await isFile(tsx)) throw new Error(`performance latency runner is missing: ${tsx}`);
   const args = [tsx, script, '--application', applicationRoot, evidence, String(repetitions), '--rscript', selectedRscript, '--frontend', frontend, '--no-progress'];
   if (fresh) args.push('--fresh');
-  const result = await spawnAndCollect(process.execPath, args, sourceRoot);
+  let result;
+  await cleanupScenarioResources(
+    async () => { result = await spawnAndCollect(process.execPath, args, sourceRoot, signal); },
+    () => cleanupLatencyOwners(evidence, processObserverOptions),
+  );
+  throwIfAborted(signal);
   let parsed;
   try {
     parsed = JSON.parse(await readFile(join(evidence, 'results.json'), 'utf8'));
@@ -131,16 +139,83 @@ async function runLatency({ sourceRoot, dependencyRoot, applicationRoot, selecte
   return parsed;
 }
 
-function spawnAndCollect(command, args, cwd) {
+async function cleanupLatencyOwners(evidence, processObserverOptions) {
+  const recorded = await readFile(join(evidence, 'results.json'), 'utf8').then(JSON.parse).catch(() => null);
+  const launchers = Array.isArray(recorded?.fixtures) ? recorded.fixtures.map(row => row?.hostProcess).filter(Boolean) : [];
+  const entries = await readdir(evidence, { withFileTypes: true }).catch(() => []);
+  await cleanupScenarioResources(
+    ...launchers.map(identity => async () => {
+      const observed = await readProcess(identity.pid, processObserverOptions);
+      if (observed === null || !observed.command.includes(evidence)) return;
+      if (identity.startTimeTicks !== undefined && observed.startIdentity !== 'linux:' + identity.startTimeTicks) return;
+      const tree = await captureProcessTree(identity.pid, observed.startIdentity, processObserverOptions);
+      await cleanupOwnedProcessTree(tree, processObserverOptions);
+    }),
+    ...entries
+      .filter(entry => entry.isDirectory() && entry.name.endsWith('-runtime-data'))
+      .map(entry => () => cleanupPartialOwner(null, join(evidence, entry.name, 'alder-nodejs', 'runtime'), processObserverOptions)),
+  );
+}
+
+function spawnAndCollect(command, args, cwd, signal) {
   return new Promise((resolveResult, rejectResult) => {
     const child = spawnSmokeProcess(command, args, { cwd, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, shell: process.platform === 'win32' });
     let stdout = '';
     let stderr = '';
+    let aborted = false;
+    let settled = false;
+    let killTimer;
+    const onAbort = () => {
+      if (aborted || child.exitCode !== null || child.signalCode !== null) return;
+      aborted = true;
+      try {
+        signalSmokeProcessGroup(child.pid, 'SIGTERM');
+      } catch {
+        try { child.kill('SIGTERM'); } catch { /* process already exited */ }
+      }
+      killTimer = setTimeout(() => {
+        if (child.exitCode !== null || child.signalCode !== null) return;
+        try {
+          signalSmokeProcessGroup(child.pid, 'SIGKILL');
+        } catch {
+          try { child.kill('SIGKILL'); } catch { /* process already exited */ }
+        }
+      }, 2_000);
+      killTimer.unref?.();
+    };
+    const cleanup = () => {
+      if (killTimer !== undefined) clearTimeout(killTimer);
+      signal?.removeEventListener('abort', onAbort);
+    };
+    const settle = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      callback(value);
+    };
     child.stdout.on('data', value => { stdout = (stdout + String(value)).slice(-1_048_576); });
     child.stderr.on('data', value => { stderr = (stderr + String(value)).slice(-1_048_576); });
-    child.once('error', rejectResult);
-    child.once('close', (code, signal) => resolveResult({ code: code ?? (signal ? 1 : 0), signal, stdout, stderr }));
+    child.once('error', error => settle(rejectResult, aborted ? cancellationReason(signal) : error));
+    child.once('close', (code, signalCode) => {
+      if (aborted) {
+        settle(rejectResult, cancellationReason(signal));
+      } else {
+        settle(resolveResult, { code: code ?? (signalCode ? 1 : 0), signal: signalCode, stdout, stderr });
+      }
+    });
+    if (signal) {
+      signal.addEventListener('abort', onAbort, { once: true });
+      if (signal.aborted) onAbort();
+    }
   });
+}
+
+function cancellationReason(signal) {
+  return signal?.reason instanceof Error ? signal.reason : new Error('performance latency run aborted');
+}
+
+function throwIfAborted(signal) {
+  if (signal?.aborted) throw cancellationReason(signal);
 }
 
 function distribution(record, fixture, scenario, repetitions) {

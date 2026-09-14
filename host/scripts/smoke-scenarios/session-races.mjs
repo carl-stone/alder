@@ -43,6 +43,7 @@ export async function run(ctx) {
   const sessions = [];
   const untitledChildren = [];
   let staleOwnerProcessNonce;
+  let browserOrigin;
 
   await mkdir(fixtureDirectory, { recursive: true });
   await mkdir(join(fixtureDirectory, 'nested'), { recursive: true });
@@ -79,7 +80,7 @@ export async function run(ctx) {
       process.kill(staleRegistry.pid, 'SIGKILL');
       assert.equal(await waitForOwnerExit(staleRegistry.pid, staleRegistry.startIdentity, 10_000), true, 'stale host owner must exit before reclaim');
       await stopChild(staleCandidate.child);
-      const staleRegistryPath = join(runtimeDirectory, createHash('sha256').update(canonical).digest('hex') + '.json');
+      const staleRegistryPath = join(runtimeDirectory, createHash('sha256').update('path:' + canonical).digest('hex') + '.json');
       const staleLockPath = staleRegistryPath + '.lock';
       const staleAt = new Date(Date.now() - 120_000);
       await utimes(staleLockPath, staleAt, staleAt);
@@ -102,10 +103,12 @@ export async function run(ctx) {
     assert.equal(typeof registry.startIdentity, 'string');
     assert.equal(typeof registry.epoch, 'string');
     assert.equal(typeof registry.address?.origin, 'string');
+    assert.equal(typeof registry.address?.browserOrigin, 'string');
     assertProcessAlive(registry.pid);
 
     const origin = registry.address.origin;
-    const attached = await Promise.all(Array.from({ length: CONCURRENT_STARTERS }, () => openSession(origin, registry)));
+    browserOrigin = registry.address.browserOrigin;
+    const attached = await Promise.all(Array.from({ length: CONCURRENT_STARTERS }, () => openSession(browserOrigin, registry)));
     assert.notEqual(registry.processNonce, staleOwnerProcessNonce);
     sessions.push(...attached);
     const sessionKeys = new Set(attached.map(value => value.sessionKey));
@@ -129,7 +132,7 @@ export async function run(ctx) {
     const untitledOrigins = untitledReady.map(value => value.origin);
     assert.equal(untitledOrigins.every(value => typeof value === 'string'), true);
     assert.equal(new Set(untitledOrigins).size, untitledOrigins.length);
-    assert.equal(untitledOrigins.includes(origin), false);
+    assert.equal(untitledOrigins.includes(browserOrigin), false);
 
     const manifestPath = join(applicationRoot, dirname(ctx.manifest.resources.hostEntry), '..', 'manifest.json');
     const manifestSha256 = await sha256File(manifestPath);
@@ -162,7 +165,7 @@ export async function run(ctx) {
     return { id, identity };
   } finally {
     await cleanupScenarioResources(
-      ...sessions.map(session => () => releaseLease(originFromSession(session), session)),
+      ...sessions.map(session => () => releaseLease(browserOrigin, session)),
       ...children.concat(untitledChildren).map(entry => () => stopCandidate(entry)),
     );
   }
@@ -190,10 +193,6 @@ async function stopCandidate(entry) {
   if (entry.child.exitCode === null && entry.child.signalCode === null) await stopChild(entry.child);
   await entry.parser.done;
   assertStrictReadyOutput(entry.parser, { requireReady: entry.parser.readyRecord !== null });
-}
-
-function originFromSession(session) {
-  return session.origin;
 }
 
 
