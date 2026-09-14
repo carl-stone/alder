@@ -270,7 +270,13 @@ async function runScenarioWithWatchdog(id, operation) {
   try {
     return await Promise.race([work, timeout]);
   } catch (error) {
-    if (controller.signal.aborted) await work.catch(() => {});
+    if (controller.signal.aborted) {
+      void work.catch(() => {});
+      await Promise.race([
+        work.then(() => undefined, () => undefined),
+        delay(5_000),
+      ]);
+    }
     throw error;
   } finally {
     if (timer !== undefined) clearTimeout(timer);

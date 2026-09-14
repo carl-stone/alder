@@ -531,11 +531,16 @@ async function closeCatalogHarness(harness, shutdownCompleted) {
   }
 }
 
-function onlyConnectionRefused(error) {
+function onlyConnectionRefused(error, seen = new Set()) {
+  if (error === null || error === undefined || seen.has(error)) return false;
+  if (typeof error === 'object' || typeof error === 'function') seen.add(error);
   if (error instanceof AggregateError) {
-    return error.errors.length > 0 && error.errors.every((cause) => onlyConnectionRefused(cause));
+    return error.errors.length > 0
+      && error.errors.every((cause) => onlyConnectionRefused(cause, seen));
   }
-  return isRecord(error) && error.code === 'ECONNREFUSED';
+  if (!isRecord(error)) return false;
+  if (error.code === 'ECONNREFUSED') return true;
+  return onlyConnectionRefused(error.cause, seen);
 }
 
 async function openAgent(ctx, harness, name) {

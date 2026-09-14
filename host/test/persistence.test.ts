@@ -227,7 +227,7 @@ test('missing or invalid recovery pointers fail on a corrupt newest generation',
       const pointerPath = join(directory, 'current.json');
       if (pointerKind === 'missing') await rm(pointerPath);
       else await writeFile(pointerPath, Buffer.from('{not-json'), { mode: 0o600 });
-      await secureWindowsPath('file', pointerPath);
+      if (pointerKind !== 'missing') await secureWindowsPath('file', pointerPath);
       await assert.rejects(
         RecoveryWriter.open({ ...recoveryOptions, rootDir: dir, key: 'pointer-' + pointerKind, baseline: base }),
         error => error instanceof RecoveryError && error.code === 'recovery_corrupt',
