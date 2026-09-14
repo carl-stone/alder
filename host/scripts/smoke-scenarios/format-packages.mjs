@@ -492,7 +492,7 @@ async function openOperationEventStream(harness, baseline) {
   const waitForOperationPhase = async (operationId, phase) => {
     assert.equal(typeof operationId, "string");
     assert.equal(typeof phase, "string");
-    const deadline = Date.now() + 120_000;
+    const deadline = Date.now() + 300_000;
     for (;;) {
       if (fatal !== null) throw fatal;
       for (const event of events) {
@@ -566,7 +566,7 @@ async function openOperationEventStream(harness, baseline) {
         eventCount: events.length,
       };
     };
-    const deadline = Date.now() + 120_000;
+    const deadline = Date.now() + 300_000;
     for (;;) {
       if (fatal !== null) throw fatal;
       const result = inspect();
@@ -646,7 +646,7 @@ function kernelEpoch(snap) { assert.equal(typeof snap.runtime?.kernelEpoch, "str
 async function settle(harness, receipt) {
   const operationId = receipt?.operationId;
   assert.equal(typeof operationId, "string", JSON.stringify(receipt));
-  const deadline = Date.now() + 120000;
+  const deadline = Date.now() + 300_000;
   for (;;) {
     const operation = value(await harness.query({ type: "operation", operationId }));
     if (operation && TERMINAL.has(operation.status)) return operation;

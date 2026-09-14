@@ -154,7 +154,8 @@ frame_header <- function(size) {
       key_length <- unname(key_lengths[[as.character(position)]])
       if (is.null(key_length) || is.na(key_length)) next
       raw_key <- substring(text, position, position + key_length - 1L)
-      key <- tryCatch(jsonlite::fromJSON(raw_key, simplifyVector = FALSE),
+      key <- tryCatch(jsonlite::fromJSON(paste0("[", raw_key, "]"),
+                                         simplifyVector = TRUE)[[1L]],
                       error = function(error) NULL)
       if (!is.character(key) || length(key) != 1L || is.na(key) ||
           !validUTF8(key)) stop("invalid JSON object key", call. = FALSE)

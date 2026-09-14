@@ -21,8 +21,10 @@
 .alder_worker_scalar_path <- function(value, label) {
   value <- .alder_worker_scalar_text(value, label, max_bytes = 4096L)
   if (.Platform$OS.type == "windows") {
-    absolute <- grepl("^(?:[A-Za-z]:[/\\\\]|[/\\\\]{2})", value,
-                      perl = TRUE)
+    absolute <- (nchar(value, type = "bytes") >= 3L &&
+      grepl("^[A-Za-z]:", value) &&
+      utf8ToInt(substr(value, 3L, 3L)) %in% c(47L, 92L)) ||
+      startsWith(value, "//") || startsWith(value, intToUtf8(c(92L, 92L)))
   } else {
     absolute <- startsWith(value, "/")
   }
@@ -41,8 +43,10 @@
 .alder_worker_scalar_file <- function(value, label) {
   value <- .alder_worker_scalar_text(value, label, max_bytes = 4096L)
   if (.Platform$OS.type == "windows") {
-    absolute <- grepl("^(?:[A-Za-z]:[/\\\\]|[/\\\\]{2})", value,
-                      perl = TRUE)
+    absolute <- (nchar(value, type = "bytes") >= 3L &&
+      grepl("^[A-Za-z]:", value) &&
+      utf8ToInt(substr(value, 3L, 3L)) %in% c(47L, 92L)) ||
+      startsWith(value, "//") || startsWith(value, intToUtf8(c(92L, 92L)))
   } else {
     absolute <- startsWith(value, "/")
   }

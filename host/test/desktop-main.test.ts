@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -167,9 +167,10 @@ test("desktop identity polling adopts an authoritative Save As and preserves one
     const newPath = join(root, "after.R");
     await writeFile(oldPath, "old\n");
     await writeFile(newPath, "new\n");
+    const newCanonicalPath = await realpath(newPath);
     const oldConnection = connection("session-before", oldPath, async path => {
       assert.equal(path, "/api/identity");
-      return jsonResponse(identity("session-after", newPath));
+      return jsonResponse(identity("session-after", newCanonicalPath));
     });
     const window = windowWithLoad();
     const main = new ElectronMain(runtime(), { resources });
@@ -178,15 +179,15 @@ test("desktop identity polling adopts an authoritative Save As and preserves one
     await (main as any).assertHostContinuity(record);
 
     assert.equal(record.connection.sessionKey, "session-after");
-    assert.equal(record.connection.canonicalPath, newPath);
+    assert.equal(record.connection.canonicalPath, newCanonicalPath);
     assert.equal((main as any).byKey.get(oldPath), undefined);
-    assert.equal((main as any).byKey.get(newPath), record);
-    assert.deepEqual(record.keys, new Set([newPath]));
+    assert.equal((main as any).byKey.get(newCanonicalPath), record);
+    assert.deepEqual(record.keys, new Set([newCanonicalPath]));
     assert.equal(window.titles.at(-1), "after.R — Alder");
 
     let acquireCount = 0;
     (main as any).options = { resources, acquireSession: async () => { acquireCount += 1; throw new Error("must not acquire"); } };
-    await main.openNotebook(newPath);
+    await main.openNotebook(newCanonicalPath);
     assert.equal(acquireCount, 0);
     assert.equal(window.focusedCount, 1);
   } finally {

@@ -8,7 +8,9 @@ local({
   result_path <- args[[2L]]
 path_is_absolute <- function(value) {
   if (.Platform$OS.type == "windows") {
-    grepl("^(?:[A-Za-z]:[/\\\\]|[/\\\\]{2})", value, perl = TRUE)
+    (nchar(value, type = "bytes") >= 3L && grepl("^[A-Za-z]:", value) &&
+      utf8ToInt(substr(value, 3L, 3L)) %in% c(47L, 92L)) ||
+      startsWith(value, "//") || startsWith(value, intToUtf8(c(92L, 92L)))
   } else startsWith(value, "/")
 }
 resolve_directory <- function(value, label) {
@@ -110,7 +112,9 @@ sys.source(framing_path, envir = framing, keep.source = FALSE)
   scalar_path <- function(value, label) {
     value <- scalar_string(value, label, max_bytes = 4096L)
     absolute <- if (.Platform$OS.type == "windows") {
-      grepl("^(?:[A-Za-z]:[/\\\\]|[/\\\\]{2})", value, perl = TRUE)
+      (nchar(value, type = "bytes") >= 3L && grepl("^[A-Za-z]:", value) &&
+        utf8ToInt(substr(value, 3L, 3L)) %in% c(47L, 92L)) ||
+        startsWith(value, "//") || startsWith(value, intToUtf8(c(92L, 92L)))
     } else startsWith(value, "/")
     if (!absolute || any(charToRaw(value) == as.raw(0))) {
       stop(paste0(label, " must be an absolute path"), call. = FALSE)
