@@ -15,7 +15,7 @@ sudo docker exec -i -w /workspace/alder codex-universal bash -lc '<command>'
 ```
 
 The full toolchain includes R 4.6.1, package Suggests, Node/npm, Chrome, Quarto,
-Pandoc, Python 3, ShellCheck and tini. CI also covers R-devel and Windows CLI/MCP.
+Pandoc, Python 3, ShellCheck and tini. Verification runs locally; GitHub Actions are removed.
 
 ```sh
 npm ci --prefix js
@@ -133,7 +133,7 @@ tini -s -- bash dev/reviews/run-cold-start-validation.sh \
 The application and evidence directories are separate; the evidence destination
 must be empty. The caller owns any container restart. Screenshots still need
 visual inspection. Generated `reviews/evidence/` runs stay local and are ignored
-by Git; CI uploads latency evidence as a workflow artifact.
+by Git; retain the evidence locally when comparing runs.
 
 ## Local development container
 
@@ -187,7 +187,7 @@ Node 24.20.0, Ark 0.1.252-alder.1, Air 0.11.0, Electron 44.2.0, and every npm
 dependency are frozen by repository locks. Restore the application-only dependency
 closure from `host/r-library.lock.json`; do not install DESCRIPTION Suggests or use
 `pak::local_install_deps(dependencies = TRUE)` for an application stage. The
-standalone R helper source package has its own build/check workflow and is not the
+standalone R helper source package has separate build/check commands and is not the
 application installer. The container itself is not part of the Git checkout.
 
 After building both JS projects and staging one application tree, use that tree for tests and benchmarks. Keep both qualified Rscript paths explicit:
