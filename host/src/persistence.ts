@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { lstat, mkdir, open, readFile, realpath, rename, stat, unlink, link } from "node:fs/promises";
+import { mkdir, open, readFile, realpath, rename, stat, unlink } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { MAX_NOTEBOOK_SOURCE_BYTES } from "./protocol.js";
 import type { DiskObservation, Layout } from "./protocol.js";
@@ -275,13 +275,17 @@ export class DocumentStore {
     const store = new DocumentStore(resolved.canonical, resolved.spelling);
     store.version = await diskVersion(resolved.canonical);
     store.observedVersion = cloneDiskVersion(store.version);
-    const sidecarFiles = (["config", "layout", "packages"] as const).map(kind => store.sidecarPath(kind));
-    for (const file of sidecarFiles) {
-      store.sidecars.set(file, await diskVersion(file));
-      store.sidecarTargets.set(file, await canonicalDestination(file));
-    }
+    await store.loadSidecars();
     store.documentValue = parseNotebook(store.version.bytes, store.path);
     return { store, notebook: cloneNotebook(store.documentValue) };
+  }
+
+  private async loadSidecars(): Promise<void> {
+    for (const kind of ["config", "layout", "packages"] as const) {
+      const file = this.sidecarPath(kind);
+      this.sidecars.set(file, await diskVersion(file));
+      this.sidecarTargets.set(file, await canonicalDestination(file));
+    }
   }
 
   get sourceVersion(): DiskVersion {
@@ -432,7 +436,7 @@ export class DocumentStore {
   private async commit(candidate: NotebookDocument): Promise<{ path: string; changed: boolean; digest: string }> {
     await this.assertUnchanged();
     const bytes = serializeNotebook(candidate);
-    if (sameBytes(bytes, this.version.bytes)) {
+    if (this.version.identity !== null && sameBytes(bytes, this.version.bytes)) {
       this.documentValue = cloneNotebook(candidate);
       return { path: this.path, changed: false, digest: this.version.digest };
     }
@@ -440,7 +444,7 @@ export class DocumentStore {
     try {
       await writeStaged(stage, bytes, this.version.mode);
       await this.assertUnchanged();
-      const committed = await publishStagedNoClobber(stage, this.path, this.version, bytes, "Notebook changed while saving");
+      const committed = await publishStaged(stage, this.path, this.version, "Notebook changed while saving");
       this.version = committed;
       this.observedVersion = cloneDiskVersion(committed);
       this.documentValue = cloneNotebook(candidate);
@@ -452,132 +456,102 @@ export class DocumentStore {
     }
   }
 
-  /** Prepare an exclusive Save As publication; the current store remains authoritative. */
-  prepareSaveAs(path: string, snapshot: SourceNotebook | NotebookDocument): Promise<PreparedSaveAs> {
-    let stage: string | null = null;
+  /** Replacement is permitted only for the exact destination the user confirmed. */
+  prepareSaveAs(
+    path: string,
+    snapshot: SourceNotebook | NotebookDocument,
+    replacement?: ReloadPrecondition,
+  ): Promise<PreparedSaveAs> {
+    const fixed = structuredClone(snapshot);
     const next = this.queue.then(async () => {
       if (typeof path !== "string" || path.length === 0 || path.includes("\0")) {
         throw new PersistenceError("invalid_path", "destination path must be a non-empty path");
       }
-      const spelling = resolve(path);
-      const parent = dirname(spelling);
-      let canonicalParent: string;
-      try {
-        canonicalParent = await realpath(parent);
-        const info = await stat(canonicalParent);
-        if (!info.isDirectory()) throw new PersistenceError("invalid_path", "destination parent must be a directory");
-      } catch (error) {
-        if (error instanceof PersistenceError) throw error;
-        throw new PersistenceError("invalid_path", "destination parent does not exist", { path: parent });
-      }
-      const destination = join(canonicalParent, basename(spelling));
-      const rejectExisting = async () => {
-        try {
-          await lstat(spelling);
-          throw new PersistenceError("destination_exists", "Save As destination already exists", { path: spelling });
-        } catch (error) {
-          if (error instanceof PersistenceError) throw error;
-          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      const { spelling, canonical: destination } = await resolveNotebookPath(path);
+      const expected = await diskVersion(destination);
+      if (replacement === undefined) {
+        if (expected.identity !== null) {
+          throw new PersistenceError("destination_exists", "Confirm replacement of the existing Save As destination", { path: spelling });
         }
-        if (await realpath(parent) !== canonicalParent) throw new PersistenceError("destination_changed", "Save As destination parent changed", { path: spelling });
+      } else {
+        validateDiskPrecondition(replacement);
+        if (expected.identity === null || expected.digest !== replacement.expectedDiskDigest
+          || diskVersionToken(expected) !== replacement.expectedDiskVersion) {
+          throw new FileConflict("Save As destination changed since replacement was confirmed");
+        }
+      }
+      const assertUnchanged = async () => {
+        const resolved = await resolveNotebookPath(spelling);
+        if (resolved.canonical !== destination || !sameDisk(expected, await diskVersion(destination))) {
+          throw new FileConflict("Save As destination changed while saving");
+        }
       };
-      await rejectExisting();
-      const fixed = structuredClone(snapshot);
       const candidate = { ...this.candidate(fixed), path: destination };
       const bytes = serializeNotebook(candidate);
-      stage = join(canonicalParent, ".alder-save-as-" + randomUUID());
-      await writeStaged(stage, bytes, 0o600);
-      try { await rejectExisting(); } catch (error) { await unlink(stage).catch(() => undefined); stage = null; throw error; }
-      const digest = sha256(bytes);
-      let published = false;
-      let adopted = false;
-      let aborted = false;
-      let publishedIdentity: string | null = null;
-      let publishedMode: number | null = null;
-      let publishedStore: DocumentStore | null = null;
-      let publication: PublishedSaveAs | null = null;
-      let abortPromise: Promise<void> | null = null;
+      let stage: string | null = join(dirname(destination), ".alder-save-as-" + randomUUID());
       const removeStage = async () => {
-        if (stage !== null) {
-          const current = stage;
-          stage = null;
-          await unlink(current).catch((error) => {
-            if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-          });
-        }
+        if (stage === null) return;
+        const current = stage;
+        await unlink(current).catch((error) => {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        });
+        stage = null;
       };
-      const abortPublished = async () => {
-        if (adopted || aborted) return;
-        if (!published) { await removeStage(); aborted = true; return; }
-        if (abortPromise !== null) return abortPromise;
-        abortPromise = (async () => {
-          try {
-            const current = await diskVersion(destination);
-            if (publishedIdentity !== null && publishedMode !== null && current.identity === publishedIdentity && current.mode === publishedMode && current.digest === digest) {
-              await unlink(destination);
-              await syncDirectory(canonicalParent);
-            }
-            await removeStage();
-            aborted = true;
-          } catch (error) {
-            throw new PersistenceError("publication_uncertain", "could not safely abort Save As publication", { path: destination, cause: String(error) });
-          }
-        })();
-        return abortPromise;
-      };
-      const publishedValue: PublishedSaveAs = {
-        get store() {
-          if (publishedStore === null) throw new PersistenceError("publication_invalid", "Save As publication has no destination store");
-          return publishedStore;
-        },
-        get result() {
-          return { path: destination, changed: true as const, digest };
-        },
+      // Prepare the destination binder before committing the file, so sidecar
+      // read failures cannot turn a successful disk save into a failed adoption.
+      const destinationStore = new DocumentStore(destination, spelling);
+      try {
+        await destinationStore.loadSidecars();
+        await writeStaged(stage, bytes, expected.mode);
+        await assertUnchanged();
+      } catch (error) {
+        await removeStage();
+        throw error;
+      }
+      const digest = sha256(bytes);
+      let aborted = false;
+      let publication: Promise<PublishedSaveAs> | null = null;
+      let published = false;
+      const result: PublishedSaveAs = {
+        store: destinationStore,
+        result: { path: destination, changed: true, digest },
         adopt: () => {
-          if (!published || aborted) throw new PersistenceError("publication_invalid", "Save As publication is not adoptable");
-          adopted = true;
-        },
-        abort: abortPublished,
-      };
-      const prepared: PreparedSaveAs = {
-        destination,
-        digest,
-        publish: async () => {
-          if (aborted) throw new PersistenceError("publication_invalid", "Save As preparation has been aborted");
-          if (publication !== null) return publication;
-          await rejectExisting();
-          try {
-            await link(stage!, destination);
-            published = true;
-          } catch (error) {
-            if ((error as NodeJS.ErrnoException).code === "EEXIST") throw new PersistenceError("destination_exists", "Save As destination already exists", { path: spelling });
-            throw error;
-          }
-          try {
-            await syncDirectory(canonicalParent);
-            const committed = await diskVersion(destination);
-            if (!sameBytes(committed.bytes, bytes) || committed.identity === null) throw new PersistenceError("destination_invalid", "Save As destination did not match staged bytes", { path: spelling });
-            publishedIdentity = committed.identity;
-            publishedMode = committed.mode;
-            const opened = await DocumentStore.open(destination);
-            publishedStore = opened.store;
-            await removeStage();
-          } catch (error) {
-            await abortPublished().catch(() => undefined);
-            throw error;
-          }
-          publication = publishedValue;
-          return publication;
-        },
-        adopt: () => {
-          if (publication === null) throw new PersistenceError("publication_invalid", "Save As must publish before adoption");
-          publication.adopt();
+          if (!published) throw new PersistenceError("publication_invalid", "Save As must publish before adoption");
         },
         abort: async () => {
-          await abortPublished();
+          // A completed save survives later session or recovery failures.
+          await removeStage();
         },
       };
-      return prepared;
+      return {
+        destination,
+        digest,
+        publish: () => {
+          if (aborted) return Promise.reject(new PersistenceError("publication_invalid", "Save As preparation has been aborted"));
+          if (publication !== null) return publication;
+          publication = (async () => {
+            try {
+              await assertUnchanged();
+              const committed = await publishStaged(stage!, destination, expected, "Save As destination changed while saving");
+              stage = null;
+              destinationStore.version = committed;
+              destinationStore.observedVersion = cloneDiskVersion(committed);
+              destinationStore.documentValue = cloneNotebook(candidate);
+              published = true;
+              return result;
+            } finally {
+              await removeStage();
+            }
+          })();
+          return publication;
+        },
+        adopt: result.adopt,
+        abort: async () => {
+          if (publication !== null) await publication.catch(() => undefined);
+          aborted = true;
+          await removeStage();
+        },
+      };
     });
     this.queue = next.catch(() => undefined);
     return next;
@@ -585,14 +559,7 @@ export class DocumentStore {
   /** Prepare a read-only reload candidate; adoption is a synchronous binder mutation. */
   prepareReload(precondition: ReloadPrecondition, previousDocument: NotebookDocument): Promise<PreparedReload> {
     const next = this.queue.then(async () => {
-      if (precondition === null || typeof precondition !== "object" || Array.isArray(precondition)
-        || Object.keys(precondition).sort().join(",") !== "expectedDiskDigest,expectedDiskVersion"
-        || typeof precondition.expectedDiskDigest !== "string"
-        || !/^[0-9a-f]{64}$/.test(precondition.expectedDiskDigest)
-        || typeof precondition.expectedDiskVersion !== "string" || precondition.expectedDiskVersion.length === 0
-        || precondition.expectedDiskVersion.length > 512 || precondition.expectedDiskVersion.includes("\0")) {
-        throw new PersistenceError("invalid_precondition", "reload disk preconditions are invalid");
-      }
+      validateDiskPrecondition(precondition);
       if (previousDocument === null || typeof previousDocument !== "object" || !Array.isArray(previousDocument.cells)) {
         throw new PersistenceError("invalid_precondition", "reload previous document is invalid");
       }
@@ -739,10 +706,10 @@ export class DocumentStore {
       const removeStage = async (): Promise<void> => {
         if (stage === null) return;
         const current = stage;
-        stage = null;
         await unlink(current).catch((error) => {
           if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
         });
+        stage = null;
       };
       const enqueue = <R>(operation: () => Promise<R>): Promise<R> => {
         const queued = this.queue.then(operation);
@@ -755,7 +722,7 @@ export class DocumentStore {
         await assertUnchanged();
         if (stage !== null) {
           try {
-            committed = await publishStagedNoClobber(stage, target, expected, bytes, "Notebook sidecar changed on disk");
+            committed = await publishStaged(stage, target, expected, "Notebook sidecar changed on disk", "sidecar");
             stage = null;
           } catch (error) {
             await removeStage();
@@ -789,105 +756,38 @@ export class DocumentStore {
   }
 }
 
-/**
- * Publish a staged file without replacing a path that changed after the
- * caller's last observation. POSIX/Windows rename replaces unconditionally,
- * so move the expected inode aside, create the new name with an exclusive
- * hard link, and restore the old inode with the same no-replace primitive on
- * every failure path.
- */
-async function publishStagedNoClobber(
+/** The old path stays readable until the single atomic rename commits. */
+async function publishStaged(
   stage: string,
   target: string,
   expected: DiskVersion,
-  bytes: Uint8Array,
   conflictMessage: string,
+  kind: "source" | "sidecar" = "source",
 ): Promise<DiskVersion> {
-  const parent = dirname(target);
-  const displaced = expected.identity === null ? null : join(parent, ".alder-replaced-" + randomUUID());
-  let displacedActive = false;
-  let preserveDisplaced = false;
-  let targetPublished = false;
-  try {
-    if (displaced !== null) {
-      try {
-        await rename(target, displaced);
-        displacedActive = true;
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === "ENOENT") throw new FileConflict(conflictMessage);
-        throw error;
-      }
-      const moved = await diskVersion(displaced);
-      if (!sameDisk(expected, moved)) {
-        if (await restoreWithoutReplacement(displaced, target)) displacedActive = false;
-        throw new FileConflict(conflictMessage);
-      }
-    }
+  const committed = await diskVersion(stage);
+  if (!sameDisk(expected, await diskVersion(target))) throw new FileConflict(conflictMessage, kind);
+  await rename(stage, target);
+  await syncDirectory(dirname(target));
+  return committed;
+}
 
-    try {
-      await link(stage, target);
-      targetPublished = true;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "EEXIST") throw new FileConflict(conflictMessage);
-      throw error;
-    }
-    const committed = await diskVersion(target);
-    if (committed.identity === null || (process.platform !== "win32" && committed.mode !== expected.mode) || !sameBytes(committed.bytes, bytes)) {
-      throw new FileConflict(conflictMessage);
-    }
-
-    if (displaced !== null) {
-      const old = await diskVersion(displaced);
-      if (!sameDisk(expected, old)) {
-        // A writer holding the old inode can still mutate it after the path is
-        // moved. Roll back only while our new path remains untouched; never
-        // replace a foreign path during recovery.
-        try {
-          const current = await diskVersion(target);
-          if (targetPublished && sameDisk(current, committed)) {
-            await unlink(target);
-            targetPublished = false;
-          }
-        } catch {
-          // Leave both artifacts in place when the target cannot be inspected.
-        }
-        const restored = await restoreWithoutReplacement(displaced, target);
-        if (restored) displacedActive = false;
-        else preserveDisplaced = true;
-        throw new FileConflict(conflictMessage);
-      }
-      await unlink(displaced);
-      displacedActive = false;
-    }
-    await syncDirectory(parent);
-    return committed;
-  } catch (error) {
-    if (displacedActive) {
-      try {
-        const restored = await restoreWithoutReplacement(displaced!, target);
-        if (restored) displacedActive = false;
-        else preserveDisplaced = true;
-      } catch {
-        // Keep the displaced inode if restoration is unavailable; deleting it
-        // would turn a failed save into data loss.
-        preserveDisplaced = true;
-      }
-    }
-    throw error;
-  } finally {
-    if (displacedActive && !preserveDisplaced) await unlink(displaced!).catch(() => undefined);
+function validateDiskPrecondition(precondition: ReloadPrecondition): void {
+  if (precondition === null || typeof precondition !== "object" || Array.isArray(precondition)
+    || Object.keys(precondition).sort().join(",") !== "expectedDiskDigest,expectedDiskVersion"
+    || typeof precondition.expectedDiskDigest !== "string"
+    || !/^[0-9a-f]{64}$/.test(precondition.expectedDiskDigest)
+    || typeof precondition.expectedDiskVersion !== "string" || precondition.expectedDiskVersion.length === 0
+    || precondition.expectedDiskVersion.length > 512 || precondition.expectedDiskVersion.includes("\0")) {
+    throw new PersistenceError("invalid_precondition", "disk preconditions are invalid");
   }
 }
 
-async function restoreWithoutReplacement(source: string, target: string): Promise<boolean> {
-  try {
-    await link(source, target);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
-    throw error;
+/** Observe a Save As target before presenting an explicit replacement confirmation. */
+export async function observeSaveAsDestination(path: string): Promise<DiskObservation> {
+  if (typeof path !== "string" || path.length === 0 || path.includes("\0")) {
+    throw new PersistenceError("invalid_path", "destination path must be a non-empty path");
   }
-  await unlink(source);
-  return true;
+  return diskObservation(await diskVersion((await resolveNotebookPath(path)).canonical));
 }
 
 async function syncDirectory(path: string): Promise<void> {
@@ -897,17 +797,16 @@ async function syncDirectory(path: string): Promise<void> {
     await directory.sync();
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
-    if (code !== "EINVAL" && code !== "ENOTSUP" && code !== "EBADF" &&
-            !(process.platform === "win32" && code === "EPERM")) throw error;
+    if (code !== "EINVAL" && code !== "ENOTSUP" && code !== "EBADF") throw error;
   } finally {
     await directory?.close().catch(() => undefined);
   }
 }
 
 async function writeStaged(path: string, bytes: Uint8Array, mode: number): Promise<void> {
-  const file = await open(path, "wx", mode || 0o600);
+  const file = await open(path, "wx", mode);
   try {
-    await file.chmod(mode || 0o600);
+    await file.chmod(mode);
     await file.writeFile(bytes);
     await file.sync();
   } finally {
