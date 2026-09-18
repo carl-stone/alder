@@ -2619,7 +2619,10 @@ export class Controller {
     canonicalOutput?: OutputRecord,
   ): void {
     const cell = this.cellById(active.job.id);
-    if (cell === undefined || cell.revision !== active.job.revision) return;
+    if (cell === undefined || cell.revision !== active.job.revision || active.cancelMode !== null) {
+      if (canonicalOutput !== undefined) this.outputStore.discardExact([canonicalOutput]);
+      return;
+    }
     if (event.kind === "clear") {
       active.streamedOutputs.length = 0;
       this.outputStore.discardExact(cell.outputs);
@@ -2690,6 +2693,7 @@ export class Controller {
     cell.outputs = nextOutputs;
     cell.status = response.stopped ? "stopped" : "done";
     cell.outputsStale = false;
+    cell.progress = null;
     if (response.log !== undefined) cell.log = completedLog(response.log);
     cell.error = null;
     this.replaceLastActionError(null, {

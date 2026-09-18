@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -696,6 +696,77 @@ test('scalar, form, and button controls drive the intended reactive cells once',
     })()`).catch(() => null), cells: app?.controller.snapshot().cells.map((cell) => ({
       id: cell.id, status: cell.status, data: cell.outputs.map((output) => output.data), error: cell.error,
     })), errors: browser?.errors }));
+    throw error;
+  } finally {
+    await browser?.close();
+    await app?.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('ordered outputs, lazy detail, progress, and project disk cache appear in the notebook', {
+  skip: process.env.ALDER_BROWSER_TEST !== '1', timeout: 120_000,
+}, async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'alder-browser-output-cache-'));
+  const path = join(directory, 'notebook.R');
+  await mkdir(join(directory, '.alder'));
+  await writeFile(join(directory, '.alder', 'config.yaml'), 'cache:\n  dir: project-cache\n');
+  await writeFile(path, [
+    '# %%', 'library(alder)',
+    '# %%', 'out$append(out$md("**First**: six observations")); cat("Second: calculated table\\n"); out$append(data.frame(group=c("a","b"), total=c(6L,15L))); "Fourth: complete"',
+    '# %%', 'p <- out$progress(total=3, label="Rows"); for (i in 1:3) p$update(i); p$close(); sum(1:3)',
+    '# %%', 'plot(1:3, c(2,4,6), type="b", main="Three points")',
+    '# %%', 'out$lazy(function() out$vstack(out$md("**Deferred**: six"), data.frame(i=1:3, doubled=c(2L,4L,6L))), label="Show detail")',
+    '# %%', 'multiplier <- 2L',
+    '# %%', 'saved <- cache$disk(function(x) { message("compute disk"); x * multiplier }); saved(4L)',
+  ].join('\n') + '\n');
+  let app: RunningHost | undefined, browser: Chrome | undefined;
+  try {
+    app = await startInstalledHost(path, { executionMode: 'automatic' });
+    assert.equal(app.controller.snapshot().config.cache.dir, 'project-cache');
+    browser = await openAuthenticatedBrowser(app);
+    await browser.wait("window.__alderHost?.client.document?.snapshot.runtime.executionReady && !window.__alderHost.client.document.snapshot.runtime.busy && !document.querySelector('#run-all')?.disabled && document.querySelectorAll('#notebook > .cell[data-cell]').length === 7", 30_000);
+    await browser.click('#run-all');
+    await browser.wait(`window.__alderHost.client.document.snapshot.cells.every(cell => cell.status === 'done') &&
+      document.querySelector('[data-cell="cell-2"] .markdown-output')?.textContent.includes('First') &&
+      document.querySelector('[data-cell="cell-2"] .table-preview')?.textContent.includes('15') &&
+      document.querySelector('[data-cell="cell-3"] [data-role=outputs]')?.textContent.includes('[1] 6') &&
+      document.querySelector('[data-cell="cell-4"] img.plot')?.complete &&
+      document.querySelector('[data-cell="cell-4"] img.plot')?.naturalWidth > 0 &&
+      document.querySelector('[data-cell="cell-5"] .out-lazy')?.textContent.includes('Show detail') &&
+      document.querySelector('[data-cell="cell-7"] [data-role=outputs]')?.textContent.includes('[1] 8')`, 45_000);
+    assert.deepEqual(await browser.evaluate(`Array.from(document.querySelector('[data-cell="cell-2"] [data-role=outputs]').children)
+      .filter(child => child.classList.contains('out-record') || child.classList.contains('ordered-log'))
+      .map(child => child.classList.contains('ordered-log') ? 'log' : child.querySelector('.markdown-output') ? 'markdown' :
+        child.querySelector('.table-preview') ? 'table' : 'text')`), ['markdown', 'log', 'table', 'text']);
+    assert.equal(await browser.evaluate("document.querySelector('[data-cell=\"cell-3\"] .progress-row') === null"), true);
+    assert.equal((await readdir(join(directory, 'project-cache'))).filter((name) => name.endsWith('.rds')).length, 1);
+
+    await browser.click('[data-cell="cell-5"] .out-lazy');
+    await browser.wait(`document.querySelector('[data-cell="cell-5"] .markdown-output')?.textContent.includes('Deferred') &&
+      document.querySelector('[data-cell="cell-5"] .table-preview')?.textContent.includes('6')`, 30_000);
+
+    const firstRun = app.controller.snapshot().cells[6]!.outputs[0]!.runId;
+    await browser.click('[data-cell="cell-7"] [data-act=run]');
+    await browser.wait(`window.__alderHost.client.document.snapshot.cells[6].status === 'done' &&
+      window.__alderHost.client.document.snapshot.cells[6].outputs[0]?.runId !== ${JSON.stringify(firstRun)}`, 30_000);
+    assert.equal(app.controller.snapshot().cells[6]!.log.some((line) => line.includes('compute disk')), false);
+
+    await browser.evaluate(`(async () => {
+      const client = window.__alderHost.client;
+      client.editCell(client.document.cells[5].key, 'multiplier <- 3L');
+      await client.commitEdits();
+    })()`);
+    await browser.wait(`window.__alderHost.client.document.snapshot.cells[5].body[0] === 'multiplier <- 3L' &&
+      window.__alderHost.client.document.snapshot.cells[6].status === 'done' &&
+      document.querySelector('[data-cell="cell-7"] [data-role=outputs]')?.textContent.includes('[1] 12')`, 10_000);
+    assert.equal(app.controller.snapshot().cells[6]!.log.some((line) => line.includes('compute disk')), true);
+    assert.equal((await readdir(join(directory, 'project-cache'))).filter((name) => name.endsWith('.rds')).length, 2);
+    assert.deepEqual(browser.errors, []);
+  } catch (error) {
+    console.error(JSON.stringify({ cells: app?.controller.snapshot().cells.map((cell) => ({
+      id: cell.id, body: cell.body, status: cell.status, outputs: cell.outputs.map((output) => output.data), log: cell.log, error: cell.error,
+    })), browser: await browser?.evaluate("({status:document.querySelector('#status')?.textContent,active:document.activeElement?.outerHTML?.slice(0,200)})").catch(() => null) }));
     throw error;
   } finally {
     await browser?.close();

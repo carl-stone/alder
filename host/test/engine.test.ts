@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { cp, mkdir, mkdtemp, rm } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -288,6 +288,122 @@ test("stock Ark keeps scalar, form, and button widget values in R", integration,
       await closeEngine(engine, processScope, directory);
     }
   });
+test("stock Ark preserves append, log, progress, and deferred output", integration, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "alder-engine-output-"));
+  const { engine, processScope } = await openEngine(directory);
+  try {
+    const epoch = (await engine.start()).kernel!.kernelEpoch;
+    assert.equal((await engine.evaluate(payload(epoch, "output-import", "import", "library(alder)"))).ok, true);
+    const kinds: string[] = [];
+    const ordered = await engine.evaluate(payload(epoch, "ordered", "ordered", `
+      out$append(out$md("**First**: six observations"))
+      cat("Second: calculated table\\n")
+      out$append(data.frame(group = c("a", "b"), total = c(6L, 15L)))
+      "Fourth: complete"
+    `), (event) => {
+      if (event.type === "output") kinds.push(event.kind);
+    });
+    assert.equal(ordered.ok, true, ordered.error?.message);
+    assert.deepEqual(kinds, ["append", "log", "append", "append"]);
+    assert.deepEqual(ordered.outputs?.map((record) => record.data.kind), ["markdown", "table", "text"]);
+    assert.match(JSON.stringify(ordered.outputs?.[1]?.data), /"total"/);
+    assert.match(JSON.stringify(ordered.outputs?.[2]?.data), /Fourth: complete/);
+
+    const progress: Array<{ value: number; done: boolean }> = [];
+    const progressed = await engine.evaluate(payload(epoch, "progress", "progress", `
+      p <- out$progress(total = 3, label = "Rows")
+      for (i in 1:3) p$update(i)
+      p$close()
+      sum(1:3)
+    `), (event) => {
+      if (event.type === "output" && event.kind === "progress") {
+        const record = (event.payload as { progress: { value: number; done: boolean } }).progress;
+        progress.push({ value: record.value, done: record.done });
+      }
+    });
+    assert.equal(progressed.ok, true, progressed.error?.message);
+    assert.deepEqual(progress, [
+      { value: 1, done: false }, { value: 2, done: false },
+      { value: 3, done: false }, { value: 3, done: true },
+    ]);
+    assert.match(JSON.stringify(progressed.outputs), /\[1\] 6/);
+
+    const deferred = await engine.evaluate(payload(epoch, "deferred", "deferred", `
+      out$lazy(function() out$vstack(out$md("**Deferred**: six"),
+        data.frame(i = 1:3, doubled = c(2L, 4L, 6L))), label = "Show detail")
+    `));
+    assert.equal(deferred.ok, true, deferred.error?.message);
+    const lazy = deferred.outputs?.[0]?.data as { kind: string; key: string; state: string };
+    assert.equal(lazy.kind, "lazy");
+    assert.equal(lazy.state, "collapsed");
+    const expanded = await engine.request("lazy_eval", { key: lazy.key, id: "deferred", token: "output-detail" }, {
+      outputScope: {
+        sessionEpoch: "engine-v2-test-session", documentRevision: 1, kernelEpoch: epoch,
+        runId: deferred.outputs![0]!.runId, cellId: "deferred", revision: 1,
+      },
+    });
+    assert.equal(expanded.ok, true, expanded.error?.message);
+    assert.match(JSON.stringify(expanded.output), /Deferred/);
+    assert.match(JSON.stringify(expanded.output), /doubled/);
+  } finally {
+    await closeEngine(engine, processScope, directory);
+  }
+});
+
+test("stock Ark cache reuses values and invalidates changed code and dependencies", integration, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "alder-engine-cache-"));
+  const { engine, processScope } = await openEngine(directory);
+  try {
+    let epoch = (await engine.start()).kernel!.kernelEpoch;
+    const evaluate = async (id: string, source: string) => {
+      const result = await engine.evaluate(payload(epoch, id, id, source));
+      assert.equal(result.ok, true, result.error?.message);
+      return result;
+    };
+    await evaluate("cache-import", "library(alder)");
+    await evaluate("cache-multiplier", "multiplier <- 2L");
+    await evaluate("cache-memory-function", `memo <- cache$memory(function(x) { message("compute memory"); x * multiplier })`);
+    const firstMemory = await evaluate("cache-memory-first", "c(memo(3L), memo(3L))");
+    assert.match(JSON.stringify(firstMemory.outputs), /6 6/);
+    assert.equal(firstMemory.log?.filter((line) => line.includes("compute memory")).length, 1);
+    const reusedMemory = await evaluate("cache-memory-reuse", "memo(3L)");
+    assert.match(JSON.stringify(reusedMemory.outputs), /\[1\] 6/);
+    assert.equal(reusedMemory.log?.some((line) => line.includes("compute memory")), false);
+
+    await evaluate("cache-disk-function", `saved <- cache$disk(function(x) { message("compute disk"); x * multiplier })`);
+    const firstDisk = await evaluate("cache-disk-first", "c(saved(4L), saved(4L))");
+    assert.match(JSON.stringify(firstDisk.outputs), /8 8/);
+    assert.equal(firstDisk.log?.filter((line) => line.includes("compute disk")).length, 1);
+    assert.equal((await readdir(join(directory, "cache"))).filter((name) => name.endsWith(".rds")).length, 1);
+    const reusedDisk = await evaluate("cache-disk-reuse", "saved(4L)");
+    assert.match(JSON.stringify(reusedDisk.outputs), /\[1\] 8/);
+    assert.equal(reusedDisk.log?.some((line) => line.includes("compute disk")), false);
+
+    await evaluate("cache-multiplier-changed", "multiplier <- 3L");
+    const changedMemory = await evaluate("cache-memory-changed", "memo(3L)");
+    const changedDisk = await evaluate("cache-disk-changed", "saved(4L)");
+    assert.match(JSON.stringify(changedMemory.outputs), /\[1\] 9/);
+    assert.match(JSON.stringify(changedDisk.outputs), /\[1\] 12/);
+    assert.equal(changedMemory.log?.some((line) => line.includes("compute memory")), true);
+    assert.equal(changedDisk.log?.some((line) => line.includes("compute disk")), true);
+
+    await evaluate("cache-disk-function-changed", `saved <- cache$disk(function(x) { message("compute disk body"); x * multiplier + 1L })`);
+    const changedCode = await evaluate("cache-disk-body-changed", "saved(4L)");
+    assert.match(JSON.stringify(changedCode.outputs), /\[1\] 13/);
+    assert.equal(changedCode.log?.some((line) => line.includes("compute disk body")), true);
+    assert.equal((await readdir(join(directory, "cache"))).filter((name) => name.endsWith(".rds")).length, 3);
+
+    epoch = (await engine.restart()).kernel!.kernelEpoch;
+    await evaluate("cache-restart-import", "library(alder)");
+    await evaluate("cache-restart-multiplier", "multiplier <- 3L");
+    await evaluate("cache-restart-function", `saved <- cache$disk(function(x) { message("compute disk"); x * multiplier })`);
+    const afterRestart = await evaluate("cache-restart-hit", "saved(4L)");
+    assert.match(JSON.stringify(afterRestart.outputs), /\[1\] 12/);
+    assert.equal(afterRestart.log?.some((line) => line.includes("compute disk")), false);
+  } finally {
+    await closeEngine(engine, processScope, directory);
+  }
+});
 test("Alder log notifications preserve exact OutputLog lines", integration,
   async () => {
     const directory = await mkdtemp(join(tmpdir(), "alder-engine-log-lines-"));

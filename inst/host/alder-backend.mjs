@@ -74576,7 +74576,10 @@ var Controller = class {
   }
   applyOutputEvent(event, active, canonicalOutput) {
     const cell = this.cellById(active.job.id);
-    if (cell === void 0 || cell.revision !== active.job.revision) return;
+    if (cell === void 0 || cell.revision !== active.job.revision || active.cancelMode !== null) {
+      if (canonicalOutput !== void 0) this.outputStore.discardExact([canonicalOutput]);
+      return;
+    }
     if (event.kind === "clear") {
       active.streamedOutputs.length = 0;
       this.outputStore.discardExact(cell.outputs);
@@ -74632,6 +74635,7 @@ var Controller = class {
     cell.outputs = nextOutputs;
     cell.status = response.stopped ? "stopped" : "done";
     cell.outputsStale = false;
+    cell.progress = null;
     if (response.log !== void 0) cell.log = completedLog(response.log);
     cell.error = null;
     this.replaceLastActionError(null, {

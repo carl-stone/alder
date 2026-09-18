@@ -22,8 +22,10 @@ test_that("cache keys track free variables, body changes, and clear", {
   expect_identical(cached_changed(2), 7)
   expect_length(list.files(cache_dir, pattern = "\\.rds$"), 3L)
 
+  saveRDS("other project data", file.path(cache_dir, "other.rds"))
   alder::cache$clear("disk")
-  expect_length(list.files(cache_dir, pattern = "\\.rds$"), 0L)
+  expect_identical(readRDS(file.path(cache_dir, "other.rds")), "other project data")
+  expect_length(list.files(cache_dir, pattern = "^alder-[[:xdigit:]]+\\.rds$"), 0L)
 })
 
 test_that("reference-like dependencies bypass unsafe cache reuse", {

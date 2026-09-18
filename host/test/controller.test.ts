@@ -1711,6 +1711,10 @@ test("an obsolete slow result cannot replace a newer reactive result", async () 
     await startCommand(controller, second);
     await settle(controller, second.requestId);
     await eventually(() => engine.interrupts.length > 0);
+    engine.emitEvaluationOutput("append", { output: { kind: "text", text: "obsolete streamed output", truncated: false } });
+    engine.emitEvaluationOutput("progress", { progress: { kind: "progress", value: 1, total: 2, label: "obsolete", done: false } });
+    assert.ok(!JSON.stringify(controller.snapshot()).includes("obsolete streamed output"));
+    assert.ok(!JSON.stringify(controller.snapshot()).includes('"label":"obsolete"'));
     engine.finishEvaluation({ ok: true, outputs: [{ kind: "text", text: "obsolete slow result", truncated: false }] });
     await eventuallyTimed(() => engine.pendingEvaluations.length === 1);
     assert.equal(engine.pendingEvaluations[0]?.payload.cellId, ids[0]);
@@ -2213,6 +2217,36 @@ test("native clear-output deltas reset every streamed projection before later ou
   await settle(controller, rerun.requestId);
   assert.notEqual(controller.snapshot().cells[0]?.outputsStale, true);
   unsubscribe();
+  await controller.close();
+});
+
+test("completed and interrupted cells clear progress and ignore output after Stop", async () => {
+  const engine = new FakeEngine();
+  engine.deferred = true;
+  const controller = createController({
+    engine, notebook: notebook([["a", "out$progress(3)"]]),
+    config: resolveSettings({ notebook: { on_startup: false } }),
+  });
+  await controller.start();
+  const completedRun = command(controller, { type: "run", scope: "all", changes: [] });
+  await startCommand(controller, completedRun);
+  await eventually(() => engine.pendingEvaluations.length === 1);
+  engine.emitEvaluationOutput("progress", { progress: { kind: "progress", value: 3, total: 3, label: "Rows", done: true } });
+  assert.equal((controller.snapshot().cells[0]?.progress as { value: number }).value, 3);
+  engine.finishEvaluation({ ok: true, outputs: [{ kind: "text", text: "[1] 6", truncated: false }] });
+  await settle(controller, completedRun.requestId);
+  assert.equal(controller.snapshot().cells[0]?.progress, null);
+
+  const interruptedRun = command(controller, { type: "run", scope: "all", changes: [] });
+  await startCommand(controller, interruptedRun);
+  await eventually(() => engine.pendingEvaluations.length === 1);
+  await startCommand(controller, command(controller, { type: "interrupt" }));
+  engine.emitEvaluationOutput("append", { output: { kind: "text", text: "late", truncated: false } });
+  engine.emitEvaluationOutput("progress", { progress: { kind: "progress", value: 2, total: 3, label: "late", done: false } });
+  assert.ok(!JSON.stringify(controller.snapshot().cells[0]).includes("late"));
+  engine.finishEvaluation({ ok: false, error: { message: "Interrupted", interrupted: true } });
+  await controller.awaitOperation(interruptedRun.requestId, "controller-tests");
+  assert.equal(controller.snapshot().cells[0]?.progress, null);
   await controller.close();
 });
 

@@ -108,7 +108,7 @@ new_cached_wrapper <- function(f, kind, dir = NULL) {
       return(value)
     }
 
-    file <- file.path(cache_dir, paste0(key, ".rds"))
+    file <- file.path(cache_dir, paste0("alder-", key, ".rds"))
     if (file.exists(file)) {
       hit <- tryCatch(list(ok = TRUE, value = readRDS(file)),
                       error = function(e) list(ok = FALSE))
@@ -156,7 +156,7 @@ clear_cache_disk <- function() {
   }
   for (dir in locations) {
     if (!dir.exists(dir)) next
-    files <- list.files(dir, pattern = "\\.rds$", full.names = TRUE)
+    files <- list.files(dir, pattern = "^alder-[[:xdigit:]]+\\.rds$", full.names = TRUE)
     if (length(files)) unlink(files, force = TRUE)
   }
   invisible()
