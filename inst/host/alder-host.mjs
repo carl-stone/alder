@@ -33446,7 +33446,7 @@ var widgetUpdateSchema = external_exports.object({
   if (primary.length !== 1) context.addIssue({ code: "custom", message: "widget update requires exactly one primary field" });
   if (update.paused !== void 0 && primary.length !== 1) context.addIssue({ code: "custom", message: "paused is only valid with a primary update" });
 });
-var widgetCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("widget"), name: idSchema, path: external_exports.array(idSchema).max(256), update: widgetUpdateSchema, source: external_exports.enum(["editor", "app", "mcp", "cli"]), kernelEpoch: idSchema, expectedRevision: revisionSchema }).strict();
+var widgetCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("widget"), name: idSchema, path: external_exports.array(idSchema).max(256), update: widgetUpdateSchema, source: external_exports.enum(["editor", "app", "mcp", "cli"]), kernelEpoch: idSchema, expectedRevision: revisionSchema, expectedOutputId: idSchema.optional(), expectedOutputGeneration: revisionSchema.optional() }).strict();
 var inspectCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("inspect"), name: idSchema, kernelEpoch: idSchema }).strict();
 var lazyOutputCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("lazy-output"), key: idSchema, kernelEpoch: idSchema }).strict();
 var tablePageCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("table-page"), handle: idSchema, offset: protocolIntegerSchema, limit: external_exports.number().int().min(1).max(200).safe(), sortBy: boundedUtf8StringSchema(256), sortDescending: external_exports.boolean(), filter: boundedUtf8StringSchema(MAX_FRAME_BYTES), kernelEpoch: idSchema }).strict();
@@ -33863,7 +33863,7 @@ var outputDataSchema = external_exports.union([external_exports.lazy(() => richO
 var outputMetadataSchema = protocolJsonRecordSchema.superRefine((value, context) => {
   if (value.presentation !== "inline" && value.presentation !== "sandbox") context.addIssue({ code: "custom", path: ["presentation"], message: "host output metadata must declare presentation" });
 });
-var outputRecordShape = external_exports.object({ id: idSchema, sessionEpoch: idSchema, kernelEpoch: idSchema.nullable(), runId: idSchema.nullable(), cellId: idSchema, revision: revisionSchema, sequence: positiveIntegerSchema, data: outputDataSchema, metadata: outputMetadataSchema, truncated: external_exports.boolean() }).strict().superRefine((record3, context) => {
+var outputRecordShape = external_exports.object({ id: idSchema, sessionEpoch: idSchema, kernelEpoch: idSchema.nullable(), runId: idSchema.nullable(), cellId: idSchema, revision: revisionSchema, sequence: positiveIntegerSchema, generation: revisionSchema.optional(), data: outputDataSchema, metadata: outputMetadataSchema, truncated: external_exports.boolean() }).strict().superRefine((record3, context) => {
   if (record3.kernelEpoch === null !== (record3.runId === null)) {
     context.addIssue({ code: "custom", path: ["kernelEpoch"], message: "kernelEpoch and runId must be paired" });
     context.addIssue({ code: "custom", path: ["runId"], message: "kernelEpoch and runId must be paired" });

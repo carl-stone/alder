@@ -1,6 +1,7 @@
 import { BrowserDocument, reconcileDraft, type BrowserRunCommand, type BrowserTransactionCommand, type LocalCell, type SourceCommitOutcome } from "./document.js";
 import { BrowserTransport, BrowserTransportError, type BrowserCommand, type BrowserDraftStore, type BrowserRecoveryDraft, type BrowserTransportOptions } from "./transport.js";
 import { notebookUrl } from "./url.js";
+import type { WidgetOrigin } from "../output-renderer.js";
 import type { PreferencesPatch, ProjectSettingsPatch } from "../settings.js";
 import type {
   CellType,
@@ -396,11 +397,12 @@ export class BrowserNotebookClient {
     });
   }
 
-  async setWidget(name: string, path: readonly string[], update: Record<string, unknown>, source: "editor" | "app" = "editor"): Promise<CommandResult> {
+  async setWidget(name: string, path: readonly string[], update: Record<string, unknown>, source: "editor" | "app" = "editor", origin?: WidgetOrigin): Promise<CommandResult> {
     const owner = this.findWidgetOwner(name);
     if (!owner) throw new BrowserTransportError("not_found", `widget owner is unavailable: ${name}`);
-    const kernelEpoch = this.kernelEpoch();
-    return this.dispatchSettled({ type: "widget", ...this.base("widget", false), name, path: [...path], update, source, kernelEpoch, expectedRevision: owner.serverRevision });
+    if (origin && origin.owner !== owner.id) throw new BrowserTransportError("widget_not_current", `widget output is no longer current: ${name}`);
+    const kernelEpoch = origin?.kernelEpoch ?? this.kernelEpoch();
+    return this.dispatchSettled({ type: "widget", ...this.base("widget", false), name, path: [...path], update, source, kernelEpoch, expectedRevision: origin?.revision ?? owner.serverRevision, ...(origin ? { expectedOutputId: origin.outputId, expectedOutputGeneration: origin.outputGeneration } : {}) });
   }
 
   async requestLazy(key: string): Promise<CommandResult> {

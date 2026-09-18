@@ -463,6 +463,7 @@ export class OutputStore {
         cellId: current.cellId,
         revision: current.revision,
         sequence: current.sequence,
+        generation: (current.generation ?? 0) + 1,
         data: replacementData,
         metadata: this.metadataForRich(current.metadata, replacementData),
         truncated: hasTruncation(replacementData),

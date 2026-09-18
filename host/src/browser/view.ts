@@ -159,7 +159,7 @@ export class NotebookView {
       resolveArtifact: async (descriptor) => ({ kind: "url", url: await client.resolveArtifact(descriptor) }),
       mode: "interactive",
       actions: {
-        widget: (name, path, update) => client.setWidget(name, path, update, this.appView ? "app" : "editor"),
+        widget: (name, path, update, origin) => client.setWidget(name, path, update, this.appView ? "app" : "editor", origin),
         upload: async (name, path, files) => {
           const encoded = await Promise.all(files.map(encodeFile));
           await client.service("upload", {

@@ -3242,6 +3242,62 @@ test("widget owner edits cancel the exact operation and late replies cannot comm
   await controller.close();
 });
 
+test("widget events from replaced output records never reach R", async () => {
+  const engine = new FakeEngine();
+  engine.requestHandler = async (name, payload) => name === "set_widget"
+    ? { ok: true, selected: { type: "double", value: payload.value } }
+    : { ok: true };
+  const controller = createController({
+    engine,
+    notebook: notebook([["a", "threshold <- ui$slider(0, 10)"]]),
+    config: resolveSettings({ notebook: { on_startup: false } }),
+  });
+  await controller.start();
+  const run = command(controller, { type: "run", scope: "all", changes: [] });
+  await startCommand(controller, run);
+  await settle(controller, run.requestId);
+  const original = controller.snapshot().cells[0]!.outputs[0]!;
+  const first = command(controller, {
+    type: "widget", name: "threshold", path: [], update: { value: 4 }, source: "editor",
+    expectedRevision: original.revision, expectedOutputId: original.id, expectedOutputGeneration: original.generation ?? 0,
+  });
+  await startCommand(controller, first);
+  const changed = await settle(controller, first.requestId);
+  assert.equal(changed.status, "done");
+  const replacement = controller.snapshot().cells[0]!.outputs[0]!;
+  assert.equal(replacement.id, original.id);
+  assert.ok((replacement.generation ?? 0) > (original.generation ?? 0));
+  assert.equal((changed.result as { outputRecordId: string }).outputRecordId, replacement.id);
+
+  const stale = command(controller, {
+    type: "widget", name: "threshold", path: [], update: { value: 7 }, source: "editor",
+    expectedRevision: original.revision, expectedOutputId: original.id, expectedOutputGeneration: original.generation ?? 0,
+  });
+  await startCommand(controller, stale);
+  const rejected = await controller.awaitOperation(stale.requestId, "controller-tests");
+  assert.equal(rejected.status, "error");
+  assert.equal(rejected.error?.code, "widget_not_current");
+  assert.equal(engine.requests.filter(({ command }) => command === "set_widget").length, 1);
+  assert.equal((controller.snapshot().cells[0]!.outputs[0]!.data as { spec: { value: number } }).spec.value, 4);
+
+  const edit = command(controller, { type: "transaction", changes: [{
+    type: "edit", cell: { cellId: "a" }, expectedRevision: 0,
+    body: ["threshold <- ui$slider(0, 20)"], cellType: "code",
+  }] });
+  await startCommand(controller, edit);
+  await settle(controller, edit.requestId);
+  const afterEdit = command(controller, {
+    type: "widget", name: "threshold", path: [], update: { value: 8 }, source: "editor",
+    expectedRevision: original.revision, expectedOutputId: original.id, expectedOutputGeneration: original.generation ?? 0,
+  });
+  await startCommand(controller, afterEdit);
+  const staleRevision = await controller.awaitOperation(afterEdit.requestId, "controller-tests");
+  assert.equal(staleRevision.status, "error");
+  assert.equal(staleRevision.error?.code, "widget_not_current");
+  assert.equal(engine.requests.filter(({ command }) => command === "set_widget").length, 1);
+  await controller.close();
+});
+
 test("a successful obsolete widget request replays authoritative source after unrelated work", async () => {
   const engine = new FakeEngine();
   let resolveWidget!: (response: EngineResponse) => void;

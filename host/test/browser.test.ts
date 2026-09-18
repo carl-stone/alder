@@ -537,7 +537,7 @@ test('scientific outputs support lazy evaluation, table paging, and a trusted wi
     app = await startInstalledHost(path, { executionMode: 'lazy' });
     browser = await openAuthenticatedBrowser(app);
     await browser.wait("window.__alderHost?.client.document?.snapshot.runtime.executionReady && document.querySelectorAll('#notebook > .cell[data-cell]').length === 6", 30_000);
-    await browser.click('#run-all');
+    await browser.evaluate("window.__alderHost.client.runAll('all')");
     await browser.wait(`window.__alderHost.client.document.snapshot.cells.every(cell => cell.status === 'done') &&
       document.querySelector('[data-cell="cell-3"] [data-role=outputs]')?.textContent.includes('VALUE=3') &&
       document.querySelector('[data-cell="cell-4"] img.plot')?.complete &&
@@ -588,6 +588,117 @@ test('scientific outputs support lazy evaluation, table paging, and a trusted wi
     console.error(JSON.stringify({ host: app?.controller.snapshot(), browser: await browser?.evaluate(
       "({status:document.querySelector('#status')?.textContent,cells:window.__alderHost?.client.document?.snapshot.cells.map(c=>({id:c.id,status:c.status,outputs:c.outputs,log:c.log,error:c.error})),dom:document.querySelector('#notebook')?.innerText})"
     ).catch(() => null), errors: browser?.errors }));
+    throw error;
+  } finally {
+    await browser?.close();
+    await app?.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('scalar, form, and button controls drive the intended reactive cells once', {
+  skip: process.env.ALDER_BROWSER_TEST !== '1', timeout: 120_000,
+}, async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'alder-browser-widgets-'));
+  const path = join(directory, 'notebook.R');
+  await writeFile(path, [
+    '# %%', 'library(alder)',
+    '# %%', 'gain <- ui$slider(0, 10, value = 2, step = 1); gain',
+    '# %%', 'scaled <- gain$value * 7; scaled',
+    '# %%', 'unrelated <- 100L; unrelated',
+    '# %%', 'settings <- ui$form(ui$array(factor = ui$slider(0, 10, value = 2), enabled = ui$checkbox(FALSE))); settings',
+    '# %%', 'form_result <- if (is.null(settings$value)) "not submitted" else if (settings$value$enabled) settings$value$factor * 7 else 0; form_result',
+    '# %%', 'clicks <- ui$button(); clicks',
+    '# %%', 'seen <- clicks$value; seen',
+  ].join('\n') + '\n');
+  let app: RunningHost | undefined, browser: Chrome | undefined;
+  try {
+    app = await startInstalledHost(path, { executionMode: 'automatic' });
+    browser = await openAuthenticatedBrowser(app);
+    await browser.wait("window.__alderHost?.client.document?.snapshot.runtime.executionReady && !window.__alderHost.client.document.snapshot.runtime.busy && !document.querySelector('#run-all')?.disabled && document.querySelectorAll('#notebook > .cell[data-cell]').length === 8", 30_000);
+    await browser.evaluate("window.__alderHost.client.runAll('all')");
+    await browser.wait(`window.__alderHost.client.document.snapshot.cells.every(cell => cell.status === 'done') &&
+      document.querySelector('[data-cell="cell-3"] [data-role=outputs]')?.textContent.includes('14') &&
+      document.querySelector('[data-cell="cell-6"] [data-role=outputs]')?.textContent.includes('not submitted') &&
+      document.querySelector('[data-cell="cell-8"] [data-role=outputs]')?.textContent.includes('0')`, 45_000);
+    const doneRuns = new Map<string, Set<string>>();
+    const unsubscribe = app.controller.subscribe((event) => {
+      if (event.type !== 'cell-completed' || event.payload.status !== 'done' || !event.payload.outputs?.length) return;
+      const runs = doneRuns.get(event.payload.id) ?? new Set<string>();
+      runs.add(event.payload.outputs[0].runId ?? '');
+      doneRuns.set(event.payload.id, runs);
+    }, ['cell-completed']);
+    const arrowRight = async () => {
+      await browser!.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', key: 'ArrowRight', code: 'ArrowRight', windowsVirtualKeyCode: 39 });
+      await browser!.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'ArrowRight', code: 'ArrowRight', windowsVirtualKeyCode: 39 });
+    };
+    try {
+      assert.equal(await browser.evaluate(`(() => {
+        const control = document.querySelector('[data-cell="cell-2"] [data-role=widget][data-name=gain]');
+        control?.focus();
+        window.__oldGainOrigin = { ...window.__alderHost.view.output.controlOrigins.get(control) };
+        return control?.value === '2' && document.activeElement === control;
+      })()`), true);
+      await arrowRight();
+      await browser.wait(`document.querySelector('[data-cell="cell-3"] [data-role=outputs]')?.textContent.includes('21') &&
+        window.__alderHost.client.document.snapshot.cells[2].status === 'done'`, 30_000);
+      assert.equal(doneRuns.get('cell-3')?.size, 1);
+      assert.equal(doneRuns.get('cell-4')?.size ?? 0, 0);
+      assert.equal(await browser.evaluate(`window.__alderHost.client.setWidget('gain', [], {value:9}, 'editor', window.__oldGainOrigin)
+        .then(() => 'accepted', error => error.code)`), 'widget_not_current');
+      assert.equal((app.controller.snapshot().cells[1]!.outputs[0]!.data as { spec: { value: number } }).spec.value, 3);
+      doneRuns.clear();
+
+      assert.equal(await browser.evaluate(`(() => {
+        const control = document.querySelector('[data-cell="cell-5"] [data-role=widget][data-name=settings][data-kind=slider]');
+        control?.focus();
+        return control?.value === '2' && document.activeElement === control;
+      })()`), true);
+      await arrowRight();
+      await browser.click('[data-cell="cell-5"] [data-role=widget][data-name=settings][data-kind=checkbox]');
+      await browser.wait(`document.querySelector('[data-cell="cell-5"] [data-role=widget][data-name=settings][data-kind=checkbox]')?.checked === true &&
+        window.__alderHost.client.document.snapshot.cells[4].outputs[0]?.data?.spec?.child?.value?.enabled === true &&
+        document.querySelector('[data-cell="cell-5"] [data-form-submit=true]')?.disabled === false`, 30_000);
+      await browser.wait(`(() => {
+        const output = window.__alderHost.view.output;
+        const record = window.__alderHost.client.document.snapshot.cells[4].outputs[0];
+        const submit = document.querySelector('[data-cell="cell-5"] [data-form-submit=true]');
+        return record.generation === 4 && output.controlOrigins.get(submit)?.outputGeneration === 4;
+      })()`, 5_000);
+      assert.equal(doneRuns.get('cell-6')?.size ?? 0, 0);
+      assert.match(String(await browser.evaluate("document.querySelector('[data-cell=\"cell-6\"] [data-role=outputs]').textContent")), /not submitted/);
+      await browser.evaluate(`(() => {
+        window.__formClicks = [];
+        const submit = document.querySelector('[data-cell="cell-5"] [data-form-submit=true]');
+        submit.addEventListener('click', event => window.__formClicks.push({trusted:event.isTrusted,disabled:submit.disabled}));
+      })()`);
+      await browser.click('[data-cell="cell-5"] [data-form-submit=true]');
+      await browser.wait('window.__formClicks.length > 0', 3_000);
+      assert.equal((await browser.evaluate('window.__formClicks'))[0].trusted, true);
+      await browser.wait(`document.querySelector('[data-cell="cell-6"] [data-role=outputs]')?.textContent.includes('21') &&
+        window.__alderHost.client.document.snapshot.cells[5].status === 'done'`, 8_000);
+      assert.equal(doneRuns.get('cell-6')?.size, 1);
+      doneRuns.clear();
+
+      await browser.click('[data-cell="cell-7"] [data-role=widget][data-name=clicks]');
+      await browser.wait(`document.querySelector('[data-cell="cell-8"] [data-role=outputs]')?.textContent.includes('[1] 1') &&
+        window.__alderHost.client.document.snapshot.cells[7].status === 'done'`, 30_000);
+      assert.equal(doneRuns.get('cell-8')?.size, 1);
+      assert.equal(doneRuns.get('cell-4')?.size ?? 0, 0);
+      assert.deepEqual(browser.errors, []);
+    } finally {
+      unsubscribe();
+    }
+  } catch (error) {
+    console.error(JSON.stringify({ runtime: app?.controller.snapshot().runtime, browser: await browser?.evaluate(`(() => {
+      const output = window.__alderHost?.view?.output;
+      const submit = document.querySelector('[data-cell="cell-5"] [data-form-submit=true]');
+      return { formClicks:window.__formClicks, submitDisabled:submit?.disabled, origin:submit && output?.controlOrigins?.get(submit),
+        pendingWidgets:[...(output?.pendingWidgets?.keys() ?? [])], pendingForms:[...(output?.pendingForms?.keys() ?? [])],
+        lastFailure:String(output?.lastFailure?.error ?? ''), status:document.querySelector('#status')?.textContent };
+    })()`).catch(() => null), cells: app?.controller.snapshot().cells.map((cell) => ({
+      id: cell.id, status: cell.status, data: cell.outputs.map((output) => output.data), error: cell.error,
+    })), errors: browser?.errors }));
     throw error;
   } finally {
     await browser?.close();

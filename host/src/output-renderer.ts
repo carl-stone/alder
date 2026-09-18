@@ -2,9 +2,17 @@ import { OUTPUT_CHUNK_BYTES, type ArtifactHandle, type HostCellState, type Outpu
 
 type JsonObject = Record<string, unknown>;
 type WidgetControl = HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement | HTMLButtonElement;
+export interface WidgetOrigin {
+  owner: string;
+  revision: number;
+  outputId: string;
+  outputGeneration: number;
+  kernelEpoch: string;
+}
 
 interface PendingWidget {
   widget: JsonObject;
+  origin: WidgetOrigin;
   path: readonly string[];
   update: JsonObject | null;
   authoritative: {
@@ -20,7 +28,7 @@ interface PendingWidget {
   resolveDone(): void;
 }
 export interface OutputActions {
-  widget(name: string, path: readonly string[], update: JsonObject): Promise<unknown>;
+  widget(name: string, path: readonly string[], update: JsonObject, origin: WidgetOrigin): Promise<unknown>;
   upload(name: string, path: readonly string[], files: readonly File[]): Promise<unknown>;
   lazy(key: string): Promise<unknown>;
   table(request: {
@@ -55,6 +63,8 @@ const MUTABLE_WIDGET_FIELDS = new Set([
 export class OutputRenderer {
   private readonly signatures = new WeakMap<Element, string>();
   private readonly structures = new WeakMap<Element, string>();
+  private readonly widgetOrigins = new WeakMap<JsonObject, WidgetOrigin>();
+  private readonly controlOrigins = new WeakMap<WidgetControl, WidgetOrigin>();
   private readonly pendingWidgets = new Map<string, PendingWidget>();
   private readonly pendingForms = new Map<string, Promise<void>>();
   private readonly pendingUploads = new Set<Promise<void>>();
@@ -121,7 +131,17 @@ export class OutputRenderer {
     progress: boolean,
     retained: Set<Element>,
   ): void {
-    this.updateValueSlot(container, key, outputData(output), index, progress, retained, stableJson(output));
+    const value = outputData(output);
+    if (output.kernelEpoch !== null) {
+      visitWidgets(value, (widget) => this.widgetOrigins.set(widget, {
+        owner: output.cellId,
+        revision: output.revision,
+        outputId: output.id,
+        outputGeneration: output.generation ?? 0,
+        kernelEpoch: output.kernelEpoch!,
+      }));
+    }
+    this.updateValueSlot(container, key, value, index, progress, retained, stableJson(output));
   }
 
   private updateProgressSlot(
@@ -705,6 +725,11 @@ export class OutputRenderer {
   }
 
   private sendWidget(widget: JsonObject, path: readonly string[], update: JsonObject, control: WidgetControl): Promise<void> {
+    const origin = this.controlOrigins.get(control);
+    if (origin === undefined) {
+      this.interactiveActions().error(new Error("widget output is no longer current"));
+      return Promise.resolve();
+    }
     const key = widgetKey(widget, string(control.dataset.kind), path);
     const oneShot = ["run_button", "button", "refresh", "form"].includes(string(control.dataset.kind));
     const current = this.pendingWidgets.get(key);
@@ -714,19 +739,45 @@ export class OutputRenderer {
       if (!current.oneShot) current.update = update;
       return current.done;
     }
+    const predecessors = Array.from(this.pendingWidgets.values()).filter((operation) => string(operation.widget.name) === string(widget.name));
     if (oneShot) control.setAttribute("disabled", "");
     let resolveDone!: () => void;
     const done = new Promise<void>((resolve) => { resolveDone = resolve; });
     const pending: PendingWidget = {
-      widget, path: [...path], update, authoritative: null, oneShot, control, failure: null, done, resolveDone,
+      widget, origin, path: [...path], update, authoritative: null, oneShot, control, failure: null, done, resolveDone,
     };
     this.pendingWidgets.set(key, pending);
     void (async () => {
       try {
+        for (const predecessor of predecessors) {
+          await predecessor.done;
+          if (predecessor.failure !== null) throw predecessor.failure;
+          if (pending.origin.owner === predecessor.origin.owner
+            && pending.origin.revision === predecessor.origin.revision
+            && pending.origin.outputId === predecessor.origin.outputId
+            && pending.origin.kernelEpoch === predecessor.origin.kernelEpoch) {
+            pending.origin = predecessor.origin;
+          }
+        }
         while (pending.update) {
           const next = pending.update;
           pending.update = null;
-          await this.interactiveActions().widget(string(pending.widget.name), pending.path, next);
+          const result = await this.interactiveActions().widget(string(pending.widget.name), pending.path, next, pending.origin);
+          if (isObject(result) && isObject(result.result) && typeof result.result.outputRecordId === "string" && typeof result.result.outputGeneration === "number") {
+            pending.origin = { ...pending.origin, outputId: result.result.outputRecordId, outputGeneration: result.result.outputGeneration };
+            const slot = pending.control.closest(".out-record");
+            for (const candidate of Array.from(slot?.querySelectorAll<HTMLElement>("[data-role=widget]") ?? [])) {
+              if (!isWidgetControl(candidate) || candidate.dataset.name !== string(pending.widget.name)) continue;
+              const currentOrigin = this.controlOrigins.get(candidate);
+              if (currentOrigin?.owner === pending.origin.owner
+                && currentOrigin.revision === pending.origin.revision
+                && currentOrigin.outputId === pending.origin.outputId
+                && currentOrigin.kernelEpoch === pending.origin.kernelEpoch
+                && currentOrigin.outputGeneration <= pending.origin.outputGeneration) {
+                this.controlOrigins.set(candidate, pending.origin);
+              }
+            }
+          }
         }
       } catch (error) {
         pending.failure = error;
@@ -843,6 +894,17 @@ export class OutputRenderer {
     force = false,
   ): void {
     const kind = string(spec.kind);
+    const origin = this.widgetOrigins.get(widget);
+    if (origin !== undefined) {
+      for (const control of Array.from(node.querySelectorAll<HTMLElement>("[data-role=widget]"))) {
+        if (!isWidgetControl(control)) continue;
+        const previous = this.controlOrigins.get(control);
+        if (previous?.owner === origin.owner && previous.revision === origin.revision
+          && previous.outputId === origin.outputId && previous.kernelEpoch === origin.kernelEpoch
+          && previous.outputGeneration > origin.outputGeneration) continue;
+        this.controlOrigins.set(control, origin);
+      }
+    }
     const key = widgetKey(widget, kind, path);
     const operation = this.pendingWidgets.get(key);
     const pending = operation !== undefined;
@@ -1005,6 +1067,8 @@ export class OutputRenderer {
     control.dataset.owner = string(widget.owner);
     control.dataset.path = JSON.stringify(path);
     control.id = `widget-${safePart(widget.owner)}-${safePart(kind)}${path.length ? `-${safePart(path.join("-"))}` : ""}`;
+    const origin = this.widgetOrigins.get(widget);
+    if (origin && isWidgetControl(control)) this.controlOrigins.set(control, origin);
     if (this.mode === "static") control.setAttribute("disabled", "");
     return control;
   }

@@ -251,6 +251,43 @@ test("stock Ark starts, repeats evaluations, and returns native plot output", in
       await closeEngine(engine, processScope, directory);
     }
   });
+
+test("stock Ark keeps scalar, form, and button widget values in R", integration,
+  async () => {
+    const directory = await mkdtemp(join(tmpdir(), "alder-engine-widgets-"));
+    const { engine, processScope } = await openEngine(directory);
+    try {
+      const epoch = (await engine.start()).kernel!.kernelEpoch;
+      const evaluate = async (id: string, source: string, definitions: string[] = []) => {
+        const request = payload(epoch, id, id, source);
+        request.definitions = definitions;
+        const result = await engine.evaluate(request);
+        assert.equal(result.ok, true, result.error?.message);
+        return result;
+      };
+      await evaluate("import", "library(alder)");
+
+      const slider = await evaluate("slider", "gain <- ui$slider(0, 10, value = 2); gain", ["gain"]);
+      assert.match(JSON.stringify(slider.outputs), /"kind":"widget"/);
+      assert.match(JSON.stringify(await evaluate("slider-before", "gain$value * 7")), /14/);
+      assert.equal((await engine.request("set_widget", { name: "gain", path: [], op_id: 1, value: 4 })).ok, true);
+      assert.match(JSON.stringify(await evaluate("slider-after", "gain$value * 7")), /28/);
+
+      await evaluate("form", "settings <- ui$form(ui$array(factor = ui$slider(0, 10, 2), enabled = ui$checkbox(FALSE))); settings", ["settings"]);
+      assert.match(JSON.stringify(await evaluate("form-before", "if (is.null(settings$value)) 'not submitted' else settings$value$factor * 7")), /not submitted/);
+      assert.equal((await engine.request("set_widget", { name: "settings", path: ["factor"], op_id: 2, value: 4 })).ok, true);
+      assert.equal((await engine.request("set_widget", { name: "settings", path: ["enabled"], op_id: 3, value: true })).ok, true);
+      assert.match(JSON.stringify(await evaluate("form-draft", "if (is.null(settings$value)) 'not submitted' else settings$value$factor * 7")), /not submitted/);
+      assert.equal((await engine.request("set_widget", { name: "settings", path: [], op_id: 4, submit: true })).ok, true);
+      assert.match(JSON.stringify(await evaluate("form-after", "settings$value$factor * 7")), /28/);
+
+      await evaluate("button", "clicks <- ui$button(); clicks", ["clicks"]);
+      assert.equal((await engine.request("set_widget", { name: "clicks", path: [], op_id: 5, value: 1 })).ok, true);
+      assert.match(JSON.stringify(await evaluate("button-after", "clicks$value")), /1/);
+    } finally {
+      await closeEngine(engine, processScope, directory);
+    }
+  });
 test("Alder log notifications preserve exact OutputLog lines", integration,
   async () => {
     const directory = await mkdtemp(join(tmpdir(), "alder-engine-log-lines-"));

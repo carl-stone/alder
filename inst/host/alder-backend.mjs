@@ -62815,7 +62815,7 @@ var widgetUpdateSchema = external_exports.object({
   if (primary.length !== 1) context.addIssue({ code: "custom", message: "widget update requires exactly one primary field" });
   if (update2.paused !== void 0 && primary.length !== 1) context.addIssue({ code: "custom", message: "paused is only valid with a primary update" });
 });
-var widgetCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("widget"), name: idSchema, path: external_exports.array(idSchema).max(256), update: widgetUpdateSchema, source: external_exports.enum(["editor", "app", "mcp", "cli"]), kernelEpoch: idSchema, expectedRevision: revisionSchema }).strict();
+var widgetCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("widget"), name: idSchema, path: external_exports.array(idSchema).max(256), update: widgetUpdateSchema, source: external_exports.enum(["editor", "app", "mcp", "cli"]), kernelEpoch: idSchema, expectedRevision: revisionSchema, expectedOutputId: idSchema.optional(), expectedOutputGeneration: revisionSchema.optional() }).strict();
 var inspectCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("inspect"), name: idSchema, kernelEpoch: idSchema }).strict();
 var lazyOutputCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("lazy-output"), key: idSchema, kernelEpoch: idSchema }).strict();
 var tablePageCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("table-page"), handle: idSchema, offset: protocolIntegerSchema, limit: external_exports.number().int().min(1).max(200).safe(), sortBy: boundedUtf8StringSchema(256), sortDescending: external_exports.boolean(), filter: boundedUtf8StringSchema(MAX_FRAME_BYTES), kernelEpoch: idSchema }).strict();
@@ -63249,7 +63249,7 @@ var outputDataSchema = external_exports.union([external_exports.lazy(() => richO
 var outputMetadataSchema = protocolJsonRecordSchema.superRefine((value, context) => {
   if (value.presentation !== "inline" && value.presentation !== "sandbox") context.addIssue({ code: "custom", path: ["presentation"], message: "host output metadata must declare presentation" });
 });
-var outputRecordShape = external_exports.object({ id: idSchema, sessionEpoch: idSchema, kernelEpoch: idSchema.nullable(), runId: idSchema.nullable(), cellId: idSchema, revision: revisionSchema, sequence: positiveIntegerSchema, data: outputDataSchema, metadata: outputMetadataSchema, truncated: external_exports.boolean() }).strict().superRefine((record4, context) => {
+var outputRecordShape = external_exports.object({ id: idSchema, sessionEpoch: idSchema, kernelEpoch: idSchema.nullable(), runId: idSchema.nullable(), cellId: idSchema, revision: revisionSchema, sequence: positiveIntegerSchema, generation: revisionSchema.optional(), data: outputDataSchema, metadata: outputMetadataSchema, truncated: external_exports.boolean() }).strict().superRefine((record4, context) => {
   if (record4.kernelEpoch === null !== (record4.runId === null)) {
     context.addIssue({ code: "custom", path: ["kernelEpoch"], message: "kernelEpoch and runId must be paired" });
     context.addIssue({ code: "custom", path: ["runId"], message: "kernelEpoch and runId must be paired" });
@@ -71145,6 +71145,7 @@ var OutputStore = class {
         cellId: current.cellId,
         revision: current.revision,
         sequence: current.sequence,
+        generation: (current.generation ?? 0) + 1,
         data: replacementData,
         metadata: this.metadataForRich(current.metadata, replacementData),
         truncated: hasTruncation(replacementData)
@@ -75423,7 +75424,7 @@ var Controller = class {
       throw new ControllerError("invalid_request", "no such widget: " + command.name, 400);
     }
     const owner = this.requireCell(location.owner);
-    if (this.statusOf(owner.id) !== "done") {
+    if (owner.revision !== command.expectedRevision || command.expectedOutputId !== void 0 && location.record.id !== command.expectedOutputId || command.expectedOutputGeneration !== void 0 && (location.record.generation ?? 0) !== command.expectedOutputGeneration || this.statusOf(owner.id) !== "done") {
       throw new ControllerError("widget_not_current", "widget " + command.name + " is not current", 409);
     }
     this.assertLiveOutput(owner, location.record, "widget_not_current");
@@ -75538,6 +75539,12 @@ var Controller = class {
       });
     });
     identity.record = next;
+    const completedResult = { token: identity.token, outputRecordId: next.id, outputGeneration: next.generation ?? 0 };
+    const operation = this.operationFor(command.requestId, command.clientId);
+    if (operation !== void 0 && !isTerminal(operation.status)) {
+      operation.result = clone3(completedResult);
+      this.rememberOperation(operation);
+    }
     this.pendingWidgets.delete(identity.key);
     const operationKey = this.operationKey(command.clientId, command.requestId);
     const pendingUpload = this.pendingUploads.get(operationKey);
@@ -75554,12 +75561,12 @@ var Controller = class {
       revision: owner.revision
     });
     if (identity.draft) {
-      this.completeOperation(command.requestId, { token: identity.token, draft: true }, command.clientId);
+      this.completeOperation(command.requestId, { ...completedResult, draft: true }, command.clientId);
     } else if (identity.kind === "run_button" && update2.value === true) {
       this.scheduleRunButton(command, identity.owner, identity.revision, identity.record);
     } else {
       const scheduled = this.scheduleWidgetConsumers(command.name, identity.owner, command.source, command.requestId, command.clientId);
-      if (!scheduled) this.completeOperation(command.requestId, { token: identity.token }, command.clientId);
+      if (!scheduled) this.completeOperation(command.requestId, completedResult, command.clientId);
     }
   }
   async failWidgetOperation(command, identity, code2, message2) {
@@ -107861,6 +107868,8 @@ var MUTABLE_WIDGET_FIELDS = /* @__PURE__ */ new Set([
 var OutputRenderer = class {
   signatures = /* @__PURE__ */ new WeakMap();
   structures = /* @__PURE__ */ new WeakMap();
+  widgetOrigins = /* @__PURE__ */ new WeakMap();
+  controlOrigins = /* @__PURE__ */ new WeakMap();
   pendingWidgets = /* @__PURE__ */ new Map();
   pendingForms = /* @__PURE__ */ new Map();
   pendingUploads = /* @__PURE__ */ new Set();
@@ -107913,7 +107922,17 @@ var OutputRenderer = class {
     }
   }
   updateSlot(container, key2, output2, index, progress, retained) {
-    this.updateValueSlot(container, key2, outputData(output2), index, progress, retained, stableJson(output2));
+    const value = outputData(output2);
+    if (output2.kernelEpoch !== null) {
+      visitWidgets(value, (widget) => this.widgetOrigins.set(widget, {
+        owner: output2.cellId,
+        revision: output2.revision,
+        outputId: output2.id,
+        outputGeneration: output2.generation ?? 0,
+        kernelEpoch: output2.kernelEpoch
+      }));
+    }
+    this.updateValueSlot(container, key2, value, index, progress, retained, stableJson(output2));
   }
   updateProgressSlot(container, key2, progress, retained) {
     this.updateValueSlot(container, key2, { kind: "progress", ...progress }, null, true, retained, stableJson(progress));
@@ -108469,6 +108488,11 @@ var OutputRenderer = class {
     }
   }
   sendWidget(widget, path3, update2, control) {
+    const origin2 = this.controlOrigins.get(control);
+    if (origin2 === void 0) {
+      this.interactiveActions().error(new Error("widget output is no longer current"));
+      return Promise.resolve();
+    }
     const key2 = widgetKey2(widget, string4(control.dataset.kind), path3);
     const oneShot = ["run_button", "button", "refresh", "form"].includes(string4(control.dataset.kind));
     const current = this.pendingWidgets.get(key2);
@@ -108476,6 +108500,7 @@ var OutputRenderer = class {
       if (!current.oneShot) current.update = update2;
       return current.done;
     }
+    const predecessors = Array.from(this.pendingWidgets.values()).filter((operation) => string4(operation.widget.name) === string4(widget.name));
     if (oneShot) control.setAttribute("disabled", "");
     let resolveDone;
     const done = new Promise((resolve15) => {
@@ -108483,6 +108508,7 @@ var OutputRenderer = class {
     });
     const pending = {
       widget,
+      origin: origin2,
       path: [...path3],
       update: update2,
       authoritative: null,
@@ -108495,10 +108521,28 @@ var OutputRenderer = class {
     this.pendingWidgets.set(key2, pending);
     void (async () => {
       try {
+        for (const predecessor of predecessors) {
+          await predecessor.done;
+          if (predecessor.failure !== null) throw predecessor.failure;
+          if (pending.origin.owner === predecessor.origin.owner && pending.origin.revision === predecessor.origin.revision && pending.origin.outputId === predecessor.origin.outputId && pending.origin.kernelEpoch === predecessor.origin.kernelEpoch) {
+            pending.origin = predecessor.origin;
+          }
+        }
         while (pending.update) {
           const next = pending.update;
           pending.update = null;
-          await this.interactiveActions().widget(string4(pending.widget.name), pending.path, next);
+          const result = await this.interactiveActions().widget(string4(pending.widget.name), pending.path, next, pending.origin);
+          if (isObject2(result) && isObject2(result.result) && typeof result.result.outputRecordId === "string" && typeof result.result.outputGeneration === "number") {
+            pending.origin = { ...pending.origin, outputId: result.result.outputRecordId, outputGeneration: result.result.outputGeneration };
+            const slot = pending.control.closest(".out-record");
+            for (const candidate of Array.from(slot?.querySelectorAll("[data-role=widget]") ?? [])) {
+              if (!isWidgetControl(candidate) || candidate.dataset.name !== string4(pending.widget.name)) continue;
+              const currentOrigin = this.controlOrigins.get(candidate);
+              if (currentOrigin?.owner === pending.origin.owner && currentOrigin.revision === pending.origin.revision && currentOrigin.outputId === pending.origin.outputId && currentOrigin.kernelEpoch === pending.origin.kernelEpoch && currentOrigin.outputGeneration <= pending.origin.outputGeneration) {
+                this.controlOrigins.set(candidate, pending.origin);
+              }
+            }
+          }
         }
       } catch (error61) {
         pending.failure = error61;
@@ -108599,6 +108643,15 @@ var OutputRenderer = class {
   }
   patchWidget(node2, widget, spec, path3, force = false) {
     const kind = string4(spec.kind);
+    const origin2 = this.widgetOrigins.get(widget);
+    if (origin2 !== void 0) {
+      for (const control2 of Array.from(node2.querySelectorAll("[data-role=widget]"))) {
+        if (!isWidgetControl(control2)) continue;
+        const previous = this.controlOrigins.get(control2);
+        if (previous?.owner === origin2.owner && previous.revision === origin2.revision && previous.outputId === origin2.outputId && previous.kernelEpoch === origin2.kernelEpoch && previous.outputGeneration > origin2.outputGeneration) continue;
+        this.controlOrigins.set(control2, origin2);
+      }
+    }
     const key2 = widgetKey2(widget, kind, path3);
     const operation = this.pendingWidgets.get(key2);
     const pending = operation !== void 0;
@@ -108748,6 +108801,8 @@ var OutputRenderer = class {
     control.dataset.owner = string4(widget.owner);
     control.dataset.path = JSON.stringify(path3);
     control.id = `widget-${safePart(widget.owner)}-${safePart(kind)}${path3.length ? `-${safePart(path3.join("-"))}` : ""}`;
+    const origin2 = this.widgetOrigins.get(widget);
+    if (origin2 && isWidgetControl(control)) this.controlOrigins.set(control, origin2);
     if (this.mode === "static") control.setAttribute("disabled", "");
     return control;
   }

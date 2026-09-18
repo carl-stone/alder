@@ -3565,7 +3565,10 @@ export class Controller {
       throw new ControllerError("invalid_request", "no such widget: " + command.name, 400);
     }
     const owner = this.requireCell(location.owner);
-    if (this.statusOf(owner.id) !== "done") {
+    if (owner.revision !== command.expectedRevision
+      || (command.expectedOutputId !== undefined && location.record.id !== command.expectedOutputId)
+      || (command.expectedOutputGeneration !== undefined && (location.record.generation ?? 0) !== command.expectedOutputGeneration)
+      || this.statusOf(owner.id) !== "done") {
       throw new ControllerError("widget_not_current", "widget " + command.name + " is not current", 409);
     }
     this.assertLiveOutput(owner, location.record, "widget_not_current");
@@ -3706,6 +3709,12 @@ export class Controller {
       });
     });
     identity.record = next;
+    const completedResult = { token: identity.token, outputRecordId: next.id, outputGeneration: next.generation ?? 0 };
+    const operation = this.operationFor(command.requestId, command.clientId);
+    if (operation !== undefined && !isTerminal(operation.status)) {
+      operation.result = clone(completedResult) as OperationRecord["result"];
+      this.rememberOperation(operation);
+    }
     this.pendingWidgets.delete(identity.key);
     const operationKey = this.operationKey(command.clientId, command.requestId);
     const pendingUpload = this.pendingUploads.get(operationKey);
@@ -3722,12 +3731,12 @@ export class Controller {
       revision: owner.revision,
     });
     if (identity.draft) {
-      this.completeOperation(command.requestId, { token: identity.token, draft: true }, command.clientId);
+      this.completeOperation(command.requestId, { ...completedResult, draft: true }, command.clientId);
     } else if (identity.kind === "run_button" && update.value === true) {
       this.scheduleRunButton(command, identity.owner, identity.revision, identity.record);
     } else {
       const scheduled = this.scheduleWidgetConsumers(command.name, identity.owner, command.source, command.requestId, command.clientId);
-      if (!scheduled) this.completeOperation(command.requestId, { token: identity.token }, command.clientId);
+      if (!scheduled) this.completeOperation(command.requestId, completedResult, command.clientId);
     }
   }
 

@@ -20635,7 +20635,7 @@ var widgetUpdateSchema = external_exports.object({
   if (primary.length !== 1) context.addIssue({ code: "custom", message: "widget update requires exactly one primary field" });
   if (update.paused !== void 0 && primary.length !== 1) context.addIssue({ code: "custom", message: "paused is only valid with a primary update" });
 });
-var widgetCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("widget"), name: idSchema, path: external_exports.array(idSchema).max(256), update: widgetUpdateSchema, source: external_exports.enum(["editor", "app", "mcp", "cli"]), kernelEpoch: idSchema, expectedRevision: revisionSchema }).strict();
+var widgetCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("widget"), name: idSchema, path: external_exports.array(idSchema).max(256), update: widgetUpdateSchema, source: external_exports.enum(["editor", "app", "mcp", "cli"]), kernelEpoch: idSchema, expectedRevision: revisionSchema, expectedOutputId: idSchema.optional(), expectedOutputGeneration: revisionSchema.optional() }).strict();
 var inspectCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("inspect"), name: idSchema, kernelEpoch: idSchema }).strict();
 var lazyOutputCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("lazy-output"), key: idSchema, kernelEpoch: idSchema }).strict();
 var tablePageCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("table-page"), handle: idSchema, offset: protocolIntegerSchema, limit: external_exports.number().int().min(1).max(200).safe(), sortBy: boundedUtf8StringSchema(256), sortDescending: external_exports.boolean(), filter: boundedUtf8StringSchema(MAX_FRAME_BYTES), kernelEpoch: idSchema }).strict();
@@ -21063,7 +21063,7 @@ var outputDataSchema = external_exports.union([external_exports.lazy(() => richO
 var outputMetadataSchema = protocolJsonRecordSchema.superRefine((value, context) => {
   if (value.presentation !== "inline" && value.presentation !== "sandbox") context.addIssue({ code: "custom", path: ["presentation"], message: "host output metadata must declare presentation" });
 });
-var outputRecordShape = external_exports.object({ id: idSchema, sessionEpoch: idSchema, kernelEpoch: idSchema.nullable(), runId: idSchema.nullable(), cellId: idSchema, revision: revisionSchema, sequence: positiveIntegerSchema, data: outputDataSchema, metadata: outputMetadataSchema, truncated: external_exports.boolean() }).strict().superRefine((record2, context) => {
+var outputRecordShape = external_exports.object({ id: idSchema, sessionEpoch: idSchema, kernelEpoch: idSchema.nullable(), runId: idSchema.nullable(), cellId: idSchema, revision: revisionSchema, sequence: positiveIntegerSchema, generation: revisionSchema.optional(), data: outputDataSchema, metadata: outputMetadataSchema, truncated: external_exports.boolean() }).strict().superRefine((record2, context) => {
   if (record2.kernelEpoch === null !== (record2.runId === null)) {
     context.addIssue({ code: "custom", path: ["kernelEpoch"], message: "kernelEpoch and runId must be paired" });
     context.addIssue({ code: "custom", path: ["runId"], message: "kernelEpoch and runId must be paired" });
@@ -22037,11 +22037,12 @@ var BrowserNotebookClient = class {
       return this.dispatchSource(command);
     });
   }
-  async setWidget(name, path, update, source = "editor") {
+  async setWidget(name, path, update, source = "editor", origin) {
     const owner = this.findWidgetOwner(name);
     if (!owner) throw new BrowserTransportError("not_found", `widget owner is unavailable: ${name}`);
-    const kernelEpoch = this.kernelEpoch();
-    return this.dispatchSettled({ type: "widget", ...this.base("widget", false), name, path: [...path], update, source, kernelEpoch, expectedRevision: owner.serverRevision });
+    if (origin && origin.owner !== owner.id) throw new BrowserTransportError("widget_not_current", `widget output is no longer current: ${name}`);
+    const kernelEpoch = origin?.kernelEpoch ?? this.kernelEpoch();
+    return this.dispatchSettled({ type: "widget", ...this.base("widget", false), name, path: [...path], update, source, kernelEpoch, expectedRevision: origin?.revision ?? owner.serverRevision, ...origin ? { expectedOutputId: origin.outputId, expectedOutputGeneration: origin.outputGeneration } : {} });
   }
   async requestLazy(key) {
     return this.dispatchSettled({ type: "lazy-output", ...this.base("lazy", false), key, kernelEpoch: this.kernelEpoch() });
@@ -22561,6 +22562,8 @@ var MUTABLE_WIDGET_FIELDS = /* @__PURE__ */ new Set([
 var OutputRenderer = class {
   signatures = /* @__PURE__ */ new WeakMap();
   structures = /* @__PURE__ */ new WeakMap();
+  widgetOrigins = /* @__PURE__ */ new WeakMap();
+  controlOrigins = /* @__PURE__ */ new WeakMap();
   pendingWidgets = /* @__PURE__ */ new Map();
   pendingForms = /* @__PURE__ */ new Map();
   pendingUploads = /* @__PURE__ */ new Set();
@@ -22613,7 +22616,17 @@ var OutputRenderer = class {
     }
   }
   updateSlot(container, key, output2, index, progress, retained) {
-    this.updateValueSlot(container, key, outputData(output2), index, progress, retained, stableJson(output2));
+    const value = outputData(output2);
+    if (output2.kernelEpoch !== null) {
+      visitWidgets(value, (widget) => this.widgetOrigins.set(widget, {
+        owner: output2.cellId,
+        revision: output2.revision,
+        outputId: output2.id,
+        outputGeneration: output2.generation ?? 0,
+        kernelEpoch: output2.kernelEpoch
+      }));
+    }
+    this.updateValueSlot(container, key, value, index, progress, retained, stableJson(output2));
   }
   updateProgressSlot(container, key, progress, retained) {
     this.updateValueSlot(container, key, { kind: "progress", ...progress }, null, true, retained, stableJson(progress));
@@ -23169,6 +23182,11 @@ var OutputRenderer = class {
     }
   }
   sendWidget(widget, path, update, control) {
+    const origin = this.controlOrigins.get(control);
+    if (origin === void 0) {
+      this.interactiveActions().error(new Error("widget output is no longer current"));
+      return Promise.resolve();
+    }
     const key = widgetKey(widget, string4(control.dataset.kind), path);
     const oneShot = ["run_button", "button", "refresh", "form"].includes(string4(control.dataset.kind));
     const current = this.pendingWidgets.get(key);
@@ -23176,6 +23194,7 @@ var OutputRenderer = class {
       if (!current.oneShot) current.update = update;
       return current.done;
     }
+    const predecessors = Array.from(this.pendingWidgets.values()).filter((operation) => string4(operation.widget.name) === string4(widget.name));
     if (oneShot) control.setAttribute("disabled", "");
     let resolveDone;
     const done = new Promise((resolve) => {
@@ -23183,6 +23202,7 @@ var OutputRenderer = class {
     });
     const pending = {
       widget,
+      origin,
       path: [...path],
       update,
       authoritative: null,
@@ -23195,10 +23215,28 @@ var OutputRenderer = class {
     this.pendingWidgets.set(key, pending);
     void (async () => {
       try {
+        for (const predecessor of predecessors) {
+          await predecessor.done;
+          if (predecessor.failure !== null) throw predecessor.failure;
+          if (pending.origin.owner === predecessor.origin.owner && pending.origin.revision === predecessor.origin.revision && pending.origin.outputId === predecessor.origin.outputId && pending.origin.kernelEpoch === predecessor.origin.kernelEpoch) {
+            pending.origin = predecessor.origin;
+          }
+        }
         while (pending.update) {
           const next = pending.update;
           pending.update = null;
-          await this.interactiveActions().widget(string4(pending.widget.name), pending.path, next);
+          const result = await this.interactiveActions().widget(string4(pending.widget.name), pending.path, next, pending.origin);
+          if (isObject2(result) && isObject2(result.result) && typeof result.result.outputRecordId === "string" && typeof result.result.outputGeneration === "number") {
+            pending.origin = { ...pending.origin, outputId: result.result.outputRecordId, outputGeneration: result.result.outputGeneration };
+            const slot = pending.control.closest(".out-record");
+            for (const candidate of Array.from(slot?.querySelectorAll("[data-role=widget]") ?? [])) {
+              if (!isWidgetControl(candidate) || candidate.dataset.name !== string4(pending.widget.name)) continue;
+              const currentOrigin = this.controlOrigins.get(candidate);
+              if (currentOrigin?.owner === pending.origin.owner && currentOrigin.revision === pending.origin.revision && currentOrigin.outputId === pending.origin.outputId && currentOrigin.kernelEpoch === pending.origin.kernelEpoch && currentOrigin.outputGeneration <= pending.origin.outputGeneration) {
+                this.controlOrigins.set(candidate, pending.origin);
+              }
+            }
+          }
         }
       } catch (error61) {
         pending.failure = error61;
@@ -23299,6 +23337,15 @@ var OutputRenderer = class {
   }
   patchWidget(node2, widget, spec, path, force = false) {
     const kind = string4(spec.kind);
+    const origin = this.widgetOrigins.get(widget);
+    if (origin !== void 0) {
+      for (const control2 of Array.from(node2.querySelectorAll("[data-role=widget]"))) {
+        if (!isWidgetControl(control2)) continue;
+        const previous = this.controlOrigins.get(control2);
+        if (previous?.owner === origin.owner && previous.revision === origin.revision && previous.outputId === origin.outputId && previous.kernelEpoch === origin.kernelEpoch && previous.outputGeneration > origin.outputGeneration) continue;
+        this.controlOrigins.set(control2, origin);
+      }
+    }
     const key = widgetKey(widget, kind, path);
     const operation = this.pendingWidgets.get(key);
     const pending = operation !== void 0;
@@ -23448,6 +23495,8 @@ var OutputRenderer = class {
     control.dataset.owner = string4(widget.owner);
     control.dataset.path = JSON.stringify(path);
     control.id = `widget-${safePart(widget.owner)}-${safePart(kind)}${path.length ? `-${safePart(path.join("-"))}` : ""}`;
+    const origin = this.widgetOrigins.get(widget);
+    if (origin && isWidgetControl(control)) this.controlOrigins.set(control, origin);
     if (this.mode === "static") control.setAttribute("disabled", "");
     return control;
   }
@@ -23608,7 +23657,7 @@ var NotebookView = class {
       resolveArtifact: async (descriptor) => ({ kind: "url", url: await client2.resolveArtifact(descriptor) }),
       mode: "interactive",
       actions: {
-        widget: (name, path, update) => client2.setWidget(name, path, update, this.appView ? "app" : "editor"),
+        widget: (name, path, update, origin) => client2.setWidget(name, path, update, this.appView ? "app" : "editor", origin),
         upload: async (name, path, files) => {
           const encoded = await Promise.all(files.map(encodeFile));
           await client2.service("upload", {
