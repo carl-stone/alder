@@ -10,6 +10,16 @@ const config: ForgeConfig = {
     executableName: process.platform === 'linux' ? 'alder-desktop' : 'Alder',
     appBundleId: 'dev.alder.desktop',
     appCategoryType: 'public.app-category.developer-tools',
+    extendInfo: {
+      CFBundleDocumentTypes: [
+        {
+          CFBundleTypeName: 'Alder R notebook',
+          CFBundleTypeRole: 'Editor',
+          CFBundleTypeExtensions: ['R', 'r', 'Rmd', 'rmd'],
+          LSHandlerRank: 'Alternate',
+        },
+      ],
+    },
   },
   makers: [
     {

@@ -147,6 +147,7 @@ export interface AlderServerOptions {
   logger?: (level: "info" | "warn" | "error", message: string) => void;
   onClientCount?: (count: number) => void;
   onLeaseCount?: (count: number) => void;
+  onLastLeaseDiscard?: () => void | Promise<void>;
   acceptingLeases?: () => boolean;
   onBrowserActivity?: () => void;
   onShutdown?: () => void | Promise<void>;
@@ -1119,7 +1120,9 @@ export function createAlderServer(options: AlderServerOptions): AlderServer {
   function scheduleShutdown(operationId: string, clientId: string): void {
     const awaitOperation = options.controller.awaitOperation;
     if (awaitOperation === undefined || options.onShutdown === undefined) return;
-    queueMicrotask(() => {
+    // Give the WebSocket implementation one event-loop turn to flush the final
+    // accepted response before host shutdown closes every connection.
+    setImmediate(() => {
       void Promise.resolve().then(() => awaitOperation.call(options.controller, operationId, clientId)).then(operation => {
         if (operation.status !== "done" || !isPlainObject(operation.result) || operation.result.closing !== true) return;
         return options.onShutdown?.();
@@ -1349,12 +1352,17 @@ export function createAlderServer(options: AlderServerOptions): AlderServer {
         return;
       }
       if (action !== "heartbeat" && action !== "release") throw new HttpBoundaryError("invalid_request", "lease action must be attach, heartbeat, or release", 400);
-      assertExactFields(body, ["action", "leaseId"], ["action", "leaseId"]);
+      assertExactFields(body, action === "release" ? ["action", "leaseId", "disposition"] : ["action", "leaseId"], ["action", "leaseId"]);
       const resolved = requireLease(request, true);
       if (body.leaseId !== resolved.lease.leaseId) throw authFailure("lease identity does not match request");
       if (action === "release") {
+        const disposition = body.disposition === undefined ? "normal" : requiredString(body.disposition, "disposition", 16);
+        if (disposition !== "normal" && disposition !== "discard") throw new HttpBoundaryError("invalid_request", "release disposition must be normal or discard", 400);
         removeLease(resolved.lease.leaseId);
         jsonResponse(response, 200, { released: true });
+        if (disposition === "discard" && leases.size === 0) {
+          setImmediate(() => { void Promise.resolve(options.onLastLeaseDiscard?.()).catch(error => logger("error", "discard shutdown callback failed: " + (error instanceof Error ? error.message : "unknown"))); });
+        }
       } else {
         resolved.lease.lastSeen = Date.now();
         jsonResponse(response, 200, { leaseId: resolved.lease.leaseId, clientId: resolved.lease.clientId, nextCommandSequence: resolved.lease.nextCommandSequence, epoch: session.epoch });
@@ -1739,6 +1747,7 @@ export function createAlderServer(options: AlderServerOptions): AlderServer {
             const bounded = await responseEnvelope(admission, snapshot);
             requireCurrentLease();
             outbox.send({ type: "commandResult", sequence: command.commandSequence, result: bounded });
+            if (command.type === "shutdown" && admission.accepted) scheduleShutdown(command.operationId, resolved.lease.clientId);
           } catch (error) {
             sendCurrentError(command.commandSequence, error);
           } finally {

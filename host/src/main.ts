@@ -236,7 +236,7 @@ async function runInternalHost(cli: CliOptions, resources: ApplicationResources)
   // Consume the token file before ownership. Passing the bearer as the
   // existing session token avoids a second server-side file read; omit the
   // path from downstream options so it cannot be read after ownership.
-  const app = await startHost({ ...appOptions(cli, resources), tokenFile: undefined, externalBearerValidated: token !== undefined, internalHost: true, session: { ...session, token } } as never);
+  const app = await startHost({ ...appOptions(cli, resources), idleTimeout: 1, tokenFile: undefined, externalBearerValidated: token !== undefined, internalHost: true, session: { ...session, token } } as never);
   writeJson({ type: "alder.private.ready", version: 1, nonce, pid: process.pid, processNonce: app.ownership.processNonce, ready: app.ready });
   const stop = () => { void app.close(); };
   process.once("SIGINT", stop);

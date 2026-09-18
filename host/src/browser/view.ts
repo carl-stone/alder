@@ -3,6 +3,7 @@ import type { AnalysisDiagnostic, ArtifactHandle, CommandResult, HostEvent, Host
 import { dependencyLevels, reachableNodes } from "../graph.js";
 import { toLogicalCellBody } from "../cell-body.js";
 import { BrowserNotebookClient } from "./client.js";
+import { BrowserTransportError } from "./transport.js";
 import type { BrowserDocument, EditorSelection, LocalCell } from "./document.js";
 import { OutputRenderer } from "../output-renderer.js";
 import { notebookUrl, notebookViewUrl } from "./url.js";
@@ -2056,13 +2057,23 @@ export class NotebookView {
     });
   }
 
-  private async saveNotebook(): Promise<CommandResult> {
+  private async saveNotebook(mode: "explicit" | "autosave" = "explicit"): Promise<CommandResult | undefined> {
     if (this.autosaveTimer !== null) window.clearTimeout(this.autosaveTimer);
     this.autosaveTimer = null;
+    const desktop = (globalThis as typeof globalThis & { alderDesktop?: import("../protocol.js").PreloadApi }).alderDesktop;
+    if (mode === "autosave" && !this.documentValue?.snapshot.path) return undefined;
+    const destination = !this.documentValue?.snapshot.path && desktop
+      ? await desktop.chooseSavePath()
+      : undefined;
+    if (destination === null) return undefined;
     if (nested(this.documentValue?.snapshot.config, ["format", "on_save"]) === true) {
       await this.client.formatCells();
     }
-    return this.client.save();
+    return destination === undefined ? this.client.save() : this.client.saveAs(destination);
+  }
+
+  async saveForDesktop(): Promise<"saved" | "cancelled"> {
+    return await this.saveNotebook("explicit") === undefined ? "cancelled" : "saved";
   }
 
   private async repaginateTables(limit: number): Promise<void> {
@@ -2087,11 +2098,19 @@ export class NotebookView {
     if ((this.documentValue?.snapshot.changed || pending?.changes.length)
       && !window.confirm("This notebook has unsaved changes. Shut down without saving?")) return;
     await this.action(async () => {
-      await this.client.shutdown();
+      const desktop = (globalThis as typeof globalThis & { alderDesktop?: import("../protocol.js").PreloadApi }).alderDesktop;
       this.hostClosed = true;
       this.cancelEditTimers();
       if (this.autosaveTimer !== null) window.clearTimeout(this.autosaveTimer);
       this.autosaveTimer = null;
+      if (desktop) {
+        await this.client.discardAndClose();
+        this.transportError = null;
+        this.editorHelpError = null;
+        await desktop.hostShutdown();
+        return;
+      }
+      await this.client.shutdown();
       this.client.close();
       this.transportError = null;
       this.editorHelpError = null;
@@ -2276,7 +2295,7 @@ export class NotebookView {
       || this.documentValue.snapshot.changed !== true) return;
     this.autosaveTimer = window.setTimeout(() => {
       this.autosaveTimer = null;
-      void this.saveNotebook().catch((error) => this.showError(error));
+      void this.saveNotebook("autosave").catch((error) => this.showError(error));
     }, 2_000);
   }
 

@@ -29,11 +29,17 @@ const { values } = parseArgs({ options: {
   'forge-output': { type: 'string' },
   'source-commit': { type: 'string' },
   'qualified-rscript': { type: 'string', multiple: true },
+  'development-single-r': { type: 'boolean', default: false },
   'r-source-cache': { type: 'string' },
 }, allowPositionals: false });
 
 if (!values.output || !values.kind || !['headless', 'desktop'].includes(values.kind)) {
-  throw new Error('Usage: node scripts/stage-application.mjs --output EMPTY_DIR --kind headless|desktop --rscript ABSOLUTE_RSCRIPT [--qualified-rscript ABSOLUTE_RSCRIPT] [--r-source-cache DIRECTORY]');
+  throw new Error('Usage: node scripts/stage-application.mjs --output EMPTY_DIR --kind headless|desktop --rscript ABSOLUTE_RSCRIPT [--qualified-rscript ABSOLUTE_RSCRIPT | --development-single-r] [--r-source-cache DIRECTORY]');
+}
+const developmentSingleR = values['development-single-r'] === true;
+const requestedQualificationMode = developmentSingleR ? 'development-single-r' : 'dual-r';
+if (developmentSingleR && (values['qualified-rscript'] ?? []).length > 0) {
+  throw new Error('--development-single-r cannot be combined with --qualified-rscript');
 }
 if (typeof values.rscript !== 'string' || !isAbsolute(values.rscript)) throw new Error('--rscript must be supplied as an absolute executable path');
 if (typeof values.supervisor !== 'string' || !isAbsolute(values.supervisor)) throw new Error('--supervisor must be supplied as an absolute verified artifact path');
@@ -42,8 +48,8 @@ for (const candidate of values['qualified-rscript'] ?? []) {
   if (!isAbsolute(candidate)) throw new Error('--qualified-rscript values must be absolute executable paths');
 }
 const selectedRscript = resolve(values.rscript);
-const qualifiedPaths = [selectedRscript, ...(values['qualified-rscript'] ?? []).map(candidate => resolve(candidate))];
-if (!values['prepare-macos-signing']) {
+const qualifiedPaths = developmentSingleR ? [selectedRscript] : [selectedRscript, ...(values['qualified-rscript'] ?? []).map(candidate => resolve(candidate))];
+if (!values['prepare-macos-signing'] && !developmentSingleR) {
   const physicalQualifiedPaths = await Promise.all(qualifiedPaths.map(candidate => realpath(candidate).catch(() => candidate)));
   if (new Set(physicalQualifiedPaths).size < 2) throw new Error('r_qualification_required: normal staging requires two independently installed Rscript paths');
 }
@@ -64,6 +70,9 @@ if (existingOutput.length !== 0) {
     const existingManifestPath = join(existingResources, 'manifest.json');
     await requireRegularContained(existingApplicationRoot, existingManifestPath, 'existing macOS application manifest');
     const existingManifest = validateApplicationManifest(JSON.parse(await readFile(existingManifestPath, 'utf8')));
+    if (existingManifest.rQualificationMode !== requestedQualificationMode) {
+      throw new Error('existing macOS application manifest R qualification mode does not match requested staging mode');
+    }
     const outerExecutable = existingManifest.resources.electronEntry;
     if (existingManifest.kind !== 'desktop' || existingManifest.target.platform !== 'darwin'
       || !outerExecutable || outerExecutable.includes('\\') || outerExecutable.startsWith('/')
@@ -144,6 +153,10 @@ if (kind === 'desktop') {
 const signatureManagedDesktop = darwinDesktop && isCodeSignedBundle(dirname(forgeRoot));
 const signedManifest = signatureManagedDesktop ? join(forgeRoot, 'Resources', 'manifest.json') : null;
 if (signedManifest && await exists(signedManifest)) {
+  const sourceEmbeddedManifest = validateApplicationManifest(JSON.parse(await readFile(signedManifest, 'utf8')));
+  if (sourceEmbeddedManifest.rQualificationMode !== requestedQualificationMode) {
+    throw new Error('signed macOS application manifest R qualification mode does not match requested staging mode');
+  }
   await cp(forgeRoot, applicationRoot, { recursive: true, verbatimSymlinks: true });
   execFileSync('/usr/bin/codesign', ['--verify', '--deep', '--strict', dirname(applicationRoot)], { stdio: 'ignore' });
   const signatureDirectory = await lstat(join(applicationRoot, '_CodeSignature')).catch(() => null);
@@ -152,7 +165,10 @@ if (signedManifest && await exists(signedManifest)) {
     : null;
   if (!codeResources?.isFile() || codeResources.isSymbolicLink() || codeResources.nlink !== 1) throw new Error('signed macOS outer signature envelope is invalid');
   const copiedManifestPath = join(applicationRoot, 'Resources', 'manifest.json');
-  const embeddedManifest = JSON.parse(await readFile(copiedManifestPath, 'utf8'));
+  const embeddedManifest = validateApplicationManifest(JSON.parse(await readFile(copiedManifestPath, 'utf8')));
+  if (embeddedManifest.rQualificationMode !== requestedQualificationMode) {
+    throw new Error('signed macOS application manifest R qualification mode does not match requested staging mode');
+  }
   if (embeddedManifest?.schemaVersion !== 1 || embeddedManifest.kind !== 'desktop' || embeddedManifest.target?.platform !== 'darwin'
     || embeddedManifest.resources?.cliLauncher !== 'MacOS/alder-cli' || embeddedManifest.resources?.electronEntry !== entryRelative || !Array.isArray(embeddedManifest.files) || !Array.isArray(embeddedManifest.symlinks)) {
     throw new Error('signed macOS application manifest identity is invalid');
@@ -278,13 +294,17 @@ qualified.sort();
 if (qualified.some(version => !/^4\.6\.[0-9]+$/.test(version))) {
   throw new Error(`r_unsupported: qualified R patches must be 4.6.x, got ${qualified.join(', ')}`);
 }
-if (!qualified.includes('4.6.0') || !qualified.includes('4.6.1')) {
-  throw new Error(`r_qualification_required: both R 4.6.0 and 4.6.1 must be independently qualified, got ${qualified.join(', ')}`);
+if (developmentSingleR) {
+  if (qualified.length !== 1 || qualified[0] !== '4.6.1') {
+    throw new Error(`r_qualification_required: development-single-r staging requires exactly R 4.6.1, got ${qualified.join(', ')}`);
+  }
+} else if (!qualified.includes('4.6.0') || !qualified.includes('4.6.1')) {
+  throw new Error(`r_qualification_required: dual-r staging requires independently qualified R 4.6.0 and 4.6.1, got ${qualified.join(', ')}`);
 }
 await writeLaunchers(applicationRoot, paths);
 await runtimePreflight(applicationRoot, paths, selectedRscript, rLibrary);
 await arkQualificationPreflight(applicationRoot, paths, qualifiedPaths);
-const manifest = await makeManifest(applicationRoot, paths, kind, values['source-commit'], rIdentity, qualified, Boolean(values['prepare-macos-signing']));
+const manifest = await makeManifest(applicationRoot, paths, kind, values['source-commit'], rIdentity, qualified, requestedQualificationMode, Boolean(values['prepare-macos-signing']));
 await writeFile(join(resourceRoot, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
 const manifestSha256 = await sha256(join(resourceRoot, 'manifest.json'));
 process.stdout.write(`${JSON.stringify({ kind, applicationRoot, cliLauncher: join(applicationRoot, paths.cliLauncher), manifestSha256 })}\n`);
@@ -424,7 +444,7 @@ async function arkQualificationPreflight(base, paths, candidates) {
   }
 }
 
-async function makeManifest(base, paths, stageKind, sourceCommit, rIdentity, qualified, excludeOuterExecutable = false) {
+async function makeManifest(base, paths, stageKind, sourceCommit, rIdentity, qualified, rQualificationMode, excludeOuterExecutable = false) {
   const packageJson = JSON.parse(await readFile(join(root, 'host/package.json'), 'utf8'));
   const arkLock = JSON.parse(await readFile(source.arkLock, 'utf8'));
   const airLock = JSON.parse(await readFile(source.airLock, 'utf8'));
@@ -446,6 +466,7 @@ async function makeManifest(base, paths, stageKind, sourceCommit, rIdentity, qua
     engineProtocol: 'alder-engine-v2',
     target: { platform: process.platform, arch: process.arch },
     rVersionRange: '>=4.6.0 <4.7.0',
+    rQualificationMode,
     qualifiedRPatchVersions: qualified,
     rBuildVersion: rIdentity.version,
     resources: paths,
@@ -512,6 +533,7 @@ async function inventory(base, skip) {
   const symlinks = [];
   const seen = new Set();
   const absoluteBase = resolve(base);
+  const physicalBase = await realpath(base);
   const onFile = async path => {
     const rel = relative(absoluteBase, resolve(path)).split(sep).join('/');
     if (!rel || rel === '..' || rel.startsWith('../') || isAbsolute(rel)) throw new Error('application inventory path escaped staged root: ' + rel);
@@ -521,7 +543,7 @@ async function inventory(base, skip) {
     seen.add(rel);
     if (info.isSymbolicLink()) {
       const target = await realpath(path).catch(() => null);
-      if (!target || (target !== absoluteBase && !target.startsWith(absoluteBase + sep))) throw new Error('application inventory symlink escapes staged root: ' + rel);
+      if (!target || (target !== physicalBase && !target.startsWith(physicalBase + sep))) throw new Error('application inventory symlink escapes staged root: ' + rel);
       const targetInfo = await stat(path).catch(() => null);
       if (targetInfo?.isDirectory()) {
         if (!skipped) symlinks.push({ path: rel, target: await readlink(path) });
@@ -536,7 +558,7 @@ async function inventory(base, skip) {
     if (!info.isFile()) throw new Error('application inventory rejects non-regular file: ' + rel);
     if (info.nlink !== 1) throw new Error('application inventory rejects hard-linked file: ' + rel);
     const physical = await realpath(path);
-    if (physical !== absoluteBase && !physical.startsWith(absoluteBase + sep)) throw new Error('application inventory file escapes staged root: ' + rel);
+    if (physical !== physicalBase && !physical.startsWith(physicalBase + sep)) throw new Error('application inventory file escapes staged root: ' + rel);
     if (skipped) return;
     const bytes = await readFile(path);
     files.push({ path: rel, bytes: bytes.byteLength, sha256: createHash('sha256').update(bytes).digest('hex') });

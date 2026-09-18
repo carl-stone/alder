@@ -13,6 +13,9 @@ export const ELECTRON_IPC_CHANNELS = Object.freeze({
   chooseSavePath: "alderDesktop:chooseSavePath",
   chooseRscript: "alderDesktop:chooseRscript",
   getWindowState: "alderDesktop:getWindowState",
+  hostShutdown: "alderDesktop:hostShutdown",
+  saveCancelled: "alderDesktop:saveCancelled",
+  rendererReady: "alderDesktop:rendererReady",
   windowAction: "alderDesktop:windowAction",
 } as const);
 
@@ -59,6 +62,15 @@ export function createPreloadApi(ipc: IpcRendererLike): PreloadApi {
       validateSelectedPath(await ipc.invoke(ELECTRON_IPC_CHANNELS.chooseRscript), "chooseRscript"),
     getWindowState: async (): Promise<WindowState> =>
       windowStateSchema.parse(await ipc.invoke(ELECTRON_IPC_CHANNELS.getWindowState)),
+    hostShutdown: async (): Promise<void> => {
+      validateVoid(await ipc.invoke(ELECTRON_IPC_CHANNELS.hostShutdown), "hostShutdown");
+    },
+    saveCancelled: async (): Promise<void> => {
+      validateVoid(await ipc.invoke(ELECTRON_IPC_CHANNELS.saveCancelled), "saveCancelled");
+    },
+    rendererReady: async (): Promise<void> => {
+      validateVoid(await ipc.invoke(ELECTRON_IPC_CHANNELS.rendererReady), "rendererReady");
+    },
     onWindowAction: (callback: (action: WindowAction) => void): (() => void) => {
       if (typeof callback !== "function") throw new TypeError("onWindowAction callback must be a function");
       let subscribed = true;

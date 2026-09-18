@@ -49,7 +49,7 @@ async function startFixture(
   mcpHandler?: McpHttpHandler,
   auth: Pick<AlderServerOptions, "externalOrigin" | "externalBearerValidated"> = {},
   controller: ControllerAdapter = makeController(),
-  timing: Pick<AlderServerOptions, "leaseExpiryMs" | "leaseSweepIntervalMs"> = {},
+  timing: Pick<AlderServerOptions, "leaseExpiryMs" | "leaseSweepIntervalMs" | "onShutdown"> = {},
   recoveryCredentials: { recoveryKey: string; recoveryKeyId: string } | undefined = undefined,
   port = 0,
 ) {
@@ -220,7 +220,10 @@ async function createCookieSession(origin: string): Promise<CookieSession> {
   const identityResponse = await fetch(origin + "/api/identity", { headers: { Origin: origin, Cookie: cookie, "X-Alder-CSRF": session.csrf as string } });
   assert.equal(identityResponse.status, 200);
   assert.equal(identityResponse.headers.get("X-Alder-Continuity-Proof"), session.continuityProof);
-  await identityResponse.body?.cancel();
+  const leasedIdentity = hostIdentitySchema.parse(await identityResponse.json());
+  assert.equal(leasedIdentity.leaseId, session.leaseId);
+  assert.equal(leasedIdentity.clientId, session.clientId);
+  assert.equal(leasedIdentity.nextCommandSequence, session.nextCommandSequence);
   const ownerIdentityResponse = await fetch(origin + "/api/identity", { headers: { Authorization: "Bearer " + TOKEN } });
   assert.equal(ownerIdentityResponse.status, 200);
   const identity = hostIdentitySchema.parse(await ownerIdentityResponse.json());
@@ -524,6 +527,26 @@ test("browser lease owns one WebSocket and release revokes it", { timeout: 30_00
   }
 });
 
+test("discarding the final browser lease requests host shutdown", { timeout: 30_000 }, async () => {
+  let discardCalls = 0;
+  const { server, origin, root } = await startFixture(undefined, {}, makeController(), {
+    onLastLeaseDiscard: async () => { discardCalls += 1; },
+  });
+  try {
+    const session = await createCookieSession(origin);
+    const released = await fetch(origin + "/api/lease", {
+      method: "POST",
+      headers: { Origin: origin, Cookie: session.cookie, "X-CSRF-Token": session.csrf, "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "release", leaseId: session.leaseId, disposition: "discard" }),
+    });
+    assert.equal(released.status, 200, await released.text());
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.equal(discardCalls, 1);
+  } finally {
+    await server.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
 test("WebSocket command pin survives idle sweep and still honors release", { timeout: 30_000 }, async () => {
   let releaseDispatch: (() => void) | undefined;
   let dispatchStartedResolve!: () => void;
@@ -572,6 +595,39 @@ test("WebSocket command pin survives idle sweep and still honors release", { tim
     await closed;
   } finally {
     releaseDispatch?.();
+    if (socket !== undefined) await closeSocket(socket);
+    await server.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("WebSocket shutdown schedules host closure after command response", { timeout: 30_000 }, async () => {
+  let resolveShutdown!: () => void;
+  const shutdown = new Promise<void>(resolve => { resolveShutdown = resolve; });
+  const controller: ControllerAdapter = {
+    ...makeController(),
+    dispatch: async command => ({
+      epoch: "server-test-epoch", clientId: command.clientId, operationId: command.operationId,
+      commandSequence: command.commandSequence, accepted: true, sequenceConsumed: true,
+      operation: null, error: null, nextCommandSequence: command.commandSequence + 1,
+    }) as never,
+    awaitOperation: async () => ({ status: "done", result: { closing: true } }) as never,
+  };
+  const { server, origin, root } = await startFixture(undefined, {}, controller, { onShutdown: () => { resolveShutdown(); } });
+  let socket: WebSocket | undefined;
+  try {
+    const session = await createCookieSession(origin);
+    socket = await openAuthenticatedSocket(origin, session);
+    const command = {
+      type: "shutdown", operationId: "server-test-shutdown", clientId: session.clientId,
+      commandSequence: 1, sessionEpoch: session.epoch, expectedDocumentRevision: 0,
+      expectedClientIds: [session.clientId],
+    };
+    socket.send(JSON.stringify({ type: "command", sequence: command.commandSequence, command }));
+    const result = await waitForSocketMessage(socket, value => value.type === "commandResult");
+    assert.equal(result.sequence, command.commandSequence);
+    await shutdown;
+  } finally {
     if (socket !== undefined) await closeSocket(socket);
     await server.close();
     await rm(root, { recursive: true, force: true });

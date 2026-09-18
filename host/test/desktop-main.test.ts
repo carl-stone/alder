@@ -43,7 +43,7 @@ function connection(
   sessionKey: string,
   canonicalPath: string | null,
   request: RequestHandler,
-): SessionConnection & { releaseCount: number } {
+): SessionConnection & { releaseCount: number; releaseDispositions: string[] } {
   const value = {
     sessionKey,
     canonicalPath,
@@ -59,9 +59,13 @@ function connection(
     request,
     heartbeat: async () => undefined,
     releaseCount: 0,
-    release: async () => { value.releaseCount += 1; },
+    releaseDispositions: [] as string[],
+    release: async (disposition = "normal") => {
+      value.releaseCount += 1;
+      value.releaseDispositions.push(disposition);
+    },
   };
-  return value as SessionConnection & { releaseCount: number };
+  return value as SessionConnection & { releaseCount: number; releaseDispositions: string[] };
 }
 
 function windowWithLoad(loadURL: (url: string) => Promise<void> = async () => undefined): ElectronWindow & { destroyed: boolean; focusedCount: number; titles: string[] } {
@@ -106,7 +110,7 @@ function runtime(messageResponse = 2): ElectronRuntime {
     BrowserWindow: { fromWebContents: () => null },
     dialog: {
       showOpenDialog: async () => ({ canceled: true, filePaths: [] }),
-      showSaveDialog: async () => ({ canceled: true, filePaths: [] }),
+      showSaveDialog: async () => ({ canceled: true, filePath: undefined }),
       showMessageBox: async () => ({ response: messageResponse }),
     },
     Menu: { buildFromTemplate: () => ({}), setApplicationMenu: () => undefined },
@@ -213,6 +217,32 @@ test("desktop close remains open when the authoritative dirty-state query fails"
   assert.equal(window.destroyed, false);
 });
 
+test("desktop close returns immediately when untitled Save As is cancelled", async () => {
+  const notebookPath = "/tmp/alder-desktop-save-cancelled.R";
+  const hostConnection = connection("session-save-cancelled", notebookPath, async () => {
+    throw new Error("unexpected host request");
+  });
+  const window = windowWithLoad();
+  const handlers = new Map<string, (event: unknown, ...args: unknown[]) => Promise<unknown>>();
+  const electronRuntime = runtime(0);
+  electronRuntime.BrowserWindow.fromWebContents = () => window;
+  electronRuntime.ipcMain.handle = (channel, handler) => { handlers.set(channel, handler); };
+  const main = new ElectronMain(electronRuntime, { resources, closeSettlementTimeoutMs: 30_000 });
+  const record = recordFor(main, hostConnection, window);
+  (main as any).readWindowState = async () => ({ path: null, dirty: true, platform: process.platform, sessionEpoch: "epoch" });
+  let applicationErrors = 0;
+  (main as any).showApplicationError = async () => { applicationErrors += 1; };
+  window.webContents.send = (_channel, payload) => {
+    if ((payload as { action?: string }).action === "save") void handlers.get("alderDesktop:saveCancelled")?.({ sender: window.webContents, senderFrame: window.webContents.mainFrame });
+  };
+  (main as any).installIpcHandlers();
+
+  await (main as any).requestClose(record);
+
+  assert.equal(record.closing, false);
+  assert.equal(window.destroyed, false);
+  assert.equal(applicationErrors, 0);
+});
 test("desktop restart releases replacement and closes when replacement and rollback loads fail", async () => {
   const oldPath = "/tmp/alder-desktop-restart-failure.R";
   const oldConnection = connection("session-old", oldPath, async path => {
@@ -243,4 +273,74 @@ test("desktop restart releases replacement and closes when replacement and rollb
   assert.equal(record.released, true);
   assert.equal(main.windows().length, 0);
   assert.equal(window.destroyed, true);
+});
+test("desktop host shutdown IPC retires its process tree and window", async () => {
+  const notebookPath = "/tmp/alder-desktop-host-shutdown.R";
+  const hostConnection = connection("session-shutdown", notebookPath, async () => {
+    throw new Error("the stopped host cannot answer release requests");
+  });
+  const window = windowWithLoad();
+  const handlers = new Map<string, (event: unknown, ...args: unknown[]) => Promise<unknown>>();
+  const electronRuntime = runtime();
+  let quitCount = 0;
+  electronRuntime.app.quit = () => { quitCount += 1; };
+  electronRuntime.BrowserWindow.fromWebContents = () => window;
+  electronRuntime.ipcMain.handle = (channel, handler) => { handlers.set(channel, handler); };
+  const main = new ElectronMain(electronRuntime, { resources });
+  const record = recordFor(main, hostConnection, window);
+  (main as any).installIpcHandlers();
+
+  const shutdown = handlers.get("alderDesktop:hostShutdown");
+  assert.ok(shutdown);
+  await shutdown({ sender: window.webContents, senderFrame: window.webContents.mainFrame });
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.equal(record.released, true);
+  assert.equal(hostConnection.releaseCount, 1);
+  assert.equal(main.windows().length, 0);
+  assert.equal(window.destroyed, true);
+  assert.equal(quitCount, 1);
+});
+test("opening a notebook replaces a clean untitled launch window", async () => {
+  const openedPath = join(tmpdir(), "opened.R");
+  const untitledConnection = connection("untitled", null, async () => { throw new Error("unexpected request"); });
+  const window = windowWithLoad();
+  const main = new ElectronMain(runtime(), { resources });
+  const record = recordFor(main, untitledConnection, window);
+  let opened: string | null = null;
+  (main as any).openNotebook = async (path: string) => { opened = path; };
+  (main as any).readWindowState = async () => ({ path: null, dirty: false, platform: process.platform, sessionEpoch: "epoch" });
+  const actions: string[] = [];
+  (main as any).dispatchAction = async (target: any, action: string) => {
+    actions.push(action);
+    await (main as any).disposeRecord(target, "discard");
+    target.window.destroy();
+  };
+
+  await (main as any).openReplacingPristineUntitled(record, openedPath);
+
+  assert.equal(opened, openedPath);
+  assert.deepEqual(actions, ["close"]);
+  assert.equal(untitledConnection.releaseCount, 1);
+  assert.deepEqual(untitledConnection.releaseDispositions, ["discard"]);
+  assert.equal(record.released, true);
+  assert.equal(window.destroyed, true);
+  assert.equal(main.windows().length, 0);
+});
+
+test("opening a notebook retains an untitled window with uncertain state", async () => {
+  const openedPath = join(tmpdir(), "opened.R");
+  const untitledConnection = connection("untitled", null, async () => { throw new Error("unexpected request"); });
+  const window = windowWithLoad();
+  const main = new ElectronMain(runtime(), { resources });
+  const record = recordFor(main, untitledConnection, window);
+  (main as any).openNotebook = async () => undefined;
+  (main as any).readWindowState = async () => { throw new Error("renderer state unavailable"); };
+
+  await (main as any).openReplacingPristineUntitled(record, openedPath);
+
+  assert.equal(untitledConnection.releaseCount, 0);
+  assert.equal(record.released, false);
+  assert.equal(window.destroyed, false);
+  assert.equal(main.windows().length, 1);
 });

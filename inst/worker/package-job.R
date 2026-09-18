@@ -395,8 +395,8 @@ sys.source(framing_path, envir = framing, keep.source = FALSE)
     if (!startsWith(paste0(physical, "/"), paste0(physical_project, "/"))) {
       stop("package library escapes the project directory", call. = FALSE)
     }
-    relative <- substring(path, nchar(project) + 2L)
-    cursor <- project
+    relative <- substring(physical, nchar(physical_project) + 2L)
+    cursor <- physical_project
     for (part in strsplit(relative, "/", fixed = TRUE)[[1L]]) {
       cursor <- file.path(cursor, part)
       if (nzchar(Sys.readlink(cursor))) stop("package library path contains a symbolic link", call. = FALSE)

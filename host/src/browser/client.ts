@@ -162,8 +162,17 @@ export class BrowserNotebookClient {
     return this.documentValue;
   }
 
+  async discardAndClose(): Promise<void> {
+    await this.discardRecovery();
+    await this.transport.release("discard");
+    this.finishClose();
+  }
   close(): void {
     this.transport.close();
+    this.finishClose();
+  }
+
+  private finishClose(): void {
     this.rejectOperationWaiters(new BrowserTransportError("transport_closed", "browser transport is closed"));
     this.rejectSourceCommitWaiters(new BrowserTransportError("transport_closed", "browser transport is closed"));
     this.operations.clear();
@@ -378,7 +387,9 @@ export class BrowserNotebookClient {
   async shutdown(): Promise<CommandResult> {
     const document = this.requireDocument();
     const expectedClientIds = document.snapshot.activeClientIds ?? [this.transport.id];
-    return this.dispatchSettled({ type: "shutdown", ...this.base("shutdown"), expectedClientIds });
+    // The accepted response is the final message that this host can guarantee:
+    // successful shutdown closes the transport before an operation update arrives.
+    return this.dispatch({ type: "shutdown", ...this.base("shutdown"), expectedClientIds });
   }
 
   async deleteCell(key: string): Promise<CommandResult | null> {

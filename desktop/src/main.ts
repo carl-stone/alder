@@ -17,14 +17,14 @@ import {
   encodeHostQueryWire,
   hostQueryResultSchema,
   hostIdentitySchema,
-  hostSnapshotSchema,
+  notebookQueryResultSchema,
   ticketMintRequestSchema,
   ticketMintResponseSchema,
   windowActionMessageSchema,
   windowActionSchema,
   windowStateSchema,
   type HostQuery,
-  type HostSnapshot,
+  type NotebookQueryResult,
   type SessionConnection,
   type WindowAction,
   type WindowState,
@@ -35,7 +35,10 @@ const IPC_CHANNELS = Object.freeze({
   chooseSavePath: "alderDesktop:chooseSavePath",
   chooseRscript: "alderDesktop:chooseRscript",
   getWindowState: "alderDesktop:getWindowState",
+  hostShutdown: "alderDesktop:hostShutdown",
   windowAction: "alderDesktop:windowAction",
+  saveCancelled: "alderDesktop:saveCancelled",
+  rendererReady: "alderDesktop:rendererReady",
 } as const);
 
 const APP_NAME = "Alder";
@@ -43,6 +46,7 @@ const MAX_TICKET_RESPONSE_BYTES = 64 * 1024;
 const MAX_QUERY_RESPONSE_BYTES = 16 * 1024 * 1024;
 const CLOSE_SETTLEMENT_TIMEOUT_MS = 120_000;
 const STATE_POLL_MS = 100;
+const RENDERER_READY_TIMEOUT_MS = 120_000;
 const HOST_MONITOR_MS = 5_000;
 const HOST_REQUEST_TIMEOUT_MS = 4_000;
 const SAFE_EXTERNAL_PROTOCOLS = new Set(["http:", "https:", "mailto:"]);
@@ -106,7 +110,7 @@ export interface ElectronBrowserWindowConstructor {
 
 export interface ElectronDialog {
   showOpenDialog(window: ElectronWindow, options: Record<string, unknown>): Promise<ElectronFileDialogResult>;
-  showSaveDialog(window: ElectronWindow, options: Record<string, unknown>): Promise<ElectronFileDialogResult>;
+  showSaveDialog(window: ElectronWindow, options: Record<string, unknown>): Promise<{ canceled: boolean; filePath?: string }>;
   showMessageBox(window: ElectronWindow, options: Record<string, unknown>): Promise<{ response: number }>;
 }
 
@@ -194,6 +198,9 @@ interface ElectronWindowRecord {
   hostFailureShown: boolean;
   loadGeneration: number;
   loadingOrigin?: string;
+  rendererReadyGeneration: number;
+  rendererReady?: { promise: Promise<void>; resolve: () => void };
+  saveCancelled: boolean;
 }
 
 /**
@@ -324,7 +331,7 @@ function selectedPath(value: unknown, label: string): string | null {
 
 function rendererActionScript(action: WindowAction): string | null {
   switch (action) {
-    case "save": return "document.querySelector('#save')?.click()";
+    case "save": return null;
     case "run-all": return null;
     case "interrupt": return "document.querySelector('#stop')?.click()";
     case "restart": return "document.querySelector('#restart')?.click()";
@@ -333,7 +340,7 @@ function rendererActionScript(action: WindowAction): string | null {
     case "run-stale": return null;
     case "select-r": return null;
     case "publish": return "Array.from(document.querySelectorAll('button')).find((button) => button.textContent?.trim() === 'Publish HTML')?.click()";
-    case "close": return "globalThis.__alderHost?.client?.discardRecovery?.()";
+    case "close": return null;
     default: return null;
   }
 }
@@ -342,8 +349,9 @@ const DIRTY_PROJECTION_SCRIPT = `(() => {
   const host = globalThis.__alderHost;
   const documentValue = host?.client?.document;
   const snapshot = documentValue?.snapshot;
+  if (snapshot === undefined) return null;
   const pending = typeof documentValue?.pendingSource === "function" ? documentValue.pendingSource() : null;
-  return Boolean(snapshot?.dirty || snapshot?.changed || pending?.changes?.length || pending?.tombstones?.length);
+  return Boolean(snapshot.dirty || snapshot.changed || pending?.changes?.length || pending?.tombstones?.length);
 })()`;
 
 export class ElectronMain implements ElectronMainApplication {
@@ -374,7 +382,7 @@ export class ElectronMain implements ElectronMainApplication {
     this.runtime.app.on("second-instance", (_event: unknown, commandLine: string[]) => {
       const path = parseNotebookArgument(commandLine);
       if (path) this.queueOrOpen(path);
-      else this.focusFirstWindow();
+      else this.focusOrOpenUntitled();
     });
     this.runtime.app.on("open-file", (event: { preventDefault?: () => void }, path: string) => {
       event.preventDefault?.();
@@ -385,6 +393,7 @@ export class ElectronMain implements ElectronMainApplication {
         void this.showApplicationError("Open", "The requested notebook path is invalid.");
       }
     });
+    this.runtime.app.on("activate", () => this.focusOrOpenUntitled());
     this.runtime.app.on("window-all-closed", () => {
       if (this.platform() !== "darwin") this.runtime.app.quit();
     });
@@ -453,6 +462,7 @@ export class ElectronMain implements ElectronMainApplication {
     try {
       connection = await acquire({
         path,
+        ...(path === null ? { untitledProjectDirectory: this.runtime.app.getPath?.("home") ?? process.cwd() } : {}),
         resources: sessionResources(resources),
         ...(this.options.rscript === undefined ? {} : { rscript: this.options.rscript }),
         ...(this.options.executionMode === undefined ? {} : { executionMode: this.options.executionMode }),
@@ -510,6 +520,8 @@ export class ElectronMain implements ElectronMainApplication {
       monitorInProgress: false,
       hostFailureShown: false,
       loadGeneration: 0,
+      rendererReadyGeneration: 0,
+      saveCancelled: false,
     };
     record.keys.add(canonical ?? `session:${connection.sessionKey}`);
     if (hint !== null) record.keys.add(hint);
@@ -542,6 +554,10 @@ export class ElectronMain implements ElectronMainApplication {
     if (webRequest === undefined) throw new Error("Electron response interception is unavailable");
     const generation = (record.loadGeneration ?? 0) + 1;
     record.loadGeneration = generation;
+    record.rendererReadyGeneration = generation;
+    let resolveRendererReady!: () => void;
+    const rendererReadyPromise = new Promise<void>(resolve => { resolveRendererReady = resolve; });
+    record.rendererReady = { promise: rendererReadyPromise, resolve: resolveRendererReady };
     const origin = connection.browserOrigin;
     const continuityProof = connection.continuityProof;
     record.loadingOrigin = origin;
@@ -577,6 +593,10 @@ export class ElectronMain implements ElectronMainApplication {
       await record.window.loadURL(authenticatedNotebookUrl(origin, ticket));
       if (record.loadGeneration !== generation) throw new Error("Electron notebook load was superseded");
       if (!receivedMainFrame) throw new Error("Electron did not authenticate the notebook response");
+      await new Promise<void>((resolveReady, rejectReady) => {
+        const timeout = setTimeout(() => rejectReady(new Error("Electron notebook renderer did not become ready")), RENDERER_READY_TIMEOUT_MS);
+        rendererReadyPromise.then(() => { clearTimeout(timeout); resolveReady(); }, rejectReady);
+      });
     } finally {
       bootstrapTicket = null;
       if (record.loadGeneration === generation) record.loadingOrigin = undefined;
@@ -610,26 +630,27 @@ export class ElectronMain implements ElectronMainApplication {
         return handler(this.recordForEvent(event));
       });
     };
-    noArguments(IPC_CHANNELS.openNotebook, async () => {
-      const result = await this.runtime.dialog.showOpenDialog(this.focusedRecord()?.window ?? this.firstWindow(), {
+    noArguments(IPC_CHANNELS.openNotebook, async (record) => {
+      const result = await this.runtime.dialog.showOpenDialog(record.window, {
         title: "Open Alder notebook",
         properties: ["openFile"],
         filters: [{ name: "R notebooks", extensions: ["R", "rmd", "r"] }],
       });
       if (result.canceled || result.filePaths.length === 0) return undefined;
-      await this.openNotebook(selectedPath(result.filePaths[0], "Open notebook"));
+      const path = selectedPath(result.filePaths[0], "Open notebook");
+      if (path) await this.openReplacingPristineUntitled(record, path);
       return undefined;
     });
     noArguments(IPC_CHANNELS.chooseSavePath, async (record) => {
       const result = await this.runtime.dialog.showSaveDialog(record.window, {
-        title: "Choose a new destination",
-        message: "Choose a new destination; an existing notebook will be rejected by the host.",
+        title: "Save notebook",
+        message: "Choose where to save this R notebook. An existing file will not be replaced.",
         properties: ["createDirectory"],
         showOverwriteConfirmation: false,
-        filters: [{ name: "HTML or R notebook", extensions: ["R", "html", "rmd"] }],
+        filters: [{ name: "R notebook", extensions: ["R", "rmd"] }],
       });
-      if (result.canceled || result.filePaths.length === 0) return null;
-      return selectedPath(result.filePaths[0], "Save path");
+      if (result.canceled || !result.filePath) return null;
+      return selectedPath(result.filePath, "Save path");
     });
     noArguments(IPC_CHANNELS.chooseRscript, async (record) => {
       const result = await this.runtime.dialog.showOpenDialog(record.window, {
@@ -641,6 +662,18 @@ export class ElectronMain implements ElectronMainApplication {
       return selectedPath(result.filePaths[0], "Rscript path");
     });
     noArguments(IPC_CHANNELS.getWindowState, record => this.readWindowState(record));
+    noArguments(IPC_CHANNELS.hostShutdown, async (record) => {
+      record.closing = true;
+      record.hostFailureShown = true;
+      await this.disposeRecord(record, "discard").catch(() => undefined);
+      if (!record.window.isDestroyed()) record.window.destroy();
+      if (this.records.size === 0) this.runtime.app.quit();
+      return undefined;
+    });
+    noArguments(IPC_CHANNELS.saveCancelled, (record) => { record.saveCancelled = true; });
+    noArguments(IPC_CHANNELS.rendererReady, (record) => {
+      if (record.rendererReadyGeneration === record.loadGeneration) record.rendererReady?.resolve();
+    });
   }
 
   private recordForEvent(event: ElectronIpcEvent): ElectronWindowRecord {
@@ -651,7 +684,7 @@ export class ElectronMain implements ElectronMainApplication {
     if (!record || record.released) throw new Error("desktop IPC sender is not an active application window");
     if (!event.senderFrame || !sender.mainFrame || event.senderFrame !== sender.mainFrame) throw new Error("desktop IPC is restricted to the main frame");
     const frameUrl = event.senderFrame.url ?? sender.getURL();
-    if (!isTrustedApplicationOrigin(frameUrl, record.origin)) throw new Error("desktop IPC origin is not trusted");
+    if (!isTrustedApplicationOrigin(frameUrl, record.loadingOrigin ?? record.origin)) throw new Error("desktop IPC origin is not trusted");
     return record;
   }
 
@@ -729,7 +762,7 @@ export class ElectronMain implements ElectronMainApplication {
     };
     const fileSubmenu: Record<string, unknown>[] = [
       { label: "New", accelerator: "CmdOrCtrl+N", click: () => void this.openNotebook(null) },
-      { label: "Open…", accelerator: "CmdOrCtrl+O", click: () => void this.openNotebookFromDialog(this.focusedRecord()?.window ?? this.firstWindow()) },
+      { label: "Open…", accelerator: "CmdOrCtrl+O", click: () => void this.openNotebookFromDialog(this.focusedRecord() ?? this.firstRecord()) },
       { label: "Recent", submenu: this.recentPaths.length === 0 ? [{ label: "No recent notebooks", enabled: false }] : this.recentPaths.map(path => ({ label: path, click: () => void this.openNotebook(path) })) },
       { type: "separator" },
       { label: "Save", accelerator: "CmdOrCtrl+S", click: action("save") },
@@ -764,16 +797,16 @@ export class ElectronMain implements ElectronMainApplication {
     this.runtime.Menu.setApplicationMenu(this.runtime.Menu.buildFromTemplate(template));
   }
 
-  private async openNotebookFromDialog(owner: ElectronWindow | undefined): Promise<void> {
-    if (!owner) return;
-    const result = await this.runtime.dialog.showOpenDialog(owner, {
+  private async openNotebookFromDialog(source: ElectronWindowRecord | undefined): Promise<void> {
+    if (!source) return;
+    const result = await this.runtime.dialog.showOpenDialog(source.window, {
       title: "Open Alder notebook",
       properties: ["openFile"],
       filters: [{ name: "R notebooks", extensions: ["R", "rmd", "r"] }],
     });
     if (result.canceled || result.filePaths.length === 0) return;
     const path = selectedPath(result.filePaths[0], "Open notebook");
-    if (path) await this.openNotebook(path);
+    if (path) await this.openReplacingPristineUntitled(source, path);
   }
 
   private async requestClose(record: ElectronWindowRecord): Promise<void> {
@@ -798,17 +831,20 @@ export class ElectronMain implements ElectronMainApplication {
       });
       if (answer.response === 2) return;
       if (answer.response === 1) {
-        // Clear only this renderer's recovery branch. The detached host and its
-        // other clients remain untouched until their own leases are released.
         await this.dispatchAction(record, "close");
-        this.finishClose(record);
+        const released = await this.waitForRelease(record, this.options.closeSettlementTimeoutMs ?? CLOSE_SETTLEMENT_TIMEOUT_MS);
+        if (!released) {
+          await this.showApplicationError("Discard", "The discard operation did not settle; the window remains open.");
+          return;
+        }
         finished = true;
         return;
       }
-      void this.dispatchAction(record, "save");
+      record.saveCancelled = false;
+      await this.dispatchAction(record, "save");
       const settled = await this.waitForClean(record, this.options.closeSettlementTimeoutMs ?? CLOSE_SETTLEMENT_TIMEOUT_MS);
       if (!settled) {
-        await this.showApplicationError("Save", "The save operation did not settle; the window remains open.");
+        if (!record.saveCancelled) await this.showApplicationError("Save", "The save operation did not settle; the window remains open.");
         return;
       }
       this.finishClose(record);
@@ -828,15 +864,20 @@ export class ElectronMain implements ElectronMainApplication {
 
   private async waitForClean(record: ElectronWindowRecord, timeoutMs: number): Promise<boolean> {
     const deadline = Date.now() + timeoutMs;
-    while (!record.released && Date.now() < deadline) {
+    while (!record.released && !record.saveCancelled && Date.now() < deadline) {
       if (!(await this.readWindowState(record)).dirty) return true;
       await new Promise(resolvePromise => setTimeout(resolvePromise, STATE_POLL_MS));
     }
     return false;
   }
+  private async waitForRelease(record: ElectronWindowRecord, timeoutMs: number): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    while (!record.released && Date.now() < deadline) await new Promise(resolvePromise => setTimeout(resolvePromise, STATE_POLL_MS));
+    return record.released;
+  }
 
   private async readWindowState(record: ElectronWindowRecord): Promise<WindowState> {
-    let localDirty = false;
+    let localDirty = true;
     try {
       const local = await record.window.webContents.executeJavaScript(DIRTY_PROJECTION_SCRIPT, false);
       if (typeof local === "boolean") localDirty = local;
@@ -908,7 +949,7 @@ export class ElectronMain implements ElectronMainApplication {
     }
   }
 
-  private async querySnapshot(record: ElectronWindowRecord): Promise<HostSnapshot> {
+  private async querySnapshot(record: ElectronWindowRecord): Promise<NotebookQueryResult> {
     await this.assertHostContinuity(record);
     const connection = record.connection;
     const query: HostQuery = { type: "notebook" };
@@ -924,7 +965,7 @@ export class ElectronMain implements ElectronMainApplication {
     const wire = decodeJsonFrame(bytes, MAX_QUERY_RESPONSE_BYTES);
     const decoded = decodeHostQueryResultWire(query, wire);
     const envelope = hostQueryResultSchema.parse(decoded);
-    return hostSnapshotSchema.parse(envelope.result);
+    return notebookQueryResultSchema.parse(envelope.result);
   }
   private async monitorHost(record: ElectronWindowRecord): Promise<void> {
     if (record.released || record.hostFailureShown || record.monitorInProgress) return;
@@ -1019,13 +1060,13 @@ export class ElectronMain implements ElectronMainApplication {
     if (!record.window.isDestroyed()) record.window.destroy();
   }
 
-  private async disposeRecord(record: ElectronWindowRecord): Promise<void> {
+  private async disposeRecord(record: ElectronWindowRecord, disposition: "normal" | "discard" = "normal"): Promise<void> {
     if (record.released) return;
     record.released = true;
     if (record.monitor) clearInterval(record.monitor);
     this.records.delete(record);
     for (const key of record.keys) if (this.byKey.get(key) === record) this.byKey.delete(key);
-    await record.connection.release();
+    await record.connection.release(disposition);
   }
 
   private async releaseAll(): Promise<void> {
@@ -1035,7 +1076,23 @@ export class ElectronMain implements ElectronMainApplication {
 
   private queueOrOpen(path: string): void {
     if (!this.started) { this.queuedPaths.push(path); return; }
-    void this.openNotebook(path).catch(() => undefined);
+    const first = this.firstRecord();
+    const source = this.records.size === 1 && first?.connection.canonicalPath === null ? first : undefined;
+    void (source ? this.openReplacingPristineUntitled(source, path) : this.openNotebook(path)).catch(() => undefined);
+  }
+
+  private async openReplacingPristineUntitled(source: ElectronWindowRecord, path: string): Promise<void> {
+    await this.openNotebook(path);
+    if (source.released || source.closing || source.connection.canonicalPath !== null) return;
+    const state = await this.readWindowState(source).catch(() => null);
+    if (state === null || state.path !== null || state.dirty || source.released || source.closing) return;
+    source.closing = true;
+    await this.dispatchAction(source, "close");
+    const released = await this.waitForRelease(source, this.options.closeSettlementTimeoutMs ?? CLOSE_SETTLEMENT_TIMEOUT_MS);
+    if (!released) {
+      source.closing = false;
+      await this.showApplicationError("Open notebook", "The empty notebook host did not stop; its window remains open.");
+    }
   }
 
   private focus(record: ElectronWindowRecord): void {
@@ -1044,9 +1101,16 @@ export class ElectronMain implements ElectronMainApplication {
     record.window.focus();
   }
 
-  private focusFirstWindow(): void {
+  private focusOrOpenUntitled(): void {
     const record = this.firstRecord();
-    if (record) this.focus(record);
+    if (record) {
+      this.focus(record);
+      return;
+    }
+    if (!this.started || this.stopping) return;
+    void this.openNotebook(null).catch(error => {
+      void this.showApplicationError("Open notebook", error instanceof Error ? error.message : "The notebook host could not be started.");
+    });
   }
 
   private firstRecord(): ElectronWindowRecord | undefined { return this.records.values().next().value as ElectronWindowRecord | undefined; }
@@ -1067,7 +1131,16 @@ export class ElectronMain implements ElectronMainApplication {
 
   private async applicationResources(): Promise<ApplicationResources> {
     if (this.options.resources) return this.options.resources;
-    return this.resourcesPromise ??= resolveApplicationResources(this.options.applicationRoot ?? appRootFromProcess());
+    return this.resourcesPromise ??= (async () => {
+      const electronProcess = process as NodeJS.Process & { noAsar?: boolean };
+      const priorNoAsar = electronProcess.noAsar;
+      electronProcess.noAsar = true;
+      try {
+        return await resolveApplicationResources(this.options.applicationRoot ?? appRootFromProcess());
+      } finally {
+        electronProcess.noAsar = priorNoAsar;
+      }
+    })();
   }
 
   private async showApplicationError(title: string, detail: string): Promise<void> {

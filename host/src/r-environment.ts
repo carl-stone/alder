@@ -134,8 +134,13 @@ async function selectRscript(
     if (saved !== null) return resolveSelectedPath(saved, "saved Rscript");
   }
   const discovered = await findOnPath("Rscript");
-  if (discovered === null) throw notFound("Rscript was not found on PATH");
-  return discovered;
+  if (discovered !== null) return discovered;
+  if (desktop && process.platform === "darwin") {
+    const framework = await resolveExecutableCandidate("/Library/Frameworks/R.framework/Resources/bin/Rscript");
+    if (framework !== null) return framework;
+    throw notFound("Rscript was not found on PATH or at the standard macOS R framework location");
+  }
+  throw notFound("Rscript was not found on PATH");
 }
 
 async function savedRscript(processSupervisorExecutable: string): Promise<string | null> {
@@ -168,18 +173,21 @@ async function findOnPath(command: string): Promise<string | null> {
       ? [join(directory, command), join(directory, `${command}.exe`), join(directory, `${command}.cmd`)]
       : [join(directory, command)];
     for (const candidate of candidates) {
-      if (!await isExecutable(candidate)) continue;
-      try {
-        return await realpath(candidate);
-      } catch {
-        // PATH entries can disappear between stat and realpath. Continue with
-        // the next candidate rather than turning a transient race into an
-        // untyped selection failure or silently falling back from an explicit
-        // selection.
-      }
+      const resolved = await resolveExecutableCandidate(candidate);
+      if (resolved !== null) return resolved;
     }
   }
   return null;
+}
+
+async function resolveExecutableCandidate(candidate: string): Promise<string | null> {
+  if (!await isExecutable(candidate)) return null;
+  try {
+    return await realpath(candidate);
+  } catch {
+    // A candidate can disappear between stat and realpath.
+    return null;
+  }
 }
 
 async function resolveSelectedPath(value: string, label: string): Promise<string> {
@@ -254,7 +262,7 @@ async function validateHelperLoad(environment: REnvironment, manifest: Applicati
     const result = await execFileAsync(environment.rscript, ["--vanilla", "--slave", "-e", script], {
       env: {
         ...withoutRHome(process.env),
-        R_HOME: environment.rHome,
+        ...(process.platform === "darwin" ? {} : { R_HOME: environment.rHome }),
         R_LIBS: environment.libraryPaths.join(delimiter),
         R_LIBS_SITE: "",
         R_LIBS_USER: "",
@@ -272,7 +280,7 @@ async function validateHelperLoad(environment: REnvironment, manifest: Applicati
     const [packageVersion, built] = result.stdout.trim().split("\n");
     const [major, minor] = environment.version.split(".");
     if (packageVersion !== manifest.applicationVersion || !built?.startsWith("R " + major + "." + minor + ".")) {
-      throw new Error("helper package version or Built R ABI does not match the selected runtime");
+      throw new Error(`helper package version or Built R ABI does not match the selected runtime (package ${packageVersion ?? "missing"}, Built ${built ?? "missing"}, expected package ${manifest.applicationVersion} built with R ${major}.${minor}.x)`);
     }
   } catch (error) {
     throw invalid(`Alder helper package cannot load under selected R: ${messageOf(error)}`);

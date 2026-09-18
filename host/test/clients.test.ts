@@ -823,6 +823,29 @@ test("browser transport handshakes before sending canonical sequential commands"
   transport.close();
 });
 
+test("browser discard release reaches the host before transport close", async () => {
+  const socket = new FakeSocket();
+  let request: { url: string; init?: RequestInit } | null = null;
+  const transport = new BrowserTransport({
+    url: "ws://127.0.0.1/api/socket", reconnect: false, clientId: "browser-test", leaseId: "lease-1", csrf: "csrf-1",
+    webSocketFactory: () => socket,
+  });
+  const connected = transport.connect();
+  socket.open();
+  socket.receive(recoverySnapshot(snapshot()));
+  await connected;
+  await withBrowserFetch(async (input, init) => {
+    request = { url: input.toString(), init };
+    return new Response(JSON.stringify({ released: true }), { status: 200, headers: { "X-Alder-Continuity-Proof": "proof-1" } });
+  }, async () => {
+    await transport.release("discard");
+  });
+  assert.equal(request!.url, "/api/lease");
+  assert.equal(request!.init?.method, "POST");
+  assert.equal(new Headers(request!.init?.headers).get("X-Alder-CSRF"), "csrf-1");
+  assert.deepEqual(JSON.parse(String(request!.init?.body)), { action: "release", leaseId: "lease-1", disposition: "discard" });
+  assert.equal(socket.readyState, 3);
+});
 test('browser submits a startup marker when host startup execution is disabled', async () => {
   const socket = new FakeSocket();
   const store = new MemoryRecoveryStore();
@@ -1308,16 +1331,18 @@ test("LSP mapping preserves native file URIs and excludes delimiter lines", () =
 test("LSP child environment excludes project and user R libraries", () => {
   const environment = trustedRLanguageServerEnvironment({
     ALDER_R_LIBRARIES: JSON.stringify(["/tmp/project-library"]),
+    R_HOME: "/tmp/foreign-r-home",
     R_LIBS_USER: "/tmp/user-library",
     ALDER_RESOURCES_ROOT: "/tmp/attacker-root",
     TEST_ENV: "preserved",
-  }, ["/opt/alder/r-library", "/usr/lib/R/library"], "/opt/alder");
+  }, ["/opt/alder/r-library", "/usr/lib/R/library"], "/opt/alder", "darwin");
   assert.deepEqual(JSON.parse(environment.ALDER_R_LIBRARIES!), [
     "/opt/alder/r-library", "/usr/lib/R/library",
   ]);
   assert.equal(environment.R_LIBS, ["/opt/alder/r-library", "/usr/lib/R/library"].join(delimiter));
   assert.equal(environment.R_LIBS_USER, "");
   assert.equal(environment.R_LIBS_SITE, "");
+  assert.equal(environment.R_HOME, undefined);
   assert.equal(environment.TEST_ENV, "preserved");
   assert.equal(environment.ALDER_RESOURCES_ROOT, "/opt/alder");
   assert.throws(() => trustedRLanguageServerEnvironment({}, ["relative/library"], "/opt/alder"), /absolute trusted R library paths/);

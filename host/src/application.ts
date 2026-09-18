@@ -465,6 +465,22 @@ async function startNotebookHost(
     await attempt(() => work === "" ? undefined : rm(work, { recursive: true, force: true }));
     if (errors.length > 0) throw new AggregateError(errors, "Alder shutdown failed");
   })().finally(resolveClosed);
+  const discardAndClose = async (): Promise<void> => {
+    if (recoveryPending) {
+      if (recovery === undefined || recoveryFingerprint === undefined) {
+        throw new Error("active recovery cannot be discarded without an exact fingerprint");
+      }
+      await recovery.flush();
+      const cleared = await recovery.clearIfMatch({
+        documentRevision: recoveryDocumentRevision,
+        fingerprint: recoveryFingerprint,
+      });
+      if (!cleared) throw new Error("active recovery changed before discard completed");
+      recoveryPending = false;
+      recoveryFingerprint = undefined;
+    }
+    await close();
+  };
   if (ownershipCompromise !== undefined) {
     await close();
     throw ownershipCompromise;
@@ -990,7 +1006,7 @@ async function startNotebookHost(
           const destinationDisk = destinationStore.observation();
           const destinationSidecars = sidecarProtocolObservations(destinationStore, false);
           const destinationSerialized = serializeNotebookWithParts(destinationStore.currentDocument);
-          const destinationRevision = context.dirty ? context.fromRevision + 1 : context.fromRevision;
+          const destinationRevision = context.fromRevision;
           const destinationBaseline: RecoveryBaseline = {
             schemaVersion: 1,
             documentRevision: destinationRevision,
@@ -1010,12 +1026,21 @@ async function startNotebookHost(
           };
           if (context.dirty || recoveryPending || pendingSidecars.config || pendingSidecars.layout || pendingSidecars.packages) { await oldRecovery.flush(); branch = await oldRecovery.forkBranch(); }
           preparedRecovery = await oldRecovery.prepareRebind({ rootDir: envPaths("alder", { suffix: "" }).data, key: preparedOwner.sessionKey, baseline: destinationBaseline });
+          const destinationRecoveryFingerprint = preparedRecovery.state.fingerprint ?? sourceBytesSha256(destinationSerialized.bytes);
           await preparedRecovery.publish();
-          const destinationRecoveryProjection: PublishedRecoveryProjection | null = context.dirty ? {
-            baseline: destinationBaseline,
-            fingerprint: preparedRecovery.state.fingerprint ?? sourceBytesSha256(destinationSerialized.bytes),
-            state: "dirty",
-          } : null;
+          if (branch !== undefined) {
+            const dropped = await preparedRecovery.writer.dropBranch(branch.id, {
+              documentRevision: branch.documentRevision,
+              fingerprint: branch.fingerprint,
+            });
+            if (!dropped) throw new Error("Save As recovery branch changed before publication");
+          }
+          const recoveryCleared = await preparedRecovery.writer.clearIfMatch({
+            documentRevision: destinationRevision,
+            fingerprint: destinationRecoveryFingerprint,
+          });
+          if (!recoveryCleared) throw new Error("Save As recovery state changed before publication");
+          const destinationRecoveryProjection: PublishedRecoveryProjection | null = null;
           const pathChanged = destinationDirectory !== notebookDirectory;
           const environmentChanged = runtimeEnvironment?.identity !== destinationRuntime?.identity;
           const runtimeChanged = pathChanged || environmentChanged;
@@ -1026,8 +1051,8 @@ async function startNotebookHost(
             layout: destinationLayout,
             disk: destinationDisk,
             sidecars: destinationSidecars,
-            dirty: context.dirty,
-            advanceRevision: context.dirty,
+            dirty: false,
+            advanceRevision: false,
             invalidateRuntime: runtimeChanged,
             rEnvironment: destinationRuntime,
           });
@@ -1077,8 +1102,8 @@ async function startNotebookHost(
                 runtimeError = destinationRuntimeError;
                 recoverySerialized = destinationSerialized;
                 recoveryDocumentRevision = destinationRevision;
-                recoveryPending = destinationRevision > 0;
-                recoveryFingerprint = recoveryPending ? preparedRecovery!.state.fingerprint ?? undefined : undefined;
+                recoveryPending = false;
+                recoveryFingerprint = undefined;
                 reservation?.release();
                 try {
                   bindWatcher(destination);
@@ -1514,8 +1539,7 @@ async function startNotebookHost(
       const canonical = resolve(path);
       const sidecarPaths = (["config", "layout", "packages"] as const).map(kind => store!.sidecarPath(kind));
       const observedPaths = new Set([canonical, ...sidecarPaths]);
-      const directories = new Set([dirname(canonical), ...sidecarPaths.map(sidecarPath => dirname(sidecarPath))]);
-      const next = watch([...directories], { ignoreInitial: true, persistent: true, followSymlinks: false });
+      const next = watch([...observedPaths], { ignoreInitial: true, persistent: true, followSymlinks: false });
       watcher = next;
       watcherReady = new Promise<void>(resolveReady => {
         let settled = false;
@@ -1636,6 +1660,7 @@ async function startNotebookHost(
       acceptingLeases: () => closing === undefined,
       onClientCount: (count: number) => { clientCount = count; browserActivity++; if (count > 0) everConnected = true; scheduleIdle(); },
       onLeaseCount: (count: number) => { leaseCount = count; browserActivity++; if (count > 0) everConnected = true; scheduleIdle(); },
+      onLastLeaseDiscard: discardAndClose,
       onBrowserActivity: () => { everConnected = true; browserActivity++; scheduleIdle(); },
       onCompromised: async (reason: string) => { controller!.recordActionError(reason, "session_compromised"); await close(); },
       onShutdown: close,
@@ -1759,6 +1784,8 @@ function lspDocument(snapshot: HostSnapshot): Promise<NotebookDocument> { return
 function cellRefId(value: unknown): string { if (isRecord(value) && typeof value.cellId === "string") return value.cellId; throw new Error("formatter returned an invalid cell reference"); }
 function stringValue(value: unknown): string | undefined { return typeof value === "string" ? value : undefined; }
 function decodePhysicalBytes(value: unknown): Uint8Array | null {
+  if (value instanceof Uint8Array) return value;
+  if (value instanceof ArrayBuffer) return new Uint8Array(value);
   if (typeof value === "string") return Uint8Array.from(Buffer.from(value, "base64"));
   if (isRecord(value) && typeof value.$bytes === "string") return Uint8Array.from(Buffer.from(value.$bytes, "base64"));
   return null;

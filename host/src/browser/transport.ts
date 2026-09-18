@@ -602,6 +602,17 @@ export class BrowserTransport {
     });
   }
 
+  async release(disposition: "normal" | "discard" = "normal"): Promise<void> {
+    const response = await fetch(notebookUrl("/api/lease"), {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json", "X-Alder-CSRF": this.csrf },
+      body: JSON.stringify({ action: "release", leaseId: this.leaseId, disposition }),
+    });
+    this.assertResponseContinuity(response);
+    if (!response.ok) throw new BrowserTransportError("lease_release_failed", "browser lease release failed (" + response.status + ")");
+    this.close();
+  }
   close(): void {
     this.stopped = true;
     this.generation += 1;

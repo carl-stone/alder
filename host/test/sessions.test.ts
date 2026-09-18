@@ -235,7 +235,7 @@ test("atomic notebook replacement cannot create a second owner", async () => {
   }
 });
 
-test("session lease release sends the release action exactly once", async () => {
+test("session lease release sends one normal release action", async () => {
   const root = await temporaryDirectory("alder-session-release-");
   const runtimeDirectory = join(root, "runtime");
   const notebook = join(root, "notebook.R");
@@ -302,8 +302,97 @@ test("session lease release sends the release action exactly once", async () => 
     await connection.release();
     assert.deepEqual(requests.filter(request => request.path === "/api/lease").map(request => request.body), [
       { action: "attach" },
-      { action: "release", leaseId },
+      { action: "release", leaseId, disposition: "normal" },
     ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("session acquisition waits for a live stopping owner to exit", async () => {
+  const root = await temporaryDirectory("alder-session-stopping-");
+  const runtimeDirectory = join(root, "runtime");
+  const notebook = join(root, "notebook.R");
+  const canonicalPath = resolve(notebook);
+  const sessionKey = keyFor(canonicalPath);
+  const registry = registryPath(runtimeDirectory, canonicalPath);
+  const origin = "http://127.0.0.1:41784";
+  const browserOrigin = browserOriginFor(41784);
+  const epoch = randomUUID();
+  const processNonce = randomUUID();
+  const continuityProof = randomUUID();
+  const token = "2".repeat(64);
+  const leaseId = randomUUID();
+  const clientId = randomUUID();
+  const requests: string[] = [];
+  const originalFetch = globalThis.fetch;
+  const common = {
+    pid: process.pid,
+    startIdentity: currentProcessStartIdentity(),
+    canonicalPath,
+    origin,
+    protocol: HOST_PROTOCOL,
+  };
+  const identity = {
+    protocol: HOST_PROTOCOL,
+    epoch,
+    processNonce,
+    continuityProof,
+    sessionKey,
+    canonicalPath,
+    capabilities: [],
+    origin,
+    browserOrigin,
+    address: addressFor(41784),
+    documentReady: true,
+    configuration: { rscript: null, executionMode: "automatic", runOnStartup: false, deferStartup: false },
+  };
+  globalThis.fetch = (async (input: RequestInfo | URL): Promise<Response> => {
+    const url = new URL(typeof input === "string" ? input : input.toString());
+    requests.push(url.pathname);
+    const body = url.pathname === "/api/identity"
+      ? identity
+      : { leaseId, clientId, nextCommandSequence: 1, epoch };
+    return new Response(JSON.stringify(body), {
+      status: 200,
+      headers: { "Content-Type": "application/json", "X-Alder-Continuity-Proof": continuityProof },
+    });
+  }) as typeof fetch;
+  try {
+    await privateDirectory(runtimeDirectory);
+    await privateFile(notebook, "notebook" + String.fromCharCode(10));
+    await privateFile(registry, JSON.stringify({
+      ...common,
+      state: "stopping",
+      processNonce: randomUUID(),
+      continuityProof: randomUUID(),
+      epoch: randomUUID(),
+      token: "3".repeat(64),
+    }));
+    const acquisition = acquireNotebookSession({ path: notebook, runtimeDirectory, startupTimeoutMs: 2_000, resources: sessionPrivateOptions });
+    let settled = false;
+    void acquisition.then(() => { settled = true; }, () => { settled = true; });
+    await new Promise(resolveDelay => setTimeout(resolveDelay, 250));
+    assert.equal(settled, false);
+    assert.deepEqual(requests, []);
+
+    const replacement = registry + ".replacement";
+    await privateFile(replacement, JSON.stringify({
+      ...common,
+      state: "ready",
+      processNonce,
+      continuityProof,
+      address: addressFor(41784),
+      epoch,
+      token,
+    }));
+    await rename(replacement, registry);
+
+    const connection = await acquisition;
+    assert.equal(connection.epoch, epoch);
+    assert.deepEqual(requests, ["/api/identity", "/api/lease"]);
+    await connection.release();
   } finally {
     globalThis.fetch = originalFetch;
     await rm(root, { recursive: true, force: true });

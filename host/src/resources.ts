@@ -12,6 +12,7 @@ import { ENGINE_PROTOCOL, HOST_PROTOCOL } from "./protocol.js";
 export type ManifestPlatform = "linux" | "darwin" | "win32";
 export type ManifestKind = "desktop" | "headless";
 
+export type ManifestRQualificationMode = "dual-r" | "development-single-r";
 export interface ManifestResourcePaths {
   cliLauncher: string;
   hostEntry: string;
@@ -69,6 +70,7 @@ export interface ApplicationManifest {
   engineProtocol: "alder-engine-v2";
   target: { platform: ManifestPlatform; arch: string };
   rVersionRange: ">=4.6.0 <4.7.0";
+  rQualificationMode: ManifestRQualificationMode;
   qualifiedRPatchVersions: string[];
   rBuildVersion: string;
   resources: ManifestResourcePaths;
@@ -198,7 +200,7 @@ export function validateApplicationManifest(value: unknown): ApplicationManifest
   const record = object(value, "manifest");
   exactKeys(record, [
     "schemaVersion", "kind", "applicationVersion", "sourceCommit", "sourceTreeSha256",
-    "hostProtocol", "engineProtocol", "target", "rVersionRange", "qualifiedRPatchVersions",
+    "hostProtocol", "engineProtocol", "target", "rVersionRange", "rQualificationMode", "qualifiedRPatchVersions",
     "rBuildVersion", "resources", "runtimes", "files", "symlinks", "rPackages",
   ], "manifest");
   if (record.schemaVersion !== MANIFEST_SCHEMA_VERSION) throw invalid("manifest.schemaVersion must be 1");
@@ -213,12 +215,17 @@ export function validateApplicationManifest(value: unknown): ApplicationManifest
   const platform = oneOf(target.platform, ["linux", "darwin", "win32"], "manifest.target.platform") as ManifestPlatform;
   const arch = nonempty(target.arch, "manifest.target.arch");
   if (record.rVersionRange !== R_VERSION_RANGE) throw invalid(`manifest.rVersionRange must be ${R_VERSION_RANGE}`);
+  const rQualificationMode = oneOf(record.rQualificationMode, ["dual-r", "development-single-r"], "manifest.rQualificationMode") as ManifestRQualificationMode;
   const qualifiedRPatchVersions = stringArray(record.qualifiedRPatchVersions, "manifest.qualifiedRPatchVersions");
   if (new Set(qualifiedRPatchVersions).size !== qualifiedRPatchVersions.length) {
     throw invalid("manifest.qualifiedRPatchVersions must not contain duplicates");
   }
-  if (!qualifiedRPatchVersions.includes("4.6.0") || !qualifiedRPatchVersions.includes("4.6.1")) {
-    throw invalid("manifest.qualifiedRPatchVersions must include both 4.6.0 and 4.6.1");
+  if (rQualificationMode === "dual-r") {
+    if (!qualifiedRPatchVersions.includes("4.6.0") || !qualifiedRPatchVersions.includes("4.6.1")) {
+      throw invalid("dual-r manifest.qualifiedRPatchVersions must include both 4.6.0 and 4.6.1");
+    }
+  } else if (qualifiedRPatchVersions.length !== 1 || qualifiedRPatchVersions[0] !== "4.6.1") {
+    throw invalid("development-single-r manifest.qualifiedRPatchVersions must contain exactly 4.6.1");
   }
   const rBuildVersion = nonempty(record.rBuildVersion, "manifest.rBuildVersion");
   if (rBuildVersion !== HELPER_BUILD_VERSION) {
@@ -250,6 +257,7 @@ export function validateApplicationManifest(value: unknown): ApplicationManifest
     engineProtocol: ENGINE_PROTOCOL,
     target: { platform, arch },
     rVersionRange: R_VERSION_RANGE,
+    rQualificationMode,
     qualifiedRPatchVersions,
     rBuildVersion,
     resources,

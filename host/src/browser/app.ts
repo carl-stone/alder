@@ -56,9 +56,25 @@ neutralizeUnsafeNotebookLinks(document);
 function bindDesktopActions(next: BrowserNotebookClient): void {
   const desktop = (globalThis as typeof globalThis & { alderDesktop?: PreloadApi }).alderDesktop;
   if (!desktop) return;
+  const openNotebook = document.getElementById("open-notebook");
+  if (openNotebook instanceof HTMLButtonElement) {
+    openNotebook.hidden = false;
+    openNotebook.addEventListener("click", () => {
+      void desktop.openNotebook().catch((error) => view?.showError(error));
+    });
+  }
   desktopUnsubscribe = desktop.onWindowAction((action: WindowAction) => {
     let operation: Promise<unknown> | undefined;
-    if (action === "save-as") {
+    if (action === "save") {
+      operation = view?.saveForDesktop().then(async (outcome) => {
+        if (outcome === "cancelled") await desktop.saveCancelled();
+      });
+    } else if (action === "close") {
+      operation = (async () => {
+        await next.discardAndClose();
+        await desktop.hostShutdown();
+      })();
+    } else if (action === "save-as") {
       operation = desktop.chooseSavePath().then((path) => path === null ? undefined : next.saveAs(path));
     } else if (action === "run-all") {
       operation = view?.runExplicit(() => next.runAll("all"));
@@ -159,6 +175,7 @@ async function start(): Promise<void> {
   bindDesktopActions(next);
   window.__alderHost = { client: next, view };
   await next.connect();
+  await (globalThis as typeof globalThis & { alderDesktop?: PreloadApi }).alderDesktop?.rendererReady();
 }
 
 void start().catch((error) => view?.showError(error));

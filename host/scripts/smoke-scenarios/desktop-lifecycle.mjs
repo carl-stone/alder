@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { access, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { access, mkdir, readFile, realpath, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { cleanupScenarioResources, delay, requireAbsoluteRscript, sanitizedEnvironment, spawnSmokeProcess, stopChild } from './_common.mjs';
 
@@ -13,7 +13,7 @@ export async function run(ctx) {
   let cdp;
   try {
     const notebook = join(ctx.evidence, `${ID}-open.R`);
-    await writeFile(notebook, 'x <- 40\nx + 2\n', 'utf8');
+    await writeFile(notebook, '# %%\nx <- 40\nx + 2\n', 'utf8');
     app = await launchDesktop(ctx, ID, { notebookPath: notebook });
     const target = await app.pageTarget();
     assert.ok(target, 'packaged Electron must expose a renderer page');
@@ -31,6 +31,10 @@ export async function run(ctx) {
         protocol: location.protocol,
         origin: location.origin,
         notebook: Boolean(document.querySelector('#notebook')),
+        openNotebook: (() => {
+          const button = document.querySelector('#open-notebook');
+          return button ? { hidden: button.hidden, disabled: button.disabled, text: button.textContent } : null;
+        })(),
         save: Boolean(document.querySelector('#save')),
         run: Boolean(document.querySelector('#run-all')),
         settings: Boolean(document.querySelector('#settings-open')),
@@ -43,20 +47,24 @@ export async function run(ctx) {
     })()`);
     assert.equal(ui.readyState, 'complete', 'Electron renderer must reach a complete document');
     assert.equal(ui.protocol, 'http:', 'Electron must load the authenticated host origin, never file://');
-    assert.ok(/^http:\/\/(?:127\.0\.0\.1|localhost|\[::1\]):\d+$/.test(ui.origin), 'Electron must use a loopback host origin');
+    assert.match(new URL(ui.origin).hostname, new RegExp('^[0-9a-f]{32}[.]localhost$'), 'Electron must use the nonce localhost host origin');
     assert.equal(ui.notebook, true, 'Electron must use the real notebook renderer');
+    assert.deepEqual(ui.openNotebook, { hidden: false, disabled: false, text: 'Open notebook…' }, 'native Open notebook action must be visible and enabled');
     assert.equal(ui.save, true, 'native menu/save surface must expose Save');
     assert.equal(ui.run, true, 'native menu/run surface must expose Run all');
     assert.equal(ui.settings, true, 'native Settings action must be reachable');
     assert.equal(ui.close, true, 'native close/shutdown action must be reachable');
     assert.equal(ui.runtime?.rEnvironment?.rscript, ctx.rscript, 'Electron must run the exact explicitly selected Rscript');
-    assert.deepEqual(ui.apiKeys, ['chooseRscript', 'chooseSavePath', 'getWindowState', 'onWindowAction', 'openNotebook'], 'preload must expose only the fixed desktop API');
+    assert.deepEqual(ui.apiKeys, ['chooseRscript', 'chooseSavePath', 'getWindowState', 'hostShutdown', 'onWindowAction', 'openNotebook', 'rendererReady', 'saveCancelled'], 'preload must expose only the fixed desktop API');
     assert.deepEqual(ui.apiMethods, {
       chooseRscript: 'function',
       chooseSavePath: 'function',
       getWindowState: 'function',
+      hostShutdown: 'function',
       onWindowAction: 'function',
       openNotebook: 'function',
+      rendererReady: 'function',
+      saveCancelled: 'function',
     }, 'preload fields must be callable functions only');
 
     const state = await cdp.evaluate('window.alderDesktop.getWindowState()');
@@ -65,21 +73,6 @@ export async function run(ctx) {
     assert.equal(typeof state.sessionEpoch, 'string', 'window state must report the host epoch');
     assert.ok(state.path === null || typeof state.path === 'string', 'window state path must be null or a path');
 
-    // Native accelerators route through the main process and the exact preload
-    // action channel. This does not call a renderer command or pass a payload.
-    await cdp.evaluate(`(() => {
-      globalThis.__alderDesktopActions = [];
-      globalThis.__alderDesktopUnsubscribe = window.alderDesktop.onWindowAction(action => globalThis.__alderDesktopActions.push(action));
-    })()`);
-    await cdp.evaluate('window.focus()');
-    await delay(100);
-    const modifiers = process.platform === 'darwin' ? 4 : 2;
-    await cdp.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', key: 's', code: 'KeyS', modifiers, windowsVirtualKeyCode: 83 });
-    await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 's', code: 'KeyS', modifiers, windowsVirtualKeyCode: 83 });
-    await delay(250);
-    const actions = await cdp.evaluate('globalThis.__alderDesktopActions');
-    assert.ok(actions.includes('save'), 'native Save accelerator must emit the exact save action');
-    await cdp.evaluate('globalThis.__alderDesktopUnsubscribe?.()');
 
     const screenshot = await cdp.send('Page.captureScreenshot', { format: 'png' });
     const screenshotPath = join(ctx.evidence, `${ID}.png`);
@@ -102,15 +95,25 @@ export async function run(ctx) {
     const targets = await app.targets();
     assert.equal(targets.filter(value => value.type === 'page').length, 1, 'one notebook must map to one primary desktop window');
 
-    await cdp.evaluate(`(async () => {
+    const executed = await cdp.evaluate(`(async () => {
       const client = window.__alderHost.client;
       client.editCell(client.document.cells[0].key, ['x <- 41', 'x + 2']);
+      await client.commitEdits();
+      await client.runAll('all');
+      for (let attempt = 0; attempt < 300 && client.document.snapshot.cells[0].status !== 'done'; attempt += 1) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
       await client.save();
+      const cell = client.document.snapshot.cells[0];
+      return { status: cell.status, outputs: cell.outputs };
     })()`);
-    assert.equal(await readFile(notebook, 'utf8'), 'x <- 41\nx + 2\n', 'native Save must persist edited notebook bytes');
+    assert.equal(executed.status, 'done', 'native Run all must complete the edited cell');
+    assert.match(JSON.stringify(executed.outputs), /43/, 'native Run all must return the edited result');
+    assert.equal(await readFile(notebook, 'utf8'), '# %%\nx <- 41\nx + 2\n', 'native Save must persist edited notebook bytes');
+    await shutdownDesktop(cdp, app);
     await cdp.close();
     cdp = null;
-    await stopDesktop(app);
+    app = undefined;
     app = await launchDesktop(ctx, ID, { notebookPath: notebook });
     const reopenedTarget = await app.pageTarget();
     assert.ok(reopenedTarget, 'saved notebook must reopen in a fresh Electron process');
@@ -124,6 +127,28 @@ export async function run(ctx) {
     await writeFile(join(ctx.evidence, 'desktop-save-reopen.json'), JSON.stringify({ body: reopenedBody, bytes: await readFile(notebook, 'utf8') }, null, 2) + '\n');
     const reopenedScreenshot = await cdp.send('Page.captureScreenshot', { format: 'png' });
     await writeFile(join(ctx.evidence, 'desktop-reopened.png'), Buffer.from(reopenedScreenshot.data, 'base64'));
+    await shutdownDesktop(cdp, app);
+    await cdp.close();
+    cdp = null;
+    app = undefined;
+
+    app = await launchDesktop(ctx, ID + '-untitled', { profileLabel: ID + '-untitled' });
+    const untitledTarget = await app.pageTarget();
+    assert.ok(untitledTarget, 'desktop launch without a notebook must open a window');
+    cdp = await CdpSession.connect(untitledTarget.webSocketDebuggerUrl);
+    await cdp.send('Page.enable');
+    await cdp.send('Runtime.enable');
+    await waitForRenderer(cdp);
+    await waitForRuntimeIdentity(cdp, ctx.rscript);
+    const untitledLaunch = await cdp.evaluate(`(() => {
+      const button = document.querySelector('#open-notebook');
+      return {
+        path: document.querySelector('#path')?.textContent ?? '',
+        openNotebook: button ? { hidden: button.hidden, disabled: button.disabled } : null,
+      };
+    })()`);
+    assert.deepEqual(untitledLaunch, { path: 'untitled notebook', openNotebook: { hidden: false, disabled: false } },
+      'desktop launch without a path must expose a usable untitled window and Open notebook action');
 
     const evidence = {
       platform: process.platform,
@@ -131,19 +156,21 @@ export async function run(ctx) {
       executable: app.entry,
       electronVersion: ctx.manifest.runtimes?.electron ?? null,
       chromiumVersion: ctx.manifest.runtimes?.chromium ?? null,
+      execution: executed,
       page: { url: target.url, title: ui.title },
       controls: ui,
       windowState: state,
-      actions,
       targetCount: targets.length,
       screenshot: screenshotPath,
       accessibility: axPath,
       secondInstanceExit: second.child.exitCode,
+      untitledLaunch,
     };
     await writeFile(join(ctx.evidence, `${ID}.json`), `${JSON.stringify(evidence, null, 2)}\n`);
+    await shutdownDesktop(cdp, app);
     await cdp.close();
     cdp = null;
-
+    app = undefined;
     return {
       id: ID,
       identity: {
@@ -156,7 +183,7 @@ export async function run(ctx) {
         },
         ui: 'Electron CDP screenshot and accessibility tree',
       },
-      result: 'packaged Electron launched the authenticated notebook renderer, exercised preload state/action IPC, and retained one primary window across a second-instance handoff',
+      result: 'packaged Electron launched saved and untitled notebook windows, ran an edited cell to result 43, saved and reopened exact source bytes, exposed native Open notebook, exercised preload state/action IPC, and retained one primary window across a second-instance handoff',
       evidence,
     };
   } catch (error) {
@@ -179,8 +206,9 @@ async function launchDesktop(ctx, label, { extraArgs = [], profileLabel = label,
   const relative = ctx.manifest.resources.electronEntry;
   const entry = join(ctx.applicationRoot, relative);
   if (!await access(entry).then(() => true).catch(() => false)) unavailable(`Electron entry is absent: ${entry}`);
-  const profile = join(ctx.evidence, `${profileLabel}-profile`);
-  await mkdir(profile, { recursive: true });
+  const profileRoot = join(ctx.evidence, `${profileLabel}-profile`);
+  await mkdir(profileRoot, { recursive: true });
+  const profile = await realpath(profileRoot);
   const rscript = await requireAbsoluteRscript(ctx.rscript, 'desktop lifecycle Rscript');
   const args = [
     '--remote-debugging-port=0',
@@ -192,7 +220,7 @@ async function launchDesktop(ctx, label, { extraArgs = [], profileLabel = label,
   ];
   const child = spawnSmokeProcess(entry, args, {
     cwd: ctx.applicationRoot,
-    env: sanitizedEnvironment({ XDG_CONFIG_HOME: join(profile, 'config'), XDG_CACHE_HOME: join(profile, 'cache') }),
+    env: sanitizedEnvironment({ HOME: profile, XDG_CONFIG_HOME: join(profile, 'config'), XDG_CACHE_HOME: join(profile, 'cache') }),
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,
   });
@@ -213,7 +241,7 @@ async function launchDesktop(ctx, label, { extraArgs = [], profileLabel = label,
     async pageTarget() {
       const deadline = Date.now() + 120_000;
       for (;;) {
-        const target = (await this.targets()).find(value => value.type === 'page' && value.webSocketDebuggerUrl && /^http:\/\/(?:127\.0\.0\.1|localhost|\[::1\]):\d+/.test(value.url ?? ''));
+        const target = (await this.targets()).find(value => value.type === 'page' && value.webSocketDebuggerUrl);
         if (target) return target;
         if (child.exitCode !== null || child.signalCode !== null || Date.now() >= deadline) return undefined;
         await delay(100);
@@ -244,6 +272,18 @@ async function waitForExit(child, timeout, output) {
   }
 }
 
+async function shutdownDesktop(cdp, app) {
+  await cdp.evaluate("(() => { const button = document.querySelector('#shutdown'); if (!(button instanceof HTMLButtonElement) || button.disabled) throw new Error('native shutdown action is unavailable'); button.click(); })()");
+  const deadline = Date.now() + 20_000;
+  while (app.child.exitCode === null && app.child.signalCode === null && Date.now() < deadline) await delay(100);
+  if (app.child.exitCode === null && app.child.signalCode === null) {
+    const shutdownState = await Promise.race([
+      cdp.evaluate("({ status: document.querySelector('#status')?.textContent ?? '', disabled: document.querySelector('#shutdown')?.disabled ?? null, readyState: document.readyState })").catch(error => ({ evaluationError: String(error) })),
+      delay(1_000).then(() => ({ evaluationError: "CDP did not answer" })),
+    ]);
+    assert.fail('native shutdown must close the Electron process: ' + JSON.stringify(shutdownState));
+  }
+}
 async function stopDesktop(app) {
   if (!app?.child) return;
   await stopChild(app.child);

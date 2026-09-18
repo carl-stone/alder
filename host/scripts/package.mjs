@@ -35,6 +35,7 @@ const { readApplicationManifest } = await tsImport('../src/resources.ts', { pare
 const sourceManifest = await findManifest(application);
 const applicationRoot = dirname(dirname(sourceManifest));
 const manifest = await readApplicationManifest(applicationRoot);
+if (manifest.rQualificationMode !== 'dual-r') throw new Error('release packaging rejects development-single-r manifests');
 const target = {
   platform: values['target-platform'] ?? process.platform,
   arch: values['target-arch'] ?? process.arch,
@@ -84,6 +85,7 @@ const releaseManifest = {
   engineProtocol: manifest.engineProtocol,
   target,
   rVersionRange: manifest.rVersionRange,
+  rQualificationMode: manifest.rQualificationMode,
   qualifiedRPatchVersions: manifest.qualifiedRPatchVersions,
   rBuildVersion: manifest.rBuildVersion,
   runtimes: manifest.runtimes,

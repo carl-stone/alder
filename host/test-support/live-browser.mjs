@@ -103,11 +103,12 @@ export async function visiblePageState(browser) {
 }
 
 async function replaceFocusedEditor(browser, text) {
+  const primaryModifier = process.platform === 'darwin' ? 4 : 2;
   await browser.send('Input.dispatchKeyEvent', {
-    type: 'keyDown', key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, modifiers: 2,
+    type: 'keyDown', key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, modifiers: primaryModifier,
   });
   await browser.send('Input.dispatchKeyEvent', {
-    type: 'keyUp', key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, modifiers: 2,
+    type: 'keyUp', key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, modifiers: primaryModifier,
   });
   await browser.send('Input.insertText', { text });
 }

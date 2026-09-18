@@ -768,7 +768,7 @@
         "needsCompilation": true,
         "systemRequirements": null
       },
-      "SourceArchive": "https://cloud.r-project.org/src/contrib/languageserver_0.3.18.tar.gz",
+      "SourceArchive": "https://cloud.r-project.org/src/contrib/Archive/languageserver/languageserver_0.3.18.tar.gz",
       "SourceSHA256": "747fdeaa4474e9424189544ce84622d146ab0cc09eaf6667000d3c8d88f079d9",
       "SourceBytes": 112666
     },

@@ -21179,12 +21179,14 @@ var sessionIdentitySchema = external_exports.object({ sessionKey: idSchema, cano
 var sessionRegistryMetadataSchema = external_exports.object({ state: external_exports.enum(["starting", "ready", "stopping"]), pid: positiveIntegerSchema, processNonce: idSchema, continuityProof: idSchema, startIdentity: idSchema, canonicalPath: pathSchema.nullable(), origin: boundedUtf8StringSchema(2048, true), epoch: idSchema, token: external_exports.string().regex(/^[0-9a-f]{64}$/), protocol: external_exports.literal(HOST_PROTOCOL), address: external_exports.object({ host: boundedUtf8StringSchema(256, true), port: external_exports.number().int().min(0).max(65535).safe(), origin: boundedUtf8StringSchema(2048, true), browserOrigin: boundedUtf8StringSchema(2048, true) }).strict().optional() }).strict();
 var sessionLeaseSchema = external_exports.object({ leaseId: idSchema, clientId: idSchema, nextCommandSequence: positiveIntegerSchema, epoch: idSchema }).strict();
 var attachLeaseRequestSchema = external_exports.object({ action: external_exports.literal("attach") }).strict();
-var leaseActionRequestSchema = external_exports.object({ action: external_exports.enum(["heartbeat", "release"]), leaseId: idSchema }).strict();
+var leaseActionRequestSchema = external_exports.object({ action: external_exports.enum(["heartbeat", "release"]), leaseId: idSchema, disposition: external_exports.enum(["normal", "discard"]).optional() }).strict().superRefine((value, context) => {
+  if (value.action === "heartbeat" && value.disposition !== void 0) context.addIssue({ code: "custom", path: ["disposition"], message: "heartbeat cannot have a release disposition" });
+});
 var ticketMintRequestSchema = external_exports.object({ origin: boundedUtf8StringSchema(2048, true) }).strict();
 var ticketMintResponseSchema = external_exports.object({ ticket: idSchema, expiresAt: boundedUtf8StringSchema(256, true) }).strict();
 var ticketExchangeRequestSchema = external_exports.object({ ticket: idSchema }).strict();
 var ticketExchangeResponseSchema = external_exports.object({ leaseId: idSchema, clientId: idSchema, nextCommandSequence: positiveIntegerSchema, epoch: idSchema, continuityProof: idSchema, csrf: idSchema, recoveryKey: external_exports.string().regex(/^[A-Za-z0-9_-]{43}$/).optional(), recoveryKeyId: external_exports.string().regex(/^[A-Za-z0-9_-]{43}$/).optional() }).strict();
-var hostIdentitySchema = external_exports.object({ protocol: external_exports.literal(HOST_PROTOCOL), epoch: idSchema, processNonce: idSchema, continuityProof: idSchema, sessionKey: idSchema, canonicalPath: pathSchema.nullable(), capabilities: external_exports.array(boundedUtf8StringSchema(256, true)).max(MAX_PROTOCOL_COLLECTION_ITEMS), origin: boundedUtf8StringSchema(2048, true), browserOrigin: boundedUtf8StringSchema(2048, true), address: external_exports.object({ host: boundedUtf8StringSchema(256, true), port: external_exports.number().int().min(0).max(65535).safe(), origin: boundedUtf8StringSchema(2048, true), browserOrigin: boundedUtf8StringSchema(2048, true) }).strict().optional(), documentReady: external_exports.boolean(), configuration: hostConfigurationSchema }).strict();
+var hostIdentitySchema = external_exports.object({ protocol: external_exports.literal(HOST_PROTOCOL), epoch: idSchema, processNonce: idSchema, continuityProof: idSchema, sessionKey: idSchema, canonicalPath: pathSchema.nullable(), capabilities: external_exports.array(boundedUtf8StringSchema(256, true)).max(MAX_PROTOCOL_COLLECTION_ITEMS), origin: boundedUtf8StringSchema(2048, true), browserOrigin: boundedUtf8StringSchema(2048, true), address: external_exports.object({ host: boundedUtf8StringSchema(256, true), port: external_exports.number().int().min(0).max(65535).safe(), origin: boundedUtf8StringSchema(2048, true), browserOrigin: boundedUtf8StringSchema(2048, true) }).strict().optional(), leaseId: idSchema.optional(), clientId: idSchema.optional(), nextCommandSequence: positiveIntegerSchema.optional(), documentReady: external_exports.boolean(), configuration: hostConfigurationSchema }).strict();
 var sessionConnectionSchema = external_exports.object({ sessionKey: idSchema, canonicalPath: pathSchema.nullable(), origin: boundedUtf8StringSchema(2048, true), browserOrigin: boundedUtf8StringSchema(2048, true), epoch: idSchema, processNonce: idSchema, continuityProof: idSchema, leaseId: idSchema, clientId: idSchema, nextCommandSequence: positiveIntegerSchema, capabilities: external_exports.array(boundedUtf8StringSchema(256, true)).max(MAX_PROTOCOL_COLLECTION_ITEMS) }).strict();
 var windowActionSchema = external_exports.enum(["new", "open", "save", "save-as", "publish", "run-cell", "run-all", "run-stale", "interrupt", "restart", "settings", "select-r", "close"]);
 var windowActionMessageSchema = external_exports.object({ action: windowActionSchema }).strict();
@@ -21829,6 +21831,17 @@ var BrowserTransport = class {
       this.flush();
     });
   }
+  async release(disposition = "normal") {
+    const response = await fetch(notebookUrl("/api/lease"), {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json", "X-Alder-CSRF": this.csrf },
+      body: JSON.stringify({ action: "release", leaseId: this.leaseId, disposition })
+    });
+    this.assertResponseContinuity(response);
+    if (!response.ok) throw new BrowserTransportError("lease_release_failed", "browser lease release failed (" + response.status + ")");
+    this.close();
+  }
   close() {
     this.stopped = true;
     this.generation += 1;
@@ -22185,8 +22198,16 @@ var BrowserNotebookClient = class {
     await this.activateStartupIfSafe();
     return this.documentValue;
   }
+  async discardAndClose() {
+    await this.discardRecovery();
+    await this.transport.release("discard");
+    this.finishClose();
+  }
   close() {
     this.transport.close();
+    this.finishClose();
+  }
+  finishClose() {
     this.rejectOperationWaiters(new BrowserTransportError("transport_closed", "browser transport is closed"));
     this.rejectSourceCommitWaiters(new BrowserTransportError("transport_closed", "browser transport is closed"));
     this.operations.clear();
@@ -22382,7 +22403,7 @@ var BrowserNotebookClient = class {
   async shutdown() {
     const document2 = this.requireDocument();
     const expectedClientIds = document2.snapshot.activeClientIds ?? [this.transport.id];
-    return this.dispatchSettled({ type: "shutdown", ...this.base("shutdown"), expectedClientIds });
+    return this.dispatch({ type: "shutdown", ...this.base("shutdown"), expectedClientIds });
   }
   async deleteCell(key) {
     return this.withSourceLock(async () => {
@@ -26216,13 +26237,20 @@ ${jupyterTrace.map((line, index) => `${index + 1}. ${line}`).join("\n")}` : ""
       }).catch((error61) => this.showError(error61));
     });
   }
-  async saveNotebook() {
+  async saveNotebook(mode = "explicit") {
     if (this.autosaveTimer !== null) window.clearTimeout(this.autosaveTimer);
     this.autosaveTimer = null;
+    const desktop = globalThis.alderDesktop;
+    if (mode === "autosave" && !this.documentValue?.snapshot.path) return void 0;
+    const destination = !this.documentValue?.snapshot.path && desktop ? await desktop.chooseSavePath() : void 0;
+    if (destination === null) return void 0;
     if (nested(this.documentValue?.snapshot.config, ["format", "on_save"]) === true) {
       await this.client.formatCells();
     }
-    return this.client.save();
+    return destination === void 0 ? this.client.save() : this.client.saveAs(destination);
+  }
+  async saveForDesktop() {
+    return await this.saveNotebook("explicit") === void 0 ? "cancelled" : "saved";
   }
   async repaginateTables(limit) {
     const requests = [];
@@ -26246,11 +26274,19 @@ ${jupyterTrace.map((line, index) => `${index + 1}. ${line}`).join("\n")}` : ""
     const pending = this.documentValue?.pendingSource();
     if ((this.documentValue?.snapshot.changed || pending?.changes.length) && !window.confirm("This notebook has unsaved changes. Shut down without saving?")) return;
     await this.action(async () => {
-      await this.client.shutdown();
+      const desktop = globalThis.alderDesktop;
       this.hostClosed = true;
       this.cancelEditTimers();
       if (this.autosaveTimer !== null) window.clearTimeout(this.autosaveTimer);
       this.autosaveTimer = null;
+      if (desktop) {
+        await this.client.discardAndClose();
+        this.transportError = null;
+        this.editorHelpError = null;
+        await desktop.hostShutdown();
+        return;
+      }
+      await this.client.shutdown();
       this.client.close();
       this.transportError = null;
       this.editorHelpError = null;
@@ -26424,7 +26460,7 @@ ${jupyterTrace.map((line, index) => `${index + 1}. ${line}`).join("\n")}` : ""
     if (this.appView || this.documentValue?.snapshot.config.autosave !== true || this.documentValue.snapshot.changed !== true) return;
     this.autosaveTimer = window.setTimeout(() => {
       this.autosaveTimer = null;
-      void this.saveNotebook().catch((error61) => this.showError(error61));
+      void this.saveNotebook("autosave").catch((error61) => this.showError(error61));
     }, 2e3);
   }
   captureSelection(key) {
@@ -27149,9 +27185,25 @@ neutralizeUnsafeNotebookLinks(document);
 function bindDesktopActions(next) {
   const desktop = globalThis.alderDesktop;
   if (!desktop) return;
+  const openNotebook = document.getElementById("open-notebook");
+  if (openNotebook instanceof HTMLButtonElement) {
+    openNotebook.hidden = false;
+    openNotebook.addEventListener("click", () => {
+      void desktop.openNotebook().catch((error61) => view?.showError(error61));
+    });
+  }
   desktopUnsubscribe = desktop.onWindowAction((action) => {
     let operation;
-    if (action === "save-as") {
+    if (action === "save") {
+      operation = view?.saveForDesktop().then(async (outcome) => {
+        if (outcome === "cancelled") await desktop.saveCancelled();
+      });
+    } else if (action === "close") {
+      operation = (async () => {
+        await next.discardAndClose();
+        await desktop.hostShutdown();
+      })();
+    } else if (action === "save-as") {
       operation = desktop.chooseSavePath().then((path) => path === null ? void 0 : next.saveAs(path));
     } else if (action === "run-all") {
       operation = view?.runExplicit(() => next.runAll("all"));
@@ -27247,6 +27299,7 @@ async function start() {
   bindDesktopActions(next);
   window.__alderHost = { client: next, view };
   await next.connect();
+  await globalThis.alderDesktop?.rendererReady();
 }
 void start().catch((error61) => view?.showError(error61));
 function recoveryIdentity() {

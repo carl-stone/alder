@@ -628,7 +628,7 @@ async function assertProcessIdentities(harness, applicationRoot, manifest) {
     && /^R(?:\.exe)?$/i.test(basename(record.executable)));
   assert.ok(rProcesses.length >= 1, 'process tree must contain an executable from the selected R installation');
   for (const processRecord of rProcesses) {
-    assert.equal(processRecord.executable, rExecutable, 'every R process must use the selected R installation');
+    assert.equal(await realpath(processRecord.executable), rExecutable, 'every R process must use the selected R installation');
   }
   const ark = arkMatches[0];
   return {
@@ -742,7 +742,10 @@ async function verifyManifest(base, manifest, manifestPath) {
   }
   const manifestRelative = safeManifestPath(relative(root, resolve(manifestPath)).split(sep).join('/'), 'manifest path');
   assert.equal(declared.has(manifestRelative) || declaredSymlinks.has(manifestRelative), false, 'manifest must not inventory itself');
-
+  const outerSignature = manifest.kind === 'desktop' && manifest.target?.platform === 'darwin'
+    ? await lstat(join(root, '_CodeSignature', 'CodeResources')).catch(() => null)
+    : null;
+  const signedOuterEntry = outerSignature?.isFile() === true && !outerSignature.isSymbolicLink();
   const verifiedResources = {};
   for (const [name, kind, nullable] of MANIFEST_RESOURCES) {
     const value = manifest.resources[name];
@@ -757,7 +760,9 @@ async function verifyManifest(base, manifest, manifestPath) {
     assert.equal(isWithin(physicalRoot, physical), true, 'manifest resource ' + name + ' symlink must stay inside application');
     const info = await stat(physical);
     assert.equal(kind === 'directory' ? info.isDirectory() : info.isFile(), true, 'manifest resource ' + name + ' has the wrong type');
-    if (kind === 'file') assert.equal(declared.has(pathValue), true, 'manifest resource ' + name + ' must be inventoried');
+    if (kind === 'file' && !(signedOuterEntry && name === 'electronEntry')) {
+      assert.equal(declared.has(pathValue), true, 'manifest resource ' + name + ' must be inventoried');
+    }
     verifiedResources[name] = physical;
   }
   return verifiedResources;

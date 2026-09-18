@@ -102,6 +102,8 @@ export interface AcquireNotebookSessionOptions {
   readonly path: string | null;
   /** Explicit local recovery identity; only valid when path is null. */
   readonly untitledRecoveryId?: string;
+  /** Existing writable directory used as the project root for a new untitled notebook. */
+  readonly untitledProjectDirectory?: string;
   readonly resources: SessionResources;
   readonly rscript?: string;
   readonly executionMode?: "automatic" | "lazy";
@@ -376,15 +378,17 @@ const launches = new Map<string, Promise<void>>();
 export async function acquireNotebookSession(options: AcquireNotebookSessionOptions): Promise<SessionConnection> {
   const hasExternalAuth = validateExternalAuthOptions(options);
   const canonicalPath = await canonicalizePath(options.path);
-  if (canonicalPath !== null && options.untitledRecoveryId !== undefined) {
-    throw new SessionAuthError("untitled recovery identity cannot be combined with a notebook path");
+  if (canonicalPath !== null && (options.untitledRecoveryId !== undefined || options.untitledProjectDirectory !== undefined)) {
+    throw new SessionAuthError("untitled options cannot be combined with a notebook path");
   }
   const processSupervisorExecutable = options.resources?.processSupervisorExecutable;
   const selectedRecovery = canonicalPath === null && options.untitledRecoveryId !== undefined
     ? await selectUntitledRecoveryDescriptor(options.untitledRecoveryId, undefined, { processSupervisorExecutable })
     : undefined;
   const sessionKey = canonicalPath === null ? selectedRecovery?.id ?? randomUUID() : await sessionKeyFor(canonicalPath);
-  const projectDirectory = canonicalPath === null ? selectedRecovery?.projectDirectory ?? resolve(process.cwd()) : undefined;
+  const projectDirectory = canonicalPath === null
+    ? selectedRecovery?.projectDirectory ?? resolve(options.untitledProjectDirectory ?? process.cwd())
+    : undefined;
   if (projectDirectory !== undefined) await registerUntitledRecoveryDescriptor(sessionKey, projectDirectory, undefined, { processSupervisorExecutable });
   const timeoutMs = options.startupTimeoutMs ?? STARTUP_TIMEOUT_MS;
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > STARTUP_TIMEOUT_MS) {
@@ -394,6 +398,19 @@ export async function acquireNotebookSession(options: AcquireNotebookSessionOpti
   const deadline = Date.now() + timeoutMs;
 
   let metadata = await readRegistry(runtime.registryPath(sessionKey));
+  while (metadata?.state === "stopping") {
+    const alive = await ownerLiveness(metadata);
+    if (alive === false) break;
+    if (Date.now() >= deadline) {
+      throw new SessionUnavailableError("notebook host did not finish stopping before the startup deadline", {
+        sessionKey,
+        registryPath: runtime.registryPath(sessionKey),
+        lockPath: runtime.lockPath(sessionKey),
+      });
+    }
+    await delay(Math.min(POLL_INTERVAL_MS, Math.max(1, deadline - Date.now())));
+    metadata = await readRegistry(runtime.registryPath(sessionKey));
+  }
   if (metadata?.state === "ready") {
     if (hasExternalAuth) {
       const ownerState = await ownerLiveness(metadata);
@@ -954,13 +971,13 @@ function createConnection(
     connection.nextCommandSequence = nextCommandSequence;
   };
   let releasePromise: Promise<void> | undefined;
-  const release = (): Promise<void> => {
+  const release = (disposition: "normal" | "discard" = "normal"): Promise<void> => {
     if (releasePromise !== undefined) return releasePromise;
     releasePromise = (async () => {
       await request("/api/lease", {
         method: "POST",
         headers: authenticatedJsonHeaders(),
-        body: JSON.stringify(leaseActionRequestSchema.parse({ action: "release", leaseId: lease.leaseId })),
+        body: JSON.stringify(leaseActionRequestSchema.parse({ action: "release", leaseId: lease.leaseId, disposition })),
       }).catch(() => undefined);
       released = true;
     })();
@@ -982,9 +999,9 @@ function createConnection(
     capabilities: [...capabilities],
     request,
     heartbeat,
-    release: async () => {
+    release: async (disposition = "normal") => {
       clearInterval(interval);
-      await release();
+      await release(disposition);
     },
   };
   return connection;

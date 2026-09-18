@@ -1295,7 +1295,9 @@ export const sessionLeaseSchema = z.object({ leaseId: idSchema, clientId: idSche
 export type SessionLease = z.infer<typeof sessionLeaseSchema>;
 export const attachLeaseRequestSchema = z.object({ action: z.literal("attach") }).strict();
 export type AttachLeaseRequest = z.infer<typeof attachLeaseRequestSchema>;
-export const leaseActionRequestSchema = z.object({ action: z.enum(["heartbeat", "release"]), leaseId: idSchema }).strict();
+export const leaseActionRequestSchema = z.object({ action: z.enum(["heartbeat", "release"]), leaseId: idSchema, disposition: z.enum(["normal", "discard"]).optional() }).strict().superRefine((value, context) => {
+  if (value.action === "heartbeat" && value.disposition !== undefined) context.addIssue({ code: "custom", path: ["disposition"], message: "heartbeat cannot have a release disposition" });
+});
 export type LeaseActionRequest = z.infer<typeof leaseActionRequestSchema>;
 export const ticketMintRequestSchema = z.object({ origin: boundedUtf8StringSchema(2_048, true) }).strict();
 export type TicketMintRequest = z.infer<typeof ticketMintRequestSchema>;
@@ -1305,11 +1307,12 @@ export const ticketExchangeRequestSchema = z.object({ ticket: idSchema }).strict
 export type TicketExchangeRequest = z.infer<typeof ticketExchangeRequestSchema>;
 export const ticketExchangeResponseSchema = z.object({ leaseId: idSchema, clientId: idSchema, nextCommandSequence: positiveIntegerSchema, epoch: idSchema, continuityProof: idSchema, csrf: idSchema, recoveryKey: z.string().regex(/^[A-Za-z0-9_-]{43}$/).optional(), recoveryKeyId: z.string().regex(/^[A-Za-z0-9_-]{43}$/).optional() }).strict();
 export type TicketExchangeResponse = z.infer<typeof ticketExchangeResponseSchema>;
-export const hostIdentitySchema = z.object({ protocol: z.literal(HOST_PROTOCOL), epoch: idSchema, processNonce: idSchema, continuityProof: idSchema, sessionKey: idSchema, canonicalPath: pathSchema.nullable(), capabilities: z.array(boundedUtf8StringSchema(256, true)).max(MAX_PROTOCOL_COLLECTION_ITEMS), origin: boundedUtf8StringSchema(2_048, true), browserOrigin: boundedUtf8StringSchema(2_048, true), address: z.object({ host: boundedUtf8StringSchema(256, true), port: z.number().int().min(0).max(65_535).safe(), origin: boundedUtf8StringSchema(2_048, true), browserOrigin: boundedUtf8StringSchema(2_048, true) }).strict().optional(), documentReady: z.boolean(), configuration: hostConfigurationSchema }).strict();
+export const hostIdentitySchema = z.object({ protocol: z.literal(HOST_PROTOCOL), epoch: idSchema, processNonce: idSchema, continuityProof: idSchema, sessionKey: idSchema, canonicalPath: pathSchema.nullable(), capabilities: z.array(boundedUtf8StringSchema(256, true)).max(MAX_PROTOCOL_COLLECTION_ITEMS), origin: boundedUtf8StringSchema(2_048, true), browserOrigin: boundedUtf8StringSchema(2_048, true), address: z.object({ host: boundedUtf8StringSchema(256, true), port: z.number().int().min(0).max(65_535).safe(), origin: boundedUtf8StringSchema(2_048, true), browserOrigin: boundedUtf8StringSchema(2_048, true) }).strict().optional(), leaseId: idSchema.optional(), clientId: idSchema.optional(), nextCommandSequence: positiveIntegerSchema.optional(), documentReady: z.boolean(), configuration: hostConfigurationSchema }).strict();
 export type HostIdentity = z.infer<typeof hostIdentitySchema>;
 export type SessionRequest = (path: string, init?: RequestInit) => Promise<Response>;
 export interface SessionConnectionData { sessionKey: string; canonicalPath: string | null; origin: string; browserOrigin: string; epoch: string; processNonce: string; continuityProof: string; leaseId: string; clientId: string; nextCommandSequence: number; capabilities: string[]; }
-export interface SessionConnection extends SessionConnectionData { request: SessionRequest; heartbeat(): Promise<void>; release(): Promise<void>; }
+export type SessionReleaseDisposition = "normal" | "discard";
+export interface SessionConnection extends SessionConnectionData { request: SessionRequest; heartbeat(): Promise<void>; release(disposition?: SessionReleaseDisposition): Promise<void>; }
 export const sessionConnectionSchema = z.object({ sessionKey: idSchema, canonicalPath: pathSchema.nullable(), origin: boundedUtf8StringSchema(2_048, true), browserOrigin: boundedUtf8StringSchema(2_048, true), epoch: idSchema, processNonce: idSchema, continuityProof: idSchema, leaseId: idSchema, clientId: idSchema, nextCommandSequence: positiveIntegerSchema, capabilities: z.array(boundedUtf8StringSchema(256, true)).max(MAX_PROTOCOL_COLLECTION_ITEMS) }).strict();
 
 export const windowActionSchema = z.enum(["new", "open", "save", "save-as", "publish", "run-cell", "run-all", "run-stale", "interrupt", "restart", "settings", "select-r", "close"]);
@@ -1317,7 +1320,7 @@ export type WindowAction = z.infer<typeof windowActionSchema>;
 export const windowActionMessageSchema = z.object({ action: windowActionSchema }).strict();
 export const windowStateSchema = z.object({ path: pathSchema.nullable(), dirty: z.boolean(), platform: boundedUtf8StringSchema(64, true), sessionEpoch: idSchema }).strict();
 export type WindowState = z.infer<typeof windowStateSchema>;
-export interface PreloadApi { openNotebook(): Promise<void>; chooseSavePath(): Promise<string | null>; chooseRscript(): Promise<string | null>; getWindowState(): Promise<WindowState>; onWindowAction(callback: (action: WindowAction) => void): () => void; }
+export interface PreloadApi { openNotebook(): Promise<void>; chooseSavePath(): Promise<string | null>; chooseRscript(): Promise<string | null>; getWindowState(): Promise<WindowState>; hostShutdown(): Promise<void>; saveCancelled(): Promise<void>; rendererReady(): Promise<void>; onWindowAction(callback: (action: WindowAction) => void): () => void; }
 
 export class ProtocolError extends Error { readonly code: string; constructor(code: string, message: string) { super(message); this.name = "ProtocolError"; this.code = code; } }
 export function decodeJsonFrame(input: string | Uint8Array, maxBytes = MAX_FRAME_BYTES): unknown {

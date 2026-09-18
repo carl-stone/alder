@@ -1311,12 +1311,14 @@ export class Engine extends EventEmitter implements EngineAdapter {
   ): RPeer {
     const paths = this.paths!;
     const environment = this.requireEnvironment("analyzer");
+    const peerEnvironment = { ...paths.analyzerEnvironment, ...rEnvironmentVariables(environment, this.options.resources, this.analysisEnvironmentId), ALDER_HOST_ROLE: role };
+    if (process.platform === "darwin") delete (peerEnvironment as Record<string, string>).R_HOME;
     return new RPeer(
       role,
       environment.rscript,
       paths.analyzerScript,
       paths.notebookDirectory,
-      { ...paths.analyzerEnvironment, ...rEnvironmentVariables(environment, this.options.resources, this.analysisEnvironmentId), ALDER_HOST_ROLE: role },
+      peerEnvironment,
       this.options.processScope,
       maxFrameBytes,
       startupTimeoutMs,

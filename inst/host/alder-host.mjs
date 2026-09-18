@@ -71763,12 +71763,14 @@ var sessionIdentitySchema = external_exports.object({ sessionKey: idSchema, cano
 var sessionRegistryMetadataSchema = external_exports.object({ state: external_exports.enum(["starting", "ready", "stopping"]), pid: positiveIntegerSchema, processNonce: idSchema, continuityProof: idSchema, startIdentity: idSchema, canonicalPath: pathSchema.nullable(), origin: boundedUtf8StringSchema(2048, true), epoch: idSchema, token: external_exports.string().regex(/^[0-9a-f]{64}$/), protocol: external_exports.literal(HOST_PROTOCOL), address: external_exports.object({ host: boundedUtf8StringSchema(256, true), port: external_exports.number().int().min(0).max(65535).safe(), origin: boundedUtf8StringSchema(2048, true), browserOrigin: boundedUtf8StringSchema(2048, true) }).strict().optional() }).strict();
 var sessionLeaseSchema = external_exports.object({ leaseId: idSchema, clientId: idSchema, nextCommandSequence: positiveIntegerSchema, epoch: idSchema }).strict();
 var attachLeaseRequestSchema = external_exports.object({ action: external_exports.literal("attach") }).strict();
-var leaseActionRequestSchema = external_exports.object({ action: external_exports.enum(["heartbeat", "release"]), leaseId: idSchema }).strict();
+var leaseActionRequestSchema = external_exports.object({ action: external_exports.enum(["heartbeat", "release"]), leaseId: idSchema, disposition: external_exports.enum(["normal", "discard"]).optional() }).strict().superRefine((value, context) => {
+  if (value.action === "heartbeat" && value.disposition !== void 0) context.addIssue({ code: "custom", path: ["disposition"], message: "heartbeat cannot have a release disposition" });
+});
 var ticketMintRequestSchema = external_exports.object({ origin: boundedUtf8StringSchema(2048, true) }).strict();
 var ticketMintResponseSchema = external_exports.object({ ticket: idSchema, expiresAt: boundedUtf8StringSchema(256, true) }).strict();
 var ticketExchangeRequestSchema = external_exports.object({ ticket: idSchema }).strict();
 var ticketExchangeResponseSchema = external_exports.object({ leaseId: idSchema, clientId: idSchema, nextCommandSequence: positiveIntegerSchema, epoch: idSchema, continuityProof: idSchema, csrf: idSchema, recoveryKey: external_exports.string().regex(/^[A-Za-z0-9_-]{43}$/).optional(), recoveryKeyId: external_exports.string().regex(/^[A-Za-z0-9_-]{43}$/).optional() }).strict();
-var hostIdentitySchema = external_exports.object({ protocol: external_exports.literal(HOST_PROTOCOL), epoch: idSchema, processNonce: idSchema, continuityProof: idSchema, sessionKey: idSchema, canonicalPath: pathSchema.nullable(), capabilities: external_exports.array(boundedUtf8StringSchema(256, true)).max(MAX_PROTOCOL_COLLECTION_ITEMS), origin: boundedUtf8StringSchema(2048, true), browserOrigin: boundedUtf8StringSchema(2048, true), address: external_exports.object({ host: boundedUtf8StringSchema(256, true), port: external_exports.number().int().min(0).max(65535).safe(), origin: boundedUtf8StringSchema(2048, true), browserOrigin: boundedUtf8StringSchema(2048, true) }).strict().optional(), documentReady: external_exports.boolean(), configuration: hostConfigurationSchema }).strict();
+var hostIdentitySchema = external_exports.object({ protocol: external_exports.literal(HOST_PROTOCOL), epoch: idSchema, processNonce: idSchema, continuityProof: idSchema, sessionKey: idSchema, canonicalPath: pathSchema.nullable(), capabilities: external_exports.array(boundedUtf8StringSchema(256, true)).max(MAX_PROTOCOL_COLLECTION_ITEMS), origin: boundedUtf8StringSchema(2048, true), browserOrigin: boundedUtf8StringSchema(2048, true), address: external_exports.object({ host: boundedUtf8StringSchema(256, true), port: external_exports.number().int().min(0).max(65535).safe(), origin: boundedUtf8StringSchema(2048, true), browserOrigin: boundedUtf8StringSchema(2048, true) }).strict().optional(), leaseId: idSchema.optional(), clientId: idSchema.optional(), nextCommandSequence: positiveIntegerSchema.optional(), documentReady: external_exports.boolean(), configuration: hostConfigurationSchema }).strict();
 var sessionConnectionSchema = external_exports.object({ sessionKey: idSchema, canonicalPath: pathSchema.nullable(), origin: boundedUtf8StringSchema(2048, true), browserOrigin: boundedUtf8StringSchema(2048, true), epoch: idSchema, processNonce: idSchema, continuityProof: idSchema, leaseId: idSchema, clientId: idSchema, nextCommandSequence: positiveIntegerSchema, capabilities: external_exports.array(boundedUtf8StringSchema(256, true)).max(MAX_PROTOCOL_COLLECTION_ITEMS) }).strict();
 var windowActionSchema = external_exports.enum(["new", "open", "save", "save-as", "publish", "run-cell", "run-all", "run-stale", "interrupt", "restart", "settings", "select-r", "close"]);
 var windowActionMessageSchema = external_exports.object({ action: windowActionSchema }).strict();
@@ -89569,6 +89571,7 @@ function validateApplicationManifest(value) {
     "engineProtocol",
     "target",
     "rVersionRange",
+    "rQualificationMode",
     "qualifiedRPatchVersions",
     "rBuildVersion",
     "resources",
@@ -89589,12 +89592,17 @@ function validateApplicationManifest(value) {
   const platform = oneOf(target.platform, ["linux", "darwin", "win32"], "manifest.target.platform");
   const arch = nonempty(target.arch, "manifest.target.arch");
   if (record3.rVersionRange !== R_VERSION_RANGE) throw invalid2(`manifest.rVersionRange must be ${R_VERSION_RANGE}`);
+  const rQualificationMode = oneOf(record3.rQualificationMode, ["dual-r", "development-single-r"], "manifest.rQualificationMode");
   const qualifiedRPatchVersions = stringArray(record3.qualifiedRPatchVersions, "manifest.qualifiedRPatchVersions");
   if (new Set(qualifiedRPatchVersions).size !== qualifiedRPatchVersions.length) {
     throw invalid2("manifest.qualifiedRPatchVersions must not contain duplicates");
   }
-  if (!qualifiedRPatchVersions.includes("4.6.0") || !qualifiedRPatchVersions.includes("4.6.1")) {
-    throw invalid2("manifest.qualifiedRPatchVersions must include both 4.6.0 and 4.6.1");
+  if (rQualificationMode === "dual-r") {
+    if (!qualifiedRPatchVersions.includes("4.6.0") || !qualifiedRPatchVersions.includes("4.6.1")) {
+      throw invalid2("dual-r manifest.qualifiedRPatchVersions must include both 4.6.0 and 4.6.1");
+    }
+  } else if (qualifiedRPatchVersions.length !== 1 || qualifiedRPatchVersions[0] !== "4.6.1") {
+    throw invalid2("development-single-r manifest.qualifiedRPatchVersions must contain exactly 4.6.1");
   }
   const rBuildVersion = nonempty(record3.rBuildVersion, "manifest.rBuildVersion");
   if (rBuildVersion !== HELPER_BUILD_VERSION) {
@@ -89626,6 +89634,7 @@ function validateApplicationManifest(value) {
     engineProtocol: ENGINE_PROTOCOL,
     target: { platform, arch },
     rVersionRange: R_VERSION_RANGE,
+    rQualificationMode,
     qualifiedRPatchVersions,
     rBuildVersion,
     resources: resources2,
@@ -90151,8 +90160,13 @@ async function selectRscript(requested, desktop, processSupervisorExecutable) {
     if (saved !== null) return resolveSelectedPath(saved, "saved Rscript");
   }
   const discovered = await findOnPath("Rscript");
-  if (discovered === null) throw notFound("Rscript was not found on PATH");
-  return discovered;
+  if (discovered !== null) return discovered;
+  if (desktop && process.platform === "darwin") {
+    const framework = await resolveExecutableCandidate("/Library/Frameworks/R.framework/Resources/bin/Rscript");
+    if (framework !== null) return framework;
+    throw notFound("Rscript was not found on PATH or at the standard macOS R framework location");
+  }
+  throw notFound("Rscript was not found on PATH");
 }
 async function savedRscript(processSupervisorExecutable) {
   const paths = envPaths("alder", { suffix: "" });
@@ -90180,14 +90194,19 @@ async function findOnPath(command) {
   for (const directory of pathValue2.split(delimiter).filter(Boolean)) {
     const candidates = process.platform === "win32" ? [join7(directory, command), join7(directory, `${command}.exe`), join7(directory, `${command}.cmd`)] : [join7(directory, command)];
     for (const candidate of candidates) {
-      if (!await isExecutable(candidate)) continue;
-      try {
-        return await realpath4(candidate);
-      } catch {
-      }
+      const resolved = await resolveExecutableCandidate(candidate);
+      if (resolved !== null) return resolved;
     }
   }
   return null;
+}
+async function resolveExecutableCandidate(candidate) {
+  if (!await isExecutable(candidate)) return null;
+  try {
+    return await realpath4(candidate);
+  } catch {
+    return null;
+  }
 }
 async function resolveSelectedPath(value, label) {
   if (!value || value.includes("\0")) throw notFound(`${label} is empty or invalid`);
@@ -90257,7 +90276,7 @@ async function validateHelperLoad(environment, manifest) {
     const result = await execFileAsync(environment.rscript, ["--vanilla", "--slave", "-e", script], {
       env: {
         ...withoutRHome(process.env),
-        R_HOME: environment.rHome,
+        ...process.platform === "darwin" ? {} : { R_HOME: environment.rHome },
         R_LIBS: environment.libraryPaths.join(delimiter),
         R_LIBS_SITE: "",
         R_LIBS_USER: "",
@@ -90275,7 +90294,7 @@ async function validateHelperLoad(environment, manifest) {
     const [packageVersion, built] = result.stdout.trim().split("\n");
     const [major, minor] = environment.version.split(".");
     if (packageVersion !== manifest.applicationVersion || !built?.startsWith("R " + major + "." + minor + ".")) {
-      throw new Error("helper package version or Built R ABI does not match the selected runtime");
+      throw new Error(`helper package version or Built R ABI does not match the selected runtime (package ${packageVersion ?? "missing"}, Built ${built ?? "missing"}, expected package ${manifest.applicationVersion} built with R ${major}.${minor}.x)`);
     }
   } catch (error61) {
     throw invalid3(`Alder helper package cannot load under selected R: ${messageOf4(error61)}`);
@@ -92672,12 +92691,14 @@ invisible(${binding})`, [binding]);
   makeRPeer(role, startupTimeoutMs, maxFrameBytes, generation) {
     const paths = this.paths;
     const environment = this.requireEnvironment("analyzer");
+    const peerEnvironment = { ...paths.analyzerEnvironment, ...rEnvironmentVariables(environment, this.options.resources, this.analysisEnvironmentId), ALDER_HOST_ROLE: role };
+    if (process.platform === "darwin") delete peerEnvironment.R_HOME;
     return new RPeer(
       role,
       environment.rscript,
       paths.analyzerScript,
       paths.notebookDirectory,
-      { ...paths.analyzerEnvironment, ...rEnvironmentVariables(environment, this.options.resources, this.analysisEnvironmentId), ALDER_HOST_ROLE: role },
+      peerEnvironment,
       this.options.processScope,
       maxFrameBytes,
       startupTimeoutMs,
@@ -94776,7 +94797,7 @@ function createAlderServer(options) {
   function scheduleShutdown(operationId, clientId) {
     const awaitOperation = options.controller.awaitOperation;
     if (awaitOperation === void 0 || options.onShutdown === void 0) return;
-    queueMicrotask(() => {
+    setImmediate(() => {
       void Promise.resolve().then(() => awaitOperation.call(options.controller, operationId, clientId)).then((operation) => {
         if (operation.status !== "done" || !isPlainObject3(operation.result) || operation.result.closing !== true) return;
         return options.onShutdown?.();
@@ -95000,12 +95021,19 @@ function createAlderServer(options) {
         return;
       }
       if (action !== "heartbeat" && action !== "release") throw new HttpBoundaryError("invalid_request", "lease action must be attach, heartbeat, or release", 400);
-      assertExactFields(body, ["action", "leaseId"], ["action", "leaseId"]);
+      assertExactFields(body, action === "release" ? ["action", "leaseId", "disposition"] : ["action", "leaseId"], ["action", "leaseId"]);
       const resolved = requireLease(request, true);
       if (body.leaseId !== resolved.lease.leaseId) throw authFailure("lease identity does not match request");
       if (action === "release") {
+        const disposition = body.disposition === void 0 ? "normal" : requiredString2(body.disposition, "disposition", 16);
+        if (disposition !== "normal" && disposition !== "discard") throw new HttpBoundaryError("invalid_request", "release disposition must be normal or discard", 400);
         removeLease(resolved.lease.leaseId);
         jsonResponse(response, 200, { released: true });
+        if (disposition === "discard" && leases.size === 0) {
+          setImmediate(() => {
+            void Promise.resolve(options.onLastLeaseDiscard?.()).catch((error61) => logger("error", "discard shutdown callback failed: " + (error61 instanceof Error ? error61.message : "unknown")));
+          });
+        }
       } else {
         resolved.lease.lastSeen = Date.now();
         jsonResponse(response, 200, { leaseId: resolved.lease.leaseId, clientId: resolved.lease.clientId, nextCommandSequence: resolved.lease.nextCommandSequence, epoch: session.epoch });
@@ -95431,6 +95459,7 @@ function createAlderServer(options) {
             const bounded = await responseEnvelope(admission, snapshot);
             requireCurrentLease();
             outbox.send({ type: "commandResult", sequence: command.commandSequence, result: bounded });
+            if (command.type === "shutdown" && admission.accepted) scheduleShutdown(command.operationId, resolved.lease.clientId);
           } catch (error61) {
             sendCurrentError(command.commandSequence, error61);
           } finally {
@@ -115837,7 +115866,7 @@ async function terminateOwnedProcess(child, timeoutMs) {
 function isAbsolutePath(value) {
   return typeof value === "string" && value.length > 0 && (value.startsWith("/") || /^[A-Za-z]:[\\/]/.test(value));
 }
-function trustedRLanguageServerEnvironment(environment, trustedLibraryPaths, trustedResourcesRoot) {
+function trustedRLanguageServerEnvironment(environment, trustedLibraryPaths, trustedResourcesRoot, platform = process.platform) {
   if (!isAbsolutePath(trustedResourcesRoot)) {
     throw new LspClientError("invalid_request", "language server requires an absolute trusted resources root");
   }
@@ -115846,6 +115875,7 @@ function trustedRLanguageServerEnvironment(environment, trustedLibraryPaths, tru
   }
   const trusted = [...trustedLibraryPaths];
   const result = stringEnvironment(environment);
+  if (platform === "darwin") delete result.R_HOME;
   for (const key2 of Object.keys(result)) if (/^R_LIBS(?:_|$)/.test(key2)) delete result[key2];
   result.R_LIBS = trusted.join(delimiter3);
   result.R_LIBS_USER = "";
@@ -116767,13 +116797,13 @@ var launches = /* @__PURE__ */ new Map();
 async function acquireNotebookSession(options) {
   const hasExternalAuth = validateExternalAuthOptions(options);
   const canonicalPath = await canonicalizePath(options.path);
-  if (canonicalPath !== null && options.untitledRecoveryId !== void 0) {
-    throw new SessionAuthError("untitled recovery identity cannot be combined with a notebook path");
+  if (canonicalPath !== null && (options.untitledRecoveryId !== void 0 || options.untitledProjectDirectory !== void 0)) {
+    throw new SessionAuthError("untitled options cannot be combined with a notebook path");
   }
   const processSupervisorExecutable = options.resources?.processSupervisorExecutable;
   const selectedRecovery = canonicalPath === null && options.untitledRecoveryId !== void 0 ? await selectUntitledRecoveryDescriptor(options.untitledRecoveryId, void 0, { processSupervisorExecutable }) : void 0;
   const sessionKey = canonicalPath === null ? selectedRecovery?.id ?? randomUUID14() : await sessionKeyFor(canonicalPath);
-  const projectDirectory2 = canonicalPath === null ? selectedRecovery?.projectDirectory ?? resolve12(process.cwd()) : void 0;
+  const projectDirectory2 = canonicalPath === null ? selectedRecovery?.projectDirectory ?? resolve12(options.untitledProjectDirectory ?? process.cwd()) : void 0;
   if (projectDirectory2 !== void 0) await registerUntitledRecoveryDescriptor(sessionKey, projectDirectory2, void 0, { processSupervisorExecutable });
   const timeoutMs = options.startupTimeoutMs ?? STARTUP_TIMEOUT_MS;
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > STARTUP_TIMEOUT_MS) {
@@ -116782,6 +116812,19 @@ async function acquireNotebookSession(options) {
   const runtime = await runtimePaths2(options.runtimeDirectory, processSupervisorExecutable);
   const deadline = Date.now() + timeoutMs;
   let metadata = await readRegistry(runtime.registryPath(sessionKey));
+  while (metadata?.state === "stopping") {
+    const alive = await ownerLiveness(metadata);
+    if (alive === false) break;
+    if (Date.now() >= deadline) {
+      throw new SessionUnavailableError("notebook host did not finish stopping before the startup deadline", {
+        sessionKey,
+        registryPath: runtime.registryPath(sessionKey),
+        lockPath: runtime.lockPath(sessionKey)
+      });
+    }
+    await delay(Math.min(POLL_INTERVAL_MS, Math.max(1, deadline - Date.now())));
+    metadata = await readRegistry(runtime.registryPath(sessionKey));
+  }
   if (metadata?.state === "ready") {
     if (hasExternalAuth) {
       const ownerState = await ownerLiveness(metadata);
@@ -117303,13 +117346,13 @@ function createConnection(metadata, sessionKey, token, lease, continuityProof, b
     connection.nextCommandSequence = nextCommandSequence;
   };
   let releasePromise;
-  const release = () => {
+  const release = (disposition = "normal") => {
     if (releasePromise !== void 0) return releasePromise;
     releasePromise = (async () => {
       await request("/api/lease", {
         method: "POST",
         headers: authenticatedJsonHeaders(),
-        body: JSON.stringify(leaseActionRequestSchema.parse({ action: "release", leaseId: lease.leaseId }))
+        body: JSON.stringify(leaseActionRequestSchema.parse({ action: "release", leaseId: lease.leaseId, disposition }))
       }).catch(() => void 0);
       released = true;
     })();
@@ -117333,9 +117376,9 @@ function createConnection(metadata, sessionKey, token, lease, continuityProof, b
     capabilities: [...capabilities],
     request,
     heartbeat,
-    release: async () => {
+    release: async (disposition = "normal") => {
       clearInterval(interval);
-      await release();
+      await release(disposition);
     }
   };
   return connection;
@@ -118235,6 +118278,22 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
     await attempt(() => work === "" ? void 0 : rm10(work, { recursive: true, force: true }));
     if (errors.length > 0) throw new AggregateError(errors, "Alder shutdown failed");
   })().finally(resolveClosed);
+  const discardAndClose = async () => {
+    if (recoveryPending) {
+      if (recovery === void 0 || recoveryFingerprint === void 0) {
+        throw new Error("active recovery cannot be discarded without an exact fingerprint");
+      }
+      await recovery.flush();
+      const cleared = await recovery.clearIfMatch({
+        documentRevision: recoveryDocumentRevision,
+        fingerprint: recoveryFingerprint
+      });
+      if (!cleared) throw new Error("active recovery changed before discard completed");
+      recoveryPending = false;
+      recoveryFingerprint = void 0;
+    }
+    await close();
+  };
   if (ownershipCompromise !== void 0) {
     await close();
     throw ownershipCompromise;
@@ -118750,7 +118809,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
           const destinationDisk = destinationStore.observation();
           const destinationSidecars = sidecarProtocolObservations(destinationStore, false);
           const destinationSerialized = serializeNotebookWithParts(destinationStore.currentDocument);
-          const destinationRevision = context.dirty ? context.fromRevision + 1 : context.fromRevision;
+          const destinationRevision = context.fromRevision;
           const destinationBaseline = {
             schemaVersion: 1,
             documentRevision: destinationRevision,
@@ -118773,12 +118832,21 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
             branch = await oldRecovery.forkBranch();
           }
           preparedRecovery = await oldRecovery.prepareRebind({ rootDir: envPaths("alder", { suffix: "" }).data, key: preparedOwner.sessionKey, baseline: destinationBaseline });
+          const destinationRecoveryFingerprint = preparedRecovery.state.fingerprint ?? sourceBytesSha256(destinationSerialized.bytes);
           await preparedRecovery.publish();
-          const destinationRecoveryProjection = context.dirty ? {
-            baseline: destinationBaseline,
-            fingerprint: preparedRecovery.state.fingerprint ?? sourceBytesSha256(destinationSerialized.bytes),
-            state: "dirty"
-          } : null;
+          if (branch !== void 0) {
+            const dropped = await preparedRecovery.writer.dropBranch(branch.id, {
+              documentRevision: branch.documentRevision,
+              fingerprint: branch.fingerprint
+            });
+            if (!dropped) throw new Error("Save As recovery branch changed before publication");
+          }
+          const recoveryCleared = await preparedRecovery.writer.clearIfMatch({
+            documentRevision: destinationRevision,
+            fingerprint: destinationRecoveryFingerprint
+          });
+          if (!recoveryCleared) throw new Error("Save As recovery state changed before publication");
+          const destinationRecoveryProjection = null;
           const pathChanged = destinationDirectory !== notebookDirectory;
           const environmentChanged = runtimeEnvironment?.identity !== destinationRuntime?.identity;
           const runtimeChanged = pathChanged || environmentChanged;
@@ -118789,8 +118857,8 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
             layout: destinationLayout,
             disk: destinationDisk,
             sidecars: destinationSidecars,
-            dirty: context.dirty,
-            advanceRevision: context.dirty,
+            dirty: false,
+            advanceRevision: false,
             invalidateRuntime: runtimeChanged,
             rEnvironment: destinationRuntime
           });
@@ -118840,8 +118908,8 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
                 runtimeError = destinationRuntimeError;
                 recoverySerialized = destinationSerialized;
                 recoveryDocumentRevision = destinationRevision;
-                recoveryPending = destinationRevision > 0;
-                recoveryFingerprint = recoveryPending ? preparedRecovery.state.fingerprint ?? void 0 : void 0;
+                recoveryPending = false;
+                recoveryFingerprint = void 0;
                 reservation?.release();
                 try {
                   bindWatcher(destination);
@@ -119305,8 +119373,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
       const canonical = resolve13(path3);
       const sidecarPaths = ["config", "layout", "packages"].map((kind) => store.sidecarPath(kind));
       const observedPaths = /* @__PURE__ */ new Set([canonical, ...sidecarPaths]);
-      const directories = /* @__PURE__ */ new Set([dirname11(canonical), ...sidecarPaths.map((sidecarPath) => dirname11(sidecarPath))]);
-      const next = watch([...directories], { ignoreInitial: true, persistent: true, followSymlinks: false });
+      const next = watch([...observedPaths], { ignoreInitial: true, persistent: true, followSymlinks: false });
       watcher = next;
       watcherReady = new Promise((resolveReady) => {
         let settled = false;
@@ -119460,6 +119527,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
         if (count > 0) everConnected = true;
         scheduleIdle();
       },
+      onLastLeaseDiscard: discardAndClose,
       onBrowserActivity: () => {
         everConnected = true;
         browserActivity++;
@@ -119610,6 +119678,8 @@ function stringValue2(value) {
   return typeof value === "string" ? value : void 0;
 }
 function decodePhysicalBytes(value) {
+  if (value instanceof Uint8Array) return value;
+  if (value instanceof ArrayBuffer) return new Uint8Array(value);
   if (typeof value === "string") return Uint8Array.from(Buffer.from(value, "base64"));
   if (isRecord11(value) && typeof value.$bytes === "string") return Uint8Array.from(Buffer.from(value.$bytes, "base64"));
   return null;
@@ -119798,7 +119868,7 @@ async function runInternalHost(cli, resources2) {
   if (nonce === void 0 || !PRIVATE_NONCE_PATTERN.test(nonce)) throw new Error("internal host readiness nonce is missing or invalid");
   const token = cli.tokenFile === void 0 ? void 0 : await readExternalBearer(cli.tokenFile, resources2.processSupervisorExecutable);
   const session = { runtimeDirectory: process.env.ALDER_RUNTIME_DIRECTORY, sessionKey: process.env.ALDER_SESSION_KEY, epoch: process.env.ALDER_EPOCH, processNonce: process.env.ALDER_PROCESS_NONCE, continuityProof: process.env.ALDER_CONTINUITY_PROOF, startIdentity: void 0, untitledRecoveryId: cli.recover, projectDirectory: process.env.ALDER_UNTITLED_PROJECT_DIRECTORY };
-  const app = await startHost({ ...appOptions(cli, resources2), tokenFile: void 0, externalBearerValidated: token !== void 0, internalHost: true, session: { ...session, token } });
+  const app = await startHost({ ...appOptions(cli, resources2), idleTimeout: 1, tokenFile: void 0, externalBearerValidated: token !== void 0, internalHost: true, session: { ...session, token } });
   writeJson({ type: "alder.private.ready", version: 1, nonce, pid: process.pid, processNonce: app.ownership.processNonce, ready: app.ready });
   const stop = () => {
     void app.close();

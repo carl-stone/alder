@@ -95,7 +95,7 @@ test("application resources require both qualified R patches", async () => {
     const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
     manifest.qualifiedRPatchVersions = ["4.6.1"];
     await writeFile(manifestPath, JSON.stringify(manifest));
-    await assert.rejects(resolveApplicationResources(fixture.root), /both 4.6.0 and 4.6.1/);
+    await assert.rejects(resolveApplicationResources(fixture.root), /dual-r.*must include both 4.6.0 and 4.6.1/);
   } finally {
     await removeFixture(fixture);
   }
@@ -311,7 +311,95 @@ test("release inventory hashes file and directory symlink targets consistently",
   }
 });
 
-async function makeFixture(helperVersion = "0.1.0"): Promise<Fixture> {
+test("application manifests require an explicit R qualification mode", async () => {
+  const fixture = await makeFixture();
+  try {
+    const manifestPath = join(fixture.root, "resources/manifest.json");
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+    delete manifest.rQualificationMode;
+    await writeFile(manifestPath, JSON.stringify(manifest));
+    await assert.rejects(resolveApplicationResources(fixture.root), /unexpected or missing fields/);
+    manifest.rQualificationMode = "unknown";
+    await writeFile(manifestPath, JSON.stringify(manifest));
+    await assert.rejects(resolveApplicationResources(fixture.root), /manifest.rQualificationMode is invalid/);
+  } finally {
+    await removeFixture(fixture);
+  }
+});
+
+test("development-single-r manifests accept only R 4.6.1", async () => {
+  const fixture = await makeFixture("0.1.0", "development-single-r");
+  try {
+    assert.equal(fixture.resources.manifest!.rQualificationMode, "development-single-r");
+    assert.deepEqual(fixture.resources.manifest!.qualifiedRPatchVersions, ["4.6.1"]);
+    const selected = await resolveREnvironment({
+      rscript: fixture.rscript,
+      projectDirectory: fixture.root,
+      resources: fixture.resources,
+    });
+    assert.equal(selected.version, "4.6.1");
+  } finally {
+    await removeFixture(fixture);
+  }
+});
+
+test("development-single-r manifests reject dual patch declarations", async () => {
+  const fixture = await makeFixture();
+  try {
+    const manifestPath = join(fixture.root, "resources/manifest.json");
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+    manifest.rQualificationMode = "development-single-r";
+    await writeFile(manifestPath, JSON.stringify(manifest));
+    await assert.rejects(resolveApplicationResources(fixture.root), /development-single-r.*exactly 4.6.1/);
+  } finally {
+    await removeFixture(fixture);
+  }
+});
+
+test("staging keeps dual-R strict and rejects mixed development flags", async () => {
+  const fixture = await makeFixture();
+  try {
+    const script = fileURLToPath(new URL("../scripts/stage-application.mjs", import.meta.url));
+    const common = [
+      script, "--output", join(fixture.supportRoot, "stage"), "--kind", "headless",
+      "--rscript", fixture.rscript, "--supervisor", fixture.rscript,
+      "--supervisor-provenance", fixture.rscript,
+    ];
+    const message = (error: unknown): string => {
+      if (error && typeof error === "object" && "stderr" in error) return String(error.stderr);
+      return String(error);
+    };
+    assert.throws(
+      () => execFileSync(process.execPath, common, { stdio: "pipe" }),
+      error => /two independently installed Rscript paths/.test(message(error)),
+    );
+    assert.throws(
+      () => execFileSync(process.execPath, [...common, "--development-single-r", "--qualified-rscript", fixture.rscript], { stdio: "pipe" }),
+      error => /cannot be combined with --qualified-rscript/.test(message(error)),
+    );
+  } finally {
+    await removeFixture(fixture);
+  }
+});
+
+test("release packaging rejects development-single-r manifests", async () => {
+  const fixture = await makeFixture("0.1.0", "development-single-r");
+  try {
+    const script = fileURLToPath(new URL("../scripts/package.mjs", import.meta.url));
+    const output = join(fixture.supportRoot, "release");
+    assert.throws(
+      () => execFileSync(process.execPath, [script, "--application", fixture.root, "--output", output, "--rscript", fixture.rscript], { stdio: "pipe" }),
+      error => {
+        const message = error && typeof error === "object" && "stderr" in error ? String(error.stderr) : String(error);
+        return /release packaging rejects development-single-r/.test(message);
+      },
+    );
+  } finally {
+    await removeFixture(fixture);
+  }
+});
+
+async function makeFixture(helperVersion = "0.1.0", rQualificationMode: "dual-r" | "development-single-r" = "dual-r"): Promise<Fixture> {
   const root = await realpath(await mkdtemp(join(tmpdir(), "alder-resources-r-")));
   const supportRoot = await realpath(await mkdtemp(join(tmpdir(), "alder-resources-r-support-")));
   await secureWindowsPath("directory", root);
@@ -392,7 +480,7 @@ async function makeFixture(helperVersion = "0.1.0"): Promise<Fixture> {
     await createWindowsNodeLauncher(rscript, rscriptScriptPath);
     await secureWindowsPath("file", rscript);
   } else {
-    const shellScript = "#!/bin/sh\ncase \"$*\" in *\"library(alder)\"*) printf '%b' " + JSON.stringify(helperOutput) + " ;; *) printf '%b' " + JSON.stringify(output) + " ;; esac\n";
+    const shellScript = "#!/bin/sh\nif [ \"$(uname -s)\" = Darwin ] && [ -n \"${R_HOME:-}\" ]; then printf '%s\n' 'WARNING: ignoring environment value of R_HOME'; fi\ncase \"$*\" in *\"library(alder)\"*) printf '%b' " + JSON.stringify(helperOutput) + " ;; *) printf '%b' " + JSON.stringify(output) + " ;; esac\n";
     await writeFile(rscript, shellScript);
     await chmod(rscript, 0o755);
   }
@@ -412,7 +500,8 @@ async function makeFixture(helperVersion = "0.1.0"): Promise<Fixture> {
     engineProtocol: "alder-engine-v2",
     target: { platform: process.platform, arch: process.arch },
     rVersionRange: ">=4.6.0 <4.7.0",
-    qualifiedRPatchVersions: ["4.6.0", "4.6.1"],
+    rQualificationMode,
+    qualifiedRPatchVersions: rQualificationMode === "development-single-r" ? ["4.6.1"] : ["4.6.0", "4.6.1"],
     rBuildVersion: "4.6.1",
     resources: {
       cliLauncher: executablePath("bin/alder"),

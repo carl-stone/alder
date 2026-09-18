@@ -192,12 +192,16 @@ export async function createHarness(ctx, { id, source = '# %%\n1 + 1\n', extensi
   assert.equal(typeof selectedR, 'string', 'Rscript must be supplied explicitly');
   assert.equal(isAbsolute(selectedR), true, 'Rscript must be an absolute path');
   const wire = await loadWireCodec(applicationRoot, ctx.manifest);
-  const dataHome = join(ctx.evidence, 'runtime-data', id);
-  const runtimeDirectory = join(dataHome, 'alder-nodejs', 'runtime');
+  const dataHome = join(await realpath(ctx.evidence), 'runtime-data', id);
+  const home = join(dataHome, 'home');
+  const runtimeDirectory = process.platform === 'darwin'
+    ? join(home, 'Library', 'Application Support', 'alder-nodejs', 'runtime')
+    : join(dataHome, 'alder-nodejs', 'runtime');
   await rm(runtimeDirectory, { recursive: true, force: true });
   await mkdir(dataHome, { recursive: true });
+  await mkdir(home, { recursive: true });
   await mkdir(runtimeDirectory, { recursive: true, mode: 0o700 });
-  const env = sanitizedEnvironment({ XDG_DATA_HOME: dataHome });
+  const env = sanitizedEnvironment({ XDG_DATA_HOME: dataHome, HOME: home });
   const canonical = notebook === null ? null : await realpath(notebook);
   await mkdir(join(ctx.evidence, 'unrelated'), { recursive: true });
   const childArgs = [

@@ -689,6 +689,7 @@ export function trustedRLanguageServerEnvironment(
   environment: NodeJS.ProcessEnv,
   trustedLibraryPaths: readonly string[],
   trustedResourcesRoot: string,
+  platform: NodeJS.Platform = process.platform,
 ): Record<string, string> {
   if (!isAbsolutePath(trustedResourcesRoot)) {
     throw new LspClientError("invalid_request", "language server requires an absolute trusted resources root");
@@ -700,6 +701,7 @@ export function trustedRLanguageServerEnvironment(
   }
   const trusted = [...trustedLibraryPaths];
   const result = stringEnvironment(environment);
+  if (platform === "darwin") delete result.R_HOME;
   for (const key of Object.keys(result)) if (/^R_LIBS(?:_|$)/.test(key)) delete result[key];
   result.R_LIBS = trusted.join(delimiter);
   result.R_LIBS_USER = "";

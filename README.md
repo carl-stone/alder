@@ -5,23 +5,23 @@ into `# %%` cells. The application host owns persistence, dependency execution,
 rendering, package operations, publishing, and the browser; the installed R
 package supplies notebook values and ordinary `Rscript` helpers.
 
-## Mac development and testing
+## Mac development and reset
 
-GitHub Actions are disabled: builds and verification run locally. Pull `main`
-on the Mac and follow the development commands in [dev/README.md](dev/README.md).
-Native Mac packaging and the notebook launch/edit/save/reopen loop still need
-verification on that machine; there is no verified downloadable Mac testing kit.
+Alder is a pre-release application undergoing an architectural reset. The current
+code and local builds are starting points, not acceptance of the redesigned app.
+The [product requirements and working design](dev/ARCHITECTURE.md) describe the
+reset; [dev/LEAD.md](dev/LEAD.md) records coordination and accepted progress.
 
-Use R 4.6.1 with the same architecture as the Mac. Packaged application
-qualification also requires an independent R 4.6.0 installation. Keep real
-notebooks outside the app bundle and test with copies. The runnable example is
-`inst/examples/iris.R`.
+Builds and checks run locally. Mac is the only active platform during the reset;
+Linux and Windows support will be rebuilt and qualified separately later.
+Follow [dev/README.md](dev/README.md) for native Mac development. The current
+development stage uses R 4.6.1 with
+the same architecture as the Mac. Public signing and notarization remain separate
+from local development.
 
-Builds are development builds, not signed/notarized releases. Latency remains
-above the architecture targets, and full release qualification is unfinished.
-When reporting a problem, include the commit, macOS version, architecture, R
-version, reproduction steps, and relevant logs or screenshots. Review these
-for private data before sharing.
+The existing app exposes **Open notebook…** for selecting a notebook and searches
+a saved R choice, `PATH`, then the standard macOS R framework installation.
+Use [the Iris example](inst/examples/iris.R) to exercise ordinary notebook behavior.
 
 ## Install the R helpers
 
@@ -73,32 +73,16 @@ runs leave descendants stale until requested. Widget changes are explicit
 reactive inputs, and dynamic R lookup that cannot be bounded statically is
 reported before execution.
 
-## Host development
+## Application development
 
-The host requires Node.js 24, Ark, and explicit compatible R 4.6.x interpreters.
-From this checkout, using absolute interpreter paths:
+The implementation includes the editor and output view, saving, HTML publishing,
+language assistance, package operations and MCP access. The reset preserves useful
+notebook functionality while simplifying the surrounding ownership and lifecycle.
 
-```sh
-rscript461=/absolute/path/to/R-4.6.1/bin/Rscript
-rscript460=/absolute/path/to/R-4.6.0/bin/Rscript
-npm ci --prefix host
-npm run check --prefix host
-npm run build --prefix host
-npm run stage --prefix host -- --rscript "$rscript461" --qualified-rscript "$rscript460"
-npm run smoke --prefix host -- --scenario all --evidence /tmp/alder-evidence \
-  --rscript "$rscript461" --peer-rscript "$rscript460"
-```
+The current development tools include Node, Ark, Air, Electron and a native process
+supervisor. Commands and current staging prerequisites are maintained in
+[dev/README.md](dev/README.md). Application builds and the standalone R helper
+package are separate.
 
-The host provides the local editor and output view, Save and Save As, one HTML
-Publish action, R language-server assistance, package inspection/install jobs,
-and MCP transports. Publishing consumes a frozen captured snapshot, never
-executes notebook code or overwrites an existing destination, and produces an
-offline HTML document.
-
-Optional notebook packages such as ggplot2, HTML widgets, and database clients
-come from the selected project environment. The [demo](demo.R) shows a small
-plotting notebook; `inst/examples/iris.R` is an ordinary runnable example.
-
-Development commands are in [dev/README.md](dev/README.md), architecture notes
-in [dev/ARCHITECTURE.md](dev/ARCHITECTURE.md), and release changes in
-[NEWS.md](NEWS.md).
+The [demo](demo.R) and [Iris example](inst/examples/iris.R) are useful starting points
+for acceptance notebooks. Historical changes are recorded in [NEWS.md](NEWS.md).

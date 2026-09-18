@@ -92,14 +92,53 @@ async function openHttpSession(app: RunningHost): Promise<HttpSession> {
   return { origin, cookie, csrf: session.csrf as string, leaseId: session.leaseId as string };
 }
 
-async function closeHttpSession(session: HttpSession): Promise<void> {
+async function closeHttpSession(session: HttpSession, disposition?: "discard"): Promise<void> {
   const response = await fetch(session.origin + "/api/lease", {
     method: "POST",
     headers: { Origin: session.origin, Cookie: session.cookie, "X-CSRF-Token": session.csrf, "Content-Type": "application/json" },
-    body: JSON.stringify({ action: "release", leaseId: session.leaseId }),
+    body: JSON.stringify({ action: "release", leaseId: session.leaseId, ...(disposition === undefined ? {} : { disposition }) }),
   });
   assert.equal(response.ok, true, "host test lease release must succeed");
 }
+test("discarding the last lease removes unsaved recovery", {
+  skip: !APPLICATION_ROOT, timeout: 60_000,
+}, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "alder-host-discard-"));
+  const path = join(directory, "notebook.R");
+  const original = "# %%\nx <- 1\n";
+  await writeFile(path, original);
+  let app: RunningHost | undefined;
+  let session: HttpSession | undefined;
+  try {
+    app = await startInstalledHost(path);
+    const before = app.controller.snapshot();
+    const edit = await dispatchHost(app, {
+      type: "transaction",
+      changes: [{ type: "edit", cell: { cellId: before.cells[0]!.id }, expectedRevision: before.cells[0]!.revision,
+        cellType: "code", body: ["x <- 2"] }],
+    });
+    assert.equal((await settledHost(app, edit)).status, "done");
+    assert.equal(app.controller.snapshot().dirty, true);
+
+    session = await openHttpSession(app);
+    await closeHttpSession(session, "discard");
+    session = undefined;
+    await app.closed;
+    app = undefined;
+    assert.equal(await readFile(path, "utf8"), original);
+
+    app = await startInstalledHost(path);
+    assert.equal(app.controller.snapshot().cells[0]!.body[0], "x <- 1");
+    assert.equal(app.controller.snapshot().dirty, false);
+    const recovery = await app.controller.query({ type: "recovery" });
+    assert.equal(recovery.result.pending, false);
+    assert.deepEqual(recovery.result.branches, []);
+  } finally {
+    if (session !== undefined) await closeHttpSession(session);
+    await app?.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 
 async function requestSymbols(session: HttpSession): Promise<string> {
   const response = await fetch(session.origin + "/api/lsp", {
@@ -341,12 +380,17 @@ test("runtime and app metadata survive recovery restart, Save, and Save As", {
     const saveAs = await dispatchHost(app, {
       type: "save-as", path: destination, expectedDestination: "absent", expectedDocumentRevision: snapshot.documentRevision,
     });
-    assert.equal((await settledHost(app, saveAs)).status, "done");
+    const settledSaveAs = await settledHost(app, saveAs);
+    assert.equal(settledSaveAs.status, "done", JSON.stringify(settledSaveAs.error));
     const copied = await readFile(destination, "utf8");
     assert.match(copied, /on_cell_change: automatic/);
     assert.match(copied, /on_startup: false/);
     assert.match(copied, /layout: grid/);
     assert.match(copied, /width: full/);
+    assert.equal(app.controller.snapshot().dirty, false, "a successful Save As must clear the durable recovery draft");
+    const saveAsRecovery = await app.controller.query({ type: "recovery" });
+    assert.equal(saveAsRecovery.result.pending, false);
+    assert.deepEqual(saveAsRecovery.result.branches, []);
   } finally {
     await app?.close();
     await rm(directory, { recursive: true, force: true });
