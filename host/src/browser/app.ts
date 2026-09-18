@@ -74,9 +74,9 @@ function bindDesktopActions(next: BrowserNotebookClient): void {
     } else if (action === "save-as") {
       operation = desktop.chooseSavePath().then((path) => path === null ? undefined : next.saveAs(path));
     } else if (action === "run-all") {
-      operation = view?.runExplicit(() => next.runAll("all"));
+      operation = view?.runExplicit(() => next.startRunAll("all"));
     } else if (action === "run-stale") {
-      operation = view?.runExplicit(() => next.runAll("stale"));
+      operation = view?.runExplicit(() => next.startRunAll("stale"));
     } else if (action === "select-r") {
       operation = desktop.chooseRscript().then((path) => path === null ? undefined : next.selectR(path, true));
     }

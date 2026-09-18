@@ -13,7 +13,11 @@ import { parseHTML } from "linkedom";
 import { BrowserTransport, BrowserTransportError, IndexedDBRecoveryStore, MemoryRecoveryStore, type BrowserRecoveryDraft, type WebSocketLike } from "../src/browser/transport.js";
 
 import { encodeFilePathUri, fileUri, LspClient, translateLspResult, trustedRLanguageServerEnvironment, validatedRLanguageServerOptions, type DiagnosticsByCell } from "../src/lsp.js";
-import { fromFilePosition, layoutNotebook, toFilePosition, type NotebookDocument } from "../src/notebook.js";
+import { fromFilePosition, layoutNotebook, parseNotebook, serializeNotebook, toFilePosition, type NotebookDocument } from "../src/notebook.js";
+import { Controller } from "../src/controller.js";
+import { resolveConfigLayers } from "../src/configuration.js";
+import { OutputStore } from "../src/outputs.js";
+import type { EngineAdapter, EngineHandshake, EngineResponse } from "../src/protocol.js";
 import { decodeHostCommandWire, encodeHostEventWire, encodeRecoveryWire, HOST_PROTOCOL, HOST_CLIENT_PROTOCOL_VERSION, type CommandResult, type HostCellState, type HostCommand, type HostEvent, type HostSnapshot, type OperationRecord, type Recovery } from "../src/protocol.js";
 import { ARTIFACT_DESCRIPTOR_HEADER, ARTIFACT_RESOLUTION_MEDIA_TYPE, encodeArtifactDescriptor, type ArtifactHandle } from "../src/protocol.js";
 import { blocksNotebookNavigation } from "../src/browser/url.js";
@@ -53,6 +57,11 @@ function snapshot(cells: HostCellState[] = [cell("c1", ["x <- 1"]), cell("c2", [
 
 async function withViewDom<T>(callback: (dom: Document, domWindow: Window) => T | PromiseLike<T>): Promise<T> {
   const { window: domWindow, document: dom } = parseHTML('<!doctype html><html><body><div id="topbar"></div><div id="notebook"></div><div id="status" role="status"></div><div id="path"></div><button id="run-all">Run all</button><button id="stop">Stop</button><button id="save">Save</button></body></html>');
+  // Linkedom exposes only the getter; editor controls need the browser setter.
+  const selectValue = Object.getOwnPropertyDescriptor(domWindow.HTMLSelectElement.prototype, "value")!;
+  Object.defineProperty(domWindow.HTMLSelectElement.prototype, "value", { ...selectValue, set(value: string) {
+    for (const option of this.options) option.selected = option.value === value;
+  } });
   Object.defineProperty(domWindow, "requestAnimationFrame", { configurable: true, value: () => 0 });
   const previous = {
     window: Object.getOwnPropertyDescriptor(globalThis, "window"),
@@ -68,6 +77,7 @@ async function withViewDom<T>(callback: (dom: Document, domWindow: Window) => T 
   try {
     return await callback(dom, domWindow);
   } finally {
+    Object.defineProperty(domWindow.HTMLSelectElement.prototype, "value", selectValue);
     for (const [name, descriptor] of Object.entries(previous)) {
       if (descriptor) Object.defineProperty(globalThis, name, descriptor);
       else Reflect.deleteProperty(globalThis, name);
@@ -430,10 +440,12 @@ test("explicit runs flush output and keep stop independent while preparing", asy
     let interruptCalls = 0;
     let releaseRun!: () => void;
     const runPending = new Promise<void>((resolve) => { releaseRun = resolve; });
+    let releaseFlush!: () => void;
+    const flushPending = new Promise<void>((resolve) => { releaseFlush = resolve; });
     const client = {
       recoveryState: { status: "none", local: null, branches: [], drafts: [], pending: false, corruption: null, persistenceError: null },
       subscribeRecovery() { return () => {}; },
-      runAll: async () => { order.push("run"); await runPending; },
+      startRunAll: async () => { order.push("run"); return { completed: runPending }; },
       interrupt: async () => { interruptCalls += 1; },
     } as unknown as BrowserNotebookClient;
     let view: NotebookView | null = null;
@@ -442,28 +454,149 @@ test("explicit runs flush output and keep stop independent while preparing", asy
       view = new NotebookView(client, dom);
       view.render(document);
       const output = (view as unknown as { output: { flush: () => Promise<void> } }).output;
-      output.flush = async () => { order.push("flush"); };
-      pending = view.runExplicit(() => client.runAll("all"));
-      await Promise.resolve();
-      await Promise.resolve();
-      assert.deepEqual(order, ["flush", "run"]);
+      output.flush = async () => { order.push("flush"); await flushPending; };
+      pending = view.runExplicit(() => client.startRunAll("all"));
+      assert.deepEqual(order, ["flush"]);
       assert.equal(dom.getElementById("run-all")?.disabled, true);
       assert.equal(dom.getElementById("save")?.disabled, true);
       assert.equal(dom.getElementById("stop")?.disabled, false);
       dom.getElementById("stop")!.dispatchEvent(new domWindow.Event("click"));
       await Promise.resolve();
       assert.equal(interruptCalls, 1);
+      releaseFlush();
+      await waitUntil(() => dom.getElementById("save")?.disabled === false);
+      assert.deepEqual(order, ["flush", "run"]);
+      assert.equal(dom.getElementById("run-all")?.disabled, true);
+      assert.equal(dom.getElementById("stop")?.disabled, false);
       releaseRun();
       await pending;
       assert.equal(dom.getElementById("stop")?.disabled, true);
       assert.equal(dom.getElementById("save")?.disabled, false);
     } finally {
+      releaseFlush?.();
       releaseRun?.();
       await pending?.catch(() => undefined);
       view?.destroy();
     }
   });
 });
+
+for (const failure of ["preparation", "execution"] as const) {
+  test(`view releases controls and surfaces a run ${failure} failure`, async () => {
+    await withViewDom(async (dom, domWindow) => {
+      const initial = snapshot([]);
+      initial.changed = true;
+      const client = {
+        recoveryState: { status: "none", local: null, branches: [], drafts: [], pending: false, corruption: null, persistenceError: null },
+        subscribeRecovery() { return () => {}; },
+        startRunAll: async () => {
+          const error = new Error(`${failure} failed`);
+          if (failure === "preparation") throw error;
+          return { completed: Promise.reject(error) };
+        },
+      } as unknown as BrowserNotebookClient;
+      const view = new NotebookView(client, dom);
+      try {
+        view.render(new BrowserDocument(initial));
+        dom.getElementById("run-all")!.dispatchEvent(new domWindow.Event("click"));
+        await waitUntil(() => dom.getElementById("status")!.textContent!.includes(`${failure} failed`));
+        assert.equal(view.runPending, false);
+        assert.equal(dom.querySelector<HTMLButtonElement>("#run-all")!.disabled, false);
+        assert.equal(dom.querySelector<HTMLButtonElement>("#save")!.disabled, false);
+        assert.equal(dom.querySelector<HTMLButtonElement>("#stop")!.disabled, true);
+      } finally { view.destroy(); }
+    });
+  });
+}
+
+for (const runControl of ["toolbar", "cell"] as const) {
+  test(`view keeps Save and source controls usable during a pending ${runControl} run`, async () => {
+    await withViewDom(async (dom, domWindow) => {
+      Object.defineProperty(globalThis, "location", { configurable: true, writable: true, value: { search: "", href: "http://notebook.test/book.R", origin: "http://notebook.test" } });
+      const markup = await readFile(new URL("../../inst/app/index.html", import.meta.url), "utf8");
+      dom.body.insertAdjacentHTML("beforeend", parseHTML(markup).document.getElementById("cell-tpl")!.outerHTML);
+      const directory = await mkdtemp(join(tmpdir(), "alder-view-run-"));
+      const evaluation = Promise.withResolvers<EngineResponse>();
+      let executing = false;
+      let interrupts = 0;
+      let savedSource = "";
+      const handshake: EngineHandshake = { protocol: "alder-engine-v2", packageVersion: "test", rVersion: "test", capabilities: [], kernelReady: true, analyzerReady: true, captureReady: true };
+      const engine: EngineAdapter = {
+        start: async () => handshake,
+        restart: async () => handshake,
+        analyze: async (cells, revision) => ({ revision, analysisEnvironmentId: "analysis-test", analyzer: { packageVersion: "test", rVersion: "test", policy: "test", analysisEnvironmentId: "analysis-test" }, cells: cells.map(value => ({ id: value.id, revision: value.revision, defs: [], refs: [], selfRefs: [], locals: [], barrier: false, opaque: false, diagnostics: [], error: null })) }),
+        evaluate: async (payload, onEvent) => {
+          executing = true;
+          onEvent?.({ type: "started", requestId: 1, sessionEpoch: payload.sessionEpoch, kernelEpoch: payload.kernelEpoch, documentRevision: payload.documentRevision, operationId: payload.operationId, runId: payload.runId, cellId: payload.cellId, revision: payload.revision, sequence: 0 });
+          return evaluation.promise;
+        },
+        request: async () => ({ ok: true }),
+        interrupt: async () => { interrupts += 1; evaluation.resolve({ ok: true, stopped: true }); return { requested: true }; },
+        close: async () => {},
+      };
+      const controller = new Controller({ engine, epoch: "epoch-1", outputStore: new OutputStore({ artifactDirectory: directory, sessionEpoch: "epoch-1", documentRevision: 0, kernelEpoch: null }),
+        notebook: parseNotebook(new TextEncoder().encode("# %%\nx <- 1\n# %%\ny <- 2\n"), "/tmp/book.R"),
+        configResolution: resolveConfigLayers({ launch: { on_startup: false, on_cell_change: "lazy" } }),
+        sourceCommit: async (request, context) => {
+          const document = request.document ?? context.document;
+          if (request.kind === "save") savedSource = new TextDecoder().decode(serializeNotebook(document));
+          context.preparePublication({ ...context, document, dirty: request.kind !== "save", advanceRevision: request.kind !== "save" })();
+          return { saved: request.kind === "save" };
+        },
+      });
+      await controller.start();
+      const { client, socket } = await browserClient(undefined, controller.snapshot());
+      const view = new NotebookView(client, dom);
+      const unsubscribe = client.subscribe((document, event, keys) => view.render(document, event, keys));
+      const unwatch = controller.subscribe(event => socket.receive({ type: "event", event: encodeHostEventWire(event) }));
+      const dispatches = new Set<Promise<unknown>>();
+      socket.send = data => {
+        socket.sent.push(data);
+        const frame = JSON.parse(data);
+        if (frame.type !== "command") return;
+        const command = decodeHostCommandWire(frame.command) as HostCommand;
+        const dispatched = controller.dispatch(command).then(result => socket.receive({ type: "commandResult", requestId: command.requestId, result }));
+        dispatches.add(dispatched);
+        void dispatched.finally(() => dispatches.delete(dispatched));
+      };
+      const click = (button: HTMLButtonElement | null) => {
+        assert.ok(button);
+        assert.equal(button.disabled, false, `${button.textContent} must be usable`);
+        button.dispatchEvent(new domWindow.Event("click", { bubbles: true, cancelable: true }));
+      };
+      try {
+        view.render(client.document!);
+        click(runControl === "toolbar" ? dom.querySelector("#run-all") : dom.querySelector("[data-act=run]"));
+        await waitUntil(() => executing && dom.querySelector<HTMLButtonElement>("[data-act=delete]")?.disabled === false);
+        assert.equal(view.runPending, true);
+        assert.equal(dom.querySelector<HTMLButtonElement>("#run-all")!.disabled, true);
+        assert.equal(dom.querySelector<HTMLButtonElement>("[data-act=run]")!.disabled, true);
+        for (const selector of ["[data-act=add]", "[data-act=move-down]", "[data-act=delete]", "[data-act=disable]"]) {
+          assert.equal(dom.querySelector<HTMLButtonElement>(selector)!.disabled, false, selector);
+        }
+        const editor = dom.querySelectorAll<HTMLTextAreaElement>("textarea")[1]!;
+        editor.value = "y <- 42";
+        editor.dispatchEvent(new domWindow.Event("input", { bubbles: true }));
+        click(dom.querySelector("#save"));
+        await waitUntil(() => savedSource.includes("y <- 42") && dom.querySelector<HTMLButtonElement>("[data-act=add]")?.disabled === false);
+        assert.equal(view.runPending, true, "Save finishes before execution does");
+        click(dom.querySelector("[data-act=add]"));
+        await waitUntil(() => client.document!.cells.length === 3);
+        assert.equal(view.runPending, true);
+        click(dom.querySelector("#stop"));
+        await waitUntil(() => !view.runPending && interrupts > 0);
+        assert.equal(dom.querySelector<HTMLButtonElement>("#stop")!.disabled, true);
+        assert.equal(dom.querySelector<HTMLButtonElement>("#run-all")!.disabled, false);
+        assert.equal(dom.querySelector<HTMLButtonElement>("[data-act=delete]")!.disabled, false);
+      } finally {
+        evaluation.resolve({ ok: true });
+        await Promise.allSettled(dispatches);
+        unsubscribe(); unwatch(); view.destroy(); client.close(); await controller.close();
+        await rm(directory, { recursive: true, force: true });
+      }
+    });
+  });
+}
 
 test("browser document applies canonical output deltas without replacing cell identity", () => {
   const previous = { ...cell("c1", ["message('a')"]), outputsStale: true };

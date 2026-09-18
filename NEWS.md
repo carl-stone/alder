@@ -1,6 +1,10 @@
-# alder 0.1.0
+# alder 0.1.0 (unreleased)
 
-First release of Alder, a reactive notebook for R.
+Historical feature notes from the implementation preceding the architectural
+reset. This is not a release announcement or a current platform-support list.
+See [dev/WORKBOARD.md](dev/WORKBOARD.md) for accepted reset behavior.
+
+Earlier development included:
 
 * Plain-text `.R` notebooks, dependency-ordered execution, automatic and lazy
   reruns, interruption, and explicit stale/error states.
@@ -16,7 +20,7 @@ First release of Alder, a reactive notebook for R.
 * Unix and Windows launchers and an installed base-R Iris tutorial.
 * Mac framework directory-symlink inventory support and native save/reopen
   verification tooling. Builds and verification run locally, without GitHub Actions.
-* Opt-in input-to-result benchmarks and process-local profiling. The planned
-  architecture's latency targets remain unmet.
+* Input-to-result benchmarks and process-local profiling for the former design.
+  Those measurements and thresholds do not define current acceptance.
 
-Requires R 4.6.0 or newer. Runs locally with the user's permissions.
+Current R helper requirements are declared in [DESCRIPTION](DESCRIPTION).

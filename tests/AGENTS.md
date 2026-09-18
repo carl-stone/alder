@@ -22,5 +22,5 @@
 - Keep performance measurements separate from portable correctness assertions;
   interpret timings on known hardware and representative user interactions.
 - Report results and material gaps to the lead. A passing suite or worker report
-  does not approve a slice. Lead-only execution restrictions are in
-  [../AGENTS.md](../AGENTS.md).
+  does not approve a completed assignment. Only the designated lead follows the
+  execution restrictions in [dev/LEAD.md](../dev/LEAD.md).

@@ -1,12 +1,21 @@
 # Development
 
-[ARCHITECTURE.md](ARCHITECTURE.md) describes the reset direction;
-[LEAD.md](LEAD.md) records the current assignment and accepted progress.
-Mac is the active platform. Builds, tests and app interaction checks run natively.
+[WORKBOARD.md](WORKBOARD.md) identifies the active implementation checkout and
+latest accepted build. [ARCHITECTURE.md](ARCHITECTURE.md) describes the intended
+product and design. An assignment is a bounded change ending in a runnable build.
+
+## Choose the right checkout
+
+During the reset, the lead's documentation checkout and the implementation
+worktree contain different code. Use the implementation worktree listed on the
+canonical workboard for app development and the commands below. The lead checkout
+still contains older source; do not use its retired staging recipes as requirements.
+Independent workers use the worktree assigned in their own brief.
 
 ## Build and open the Mac app
 
-From the repository root:
+Run on macOS from the implementation checkout's repository root. Start with an
+available npm installation; the host lockfile then supplies the pinned Node runtime.
 
 ```sh
 npm ci --prefix host
@@ -17,48 +26,52 @@ npm run build:mac --prefix desktop
 open "$PWD/host/.application-desktop/Alder.app"
 ```
 
-This builds the editor, shared backend and Electron shell, stages their runtime
-files and license notices, and signs the local app. Node is installed through the
-host npm lockfile. The local signature does not provide public notarization.
+The Mac command builds the editor, shared Node backend and Electron shell, stages
+resources and license notices, and signs the local app. Quit the staged app before
+rebuilding it. Local signing is separate from public notarization.
 
-Open, edit, Save, Save As and recovery work independently of an R installation.
-The document checkpoint does not bundle an execution runtime; stock Ark and R
-integration is the next execution slice. The app retains source editing when R
-startup fails. Open a notebook from File > Open or the **Open notebook…** button.
-
-All attached desktop and agent clients use the same local backend. Closing a
-window releases that window's connection; other clients keep their documents
-alive. Unsaved documents are recovered separately from the saved `.R` file.
+The accepted document build opens, edits, saves and recovers notebooks without R.
+It does not yet include an R execution runtime; consult the board for the current
+assignment. R helper installation alone does not add execution to this build.
+Open a notebook with File > Open or **Open notebook…**.
 
 ## Focused checks
 
-Choose the tests relevant to the changed behavior:
+Choose checks for the behavior being changed. For example:
 
 ```sh
 npm run check --prefix host
 npm run typecheck --prefix desktop
-(cd host && node --import tsx --test test/persistence.test.ts test/document-foundation.test.ts test/desktop-recovery.test.ts test/shared-backend.test.ts test/desktop-main.test.ts)
+(cd host && node --import tsx --test test/persistence.test.ts test/desktop-main.test.ts)
 ```
 
-Verify native typing, File menus, replacement confirmation, Cancel during close,
-reopening and crash recovery in the staged Mac application. Automated tests
-complement those interactions. Runtime-dependent tests need their own R setup.
+`npm test --prefix host` runs the broader host suite. Runtime-dependent tests need
+their R packages and external tools; report missing prerequisites separately from
+behavior actually checked. A skipped execution test does not qualify R execution.
+Verify actual Mac typing, menus, dialogs, save/reopen and recovery where relevant.
+See [tests/AGENTS.md](../tests/AGENTS.md) for test guidance and
+[responsiveness guidance](reviews/INPUT-LATENCY.md) when performance is involved.
 
-After editing `js/src/editor.ts`, rebuild with `npm run build --prefix js`.
-After changing host or browser source, rebuild with `npm run build --prefix host`.
-The Mac build command does both and replaces the staged app; quit that app first.
+## Generated files and R helpers
 
-## R helper development
+- After changing editor sources in `js/`, run `npm run build --prefix js`.
+- After changing host/browser sources in `host/`, run `npm run build --prefix host`.
+- Rebuild committed bundles from their sources. The Mac build does both steps.
+- Widget constructors live in `R/ui-widgets.R`; the execution integration uses
+  the installed Alder package. R help in `man/` and exports are generated from
+  roxygen comments in `R/`.
 
-R help and exports are generated from comments in `R/`:
+For R helper development, use the R version and dependencies declared in
+[DESCRIPTION](../DESCRIPTION). From the implementation checkout:
 
 ```sh
 Rscript -e 'roxygen2::roxygenise()'
 Rscript -e 'testthat::test_local(stop_on_failure = TRUE)'
 ```
 
-Use a private test library when testing a modified helper package so the tests
-exercise that package. Helper installation is separate from the document app.
+Install development tools such as roxygen2 and testthat in the development
+library when needed. Tests using an installed helper package must use the version
+being edited; a private test library avoids picking up an unrelated installation.
 
 ## Example notebooks
 
@@ -68,4 +81,6 @@ exercise that package. Helper installation is separate from the document app.
 - [Bulk differential expression](examples/bulk-differential-expression.R):
   simulated data with edgeR, statmod and ggplot2.
 
-Keep notebooks runnable as ordinary R scripts.
+These are candidate workflows, not claims that every feature is already accepted
+in the reset. Keep them runnable as ordinary R scripts and establish expected
+behavior independently of the implementation.

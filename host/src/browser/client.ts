@@ -260,6 +260,11 @@ export class BrowserNotebookClient {
   }
 
   async runCell(key: string, input?: Event | { timeStamp: number }): Promise<CommandResult> {
+    const { completed } = await this.startRunCell(key, input);
+    return completed;
+  }
+
+  async startRunCell(key: string, input?: Event | { timeStamp: number }): Promise<{ completed: Promise<CommandResult> }> {
     const id = operationId("run");
     this.runs.set(id, {
       operationId: id,
@@ -271,7 +276,7 @@ export class BrowserNotebookClient {
       const { completed } = await this.withSourceLock(() => this.startRun(
         this.requireDocument().buildRunCommand({ requestId: id, clientId: this.transport.id, scope: "cell", targetKey: key }),
       ));
-      return await completed;
+      return { completed: completed.catch((error) => { this.runs.delete(id); throw error; }) };
     } catch (error) {
       this.runs.delete(id);
       throw error;
@@ -279,12 +284,16 @@ export class BrowserNotebookClient {
   }
 
   async runAll(scope: "all" | "stale" = "all", input?: Event | { timeStamp: number }): Promise<CommandResult> {
+    const { completed } = await this.startRunAll(scope, input);
+    return completed;
+  }
+
+  async startRunAll(scope: "all" | "stale" = "all", input?: Event | { timeStamp: number }): Promise<{ completed: Promise<CommandResult> }> {
     const id = operationId("run");
     void input;
-    const { completed } = await this.withSourceLock(() => this.startRun(
+    return this.withSourceLock(() => this.startRun(
       this.requireDocument().buildRunCommand({ requestId: id, clientId: this.transport.id, scope }),
     ));
-    return completed;
   }
 
   async interrupt(runId?: string): Promise<CommandResult> {

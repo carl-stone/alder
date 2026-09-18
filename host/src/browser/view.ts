@@ -186,9 +186,9 @@ export class NotebookView {
 
   get document(): BrowserDocument | null { return this.documentValue; }
   get allowsUnload(): boolean { return this.hostClosed || this.internalNavigation; }
-  get runPreparing(): boolean { return this.explicitRunCount > 0; }
+  get runPending(): boolean { return this.explicitRunCount > 0; }
 
-  async runExplicit<T>(operation: () => Promise<T>): Promise<T> {
+  async runExplicit<T>(operation: () => Promise<{ completed: Promise<T> }>): Promise<T> {
     this.cancelEditTimers();
     this.explicitRunCount += 1;
     if (this.documentValue) this.renderControls(this.documentValue.snapshot);
@@ -196,12 +196,12 @@ export class NotebookView {
       await this.output.flush();
       return operation();
     });
-    // action() deliberately avoids repainting every cell action until the
-    // request is acknowledged. Explicit Run must still gate all mutations
-    // while its preparation/dispatch is in flight.
+    // Lock source controls only through preparation and dispatch. Execution can
+    // stay pending while the user edits or saves; Stop remains available for it.
     this.renderAllCellActions();
     try {
-      return await pending;
+      const { completed } = await pending;
+      return await completed;
     } finally {
       this.explicitRunCount -= 1;
       if (this.documentValue) {
@@ -405,9 +405,9 @@ export class NotebookView {
         if (this.requireCell(key).tombstone) {
           throw new Error("Restore this deleted cell as a new cell before running it");
         }
-        await this.client.runCell(key, input);
-        this.scheduleAutosave();
+        return this.client.startRunCell(key, input);
       });
+      this.scheduleAutosave();
       return;
     }
     await this.action(async () => {
@@ -537,7 +537,7 @@ export class NotebookView {
     const cells = this.documentValue?.cells ?? [];
     const index = knownIndex ?? cells.findIndex((item) => item.key === cell.key);
     buttons.forEach((button) => {
-      if (button.dataset.act === "run") setDisabled(button, this.actionCount > 0 || !this.executionAvailable() ||
+      if (button.dataset.act === "run") setDisabled(button, this.actionCount > 0 || this.runPending || !this.executionAvailable() ||
         this.documentValue?.snapshot.runtime.busy === true || this.documentValue?.snapshot.runtime.packageOperationActive === true);
       else if (button.dataset.act === "move-up") setDisabled(button, this.actionCount > 0 || !cell.id || index <= 0);
       else if (button.dataset.act === "move-down") setDisabled(button, this.actionCount > 0 || !cell.id || index < 0 || index >= cells.length - 1);
@@ -571,7 +571,7 @@ export class NotebookView {
     const actionPending = this.actionCount > 0;
     const signature = JSON.stringify({
       actionPending,
-      runBlocked: actionPending || runtime?.busy === true || runtime?.packageOperationActive === true ||
+      runBlocked: actionPending || this.runPending || runtime?.busy === true || runtime?.packageOperationActive === true ||
         runtime?.executionReady !== true || runtime?.kernelState !== "ready",
     });
     if (signature === this.cellActionsSignature) return;
@@ -625,14 +625,14 @@ export class NotebookView {
             if (this.requireCell(cell.key).tombstone) {
               throw new Error("Restore this deleted cell as a new cell before running it");
             }
-            await this.client.runCell(cell.key);
+            return this.client.startRunCell(cell.key);
+          }).then(() => {
             this.scheduleAutosave();
             if (next) this.focusAdjacentCell(cell.key, 1);
           }).catch((error) => this.showError(error));
         },
         onRunAll: () => {
-          void this.runExplicit(async () => {
-            await this.client.runAll(this.runScope());
+          void this.runExplicit(() => this.client.startRunAll(this.runScope())).then(() => {
             this.scheduleAutosave();
           }).catch((error) => this.showError(error));
         },
@@ -965,7 +965,7 @@ export class NotebookView {
     const available = !this.hostClosed && snapshot.runtime.executionReady && snapshot.runtime.kernelState === "ready";
     const signature = JSON.stringify({
       actionCount: this.actionCount,
-      runPreparing: this.runPreparing,
+      runPending: this.runPending,
       hostClosed: this.hostClosed,
       busy,
       available,
@@ -983,10 +983,10 @@ export class NotebookView {
     if (runAll) {
       const label = snapshot.runtime.executionMode === "lazy" ? "Run stale" : "Run all";
       if (runAll.textContent !== label) runAll.textContent = label;
-      setDisabled(runAll, this.actionCount > 0 || busy || snapshot.runtime.packageOperationActive || !available);
+      setDisabled(runAll, this.actionCount > 0 || this.runPending || busy || snapshot.runtime.packageOperationActive || !available);
     }
     const stop = this.dom.getElementById("stop") as HTMLButtonElement | null;
-    if (stop) setDisabled(stop, this.hostClosed || !(busy || this.runPreparing));
+    if (stop) setDisabled(stop, this.hostClosed || !(busy || this.runPending));
     const restart = this.dom.getElementById("restart") as HTMLButtonElement | null;
     if (restart) {
       restart.hidden = snapshot.runtime.kernelState === "ready";
@@ -2120,8 +2120,7 @@ export class NotebookView {
       void this.shutdownHost().catch((error) => this.showError(error));
     });
     this.dom.getElementById("run-all")?.addEventListener("click", (event) => {
-      void this.runExplicit(async () => {
-        await this.client.runAll(this.runScope(), event);
+      void this.runExplicit(() => this.client.startRunAll(this.runScope(), event)).then(() => {
         this.scheduleAutosave();
       }).catch((error) => this.showError(error));
     });
@@ -2316,7 +2315,7 @@ export class NotebookView {
     this.actionCount += 1;
     this.actionNotice = null;
     // Guard input immediately, but avoid repainting every cell's buttons
-    // before the request can leave the browser. Reconcile them on acknowledgement.
+    // before the request can leave the browser. Reconcile them when the action finishes.
     this.cellActionsSignature = "";
     if (this.documentValue) {
       this.renderControls(this.documentValue.snapshot);

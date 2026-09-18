@@ -1,9 +1,9 @@
 # Alder architectural reset
 
-Status: approved direction for implementation, 2026-09-18. The reset is not yet
-implemented or accepted. This document supersedes the old architecture plan,
-migration freeze and review matrix. Current assignments and acceptance live in
-[LEAD.md](LEAD.md); commands live in [README.md](README.md).
+Status: approved direction, 2026-09-18; implementation is proceeding in slices.
+This document supersedes the old architecture plan, migration freeze and review
+matrix. Current assignments and acceptance live in
+[WORKBOARD.md](WORKBOARD.md); commands live in [README.md](README.md).
 
 ## Product requirements
 
@@ -43,7 +43,8 @@ Ordinary notebook launch, editing and draft recovery require no Keychain approva
 recovery persistence is independent of credential storage.
 
 **User constraint: unmodified Ark.** Use upstream Ark without a fork, source or
-binary patches, or runtime replacement of Ark internals. Alder owns its adapter
+binary patches, or runtime replacement of Ark internals. Ark is the R kernel
+that evaluates code; Alder owns its notebook adapter
 and ordinary R helpers outside that boundary. Do not replace the current patch
 with reliance on private Ark hooks. This constraint is Carl's decision and is
 not subject to the lead's discretion over the working design below.
@@ -72,8 +73,11 @@ boundary changes to the lead.
 with one Ark kernel per notebook. Desktop, browser and agent clients use the same
 document and execution owner. Concentrate connection and operation lifetime
 decisions in the session manager. A backend crash can affect multiple notebooks,
-so recoverable document state must survive that failure. The first slices must
-demonstrate these boundaries before broad migration.
+so recoverable document state must survive that failure. Verify that closing one
+client preserves work for another attached client.
+Use ordinary Node child processes and process groups for lifecycle management.
+Notebook endpoints are routing boundaries; closing a frontend must not end work
+owned by another attached client.
 
 **Documents.** Maintain an in-memory working document, a saved baseline, an
 external-file fingerprint and a recovery snapshot. Stage saves and atomically
@@ -141,17 +145,22 @@ integrity checks and required license notices. Startup resolves necessary
 resources and checks actual compatibility. Separate local development from public
 distribution and signing. Existing script restrictions describe the current
 implementation; they do not freeze the redesigned runtime contract.
+Stage the Mac app with a compact Forge build and bundled Node/shared resources.
 
 Prefer deleting obsolete build and verification machinery to preserving it in
 disabled form. Keep a small local Mac build/check workflow with focused behavior
 tests and native interaction checks. Retire cross-platform release matrices,
 duplicate qualification layers and tests that only pin superseded designs. Do
-not recreate their scope under new names. Process cleanup remains necessary;
-the current custom Rust supervisor and its containment policy are replaceable.
+not recreate their scope under new names. Use ordinary process cleanup through
+platform facilities; retire the former custom supervisor and containment framework.
 
 ## Delivery and acceptance
 
-| Slice | Observable outcome |
+These are capability areas, not an assignment sequence. The workboard determines
+what is active, queued and accepted. A slice is one bounded implementation change
+with observable completion criteria and a runnable Mac build.
+
+| Capability area | Observable outcome |
 | --- | --- |
 | Document foundation | Launch, open, edit, save, confirmed replacement, close and recovery with R unavailable |
 | Execution foundation | Ark execution, outputs, interruption and recovery in the project environment |

@@ -21843,6 +21843,10 @@ var BrowserNotebookClient = class {
     return this.dispatchSource(command);
   }
   async runCell(key, input2) {
+    const { completed } = await this.startRunCell(key, input2);
+    return completed;
+  }
+  async startRunCell(key, input2) {
     const id = operationId("run");
     this.runs.set(id, {
       operationId: id,
@@ -21854,19 +21858,25 @@ var BrowserNotebookClient = class {
       const { completed } = await this.withSourceLock(() => this.startRun(
         this.requireDocument().buildRunCommand({ requestId: id, clientId: this.transport.id, scope: "cell", targetKey: key })
       ));
-      return await completed;
+      return { completed: completed.catch((error61) => {
+        this.runs.delete(id);
+        throw error61;
+      }) };
     } catch (error61) {
       this.runs.delete(id);
       throw error61;
     }
   }
   async runAll(scope = "all", input2) {
+    const { completed } = await this.startRunAll(scope, input2);
+    return completed;
+  }
+  async startRunAll(scope = "all", input2) {
     const id = operationId("run");
     void input2;
-    const { completed } = await this.withSourceLock(() => this.startRun(
+    return this.withSourceLock(() => this.startRun(
       this.requireDocument().buildRunCommand({ requestId: id, clientId: this.transport.id, scope })
     ));
-    return completed;
   }
   async interrupt(runId) {
     return this.dispatch({ type: "interrupt", ...this.base("interrupt", false), ...runId ? { runId } : {} });
@@ -23640,7 +23650,7 @@ var NotebookView = class {
   get allowsUnload() {
     return this.hostClosed || this.internalNavigation;
   }
-  get runPreparing() {
+  get runPending() {
     return this.explicitRunCount > 0;
   }
   async runExplicit(operation) {
@@ -23653,7 +23663,8 @@ var NotebookView = class {
     });
     this.renderAllCellActions();
     try {
-      return await pending;
+      const { completed } = await pending;
+      return await completed;
     } finally {
       this.explicitRunCount -= 1;
       if (this.documentValue) {
@@ -23833,9 +23844,9 @@ var NotebookView = class {
         if (this.requireCell(key).tombstone) {
           throw new Error("Restore this deleted cell as a new cell before running it");
         }
-        await this.client.runCell(key, input2);
-        this.scheduleAutosave();
+        return this.client.startRunCell(key, input2);
       });
+      this.scheduleAutosave();
       return;
     }
     await this.action(async () => {
@@ -23958,7 +23969,7 @@ var NotebookView = class {
     const cells = this.documentValue?.cells ?? [];
     const index = knownIndex ?? cells.findIndex((item) => item.key === cell.key);
     buttons.forEach((button) => {
-      if (button.dataset.act === "run") setDisabled(button, this.actionCount > 0 || !this.executionAvailable() || this.documentValue?.snapshot.runtime.busy === true || this.documentValue?.snapshot.runtime.packageOperationActive === true);
+      if (button.dataset.act === "run") setDisabled(button, this.actionCount > 0 || this.runPending || !this.executionAvailable() || this.documentValue?.snapshot.runtime.busy === true || this.documentValue?.snapshot.runtime.packageOperationActive === true);
       else if (button.dataset.act === "move-up") setDisabled(button, this.actionCount > 0 || !cell.id || index <= 0);
       else if (button.dataset.act === "move-down") setDisabled(button, this.actionCount > 0 || !cell.id || index < 0 || index >= cells.length - 1);
       else if (button.dataset.act === "disable") {
@@ -23990,7 +24001,7 @@ var NotebookView = class {
     const actionPending = this.actionCount > 0;
     const signature = JSON.stringify({
       actionPending,
-      runBlocked: actionPending || runtime?.busy === true || runtime?.packageOperationActive === true || runtime?.executionReady !== true || runtime?.kernelState !== "ready"
+      runBlocked: actionPending || this.runPending || runtime?.busy === true || runtime?.packageOperationActive === true || runtime?.executionReady !== true || runtime?.kernelState !== "ready"
     });
     if (signature === this.cellActionsSignature) return;
     this.cellActionsSignature = signature;
@@ -24040,14 +24051,14 @@ var NotebookView = class {
             if (this.requireCell(cell.key).tombstone) {
               throw new Error("Restore this deleted cell as a new cell before running it");
             }
-            await this.client.runCell(cell.key);
+            return this.client.startRunCell(cell.key);
+          }).then(() => {
             this.scheduleAutosave();
             if (next) this.focusAdjacentCell(cell.key, 1);
           }).catch((error61) => this.showError(error61));
         },
         onRunAll: () => {
-          void this.runExplicit(async () => {
-            await this.client.runAll(this.runScope());
+          void this.runExplicit(() => this.client.startRunAll(this.runScope())).then(() => {
             this.scheduleAutosave();
           }).catch((error61) => this.showError(error61));
         },
@@ -24367,7 +24378,7 @@ ${jupyterTrace.map((line, index) => `${index + 1}. ${line}`).join("\n")}` : ""
     const available = !this.hostClosed && snapshot.runtime.executionReady && snapshot.runtime.kernelState === "ready";
     const signature = JSON.stringify({
       actionCount: this.actionCount,
-      runPreparing: this.runPreparing,
+      runPending: this.runPending,
       hostClosed: this.hostClosed,
       busy,
       available,
@@ -24385,10 +24396,10 @@ ${jupyterTrace.map((line, index) => `${index + 1}. ${line}`).join("\n")}` : ""
     if (runAll) {
       const label = snapshot.runtime.executionMode === "lazy" ? "Run stale" : "Run all";
       if (runAll.textContent !== label) runAll.textContent = label;
-      setDisabled(runAll, this.actionCount > 0 || busy || snapshot.runtime.packageOperationActive || !available);
+      setDisabled(runAll, this.actionCount > 0 || this.runPending || busy || snapshot.runtime.packageOperationActive || !available);
     }
     const stop = this.dom.getElementById("stop");
-    if (stop) setDisabled(stop, this.hostClosed || !(busy || this.runPreparing));
+    if (stop) setDisabled(stop, this.hostClosed || !(busy || this.runPending));
     const restart = this.dom.getElementById("restart");
     if (restart) {
       restart.hidden = snapshot.runtime.kernelState === "ready";
@@ -25458,8 +25469,7 @@ ${jupyterTrace.map((line, index) => `${index + 1}. ${line}`).join("\n")}` : ""
       void this.shutdownHost().catch((error61) => this.showError(error61));
     });
     this.dom.getElementById("run-all")?.addEventListener("click", (event) => {
-      void this.runExplicit(async () => {
-        await this.client.runAll(this.runScope(), event);
+      void this.runExplicit(() => this.client.startRunAll(this.runScope(), event)).then(() => {
         this.scheduleAutosave();
       }).catch((error61) => this.showError(error61));
     });
@@ -26365,9 +26375,9 @@ function bindDesktopActions(next) {
     } else if (action === "save-as") {
       operation = desktop.chooseSavePath().then((path) => path === null ? void 0 : next.saveAs(path));
     } else if (action === "run-all") {
-      operation = view?.runExplicit(() => next.runAll("all"));
+      operation = view?.runExplicit(() => next.startRunAll("all"));
     } else if (action === "run-stale") {
-      operation = view?.runExplicit(() => next.runAll("stale"));
+      operation = view?.runExplicit(() => next.startRunAll("stale"));
     } else if (action === "select-r") {
       operation = desktop.chooseRscript().then((path) => path === null ? void 0 : next.selectR(path, true));
     }

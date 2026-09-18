@@ -5,26 +5,27 @@ into `# %%` cells. The application host owns persistence, dependency execution,
 rendering, package operations, publishing, and the browser; the installed R
 package supplies notebook values and ordinary `Rscript` helpers.
 
-## Mac development and reset
+## Current Mac development
 
-Alder is a pre-release application undergoing an architectural reset. The current
-code and local builds are starting points, not acceptance of the redesigned app.
-The [product requirements and working design](dev/ARCHITECTURE.md) describe the
-reset; [dev/LEAD.md](dev/LEAD.md) records coordination and accepted progress.
+Alder is pre-release software undergoing a redesign of its internal architecture.
+The accepted Mac build currently supports opening, editing, saving and recovering
+notebooks without R. R execution and the related scientific workflows are being
+reintegrated; the [workboard](dev/WORKBOARD.md) records exactly what is accepted,
+under review and queued.
 
-Builds and checks run locally. Mac is the only active platform during the reset;
-Linux and Windows support will be rebuilt and qualified separately later.
-Follow [dev/README.md](dev/README.md) for native Mac development. The document app opens, edits, saves and recovers notebooks without R.
-Execution runtime integration is the next reset slice. Public signing and
-notarization remain separate from local development.
+The active app source is in the implementation worktree identified on that board.
+Follow [dev/README.md](dev/README.md) to choose the checkout, build and launch it.
+The [architecture](dev/ARCHITECTURE.md) describes the intended finished behavior;
+it is not a statement that every feature is already available in the reset build.
 
-The existing app exposes **Open notebook…** for selecting a notebook and searches
-a saved R choice, `PATH`, then the standard macOS R framework installation.
-Use [the Iris example](inst/examples/iris.R) to exercise ordinary notebook behavior.
+Mac is the current delivery target. Linux, Windows and public distribution are
+deferred. The document app uses Electron for its window and a shared Node backend
+for desktop and agent clients. Open notebooks with File > Open or **Open notebook…**.
 
 ## Install the R helpers
 
-From a clone of this repository:
+The helper package can be used independently of the desktop app. Its R version
+and dependency requirements are in [DESCRIPTION](DESCRIPTION). From a clone:
 
 ```r
 install.packages("pak")
@@ -66,22 +67,19 @@ filtered
 ```
 
 Use `# %% [markdown]` for Markdown cells and `#| key: value` for cell options.
-The host keeps source bytes and analysis diagnostics separate from captured
-outputs. Explicit runs execute stale dependencies in dependency order; lazy
-runs leave descendants stale until requested. Widget changes are explicit
-reactive inputs, and dynamic R lookup that cannot be bounded statically is
-reported before execution.
+The intended execution behavior is to run stale dependencies in dependency
+order; lazy mode leaves descendants stale until requested. Widget changes are
+reactive inputs, and unsupported dynamic dependencies produce a diagnostic.
+These workflows and the R help describe the feature contracts being restored;
+check the workboard for their implementation status.
 
-## Application development
+## Contributing
 
-The implementation includes the editor and output view, saving, HTML publishing,
-language assistance, package operations and MCP access. The reset preserves useful
-notebook functionality while simplifying the surrounding ownership and lifecycle.
+Agents start with [AGENTS.md](AGENTS.md), which routes implementation, review and
+coordination work to the relevant instructions. The [development guide](dev/README.md)
+contains build commands and source/generated-file guidance. Application builds
+and the standalone R helper package are separate.
 
-The Mac document app uses Node and Electron, with one shared backend for desktop
-and agent clients. Build and launch commands are maintained in
-[dev/README.md](dev/README.md). Application builds and the standalone R helper
-package are separate.
-
-The [demo](demo.R) and [Iris example](inst/examples/iris.R) are useful starting points
-for acceptance notebooks. Historical changes are recorded in [NEWS.md](NEWS.md).
+The [demo](demo.R) and [Iris example](inst/examples/iris.R) provide ordinary R
+workflows. [NEWS.md](NEWS.md) records earlier development features, not current
+reset acceptance.
