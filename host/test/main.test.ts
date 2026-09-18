@@ -9,31 +9,20 @@ import { fileURLToPath } from "node:url";
 import { browserUrl, desktopUnavailableError, openSystemBrowser, parseCli, waitForRuntimeReadiness } from "../src/main.js";
 import type { HostSnapshot, SessionConnection } from "../src/protocol.js";
 
-test("internal deferred startup does not disable configured startup", () => {
-  const options = parseCli(["--internal-host", "--defer-startup"]);
-  assert.equal(options.deferStartup, true);
-  assert.equal(options.noRun, false);
-});
-test("internal host accepts forwarded remote session options", () => {
-  const options = parseCli([
-    "--internal-host", "notebook.R", "--defer-startup",
-    "--external-origin", "https://proxy.example", "--token-file", "token",
-  ]);
-  assert.equal(options.internalHost, true);
+test("headless CLI accepts paired external authentication options", () => {
+  const options = parseCli(["notebook.R", "--headless", "--external-origin", "https://proxy.example", "--token-file", "token"]);
+  assert.equal(options.headless, true);
   assert.equal(options.externalOrigin, "https://proxy.example");
   assert.equal(options.tokenFile, "token");
+  assert.throws(() => parseCli(["notebook.R", "--headless", "--token-file", "token"]), /must be supplied together/);
+  assert.throws(() => parseCli(["notebook.R", "--headless", "--external-origin", "http://proxy.example", "--token-file", "token"]), /HTTPS origin/);
 });
 
-
-test("explicit no-run remains distinct from deferred startup", () => {
-  const options = parseCli(["--no-run"]);
-  assert.equal(options.noRun, true);
-  assert.equal(options.deferStartup, false);
+test("explicit no-run disables configured startup", () => {
+  assert.equal(parseCli(["--no-run"]).noRun, true);
+  assert.equal(parseCli([]).noRun, false);
 });
 
-test("deferred startup transport is internal-only", () => {
-  assert.throws(() => parseCli(["--defer-startup"]), /reserved for internal hosts/);
-});
 test("CLI waits for cold runtime startup before the first operation", async () => {
   const snapshots = [
     { runtime: { executionReady: false, executionBlockedReason: null } },
@@ -100,7 +89,7 @@ test("external browser launch keeps its bearer out of opener arguments", async (
   let launcherPath: string | undefined;
   try {
     await openSystemBrowser(target, {
-      platform: "linux",
+      platform: "darwin",
       temporaryRoot: root,
       cleanupDelayMs: 50,
       spawn: (executable, openerArgs, options) => {
@@ -113,7 +102,7 @@ test("external browser launch keeps its bearer out of opener arguments", async (
       },
     });
 
-    assert.equal(command, "xdg-open");
+    assert.equal(command, "open");
     assert.deepEqual(spawnOptions, { detached: true, stdio: "ignore" });
     assert.equal(args?.length, 1);
     assert.match(args![0]!, /^file:\/\//);
@@ -125,14 +114,8 @@ test("external browser launch keeps its bearer out of opener arguments", async (
 
     const directoryInfo = await stat(dirname(launcherPath!));
     const launcherInfo = await stat(launcherPath!);
-    if (process.platform === "win32") {
-      // Windows does not expose POSIX permission bits through stat().
-      assert.equal(directoryInfo.isDirectory(), true);
-      assert.equal(launcherInfo.isFile(), true);
-    } else {
-      assert.equal(directoryInfo.mode & 0o777, 0o700);
-      assert.equal(launcherInfo.mode & 0o777, 0o600);
-    }
+    assert.equal(directoryInfo.mode & 0o777, 0o700);
+    assert.equal(launcherInfo.mode & 0o777, 0o600);
     const contents = await readFile(launcherPath!, "utf8");
     assert.match(contents, /^<!doctype html>/);
     assert.match(contents, /<meta name="referrer" content="no-referrer">/);
@@ -158,7 +141,7 @@ test("external browser launch removes its private launcher on spawn failure", as
   try {
     await assert.rejects(
       openSystemBrowser(target, {
-        platform: "linux",
+        platform: "darwin",
         temporaryRoot: root,
         spawn: (_executable, openerArgs) => {
           args = [...openerArgs];

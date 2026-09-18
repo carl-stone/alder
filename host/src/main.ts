@@ -4,7 +4,6 @@ import { chmod, mkdtemp, open, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { readPrivateFile } from "./private-paths.js";
 import { parseArgs } from "node:util";
 import { randomUUID } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -13,9 +12,9 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { parseStrictJson } from "./strict-json.js";
 
 import { connectMcpStdio, drainMcpStdio, type McpInitializationMetadata } from "./mcp-stdio.js";
-import { startHost, type HostReady } from "./application.js";
+import { type HostReady } from "./application.js";
 import { resolveApplicationResources, type ApplicationResources } from "./resources.js";
-import { acquireNotebookSession, isUntitledRecoveryId, listUntitledRecoveryDescriptors, selectUntitledRecoveryDescriptor, SessionAuthError } from "./sessions.js";
+import { acquireNotebookSession, isUntitledRecoveryId, listUntitledRecoveryDescriptors, selectUntitledRecoveryDescriptor } from "./sessions.js";
 import {
   artifactHandleSchema,
   commandAdmissionSchema,
@@ -37,10 +36,7 @@ import {
 } from "./protocol.js";
 
 export const HOST_IDENTITY = Object.freeze({ protocol: HOST_PROTOCOL, engineProtocol: ENGINE_PROTOCOL, hostVersion: "0.1.0", packageVersion: "0.1.0" });
-const PRIVATE_NONCE = "ALDER_PRIVATE_READY_NONCE";
-const PRIVATE_NONCE_PATTERN = /^[0-9a-f]{64}$/;
 const AUTH_TOKEN_PATTERN = /^[0-9a-f]{64}$/;
-const TOKEN_FILE_MAX_BYTES = 65;
 const RUNTIME_READY_TIMEOUT_MS = 120_000;
 const RUNTIME_READY_POLL_MS = 100;
 
@@ -89,7 +85,6 @@ interface CliOptions {
   sandbox: boolean;
   lazy: boolean;
   noRun: boolean;
-  deferStartup: boolean;
   host: string;
   port: number;
   allowedOrigins: string[];
@@ -97,7 +92,6 @@ interface CliOptions {
   tokenFile?: string;
   output?: string;
   includeCode: boolean;
-  internalHost: boolean;
 }
 
 function usageError(message: string): Error { return Object.assign(new Error(message), { exitCode: 2 }); }
@@ -107,19 +101,6 @@ function errorText(error: unknown): string {
   if (!(error instanceof Error)) return String(error);
   const code = (error as { code?: unknown }).code;
   return typeof code === "string" && code.length > 0 ? code + ": " + error.message : error.message;
-}
-
-async function readExternalBearer(path: string, processSupervisorExecutable?: string | null): Promise<string> {
-  try {
-    const bytes = await readPrivateFile(path, { maxBytes: TOKEN_FILE_MAX_BYTES, processSupervisorExecutable });
-    let contents = bytes.toString("utf8");
-    if (contents.endsWith("\n")) contents = contents.slice(0, -1);
-    if (contents.includes("\n") || !AUTH_TOKEN_PATTERN.test(contents)) throw new SessionAuthError("token file must contain exactly one lowercase 64-hex bearer token");
-    return contents;
-  } catch (error) {
-    if (error instanceof SessionAuthError) throw error;
-    throw new SessionAuthError("token file is unavailable or insecure");
-  }
 }
 
 async function readSessionJson(response: Response): Promise<unknown> {
@@ -166,15 +147,15 @@ export function parseCli(argv: readonly string[]): CliOptions {
       strict: true,
       options: {
         help: { type: "boolean" }, version: { type: "boolean" }, "host-info": { type: "boolean" },
-        browser: { type: "boolean" }, headless: { type: "boolean" }, lazy: { type: "boolean" }, "no-run": { type: "boolean" }, "defer-startup": { type: "boolean" },
+        browser: { type: "boolean" }, headless: { type: "boolean" }, lazy: { type: "boolean" }, "no-run": { type: "boolean" },
         sandbox: { type: "boolean" }, rscript: { type: "string" }, host: { type: "string" }, port: { type: "string" },
         "allowed-origin": { type: "string", multiple: true }, "external-origin": { type: "string" }, "token-file": { type: "string" },
-        output: { type: "string" }, "include-code": { type: "boolean" }, "internal-host": { type: "boolean" }, "list-recoveries": { type: "boolean" }, recover: { type: "string" },
+        output: { type: "string" }, "include-code": { type: "boolean" }, "list-recoveries": { type: "boolean" }, recover: { type: "string" },
       },
     });
   } catch (error) { throw usageError(errorText(error)); }
   const values = parsed.values as Record<string, unknown>;
-  if (values.help === true) return { command: "desktop", path: null, recover: undefined, listRecoveries: false, browser: false, headless: false, rscript: undefined, sandbox: false, lazy: false, noRun: false, deferStartup: false, host: "127.0.0.1", port: 0, allowedOrigins: [], externalOrigin: undefined, tokenFile: undefined, output: undefined, includeCode: false, internalHost: false };
+  if (values.help === true) return { command: "desktop", path: null, recover: undefined, listRecoveries: false, browser: false, headless: false, rscript: undefined, sandbox: false, lazy: false, noRun: false, host: "127.0.0.1", port: 0, allowedOrigins: [], externalOrigin: undefined, tokenFile: undefined, output: undefined, includeCode: false };
   const positionals = parsed.positionals;
   const first = positionals[0];
   const command = first === "check" || first === "run" || first === "publish" || first === "mcp" ? first : "desktop";
@@ -182,14 +163,11 @@ export function parseCli(argv: readonly string[]): CliOptions {
   if (positionals.length > (command === "desktop" ? 1 : 2)) throw usageError("too many positional arguments");
   const browser = values.browser === true;
   const headless = values.headless === true;
-  const internalHost = values["internal-host"] === true;
-  const deferStartup = values["defer-startup"] === true;
-  if (deferStartup && !internalHost) throw usageError("--defer-startup is reserved for internal hosts");
   const listRecoveries = values["list-recoveries"] === true;
   const recover = values.recover === undefined ? undefined : String(values.recover);
   if (browser && headless) throw usageError("--browser and --headless are mutually exclusive");
   if (listRecoveries) {
-    if (positionals.length > 0 || recover !== undefined || browser || headless || values.lazy === true || values["no-run"] === true || deferStartup || values.sandbox === true || values.rscript !== undefined || values.host !== undefined || values.port !== undefined || values["allowed-origin"] !== undefined || values["external-origin"] !== undefined || values["token-file"] !== undefined || values.output !== undefined || values["include-code"] === true || values["host-info"] === true || internalHost) {
+    if (positionals.length > 0 || recover !== undefined || browser || headless || values.lazy === true || values["no-run"] === true || values.sandbox === true || values.rscript !== undefined || values.host !== undefined || values.port !== undefined || values["allowed-origin"] !== undefined || values["external-origin"] !== undefined || values["token-file"] !== undefined || values.output !== undefined || values["include-code"] === true || values["host-info"] === true) {
       throw usageError("--list-recoveries cannot be combined with other command or session options");
     }
   }
@@ -202,9 +180,9 @@ export function parseCli(argv: readonly string[]): CliOptions {
   const externalOrigin = typeof values["external-origin"] === "string" ? values["external-origin"] : undefined;
   const tokenFile = typeof values["token-file"] === "string" ? values["token-file"] : undefined;
   validateExternalAuthOptions(externalOrigin, tokenFile);
-  const sessionOnly = browser || headless || values.lazy === true || values["no-run"] === true || deferStartup || values.host !== undefined || values.port !== undefined || values["allowed-origin"] !== undefined || values["external-origin"] !== undefined || values["token-file"] !== undefined;
+  const sessionOnly = browser || headless || values.lazy === true || values["no-run"] === true || values.host !== undefined || values.port !== undefined || values["allowed-origin"] !== undefined || values["external-origin"] !== undefined || values["token-file"] !== undefined;
   if (command !== "desktop" && sessionOnly) throw usageError("session flags are not valid for " + command);
-  if (command === "desktop" && !internalHost && !browser && !headless && (values.sandbox === true || values.host !== undefined || values.port !== undefined || values["allowed-origin"] !== undefined || values["external-origin"] !== undefined || values["token-file"] !== undefined)) {
+  if (command === "desktop" && !browser && !headless && (values.sandbox === true || values.host !== undefined || values.port !== undefined || values["allowed-origin"] !== undefined || values["external-origin"] !== undefined || values["token-file"] !== undefined)) {
     throw usageError("native desktop launch does not accept headless session flags");
   }
   if (command !== "publish" && (values.output !== undefined || values["include-code"] === true)) throw usageError("publish flags are only valid for publish");
@@ -216,35 +194,13 @@ export function parseCli(argv: readonly string[]): CliOptions {
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw usageError("--port must be an integer between 0 and 65535");
   const host = values.host === undefined ? "127.0.0.1" : String(values.host);
   if (!["127.0.0.1", "::1"].includes(host)) throw usageError("--host must be 127.0.0.1 or ::1");
-  return { command, path, recover, listRecoveries, browser, headless, rscript: typeof values.rscript === "string" ? values.rscript : undefined, sandbox: values.sandbox === true, lazy: values.lazy === true, noRun: values["no-run"] === true, deferStartup, host, port, allowedOrigins: Array.isArray(values["allowed-origin"]) ? values["allowed-origin"].map(String) : [], externalOrigin, tokenFile, output: typeof values.output === "string" ? values.output : undefined, includeCode: values["include-code"] === true, internalHost };
+  return { command, path, recover, listRecoveries, browser, headless, rscript: typeof values.rscript === "string" ? values.rscript : undefined, sandbox: values.sandbox === true, lazy: values.lazy === true, noRun: values["no-run"] === true, host, port, allowedOrigins: Array.isArray(values["allowed-origin"]) ? values["allowed-origin"].map(String) : [], externalOrigin, tokenFile, output: typeof values.output === "string" ? values.output : undefined, includeCode: values["include-code"] === true };
 }
 
 async function applicationResources(): Promise<ApplicationResources> {
   const root = process.env.ALDER_APPLICATION_ROOT ?? resolve(dirname(fileURLToPath(import.meta.url)), "..");
   return resolveApplicationResources(root);
 }
-function appOptions(cli: CliOptions, resources: ApplicationResources): Record<string, unknown> {
-  return { path: cli.path, host: cli.host, port: cli.port, rscript: cli.rscript, sandbox: cli.sandbox, executionMode: cli.lazy ? "lazy" : undefined, runOnStartup: cli.noRun ? false : undefined, deferStartup: cli.deferStartup, allowedOrigins: cli.allowedOrigins.length === 0 ? undefined : cli.allowedOrigins, externalOrigin: cli.externalOrigin, tokenFile: cli.tokenFile, resources };
-}
-
-async function runInternalHost(cli: CliOptions, resources: ApplicationResources): Promise<number> {
-  const nonce = process.env[PRIVATE_NONCE];
-  delete process.env[PRIVATE_NONCE];
-  if (nonce === undefined || !PRIVATE_NONCE_PATTERN.test(nonce)) throw new Error("internal host readiness nonce is missing or invalid");
-  const token = cli.tokenFile === undefined ? undefined : await readExternalBearer(cli.tokenFile, resources.processSupervisorExecutable);
-  const session = { runtimeDirectory: process.env.ALDER_RUNTIME_DIRECTORY, sessionKey: process.env.ALDER_SESSION_KEY, epoch: process.env.ALDER_EPOCH, processNonce: process.env.ALDER_PROCESS_NONCE, continuityProof: process.env.ALDER_CONTINUITY_PROOF, startIdentity: undefined, untitledRecoveryId: cli.recover, projectDirectory: process.env.ALDER_UNTITLED_PROJECT_DIRECTORY };
-  // Consume the token file before ownership. Passing the bearer as the
-  // existing session token avoids a second server-side file read; omit the
-  // path from downstream options so it cannot be read after ownership.
-  const app = await startHost({ ...appOptions(cli, resources), idleTimeout: 1, tokenFile: undefined, externalBearerValidated: token !== undefined, internalHost: true, session: { ...session, token } } as never);
-  writeJson({ type: "alder.private.ready", version: 1, nonce, pid: process.pid, processNonce: app.ownership.processNonce, ready: app.ready });
-  const stop = () => { void app.close(); };
-  process.once("SIGINT", stop);
-  process.once("SIGTERM", stop);
-  await app.closed;
-  return 0;
-}
-
 function publicReady(origin: string, epoch: string, capabilities: readonly string[]): HostReady { return { type: "host.ready", origin, epoch, capabilities: [...capabilities] }; }
 export async function browserUrl(connection: SessionConnection): Promise<string> {
   const response = await connection.request("/api/ticket", {
@@ -494,7 +450,6 @@ async function runDesktop(cli: CliOptions, resources: ApplicationResources): Pro
       executionMode: cli.lazy ? "lazy" : undefined,
       runOnStartup: cli.noRun ? false : undefined,
       deferStartup: true,
-      requestedConfiguration: cli.deferStartup ? { deferStartup: true } : undefined,
       externalOrigin: cli.externalOrigin,
       tokenFile: cli.tokenFile,
     });
@@ -539,7 +494,6 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
   }
   const resources = await applicationResources();
   if (argv.includes("--host-info")) { writeJson({ type: "host.info", ...HOST_IDENTITY, resources: { root: resources.root, cliLauncher: resources.cliLauncher, hostEntry: resources.hostEntry, rendererDirectory: resources.rendererDirectory, workerDirectory: resources.workerDirectory, rLibraryDirectory: resources.rLibraryDirectory, arkExecutable: resources.arkExecutable, airExecutable: resources.airExecutable, nodeExecutable: resources.nodeExecutable, processSupervisorExecutable: resources.processSupervisorExecutable, electronEntry: resources.electronEntry } }); return 0; }
-  if (cli.internalHost) return runInternalHost(cli, resources);
   if (cli.command === "check" || cli.command === "run" || cli.command === "publish") return runTool(cli, resources);
   if (cli.command === "mcp") return runMcp(cli, resources);
   return runDesktop(cli, resources);
