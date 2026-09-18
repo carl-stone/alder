@@ -72476,6 +72476,8 @@ var Controller = class {
   analysisCache = /* @__PURE__ */ new Map();
   analysisCacheBytes = 0;
   analysisNeeded = /* @__PURE__ */ new Set();
+  reactivePending = /* @__PURE__ */ new Set();
+  reactiveScheduled = false;
   barrierAnalysisCandidates = /* @__PURE__ */ new Set();
   clearBeforeEvaluation = /* @__PURE__ */ new Set();
   invalidatedDefinitionsByCell = /* @__PURE__ */ new Map();
@@ -73321,6 +73323,7 @@ var Controller = class {
       switch (command.type) {
         case "transaction":
           result = await this.applyTransaction(command.changes, command.expectedDocumentRevision, command.requestId, false);
+          this.scheduleReactiveRun();
           break;
         case "run":
           if (command.startup === true && (!this.runOnStartup || this.suppressStartup)) {
@@ -73545,7 +73548,12 @@ var Controller = class {
     const publishedOrder = publication.document.cells.map((cell) => cell.id);
     const orderChanged = !arrayEqual(currentOrder, publishedOrder);
     if (staged.changed.size > 0 || staged.created.size > 0 || staged.deleted.size > 0 || orderChanged) {
-      this.applyStagedDocument(publication.document, staged, operationId);
+      const invalidated = this.applyStagedDocument(publication.document, staged, operationId);
+      if (request.kind === "transaction" && this.executionMode === "automatic") {
+        for (const id2 of invalidated) {
+          if (this.cellById(id2)?.type === "code") this.reactivePending.add(id2);
+        }
+      }
     } else {
       this.sourceDocument = publication.document;
     }
@@ -73556,6 +73564,7 @@ var Controller = class {
     const graphChanged = this.graphValue.state !== currentGraph;
     const configuredMode = this.config.on_cell_change;
     if (configuredMode === "automatic" || configuredMode === "lazy") this.executionMode = configuredMode;
+    if (this.executionMode === "lazy") this.reactivePending.clear();
     if (typeof this.config.on_startup === "boolean") this.runOnStartup = this.config.on_startup;
     this.layout = clone3(publication.layout);
     this.diskValue = clone3(publication.disk);
@@ -73656,6 +73665,8 @@ var Controller = class {
             const previousSidecars = this.sidecarsValue;
             const previousREnvironment = this.rEnvironmentValue;
             const previousChanged = this.changed;
+            const previousExecutionMode = this.executionMode;
+            const previousReactivePending = new Set(this.reactivePending);
             const previousDocumentRevision = this.documentRevisionValue;
             const previousVersion = this.version;
             const previousCursor = this.cursorValue;
@@ -73673,6 +73684,9 @@ var Controller = class {
               this.sidecarsValue = previousSidecars;
               this.rEnvironmentValue = previousREnvironment;
               this.changed = previousChanged;
+              this.executionMode = previousExecutionMode;
+              this.reactivePending.clear();
+              for (const id2 of previousReactivePending) this.reactivePending.add(id2);
               this.documentRevisionValue = previousDocumentRevision;
               this.outputStore.setIdentity({ documentRevision: this.documentRevisionValue, kernelEpoch: this.kernelEpochValue });
               this.version = previousVersion;
@@ -73784,6 +73798,7 @@ var Controller = class {
     const prior = new Map(this.cells.map((cell) => [cell.id, cell]));
     const changedIds = new Set(staged.changed);
     const affected = /* @__PURE__ */ new Set();
+    for (const id2 of staged.created.values()) affected.add(id2);
     for (const id2 of changedIds) {
       affected.add(id2);
       for (const descendant of this.graphValue.descendants(id2)) affected.add(descendant);
@@ -73875,6 +73890,7 @@ var Controller = class {
     this.refreshValueFreshness();
     this.publishGraphResourceError({ operationId }, true);
     this.sourceDocument = document;
+    return affected;
   }
   async applySourceChanges(changes, waitForAnalysis, operationId) {
     const result = await this.applyTransaction(changes, this.documentRevisionValue, operationId ?? randomUUID3(), waitForAnalysis);
@@ -74047,6 +74063,7 @@ var Controller = class {
       this.runPreparationActive = false;
       if (this.runPreparationCancellation === preparation) this.runPreparationCancellation = null;
       this.scheduleWidgetReconciliation();
+      this.scheduleReactiveRun();
     }
   }
   cancelRunPreparation(preparation) {
@@ -74118,6 +74135,7 @@ var Controller = class {
     if (jobs.length === 0 && !deferEmptySettlement) operation.settledAt = Date.now();
     this.rememberOperation(operation);
     this.runOperationById.set(runId, this.operationKey(clientId, operationId));
+    for (const job of jobs) this.reactivePending.delete(job.id);
     this.queue.push(...jobs);
     this.bump("runtime", this.runtimeSnapshot(), { operationId, runId });
     if (jobs.length === 0 && !deferEmptySettlement) this.notifyOperationWaiters(operation);
@@ -74133,8 +74151,44 @@ var Controller = class {
       } else {
         if (!this.closed) this.emit("runtime", this.runtimeSnapshot());
         this.scheduleWidgetReconciliation();
+        this.scheduleReactiveRun();
       }
     });
+  }
+  reactiveRunReady() {
+    return !this.closed && this.executionMode === "automatic" && this.reactivePending.size > 0 && this.kernelAvailable && this.executionReady && this.analyzerAvailable && !this.engineRestarting && this.analysisNeeded.size === 0 && this.analysisInFlight === null && this.activeEvaluation === null && this.queue.length === 0 && !this.runPreparationActive && this.queuedRunCommands.size === 0 && !this.packageOperationActive && this.runtimeContextReservation === void 0;
+  }
+  scheduleReactiveRun() {
+    if (this.reactiveScheduled || !this.reactiveRunReady()) return;
+    this.reactiveScheduled = true;
+    setTimeout(() => {
+      this.reactiveScheduled = false;
+      if (!this.reactiveRunReady()) return;
+      const pending = [...this.reactivePending];
+      this.reactivePending.clear();
+      try {
+        this.assertGraphRunnable();
+        const blocked = this.graphValue.blockedByDisabled();
+        const plan = /* @__PURE__ */ new Set();
+        for (const id2 of pending) {
+          const cell = this.cellById(id2);
+          if (cell?.type !== "code" || blocked.has(id2)) continue;
+          if (!["idle", "stale", "error", "stopped"].includes(this.statusOf(id2))) continue;
+          for (const candidate of this.graphValue.planCell(
+            id2,
+            (candidateId) => this.statusOf(candidateId),
+            "automatic",
+            "app"
+          )) plan.add(candidate);
+        }
+        if (plan.size === 0) return;
+        const operationId = `reactive-${randomUUID3()}`;
+        this.createOperation(operationId, "run", INTERNAL_CLIENT_ID);
+        this.launchRun(this.graphValue.orderOf(plan), operationId, false, INTERNAL_CLIENT_ID);
+      } catch (error61) {
+        this.replaceLastActionError(asControllerError(error61).toJSON());
+      }
+    }, 40);
   }
   async pump() {
     while (!this.closed && this.activeEvaluation === null && this.queue.length > 0) {
@@ -75095,7 +75149,10 @@ var Controller = class {
       try {
         await promise2;
       } finally {
-        if (this.analysisInFlight === promise2) this.analysisInFlight = null;
+        if (this.analysisInFlight === promise2) {
+          this.analysisInFlight = null;
+          this.scheduleReactiveRun();
+        }
       }
     }
   }
@@ -75218,6 +75275,9 @@ var Controller = class {
     for (const root of invalidationRoots) {
       for (const descendant of this.graphValue.descendants(root)) {
         if (this.markStale(descendant)) statusChanges.add(descendant);
+        if (this.reactivePending.has(root) && this.cellById(descendant)?.type === "code") {
+          this.reactivePending.add(descendant);
+        }
       }
       if (this.barrierAnalysisCandidates.has(root) && this.cellById(root)?.analysis?.barrier) {
         for (const changedId of this.invalidateForBarrier()) statusChanges.add(changedId);

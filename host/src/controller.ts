@@ -302,6 +302,8 @@ export class Controller {
   private readonly analysisCache = new Map<string, AnalysisCacheValue>();
   private analysisCacheBytes = 0;
   private readonly analysisNeeded = new Set<string>();
+  private readonly reactivePending = new Set<string>();
+  private reactiveScheduled = false;
   private readonly barrierAnalysisCandidates = new Set<string>();
   private readonly clearBeforeEvaluation = new Set<string>();
   private readonly invalidatedDefinitionsByCell = new Map<string, Set<string>>();
@@ -1206,6 +1208,7 @@ export class Controller {
       switch (command.type) {
         case "transaction":
           result = await this.applyTransaction(command.changes, command.expectedDocumentRevision, command.requestId, false);
+          this.scheduleReactiveRun();
           break;
         case "run":
           if (command.startup === true && (!this.runOnStartup || this.suppressStartup)) {
@@ -1444,7 +1447,12 @@ export class Controller {
     const publishedOrder = publication.document.cells.map((cell) => cell.id);
     const orderChanged = !arrayEqual(currentOrder, publishedOrder);
     if (staged.changed.size > 0 || staged.created.size > 0 || staged.deleted.size > 0 || orderChanged) {
-      this.applyStagedDocument(publication.document, staged, operationId);
+      const invalidated = this.applyStagedDocument(publication.document, staged, operationId);
+      if (request.kind === "transaction" && this.executionMode === "automatic") {
+        for (const id of invalidated) {
+          if (this.cellById(id)?.type === "code") this.reactivePending.add(id);
+        }
+      }
     } else {
       this.sourceDocument = publication.document;
     }
@@ -1455,6 +1463,7 @@ export class Controller {
     const graphChanged = this.graphValue.state !== currentGraph;
     const configuredMode = this.config.on_cell_change;
     if (configuredMode === "automatic" || configuredMode === "lazy") this.executionMode = configuredMode;
+    if (this.executionMode === "lazy") this.reactivePending.clear();
     if (typeof this.config.on_startup === "boolean") this.runOnStartup = this.config.on_startup;
     this.layout = clone(publication.layout);
     this.diskValue = clone(publication.disk);
@@ -1565,6 +1574,8 @@ export class Controller {
             const previousSidecars = this.sidecarsValue;
             const previousREnvironment = this.rEnvironmentValue;
             const previousChanged = this.changed;
+            const previousExecutionMode = this.executionMode;
+            const previousReactivePending = new Set(this.reactivePending);
             const previousDocumentRevision = this.documentRevisionValue;
             const previousVersion = this.version;
             const previousCursor = this.cursorValue;
@@ -1582,6 +1593,9 @@ export class Controller {
               this.sidecarsValue = previousSidecars;
               this.rEnvironmentValue = previousREnvironment;
               this.changed = previousChanged;
+              this.executionMode = previousExecutionMode;
+              this.reactivePending.clear();
+              for (const id of previousReactivePending) this.reactivePending.add(id);
               this.documentRevisionValue = previousDocumentRevision;
               this.outputStore.setIdentity({ documentRevision: this.documentRevisionValue, kernelEpoch: this.kernelEpochValue });
               this.version = previousVersion;
@@ -1702,7 +1716,7 @@ export class Controller {
     document: NotebookDocument,
     staged: ReturnType<typeof stageDocumentChanges>,
     operationId: string,
-  ): void {
+  ): Set<string> {
     const nextIds = new Set(document.cells.map(cell => cell.id));
     const priorIds = new Set(this.cells.map(cell => cell.id));
     const priorRetainedOrder = this.cells.filter(cell => nextIds.has(cell.id)).map(cell => cell.id);
@@ -1715,6 +1729,7 @@ export class Controller {
     const prior = new Map(this.cells.map((cell) => [cell.id, cell]));
     const changedIds = new Set(staged.changed);
     const affected = new Set<string>();
+    for (const id of staged.created.values()) affected.add(id);
     for (const id of changedIds) {
       affected.add(id);
       for (const descendant of this.graphValue.descendants(id)) affected.add(descendant);
@@ -1809,6 +1824,7 @@ export class Controller {
     this.refreshValueFreshness();
     this.publishGraphResourceError({ operationId }, true);
     this.sourceDocument = document;
+    return affected;
   }
 
 
@@ -2013,6 +2029,7 @@ export class Controller {
       this.runPreparationActive = false;
       if (this.runPreparationCancellation === preparation) this.runPreparationCancellation = null;
       this.scheduleWidgetReconciliation();
+      this.scheduleReactiveRun();
     }
   }
 
@@ -2100,6 +2117,7 @@ export class Controller {
     if (jobs.length === 0 && !deferEmptySettlement) operation.settledAt = Date.now();
     this.rememberOperation(operation);
     this.runOperationById.set(runId, this.operationKey(clientId, operationId));
+    for (const job of jobs) this.reactivePending.delete(job.id);
     this.queue.push(...jobs);
     this.bump("runtime", this.runtimeSnapshot(), { operationId, runId });
     if (jobs.length === 0 && !deferEmptySettlement) this.notifyOperationWaiters(operation);
@@ -2116,8 +2134,60 @@ export class Controller {
       } else {
         if (!this.closed) this.emit("runtime", this.runtimeSnapshot());
         this.scheduleWidgetReconciliation();
+        this.scheduleReactiveRun();
       }
     });
+  }
+
+  private reactiveRunReady(): boolean {
+    return !this.closed
+      && this.executionMode === "automatic"
+      && this.reactivePending.size > 0
+      && this.kernelAvailable
+      && this.executionReady
+      && this.analyzerAvailable
+      && !this.engineRestarting
+      && this.analysisNeeded.size === 0
+      && this.analysisInFlight === null
+      && this.activeEvaluation === null
+      && this.queue.length === 0
+      && !this.runPreparationActive
+      && this.queuedRunCommands.size === 0
+      && !this.packageOperationActive
+      && this.runtimeContextReservation === undefined;
+  }
+
+  private scheduleReactiveRun(): void {
+    if (this.reactiveScheduled || !this.reactiveRunReady()) return;
+    this.reactiveScheduled = true;
+    setTimeout(() => {
+      this.reactiveScheduled = false;
+      if (!this.reactiveRunReady()) return;
+      const pending = [...this.reactivePending];
+      this.reactivePending.clear();
+      try {
+        this.assertGraphRunnable();
+        const blocked = this.graphValue.blockedByDisabled();
+        const plan = new Set<string>();
+        for (const id of pending) {
+          const cell = this.cellById(id);
+          if (cell?.type !== "code" || blocked.has(id)) continue;
+          if (!["idle", "stale", "error", "stopped"].includes(this.statusOf(id))) continue;
+          for (const candidate of this.graphValue.planCell(
+            id,
+            (candidateId) => this.statusOf(candidateId),
+            "automatic",
+            "app",
+          )) plan.add(candidate);
+        }
+        if (plan.size === 0) return;
+        const operationId = `reactive-${randomUUID()}`;
+        this.createOperation(operationId, "run", INTERNAL_CLIENT_ID);
+        this.launchRun(this.graphValue.orderOf(plan), operationId, false, INTERNAL_CLIENT_ID);
+      } catch (error) {
+        this.replaceLastActionError(asControllerError(error).toJSON());
+      }
+    }, 40);
   }
 
   private async pump(): Promise<void> {
@@ -3189,7 +3259,10 @@ export class Controller {
       try {
         await promise;
       } finally {
-        if (this.analysisInFlight === promise) this.analysisInFlight = null;
+        if (this.analysisInFlight === promise) {
+          this.analysisInFlight = null;
+          this.scheduleReactiveRun();
+        }
       }
     }
   }
@@ -3326,6 +3399,9 @@ export class Controller {
     for (const root of invalidationRoots) {
       for (const descendant of this.graphValue.descendants(root)) {
         if (this.markStale(descendant)) statusChanges.add(descendant);
+        if (this.reactivePending.has(root) && this.cellById(descendant)?.type === "code") {
+          this.reactivePending.add(descendant);
+        }
       }
       if (this.barrierAnalysisCandidates.has(root)
         && this.cellById(root)?.analysis?.barrier) {

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -445,6 +446,10 @@ function parsedNotebook(source: string) {
   return parseNotebook(new TextEncoder().encode(source), "/tmp/test.R");
 }
 
+function reactiveExample(name: string) {
+  return parseNotebook(readFileSync(new URL(`../../dev/examples/${name}`, import.meta.url)), `/tmp/${name}`);
+}
+
 function serializedNotebookBytes(controller: Controller): Uint8Array {
   return serializeNotebook(controller.notebookDocument());
 }
@@ -525,6 +530,14 @@ async function eventually(predicate: () => boolean): Promise<void> {
   for (let attempt = 0; attempt < 100; attempt += 1) {
     if (predicate()) return;
     await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.fail("condition did not become true");
+}
+
+async function eventuallyTimed(predicate: () => boolean): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
   }
   assert.fail("condition did not become true");
 }
@@ -1585,6 +1598,166 @@ test("a scalar chain edit and run needs no separate binding cleanup", async () =
       ["x <- 1", "y <- x + 1", "z <- y + 1", "x <- 2", "y <- x + 1", "z <- y + 1"]);
     assert.deepEqual(engine.requests.filter((item) => item.command === "clear_cell"), []);
     assert.equal(controller.snapshot().cells[0]?.status, "done");
+  } finally { await controller.close(); }
+});
+
+test("automatic edits run only affected branches in dependency order", async () => {
+  const engine = new FakeEngine();
+  const controller = createController({
+    engine, notebook: reactiveExample("reactive-branches.R"),
+    config: resolveSettings({ notebook: { on_startup: false, on_cell_change: "automatic" } }),
+  });
+  try {
+    await controller.start();
+    const ids = controller.snapshot().cells.map((cell) => cell.id);
+    const initial = command(controller, { type: "run", scope: "all" });
+    await startCommand(controller, initial);
+    await settle(controller, initial.requestId);
+    assert.deepEqual(engine.evaluations.map((item) => item.cellId), [ids[0], ids[3], ids[1], ids[2]]);
+    const independentOutput = controller.snapshot().cells[3]?.outputs[0]?.id;
+
+    const edit = command(controller, {
+      type: "transaction",
+      changes: [{ type: "edit", cell: { cellId: ids[0]! }, expectedRevision: 0,
+        body: ["x <- 4L", "x"], cellType: "code" }],
+    });
+    await startCommand(controller, edit);
+    await settle(controller, edit.requestId);
+    await eventuallyTimed(() => engine.evaluations.length === 7);
+    assert.equal(engine.evaluations.length, 7);
+    assert.deepEqual(engine.evaluations.slice(4).map((item) => item.cellId), ids.slice(0, 3));
+    assert.equal(controller.snapshot().cells[3]?.outputs[0]?.id, independentOutput);
+  } finally { await controller.close(); }
+});
+
+test("a newly created code cell joins automatic execution", async () => {
+  const engine = new FakeEngine();
+  const controller = createController({
+    engine, notebook: reactiveExample("reactive-branches.R"),
+    config: resolveSettings({ notebook: { on_startup: false, on_cell_change: "automatic" } }),
+  });
+  try {
+    await controller.start();
+    const initial = command(controller, { type: "run", scope: "all" });
+    await startCommand(controller, initial);
+    await settle(controller, initial.requestId);
+    const originalOutputs = controller.snapshot().cells.map((cell) => cell.outputs[0]?.id);
+    const lastId = controller.snapshot().cells[3]!.id;
+    const create = command(controller, { type: "transaction", changes: [{
+      type: "create", creationId: "added", after: { cellId: lastId },
+      cellType: "code", body: ["triple <- x * 3L", "triple"], options: {},
+    }] });
+    await startCommand(controller, create);
+    await settle(controller, create.requestId);
+    await eventuallyTimed(() => engine.evaluations.length === 5);
+    assert.equal(engine.evaluations[4]?.cellId, controller.snapshot().cells[4]?.id);
+    assert.deepEqual(controller.snapshot().cells.slice(0, 4).map((cell) => cell.outputs[0]?.id), originalOutputs);
+  } finally { await controller.close(); }
+});
+
+test("lazy edits wait for an explicit dependent Run", async () => {
+  const engine = new FakeEngine();
+  const controller = createController({
+    engine, notebook: reactiveExample("reactive-lazy.R"),
+    config: resolveSettings({ notebook: { on_startup: false, on_cell_change: "lazy" } }),
+  });
+  try {
+    await controller.start();
+    const ids = controller.snapshot().cells.map((cell) => cell.id);
+    const edit = command(controller, {
+      type: "transaction",
+      changes: [{ type: "edit", cell: { cellId: ids[0]! }, expectedRevision: 0,
+        body: ["x <- 3L", "x"], cellType: "code" }],
+    });
+    await startCommand(controller, edit);
+    await settle(controller, edit.requestId);
+    assert.equal(engine.evaluations.length, 0);
+    const run = command(controller, { type: "run", scope: "cell", target: { cellId: ids[1]! } });
+    await startCommand(controller, run);
+    await settle(controller, run.requestId);
+    assert.deepEqual(engine.evaluations.map((item) => item.cellId), ids);
+  } finally { await controller.close(); }
+});
+
+test("an obsolete slow result cannot replace a newer reactive result", async () => {
+  const engine = new FakeEngine();
+  const controller = createController({
+    engine, notebook: reactiveExample("reactive-slow.R"),
+    config: resolveSettings({ notebook: { on_startup: false, on_cell_change: "automatic" } }),
+  });
+  try {
+    await controller.start();
+    const ids = controller.snapshot().cells.map((cell) => cell.id);
+    const initial = command(controller, { type: "run", scope: "all" });
+    await startCommand(controller, initial);
+    await settle(controller, initial.requestId);
+    const unrelatedOutput = controller.snapshot().cells[2]?.outputs[0]?.id;
+    engine.deferred = true;
+
+    const edit = (value: number, revision: number) => command(controller, {
+      type: "transaction",
+      changes: [{ type: "edit", cell: { cellId: ids[0]! }, expectedRevision: revision,
+        body: [`x <- ${value}L`, "x"], cellType: "code" }],
+    });
+    const first = edit(2, 0);
+    await startCommand(controller, first);
+    await settle(controller, first.requestId);
+    await eventuallyTimed(() => engine.pendingEvaluations.length === 1);
+    engine.finishEvaluation();
+    await eventually(() => engine.pendingEvaluations.length === 1);
+    assert.equal(engine.pendingEvaluations[0]?.payload.cellId, ids[1]);
+
+    const second = edit(3, 1);
+    await startCommand(controller, second);
+    await settle(controller, second.requestId);
+    await eventually(() => engine.interrupts.length > 0);
+    engine.finishEvaluation({ ok: true, outputs: [{ kind: "text", text: "obsolete slow result", truncated: false }] });
+    await eventuallyTimed(() => engine.pendingEvaluations.length === 1);
+    assert.equal(engine.pendingEvaluations[0]?.payload.cellId, ids[0]);
+    engine.finishEvaluation();
+    await eventually(() => engine.pendingEvaluations.length === 1);
+    assert.equal(engine.pendingEvaluations[0]?.payload.cellId, ids[1]);
+    engine.finishEvaluation();
+    await eventuallyTimed(() => controller.snapshot().cells[1]?.status === "done");
+    assert.ok(!JSON.stringify(controller.snapshot()).includes("obsolete slow result"));
+    assert.equal(controller.snapshot().cells[2]?.outputs[0]?.id, unrelatedOutput);
+  } finally { await controller.close(); }
+});
+
+test("reactive errors leave descendants stale and recover after an edit", async () => {
+  const engine = new FakeEngine();
+  const controller = createController({
+    engine, notebook: reactiveExample("reactive-errors.R"),
+    config: resolveSettings({ notebook: { on_startup: false, on_cell_change: "automatic" } }),
+  });
+  try {
+    await controller.start();
+    const ids = controller.snapshot().cells.map((cell) => cell.id);
+    const initial = command(controller, { type: "run", scope: "all" });
+    await startCommand(controller, initial);
+    await settle(controller, initial.requestId);
+    let fail = true;
+    engine.evaluationHandler = (payload) => fail && payload.cellId === ids[1]
+      ? { ok: false, error: { message: "x must be nonnegative" } }
+      : engine.rawResponseFor(payload);
+
+    const edit = (value: number, revision: number) => command(controller, {
+      type: "transaction",
+      changes: [{ type: "edit", cell: { cellId: ids[0]! }, expectedRevision: revision,
+        body: [`x <- ${value}L`, "x"], cellType: "code" }],
+    });
+    const negative = edit(-1, 0);
+    await startCommand(controller, negative);
+    await settle(controller, negative.requestId);
+    await eventuallyTimed(() => controller.snapshot().cells[1]?.status === "error");
+    assert.equal(controller.snapshot().cells[2]?.status, "stale");
+
+    fail = false;
+    const positive = edit(3, 1);
+    await startCommand(controller, positive);
+    await settle(controller, positive.requestId);
+    await eventuallyTimed(() => controller.snapshot().cells.every((cell) => cell.status === "done"));
+    assert.deepEqual(engine.evaluations.slice(-3).map((item) => item.cellId), ids);
   } finally { await controller.close(); }
 });
 
