@@ -21,18 +21,6 @@
   },
   "mimePublisher": "alder-json-v1",
   "targets": {
-    "linux-x64": {
-      "rustTarget": "x86_64-unknown-linux-gnu",
-      "artifactSha256": "bb5faad755794ef6f5e6eecaee49e330a15ce4af91be025bf54af5ed988def65",
-      "artifactFile": "ark-0.1.252-alder.1-linux-x64.tar.gz",
-      "executableSha256": "7010a4a78ff1b174005a9bcb70f8fa7620865788d140a46c4a97877ce625be47"
-    },
-    "linux-arm64": {
-      "rustTarget": "aarch64-unknown-linux-gnu",
-      "artifactSha256": "968e2f3724175418fd7ff36a39571455638720b437d3ce721152f2e353911cf5",
-      "artifactFile": "ark-0.1.252-alder.1-linux-arm64.tar.gz",
-      "executableSha256": "c83a355d67f47169662097aaabcb6fc15cb5db3f441e5fba888c0bf3069d6b49"
-    },
     "darwin-x64": {
       "rustTarget": "x86_64-apple-darwin",
       "artifactSha256": "ac6fddc2141bd568bfc14a7280e63e8888e617bd801e3b9e987ea10c63374175",
@@ -44,12 +32,6 @@
       "artifactSha256": "7a68848eb7d6582b886c599f8dd0167277f9ca3e62727f5a8f53eaaa5cbf3b44",
       "artifactFile": "ark-0.1.252-alder.1-darwin-arm64.tar.gz",
       "executableSha256": "7b965e57101d4ca6fdfd53237ca4357ac886826fb6db70a2cb380cdbdc09c63c"
-    },
-    "win32-x64": {
-      "rustTarget": "x86_64-pc-windows-msvc",
-      "artifactSha256": "08cdc8502bcd389158d7e008e5940df4cbe409d19cc560fcfcf50f444435b9c8",
-      "artifactFile": "ark-0.1.252-alder.1-win32-x64.tar.gz",
-      "executableSha256": "46db2f8792d23b6eef592b9a952917b493047a87a0c2f4533a15e4fb2ea7595d"
     }
   }
 }

@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { execFileSync, spawn } from 'node:child_process';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { basename, dirname, join, posix, resolve, win32 } from 'node:path';
+import { basename, dirname, join, posix, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 
@@ -17,8 +17,6 @@ function sha256(bytes) {
 
 function targetKeyFor(platform = process.platform, arch = process.arch) {
   const key = `${platform}-${arch}`;
-  if (key === 'win32-x64') return key;
-  if (key === 'linux-x64' || key === 'linux-arm64') return key;
   if (key === 'darwin-x64' || key === 'darwin-arm64') return key;
   throw new Error(`No pinned Ark target for ${key}`);
 }
@@ -41,7 +39,6 @@ function run(command, args, options) {
     const child = spawn(command, args, {
       ...options,
       stdio: 'inherit',
-      windowsHide: true,
     });
     child.once('error', rejectRun);
     child.once('exit', (code, signal) => {
@@ -71,8 +68,8 @@ async function loadLock() {
   return lock;
 }
 
-export function archiveExtractionPlan(archive, destination, platform = process.platform) {
-  const path = platform === 'win32' ? win32 : posix;
+export function archiveExtractionPlan(archive, destination) {
+  const path = posix;
   const cwd = path.dirname(archive);
   const relativeDestination = path.relative(cwd, destination);
   if (!relativeDestination || path.isAbsolute(relativeDestination)) {
@@ -90,8 +87,8 @@ async function extractSource(archive, destination) {
   const plan = archiveExtractionPlan(archive, destination);
   await run('tar', ['--extract', '--gzip', '--file', plan.archive, '--directory', plan.destination, '--strip-components=1', '--no-same-owner'], { cwd: plan.cwd });
 }
-export function archivePackagingPlan(packageDirectory, artifact, platform = process.platform) {
-  const path = platform === 'win32' ? win32 : posix;
+export function archivePackagingPlan(packageDirectory, artifact) {
+  const path = posix;
   const cwd = path.dirname(packageDirectory);
   const relativeArtifact = path.relative(cwd, artifact);
   if (!relativeArtifact || path.isAbsolute(relativeArtifact)) {
@@ -106,7 +103,7 @@ export function archivePackagingPlan(packageDirectory, artifact, platform = proc
 
 async function packageArtifact(packageDir, artifactPath, executableName) {
   await mkdir(dirname(artifactPath), { recursive: true });
-  const tarCommand = process.platform === 'darwin' ? 'gtar' : 'tar';
+  const tarCommand = 'gtar';
   const plan = archivePackagingPlan(packageDir, artifactPath);
   await run(tarCommand, [
     '--create',
@@ -124,15 +121,13 @@ async function packageArtifact(packageDir, artifactPath, executableName) {
     'ark-provenance.json',
   ], {
     cwd: plan.cwd,
-    env: process.platform === 'darwin'
-      ? { ...process.env, GZIP: '-n' }
-      : process.env,
+    env: { ...process.env, GZIP: '-n' },
   });
   return readFile(artifactPath);
 }
 
-export function patchApplicationPlan(sourceDirectory, patch, platform = process.platform) {
-  const path = platform === 'win32' ? win32 : posix;
+export function patchApplicationPlan(sourceDirectory, patch) {
+  const path = posix;
   const input = path.relative(sourceDirectory, patch);
   if (!input || path.isAbsolute(input)) {
     throw new Error('Ark patch must be reachable from the extracted source directory');
@@ -212,16 +207,8 @@ export async function buildArk({
     '--remap-path-prefix=' + outputDir + '=/alder/build',
     '--remap-path-prefix=' + sourceDir + '=/alder/ark-source',
     '--remap-path-prefix=' + cargoHome + '=/alder/cargo',
-    ...(target === 'win32-x64' ? ['-C', 'link-arg=/STACK:8000000', '-C', 'link-arg=/Brepro'] : []),
   ].join('\x1f');
-  const nativePathRemaps = target === 'win32-x64'
-    ? [
-        '/d1trimfile:' + ROOT,
-        '/d1trimfile:' + outputDir,
-        '/d1trimfile:' + sourceDir,
-        '/d1trimfile:' + cargoHome,
-      ]
-    : [
+  const nativePathRemaps = [
         '-ffile-prefix-map=' + ROOT + '=/alder/source',
         '-ffile-prefix-map=' + outputDir + '=/alder/build',
         '-ffile-prefix-map=' + sourceDir + '=/alder/ark-source',
@@ -230,8 +217,8 @@ export async function buildArk({
   environment.CFLAGS = [environment.CFLAGS, ...nativePathRemaps].filter(Boolean).join(' ');
   environment.CXXFLAGS = [environment.CXXFLAGS, ...nativePathRemaps].filter(Boolean).join(' ');
   const rLib = join(environment.R_HOME, 'lib');
-  environment.LD_LIBRARY_PATH = environment.LD_LIBRARY_PATH
-    ? `${rLib}${process.platform === 'win32' ? ';' : ':'}${environment.LD_LIBRARY_PATH}`
+  environment.DYLD_LIBRARY_PATH = environment.DYLD_LIBRARY_PATH
+    ? `${rLib}:${environment.DYLD_LIBRARY_PATH}`
     : rLib;
   const rustVersion = execFileSync('rustc', ['--version'], { encoding: 'utf8', env: environment, cwd: sourceDir }).trim();
   if (rustVersion.split(' ')[1] !== lock.rustToolchain.version) {
@@ -243,8 +230,8 @@ export async function buildArk({
     env: environment,
   });
 
-  const builtArk = join(environment.CARGO_TARGET_DIR, targetLock.rustTarget, 'release', target.startsWith('win32-') ? 'ark.exe' : 'ark');
-  const executableName = target.startsWith('win32-') ? 'ark.exe' : 'ark';
+  const builtArk = join(environment.CARGO_TARGET_DIR, targetLock.rustTarget, 'release', 'ark');
+  const executableName = 'ark';
   await mkdir(packageDir, { recursive: true });
   await writeFile(join(packageDir, executableName), await readFile(builtArk), { mode: 0o755 });
   await writeFile(join(packageDir, 'LICENSE'), await readFile(join(sourceDir, 'LICENSE')), { mode: 0o644 });

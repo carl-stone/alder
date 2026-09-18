@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -108,6 +108,26 @@ test("selected R rejects a bundled helper with the wrong package identity", asyn
   } finally {
     await removeFixture(fixture);
   }
+});
+
+test("canceling R discovery promptly stops its child process", async () => {
+  const fixture = await makeFixture();
+  try {
+    const pidFile = join(fixture.root, "probe.pid");
+    await writeFile(fixture.rscript, `#!${process.execPath}\nrequire('node:fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); setInterval(() => {}, 1000);\n`, { mode: 0o755 });
+    const controller = new AbortController();
+    const resolving = resolveREnvironment({ rscript: fixture.rscript, projectDirectory: fixture.root, resources: fixture.resources, signal: controller.signal });
+    const rejected = assert.rejects(resolving, /abort/i);
+    const deadline = Date.now() + 3_000;
+    while (!await stat(pidFile).catch(() => null) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 20));
+    const pid = Number(await readFile(pidFile, "utf8"));
+    controller.abort();
+    await rejected;
+    const stopped = Date.now() + 1_000;
+    const alive = () => { try { process.kill(pid, 0); return true; } catch { return false; } };
+    while (alive() && Date.now() < stopped) await new Promise(resolve => setTimeout(resolve, 20));
+    assert.equal(alive(), false);
+  } finally { await removeFixture(fixture); }
 });
 
 async function makeFixture(helperVersion = "0.1.0"): Promise<Fixture> {

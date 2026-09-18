@@ -29,6 +29,7 @@ export interface ProcessScope {
 
 interface ChildHandle extends OwnedProcess {
   child: ChildProcess;
+  stop(): Promise<void>;
 }
 
 function signalGroup(pid: number, signal: NodeJS.Signals): void {
@@ -64,12 +65,15 @@ async function spawnChild(options: ProcessSpawnOptions): Promise<ChildHandle> {
   await once(child, "spawn");
   const pid = child.pid!;
   let stopping: Promise<void> | undefined;
-  const terminate = (): Promise<void> => stopping ??= stopGroup(pid).finally(() => {
-    child.stdin?.destroy(); child.stdout?.destroy(); child.stderr?.destroy();
-  });
+  const stop = (): Promise<void> => stopping ??= stopGroup(pid);
+  const terminate = async (): Promise<void> => {
+    await stop();
+    await exited;
+    child.stdin?.destroy();
+  };
   return {
     child, pid, startIdentity: `pid:${pid}:${options.environment.ALDER_PROCESS_NONCE ?? randomBytes(16).toString("hex")}`,
-    stdin: child.stdin, stdout: child.stdout, stderr: child.stderr, exited, terminate,
+    stdin: child.stdin, stdout: child.stdout, stderr: child.stderr, exited, terminate, stop,
   };
 }
 
@@ -96,7 +100,7 @@ export async function createProcessScope(_resources?: ApplicationResources): Pro
         }
         // A completed helper must not leave its ordinary descendants running.
         void child.exited.finally(async () => {
-          await child.terminate();
+          await child.stop();
           children.delete(child);
         }).catch(() => {});
         return child;

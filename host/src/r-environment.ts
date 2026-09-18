@@ -21,6 +21,7 @@ const PRIVATE_SETTINGS_SCHEMA_VERSION = 1;
 
 
 export interface ResolveREnvironmentOptions {
+  signal?: AbortSignal;
   rscript?: string;
   projectDirectory: string;
   resources: ApplicationResources;
@@ -51,6 +52,7 @@ interface RProbe {
 }
 
 export async function resolveREnvironment(options: ResolveREnvironmentOptions): Promise<REnvironment> {
+  options.signal?.throwIfAborted();
   const resources = options.resources;
   const manifest = await verifiedApplicationManifest(resources).catch((error) => {
     if (error instanceof REnvironmentError) throw error;
@@ -58,7 +60,7 @@ export async function resolveREnvironment(options: ResolveREnvironmentOptions): 
   });
   await validateHelperLibrary(resources);
   const selected = await selectRscript(options.rscript, resources.electronEntry !== null, resources.processSupervisorExecutable);
-  const probe = await probeR(selected);
+  const probe = await probeR(selected, options.signal);
   const version = normalizeVersion(probe.version);
   if (!/^4\.6\./.test(version)) throw unsupported(version);
   const rHome = await existingDirectory(probe.rHome, "selected R_HOME");
@@ -79,7 +81,7 @@ export async function resolveREnvironment(options: ResolveREnvironmentOptions): 
     baseLibrary,
   ]);
   const baseEnvironment = makeEnvironment(environmentFields, helperAbi, baseLibraryPaths);
-  await validateHelperLoad(baseEnvironment, manifest);
+  await validateHelperLoad(baseEnvironment, manifest, options.signal);
   const requestedProjectLibrary = options.resolveProjectLibrary === undefined
     ? options.sandbox === true ? join(options.projectDirectory, ".alder", "library") : null
     : await options.resolveProjectLibrary(baseEnvironment);
@@ -95,6 +97,7 @@ export async function resolveREnvironment(options: ResolveREnvironmentOptions): 
     ...(options.sandbox === true ? [] : normalLibraries),
     baseLibrary,
   ]);
+  options.signal?.throwIfAborted();
   const environment = makeEnvironment(environmentFields, helperAbi, libraryPaths);
   return environment;
 }
@@ -193,7 +196,7 @@ async function resolveSelectedPath(value: string, label: string): Promise<string
   }
 }
 
-async function probeR(rscript: string): Promise<RProbe> {
+async function probeR(rscript: string, signal?: AbortSignal): Promise<RProbe> {
   const script = [
     "cat(R.home(), '\\n', sep = '')",
     "cat(R.version$version.string, intToUtf8(10), sep = '')",
@@ -204,6 +207,7 @@ async function probeR(rscript: string): Promise<RProbe> {
   ].join("; ");
   try {
     const result = await execFileAsync(rscript, ["--vanilla", "--slave", "-e", script], {
+      signal,
       env: withoutRHome(process.env),
       timeout: R_PROBE_TIMEOUT_MS,
       maxBuffer: 512 * 1024,
@@ -240,7 +244,7 @@ async function validateHelperLibrary(resources: ApplicationResources): Promise<v
   }
 }
 
-async function validateHelperLoad(environment: REnvironment, manifest: ApplicationManifest): Promise<void> {
+async function validateHelperLoad(environment: REnvironment, manifest: ApplicationManifest, signal?: AbortSignal): Promise<void> {
   const script = [
     "suppressPackageStartupMessages(library(alder))",
     "description <- packageDescription('alder')",
@@ -248,6 +252,7 @@ async function validateHelperLoad(environment: REnvironment, manifest: Applicati
   ].join("; ");
   try {
     const result = await execFileAsync(environment.rscript, ["--vanilla", "--slave", "-e", script], {
+      signal,
       env: {
         ...withoutRHome(process.env),
         R_LIBS: environment.libraryPaths.join(delimiter),

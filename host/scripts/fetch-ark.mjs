@@ -17,7 +17,7 @@ function sha256(bytes) {
 
 function run(command, args, options) {
   return new Promise((resolveRun, rejectRun) => {
-    const child = spawn(command, args, { ...options, stdio: 'inherit', windowsHide: true });
+    const child = spawn(command, args, { ...options, stdio: 'inherit' });
     child.once('error', rejectRun);
     child.once('exit', (code, signal) => {
       if (code === 0) resolveRun();
@@ -28,7 +28,7 @@ function run(command, args, options) {
 
 function targetKeyFor(platform = process.platform, arch = process.arch) {
   const key = `${platform}-${arch}`;
-  if (key === 'linux-x64' || key === 'linux-arm64' || key === 'darwin-x64' || key === 'darwin-arm64' || key === 'win32-x64') return key;
+  if (key === 'darwin-x64' || key === 'darwin-arm64') return key;
   throw new Error(`No pinned Ark target for ${key}`);
 }
 
@@ -99,7 +99,7 @@ export async function stageArk({
   const staging = await mkdtemp(join(dirname(artifactPath), '.alder-ark-stage-'));
   try {
     await extractArtifact(artifactPath, staging);
-    const executable = platform === 'win32' ? 'ark.exe' : 'ark';
+    const executable = 'ark';
     const executablePath = await requireRegularFile(staging, executable);
     const licensePath = await requireRegularFile(staging, 'LICENSE');
     const noticePath = await requireRegularFile(staging, 'NOTICE');
