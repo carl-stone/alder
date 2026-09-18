@@ -49,7 +49,7 @@ async function startFixture(
   mcpHandler?: McpHttpHandler,
   auth: Pick<AlderServerOptions, "externalOrigin" | "externalBearerValidated"> = {},
   controller: ControllerAdapter = makeController(),
-  timing: Pick<AlderServerOptions, "leaseExpiryMs" | "leaseSweepIntervalMs" | "onShutdown"> = {},
+  timing: Pick<AlderServerOptions, "leaseExpiryMs" | "leaseSweepIntervalMs" | "onShutdown" | "onLastLeaseDiscard"> = {},
   recoveryCredentials: { recoveryKey: string; recoveryKeyId: string } | undefined = undefined,
   port = 0,
 ) {
@@ -189,11 +189,11 @@ function loopbackSocketTarget(origin: string): { url: string; host: string } {
 
 type CookieSession = { leaseId: string; clientId: string; csrf: string; epoch: string; continuityProof: string; cookie: string };
 
-async function createCookieSession(origin: string): Promise<CookieSession> {
+async function createCookieSession(origin: string, parentLeaseId?: string): Promise<CookieSession> {
   const ticketResponse = await fetch(origin + "/api/ticket", {
     method: "POST",
-    headers: bearerHeaders(origin),
-    body: JSON.stringify({ origin }),
+    headers: bearerHeaders(origin, parentLeaseId),
+    body: JSON.stringify({ origin, ...(parentLeaseId === undefined ? {} : { parentLeaseId }) }),
   });
   const ticketText = await ticketResponse.text();
   assert.equal(ticketResponse.status, 200, ticketText);
@@ -547,6 +547,75 @@ test("discarding the final browser lease requests host shutdown", { timeout: 30_
     await rm(root, { recursive: true, force: true });
   }
 });
+test("native window reload retires the previous browser lease and final discard closes the document", { timeout: 5_000 }, async () => {
+  let discarded = 0;
+  const { server, origin, root } = await startFixture(undefined, {}, makeController(), {
+    onLastLeaseDiscard: () => { discarded += 1; },
+  });
+  try {
+    const parentLeaseId = await attachBearerLease(origin);
+    const initial = await createCookieSession(origin, parentLeaseId);
+    const reloaded = await createCookieSession(origin, parentLeaseId);
+    assert.notEqual(initial.leaseId, reloaded.leaseId);
+    const heartbeat = (session: CookieSession) => fetch(origin + "/api/lease", {
+      method: "POST", headers: { Origin: origin, Cookie: session.cookie, "X-CSRF-Token": session.csrf, "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "heartbeat", leaseId: session.leaseId }),
+    });
+    assert.equal((await heartbeat(initial)).status, 403);
+    assert.equal((await heartbeat(reloaded)).status, 200);
+    const released = await fetch(origin + "/api/lease", {
+      method: "POST", headers: bearerHeaders(origin, parentLeaseId),
+      body: JSON.stringify({ action: "release", leaseId: parentLeaseId, disposition: "discard" }),
+    });
+    assert.equal(released.status, 200, await released.text());
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(discarded, 1);
+    assert.equal((await heartbeat(reloaded)).status, 403);
+  } finally { await server.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test("native parent discard revokes only its browser children and keeps an attached agent alive", { timeout: 5_000 }, async () => {
+  let discarded = 0;
+  const { server, origin, root } = await startFixture(undefined, {}, makeController(), {
+    onLastLeaseDiscard: () => { discarded += 1; },
+  });
+  try {
+    const parentLeaseId = await attachBearerLease(origin);
+    const agentLeaseId = await attachBearerLease(origin);
+    const browser = await createCookieSession(origin, parentLeaseId);
+    const unexchanged = await fetch(origin + "/api/ticket", {
+      method: "POST", headers: bearerHeaders(origin, parentLeaseId),
+      body: JSON.stringify({ origin, parentLeaseId }),
+    });
+    assert.equal(unexchanged.status, 200);
+    const { ticket } = await unexchanged.json() as { ticket: string };
+    const release = (leaseId: string) => fetch(origin + "/api/lease", {
+      method: "POST", headers: bearerHeaders(origin, leaseId),
+      body: JSON.stringify({ action: "release", leaseId, disposition: "discard" }),
+    });
+    assert.equal((await release(parentLeaseId)).status, 200);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(discarded, 0);
+    const revokedBrowser = await fetch(origin + "/api/lease", {
+      method: "POST", headers: { Origin: origin, Cookie: browser.cookie, "X-CSRF-Token": browser.csrf, "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "heartbeat", leaseId: browser.leaseId }),
+    });
+    assert.equal(revokedBrowser.status, 403);
+    const staleTicket = await fetch(origin + "/api/session", {
+      method: "POST", headers: { Origin: origin, "Content-Type": "application/json" }, body: JSON.stringify({ ticket }),
+    });
+    assert.equal(staleTicket.status, 403);
+    const agentHeartbeat = await fetch(origin + "/api/lease", {
+      method: "POST", headers: bearerHeaders(origin, agentLeaseId),
+      body: JSON.stringify({ action: "heartbeat", leaseId: agentLeaseId }),
+    });
+    assert.equal(agentHeartbeat.status, 200);
+    assert.equal((await release(agentLeaseId)).status, 200);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(discarded, 1);
+  } finally { await server.close(); await rm(root, { recursive: true, force: true }); }
+});
+
 test("WebSocket command pin survives idle sweep and still honors release", { timeout: 30_000 }, async () => {
   let releaseDispatch: (() => void) | undefined;
   let dispatchStartedResolve!: () => void;

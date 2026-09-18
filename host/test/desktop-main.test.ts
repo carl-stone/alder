@@ -73,6 +73,7 @@ function windowWithLoad(loadURL: (url: string) => Promise<void> = async () => un
   let focusedCount = 0;
   const titles: string[] = [];
   const closedListeners: Array<() => void> = [];
+  const closeListeners: Array<(event: { preventDefault: () => void }) => void> = [];
   const webRequest = {
     onBeforeSendHeaders: () => undefined,
     onHeadersReceived: () => undefined,
@@ -90,12 +91,24 @@ function windowWithLoad(loadURL: (url: string) => Promise<void> = async () => un
   };
   const window = {
     webContents,
-    on: (event: string, listener: () => void) => { if (event === "closed") closedListeners.push(listener); return window; },
-    once: (event: string, listener: () => void) => { if (event === "closed") closedListeners.push(listener); return window; },
+    on: (event: string, listener: (...args: any[]) => void) => {
+      if (event === "closed") closedListeners.push(listener);
+      if (event === "close") closeListeners.push(listener);
+      return window;
+    },
+    once: (event: string, listener: (...args: any[]) => void) => {
+      if (event === "closed") closedListeners.push(listener);
+      if (event === "close") closeListeners.push(listener);
+      return window;
+    },
     isDestroyed: () => destroyed,
     focus: () => { focusedCount += 1; },
     show: () => undefined,
-    close: () => undefined,
+    close: () => {
+      let prevented = false;
+      for (const listener of closeListeners) listener({ preventDefault: () => { prevented = true; } });
+      if (!prevented) window.destroy();
+    },
     destroy: () => { if (!destroyed) { destroyed = true; for (const listener of closedListeners) listener(); } },
     loadURL,
     setTitle: (title: string) => { titles.push(title); },
@@ -281,6 +294,85 @@ test("cancelled quit preserves unsaved windows and a later quit can discard them
   assert.equal(dialogs, 2);
   assert.equal(window.destroyed, true);
   assert.deepEqual(hostConnection.releaseDispositions, ["discard"]);
+});
+
+for (const decision of ["Cancel", "Save"] as const) {
+  test(`repeated native Close events cannot bypass a pending ${decision} decision`, { timeout: 3_000 }, async () => {
+    const path = "/tmp/alder-repeated-close.R";
+    const hostConnection = connection("repeated-close", path, async endpoint => {
+      assert.equal(endpoint, "/api/ticket");
+      return jsonResponse({ ticket: "a".repeat(64), expiresAt: "2026-12-01T00:00:00.000Z" });
+    });
+    const window = windowWithLoad();
+    const actions: unknown[] = [];
+    window.webContents.send = (_channel, payload) => { actions.push(payload); };
+    const electronRuntime = runtime();
+    electronRuntime.BrowserWindow = Object.assign(function () { return window; }, { fromWebContents: () => window }) as unknown as ElectronRuntime["BrowserWindow"];
+    const dialogOpened = Promise.withResolvers<void>();
+    const answer = Promise.withResolvers<{ response: number }>();
+    let dialogs = 0;
+    electronRuntime.dialog.showMessageBox = async () => { dialogs += 1; dialogOpened.resolve(); return answer.promise; };
+    const main = new ElectronMain(electronRuntime, { resources, acquireSession: async () => hostConnection, closeSettlementTimeoutMs: 1_000 });
+    (main as any).loadAuthenticatedNotebook = async () => undefined;
+    let dirty = true;
+    (main as any).readWindowState = async () => ({ path, dirty, platform: "darwin", sessionEpoch: "epoch" });
+    try {
+      await main.openNotebook(path);
+      window.close();
+      await dialogOpened.promise;
+      window.close();
+      window.close();
+      assert.equal(window.destroyed, false);
+      assert.equal(dialogs, 1);
+      assert.equal(hostConnection.releaseCount, 0);
+      answer.resolve({ response: decision === "Cancel" ? 2 : 0 });
+      await new Promise(resolve => setImmediate(resolve));
+      if (decision === "Cancel") {
+        assert.equal(window.destroyed, false);
+        assert.deepEqual(actions, []);
+        assert.equal(hostConnection.releaseCount, 0);
+      } else {
+        assert.deepEqual(actions, [{ action: "save" }]);
+        window.close();
+        assert.equal(window.destroyed, false, "the window must remain open until saving finishes");
+        dirty = false;
+        while (!window.destroyed) await new Promise(resolve => setTimeout(resolve, 10));
+        assert.equal(hostConnection.releaseCount, 1);
+      }
+    } finally {
+      answer.resolve({ response: 2 });
+      await main.stop();
+    }
+  });
+}
+
+test("native recovery IPC accepts the owning main frame and keeps its recovery identity scoped", async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "alder-desktop-recovery-ipc-")));
+  try {
+    const window = windowWithLoad();
+    const hostConnection = connection("native-recovery", null, async () => { throw new Error("unexpected request"); });
+    const handlers = new Map<string, (event: unknown, ...args: unknown[]) => Promise<unknown>>();
+    const electronRuntime = runtime();
+    electronRuntime.app.getPath = () => root;
+    electronRuntime.BrowserWindow.fromWebContents = sender => sender === window.webContents ? window : null;
+    electronRuntime.ipcMain.handle = (channel, handler) => { handlers.set(channel, handler); };
+    const main = new ElectronMain(electronRuntime, { resources });
+    recordFor(main, hostConnection, window);
+    (main as any).installIpcHandlers();
+    const recovery = handlers.get("alderDesktop:recovery")!;
+    const event = { sender: window.webContents, senderFrame: window.webContents.mainFrame };
+    const keyId = "a".repeat(43);
+    const name = "draft:client-one";
+    const value = { source: "# %%\nx <- 42\n" };
+    await recovery(event, { action: "write", keyId, name, value });
+    assert.deepEqual(await recovery(event, { action: "read", keyId, name }), value);
+    assert.deepEqual(await recovery(event, { action: "list", keyId, prefix: "draft:" }), [{ name, value }]);
+    await assert.rejects(recovery({ ...event, senderFrame: { url: browserOrigin + "/" } }, { action: "read", keyId, name }), /main frame/);
+    await assert.rejects(recovery({ sender: windowWithLoad().webContents }, { action: "read", keyId, name }), /active application window/);
+    await assert.rejects(recovery(event, { action: "read", keyId: "b".repeat(43), name }), /identity changed/);
+    await recovery(event, { action: "remove", keyId, name });
+    assert.equal(await recovery(event, { action: "read", keyId, name }), null);
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test("Save As returns an absent target or the exact explicitly confirmed destination", async () => {
