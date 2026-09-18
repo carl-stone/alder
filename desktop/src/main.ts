@@ -356,7 +356,7 @@ const DIRTY_PROJECTION_SCRIPT = `(() => {
   const snapshot = documentValue?.snapshot;
   if (snapshot === undefined) return null;
   const pending = typeof documentValue?.pendingSource === "function" ? documentValue.pendingSource() : null;
-  return Boolean(snapshot.dirty || snapshot.changed || pending?.changes?.length || pending?.tombstones?.length);
+  return Boolean(snapshot.changed || pending?.changes?.length || pending?.tombstones?.length);
 })()`;
 
 export class ElectronMain implements ElectronMainApplication {

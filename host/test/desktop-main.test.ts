@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { runInNewContext } from "node:vm";
 import { createHash } from "node:crypto";
 import { mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -557,4 +558,19 @@ test("host restart preserves the live editor when its current draft cannot be st
   assert.equal(acquired, false);
   assert.equal(window.destroyed, false);
   assert.equal(record.loadingOrigin, undefined);
+});
+
+
+test("saving recovered source clears the native unsaved prompt despite an older snapshot dirty flag", async () => {
+  const window = windowWithLoad();
+  window.webContents.executeJavaScript = async script => runInNewContext(script, {
+    __alderHost: { client: { document: {
+      snapshot: { dirty: true, changed: false },
+      pendingSource: () => ({ changes: [], tombstones: [] }),
+    } } },
+  });
+  const main = new ElectronMain(runtime(), { resources });
+  const record = recordFor(main, connection("recovered-save", "/tmp/recovered-save.R", async () => jsonResponse({})), window);
+  (main as any).querySnapshot = async () => ({ dirty: false, changed: false });
+  assert.equal((await (main as any).readWindowState(record)).dirty, false);
 });
