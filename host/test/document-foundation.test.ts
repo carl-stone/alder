@@ -1,4 +1,4 @@
-import test from "node:test";
+import test, { mock } from "node:test";
 import assert from "node:assert/strict";
 import { fork } from "node:child_process";
 import { once } from "node:events";
@@ -295,6 +295,55 @@ if (process.env.ALDER_RECOVERY_CHILD) {
       await reopenedSource.close();
       await reopenedDestination.close();
     } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
+
+  test("immediately reopening the Save As source gives it a separate recovery identity", { timeout: 10_000 }, async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "alder-document-save-as-identity-")));
+    const sourcePath = join(directory, "source.R");
+    const destinationPath = join(directory, "destination.R");
+    await writeFile(sourcePath, "# %%\nx <- 1\n");
+    const recoveryIdentity = async (app: RunningHost): Promise<string> => {
+      const origin = app.server.address()!.origin;
+      const ticketResponse = await fetch(origin + "/api/ticket", { method: "POST", headers: {
+        Authorization: "Bearer " + app.ownership.token, Origin: origin, "Content-Type": "application/json" }, body: JSON.stringify({ origin }) });
+      assert.equal(ticketResponse.ok, true);
+      const ticket = await ticketResponse.json() as { ticket: string };
+      const response = await fetch(origin + "/api/session", { method: "POST", headers: {
+        Origin: origin, "Content-Type": "application/json" }, body: JSON.stringify({ ticket: ticket.ticket }) });
+      assert.equal(response.ok, true);
+      const session = await response.json() as { recoveryKeyId?: string };
+      assert.equal(typeof session.recoveryKeyId, "string");
+      return session.recoveryKeyId!;
+    };
+    let active: RunningHost | undefined;
+    let reopenedSource: RunningHost | undefined;
+    let delayedFlush: ReturnType<typeof mock.method> | undefined;
+    try {
+      active = await startDocument(sourcePath, directory);
+      const sourceKey = active.ownership.sessionKey;
+      const flush = RecoveryWriter.prototype.flush;
+      // Slow recovery storage exposes release-before-persistence without delaying the source reopen.
+      delayedFlush = mock.method(RecoveryWriter.prototype, "flush", async function(this: RecoveryWriter) {
+        if (this.key === sourceKey) await new Promise(resolve => setTimeout(resolve, 500));
+        return flush.call(this);
+      });
+      const originalIdentity = await recoveryIdentity(active);
+      await edit(active, "x <- 42");
+      await command(active, { type: "save-as", path: destinationPath, expectedDestination: "absent" });
+      // Reopen in the same runtime as soon as Save As completes; no recovery flush or close is awaited here.
+      reopenedSource = await startDocument(sourcePath, directory);
+      const [destinationIdentity, sourceIdentity] = await Promise.all([recoveryIdentity(active), recoveryIdentity(reopenedSource)]);
+      assert.equal(destinationIdentity, originalIdentity, "the active renderer's drafts follow Save As");
+      assert.notEqual(sourceIdentity, destinationIdentity, "reopened source must not share the destination's renderer drafts");
+      assert.equal(await readFile(sourcePath, "utf8"), "# %%\nx <- 1\n");
+      assert.equal(await readFile(destinationPath, "utf8"), "# %%\nx <- 42\n");
+    } finally {
+      await reopenedSource?.close();
+      await active?.close();
+      delayedFlush?.mock.restore();
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
 }
