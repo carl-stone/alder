@@ -44,6 +44,11 @@ process details only when they affect the result, need a decision, or block work
   authorized. Choose languages for the component's behavior and demonstrated
   performance needs; Rust is not a requirement or proof of speed. Migration
   complexity, sunk cost and estimated effort must not preserve a worse design.
+- Carl approved removing bespoke dependency certification, the oversized
+  command/recovery framework, handwritten JSON parsing and repeated validation,
+  five-layer settings precedence, and excess R-adapter machinery. Replace these
+  with the small designs in dev/ARCHITECTURE.md; do not preserve them as wrappers,
+  compatibility paths or test requirements.
 - The old architecture plan, review matrix and latency migration freeze are
   superseded. Git history, existing tests and implementation choices are evidence
   of past behavior, not automatic requirements for the reset.

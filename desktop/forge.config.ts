@@ -7,7 +7,7 @@ const config: ForgeConfig = {
   packagerConfig: {
     asar: true,
     name: 'Alder',
-    executableName: process.platform === 'linux' ? 'alder-desktop' : 'Alder',
+    executableName: 'Alder',
     appBundleId: 'dev.alder.desktop',
     appCategoryType: 'public.app-category.developer-tools',
     extendInfo: {
@@ -21,45 +21,7 @@ const config: ForgeConfig = {
       ],
     },
   },
-  makers: [
-    {
-      name: '@electron-forge/maker-zip',
-      config: {},
-      platforms: ['linux', 'darwin', 'win32'],
-    },
-    {
-      name: '@electron-forge/maker-deb',
-      config: {
-        options: {
-          bin: 'alder-desktop',
-          maintainer: 'Alder contributors',
-          homepage: 'https://github.com/alder-dev/alder',
-        },
-      },
-      platforms: ['linux'],
-    },
-    {
-      name: '@electron-forge/maker-rpm',
-      config: {
-        options: {
-          bin: 'alder-desktop',
-          license: 'Apache-2.0',
-          homepage: 'https://github.com/alder-dev/alder',
-        },
-      },
-      platforms: ['linux'],
-    },
-    {
-      name: '@electron-forge/maker-dmg',
-      config: { format: 'ULFO' },
-      platforms: ['darwin'],
-    },
-    {
-      name: '@electron-forge/maker-squirrel',
-      config: { name: 'alder' },
-      platforms: ['win32'],
-    },
-  ],
+  makers: [],
   plugins: [
     new VitePlugin({
       build: [
@@ -71,7 +33,8 @@ const config: ForgeConfig = {
     new FusesPlugin({
       version: FuseVersion.V1,
       [FuseV1Options.RunAsNode]: false,
-      [FuseV1Options.EnableCookieEncryption]: true,
+      // Window cookies stay in memory, so launching does not need a Keychain key.
+      [FuseV1Options.EnableCookieEncryption]: false,
       [FuseV1Options.EnableNodeOptionsEnvironmentVariable]: false,
       [FuseV1Options.EnableNodeCliInspectArguments]: false,
       [FuseV1Options.OnlyLoadAppFromAsar]: true,

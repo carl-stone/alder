@@ -69,19 +69,33 @@ Updated: 2026-09-18.
   performance, with no Rust mandate. Whole-component rewrites are authorized;
   migration difficulty, time estimates and sunk cost must not preserve a worse
   design. Prefer deletion of obsolete CI, checks and release machinery.
-- **Primary implementation task:** Creation dispatched on the local Alder
-  project in an isolated worktree; setup pending. Creation ID:
-  `client-new-thread:4d82f069-41eb-49d6-9b37-c87b19f3398e`.
-- **Assigned now:** Import and checkpoint the current dirty checkout in the
-  implementation worktree; delete retired platform/verification machinery;
-  simplify lifecycle/build infrastructure and deliver the Mac document slice.
+- **Decided by Carl:** Remove bespoke dependency certification, the oversized
+  command/recovery framework, handwritten JSON parsing/repeated validation,
+  five-layer settings and excess R-adapter machinery. The replacement direction
+  is recorded in ARCHITECTURE.md. These are implementation targets, not optional
+  cleanup; preserve notebook behavior rather than old internal protocols.
+- **Primary implementation task:** `01a0b5a6-22ac-7480-9394-5cc4c1ba807d`, local
+  host, active. Worktree: `/Users/carlstone/.codex/worktrees/ebd6/alder`;
+  branch `codex/mac-document-foundation`. Baseline checkpoint: `01077ad`.
+- **Assigned now:** Delete retired platform/verification machinery; simplify
+  lifecycle/build infrastructure and deliver the Mac document slice. The primary
+  owns desktop/backend integration and delegates saves, recovery and tooling in
+  bounded separate worktrees.
   The original checkout remains the lead's documentation workspace.
 - **Completed now:** Lead routing and resumption record; replacement product and
-  development guidance; retirement of obsolete architectural mandates.
+  development guidance; retirement of obsolete architectural mandates; current
+  checkout imported and checkpointed in the primary worktree.
+- **Engineering direction accepted:** Ordinary Node process/process-group
+  lifecycle and compact Forge Mac staging; one shared Node backend owns notebook
+  sessions. R/kernel readiness stays optional for document use. Existing notebook
+  endpoints may remain simple routing surfaces; frontend lifetime must not
+  become ownership of another attached client's work.
 - **Implementation acceptance:** No reset implementation slice has been accepted.
-- **Next checkpoint:** Confirm the imported baseline and lifecycle/build
-  direction, then review the runnable first slice. Continue with unmodified
-  Ark execution after accepting that slice. Keep focused checks for behavior.
+- **Next checkpoint:** Review the integrated runnable first slice; the primary
+  reports a runnable no-R Mac build and is checking native interactions. Then
+  simplify commands/recovery, JSON boundaries and settings; remove remaining
+  dependency certification. Right-size the R adapter with the unmodified Ark
+  execution slice. Keep focused checks for behavior.
 - **First slice acceptance:** A real Mac window can open and edit a plain `.R`
   notebook, save atomically, confirm replacement on Save As, reopen exact contents,
   close, and offer useful recovery after a crash or corrupt recovery snapshot.

@@ -49,8 +49,8 @@ po/*~
 
 # RStudio Connect folder
 rsconnect/
-js/node_modules/
-host/node_modules/
+js/node_modules
+host/node_modules
 desktop/node_modules/
 desktop/out/
 desktop/.vite/
@@ -63,7 +63,6 @@ host/.release/
 host/.evidence*/
 host/.qualification/
 host/.staging*/
-host/native/process-supervisor/target/
 .alder/
 
 # Local review runs: generated notebooks, logs, screenshots, traces and caches.

@@ -367,9 +367,10 @@ export class BrowserNotebookClient {
     return this.dispatchSettled({ type: "save", ...this.base("save") });
   }
 
-  async saveAs(path: string): Promise<CommandResult> {
+  async saveAs(destination: string | import("../protocol.js").SaveDestination): Promise<CommandResult> {
     await this.commitEdits();
-    const result = await this.dispatchSettled({ type: "save-as", path, expectedDestination: "absent", ...this.base("save-as") });
+    const target = typeof destination === "string" ? { path: destination, expectedDestination: "absent" as const } : destination;
+    const result = await this.dispatchSettled({ type: "save-as", ...target, ...this.base("save-as") });
     await this.refreshRecoveryState();
     return result;
   }
@@ -904,23 +905,8 @@ export class BrowserNotebookClient {
       changes: commandChanges.map((change) => cloneChange(change)),
     };
     this.draftOperation = draftOperation;
-    const recoveryDraft = document.recoveryDraft(this.transport.id, draftOperation);
-    if (recoveryDraft) {
-      const store = this.draftStore();
-      if (!store) throw new BrowserTransportError("recovery_store_unavailable", "source intent cannot be sent without durable browser recovery storage");
-      try {
-        await store.saveDraft(recoveryDraft);
-      } catch (error) {
-        document.markStructuralRecoveryConflict();
-        this.draftOperation = null;
-        const failure = error instanceof Error ? error : new Error(String(error));
-        this.draftPersistenceError = failure;
-        this.recoveryStateValue = { ...this.recoveryStateValue, status: "conflict", local: document.recoveryDraft(this.transport.id, null), persistenceError: { code: "draft_persistence_failed", message: failure.message } };
-        this.notifyRecovery();
-        this.notify();
-        throw failure;
-      }
-    }
+    // Recovery is best effort and must not gate the authoritative in-memory edit.
+    this.queueDraftPersistence();
     document.noteSubmitted(command.operationId, submitted);
     const sourceCommit = command.type === "run" && (command.changes?.length ?? 0) > 0
       ? this.awaitSourceCommit(command.operationId)

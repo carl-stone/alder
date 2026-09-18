@@ -240,7 +240,7 @@ async function validateHelperLibrary(resources: ApplicationResources): Promise<v
     const info = await stat(description);
     if (!info.isFile()) throw new Error("not a file");
   } catch (error) {
-    throw invalid(`Alder helper package is unavailable: ${messageOf(error)}`);
+    throw invalid("The R execution helpers are not installed in this build.");
   }
 }
 

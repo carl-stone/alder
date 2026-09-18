@@ -366,7 +366,7 @@ test("native recovery IPC accepts the owning main frame and keeps its recovery i
     const value = { source: "# %%\nx <- 42\n" };
     await recovery(event, { action: "write", keyId, name, value });
     assert.deepEqual(await recovery(event, { action: "read", keyId, name }), value);
-    assert.deepEqual(await recovery(event, { action: "list", keyId, prefix: "draft:" }), [{ name, value }]);
+    assert.deepEqual(await recovery(event, { action: "list", keyId, prefix: "draft:" }), { records: [{ name, value }] });
     await assert.rejects(recovery({ ...event, senderFrame: { url: browserOrigin + "/" } }, { action: "read", keyId, name }), /main frame/);
     await assert.rejects(recovery({ sender: windowWithLoad().webContents }, { action: "read", keyId, name }), /active application window/);
     await assert.rejects(recovery(event, { action: "read", keyId: "b".repeat(43), name }), /identity changed/);
@@ -529,4 +529,32 @@ test("opening a notebook retains an untitled window with uncertain state", async
   assert.equal(record.released, false);
   assert.equal(window.destroyed, false);
   assert.equal(main.windows().length, 1);
+});
+
+test("approved notebook reload can leave an unsaved renderer while ordinary navigation cannot", () => {
+  const window = windowWithLoad();
+  const handlers = new Map<string, (...args: any[]) => unknown>();
+  window.webContents.on = (event, handler) => { handlers.set(event, handler); return window.webContents; };
+  const main = new ElectronMain(runtime(), { resources });
+  const record = recordFor(main, connection("reload", "/tmp/reload.R", async () => jsonResponse({})), window);
+  (main as any).installWindowPolicy(record);
+  let allowed = false;
+  const event = { preventDefault: () => { allowed = true; } };
+  handlers.get("will-prevent-unload")!(event);
+  assert.equal(allowed, false);
+  record.loadingOrigin = browserOrigin;
+  handlers.get("will-prevent-unload")!(event);
+  assert.equal(allowed, true);
+});
+
+test("host restart preserves the live editor when its current draft cannot be stored", async () => {
+  const window = windowWithLoad();
+  window.webContents.executeJavaScript = async () => { throw new Error("Recovery disk unavailable"); };
+  let acquired = false;
+  const main = new ElectronMain(runtime(), { resources, acquireSession: async () => { acquired = true; throw new Error("should not replace editor"); } });
+  const record = recordFor(main, connection("restart-draft", "/tmp/restart-draft.R", async () => jsonResponse({})), window);
+  await (main as any).restartHost(record);
+  assert.equal(acquired, false);
+  assert.equal(window.destroyed, false);
+  assert.equal(record.loadingOrigin, undefined);
 });

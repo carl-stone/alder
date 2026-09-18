@@ -10,14 +10,9 @@
     "build": "tsc -p tsconfig.json --noEmit && node scripts/build.mjs",
     "check": "tsc -p tsconfig.json --noEmit",
     "test": "tsx --test test/*.test.ts",
-    "latency": "tsx scripts/latency.ts",
     "start": "tsx src/main.ts",
     "stage": "node scripts/stage-application.mjs --output .application --kind headless",
-    "stage:desktop": "node scripts/stage-application.mjs --output .application-desktop --kind desktop",
-    "smoke": "node scripts/smoke-application.mjs .application --rscript \"${ALDER_RSCRIPT:?ALDER_RSCRIPT must be an absolute Rscript path}\"",
-    "smoke:release": "node scripts/smoke-release.mjs .release --scenario all --rscript \"${ALDER_RSCRIPT:?ALDER_RSCRIPT must be an absolute Rscript path}\" --qualification-driver \"${ALDER_QUALIFICATION_DRIVER:?ALDER_QUALIFICATION_DRIVER must be an absolute frozen helper path}\" --qualification-source \"${ALDER_QUALIFICATION_SOURCE:?ALDER_QUALIFICATION_SOURCE must be an absolute frozen source path}\" --artifact-root \"${ALDER_ARTIFACT_ROOT:?ALDER_ARTIFACT_ROOT must be an absolute qualification root}\"",
-    "package": "node scripts/package.mjs",
-    "ci:package": "node scripts/ci-package.mjs"
+    "stage:desktop": "node scripts/stage-application.mjs --output .application-desktop --kind desktop"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.30.0",

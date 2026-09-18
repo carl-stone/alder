@@ -553,6 +553,7 @@ class SocketOutbox {
 }
 
 interface Lease {
+  parentLeaseId?: string;
   readonly leaseId: string;
   readonly clientId: string;
   readonly csrf: string;
@@ -924,6 +925,8 @@ export function createAlderServer(options: AlderServerOptions): AlderServer {
     const lease = leases.get(leaseId);
     if (lease === undefined) return undefined;
     leases.delete(leaseId);
+    for (const child of [...leases.values()]) if (child.parentLeaseId === leaseId) removeLease(child.leaseId);
+    for (const [key, ticket] of tickets) if (ticket.lease.parentLeaseId === leaseId) tickets.delete(key);
     activeMcpLeases.delete(leaseId);
     closeLeaseTransports(leaseId);
     try {
@@ -1098,9 +1101,10 @@ export function createAlderServer(options: AlderServerOptions): AlderServer {
     tickets.delete(ticket);
   }
 
-  function mintTicket(origin: string): Ticket {
+  function mintTicket(origin: string, parentLeaseId?: string): Ticket {
     if (tickets.size >= MAX_LIVE_TICKETS) throw new HttpBoundaryError("ticket_limit", "too many live bootstrap tickets", 429);
     const lease = createLease(true);
+    lease.parentLeaseId = parentLeaseId;
     const ticket: Ticket = { ticket: randomBytes(32).toString("hex"), origin, expiresAt: Date.now() + TICKET_TTL_MS, lease };
     tickets.set(ticket.ticket, ticket);
     return ticket;
@@ -1113,6 +1117,12 @@ export function createAlderServer(options: AlderServerOptions): AlderServer {
       throw authFailure("ticket is invalid or expired");
     }
     cleanupTicket(ticketValue);
+    if (ticket.lease.parentLeaseId !== undefined) {
+      if (!leases.has(ticket.lease.parentLeaseId)) throw authFailure("desktop window is closed");
+      for (const previous of [...leases.values()]) {
+        if (previous.parentLeaseId === ticket.lease.parentLeaseId) removeLease(previous.leaseId);
+      }
+    }
     const lease = activateLease(ticket.lease);
     return { ticket, lease };
   }
@@ -1298,10 +1308,12 @@ export function createAlderServer(options: AlderServerOptions): AlderServer {
       const supplied = parseBearer(request.headers);
       if (supplied === null || !constantTimeEqual(supplied, configuredBearer ?? bearer)) throw authFailure();
       const body = await readJsonBody(request, maxJson);
-      assertExactFields(body, ["origin"], ["origin"]);
+      assertExactFields(body, ["origin", "parentLeaseId"], ["origin"]);
+      const parentLeaseId = body.parentLeaseId === undefined ? undefined : requiredString(body.parentLeaseId, "parentLeaseId", 256);
+      if (parentLeaseId !== undefined && requireLease(request, true).lease.leaseId !== parentLeaseId) throw authFailure("desktop lease does not match request");
       const origin = requiredString(body.origin, "origin", 2048);
       if (!origins().includes(origin)) throw new HttpBoundaryError("forbidden_origin", "ticket origin is not configured", 403);
-      const ticket = mintTicket(origin);
+      const ticket = mintTicket(origin, parentLeaseId);
       jsonResponse(response, 200, { ticket: ticket.ticket, expiresAt: new Date(ticket.expiresAt).toISOString() });
       return;
     }

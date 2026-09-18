@@ -863,6 +863,10 @@ async function startNotebookHost(
         publishSource(context, { document, path: context.path, layout: context.layout, disk: context.disk, sidecars: context.sidecars, dirty: true, advanceRevision: true });
         return { effective: appResolution.effective, provenance: appResolution.provenance };
       }
+      if (request.kind === "save-as" && request.path !== undefined && !isUntitled
+          && await realpath(request.path).catch(() => null) === store!.path) {
+        return sourceCommit({ ...request, kind: "save" }, context);
+      }
       if (request.kind === "save-as") {
         if (request.path === undefined || request.path.length === 0) throw new Error("Save As destination path is required");
         const oldStore = store!;
@@ -959,7 +963,7 @@ async function startNotebookHost(
               });
               binder();
             };
-            return () => {
+            return async () => {
               try {
                 // Apply the controller publication before adopting any destination state.
                 applyPublishedProjection(publicationBinder, destinationRecoveryProjection);
@@ -994,7 +998,8 @@ async function startNotebookHost(
                 if (runtimeError !== null) controller!.recordRuntimeAvailabilityError(asRuntimeHostError(runtimeError)!);
                 if (untitledRecoveryDescriptor !== undefined) void retireUntitledRecoveryDescriptor(untitledRecoveryDescriptor, undefined, privatePathOptions).catch(error => controller?.recordActionError(errorMessage(error), "recovery_checkpoint_failed"));
                 void oldStore.close().catch(() => {});
-                void oldRecovery.load().then(state => oldRecovery.clearIfMatch({ documentRevision: state.documentRevision, fingerprint: state.fingerprint! })).then(() => oldRecovery.close()).catch(() => {});
+                // Retire the source recovery identity before releasing its ownership.
+                await oldRecovery.load().then(state => oldRecovery.clearIfMatch({ documentRevision: state.documentRevision, fingerprint: state.fingerprint! })).then(() => oldRecovery.close()).catch(() => {});
                 if (runtimeChanged) startRuntime(true);
                 void oldManager?.close().catch(() => {});
               } catch (error) {

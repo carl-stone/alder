@@ -738,7 +738,7 @@ export const publishCommandSchema = z.object({ ...commandIdentityShape, type: z.
 export const uploadFileSchema = z.object({ name: pathSchema, content_base64: boundedUtf8StringSchema(16 * 1024 * 1024, true) }).strict();
 export const uploadCommandSchema = z.object({ ...commandIdentityShape, type: z.literal("upload"), name: idSchema, path: z.array(idSchema).max(256), files: z.array(uploadFileSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS), kernelEpoch: idSchema }).strict();
 export const saveCommandSchema = z.object({ ...commandIdentityShape, type: z.literal("save"), expectedDocumentRevision: revisionSchema }).strict();
-export const saveAsCommandSchema = z.object({ ...commandIdentityShape, type: z.literal("save-as"), path: pathSchema, expectedDestination: z.literal("absent"), expectedDocumentRevision: revisionSchema }).strict();
+export const saveAsCommandSchema = z.object({ ...commandIdentityShape, type: z.literal("save-as"), path: pathSchema, expectedDestination: z.union([z.literal("absent"), z.object({ expectedDiskDigest: z.string().min(1), expectedDiskVersion: z.string().min(1) }).strict()]), expectedDocumentRevision: revisionSchema }).strict();
 export const reloadSourceCommandSchema = z.object({ ...commandIdentityShape, type: z.literal("reload-source"), expectedDocumentRevision: revisionSchema, expectedDiskDigest: z.string().regex(/^[0-9a-f]{64}$/), expectedDiskVersion: boundedUtf8StringSchema(MAX_ID_BYTES, true) }).strict();
 export const formatCommandSchema = z.object({ ...commandIdentityShape, type: z.literal("format"), cellIds: z.array(idSchema).max(MAX_NOTEBOOK_CELLS).optional(), expectedRevisions: safeStringRecordSchema(revisionSchema), expectedDocumentRevision: revisionSchema }).strict();
 export const setConfigCommandSchema = z.object({ ...commandIdentityShape, type: z.literal("set-config"), patch: protocolJsonRecordSchema, expectedSidecarVersion: boundedUtf8StringSchema(MAX_ID_BYTES).nullable(), expectedDocumentRevision: revisionSchema }).strict();
@@ -1299,7 +1299,7 @@ export const leaseActionRequestSchema = z.object({ action: z.enum(["heartbeat", 
   if (value.action === "heartbeat" && value.disposition !== undefined) context.addIssue({ code: "custom", path: ["disposition"], message: "heartbeat cannot have a release disposition" });
 });
 export type LeaseActionRequest = z.infer<typeof leaseActionRequestSchema>;
-export const ticketMintRequestSchema = z.object({ origin: boundedUtf8StringSchema(2_048, true) }).strict();
+export const ticketMintRequestSchema = z.object({ origin: boundedUtf8StringSchema(2_048, true), parentLeaseId: idSchema.optional() }).strict();
 export type TicketMintRequest = z.infer<typeof ticketMintRequestSchema>;
 export const ticketMintResponseSchema = z.object({ ticket: idSchema, expiresAt: boundedUtf8StringSchema(256, true) }).strict();
 export type TicketMintResponse = z.infer<typeof ticketMintResponseSchema>;
@@ -1320,7 +1320,14 @@ export type WindowAction = z.infer<typeof windowActionSchema>;
 export const windowActionMessageSchema = z.object({ action: windowActionSchema }).strict();
 export const windowStateSchema = z.object({ path: pathSchema.nullable(), dirty: z.boolean(), platform: boundedUtf8StringSchema(64, true), sessionEpoch: idSchema }).strict();
 export type WindowState = z.infer<typeof windowStateSchema>;
-export interface PreloadApi { openNotebook(): Promise<void>; chooseSavePath(): Promise<string | null>; chooseRscript(): Promise<string | null>; getWindowState(): Promise<WindowState>; hostShutdown(): Promise<void>; saveCancelled(): Promise<void>; rendererReady(): Promise<void>; onWindowAction(callback: (action: WindowAction) => void): () => void; }
+export interface SaveDestination { path: string; expectedDestination: "absent" | { expectedDiskDigest: string; expectedDiskVersion: string }; }
+export const desktopRecoveryRequestSchema = z.object({
+  keyId: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
+  action: z.enum(["read", "write", "remove", "list"]),
+  name: z.string().max(256).optional(), prefix: z.string().max(256).optional(), value: z.unknown().optional(),
+}).strict();
+export type DesktopRecoveryRequest = z.infer<typeof desktopRecoveryRequestSchema>;
+export interface PreloadApi { recovery(request: DesktopRecoveryRequest): Promise<unknown>; openNotebook(): Promise<void>; chooseSavePath(): Promise<SaveDestination | null>; chooseRscript(): Promise<string | null>; getWindowState(): Promise<WindowState>; hostShutdown(): Promise<void>; saveCancelled(): Promise<void>; rendererReady(): Promise<void>; onWindowAction(callback: (action: WindowAction) => void): () => void; }
 
 export class ProtocolError extends Error { readonly code: string; constructor(code: string, message: string) { super(message); this.name = "ProtocolError"; this.code = code; } }
 export function decodeJsonFrame(input: string | Uint8Array, maxBytes = MAX_FRAME_BYTES): unknown {

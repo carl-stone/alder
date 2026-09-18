@@ -34,13 +34,7 @@ ALDER_HOST_MAX_SOURCE_BYTES <- 32L * 1024L * 1024L
       .alder_runtime_has_control(path)) {
     stop(label, " must be a non-empty absolute directory", call. = FALSE)
   }
-  absolute <- if (.Platform$OS.type == "windows") {
-    (nchar(path, type = "bytes") >= 3L && grepl("^[A-Za-z]:", path) &&
-      utf8ToInt(substr(path, 3L, 3L)) %in% c(47L, 92L)) ||
-      startsWith(path, "//") || startsWith(path, intToUtf8(c(92L, 92L)))
-  } else {
-    startsWith(path, "/")
-  }
+  absolute <- startsWith(path, "/")
   if (!absolute) stop(label, " must be absolute", call. = FALSE)
   resolved <- tryCatch(normalizePath(path, mustWork = TRUE, winslash = "/"),
                        error = function(error) NULL)

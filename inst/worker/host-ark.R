@@ -4,11 +4,7 @@
 
 local({
   path_is_absolute <- function(value) {
-    if (.Platform$OS.type == "windows") {
-      (nchar(value, type = "bytes") >= 3L && grepl("^[A-Za-z]:", value) &&
-        utf8ToInt(substr(value, 3L, 3L)) %in% c(47L, 92L)) ||
-        startsWith(value, "//") || startsWith(value, intToUtf8(c(92L, 92L)))
-    } else startsWith(value, "/")
+    startsWith(value, "/")
   }
   resolve_directory <- function(value, label) {
     if (!is.character(value) || length(value) != 1L || is.na(value) ||
@@ -29,10 +25,6 @@ local({
   path_is_under <- function(path, root) {
     path <- trim_path(path)
     root <- trim_path(root)
-    if (.Platform$OS.type == "windows") {
-      path <- tolower(path)
-      root <- tolower(root)
-    }
     prefix <- if (identical(root, "/")) "/" else paste0(root, "/")
     identical(path, root) || startsWith(path, prefix)
   }

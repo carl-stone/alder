@@ -1,14 +1,18 @@
 import { contextBridge, ipcRenderer } from "electron";
 import {
+  desktopRecoveryRequestSchema,
   windowActionMessageSchema,
   windowStateSchema,
   type PreloadApi,
   type WindowAction,
   type WindowState,
+  type SaveDestination,
+  saveAsCommandSchema,
 } from "../../host/src/protocol.js";
 
 /** Private, fixed IPC channels. They are deliberately not exposed to the page. */
 export const ELECTRON_IPC_CHANNELS = Object.freeze({
+  recovery: "alderDesktop:recovery",
   openNotebook: "alderDesktop:openNotebook",
   chooseSavePath: "alderDesktop:chooseSavePath",
   chooseRscript: "alderDesktop:chooseRscript",
@@ -20,7 +24,7 @@ export const ELECTRON_IPC_CHANNELS = Object.freeze({
 } as const);
 
 interface IpcRendererLike {
-  invoke(channel: string): Promise<unknown>;
+  invoke(channel: string, ...args: unknown[]): Promise<unknown>;
   on(channel: string, listener: (event: unknown, value: unknown) => void): void;
   removeListener(channel: string, listener: (event: unknown, value: unknown) => void): void;
 }
@@ -48,16 +52,24 @@ function validateVoid(value: unknown, label: string): void {
 
 /**
  * Build the only object that may cross the context-isolation boundary.
- * The renderer cannot provide paths, commands, credentials, or arbitrary IPC
+ * The renderer cannot provide filesystem paths, commands, credentials, or arbitrary IPC
  * channel names; native dialogs and actions are selected by the main process.
  */
 export function createPreloadApi(ipc: IpcRendererLike): PreloadApi {
   const api: PreloadApi = {
+    recovery: request => ipc.invoke(ELECTRON_IPC_CHANNELS.recovery, desktopRecoveryRequestSchema.parse(request)),
     openNotebook: async (): Promise<void> => {
       validateVoid(await ipc.invoke(ELECTRON_IPC_CHANNELS.openNotebook), "openNotebook");
     },
-    chooseSavePath: async (): Promise<string | null> =>
-      validateSelectedPath(await ipc.invoke(ELECTRON_IPC_CHANNELS.chooseSavePath), "chooseSavePath"),
+    chooseSavePath: async (): Promise<SaveDestination | null> => {
+      const value = await ipc.invoke(ELECTRON_IPC_CHANNELS.chooseSavePath);
+      if (value === null) return null;
+      const candidate = value as SaveDestination;
+      const path = validateSelectedPath(candidate.path, "chooseSavePath");
+      if (path === null) throw new Error("Save destination is missing");
+      const expectedDestination = saveAsCommandSchema.shape.expectedDestination.parse(candidate.expectedDestination);
+      return { path, expectedDestination };
+    },
     chooseRscript: async (): Promise<string | null> =>
       validateSelectedPath(await ipc.invoke(ELECTRON_IPC_CHANNELS.chooseRscript), "chooseRscript"),
     getWindowState: async (): Promise<WindowState> =>

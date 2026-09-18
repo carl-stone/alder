@@ -26,7 +26,7 @@ test("document resources resolve while all execution resources are absent", asyn
     assert.equal(resources.hostEntry, join(fixture.root, "host/alder-host.mjs"));
     await assert.rejects(stat(resources.arkExecutable), { code: "ENOENT" });
     await assert.rejects(stat(resources.airExecutable), { code: "ENOENT" });
-    await assert.rejects(resolveREnvironment({ resources, projectDirectory: fixture.root }), /helper package is unavailable/);
+    await assert.rejects(resolveREnvironment({ resources, projectDirectory: fixture.root }), { code: "r_invalid" });
   } finally { await removeFixture(fixture); }
 });
 

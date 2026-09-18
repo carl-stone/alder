@@ -14,10 +14,9 @@ reset; [dev/LEAD.md](dev/LEAD.md) records coordination and accepted progress.
 
 Builds and checks run locally. Mac is the only active platform during the reset;
 Linux and Windows support will be rebuilt and qualified separately later.
-Follow [dev/README.md](dev/README.md) for native Mac development. The current
-development stage uses R 4.6.1 with
-the same architecture as the Mac. Public signing and notarization remain separate
-from local development.
+Follow [dev/README.md](dev/README.md) for native Mac development. The document app opens, edits, saves and recovers notebooks without R.
+Execution runtime integration is the next reset slice. Public signing and
+notarization remain separate from local development.
 
 The existing app exposes **Open notebook…** for selecting a notebook and searches
 a saved R choice, `PATH`, then the standard macOS R framework installation.
@@ -79,8 +78,8 @@ The implementation includes the editor and output view, saving, HTML publishing,
 language assistance, package operations and MCP access. The reset preserves useful
 notebook functionality while simplifying the surrounding ownership and lifecycle.
 
-The current development tools include Node, Ark, Air, Electron and a native process
-supervisor. Commands and current staging prerequisites are maintained in
+The Mac document app uses Node and Electron, with one shared backend for desktop
+and agent clients. Build and launch commands are maintained in
 [dev/README.md](dev/README.md). Application builds and the standalone R helper
 package are separate.
 

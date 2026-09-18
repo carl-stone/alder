@@ -1,11 +1,10 @@
-import { spawn } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { readFile, realpath, lstat, mkdir, open, chmod, rename, rm, unlink, writeFile, readdir, link } from "node:fs/promises";
 
 import { basename, dirname, join, resolve, sep } from "node:path";
 import envPaths from "env-paths";
 import lockfile, { type LockOptions } from "proper-lockfile";
-import { spawnDetachedHost } from "./processes.js";
+import { SharedBackend } from "./backend-client.js";
 import {
   HOST_PROTOCOL,
   MAX_PROTOCOL_COLLECTION_ITEMS,
@@ -98,7 +97,21 @@ export interface UntitledRecoveryDescriptor {
   readonly createdAt: string;
 }
 
+export interface HostLaunchOptions {
+  externalOrigin?: string;
+  tokenFile?: string;
+  path: string | null;
+  sessionKey: string;
+  runtimeDirectory: string;
+  projectDirectory?: string;
+  rscript?: string;
+  executionMode?: "automatic" | "lazy";
+  runOnStartup?: boolean;
+  deferStartup?: boolean;
+}
+
 export interface AcquireNotebookSessionOptions {
+  readonly launchHost?: (options: HostLaunchOptions) => Promise<void>;
   readonly path: string | null;
   /** Explicit local recovery identity; only valid when path is null. */
   readonly untitledRecoveryId?: string;
@@ -150,7 +163,7 @@ export interface PreparedNotebookRekey {
    * A binder failure leaves the source claim authoritative and releases the
    * destination reservation.
    */
-  commit(preparePublication: () => Promise<() => void>): Promise<void>;
+  commit(preparePublication: () => Promise<() => void | Promise<void>>): Promise<void>;
   abort(): Promise<void>;
 }
 
@@ -452,7 +465,9 @@ export async function acquireNotebookSession(options: AcquireNotebookSessionOpti
   }
   if (launch === undefined) {
     launchedHere = true;
-    launch = launchCandidate({ ...options, path: canonicalPath }, runtime, sessionKey, deadline, projectDirectory);
+    launch = options.launchHost
+      ? options.launchHost({ path: canonicalPath, sessionKey, runtimeDirectory: runtime.directory, projectDirectory, rscript: options.rscript, executionMode: options.executionMode, runOnStartup: options.runOnStartup, deferStartup: options.deferStartup })
+      : launchCandidate({ ...options, path: canonicalPath }, runtime, sessionKey, deadline, projectDirectory);
     launches.set(sessionKey, launch);
     void launch.then(
       () => { if (launches.get(sessionKey) === launch) launches.delete(sessionKey); },
@@ -637,9 +652,6 @@ export async function acquireNotebookOwnership(options: NotebookOwnershipOptions
     if (destination === currentPath) {
       throw new SessionUnavailableError("Save As destination is already the active notebook", { path: destination });
     }
-    if (await pathPresent(spelling)) {
-      throw new SessionUnavailableError("Save As destination already exists", { path: destination });
-    }
     const destinationKey = await sessionKeyFor(destination);
     if (destinationKey === currentKey) {
       throw new SessionUnavailableError("Save As destination is already the active notebook", { path: destination });
@@ -680,7 +692,6 @@ export async function acquireNotebookOwnership(options: NotebookOwnershipOptions
           ? "destination ownership metadata appeared during reservation"
           : "destination ownership metadata is already claimed"));
       }
-      if (await pathPresent(spelling)) throw new SessionUnavailableError("Save As destination appeared during reservation", { path: destination });
       reservationWriteAttempted = true;
       await atomicWriteRegistry(destinationRegistry, reservationMetadata);
     } catch (error) {
@@ -709,7 +720,7 @@ export async function acquireNotebookOwnership(options: NotebookOwnershipOptions
       phase = "aborted";
       await cleanupReservation();
     };
-    const commit = (preparePublication: () => Promise<() => void>): Promise<void> => {
+    const commit = (preparePublication: () => Promise<() => void | Promise<void>>): Promise<void> => {
       throwIfCompromised();
       if (phase !== "prepared") throw new SessionUnavailableError("prepared Save As ownership is no longer available");
       if (typeof preparePublication !== "function") throw new TypeError("Save As publication preparation is required");
@@ -746,7 +757,7 @@ export async function acquireNotebookOwnership(options: NotebookOwnershipOptions
               await atomicWriteRegistry(destinationRegistry, destinationReady);
             }, handleCompromise);
             try {
-              publishBinding();
+              await publishBinding();
             } catch (error) {
               if (destinationReady !== undefined) await removeExactRegistry(destinationRegistry, destinationReady);
               await releaseDestinationLock();
@@ -1010,92 +1021,15 @@ function createConnection(
 export async function releaseNotebookSession(connection: SessionConnection): Promise<void> {
   await connection.release();
 }
-async function launchCandidate(options: AcquireNotebookSessionOptions, runtime: RuntimePaths, sessionKey: string, deadline: number, projectDirectory?: string): Promise<void> {
-  if (!options.resources.nodeExecutable || !options.resources.hostEntry || !options.resources.processSupervisorExecutable || !options.resources.root) {
-    throw new SessionUnavailableError("bundled detached host/process supervisor is unavailable", {
-      sessionKey,
-      registryPath: runtime.registryPath(sessionKey),
-    });
-  }
-  const args = [...(options.path === null ? [] : [options.path])];
-  if (options.rscript !== undefined) args.push("--rscript", options.rscript);
-  if (options.path === null) args.push("--recover", sessionKey);
-  if (options.executionMode === "lazy") args.push("--lazy");
-  if (options.deferStartup) args.push("--defer-startup");
-  if (options.runOnStartup === false) args.push("--no-run");
-  if (options.externalOrigin !== undefined) args.push("--external-origin", options.externalOrigin);
-  if (options.tokenFile !== undefined) args.push("--token-file", resolve(options.tokenFile));
-  const environment: Record<string, string> = {
-    ...inheritedDetachedEnvironment(),
-    ALDER_SESSION_KEY: sessionKey,
-    ALDER_RUNTIME_DIRECTORY: runtime.directory,
-    ALDER_PROCESS_NONCE: randomUUID(),
-    ALDER_CONTINUITY_PROOF: randomBytes(32).toString("hex"),
-    ALDER_EPOCH: randomUUID(),
-    ...(projectDirectory === undefined ? {} : { ALDER_UNTITLED_PROJECT_DIRECTORY: projectDirectory }),
-  };
-  const authenticateReady = async (context: { ready: Record<string, unknown>; pid: number; startIdentity: string; processNonce: string; epoch: string }): Promise<void> => {
-    const metadata = await readRegistry(runtime.registryPath(sessionKey));
-    const readyOrigin = typeof context.ready.origin === "string" ? context.ready.origin : null;
-    if (metadata === null || metadata.state !== "ready" || metadata.address === undefined
-      || metadata.pid !== context.pid
-      || metadata.startIdentity !== context.startIdentity
-      || metadata.processNonce !== environment.ALDER_PROCESS_NONCE
-      || metadata.continuityProof !== environment.ALDER_CONTINUITY_PROOF
-      || metadata.epoch !== environment.ALDER_EPOCH
-      || context.processNonce !== metadata.processNonce
-      || context.epoch !== metadata.epoch
-      || context.ready.epoch !== metadata.epoch
-      || readyOrigin !== metadata.address.browserOrigin
-      || metadata.address.origin !== metadata.origin) {
-      throw new SessionUnavailableError("candidate readiness did not match its authenticated registry owner", {
-        sessionKey,
-        registryPath: runtime.registryPath(sessionKey),
-      });
-    }
-    const identity = hostIdentitySchema.parse(await requestJson<Record<string, unknown>>(metadata.origin, metadata.token, "/api/identity", {
-      method: "GET",
-      signal: AbortSignal.timeout(IDENTITY_REQUEST_TIMEOUT_MS),
-    }, metadata.continuityProof));
-    if (identity.documentReady !== true
-      || identity.processNonce !== metadata.processNonce
-      || identity.continuityProof !== metadata.continuityProof
-      || identity.epoch !== metadata.epoch
-      || identity.canonicalPath !== metadata.canonicalPath
-      || identity.origin !== metadata.origin
-      || identity.browserOrigin !== metadata.address.browserOrigin
-      || identity.address === undefined
-      || identity.address.host !== metadata.address.host
-      || identity.address.port !== metadata.address.port
-      || identity.address.origin !== metadata.address.origin
-      || identity.address.browserOrigin !== metadata.address.browserOrigin) {
-      throw new SessionUnavailableError("candidate identity was not document-ready", { sessionKey });
-    }
-  };
-  const detached = await spawnDetachedHost({
-    resources: options.resources as never,
-    args,
-    environment,
-    readyTimeoutMs: Math.max(1, Math.min(STARTUP_TIMEOUT_MS, deadline - Date.now())),
-    authenticateReady,
+async function launchCandidate(options: AcquireNotebookSessionOptions, runtime: RuntimePaths, sessionKey: string, _deadline: number, projectDirectory?: string): Promise<void> {
+  const { root, nodeExecutable, hostEntry } = options.resources;
+  if (!root || !nodeExecutable || !hostEntry) throw new SessionUnavailableError("bundled document service is unavailable");
+  await new SharedBackend({ root, nodeExecutable, hostEntry }, runtime.directory).open({
+    path: options.path, sessionKey, runtimeDirectory: runtime.directory, projectDirectory,
+    rscript: options.rscript, executionMode: options.executionMode,
+    runOnStartup: options.runOnStartup, deferStartup: options.deferStartup,
+    externalOrigin: options.externalOrigin, tokenFile: options.tokenFile,
   });
-  try {
-    await detached.ready;
-  } catch (error) {
-    const current = await readRegistry(runtime.registryPath(sessionKey));
-    const contender = current !== null
-      && current.processNonce !== environment.ALDER_PROCESS_NONCE
-      && (current.state === "starting" || current.state === "ready");
-    if (contender) {
-      await waitForReady(runtime, sessionKey, deadline);
-      return;
-    }
-    const cause = error instanceof Error ? error.message : String(error);
-    throw new SessionUnavailableError("detached notebook host failed its bounded readiness channel: " + cause, {
-      sessionKey,
-      cause,
-    });
-  }
 }
 
 async function assertReclaimable(metadata: SessionRegistryMetadata, lockPath: string, sessionKey?: string): Promise<void> {
@@ -1348,7 +1282,7 @@ function privatePathOptionsFor(path: string): PrivatePathOptions {
   return selected ?? {};
 }
 async function runtimePaths(explicit?: string, processSupervisorExecutable?: string | null): Promise<RuntimePaths> {
-  const directory = resolve(explicit ?? join(envPaths("alder").data, "runtime"));
+  const directory = resolve(explicit ?? process.env.ALDER_RUNTIME_DIRECTORY ?? join(envPaths("alder").data, "runtime"));
   const privatePathOptions: PrivatePathOptions = { processSupervisorExecutable };
   await ensurePrivateDirectory(directory, privatePathOptions);
   privatePathOptionsByDirectory.set(directory, privatePathOptions);
@@ -1413,80 +1347,12 @@ async function pidAlive(pid: number): Promise<boolean | null> {
   }
 }
 
-async function processStartIdentity(pid: number): Promise<string | null> {
-  if (process.platform !== "linux") return null;
-  try {
-    const stat = await readFile(`/proc/${pid}/stat`, "utf8");
-    const close = stat.lastIndexOf(")");
-    if (close < 0) return null;
-    const fields = stat.slice(close + 2).split(" ");
-    const startTime = fields[19];
-    return startTime === undefined ? null : `linux:${startTime}`;
-  } catch {
-    return null;
-  }
+async function processStartIdentity(_pid: number): Promise<string | null> {
+  return null;
 }
 
-async function inspectNativeProcessStartIdentity(pid: number, executable: string): Promise<string | null> {
-  return new Promise(resolve => {
-    let output = Buffer.alloc(0);
-    let settled = false;
-    let timer: NodeJS.Timeout | undefined;
-    const finish = (value: string | null): void => {
-      if (settled) return;
-      settled = true;
-      if (timer !== undefined) clearTimeout(timer);
-      resolve(value);
-    };
-    const onData = (chunk: Buffer | string): void => {
-      const next = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-      output = Buffer.concat([output, next]);
-      if (output.byteLength > 16 * 1024) {
-        try { child.kill(); } catch { /* already gone */ }
-        finish(null);
-      }
-    };
-    const onClose = (code: number | null): void => {
-      if (code !== 0 || settled) {
-        finish(null);
-        return;
-      }
-      try {
-        const value = parseStrictJson(output.toString("utf8"), { maxBytes: 16 * 1024, maxDepth: 8 });
-        if (typeof value !== "object" || value === null || Array.isArray(value)) return finish(null);
-        const record = value as Record<string, unknown>;
-        if (record.pid !== pid || typeof record.startIdentity !== "string" || record.startIdentity.length === 0) return finish(null);
-        finish(record.startIdentity);
-      } catch {
-        finish(null);
-      }
-    };
-    let child: ReturnType<typeof spawn>;
-    try {
-      child = spawn(executable, ["--inspect-process", String(pid)], {
-        stdio: ["ignore", "pipe", "ignore"],
-        windowsHide: true,
-      });
-    } catch {
-      finish(null);
-      return;
-    }
-    child.stdout?.on("data", onData);
-    child.once("error", () => finish(null));
-    child.once("close", onClose);
-    timer = setTimeout(() => {
-      try { child.kill(); } catch { /* already gone */ }
-      finish(null);
-    }, IDENTITY_REQUEST_TIMEOUT_MS);
-  });
-}
-
-async function currentProcessStartIdentity(pid: number, supervisorExecutable?: string | null): Promise<string | null> {
-  const local = await processStartIdentity(pid);
-  if (local !== null || process.platform === "linux" || supervisorExecutable === undefined || supervisorExecutable === null) {
-    return local;
-  }
-  return inspectNativeProcessStartIdentity(pid, supervisorExecutable);
+async function currentProcessStartIdentity(_pid: number, _supervisorExecutable?: string | null): Promise<string | null> {
+  return null;
 }
 
 function parseAddress(origin: string): { host: string; port: number; origin: string } {
@@ -1509,10 +1375,6 @@ function unavailableLock(registryPath: string, lockPath: string, cause: unknown)
 }
 
 async function hardenLockDirectory(path: string, privatePathOptions: PrivatePathOptions): Promise<void> {
-  if ((privatePathOptions.platform ?? process.platform) === "win32") {
-    await securePrivateDirectory(path, privatePathOptions);
-    return;
-  }
   const info = await lstat(path);
   if (!info.isDirectory() || info.isSymbolicLink()) {
     await verifyPrivateDirectory(path, privatePathOptions);

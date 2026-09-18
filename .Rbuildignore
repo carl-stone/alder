@@ -2,8 +2,6 @@
 ^\.lintr$
 ^AGENTS\.md$
 ^tests/AGENTS\.md$
-^ALDER_ARCHITECTURE_PLAN[.]md$
-^NEEDS_CARL[.]md$
 ^alder-evidence($|[-_.])
 ^[^/]+[.]tar([.](gz|bz2|xz|zst))?$
 ^[^/]+[.](tgz|zip)$

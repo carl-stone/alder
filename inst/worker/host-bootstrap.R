@@ -20,14 +20,7 @@
 
 .alder_worker_scalar_path <- function(value, label) {
   value <- .alder_worker_scalar_text(value, label, max_bytes = 4096L)
-  if (.Platform$OS.type == "windows") {
-    absolute <- (nchar(value, type = "bytes") >= 3L &&
-      grepl("^[A-Za-z]:", value) &&
-      utf8ToInt(substr(value, 3L, 3L)) %in% c(47L, 92L)) ||
-      startsWith(value, "//") || startsWith(value, intToUtf8(c(92L, 92L)))
-  } else {
-    absolute <- startsWith(value, "/")
-  }
+  absolute <- startsWith(value, "/")
   if (!absolute) {
     stop(label, " must be an absolute directory", call. = FALSE)
   }
@@ -42,14 +35,7 @@
 
 .alder_worker_scalar_file <- function(value, label) {
   value <- .alder_worker_scalar_text(value, label, max_bytes = 4096L)
-  if (.Platform$OS.type == "windows") {
-    absolute <- (nchar(value, type = "bytes") >= 3L &&
-      grepl("^[A-Za-z]:", value) &&
-      utf8ToInt(substr(value, 3L, 3L)) %in% c(47L, 92L)) ||
-      startsWith(value, "//") || startsWith(value, intToUtf8(c(92L, 92L)))
-  } else {
-    absolute <- startsWith(value, "/")
-  }
+  absolute <- startsWith(value, "/")
   if (!absolute) stop(label, " must be an absolute file", call. = FALSE)
   resolved <- tryCatch(normalizePath(value, mustWork = TRUE, winslash = "/"),
                        error = function(error) NULL)
@@ -63,10 +49,6 @@
 .alder_worker_under <- function(path, root) {
   path <- if (identical(path, "/")) "/" else sub("/+$", "", path)
   root <- if (identical(root, "/")) "/" else sub("/+$", "", root)
-  if (.Platform$OS.type == "windows") {
-    path <- tolower(path)
-    root <- tolower(root)
-  }
   prefix <- if (identical(root, "/")) "/" else paste0(root, "/")
   identical(path, root) || startsWith(path, prefix)
 }

@@ -77,6 +77,26 @@ Snapshot unsaved work periodically; recovery durability is not a prerequisite
 for every edit or execution. Retain revision checks for concurrent edits and
 stale execution results. Provide a bounded close path when the host is unhealthy.
 
+**Commands and recovery.** Replace the general command admission/receipt,
+per-client sequence and event-replay framework with simple request IDs, document
+revision checks, an execution queue and current-state synchronization. Reconnect
+from a current snapshot. Keep the narrow duplicate-request handling needed to
+avoid executing an uncertain retry twice. Preserve local edits not yet accepted
+by the backend and useful crash recovery through simple snapshots; replace the
+renderer draft-branch/encryption-key machinery rather than recreating it.
+
+**Parsing and validation.** Use standard JSON parsers and existing libraries.
+Remove handwritten JSON parsers/scanners and serialize-parse-validation cycles
+on trusted in-process values. Validate incoming data at the actual I/O boundary
+with appropriate schema and size limits; internally use typed values. Existing
+tests for stricter custom parser behavior do not define product requirements.
+
+**Settings.** Remove the five-layer defaults/user/project/runtime/launch overlay
+system, per-key provenance and shadowed-setting errors. Use application
+preferences and notebook/project settings with one clear writable owner for
+each setting. Defaults are ordinary fallbacks. Editing a setting must predictably
+change the effective value; do not recreate arbitrary override stacks.
+
 **R execution.** Let Ark own execution, interruption and native output facilities.
 Keep only the kernel adapter and R helpers required for observable notebook
 behavior, including widgets and necessary cell bookkeeping. Dependency analysis
@@ -89,6 +109,12 @@ integration that works with unmodified Ark, then removes the patch and its
 exclusive build, readiness and test machinery. Verify output ordering, widgets
 and interruption through the replacement. Keep the adapter small; the exact
 transport is an implementation decision within the unmodified-Ark constraint.
+
+Right-size the R adapter around the notebook's actual needs and Ark's existing
+execution/output facilities. Remove duplicated runtime policy, blanket helper
+compilation and synthetic warm-up execution. Add performance optimizations only
+when measurements of the redesigned app demonstrate a benefit. Preserve useful
+widgets, rich outputs and scientific semantics through a small helper layer.
 
 **Optional services.** Automatic inspection must not invoke arbitrary user methods
 or force promises. Rich inspection is explicit, cancellable work. Optional service
@@ -104,8 +130,9 @@ failure should have the following effects:
 | Agent disconnects | Desktop work continues |
 | Backend unresponsive | Preserve local unsaved work and provide an explicit close path |
 
-**Build and runtime policy.** Keep package inventories, source hashes, compiler
-metadata and release records in build tooling. Startup resolves necessary
+**Build and runtime policy.** Delete bespoke dependency certification and source
+lineage/provenance gates. Keep ordinary lockfiles, standard package-manager
+integrity checks and required license notices. Startup resolves necessary
 resources and checks actual compatibility. Separate local development from public
 distribution and signing. Existing script restrictions describe the current
 implementation; they do not freeze the redesigned runtime contract.

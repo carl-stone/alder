@@ -125,6 +125,7 @@ export interface SourceCommitRequest {
   readonly kind: SourceCommitKind;
   readonly expectedDocumentRevision: number;
   readonly expectedDisk?: SourceDiskExpectation;
+  readonly expectedDestination?: { expectedDiskDigest: string; expectedDiskVersion: string };
   readonly expectedSidecarVersion?: string | null;
   readonly sidecar?: "config" | "layout" | "packages";
   readonly operationId?: string;
@@ -1264,7 +1265,7 @@ export class Controller {
 
   private async executeCommand(command: HostCommand): Promise<CommandResult> {
     try {
-      if (this.engineRestarting && command.type !== "restart") {
+      if (this.engineRestarting && ["run", "widget", "inspect", "lazy-output", "table-page", "format", "packages-install"].includes(command.type)) {
         throw new ControllerError(
           "operation_in_progress",
           "R engine restart is already in progress",
@@ -5632,6 +5633,7 @@ export class Controller {
           expectedDocumentRevision: command.expectedDocumentRevision,
           operationId: command.operationId,
           path: command.path,
+          expectedDestination: command.expectedDestination === "absent" ? undefined : command.expectedDestination,
           fingerprint: stableStringify({ path: command.path, expectedDestination: command.expectedDestination }),
         });
       case "reload-source":
@@ -5903,15 +5905,7 @@ export class Controller {
 
   private assertStartedForMutation(): void {
     this.assertDocumentReady();
-    if (this.engineRestarting) {
-      throw new ControllerError(
-        "operation_in_progress",
-        "R engine restart is already in progress",
-        409,
-      );
-    }
   }
-
 
   private assertExecutionPossible(): void {
     this.assertStarted();

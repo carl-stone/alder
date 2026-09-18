@@ -1,4 +1,5 @@
 import { BrowserNotebookClient } from "./client.js";
+import { DesktopRecoveryStore } from "./desktop-recovery.js";
 import { IndexedDBRecoveryStore } from "./transport.js";
 import type { BrowserTransportOptions } from "./transport.js";
 import { NotebookView } from "./view.js";
@@ -155,8 +156,11 @@ async function bootstrapSession(): Promise<BrowserSessionCredentials> {
 
 async function start(): Promise<void> {
   const session = await bootstrapSession();
+  const desktop = (globalThis as typeof globalThis & { alderDesktop?: PreloadApi }).alderDesktop;
   const options: BrowserTransportOptions = {
-    recoveryStore: new IndexedDBRecoveryStore(recoveryIdentity(), session.recoveryKey, session.recoveryKeyId),
+    recoveryStore: desktop && session.recoveryKeyId
+      ? new DesktopRecoveryStore(session.recoveryKeyId, request => desktop.recovery(request), message => view?.showError(new Error(message)))
+      : new IndexedDBRecoveryStore(recoveryIdentity(), session.recoveryKey, session.recoveryKeyId),
     clientId: session.clientId,
     leaseId: session.leaseId,
     csrf: session.csrf,

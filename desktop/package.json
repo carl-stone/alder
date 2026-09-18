@@ -7,11 +7,11 @@
   "main": ".vite/build/main.cjs",
   "type": "commonjs",
   "scripts": {
-    "start": "electron-forge start",
+    "start": "open ../host/.application-desktop/Alder.app",
     "build": "tsc -p tsconfig.json --noEmit && electron-forge package",
     "package": "electron-forge package",
-    "make": "electron-forge make",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "build:mac": "node scripts/build-mac.mjs"
   },
   "dependencies": {
     "env-paths": "4.0.0",
@@ -20,11 +20,6 @@
   },
   "devDependencies": {
     "@electron-forge/cli": "7.11.2",
-    "@electron-forge/maker-deb": "7.11.2",
-    "@electron-forge/maker-dmg": "7.11.2",
-    "@electron-forge/maker-rpm": "7.11.2",
-    "@electron-forge/maker-squirrel": "7.11.2",
-    "@electron-forge/maker-zip": "7.11.2",
     "@electron-forge/plugin-fuses": "7.11.2",
     "@electron-forge/plugin-vite": "7.11.2",
     "@electron/fuses": "1.8.0",
