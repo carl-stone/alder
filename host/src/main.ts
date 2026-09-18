@@ -220,7 +220,7 @@ export function parseCli(argv: readonly string[]): CliOptions {
 }
 
 async function applicationResources(): Promise<ApplicationResources> {
-  const root = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
+  const root = process.env.ALDER_APPLICATION_ROOT ?? resolve(dirname(fileURLToPath(import.meta.url)), "..");
   return resolveApplicationResources(root);
 }
 function appOptions(cli: CliOptions, resources: ApplicationResources): Record<string, unknown> {
@@ -269,7 +269,7 @@ interface BrowserOpenerChild {
 
 export interface SystemBrowserOpenOptions {
   /** Test-only platform override; production callers should omit it. */
-  readonly platform?: "linux" | "darwin" | "win32";
+  readonly platform?: "darwin";
   /** Test-only parent for the freshly created private launcher directory. */
   readonly temporaryRoot?: string;
   /** Test seam which must not invoke a real OS opener. */
@@ -292,7 +292,7 @@ function browserLauncherHtml(url: string): string {
 
 export async function openSystemBrowser(url: string, options: SystemBrowserOpenOptions = {}): Promise<void> {
   const platform = options.platform ?? process.platform;
-  if (platform !== "linux" && platform !== "darwin" && platform !== "win32") throw new Error("could not open system browser");
+  if (platform !== "darwin") throw new Error("Alder currently supports macOS");
   const cleanupDelayMs = options.cleanupDelayMs ?? BROWSER_LAUNCHER_CLEANUP_MS;
   if (!Number.isSafeInteger(cleanupDelayMs) || cleanupDelayMs < 0 || cleanupDelayMs > BROWSER_LAUNCHER_MAX_CLEANUP_MS) {
     throw new RangeError("browser launcher cleanup delay is invalid");
@@ -312,9 +312,9 @@ export async function openSystemBrowser(url: string, options: SystemBrowserOpenO
     await handle.close();
     handle = undefined;
 
-    const command = platform === "darwin" ? "open" : platform === "win32" ? "rundll32.exe" : "xdg-open";
+    const command = "open";
     const launcherUrl = pathToFileURL(launcherPath).href;
-    const args = platform === "win32" ? ["url.dll,FileProtocolHandler", launcherUrl] : [launcherUrl];
+    const args = [launcherUrl];
     const spawnOpener = options.spawn ?? ((executable, openerArgs, spawnOptions) => spawn(executable, [...openerArgs], spawnOptions));
     await new Promise<void>((resolveOpen, rejectOpen) => {
       const child = spawnOpener(command, args, { detached: true, stdio: "ignore" });
