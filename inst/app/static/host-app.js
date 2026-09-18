@@ -5,1152 +5,6 @@ var __export = (target, all) => {
     __defProp(target, name, { get: all[name], enumerable: true });
 };
 
-// src/output-log.ts
-var encoder = new TextEncoder();
-var decoder = new TextDecoder("utf-8", { ignoreBOM: true });
-function tailLog(lines, limit) {
-  let start2 = lines.length;
-  let bytes = 0;
-  while (start2 > 0) {
-    const addition = encoder.encode(lines[start2 - 1]).length + Number(start2 < lines.length);
-    if (bytes + addition > limit) break;
-    bytes += addition;
-    start2--;
-  }
-  return lines.slice(start2);
-}
-
-// src/cell-body.ts
-function markdownLogicalLine(line) {
-  if (line.length === 0) return "";
-  const match = /^(\s*)#(?: ?)([\s\S]*)$/.exec(line);
-  return match === null ? line : match[1] + match[2];
-}
-function isMarkdownPhysicalLine(line) {
-  return line.trim().length === 0 || /^\s*#/.test(line);
-}
-function markdownPhysicalLinesEqual(left, right) {
-  return isMarkdownPhysicalLine(left) && isMarkdownPhysicalLine(right) && markdownLogicalLine(left) === markdownLogicalLine(right);
-}
-function canonicalMarkdownLine(logical) {
-  return logical.length === 0 ? "" : "# " + logical;
-}
-function toPhysicalCellBody(cellType, logicalBody, originalPhysicalBody) {
-  if (cellType === "code") return [...logicalBody];
-  const physicalBody = logicalBody.map((line) => canonicalMarkdownLine(line));
-  if (originalPhysicalBody === void 0) return physicalBody;
-  const shared = Math.min(originalPhysicalBody.length, physicalBody.length);
-  let prefix = 0;
-  let suffix = 0;
-  while (prefix < shared && markdownPhysicalLinesEqual(originalPhysicalBody[prefix], physicalBody[prefix])) prefix += 1;
-  while (suffix < shared - prefix && markdownPhysicalLinesEqual(
-    originalPhysicalBody[originalPhysicalBody.length - suffix - 1],
-    physicalBody[physicalBody.length - suffix - 1]
-  )) suffix += 1;
-  for (let index = 0; index < prefix; index += 1) physicalBody[index] = originalPhysicalBody[index];
-  for (let index = prefix; index < shared - suffix; index += 1) {
-    if (markdownPhysicalLinesEqual(originalPhysicalBody[index], physicalBody[index])) {
-      physicalBody[index] = originalPhysicalBody[index];
-    }
-  }
-  for (let index = 0; index < suffix; index += 1) {
-    physicalBody[physicalBody.length - suffix + index] = originalPhysicalBody[originalPhysicalBody.length - suffix + index];
-  }
-  return physicalBody;
-}
-function toLogicalCellBody(cellType, physicalBody) {
-  if (cellType === "code") return [...physicalBody];
-  return physicalBody.map((line) => markdownLogicalLine(line));
-}
-
-// src/browser/document.ts
-var MAX_LOG_BYTES = 65536;
-var BrowserDocument = class {
-  ordered = [];
-  byKey = /* @__PURE__ */ new Map();
-  keyByServerId = /* @__PURE__ */ new Map();
-  keyByCreationId = /* @__PURE__ */ new Map();
-  submitted = /* @__PURE__ */ new Map();
-  focused = null;
-  epochValue;
-  cursorValue;
-  snapshotValue;
-  serverOrder;
-  draftBaseValue = null;
-  recoveredStructural = [];
-  recoveredStructuralConflict = false;
-  constructor(snapshot) {
-    this.epochValue = snapshot.epoch;
-    this.cursorValue = snapshot.cursor;
-    this.snapshotValue = snapshot;
-    this.serverOrder = snapshot.cells.map((cell) => cell.id);
-    this.applySnapshot(snapshot);
-  }
-  get epoch() {
-    return this.epochValue;
-  }
-  get cursor() {
-    return this.cursorValue;
-  }
-  get snapshot() {
-    return this.snapshotValue;
-  }
-  get cells() {
-    return this.ordered;
-  }
-  get focusedKey() {
-    return this.focused;
-  }
-  get hasSourceConflicts() {
-    return this.recoveredStructuralConflict || this.ordered.some((cell) => cell.conflict || cell.tombstone);
-  }
-  cell(keyOrId) {
-    return this.byKey.get(keyOrId) ?? this.byKey.get(this.keyByServerId.get(keyOrId) ?? "");
-  }
-  focus(key, selection) {
-    if (key !== null && !this.byKey.has(key)) return;
-    if (this.focused && selection !== void 0) {
-      const old = this.byKey.get(this.focused);
-      if (old) old.selection = selection;
-    }
-    this.focused = key;
-  }
-  updateSelection(key, selection) {
-    const cell = this.requireCell(key);
-    cell.selection = { ...selection };
-  }
-  create(creationId, afterKey, type = "code", body = []) {
-    if (!creationId || this.keyByCreationId.has(creationId)) {
-      throw new Error("creationId must be unique and nonempty");
-    }
-    const key = `creation:${creationId}`;
-    const after = afterKey === null ? this.ordered.length - 1 : this.ordered.findIndex((cell2) => cell2.key === afterKey);
-    if (afterKey !== null && after < 0) throw new Error(`no such predecessor: ${afterKey}`);
-    this.captureDraftBase();
-    const cell = {
-      key,
-      id: null,
-      creationId,
-      desiredBody: [...body],
-      desiredType: type,
-      serverBody: [],
-      serverType: type,
-      serverRevision: 0,
-      generation: 0,
-      acknowledgedGeneration: -1,
-      conflict: false,
-      tombstone: false,
-      restoreAfter: null,
-      server: null,
-      selection: { anchor: 0, head: 0 }
-    };
-    this.ordered.splice(after + 1, 0, cell);
-    this.byKey.set(key, cell);
-    this.keyByCreationId.set(creationId, key);
-    this.snapshotValue = { ...this.snapshotValue, changed: true };
-    return cell;
-  }
-  edit(key, body, type) {
-    const cell = this.requireCell(key);
-    this.captureDraftBase();
-    cell.desiredBody = [...body];
-    if (type) cell.desiredType = type;
-    cell.generation += 1;
-    if (!cell.tombstone && cell.desiredType === cell.serverType && sameLines(cell.desiredBody, cell.serverBody)) {
-      cell.conflict = false;
-      cell.acknowledgedGeneration = cell.generation;
-    }
-    this.snapshotValue = { ...this.snapshotValue, changed: true };
-    return cell;
-  }
-  useServerVersion(key) {
-    const cell = this.requireCell(key);
-    if (!cell.conflict || cell.tombstone || cell.id === null) throw new Error("cell has no resolvable source conflict");
-    cell.desiredBody = [...cell.serverBody];
-    cell.desiredType = cell.serverType;
-    cell.acknowledgedGeneration = cell.generation;
-    cell.conflict = false;
-    return cell;
-  }
-  discardLocal(key) {
-    const cell = this.requireCell(key);
-    if (cell.id !== null && !cell.tombstone) throw new Error("cannot discard an authoritative cell locally");
-    this.removeCell(cell);
-  }
-  restoreDeleted(key, creationId) {
-    const cell = this.requireCell(key);
-    if (!cell.tombstone || cell.id === null) throw new Error("cell is not a deleted-source conflict");
-    if (!creationId || this.keyByCreationId.has(creationId)) {
-      throw new Error("creationId must be unique and nonempty");
-    }
-    this.captureDraftBase();
-    this.keyByServerId.delete(cell.id);
-    cell.id = null;
-    cell.creationId = creationId;
-    cell.serverBody = [];
-    cell.serverType = cell.desiredType;
-    cell.serverRevision = 0;
-    cell.acknowledgedGeneration = -1;
-    cell.conflict = false;
-    cell.tombstone = false;
-    cell.server = null;
-    this.keyByCreationId.set(creationId, cell.key);
-    this.snapshotValue = { ...this.snapshotValue, changed: true };
-    return cell;
-  }
-  pendingSource() {
-    const changes = [];
-    for (const cell of this.ordered) {
-      if (cell.tombstone) continue;
-      if (cell.id === null) {
-        const predecessor = this.predecessorReference(cell.key);
-        changes.push({
-          type: "create",
-          creationId: cell.creationId,
-          after: predecessor,
-          body: toPhysicalCellBody(cell.desiredType, cell.desiredBody),
-          cellType: cell.desiredType,
-          options: {}
-        });
-      } else if (cell.generation > cell.acknowledgedGeneration || cell.desiredType !== cell.serverType || !sameLines(cell.desiredBody, cell.serverBody)) {
-        changes.push({
-          type: "edit",
-          cell: { cellId: cell.id },
-          body: toPhysicalCellBody(cell.desiredType, cell.desiredBody, cell.server?.body),
-          cellType: cell.desiredType,
-          expectedRevision: cell.serverRevision
-        });
-      }
-    }
-    changes.push(...this.recoveredStructural.map((change) => cloneChange(change)));
-    return { changes };
-  }
-  stageRecoveryIntent(changes) {
-    const structural = changes.filter((change) => change.type !== "create" && change.type !== "edit");
-    if (structural.length === 0) return;
-    this.captureDraftBase();
-    this.recoveredStructural = structural.map((change) => cloneChange(change));
-    this.recoveredStructuralConflict = false;
-  }
-  markStructuralRecoveryConflict() {
-    if (this.recoveredStructural.length > 0) this.recoveredStructuralConflict = true;
-  }
-  recoveryDraft(clientId, operation = null) {
-    const changes = this.recoveryChanges();
-    if (changes.length === 0) {
-      this.draftBaseValue = null;
-      return null;
-    }
-    const base = this.draftBaseValue ?? this.snapshotBase();
-    return {
-      schemaVersion: 1,
-      clientId,
-      base: cloneDraftBase(base),
-      changes,
-      operation
-    };
-  }
-  restoreDraft(draft, conflict) {
-    this.draftBaseValue = cloneDraftBase(draft.base);
-    for (const change of draft.changes) {
-      if (change.type === "create") {
-        const existing = this.cell(this.keyByCreationId.get(change.creationId) ?? "");
-        if (existing) {
-          existing.desiredBody = toLogicalCellBody(change.cellType, change.body);
-          existing.desiredType = change.cellType;
-          existing.conflict = conflict;
-          continue;
-        }
-        const after = change.after === null ? null : "cellId" in change.after ? this.cell(change.after.cellId)?.key ?? null : this.cell(this.keyByCreationId.get(change.after.creationId) ?? "")?.key ?? null;
-        const cell = this.create(change.creationId, after, change.cellType, toLogicalCellBody(change.cellType, change.body));
-        cell.conflict = conflict;
-      } else if (change.type === "edit") {
-        const key = "cellId" in change.cell ? this.cell(change.cell.cellId)?.key ?? "" : this.keyByCreationId.get(change.cell.creationId) ?? "";
-        const cell = this.cell(key) ?? this.restoreMissingEdit(change, draft);
-        cell.desiredBody = toLogicalCellBody(change.cellType, change.body);
-        cell.desiredType = change.cellType;
-        cell.generation = Math.max(1, cell.generation + 1);
-        cell.acknowledgedGeneration = cell.generation - 1;
-        cell.conflict = conflict || cell.tombstone;
-        this.snapshotValue = { ...this.snapshotValue, changed: true };
-      } else {
-        this.recoveredStructural.push(cloneChange(change));
-        this.recoveredStructuralConflict ||= conflict;
-      }
-    }
-    this.snapshotValue = { ...this.snapshotValue, changed: true };
-  }
-  recoveryChanges() {
-    const changes = [];
-    for (const cell of this.ordered) {
-      if (cell.id === null) {
-        changes.push({
-          type: "create",
-          creationId: cell.creationId,
-          after: this.predecessorReference(cell.key),
-          body: toPhysicalCellBody(cell.desiredType, cell.desiredBody),
-          cellType: cell.desiredType,
-          options: {}
-        });
-      } else if (cell.tombstone || cell.generation > cell.acknowledgedGeneration || cell.desiredType !== cell.serverType || !sameLines(cell.desiredBody, cell.serverBody)) {
-        changes.push({
-          type: "edit",
-          cell: { cellId: cell.id },
-          body: toPhysicalCellBody(cell.desiredType, cell.desiredBody),
-          cellType: cell.desiredType,
-          expectedRevision: cell.serverRevision
-        });
-      }
-    }
-    changes.push(...this.recoveredStructural.map((change) => cloneChange(change)));
-    return changes;
-  }
-  snapshotBase() {
-    return {
-      epoch: this.snapshotValue.epoch,
-      cursor: this.snapshotValue.cursor,
-      version: this.snapshotValue.version,
-      documentRevision: this.snapshotValue.documentRevision,
-      cells: this.snapshotValue.cells.map((cell) => ({ id: cell.id, revision: cell.revision, type: cell.type, body: [...cell.body] }))
-    };
-  }
-  captureDraftBase() {
-    this.draftBaseValue ??= this.snapshotBase();
-  }
-  rebaseDraftToSnapshot() {
-    this.draftBaseValue = this.recoveryChanges().length === 0 ? null : this.snapshotBase();
-  }
-  restoreMissingEdit(change, draft) {
-    const id = "cellId" in change.cell ? change.cell.cellId : null;
-    const creationId = "creationId" in change.cell ? change.cell.creationId : null;
-    const baseIndex = id === null ? -1 : draft.base.cells.findIndex((cell2) => cell2.id === id);
-    const baseCell = baseIndex < 0 ? null : draft.base.cells[baseIndex];
-    const key = id === null ? "recovery-created:" + creationId : "recovery-deleted:" + id;
-    const preceding = baseIndex <= 0 ? null : draft.base.cells.slice(0, baseIndex).reverse().find((candidate) => this.cell(candidate.id))?.id ?? null;
-    const cell = {
-      key,
-      id,
-      creationId,
-      desiredBody: toLogicalCellBody(change.cellType, change.body),
-      desiredType: change.cellType,
-      serverBody: baseCell ? toLogicalCellBody(baseCell.type, baseCell.body) : [],
-      serverType: baseCell?.type ?? change.cellType,
-      serverRevision: baseCell?.revision ?? change.expectedRevision ?? 0,
-      generation: 0,
-      acknowledgedGeneration: 0,
-      conflict: true,
-      tombstone: id !== null,
-      restoreAfter: preceding,
-      server: null,
-      selection: null
-    };
-    const insertion = preceding === null ? 0 : Math.max(0, this.ordered.findIndex((candidate) => candidate.id === preceding) + 1);
-    this.ordered.splice(insertion, 0, cell);
-    this.byKey.set(key, cell);
-    if (id !== null) this.keyByServerId.set(id, key);
-    if (creationId !== null) this.keyByCreationId.set(creationId, key);
-    return cell;
-  }
-  buildTransactionCommand(operationId2, clientId) {
-    this.assertNoSourceConflicts();
-    const changes = this.pendingSource().changes;
-    if (changes.length === 0) return null;
-    return {
-      type: "transaction",
-      operationId: operationId2,
-      clientId,
-      sessionEpoch: this.epochValue,
-      expectedDocumentRevision: this.snapshotValue.documentRevision,
-      changes
-    };
-  }
-  buildRunCommand(options) {
-    this.assertNoSourceConflicts();
-    const changes = this.pendingSource().changes;
-    const target = options.targetKey ? this.requireCell(options.targetKey) : null;
-    if (options.scope === "cell" && !target) throw new Error("a target cell is required");
-    if (options.scope !== "cell" && target) throw new Error("a target cell is valid only for a cell run");
-    if (target?.tombstone) throw new Error("deleted cells must be restored or discarded before running");
-    const targetRef = target?.id !== null && target?.id !== void 0 ? { cellId: target.id } : target?.creationId !== null && target?.creationId !== void 0 ? { creationId: target.creationId } : void 0;
-    return {
-      type: "run",
-      operationId: options.operationId,
-      clientId: options.clientId,
-      sessionEpoch: this.epochValue,
-      scope: options.scope,
-      ...targetRef === void 0 ? {} : { target: targetRef },
-      ...changes.length === 0 ? {} : { changes },
-      expectedDocumentRevision: this.snapshotValue.documentRevision
-    };
-  }
-  noteSubmitted(operationId2, command) {
-    const operation = { cells: /* @__PURE__ */ new Map(), creations: /* @__PURE__ */ new Map(), structural: [] };
-    const changes = command.type === "run" || command.type === "transaction" ? command.changes ?? [] : [];
-    for (const change of changes) {
-      if (change.type === "edit" || change.type === "text-edit") {
-        const cell = this.cellRef(change.cell);
-        if (cell && change.type === "edit") {
-          const body = toLogicalCellBody(change.cellType, change.body);
-          operation.cells.set(cell.key, {
-            generation: cell.generation,
-            body,
-            type: change.cellType,
-            expectedRevision: change.expectedRevision ?? cell.serverRevision,
-            changesSource: cell.serverType !== change.cellType || !sameLines(cell.serverBody, body)
-          });
-        }
-      } else if (change.type === "create") {
-        const key = this.keyByCreationId.get(change.creationId);
-        const cell = key ? this.byKey.get(key) : void 0;
-        if (cell) operation.creations.set(change.creationId, {
-          generation: cell.generation,
-          body: toLogicalCellBody(change.cellType, change.body),
-          type: change.cellType,
-          expectedRevision: null,
-          changesSource: true
-        });
-      } else {
-        operation.structural.push(cloneChange(change));
-      }
-    }
-    this.submitted.set(operationId2, operation);
-  }
-  acknowledge(result) {
-    this.cursorValue = Math.max(this.cursorValue, result.cursor);
-    this.snapshotValue = {
-      ...this.snapshotValue,
-      cursor: this.cursorValue,
-      version: Math.max(this.snapshotValue.version, result.version),
-      documentRevision: Math.max(this.snapshotValue.documentRevision, result.documentRevision)
-    };
-    const submitted = this.submitted.get(result.operation.id);
-    const change = isRecord(result.result) ? result.result : {};
-    this.reconcileCreated(change.created);
-    this.reconcileEdited(change.edited, submitted);
-    if (submitted) this.reconcileSubmittedCreations(change.created, submitted);
-    if (submitted) this.recoveredStructuralConflict = false;
-    if (submitted) this.recoveredStructural = [];
-    this.submitted.delete(result.operation.id);
-    this.reassertLocalDirty();
-    this.rebaseDraftToSnapshot();
-  }
-  acknowledgeSourceCommit(operationId2, outcome) {
-    const submitted = this.submitted.get(operationId2);
-    if (submitted === void 0 || !Number.isSafeInteger(outcome.documentRevision) || outcome.documentRevision < 0 || this.snapshotValue.documentRevision < outcome.documentRevision) return false;
-    this.snapshotValue = { ...this.snapshotValue, documentRevision: Math.max(this.snapshotValue.documentRevision, outcome.documentRevision) };
-    this.reconcileCreated(outcome.created);
-    this.reconcileEdited(outcome.edited, submitted);
-    this.reconcileSubmittedCreations(outcome.created, submitted);
-    return this.finishSourceCommit(operationId2, submitted);
-  }
-  finishSourceCommit(operationId2, submitted) {
-    if (!this.sourceSubmissionAcknowledged(submitted)) return false;
-    this.recoveredStructuralConflict = false;
-    this.recoveredStructural = [];
-    this.submitted.delete(operationId2);
-    this.reassertLocalDirty();
-    this.rebaseDraftToSnapshot();
-    return true;
-  }
-  reject(operationId2, code) {
-    const submitted = this.submitted.get(operationId2);
-    if (submitted && code === "source_conflict") {
-      for (const [key, sent] of submitted.cells) {
-        const cell = this.byKey.get(key);
-        if (cell && (cell.serverType !== sent.type || !sameLines(cell.serverBody, sent.body))) cell.conflict = true;
-      }
-    }
-    if (submitted && submitted.structural.length > 0) {
-      this.recoveredStructural = this.recoveredStructural.filter((candidate) => !submitted.structural.some((sent) => sameChange(candidate, sent)));
-      if (this.recoveredStructural.length === 0) this.recoveredStructuralConflict = false;
-    }
-    this.submitted.delete(operationId2);
-  }
-  applyEvent(event) {
-    if (event.epoch !== this.epochValue || event.cursor <= this.cursorValue) return;
-    this.cursorValue = event.cursor;
-    if (event.type === "cell" || event.type === "cell-completed" || event.type === "cell-started") {
-      if (isRecord(event.payload) && event.payload.deleted === true && event.cellId) {
-        this.removeServerCell(event.cellId);
-      } else if (isHostCell(event.payload)) {
-        const known = this.keyByServerId.has(event.payload.id);
-        this.mergeServerCell(event.payload, false, event.operationId);
-        if (!known) this.reorderFromServerOrderIfPossible();
-      }
-    } else if (event.type === "cell-output" && event.cellId && isRecord(event.payload)) {
-      this.applyOutput(event.cellId, event.payload);
-    } else if (event.type === "diagnostics" && event.cellId && Array.isArray(event.payload)) {
-      this.applyDiagnostics(event.cellId, event.payload);
-    } else if ((event.type === "notebook" || event.type === "transaction") && isRecord(event.payload)) {
-      this.reconcileCreated(event.payload.created);
-      if (Array.isArray(event.payload.updated)) {
-        for (const cell of event.payload.updated) if (isHostCell(cell)) this.mergeServerCell(cell, false, event.operationId);
-      }
-      if (typeof event.payload.deleted === "string") this.removeServerCell(event.payload.deleted);
-      if (Array.isArray(event.payload.deleted)) {
-        for (const id of event.payload.deleted) if (typeof id === "string") this.removeServerCell(id);
-      }
-      let orderChanged = false;
-      if (Array.isArray(event.payload.order) && event.payload.order.every((id) => typeof id === "string")) {
-        const order = event.payload.order;
-        orderChanged = !sameLines(this.serverOrder, order);
-        if (orderChanged) this.serverOrder = [...order];
-      } else if (typeof event.payload.moved === "string") {
-        const before = [...this.serverOrder];
-        this.moveServerOrder(event.payload.moved, typeof event.payload.after === "string" ? event.payload.after : null);
-        orderChanged = !sameLines(before, this.serverOrder);
-      }
-      if (orderChanged) this.reorderFromServerOrderIfPossible();
-    }
-    this.snapshotValue = patchSnapshot(this.snapshotValue, event, this.serverOrder);
-    if (isRecord(event.payload) && event.type === "notebook" && event.payload.saved === true) {
-      const pending = this.pendingSource();
-      if (pending.changes.length || this.ordered.some((cell) => cell.tombstone)) this.snapshotValue = { ...this.snapshotValue, changed: true };
-    }
-  }
-  applySnapshot(snapshot) {
-    const epochChanged = this.epochValue !== snapshot.epoch;
-    this.epochValue = snapshot.epoch;
-    this.cursorValue = snapshot.cursor;
-    this.snapshotValue = snapshot;
-    const previousOrder = this.serverOrder;
-    this.serverOrder = snapshot.cells.map((cell) => cell.id);
-    if (epochChanged) {
-      for (const operation of this.submitted.values()) {
-        for (const change of operation.structural) {
-          if (!this.recoveredStructural.some((candidate) => sameChange(candidate, change))) this.recoveredStructural.push(cloneChange(change));
-        }
-      }
-      this.submitted.clear();
-      for (const cell of this.ordered) {
-        if (cell.creationId !== null || cell.generation > cell.acknowledgedGeneration || cell.tombstone) cell.conflict = true;
-      }
-      if (this.recoveredStructural.length > 0) this.recoveredStructuralConflict = true;
-    }
-    const seen = /* @__PURE__ */ new Set();
-    for (const serverCell of snapshot.cells) {
-      seen.add(serverCell.id);
-      this.mergeServerCell(serverCell, epochChanged);
-    }
-    for (const cell of [...this.ordered]) {
-      if (cell.id !== null && !seen.has(cell.id)) {
-        if (cell.tombstone || cell.generation > cell.acknowledgedGeneration) {
-          cell.conflict = true;
-          cell.tombstone = true;
-          cell.restoreAfter ??= predecessorInOrder(previousOrder, cell.id, new Set(this.serverOrder));
-        } else this.removeCell(cell);
-      }
-    }
-    this.reorderFromServerOrderIfPossible();
-    this.reassertLocalDirty();
-  }
-  mergeServerCell(serverCell, forceSource = false, operationId2) {
-    const logicalBody = toLogicalCellBody(serverCell.type, serverCell.body);
-    let key = this.keyByServerId.get(serverCell.id);
-    let cell = key ? this.byKey.get(key) : void 0;
-    if (!cell) {
-      key = `cell:${serverCell.id}`;
-      cell = {
-        key,
-        id: serverCell.id,
-        creationId: null,
-        desiredBody: [...logicalBody],
-        desiredType: serverCell.type,
-        serverBody: [...logicalBody],
-        serverType: serverCell.type,
-        serverRevision: serverCell.revision,
-        generation: 0,
-        acknowledgedGeneration: 0,
-        conflict: false,
-        tombstone: false,
-        restoreAfter: null,
-        server: serverCell,
-        selection: null
-      };
-      this.ordered.push(cell);
-      this.byKey.set(key, cell);
-      this.keyByServerId.set(serverCell.id, key);
-      return cell;
-    }
-    const pending = cell.generation > cell.acknowledgedGeneration;
-    const sourceChanged = forceSource || cell.serverRevision !== serverCell.revision || cell.serverType !== serverCell.type || !sameLines(cell.serverBody, logicalBody);
-    if (pending && sourceChanged) {
-      const desiredMatches = cell.desiredType === serverCell.type && sameLines(cell.desiredBody, logicalBody);
-      const sent = operationId2 === void 0 ? void 0 : this.matchingSubmittedCell(operationId2, cell, serverCell);
-      cell.conflict = sent === void 0 && !desiredMatches;
-      if (sent !== void 0) cell.acknowledgedGeneration = Math.max(cell.acknowledgedGeneration, sent.generation);
-      else if (desiredMatches) cell.acknowledgedGeneration = cell.generation;
-    } else if (!pending) {
-      if (sourceChanged) {
-        cell.desiredBody = [...logicalBody];
-        cell.desiredType = serverCell.type;
-      }
-      cell.conflict = false;
-    }
-    cell.id = serverCell.id;
-    if (sourceChanged) cell.serverBody = [...logicalBody];
-    cell.serverType = serverCell.type;
-    cell.serverRevision = serverCell.revision;
-    cell.server = serverCell;
-    cell.tombstone = false;
-    cell.restoreAfter = null;
-    return cell;
-  }
-  applyDiagnostics(id, value) {
-    const cell = this.cell(id);
-    if (!cell?.server) return;
-    const server = { ...cell.server, diagnostics: value };
-    cell.server = server;
-    const index = this.snapshotValue.cells.findIndex((candidate) => candidate.id === id);
-    if (index >= 0) {
-      const cells = [...this.snapshotValue.cells];
-      cells[index] = server;
-      this.snapshotValue = { ...this.snapshotValue, cells };
-    }
-  }
-  reconcileCreated(value) {
-    const entries = createdEntries(value);
-    for (const item of entries) {
-      const key = this.keyByCreationId.get(item.creationId);
-      const cell = key ? this.byKey.get(key) : void 0;
-      if (!cell) continue;
-      const existingKey = this.keyByServerId.get(item.id);
-      const existing = existingKey === void 0 || existingKey === cell.key ? void 0 : this.byKey.get(existingKey);
-      if (existing !== void 0) {
-        const wasFocused = this.focused === existing.key;
-        this.removeCell(existing);
-        if (wasFocused) this.focused = cell.key;
-        if (existing.server !== null) {
-          cell.serverBody = [...existing.serverBody];
-          cell.serverType = existing.serverType;
-          cell.serverRevision = existing.serverRevision;
-          cell.server = existing.server;
-          cell.conflict = cell.generation > cell.acknowledgedGeneration && (cell.desiredType !== existing.serverType || !sameLines(cell.desiredBody, existing.serverBody));
-        }
-      }
-      cell.id = item.id;
-      cell.serverRevision = Math.max(cell.serverRevision, item.revision);
-      this.keyByServerId.set(item.id, cell.key);
-    }
-  }
-  applyOutput(id, payload) {
-    const cell = this.cell(id);
-    if (!cell?.server) return;
-    const next = { ...cell.server, outputs: [...cell.server.outputs], log: [...cell.server.log] };
-    if (payload.kind === "clear") {
-      next.outputs = [];
-      next.outputsStale = false;
-      next.log = [];
-      next.progress = null;
-    } else if (payload.kind === "append") {
-      const value = isRecord(payload.payload) && "output" in payload.payload ? payload.payload.output : payload.payload;
-      if (next.outputsStale) next.outputs = [];
-      next.outputsStale = false;
-      if (isOutputRecord(value)) next.outputs.push(value);
-    } else if (payload.kind === "progress") {
-      const progress = isRecord(payload.payload) && "progress" in payload.payload ? payload.payload.progress : payload.payload;
-      next.progress = progress;
-    } else if (payload.kind === "log") {
-      const detail = isRecord(payload.payload) ? payload.payload : null;
-      const value = detail ? detail.lines ?? detail.log ?? [] : payload.payload;
-      const lines = Array.isArray(value) ? value.map(String) : [String(value)];
-      const previous = detail?.replaceLast === true && next.log.length > 0 ? next.log.slice(0, -1) : next.log;
-      next.log = boundedLog([...previous, ...lines]);
-    }
-    cell.server = next;
-    const index = this.snapshotValue.cells.findIndex((candidate) => candidate.id === id);
-    if (index >= 0) {
-      const cells = [...this.snapshotValue.cells];
-      cells[index] = next;
-      this.snapshotValue = { ...this.snapshotValue, cells };
-    }
-  }
-  reconcileEdited(value, submitted) {
-    if (!Array.isArray(value)) return;
-    for (const item of value) {
-      if (!isRecord(item) || typeof item.id !== "string" || typeof item.revision !== "number") continue;
-      const cell = this.cell(item.id);
-      if (!cell) continue;
-      const sent = submitted?.cells.get(cell.key);
-      if (sent === void 0 || sent.expectedRevision === null) continue;
-      const submittedRevision = sent.expectedRevision + (sent.changesSource ? 1 : 0);
-      if (item.revision !== submittedRevision || item.revision < cell.serverRevision) continue;
-      if (item.revision > cell.serverRevision) {
-        cell.serverBody = [...sent.body];
-        cell.serverType = sent.type;
-      }
-      const authoritativeMatches = cell.serverType === sent.type && sameLines(cell.serverBody, sent.body);
-      if (!authoritativeMatches) continue;
-      cell.serverRevision = item.revision;
-      cell.acknowledgedGeneration = Math.max(cell.acknowledgedGeneration, sent.generation);
-      cell.conflict = false;
-    }
-  }
-  reconcileSubmittedCreations(value, submitted) {
-    for (const [creationId, sent] of submitted.creations) {
-      const cell = this.cell(this.keyByCreationId.get(creationId) ?? "");
-      const created = createdEntry(value, creationId);
-      if (!cell || cell.id === null || created === null || cell.serverRevision > created.revision) continue;
-      cell.serverBody = [...sent.body];
-      cell.serverType = sent.type;
-      cell.serverRevision = created.revision;
-      cell.acknowledgedGeneration = Math.max(cell.acknowledgedGeneration, sent.generation);
-      cell.conflict = false;
-    }
-  }
-  sourceSubmissionAcknowledged(submitted) {
-    const acknowledgements = [];
-    for (const [key, sent] of submitted.cells) {
-      const cell = this.byKey.get(key);
-      const expectedRevision = sent.expectedRevision === null ? 0 : sent.expectedRevision + (sent.changesSource ? 1 : 0);
-      if (!cell || cell.id === null || cell.tombstone || cell.serverRevision < expectedRevision) return false;
-      if (cell.serverRevision === expectedRevision && (cell.serverType !== sent.type || !sameLines(cell.serverBody, sent.body))) return false;
-      acknowledgements.push({ cell, sent });
-    }
-    for (const [creationId, sent] of submitted.creations) {
-      const cell = this.cell(this.keyByCreationId.get(creationId) ?? "");
-      if (!cell || cell.id === null || cell.tombstone || cell.serverRevision < 0) return false;
-      if (cell.serverRevision === 0 && (cell.serverType !== sent.type || !sameLines(cell.serverBody, sent.body))) return false;
-      acknowledgements.push({ cell, sent });
-    }
-    for (const { cell, sent } of acknowledgements) {
-      cell.acknowledgedGeneration = Math.max(cell.acknowledgedGeneration, sent.generation);
-      if (cell.generation === sent.generation) {
-        cell.conflict = cell.serverType !== sent.type || !sameLines(cell.serverBody, sent.body);
-      } else if (cell.serverType === cell.desiredType && sameLines(cell.serverBody, cell.desiredBody)) {
-        cell.conflict = false;
-      }
-    }
-    return true;
-  }
-  matchingSubmittedCell(operationId2, cell, serverCell) {
-    const operation = this.submitted.get(operationId2);
-    if (operation === void 0) return void 0;
-    const sent = operation.cells.get(cell.key) ?? (cell.creationId === null ? void 0 : operation.creations.get(cell.creationId));
-    if (sent === void 0 || sent.type !== serverCell.type || !sameLines(sent.body, toLogicalCellBody(serverCell.type, serverCell.body))) return void 0;
-    const expectedRevision = sent.expectedRevision;
-    if (expectedRevision === null) return serverCell.revision === 0 ? sent : void 0;
-    const submittedRevision = sent.changesSource ? expectedRevision + 1 : expectedRevision;
-    return serverCell.revision === submittedRevision ? sent : void 0;
-  }
-  reassertLocalDirty() {
-    const pending = this.pendingSource();
-    if (pending.changes.length || this.ordered.some((cell) => cell.tombstone)) this.snapshotValue = { ...this.snapshotValue, changed: true };
-  }
-  predecessorReference(key) {
-    const index = this.ordered.findIndex((cell) => cell.key === key);
-    for (let before = index - 1; before >= 0; before -= 1) {
-      const prior = this.ordered[before];
-      if (prior.id !== null) return { cellId: prior.id };
-      if (prior.creationId !== null) return { creationId: prior.creationId };
-    }
-    return null;
-  }
-  cellRef(ref) {
-    return "cellId" in ref ? this.cell(ref.cellId) : this.cell(this.keyByCreationId.get(ref.creationId) ?? "");
-  }
-  removeServerCell(id) {
-    const cell = this.cell(id);
-    if (!cell) return;
-    const restoreAfter = predecessorInOrder(this.serverOrder, id, new Set(this.serverOrder.filter((candidate) => candidate !== id)));
-    this.serverOrder = this.serverOrder.filter((candidate) => candidate !== id);
-    if (cell.tombstone) return;
-    if (cell.generation > cell.acknowledgedGeneration) {
-      cell.conflict = true;
-      cell.tombstone = true;
-      cell.restoreAfter = restoreAfter;
-      return;
-    }
-    this.removeCell(cell);
-  }
-  removeCell(cell) {
-    this.ordered = this.ordered.filter((candidate) => candidate !== cell);
-    this.byKey.delete(cell.key);
-    if (cell.id) this.keyByServerId.delete(cell.id);
-    if (cell.creationId) this.keyByCreationId.delete(cell.creationId);
-    if (this.focused === cell.key) this.focused = null;
-  }
-  reorderFromServerOrderIfPossible() {
-    if (this.ordered.some((cell) => cell.id === null || cell.tombstone)) return;
-    const indexes = new Map(this.serverOrder.map((id, index) => [id, index]));
-    this.ordered.sort((a, b) => (a.id ? indexes.get(a.id) ?? Infinity : Infinity) - (b.id ? indexes.get(b.id) ?? Infinity : Infinity));
-  }
-  moveServerOrder(id, after) {
-    const from = this.serverOrder.indexOf(id);
-    if (from < 0) return;
-    this.serverOrder.splice(from, 1);
-    const predecessor = after === null ? -1 : this.serverOrder.indexOf(after);
-    if (after !== null && predecessor < 0) {
-      this.serverOrder.splice(from, 0, id);
-      return;
-    }
-    this.serverOrder.splice(Math.max(0, predecessor + 1), 0, id);
-  }
-  requireCell(key) {
-    const cell = this.cell(key);
-    if (!cell) throw new Error(`no such local cell: ${key}`);
-    return cell;
-  }
-  assertNoSourceConflicts() {
-    if (this.hasSourceConflicts) throw new Error("resolve deleted or conflicting local source before continuing");
-  }
-};
-function cloneDraftBase(base) {
-  return {
-    epoch: base.epoch,
-    cursor: base.cursor,
-    version: base.version,
-    documentRevision: base.documentRevision,
-    cells: base.cells.map((cell) => ({ ...cell, body: [...cell.body] }))
-  };
-}
-function patchSnapshot(snapshot, event, order) {
-  const next = { ...snapshot, cursor: event.cursor, version: event.version, documentRevision: event.documentRevision };
-  let addedCell = false;
-  if (event.type === "active_clients_changed" && isRecord(event.payload)) {
-    const activeClientIds = validActiveClientIds(event.payload.activeClientIds);
-    if (activeClientIds !== null) next.activeClientIds = activeClientIds;
-  }
-  if (event.type === "runtime" && isRecord(event.payload)) next.runtime = event.payload;
-  if (event.type === "graph" && isRecord(event.payload)) next.graph = event.payload;
-  if (event.type === "variables" && Array.isArray(event.payload)) next.variables = event.payload;
-  if (event.type === "editor-diagnostics" && isRecord(event.payload)) next.editorDiagnostics = event.payload;
-  if (event.type === "service-errors" && isRecord(event.payload)) next.serviceErrors = event.payload;
-  if (event.type === "service-error") next.lastActionError = isRecord(event.payload) ? event.payload : null;
-  if (event.type === "receipt" || event.type === "operation") {
-    const operation = operationFromEventPayload(event.payload);
-    if (operation) next.operations = upsertOperation(next.operations, operation);
-  }
-  if ((event.type === "notebook" || event.type === "transaction") && isRecord(event.payload)) {
-    const payload = event.payload;
-    if (isRecord(payload.config)) next.config = payload.config;
-    if (typeof payload.path === "string" || payload.path === null) next.path = payload.path;
-    if (isSidecarObservations(payload.sidecars)) next.sidecars = payload.sidecars;
-    if ("layout" in payload) next.layout = payload.layout;
-    if (isRecord(payload.metadata)) next.metadata = payload.metadata;
-    if (isRecord(payload.app)) next.metadata = { ...next.metadata, app: payload.app };
-    if (isRecord(payload.graph)) next.graph = payload.graph;
-    if ("lastValue" in payload) next.lastValue = payload.lastValue;
-    if (payload.saved === true) next.changed = false;
-    if (typeof payload.deleted === "string") next.cells = next.cells.filter((cell) => cell.id !== payload.deleted);
-    const deletedIds = payload.deleted;
-    if (Array.isArray(deletedIds)) next.cells = next.cells.filter((cell) => !deletedIds.includes(cell.id));
-    if (Array.isArray(payload.edited)) next.changed = true;
-    if ("updated" in payload) next.changed = true;
-    if (payload.created !== void 0 || payload.deleted !== void 0 || typeof payload.moved === "string" || isRecord(payload.config) || isRecord(payload.metadata) || isRecord(payload.app)) next.changed = true;
-    if (Array.isArray(payload.updated)) {
-      const updates = /* @__PURE__ */ new Map();
-      for (const value of payload.updated) if (isHostCell(value)) updates.set(value.id, value);
-      if (updates.size > 0) {
-        const present = new Set(next.cells.map((cell) => cell.id));
-        next.cells = next.cells.map((cell) => updates.get(cell.id) ?? cell);
-        for (const [id, cell] of updates) if (!present.has(id)) next.cells.push(cell);
-        addedCell ||= [...updates.keys()].some((id) => !present.has(id));
-      }
-    }
-    if (typeof payload.dirty === "boolean") next.changed = payload.dirty;
-  }
-  if (["cell", "cell-started", "cell-completed"].includes(event.type) && event.cellId) {
-    if (isRecord(event.payload) && event.payload.deleted === true) next.cells = next.cells.filter((cell) => cell.id !== event.cellId);
-    else if (isHostCell(event.payload)) {
-      const payload = event.payload;
-      const index = next.cells.findIndex((cell) => cell.id === payload.id);
-      const prior = index < 0 ? null : next.cells[index];
-      next.cells = [...next.cells];
-      if (index < 0) {
-        next.cells.push(payload);
-        addedCell = true;
-      } else next.cells[index] = payload;
-      if (event.type === "cell" && prior && sourceRecordChanged(prior, payload)) next.changed = true;
-    }
-  }
-  if (event.type === "diagnostics" && event.cellId && Array.isArray(event.payload)) {
-    const index = next.cells.findIndex((cell) => cell.id === event.cellId);
-    if (index >= 0) {
-      next.cells = [...next.cells];
-      next.cells[index] = { ...next.cells[index], diagnostics: event.payload };
-    }
-  }
-  const reorderNotebook = (event.type === "notebook" || event.type === "transaction") && order.length === next.cells.length && !next.cells.every((cell, index) => cell.id === order[index]);
-  if (order.length && next.cells.length && (addedCell || reorderNotebook)) {
-    const indexes = new Map(order.map((id, index) => [id, index]));
-    next.cells = [...next.cells].sort((left, right) => (indexes.get(left.id) ?? Number.MAX_SAFE_INTEGER) - (indexes.get(right.id) ?? Number.MAX_SAFE_INTEGER));
-  }
-  return next;
-}
-function validActiveClientIds(value) {
-  if (!Array.isArray(value) || value.length > 128) return null;
-  const ids = value.filter((id) => typeof id === "string" && id.length > 0);
-  if (ids.length !== value.length || new Set(ids).size !== ids.length) return null;
-  return ids;
-}
-function upsertOperation(operations, operation) {
-  const index = operations.findIndex((candidate) => candidate.id === operation.id);
-  if (index < 0) return [...operations, operation];
-  const next = [...operations];
-  next[index] = operation;
-  return next;
-}
-function predecessorInOrder(order, id, retained) {
-  const index = order.indexOf(id);
-  for (let before = index - 1; before >= 0; before -= 1) {
-    const candidate = order[before];
-    if (candidate !== void 0 && retained.has(candidate)) return candidate;
-  }
-  return null;
-}
-function createdEntries(value) {
-  if (!isRecord(value)) return [];
-  return Object.entries(value).flatMap(([creationId, id]) => typeof id === "string" ? [{ creationId, id, revision: 0 }] : []);
-}
-function sameChange(left, right) {
-  return JSON.stringify(left) === JSON.stringify(right);
-}
-function createdEntry(value, creationId) {
-  return createdEntries(value).find((item) => item.creationId === creationId) ?? null;
-}
-function cloneChange(change) {
-  return JSON.parse(JSON.stringify(change));
-}
-function isOperation(value) {
-  return isRecord(value) && typeof value.id === "string" && typeof value.kind === "string" && typeof value.status === "string";
-}
-function operationFromEventPayload(value) {
-  if (isOperation(value)) return value;
-  if (isRecord(value) && isOperation(value.operation)) return value.operation;
-  return null;
-}
-function sourceRecordChanged(left, right) {
-  return left.type !== right.type || !sameLines(left.body, right.body) || JSON.stringify(left.options) !== JSON.stringify(right.options);
-}
-function isSidecarObservations(value) {
-  return isRecord(value) && isDiskObservation(value.config) && isDiskObservation(value.layout) && isDiskObservation(value.packages);
-}
-function isDiskObservation(value) {
-  if (!isRecord(value)) return false;
-  const state = value.state;
-  const digest = value.digest;
-  return (state === "untitled" || state === "absent" || state === "present" || state === "unreadable") && (digest === null || typeof digest === "string" && /^[0-9a-f]{64}$/.test(digest)) && (value.version === null || typeof value.version === "string") && (value.error === null || isRecord(value.error));
-}
-function isHostCell(value) {
-  return isRecord(value) && typeof value.id === "string" && Array.isArray(value.body) && typeof value.revision === "number" && (value.type === "code" || value.type === "markdown");
-}
-function isOutputRecord(value) {
-  return isRecord(value) && typeof value.id === "string" && typeof value.cellId === "string" && typeof value.sequence === "number" && "data" in value;
-}
-function isRecord(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-function sameLines(left, right) {
-  return left.length === right.length && left.every((line, index) => line === right[index]);
-}
-function boundedLog(lines) {
-  return tailLog(lines, MAX_LOG_BYTES);
-}
-
-// src/strict-json.ts
-var DEFAULT_STRICT_JSON_LIMITS = Object.freeze({
-  maxBytes: 8 * 1024 * 1024,
-  maxDepth: 64
-});
-var StrictJsonError = class extends Error {
-  constructor(message2, offset) {
-    super(`${message2} at byte ${offset}`);
-    this.offset = offset;
-    this.name = "StrictJsonError";
-  }
-  offset;
-};
-var StrictJsonParser = class {
-  constructor(text, maxDepth) {
-    this.text = text;
-    this.maxDepth = maxDepth;
-  }
-  text;
-  maxDepth;
-  offset = 0;
-  encoder = new TextEncoder();
-  parse() {
-    this.whitespace();
-    const result = this.value(0);
-    this.whitespace();
-    if (this.offset !== this.text.length) this.fail("trailing content");
-    return result;
-  }
-  value(depth) {
-    const next = this.text[this.offset];
-    if (next === "{") return this.object(depth + 1);
-    if (next === "[") return this.array(depth + 1);
-    if (next === '"') return this.string();
-    if (next === "t") return this.literal("true", true);
-    if (next === "f") return this.literal("false", false);
-    if (next === "n") return this.literal("null", null);
-    if (next === "-" || next !== void 0 && next >= "0" && next <= "9") {
-      return this.number();
-    }
-    this.fail("expected a JSON value");
-  }
-  object(depth) {
-    this.checkDepth(depth);
-    this.offset += 1;
-    this.whitespace();
-    const result = {};
-    const keys = /* @__PURE__ */ new Set();
-    if (this.consume("}")) return result;
-    while (true) {
-      if (this.text[this.offset] !== '"') this.fail("expected an object key");
-      const key = this.string();
-      if (keys.has(key)) this.fail(`duplicate object key ${JSON.stringify(key)}`);
-      keys.add(key);
-      this.whitespace();
-      if (!this.consume(":")) this.fail("expected ':' after an object key");
-      this.whitespace();
-      const item = this.value(depth);
-      Object.defineProperty(result, key, {
-        configurable: true,
-        enumerable: true,
-        value: item,
-        writable: true
-      });
-      this.whitespace();
-      if (this.consume("}")) return result;
-      if (!this.consume(",")) this.fail("expected ',' or '}'");
-      this.whitespace();
-    }
-  }
-  array(depth) {
-    this.checkDepth(depth);
-    this.offset += 1;
-    this.whitespace();
-    const result = [];
-    if (this.consume("]")) return result;
-    while (true) {
-      result.push(this.value(depth));
-      this.whitespace();
-      if (this.consume("]")) return result;
-      if (!this.consume(",")) this.fail("expected ',' or ']'");
-      this.whitespace();
-    }
-  }
-  string() {
-    const start2 = this.offset;
-    this.offset += 1;
-    while (this.offset < this.text.length) {
-      const code = this.text.charCodeAt(this.offset);
-      if (code === 34) {
-        this.offset += 1;
-        let result;
-        try {
-          result = JSON.parse(this.text.slice(start2, this.offset));
-        } catch {
-          this.fail("invalid JSON string");
-        }
-        this.validateSurrogates(result);
-        return result;
-      }
-      if (code < 32) this.fail("unescaped control character in string");
-      if (code === 92) {
-        this.offset += 1;
-        if (this.offset >= this.text.length) this.fail("unterminated escape");
-        const escaped = this.text[this.offset];
-        if (escaped === "u") {
-          const digits = this.text.slice(this.offset + 1, this.offset + 5);
-          if (!/^[0-9a-fA-F]{4}$/.test(digits)) this.fail("invalid Unicode escape");
-          this.offset += 4;
-        } else if (!'"\\/bfnrt'.includes(escaped)) {
-          this.fail("invalid string escape");
-        }
-      }
-      this.offset += 1;
-    }
-    this.fail("unterminated JSON string");
-  }
-  validateSurrogates(value) {
-    for (let index = 0; index < value.length; index += 1) {
-      const code = value.charCodeAt(index);
-      if (code >= 55296 && code <= 56319) {
-        const low = value.charCodeAt(index + 1);
-        if (!(low >= 56320 && low <= 57343)) this.fail("unpaired surrogate");
-        index += 1;
-      } else if (code >= 56320 && code <= 57343) {
-        this.fail("unpaired surrogate");
-      }
-    }
-  }
-  number() {
-    const token = this.text.slice(this.offset).match(
-      /^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?/
-    )?.[0];
-    if (token === void 0) this.fail("invalid number");
-    this.offset += token.length;
-    const result = Number(token);
-    if (!Number.isFinite(result)) this.fail("non-finite number");
-    return result;
-  }
-  literal(token, result) {
-    if (!this.text.startsWith(token, this.offset)) this.fail("invalid literal");
-    this.offset += token.length;
-    return result;
-  }
-  whitespace() {
-    while (/\s/.test(this.text[this.offset] ?? "") && " 	\r\n".includes(this.text[this.offset])) {
-      this.offset += 1;
-    }
-  }
-  consume(token) {
-    if (this.text[this.offset] !== token) return false;
-    this.offset += 1;
-    return true;
-  }
-  checkDepth(depth) {
-    if (depth > this.maxDepth) this.fail("JSON nesting limit exceeded");
-  }
-  fail(message2) {
-    throw new StrictJsonError(message2, this.encoder.encode(this.text.slice(0, this.offset)).byteLength);
-  }
-};
-function parseStrictJson(input2, limits = DEFAULT_STRICT_JSON_LIMITS) {
-  validateLimits(limits);
-  let text;
-  if (typeof input2 === "string") {
-    if (hasUnpairedSurrogate(input2)) throw new StrictJsonError("unpaired surrogate", 0);
-    if (new TextEncoder().encode(input2).byteLength > limits.maxBytes) {
-      throw new RangeError(`JSON input exceeds ${limits.maxBytes} bytes`);
-    }
-    text = input2;
-  } else {
-    if (!(input2 instanceof Uint8Array)) throw new TypeError("JSON input must be text or bytes");
-    if (input2.byteLength > limits.maxBytes) throw new RangeError(`JSON input exceeds ${limits.maxBytes} bytes`);
-    try {
-      text = new TextDecoder("utf-8", { fatal: true }).decode(input2);
-    } catch {
-      throw new StrictJsonError("invalid UTF-8", 0);
-    }
-  }
-  return new StrictJsonParser(text, limits.maxDepth).parse();
-}
-function validateLimits(limits) {
-  if (!limits || !Number.isSafeInteger(limits.maxBytes) || limits.maxBytes < 1) {
-    throw new RangeError("maxBytes must be a positive safe integer");
-  }
-  if (!Number.isSafeInteger(limits.maxDepth) || limits.maxDepth < 1) {
-    throw new RangeError("maxDepth must be a positive safe integer");
-  }
-}
-function hasUnpairedSurrogate(value) {
-  for (let index = 0; index < value.length; index += 1) {
-    const code = value.charCodeAt(index);
-    if (code >= 55296 && code <= 56319) {
-      const low = value.charCodeAt(index + 1);
-      if (!(low >= 56320 && low <= 57343)) return true;
-      index += 1;
-    } else if (code >= 56320 && code <= 57343) {
-      return true;
-    }
-  }
-  return false;
-}
-
 // ../../../../../alder/host/node_modules/zod/v4/classic/external.js
 var external_exports = {};
 __export(external_exports, {
@@ -20017,6 +18871,996 @@ function date4(params) {
   return _coercedDate(ZodDate, params);
 }
 
+// src/output-log.ts
+var encoder = new TextEncoder();
+var decoder = new TextDecoder("utf-8", { ignoreBOM: true });
+function tailLog(lines, limit) {
+  let start2 = lines.length;
+  let bytes = 0;
+  while (start2 > 0) {
+    const addition = encoder.encode(lines[start2 - 1]).length + Number(start2 < lines.length);
+    if (bytes + addition > limit) break;
+    bytes += addition;
+    start2--;
+  }
+  return lines.slice(start2);
+}
+
+// src/cell-body.ts
+function markdownLogicalLine(line) {
+  if (line.length === 0) return "";
+  const match = /^(\s*)#(?: ?)([\s\S]*)$/.exec(line);
+  return match === null ? line : match[1] + match[2];
+}
+function isMarkdownPhysicalLine(line) {
+  return line.trim().length === 0 || /^\s*#/.test(line);
+}
+function markdownPhysicalLinesEqual(left, right) {
+  return isMarkdownPhysicalLine(left) && isMarkdownPhysicalLine(right) && markdownLogicalLine(left) === markdownLogicalLine(right);
+}
+function canonicalMarkdownLine(logical) {
+  return logical.length === 0 ? "" : "# " + logical;
+}
+function toPhysicalCellBody(cellType, logicalBody, originalPhysicalBody) {
+  if (cellType === "code") return [...logicalBody];
+  const physicalBody = logicalBody.map((line) => canonicalMarkdownLine(line));
+  if (originalPhysicalBody === void 0) return physicalBody;
+  const shared = Math.min(originalPhysicalBody.length, physicalBody.length);
+  let prefix = 0;
+  let suffix = 0;
+  while (prefix < shared && markdownPhysicalLinesEqual(originalPhysicalBody[prefix], physicalBody[prefix])) prefix += 1;
+  while (suffix < shared - prefix && markdownPhysicalLinesEqual(
+    originalPhysicalBody[originalPhysicalBody.length - suffix - 1],
+    physicalBody[physicalBody.length - suffix - 1]
+  )) suffix += 1;
+  for (let index = 0; index < prefix; index += 1) physicalBody[index] = originalPhysicalBody[index];
+  for (let index = prefix; index < shared - suffix; index += 1) {
+    if (markdownPhysicalLinesEqual(originalPhysicalBody[index], physicalBody[index])) {
+      physicalBody[index] = originalPhysicalBody[index];
+    }
+  }
+  for (let index = 0; index < suffix; index += 1) {
+    physicalBody[physicalBody.length - suffix + index] = originalPhysicalBody[originalPhysicalBody.length - suffix + index];
+  }
+  return physicalBody;
+}
+function toLogicalCellBody(cellType, physicalBody) {
+  if (cellType === "code") return [...physicalBody];
+  return physicalBody.map((line) => markdownLogicalLine(line));
+}
+
+// src/browser/document.ts
+var MAX_LOG_BYTES = 65536;
+var BrowserDocument = class {
+  ordered = [];
+  byKey = /* @__PURE__ */ new Map();
+  keyByServerId = /* @__PURE__ */ new Map();
+  keyByCreationId = /* @__PURE__ */ new Map();
+  submitted = /* @__PURE__ */ new Map();
+  focused = null;
+  epochValue;
+  cursorValue;
+  snapshotValue;
+  serverOrder;
+  draftBaseValue = null;
+  recoveredStructural = [];
+  recoveredStructuralConflict = false;
+  constructor(snapshot) {
+    this.epochValue = snapshot.epoch;
+    this.cursorValue = snapshot.cursor;
+    this.snapshotValue = snapshot;
+    this.serverOrder = snapshot.cells.map((cell) => cell.id);
+    this.applySnapshot(snapshot);
+  }
+  get epoch() {
+    return this.epochValue;
+  }
+  get cursor() {
+    return this.cursorValue;
+  }
+  get snapshot() {
+    return this.snapshotValue;
+  }
+  get cells() {
+    return this.ordered;
+  }
+  get focusedKey() {
+    return this.focused;
+  }
+  get hasSourceConflicts() {
+    return this.recoveredStructuralConflict || this.ordered.some((cell) => cell.conflict || cell.tombstone);
+  }
+  cell(keyOrId) {
+    return this.byKey.get(keyOrId) ?? this.byKey.get(this.keyByServerId.get(keyOrId) ?? "");
+  }
+  focus(key, selection) {
+    if (key !== null && !this.byKey.has(key)) return;
+    if (this.focused && selection !== void 0) {
+      const old = this.byKey.get(this.focused);
+      if (old) old.selection = selection;
+    }
+    this.focused = key;
+  }
+  updateSelection(key, selection) {
+    const cell = this.requireCell(key);
+    cell.selection = { ...selection };
+  }
+  create(creationId, afterKey, type = "code", body = []) {
+    if (!creationId || this.keyByCreationId.has(creationId)) {
+      throw new Error("creationId must be unique and nonempty");
+    }
+    const key = `creation:${creationId}`;
+    const after = afterKey === null ? this.ordered.length - 1 : this.ordered.findIndex((cell2) => cell2.key === afterKey);
+    if (afterKey !== null && after < 0) throw new Error(`no such predecessor: ${afterKey}`);
+    this.captureDraftBase();
+    const cell = {
+      key,
+      id: null,
+      creationId,
+      desiredBody: [...body],
+      desiredType: type,
+      serverBody: [],
+      serverType: type,
+      serverRevision: 0,
+      generation: 0,
+      acknowledgedGeneration: -1,
+      conflict: false,
+      tombstone: false,
+      restoreAfter: null,
+      server: null,
+      selection: { anchor: 0, head: 0 }
+    };
+    this.ordered.splice(after + 1, 0, cell);
+    this.byKey.set(key, cell);
+    this.keyByCreationId.set(creationId, key);
+    this.snapshotValue = { ...this.snapshotValue, changed: true };
+    return cell;
+  }
+  edit(key, body, type) {
+    const cell = this.requireCell(key);
+    this.captureDraftBase();
+    cell.desiredBody = [...body];
+    if (type) cell.desiredType = type;
+    cell.generation += 1;
+    if (!cell.tombstone && cell.desiredType === cell.serverType && sameLines(cell.desiredBody, cell.serverBody)) {
+      cell.conflict = false;
+      cell.acknowledgedGeneration = cell.generation;
+    }
+    this.snapshotValue = { ...this.snapshotValue, changed: true };
+    return cell;
+  }
+  useServerVersion(key) {
+    const cell = this.requireCell(key);
+    if (!cell.conflict || cell.tombstone || cell.id === null) throw new Error("cell has no resolvable source conflict");
+    cell.desiredBody = [...cell.serverBody];
+    cell.desiredType = cell.serverType;
+    cell.acknowledgedGeneration = cell.generation;
+    cell.conflict = false;
+    return cell;
+  }
+  discardLocal(key) {
+    const cell = this.requireCell(key);
+    if (cell.id !== null && !cell.tombstone) throw new Error("cannot discard an authoritative cell locally");
+    this.removeCell(cell);
+  }
+  restoreDeleted(key, creationId) {
+    const cell = this.requireCell(key);
+    if (!cell.tombstone || cell.id === null) throw new Error("cell is not a deleted-source conflict");
+    if (!creationId || this.keyByCreationId.has(creationId)) {
+      throw new Error("creationId must be unique and nonempty");
+    }
+    this.captureDraftBase();
+    this.keyByServerId.delete(cell.id);
+    cell.id = null;
+    cell.creationId = creationId;
+    cell.serverBody = [];
+    cell.serverType = cell.desiredType;
+    cell.serverRevision = 0;
+    cell.acknowledgedGeneration = -1;
+    cell.conflict = false;
+    cell.tombstone = false;
+    cell.server = null;
+    this.keyByCreationId.set(creationId, cell.key);
+    this.snapshotValue = { ...this.snapshotValue, changed: true };
+    return cell;
+  }
+  pendingSource() {
+    const changes = [];
+    for (const cell of this.ordered) {
+      if (cell.tombstone) continue;
+      if (cell.id === null) {
+        const predecessor = this.predecessorReference(cell.key);
+        changes.push({
+          type: "create",
+          creationId: cell.creationId,
+          after: predecessor,
+          body: toPhysicalCellBody(cell.desiredType, cell.desiredBody),
+          cellType: cell.desiredType,
+          options: {}
+        });
+      } else if (cell.generation > cell.acknowledgedGeneration || cell.desiredType !== cell.serverType || !sameLines(cell.desiredBody, cell.serverBody)) {
+        changes.push({
+          type: "edit",
+          cell: { cellId: cell.id },
+          body: toPhysicalCellBody(cell.desiredType, cell.desiredBody, cell.server?.body),
+          cellType: cell.desiredType,
+          expectedRevision: cell.serverRevision
+        });
+      }
+    }
+    changes.push(...this.recoveredStructural.map((change) => cloneChange(change)));
+    return { changes };
+  }
+  stageRecoveryIntent(changes) {
+    const structural = changes.filter((change) => change.type !== "create" && change.type !== "edit");
+    if (structural.length === 0) return;
+    this.captureDraftBase();
+    this.recoveredStructural = structural.map((change) => cloneChange(change));
+    this.recoveredStructuralConflict = false;
+  }
+  markStructuralRecoveryConflict() {
+    if (this.recoveredStructural.length > 0) this.recoveredStructuralConflict = true;
+  }
+  recoveryDraft(draftId, submission = null, pendingRun = null) {
+    const changes = this.recoveryChanges();
+    if (changes.length === 0 && pendingRun === null) {
+      this.draftBaseValue = null;
+      return null;
+    }
+    const base = this.draftBaseValue ?? this.snapshotBase();
+    return {
+      schemaVersion: 2,
+      draftId,
+      updatedAt: Date.now(),
+      base: cloneDraftBase(base),
+      changes,
+      submission,
+      pendingRun
+    };
+  }
+  restoreDraft(draft, conflict) {
+    this.draftBaseValue = cloneDraftBase(draft.base);
+    for (const change of draft.changes) {
+      if (change.type === "create") {
+        const existing = this.cell(this.keyByCreationId.get(change.creationId) ?? "");
+        if (existing) {
+          existing.desiredBody = toLogicalCellBody(change.cellType, change.body);
+          existing.desiredType = change.cellType;
+          existing.conflict = conflict;
+          continue;
+        }
+        const after = change.after === null ? null : "cellId" in change.after ? this.cell(change.after.cellId)?.key ?? null : this.cell(this.keyByCreationId.get(change.after.creationId) ?? "")?.key ?? null;
+        const cell = this.create(change.creationId, after, change.cellType, toLogicalCellBody(change.cellType, change.body));
+        cell.conflict = conflict;
+      } else if (change.type === "edit") {
+        const key = "cellId" in change.cell ? this.cell(change.cell.cellId)?.key ?? "" : this.keyByCreationId.get(change.cell.creationId) ?? "";
+        const cell = this.cell(key) ?? this.restoreMissingEdit(change, draft);
+        cell.desiredBody = toLogicalCellBody(change.cellType, change.body);
+        cell.desiredType = change.cellType;
+        cell.generation = Math.max(1, cell.generation + 1);
+        cell.acknowledgedGeneration = cell.generation - 1;
+        cell.conflict = conflict || cell.tombstone;
+        this.snapshotValue = { ...this.snapshotValue, changed: true };
+      } else {
+        this.recoveredStructural.push(cloneChange(change));
+        this.recoveredStructuralConflict ||= conflict;
+      }
+    }
+    this.snapshotValue = { ...this.snapshotValue, changed: true };
+  }
+  recoveryChanges() {
+    const changes = [];
+    for (const cell of this.ordered) {
+      if (cell.id === null) {
+        changes.push({
+          type: "create",
+          creationId: cell.creationId,
+          after: this.predecessorReference(cell.key),
+          body: toPhysicalCellBody(cell.desiredType, cell.desiredBody),
+          cellType: cell.desiredType,
+          options: {}
+        });
+      } else if (cell.tombstone || cell.generation > cell.acknowledgedGeneration || cell.desiredType !== cell.serverType || !sameLines(cell.desiredBody, cell.serverBody)) {
+        changes.push({
+          type: "edit",
+          cell: { cellId: cell.id },
+          body: toPhysicalCellBody(cell.desiredType, cell.desiredBody),
+          cellType: cell.desiredType,
+          expectedRevision: cell.serverRevision
+        });
+      }
+    }
+    changes.push(...this.recoveredStructural.map((change) => cloneChange(change)));
+    return changes;
+  }
+  snapshotBase() {
+    return {
+      epoch: this.snapshotValue.epoch,
+      documentRevision: this.snapshotValue.documentRevision,
+      cells: this.snapshotValue.cells.map((cell) => ({ id: cell.id, revision: cell.revision, type: cell.type, body: [...cell.body] }))
+    };
+  }
+  captureDraftBase() {
+    this.draftBaseValue ??= this.snapshotBase();
+  }
+  rebaseDraftToSnapshot() {
+    this.draftBaseValue = this.recoveryChanges().length === 0 ? null : this.snapshotBase();
+  }
+  restoreMissingEdit(change, draft) {
+    const id = "cellId" in change.cell ? change.cell.cellId : null;
+    const creationId = "creationId" in change.cell ? change.cell.creationId : null;
+    const baseIndex = id === null ? -1 : draft.base.cells.findIndex((cell2) => cell2.id === id);
+    const baseCell = baseIndex < 0 ? null : draft.base.cells[baseIndex];
+    const key = id === null ? "recovery-created:" + creationId : "recovery-deleted:" + id;
+    const preceding = baseIndex <= 0 ? null : draft.base.cells.slice(0, baseIndex).reverse().find((candidate) => this.cell(candidate.id))?.id ?? null;
+    const cell = {
+      key,
+      id,
+      creationId,
+      desiredBody: toLogicalCellBody(change.cellType, change.body),
+      desiredType: change.cellType,
+      serverBody: baseCell ? toLogicalCellBody(baseCell.type, baseCell.body) : [],
+      serverType: baseCell?.type ?? change.cellType,
+      serverRevision: baseCell?.revision ?? change.expectedRevision ?? 0,
+      generation: 0,
+      acknowledgedGeneration: 0,
+      conflict: true,
+      tombstone: id !== null,
+      restoreAfter: preceding,
+      server: null,
+      selection: null
+    };
+    const insertion = preceding === null ? 0 : Math.max(0, this.ordered.findIndex((candidate) => candidate.id === preceding) + 1);
+    this.ordered.splice(insertion, 0, cell);
+    this.byKey.set(key, cell);
+    if (id !== null) this.keyByServerId.set(id, key);
+    if (creationId !== null) this.keyByCreationId.set(creationId, key);
+    return cell;
+  }
+  buildTransactionCommand(operationId2, clientId) {
+    this.assertNoSourceConflicts();
+    const changes = this.pendingSource().changes;
+    if (changes.length === 0) return null;
+    return {
+      type: "transaction",
+      requestId: operationId2,
+      clientId,
+      sessionEpoch: this.epochValue,
+      expectedDocumentRevision: this.snapshotValue.documentRevision,
+      changes
+    };
+  }
+  buildRunCommand(options) {
+    this.assertNoSourceConflicts();
+    const changes = this.pendingSource().changes;
+    const target = options.targetKey ? this.requireCell(options.targetKey) : null;
+    if (options.scope === "cell" && !target) throw new Error("a target cell is required");
+    if (options.scope !== "cell" && target) throw new Error("a target cell is valid only for a cell run");
+    if (target?.tombstone) throw new Error("deleted cells must be restored or discarded before running");
+    const targetRef = target?.id !== null && target?.id !== void 0 ? { cellId: target.id } : target?.creationId !== null && target?.creationId !== void 0 ? { creationId: target.creationId } : void 0;
+    return {
+      type: "run",
+      requestId: options.requestId,
+      clientId: options.clientId,
+      sessionEpoch: this.epochValue,
+      scope: options.scope,
+      ...targetRef === void 0 ? {} : { target: targetRef },
+      ...changes.length === 0 ? {} : { changes },
+      expectedDocumentRevision: this.snapshotValue.documentRevision
+    };
+  }
+  noteSubmitted(operationId2, command) {
+    const operation = { cells: /* @__PURE__ */ new Map(), creations: /* @__PURE__ */ new Map(), structural: [] };
+    const changes = command.type === "run" || command.type === "transaction" ? command.changes ?? [] : [];
+    for (const change of changes) {
+      if (change.type === "edit" || change.type === "text-edit") {
+        const cell = this.cellRef(change.cell);
+        if (cell && change.type === "edit") {
+          const body = toLogicalCellBody(change.cellType, change.body);
+          operation.cells.set(cell.key, {
+            generation: cell.generation,
+            body,
+            type: change.cellType,
+            expectedRevision: change.expectedRevision ?? cell.serverRevision,
+            changesSource: cell.serverType !== change.cellType || !sameLines(cell.serverBody, body)
+          });
+        }
+      } else if (change.type === "create") {
+        const key = this.keyByCreationId.get(change.creationId);
+        const cell = key ? this.byKey.get(key) : void 0;
+        if (cell) operation.creations.set(change.creationId, {
+          generation: cell.generation,
+          body: toLogicalCellBody(change.cellType, change.body),
+          type: change.cellType,
+          expectedRevision: null,
+          changesSource: true
+        });
+      } else {
+        operation.structural.push(cloneChange(change));
+      }
+    }
+    this.submitted.set(operationId2, operation);
+  }
+  acknowledge(result) {
+    this.cursorValue = Math.max(this.cursorValue, result.cursor);
+    this.snapshotValue = {
+      ...this.snapshotValue,
+      cursor: this.cursorValue,
+      version: Math.max(this.snapshotValue.version, result.version),
+      documentRevision: Math.max(this.snapshotValue.documentRevision, result.documentRevision)
+    };
+    const submitted = this.submitted.get(result.requestId);
+    const change = isRecord(result.result) ? result.result : {};
+    this.reconcileCreated(change.created);
+    this.reconcileEdited(change.edited, submitted);
+    if (submitted) this.reconcileSubmittedCreations(change.created, submitted);
+    if (submitted) this.recoveredStructuralConflict = false;
+    if (submitted) this.recoveredStructural = [];
+    this.submitted.delete(result.requestId);
+    this.reassertLocalDirty();
+    this.rebaseDraftToSnapshot();
+  }
+  acknowledgeSourceCommit(operationId2, outcome) {
+    const submitted = this.submitted.get(operationId2);
+    if (submitted === void 0 || !Number.isSafeInteger(outcome.documentRevision) || outcome.documentRevision < 0 || this.snapshotValue.documentRevision < outcome.documentRevision) return false;
+    this.snapshotValue = { ...this.snapshotValue, documentRevision: Math.max(this.snapshotValue.documentRevision, outcome.documentRevision) };
+    this.reconcileCreated(outcome.created);
+    this.reconcileEdited(outcome.edited, submitted);
+    this.reconcileSubmittedCreations(outcome.created, submitted);
+    return this.finishSourceCommit(operationId2, submitted);
+  }
+  finishSourceCommit(operationId2, submitted) {
+    if (!this.sourceSubmissionAcknowledged(submitted)) return false;
+    this.recoveredStructuralConflict = false;
+    this.recoveredStructural = [];
+    this.submitted.delete(operationId2);
+    this.reassertLocalDirty();
+    this.rebaseDraftToSnapshot();
+    return true;
+  }
+  reject(operationId2, code) {
+    const submitted = this.submitted.get(operationId2);
+    if (submitted && code === "source_conflict") {
+      for (const [key, sent] of submitted.cells) {
+        const cell = this.byKey.get(key);
+        if (cell && cell.generation <= sent.generation && cell.generation > cell.acknowledgedGeneration && (cell.serverType !== sent.type || !sameLines(cell.serverBody, sent.body))) cell.conflict = true;
+      }
+    }
+    if (submitted && submitted.structural.length > 0) {
+      this.recoveredStructural = this.recoveredStructural.filter((candidate) => !submitted.structural.some((sent) => sameChange(candidate, sent)));
+      if (this.recoveredStructural.length === 0) this.recoveredStructuralConflict = false;
+    }
+    this.submitted.delete(operationId2);
+  }
+  applyEvent(event) {
+    if (event.epoch !== this.epochValue || event.cursor <= this.cursorValue) return;
+    this.cursorValue = event.cursor;
+    if (event.type === "cell" || event.type === "cell-completed" || event.type === "cell-started") {
+      if (isRecord(event.payload) && event.payload.deleted === true && event.cellId) {
+        this.removeServerCell(event.cellId);
+      } else if (isHostCell(event.payload)) {
+        const known = this.keyByServerId.has(event.payload.id);
+        this.mergeServerCell(event.payload, false, event.operationId);
+        if (!known) this.reorderFromServerOrderIfPossible();
+      }
+    } else if (event.type === "cell-output" && event.cellId && isRecord(event.payload)) {
+      this.applyOutput(event.cellId, event.payload);
+    } else if (event.type === "diagnostics" && event.cellId && Array.isArray(event.payload)) {
+      this.applyDiagnostics(event.cellId, event.payload);
+    } else if ((event.type === "notebook" || event.type === "transaction") && isRecord(event.payload)) {
+      this.reconcileCreated(event.payload.created);
+      if (Array.isArray(event.payload.updated)) {
+        for (const cell of event.payload.updated) if (isHostCell(cell)) this.mergeServerCell(cell, false, event.operationId);
+      }
+      if (typeof event.payload.deleted === "string") this.removeServerCell(event.payload.deleted);
+      if (Array.isArray(event.payload.deleted)) {
+        for (const id of event.payload.deleted) if (typeof id === "string") this.removeServerCell(id);
+      }
+      let orderChanged = false;
+      if (Array.isArray(event.payload.order) && event.payload.order.every((id) => typeof id === "string")) {
+        const order = event.payload.order;
+        orderChanged = !sameLines(this.serverOrder, order);
+        if (orderChanged) this.serverOrder = [...order];
+      } else if (typeof event.payload.moved === "string") {
+        const before = [...this.serverOrder];
+        this.moveServerOrder(event.payload.moved, typeof event.payload.after === "string" ? event.payload.after : null);
+        orderChanged = !sameLines(before, this.serverOrder);
+      }
+      if (orderChanged) this.reorderFromServerOrderIfPossible();
+    }
+    this.snapshotValue = patchSnapshot(this.snapshotValue, event, this.serverOrder);
+    if (isRecord(event.payload) && event.type === "notebook" && event.payload.saved === true) {
+      const pending = this.pendingSource();
+      if (pending.changes.length || this.ordered.some((cell) => cell.tombstone)) this.snapshotValue = { ...this.snapshotValue, changed: true };
+    }
+  }
+  applySnapshot(snapshot) {
+    const epochChanged = this.epochValue !== snapshot.epoch;
+    this.epochValue = snapshot.epoch;
+    this.cursorValue = snapshot.cursor;
+    this.snapshotValue = snapshot;
+    const previousOrder = this.serverOrder;
+    this.serverOrder = snapshot.cells.map((cell) => cell.id);
+    if (epochChanged) {
+      for (const operation of this.submitted.values()) {
+        for (const change of operation.structural) {
+          if (!this.recoveredStructural.some((candidate) => sameChange(candidate, change))) this.recoveredStructural.push(cloneChange(change));
+        }
+      }
+      this.submitted.clear();
+      for (const cell of this.ordered) {
+        if (cell.creationId !== null || cell.generation > cell.acknowledgedGeneration || cell.tombstone) cell.conflict = true;
+      }
+      if (this.recoveredStructural.length > 0) this.recoveredStructuralConflict = true;
+    }
+    const seen = /* @__PURE__ */ new Set();
+    for (const serverCell of snapshot.cells) {
+      seen.add(serverCell.id);
+      this.mergeServerCell(serverCell, epochChanged);
+    }
+    for (const cell of [...this.ordered]) {
+      if (cell.id !== null && !seen.has(cell.id)) {
+        if (cell.tombstone || cell.generation > cell.acknowledgedGeneration) {
+          cell.conflict = true;
+          cell.tombstone = true;
+          cell.restoreAfter ??= predecessorInOrder(previousOrder, cell.id, new Set(this.serverOrder));
+        } else this.removeCell(cell);
+      }
+    }
+    this.reorderFromServerOrderIfPossible();
+    this.reassertLocalDirty();
+  }
+  mergeServerCell(serverCell, forceSource = false, operationId2) {
+    const logicalBody = toLogicalCellBody(serverCell.type, serverCell.body);
+    let key = this.keyByServerId.get(serverCell.id);
+    let cell = key ? this.byKey.get(key) : void 0;
+    if (!cell) {
+      key = `cell:${serverCell.id}`;
+      cell = {
+        key,
+        id: serverCell.id,
+        creationId: null,
+        desiredBody: [...logicalBody],
+        desiredType: serverCell.type,
+        serverBody: [...logicalBody],
+        serverType: serverCell.type,
+        serverRevision: serverCell.revision,
+        generation: 0,
+        acknowledgedGeneration: 0,
+        conflict: false,
+        tombstone: false,
+        restoreAfter: null,
+        server: serverCell,
+        selection: null
+      };
+      this.ordered.push(cell);
+      this.byKey.set(key, cell);
+      this.keyByServerId.set(serverCell.id, key);
+      return cell;
+    }
+    const pending = cell.generation > cell.acknowledgedGeneration;
+    const sourceChanged = forceSource || cell.serverRevision !== serverCell.revision || cell.serverType !== serverCell.type || !sameLines(cell.serverBody, logicalBody);
+    if (pending && sourceChanged) {
+      const desiredMatches = cell.desiredType === serverCell.type && sameLines(cell.desiredBody, logicalBody);
+      const sent = operationId2 === void 0 ? void 0 : this.matchingSubmittedCell(operationId2, cell, serverCell);
+      cell.conflict = sent === void 0 && !desiredMatches;
+      if (sent !== void 0) cell.acknowledgedGeneration = Math.max(cell.acknowledgedGeneration, sent.generation);
+      else if (desiredMatches) cell.acknowledgedGeneration = cell.generation;
+    } else if (!pending) {
+      if (sourceChanged) {
+        cell.desiredBody = [...logicalBody];
+        cell.desiredType = serverCell.type;
+      }
+      cell.conflict = false;
+    }
+    cell.id = serverCell.id;
+    if (sourceChanged) cell.serverBody = [...logicalBody];
+    cell.serverType = serverCell.type;
+    cell.serverRevision = serverCell.revision;
+    cell.server = serverCell;
+    cell.tombstone = false;
+    cell.restoreAfter = null;
+    return cell;
+  }
+  applyDiagnostics(id, value) {
+    const cell = this.cell(id);
+    if (!cell?.server) return;
+    const server = { ...cell.server, diagnostics: value };
+    cell.server = server;
+    const index = this.snapshotValue.cells.findIndex((candidate) => candidate.id === id);
+    if (index >= 0) {
+      const cells = [...this.snapshotValue.cells];
+      cells[index] = server;
+      this.snapshotValue = { ...this.snapshotValue, cells };
+    }
+  }
+  reconcileCreated(value) {
+    const entries = createdEntries(value);
+    for (const item of entries) {
+      const key = this.keyByCreationId.get(item.creationId);
+      const cell = key ? this.byKey.get(key) : void 0;
+      if (!cell) continue;
+      const existingKey = this.keyByServerId.get(item.id);
+      const existing = existingKey === void 0 || existingKey === cell.key ? void 0 : this.byKey.get(existingKey);
+      if (existing !== void 0) {
+        const wasFocused = this.focused === existing.key;
+        this.removeCell(existing);
+        if (wasFocused) this.focused = cell.key;
+        if (existing.server !== null) {
+          cell.serverBody = [...existing.serverBody];
+          cell.serverType = existing.serverType;
+          cell.serverRevision = existing.serverRevision;
+          cell.server = existing.server;
+          cell.conflict = cell.generation > cell.acknowledgedGeneration && (cell.desiredType !== existing.serverType || !sameLines(cell.desiredBody, existing.serverBody));
+        }
+      }
+      cell.id = item.id;
+      cell.serverRevision = Math.max(cell.serverRevision, item.revision);
+      this.keyByServerId.set(item.id, cell.key);
+    }
+  }
+  applyOutput(id, payload) {
+    const cell = this.cell(id);
+    if (!cell?.server) return;
+    const next = { ...cell.server, outputs: [...cell.server.outputs], log: [...cell.server.log] };
+    if (payload.kind === "clear") {
+      next.outputs = [];
+      next.outputsStale = false;
+      next.log = [];
+      next.progress = null;
+    } else if (payload.kind === "append") {
+      const value = isRecord(payload.payload) && "output" in payload.payload ? payload.payload.output : payload.payload;
+      if (next.outputsStale) next.outputs = [];
+      next.outputsStale = false;
+      if (isOutputRecord(value)) next.outputs.push(value);
+    } else if (payload.kind === "progress") {
+      const progress = isRecord(payload.payload) && "progress" in payload.payload ? payload.payload.progress : payload.payload;
+      next.progress = progress;
+    } else if (payload.kind === "log") {
+      const detail = isRecord(payload.payload) ? payload.payload : null;
+      const value = detail ? detail.lines ?? detail.log ?? [] : payload.payload;
+      const lines = Array.isArray(value) ? value.map(String) : [String(value)];
+      const previous = detail?.replaceLast === true && next.log.length > 0 ? next.log.slice(0, -1) : next.log;
+      next.log = boundedLog([...previous, ...lines]);
+    }
+    cell.server = next;
+    const index = this.snapshotValue.cells.findIndex((candidate) => candidate.id === id);
+    if (index >= 0) {
+      const cells = [...this.snapshotValue.cells];
+      cells[index] = next;
+      this.snapshotValue = { ...this.snapshotValue, cells };
+    }
+  }
+  reconcileEdited(value, submitted) {
+    if (!Array.isArray(value)) return;
+    for (const item of value) {
+      if (!isRecord(item) || typeof item.id !== "string" || typeof item.revision !== "number") continue;
+      const cell = this.cell(item.id);
+      if (!cell) continue;
+      const sent = submitted?.cells.get(cell.key);
+      if (sent === void 0 || sent.expectedRevision === null) continue;
+      const submittedRevision = sent.expectedRevision + (sent.changesSource ? 1 : 0);
+      if (item.revision !== submittedRevision || item.revision < cell.serverRevision) continue;
+      if (item.revision > cell.serverRevision) {
+        cell.serverBody = [...sent.body];
+        cell.serverType = sent.type;
+      }
+      const authoritativeMatches = cell.serverType === sent.type && sameLines(cell.serverBody, sent.body);
+      if (!authoritativeMatches) continue;
+      cell.serverRevision = item.revision;
+      cell.acknowledgedGeneration = Math.max(cell.acknowledgedGeneration, sent.generation);
+      cell.conflict = false;
+    }
+  }
+  reconcileSubmittedCreations(value, submitted) {
+    for (const [creationId, sent] of submitted.creations) {
+      const cell = this.cell(this.keyByCreationId.get(creationId) ?? "");
+      const created = createdEntry(value, creationId);
+      if (!cell || cell.id === null || created === null || cell.serverRevision > created.revision) continue;
+      cell.serverBody = [...sent.body];
+      cell.serverType = sent.type;
+      cell.serverRevision = created.revision;
+      cell.acknowledgedGeneration = Math.max(cell.acknowledgedGeneration, sent.generation);
+      cell.conflict = false;
+    }
+  }
+  sourceSubmissionAcknowledged(submitted) {
+    const acknowledgements = [];
+    for (const [key, sent] of submitted.cells) {
+      const cell = this.byKey.get(key);
+      const expectedRevision = sent.expectedRevision === null ? 0 : sent.expectedRevision + (sent.changesSource ? 1 : 0);
+      if (!cell || cell.id === null || cell.tombstone || cell.serverRevision < expectedRevision) return false;
+      if (cell.serverRevision === expectedRevision && (cell.serverType !== sent.type || !sameLines(cell.serverBody, sent.body))) return false;
+      acknowledgements.push({ cell, sent });
+    }
+    for (const [creationId, sent] of submitted.creations) {
+      const cell = this.cell(this.keyByCreationId.get(creationId) ?? "");
+      if (!cell || cell.id === null || cell.tombstone || cell.serverRevision < 0) return false;
+      if (cell.serverRevision === 0 && (cell.serverType !== sent.type || !sameLines(cell.serverBody, sent.body))) return false;
+      acknowledgements.push({ cell, sent });
+    }
+    for (const { cell, sent } of acknowledgements) {
+      cell.acknowledgedGeneration = Math.max(cell.acknowledgedGeneration, sent.generation);
+      if (cell.generation === sent.generation) {
+        cell.conflict = cell.serverType !== sent.type || !sameLines(cell.serverBody, sent.body);
+      } else if (cell.serverType === cell.desiredType && sameLines(cell.serverBody, cell.desiredBody)) {
+        cell.conflict = false;
+      }
+    }
+    return true;
+  }
+  matchingSubmittedCell(operationId2, cell, serverCell) {
+    const operation = this.submitted.get(operationId2);
+    if (operation === void 0) return void 0;
+    const sent = operation.cells.get(cell.key) ?? (cell.creationId === null ? void 0 : operation.creations.get(cell.creationId));
+    if (sent === void 0 || sent.type !== serverCell.type || !sameLines(sent.body, toLogicalCellBody(serverCell.type, serverCell.body))) return void 0;
+    const expectedRevision = sent.expectedRevision;
+    if (expectedRevision === null) return serverCell.revision === 0 ? sent : void 0;
+    const submittedRevision = sent.changesSource ? expectedRevision + 1 : expectedRevision;
+    return serverCell.revision === submittedRevision ? sent : void 0;
+  }
+  reassertLocalDirty() {
+    const pending = this.pendingSource();
+    if (pending.changes.length || this.ordered.some((cell) => cell.tombstone)) this.snapshotValue = { ...this.snapshotValue, changed: true };
+  }
+  predecessorReference(key) {
+    const index = this.ordered.findIndex((cell) => cell.key === key);
+    for (let before = index - 1; before >= 0; before -= 1) {
+      const prior = this.ordered[before];
+      if (prior.id !== null) return { cellId: prior.id };
+      if (prior.creationId !== null) return { creationId: prior.creationId };
+    }
+    return null;
+  }
+  cellRef(ref) {
+    return "cellId" in ref ? this.cell(ref.cellId) : this.cell(this.keyByCreationId.get(ref.creationId) ?? "");
+  }
+  removeServerCell(id) {
+    const cell = this.cell(id);
+    if (!cell) return;
+    const restoreAfter = predecessorInOrder(this.serverOrder, id, new Set(this.serverOrder.filter((candidate) => candidate !== id)));
+    this.serverOrder = this.serverOrder.filter((candidate) => candidate !== id);
+    if (cell.tombstone) return;
+    if (cell.generation > cell.acknowledgedGeneration) {
+      cell.conflict = true;
+      cell.tombstone = true;
+      cell.restoreAfter = restoreAfter;
+      return;
+    }
+    this.removeCell(cell);
+  }
+  removeCell(cell) {
+    this.ordered = this.ordered.filter((candidate) => candidate !== cell);
+    this.byKey.delete(cell.key);
+    if (cell.id) this.keyByServerId.delete(cell.id);
+    if (cell.creationId) this.keyByCreationId.delete(cell.creationId);
+    if (this.focused === cell.key) this.focused = null;
+  }
+  reorderFromServerOrderIfPossible() {
+    if (this.ordered.some((cell) => cell.id === null || cell.tombstone)) return;
+    const indexes = new Map(this.serverOrder.map((id, index) => [id, index]));
+    this.ordered.sort((a, b) => (a.id ? indexes.get(a.id) ?? Infinity : Infinity) - (b.id ? indexes.get(b.id) ?? Infinity : Infinity));
+  }
+  moveServerOrder(id, after) {
+    const from = this.serverOrder.indexOf(id);
+    if (from < 0) return;
+    this.serverOrder.splice(from, 1);
+    const predecessor = after === null ? -1 : this.serverOrder.indexOf(after);
+    if (after !== null && predecessor < 0) {
+      this.serverOrder.splice(from, 0, id);
+      return;
+    }
+    this.serverOrder.splice(Math.max(0, predecessor + 1), 0, id);
+  }
+  requireCell(key) {
+    const cell = this.cell(key);
+    if (!cell) throw new Error(`no such local cell: ${key}`);
+    return cell;
+  }
+  assertNoSourceConflicts() {
+    if (this.hasSourceConflicts) throw new Error("resolve deleted or conflicting local source before continuing");
+  }
+};
+function cloneDraftBase(base) {
+  return {
+    epoch: base.epoch,
+    documentRevision: base.documentRevision,
+    cells: base.cells.map((cell) => ({ ...cell, body: [...cell.body] }))
+  };
+}
+function patchSnapshot(snapshot, event, order) {
+  const next = { ...snapshot, cursor: event.cursor, version: event.version, documentRevision: event.documentRevision };
+  let addedCell = false;
+  if (event.type === "active_clients_changed" && isRecord(event.payload)) {
+    const activeClientIds = validActiveClientIds(event.payload.activeClientIds);
+    if (activeClientIds !== null) next.activeClientIds = activeClientIds;
+  }
+  if (event.type === "runtime" && isRecord(event.payload)) next.runtime = event.payload;
+  if (event.type === "graph" && isRecord(event.payload)) next.graph = event.payload;
+  if (event.type === "variables" && Array.isArray(event.payload)) next.variables = event.payload;
+  if (event.type === "editor-diagnostics" && isRecord(event.payload)) next.editorDiagnostics = event.payload;
+  if (event.type === "service-errors" && isRecord(event.payload)) next.serviceErrors = event.payload;
+  if (event.type === "service-error") next.lastActionError = isRecord(event.payload) ? event.payload : null;
+  if (event.type === "operation") {
+    const operation = operationFromEventPayload(event.payload);
+    if (operation) next.operations = upsertOperation(next.operations, operation);
+  }
+  if ((event.type === "notebook" || event.type === "transaction") && isRecord(event.payload)) {
+    const payload = event.payload;
+    if (isRecord(payload.config)) next.config = payload.config;
+    if (typeof payload.path === "string" || payload.path === null) next.path = payload.path;
+    if (isSidecarObservations(payload.sidecars)) next.sidecars = payload.sidecars;
+    if ("layout" in payload) next.layout = payload.layout;
+    if (isRecord(payload.metadata)) next.metadata = payload.metadata;
+    if (isRecord(payload.app)) next.metadata = { ...next.metadata, app: payload.app };
+    if (isRecord(payload.graph)) next.graph = payload.graph;
+    if ("lastValue" in payload) next.lastValue = payload.lastValue;
+    if (payload.saved === true) next.changed = false;
+    if (typeof payload.deleted === "string") next.cells = next.cells.filter((cell) => cell.id !== payload.deleted);
+    const deletedIds = payload.deleted;
+    if (Array.isArray(deletedIds)) next.cells = next.cells.filter((cell) => !deletedIds.includes(cell.id));
+    if (Array.isArray(payload.edited)) next.changed = true;
+    if ("updated" in payload) next.changed = true;
+    if (payload.created !== void 0 || payload.deleted !== void 0 || typeof payload.moved === "string" || isRecord(payload.config) || isRecord(payload.metadata) || isRecord(payload.app)) next.changed = true;
+    if (Array.isArray(payload.updated)) {
+      const updates = /* @__PURE__ */ new Map();
+      for (const value of payload.updated) if (isHostCell(value)) updates.set(value.id, value);
+      if (updates.size > 0) {
+        const present = new Set(next.cells.map((cell) => cell.id));
+        next.cells = next.cells.map((cell) => updates.get(cell.id) ?? cell);
+        for (const [id, cell] of updates) if (!present.has(id)) next.cells.push(cell);
+        addedCell ||= [...updates.keys()].some((id) => !present.has(id));
+      }
+    }
+    if (typeof payload.dirty === "boolean") next.changed = payload.dirty;
+  }
+  if (["cell", "cell-started", "cell-completed"].includes(event.type) && event.cellId) {
+    if (isRecord(event.payload) && event.payload.deleted === true) next.cells = next.cells.filter((cell) => cell.id !== event.cellId);
+    else if (isHostCell(event.payload)) {
+      const payload = event.payload;
+      const index = next.cells.findIndex((cell) => cell.id === payload.id);
+      const prior = index < 0 ? null : next.cells[index];
+      next.cells = [...next.cells];
+      if (index < 0) {
+        next.cells.push(payload);
+        addedCell = true;
+      } else next.cells[index] = payload;
+      if (event.type === "cell" && prior && sourceRecordChanged(prior, payload)) next.changed = true;
+    }
+  }
+  if (event.type === "diagnostics" && event.cellId && Array.isArray(event.payload)) {
+    const index = next.cells.findIndex((cell) => cell.id === event.cellId);
+    if (index >= 0) {
+      next.cells = [...next.cells];
+      next.cells[index] = { ...next.cells[index], diagnostics: event.payload };
+    }
+  }
+  const reorderNotebook = (event.type === "notebook" || event.type === "transaction") && order.length === next.cells.length && !next.cells.every((cell, index) => cell.id === order[index]);
+  if (order.length && next.cells.length && (addedCell || reorderNotebook)) {
+    const indexes = new Map(order.map((id, index) => [id, index]));
+    next.cells = [...next.cells].sort((left, right) => (indexes.get(left.id) ?? Number.MAX_SAFE_INTEGER) - (indexes.get(right.id) ?? Number.MAX_SAFE_INTEGER));
+  }
+  return next;
+}
+function validActiveClientIds(value) {
+  if (!Array.isArray(value) || value.length > 128) return null;
+  const ids = value.filter((id) => typeof id === "string" && id.length > 0);
+  if (ids.length !== value.length || new Set(ids).size !== ids.length) return null;
+  return ids;
+}
+function upsertOperation(operations, operation) {
+  const index = operations.findIndex((candidate) => candidate.id === operation.id);
+  if (index < 0) return [...operations, operation];
+  const next = [...operations];
+  next[index] = operation;
+  return next;
+}
+function predecessorInOrder(order, id, retained) {
+  const index = order.indexOf(id);
+  for (let before = index - 1; before >= 0; before -= 1) {
+    const candidate = order[before];
+    if (candidate !== void 0 && retained.has(candidate)) return candidate;
+  }
+  return null;
+}
+function createdEntries(value) {
+  if (!isRecord(value)) return [];
+  return Object.entries(value).flatMap(([creationId, id]) => typeof id === "string" ? [{ creationId, id, revision: 0 }] : []);
+}
+function sameChange(left, right) {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+function createdEntry(value, creationId) {
+  return createdEntries(value).find((item) => item.creationId === creationId) ?? null;
+}
+function cloneChange(change) {
+  return structuredClone(change);
+}
+function isOperation(value) {
+  return isRecord(value) && typeof value.id === "string" && typeof value.kind === "string" && typeof value.status === "string";
+}
+function operationFromEventPayload(value) {
+  if (isOperation(value)) return value;
+  if (isRecord(value) && isOperation(value.operation)) return value.operation;
+  return null;
+}
+function sourceRecordChanged(left, right) {
+  return left.type !== right.type || !sameLines(left.body, right.body) || JSON.stringify(left.options) !== JSON.stringify(right.options);
+}
+function isSidecarObservations(value) {
+  return isRecord(value) && isDiskObservation(value.config) && isDiskObservation(value.layout) && isDiskObservation(value.packages);
+}
+function isDiskObservation(value) {
+  if (!isRecord(value)) return false;
+  const state = value.state;
+  const digest = value.digest;
+  return (state === "untitled" || state === "absent" || state === "present" || state === "unreadable") && (digest === null || typeof digest === "string" && /^[0-9a-f]{64}$/.test(digest)) && (value.version === null || typeof value.version === "string") && (value.error === null || isRecord(value.error));
+}
+function isHostCell(value) {
+  return isRecord(value) && typeof value.id === "string" && Array.isArray(value.body) && typeof value.revision === "number" && (value.type === "code" || value.type === "markdown");
+}
+function isOutputRecord(value) {
+  return isRecord(value) && typeof value.id === "string" && typeof value.cellId === "string" && typeof value.sequence === "number" && "data" in value;
+}
+function isRecord(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function sameLines(left, right) {
+  return left.length === right.length && left.every((line, index) => line === right[index]);
+}
+function boundedLog(lines) {
+  return tailLog(lines, MAX_LOG_BYTES);
+}
+function reconcileDraft(draft, snapshot) {
+  const sameCell = (cell, type, body) => cell !== void 0 && cell.type === type && sameLines(cell.body, body);
+  const current = new Map(snapshot.cells.map((cell) => [cell.id, cell]));
+  const base = new Map(draft.base.cells.map((cell) => [cell.id, cell]));
+  const unchanged = draft.base.cells.length === snapshot.cells.length && draft.base.cells.every((cell, index) => {
+    const next = snapshot.cells[index];
+    return next?.id === cell.id && sameCell(next, cell.type, cell.body);
+  });
+  let conflict = false;
+  const changes = [];
+  for (const original of draft.changes) {
+    let change = structuredClone(original);
+    if (change.type === "create") {
+      const cell = current.get(change.creationId);
+      if (cell) {
+        if (sameCell(cell, change.cellType, change.body)) continue;
+        const creationId = change.creationId;
+        const sent = draft.submission?.changes.find((item) => item.type === "create" && item.creationId === creationId);
+        if (!sent || sent.type !== "create" || !sameCell(cell, sent.cellType, sent.body)) conflict = true;
+        change = { type: "edit", cell: { cellId: cell.id }, cellType: change.cellType, body: change.body, expectedRevision: cell.revision };
+      } else if (!unchanged) conflict = true;
+    } else if (change.type === "edit" && "cellId" in change.cell) {
+      const cell = current.get(change.cell.cellId);
+      if (sameCell(cell, change.cellType, change.body)) continue;
+      const old = base.get(change.cell.cellId);
+      const cellId = change.cell.cellId;
+      const sent = draft.submission?.changes.find((item) => item.type === "edit" && "cellId" in item.cell && item.cell.cellId === cellId);
+      const matchesBase = old && sameCell(cell, old.type, old.body);
+      const matchesSent = sent?.type === "edit" && sameCell(cell, sent.cellType, sent.body);
+      if (!matchesBase && !matchesSent) conflict = true;
+      if (cell) change.expectedRevision = cell.revision;
+    } else if (change.type === "delete" && "cellId" in change.cell && !current.has(change.cell.cellId)) {
+      continue;
+    } else if (change.type === "move" && "cellId" in change.cell) {
+      const cellId = change.cell.cellId;
+      const index = snapshot.cells.findIndex((cell) => cell.id === cellId);
+      const previous = index <= 0 ? null : snapshot.cells[index - 1].id;
+      const desired = change.after === null ? null : "cellId" in change.after ? change.after.cellId : change.after.creationId;
+      if (index >= 0 && previous === desired) continue;
+      if (!unchanged) conflict = true;
+    } else if (change.type === "options" && "cellId" in change.cell) {
+      const cell = current.get(change.cell.cellId);
+      if (cell && Object.entries(change.patch).every(([key, value]) => cell.options[key] === value)) continue;
+      if (!unchanged) conflict = true;
+    } else if (!unchanged) conflict = true;
+    changes.push(change);
+  }
+  return { draft: { ...draft, changes, submission: null }, conflict };
+}
+
 // src/protocol.ts
 var HOST_PROTOCOL = "alder-host-v2";
 var ENGINE_PROTOCOL = "alder-engine-v2";
@@ -20044,7 +19888,7 @@ var MAX_ANALYSIS_SYMBOL_BYTES = 1024;
 var MAX_ANALYSIS_SYMBOLS = 1e4;
 var MAX_TABLE_COLUMNS = 50;
 var MAX_TABLE_PREVIEW_ROWS = 25;
-function hasUnpairedSurrogate2(value) {
+function hasUnpairedSurrogate(value) {
   for (let index = 0; index < value.length; index += 1) {
     const code = value.charCodeAt(index);
     if (code >= 55296 && code <= 56319) {
@@ -20060,7 +19904,7 @@ function hasUnpairedSurrogate2(value) {
 function boundedUtf8StringSchema(maximumBytes, nonempty = false) {
   const schema = nonempty ? external_exports.string().min(1) : external_exports.string();
   return schema.superRefine((value, context) => {
-    if (hasUnpairedSurrogate2(value)) {
+    if (hasUnpairedSurrogate(value)) {
       context.addIssue({ code: "custom", message: "string must contain valid Unicode" });
       return;
     }
@@ -20245,14 +20089,14 @@ function decodeUtf8(bytes) {
 function encodeWireSource(value) {
   const lines = typeof value === "string" ? null : value.length;
   const text = typeof value === "string" ? value : value.join("\n");
-  if (hasUnpairedSurrogate2(text)) throw new ProtocolError("invalid_request", "source transfer text contains an unpaired surrogate");
+  if (hasUnpairedSurrogate(text)) throw new ProtocolError("invalid_request", "source transfer text contains an unpaired surrogate");
   return { encoding: "base64", data: encodeBase64(new TextEncoder().encode(text)), lines };
 }
 function decodeWireSource(value) {
   const parsed = wireSourceSchema.safeParse(value);
   if (!parsed.success) throw new ProtocolError("invalid_request", "invalid source transfer value");
   const text = decodeUtf8(decodeBase64(parsed.data.data));
-  if (hasUnpairedSurrogate2(text)) throw new ProtocolError("invalid_request", "source transfer text contains an unpaired surrogate");
+  if (hasUnpairedSurrogate(text)) throw new ProtocolError("invalid_request", "source transfer text contains an unpaired surrogate");
   if (parsed.data.lines === null) return text;
   if (parsed.data.lines === 0) {
     if (text !== "") throw new ProtocolError("invalid_request", "empty source line array must have empty data");
@@ -20617,9 +20461,8 @@ var mcpDocumentChangeSchema = external_exports.discriminatedUnion("type", [
   textEditDocumentChangeSchema
 ]);
 var commandIdentityShape = {
-  operationId: idSchema,
+  requestId: idSchema,
   clientId: idSchema,
-  commandSequence: positiveIntegerSchema,
   sessionEpoch: idSchema
 };
 var commandIdentitySchema = external_exports.object(commandIdentityShape).strict();
@@ -20789,7 +20632,6 @@ var operationProgressSchema = external_exports.object({
 var operationRecordSchema = external_exports.object({
   id: idSchema,
   clientId: idSchema,
-  commandSequence: positiveIntegerSchema,
   kind: operationKindSchema,
   status: operationStatusSchema,
   documentRevision: revisionSchema,
@@ -20803,17 +20645,6 @@ var operationRecordSchema = external_exports.object({
   executionDone: external_exports.boolean().optional(),
   resetOperationIds: external_exports.array(idSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS).optional(),
   progress: operationProgressSchema.optional()
-}).strict();
-var commandAdmissionSchema = external_exports.object({
-  epoch: idSchema,
-  clientId: idSchema,
-  operationId: idSchema,
-  commandSequence: positiveIntegerSchema,
-  accepted: external_exports.boolean(),
-  sequenceConsumed: external_exports.boolean(),
-  operation: operationRecordSchema.nullable(),
-  error: hostErrorSchema.nullable(),
-  nextCommandSequence: positiveIntegerSchema
 }).strict();
 var runtimeStateSchema = external_exports.object({
   documentReady: external_exports.boolean(),
@@ -20845,14 +20676,14 @@ var runtimeVariableSchema = external_exports.object({ name: boundedUtf8StringSch
 var runtimeVariablesSchema = external_exports.array(runtimeVariableSchema).max(MAX_RUNTIME_VARIABLES);
 var editorDiagnosticsSchema = safeStringRecordSchema(external_exports.array(analysisDiagnosticSchema).max(MAX_EDITOR_DIAGNOSTICS));
 var serviceErrorsSchema = external_exports.object({ lsp: hostErrorSchema.optional() }).strict();
-var hostSnapshotSchema = external_exports.object({ protocol: external_exports.literal(HOST_PROTOCOL), epoch: idSchema, cursor: protocolIntegerSchema, version: protocolIntegerSchema, documentRevision: revisionSchema, path: pathSchema.nullable(), metadata: protocolJsonRecordSchema, config: protocolJsonRecordSchema, layout: protocolJsonSchema, dirty: external_exports.boolean(), changed: external_exports.boolean().optional(), disk: diskObservationSchema, sidecars: sidecarObservationsSchema, runtime: hostRuntimeSchema, cells: external_exports.array(hostCellStateSchema).max(MAX_NOTEBOOK_CELLS), graph: dependencyGraphStateSchema, variables: runtimeVariablesSchema, editorDiagnostics: editorDiagnosticsSchema, serviceErrors: serviceErrorsSchema, operations: external_exports.array(operationRecordSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS), lastValue: protocolJsonSchema.nullable(), lastActionError: hostErrorSchema.nullable(), capabilities: external_exports.array(boundedUtf8StringSchema(256)).max(MAX_PROTOCOL_COLLECTION_ITEMS).optional(), nextCommandSequence: positiveIntegerSchema.optional(), activeClientIds: external_exports.array(idSchema).max(128).optional() }).strict();
-var hostEventTypeSchema = external_exports.enum(["receipt", "transaction", "notebook", "cell", "cell-started", "cell-output", "cell-completed", "diagnostics", "editor-diagnostics", "service-errors", "graph", "variables", "runtime", "operation", "service-error", "active_clients_changed"]);
-var eventBase = { protocol: external_exports.literal(HOST_PROTOCOL), epoch: idSchema, cursor: protocolIntegerSchema, version: protocolIntegerSchema, documentRevision: revisionSchema, timestamp: external_exports.number().finite().nonnegative(), operationId: idSchema.optional(), clientId: idSchema.optional(), commandSequence: positiveIntegerSchema.optional(), cellId: idSchema.optional(), runId: idSchema.optional(), kernelEpoch: idSchema.nullable().optional(), revision: revisionSchema.optional(), sequence: protocolIntegerSchema.optional() };
+var hostSnapshotSchema = external_exports.object({ protocol: external_exports.literal(HOST_PROTOCOL), epoch: idSchema, cursor: protocolIntegerSchema, version: protocolIntegerSchema, documentRevision: revisionSchema, path: pathSchema.nullable(), metadata: protocolJsonRecordSchema, config: protocolJsonRecordSchema, layout: protocolJsonSchema, dirty: external_exports.boolean(), changed: external_exports.boolean().optional(), disk: diskObservationSchema, sidecars: sidecarObservationsSchema, runtime: hostRuntimeSchema, cells: external_exports.array(hostCellStateSchema).max(MAX_NOTEBOOK_CELLS), graph: dependencyGraphStateSchema, variables: runtimeVariablesSchema, editorDiagnostics: editorDiagnosticsSchema, serviceErrors: serviceErrorsSchema, operations: external_exports.array(operationRecordSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS), lastValue: protocolJsonSchema.nullable(), lastActionError: hostErrorSchema.nullable(), capabilities: external_exports.array(boundedUtf8StringSchema(256)).max(MAX_PROTOCOL_COLLECTION_ITEMS).optional(), activeClientIds: external_exports.array(idSchema).max(128).optional() }).strict();
+var hostEventTypeSchema = external_exports.enum(["transaction", "notebook", "cell", "cell-started", "cell-output", "cell-completed", "diagnostics", "editor-diagnostics", "service-errors", "graph", "variables", "runtime", "operation", "service-error", "active_clients_changed"]);
+var eventBase = { protocol: external_exports.literal(HOST_PROTOCOL), epoch: idSchema, cursor: protocolIntegerSchema, version: protocolIntegerSchema, documentRevision: revisionSchema, timestamp: external_exports.number().finite().nonnegative(), operationId: idSchema.optional(), clientId: idSchema.optional(), cellId: idSchema.optional(), runId: idSchema.optional(), kernelEpoch: idSchema.nullable().optional(), revision: revisionSchema.optional(), sequence: protocolIntegerSchema.optional() };
 var hostEventSchema = external_exports.object({ ...eventBase, type: hostEventTypeSchema, payload: protocolJsonSchema }).strict();
 var recoveryBranchSchema = external_exports.object({ id: idSchema, documentRevision: revisionSchema, baseDisk: diskObservationSchema, sourceHandle: external_exports.lazy(() => artifactHandleSchema), state: external_exports.enum(["clean", "dirty", "conflict"]), conflict: hostErrorSchema.nullable() }).strict();
 var recoveryStateSchema = external_exports.object({ branches: external_exports.array(recoveryBranchSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS), pending: external_exports.boolean(), corruption: hostErrorSchema.nullable() }).strict();
-var recoverySchema = external_exports.discriminatedUnion("kind", [external_exports.object({ kind: external_exports.literal("replay"), epoch: idSchema, cursor: protocolIntegerSchema, events: external_exports.array(hostEventSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS) }).strict(), external_exports.object({ kind: external_exports.literal("snapshot"), epoch: idSchema, cursor: protocolIntegerSchema, snapshot: hostSnapshotSchema }).strict()]);
-var commandResultSchema = external_exports.object({ epoch: idSchema, operation: operationRecordSchema, documentRevision: revisionSchema, version: protocolIntegerSchema, cursor: protocolIntegerSchema, nextCommandSequence: positiveIntegerSchema, result: protocolJsonSchema.nullable(), error: hostErrorSchema.nullable() }).strict();
+var recoverySchema = external_exports.object({ kind: external_exports.literal("snapshot"), epoch: idSchema, cursor: protocolIntegerSchema, snapshot: hostSnapshotSchema }).strict();
+var commandResultSchema = external_exports.object({ requestId: idSchema, epoch: idSchema, documentRevision: revisionSchema, version: protocolIntegerSchema, cursor: protocolIntegerSchema, result: protocolJsonSchema.nullable(), error: hostErrorSchema.nullable() }).strict();
 var queryOffset = protocolIntegerSchema.optional();
 var cellQueryLimit = external_exports.number().int().min(1).max(1e3).safe().optional();
 var outputQueryLimit = external_exports.number().int().min(1).max(262144).safe().optional();
@@ -20865,7 +20696,7 @@ var hostQuerySchema = external_exports.discriminatedUnion("type", [
   external_exports.object({ type: external_exports.literal("outputs"), cellId: idSchema.optional() }).strict(),
   external_exports.object({ type: external_exports.literal("output"), handle: artifactHandleIdSchema, offset: queryOffset, limit: outputQueryLimit }).strict(),
   external_exports.object({ type: external_exports.literal("operation"), operationId: idSchema, clientId: idSchema.optional() }).strict(),
-  external_exports.object({ type: external_exports.literal("events"), epoch: idSchema.nullable(), cursor: protocolIntegerSchema.nullable() }).strict(),
+  external_exports.object({ type: external_exports.literal("state") }).strict(),
   external_exports.object({ type: external_exports.literal("config") }).strict(),
   external_exports.object({ type: external_exports.literal("layout") }).strict(),
   external_exports.object({ type: external_exports.literal("packages-status") }).strict(),
@@ -20890,7 +20721,6 @@ var notebookQueryResultSchema = external_exports.object({
   sidecars: sidecarObservationsSchema,
   runtime: hostRuntimeSchema,
   capabilities: external_exports.array(boundedUtf8StringSchema(256, true)).max(MAX_PROTOCOL_COLLECTION_ITEMS),
-  nextCommandSequence: positiveIntegerSchema,
   activeClientIds: external_exports.array(idSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS),
   cells: external_exports.array(notebookCellDescriptorSchema).max(MAX_NOTEBOOK_CELLS)
 }).strict();
@@ -21177,7 +21007,7 @@ var outputRecordShape = external_exports.object({ id: idSchema, sessionEpoch: id
 var outputRecordSchema = protocolJsonSchema.pipe(outputRecordShape);
 var sessionIdentitySchema = external_exports.object({ sessionKey: idSchema, canonicalPath: pathSchema.nullable(), origin: boundedUtf8StringSchema(2048, true), browserOrigin: boundedUtf8StringSchema(2048, true), epoch: idSchema, processNonce: idSchema }).strict();
 var sessionRegistryMetadataSchema = external_exports.object({ state: external_exports.enum(["starting", "ready", "stopping"]), pid: positiveIntegerSchema, processNonce: idSchema, continuityProof: idSchema, startIdentity: idSchema, canonicalPath: pathSchema.nullable(), origin: boundedUtf8StringSchema(2048, true), epoch: idSchema, token: external_exports.string().regex(/^[0-9a-f]{64}$/), protocol: external_exports.literal(HOST_PROTOCOL), address: external_exports.object({ host: boundedUtf8StringSchema(256, true), port: external_exports.number().int().min(0).max(65535).safe(), origin: boundedUtf8StringSchema(2048, true), browserOrigin: boundedUtf8StringSchema(2048, true) }).strict().optional() }).strict();
-var sessionLeaseSchema = external_exports.object({ leaseId: idSchema, clientId: idSchema, nextCommandSequence: positiveIntegerSchema, epoch: idSchema }).strict();
+var sessionLeaseSchema = external_exports.object({ leaseId: idSchema, clientId: idSchema, epoch: idSchema }).strict();
 var attachLeaseRequestSchema = external_exports.object({ action: external_exports.literal("attach") }).strict();
 var leaseActionRequestSchema = external_exports.object({ action: external_exports.enum(["heartbeat", "release"]), leaseId: idSchema, disposition: external_exports.enum(["normal", "discard"]).optional() }).strict().superRefine((value, context) => {
   if (value.action === "heartbeat" && value.disposition !== void 0) context.addIssue({ code: "custom", path: ["disposition"], message: "heartbeat cannot have a release disposition" });
@@ -21185,14 +21015,14 @@ var leaseActionRequestSchema = external_exports.object({ action: external_export
 var ticketMintRequestSchema = external_exports.object({ origin: boundedUtf8StringSchema(2048, true), parentLeaseId: idSchema.optional() }).strict();
 var ticketMintResponseSchema = external_exports.object({ ticket: idSchema, expiresAt: boundedUtf8StringSchema(256, true) }).strict();
 var ticketExchangeRequestSchema = external_exports.object({ ticket: idSchema }).strict();
-var ticketExchangeResponseSchema = external_exports.object({ leaseId: idSchema, clientId: idSchema, nextCommandSequence: positiveIntegerSchema, epoch: idSchema, continuityProof: idSchema, csrf: idSchema, recoveryKey: external_exports.string().regex(/^[A-Za-z0-9_-]{43}$/).optional(), recoveryKeyId: external_exports.string().regex(/^[A-Za-z0-9_-]{43}$/).optional() }).strict();
-var hostIdentitySchema = external_exports.object({ protocol: external_exports.literal(HOST_PROTOCOL), epoch: idSchema, processNonce: idSchema, continuityProof: idSchema, sessionKey: idSchema, canonicalPath: pathSchema.nullable(), capabilities: external_exports.array(boundedUtf8StringSchema(256, true)).max(MAX_PROTOCOL_COLLECTION_ITEMS), origin: boundedUtf8StringSchema(2048, true), browserOrigin: boundedUtf8StringSchema(2048, true), address: external_exports.object({ host: boundedUtf8StringSchema(256, true), port: external_exports.number().int().min(0).max(65535).safe(), origin: boundedUtf8StringSchema(2048, true), browserOrigin: boundedUtf8StringSchema(2048, true) }).strict().optional(), leaseId: idSchema.optional(), clientId: idSchema.optional(), nextCommandSequence: positiveIntegerSchema.optional(), documentReady: external_exports.boolean(), configuration: hostConfigurationSchema }).strict();
-var sessionConnectionSchema = external_exports.object({ sessionKey: idSchema, canonicalPath: pathSchema.nullable(), origin: boundedUtf8StringSchema(2048, true), browserOrigin: boundedUtf8StringSchema(2048, true), epoch: idSchema, processNonce: idSchema, continuityProof: idSchema, leaseId: idSchema, clientId: idSchema, nextCommandSequence: positiveIntegerSchema, capabilities: external_exports.array(boundedUtf8StringSchema(256, true)).max(MAX_PROTOCOL_COLLECTION_ITEMS) }).strict();
+var ticketExchangeResponseSchema = external_exports.object({ leaseId: idSchema, clientId: idSchema, epoch: idSchema, continuityProof: idSchema, csrf: idSchema, recoveryId: idSchema.optional() }).strict();
+var hostIdentitySchema = external_exports.object({ protocol: external_exports.literal(HOST_PROTOCOL), epoch: idSchema, processNonce: idSchema, continuityProof: idSchema, sessionKey: idSchema, canonicalPath: pathSchema.nullable(), capabilities: external_exports.array(boundedUtf8StringSchema(256, true)).max(MAX_PROTOCOL_COLLECTION_ITEMS), origin: boundedUtf8StringSchema(2048, true), browserOrigin: boundedUtf8StringSchema(2048, true), address: external_exports.object({ host: boundedUtf8StringSchema(256, true), port: external_exports.number().int().min(0).max(65535).safe(), origin: boundedUtf8StringSchema(2048, true), browserOrigin: boundedUtf8StringSchema(2048, true) }).strict().optional(), leaseId: idSchema.optional(), clientId: idSchema.optional(), documentReady: external_exports.boolean(), configuration: hostConfigurationSchema }).strict();
+var sessionConnectionSchema = external_exports.object({ sessionKey: idSchema, canonicalPath: pathSchema.nullable(), origin: boundedUtf8StringSchema(2048, true), browserOrigin: boundedUtf8StringSchema(2048, true), epoch: idSchema, processNonce: idSchema, continuityProof: idSchema, leaseId: idSchema, clientId: idSchema, capabilities: external_exports.array(boundedUtf8StringSchema(256, true)).max(MAX_PROTOCOL_COLLECTION_ITEMS) }).strict();
 var windowActionSchema = external_exports.enum(["new", "open", "save", "save-as", "publish", "run-cell", "run-all", "run-stale", "interrupt", "restart", "settings", "select-r", "close"]);
 var windowActionMessageSchema = external_exports.object({ action: windowActionSchema }).strict();
 var windowStateSchema = external_exports.object({ path: pathSchema.nullable(), dirty: external_exports.boolean(), platform: boundedUtf8StringSchema(64, true), sessionEpoch: idSchema }).strict();
 var desktopRecoveryRequestSchema = external_exports.object({
-  keyId: external_exports.string().regex(/^[A-Za-z0-9_-]{43}$/),
+  recoveryId: external_exports.string().regex(/^[A-Za-z0-9_-]{1,128}$/),
   action: external_exports.enum(["read", "write", "remove", "list"]),
   name: external_exports.string().max(256).optional(),
   prefix: external_exports.string().max(256).optional(),
@@ -21207,13 +21037,18 @@ var ProtocolError = class extends Error {
   }
 };
 function decodeJsonFrame(input2, maxBytes = MAX_FRAME_BYTES) {
+  const bytes = typeof input2 === "string" ? new TextEncoder().encode(input2) : input2;
+  if (bytes.byteLength > maxBytes) throw new ProtocolError("frame_too_large", "JSON input exceeds byte limit");
+  let text;
   try {
-    return parseStrictJson(input2, { maxBytes, maxDepth: MAX_JSON_DEPTH });
-  } catch (error61) {
-    const value = error61;
-    const message2 = typeof value.message === "string" ? value.message : "frame is not valid JSON";
-    const code = typeof value.code === "string" ? value.code : message2.startsWith("duplicate object key") ? "duplicate_key" : message2.startsWith("invalid UTF-8") ? "invalid_utf8" : message2.startsWith("JSON nesting limit exceeded") ? "nesting_too_deep" : message2.startsWith("JSON input exceeds") ? "frame_too_large" : "invalid_json";
-    throw new ProtocolError(code, message2);
+    text = typeof input2 === "string" ? input2 : new TextDecoder("utf-8", { fatal: true }).decode(input2);
+  } catch {
+    throw new ProtocolError("invalid_utf8", "Frame is not valid UTF-8");
+  }
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new ProtocolError("invalid_json", "Frame is not valid JSON");
   }
 }
 function sourceLinesByteLength(lines) {
@@ -21306,10 +21141,6 @@ function decodeHostSnapshotWire(value) {
 function eventCellPayload(type) {
   return type === "cell" || type === "cell-started" || type === "cell-completed";
 }
-function encodeHostEventWire(event) {
-  const value = wireRecord(event, "host event");
-  return eventCellPayload(value.type) ? { ...value, payload: encodeCellWire(value.payload) } : { ...value };
-}
 function decodeHostEventWire(value) {
   const event = wireRecord(value, "host event");
   return eventCellPayload(event.type) ? { ...event, payload: decodeCellWire(event.payload) } : { ...event };
@@ -21319,13 +21150,11 @@ function isArtifactHandle(value) {
 }
 function encodeRecoveryWire(recovery) {
   if (isArtifactHandle(recovery)) return recovery;
-  if (recovery.kind === "replay") return { ...recovery, events: recovery.events.map(encodeHostEventWire) };
   return { ...recovery, snapshot: encodeHostSnapshotWire(recovery.snapshot) };
 }
 function decodeRecoveryWire(value) {
   if (isArtifactHandle(value)) return value;
   const recovery = wireRecord(value, "recovery");
-  if (recovery.kind === "replay") return { ...recovery, events: wireArray(recovery.events, "recovery events").map(decodeHostEventWire) };
   if (recovery.kind === "snapshot") return { ...recovery, snapshot: decodeHostSnapshotWire(recovery.snapshot) };
   throw new ProtocolError("invalid_request", "invalid recovery transfer");
 }
@@ -21349,7 +21178,7 @@ function mapQueryResultWire(queryType, result, encode3) {
       return encode3 ? encodeCellWire(result) : decodeCellWire(result);
     case "source":
       return wireArray(result, "source query result").map(encode3 ? encodeCellWire : decodeCellWire);
-    case "events":
+    case "state":
       return encode3 ? encodeRecoveryWire(result) : decodeRecoveryWire(result);
     default:
       return result;
@@ -21399,367 +21228,120 @@ var BrowserTransportError = class extends Error {
   code;
   definitive;
 };
+var revision = external_exports.number().int().nonnegative().safe();
+var draftBaseSchema = external_exports.object({
+  epoch: external_exports.string(),
+  documentRevision: revision,
+  cells: external_exports.array(external_exports.object({ id: external_exports.string(), revision, type: external_exports.enum(["code", "markdown"]), body: external_exports.array(external_exports.string()) }))
+});
+var recoveryDraftSchema = external_exports.object({
+  schemaVersion: external_exports.literal(2),
+  draftId: external_exports.string().min(1),
+  updatedAt: external_exports.number(),
+  base: draftBaseSchema,
+  changes: external_exports.array(documentChangeSchema),
+  pendingRun: external_exports.object({ requestId: external_exports.string(), epoch: external_exports.string() }).nullable().default(null),
+  submission: external_exports.object({ requestId: external_exports.string(), kind: external_exports.enum(["transaction", "run"]), changes: external_exports.array(documentChangeSchema) }).nullable()
+});
+function readRecoveryDraft(value, legacyId) {
+  const current = recoveryDraftSchema.safeParse(value);
+  if (current.success) return current.data;
+  const legacy = external_exports.object({
+    schemaVersion: external_exports.literal(1),
+    clientId: external_exports.string(),
+    base: draftBaseSchema,
+    changes: external_exports.array(documentChangeSchema),
+    operation: external_exports.object({ operationId: external_exports.string(), kind: external_exports.enum(["transaction", "run"]), changes: external_exports.array(documentChangeSchema).optional() }).nullable().optional()
+  }).safeParse(value);
+  if (!legacy.success) return null;
+  return {
+    schemaVersion: 2,
+    draftId: legacyId ?? legacy.data.clientId,
+    updatedAt: 0,
+    base: legacy.data.base,
+    changes: legacy.data.changes,
+    pendingRun: legacy.data.operation?.kind === "run" ? { requestId: legacy.data.operation.operationId, epoch: legacy.data.base.epoch } : null,
+    submission: legacy.data.operation ? { requestId: legacy.data.operation.operationId, kind: legacy.data.operation.kind, changes: legacy.data.operation.changes ?? legacy.data.changes } : null
+  };
+}
 var MemoryRecoveryStore = class {
-  value = null;
   drafts = /* @__PURE__ */ new Map();
-  branches = /* @__PURE__ */ new Map();
-  async load() {
-    return this.value === null ? null : { ...this.value };
-  }
-  async save(epoch, cursor) {
-    this.value = { epoch, cursor };
-  }
-  async clear() {
-    this.value = null;
-  }
-  async loadDraft(clientId) {
-    const draft = clientId === void 0 ? this.drafts.values().next().value : this.drafts.get(clientId);
-    return draft === void 0 ? null : cloneDraft(draft);
-  }
   async listDrafts() {
-    return [...this.drafts.values()].map(cloneDraft);
+    return [...this.drafts.values()].map((value) => structuredClone(value));
   }
   async saveDraft(draft) {
-    this.drafts.set(draft.clientId, cloneDraft(draft));
+    this.drafts.set(draft.draftId, structuredClone(draft));
   }
-  async clearDraft(clientId) {
-    this.drafts.delete(clientId);
-  }
-  async saveBranch(branchId, draft) {
-    this.branches.set(branchId, cloneDraft(draft));
-  }
-  async listBranches() {
-    return [...this.branches].map(([id, draft]) => ({ id, draft: cloneDraft(draft) }));
-  }
-  async deleteBranch(branchId) {
-    this.branches.delete(branchId);
+  async clearDraft(draftId) {
+    this.drafts.delete(draftId);
   }
 };
-var RECOVERY_ENVELOPE_VERSION = 1;
-var RECOVERY_ALGORITHM = "AES-256-GCM";
-var RECOVERY_IV_BYTES = 12;
-var RECOVERY_KEY_BYTES = 32;
-var RECOVERY_KEY_PATTERN = /^[A-Za-z0-9_-]{43}$/;
-function decodeRecoveryKey(value) {
-  if (value === void 0 || !RECOVERY_KEY_PATTERN.test(value)) return null;
-  try {
-    const normalized = value.replace(/-/g, "+").replace(/_/g, "/") + "=".repeat((4 - value.length % 4) % 4);
-    const binary = globalThis.atob(normalized);
-    if (binary.length !== RECOVERY_KEY_BYTES) return null;
-    return Uint8Array.from(binary, (character) => character.charCodeAt(0));
-  } catch {
-    return null;
+var IndexedDBRecoveryStore = class {
+  constructor(identity) {
+    this.identity = identity;
   }
-}
-function isEncryptedRecoveryValue(value) {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
-  const record2 = value;
-  const keys = Object.keys(record2).sort();
-  return keys.length === 5 && keys[0] === "algorithm" && keys[1] === "ciphertext" && keys[2] === "iv" && keys[3] === "keyId" && keys[4] === "schemaVersion" && record2.schemaVersion === RECOVERY_ENVELOPE_VERSION && record2.algorithm === RECOVERY_ALGORITHM && typeof record2.keyId === "string" && RECOVERY_KEY_PATTERN.test(record2.keyId) && record2.iv instanceof Uint8Array && record2.iv.byteLength === RECOVERY_IV_BYTES && record2.ciphertext instanceof Uint8Array && record2.ciphertext.byteLength > 16;
-}
-function recoveryAad(recordKey) {
-  return new TextEncoder().encode("alder-browser-recovery:v1:" + recordKey);
-}
-var IndexedDBRecoveryStore = class _IndexedDBRecoveryStore {
-  static databaseName = "alder-browser-recovery";
-  static databaseVersion = 2;
-  static objectStoreName = "state";
+  identity;
+  database = null;
   memory = new MemoryRecoveryStore();
-  key;
-  recoveryKey;
-  recoveryKeyId;
-  databasePromise = null;
-  disabled;
-  cryptoKeyPromise = null;
-  constructor(key, recoveryKey, recoveryKeyId) {
-    this.key = key || "/";
-    this.recoveryKey = decodeRecoveryKey(recoveryKey);
-    this.recoveryKeyId = recoveryKey !== void 0 && recoveryKeyId !== void 0 && RECOVERY_KEY_PATTERN.test(recoveryKeyId) ? recoveryKeyId : null;
-    this.disabled = typeof globalThis.indexedDB === "undefined" || this.recoveryKey === null || this.recoveryKeyId === null || globalThis.crypto?.subtle === void 0;
-  }
-  async load() {
-    const stored = await this.read("cursor");
-    if (isCursorState(stored)) return stored;
-    return this.memory.load();
-  }
-  async save(epoch, cursor) {
-    await this.memory.save(epoch, cursor);
-    await this.write("cursor", { epoch, cursor });
-  }
-  async clear() {
-    await this.memory.clear();
-    await this.remove("cursor");
-  }
-  async loadDraft(clientId) {
-    if (clientId !== void 0) {
-      const stored = await this.read("draft:" + clientId);
-      if (isRecoveryDraft(stored)) return cloneDraft(stored);
-      return this.memory.loadDraft(clientId);
-    }
-    const drafts = await this.listDrafts();
-    return drafts[0] ?? null;
+  open() {
+    return this.database ??= new Promise((resolve, reject) => {
+      const request = indexedDB.open("alder-document-drafts", 1);
+      request.onupgradeneeded = () => request.result.createObjectStore("drafts");
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
   }
   async listDrafts() {
-    const stored = await this.readDrafts();
-    return stored.length > 0 ? stored : this.memory.listDrafts();
+    if (typeof indexedDB === "undefined") return this.memory.listDrafts();
+    const database = await this.open();
+    return new Promise((resolve, reject) => {
+      const request = database.transaction("drafts").objectStore("drafts").openCursor();
+      const drafts = [];
+      request.onsuccess = () => {
+        const cursor = request.result;
+        if (!cursor) {
+          resolve(drafts);
+          return;
+        }
+        if (String(cursor.key).startsWith(this.identity + ":")) {
+          const draft = readRecoveryDraft(cursor.value);
+          if (draft) drafts.push(draft);
+        }
+        cursor.continue();
+      };
+      request.onerror = () => reject(request.error);
+    });
   }
   async saveDraft(draft) {
-    await this.memory.saveDraft(draft);
-    await this.write("draft:" + draft.clientId, cloneDraft(draft));
+    if (typeof indexedDB === "undefined") return this.memory.saveDraft(draft);
+    await this.write(draft.draftId, draft);
   }
-  async clearDraft(clientId) {
-    await this.memory.clearDraft(clientId);
-    await this.remove("draft:" + clientId);
+  async clearDraft(draftId) {
+    if (typeof indexedDB === "undefined") return this.memory.clearDraft(draftId);
+    await this.write(draftId, null);
   }
-  async saveBranch(branchId, draft) {
-    if (!branchId) return;
-    await this.memory.saveBranch(branchId, draft);
-    await this.write("branch:" + branchId, cloneDraft(draft));
-  }
-  async listBranches() {
-    const stored = await this.readBranches();
-    return stored.length > 0 ? stored : this.memory.listBranches();
-  }
-  async deleteBranch(branchId) {
-    await this.memory.deleteBranch(branchId);
-    await this.remove("branch:" + branchId);
-  }
-  database() {
-    if (this.disabled) return Promise.resolve(null);
-    if (this.databasePromise !== null) return this.databasePromise;
-    this.databasePromise = new Promise((resolve) => {
-      let request;
-      try {
-        request = globalThis.indexedDB.open(_IndexedDBRecoveryStore.databaseName, _IndexedDBRecoveryStore.databaseVersion);
-      } catch {
-        this.disabled = true;
-        resolve(null);
-        return;
-      }
-      request.onupgradeneeded = (event) => {
-        if (!request.result.objectStoreNames.contains(_IndexedDBRecoveryStore.objectStoreName)) {
-          request.result.createObjectStore(_IndexedDBRecoveryStore.objectStoreName);
-        }
-        if (event.oldVersion < 2) request.transaction?.objectStore(_IndexedDBRecoveryStore.objectStoreName).clear();
-      };
-      request.onsuccess = () => resolve(request.result);
-      request.onerror = () => {
-        this.disabled = true;
-        resolve(null);
-      };
-      request.onblocked = () => {
-        this.disabled = true;
-        resolve(null);
-      };
-    });
-    return this.databasePromise;
-  }
-  cryptoKey() {
-    if (this.recoveryKey === null || this.recoveryKeyId === null || this.disabled) return Promise.resolve(null);
-    if (this.cryptoKeyPromise !== null) return this.cryptoKeyPromise;
-    this.cryptoKeyPromise = globalThis.crypto.subtle.importKey("raw", this.recoveryKey, { name: "AES-GCM" }, false, ["encrypt", "decrypt"]).catch(() => {
-      this.disabled = true;
-      return null;
-    });
-    return this.cryptoKeyPromise;
-  }
-  async encrypt(name, value) {
-    if (this.disabled || this.recoveryKeyId === null) return null;
-    const key = await this.cryptoKey();
-    if (key === null) return null;
-    try {
-      const iv = globalThis.crypto.getRandomValues(new Uint8Array(RECOVERY_IV_BYTES));
-      const plaintext = new TextEncoder().encode(JSON.stringify(value));
-      const ciphertext = await globalThis.crypto.subtle.encrypt({ name: "AES-GCM", iv, additionalData: recoveryAad(this.recordKey(name)), tagLength: 128 }, key, plaintext);
-      return { schemaVersion: RECOVERY_ENVELOPE_VERSION, keyId: this.recoveryKeyId, algorithm: RECOVERY_ALGORITHM, iv, ciphertext: new Uint8Array(ciphertext) };
-    } catch {
-      this.disabled = true;
-      return null;
-    }
-  }
-  async decrypt(name, value) {
-    if (!isEncryptedRecoveryValue(value) || this.recoveryKeyId === null || value.keyId !== this.recoveryKeyId) return null;
-    const key = await this.cryptoKey();
-    if (key === null) return null;
-    try {
-      const plaintext = await globalThis.crypto.subtle.decrypt({ name: "AES-GCM", iv: value.iv, additionalData: recoveryAad(this.recordKey(name)), tagLength: 128 }, key, value.ciphertext);
-      return JSON.parse(new TextDecoder().decode(plaintext));
-    } catch {
-      return null;
-    }
-  }
-  async read(name) {
-    const database = await this.database();
-    if (database === null) return null;
-    return new Promise((resolve) => {
-      try {
-        const transaction = database.transaction(_IndexedDBRecoveryStore.objectStoreName, "readonly");
-        const request = transaction.objectStore(_IndexedDBRecoveryStore.objectStoreName).get(this.recordKey(name));
-        request.onsuccess = () => {
-          const raw = request.result;
-          void this.decrypt(name, raw).then((value) => {
-            if (raw !== void 0 && value === null) void this.remove(name).catch(() => void 0);
-            resolve(value);
-          });
-        };
-        request.onerror = () => {
-          this.disabled = true;
-          resolve(null);
-        };
-      } catch {
-        this.disabled = true;
-        resolve(null);
-      }
-    });
-  }
-  async write(name, value) {
-    const encrypted = await this.encrypt(name, value);
-    if (encrypted === null) return;
-    const database = await this.database();
-    if (database === null) return;
+  async write(draftId, draft) {
+    const database = await this.open();
     await new Promise((resolve, reject) => {
-      try {
-        const transaction = database.transaction(_IndexedDBRecoveryStore.objectStoreName, "readwrite");
-        transaction.objectStore(_IndexedDBRecoveryStore.objectStoreName).put(encrypted, this.recordKey(name));
-        transaction.oncomplete = () => resolve();
-        transaction.onabort = () => reject(transaction.error ?? new Error("IndexedDB write transaction aborted"));
-        transaction.onerror = () => reject(transaction.error ?? new Error("IndexedDB write transaction failed"));
-      } catch (error61) {
-        reject(error61);
-      }
+      const transaction = database.transaction("drafts", "readwrite");
+      const store = transaction.objectStore("drafts");
+      if (draft === null) store.delete(this.identity + ":" + draftId);
+      else store.put(draft, this.identity + ":" + draftId);
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = transaction.onabort = () => reject(transaction.error);
     });
-  }
-  async remove(name) {
-    const database = await this.database();
-    if (database === null) return;
-    await new Promise((resolve, reject) => {
-      try {
-        const transaction = database.transaction(_IndexedDBRecoveryStore.objectStoreName, "readwrite");
-        transaction.objectStore(_IndexedDBRecoveryStore.objectStoreName).delete(this.recordKey(name));
-        transaction.oncomplete = () => resolve();
-        transaction.onabort = () => reject(transaction.error ?? new Error("IndexedDB delete transaction aborted"));
-        transaction.onerror = () => reject(transaction.error ?? new Error("IndexedDB delete transaction failed"));
-      } catch (error61) {
-        reject(error61);
-      }
-    });
-  }
-  async readDrafts() {
-    const database = await this.database();
-    if (database === null) return [];
-    return new Promise((resolve, reject) => {
-      try {
-        const transaction = database.transaction(_IndexedDBRecoveryStore.objectStoreName, "readonly");
-        const store = transaction.objectStore(_IndexedDBRecoveryStore.objectStoreName);
-        const keys = store.getAllKeys();
-        const values = store.getAll();
-        transaction.oncomplete = () => {
-          const entries = keys.result.map((key, index) => ({ key, value: values.result[index] }));
-          void Promise.all(entries.map(async (entry) => {
-            if (typeof entry.key !== "string") return null;
-            const name = this.recordName(entry.key);
-            if (name === null || !name.startsWith("draft:")) return null;
-            const decoded = await this.decrypt(name, entry.value);
-            if (decoded === null) {
-              void this.remove(name).catch(() => void 0);
-              return null;
-            }
-            return isRecoveryDraft(decoded) ? cloneDraft(decoded) : null;
-          })).then((drafts) => {
-            const unique = /* @__PURE__ */ new Map();
-            for (const draft of drafts) if (draft !== null) unique.set(draft.clientId, draft);
-            resolve([...unique.values()]);
-          }).catch(() => resolve([]));
-        };
-        transaction.onabort = () => reject(transaction.error ?? new Error("IndexedDB draft inventory transaction aborted"));
-        transaction.onerror = () => reject(transaction.error ?? new Error("IndexedDB draft inventory transaction failed"));
-      } catch (error61) {
-        reject(error61);
-      }
-    });
-  }
-  async readBranches() {
-    const database = await this.database();
-    if (database === null) return [];
-    return new Promise((resolve, reject) => {
-      try {
-        const transaction = database.transaction(_IndexedDBRecoveryStore.objectStoreName, "readonly");
-        const store = transaction.objectStore(_IndexedDBRecoveryStore.objectStoreName);
-        const keys = store.getAllKeys();
-        const values = store.getAll();
-        transaction.oncomplete = () => {
-          const entries = keys.result.map((key, index) => ({ key, value: values.result[index] }));
-          void Promise.all(entries.map(async (entry) => {
-            if (typeof entry.key !== "string") return null;
-            const name = this.recordName(entry.key);
-            if (name === null || !name.startsWith("branch:")) return null;
-            const decoded = await this.decrypt(name, entry.value);
-            if (decoded === null) {
-              void this.remove(name).catch(() => void 0);
-              return null;
-            }
-            return isRecoveryDraft(decoded) ? { id: name.slice("branch:".length), draft: cloneDraft(decoded) } : null;
-          })).then((branches) => resolve(branches.filter((branch) => branch !== null))).catch(() => resolve([]));
-        };
-        transaction.onabort = () => reject(transaction.error ?? new Error("IndexedDB branch inventory transaction aborted"));
-        transaction.onerror = () => reject(transaction.error ?? new Error("IndexedDB branch inventory transaction failed"));
-      } catch (error61) {
-        reject(error61);
-      }
-    });
-  }
-  recordKey(name) {
-    return this.key + ":" + name;
-  }
-  recordName(value) {
-    const prefix = this.key + ":";
-    return value.startsWith(prefix) ? value.slice(prefix.length) : null;
   }
 };
-function cloneDraft(draft) {
-  return JSON.parse(JSON.stringify(draft));
-}
-function isCursorState(value) {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
-  const record2 = value;
-  return typeof record2.epoch === "string" && record2.epoch.length > 0 && Number.isSafeInteger(record2.cursor) && record2.cursor >= 0;
-}
-function isRecoveryDraft(value) {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
-  const record2 = value;
-  const base = record2.base;
-  if (record2.schemaVersion !== 1 || typeof record2.clientId !== "string" || record2.clientId.length === 0 || !Array.isArray(record2.changes) || typeof base !== "object" || base === null || Array.isArray(base) || !Array.isArray(base.cells)) return false;
-  const identity2 = base;
-  if (typeof identity2.epoch !== "string" || !Number.isSafeInteger(identity2.cursor) || identity2.cursor < 0 || !Number.isSafeInteger(identity2.version) || identity2.version < 0 || !Number.isSafeInteger(identity2.documentRevision) || identity2.documentRevision < 0) return false;
-  if (!identity2.cells.every((cell) => {
-    if (typeof cell !== "object" || cell === null || Array.isArray(cell)) return false;
-    const item = cell;
-    return typeof item.id === "string" && item.id.length > 0 && Number.isSafeInteger(item.revision) && item.revision >= 0 && (item.type === "code" || item.type === "markdown") && Array.isArray(item.body) && item.body.every((line) => typeof line === "string");
-  })) return false;
-  if (!record2.changes.every((change) => documentChangeSchema.safeParse(change).success)) return false;
-  const operation = record2.operation;
-  if (operation !== null && operation !== void 0) {
-    if (typeof operation !== "object" || Array.isArray(operation)) return false;
-    const item = operation;
-    if (typeof item.operationId !== "string" || item.operationId.length === 0 || item.kind !== "transaction" && item.kind !== "run" || !Number.isSafeInteger(item.commandSequence) || item.commandSequence < 1 || !Number.isSafeInteger(item.expectedDocumentRevision) || item.expectedDocumentRevision < 0) return false;
-    if (item.clientId !== void 0 && (typeof item.clientId !== "string" || item.clientId.length === 0)) return false;
-    if (item.changes !== void 0 && (!Array.isArray(item.changes) || !item.changes.every((change) => documentChangeSchema.safeParse(change).success))) return false;
-  }
-  return true;
-}
 var OPEN = 1;
 var HANDSHAKE_TIMEOUT_MS = 1e4;
 var BrowserTransport = class {
   constructor(options = {}) {
     this.options = options;
-    const sequence = options.nextCommandSequence ?? 1;
-    this.nextSequence = Number.isSafeInteger(sequence) && sequence > 0 ? sequence : 1;
     this.recoveryStore = options.recoveryStore ?? new MemoryRecoveryStore();
   }
   options;
   socket = null;
   pending = /* @__PURE__ */ new Map();
-  nextSequence;
   epochValue = null;
   cursorValue = null;
   recovered = false;
@@ -21798,9 +21380,6 @@ var BrowserTransport = class {
   get cursor() {
     return this.cursorValue;
   }
-  get commandSequence() {
-    return this.nextSequence;
-  }
   get url() {
     return this.options.url ?? notebookSocketUrl();
   }
@@ -21818,23 +21397,13 @@ var BrowserTransport = class {
     return this.connectPromise;
   }
   dispatch(command) {
-    if (this.stopped) return Promise.reject(new BrowserTransportError("transport_closed", "browser transport is closed", true));
-    if (this.pending.size >= (this.options.maxQueuedCommands ?? 1e3)) return Promise.reject(new BrowserTransportError("client_backpressure", "too many browser commands are pending", true));
-    if (!this.id || !this.leaseId || !this.csrf) return Promise.reject(new BrowserTransportError("session_credentials_missing", "browser session credentials are missing", true));
-    const sequence = this.nextSequence;
-    if (!Number.isSafeInteger(sequence) || sequence < 1) return Promise.reject(new BrowserTransportError("command_sequence_exhausted", "browser command sequence is exhausted", true));
-    const sessionEpoch = this.epochValue ?? command.sessionEpoch;
-    if (!sessionEpoch) return Promise.reject(new BrowserTransportError("not_ready", "browser session epoch is not known", true));
-    const wireCommand = {
-      ...command,
-      operationId: command.operationId,
-      clientId: this.id,
-      commandSequence: sequence,
-      sessionEpoch
-    };
-    this.nextSequence = sequence + 1;
+    if (this.stopped || !this.recovered || this.socket?.readyState !== OPEN) return Promise.reject(new BrowserTransportError("transport_closed", "Reconnect before sending this request.", true));
+    if (this.pending.size >= (this.options.maxQueuedCommands ?? 100)) return Promise.reject(new BrowserTransportError("client_backpressure", "Too many requests are pending.", true));
+    if (this.pending.has(command.requestId)) return Promise.reject(new BrowserTransportError("request_pending", "This request is already pending.", true));
+    if (command.sessionEpoch !== this.epochValue) return Promise.reject(new BrowserTransportError("session_replaced", "This request belongs to a previous backend session and cannot be repeated.", true));
+    const wireCommand = { ...command, clientId: this.id };
     return new Promise((resolve, reject) => {
-      this.pending.set(sequence, { command: wireCommand, resolve, reject, sentGeneration: -1 });
+      this.pending.set(command.requestId, { command: wireCommand, resolve, reject, sent: false });
       this.flush();
     });
   }
@@ -21864,7 +21433,7 @@ var BrowserTransport = class {
     const error61 = new BrowserTransportError("transport_closed", "browser transport is closed");
     this.rejectConnect?.(error61);
     this.clearConnectPromise();
-    for (const pending of this.pending.values()) pending.reject(new BrowserTransportError(error61.code, error61.message, pending.sentGeneration < 0));
+    for (const pending of this.pending.values()) pending.reject(new BrowserTransportError(error61.code, error61.message, !pending.sent));
     this.pending.clear();
     this.options.onState?.("closed", error61);
   }
@@ -21893,7 +21462,7 @@ var BrowserTransport = class {
     socket.onopen = () => {
       if (!this.isCurrent(attempt)) return;
       try {
-        socket.send(JSON.stringify({ type: "connect", protocolVersion: HOST_CLIENT_PROTOCOL_VERSION, leaseId: this.leaseId, clientId: this.id, csrf: this.csrf, epoch: this.epochValue, cursor: this.cursorValue }));
+        socket.send(JSON.stringify({ type: "connect", protocolVersion: HOST_CLIENT_PROTOCOL_VERSION, leaseId: this.leaseId, clientId: this.id, csrf: this.csrf }));
         this.options.onState?.("recovering");
       } catch (error61) {
         this.handleAttemptFailure(generation, asError(error61, "browser WebSocket handshake failed"));
@@ -21901,12 +21470,8 @@ var BrowserTransport = class {
     };
     socket.onmessage = (event) => {
       if (!this.isCurrent(attempt)) return;
-      if (this.recovered) {
-        attempt.receiveChain = this.receive(event.data).catch((error61) => this.handleAttemptFailure(generation, asError(error61, "invalid host message")));
-        return;
-      }
       attempt.receiveChain = attempt.receiveChain.then(async () => {
-        if (this.isCurrent(attempt)) await this.receive(event.data);
+        if (this.isCurrent(attempt)) await this.receive(event.data, attempt);
       }).catch((error61) => this.handleAttemptFailure(generation, asError(error61, "invalid host message")));
     };
     socket.onerror = () => {
@@ -21930,6 +21495,9 @@ var BrowserTransport = class {
     this.recovered = false;
     this.clearHeartbeat();
     if (socket !== null) socket.close();
+    const interrupted = new BrowserTransportError("request_uncertain", "The connection was interrupted. The request may have completed; it has not been sent again.");
+    for (const pending of this.pending.values()) pending.reject(interrupted);
+    this.pending.clear();
     this.options.onState?.("closed", error61);
     if (this.options.reconnect !== false) {
       this.scheduleReconnect();
@@ -21964,7 +21532,7 @@ var BrowserTransport = class {
     this.resolveConnect = null;
     this.rejectConnect = null;
   }
-  async receive(raw) {
+  async receive(raw, attempt) {
     if (typeof raw !== "string" && !(raw instanceof Uint8Array)) throw new BrowserTransportError("invalid_server_message", "host message is not a JSON frame");
     const message2 = decodeJsonFrame(raw, SNAPSHOT_ENVELOPE_LIMIT);
     if (!this.recovered && message2.type !== "recovery") throw new BrowserTransportError("host_identity_mismatch", "host sent data before proving its process identity");
@@ -21972,6 +21540,7 @@ var BrowserTransport = class {
       if (message2.protocolVersion !== HOST_CLIENT_PROTOCOL_VERSION) throw new BrowserTransportError("protocol_mismatch", "host and browser protocol versions differ");
       if (this.continuityProof && message2.continuityProof !== this.continuityProof) throw new BrowserTransportError("host_identity_mismatch", "browser reconnected to a different host process");
       const recovery = await this.loadRecovery(message2.recovery);
+      if (!this.isCurrent(attempt)) return;
       await this.applyRecovery(recovery);
       this.recovered = true;
       if (this.attempt !== null) clearTimeout(this.attempt.handshakeTimer);
@@ -21989,30 +21558,24 @@ var BrowserTransport = class {
       if (event.epoch !== this.epochValue || event.cursor <= (this.cursorValue ?? -1)) return;
       this.options.onEvent?.(event);
       this.cursorValue = event.cursor;
-      await this.recoveryStore.save(event.epoch, event.cursor);
       return;
     }
     if (message2.type === "commandResult") {
-      if (!Number.isSafeInteger(message2.sequence)) throw new BrowserTransportError("invalid_server_message", "command result has no sequence");
-      const sequence = message2.sequence;
-      const pending = this.pending.get(sequence);
-      if (!pending) return;
-      const admission = commandAdmissionSchema.safeParse(message2.result);
-      if (!admission.success) throw new BrowserTransportError("invalid_server_message", "invalid command admission");
-      this.pending.delete(sequence);
-      this.nextSequence = Math.max(this.nextSequence, admission.data.nextCommandSequence);
-      pending.resolve(admission.data);
+      const result = commandResultSchema.parse(message2.result);
+      if (message2.requestId !== result.requestId) throw new BrowserTransportError("invalid_server_message", "Request result identity differs.");
+      const pending = this.pending.get(result.requestId);
+      if (pending) {
+        this.pending.delete(result.requestId);
+        pending.resolve(result);
+      }
       return;
     }
     if (message2.type === "error") {
-      const sequence = Number.isSafeInteger(message2.sequence) ? message2.sequence : null;
       const detail = asErrorDetail(message2.error);
-      if (sequence === null) throw new BrowserTransportError(detail.code, detail.message);
-      const pending = this.pending.get(sequence);
-      if (pending) {
-        this.pending.delete(sequence);
-        pending.reject(new BrowserTransportError(detail.code, detail.message, message2.definitive === true));
-      }
+      const pending = typeof message2.requestId === "string" ? this.pending.get(message2.requestId) : void 0;
+      if (!pending) throw new BrowserTransportError(detail.code, detail.message);
+      this.pending.delete(message2.requestId);
+      pending.reject(new BrowserTransportError(detail.code, detail.message, message2.definitive === true));
       return;
     }
     if (message2.type === "heartbeat" || message2.type === "pong") return;
@@ -22077,42 +21640,19 @@ var BrowserTransport = class {
     }
   }
   async applyRecovery(recovery) {
-    const priorEpoch = this.epochValue;
-    if (recovery.kind === "snapshot") {
-      this.epochValue = recovery.epoch;
-      this.cursorValue = recovery.cursor;
-      if (priorEpoch !== null && priorEpoch !== recovery.epoch) {
-        const error61 = new BrowserTransportError("session_replaced", "notebook session was replaced while reconnecting");
-        for (const pending of this.pending.values()) pending.reject(error61);
-        this.pending.clear();
-      }
-      this.options.onSnapshot?.(recovery.snapshot);
-      await this.recoveryStore.save(recovery.epoch, recovery.cursor);
-      return;
-    }
-    if (this.epochValue !== null && recovery.epoch !== this.epochValue) throw new BrowserTransportError("recovery_base_mismatch", "replay recovery belongs to another session epoch");
-    const stored = this.options.resumeFromStore === false ? null : await this.recoveryStore.load();
-    if (stored !== null && (stored.epoch !== recovery.epoch || stored.cursor > recovery.cursor)) throw new BrowserTransportError("recovery_base_mismatch", "stored browser recovery cursor does not match host replay");
     this.epochValue = recovery.epoch;
-    let cursor = this.cursorValue ?? -1;
-    for (const event of recovery.events) {
-      if (event.epoch !== this.epochValue || event.cursor <= cursor) continue;
-      this.options.onEvent?.(event);
-      cursor = event.cursor;
-      this.cursorValue = cursor;
-    }
-    this.cursorValue = Math.max(cursor, recovery.cursor);
-    await this.recoveryStore.save(this.epochValue, this.cursorValue);
+    this.cursorValue = recovery.cursor;
+    this.options.onSnapshot?.(recovery.snapshot);
   }
   flush() {
     if (!this.recovered || this.socket?.readyState !== OPEN) return;
-    for (const [sequence, pending] of this.pending) {
-      if (pending.sentGeneration === this.generation) continue;
-      pending.sentGeneration = this.generation;
+    for (const [requestId, pending] of this.pending) {
+      if (pending.sent) continue;
+      pending.sent = true;
       try {
-        this.socket.send(JSON.stringify({ type: "command", sequence, command: encodeHostCommandWire(pending.command) }));
+        this.socket.send(JSON.stringify({ type: "command", requestId, command: encodeHostCommandWire(pending.command) }));
       } catch (error61) {
-        this.handleAttemptFailure(this.generation, asError(error61, "browser command send failed"));
+        this.handleAttemptFailure(this.generation, asError(error61, "Request could not be sent."));
         return;
       }
     }
@@ -22155,40 +21695,39 @@ var BrowserNotebookClient = class {
         if (state === "open" && this.recoveryAttempted) void this.refreshRecoveryState();
       }
     });
-    this.draftOwnershipReady = this.holdDraftOwnership();
   }
   options;
   transport;
   documentValue = null;
   listeners = /* @__PURE__ */ new Set();
   runs = /* @__PURE__ */ new Map();
-  operations = /* @__PURE__ */ new Map();
-  operationWaiters = /* @__PURE__ */ new Map();
-  sourceCommitWaiters = /* @__PURE__ */ new Map();
   sourceQueue = Promise.resolve();
   frame;
   now;
   artifactCache = /* @__PURE__ */ new Map();
-  recoveryStateValue = { status: "none", local: null, branches: [], keptBranches: [], foreignDrafts: 0, pending: false, corruption: null, persistenceError: null };
+  recoveryStateValue = { status: "none", local: null, branches: [], drafts: [], pending: false, uncertainRun: false, corruption: null, persistenceError: null };
   recoveryListeners = /* @__PURE__ */ new Set();
-  draftOperation = null;
+  activeRuns = /* @__PURE__ */ new Map();
+  uncertainRun = null;
+  pendingRun = null;
+  draftSubmission = null;
   draftPersistence = Promise.resolve();
   draftGeneration = 0;
   draftPersistenceError = null;
   recoveryAttempted = false;
-  releaseDraftOwnership = null;
   browserRecoveryInspected = false;
   hostRecoveryInspected = false;
-  keptRecoveryInspected = false;
   startupActivated = false;
-  draftOwnershipReady = Promise.resolve();
+  get draftId() {
+    return this.options.draftId ?? this.transport.id;
+  }
   get document() {
     return this.documentValue;
   }
   async connect() {
     const recovery = await this.transport.connect();
     if (!this.documentValue && recovery.kind === "snapshot") this.receiveSnapshot(recovery.snapshot);
-    if (!this.documentValue) throw new BrowserTransportError("recovery_requires_snapshot", "browser has no base snapshot for replay recovery");
+    if (!this.documentValue) throw new BrowserTransportError("recovery_requires_snapshot", "Notebook snapshot has not arrived.");
     if (!this.recoveryAttempted) this.recoveryAttempted = true;
     if (!this.browserRecoveryInspected) {
       try {
@@ -22201,8 +21740,7 @@ var BrowserNotebookClient = class {
       }
     }
     if (!this.hostRecoveryInspected) this.hostRecoveryInspected = await this.refreshRecoveryState();
-    if (!this.keptRecoveryInspected) this.keptRecoveryInspected = await this.refreshKeptBranches();
-    await this.activateStartupIfSafe();
+    void this.activateStartupIfSafe();
     return this.documentValue;
   }
   async discardAndClose() {
@@ -22215,13 +21753,8 @@ var BrowserNotebookClient = class {
     this.finishClose();
   }
   finishClose() {
-    this.rejectOperationWaiters(new BrowserTransportError("transport_closed", "browser transport is closed"));
-    this.rejectSourceCommitWaiters(new BrowserTransportError("transport_closed", "browser transport is closed"));
-    this.operations.clear();
     this.runs.clear();
     this.artifactCache.clear();
-    this.releaseDraftOwnership?.();
-    this.releaseDraftOwnership = null;
   }
   subscribe(listener) {
     this.listeners.add(listener);
@@ -22242,72 +21775,32 @@ var BrowserNotebookClient = class {
     await this.draftPersistence;
     if (this.draftPersistenceError) throw this.draftPersistenceError;
   }
-  async keepAsRecovery() {
+  async restoreSavedDraft(draftId) {
+    const store = this.draftStore();
+    const draft = this.recoveryStateValue.drafts.find((candidate) => candidate.draftId === draftId);
+    if (!draft) return;
     await this.beginDraftMutation();
-    const store = this.draftStore();
-    const draft = this.documentValue?.recoveryDraft(this.transport.id, null) ?? await store?.loadDraft(this.transport.id).catch(() => null) ?? null;
-    if (draft && store) {
-      await store.saveBranch("browser-" + operationId("branch"), draft);
-      await store.clearDraft(this.transport.id);
-    }
-    this.draftGeneration += 1;
+    const current = this.documentValue?.recoveryDraft(this.draftId, this.draftSubmission, this.pendingRun);
+    if (current) await store.saveDraft({ ...current, draftId: operationId("saved") });
     this.resetAuthoritativeDocument();
-    await this.refreshKeptBranches();
-    this.recoveryStateValue = { ...this.recoveryStateValue, status: "kept", local: null };
-    this.notifyRecovery();
-    this.notify();
-    await this.activateStartupIfSafe();
+    this.restoreDraft(draft);
+    await this.flushDraftPersistence();
+    if (draftId !== this.draftId) await store.clearDraft(draftId);
+    await this.refreshSavedDrafts();
   }
-  async restoreKeptRecovery(branchId) {
-    await this.beginDraftMutation();
-    const store = this.draftStore();
-    const branch = this.recoveryStateValue.keptBranches.find((candidate) => candidate.id === branchId);
-    if (!store || !branch) return;
-    const active = this.documentValue?.recoveryDraft(this.transport.id, null) ?? null;
-    if (active) await store.saveBranch("browser-" + operationId("swap"), active);
-    let recovered = branch.draft;
-    let acknowledgedRevision = null;
-    if (recovered.operation) {
-      try {
-        const owner = recovered.operation.clientId ?? recovered.clientId;
-        const queried = await this.query({ type: "operation", operationId: recovered.operation.operationId, clientId: owner });
-        if (isOperation2(queried.result) && queried.result.clientId === owner && queried.result.status === "done") {
-          acknowledgedRevision = recovered.operation.expectedDocumentRevision;
-          recovered = this.reconcileAcknowledgedCreations(recovered, queried.result);
-        }
-      } catch {
-      }
-    }
-    this.draftGeneration += 1;
-    this.resetAuthoritativeDocument();
-    const conflict = acknowledgedRevision === null ? !this.recoveryBaseMatches(recovered) : this.requireDocument().snapshot.documentRevision > acknowledgedRevision + 1;
-    this.requireDocument().restoreDraft(recovered, conflict);
-    if (!conflict) this.requireDocument().rebaseDraftToSnapshot();
-    const local = this.requireDocument().recoveryDraft(this.transport.id, null);
-    if (local) await store.saveDraft(local);
-    else await store.clearDraft(this.transport.id);
-    await store.deleteBranch(branchId);
-    await this.refreshKeptBranches();
-    this.recoveryStateValue = { ...this.recoveryStateValue, status: local === null ? "none" : conflict ? "conflict" : "restored", local };
-    this.notifyRecovery();
-    this.notify();
-    await this.activateStartupIfSafe();
-  }
-  async discardKeptRecovery(branchId) {
-    const store = this.draftStore();
-    if (!store) return;
-    await store.deleteBranch(branchId);
-    await this.refreshKeptBranches();
-    await this.activateStartupIfSafe();
+  async discardSavedDraft(draftId) {
+    await this.draftStore().clearDraft(draftId);
+    await this.refreshSavedDrafts();
   }
   async discardRecovery() {
     await this.beginDraftMutation();
-    await this.draftStore()?.clearDraft(this.transport.id);
+    await this.draftStore().clearDraft(this.draftId);
     this.draftGeneration += 1;
     this.resetAuthoritativeDocument();
     this.recoveryStateValue = { ...this.recoveryStateValue, status: "none", local: null };
     this.notifyRecovery();
     this.notify();
+    this.queueDraftPersistence();
     await this.activateStartupIfSafe();
   }
   async reloadAuthoritativeRecovery() {
@@ -22323,11 +21816,6 @@ var BrowserNotebookClient = class {
       throw new BrowserTransportError("document_conflict", "Authoritative reload was refused because the host document has unsaved changes", true);
     }
     await this.discardRecovery();
-  }
-  cancelRecovery() {
-    if (this.recoveryStateValue.local === null) return;
-    this.recoveryStateValue = { ...this.recoveryStateValue, status: this.recoveryStateValue.status === "resubmitting" ? "resubmitting" : "conflict" };
-    this.notifyRecovery();
   }
   createCell(afterKey, type = "code", body = []) {
     const document2 = this.requireDocument();
@@ -22352,7 +21840,7 @@ var BrowserNotebookClient = class {
     if (document2.hasSourceConflicts) throw new BrowserTransportError("source_conflict", "resolve deleted or conflicting local source before continuing");
     const command = document2.buildTransactionCommand(operationId("transaction"), this.transport.id);
     if (command === null) return null;
-    return this.dispatchSource(command, true);
+    return this.dispatchSource(command);
   }
   async runCell(key, input2) {
     const id = operationId("run");
@@ -22363,10 +21851,10 @@ var BrowserNotebookClient = class {
       handlerTimestamp: this.now()
     });
     try {
-      return await this.withSourceLock(() => {
-        const command = this.requireDocument().buildRunCommand({ operationId: id, clientId: this.transport.id, scope: "cell", targetKey: key });
-        return this.dispatchSource(command, false);
-      });
+      const { completed } = await this.withSourceLock(() => this.startRun(
+        this.requireDocument().buildRunCommand({ requestId: id, clientId: this.transport.id, scope: "cell", targetKey: key })
+      ));
+      return await completed;
     } catch (error61) {
       this.runs.delete(id);
       throw error61;
@@ -22375,10 +21863,10 @@ var BrowserNotebookClient = class {
   async runAll(scope = "all", input2) {
     const id = operationId("run");
     void input2;
-    return this.withSourceLock(() => {
-      const command = this.requireDocument().buildRunCommand({ operationId: id, clientId: this.transport.id, scope });
-      return this.dispatchSource(command, false);
-    });
+    const { completed } = await this.withSourceLock(() => this.startRun(
+      this.requireDocument().buildRunCommand({ requestId: id, clientId: this.transport.id, scope })
+    ));
+    return completed;
   }
   async interrupt(runId) {
     return this.dispatch({ type: "interrupt", ...this.base("interrupt", false), ...runId ? { runId } : {} });
@@ -22428,7 +21916,7 @@ var BrowserNotebookClient = class {
         ...this.base("delete"),
         changes: [{ type: "delete", cell: { cellId: cell.id }, expectedRevision: cell.serverRevision }]
       };
-      return this.dispatchSource(command, true);
+      return this.dispatchSource(command);
     });
   }
   async restoreDeletedCell(key) {
@@ -22459,7 +21947,7 @@ var BrowserNotebookClient = class {
         ...this.base("move"),
         changes: [{ type: "move", cell: { cellId: cell.id }, after: after ? { cellId: after } : null }]
       };
-      return this.dispatchSource(command, true);
+      return this.dispatchSource(command);
     });
   }
   async setDisabled(key, disabled) {
@@ -22471,7 +21959,7 @@ var BrowserNotebookClient = class {
         ...this.base("options"),
         changes: [{ type: "options", cell: { cellId: cell.id }, expectedRevision: cell.serverRevision, patch: { disabled } }]
       };
-      return this.dispatchSource(command, true);
+      return this.dispatchSource(command);
     });
   }
   async setWidget(name, path, update, source = "editor") {
@@ -22582,10 +22070,9 @@ var BrowserNotebookClient = class {
     return hostQueryResultSchema.parse(decodeHostQueryResultWire(query, value));
   }
   async activateStartupIfSafe() {
-    if (this.startupActivated) return;
+    if (this.startupActivated || !this.browserRecoveryInspected || !this.hostRecoveryInspected) return;
     const state = this.recoveryStateValue;
-    if (!this.browserRecoveryInspected || !this.hostRecoveryInspected || !this.keptRecoveryInspected) return;
-    if (state.local !== null || state.keptBranches.length > 0 && state.status !== "kept" || state.foreignDrafts > 0 || state.branches.some((branch) => branch.state !== "clean") || state.pending || state.corruption !== null) return;
+    if (this.pendingRun || state.local || state.drafts.length || state.branches.some((branch) => branch.state !== "clean") || state.pending || state.corruption) return;
     const snapshot = this.requireDocument().snapshot;
     if (snapshot.runtime.startupActivated) {
       this.startupActivated = true;
@@ -22594,65 +22081,13 @@ var BrowserNotebookClient = class {
     if (!snapshot.runtime.documentReady || snapshot.runtime.rEnvironment === null) return;
     this.startupActivated = true;
     try {
-      await this.dispatchSettled({ type: "run", ...this.base("startup"), scope: "all", startup: true });
+      await this.dispatch({ type: "run", ...this.base("startup"), scope: "all", startup: true });
     } catch (error61) {
-      if (error61 instanceof BrowserTransportError && error61.code === "startup_already_activated") return;
-      this.startupActivated = false;
-      throw error61;
+      if (error61 instanceof BrowserTransportError && error61.definitive && error61.code !== "startup_already_activated") this.startupActivated = false;
     }
   }
-  awaitOperation(id, timeoutMs = 12e4) {
-    const current = this.operations.get(id);
-    if (current && operationSettled(current)) return Promise.resolve(current);
-    return new Promise((resolve, reject) => {
-      const waiter = {
-        resolve,
-        reject,
-        timer: globalThis.setTimeout(() => {
-          this.removeOperationWaiter(id, waiter);
-          reject(new BrowserTransportError("operation_timeout", `operation ${id} did not settle in time`));
-        }, timeoutMs)
-      };
-      const waiters = this.operationWaiters.get(id) ?? /* @__PURE__ */ new Set();
-      waiters.add(waiter);
-      this.operationWaiters.set(id, waiters);
-    });
-  }
-  holdDraftOwnership() {
-    const locks = typeof navigator === "undefined" ? void 0 : navigator.locks;
-    if (!locks) return Promise.resolve();
-    return new Promise((ready) => {
-      void locks.request("alder-draft:" + this.transport.id, async () => {
-        await new Promise((release) => {
-          this.releaseDraftOwnership = release;
-          ready();
-        });
-      }).catch(() => ready());
-    });
-  }
-  tryClaimDraftOwnership(clientId) {
-    const locks = typeof navigator === "undefined" ? void 0 : navigator.locks;
-    if (!locks) return Promise.resolve(null);
-    return new Promise((resolve) => {
-      let settled = false;
-      void locks.request("alder-draft:" + clientId, { ifAvailable: true }, async (lock) => {
-        if (lock === null) {
-          settled = true;
-          resolve(null);
-          return;
-        }
-        await new Promise((release) => {
-          settled = true;
-          resolve(release);
-        });
-      }).catch(() => {
-        if (!settled) resolve(null);
-      });
-    });
-  }
   draftStore() {
-    const store = this.transport.recoveryStore;
-    return isBrowserDraftStore(store) ? store : null;
+    return this.transport.recoveryStore;
   }
   queueDraftPersistence() {
     const store = this.draftStore();
@@ -22660,9 +22095,9 @@ var BrowserNotebookClient = class {
     const generation = this.draftGeneration;
     this.draftPersistence = this.draftPersistence.catch(() => void 0).then(async () => {
       if (generation !== this.draftGeneration) return;
-      const draft = this.documentValue?.recoveryDraft(this.transport.id, this.draftOperation) ?? null;
+      const draft = this.documentValue?.recoveryDraft(this.draftId, this.draftSubmission, this.pendingRun) ?? null;
       if (draft) await store.saveDraft(draft);
-      else await store.clearDraft(this.transport.id);
+      else await store.clearDraft(this.draftId);
       this.draftPersistenceError = null;
       if (this.recoveryStateValue.persistenceError !== null) {
         this.recoveryStateValue = { ...this.recoveryStateValue, persistenceError: null };
@@ -22679,185 +22114,35 @@ var BrowserNotebookClient = class {
     await this.draftPersistence.catch(() => void 0);
   }
   async restoreBrowserRecovery() {
-    const store = this.draftStore();
-    if (!store || !this.documentValue) throw new BrowserTransportError("recovery_store_unavailable", "browser recovery store is unavailable");
-    await this.draftOwnershipReady;
-    const drafts = await store.listDrafts();
-    let draft = drafts.find((candidate) => candidate.clientId === this.transport.id) ?? null;
-    let selectedOriginalId = this.transport.id;
-    if (draft === null) {
-      for (const candidate of drafts) {
-        const release = await this.tryClaimDraftOwnership(candidate.clientId);
-        if (release === null) continue;
-        try {
-          selectedOriginalId = candidate.clientId;
-          draft = { ...candidate, clientId: this.transport.id };
-          await store.saveDraft(draft);
-          await store.clearDraft(candidate.clientId);
-        } finally {
-          release();
-        }
-        break;
-      }
+    const drafts = await this.draftStore().listDrafts();
+    const own2 = drafts.find((draft) => draft.draftId === this.draftId);
+    const selected = own2 ?? (this.options.restoreSingleDraft && drafts.length === 1 ? drafts[0] : void 0);
+    this.recoveryStateValue = { ...this.recoveryStateValue, drafts: drafts.filter((draft) => draft !== selected) };
+    if (selected) {
+      this.restoreDraft(selected);
+      await this.flushDraftPersistence();
+      if (selected.draftId !== this.draftId) await this.draftStore().clearDraft(selected.draftId);
     }
-    if (!draft) {
-      this.recoveryStateValue = { ...this.recoveryStateValue, foreignDrafts: drafts.length };
-      this.notifyRecovery();
-      return;
-    }
-    for (const candidate of drafts) {
-      if (candidate.clientId === selectedOriginalId || candidate.clientId === this.transport.id) continue;
-      const release = await this.tryClaimDraftOwnership(candidate.clientId);
-      if (release === null) continue;
-      try {
-        await store.saveBranch("browser-" + operationId("orphan"), candidate);
-        await store.clearDraft(candidate.clientId);
-      } finally {
-        release();
-      }
-    }
-    const remainingDrafts = await store.listDrafts();
-    this.recoveryStateValue = { ...this.recoveryStateValue, foreignDrafts: remainingDrafts.filter((candidate) => candidate.clientId !== this.transport.id).length };
     this.notifyRecovery();
-    let receipt = null;
-    if (draft.operation) {
-      try {
-        const receiptClientId = draft.operation.clientId ?? selectedOriginalId;
-        const queryResult = await this.query({ type: "operation", operationId: draft.operation.operationId, clientId: receiptClientId });
-        receipt = isOperation2(queryResult.result) && queryResult.result.clientId === receiptClientId ? queryResult.result : null;
-      } catch (error61) {
-        if (!(error61 instanceof BrowserTransportError) || error61.code !== "query_not_found") {
-          await this.restoreLocalDraft(store, draft, true, "conflict");
-          return;
-        }
-      }
-      if (receipt !== null) {
-        if (receipt.status === "done") {
-          const submitted = draft.operation.changes;
-          if (submitted !== void 0 && sameChanges(draft.changes, submitted)) {
-            await store.clearDraft(draft.clientId);
-            this.resetAuthoritativeDocument();
-            this.recoveryStateValue = { ...this.recoveryStateValue, status: "none", local: null };
-            this.notifyRecovery();
-            this.notify();
-            return;
-          }
-          this.resetAuthoritativeDocument();
-          const recovered = this.reconcileAcknowledgedCreations(draft, receipt);
-          const conflict2 = submitted === void 0 || this.requireDocument().snapshot.documentRevision > draft.operation.expectedDocumentRevision + 1;
-          await this.restoreLocalDraft(store, recovered, conflict2, conflict2 ? "conflict" : "restored");
-          return;
-        }
-        await this.restoreLocalDraft(store, draft, true, "conflict");
-        return;
-      }
-    }
-    const conflict = !this.recoveryBaseMatches(draft);
-    await this.restoreLocalDraft(store, draft, conflict, conflict ? "conflict" : draft.operation ? "resubmitting" : "restored");
-    if (draft.operation && !conflict) await this.resubmitRecoveredDraft();
   }
-  reconcileAcknowledgedCreations(draft, receipt) {
-    const result = isRecord2(receipt.result) ? receipt.result : {};
-    const created = isRecord2(result.created) ? result.created : {};
-    const submitted = draft.operation?.changes ?? [];
-    const changes = [];
-    for (const change of draft.changes) {
-      if (change.type === "create") {
-        const cellId = created[change.creationId];
-        if (typeof cellId === "string") {
-          changes.push({
-            type: "edit",
-            cell: { cellId },
-            body: [...change.body],
-            cellType: change.cellType,
-            expectedRevision: this.requireDocument().cell(cellId)?.serverRevision ?? 0
-          });
-        } else {
-          changes.push(cloneChange2(change));
-        }
-        continue;
-      }
-      if (submitted.some((sent) => sameChanges([change], [sent]))) continue;
-      changes.push(cloneChange2(change));
-    }
-    return { ...draft, changes, operation: null };
-  }
-  async restoreLocalDraft(store, draft, conflict, status) {
-    this.requireDocument().restoreDraft(draft, conflict);
-    if (!conflict) this.requireDocument().rebaseDraftToSnapshot();
-    const local = this.requireDocument().recoveryDraft(this.transport.id, null);
-    if (local) await store.saveDraft(local);
-    else await store.clearDraft(this.transport.id);
-    if (draft.clientId !== this.transport.id) await store.clearDraft(draft.clientId);
-    this.recoveryStateValue = { ...this.recoveryStateValue, status: local === null ? "none" : status, local };
+  restoreDraft(draft) {
+    const document2 = this.requireDocument();
+    if (draft.pendingRun && !this.activeRuns.has(draft.pendingRun.requestId)) this.uncertainRun ??= draft.pendingRun;
+    this.pendingRun ??= draft.pendingRun;
+    const reconciled = reconcileDraft(draft, document2.snapshot);
+    if (reconciled.draft.changes.length) document2.restoreDraft(reconciled.draft, reconciled.conflict);
+    if (!reconciled.conflict) document2.rebaseDraftToSnapshot();
+    this.draftSubmission = null;
+    const local = document2.recoveryDraft(this.draftId);
+    this.recoveryStateValue = { ...this.recoveryStateValue, local, uncertainRun: this.uncertainRun !== null, status: local ? reconciled.conflict ? "conflict" : "restored" : "none" };
+    this.queueDraftPersistence();
     this.notifyRecovery();
     this.notify();
-  }
-  recoveryBaseMatches(draft) {
-    const snapshot = this.requireDocument().snapshot;
-    if (snapshot.epoch !== draft.base.epoch || snapshot.documentRevision !== draft.base.documentRevision || snapshot.cells.length !== draft.base.cells.length) return false;
-    return draft.base.cells.every((baseCell, index) => {
-      const current = snapshot.cells[index];
-      return current !== void 0 && current.id === baseCell.id && current.revision === baseCell.revision && current.type === baseCell.type && sameLines2(current.body, baseCell.body);
-    });
-  }
-  async resubmitRecoveredDraft() {
-    const document2 = this.requireDocument();
-    let command;
-    try {
-      command = document2.buildTransactionCommand(operationId("recovery"), this.transport.id);
-    } catch {
-      this.recoveryStateValue = { ...this.recoveryStateValue, status: "conflict" };
-      this.notifyRecovery();
-      return;
-    }
-    if (command === null) {
-      await this.draftStore()?.clearDraft(this.transport.id);
-      this.recoveryStateValue = { ...this.recoveryStateValue, status: "none", local: null };
-      this.notifyRecovery();
-      return;
-    }
-    const submitted = { ...command, commandSequence: this.transport.commandSequence };
-    this.draftOperation = {
-      operationId: command.operationId,
-      clientId: this.transport.id,
-      kind: "transaction",
-      commandSequence: this.transport.commandSequence,
-      expectedDocumentRevision: command.expectedDocumentRevision,
-      changes: document2.recoveryDraft(this.transport.id, null)?.changes ?? []
-    };
-    document2.noteSubmitted(command.operationId, submitted);
-    this.queueDraftPersistence();
-    let accepted;
-    try {
-      accepted = await this.dispatch(command);
-    } catch (error61) {
-      this.handleSourceFailure(command, error61);
-      return;
-    }
-    this.recoveryStateValue = { ...this.recoveryStateValue, status: "resubmitting", local: document2.recoveryDraft(this.transport.id, this.draftOperation) };
-    this.notifyRecovery();
-    void this.finishRecoveredDraft(command, accepted);
-  }
-  async finishRecoveredDraft(command, accepted) {
-    const document2 = this.requireDocument();
-    try {
-      const operation = operationSettled(accepted.operation) ? accepted.operation : await this.awaitOperation(accepted.operation.id);
-      if (operation.status === "error" || operation.status === "cancelled") throw new BrowserTransportError(operation.error?.code ?? "recovery_failed", operation.error?.message ?? "recovered source could not be committed", true);
-      document2.acknowledge(settledCommandResult(accepted, operation));
-      this.draftOperation = null;
-      this.queueDraftPersistence();
-      this.recoveryStateValue = { ...this.recoveryStateValue, status: "none", local: null };
-      this.notifyRecovery();
-      this.notify(void 0, sourceCellKeys(command, document2));
-    } catch (error61) {
-      this.handleSourceFailure(command, error61);
-    }
   }
   resetAuthoritativeDocument() {
     if (!this.documentValue) return;
     this.documentValue = new BrowserDocument(this.documentValue.snapshot);
-    this.draftOperation = null;
+    this.draftSubmission = null;
   }
   async refreshRecoveryState() {
     try {
@@ -22876,143 +22161,102 @@ var BrowserNotebookClient = class {
       return false;
     }
   }
-  async refreshKeptBranches() {
-    const store = this.draftStore();
-    if (!store) return false;
-    try {
-      const keptBranches = await store.listBranches();
-      this.recoveryStateValue = { ...this.recoveryStateValue, keptBranches };
-      this.notifyRecovery();
-      return true;
-    } catch {
-      return false;
-    }
+  async refreshSavedDrafts() {
+    this.recoveryStateValue = { ...this.recoveryStateValue, drafts: (await this.draftStore().listDrafts()).filter((draft) => draft.draftId !== this.draftId) };
+    this.notifyRecovery();
   }
   notifyRecovery() {
     for (const listener of this.recoveryListeners) listener(this.recoveryStateValue);
   }
-  async dispatchSource(command, waitForSettlement) {
-    if (this.draftOperation !== null) {
-      throw new BrowserTransportError("recovery_receipt_pending", "source changes are blocked until the previous operation receipt is reconciled");
-    }
+  startRun(command) {
+    return { completed: command.changes?.length ? this.dispatchSource(command) : this.dispatch(command) };
+  }
+  async dispatchSource(command) {
     const document2 = this.requireDocument();
-    const submitted = { ...command, commandSequence: this.transport.commandSequence };
-    const commandChanges = command.changes ?? [];
-    document2.stageRecoveryIntent(commandChanges);
-    const draftOperation = {
-      operationId: command.operationId,
-      clientId: this.transport.id,
-      kind: command.type,
-      commandSequence: this.transport.commandSequence,
-      expectedDocumentRevision: command.expectedDocumentRevision,
-      changes: commandChanges.map((change) => cloneChange2(change))
-    };
-    this.draftOperation = draftOperation;
+    const changes = command.changes ?? [];
+    document2.stageRecoveryIntent(changes);
+    this.draftSubmission = { requestId: command.requestId, kind: command.type, changes: changes.map((change) => structuredClone(change)) };
+    document2.noteSubmitted(command.requestId, command);
     this.queueDraftPersistence();
-    document2.noteSubmitted(command.operationId, submitted);
-    const sourceCommit = command.type === "run" && (command.changes?.length ?? 0) > 0 ? this.awaitSourceCommit(command.operationId) : null;
     try {
-      const accepted = await this.dispatch(command);
-      if (sourceCommit !== null) {
-        await sourceCommit;
-        this.draftOperation = null;
-        this.queueDraftPersistence();
-        this.notify(void 0, sourceCellKeys(command, document2));
-        return { ...accepted, documentRevision: document2.snapshot.documentRevision, version: document2.snapshot.version, cursor: document2.cursor };
-      }
-      const operation = waitForSettlement && !operationSettled(accepted.operation) ? await this.awaitOperation(accepted.operation.id) : accepted.operation;
-      if (operation.status === "error" || operation.status === "cancelled") {
-        throw new BrowserTransportError(operation.error?.code ?? command.type + "_failed", operation.error?.message ?? command.type + " operation failed", true);
-      }
-      const result = settledCommandResult(accepted, operation);
+      const result = await this.dispatch(command);
       document2.acknowledge(result);
-      this.draftOperation = null;
+      if (this.draftSubmission?.requestId === command.requestId) this.draftSubmission = null;
       this.queueDraftPersistence();
+      this.recoveryStateValue = { ...this.recoveryStateValue, local: document2.recoveryDraft(this.draftId), status: "none" };
+      this.notifyRecovery();
       this.notify(void 0, sourceCellKeys(command, document2));
       return result;
     } catch (error61) {
-      this.removeSourceCommitWaiter(command.operationId);
-      this.handleSourceFailure(command, error61);
+      if (error61 instanceof BrowserTransportError && error61.definitive) {
+        document2.reject(command.requestId, error61.code);
+        if (this.draftSubmission?.requestId === command.requestId) this.draftSubmission = null;
+      }
+      this.queueDraftPersistence();
+      const local = document2.recoveryDraft(this.draftId, this.draftSubmission);
+      this.recoveryStateValue = { ...this.recoveryStateValue, status: local ? "conflict" : "none", local };
+      this.notifyRecovery();
+      this.notify();
       throw error61;
     }
   }
-  handleSourceFailure(command, error61) {
-    const document2 = this.requireDocument();
-    if (this.draftOperation === null) {
-      this.queueDraftPersistence();
-      const local = document2.recoveryDraft(this.transport.id, null);
-      this.recoveryStateValue = { ...this.recoveryStateValue, status: local === null ? "none" : "conflict", local };
-      this.notifyRecovery();
-      this.notify();
-      return;
-    }
-    const definitive = error61 instanceof BrowserTransportError && error61.definitive;
-    if (definitive) {
-      document2.reject(command.operationId, error61.code);
-      this.draftOperation = null;
-    } else if ((command.changes ?? []).some((change) => !["create", "edit", "text-edit"].includes(change.type))) {
-      document2.markStructuralRecoveryConflict();
-    }
-    this.queueDraftPersistence();
-    this.recoveryStateValue = {
-      ...this.recoveryStateValue,
-      status: "conflict",
-      local: document2.recoveryDraft(this.transport.id, this.draftOperation)
-    };
-    this.notifyRecovery();
-    this.notify();
-  }
   async dispatch(command) {
-    const admission = await this.transport.dispatch(command);
-    const commandWithSequence = { ...command, clientId: this.transport.id, sessionEpoch: this.requireDocument().epoch, commandSequence: admission.commandSequence };
-    const admitted = admission.operation;
-    if (admitted && !this.operations.has(admitted.id)) this.captureOperation(admitted);
-    const retained = admitted ? this.operations.get(admitted.id) ?? admitted : null;
-    const result = admissionResult(admission, this.requireDocument().snapshot, this.transport.cursor, commandWithSequence, retained);
-    this.options.onCommand?.(commandWithSequence, result);
-    if (!admission.accepted || admission.operation === null) {
-      throw new BrowserTransportError(admission.error?.code ?? "command_rejected", admission.error?.message ?? command.type + " command was rejected", true);
+    const executes = command.type === "run" || command.type === "restart" && command.replay;
+    if (executes) {
+      this.uncertainRun = null;
+      this.activeRuns.set(command.requestId, { requestId: command.requestId, epoch: command.sessionEpoch });
+      this.updatePendingRun();
     }
-    return result;
+    try {
+      const result = await this.transport.dispatch(command);
+      this.activeRuns.delete(command.requestId);
+      if (this.uncertainRun?.requestId === command.requestId) this.uncertainRun = null;
+      if (executes) this.updatePendingRun();
+      this.options.onCommand?.(command, result);
+      if (result.error) throw new BrowserTransportError(result.error.code, result.error.message, true);
+      return result;
+    } catch (error61) {
+      if (executes) {
+        this.activeRuns.delete(command.requestId);
+        if (!(error61 instanceof BrowserTransportError) || !error61.definitive) this.uncertainRun = { requestId: command.requestId, epoch: command.sessionEpoch };
+        this.updatePendingRun();
+      }
+      throw error61;
+    }
   }
-  async dispatchSettled(command, onAccepted) {
-    const accepted = await this.dispatch(command);
-    onAccepted?.(accepted.operation.id);
-    const operation = operationSettled(accepted.operation) ? accepted.operation : await this.awaitOperation(accepted.operation.id);
-    if (operation.status === "error" || operation.status === "cancelled") throw new BrowserTransportError(operation.error?.code ?? command.type + "_failed", operation.error?.message ?? command.type + " operation failed");
-    return settledCommandResult(accepted, operation);
+  updatePendingRun() {
+    this.pendingRun = this.uncertainRun ?? this.activeRuns.values().next().value ?? null;
+    this.recoveryStateValue = { ...this.recoveryStateValue, uncertainRun: this.uncertainRun !== null };
+    this.queueDraftPersistence();
+    this.notifyRecovery();
+  }
+  dispatchSettled(command, onStarted) {
+    onStarted?.(command.requestId);
+    return this.dispatch(command);
   }
   receiveSnapshot(snapshot) {
-    if (this.documentValue !== null && this.documentValue.epoch !== snapshot.epoch) {
-      const error61 = new BrowserTransportError("session_replaced", "notebook session was replaced while the operation was pending");
-      this.rejectOperationWaiters(error61);
-      this.rejectSourceCommitWaiters(error61);
-      this.operations.clear();
+    const draft = this.documentValue?.recoveryDraft(this.draftId, this.draftSubmission, this.pendingRun);
+    if (this.documentValue?.epoch !== snapshot.epoch) {
       this.runs.clear();
       this.artifactCache.clear();
-      this.draftOperation = null;
-      this.queueDraftPersistence();
     }
-    if (this.documentValue) this.documentValue.applySnapshot(snapshot);
-    else this.documentValue = new BrowserDocument(snapshot);
-    snapshot.operations.forEach((operation) => this.captureOperation(operation));
-    this.notify();
+    this.documentValue = new BrowserDocument(snapshot);
+    if (draft) this.restoreDraft(draft);
+    else this.notify();
   }
   receiveEvent(event) {
     const document2 = this.documentValue;
-    if (!document2) throw new BrowserTransportError("invalid_server_message", "received event without a notebook snapshot");
+    if (!document2) throw new BrowserTransportError("invalid_server_message", "Received an update before the notebook.");
     document2.applyEvent(event);
     if (event.type === "transaction" && event.operationId) {
       const outcome = sourceCommitOutcome(event.payload);
-      if (outcome !== null) this.acknowledgeSourceCommit(event.operationId, outcome);
-    }
-    if (event.type === "receipt" || event.type === "operation") {
-      const operation = operationFromEventPayload2(event.payload);
-      if (operation) this.captureOperation(operation);
+      if (outcome && document2.acknowledgeSourceCommit(event.operationId, outcome)) {
+        if (this.draftSubmission?.requestId === event.operationId) this.draftSubmission = null;
+        this.queueDraftPersistence();
+      }
     }
     this.notify(event);
-    if (event.type === "runtime") void this.activateStartupIfSafe().catch(() => {
-    });
+    if (event.type === "runtime") void this.activateStartupIfSafe();
     if (event.type === "cell-completed" && event.operationId) this.observeCompletion(event);
   }
   observeCompletion(event) {
@@ -23027,7 +22271,7 @@ var BrowserNotebookClient = class {
   }
   base(label, documentRevision = true) {
     const document2 = this.requireDocument();
-    return { operationId: operationId(label), clientId: this.transport.id, sessionEpoch: document2.epoch, ...documentRevision ? { expectedDocumentRevision: document2.snapshot.documentRevision } : {} };
+    return { requestId: operationId(label), clientId: this.transport.id, sessionEpoch: document2.epoch, ...documentRevision ? { expectedDocumentRevision: document2.snapshot.documentRevision } : {} };
   }
   kernelEpoch() {
     const epoch = this.requireDocument().snapshot.runtime.kernelEpoch;
@@ -23056,84 +22300,6 @@ var BrowserNotebookClient = class {
     if (!event && localCellKeys?.length === 0) return;
     for (const listener of this.listeners) listener(this.documentValue, event, localCellKeys);
   }
-  captureOperation(operation) {
-    this.operations.set(operation.id, operation);
-    this.trySourceCommitFromOperation(operation);
-    if (!operationSettled(operation)) return;
-    const waiters = this.operationWaiters.get(operation.id);
-    if (!waiters) return;
-    this.operationWaiters.delete(operation.id);
-    for (const waiter of waiters) {
-      globalThis.clearTimeout(waiter.timer);
-      waiter.resolve(operation);
-    }
-  }
-  removeOperationWaiter(id, waiter) {
-    const waiters = this.operationWaiters.get(id);
-    waiters?.delete(waiter);
-    if (waiters?.size === 0) this.operationWaiters.delete(id);
-  }
-  rejectOperationWaiters(error61) {
-    for (const waiters of this.operationWaiters.values()) {
-      for (const waiter of waiters) {
-        globalThis.clearTimeout(waiter.timer);
-        waiter.reject(error61);
-      }
-    }
-    this.operationWaiters.clear();
-  }
-  acknowledgeSourceCommit(operationId2, outcome) {
-    const document2 = this.documentValue;
-    if (!document2 || !this.sourceCommitWaiters.has(operationId2)) return;
-    if (document2.acknowledgeSourceCommit(operationId2, outcome)) this.resolveSourceCommit(operationId2);
-  }
-  trySourceCommitFromOperation(operation) {
-    const document2 = this.documentValue;
-    const waiter = this.sourceCommitWaiters.get(operation.id);
-    if (!document2 || !waiter) return;
-    const outcome = sourceCommitOutcome(operation.result);
-    if (outcome !== null) {
-      if (document2.acknowledgeSourceCommit(operation.id, outcome)) this.resolveSourceCommit(operation.id);
-      return;
-    }
-    if (operationSettled(operation)) {
-      this.rejectSourceCommit(operation.id, new BrowserTransportError(operation.error?.code ?? "source_commit_unconfirmed", operation.error?.message ?? "run source changes were not committed"));
-    }
-  }
-  awaitSourceCommit(operationId2) {
-    return new Promise((resolve, reject) => {
-      const timer = globalThis.setTimeout(() => {
-        this.removeSourceCommitWaiter(operationId2);
-        reject(new BrowserTransportError("source_commit_timeout", "run source changes did not receive a commit acknowledgement in time"));
-      }, 12e4);
-      this.sourceCommitWaiters.set(operationId2, { resolve, reject, timer });
-    });
-  }
-  removeSourceCommitWaiter(operationId2) {
-    const waiter = this.sourceCommitWaiters.get(operationId2);
-    if (!waiter) return;
-    globalThis.clearTimeout(waiter.timer);
-    this.sourceCommitWaiters.delete(operationId2);
-  }
-  resolveSourceCommit(operationId2) {
-    const waiter = this.sourceCommitWaiters.get(operationId2);
-    if (!waiter) return;
-    this.removeSourceCommitWaiter(operationId2);
-    waiter.resolve();
-  }
-  rejectSourceCommit(operationId2, error61) {
-    const waiter = this.sourceCommitWaiters.get(operationId2);
-    if (!waiter) return;
-    this.removeSourceCommitWaiter(operationId2);
-    waiter.reject(error61);
-  }
-  rejectSourceCommitWaiters(error61) {
-    for (const [operationId2, waiter] of this.sourceCommitWaiters) {
-      globalThis.clearTimeout(waiter.timer);
-      waiter.reject(error61);
-      this.sourceCommitWaiters.delete(operationId2);
-    }
-  }
   async withSourceLock(operation) {
     const predecessor = this.sourceQueue;
     let release;
@@ -23148,22 +22314,6 @@ var BrowserNotebookClient = class {
     }
   }
 };
-function admissionResult(admission, snapshot, cursor, command, operation = admission.operation) {
-  if (operation === null) throw new BrowserTransportError(admission.error?.code ?? "command_rejected", admission.error?.message ?? `${command.type} command was rejected`, true);
-  return {
-    epoch: admission.epoch,
-    operation,
-    documentRevision: operation.documentRevision,
-    version: snapshot.version,
-    cursor: cursor ?? snapshot.cursor,
-    nextCommandSequence: admission.nextCommandSequence,
-    result: operation.result,
-    error: operation.error
-  };
-}
-function settledCommandResult(accepted, operation) {
-  return { ...accepted, operation, documentRevision: operation.documentRevision, result: operation.result, error: operation.error };
-}
 function sourceCellKeys(command, document2) {
   const changes = command.changes ?? [];
   return changes.flatMap((change) => {
@@ -23202,7 +22352,7 @@ function fileArray(value) {
   return Array.isArray(value) ? value.filter((item) => typeof item === "object" && item !== null && !Array.isArray(item) && typeof item.name === "string" && typeof item.content_base64 === "string") : [];
 }
 function jsonRecord(value) {
-  return JSON.parse(JSON.stringify(value));
+  return value;
 }
 function safeArtifactPath(path) {
   try {
@@ -23223,9 +22373,6 @@ function normalizeInputTimestamp(timestamp, now) {
   if (timestamp > 1e12 && typeof performance.timeOrigin === "number") return timestamp - performance.timeOrigin;
   return timestamp;
 }
-function cloneChange2(change) {
-  return JSON.parse(JSON.stringify(change));
-}
 function operationId(label) {
   try {
     return `${label}-${crypto.randomUUID()}`;
@@ -23236,158 +22383,49 @@ function operationId(label) {
 function sameLines2(left, right) {
   return left.length === right.length && left.every((line, index) => line === right[index]);
 }
-function operationSettled(operation) {
-  return operation.status === "done" || operation.status === "error" || operation.status === "interrupted" || operation.status === "cancelled";
-}
 function isRecord2(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
-function isOperation2(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value) && typeof value.id === "string" && typeof value.status === "string";
-}
-function operationFromEventPayload2(value) {
-  if (isOperation2(value)) return value;
-  if (isRecord2(value) && isOperation2(value.operation)) return value.operation;
-  return null;
-}
-function isBrowserDraftStore(value) {
-  const candidate = value;
-  return typeof candidate.loadDraft === "function" && typeof candidate.listDrafts === "function" && typeof candidate.saveDraft === "function" && typeof candidate.clearDraft === "function" && typeof candidate.saveBranch === "function" && typeof candidate.listBranches === "function" && typeof candidate.deleteBranch === "function";
-}
-function sameChanges(left, right) {
-  return JSON.stringify(left) === JSON.stringify(right);
-}
 
 // src/browser/desktop-recovery.ts
-var revision = external_exports.number().int().nonnegative().safe();
-var identity = external_exports.string().min(1);
-var cursorSchema = external_exports.object({ epoch: identity, cursor: revision });
-var draftSchema = external_exports.object({
-  schemaVersion: external_exports.literal(1),
-  clientId: identity,
-  base: external_exports.object({
-    epoch: identity,
-    cursor: revision,
-    version: revision,
-    documentRevision: revision,
-    cells: external_exports.array(external_exports.object({ id: identity, revision, type: external_exports.enum(["code", "markdown"]), body: external_exports.array(external_exports.string()) }))
-  }),
-  changes: external_exports.array(documentChangeSchema),
-  operation: external_exports.object({
-    operationId: identity,
-    clientId: identity.optional(),
-    kind: external_exports.enum(["transaction", "run"]),
-    commandSequence: external_exports.number().int().positive().safe(),
-    expectedDocumentRevision: revision,
-    changes: external_exports.array(documentChangeSchema).optional()
-  }).nullable()
-});
 var recordsSchema = external_exports.object({ records: external_exports.array(external_exports.object({ name: external_exports.string(), value: external_exports.unknown() })), warning: external_exports.string().optional() });
 var DesktopRecoveryStore = class {
-  constructor(keyId, call, onWarning) {
-    this.keyId = keyId;
+  constructor(recoveryId, call, onWarning) {
+    this.recoveryId = recoveryId;
     this.call = call;
     this.onWarning = onWarning;
-    if (!/^[A-Za-z0-9_-]{43}$/.test(keyId)) throw new Error("Invalid desktop recovery identity");
   }
-  keyId;
+  recoveryId;
   call;
   onWarning;
-  cursor = null;
-  cursorLoaded = false;
-  cursorRevision = 0;
-  cursorWriting = false;
-  warned = false;
-  request(action, extra) {
-    return this.call({ keyId: this.keyId, action, ...extra });
-  }
-  async load() {
-    if (!this.cursorLoaded) {
-      this.cursorLoaded = true;
-      const revision2 = this.cursorRevision;
-      void Promise.resolve().then(() => this.request("read", { name: "cursor" })).then((value) => {
-        if (revision2 === this.cursorRevision && value !== null) this.cursor = cursorSchema.parse(value);
-      }).catch(() => {
-      });
-    }
-    return this.cursor === null ? null : { ...this.cursor };
-  }
-  async save(epoch, cursor) {
-    this.cursor = cursorSchema.parse({ epoch, cursor });
-    this.cursorLoaded = true;
-    this.cursorRevision += 1;
-    this.persistCursor();
-  }
-  async clear() {
-    this.cursor = null;
-    this.cursorLoaded = true;
-    this.cursorRevision += 1;
-    this.persistCursor();
-  }
-  persistCursor() {
-    if (this.cursorWriting) return;
-    this.cursorWriting = true;
-    const revision2 = this.cursorRevision;
-    const value = this.cursor;
-    void Promise.resolve().then(() => value === null ? this.request("remove", { name: "cursor" }) : this.request("write", { name: "cursor", value })).catch(() => {
-    }).finally(() => {
-      this.cursorWriting = false;
-      if (revision2 !== this.cursorRevision) this.persistCursor();
-    });
-  }
-  warn(message2) {
-    if (this.warned) return;
-    this.warned = true;
-    this.onWarning?.(message2);
-  }
-  async inventory(prefix) {
-    const result = recordsSchema.parse(await this.request("list", { prefix }));
-    if (result.warning) this.warn(result.warning);
-    return result.records;
-  }
-  async loadDraft(clientId) {
-    if (clientId === void 0) return (await this.listDrafts())[0] ?? null;
-    const value = await this.request("read", { name: "draft:" + clientId });
-    if (value === null) return null;
-    const draft = draftSchema.parse(value);
-    if (draft.clientId !== clientId) throw new Error("Recovery draft belongs to a different client");
-    return draft;
-  }
+  legacyNames = /* @__PURE__ */ new Map();
   async listDrafts() {
-    const drafts = [];
-    for (const record2 of await this.inventory("draft:")) {
-      const parsed = draftSchema.safeParse(record2.value);
-      if (!parsed.success || record2.name !== "draft:" + parsed.data.clientId) {
-        this.warn("Some recovery drafts could not be read and were retained.");
+    const result = recordsSchema.parse(await this.call({ recoveryId: this.recoveryId, action: "list", prefix: "" }));
+    if (result.warning) this.onWarning?.(result.warning);
+    const drafts = /* @__PURE__ */ new Map();
+    for (const record2 of result.records) {
+      if (!record2.name.startsWith("draft:") && !record2.name.startsWith("branch:")) continue;
+      const legacyId = record2.name.startsWith("branch:") ? "saved-" + record2.name.slice(7) : record2.name.slice(6);
+      const draft = readRecoveryDraft(record2.value, legacyId);
+      if (!draft) {
+        this.onWarning?.("A saved draft could not be read and has been retained.");
         continue;
       }
-      drafts.push(parsed.data);
+      if (record2.name !== "draft:" + draft.draftId) this.legacyNames.set(draft.draftId, record2.name);
+      drafts.set(draft.draftId, draft);
     }
-    return drafts;
+    return [...drafts.values()].sort((a, b) => b.updatedAt - a.updatedAt);
   }
   async saveDraft(draft) {
-    await this.request("write", { name: "draft:" + draft.clientId, value: draftSchema.parse(draft) });
+    await this.call({ recoveryId: this.recoveryId, action: "write", name: "draft:" + draft.draftId, value: draft });
   }
-  async clearDraft(clientId) {
-    await this.request("remove", { name: "draft:" + clientId });
-  }
-  async saveBranch(branchId, draft) {
-    await this.request("write", { name: "branch:" + branchId, value: draftSchema.parse(draft) });
-  }
-  async listBranches() {
-    const branches = [];
-    for (const record2 of await this.inventory("branch:")) {
-      const parsed = draftSchema.safeParse(record2.value);
-      if (!parsed.success || !record2.name.startsWith("branch:") || record2.name.length <= 7) {
-        this.warn("Some recovery drafts could not be read and were retained.");
-        continue;
-      }
-      branches.push({ id: record2.name.slice(7), draft: parsed.data });
+  async clearDraft(draftId) {
+    await this.call({ recoveryId: this.recoveryId, action: "remove", name: "draft:" + draftId });
+    const legacy = this.legacyNames.get(draftId);
+    if (legacy) {
+      await this.call({ recoveryId: this.recoveryId, action: "remove", name: legacy });
+      this.legacyNames.delete(draftId);
     }
-    return branches;
-  }
-  async deleteBranch(branchId) {
-    await this.request("remove", { name: "branch:" + branchId });
   }
 };
 
@@ -24636,7 +23674,6 @@ var NotebookView = class {
     if (event?.type === "service-errors" && snapshot.serviceErrors.lsp === void 0) {
       this.editorHelpError = null;
     }
-    window.__alderObserveRender?.("start", snapshot.version);
     if (this.configValue !== snapshot.config) {
       this.configValue = snapshot.config;
       this.applyConfig(snapshot.config);
@@ -24684,7 +23721,6 @@ var NotebookView = class {
     this.renderEditorDiagnostics(snapshot);
     if (!canTargetLocal) this.renderDataflow(snapshot, event);
     this.renderStatus();
-    window.__alderObserveRender?.("end", snapshot.version);
     if (event) {
       window.dispatchEvent(new CustomEvent("alder:host-event", { detail: event }));
     }
@@ -25402,7 +24438,6 @@ ${jupyterTrace.map((line, index) => `${index + 1}. ${line}`).join("\n")}` : ""
       return;
     }
     if (event && [
-      "receipt",
       "cell-started",
       "cell-output",
       "cell-completed",
@@ -26630,7 +25665,7 @@ ${jupyterTrace.map((line, index) => `${index + 1}. ${line}`).join("\n")}` : ""
     const runtimeMessage = runtimeBlocked === null ? null : "R execution is blocked: " + (runtimeBlocked.message || runtimeBlocked.code);
     const recovery = this.client.recoveryState;
     const recoveryConflict = recovery.status === "conflict" || recovery.branches.some((branch) => branch.state === "conflict") || recovery.corruption !== null;
-    const recoveryMessage = recovery.local !== null ? recovery.status === "resubmitting" ? "Resubmitting recovered local edits\u2026" : "Recovered local edits need your review." : recovery.persistenceError ? "Local edit recovery is not durable." : recovery.foreignDrafts > 0 ? "Another renderer retains a local recovery branch." : recovery.pending ? "Recovering an interrupted local edit\u2026" : recovery.corruption ? "Recovery data needs your review." : recoveryConflict ? "A recovery branch needs your review." : null;
+    const recoveryMessage = recovery.uncertainRun ? "The previous run may have been interrupted. Run explicitly when you are ready." : recovery.local !== null ? recovery.status === "conflict" ? "Recovered edits conflict with newer changes." : "Unsaved edits recovered." : recovery.persistenceError ? "Local edit recovery is not durable." : recovery.drafts.length > 0 ? "A saved draft is available." : recovery.pending ? "Recovering an interrupted local edit\u2026" : recovery.corruption ? "Recovery data needs your review." : recoveryConflict ? "Recovered edits need your review." : null;
     const message2 = this.hostClosed ? "Notebook host shut down." : this.actionError ?? stateError ?? editorHelpError ?? runtimeMessage ?? this.transportError ?? this.actionNotice ?? recoveryMessage ?? "";
     const signature = JSON.stringify({
       runtimeBlocked: runtimeBlocked === null ? null : [runtimeBlocked.code, runtimeBlocked.message],
@@ -26641,7 +25676,7 @@ ${jupyterTrace.map((line, index) => `${index + 1}. ${line}`).join("\n")}` : ""
       transportError: Boolean(this.transportError),
       editorHelpRestarting: this.editorHelpRestarting,
       actionCount: this.actionCount,
-      recovery: { status: recovery.status, local: recovery.local !== null, branches: recovery.branches.map((branch) => [branch.id, branch.state, branch.documentRevision]), keptBranches: recovery.keptBranches.map((branch) => branch.id), foreignDrafts: recovery.foreignDrafts, pending: recovery.pending, corruption: recovery.corruption?.code ?? null, persistenceError: recovery.persistenceError?.code ?? null }
+      recovery: { status: recovery.status, local: recovery.local !== null, branches: recovery.branches.map((branch) => [branch.id, branch.state, branch.documentRevision]), drafts: recovery.drafts.map((draft) => draft.draftId), pending: recovery.pending, uncertainRun: recovery.uncertainRun, corruption: recovery.corruption?.code ?? null, persistenceError: recovery.persistenceError?.code ?? null }
     });
     if (signature === this.statusSignature) return;
     this.statusSignature = signature;
@@ -26679,38 +25714,31 @@ ${jupyterTrace.map((line, index) => `${index + 1}. ${line}`).join("\n")}` : ""
   renderRecoveryControls() {
     if (!this.status) return;
     const state = this.client.recoveryState;
-    const hasBranch = state.branches.length > 0;
-    if (state.local === null && state.keptBranches.length === 0 && state.foreignDrafts === 0 && !hasBranch && !state.pending && state.corruption === null && state.persistenceError === null) return;
+    if (!state.local && !state.drafts.length && !state.branches.length && !state.pending && !state.uncertainRun && !state.corruption && !state.persistenceError) return;
     const panel = elementNode(this.dom, "div", "recovery-panel", "");
     panel.dataset.recovery = "true";
     panel.dataset.recoveryPanel = "true";
     panel.setAttribute("role", "alert");
-    const detail = state.local !== null ? "The renderer retained an unacknowledged editing intent." : state.keptBranches.length > 0 ? "The renderer retained a browser recovery branch." : state.persistenceError?.message ?? (state.foreignDrafts > 0 ? "Another open renderer retains a browser recovery branch." : state.corruption?.message ?? (hasBranch ? "The host retained a recovery branch. Save As to preserve the current document before resolving it." : "Recovery is in progress."));
+    const detail = state.uncertainRun ? "The previous run may have been interrupted. It has not been run again." : state.local ? state.status === "conflict" ? "Your edits are preserved. Review the conflicting cells before saving." : "Your unsaved edits have been recovered." : state.persistenceError?.message ?? state.corruption?.message ?? (state.drafts.length ? "Saved edits are available to restore." : "Unsaved changes were recovered.");
     panel.appendChild(elementNode(this.dom, "div", "recovery-message", detail));
     const actions = elementNode(this.dom, "div", "recovery-actions", "");
     const add = (label, action) => {
       const button = elementNode(this.dom, "button", "btn mini", label);
       button.type = "button";
       button.dataset.recovery = "true";
-      button.disabled = this.actionCount > 0 || state.status === "resubmitting";
+      button.disabled = this.actionCount > 0;
       button.addEventListener("click", () => {
-        void this.action(async () => {
-          await action();
-        }).catch((error61) => this.showError(error61));
+        void this.action(action).catch((error61) => this.showError(error61));
       });
       actions.appendChild(button);
     };
-    if (state.local !== null) {
-      add("Reload authoritative", () => this.client.reloadAuthoritativeRecovery());
-      add("Keep as recovery", () => this.client.keepAsRecovery());
-      add("Discard local branch", () => this.client.discardRecovery());
-      add("Cancel", () => this.client.cancelRecovery());
-    }
-    for (const branch of state.keptBranches) {
-      add("Restore kept branch", () => this.client.restoreKeptRecovery(branch.id));
-      add("Discard kept branch", () => this.client.discardKeptRecovery(branch.id));
-    }
-    if (actions.childElementCount > 0) panel.appendChild(actions);
+    if (state.local) add("Discard recovered edits", () => this.client.discardRecovery());
+    state.drafts.forEach((draft, index) => {
+      const label = state.drafts.length === 1 ? "draft" : "draft " + (index + 1);
+      add("Restore " + label, () => this.client.restoreSavedDraft(draft.draftId));
+      add("Discard " + label, () => this.client.discardSavedDraft(draft.draftId));
+    });
+    if (actions.childElementCount) panel.appendChild(actions);
     this.status.appendChild(panel);
   }
   executionAvailable() {
@@ -27106,12 +26134,10 @@ function visitTableOutputs(cells, visit2) {
   cells.forEach((cell) => cell.outputs.forEach(walk));
 }
 function operationPayload(result) {
-  if ("operation" in result && isObject3(result.operation.result)) return result.operation.result;
   return isObject3(result.result) ? result.result : {};
 }
 function artifactHandleFromResult(result) {
   const candidates = [];
-  if ("operation" in result) candidates.push(result.operation.result);
   candidates.push(result.result);
   for (const candidate of candidates) if (isArtifactHandle2(candidate)) return candidate;
   return null;
@@ -27278,6 +26304,14 @@ async function encodeFile(file2) {
 // src/browser/app.ts
 var view = null;
 var client = null;
+var browserSessionSchema = external_exports.object({
+  leaseId: external_exports.string(),
+  clientId: external_exports.string(),
+  epoch: external_exports.string(),
+  continuityProof: external_exports.string().min(1),
+  csrf: external_exports.string(),
+  recoveryId: external_exports.string().optional()
+});
 var pendingRenders = /* @__PURE__ */ new Map();
 var pendingStarts = /* @__PURE__ */ new Map();
 var renderFrame = null;
@@ -27399,24 +26433,25 @@ async function bootstrapSession() {
     body: JSON.stringify({ ticket })
   });
   const value = await response.json().catch(() => null);
-  if (!response.ok || !isSessionCredentials(value)) throw new Error("browser session ticket exchange was rejected");
-  return value;
+  if (!response.ok || !browserSessionSchema.safeParse(value).success) throw new Error("browser session ticket exchange was rejected");
+  return browserSessionSchema.parse(value);
 }
 async function start() {
   const session = await bootstrapSession();
   const desktop = globalThis.alderDesktop;
   const options = {
-    recoveryStore: desktop && session.recoveryKeyId ? new DesktopRecoveryStore(session.recoveryKeyId, (request) => desktop.recovery(request), (message2) => view?.showError(new Error(message2))) : new IndexedDBRecoveryStore(recoveryIdentity(), session.recoveryKey, session.recoveryKeyId),
+    recoveryStore: desktop && session.recoveryId ? new DesktopRecoveryStore(session.recoveryId, (request) => desktop.recovery(request), (message2) => view?.showError(new Error(message2))) : new IndexedDBRecoveryStore(session.recoveryId ?? recoveryIdentity()),
     clientId: session.clientId,
     leaseId: session.leaseId,
     csrf: session.csrf,
     continuityProof: session.continuityProof,
-    nextCommandSequence: session.nextCommandSequence,
     reconnect: true,
     onState: (state, error61) => view?.setTransportState(state, error61)
   };
   const next = new BrowserNotebookClient({
     ...options,
+    restoreSingleDraft: Boolean(desktop),
+    draftId: desktop ? await desktop.getDraftId() : browserDraftId(),
     onCommand: (command, result) => window.dispatchEvent(new CustomEvent("alder:host-command", { detail: { command, result } })),
     onVisibleResult: (observation) => window.dispatchEvent(new CustomEvent("alder:visible-result", { detail: observation }))
   });
@@ -27434,11 +26469,12 @@ function recoveryIdentity() {
   current.searchParams.delete("view");
   return current.origin + current.pathname + current.search;
 }
-function isSessionCredentials(value) {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
-  const record2 = value;
-  const recoveryKey = record2.recoveryKey;
-  const recoveryKeyId = record2.recoveryKeyId;
-  const recoveryPairValid = recoveryKey === void 0 && recoveryKeyId === void 0 || typeof recoveryKey === "string" && /^[A-Za-z0-9_-]{43}$/.test(recoveryKey) && typeof recoveryKeyId === "string" && /^[A-Za-z0-9_-]{43}$/.test(recoveryKeyId);
-  return recoveryPairValid && typeof record2.leaseId === "string" && typeof record2.clientId === "string" && Number.isSafeInteger(record2.nextCommandSequence) && record2.nextCommandSequence > 0 && typeof record2.epoch === "string" && typeof record2.continuityProof === "string" && record2.continuityProof.length > 0 && typeof record2.csrf === "string";
+function browserDraftId() {
+  const key = "alder-draft:" + recoveryIdentity();
+  let id = sessionStorage.getItem(key);
+  if (!id) {
+    id = crypto.randomUUID();
+    sessionStorage.setItem(key, id);
+  }
+  return id;
 }

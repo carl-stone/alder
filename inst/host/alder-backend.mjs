@@ -21520,7 +21520,7 @@ var require_websocket = __commonJS({
     var http = __require("http");
     var net = __require("net");
     var tls = __require("tls");
-    var { randomBytes: randomBytes7, createHash: createHash9 } = __require("crypto");
+    var { randomBytes: randomBytes6, createHash: createHash9 } = __require("crypto");
     var { Duplex, Readable: Readable3 } = __require("stream");
     var { URL: URL3 } = __require("url");
     var PerMessageDeflate2 = require_permessage_deflate();
@@ -22058,7 +22058,7 @@ var require_websocket = __commonJS({
         }
       }
       const defaultPort = isSecure ? 443 : 80;
-      const key2 = randomBytes7(16).toString("base64");
+      const key2 = randomBytes6(16).toString("base64");
       const request = isSecure ? https.request : http.request;
       const protocolSet = /* @__PURE__ */ new Set();
       let perMessageDeflate;
@@ -40862,7 +40862,7 @@ import { dirname as dirname10, resolve as resolve14 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // src/application.ts
-import { createHash as createHash8, randomUUID as randomUUID15 } from "node:crypto";
+import { createHash as createHash8, randomUUID as randomUUID14 } from "node:crypto";
 import { mkdtemp as mkdtemp5, realpath as realpath11, rm as rm10 } from "node:fs/promises";
 import { basename as basename8, dirname as dirname9, join as join21, resolve as resolve13 } from "node:path";
 import { tmpdir as tmpdir6 } from "node:os";
@@ -61596,210 +61596,7 @@ function date4(params) {
 }
 
 // src/controller.ts
-import { randomUUID as randomUUID3 } from "node:crypto";
-
-// src/strict-json.ts
-var DEFAULT_STRICT_JSON_LIMITS = Object.freeze({
-  maxBytes: 8 * 1024 * 1024,
-  maxDepth: 64
-});
-var StrictJsonError = class extends Error {
-  constructor(message2, offset) {
-    super(`${message2} at byte ${offset}`);
-    this.offset = offset;
-    this.name = "StrictJsonError";
-  }
-  offset;
-};
-var StrictJsonParser = class {
-  constructor(text2, maxDepth) {
-    this.text = text2;
-    this.maxDepth = maxDepth;
-  }
-  text;
-  maxDepth;
-  offset = 0;
-  encoder = new TextEncoder();
-  parse() {
-    this.whitespace();
-    const result = this.value(0);
-    this.whitespace();
-    if (this.offset !== this.text.length) this.fail("trailing content");
-    return result;
-  }
-  value(depth) {
-    const next = this.text[this.offset];
-    if (next === "{") return this.object(depth + 1);
-    if (next === "[") return this.array(depth + 1);
-    if (next === '"') return this.string();
-    if (next === "t") return this.literal("true", true);
-    if (next === "f") return this.literal("false", false);
-    if (next === "n") return this.literal("null", null);
-    if (next === "-" || next !== void 0 && next >= "0" && next <= "9") {
-      return this.number();
-    }
-    this.fail("expected a JSON value");
-  }
-  object(depth) {
-    this.checkDepth(depth);
-    this.offset += 1;
-    this.whitespace();
-    const result = {};
-    const keys2 = /* @__PURE__ */ new Set();
-    if (this.consume("}")) return result;
-    while (true) {
-      if (this.text[this.offset] !== '"') this.fail("expected an object key");
-      const key2 = this.string();
-      if (keys2.has(key2)) this.fail(`duplicate object key ${JSON.stringify(key2)}`);
-      keys2.add(key2);
-      this.whitespace();
-      if (!this.consume(":")) this.fail("expected ':' after an object key");
-      this.whitespace();
-      const item = this.value(depth);
-      Object.defineProperty(result, key2, {
-        configurable: true,
-        enumerable: true,
-        value: item,
-        writable: true
-      });
-      this.whitespace();
-      if (this.consume("}")) return result;
-      if (!this.consume(",")) this.fail("expected ',' or '}'");
-      this.whitespace();
-    }
-  }
-  array(depth) {
-    this.checkDepth(depth);
-    this.offset += 1;
-    this.whitespace();
-    const result = [];
-    if (this.consume("]")) return result;
-    while (true) {
-      result.push(this.value(depth));
-      this.whitespace();
-      if (this.consume("]")) return result;
-      if (!this.consume(",")) this.fail("expected ',' or ']'");
-      this.whitespace();
-    }
-  }
-  string() {
-    const start = this.offset;
-    this.offset += 1;
-    while (this.offset < this.text.length) {
-      const code2 = this.text.charCodeAt(this.offset);
-      if (code2 === 34) {
-        this.offset += 1;
-        let result;
-        try {
-          result = JSON.parse(this.text.slice(start, this.offset));
-        } catch {
-          this.fail("invalid JSON string");
-        }
-        this.validateSurrogates(result);
-        return result;
-      }
-      if (code2 < 32) this.fail("unescaped control character in string");
-      if (code2 === 92) {
-        this.offset += 1;
-        if (this.offset >= this.text.length) this.fail("unterminated escape");
-        const escaped2 = this.text[this.offset];
-        if (escaped2 === "u") {
-          const digits = this.text.slice(this.offset + 1, this.offset + 5);
-          if (!/^[0-9a-fA-F]{4}$/.test(digits)) this.fail("invalid Unicode escape");
-          this.offset += 4;
-        } else if (!'"\\/bfnrt'.includes(escaped2)) {
-          this.fail("invalid string escape");
-        }
-      }
-      this.offset += 1;
-    }
-    this.fail("unterminated JSON string");
-  }
-  validateSurrogates(value) {
-    for (let index = 0; index < value.length; index += 1) {
-      const code2 = value.charCodeAt(index);
-      if (code2 >= 55296 && code2 <= 56319) {
-        const low = value.charCodeAt(index + 1);
-        if (!(low >= 56320 && low <= 57343)) this.fail("unpaired surrogate");
-        index += 1;
-      } else if (code2 >= 56320 && code2 <= 57343) {
-        this.fail("unpaired surrogate");
-      }
-    }
-  }
-  number() {
-    const token = this.text.slice(this.offset).match(
-      /^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?/
-    )?.[0];
-    if (token === void 0) this.fail("invalid number");
-    this.offset += token.length;
-    const result = Number(token);
-    if (!Number.isFinite(result)) this.fail("non-finite number");
-    return result;
-  }
-  literal(token, result) {
-    if (!this.text.startsWith(token, this.offset)) this.fail("invalid literal");
-    this.offset += token.length;
-    return result;
-  }
-  whitespace() {
-    while (/\s/.test(this.text[this.offset] ?? "") && " 	\r\n".includes(this.text[this.offset])) {
-      this.offset += 1;
-    }
-  }
-  consume(token) {
-    if (this.text[this.offset] !== token) return false;
-    this.offset += 1;
-    return true;
-  }
-  checkDepth(depth) {
-    if (depth > this.maxDepth) this.fail("JSON nesting limit exceeded");
-  }
-  fail(message2) {
-    throw new StrictJsonError(message2, this.encoder.encode(this.text.slice(0, this.offset)).byteLength);
-  }
-};
-function parseStrictJson(input2, limits = DEFAULT_STRICT_JSON_LIMITS) {
-  validateLimits(limits);
-  let text2;
-  if (typeof input2 === "string") {
-    if (hasUnpairedSurrogate(input2)) throw new StrictJsonError("unpaired surrogate", 0);
-    if (new TextEncoder().encode(input2).byteLength > limits.maxBytes) {
-      throw new RangeError(`JSON input exceeds ${limits.maxBytes} bytes`);
-    }
-    text2 = input2;
-  } else {
-    if (!(input2 instanceof Uint8Array)) throw new TypeError("JSON input must be text or bytes");
-    if (input2.byteLength > limits.maxBytes) throw new RangeError(`JSON input exceeds ${limits.maxBytes} bytes`);
-    try {
-      text2 = new TextDecoder("utf-8", { fatal: true }).decode(input2);
-    } catch {
-      throw new StrictJsonError("invalid UTF-8", 0);
-    }
-  }
-  return new StrictJsonParser(text2, limits.maxDepth).parse();
-}
-function validateLimits(limits) {
-  if (!limits || !Number.isSafeInteger(limits.maxBytes) || limits.maxBytes < 1) {
-    throw new RangeError("maxBytes must be a positive safe integer");
-  }
-  if (!Number.isSafeInteger(limits.maxDepth) || limits.maxDepth < 1) {
-    throw new RangeError("maxDepth must be a positive safe integer");
-  }
-}
-function hasUnpairedSurrogate(value) {
-  for (let index = 0; index < value.length; index += 1) {
-    const code2 = value.charCodeAt(index);
-    if (code2 >= 55296 && code2 <= 56319) {
-      const low = value.charCodeAt(index + 1);
-      if (!(low >= 56320 && low <= 57343)) return true;
-      index += 1;
-    } else if (code2 >= 56320 && code2 <= 57343) {
-      return true;
-    }
-  }
-  return false;
-}
+import { createHash as createHash2, randomUUID as randomUUID3 } from "node:crypto";
 
 // src/protocol.ts
 var HOST_PROTOCOL = "alder-host-v2";
@@ -61830,7 +61627,7 @@ var MAX_ANALYSIS_SYMBOL_BYTES = 1024;
 var MAX_ANALYSIS_SYMBOLS = 1e4;
 var MAX_TABLE_COLUMNS = 50;
 var MAX_TABLE_PREVIEW_ROWS = 25;
-function hasUnpairedSurrogate2(value) {
+function hasUnpairedSurrogate(value) {
   for (let index = 0; index < value.length; index += 1) {
     const code2 = value.charCodeAt(index);
     if (code2 >= 55296 && code2 <= 56319) {
@@ -61846,7 +61643,7 @@ function hasUnpairedSurrogate2(value) {
 function boundedUtf8StringSchema(maximumBytes, nonempty = false) {
   const schema = nonempty ? external_exports.string().min(1) : external_exports.string();
   return schema.superRefine((value, context) => {
-    if (hasUnpairedSurrogate2(value)) {
+    if (hasUnpairedSurrogate(value)) {
       context.addIssue({ code: "custom", message: "string must contain valid Unicode" });
       return;
     }
@@ -62031,14 +61828,14 @@ function decodeUtf8(bytes) {
 function encodeWireSource(value) {
   const lines = typeof value === "string" ? null : value.length;
   const text2 = typeof value === "string" ? value : value.join("\n");
-  if (hasUnpairedSurrogate2(text2)) throw new ProtocolError("invalid_request", "source transfer text contains an unpaired surrogate");
+  if (hasUnpairedSurrogate(text2)) throw new ProtocolError("invalid_request", "source transfer text contains an unpaired surrogate");
   return { encoding: "base64", data: encodeBase64(new TextEncoder().encode(text2)), lines };
 }
 function decodeWireSource(value) {
   const parsed = wireSourceSchema.safeParse(value);
   if (!parsed.success) throw new ProtocolError("invalid_request", "invalid source transfer value");
   const text2 = decodeUtf8(decodeBase64(parsed.data.data));
-  if (hasUnpairedSurrogate2(text2)) throw new ProtocolError("invalid_request", "source transfer text contains an unpaired surrogate");
+  if (hasUnpairedSurrogate(text2)) throw new ProtocolError("invalid_request", "source transfer text contains an unpaired surrogate");
   if (parsed.data.lines === null) return text2;
   if (parsed.data.lines === 0) {
     if (text2 !== "") throw new ProtocolError("invalid_request", "empty source line array must have empty data");
@@ -62403,9 +62200,8 @@ var mcpDocumentChangeSchema = external_exports.discriminatedUnion("type", [
   textEditDocumentChangeSchema
 ]);
 var commandIdentityShape = {
-  operationId: idSchema,
+  requestId: idSchema,
   clientId: idSchema,
-  commandSequence: positiveIntegerSchema,
   sessionEpoch: idSchema
 };
 var commandIdentitySchema = external_exports.object(commandIdentityShape).strict();
@@ -62575,7 +62371,6 @@ var operationProgressSchema = external_exports.object({
 var operationRecordSchema = external_exports.object({
   id: idSchema,
   clientId: idSchema,
-  commandSequence: positiveIntegerSchema,
   kind: operationKindSchema,
   status: operationStatusSchema,
   documentRevision: revisionSchema,
@@ -62589,17 +62384,6 @@ var operationRecordSchema = external_exports.object({
   executionDone: external_exports.boolean().optional(),
   resetOperationIds: external_exports.array(idSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS).optional(),
   progress: operationProgressSchema.optional()
-}).strict();
-var commandAdmissionSchema = external_exports.object({
-  epoch: idSchema,
-  clientId: idSchema,
-  operationId: idSchema,
-  commandSequence: positiveIntegerSchema,
-  accepted: external_exports.boolean(),
-  sequenceConsumed: external_exports.boolean(),
-  operation: operationRecordSchema.nullable(),
-  error: hostErrorSchema.nullable(),
-  nextCommandSequence: positiveIntegerSchema
 }).strict();
 var runtimeStateSchema = external_exports.object({
   documentReady: external_exports.boolean(),
@@ -62631,14 +62415,14 @@ var runtimeVariableSchema = external_exports.object({ name: boundedUtf8StringSch
 var runtimeVariablesSchema = external_exports.array(runtimeVariableSchema).max(MAX_RUNTIME_VARIABLES);
 var editorDiagnosticsSchema = safeStringRecordSchema(external_exports.array(analysisDiagnosticSchema).max(MAX_EDITOR_DIAGNOSTICS));
 var serviceErrorsSchema = external_exports.object({ lsp: hostErrorSchema.optional() }).strict();
-var hostSnapshotSchema = external_exports.object({ protocol: external_exports.literal(HOST_PROTOCOL), epoch: idSchema, cursor: protocolIntegerSchema, version: protocolIntegerSchema, documentRevision: revisionSchema, path: pathSchema.nullable(), metadata: protocolJsonRecordSchema, config: protocolJsonRecordSchema, layout: protocolJsonSchema, dirty: external_exports.boolean(), changed: external_exports.boolean().optional(), disk: diskObservationSchema, sidecars: sidecarObservationsSchema, runtime: hostRuntimeSchema, cells: external_exports.array(hostCellStateSchema).max(MAX_NOTEBOOK_CELLS), graph: dependencyGraphStateSchema, variables: runtimeVariablesSchema, editorDiagnostics: editorDiagnosticsSchema, serviceErrors: serviceErrorsSchema, operations: external_exports.array(operationRecordSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS), lastValue: protocolJsonSchema.nullable(), lastActionError: hostErrorSchema.nullable(), capabilities: external_exports.array(boundedUtf8StringSchema(256)).max(MAX_PROTOCOL_COLLECTION_ITEMS).optional(), nextCommandSequence: positiveIntegerSchema.optional(), activeClientIds: external_exports.array(idSchema).max(128).optional() }).strict();
-var hostEventTypeSchema = external_exports.enum(["receipt", "transaction", "notebook", "cell", "cell-started", "cell-output", "cell-completed", "diagnostics", "editor-diagnostics", "service-errors", "graph", "variables", "runtime", "operation", "service-error", "active_clients_changed"]);
-var eventBase = { protocol: external_exports.literal(HOST_PROTOCOL), epoch: idSchema, cursor: protocolIntegerSchema, version: protocolIntegerSchema, documentRevision: revisionSchema, timestamp: external_exports.number().finite().nonnegative(), operationId: idSchema.optional(), clientId: idSchema.optional(), commandSequence: positiveIntegerSchema.optional(), cellId: idSchema.optional(), runId: idSchema.optional(), kernelEpoch: idSchema.nullable().optional(), revision: revisionSchema.optional(), sequence: protocolIntegerSchema.optional() };
+var hostSnapshotSchema = external_exports.object({ protocol: external_exports.literal(HOST_PROTOCOL), epoch: idSchema, cursor: protocolIntegerSchema, version: protocolIntegerSchema, documentRevision: revisionSchema, path: pathSchema.nullable(), metadata: protocolJsonRecordSchema, config: protocolJsonRecordSchema, layout: protocolJsonSchema, dirty: external_exports.boolean(), changed: external_exports.boolean().optional(), disk: diskObservationSchema, sidecars: sidecarObservationsSchema, runtime: hostRuntimeSchema, cells: external_exports.array(hostCellStateSchema).max(MAX_NOTEBOOK_CELLS), graph: dependencyGraphStateSchema, variables: runtimeVariablesSchema, editorDiagnostics: editorDiagnosticsSchema, serviceErrors: serviceErrorsSchema, operations: external_exports.array(operationRecordSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS), lastValue: protocolJsonSchema.nullable(), lastActionError: hostErrorSchema.nullable(), capabilities: external_exports.array(boundedUtf8StringSchema(256)).max(MAX_PROTOCOL_COLLECTION_ITEMS).optional(), activeClientIds: external_exports.array(idSchema).max(128).optional() }).strict();
+var hostEventTypeSchema = external_exports.enum(["transaction", "notebook", "cell", "cell-started", "cell-output", "cell-completed", "diagnostics", "editor-diagnostics", "service-errors", "graph", "variables", "runtime", "operation", "service-error", "active_clients_changed"]);
+var eventBase = { protocol: external_exports.literal(HOST_PROTOCOL), epoch: idSchema, cursor: protocolIntegerSchema, version: protocolIntegerSchema, documentRevision: revisionSchema, timestamp: external_exports.number().finite().nonnegative(), operationId: idSchema.optional(), clientId: idSchema.optional(), cellId: idSchema.optional(), runId: idSchema.optional(), kernelEpoch: idSchema.nullable().optional(), revision: revisionSchema.optional(), sequence: protocolIntegerSchema.optional() };
 var hostEventSchema = external_exports.object({ ...eventBase, type: hostEventTypeSchema, payload: protocolJsonSchema }).strict();
 var recoveryBranchSchema = external_exports.object({ id: idSchema, documentRevision: revisionSchema, baseDisk: diskObservationSchema, sourceHandle: external_exports.lazy(() => artifactHandleSchema), state: external_exports.enum(["clean", "dirty", "conflict"]), conflict: hostErrorSchema.nullable() }).strict();
 var recoveryStateSchema = external_exports.object({ branches: external_exports.array(recoveryBranchSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS), pending: external_exports.boolean(), corruption: hostErrorSchema.nullable() }).strict();
-var recoverySchema = external_exports.discriminatedUnion("kind", [external_exports.object({ kind: external_exports.literal("replay"), epoch: idSchema, cursor: protocolIntegerSchema, events: external_exports.array(hostEventSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS) }).strict(), external_exports.object({ kind: external_exports.literal("snapshot"), epoch: idSchema, cursor: protocolIntegerSchema, snapshot: hostSnapshotSchema }).strict()]);
-var commandResultSchema = external_exports.object({ epoch: idSchema, operation: operationRecordSchema, documentRevision: revisionSchema, version: protocolIntegerSchema, cursor: protocolIntegerSchema, nextCommandSequence: positiveIntegerSchema, result: protocolJsonSchema.nullable(), error: hostErrorSchema.nullable() }).strict();
+var recoverySchema = external_exports.object({ kind: external_exports.literal("snapshot"), epoch: idSchema, cursor: protocolIntegerSchema, snapshot: hostSnapshotSchema }).strict();
+var commandResultSchema = external_exports.object({ requestId: idSchema, epoch: idSchema, documentRevision: revisionSchema, version: protocolIntegerSchema, cursor: protocolIntegerSchema, result: protocolJsonSchema.nullable(), error: hostErrorSchema.nullable() }).strict();
 var queryOffset = protocolIntegerSchema.optional();
 var cellQueryLimit = external_exports.number().int().min(1).max(1e3).safe().optional();
 var outputQueryLimit = external_exports.number().int().min(1).max(262144).safe().optional();
@@ -62651,7 +62435,7 @@ var hostQuerySchema = external_exports.discriminatedUnion("type", [
   external_exports.object({ type: external_exports.literal("outputs"), cellId: idSchema.optional() }).strict(),
   external_exports.object({ type: external_exports.literal("output"), handle: artifactHandleIdSchema, offset: queryOffset, limit: outputQueryLimit }).strict(),
   external_exports.object({ type: external_exports.literal("operation"), operationId: idSchema, clientId: idSchema.optional() }).strict(),
-  external_exports.object({ type: external_exports.literal("events"), epoch: idSchema.nullable(), cursor: protocolIntegerSchema.nullable() }).strict(),
+  external_exports.object({ type: external_exports.literal("state") }).strict(),
   external_exports.object({ type: external_exports.literal("config") }).strict(),
   external_exports.object({ type: external_exports.literal("layout") }).strict(),
   external_exports.object({ type: external_exports.literal("packages-status") }).strict(),
@@ -62676,7 +62460,6 @@ var notebookQueryResultSchema = external_exports.object({
   sidecars: sidecarObservationsSchema,
   runtime: hostRuntimeSchema,
   capabilities: external_exports.array(boundedUtf8StringSchema(256, true)).max(MAX_PROTOCOL_COLLECTION_ITEMS),
-  nextCommandSequence: positiveIntegerSchema,
   activeClientIds: external_exports.array(idSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS),
   cells: external_exports.array(notebookCellDescriptorSchema).max(MAX_NOTEBOOK_CELLS)
 }).strict();
@@ -62948,10 +62731,7 @@ function encodeArtifactDescriptor(descriptor) {
 }
 function parseArtifactDescriptor(encoded) {
   if (typeof encoded !== "string" || encoded.length === 0 || encoded.length > MAX_ARTIFACT_DESCRIPTOR_HEADER_BYTES || /[^\x21-\x7e]/.test(encoded)) throw new Error("invalid artifact descriptor header");
-  const descriptor = artifactHandleSchema.parse(parseStrictJson(decodeURIComponent(encoded), {
-    maxBytes: MAX_ARTIFACT_DESCRIPTOR_HEADER_BYTES,
-    maxDepth: 8
-  }));
+  const descriptor = artifactHandleSchema.parse(decodeJsonFrame(decodeURIComponent(encoded), MAX_ARTIFACT_DESCRIPTOR_HEADER_BYTES));
   if (encodeArtifactDescriptor(descriptor) !== encoded) throw new Error("artifact descriptor header is not canonical");
   return descriptor;
 }
@@ -62972,7 +62752,7 @@ var outputRecordShape = external_exports.object({ id: idSchema, sessionEpoch: id
 var outputRecordSchema = protocolJsonSchema.pipe(outputRecordShape);
 var sessionIdentitySchema = external_exports.object({ sessionKey: idSchema, canonicalPath: pathSchema.nullable(), origin: boundedUtf8StringSchema(2048, true), browserOrigin: boundedUtf8StringSchema(2048, true), epoch: idSchema, processNonce: idSchema }).strict();
 var sessionRegistryMetadataSchema = external_exports.object({ state: external_exports.enum(["starting", "ready", "stopping"]), pid: positiveIntegerSchema, processNonce: idSchema, continuityProof: idSchema, startIdentity: idSchema, canonicalPath: pathSchema.nullable(), origin: boundedUtf8StringSchema(2048, true), epoch: idSchema, token: external_exports.string().regex(/^[0-9a-f]{64}$/), protocol: external_exports.literal(HOST_PROTOCOL), address: external_exports.object({ host: boundedUtf8StringSchema(256, true), port: external_exports.number().int().min(0).max(65535).safe(), origin: boundedUtf8StringSchema(2048, true), browserOrigin: boundedUtf8StringSchema(2048, true) }).strict().optional() }).strict();
-var sessionLeaseSchema = external_exports.object({ leaseId: idSchema, clientId: idSchema, nextCommandSequence: positiveIntegerSchema, epoch: idSchema }).strict();
+var sessionLeaseSchema = external_exports.object({ leaseId: idSchema, clientId: idSchema, epoch: idSchema }).strict();
 var attachLeaseRequestSchema = external_exports.object({ action: external_exports.literal("attach") }).strict();
 var leaseActionRequestSchema = external_exports.object({ action: external_exports.enum(["heartbeat", "release"]), leaseId: idSchema, disposition: external_exports.enum(["normal", "discard"]).optional() }).strict().superRefine((value, context) => {
   if (value.action === "heartbeat" && value.disposition !== void 0) context.addIssue({ code: "custom", path: ["disposition"], message: "heartbeat cannot have a release disposition" });
@@ -62980,14 +62760,14 @@ var leaseActionRequestSchema = external_exports.object({ action: external_export
 var ticketMintRequestSchema = external_exports.object({ origin: boundedUtf8StringSchema(2048, true), parentLeaseId: idSchema.optional() }).strict();
 var ticketMintResponseSchema = external_exports.object({ ticket: idSchema, expiresAt: boundedUtf8StringSchema(256, true) }).strict();
 var ticketExchangeRequestSchema = external_exports.object({ ticket: idSchema }).strict();
-var ticketExchangeResponseSchema = external_exports.object({ leaseId: idSchema, clientId: idSchema, nextCommandSequence: positiveIntegerSchema, epoch: idSchema, continuityProof: idSchema, csrf: idSchema, recoveryKey: external_exports.string().regex(/^[A-Za-z0-9_-]{43}$/).optional(), recoveryKeyId: external_exports.string().regex(/^[A-Za-z0-9_-]{43}$/).optional() }).strict();
-var hostIdentitySchema = external_exports.object({ protocol: external_exports.literal(HOST_PROTOCOL), epoch: idSchema, processNonce: idSchema, continuityProof: idSchema, sessionKey: idSchema, canonicalPath: pathSchema.nullable(), capabilities: external_exports.array(boundedUtf8StringSchema(256, true)).max(MAX_PROTOCOL_COLLECTION_ITEMS), origin: boundedUtf8StringSchema(2048, true), browserOrigin: boundedUtf8StringSchema(2048, true), address: external_exports.object({ host: boundedUtf8StringSchema(256, true), port: external_exports.number().int().min(0).max(65535).safe(), origin: boundedUtf8StringSchema(2048, true), browserOrigin: boundedUtf8StringSchema(2048, true) }).strict().optional(), leaseId: idSchema.optional(), clientId: idSchema.optional(), nextCommandSequence: positiveIntegerSchema.optional(), documentReady: external_exports.boolean(), configuration: hostConfigurationSchema }).strict();
-var sessionConnectionSchema = external_exports.object({ sessionKey: idSchema, canonicalPath: pathSchema.nullable(), origin: boundedUtf8StringSchema(2048, true), browserOrigin: boundedUtf8StringSchema(2048, true), epoch: idSchema, processNonce: idSchema, continuityProof: idSchema, leaseId: idSchema, clientId: idSchema, nextCommandSequence: positiveIntegerSchema, capabilities: external_exports.array(boundedUtf8StringSchema(256, true)).max(MAX_PROTOCOL_COLLECTION_ITEMS) }).strict();
+var ticketExchangeResponseSchema = external_exports.object({ leaseId: idSchema, clientId: idSchema, epoch: idSchema, continuityProof: idSchema, csrf: idSchema, recoveryId: idSchema.optional() }).strict();
+var hostIdentitySchema = external_exports.object({ protocol: external_exports.literal(HOST_PROTOCOL), epoch: idSchema, processNonce: idSchema, continuityProof: idSchema, sessionKey: idSchema, canonicalPath: pathSchema.nullable(), capabilities: external_exports.array(boundedUtf8StringSchema(256, true)).max(MAX_PROTOCOL_COLLECTION_ITEMS), origin: boundedUtf8StringSchema(2048, true), browserOrigin: boundedUtf8StringSchema(2048, true), address: external_exports.object({ host: boundedUtf8StringSchema(256, true), port: external_exports.number().int().min(0).max(65535).safe(), origin: boundedUtf8StringSchema(2048, true), browserOrigin: boundedUtf8StringSchema(2048, true) }).strict().optional(), leaseId: idSchema.optional(), clientId: idSchema.optional(), documentReady: external_exports.boolean(), configuration: hostConfigurationSchema }).strict();
+var sessionConnectionSchema = external_exports.object({ sessionKey: idSchema, canonicalPath: pathSchema.nullable(), origin: boundedUtf8StringSchema(2048, true), browserOrigin: boundedUtf8StringSchema(2048, true), epoch: idSchema, processNonce: idSchema, continuityProof: idSchema, leaseId: idSchema, clientId: idSchema, capabilities: external_exports.array(boundedUtf8StringSchema(256, true)).max(MAX_PROTOCOL_COLLECTION_ITEMS) }).strict();
 var windowActionSchema = external_exports.enum(["new", "open", "save", "save-as", "publish", "run-cell", "run-all", "run-stale", "interrupt", "restart", "settings", "select-r", "close"]);
 var windowActionMessageSchema = external_exports.object({ action: windowActionSchema }).strict();
 var windowStateSchema = external_exports.object({ path: pathSchema.nullable(), dirty: external_exports.boolean(), platform: boundedUtf8StringSchema(64, true), sessionEpoch: idSchema }).strict();
 var desktopRecoveryRequestSchema = external_exports.object({
-  keyId: external_exports.string().regex(/^[A-Za-z0-9_-]{43}$/),
+  recoveryId: external_exports.string().regex(/^[A-Za-z0-9_-]{1,128}$/),
   action: external_exports.enum(["read", "write", "remove", "list"]),
   name: external_exports.string().max(256).optional(),
   prefix: external_exports.string().max(256).optional(),
@@ -63002,13 +62782,18 @@ var ProtocolError = class extends Error {
   }
 };
 function decodeJsonFrame(input2, maxBytes = MAX_FRAME_BYTES) {
+  const bytes = typeof input2 === "string" ? new TextEncoder().encode(input2) : input2;
+  if (bytes.byteLength > maxBytes) throw new ProtocolError("frame_too_large", "JSON input exceeds byte limit");
+  let text2;
   try {
-    return parseStrictJson(input2, { maxBytes, maxDepth: MAX_JSON_DEPTH });
-  } catch (error61) {
-    const value = error61;
-    const message2 = typeof value.message === "string" ? value.message : "frame is not valid JSON";
-    const code2 = typeof value.code === "string" ? value.code : message2.startsWith("duplicate object key") ? "duplicate_key" : message2.startsWith("invalid UTF-8") ? "invalid_utf8" : message2.startsWith("JSON nesting limit exceeded") ? "nesting_too_deep" : message2.startsWith("JSON input exceeds") ? "frame_too_large" : "invalid_json";
-    throw new ProtocolError(code2, message2);
+    text2 = typeof input2 === "string" ? input2 : new TextDecoder("utf-8", { fatal: true }).decode(input2);
+  } catch {
+    throw new ProtocolError("invalid_utf8", "Frame is not valid UTF-8");
+  }
+  try {
+    return JSON.parse(text2);
+  } catch {
+    throw new ProtocolError("invalid_json", "Frame is not valid JSON");
   }
 }
 function sourceLinesByteLength(lines) {
@@ -63106,22 +62891,16 @@ function encodeHostEventWire(event) {
   const value = wireRecord(event, "host event");
   return eventCellPayload(value.type) ? { ...value, payload: encodeCellWire(value.payload) } : { ...value };
 }
-function decodeHostEventWire(value) {
-  const event = wireRecord(value, "host event");
-  return eventCellPayload(event.type) ? { ...event, payload: decodeCellWire(event.payload) } : { ...event };
-}
 function isArtifactHandle(value) {
   return artifactHandleSchema.safeParse(value).success;
 }
 function encodeRecoveryWire(recovery) {
   if (isArtifactHandle(recovery)) return recovery;
-  if (recovery.kind === "replay") return { ...recovery, events: recovery.events.map(encodeHostEventWire) };
   return { ...recovery, snapshot: encodeHostSnapshotWire(recovery.snapshot) };
 }
 function decodeRecoveryWire(value) {
   if (isArtifactHandle(value)) return value;
   const recovery = wireRecord(value, "recovery");
-  if (recovery.kind === "replay") return { ...recovery, events: wireArray(recovery.events, "recovery events").map(decodeHostEventWire) };
   if (recovery.kind === "snapshot") return { ...recovery, snapshot: decodeHostSnapshotWire(recovery.snapshot) };
   throw new ProtocolError("invalid_request", "invalid recovery transfer");
 }
@@ -63145,7 +62924,7 @@ function mapQueryResultWire(queryType, result, encode4) {
       return encode4 ? encodeCellWire(result) : decodeCellWire(result);
     case "source":
       return wireArray(result, "source query result").map(encode4 ? encodeCellWire : decodeCellWire);
-    case "events":
+    case "state":
       return encode4 ? encodeRecoveryWire(result) : decodeRecoveryWire(result);
     default:
       return result;
@@ -63321,7 +63100,7 @@ function projectConfigPath(path3) {
   const directory = projectDirectory(path3);
   return directory === null ? null : join3(directory, ".alder", "config.yaml");
 }
-function hasUnpairedSurrogate3(value) {
+function hasUnpairedSurrogate2(value) {
   for (let index = 0; index < value.length; index += 1) {
     const code2 = value.charCodeAt(index);
     if (code2 >= 55296 && code2 <= 56319) {
@@ -63382,7 +63161,7 @@ function assertPlainJson(value, depth, kind) {
 }
 function parseYamlMapping(text2, kind) {
   if (typeof text2 !== "string") throw new ConfigError(kind, "YAML input must be text");
-  if (hasUnpairedSurrogate3(text2)) throw new ConfigError(kind, "YAML input contains an unpaired surrogate");
+  if (hasUnpairedSurrogate2(text2)) throw new ConfigError(kind, "YAML input contains an unpaired surrogate");
   if (text2.includes("\0")) throw new ConfigError(kind, "YAML input contains an embedded NUL");
   const bytes = new TextEncoder().encode(text2).byteLength;
   if (bytes > MAX_YAML_BYTES) {
@@ -64699,7 +64478,7 @@ function assignedCellId(document) {
   }
   return { id: id2, next: next + 1 };
 }
-function addCell(document, body = [], type = "code", after2 = null) {
+function addCell(document, body = [], type = "code", after2 = null, id2) {
   validateCellType(type);
   const bodyArray = typeof body === "string" ? [body] : validateBody(body, "<new cell>");
   if (typeof body === "string") validateSourceLine(body, "new cell source line 1");
@@ -64716,7 +64495,11 @@ function addCell(document, body = [], type = "code", after2 = null) {
     index += 1;
   }
   const assignment = assignedCellId(document);
-  const cell = createCell(assignment.id, bodyArray, type, effectivePreferredEol(document));
+  if (id2 !== void 0) {
+    validateIdentifier(id2, "cell id");
+    if (document.cells.some((cell2) => cell2.id === id2)) throw new NotebookMutationError("invalid_document", "cell already exists: " + id2);
+  }
+  const cell = createCell(id2 ?? assignment.id, bodyArray, type, effectivePreferredEol(document));
   const cells = document.cells.map((candidate, cellIndex) => syncCell(candidate, physical.cells[cellIndex]));
   cells.splice(index, 0, cell);
   const next = documentWith(document, cells, physical.header, { nextCellNumber: assignment.next });
@@ -65155,7 +64938,7 @@ function stageDocumentChanges(base, changes) {
       }
       const after2 = change.after === null ? null : resolveStageRef(document, change.after, created, deleted).id;
       const beforeIds = new Set(document.cells.map((cell) => cell.id));
-      document = addCell(document, change.body, change.cellType, after2);
+      document = addCell(document, change.body, change.cellType, after2, change.creationId);
       const added = document.cells.find((cell) => !beforeIds.has(cell.id));
       if (added === void 0) throw stageInvalid("cell creation did not produce a cell");
       created.set(change.creationId, added.id);
@@ -72322,7 +72105,7 @@ var OutputStore = class {
     return Buffer.from(value, "utf8");
   }
   assertMIMEInput(value) {
-    if (hasUnpairedSurrogate4(value)) {
+    if (hasUnpairedSurrogate3(value)) {
       throw new OutputStoreError("output_invalid", "MIME output must contain valid Unicode");
     }
     if (byteLength(value) > OUTPUT_RECORD_MAX_BYTES) {
@@ -72514,13 +72297,13 @@ function freezeJson(value) {
   return value;
 }
 function safeId(value) {
-  return typeof value === "string" && value.length > 0 && byteLength(value) <= 256 && !hasUnpairedSurrogate4(value) && !/[\u0000-\u001f\u007f]/.test(value);
+  return typeof value === "string" && value.length > 0 && byteLength(value) <= 256 && !hasUnpairedSurrogate3(value) && !/[\u0000-\u001f\u007f]/.test(value);
 }
 function safeHandle(value) {
   return typeof value === "string" && value.length > 0 && byteLength(value) <= MAX_ARTIFACT_HANDLE_BYTES && safeId(value) && !/[\\/]/.test(value) && !value.includes("..") && !value.startsWith(".");
 }
 function safeMime(value) {
-  return typeof value === "string" && value.length > 0 && byteLength(value) <= MAX_MIME_BYTES && !hasUnpairedSurrogate4(value) && !/[\u0000-\u001f\u007f]/.test(value);
+  return typeof value === "string" && value.length > 0 && byteLength(value) <= MAX_MIME_BYTES && !hasUnpairedSurrogate3(value) && !/[\u0000-\u001f\u007f]/.test(value);
 }
 function normalizeExtension(value) {
   if (typeof value !== "string" || byteLength(value) > MAX_ARTIFACT_EXTENSION_BYTES || !/^\.[A-Za-z0-9]{1,12}$/.test(value)) return ".bin";
@@ -72536,7 +72319,7 @@ function utf8Prefix(value, maximumBytes) {
   while (end > 0 && (bytes[end] & 192) === 128) end -= 1;
   return bytes.subarray(0, end).toString("utf8");
 }
-function hasUnpairedSurrogate4(value) {
+function hasUnpairedSurrogate3(value) {
   for (let index = 0; index < value.length; index += 1) {
     const code2 = value.charCodeAt(index);
     if (code2 >= 55296 && code2 <= 56319) {
@@ -72658,7 +72441,6 @@ function createArtifactManifest(descriptor, extension2) {
 var INTERNAL_CLIENT_ID = "internal";
 var OPERATION_JOURNAL_LIMIT = 256;
 var COMMAND_DEDUPLICATION_LIMIT = 512;
-var EVENT_JOURNAL_LIMIT = 2048;
 var MAX_LOG_BYTES = 65536;
 var MAX_COMPLETED_LOG_BYTES = 1048576;
 var LOG_TRUNCATION_MARKER = "[output truncated at 1048576 bytes]";
@@ -72693,14 +72475,13 @@ var Controller = class {
   outputStore;
   services;
   epochValue;
-  eventJournalLimit;
-  eventJournalByteLimit;
   listeners = /* @__PURE__ */ new Map();
-  eventJournal = [];
   operations = /* @__PURE__ */ new Map();
   operationWaiters = /* @__PURE__ */ new Map();
   commandEntries = /* @__PURE__ */ new Map();
-  clientHighWater = /* @__PURE__ */ new Map();
+  executionRequestIds = /* @__PURE__ */ new Map();
+  runCommandTail = Promise.resolve();
+  queuedRunCommands = /* @__PURE__ */ new Map();
   activeClients = /* @__PURE__ */ new Set();
   analysisCache = /* @__PURE__ */ new Map();
   analysisCacheBytes = 0;
@@ -72721,7 +72502,6 @@ var Controller = class {
   pendingLazyOutputs = /* @__PURE__ */ new Map();
   pendingTablePages = /* @__PURE__ */ new Map();
   pendingUploads = /* @__PURE__ */ new Map();
-  eventJournalBytes = 0;
   sourceCommitTail = Promise.resolve();
   durableCommit;
   sourceCommit;
@@ -72800,14 +72580,6 @@ var Controller = class {
     this.outputStore = options.outputStore;
     this.services = options.services ?? {};
     this.epochValue = options.epoch ?? randomUUID3();
-    this.eventJournalLimit = boundedPositiveInteger(
-      options.journalLimit,
-      EVENT_JOURNAL_LIMIT
-    );
-    this.eventJournalByteLimit = boundedPositiveInteger(
-      options.journalByteLimit,
-      4 * 1024 * 1024
-    );
     let notebook;
     let sourceDocument;
     try {
@@ -73061,12 +72833,11 @@ var Controller = class {
         [...this.editorDiagnostics].map(([id2, diagnostics]) => [id2, clone3(diagnostics)])
       ),
       serviceErrors: clone3(this.serviceErrors),
-      operations: [...this.operations.values()].map(clone3),
+      operations: [...this.operations.values()].filter((operation) => isExecutionCommand(operation.kind)).map(clone3),
       lastValue: clone3(this.lastValue),
       lastActionError: clone3(this.lastActionError),
       capabilities: [...this.handshake?.capabilities ?? []],
-      activeClientIds: [...this.activeClients],
-      ...clientId === void 0 ? {} : { nextCommandSequence: (this.clientHighWater.get(clientId) ?? 0) + 1 }
+      activeClientIds: [...this.activeClients]
     };
     return snapshot;
   }
@@ -73133,19 +72904,6 @@ var Controller = class {
     else this.serviceErrors[service] = next;
     this.bump("service-errors", clone3(this.serviceErrors));
     return true;
-  }
-  recover(epoch, cursor) {
-    if (epoch !== this.epochValue || cursor === null || !Number.isSafeInteger(cursor) || cursor < 0 || cursor > this.cursorValue) {
-      return this.snapshotRecovery();
-    }
-    const earliest = this.eventJournal[0]?.cursor ?? this.cursorValue + 1;
-    if (cursor < earliest - 1) return this.snapshotRecovery();
-    return {
-      kind: "replay",
-      epoch: this.epochValue,
-      cursor: this.cursorValue,
-      events: this.eventJournal.filter((event) => event.cursor > cursor).map(clone3)
-    };
   }
   subscribe(listener, types) {
     this.assertNotClosed();
@@ -73240,117 +72998,63 @@ var Controller = class {
       signal?.addEventListener("abort", abort, { once: true });
     });
   }
-  dispatch(input2) {
+  dispatch(command) {
     this.assertNotClosed();
-    let command;
-    try {
-      command = parseHostCommand(input2);
-    } catch (error61) {
-      return Promise.reject(asControllerError(error61, "invalid_request", 400));
-    }
     if (command.sessionEpoch !== this.epochValue) {
       return Promise.reject(new ControllerError(
         "session_epoch_mismatch",
-        "command belongs to a different session epoch",
+        "request belongs to a previous backend session; its outcome is unknown",
         409
       ));
     }
-    const key2 = commandKey(command.clientId, command.operationId);
-    const fingerprint2 = stableStringify(command);
-    const prior = this.commandEntries.get(key2);
+    const { clientId: _clientId, ...request } = command;
+    const fingerprint2 = createHash2("sha256").update(stableStringify(request)).digest("hex");
+    const prior = this.commandEntries.get(command.requestId);
     if (prior !== void 0) {
-      if (prior.fingerprint !== fingerprint2 || prior.commandSequence !== command.commandSequence) {
-        return Promise.resolve(this.rejectedAdmission(command, hostError(
-          "operation_id_conflict",
-          "operation " + command.operationId + " was already used for a different command",
-          command.operationId
-        )));
+      if (prior.fingerprint !== fingerprint2) {
+        return Promise.reject(new ControllerError(
+          "request_id_conflict",
+          "request ID was already used for a different command",
+          409
+        ));
       }
-      return prior.admission;
+      return prior.completion.then(clone3);
     }
-    if (command.commandSequence >= Number.MAX_SAFE_INTEGER) {
-      return Promise.resolve(this.rejectedAdmission(command, hostError(
-        "command_sequence_exhausted",
-        "command sequence counter is exhausted",
-        command.operationId
-      )));
-    }
-    const previous = this.clientHighWater.get(command.clientId) ?? 0;
-    const expected = previous + 1;
-    if (command.commandSequence <= previous) {
-      return Promise.resolve(this.rejectedAdmission(command, hostError(
-        "operation_expired",
-        "command sequence " + command.commandSequence + " is no longer retained",
-        command.operationId,
-        { expectedCommandSequence: previous + 1, nextCommandSequence: command.commandSequence, sequenceConsumed: false }
-      )));
-    }
-    if (command.commandSequence !== expected) {
-      return Promise.resolve(this.rejectedAdmission(command, hostError(
-        "command_sequence_gap",
-        "expected command sequence " + expected + ", received " + command.commandSequence,
-        command.operationId,
-        { expectedCommandSequence: expected, nextCommandSequence: command.commandSequence, sequenceConsumed: false }
-      )));
-    }
-    if (!this.clientHighWater.has(command.clientId) && this.activeClients.size >= 128) {
-      return Promise.resolve(this.rejectedAdmission(command, hostError(
-        "client_limit",
-        "too many active client sessions",
-        command.operationId
-      )));
+    const executed = this.executionRequestIds.get(command.requestId);
+    if (executed !== void 0) {
+      return Promise.reject(new ControllerError(
+        executed === fingerprint2 ? "request_expired" : "request_id_conflict",
+        executed === fingerprint2 ? "this execution request was already handled; its result is no longer retained" : "request ID was already used for a different command",
+        409
+      ));
     }
     this.registerClient(command.clientId);
-    this.clientHighWater.set(command.clientId, command.commandSequence);
-    if (command.type === "run" && command.startup === true && this.startupActivated) {
-      const admission2 = Promise.resolve(this.rejectedAdmission(command, hostError(
-        "startup_already_activated",
-        "startup activation was already claimed by another client",
-        command.operationId,
-        { sequenceConsumed: true }
-      ), true));
-      this.commandEntries.set(key2, {
-        operationId: command.operationId,
-        clientId: command.clientId,
-        commandSequence: command.commandSequence,
-        fingerprint: fingerprint2,
-        admission: admission2,
-        terminal: Promise.resolve(void 0)
+    this.createOperation(command.requestId, command.type, command.clientId);
+    if (isExecutionCommand(command.type)) this.executionRequestIds.set(command.requestId, fingerprint2);
+    const operationCompletion = this.awaitOperation(command.requestId, command.clientId);
+    const execute = () => this.executeCommand(command, operationCompletion);
+    let completion;
+    if (command.type === "run") {
+      this.queuedRunCommands.set(command.requestId, command);
+      completion = this.runCommandTail.then(() => {
+        this.queuedRunCommands.delete(command.requestId);
+        return execute();
       });
+      this.runCommandTail = completion.then(() => void 0, () => void 0);
+    } else {
+      completion = Promise.resolve().then(execute);
+    }
+    const entry = {
+      fingerprint: fingerprint2,
+      completion,
+      settled: false
+    };
+    this.commandEntries.set(command.requestId, entry);
+    void completion.finally(() => {
+      entry.settled = true;
       this.trimCommandEntries();
-      return admission2;
-    }
-    let operation;
-    try {
-      operation = this.createOperation(command.operationId, command.type, command.clientId, command.commandSequence);
-    } catch (error61) {
-      return Promise.reject(error61);
-    }
-    if (command.type === "run" && !this.startupActivated) {
-      this.startupActivated = true;
-      this.emit("runtime", this.runtimeSnapshot(), { operationId: command.operationId, clientId: command.clientId, commandSequence: command.commandSequence });
-    }
-    this.emit("receipt", { operation: clone3(operation), commandType: command.type }, {
-      operationId: command.operationId,
-      clientId: command.clientId,
-      commandSequence: command.commandSequence
-    });
-    const terminal = Promise.resolve().then(() => this.executeCommand(command));
-    void terminal.catch(() => void 0);
-    const admission = Promise.resolve({
-      epoch: this.epochValue,
-      clientId: command.clientId,
-      operationId: command.operationId,
-      commandSequence: command.commandSequence,
-      accepted: true,
-      sequenceConsumed: true,
-      operation: clone3(operation),
-      error: null,
-      nextCommandSequence: command.commandSequence + 1
-    });
-    this.commandEntries.set(key2, { operationId: command.operationId, clientId: command.clientId, commandSequence: command.commandSequence, fingerprint: fingerprint2, admission, terminal });
-    this.trimCommandEntries();
-    return admission;
+    }).catch(() => void 0);
+    return completion.then(clone3);
   }
   /** Register an authenticated client lease exactly once. */
   registerClient(clientId) {
@@ -73362,7 +73066,7 @@ var Controller = class {
     this.activeClients.add(clientId);
     this.emitActiveClientsChanged(clientId);
   }
-  /** Release an authenticated lease without rewinding its high-water mark. */
+  /** Release an authenticated client lease. */
   releaseClient(clientId) {
     if (!this.activeClients.delete(clientId)) return;
     this.emitActiveClientsChanged(clientId);
@@ -73388,7 +73092,6 @@ var Controller = class {
           sidecars: clone3(this.sidecarsValue),
           runtime: this.runtimeSnapshot(),
           capabilities: [...this.handshake?.capabilities ?? []],
-          nextCommandSequence: (this.clientHighWater.get(callerClientId ?? "internal") ?? 0) + 1,
           activeClientIds: [...this.activeClients],
           cells: this.cells.map((cell) => ({ id: cell.id, type: cell.type, options: clone3(cell.options), revision: cell.revision }))
         };
@@ -73423,12 +73126,12 @@ var Controller = class {
         const owner = callerClientId ?? query2.clientId;
         if (owner === void 0) throw new ControllerError("not_found", "operation owner is required", 404);
         const operation = this.operations.get(commandKey(owner, query2.operationId));
-        if (operation === void 0) throw new ControllerError("not_found", "no such operation: " + query2.operationId, 404);
+        if (operation === void 0 || !isExecutionCommand(operation.kind)) throw new ControllerError("not_found", "no such operation: " + query2.operationId, 404);
         result = clone3(operation);
         break;
       }
-      case "events":
-        result = this.recover(query2.epoch, query2.cursor);
+      case "state":
+        result = this.snapshotRecovery();
         break;
       case "config":
         result = {
@@ -73536,20 +73239,6 @@ var Controller = class {
       resource.close();
     }
   }
-  rejectedAdmission(command, error61, sequenceConsumed = false) {
-    const previous = this.clientHighWater.get(command.clientId) ?? 0;
-    return {
-      epoch: this.epochValue,
-      clientId: command.clientId,
-      operationId: command.operationId,
-      commandSequence: command.commandSequence,
-      accepted: false,
-      sequenceConsumed,
-      operation: null,
-      error: clone3(error61),
-      nextCommandSequence: sequenceConsumed ? command.commandSequence + 1 : previous + 1
-    };
-  }
   async close() {
     if (this.closed) return;
     this.closed = true;
@@ -73604,8 +73293,17 @@ var Controller = class {
     await this.engine.close();
     this.listeners.clear();
   }
-  async executeCommand(command) {
+  async executeCommand(command, completion) {
     try {
+      if (this.closed || isTerminal(this.operationFor(command.requestId, command.clientId)?.status ?? "error")) {
+        return this.commandResult(command.requestId, await completion);
+      }
+      if (command.type === "run") {
+        if (command.startup === true && this.startupActivated) {
+          throw new ControllerError("startup_already_activated", "startup was already activated", 409);
+        }
+        this.startupActivated = true;
+      }
       if (this.engineRestarting && ["run", "widget", "inspect", "lazy-output", "table-page", "format", "packages-install"].includes(command.type)) {
         throw new ControllerError(
           "operation_in_progress",
@@ -73625,7 +73323,7 @@ var Controller = class {
       let deferred = false;
       switch (command.type) {
         case "transaction":
-          result = await this.applyTransaction(command.changes, command.expectedDocumentRevision, command.operationId, false);
+          result = await this.applyTransaction(command.changes, command.expectedDocumentRevision, command.requestId, false);
           break;
         case "run":
           if (command.startup === true && !this.runOnStartup) {
@@ -73639,7 +73337,8 @@ var Controller = class {
           result = await this.interruptActiveRun(command.runId);
           break;
         case "restart":
-          result = await this.restartEngine(void 0, command.replay, command.operationId, command.clientId, true);
+          if (command.expectedDocumentRevision !== void 0) this.assertDocumentRevision(command.expectedDocumentRevision);
+          result = await this.restartEngine(void 0, command.replay, command.requestId, command.clientId, true, command.expectedDocumentRevision);
           deferred = command.replay;
           break;
         case "widget":
@@ -73649,12 +73348,12 @@ var Controller = class {
           break;
         case "inspect":
           this.assertKernelEpoch(command.kernelEpoch);
-          result = this.startInspection(command.operationId, command.name, command.clientId);
+          result = this.startInspection(command.requestId, command.name, command.clientId);
           deferred = true;
           break;
         case "lazy-output":
           this.assertKernelEpoch(command.kernelEpoch);
-          result = this.startLazyOutput(command.operationId, command.key, command.clientId);
+          result = this.startLazyOutput(command.requestId, command.key, command.clientId);
           deferred = true;
           break;
         case "table-page":
@@ -73663,7 +73362,7 @@ var Controller = class {
           deferred = true;
           break;
         case "save":
-          result = await this.saveNotebook(command.expectedDocumentRevision, command.operationId);
+          result = await this.saveNotebook(command.expectedDocumentRevision, command.requestId);
           break;
         case "save-as":
         case "reload-source":
@@ -73680,16 +73379,16 @@ var Controller = class {
           break;
         case "format":
           this.assertDocumentRevision(command.expectedDocumentRevision);
-          result = await this.formatSource(command.cellIds, command.expectedRevisions, command.operationId);
+          result = await this.formatSource(command.cellIds, command.expectedRevisions, command.requestId);
           break;
         case "set-runtime":
-          result = await this.setRuntime(command.on_cell_change, command.on_startup, command.expectedDocumentRevision, command.operationId);
+          result = await this.setRuntime(command.on_cell_change, command.on_startup, command.expectedDocumentRevision, command.requestId);
           break;
         case "set-config":
-          result = await this.setConfig(command.patch, command.expectedDocumentRevision, command.expectedSidecarVersion, command.operationId);
+          result = await this.setConfig(command.patch, command.expectedDocumentRevision, command.expectedSidecarVersion, command.requestId);
           break;
         case "set-layout":
-          result = await this.setLayout(command.layout, command.expectedDocumentRevision, command.expectedSidecarVersion, command.operationId);
+          result = await this.setLayout(command.layout, command.expectedDocumentRevision, command.expectedSidecarVersion, command.requestId);
           break;
         case "shutdown":
           this.assertDocumentRevision(command.expectedDocumentRevision);
@@ -73707,31 +73406,33 @@ var Controller = class {
           throw assertNever2(command);
       }
       if (deferred) {
-        const operation = this.operationFor(command.operationId, command.clientId);
+        const operation = this.operationFor(command.requestId, command.clientId);
         if (operation !== void 0 && result !== void 0) operation.result = clone3(result);
       }
-      if (!deferred) this.completeOperation(command.operationId, result, command.clientId);
-      const settled = this.operationFor(command.operationId, command.clientId);
-      if (settled === void 0) throw new ControllerError("internal_error", "operation missing after execution", 500);
-      return {
-        epoch: this.epochValue,
-        operation: clone3(settled),
-        documentRevision: this.documentRevisionValue,
-        version: this.version,
-        cursor: this.cursorValue,
-        nextCommandSequence: (this.clientHighWater.get(command.clientId) ?? command.commandSequence) + 1,
-        result: result === void 0 ? null : clone3(result),
-        error: settled.error
-      };
+      if (!deferred) this.completeOperation(command.requestId, result, command.clientId);
+      const settled = await completion;
+      if (settled.result === null && result !== void 0) settled.result = clone3(result);
+      return this.commandResult(command.requestId, settled);
     } catch (error61) {
       const failure = asControllerError(error61);
-      const hostFailure = failure.toJSON(command.operationId);
+      const hostFailure = failure.toJSON(command.requestId);
       if (!this.closed) {
-        this.replaceLastActionError(hostFailure, { operationId: command.operationId });
-        this.failOperation(command.operationId, hostFailure, command.clientId);
+        this.replaceLastActionError(hostFailure, { operationId: command.requestId });
+        this.failOperation(command.requestId, hostFailure, command.clientId);
       }
-      throw failure;
+      return this.commandResult(command.requestId, await completion);
     }
+  }
+  commandResult(requestId, operation) {
+    return {
+      requestId,
+      epoch: this.epochValue,
+      documentRevision: this.documentRevisionValue,
+      version: this.version,
+      cursor: this.cursorValue,
+      result: clone3(operation.result),
+      error: clone3(operation.error)
+    };
   }
   /** Return the authoritative physical document with current semantic state applied. */
   notebookDocument() {
@@ -73958,8 +73659,6 @@ var Controller = class {
             const previousDocumentRevision = this.documentRevisionValue;
             const previousVersion = this.version;
             const previousCursor = this.cursorValue;
-            const previousEventJournalLength = this.eventJournal.length;
-            const previousEventJournalBytes = this.eventJournalBytes;
             const previousRuntimeSignature = this.runtimeSignature;
             try {
               this.applySourcePublication(prepared, request);
@@ -73978,8 +73677,6 @@ var Controller = class {
               this.outputStore.setIdentity({ documentRevision: this.documentRevisionValue, kernelEpoch: this.kernelEpochValue });
               this.version = previousVersion;
               this.cursorValue = previousCursor;
-              this.eventJournal.length = previousEventJournalLength;
-              this.eventJournalBytes = previousEventJournalBytes;
               this.runtimeSignature = previousRuntimeSignature;
               throw error61;
             }
@@ -74308,7 +74005,7 @@ var Controller = class {
     }
     this.runPreparationActive = true;
     const preparation = {
-      operationId: command.operationId,
+      operationId: command.requestId,
       clientId: command.clientId,
       cancelled: false
     };
@@ -74316,18 +74013,18 @@ var Controller = class {
     try {
       let changes;
       if ((command.changes?.length ?? 0) > 0) {
-        changes = await this.applyTransaction(command.changes ?? [], command.expectedDocumentRevision, command.operationId, false, preflightStaged);
+        changes = await this.applyTransaction(command.changes ?? [], command.expectedDocumentRevision, command.requestId, false, preflightStaged);
         if (this.cancelRunPreparation(preparation)) return void 0;
-        const operation2 = this.operationFor(command.operationId, command.clientId);
+        const operation2 = this.operationFor(command.requestId, command.clientId);
         if (operation2 !== void 0 && !isTerminal(operation2.status)) {
           operation2.result = clone3(changes);
           this.rememberOperation(operation2);
         }
-        await this.ensureCurrentAnalysis();
-      } else {
-        this.assertDocumentRevision(command.expectedDocumentRevision);
-        await this.ensureCurrentAnalysis();
       }
+      const runDocumentRevision = changes === void 0 ? command.expectedDocumentRevision : Number(changes.documentRevision);
+      this.assertDocumentRevision(runDocumentRevision);
+      await this.ensureCurrentAnalysis();
+      this.assertDocumentRevision(runDocumentRevision);
       if (this.cancelRunPreparation(preparation)) return void 0;
       this.assertNoPackageOperation();
       this.assertExecutionPossible();
@@ -74341,9 +74038,9 @@ var Controller = class {
       } else {
         plan = this.graphValue.planStale((id2) => this.statusOf(id2));
       }
-      const runId = this.launchRun(plan, command.operationId, false, command.clientId);
+      const runId = this.launchRun(plan, command.requestId, false, command.clientId);
       const result = { runId, plan: [...plan], ...changes === void 0 ? {} : changes };
-      const operation = this.operationFor(command.operationId, command.clientId);
+      const operation = this.operationFor(command.requestId, command.clientId);
       if (operation !== void 0 && !isTerminal(operation.status)) operation.result = clone3(result);
       return result;
     } finally {
@@ -74939,6 +74636,14 @@ var Controller = class {
   }
   async interruptActiveRun(targetRunId) {
     this.assertStarted();
+    let cancelledQueued = false;
+    if (targetRunId === void 0) {
+      for (const command of this.queuedRunCommands.values()) {
+        this.failOperation(command.requestId, hostError("interrupted", "Interrupted", command.requestId), command.clientId);
+        cancelledQueued = true;
+      }
+      this.queuedRunCommands.clear();
+    }
     const preparation = this.runPreparationCancellation;
     if (preparation !== null && this.runPreparationActive) {
       if (targetRunId !== void 0) {
@@ -74967,6 +74672,7 @@ var Controller = class {
         });
         return { runId: runId2, requested: true };
       }
+      if (cancelledQueued) return { runId: null, requested: true };
       throw new ControllerError("no_run_in_progress", "no run in progress", 409);
     }
     if (active.cancelMode !== null) {
@@ -75035,7 +74741,7 @@ var Controller = class {
     this.assertRuntimeContextTransitionReady();
     return this.restartEngine(options, false, operationId);
   }
-  async restartEngine(options, replay, operationId, clientId = "internal", waitForSourceLane = false) {
+  async restartEngine(options, replay, operationId, clientId = "internal", waitForSourceLane = false, expectedDocumentRevision2) {
     this.assertRuntimeContextTransitionReady();
     this.engineRestarting = true;
     try {
@@ -75101,6 +74807,7 @@ var Controller = class {
       }
       this.bump("runtime", this.runtimeSnapshot(), { operationId });
       if (!replay) return { runId: null };
+      if (expectedDocumentRevision2 !== void 0) this.assertDocumentRevision(expectedDocumentRevision2);
       this.assertGraphRunnable();
       const runId = this.launchRun(this.allCodePlan(), operationId, false, clientId);
       return { runId };
@@ -75645,13 +75352,13 @@ var Controller = class {
     const draft = widgetPathHasForm(spec ?? {}, command.path) && command.update.submit !== true;
     const key2 = widgetKey(command.name, command.path);
     const reservedUpload = [...this.pendingUploads.entries()].find(([, pending]) => pending.key === key2);
-    const operationKey = this.operationKey(command.clientId, command.operationId);
+    const operationKey = this.operationKey(command.clientId, command.requestId);
     if (this.pendingWidgets.has(key2) || reservedUpload !== void 0 && reservedUpload[0] !== operationKey) {
       throw new ControllerError("operation_in_progress", "widget " + command.name + " already has a pending update", 409);
     }
-    this.pendingWidgets.set(key2, this.operationKey(command.clientId, command.operationId));
+    this.pendingWidgets.set(key2, this.operationKey(command.clientId, command.requestId));
     this.widgetToken += 1;
-    const operation = this.operationFor(command.operationId, command.clientId);
+    const operation = this.operationFor(command.requestId, command.clientId);
     if (operation !== void 0) {
       operation.status = "running";
       operation.token = this.widgetToken;
@@ -75676,14 +75383,14 @@ var Controller = class {
       setWidgetOperation(widget, key2, {
         token: identity.token,
         draft,
-        operationId: command.operationId,
+        operationId: command.requestId,
         status: "pending",
         error: null
       });
     }).then((record4) => {
       identity.record = record4;
       this.bump("cell", this.publicCell(owner), {
-        operationId: command.operationId,
+        operationId: command.requestId,
         cellId: owner.id,
         revision: owner.revision
       });
@@ -75700,8 +75407,8 @@ var Controller = class {
     return { token: identity.token, owner: owner.id };
   }
   async finishWidgetOperation(command, identity, rawResponse, update2) {
-    const reconciliationOwner = this.obsoleteWidgetRequests.get(command.operationId);
-    this.obsoleteWidgetRequests.delete(command.operationId);
+    const reconciliationOwner = this.obsoleteWidgetRequests.get(command.requestId);
+    this.obsoleteWidgetRequests.delete(command.requestId);
     if (this.closed || identity.generation !== this.runtimeGeneration) return;
     let response;
     try {
@@ -75716,7 +75423,7 @@ var Controller = class {
     }
     const current = this.findWidget(command.name);
     const owner = this.cellById(identity.owner);
-    if (this.pendingWidgets.get(identity.key) !== this.operationKey(command.clientId, command.operationId) || current === null || current.owner !== identity.owner || current.record.id !== identity.recordId || owner === void 0 || owner.revision !== identity.revision || this.statusOf(owner.id) !== "done") {
+    if (this.pendingWidgets.get(identity.key) !== this.operationKey(command.clientId, command.requestId) || current === null || current.owner !== identity.owner || current.record.id !== identity.recordId || owner === void 0 || owner.revision !== identity.revision || this.statusOf(owner.id) !== "done") {
       await this.failWidgetOperation(command, identity, "widget_not_current", "widget is no longer current");
       return;
     }
@@ -75740,14 +75447,14 @@ var Controller = class {
       }
       setWidgetOperation(widget, identity.key, {
         token: identity.token,
-        operationId: command.operationId,
+        operationId: command.requestId,
         status: "done",
         error: null
       });
     });
     identity.record = next;
     this.pendingWidgets.delete(identity.key);
-    const operationKey = this.operationKey(command.clientId, command.operationId);
+    const operationKey = this.operationKey(command.clientId, command.requestId);
     const pendingUpload = this.pendingUploads.get(operationKey);
     this.pendingUploads.delete(operationKey);
     if (pendingUpload !== void 0 && pendingUpload.uploadId !== null) {
@@ -75757,25 +75464,25 @@ var Controller = class {
     }
     this.scheduleVariableRefresh();
     this.bump("cell", this.publicCell(owner), {
-      operationId: command.operationId,
+      operationId: command.requestId,
       cellId: owner.id,
       revision: owner.revision
     });
     if (identity.draft) {
-      this.completeOperation(command.operationId, { token: identity.token, draft: true }, command.clientId);
+      this.completeOperation(command.requestId, { token: identity.token, draft: true }, command.clientId);
     } else if (identity.kind === "run_button" && update2.value === true) {
       this.scheduleRunButton(command, identity.owner, identity.revision, identity.record);
     } else {
-      const scheduled = this.scheduleWidgetConsumers(command.name, identity.owner, command.source, command.operationId, command.clientId);
-      if (!scheduled) this.completeOperation(command.operationId, { token: identity.token }, command.clientId);
+      const scheduled = this.scheduleWidgetConsumers(command.name, identity.owner, command.source, command.requestId, command.clientId);
+      if (!scheduled) this.completeOperation(command.requestId, { token: identity.token }, command.clientId);
     }
   }
   async failWidgetOperation(command, identity, code2, message2) {
-    if (this.obsoleteWidgetRequests.delete(command.operationId)) return;
+    if (this.obsoleteWidgetRequests.delete(command.requestId)) return;
     if (this.closed || identity.generation !== this.runtimeGeneration) return;
-    if (this.pendingWidgets.get(identity.key) !== this.operationKey(command.clientId, command.operationId)) return;
+    if (this.pendingWidgets.get(identity.key) !== this.operationKey(command.clientId, command.requestId)) return;
     this.pendingWidgets.delete(identity.key);
-    this.discardUpload(this.operationKey(command.clientId, command.operationId));
+    this.discardUpload(this.operationKey(command.clientId, command.requestId));
     const owner = this.cellById(identity.owner);
     if (owner !== void 0 && owner.revision === identity.revision && this.statusOf(owner.id) === "done") {
       const current = this.findWidget(identity.name);
@@ -75786,13 +75493,13 @@ var Controller = class {
             const widget = findRichOutputRecord(data, (output2) => output2.kind === "widget" && output2.name === identity.name);
             if (widget !== null) setWidgetOperation(widget, identity.key, {
               token: identity.token,
-              operationId: command.operationId,
+              operationId: command.requestId,
               status: "error",
               error: { code: code2, message: message2 }
             });
           });
           this.bump("cell", this.publicCell(owner), {
-            operationId: command.operationId,
+            operationId: command.requestId,
             cellId: owner.id,
             revision: owner.revision
           });
@@ -75800,9 +75507,9 @@ var Controller = class {
         }
       }
     }
-    const failure = hostError(code2, message2, command.operationId);
-    this.replaceLastActionError(failure, { operationId: command.operationId, cellId: identity.owner });
-    this.failOperation(command.operationId, failure, command.clientId);
+    const failure = hostError(code2, message2, command.requestId);
+    this.replaceLastActionError(failure, { operationId: command.requestId, cellId: identity.owner });
+    this.failOperation(command.requestId, failure, command.clientId);
   }
   scheduleWidgetConsumers(name, owner, source, operationId, clientId) {
     const references = this.cellsReferencing(name, owner);
@@ -75853,7 +75560,7 @@ var Controller = class {
         owner,
         revision: revision2,
         record: record4,
-        triggerOperationId: command.operationId,
+        triggerOperationId: command.requestId,
         triggerClientId: command.clientId,
         directConsumers,
         runId: null
@@ -75867,19 +75574,19 @@ var Controller = class {
         for (const descendant of this.graphValue.descendants(reference2)) region.add(descendant);
       }
       const statusChanges = this.cancelRunRegion(region, "widget");
-      this.emitCells(statusChanges, { operationId: command.operationId });
-      const runOperationId = "run-button-" + command.operationId;
+      this.emitCells(statusChanges, { operationId: command.requestId });
+      const runOperationId = "run-button-" + command.requestId;
       this.createOperation(runOperationId, "run", command.clientId);
       this.causalWidgetRunParents.set(
         this.operationKey(command.clientId, runOperationId),
-        this.operationKey(command.clientId, command.operationId)
+        this.operationKey(command.clientId, command.requestId)
       );
       try {
         runId = this.launchRun(this.widgetClosure(directConsumers, owner), runOperationId, true, command.clientId);
       } catch (error61) {
         this.causalWidgetRunParents.delete(this.operationKey(command.clientId, runOperationId));
         this.failOperation(runOperationId, asControllerError(error61).toJSON(runOperationId), command.clientId);
-        this.failOperation(command.operationId, hostError("widget_update_failed", "run button could not schedule consumers", command.operationId), command.clientId);
+        this.failOperation(command.requestId, hostError("widget_update_failed", "run button could not schedule consumers", command.requestId), command.clientId);
         return;
       }
     } else {
@@ -75907,7 +75614,7 @@ var Controller = class {
       owner,
       revision: revision2,
       record: record4,
-      triggerOperationId: command.operationId,
+      triggerOperationId: command.requestId,
       triggerClientId: command.clientId,
       directConsumers,
       runId
@@ -76348,14 +76055,14 @@ var Controller = class {
     if (kernelEpoch === null) throw new ControllerError("stale_kernel", "R kernel incarnation is unavailable", 503);
     const generation = this.runtimeGeneration;
     this.pendingTablePages.set(command.handle, {
-      operationId: command.operationId,
+      operationId: command.requestId,
       clientId: command.clientId,
       owner: owner.id,
       recordId: location.record.id,
       revision: revision2,
       kernelEpoch
     });
-    const operation = this.operationFor(command.operationId, command.clientId);
+    const operation = this.operationFor(command.requestId, command.clientId);
     if (operation !== void 0) {
       operation.status = "running";
       operation.cellIds = [owner.id];
@@ -76368,14 +76075,14 @@ var Controller = class {
       sort_by: command.sortBy,
       sort_desc: command.sortDescending,
       filter: command.filter,
-      token: command.operationId
+      token: command.requestId
     }).then(async (raw) => {
-      if (!this.runtimeRequestCurrent(command.operationId, generation, command.clientId)) return;
+      if (!this.runtimeRequestCurrent(command.requestId, generation, command.clientId)) return;
       const response = engineResponseSchema.parse(raw);
       const responsePayload = response;
       const pending = this.pendingTablePages.get(command.handle);
       const current = this.findOutput((output2) => output2.kind === "table" && output2.handle === command.handle);
-      if (pending === void 0 || pending.operationId !== command.operationId || pending.owner !== owner.id || pending.recordId !== location.record.id || pending.revision !== revision2 || pending.kernelEpoch !== kernelEpoch || current === null || current.owner !== owner.id || current.record.id !== location.record.id || this.cellById(owner.id)?.revision !== revision2 || this.runtimeSnapshot().kernelEpoch !== kernelEpoch || this.statusOf(owner.id) !== "done") {
+      if (pending === void 0 || pending.operationId !== command.requestId || pending.owner !== owner.id || pending.recordId !== location.record.id || pending.revision !== revision2 || pending.kernelEpoch !== kernelEpoch || current === null || current.owner !== owner.id || current.record.id !== location.record.id || this.cellById(owner.id)?.revision !== revision2 || this.runtimeSnapshot().kernelEpoch !== kernelEpoch || this.statusOf(owner.id) !== "done") {
         throw new ControllerError("table_unavailable", "table is no longer current", 409);
       }
       if (!response.ok) {
@@ -76392,14 +76099,14 @@ var Controller = class {
         table2.page = page;
       });
       this.pendingTablePages.delete(command.handle);
-      this.completeOperation(command.operationId, { handle: command.handle, page: clone3(page) }, command.clientId);
-      this.bump("cell", this.publicCell(owner), { operationId: command.operationId, cellId: owner.id, revision: revision2 });
+      this.completeOperation(command.requestId, { handle: command.handle, page: clone3(page) }, command.clientId);
+      this.bump("cell", this.publicCell(owner), { operationId: command.requestId, cellId: owner.id, revision: revision2 });
     }).catch((error61) => {
-      if (!this.runtimeRequestCurrent(command.operationId, generation, command.clientId)) return;
-      if (this.pendingTablePages.get(command.handle)?.operationId === command.operationId) {
+      if (!this.runtimeRequestCurrent(command.requestId, generation, command.clientId)) return;
+      if (this.pendingTablePages.get(command.handle)?.operationId === command.requestId) {
         this.pendingTablePages.delete(command.handle);
       }
-      this.failOperation(command.operationId, asControllerError(error61, "table_request_failed").toJSON(command.operationId), command.clientId);
+      this.failOperation(command.requestId, asControllerError(error61, "table_request_failed").toJSON(command.requestId), command.clientId);
     });
     return { handle: command.handle, cellId: owner.id };
   }
@@ -77204,14 +76911,13 @@ var Controller = class {
       throw new ControllerError(error61, "output is no longer current", 409);
     }
   }
-  createOperation(id2, kind, clientId = "internal", commandSequence = 1) {
+  createOperation(id2, kind, clientId = "internal") {
     if (this.operations.has(this.operationKey(clientId, id2))) {
       throw new ControllerError("operation_id_conflict", "operation " + id2 + " already exists", 409);
     }
     const operation = {
       id: id2,
       clientId,
-      commandSequence,
       kind,
       status: "accepted",
       documentRevision: this.documentRevisionValue,
@@ -77226,7 +76932,7 @@ var Controller = class {
   }
   rememberOperation(operation) {
     this.operations.set(this.operationKey(operation.clientId, operation.id), operation);
-    this.emit("operation", clone3(operation), { operationId: operation.id, runId: operation.runId ?? void 0 });
+    if (isExecutionCommand(operation.kind)) this.emit("operation", clone3(operation), { operationId: operation.id, runId: operation.runId ?? void 0 });
     this.trimOperations();
   }
   completeOperation(id2, result, clientId = "internal") {
@@ -77326,14 +77032,14 @@ var Controller = class {
     if (this.pendingWidgets.has(key2) || [...this.pendingUploads.values()].some((pending) => pending.key === key2)) {
       throw new ControllerError("operation_in_progress", "widget " + command.name + " already has a pending update", 409);
     }
-    const operation = this.operationFor(command.operationId, command.clientId);
+    const operation = this.operationFor(command.requestId, command.clientId);
     if (operation !== void 0) {
       operation.kind = "widget";
       operation.status = "running";
       operation.cellIds = [owner.id];
       this.rememberOperation(operation);
     }
-    this.pendingUploads.set(this.operationKey(command.clientId, command.operationId), {
+    this.pendingUploads.set(this.operationKey(command.clientId, command.requestId), {
       clientId: command.clientId,
       name: command.name,
       path: [...command.path],
@@ -77347,18 +77053,18 @@ var Controller = class {
     void this.storeAndApplyUpload(command).catch((error61) => {
       if (this.closed) return;
       const failure = asControllerError(error61, "upload_failed");
-      const hostFailure = failure.toJSON(command.operationId);
-      this.replaceLastActionError(hostFailure, { operationId: command.operationId });
-      this.discardUpload(this.operationKey(command.clientId, command.operationId));
-      this.failOperation(command.operationId, hostFailure, command.clientId);
+      const hostFailure = failure.toJSON(command.requestId);
+      this.replaceLastActionError(hostFailure, { operationId: command.requestId });
+      this.discardUpload(this.operationKey(command.clientId, command.requestId));
+      this.failOperation(command.requestId, hostFailure, command.clientId);
     });
     return { accepted: true, command: "upload", owner: owner.id };
   }
   async storeAndApplyUpload(command) {
     const raw = await this.services.service?.("upload.store", { files: clone3(command.files) });
     const response = parseStoredUpload(raw);
-    const pending = this.pendingUploads.get(this.operationKey(command.clientId, command.operationId));
-    if (pending === void 0 || this.closed || isTerminal(this.operationFor(command.operationId, command.clientId)?.status ?? "error")) {
+    const pending = this.pendingUploads.get(this.operationKey(command.clientId, command.requestId));
+    if (pending === void 0 || this.closed || isTerminal(this.operationFor(command.requestId, command.clientId)?.status ?? "error")) {
       await this.removeUpload(response.uploadId);
       return;
     }
@@ -77372,9 +77078,8 @@ var Controller = class {
     pending.record = current.record;
     this.startWidgetOperation({
       type: "widget",
-      operationId: command.operationId,
+      requestId: command.requestId,
       clientId: command.clientId,
-      commandSequence: command.commandSequence,
       sessionEpoch: command.sessionEpoch,
       name: pending.name,
       path: [...pending.path],
@@ -77410,15 +77115,15 @@ var Controller = class {
         this.assertDocumentRevision(command.expectedDocumentRevision);
         return this.callService("r.select", { rscript: command.rscript, persistDefault: command.persistDefault });
       case "set-app":
-        return this.setApp(command.patch, command.expectedDocumentRevision, command.operationId);
+        return this.setApp(command.patch, command.expectedDocumentRevision, command.requestId);
       case "packages-declare":
-        return this.declarePackages(command.packages, command.expectedDocumentRevision, command.expectedSidecarVersion, command.operationId);
+        return this.declarePackages(command.packages, command.expectedDocumentRevision, command.expectedSidecarVersion, command.requestId);
       case "packages-install":
         this.assertDocumentRevision(command.expectedDocumentRevision);
         this.assertKernelEpoch(command.kernelEpoch);
         this.assertPackageInstallCanStart();
         this.assertExecutionPossible();
-        return this.runLongService("packages.install", { packages: command.packages }, command.operationId, command.clientId);
+        return this.runLongService("packages.install", { packages: command.packages }, command.requestId, command.clientId);
       case "publish": {
         this.assertDocumentRevision(command.expectedDocumentRevision);
         const reservation = this.reserveRuntimeContext();
@@ -77432,7 +77137,7 @@ var Controller = class {
         return this.executeSourceService({
           kind: "save-as",
           expectedDocumentRevision: command.expectedDocumentRevision,
-          operationId: command.operationId,
+          operationId: command.requestId,
           path: command.path,
           expectedDestination: command.expectedDestination === "absent" ? void 0 : command.expectedDestination,
           fingerprint: stableStringify({ path: command.path, expectedDestination: command.expectedDestination })
@@ -77442,7 +77147,7 @@ var Controller = class {
           kind: "reload-source",
           expectedDocumentRevision: command.expectedDocumentRevision,
           expectedDisk: { digest: command.expectedDiskDigest, version: command.expectedDiskVersion },
-          operationId: command.operationId,
+          operationId: command.requestId,
           fingerprint: stableStringify({ expectedDiskDigest: command.expectedDiskDigest, expectedDiskVersion: command.expectedDiskVersion })
         });
       case "upload":
@@ -77453,10 +77158,13 @@ var Controller = class {
     }
   }
   trimCommandEntries() {
-    if (this.commandEntries.size <= COMMAND_DEDUPLICATION_LIMIT) return;
-    for (const [key2, entry] of this.commandEntries) {
-      if (this.commandEntries.size <= COMMAND_DEDUPLICATION_LIMIT) break;
-      if (isTerminal(this.operationForKey(this.operationKey(entry.clientId, entry.operationId))?.status ?? "done")) this.commandEntries.delete(key2);
+    let recent = [...this.commandEntries.values()].filter((entry) => entry.settled).length;
+    for (const [id2, entry] of this.commandEntries) {
+      if (recent <= COMMAND_DEDUPLICATION_LIMIT) break;
+      if (entry.settled) {
+        this.commandEntries.delete(id2);
+        recent -= 1;
+      }
     }
   }
   replaceLastActionError(error61, identity = {}) {
@@ -77511,20 +77219,11 @@ var Controller = class {
     };
     if (identity.operationId !== void 0) event.operationId = identity.operationId;
     if (identity.clientId !== void 0) event.clientId = identity.clientId;
-    if (identity.commandSequence !== void 0) event.commandSequence = identity.commandSequence;
     if (identity.cellId !== void 0) event.cellId = identity.cellId;
     if (identity.runId !== void 0) event.runId = identity.runId;
     if (identity.kernelEpoch !== void 0) event.kernelEpoch = identity.kernelEpoch;
     if (identity.revision !== void 0) event.revision = identity.revision;
     if (identity.sequence !== void 0) event.sequence = identity.sequence;
-    const bytes = jsonBytes(event);
-    this.eventJournal.push(event);
-    this.eventJournalBytes += bytes;
-    while (this.eventJournal.length > this.eventJournalLimit || this.eventJournalBytes > this.eventJournalByteLimit) {
-      const removed = this.eventJournal.shift();
-      if (removed === void 0) break;
-      this.eventJournalBytes -= jsonBytes(removed);
-    }
     for (const [listener, types] of this.listeners) {
       if (types && !types.includes(type)) continue;
       try {
@@ -77556,7 +77255,7 @@ var Controller = class {
       executionMode: this.executionMode,
       runOnStartup: this.runOnStartup,
       packageOperationActive: this.packageOperationActive,
-      busy: this.activeEvaluation !== null || this.queue.length > 0 || this.runPreparationActive,
+      busy: this.activeEvaluation !== null || this.queue.length > 0 || this.runPreparationActive || this.queuedRunCommands.size > 0,
       activeRunId: this.activeEvaluation?.job.runId ?? queuedRunId
     };
   }
@@ -77774,9 +77473,6 @@ function abortError() {
 function isTerminal(status) {
   return status === "done" || status === "error" || status === "interrupted" || status === "cancelled";
 }
-function boundedPositiveInteger(value, fallback) {
-  return value !== void 0 && Number.isSafeInteger(value) && value > 0 ? value : fallback;
-}
 function arrayEqual(left, right) {
   return left.length === right.length && left.every((value, index) => value === right[index]);
 }
@@ -77847,7 +77543,7 @@ function stableStringify(value) {
   };
   return JSON.stringify(visit2(value));
 }
-function hasUnpairedSurrogate5(value) {
+function hasUnpairedSurrogate4(value) {
   for (let index = 0; index < value.length; index += 1) {
     const code2 = value.charCodeAt(index);
     if (code2 >= 55296 && code2 <= 56319) {
@@ -78076,7 +77772,7 @@ function parseRuntimeVariables(raw, graph, cells) {
   const variables = [];
   const names = /* @__PURE__ */ new Set();
   for (const candidate of raw) {
-    if (!isRecord(candidate) || typeof candidate.name !== "string" || candidate.name.length === 0 || new TextEncoder().encode(candidate.name).byteLength > 1024 || hasUnpairedSurrogate5(candidate.name) || names.has(candidate.name) || typeof candidate.class !== "string" || candidate.class.length === 0 || new TextEncoder().encode(candidate.class).byteLength > 1024 || hasUnpairedSurrogate5(candidate.class) || typeof candidate.size !== "number" || !Number.isSafeInteger(candidate.size) || candidate.size < 0 || typeof candidate.widget !== "boolean") {
+    if (!isRecord(candidate) || typeof candidate.name !== "string" || candidate.name.length === 0 || new TextEncoder().encode(candidate.name).byteLength > 1024 || hasUnpairedSurrogate4(candidate.name) || names.has(candidate.name) || typeof candidate.class !== "string" || candidate.class.length === 0 || new TextEncoder().encode(candidate.class).byteLength > 1024 || hasUnpairedSurrogate4(candidate.class) || typeof candidate.size !== "number" || !Number.isSafeInteger(candidate.size) || candidate.size < 0 || typeof candidate.widget !== "boolean") {
       throw new ControllerError("invalid_engine_response", "variable snapshot is invalid", 503);
     }
     let dim = null;
@@ -78087,7 +77783,7 @@ function parseRuntimeVariables(raw, graph, cells) {
       dim = [...candidate.dim];
     }
     const summary = candidate.value_summary;
-    if (summary !== void 0 && summary !== null && (typeof summary !== "string" || new TextEncoder().encode(summary).byteLength > 160 || hasUnpairedSurrogate5(summary))) {
+    if (summary !== void 0 && summary !== null && (typeof summary !== "string" || new TextEncoder().encode(summary).byteLength > 160 || hasUnpairedSurrogate4(summary))) {
       throw new ControllerError("invalid_engine_response", "variable summary is invalid", 503);
     }
     names.add(candidate.name);
@@ -78143,21 +77839,240 @@ function operationDependsOnRuntime(kind) {
 function assertNever2(value) {
   throw new ControllerError("invalid_request", `unsupported command: ${String(value)}`, 400);
 }
+function isExecutionCommand(type) {
+  return [
+    "run",
+    "restart",
+    "interrupt",
+    "widget",
+    "widget-reset",
+    "upload",
+    "inspect",
+    "lazy-output",
+    "table-page",
+    "packages-install",
+    "publish",
+    "select-r"
+  ].includes(type);
+}
 
 // src/engine.ts
 import { EventEmitter as EventEmitter3 } from "node:events";
-import { createHash as createHash3, randomBytes as randomBytes2, randomUUID as randomUUID6 } from "node:crypto";
+import { createHash as createHash4, randomBytes as randomBytes2, randomUUID as randomUUID6 } from "node:crypto";
 import { access as access2, mkdir as mkdir5, mkdtemp, rm as rm4, stat as stat9 } from "node:fs/promises";
 import { rmSync, writeFileSync } from "node:fs";
 import { tmpdir as tmpdir2 } from "node:os";
 import { basename as basename4, extname as extname2, join as join10, resolve as resolve7 } from "node:path";
 
 // src/r-environment.ts
-import { createHash as createHash2 } from "node:crypto";
+import { createHash as createHash3 } from "node:crypto";
 import { realpath as realpath4, stat as stat7 } from "node:fs/promises";
 import { delimiter, isAbsolute as isAbsolute5, join as join7, resolve as resolve6 } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+
+// src/strict-json.ts
+var DEFAULT_STRICT_JSON_LIMITS = Object.freeze({
+  maxBytes: 8 * 1024 * 1024,
+  maxDepth: 64
+});
+var StrictJsonError = class extends Error {
+  constructor(message2, offset) {
+    super(`${message2} at byte ${offset}`);
+    this.offset = offset;
+    this.name = "StrictJsonError";
+  }
+  offset;
+};
+var StrictJsonParser = class {
+  constructor(text2, maxDepth) {
+    this.text = text2;
+    this.maxDepth = maxDepth;
+  }
+  text;
+  maxDepth;
+  offset = 0;
+  encoder = new TextEncoder();
+  parse() {
+    this.whitespace();
+    const result = this.value(0);
+    this.whitespace();
+    if (this.offset !== this.text.length) this.fail("trailing content");
+    return result;
+  }
+  value(depth) {
+    const next = this.text[this.offset];
+    if (next === "{") return this.object(depth + 1);
+    if (next === "[") return this.array(depth + 1);
+    if (next === '"') return this.string();
+    if (next === "t") return this.literal("true", true);
+    if (next === "f") return this.literal("false", false);
+    if (next === "n") return this.literal("null", null);
+    if (next === "-" || next !== void 0 && next >= "0" && next <= "9") {
+      return this.number();
+    }
+    this.fail("expected a JSON value");
+  }
+  object(depth) {
+    this.checkDepth(depth);
+    this.offset += 1;
+    this.whitespace();
+    const result = {};
+    const keys2 = /* @__PURE__ */ new Set();
+    if (this.consume("}")) return result;
+    while (true) {
+      if (this.text[this.offset] !== '"') this.fail("expected an object key");
+      const key2 = this.string();
+      if (keys2.has(key2)) this.fail(`duplicate object key ${JSON.stringify(key2)}`);
+      keys2.add(key2);
+      this.whitespace();
+      if (!this.consume(":")) this.fail("expected ':' after an object key");
+      this.whitespace();
+      const item = this.value(depth);
+      Object.defineProperty(result, key2, {
+        configurable: true,
+        enumerable: true,
+        value: item,
+        writable: true
+      });
+      this.whitespace();
+      if (this.consume("}")) return result;
+      if (!this.consume(",")) this.fail("expected ',' or '}'");
+      this.whitespace();
+    }
+  }
+  array(depth) {
+    this.checkDepth(depth);
+    this.offset += 1;
+    this.whitespace();
+    const result = [];
+    if (this.consume("]")) return result;
+    while (true) {
+      result.push(this.value(depth));
+      this.whitespace();
+      if (this.consume("]")) return result;
+      if (!this.consume(",")) this.fail("expected ',' or ']'");
+      this.whitespace();
+    }
+  }
+  string() {
+    const start = this.offset;
+    this.offset += 1;
+    while (this.offset < this.text.length) {
+      const code2 = this.text.charCodeAt(this.offset);
+      if (code2 === 34) {
+        this.offset += 1;
+        let result;
+        try {
+          result = JSON.parse(this.text.slice(start, this.offset));
+        } catch {
+          this.fail("invalid JSON string");
+        }
+        this.validateSurrogates(result);
+        return result;
+      }
+      if (code2 < 32) this.fail("unescaped control character in string");
+      if (code2 === 92) {
+        this.offset += 1;
+        if (this.offset >= this.text.length) this.fail("unterminated escape");
+        const escaped2 = this.text[this.offset];
+        if (escaped2 === "u") {
+          const digits = this.text.slice(this.offset + 1, this.offset + 5);
+          if (!/^[0-9a-fA-F]{4}$/.test(digits)) this.fail("invalid Unicode escape");
+          this.offset += 4;
+        } else if (!'"\\/bfnrt'.includes(escaped2)) {
+          this.fail("invalid string escape");
+        }
+      }
+      this.offset += 1;
+    }
+    this.fail("unterminated JSON string");
+  }
+  validateSurrogates(value) {
+    for (let index = 0; index < value.length; index += 1) {
+      const code2 = value.charCodeAt(index);
+      if (code2 >= 55296 && code2 <= 56319) {
+        const low = value.charCodeAt(index + 1);
+        if (!(low >= 56320 && low <= 57343)) this.fail("unpaired surrogate");
+        index += 1;
+      } else if (code2 >= 56320 && code2 <= 57343) {
+        this.fail("unpaired surrogate");
+      }
+    }
+  }
+  number() {
+    const token = this.text.slice(this.offset).match(
+      /^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?/
+    )?.[0];
+    if (token === void 0) this.fail("invalid number");
+    this.offset += token.length;
+    const result = Number(token);
+    if (!Number.isFinite(result)) this.fail("non-finite number");
+    return result;
+  }
+  literal(token, result) {
+    if (!this.text.startsWith(token, this.offset)) this.fail("invalid literal");
+    this.offset += token.length;
+    return result;
+  }
+  whitespace() {
+    while (/\s/.test(this.text[this.offset] ?? "") && " 	\r\n".includes(this.text[this.offset])) {
+      this.offset += 1;
+    }
+  }
+  consume(token) {
+    if (this.text[this.offset] !== token) return false;
+    this.offset += 1;
+    return true;
+  }
+  checkDepth(depth) {
+    if (depth > this.maxDepth) this.fail("JSON nesting limit exceeded");
+  }
+  fail(message2) {
+    throw new StrictJsonError(message2, this.encoder.encode(this.text.slice(0, this.offset)).byteLength);
+  }
+};
+function parseStrictJson(input2, limits = DEFAULT_STRICT_JSON_LIMITS) {
+  validateLimits(limits);
+  let text2;
+  if (typeof input2 === "string") {
+    if (hasUnpairedSurrogate5(input2)) throw new StrictJsonError("unpaired surrogate", 0);
+    if (new TextEncoder().encode(input2).byteLength > limits.maxBytes) {
+      throw new RangeError(`JSON input exceeds ${limits.maxBytes} bytes`);
+    }
+    text2 = input2;
+  } else {
+    if (!(input2 instanceof Uint8Array)) throw new TypeError("JSON input must be text or bytes");
+    if (input2.byteLength > limits.maxBytes) throw new RangeError(`JSON input exceeds ${limits.maxBytes} bytes`);
+    try {
+      text2 = new TextDecoder("utf-8", { fatal: true }).decode(input2);
+    } catch {
+      throw new StrictJsonError("invalid UTF-8", 0);
+    }
+  }
+  return new StrictJsonParser(text2, limits.maxDepth).parse();
+}
+function validateLimits(limits) {
+  if (!limits || !Number.isSafeInteger(limits.maxBytes) || limits.maxBytes < 1) {
+    throw new RangeError("maxBytes must be a positive safe integer");
+  }
+  if (!Number.isSafeInteger(limits.maxDepth) || limits.maxDepth < 1) {
+    throw new RangeError("maxDepth must be a positive safe integer");
+  }
+}
+function hasUnpairedSurrogate5(value) {
+  for (let index = 0; index < value.length; index += 1) {
+    const code2 = value.charCodeAt(index);
+    if (code2 >= 55296 && code2 <= 56319) {
+      const low = value.charCodeAt(index + 1);
+      if (!(low >= 56320 && low <= 57343)) return true;
+      index += 1;
+    } else if (code2 >= 56320 && code2 <= 57343) {
+      return true;
+    }
+  }
+  return false;
+}
 
 // src/resources.ts
 import { readFile as readFile2, realpath as realpath3, stat as stat6 } from "node:fs/promises";
@@ -78757,7 +78672,7 @@ function uniquePaths(paths) {
   return [...new Map(paths.map((path3) => [path3, path3])).values()];
 }
 function createIdentity(value) {
-  return createHash2("sha256").update(JSON.stringify(value)).digest("hex");
+  return createHash3("sha256").update(JSON.stringify(value)).digest("hex");
 }
 function prependPath(prefixes, existing) {
   return [...prefixes, ...existing ? existing.split(delimiter) : []].join(delimiter);
@@ -81353,9 +81268,9 @@ invisible(${binding})`, [binding]);
     }
     if (type !== "started" && type !== "batch_end" && type !== "command_result") {
       if (!state.started) throw new FrameProtocolError("Alder Ark event arrived before evaluation start");
-      const sequence2 = positiveSafeInteger(input2.sequence, "Alder Ark output sequence");
-      if (sequence2 <= state.rSequence) throw new FrameProtocolError("Alder Ark output sequence is not monotonic");
-      state.rSequence = sequence2;
+      const sequence = positiveSafeInteger(input2.sequence, "Alder Ark output sequence");
+      if (sequence <= state.rSequence) throw new FrameProtocolError("Alder Ark output sequence is not monotonic");
+      state.rSequence = sequence;
     }
     if (type === "started") {
       if (input2.sequence !== 0) throw new FrameProtocolError("invalid Alder evaluation start sequence");
@@ -82215,7 +82130,7 @@ function sameRestartContext(left, right) {
   return left.notebookDirectory === right.notebookDirectory && left.cacheDirectory === right.cacheDirectory && left.environment?.identity === right.environment?.identity;
 }
 function makeAnalysisEnvironmentId(environment, generation) {
-  return createHash3("sha256").update(environment.identity + "\\0" + String(generation)).digest("hex");
+  return createHash4("sha256").update(environment.identity + "\\0" + String(generation)).digest("hex");
 }
 function validatePositiveTimeout(value, name) {
   if (value !== void 0 && (!Number.isFinite(value) || value <= 0)) throw new RangeError(name + " must be a positive finite number");
@@ -82274,16 +82189,16 @@ var HttpBoundaryError = class extends Error {
   code;
   status;
 };
-function parseStrictJsonObject(bytes, maxBytes = HTTP_JSON_LIMIT) {
+function parseJsonObject(bytes, maxBytes = HTTP_JSON_LIMIT) {
   try {
-    const value = parseStrictJson(bytes, { maxBytes, maxDepth: 64 });
+    const value = decodeJsonFrame(bytes, maxBytes);
     if (typeof value !== "object" || value === null || Array.isArray(value)) {
       throw new HttpBoundaryError("invalid_request", "JSON body must be an object", 400);
     }
     return value;
   } catch (error61) {
     if (error61 instanceof HttpBoundaryError) throw error61;
-    const message2 = error61 instanceof StrictJsonError ? error61.message : error61 instanceof Error ? error61.message : "invalid JSON body";
+    const message2 = error61 instanceof Error ? error61.message : "invalid JSON body";
     throw new HttpBoundaryError("invalid_request", message2, 400);
   }
 }
@@ -82316,7 +82231,7 @@ async function readJsonBody(request, maxBytes = HTTP_JSON_LIMIT) {
   if (oversized) throw new HttpBoundaryError("payload_too_large", bodyLimitMessage(maxBytes), 413);
   if (total === 0) throw new HttpBoundaryError("invalid_request", "empty request body", 400);
   try {
-    return parseStrictJsonObject(Buffer.concat(chunks, total), maxBytes);
+    return parseJsonObject(Buffer.concat(chunks, total), maxBytes);
   } catch (error61) {
     if (error61 instanceof HttpBoundaryError) throw error61;
     throw new HttpBoundaryError("invalid_request", "invalid JSON body", 400);
@@ -82482,9 +82397,8 @@ function errorStatus2(code2) {
     kernel_state_invalid: 409,
     run_in_progress: 409,
     operation_in_progress: 409,
-    operation_id_conflict: 409,
-    command_sequence_gap: 409,
-    command_sequence_exhausted: 409,
+    request_id_conflict: 409,
+    request_expired: 409,
     package_operation_in_progress: 409,
     no_run_in_progress: 409,
     stale_value: 409,
@@ -82509,6 +82423,7 @@ function errorStatus2(code2) {
 }
 function errorPayload(error61) {
   if (error61 instanceof HttpBoundaryError) return error61;
+  if (error61 instanceof external_exports.ZodError) return { code: "invalid_request", message: external_exports.prettifyError(error61), status: 400 };
   const errorWithCode = error61 instanceof Error ? error61 : null;
   const record4 = errorWithCode ?? (isPlainObject2(error61) ? error61 : null);
   if (record4 !== null) {
@@ -82802,13 +82717,6 @@ function validateToken(token) {
   if (!AUTH_TOKEN_PATTERN.test(token)) throw tokenFileError("session bearer token must be a lowercase 64-hex value");
   return token;
 }
-function validateRecoveryCredentials(key2, keyId) {
-  if (key2 === void 0 && keyId === void 0) return { key: null, keyId: null };
-  if (key2 === void 0 || keyId === void 0 || !/^[A-Za-z0-9_-]{43}$/.test(key2) || !/^[A-Za-z0-9_-]{43}$/.test(keyId) || Buffer.from(key2, "base64url").byteLength !== 32 || Buffer.from(keyId, "base64url").byteLength !== 32) {
-    throw tokenFileError("session recovery credentials must be 256-bit base64url values");
-  }
-  return { key: key2, keyId };
-}
 function publicOrigin(host, port) {
   return `http://${host === "::1" ? "[::1]" : host}:${port}`;
 }
@@ -82819,15 +82727,15 @@ function parseSocketObject(data, binary, maxBytes) {
   if (binary) throw new HttpBoundaryError("invalid_request", "WebSocket messages must be UTF-8 JSON text", 400);
   const buffer = Buffer.isBuffer(data) ? data : Array.isArray(data) ? Buffer.concat(data) : Buffer.from(data);
   if (buffer.length > maxBytes) throw new HttpBoundaryError("payload_too_large", "WebSocket message is too large", 413);
-  return parseStrictJsonObject(buffer, maxBytes);
+  return parseJsonObject(buffer, maxBytes);
 }
-function parseSocketConnect(value) {
-  assertExactFields(value, ["type", "protocolVersion", "leaseId", "clientId", "csrf", "epoch", "cursor"], ["type", "protocolVersion", "leaseId", "clientId", "csrf", "epoch", "cursor"]);
-  if (value.type !== "connect" || value.protocolVersion !== HOST_CLIENT_PROTOCOL_VERSION) throw new HttpBoundaryError("invalid_request", "invalid WebSocket connect message", 400);
-  if (typeof value.leaseId !== "string" || typeof value.clientId !== "string" || typeof value.csrf !== "string") throw new HttpBoundaryError("invalid_request", "invalid WebSocket lease identity", 400);
-  if (!(value.epoch === null || typeof value.epoch === "string") || !(value.cursor === null || typeof value.cursor === "number" && Number.isSafeInteger(value.cursor) && value.cursor >= 0)) throw new HttpBoundaryError("invalid_request", "invalid WebSocket recovery cursor", 400);
-  return { leaseId: value.leaseId, clientId: value.clientId, csrf: value.csrf, epoch: value.epoch, cursor: value.cursor };
-}
+var socketConnectSchema = external_exports.object({
+  type: external_exports.literal("connect"),
+  protocolVersion: external_exports.literal(HOST_CLIENT_PROTOCOL_VERSION),
+  leaseId: external_exports.string().min(1).max(256),
+  clientId: external_exports.string().min(1).max(256),
+  csrf: external_exports.string().min(1).max(256)
+}).strict();
 function createAlderServer(options) {
   const host = validateLoopbackHost(options.host ?? "127.0.0.1");
   const originHost = validateOriginHost(options.originHost ?? createOriginHost());
@@ -82858,8 +82766,6 @@ function createAlderServer(options) {
   const shutdown = new AbortController();
   const sockets = /* @__PURE__ */ new Set();
   const socketsByLease = /* @__PURE__ */ new Map();
-  const recoveryCredentials = validateRecoveryCredentials(session.recoveryKey, session.recoveryKeyId);
-  const recoveryKey = recoveryCredentials.key;
   const leases = /* @__PURE__ */ new Map();
   const tickets = /* @__PURE__ */ new Map();
   const artifactLeases = /* @__PURE__ */ new Map();
@@ -83073,7 +82979,7 @@ function createAlderServer(options) {
       address: { host: address.host, port: address.port, origin: address.origin, browserOrigin: address.browserOrigin },
       documentReady: options.documentReady !== false,
       configuration,
-      ...lease === null ? {} : { leaseId: lease.leaseId, clientId: lease.clientId, nextCommandSequence: lease.nextCommandSequence }
+      ...lease === null ? {} : { leaseId: lease.leaseId, clientId: lease.clientId }
     };
   }
   function findLease(request) {
@@ -83108,13 +83014,9 @@ function createAlderServer(options) {
         leaseId: authenticatedLease?.leaseId ?? null,
         clientId: authenticatedLease?.clientId ?? null,
         csrf: authenticatedLease?.csrf ?? null,
-        nextCommandSequence: authenticatedLease?.nextCommandSequence ?? null,
         ...authenticatedLease === null ? {} : {
           assertActive: () => {
             assertCurrentHttpLease(authenticatedLease);
-          },
-          updateNextCommandSequence: (next) => {
-            authenticatedLease.nextCommandSequence = Math.max(authenticatedLease.nextCommandSequence, next);
           }
         }
       },
@@ -83132,7 +83034,7 @@ function createAlderServer(options) {
     return { auth: resolved.auth, lease: resolved.lease };
   }
   function createLease(reserved = false) {
-    return { leaseId: randomUUID7(), clientId: randomUUID7(), csrf: randomBytes3(32).toString("hex"), nextCommandSequence: 1, lastSeen: Date.now(), reserved };
+    return { leaseId: randomUUID7(), clientId: randomUUID7(), csrf: randomBytes3(32).toString("hex"), lastSeen: Date.now(), reserved };
   }
   function activateLease(lease) {
     if (leases.size >= MAX_ACTIVE_LEASES) throw new HttpBoundaryError("client_limit", "too many active client leases", 429);
@@ -83170,14 +83072,10 @@ function createAlderServer(options) {
     const lease = activateLease(ticket.lease);
     return { ticket, lease };
   }
-  function scheduleShutdown(operationId, clientId) {
-    const awaitOperation = options.controller.awaitOperation;
-    if (awaitOperation === void 0 || options.onShutdown === void 0) return;
+  function scheduleShutdown(result) {
+    if (result.error || !isPlainObject2(result.result) || result.result.closing !== true) return;
     setImmediate(() => {
-      void Promise.resolve().then(() => awaitOperation.call(options.controller, operationId, clientId)).then((operation) => {
-        if (operation.status !== "done" || !isPlainObject2(operation.result) || operation.result.closing !== true) return;
-        return options.onShutdown?.();
-      }).catch((error61) => logger("error", "shutdown callback failed: " + (error61 instanceof Error ? error61.message : "unknown")));
+      void Promise.resolve().then(() => options.onShutdown?.()).catch((error61) => logger("error", "shutdown callback failed: " + (error61 instanceof Error ? error61.message : "unknown")));
     });
   }
   async function responseEnvelope(value, snapshot) {
@@ -83186,10 +83084,8 @@ function createAlderServer(options) {
     if (envelopeBytes <= MAX_ENVELOPE_BYTES) return value;
     if (envelopeBytes > SNAPSHOT_ENVELOPE_LIMIT) throw new HttpBoundaryError("payload_too_large", "response envelope exceeds 128 MiB", 413);
     if (!isPlainObject2(value)) throw new HttpBoundaryError("payload_too_large", "response envelope exceeds 1 MiB", 413);
-    const operation = isPlainObject2(value.operation) ? value.operation : null;
-    const resultOwner = value.result !== void 0 ? value : operation;
-    if (resultOwner === null || resultOwner.result === void 0) throw new HttpBoundaryError("payload_too_large", "response envelope exceeds 1 MiB", 413);
-    const bytes = Buffer.from(JSON.stringify(resultOwner.result));
+    if (value.result === void 0) throw new HttpBoundaryError("payload_too_large", "response envelope exceeds 1 MiB", 413);
+    const bytes = Buffer.from(JSON.stringify(value.result));
     const artifact = retainArtifact(await options.artifactStore.writeArtifact(bytes, "application/json", ".json", {
       sessionEpoch: session.epoch,
       documentRevision: snapshot.documentRevision,
@@ -83198,7 +83094,7 @@ function createAlderServer(options) {
       cellId: null,
       revision: null
     }));
-    return resultOwner === value ? { ...value, result: artifact } : { ...value, operation: { ...operation, result: artifact } };
+    return { ...value, result: artifact };
   }
   async function handleArtifact(request, response, target) {
     assertArtifactAuthority(request);
@@ -83342,11 +83238,10 @@ function createAlderServer(options) {
       if (!method(response, request.method ?? "", "POST")) return;
       const supplied = parseBearer(request.headers);
       if (supplied === null || !constantTimeEqual(supplied, configuredBearer ?? bearer)) throw authFailure();
-      const body = await readJsonBody(request, maxJson);
-      assertExactFields(body, ["origin", "parentLeaseId"], ["origin"]);
-      const parentLeaseId = body.parentLeaseId === void 0 ? void 0 : requiredString2(body.parentLeaseId, "parentLeaseId", 256);
+      const body = ticketMintRequestSchema.parse(await readJsonBody(request, maxJson));
+      const parentLeaseId = body.parentLeaseId;
       if (parentLeaseId !== void 0 && requireLease(request, true).lease.leaseId !== parentLeaseId) throw authFailure("desktop lease does not match request");
-      const origin2 = requiredString2(body.origin, "origin", 2048);
+      const origin2 = body.origin;
       if (!origins().includes(origin2)) throw new HttpBoundaryError("forbidden_origin", "ticket origin is not configured", 403);
       const ticket = mintTicket(origin2, parentLeaseId);
       jsonResponse(response, 200, { ticket: ticket.ticket, expiresAt: new Date(ticket.expiresAt).toISOString() });
@@ -83357,9 +83252,7 @@ function createAlderServer(options) {
       if (!method(response, request.method ?? "", "POST")) return;
       const requestOrigin = singleHeader(request.headers.origin);
       if (requestOrigin === null || !origins().includes(requestOrigin)) throw new HttpBoundaryError("forbidden_origin", "exact session Origin is required", 403);
-      const body = await readJsonBody(request, maxJson);
-      assertExactFields(body, ["ticket"], ["ticket"]);
-      const ticketValue = requiredString2(body.ticket, "ticket", 256);
+      const { ticket: ticketValue } = ticketExchangeRequestSchema.parse(await readJsonBody(request, maxJson));
       const ticket = tickets.get(ticketValue);
       if (!ticket || ticket.origin !== requestOrigin) throw authFailure("ticket is invalid or reserved for another origin");
       if (options.acceptingLeases?.() === false) throw new HttpBoundaryError("session_stopping", "notebook host is stopping", 503);
@@ -83369,11 +83262,10 @@ function createAlderServer(options) {
       const credentials = {
         leaseId: exchanged.lease.leaseId,
         clientId: exchanged.lease.clientId,
-        nextCommandSequence: exchanged.lease.nextCommandSequence,
         epoch: session.epoch,
         continuityProof,
         csrf: exchanged.lease.csrf,
-        ...recoveryKey === null ? {} : { recoveryKey, recoveryKeyId: recoveryCredentials.keyId }
+        ...session.recoveryId === void 0 ? {} : { recoveryId: session.recoveryId }
       };
       jsonResponse(response, 200, credentials, { "Set-Cookie": cookie });
       return;
@@ -83390,21 +83282,20 @@ function createAlderServer(options) {
       const body = await readJsonBody(request, maxJson);
       const action = body.action;
       if (action === "attach") {
-        assertExactFields(body, ["action"], ["action"]);
+        attachLeaseRequestSchema.parse(body);
         const supplied = parseBearer(request.headers);
         if (options.acceptingLeases?.() === false) throw new HttpBoundaryError("session_stopping", "notebook host is stopping", 503);
         if (supplied === null || !constantTimeEqual(supplied, configuredBearer ?? bearer)) throw authFailure();
         const lease = activateLease(createLease());
-        jsonResponse(response, 200, { leaseId: lease.leaseId, clientId: lease.clientId, nextCommandSequence: lease.nextCommandSequence, epoch: session.epoch });
+        jsonResponse(response, 200, { leaseId: lease.leaseId, clientId: lease.clientId, epoch: session.epoch });
         return;
       }
       if (action !== "heartbeat" && action !== "release") throw new HttpBoundaryError("invalid_request", "lease action must be attach, heartbeat, or release", 400);
-      assertExactFields(body, action === "release" ? ["action", "leaseId", "disposition"] : ["action", "leaseId"], ["action", "leaseId"]);
+      const leaseAction = leaseActionRequestSchema.parse(body);
       const resolved = requireLease(request, true);
       if (body.leaseId !== resolved.lease.leaseId) throw authFailure("lease identity does not match request");
       if (action === "release") {
-        const disposition = body.disposition === void 0 ? "normal" : requiredString2(body.disposition, "disposition", 16);
-        if (disposition !== "normal" && disposition !== "discard") throw new HttpBoundaryError("invalid_request", "release disposition must be normal or discard", 400);
+        const disposition = leaseAction.disposition ?? "normal";
         removeLease(resolved.lease.leaseId);
         jsonResponse(response, 200, { released: true });
         if (disposition === "discard" && leases.size === 0) {
@@ -83414,7 +83305,7 @@ function createAlderServer(options) {
         }
       } else {
         resolved.lease.lastSeen = Date.now();
-        jsonResponse(response, 200, { leaseId: resolved.lease.leaseId, clientId: resolved.lease.clientId, nextCommandSequence: resolved.lease.nextCommandSequence, epoch: session.epoch });
+        jsonResponse(response, 200, { leaseId: resolved.lease.leaseId, clientId: resolved.lease.clientId, epoch: session.epoch });
       }
       return;
     }
@@ -83426,12 +83317,16 @@ function createAlderServer(options) {
       if (command.clientId !== resolved.lease.clientId) throw authFailure("command clientId does not match lease");
       if (command.sessionEpoch !== session.epoch) throw new HttpBoundaryError("session_epoch_mismatch", "command belongs to a different session epoch", 409);
       assertCurrentHttpLease(resolved.lease);
-      const admission = commandAdmissionSchema.parse(await options.controller.dispatch(command));
-      resolved.lease.nextCommandSequence = Math.max(resolved.lease.nextCommandSequence, admission.nextCommandSequence);
-      if (command.type === "shutdown" && admission.accepted) scheduleShutdown(command.operationId, resolved.lease.clientId);
-      const snapshot = options.controller.snapshot(resolved.lease.clientId);
-      const bounded = await responseEnvelope(admission, snapshot);
-      jsonResponse(response, admission.accepted ? 200 : errorStatus2(admission.error?.code ?? "invalid_request"), bounded);
+      const release = retainMcpLease(resolved.lease);
+      try {
+        const result = await options.controller.dispatch(command);
+        assertCurrentHttpLease(resolved.lease);
+        const bounded = await responseEnvelope(result, options.controller.snapshot(resolved.lease.clientId));
+        jsonResponse(response, 200, bounded);
+        if (command.type === "shutdown") scheduleShutdown(result);
+      } finally {
+        release();
+      }
       return;
     }
     if (path3 === "/api/query") {
@@ -83484,7 +83379,7 @@ function createAlderServer(options) {
       if (!options.controller.query) throw new HttpBoundaryError("service_unavailable", "typed host queries are unavailable", 503);
       if (query2.type === "operation" && query2.clientId !== void 0 && query2.clientId !== resolved.lease.clientId) throw authFailure("operation query clientId does not match lease");
       assertCurrentHttpLease(resolved.lease);
-      const result = hostQueryResultSchema.parse(await options.controller.query(query2, resolved.lease.clientId));
+      const result = await options.controller.query(query2, resolved.lease.clientId);
       assertCurrentHttpLease(resolved.lease);
       const wireResult = encodeHostQueryResultWire(query2, result);
       const bounded = await responseEnvelope(wireResult, options.controller.snapshot(resolved.lease.clientId));
@@ -83613,7 +83508,6 @@ function createAlderServer(options) {
     let closeTimer = null;
     let unsubscribed = false;
     let unsubscribe = null;
-    let commandChain = Promise.resolve();
     let commandPendingCount = 0;
     let commandPendingBytes = 0;
     const pendingEvents = [];
@@ -83647,14 +83541,14 @@ function createAlderServer(options) {
       }
       return current;
     };
-    const sendError = (sequence2, error61, definitive = false) => {
+    const sendError = (requestId, error61, definitive = false) => {
       const detail = error61 instanceof HttpBoundaryError ? error61 : errorPayload(error61);
-      outbox.send({ type: "error", sequence: Number.isSafeInteger(sequence2) ? sequence2 : null, definitive, error: { code: detail.code, message: detail.message } });
+      outbox.send({ type: "error", requestId: typeof requestId === "string" ? requestId : null, definitive, error: { code: detail.code, message: detail.message } });
     };
-    const sendCurrentError = (sequence2, error61, definitive = false) => {
+    const sendCurrentError = (requestId, error61, definitive = false) => {
       try {
         requireCurrentLease();
-        sendError(sequence2, error61, definitive);
+        sendError(requestId, error61, definitive);
       } catch {
       }
     };
@@ -83676,7 +83570,7 @@ function createAlderServer(options) {
           if (eventBytes > MAX_EVENT_BYTES) {
             const snapshot = options.controller.snapshot(resolved.lease.clientId);
             requireCurrentLease();
-            const recovery = await recoveryTransfer(options.controller.recover(null, null), snapshot);
+            const recovery = await recoveryTransfer({ kind: "snapshot", epoch: snapshot.epoch, cursor: snapshot.cursor, snapshot }, snapshot);
             requireCurrentLease();
             outbox.send({ type: "recovery", protocolVersion: HOST_CLIENT_PROTOCOL_VERSION, continuityProof, recovery });
             return;
@@ -83727,12 +83621,12 @@ function createAlderServer(options) {
       }
       if (!connected) {
         try {
-          const connect = parseSocketConnect(message2);
+          const connect = socketConnectSchema.parse(message2);
           if (connect.leaseId !== resolved.lease.leaseId || connect.clientId !== resolved.lease.clientId || !constantTimeEqual(connect.csrf, resolved.lease.csrf)) throw authFailure("WebSocket lease or CSRF identity mismatch");
           requireCurrentLease().lastSeen = Date.now();
           unsubscribe = options.controller.subscribe(listener);
-          const recovery = options.controller.recover(connect.epoch, connect.cursor);
           const snapshot = options.controller.snapshot(resolved.lease.clientId);
+          const recovery = { kind: "snapshot", epoch: snapshot.epoch, cursor: snapshot.cursor, snapshot };
           connected = true;
           clearTimeout(handshakeTimer);
           const releaseMcpLease = retainMcpLease(resolved.lease);
@@ -83796,8 +83690,7 @@ function createAlderServer(options) {
             return queryHandler.call(options.controller, query2, resolved.lease.clientId);
           }).then(async (result) => {
             requireCurrentLease();
-            const parsed = hostQueryResultSchema.parse(result);
-            const wireResult = encodeHostQueryResultWire(query2, parsed);
+            const wireResult = encodeHostQueryResultWire(query2, result);
             requireCurrentLease();
             const bounded = await responseEnvelope(wireResult, options.controller.snapshot(resolved.lease.clientId));
             requireCurrentLease();
@@ -83808,7 +83701,7 @@ function createAlderServer(options) {
         if (message2.type !== "command" || !isPlainObject2(message2.command)) throw new HttpBoundaryError("invalid_request", "invalid WebSocket message", 400);
         const command = parseHostCommand(decodeHostCommandWire(message2.command));
         if (command.clientId !== resolved.lease.clientId || command.sessionEpoch !== session.epoch) throw authFailure("WebSocket command identity mismatch");
-        if (message2.sequence !== void 0 && message2.sequence !== command.commandSequence) throw new HttpBoundaryError("invalid_request", "WebSocket sequence mismatch", 400);
+        if (message2.requestId !== command.requestId) throw new HttpBoundaryError("invalid_request", "WebSocket request ID mismatch", 400);
         const commandBytes = Buffer.byteLength(JSON.stringify(message2.command));
         if (commandPendingCount >= SOCKET_COMMAND_QUEUE_LIMIT || commandPendingBytes + commandBytes > maxOutbox) {
           closeForBackpressure();
@@ -83817,37 +83710,27 @@ function createAlderServer(options) {
         commandPendingCount += 1;
         commandPendingBytes += commandBytes;
         const releaseMcpLease = retainMcpLease(resolved.lease);
-        commandChain = commandChain.then(async () => {
+        void (async () => {
           try {
             if (transportClosing) return;
-            let admission;
-            try {
-              requireCurrentLease();
-              const dispatched = await options.controller.dispatch(command);
-              requireCurrentLease();
-              admission = commandAdmissionSchema.parse(dispatched);
-            } catch (error61) {
-              sendCurrentError(command.commandSequence, error61, true);
-              return;
-            }
             requireCurrentLease();
-            resolved.lease.nextCommandSequence = Math.max(resolved.lease.nextCommandSequence, admission.nextCommandSequence);
-            const snapshot = options.controller.snapshot(resolved.lease.clientId);
+            const result = await options.controller.dispatch(command);
             requireCurrentLease();
-            const bounded = await responseEnvelope(admission, snapshot);
+            const bounded = await responseEnvelope(result, options.controller.snapshot(resolved.lease.clientId));
+            await eventChain;
             requireCurrentLease();
-            outbox.send({ type: "commandResult", sequence: command.commandSequence, result: bounded });
-            if (command.type === "shutdown" && admission.accepted) scheduleShutdown(command.operationId, resolved.lease.clientId);
+            outbox.send({ type: "commandResult", requestId: command.requestId, result: bounded });
+            if (command.type === "shutdown") scheduleShutdown(result);
           } catch (error61) {
-            sendCurrentError(command.commandSequence, error61);
+            sendCurrentError(command.requestId, error61);
           } finally {
             commandPendingCount -= 1;
             commandPendingBytes -= commandBytes;
             releaseMcpLease();
           }
-        });
+        })();
       } catch (error61) {
-        sendError(message2.sequence, error61);
+        sendError(message2.requestId, error61);
       }
     });
     socket.on("close", () => {
@@ -83956,7 +83839,7 @@ function createAlderServer(options) {
 }
 
 // src/mcp.ts
-import { randomUUID as randomUUID9 } from "node:crypto";
+import { randomUUID as randomUUID8 } from "node:crypto";
 
 // ../../../../../alder/host/node_modules/@hono/node-server/dist/constants-BLSFu_RU.mjs
 var X_ALREADY_SENT = "x-hono-already-sent";
@@ -87537,9 +87420,6 @@ var StreamableHTTPServerTransport = class {
     this._webStandardTransport.closeStandaloneSSEStream();
   }
 };
-
-// src/mcp-catalog.ts
-import { randomUUID as randomUUID8 } from "node:crypto";
 
 // ../../../../../alder/host/node_modules/zod/v3/helpers/util.js
 var util;
@@ -95769,23 +95649,17 @@ var MCP_OUTPUT_CHUNK_BYTES = 256 * 1024;
 var id = external_exports.string().min(1).max(256);
 var path2 = external_exports.string().min(1).max(32 * 1024);
 var revision = external_exports.number().int().min(0).max(2147483647);
-var sequence = external_exports.number().int().min(1).max(2147483647);
 var bodyLine = external_exports.string().refine((value) => !/[\r\n\0]/.test(value), "logical source lines cannot contain line breaks or NUL");
 var logicalLines = external_exports.array(bodyLine).max(1e6);
 var activeClientIds = external_exports.array(id).max(128).refine((clientIds) => new Set(clientIds).size === clientIds.length, "expectedClientIds must not contain duplicates");
 var cellType = external_exports.enum(["code", "markdown"]);
 var empty = external_exports.object({}).strict();
-var wait = external_exports.boolean().default(true);
-var operationIdentity = {
-  operationId: id,
-  commandSequence: sequence
-};
+var requestIdentity = { requestId: id, sessionEpoch: id };
 var expectedDocumentRevision = revision;
 var expectedCellRevision = revision;
 var jsonRecord = external_exports.record(external_exports.string(), external_exports.unknown());
 var queryOffset2 = external_exports.number().int().min(0).max(2147483647).optional();
-var queryLimit = external_exports.number().int().min(1).max(262144).optional();
-var commonEffect = { ...operationIdentity };
+var commonEffect = { ...requestIdentity };
 var toolSchemas = {
   notebook_state: empty,
   list_cells: external_exports.object({ offset: queryOffset2, limit: external_exports.number().int().min(1).max(1e3).optional() }).strict(),
@@ -95796,9 +95670,9 @@ var toolSchemas = {
   move_cell: external_exports.object({ ...commonEffect, expectedDocumentRevision, cell: id, after: id.nullable() }).strict(),
   rename_cell: external_exports.object({ ...commonEffect, expectedDocumentRevision, cell: id, name: id.nullable(), expectedRevision: expectedCellRevision }).strict(),
   disable_cell: external_exports.object({ ...commonEffect, expectedDocumentRevision, cell: id, disabled: external_exports.boolean(), expectedRevision: expectedCellRevision }).strict(),
-  run_cell: external_exports.object({ ...commonEffect, expectedDocumentRevision, cell: id, changes: external_exports.array(mcpDocumentChangeSchema).max(1e3).optional(), wait }).strict(),
-  run_all: external_exports.object({ ...commonEffect, expectedDocumentRevision, changes: external_exports.array(mcpDocumentChangeSchema).max(1e3).optional(), wait }).strict(),
-  run_stale: external_exports.object({ ...commonEffect, expectedDocumentRevision, changes: external_exports.array(mcpDocumentChangeSchema).max(1e3).optional(), wait }).strict(),
+  run_cell: external_exports.object({ ...commonEffect, expectedDocumentRevision, cell: id, changes: external_exports.array(mcpDocumentChangeSchema).max(1e3).optional() }).strict(),
+  run_all: external_exports.object({ ...commonEffect, expectedDocumentRevision, changes: external_exports.array(mcpDocumentChangeSchema).max(1e3).optional() }).strict(),
+  run_stale: external_exports.object({ ...commonEffect, expectedDocumentRevision, changes: external_exports.array(mcpDocumentChangeSchema).max(1e3).optional() }).strict(),
   interrupt: external_exports.object({ ...commonEffect, runId: id.optional() }).strict(),
   get_value: external_exports.object({ ...commonEffect, name: id, kernelEpoch: id }).strict(),
   set_widget: external_exports.object({ ...commonEffect, name: id, path: external_exports.array(id).max(256), update: widgetUpdateSchema, kernelEpoch: id, expectedRevision: expectedCellRevision }).strict(),
@@ -95812,23 +95686,21 @@ var toolSchemas = {
   get_help: external_exports.object({ contents: external_exports.unknown() }).strict(),
   recovery_state: empty,
   shutdown: external_exports.object({ ...commonEffect, expectedDocumentRevision, expectedClientIds: activeClientIds, confirmed: external_exports.literal(true) }).strict(),
-  restart: external_exports.object({ ...commonEffect, replay: external_exports.boolean().default(false), expectedDocumentRevision: expectedDocumentRevision.optional(), wait }).strict(),
+  restart: external_exports.object({ ...commonEffect, replay: external_exports.boolean().default(false), expectedDocumentRevision: expectedDocumentRevision.optional() }).strict().refine((value) => !value.replay || value.expectedDocumentRevision !== void 0, "replay restart requires document revision"),
   format: external_exports.object({ ...commonEffect, cellIds: external_exports.array(id).max(1e3).optional(), expectedRevisions: external_exports.record(external_exports.string(), revision), expectedDocumentRevision }).strict(),
   save_as: external_exports.object({ ...commonEffect, path: path2, expectedDestination: external_exports.literal("absent"), expectedDocumentRevision }).strict(),
   read_output: external_exports.object({ handle: id, offset: external_exports.number().int().min(0), limit: external_exports.number().int().min(1).max(MCP_OUTPUT_CHUNK_BYTES) }).strict(),
   table_page: external_exports.object({ ...commonEffect, handle: id, offset: external_exports.number().int().min(0), limit: external_exports.number().int().min(1).max(200), sortBy: external_exports.string().max(256), sortDescending: external_exports.boolean(), filter: external_exports.string().max(32 * 1024), kernelEpoch: id }).strict(),
-  materialize_output: external_exports.object({ ...commonEffect, key: id, kernelEpoch: id, wait }).strict(),
-  operation_status: external_exports.object({ operation: id }).strict(),
-  read_events: external_exports.object({ epoch: id.nullable(), cursor: external_exports.number().int().min(0).nullable() }).strict(),
+  materialize_output: external_exports.object({ ...commonEffect, key: id, kernelEpoch: id }).strict(),
   get_config: empty,
   set_config: external_exports.object({ ...commonEffect, patch: jsonRecord, expectedSidecarVersion: id.nullable(), expectedDocumentRevision }).strict(),
   get_layout: empty,
   set_layout: external_exports.object({ ...commonEffect, layout: layoutSchema, expectedSidecarVersion: id.nullable(), expectedDocumentRevision }).strict(),
-  set_app: external_exports.object({ ...commonEffect, patch: jsonRecord, expectedDocumentRevision }).strict(),
+  set_app: external_exports.object({ ...commonEffect, patch: setAppCommandSchema.shape.patch, expectedDocumentRevision }).strict(),
   packages_status: empty,
   packages_declare: external_exports.object({ ...commonEffect, packages: external_exports.array(external_exports.string().min(1).max(256)).max(1e3), expectedSidecarVersion: id.nullable(), expectedDocumentRevision }).strict(),
-  packages_install: external_exports.object({ ...commonEffect, packages: external_exports.array(external_exports.string().min(1).max(256)).max(1e3), expectedDocumentRevision, kernelEpoch: id.nullable(), wait }).strict(),
-  publish: external_exports.object({ ...commonEffect, includeCode: external_exports.boolean(), outputPath: path2.optional(), expectedDocumentRevision, wait }).strict(),
+  packages_install: external_exports.object({ ...commonEffect, packages: external_exports.array(external_exports.string().min(1).max(256)).max(1e3), expectedDocumentRevision, kernelEpoch: id.nullable() }).strict(),
+  publish: external_exports.object({ ...commonEffect, includeCode: external_exports.boolean(), outputPath: path2.optional(), expectedDocumentRevision }).strict(),
   upload_file: external_exports.object({ ...commonEffect, name: id, path: external_exports.array(id).max(256), files: external_exports.array(external_exports.object({ name: path2, content_base64: external_exports.string().max(16 * 1024 * 1024) }).strict()).max(1e3), kernelEpoch: id }).strict()
 };
 var descriptions = {
@@ -95863,8 +95735,6 @@ var descriptions = {
   read_output: "Read one bounded output page.",
   table_page: "Read one table page.",
   materialize_output: "Materialize one lazy output.",
-  operation_status: "Read one operation receipt.",
-  read_events: "Recover events from a cursor.",
   get_config: "Read notebook configuration.",
   set_config: "Update notebook configuration.",
   get_layout: "Read notebook layout.",
@@ -95876,14 +95746,13 @@ var descriptions = {
   publish: "Publish the settled notebook.",
   upload_file: "Upload files for a widget."
 };
-var catalogOrder = ["notebook_state", "list_cells", "read_cell", "add_cell", "edit_cell", "delete_cell", "move_cell", "rename_cell", "disable_cell", "run_cell", "run_all", "run_stale", "interrupt", "get_value", "set_widget", "save", "check", "apply_transaction", "edit_cell_ranges", "select_r", "set_runtime", "reload_source", "get_help", "recovery_state", "shutdown", "restart", "format", "save_as", "read_output", "table_page", "materialize_output", "operation_status", "read_events", "get_config", "set_config", "get_layout", "set_layout", "set_app", "packages_status", "packages_declare", "packages_install", "publish", "upload_file"];
-var waitToolNames = /* @__PURE__ */ new Set(["run_cell", "run_all", "run_stale", "restart", "packages_install", "publish", "materialize_output"]);
+var catalogOrder = ["notebook_state", "list_cells", "read_cell", "add_cell", "edit_cell", "delete_cell", "move_cell", "rename_cell", "disable_cell", "run_cell", "run_all", "run_stale", "interrupt", "get_value", "set_widget", "save", "check", "apply_transaction", "edit_cell_ranges", "select_r", "set_runtime", "reload_source", "get_help", "recovery_state", "shutdown", "restart", "format", "save_as", "read_output", "table_page", "materialize_output", "get_config", "set_config", "get_layout", "set_layout", "set_app", "packages_status", "packages_declare", "packages_install", "publish", "upload_file"];
 var runtimeToolNames = /* @__PURE__ */ new Set(["run_cell", "run_all", "run_stale", "get_value", "set_widget", "restart", "packages_status", "packages_install", "check"]);
 var staticResourceUris = /* @__PURE__ */ new Set(["alder://notebook/source", "alder://notebook/dag", "alder://notebook/state"]);
 function canonicalResourceUri(uri) {
   if (Buffer.byteLength(uri, "utf8") > 1024) return false;
   if (staticResourceUris.has(uri)) return true;
-  const match = new RegExp("^(alder://(?:cell|operations|outputs)/)([^/?#]+)(/outputs)?$").exec(uri);
+  const match = new RegExp("^(alder://(?:cell|outputs)/)([^/?#]+)(/outputs)?$").exec(uri);
   if (!match) return false;
   if (match[1] === "alder://cell/" ? match[3] !== "/outputs" : match[3] !== void 0) return false;
   try {
@@ -95947,7 +95816,6 @@ function createMcpServer(options) {
       if (event.type === "graph" || event.type === "transaction" || event.type === "notebook") uris.add("alder://notebook/dag");
       if (event.type === "transaction" || event.type === "notebook" || event.type === "cell") uris.add("alder://notebook/source");
       if (event.cellId !== void 0) uris.add(`alder://cell/${encodeURIComponent(event.cellId)}/outputs`);
-      if (event.operationId !== void 0) uris.add(`alder://operations/${encodeURIComponent(event.operationId)}`);
       for (const uri of uris) if (subscribedResources.has(uri)) void server.server.sendResourceUpdated({ uri }).catch(() => void 0);
     });
     void track((async () => {
@@ -96038,10 +95906,10 @@ function createMcpServer(options) {
     const invoke = async (raw, extra) => {
       await (runtimeToolNames.has(name) ? requireReady(extra) : requireInitialized(extra));
       try {
-        const parsed = schema.parse(raw);
+        const parsed = raw;
         const combined = combineSignals(extra.signal, sessionAbort.signal);
         try {
-          const value = await executeTool(options, name, parsed, combined.signal, extra, sessionAbort.signal);
+          const value = await executeTool(options, name, parsed, combined.signal, extra);
           if (name === "select_r") markRuntimeReady();
           return await envelope(options, value, false);
         } finally {
@@ -96052,7 +95920,7 @@ function createMcpServer(options) {
         return await envelope(options, value, true);
       }
     };
-    registerTool(name, { description: descriptions[name], inputSchema: schema }, ((args, extra) => {
+    registerTool(name, { description: descriptions[name] + ("requestId" in schema.shape ? " Supply a unique requestId and the current sessionEpoch. If the result is uncertain, retry only the identical request with the same ID and epoch; never start a fresh run automatically." : ""), inputSchema: schema }, ((args, extra) => {
       const retainedBytes = Buffer.byteLength(JSON.stringify(args), "utf8");
       return schedule(() => invoke(args, extra), retainedBytes);
     }));
@@ -96078,7 +95946,7 @@ function createMcpServer(options) {
   }
   return server;
 }
-async function executeTool(options, name, args, signal, extra, sessionSignal) {
+async function executeTool(options, name, args, signal, extra) {
   const controller = options.controller;
   const query2 = async (input2) => {
     options.assertActive?.();
@@ -96090,14 +95958,12 @@ async function executeTool(options, name, args, signal, extra, sessionSignal) {
   };
   throwIfAborted2(signal);
   options.assertActive?.();
-  if (name === "notebook_state") return await query2({ type: "notebook" });
+  if (name === "notebook_state") return logicalQueryResult(await query2({ type: "state" }));
   if (name === "list_cells") return logicalQueryResult(await query2({ type: "cells", ...args.offset === void 0 ? {} : { offset: Number(args.offset) }, ...args.limit === void 0 ? {} : { limit: Number(args.limit) } }));
   if (name === "read_cell") return logicalQueryResult(await query2({ type: "cell", cellId: String(args.cell) }));
   if (name === "get_config") return await query2({ type: "config" });
   if (name === "get_layout") return await query2({ type: "layout" });
   if (name === "packages_status") return await query2({ type: "packages-status" });
-  if (name === "operation_status") return await query2({ type: "operation", operationId: String(args.operation), clientId: options.clientId });
-  if (name === "read_events") return logicalQueryResult(await query2({ type: "events", epoch: args.epoch === null ? null : String(args.epoch), cursor: args.cursor === null ? null : Number(args.cursor) }));
   if (name === "recovery_state") return logicalQueryResult(await query2({ type: "recovery" }));
   if (name === "read_output") {
     return await query2({
@@ -96110,92 +95976,47 @@ async function executeTool(options, name, args, signal, extra, sessionSignal) {
   if (name === "get_help") return await query2({ type: "help", contents: args.contents });
   if (name === "check") return await query2({ type: "check" });
   throwIfAborted2(signal);
-  const command = parseCommand(options, name, args);
-  options.assertActive?.();
-  await sendProgress(extra, 0, "accepted");
+  const command = commandFromTool(options, name, args);
+  await sendProgress(extra, 0, "started");
   throwIfAborted2(signal);
   options.assertActive?.();
-  const accepted = await controller.dispatch(command);
-  throwIfAborted2(signal);
-  options.assertActive?.();
-  options.nextCommandSequence = Math.max(options.nextCommandSequence ?? 1, accepted.nextCommandSequence);
-  options.onNextCommandSequence?.(accepted.nextCommandSequence);
-  const operation = requireAccepted(accepted);
-  const shouldWait = waitToolNames.has(name) ? args.wait !== false : true;
-  if (!shouldWait) {
-    await sendProgress(extra, 1, "accepted");
-    throwIfAborted2(signal);
-    options.assertActive?.();
-    return receipt(accepted);
-  }
-  let cancellation;
-  const onAbort = () => {
-    if (sessionSignal.aborted) return;
-    cancellation ??= interruptOperation(options, operation, accepted.nextCommandSequence, sessionSignal).catch(() => void 0);
-  };
-  signal.addEventListener("abort", onAbort, { once: true });
-  if (signal.aborted) onAbort();
+  let completed;
   try {
-    const settled = await waitForOperation(controller, operation.id, options.operationTimeoutMs ?? 12e4, signal, options.clientId);
-    throwIfAborted2(signal);
-    options.assertActive?.();
-    await sendProgress(extra, 1, settled.status);
-    throwIfAborted2(signal);
-    options.assertActive?.();
-    if (settled.status === "error" || settled.status === "cancelled" || settled.status === "interrupted") throw operationFailure(name, accepted, settled);
-    if (name === "shutdown" && isRecord3(settled.result) && settled.result.closing === true) {
-      setImmediate(() => {
-        void Promise.resolve().then(() => {
-          options.assertActive?.();
-          return options.onShutdown?.();
-        }).catch(() => void 0);
-      });
-    }
-    return settledValue(accepted, settled);
+    completed = await awaitWithTimeout(
+      controller.dispatch(command),
+      options.commandTimeoutMs ?? 12e4,
+      codedError("command_uncertain", "The command is still pending or its response was lost."),
+      [signal]
+    );
   } catch (error61) {
-    if (cancellation !== void 0) await cancellation;
-    throw error61;
-  } finally {
-    signal.removeEventListener("abort", onAbort);
+    const failure = codedError("command_uncertain", `${errorShape(error61).message} Retry the identical request only with requestId ${command.requestId} and sessionEpoch ${command.sessionEpoch}.`);
+    throw Object.assign(failure, { envelope: { requestId: command.requestId, epoch: command.sessionEpoch, result: null, error: errorShape(failure) } });
   }
-}
-async function interruptOperation(options, operation, nextCommandSequence, sessionSignal) {
-  const controller = options.controller;
-  if (sessionSignal.aborted) return;
-  let current = controller.operation?.(operation.id, options.clientId) ?? operation;
-  if (current.status !== "accepted" && current.status !== "running") return;
-  const command = parseHostCommand({
-    operationId: randomUUID8(),
-    commandSequence: options.nextCommandSequence ?? nextCommandSequence,
-    clientId: options.clientId,
-    sessionEpoch: options.sessionEpoch,
-    type: "interrupt",
-    ...current.runId === null ? {} : { runId: current.runId }
-  });
-  if (sessionSignal.aborted) return;
   options.assertActive?.();
-  const admission = await controller.dispatch(command);
-  if (sessionSignal.aborted) return;
-  options.assertActive?.();
-  options.nextCommandSequence = Math.max(options.nextCommandSequence ?? 1, admission.nextCommandSequence);
-  options.onNextCommandSequence?.(admission.nextCommandSequence);
+  await sendProgress(extra, 1, completed.error === null ? "done" : "failed").catch(() => void 0);
+  if (completed.error !== null) throw Object.assign(codedError(completed.error.code, completed.error.message), { envelope: completed });
+  if (name === "shutdown" && isRecord3(completed.result) && completed.result.closing === true) {
+    setImmediate(() => {
+      void Promise.resolve().then(() => options.onShutdown?.()).catch(() => void 0);
+    });
+  }
+  return completed;
 }
-function parseCommand(options, name, args) {
+function commandFromTool(options, name, args) {
   const base = {
-    operationId: args.operationId,
-    commandSequence: args.commandSequence,
+    requestId: String(args.requestId),
     clientId: options.clientId,
-    sessionEpoch: options.sessionEpoch
+    sessionEpoch: String(args.sessionEpoch)
   };
-  const transaction = (changes) => parseHostCommand({
+  const transaction = (changes) => ({
     ...base,
     type: "transaction",
-    expectedDocumentRevision: args.expectedDocumentRevision,
+    expectedDocumentRevision: Number(args.expectedDocumentRevision),
     changes: projectChanges(changes)
   });
   switch (name) {
     case "add_cell":
-      return transaction([{ type: "create", creationId: String(args.operationId), after: args.after === null ? null : { cellId: String(args.after) }, cellType: args.type, body: args.body, options: args.options }]);
+      return transaction([{ type: "create", creationId: String(args.requestId), after: args.after === null ? null : { cellId: String(args.after) }, cellType: args.type, body: args.body, options: args.options }]);
     case "edit_cell":
       return transaction([{ type: "edit", cell: { cellId: String(args.cell) }, cellType: args.type, body: args.body, expectedRevision: Number(args.expectedRevision) }]);
     case "delete_cell":
@@ -96207,55 +96028,55 @@ function parseCommand(options, name, args) {
     case "disable_cell":
       return transaction([{ type: "options", cell: { cellId: String(args.cell) }, patch: { disabled: Boolean(args.disabled) }, expectedRevision: Number(args.expectedRevision) }]);
     case "run_cell":
-      return parseHostCommand({ ...base, type: "run", scope: "cell", target: { cellId: args.cell }, changes: projectOptionalChanges(args.changes), expectedDocumentRevision: args.expectedDocumentRevision });
+      return { ...base, type: "run", scope: "cell", target: { cellId: args.cell }, changes: projectOptionalChanges(args.changes), expectedDocumentRevision: args.expectedDocumentRevision };
     case "run_all":
-      return parseHostCommand({ ...base, type: "run", scope: "all", changes: projectOptionalChanges(args.changes), expectedDocumentRevision: args.expectedDocumentRevision });
+      return { ...base, type: "run", scope: "all", changes: projectOptionalChanges(args.changes), expectedDocumentRevision: args.expectedDocumentRevision };
     case "run_stale":
-      return parseHostCommand({ ...base, type: "run", scope: "stale", changes: projectOptionalChanges(args.changes), expectedDocumentRevision: args.expectedDocumentRevision });
+      return { ...base, type: "run", scope: "stale", changes: projectOptionalChanges(args.changes), expectedDocumentRevision: args.expectedDocumentRevision };
     case "interrupt":
-      return parseHostCommand({ ...base, type: "interrupt", ...args.runId === void 0 ? {} : { runId: args.runId } });
+      return { ...base, type: "interrupt", ...args.runId === void 0 ? {} : { runId: args.runId } };
     case "get_value":
-      return parseHostCommand({ ...base, type: "inspect", name: args.name, kernelEpoch: args.kernelEpoch });
+      return { ...base, type: "inspect", name: args.name, kernelEpoch: args.kernelEpoch };
     case "set_widget":
-      return parseHostCommand({ ...base, type: "widget", name: args.name, path: args.path, update: args.update, source: "mcp", kernelEpoch: args.kernelEpoch, expectedRevision: args.expectedRevision });
+      return { ...base, type: "widget", name: args.name, path: args.path, update: args.update, source: "mcp", kernelEpoch: args.kernelEpoch, expectedRevision: args.expectedRevision };
     case "save":
-      return parseHostCommand({ ...base, type: "save", expectedDocumentRevision: args.expectedDocumentRevision });
+      return { ...base, type: "save", expectedDocumentRevision: args.expectedDocumentRevision };
     case "apply_transaction":
       return transaction(args.changes);
     case "edit_cell_ranges":
       return transaction([projectRangeEdit(args)]);
     case "select_r":
-      return parseHostCommand({ ...base, type: "select-r", rscript: args.rscript, persistDefault: args.persistDefault, expectedDocumentRevision: args.expectedDocumentRevision });
+      return { ...base, type: "select-r", rscript: args.rscript, persistDefault: args.persistDefault, expectedDocumentRevision: args.expectedDocumentRevision };
     case "set_runtime":
-      return parseHostCommand({ ...base, type: "set-runtime", on_cell_change: args.on_cell_change, on_startup: args.on_startup, expectedDocumentRevision: args.expectedDocumentRevision });
+      return { ...base, type: "set-runtime", on_cell_change: args.on_cell_change, on_startup: args.on_startup, expectedDocumentRevision: args.expectedDocumentRevision };
     case "reload_source":
-      return parseHostCommand({ ...base, type: "reload-source", expectedDocumentRevision: args.expectedDocumentRevision, expectedDiskDigest: args.expectedDiskDigest, expectedDiskVersion: args.expectedDiskVersion });
+      return { ...base, type: "reload-source", expectedDocumentRevision: args.expectedDocumentRevision, expectedDiskDigest: args.expectedDiskDigest, expectedDiskVersion: args.expectedDiskVersion };
     case "shutdown":
-      return parseHostCommand({ ...base, type: "shutdown", expectedDocumentRevision: args.expectedDocumentRevision, expectedClientIds: args.expectedClientIds });
+      return { ...base, type: "shutdown", expectedDocumentRevision: args.expectedDocumentRevision, expectedClientIds: args.expectedClientIds };
     case "restart":
-      return parseHostCommand({ ...base, type: "restart", replay: args.replay, ...args.expectedDocumentRevision === void 0 ? {} : { expectedDocumentRevision: args.expectedDocumentRevision } });
+      return { ...base, type: "restart", replay: args.replay, ...args.expectedDocumentRevision === void 0 ? {} : { expectedDocumentRevision: args.expectedDocumentRevision } };
     case "format":
-      return parseHostCommand({ ...base, type: "format", cellIds: args.cellIds, expectedRevisions: args.expectedRevisions, expectedDocumentRevision: args.expectedDocumentRevision });
+      return { ...base, type: "format", cellIds: args.cellIds, expectedRevisions: args.expectedRevisions, expectedDocumentRevision: args.expectedDocumentRevision };
     case "save_as":
-      return parseHostCommand({ ...base, type: "save-as", path: args.path, expectedDestination: args.expectedDestination, expectedDocumentRevision: args.expectedDocumentRevision });
+      return { ...base, type: "save-as", path: args.path, expectedDestination: args.expectedDestination, expectedDocumentRevision: args.expectedDocumentRevision };
     case "table_page":
-      return parseHostCommand({ ...base, type: "table-page", handle: args.handle, offset: args.offset, limit: args.limit, sortBy: args.sortBy, sortDescending: args.sortDescending, filter: args.filter, kernelEpoch: args.kernelEpoch });
+      return { ...base, type: "table-page", handle: args.handle, offset: args.offset, limit: args.limit, sortBy: args.sortBy, sortDescending: args.sortDescending, filter: args.filter, kernelEpoch: args.kernelEpoch };
     case "materialize_output":
-      return parseHostCommand({ ...base, type: "lazy-output", key: args.key, kernelEpoch: args.kernelEpoch });
+      return { ...base, type: "lazy-output", key: args.key, kernelEpoch: args.kernelEpoch };
     case "set_config":
-      return parseHostCommand({ ...base, type: "set-config", patch: args.patch, expectedSidecarVersion: args.expectedSidecarVersion, expectedDocumentRevision: args.expectedDocumentRevision });
+      return { ...base, type: "set-config", patch: args.patch, expectedSidecarVersion: args.expectedSidecarVersion, expectedDocumentRevision: args.expectedDocumentRevision };
     case "set_layout":
-      return parseHostCommand({ ...base, type: "set-layout", layout: args.layout, expectedSidecarVersion: args.expectedSidecarVersion, expectedDocumentRevision: args.expectedDocumentRevision });
+      return { ...base, type: "set-layout", layout: args.layout, expectedSidecarVersion: args.expectedSidecarVersion, expectedDocumentRevision: args.expectedDocumentRevision };
     case "set_app":
-      return parseHostCommand({ ...base, type: "set-app", patch: args.patch, expectedDocumentRevision: args.expectedDocumentRevision });
+      return { ...base, type: "set-app", patch: args.patch, expectedDocumentRevision: args.expectedDocumentRevision };
     case "packages_declare":
-      return parseHostCommand({ ...base, type: "packages-declare", packages: args.packages, expectedSidecarVersion: args.expectedSidecarVersion, expectedDocumentRevision: args.expectedDocumentRevision });
+      return { ...base, type: "packages-declare", packages: args.packages, expectedSidecarVersion: args.expectedSidecarVersion, expectedDocumentRevision: args.expectedDocumentRevision };
     case "packages_install":
-      return parseHostCommand({ ...base, type: "packages-install", packages: args.packages, expectedDocumentRevision: args.expectedDocumentRevision, kernelEpoch: args.kernelEpoch });
+      return { ...base, type: "packages-install", packages: args.packages, expectedDocumentRevision: args.expectedDocumentRevision, kernelEpoch: args.kernelEpoch };
     case "publish":
-      return parseHostCommand({ ...base, type: "publish", includeCode: args.includeCode, outputPath: args.outputPath, expectedDocumentRevision: args.expectedDocumentRevision });
+      return { ...base, type: "publish", includeCode: args.includeCode, outputPath: args.outputPath, expectedDocumentRevision: args.expectedDocumentRevision };
     case "upload_file":
-      return parseHostCommand({ ...base, type: "upload", name: args.name, path: args.path, files: args.files, kernelEpoch: args.kernelEpoch });
+      return { ...base, type: "upload", name: args.name, path: args.path, files: args.files, kernelEpoch: args.kernelEpoch };
     default:
       throw codedError("invalid_request", `unknown tool: ${name}`);
   }
@@ -96279,42 +96100,6 @@ async function queryOrSnapshot(controller, query2, clientId, assertActive) {
   assertActive?.();
   return result;
 }
-async function waitForOperation(controller, operationId, timeoutMs, signal, clientId) {
-  const current = controller.operation?.(operationId, clientId);
-  if (current !== void 0 && current.status !== "accepted" && current.status !== "running") return current;
-  if (controller.awaitOperation === void 0) throw codedError("operation_unavailable", "operation waiting is unavailable");
-  const timeout = new AbortController();
-  const timer = setTimeout(() => timeout.abort(codedError("mcp_timeout", "MCP action timed out")), timeoutMs);
-  timer.unref?.();
-  const combined = signal === void 0 ? { signal: timeout.signal, dispose: () => void 0 } : combineSignals(signal, timeout.signal);
-  try {
-    return await controller.awaitOperation(operationId, clientId, combined.signal);
-  } catch (error61) {
-    if (timeout.signal.aborted) throw codedError("mcp_timeout", "MCP action timed out");
-    if (combined.signal.aborted) throw codedError("request_cancelled", "MCP request was cancelled");
-    throw error61;
-  } finally {
-    clearTimeout(timer);
-    combined.dispose();
-  }
-}
-function settledValue(accepted, operation) {
-  return { operation, result: { admission: accepted, value: operation.result }, ...operation.error === void 0 ? {} : { error: operation.error } };
-}
-function receipt(accepted) {
-  return { operation: accepted.operation, result: { admission: accepted }, ...accepted.error === void 0 ? {} : { error: accepted.error } };
-}
-function requireAccepted(admission) {
-  if (admission.accepted && admission.operation !== null) return admission.operation;
-  const failure = codedError(admission.error?.code ?? "command_rejected", admission.error?.message ?? "command rejected");
-  failure.envelope = { result: { admission }, ...admission.error === void 0 ? {} : { error: admission.error } };
-  throw failure;
-}
-function operationFailure(name, accepted, operation) {
-  const failure = codedError(operation.error?.code ?? `${name}_failed`, operation.error?.message ?? `${name} operation failed`);
-  failure.envelope = settledValue(accepted, operation);
-  return failure;
-}
 async function envelope(options, value, isError) {
   options.assertActive?.();
   const snapshot = options.controller.snapshot();
@@ -96333,7 +96118,7 @@ async function envelope(options, value, isError) {
 function normalizeEnvelope(value, snapshot) {
   const base = { epoch: snapshot.epoch, documentRevision: snapshot.documentRevision, cursor: snapshot.cursor };
   if (isRecord3(value) && "epoch" in value && "documentRevision" in value && "cursor" in value) return value;
-  if (isRecord3(value) && ("operation" in value || "error" in value || "result" in value)) return { ...base, ...value };
+  if (isRecord3(value) && ("error" in value || "result" in value)) return { ...base, ...value };
   return { ...base, result: value };
 }
 async function captureArtifact(options, bytes, mimeType, extension2, snapshot = options.controller.snapshot()) {
@@ -96533,11 +96318,6 @@ function resources(options, requireInitialized) {
       if (!cell) throw codedError("not_found", `no such cell: ${cellId}`);
       return boundedJsonResource(options, cell.outputs);
     }
-    if (variables?.operation !== void 0) {
-      const raw = variables.operation;
-      const operationId = decodeURIComponent(Array.isArray(raw) ? raw[0] : raw);
-      return boundedJsonResource(options, await queryOrSnapshot(controller, { type: "operation", operationId, clientId: options.clientId }, options.clientId, options.assertActive));
-    }
     if (variables?.output !== void 0) {
       const raw = variables.output;
       const handle = decodeURIComponent(Array.isArray(raw) ? raw[0] : raw);
@@ -96546,14 +96326,12 @@ function resources(options, requireInitialized) {
     throw codedError("not_found", `unknown MCP resource: ${uri}`);
   };
   const cellTemplate = new ResourceTemplate("alder://cell/{cell}/outputs", { list: async () => ({ resources: options.controller.snapshot(options.clientId).cells.map((cell) => ({ uri: `alder://cell/${encodeURIComponent(cell.id)}/outputs`, name: `Outputs ${cell.id}`, mimeType: "application/json" })) }) });
-  const opTemplate = new ResourceTemplate("alder://operations/{operation}", { list: void 0 });
   const outTemplate = new ResourceTemplate("alder://outputs/{output}", { list: void 0 });
   return [
     ["Notebook source", "alder://notebook/source", "Exact executable notebook source", "text/plain", read],
     ["Notebook DAG", "alder://notebook/dag", "Notebook dependency graph", "application/json", read],
     ["Notebook state", "alder://notebook/state", "Authoritative notebook state", "application/json", read],
     ["Cell outputs", cellTemplate, "Rendered outputs for one cell", "application/json", read],
-    ["Operation", opTemplate, "Operation receipt", "application/json", read],
     ["Output", outTemplate, "Captured output", "application/json", read]
   ];
 }
@@ -96763,7 +96541,7 @@ async function makeSession(options, auth, sessions, allSessions, dispose) {
     resolveClosed = resolve15;
   });
   const transport = new StreamableHTTPServerTransport({
-    sessionIdGenerator: randomUUID9,
+    sessionIdGenerator: randomUUID8,
     onsessioninitialized: (sessionId) => {
       if (session.closeStarted) return;
       if (sessions.has(sessionId)) throw new Error("MCP session identifier collision");
@@ -96779,12 +96557,10 @@ async function makeSession(options, auth, sessions, allSessions, dispose) {
     artifactStore: options.artifactStore,
     clientId: auth.clientId,
     sessionEpoch: options.controller.snapshot().epoch,
-    ...auth.nextCommandSequence === null ? {} : { nextCommandSequence: auth.nextCommandSequence },
-    ...auth.updateNextCommandSequence === void 0 ? {} : { onNextCommandSequence: auth.updateNextCommandSequence },
     ...auth.assertActive === void 0 ? {} : { assertActive: auth.assertActive },
     ...options.version === void 0 ? {} : { version: options.version },
     ...options.capabilities === void 0 ? {} : { capabilities: options.capabilities },
-    ...options.operationTimeoutMs === void 0 ? {} : { operationTimeoutMs: options.operationTimeoutMs },
+    ...options.commandTimeoutMs === void 0 ? {} : { commandTimeoutMs: options.commandTimeoutMs },
     ...options.startup === void 0 ? {} : { startup: options.startup },
     ...options.runtimeReady === void 0 ? {} : { runtimeReady: options.runtimeReady },
     ...options.onShutdown === void 0 ? {} : { onShutdown: options.onShutdown }
@@ -96797,7 +96573,7 @@ async function makeSession(options, auth, sessions, allSessions, dispose) {
     ...auth.assertActive === void 0 ? {} : { assertActive: auth.assertActive },
     transport,
     server,
-    authToken: randomUUID9(),
+    authToken: randomUUID8(),
     closed,
     closeStarted: false,
     resolveClosed
@@ -97041,7 +96817,7 @@ async function readLayout(value) {
 }
 
 // src/persistence.ts
-import { createHash as createHash5, randomUUID as randomUUID10 } from "node:crypto";
+import { createHash as createHash5, randomUUID as randomUUID9 } from "node:crypto";
 import { mkdir as mkdir7, open as open6, readFile as readFile6, realpath as realpath7, rename as rename4, stat as stat13, unlink as unlink2 } from "node:fs/promises";
 import { basename as basename5, dirname as dirname6, join as join14, resolve as resolve9 } from "node:path";
 
@@ -97168,9 +96944,9 @@ var PackageJobs = class {
         );
       }
       const result = command === "install" ? withDiagnostics(response.result, diagnostics.text) : response.result;
-      const operationFailure2 = command === "install" ? nestedFailure(result) : void 0;
+      const operationFailure = command === "install" ? nestedFailure(result) : void 0;
       await notify(this.options.callbacks?.onProgress, { command, operationId, phase: "finished" });
-      await notify(this.options.callbacks?.onTerminal, operationFailure2 === void 0 ? { command, operationId, ok: true, result } : { command, operationId, ok: false, error: operationFailure2, result });
+      await notify(this.options.callbacks?.onTerminal, operationFailure === void 0 ? { command, operationId, ok: true, result } : { command, operationId, ok: false, error: operationFailure, result });
       return result;
     } catch (error61) {
       failure = error61 instanceof PackageJobError ? error61 : jobError("job_failed", messageOf5(error61));
@@ -98163,7 +97939,7 @@ var DocumentStore = class _DocumentStore {
       this.documentValue = cloneNotebook(candidate);
       return { path: this.path, changed: false, digest: this.version.digest };
     }
-    const stage = join14(dirname6(this.path), `.alder-save-${randomUUID10()}`);
+    const stage = join14(dirname6(this.path), `.alder-save-${randomUUID9()}`);
     try {
       await writeStaged(stage, bytes, this.version.mode);
       await this.assertUnchanged();
@@ -98205,7 +97981,7 @@ var DocumentStore = class _DocumentStore {
       };
       const candidate = { ...this.candidate(fixed), path: destination };
       const bytes = serializeNotebook(candidate);
-      let stage = join14(dirname6(destination), ".alder-save-as-" + randomUUID10());
+      let stage = join14(dirname6(destination), ".alder-save-as-" + randomUUID9());
       const removeStage = async () => {
         if (stage === null) return;
         const current = stage;
@@ -98297,7 +98073,7 @@ var DocumentStore = class _DocumentStore {
       const transientId = () => {
         let id2;
         do
-          id2 = "reload-" + randomUUID10();
+          id2 = "reload-" + randomUUID9();
         while (priorIds.has(id2) || transientIds.has(id2));
         transientIds.add(id2);
         return id2;
@@ -98389,7 +98165,7 @@ var DocumentStore = class _DocumentStore {
       let stage = null;
       if (!sameBytes2(bytes, expected.bytes)) {
         await mkdir7(parent, { recursive: true, mode: 448 });
-        stage = join14(parent, ".alder-sidecar-" + randomUUID10());
+        stage = join14(parent, ".alder-sidecar-" + randomUUID9());
         try {
           await writeStaged(stage, bytes, expected.mode);
           await assertUnchanged();
@@ -98499,7 +98275,7 @@ function decodeBase643(value) {
 }
 
 // src/recovery.ts
-import { createHash as createHash6, randomBytes as randomBytes4, randomUUID as randomUUID11 } from "node:crypto";
+import { createHash as createHash6, randomUUID as randomUUID10 } from "node:crypto";
 import { mkdir as mkdir8, open as open7, readdir as readdir3, realpath as realpath8, rename as rename5, rm as rm6 } from "node:fs/promises";
 import { join as join15, resolve as resolve10 } from "node:path";
 var RecoveryError = class extends Error {
@@ -98547,7 +98323,7 @@ var RecoveryWriter = class _RecoveryWriter {
   rootDir;
   key;
   directory;
-  recoveryKey = randomBytes4(32).toString("base64url");
+  recoveryId = randomUUID10();
   issue = null;
   baseline;
   pending = false;
@@ -98593,14 +98369,21 @@ var RecoveryWriter = class _RecoveryWriter {
   async restore() {
     try {
       await mkdir8(this.directory, { recursive: true, mode: 448 });
-      const keyPath = join15(this.directory, "recovery.key");
+      const identityPath = join15(this.directory, "document.id");
       try {
-        const key2 = await readPrivateFile(keyPath, { maxBytes: 64 });
-        if (key2.length !== 32) throw new Error("Recovery browser key is invalid");
-        this.recoveryKey = key2.toString("base64url");
+        const id2 = (await readPrivateFile(identityPath, { maxBytes: 128 })).toString("utf8");
+        if (!/^[A-Za-z0-9_-]{1,128}$/.test(id2)) throw new Error("Recovery identity is invalid");
+        this.recoveryId = id2;
       } catch (error61) {
-        if (!missing2(error61)) this.report(error61, "recovery_corrupt", [keyPath]);
-        if (missing2(error61)) await this.atomicWrite(keyPath, Buffer.from(this.recoveryKey, "base64url"));
+        if (!missing2(error61)) this.report(error61, "recovery_corrupt", [identityPath]);
+        if (missing2(error61)) {
+          try {
+            const key2 = await readPrivateFile(join15(this.directory, "recovery.key"), { maxBytes: 64 });
+            if (key2.length === 32) this.recoveryId = createHash6("sha256").update(key2).digest("base64url");
+          } catch {
+          }
+          await this.atomicWrite(identityPath, Buffer.from(this.recoveryId));
+        }
       }
       const names = (await readdir3(this.directory)).filter((name) => SNAPSHOT_NAME.test(name)).sort().reverse();
       this.timestamp = Number(names[0]?.split("-")[1] ?? 0);
@@ -98619,6 +98402,9 @@ var RecoveryWriter = class _RecoveryWriter {
           this.validGenerations.push(name);
           if (!restored) {
             if (snapshot.pending) this.baseline = baseline;
+            else if (baseline.physicalBytes === this.baseline.physicalBytes) {
+              this.baseline = { ...this.baseline, cells: baseline.cells, documentRevision: baseline.documentRevision };
+            }
             this.pending = snapshot.pending;
             this.latestFingerprint = snapshot.pending ? snapshot.fingerprint : fingerprint(this.baseline);
             this.branches = new Map(branches.map((branch) => [branch.id, branch]));
@@ -98690,7 +98476,7 @@ var RecoveryWriter = class _RecoveryWriter {
   }
   async forkBranch(input2 = {}) {
     const baseline = normalizeBaseline(input2.baseline ?? this.baseline);
-    const branch = { id: input2.id ?? randomUUID11(), baseline, fingerprint: fingerprint(baseline) };
+    const branch = { id: input2.id ?? randomUUID10(), baseline, fingerprint: fingerprint(baseline) };
     this.branches.set(branch.id, branch);
     this.changed();
     return this.describeBranch(branch);
@@ -98722,8 +98508,8 @@ var RecoveryWriter = class _RecoveryWriter {
     const existing = await writer.load();
     if (existing.pending) await writer.forkBranch();
     for (const [id2, branch] of this.branches) writer.branches.set(id2, clone4(branch));
-    const destinationKey = writer.recoveryKey;
-    writer.recoveryKey = this.recoveryKey;
+    const destinationId = writer.recoveryId;
+    writer.recoveryId = this.recoveryId;
     writer.update(target.baseline);
     let adopted = false;
     let aborted2 = false;
@@ -98738,7 +98524,7 @@ var RecoveryWriter = class _RecoveryWriter {
         if (aborted2) throw new RecoveryError("recovery_invalid", "Recovery rebind was aborted");
         adopted = true;
         if (writer.directory !== this.directory) {
-          this.recoveryKey = randomBytes4(32).toString("base64url");
+          this.recoveryId = randomUUID10();
           this.changed();
           void this.flush();
         }
@@ -98746,14 +98532,14 @@ var RecoveryWriter = class _RecoveryWriter {
       abort: async () => {
         if (adopted || aborted2) return;
         aborted2 = true;
-        writer.recoveryKey = destinationKey;
+        writer.recoveryId = destinationId;
         writer.changed();
         await writer.close();
       }
     };
   }
   async atomicWrite(path3, bytes) {
-    const temporary = path3 + "." + randomUUID11() + ".tmp";
+    const temporary = path3 + "." + randomUUID10() + ".tmp";
     const handle = await open7(temporary, "wx", 384);
     try {
       await handle.writeFile(bytes);
@@ -98782,10 +98568,10 @@ var RecoveryWriter = class _RecoveryWriter {
         branches: [...this.branches.values()].map(clone4)
       };
       this.timestamp = Math.max(Date.now(), this.timestamp + 1);
-      const generation = `snapshot-${this.timestamp}-${randomUUID11()}.json`;
+      const generation = `snapshot-${this.timestamp}-${randomUUID10()}.json`;
       try {
         await mkdir8(this.directory, { recursive: true, mode: 448 });
-        await this.atomicWrite(join15(this.directory, "recovery.key"), Buffer.from(this.recoveryKey, "base64url"));
+        await this.atomicWrite(join15(this.directory, "document.id"), Buffer.from(this.recoveryId));
         const bytes = Buffer.from(JSON.stringify({ snapshot, sha256: hash2(JSON.stringify(snapshot)) }));
         if (bytes.length > MAX_SNAPSHOT_BYTES) throw new Error("Recovery snapshot is too large");
         await this.atomicWrite(join15(this.directory, generation), bytes);
@@ -98810,7 +98596,7 @@ var RecoveryWriter = class _RecoveryWriter {
 
 // src/publishing.ts
 import { constants as constants5 } from "node:fs";
-import { randomUUID as randomUUID12 } from "node:crypto";
+import { randomUUID as randomUUID11 } from "node:crypto";
 import {
   access as access3,
   chmod as chmod3,
@@ -99612,9 +99398,9 @@ var Tokenizer2 = class {
   isTagStartChar(c) {
     return this.xmlMode ? !isEndOfTagSection2(c) : isASCIIAlpha2(c);
   }
-  startSpecial(sequence2, offset) {
+  startSpecial(sequence, offset) {
     this.isSpecial = true;
-    this.currentSequence = sequence2;
+    this.currentSequence = sequence;
     this.sequenceIndex = offset;
     this.state = State2.SpecialStartSequence;
   }
@@ -109088,7 +108874,7 @@ function number4(value) {
 var MAX_QUARTO_STREAM_BYTES = 8 * 1024 * 1024;
 var MAX_PUBLISHED_HTML_BYTES = 128 * 1024 * 1024;
 var QUARTO_COMMAND = "quarto";
-var PUBLISH_TITLE_MARKER = "ALDER_PUBLISH_TITLE_MARKER_" + randomUUID12().replaceAll("-", "");
+var PUBLISH_TITLE_MARKER = "ALDER_PUBLISH_TITLE_MARKER_" + randomUUID11().replaceAll("-", "");
 var HTML_RESOURCE_ATTRIBUTES = {
   img: ["src", "srcset"],
   audio: ["src"],
@@ -109524,7 +109310,7 @@ async function collectStream(stream) {
 }
 async function publishAbsentDestination(path3, bytes, signal) {
   throwIfAborted3(signal);
-  const temporary = join16(dirname7(path3), `.${basename6(path3)}.alder-${process.pid}-${randomUUID12()}.tmp`);
+  const temporary = join16(dirname7(path3), `.${basename6(path3)}.alder-${process.pid}-${randomUUID11()}.tmp`);
   try {
     await writeFile5(temporary, bytes, { flag: "wx", mode: 384 });
     await chmod3(temporary, 420);
@@ -109617,7 +109403,7 @@ function withContentSecurityPolicy(html) {
   if (/<head\b/i.test(html)) return html.replace(/<head([^>]*)>/i, "<head$1>" + policy);
   return "<html><head>" + policy + "</head><body>" + html + "</body></html>";
 }
-var PUBLISH_LITERAL_MARKER_PREFIX = "ALDER_PUBLISH_LITERAL_" + randomUUID12().replaceAll("-", "") + "_";
+var PUBLISH_LITERAL_MARKER_PREFIX = "ALDER_PUBLISH_LITERAL_" + randomUUID11().replaceAll("-", "") + "_";
 var PUBLISH_LITERAL_MARKER_PATTERN = new RegExp(PUBLISH_LITERAL_MARKER_PREFIX + "([A-Za-z0-9_-]+)_", "g");
 function neutralizeQuartoTokens(value) {
   let result = "";
@@ -110477,7 +110263,7 @@ function validatedRLanguageServerOptions(document, rscript, workerDirectory, pro
 }
 
 // src/uploads.ts
-import { randomUUID as randomUUID13 } from "node:crypto";
+import { randomUUID as randomUUID12 } from "node:crypto";
 import { chmod as chmod4, lstat as lstat8, mkdir as mkdir9, unlink as unlink4, writeFile as writeFile7 } from "node:fs/promises";
 import { join as join19 } from "node:path";
 var UPLOAD_MAX_FILES = 1024;
@@ -110517,14 +110303,14 @@ var UploadStore = class {
       return { name: file2.name, bytes };
     });
     await this.ensureDirectory();
-    const uploadId = randomUUID13();
+    const uploadId = randomUUID12();
     const paths = [];
     this.batches.set(uploadId, paths);
     try {
       const value = [];
       for (const file2 of decoded) {
         if (this.closed) throw invalid4("session_stopped", "upload store is closed");
-        const path3 = join19(this.directory, `upload-${randomUUID13()}`);
+        const path3 = join19(this.directory, `upload-${randomUUID12()}`);
         paths.push(path3);
         await writeFile7(path3, file2.bytes, { flag: "wx", mode: 384 });
         await chmod4(path3, 384);
@@ -110552,7 +110338,7 @@ var UploadStore = class {
 };
 
 // src/processes.ts
-import { randomBytes as randomBytes5 } from "node:crypto";
+import { randomBytes as randomBytes4 } from "node:crypto";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 function signalGroup(pid, signal) {
@@ -110604,7 +110390,7 @@ async function spawnChild(options) {
   return {
     child,
     pid,
-    startIdentity: `pid:${pid}:${options.environment.ALDER_PROCESS_NONCE ?? randomBytes5(16).toString("hex")}`,
+    startIdentity: `pid:${pid}:${options.environment.ALDER_PROCESS_NONCE ?? randomBytes4(16).toString("hex")}`,
     stdin: child.stdin,
     stdout: child.stdout,
     stderr: child.stderr,
@@ -110663,7 +110449,7 @@ async function createProcessScope(_resources) {
 }
 
 // src/sessions.ts
-import { createHash as createHash7, randomBytes as randomBytes6, randomUUID as randomUUID14 } from "node:crypto";
+import { createHash as createHash7, randomBytes as randomBytes5, randomUUID as randomUUID13 } from "node:crypto";
 import { realpath as realpath10, lstat as lstat9, chmod as chmod5, rm as rm9, unlink as unlink5, readdir as readdir4, link as link3 } from "node:fs/promises";
 import { basename as basename7, dirname as dirname8, join as join20, resolve as resolve12, sep as sep3 } from "node:path";
 var import_proper_lockfile2 = __toESM(require_proper_lockfile(), 1);
@@ -110799,12 +110585,12 @@ async function acquireNotebookOwnership(options) {
   const lockPath = runtime.lockPath(sessionKey);
   const deadline = Date.now() + STARTUP_TIMEOUT_MS;
   const pid = options.pid ?? process.pid;
-  const epoch = options.epoch ?? randomUUID14();
-  const processNonce = options.processNonce ?? randomUUID14();
-  const continuityProof = options.continuityProof ?? randomBytes6(32).toString("hex");
+  const epoch = options.epoch ?? randomUUID13();
+  const processNonce = options.processNonce ?? randomUUID13();
+  const continuityProof = options.continuityProof ?? randomBytes5(32).toString("hex");
   const startIdentity = options.startIdentity ?? await currentProcessStartIdentity(pid, options.processSupervisorExecutable) ?? `pid:${pid}:${processNonce}`;
   let currentOrigin = options.origin ?? "http://127.0.0.1:0";
-  const token = options.token ?? randomBytes6(32).toString("hex");
+  const token = options.token ?? randomBytes5(32).toString("hex");
   let closed = false;
   let currentPath = canonicalPath;
   let currentKey = sessionKey;
@@ -111196,7 +110982,7 @@ async function requestJson(origin2, token, path3, init = {}, expectedProof) {
   let value = null;
   if (bytes.length > 0) {
     try {
-      value = parseStrictJson(bytes, { maxBytes: 1024 * 1024, maxDepth: 64 });
+      value = decodeJsonFrame(bytes, 1024 * 1024);
     } catch (error61) {
       throw new SessionAuthError(error61 instanceof Error ? error61.message : "session response is not valid JSON");
     }
@@ -111211,7 +110997,7 @@ async function readRegistry(path3, privatePathOptions = privatePathOptionsFor(pa
   try {
     const bytes = await readPrivateFile(path3, { ...privatePathOptions, maxBytes: 64 * 1024 });
     if (bytes.byteLength === 0) return null;
-    return sessionRegistryMetadataSchema.parse(parseStrictJson(bytes, { maxBytes: 64 * 1024, maxDepth: 32 }));
+    return sessionRegistryMetadataSchema.parse(decodeJsonFrame(bytes, 64 * 1024));
   } catch (error61) {
     const code2 = error61.code;
     if (code2 === "ENOENT") return null;
@@ -111255,7 +111041,7 @@ async function readUntitledRecoveryDescriptor(path3, id2, privatePathOptions = {
   try {
     const bytes = await readPrivateFile(path3, { ...privatePathOptions, maxBytes: UNTITLED_RECOVERY_DESCRIPTOR_MAX_BYTES });
     if (bytes.byteLength === 0) throw new SessionUnavailableError("untitled recovery descriptor is empty", { path: path3 });
-    return parseUntitledRecoveryDescriptor(parseStrictJson(bytes, { maxBytes: UNTITLED_RECOVERY_DESCRIPTOR_MAX_BYTES, maxDepth: 16 }), id2, path3);
+    return parseUntitledRecoveryDescriptor(decodeJsonFrame(bytes, UNTITLED_RECOVERY_DESCRIPTOR_MAX_BYTES), id2, path3);
   } catch (error61) {
     if (error61.code === "ENOENT") return null;
     if (error61 instanceof SessionUnavailableError) throw error61;
@@ -111279,7 +111065,7 @@ function isIsoTimestamp(value) {
   return Number.isFinite(parsed.getTime()) && parsed.toISOString() === value;
 }
 async function atomicWriteUntitledRecoveryDescriptor(path3, descriptor, privatePathOptions = {}) {
-  const temporary = path3 + "." + process.pid + "." + randomUUID14() + ".tmp";
+  const temporary = path3 + "." + process.pid + "." + randomUUID13() + ".tmp";
   const bytes = Buffer.from(JSON.stringify(descriptor) + "\n");
   try {
     await writePrivateFile(temporary, bytes, privatePathOptions);
@@ -111338,7 +111124,7 @@ async function canonicalizePath(path3) {
   }
 }
 async function sessionKeyFor(path3) {
-  if (path3 === null) return randomUUID14();
+  if (path3 === null) return randomUUID13();
   return createHash7("sha256").update("path:" + path3).digest("hex");
 }
 async function ownershipSessionKey(canonicalPath, supplied) {
@@ -111860,6 +111646,11 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
       }
     } else if (recoveryPending) {
       recoveryConflict = true;
+    } else {
+      const savedBytes = decodePhysicalBytes(materialized.physicalBytes);
+      if (savedBytes !== null && Buffer.from(savedBytes).equals(Buffer.from(serializeNotebookWithParts(notebook).bytes))) {
+        notebook = restoreNotebookCellIdentity(notebook, materialized.cells);
+      }
     }
     configResolution = await resolveConfig({ path: isUntitled ? null : store.path, metadata: notebook.metadata, project: projectConfigLayer, launch: launchConfig });
     resolvedLayout = projectLayoutIntent;
@@ -112684,7 +112475,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
               if (current.runtime.busy || current.runtime.activeRunId !== null || current.runtime.packageOperationActive) throw Object.assign(new Error("cannot select R while the notebook is busy"), { code: "busy" });
               const nextManager = createPackageManager({ resources: options.resources, environment: selected, processScope, projectDirectory: notebookDirectory, callbacks: packageCallbacks });
               try {
-                await controller.restartRuntimeContext({ environment: selected, notebookDirectory, cacheDirectory }, stringValue(payload.operationId) ?? randomUUID15());
+                await controller.restartRuntimeContext({ environment: selected, notebookDirectory, cacheDirectory }, stringValue(payload.operationId) ?? randomUUID14());
               } catch (error61) {
                 await nextManager.close().catch(() => {
                 });
@@ -112712,7 +112503,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
             if (publisher === void 0) publisher = createPublishingService({ outputStore: artifactStore, processScope });
             const snapshot = controller.snapshot();
             const requestedPath = typeof payload.outputPath === "string" && payload.outputPath.length > 0 ? payload.outputPath : null;
-            const outputPath = requestedPath ?? join21(work, "publish-" + randomUUID15() + ".html");
+            const outputPath = requestedPath ?? join21(work, "publish-" + randomUUID14() + ".html");
             const pendingPublish = publisher.publishSnapshot(snapshot, { outputPath, includeCode: payload.includeCode === true, signal: publishAbort.signal });
             activePublishes.add(pendingPublish);
             const result = await pendingPublish.finally(() => {
@@ -112847,7 +112638,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
             const sidecars = sidecarProtocolObservations(store, false);
             const unchanged = sameObservation(snapshot.disk, disk) && sameObservation(snapshot.sidecars.config, sidecars.config) && sameObservation(snapshot.sidecars.layout, sidecars.layout) && sameObservation(snapshot.sidecars.packages, sidecars.packages);
             if (unchanged) return;
-            const request = { kind: "watcher", expectedDocumentRevision: snapshot.documentRevision, operationId: randomUUID15() };
+            const request = { kind: "watcher", expectedDocumentRevision: snapshot.documentRevision, operationId: randomUUID14() };
             await controller.commitSource(request, async (context) => sourceCommit(request, context));
           }).catch((error61) => {
             if (!closing) controller?.recordActionError(errorMessage(error61), "watcher_failed");
@@ -112898,8 +112689,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
         continuityProof: ownership.continuityProof,
         token: ownership.token,
         pid: ownership.pid,
-        recoveryKey: recovery.recoveryKey,
-        recoveryKeyId: createHash8("sha256").update(Buffer.from(recovery.recoveryKey, "base64url")).digest("base64url")
+        recoveryId: recovery.recoveryId
       },
       staticDir: options.resources.rendererDirectory,
       indexFile: join21(options.resources.rendererDirectory, "index.html"),

@@ -32580,209 +32580,6 @@ var StreamableHTTPClientTransport = class {
   }
 };
 
-// src/strict-json.ts
-var DEFAULT_STRICT_JSON_LIMITS = Object.freeze({
-  maxBytes: 8 * 1024 * 1024,
-  maxDepth: 64
-});
-var StrictJsonError = class extends Error {
-  constructor(message, offset) {
-    super(`${message} at byte ${offset}`);
-    this.offset = offset;
-    this.name = "StrictJsonError";
-  }
-  offset;
-};
-var StrictJsonParser = class {
-  constructor(text, maxDepth) {
-    this.text = text;
-    this.maxDepth = maxDepth;
-  }
-  text;
-  maxDepth;
-  offset = 0;
-  encoder = new TextEncoder();
-  parse() {
-    this.whitespace();
-    const result = this.value(0);
-    this.whitespace();
-    if (this.offset !== this.text.length) this.fail("trailing content");
-    return result;
-  }
-  value(depth) {
-    const next = this.text[this.offset];
-    if (next === "{") return this.object(depth + 1);
-    if (next === "[") return this.array(depth + 1);
-    if (next === '"') return this.string();
-    if (next === "t") return this.literal("true", true);
-    if (next === "f") return this.literal("false", false);
-    if (next === "n") return this.literal("null", null);
-    if (next === "-" || next !== void 0 && next >= "0" && next <= "9") {
-      return this.number();
-    }
-    this.fail("expected a JSON value");
-  }
-  object(depth) {
-    this.checkDepth(depth);
-    this.offset += 1;
-    this.whitespace();
-    const result = {};
-    const keys = /* @__PURE__ */ new Set();
-    if (this.consume("}")) return result;
-    while (true) {
-      if (this.text[this.offset] !== '"') this.fail("expected an object key");
-      const key = this.string();
-      if (keys.has(key)) this.fail(`duplicate object key ${JSON.stringify(key)}`);
-      keys.add(key);
-      this.whitespace();
-      if (!this.consume(":")) this.fail("expected ':' after an object key");
-      this.whitespace();
-      const item = this.value(depth);
-      Object.defineProperty(result, key, {
-        configurable: true,
-        enumerable: true,
-        value: item,
-        writable: true
-      });
-      this.whitespace();
-      if (this.consume("}")) return result;
-      if (!this.consume(",")) this.fail("expected ',' or '}'");
-      this.whitespace();
-    }
-  }
-  array(depth) {
-    this.checkDepth(depth);
-    this.offset += 1;
-    this.whitespace();
-    const result = [];
-    if (this.consume("]")) return result;
-    while (true) {
-      result.push(this.value(depth));
-      this.whitespace();
-      if (this.consume("]")) return result;
-      if (!this.consume(",")) this.fail("expected ',' or ']'");
-      this.whitespace();
-    }
-  }
-  string() {
-    const start = this.offset;
-    this.offset += 1;
-    while (this.offset < this.text.length) {
-      const code = this.text.charCodeAt(this.offset);
-      if (code === 34) {
-        this.offset += 1;
-        let result;
-        try {
-          result = JSON.parse(this.text.slice(start, this.offset));
-        } catch {
-          this.fail("invalid JSON string");
-        }
-        this.validateSurrogates(result);
-        return result;
-      }
-      if (code < 32) this.fail("unescaped control character in string");
-      if (code === 92) {
-        this.offset += 1;
-        if (this.offset >= this.text.length) this.fail("unterminated escape");
-        const escaped = this.text[this.offset];
-        if (escaped === "u") {
-          const digits = this.text.slice(this.offset + 1, this.offset + 5);
-          if (!/^[0-9a-fA-F]{4}$/.test(digits)) this.fail("invalid Unicode escape");
-          this.offset += 4;
-        } else if (!'"\\/bfnrt'.includes(escaped)) {
-          this.fail("invalid string escape");
-        }
-      }
-      this.offset += 1;
-    }
-    this.fail("unterminated JSON string");
-  }
-  validateSurrogates(value) {
-    for (let index = 0; index < value.length; index += 1) {
-      const code = value.charCodeAt(index);
-      if (code >= 55296 && code <= 56319) {
-        const low = value.charCodeAt(index + 1);
-        if (!(low >= 56320 && low <= 57343)) this.fail("unpaired surrogate");
-        index += 1;
-      } else if (code >= 56320 && code <= 57343) {
-        this.fail("unpaired surrogate");
-      }
-    }
-  }
-  number() {
-    const token = this.text.slice(this.offset).match(
-      /^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?/
-    )?.[0];
-    if (token === void 0) this.fail("invalid number");
-    this.offset += token.length;
-    const result = Number(token);
-    if (!Number.isFinite(result)) this.fail("non-finite number");
-    return result;
-  }
-  literal(token, result) {
-    if (!this.text.startsWith(token, this.offset)) this.fail("invalid literal");
-    this.offset += token.length;
-    return result;
-  }
-  whitespace() {
-    while (/\s/.test(this.text[this.offset] ?? "") && " 	\r\n".includes(this.text[this.offset])) {
-      this.offset += 1;
-    }
-  }
-  consume(token) {
-    if (this.text[this.offset] !== token) return false;
-    this.offset += 1;
-    return true;
-  }
-  checkDepth(depth) {
-    if (depth > this.maxDepth) this.fail("JSON nesting limit exceeded");
-  }
-  fail(message) {
-    throw new StrictJsonError(message, this.encoder.encode(this.text.slice(0, this.offset)).byteLength);
-  }
-};
-function parseStrictJson(input2, limits = DEFAULT_STRICT_JSON_LIMITS) {
-  validateLimits(limits);
-  let text;
-  if (typeof input2 === "string") {
-    if (hasUnpairedSurrogate(input2)) throw new StrictJsonError("unpaired surrogate", 0);
-    if (new TextEncoder().encode(input2).byteLength > limits.maxBytes) {
-      throw new RangeError(`JSON input exceeds ${limits.maxBytes} bytes`);
-    }
-    text = input2;
-  } else {
-    if (!(input2 instanceof Uint8Array)) throw new TypeError("JSON input must be text or bytes");
-    if (input2.byteLength > limits.maxBytes) throw new RangeError(`JSON input exceeds ${limits.maxBytes} bytes`);
-    try {
-      text = new TextDecoder("utf-8", { fatal: true }).decode(input2);
-    } catch {
-      throw new StrictJsonError("invalid UTF-8", 0);
-    }
-  }
-  return new StrictJsonParser(text, limits.maxDepth).parse();
-}
-function validateLimits(limits) {
-  if (!limits || !Number.isSafeInteger(limits.maxBytes) || limits.maxBytes < 1) {
-    throw new RangeError("maxBytes must be a positive safe integer");
-  }
-  if (!Number.isSafeInteger(limits.maxDepth) || limits.maxDepth < 1) {
-    throw new RangeError("maxDepth must be a positive safe integer");
-  }
-}
-function hasUnpairedSurrogate(value) {
-  for (let index = 0; index < value.length; index += 1) {
-    const code = value.charCodeAt(index);
-    if (code >= 55296 && code <= 56319) {
-      const low = value.charCodeAt(index + 1);
-      if (!(low >= 56320 && low <= 57343)) return true;
-      index += 1;
-    } else if (code >= 56320 && code <= 57343) {
-      return true;
-    }
-  }
-  return false;
-}
-
 // src/mcp-stdio.ts
 import { Transform } from "node:stream";
 
@@ -32919,7 +32716,7 @@ var MAX_ANALYSIS_SYMBOL_BYTES = 1024;
 var MAX_ANALYSIS_SYMBOLS = 1e4;
 var MAX_TABLE_COLUMNS = 50;
 var MAX_TABLE_PREVIEW_ROWS = 25;
-function hasUnpairedSurrogate2(value) {
+function hasUnpairedSurrogate(value) {
   for (let index = 0; index < value.length; index += 1) {
     const code = value.charCodeAt(index);
     if (code >= 55296 && code <= 56319) {
@@ -32935,7 +32732,7 @@ function hasUnpairedSurrogate2(value) {
 function boundedUtf8StringSchema(maximumBytes, nonempty = false) {
   const schema = nonempty ? external_exports.string().min(1) : external_exports.string();
   return schema.superRefine((value, context) => {
-    if (hasUnpairedSurrogate2(value)) {
+    if (hasUnpairedSurrogate(value)) {
       context.addIssue({ code: "custom", message: "string must contain valid Unicode" });
       return;
     }
@@ -33120,14 +32917,14 @@ function decodeUtf8(bytes) {
 function encodeWireSource(value) {
   const lines = typeof value === "string" ? null : value.length;
   const text = typeof value === "string" ? value : value.join("\n");
-  if (hasUnpairedSurrogate2(text)) throw new ProtocolError("invalid_request", "source transfer text contains an unpaired surrogate");
+  if (hasUnpairedSurrogate(text)) throw new ProtocolError("invalid_request", "source transfer text contains an unpaired surrogate");
   return { encoding: "base64", data: encodeBase64(new TextEncoder().encode(text)), lines };
 }
 function decodeWireSource(value) {
   const parsed = wireSourceSchema.safeParse(value);
   if (!parsed.success) throw new ProtocolError("invalid_request", "invalid source transfer value");
   const text = decodeUtf8(decodeBase64(parsed.data.data));
-  if (hasUnpairedSurrogate2(text)) throw new ProtocolError("invalid_request", "source transfer text contains an unpaired surrogate");
+  if (hasUnpairedSurrogate(text)) throw new ProtocolError("invalid_request", "source transfer text contains an unpaired surrogate");
   if (parsed.data.lines === null) return text;
   if (parsed.data.lines === 0) {
     if (text !== "") throw new ProtocolError("invalid_request", "empty source line array must have empty data");
@@ -33492,9 +33289,8 @@ var mcpDocumentChangeSchema = external_exports.discriminatedUnion("type", [
   textEditDocumentChangeSchema
 ]);
 var commandIdentityShape = {
-  operationId: idSchema,
+  requestId: idSchema,
   clientId: idSchema,
-  commandSequence: positiveIntegerSchema,
   sessionEpoch: idSchema
 };
 var commandIdentitySchema = external_exports.object(commandIdentityShape).strict();
@@ -33664,7 +33460,6 @@ var operationProgressSchema = external_exports.object({
 var operationRecordSchema = external_exports.object({
   id: idSchema,
   clientId: idSchema,
-  commandSequence: positiveIntegerSchema,
   kind: operationKindSchema,
   status: operationStatusSchema,
   documentRevision: revisionSchema,
@@ -33678,17 +33473,6 @@ var operationRecordSchema = external_exports.object({
   executionDone: external_exports.boolean().optional(),
   resetOperationIds: external_exports.array(idSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS).optional(),
   progress: operationProgressSchema.optional()
-}).strict();
-var commandAdmissionSchema = external_exports.object({
-  epoch: idSchema,
-  clientId: idSchema,
-  operationId: idSchema,
-  commandSequence: positiveIntegerSchema,
-  accepted: external_exports.boolean(),
-  sequenceConsumed: external_exports.boolean(),
-  operation: operationRecordSchema.nullable(),
-  error: hostErrorSchema.nullable(),
-  nextCommandSequence: positiveIntegerSchema
 }).strict();
 var runtimeStateSchema = external_exports.object({
   documentReady: external_exports.boolean(),
@@ -33720,14 +33504,14 @@ var runtimeVariableSchema = external_exports.object({ name: boundedUtf8StringSch
 var runtimeVariablesSchema = external_exports.array(runtimeVariableSchema).max(MAX_RUNTIME_VARIABLES);
 var editorDiagnosticsSchema = safeStringRecordSchema(external_exports.array(analysisDiagnosticSchema).max(MAX_EDITOR_DIAGNOSTICS));
 var serviceErrorsSchema = external_exports.object({ lsp: hostErrorSchema.optional() }).strict();
-var hostSnapshotSchema = external_exports.object({ protocol: external_exports.literal(HOST_PROTOCOL), epoch: idSchema, cursor: protocolIntegerSchema, version: protocolIntegerSchema, documentRevision: revisionSchema, path: pathSchema.nullable(), metadata: protocolJsonRecordSchema, config: protocolJsonRecordSchema, layout: protocolJsonSchema, dirty: external_exports.boolean(), changed: external_exports.boolean().optional(), disk: diskObservationSchema, sidecars: sidecarObservationsSchema, runtime: hostRuntimeSchema, cells: external_exports.array(hostCellStateSchema).max(MAX_NOTEBOOK_CELLS), graph: dependencyGraphStateSchema, variables: runtimeVariablesSchema, editorDiagnostics: editorDiagnosticsSchema, serviceErrors: serviceErrorsSchema, operations: external_exports.array(operationRecordSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS), lastValue: protocolJsonSchema.nullable(), lastActionError: hostErrorSchema.nullable(), capabilities: external_exports.array(boundedUtf8StringSchema(256)).max(MAX_PROTOCOL_COLLECTION_ITEMS).optional(), nextCommandSequence: positiveIntegerSchema.optional(), activeClientIds: external_exports.array(idSchema).max(128).optional() }).strict();
-var hostEventTypeSchema = external_exports.enum(["receipt", "transaction", "notebook", "cell", "cell-started", "cell-output", "cell-completed", "diagnostics", "editor-diagnostics", "service-errors", "graph", "variables", "runtime", "operation", "service-error", "active_clients_changed"]);
-var eventBase = { protocol: external_exports.literal(HOST_PROTOCOL), epoch: idSchema, cursor: protocolIntegerSchema, version: protocolIntegerSchema, documentRevision: revisionSchema, timestamp: external_exports.number().finite().nonnegative(), operationId: idSchema.optional(), clientId: idSchema.optional(), commandSequence: positiveIntegerSchema.optional(), cellId: idSchema.optional(), runId: idSchema.optional(), kernelEpoch: idSchema.nullable().optional(), revision: revisionSchema.optional(), sequence: protocolIntegerSchema.optional() };
+var hostSnapshotSchema = external_exports.object({ protocol: external_exports.literal(HOST_PROTOCOL), epoch: idSchema, cursor: protocolIntegerSchema, version: protocolIntegerSchema, documentRevision: revisionSchema, path: pathSchema.nullable(), metadata: protocolJsonRecordSchema, config: protocolJsonRecordSchema, layout: protocolJsonSchema, dirty: external_exports.boolean(), changed: external_exports.boolean().optional(), disk: diskObservationSchema, sidecars: sidecarObservationsSchema, runtime: hostRuntimeSchema, cells: external_exports.array(hostCellStateSchema).max(MAX_NOTEBOOK_CELLS), graph: dependencyGraphStateSchema, variables: runtimeVariablesSchema, editorDiagnostics: editorDiagnosticsSchema, serviceErrors: serviceErrorsSchema, operations: external_exports.array(operationRecordSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS), lastValue: protocolJsonSchema.nullable(), lastActionError: hostErrorSchema.nullable(), capabilities: external_exports.array(boundedUtf8StringSchema(256)).max(MAX_PROTOCOL_COLLECTION_ITEMS).optional(), activeClientIds: external_exports.array(idSchema).max(128).optional() }).strict();
+var hostEventTypeSchema = external_exports.enum(["transaction", "notebook", "cell", "cell-started", "cell-output", "cell-completed", "diagnostics", "editor-diagnostics", "service-errors", "graph", "variables", "runtime", "operation", "service-error", "active_clients_changed"]);
+var eventBase = { protocol: external_exports.literal(HOST_PROTOCOL), epoch: idSchema, cursor: protocolIntegerSchema, version: protocolIntegerSchema, documentRevision: revisionSchema, timestamp: external_exports.number().finite().nonnegative(), operationId: idSchema.optional(), clientId: idSchema.optional(), cellId: idSchema.optional(), runId: idSchema.optional(), kernelEpoch: idSchema.nullable().optional(), revision: revisionSchema.optional(), sequence: protocolIntegerSchema.optional() };
 var hostEventSchema = external_exports.object({ ...eventBase, type: hostEventTypeSchema, payload: protocolJsonSchema }).strict();
 var recoveryBranchSchema = external_exports.object({ id: idSchema, documentRevision: revisionSchema, baseDisk: diskObservationSchema, sourceHandle: external_exports.lazy(() => artifactHandleSchema), state: external_exports.enum(["clean", "dirty", "conflict"]), conflict: hostErrorSchema.nullable() }).strict();
 var recoveryStateSchema = external_exports.object({ branches: external_exports.array(recoveryBranchSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS), pending: external_exports.boolean(), corruption: hostErrorSchema.nullable() }).strict();
-var recoverySchema = external_exports.discriminatedUnion("kind", [external_exports.object({ kind: external_exports.literal("replay"), epoch: idSchema, cursor: protocolIntegerSchema, events: external_exports.array(hostEventSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS) }).strict(), external_exports.object({ kind: external_exports.literal("snapshot"), epoch: idSchema, cursor: protocolIntegerSchema, snapshot: hostSnapshotSchema }).strict()]);
-var commandResultSchema = external_exports.object({ epoch: idSchema, operation: operationRecordSchema, documentRevision: revisionSchema, version: protocolIntegerSchema, cursor: protocolIntegerSchema, nextCommandSequence: positiveIntegerSchema, result: protocolJsonSchema.nullable(), error: hostErrorSchema.nullable() }).strict();
+var recoverySchema = external_exports.object({ kind: external_exports.literal("snapshot"), epoch: idSchema, cursor: protocolIntegerSchema, snapshot: hostSnapshotSchema }).strict();
+var commandResultSchema = external_exports.object({ requestId: idSchema, epoch: idSchema, documentRevision: revisionSchema, version: protocolIntegerSchema, cursor: protocolIntegerSchema, result: protocolJsonSchema.nullable(), error: hostErrorSchema.nullable() }).strict();
 var queryOffset = protocolIntegerSchema.optional();
 var cellQueryLimit = external_exports.number().int().min(1).max(1e3).safe().optional();
 var outputQueryLimit = external_exports.number().int().min(1).max(262144).safe().optional();
@@ -33740,7 +33524,7 @@ var hostQuerySchema = external_exports.discriminatedUnion("type", [
   external_exports.object({ type: external_exports.literal("outputs"), cellId: idSchema.optional() }).strict(),
   external_exports.object({ type: external_exports.literal("output"), handle: artifactHandleIdSchema, offset: queryOffset, limit: outputQueryLimit }).strict(),
   external_exports.object({ type: external_exports.literal("operation"), operationId: idSchema, clientId: idSchema.optional() }).strict(),
-  external_exports.object({ type: external_exports.literal("events"), epoch: idSchema.nullable(), cursor: protocolIntegerSchema.nullable() }).strict(),
+  external_exports.object({ type: external_exports.literal("state") }).strict(),
   external_exports.object({ type: external_exports.literal("config") }).strict(),
   external_exports.object({ type: external_exports.literal("layout") }).strict(),
   external_exports.object({ type: external_exports.literal("packages-status") }).strict(),
@@ -33765,7 +33549,6 @@ var notebookQueryResultSchema = external_exports.object({
   sidecars: sidecarObservationsSchema,
   runtime: hostRuntimeSchema,
   capabilities: external_exports.array(boundedUtf8StringSchema(256, true)).max(MAX_PROTOCOL_COLLECTION_ITEMS),
-  nextCommandSequence: positiveIntegerSchema,
   activeClientIds: external_exports.array(idSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS),
   cells: external_exports.array(notebookCellDescriptorSchema).max(MAX_NOTEBOOK_CELLS)
 }).strict();
@@ -34041,7 +33824,7 @@ var outputRecordShape = external_exports.object({ id: idSchema, sessionEpoch: id
 var outputRecordSchema = protocolJsonSchema.pipe(outputRecordShape);
 var sessionIdentitySchema = external_exports.object({ sessionKey: idSchema, canonicalPath: pathSchema.nullable(), origin: boundedUtf8StringSchema(2048, true), browserOrigin: boundedUtf8StringSchema(2048, true), epoch: idSchema, processNonce: idSchema }).strict();
 var sessionRegistryMetadataSchema = external_exports.object({ state: external_exports.enum(["starting", "ready", "stopping"]), pid: positiveIntegerSchema, processNonce: idSchema, continuityProof: idSchema, startIdentity: idSchema, canonicalPath: pathSchema.nullable(), origin: boundedUtf8StringSchema(2048, true), epoch: idSchema, token: external_exports.string().regex(/^[0-9a-f]{64}$/), protocol: external_exports.literal(HOST_PROTOCOL), address: external_exports.object({ host: boundedUtf8StringSchema(256, true), port: external_exports.number().int().min(0).max(65535).safe(), origin: boundedUtf8StringSchema(2048, true), browserOrigin: boundedUtf8StringSchema(2048, true) }).strict().optional() }).strict();
-var sessionLeaseSchema = external_exports.object({ leaseId: idSchema, clientId: idSchema, nextCommandSequence: positiveIntegerSchema, epoch: idSchema }).strict();
+var sessionLeaseSchema = external_exports.object({ leaseId: idSchema, clientId: idSchema, epoch: idSchema }).strict();
 var attachLeaseRequestSchema = external_exports.object({ action: external_exports.literal("attach") }).strict();
 var leaseActionRequestSchema = external_exports.object({ action: external_exports.enum(["heartbeat", "release"]), leaseId: idSchema, disposition: external_exports.enum(["normal", "discard"]).optional() }).strict().superRefine((value, context) => {
   if (value.action === "heartbeat" && value.disposition !== void 0) context.addIssue({ code: "custom", path: ["disposition"], message: "heartbeat cannot have a release disposition" });
@@ -34049,14 +33832,14 @@ var leaseActionRequestSchema = external_exports.object({ action: external_export
 var ticketMintRequestSchema = external_exports.object({ origin: boundedUtf8StringSchema(2048, true), parentLeaseId: idSchema.optional() }).strict();
 var ticketMintResponseSchema = external_exports.object({ ticket: idSchema, expiresAt: boundedUtf8StringSchema(256, true) }).strict();
 var ticketExchangeRequestSchema = external_exports.object({ ticket: idSchema }).strict();
-var ticketExchangeResponseSchema = external_exports.object({ leaseId: idSchema, clientId: idSchema, nextCommandSequence: positiveIntegerSchema, epoch: idSchema, continuityProof: idSchema, csrf: idSchema, recoveryKey: external_exports.string().regex(/^[A-Za-z0-9_-]{43}$/).optional(), recoveryKeyId: external_exports.string().regex(/^[A-Za-z0-9_-]{43}$/).optional() }).strict();
-var hostIdentitySchema = external_exports.object({ protocol: external_exports.literal(HOST_PROTOCOL), epoch: idSchema, processNonce: idSchema, continuityProof: idSchema, sessionKey: idSchema, canonicalPath: pathSchema.nullable(), capabilities: external_exports.array(boundedUtf8StringSchema(256, true)).max(MAX_PROTOCOL_COLLECTION_ITEMS), origin: boundedUtf8StringSchema(2048, true), browserOrigin: boundedUtf8StringSchema(2048, true), address: external_exports.object({ host: boundedUtf8StringSchema(256, true), port: external_exports.number().int().min(0).max(65535).safe(), origin: boundedUtf8StringSchema(2048, true), browserOrigin: boundedUtf8StringSchema(2048, true) }).strict().optional(), leaseId: idSchema.optional(), clientId: idSchema.optional(), nextCommandSequence: positiveIntegerSchema.optional(), documentReady: external_exports.boolean(), configuration: hostConfigurationSchema }).strict();
-var sessionConnectionSchema = external_exports.object({ sessionKey: idSchema, canonicalPath: pathSchema.nullable(), origin: boundedUtf8StringSchema(2048, true), browserOrigin: boundedUtf8StringSchema(2048, true), epoch: idSchema, processNonce: idSchema, continuityProof: idSchema, leaseId: idSchema, clientId: idSchema, nextCommandSequence: positiveIntegerSchema, capabilities: external_exports.array(boundedUtf8StringSchema(256, true)).max(MAX_PROTOCOL_COLLECTION_ITEMS) }).strict();
+var ticketExchangeResponseSchema = external_exports.object({ leaseId: idSchema, clientId: idSchema, epoch: idSchema, continuityProof: idSchema, csrf: idSchema, recoveryId: idSchema.optional() }).strict();
+var hostIdentitySchema = external_exports.object({ protocol: external_exports.literal(HOST_PROTOCOL), epoch: idSchema, processNonce: idSchema, continuityProof: idSchema, sessionKey: idSchema, canonicalPath: pathSchema.nullable(), capabilities: external_exports.array(boundedUtf8StringSchema(256, true)).max(MAX_PROTOCOL_COLLECTION_ITEMS), origin: boundedUtf8StringSchema(2048, true), browserOrigin: boundedUtf8StringSchema(2048, true), address: external_exports.object({ host: boundedUtf8StringSchema(256, true), port: external_exports.number().int().min(0).max(65535).safe(), origin: boundedUtf8StringSchema(2048, true), browserOrigin: boundedUtf8StringSchema(2048, true) }).strict().optional(), leaseId: idSchema.optional(), clientId: idSchema.optional(), documentReady: external_exports.boolean(), configuration: hostConfigurationSchema }).strict();
+var sessionConnectionSchema = external_exports.object({ sessionKey: idSchema, canonicalPath: pathSchema.nullable(), origin: boundedUtf8StringSchema(2048, true), browserOrigin: boundedUtf8StringSchema(2048, true), epoch: idSchema, processNonce: idSchema, continuityProof: idSchema, leaseId: idSchema, clientId: idSchema, capabilities: external_exports.array(boundedUtf8StringSchema(256, true)).max(MAX_PROTOCOL_COLLECTION_ITEMS) }).strict();
 var windowActionSchema = external_exports.enum(["new", "open", "save", "save-as", "publish", "run-cell", "run-all", "run-stale", "interrupt", "restart", "settings", "select-r", "close"]);
 var windowActionMessageSchema = external_exports.object({ action: windowActionSchema }).strict();
 var windowStateSchema = external_exports.object({ path: pathSchema.nullable(), dirty: external_exports.boolean(), platform: boundedUtf8StringSchema(64, true), sessionEpoch: idSchema }).strict();
 var desktopRecoveryRequestSchema = external_exports.object({
-  keyId: external_exports.string().regex(/^[A-Za-z0-9_-]{43}$/),
+  recoveryId: external_exports.string().regex(/^[A-Za-z0-9_-]{1,128}$/),
   action: external_exports.enum(["read", "write", "remove", "list"]),
   name: external_exports.string().max(256).optional(),
   prefix: external_exports.string().max(256).optional(),
@@ -34071,13 +33854,18 @@ var ProtocolError = class extends Error {
   }
 };
 function decodeJsonFrame(input2, maxBytes = MAX_FRAME_BYTES) {
+  const bytes = typeof input2 === "string" ? new TextEncoder().encode(input2) : input2;
+  if (bytes.byteLength > maxBytes) throw new ProtocolError("frame_too_large", "JSON input exceeds byte limit");
+  let text;
   try {
-    return parseStrictJson(input2, { maxBytes, maxDepth: MAX_JSON_DEPTH });
-  } catch (error61) {
-    const value = error61;
-    const message = typeof value.message === "string" ? value.message : "frame is not valid JSON";
-    const code = typeof value.code === "string" ? value.code : message.startsWith("duplicate object key") ? "duplicate_key" : message.startsWith("invalid UTF-8") ? "invalid_utf8" : message.startsWith("JSON nesting limit exceeded") ? "nesting_too_deep" : message.startsWith("JSON input exceeds") ? "frame_too_large" : "invalid_json";
-    throw new ProtocolError(code, message);
+    text = typeof input2 === "string" ? input2 : new TextDecoder("utf-8", { fatal: true }).decode(input2);
+  } catch {
+    throw new ProtocolError("invalid_utf8", "Frame is not valid UTF-8");
+  }
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new ProtocolError("invalid_json", "Frame is not valid JSON");
   }
 }
 function sourceLinesByteLength(lines) {
@@ -34167,29 +33955,16 @@ function decodeHostSnapshotWire(value) {
   if (notebookSourceByteLength(decoded.cells) > MAX_NOTEBOOK_SOURCE_BYTES) throw new ProtocolError("invalid_request", "snapshot source exceeds the transfer budget");
   return decoded;
 }
-function eventCellPayload(type) {
-  return type === "cell" || type === "cell-started" || type === "cell-completed";
-}
-function encodeHostEventWire(event) {
-  const value = wireRecord(event, "host event");
-  return eventCellPayload(value.type) ? { ...value, payload: encodeCellWire(value.payload) } : { ...value };
-}
-function decodeHostEventWire(value) {
-  const event = wireRecord(value, "host event");
-  return eventCellPayload(event.type) ? { ...event, payload: decodeCellWire(event.payload) } : { ...event };
-}
 function isArtifactHandle(value) {
   return artifactHandleSchema.safeParse(value).success;
 }
 function encodeRecoveryWire(recovery) {
   if (isArtifactHandle(recovery)) return recovery;
-  if (recovery.kind === "replay") return { ...recovery, events: recovery.events.map(encodeHostEventWire) };
   return { ...recovery, snapshot: encodeHostSnapshotWire(recovery.snapshot) };
 }
 function decodeRecoveryWire(value) {
   if (isArtifactHandle(value)) return value;
   const recovery = wireRecord(value, "recovery");
-  if (recovery.kind === "replay") return { ...recovery, events: wireArray(recovery.events, "recovery events").map(decodeHostEventWire) };
   if (recovery.kind === "snapshot") return { ...recovery, snapshot: decodeHostSnapshotWire(recovery.snapshot) };
   throw new ProtocolError("invalid_request", "invalid recovery transfer");
 }
@@ -34213,7 +33988,7 @@ function mapQueryResultWire(queryType, result, encode3) {
       return encode3 ? encodeCellWire(result) : decodeCellWire(result);
     case "source":
       return wireArray(result, "source query result").map(encode3 ? encodeCellWire : decodeCellWire);
-    case "events":
+    case "state":
       return encode3 ? encodeRecoveryWire(result) : decodeRecoveryWire(result);
     default:
       return result;
@@ -34222,11 +33997,6 @@ function mapQueryResultWire(queryType, result, encode3) {
 function decodeHostQueryResultWire(query, value) {
   const result = wireRecord(value, "host query result");
   return { ...result, result: mapQueryResultWire(query.type, result.result, false) };
-}
-function parseHostCommand(input2) {
-  const result = hostCommandSchema.safeParse(input2);
-  if (!result.success) throw new ProtocolError("invalid_request", external_exports.prettifyError(result.error));
-  return result.data;
 }
 
 // src/mcp-stdio.ts
@@ -35625,7 +35395,6 @@ function parseIdentityCapabilities(value) {
 }
 function createConnection(metadata, sessionKey, token, lease, continuityProof, browserOrigin, capabilities = []) {
   let released = false;
-  let nextCommandSequence = lease.nextCommandSequence;
   const authenticatedHeaders = (init = {}) => {
     const headers = new Headers(init.headers);
     headers.set("Authorization", "Bearer " + token);
@@ -35649,12 +35418,10 @@ function createConnection(metadata, sessionKey, token, lease, continuityProof, b
     const response = await request("/api/lease", {
       method: "POST",
       headers: authenticatedJsonHeaders(),
-      body: JSON.stringify(leaseActionRequestSchema.parse({ action: "heartbeat", leaseId: lease.leaseId }))
+      body: JSON.stringify({ action: "heartbeat", leaseId: lease.leaseId })
     });
     if (!response.ok) throw new SessionUnavailableError("session heartbeat failed (" + response.status + ")");
-    const current = sessionLeaseSchema.parse(await response.json());
-    nextCommandSequence = Math.max(nextCommandSequence, current.nextCommandSequence);
-    connection.nextCommandSequence = nextCommandSequence;
+    sessionLeaseSchema.parse(await response.json());
   };
   let releasePromise;
   const release = (disposition = "normal") => {
@@ -35663,7 +35430,7 @@ function createConnection(metadata, sessionKey, token, lease, continuityProof, b
       await request("/api/lease", {
         method: "POST",
         headers: authenticatedJsonHeaders(),
-        body: JSON.stringify(leaseActionRequestSchema.parse({ action: "release", leaseId: lease.leaseId, disposition }))
+        body: JSON.stringify({ action: "release", leaseId: lease.leaseId, disposition })
       }).catch(() => void 0);
       released = true;
     })();
@@ -35683,7 +35450,6 @@ function createConnection(metadata, sessionKey, token, lease, continuityProof, b
     continuityProof,
     leaseId: lease.leaseId,
     clientId: lease.clientId,
-    nextCommandSequence,
     capabilities: [...capabilities],
     request,
     heartbeat,
@@ -35815,7 +35581,7 @@ async function requestJson(origin, token, path2, init = {}, expectedProof) {
   let value = null;
   if (bytes.length > 0) {
     try {
-      value = parseStrictJson(bytes, { maxBytes: 1024 * 1024, maxDepth: 64 });
+      value = decodeJsonFrame(bytes, 1024 * 1024);
     } catch (error61) {
       throw new SessionAuthError(error61 instanceof Error ? error61.message : "session response is not valid JSON");
     }
@@ -35830,7 +35596,7 @@ async function readRegistry(path2, privatePathOptions = privatePathOptionsFor(pa
   try {
     const bytes = await readPrivateFile(path2, { ...privatePathOptions, maxBytes: 64 * 1024 });
     if (bytes.byteLength === 0) return null;
-    return sessionRegistryMetadataSchema.parse(parseStrictJson(bytes, { maxBytes: 64 * 1024, maxDepth: 32 }));
+    return sessionRegistryMetadataSchema.parse(decodeJsonFrame(bytes, 64 * 1024));
   } catch (error61) {
     const code = error61.code;
     if (code === "ENOENT") return null;
@@ -35866,7 +35632,7 @@ async function readUntitledRecoveryDescriptor(path2, id, privatePathOptions = {}
   try {
     const bytes = await readPrivateFile(path2, { ...privatePathOptions, maxBytes: UNTITLED_RECOVERY_DESCRIPTOR_MAX_BYTES });
     if (bytes.byteLength === 0) throw new SessionUnavailableError("untitled recovery descriptor is empty", { path: path2 });
-    return parseUntitledRecoveryDescriptor(parseStrictJson(bytes, { maxBytes: UNTITLED_RECOVERY_DESCRIPTOR_MAX_BYTES, maxDepth: 16 }), id, path2);
+    return parseUntitledRecoveryDescriptor(decodeJsonFrame(bytes, UNTITLED_RECOVERY_DESCRIPTOR_MAX_BYTES), id, path2);
   } catch (error61) {
     if (error61.code === "ENOENT") return null;
     if (error61 instanceof SessionUnavailableError) throw error61;
@@ -36006,7 +35772,7 @@ function errorText(error61) {
 async function readSessionJson(response) {
   const bytes = new Uint8Array(await response.arrayBuffer());
   let value = null;
-  if (bytes.byteLength > 0) value = parseStrictJson(bytes, { maxBytes: SNAPSHOT_ENVELOPE_LIMIT, maxDepth: 64 });
+  if (bytes.byteLength > 0) value = decodeJsonFrame(bytes, SNAPSHOT_ENVELOPE_LIMIT);
   if (!response.ok) {
     const detail = isRecord2(value) ? value : {};
     throw new Error(typeof detail.message === "string" ? detail.message : "session request failed (" + response.status + ")");
@@ -36055,6 +35821,9 @@ function parseCli(argv) {
         "allowed-origin": { type: "string", multiple: true },
         "external-origin": { type: "string" },
         "token-file": { type: "string" },
+        "request-id": { type: "string" },
+        "session-epoch": { type: "string" },
+        "document-revision": { type: "string" },
         output: { type: "string" },
         "include-code": { type: "boolean" },
         "list-recoveries": { type: "boolean" },
@@ -36099,12 +35868,23 @@ function parseCli(argv) {
   if (command === "publish" && typeof values.output !== "string") throw usageError("publish requires --output FILE.html");
   if ((command === "check" || command === "run" || command === "publish" || command === "mcp") && path2 === null) throw usageError(command + " requires NOTEBOOK.R");
   if (command === "mcp" && (browser || headless)) throw usageError("mcp does not accept --browser or --headless");
+  const retryFlags = [values["request-id"], values["session-epoch"], values["document-revision"]];
+  let retry;
+  if (retryFlags.some((value) => value !== void 0)) {
+    if (command !== "run" && command !== "publish") throw usageError("request retry flags are only valid for run or publish");
+    if (retryFlags.some((value) => value === void 0)) throw usageError("--request-id, --session-epoch and --document-revision must be supplied together");
+    const requestId = String(values["request-id"]);
+    const sessionEpoch = String(values["session-epoch"]);
+    const expectedDocumentRevision = Number(values["document-revision"]);
+    if (!requestId || !sessionEpoch || requestId.length > 256 || sessionEpoch.length > 256 || !Number.isSafeInteger(expectedDocumentRevision) || expectedDocumentRevision < 0) throw usageError("invalid command retry identity or document revision");
+    retry = { requestId, sessionEpoch, expectedDocumentRevision };
+  }
   const portText = values.port === void 0 ? "0" : String(values.port);
   const port = Number(portText);
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw usageError("--port must be an integer between 0 and 65535");
   const host = values.host === void 0 ? "127.0.0.1" : String(values.host);
   if (!["127.0.0.1", "::1"].includes(host)) throw usageError("--host must be 127.0.0.1 or ::1");
-  return { command, path: path2, recover, listRecoveries, browser, headless, rscript: typeof values.rscript === "string" ? values.rscript : void 0, sandbox: values.sandbox === true, lazy: values.lazy === true, noRun: values["no-run"] === true, host, port, allowedOrigins: Array.isArray(values["allowed-origin"]) ? values["allowed-origin"].map(String) : [], externalOrigin, tokenFile, output: typeof values.output === "string" ? values.output : void 0, includeCode: values["include-code"] === true };
+  return { command, path: path2, recover, listRecoveries, browser, headless, rscript: typeof values.rscript === "string" ? values.rscript : void 0, sandbox: values.sandbox === true, lazy: values.lazy === true, noRun: values["no-run"] === true, host, port, allowedOrigins: Array.isArray(values["allowed-origin"]) ? values["allowed-origin"].map(String) : [], externalOrigin, tokenFile, output: typeof values.output === "string" ? values.output : void 0, includeCode: values["include-code"] === true, ...retry === void 0 ? {} : { retry } };
 }
 async function applicationResources() {
   const root = process.env.ALDER_APPLICATION_ROOT ?? resolve4(dirname4(fileURLToPath(import.meta.url)), "..");
@@ -36194,7 +35974,6 @@ async function holdSession(connection) {
   }
   return 0;
 }
-var TERMINAL_OPERATION_STATUSES = /* @__PURE__ */ new Set(["done", "error", "interrupted", "cancelled"]);
 async function readOwnerArtifact(connection, artifact) {
   const chunks = [];
   let offset = 0;
@@ -36223,34 +36002,33 @@ async function ownerQuery(connection, query) {
   return hostQueryResultSchema.parse(decodeHostQueryResultWire(query, hydrated));
 }
 async function ownerSnapshot(connection) {
-  const query = { type: "events", epoch: null, cursor: null };
+  const query = { type: "state" };
   const result = (await ownerQuery(connection, query)).result;
   if (!isRecord2(result)) throw new Error("owner recovery query did not return an object");
   const recovery = result;
   if (recovery.kind !== "snapshot") throw new Error("owner recovery query did not return a snapshot");
   return hostSnapshotSchema.parse(recovery.snapshot);
 }
-async function commandOnOwner(connection, command) {
-  const notebookResult = await ownerQuery(connection, { type: "notebook" });
-  const documentRevision = notebookResult.documentRevision;
-  if (!Number.isSafeInteger(documentRevision) || documentRevision < 0) throw new Error("owner notebook metadata has no document revision");
-  const commandSequence = connection.nextCommandSequence;
-  const body = parseHostCommand({ ...command, operationId: randomUUID3(), clientId: connection.clientId, commandSequence, sessionEpoch: connection.epoch, expectedDocumentRevision: documentRevision });
-  const admission = commandAdmissionSchema.parse(await readSessionJson(await connection.request("/api/command", { method: "POST", body: JSON.stringify(encodeHostCommandWire(body)) })));
-  connection.nextCommandSequence = Math.max(connection.nextCommandSequence, admission.nextCommandSequence);
-  const operation = admission.accepted && admission.operation !== null ? await waitOwnerOperation(connection, admission.operationId) : null;
-  const finalSnapshot = await ownerSnapshot(connection);
-  return { snapshot: finalSnapshot, operation, result: operation?.result ?? null, error: operation?.error ?? admission.error };
-}
-async function waitOwnerOperation(connection, operationId) {
-  const deadline = Date.now() + 12e4;
-  for (; ; ) {
-    const query = { type: "operation", operationId, clientId: connection.clientId };
-    const result = (await ownerQuery(connection, query)).result;
-    const operation = operationRecordSchema.parse(result);
-    if (TERMINAL_OPERATION_STATUSES.has(operation.status)) return operation;
-    if (Date.now() >= deadline) throw new Error("operation_timeout: " + operationId);
-    await new Promise((resolveDelay) => setTimeout(resolveDelay, 100));
+async function commandOnOwner(connection, command, retry) {
+  const identity = retry ?? { requestId: randomUUID3(), sessionEpoch: connection.epoch, expectedDocumentRevision: (await ownerQuery(connection, { type: "notebook" })).documentRevision };
+  const request = { ...command, ...identity, clientId: connection.clientId };
+  if (identity.sessionEpoch !== connection.epoch) {
+    return { requestId: identity.requestId, epoch: identity.sessionEpoch, result: null, error: { code: "session_replaced", message: "The original backend session ended. This uncertain command will not run again automatically." }, request };
+  }
+  try {
+    const raw = await readSessionJson(await connection.request("/api/command", { method: "POST", body: JSON.stringify(encodeHostCommandWire(request)) }));
+    const completed = commandResultSchema.parse(raw);
+    const artifact = artifactHandleSchema.safeParse(completed.result);
+    const result = artifact.success ? await readOwnerArtifact(connection, artifact.data) : completed.result;
+    return { ...completed, result, request };
+  } catch (error61) {
+    return {
+      requestId: identity.requestId,
+      epoch: identity.sessionEpoch,
+      result: null,
+      request,
+      error: { code: "command_uncertain", message: `${errorText(error61)} Retry the identical command with --request-id ${identity.requestId} --session-epoch ${identity.sessionEpoch} --document-revision ${identity.expectedDocumentRevision}.` }
+    };
   }
 }
 async function activateHeadlessStartup(connection) {
@@ -36269,15 +36047,14 @@ async function runTool(cli, resources) {
       const result = (await ownerQuery(connection, query)).result;
       if (!isRecord2(result)) throw new Error("owner check query did not return an object");
       const check2 = result;
-      writeJson({ epoch: connection.epoch, documentRevision: runtimeSnapshot.documentRevision, dirty: runtimeSnapshot.dirty, disk: runtimeSnapshot.disk, operation: null, result: check2, error: null });
+      writeJson({ epoch: connection.epoch, documentRevision: runtimeSnapshot.documentRevision, dirty: runtimeSnapshot.dirty, disk: runtimeSnapshot.disk, result: check2, error: null });
       return Array.isArray(check2.issues) && check2.issues.length > 0 || runtimeSnapshot.runtime.executionBlockedReason !== null ? 1 : 0;
     }
     const command = cli.command === "run" ? { type: "run", scope: "all" } : { type: "publish", includeCode: cli.includeCode, outputPath: cli.output };
-    const completed = await commandOnOwner(connection, command);
-    writeJson({ epoch: connection.epoch, documentRevision: completed.snapshot.documentRevision, dirty: completed.snapshot.dirty, disk: completed.snapshot.disk, operation: completed.operation, result: completed.result, error: completed.error });
-    const interrupted = completed.operation?.status === "interrupted" || completed.operation?.status === "cancelled" && isRecord2(completed.error) && completed.error.code === "interrupted";
-    if (interrupted) return 130;
-    return completed.error !== null || completed.operation?.status === "error" || completed.operation?.status === "cancelled" ? 1 : 0;
+    const completed = await commandOnOwner(connection, command, cli.retry);
+    writeJson(completed);
+    if (completed.error?.code === "interrupted") return 130;
+    return completed.error === null ? 0 : 1;
   } finally {
     await connection.release();
   }
@@ -36300,7 +36077,6 @@ async function runMcp(cli, resources) {
     const alder = {
       clientId: connection.clientId,
       sessionEpoch: connection.epoch,
-      nextCommandSequence: connection.nextCommandSequence,
       documentRevision: notebook.documentRevision,
       capabilities: [...connection.capabilities]
     };
@@ -36377,6 +36153,7 @@ async function runCli(argv = process.argv.slice(2)) {
     process.stdout.write("       alder --recover UUID [--browser|--headless]\n");
     process.stdout.write("       alder --list-recoveries\n");
     process.stdout.write("       alder check|run|publish|mcp NOTEBOOK.R\n");
+    process.stdout.write("       alder run|publish NOTEBOOK.R --request-id ID --session-epoch EPOCH --document-revision N\n");
     return 0;
   }
   if (argv.includes("--version")) {
@@ -36416,6 +36193,7 @@ export {
   HOST_IDENTITY,
   artifactHandleSchema,
   browserUrl,
+  commandOnOwner,
   decodeHostQueryResultWire,
   desktopUnavailableError,
   encodeHostCommandWire,
