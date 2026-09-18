@@ -32,13 +32,11 @@ const CANONICAL_TOOL_NAMES = [
   "materialize_output",
   "move_cell",
   "notebook_state",
-  "operation_status",
   "packages_declare",
   "packages_install",
   "packages_status",
   "publish",
   "read_cell",
-  "read_events",
   "read_output",
   "recovery_state",
   "reload_source",
@@ -111,7 +109,6 @@ test("the staged alder launcher serves MCP over official stdio", installedIntegr
     const templates = await client.listResourceTemplates();
     assert.deepEqual(templates.resourceTemplates.map(template => template.uriTemplate).sort(), [
       "alder://cell/{cell}/outputs",
-      "alder://operations/{operation}",
       "alder://outputs/{output}",
     ]);
     const result = await client.callTool({ name: "list_cells", arguments: {} });

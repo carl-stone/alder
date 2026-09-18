@@ -9,15 +9,14 @@ import { randomUUID } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
-import { parseStrictJson } from "./strict-json.js";
-
 import { connectMcpStdio, drainMcpStdio, type McpInitializationMetadata } from "./mcp-stdio.js";
 import { type HostReady } from "./application.js";
 import { resolveApplicationResources, type ApplicationResources } from "./resources.js";
 import { acquireNotebookSession, isUntitledRecoveryId, listUntitledRecoveryDescriptors, selectUntitledRecoveryDescriptor } from "./sessions.js";
 import {
   artifactHandleSchema,
-  commandAdmissionSchema,
+  commandResultSchema,
+  decodeJsonFrame,
   decodeHostQueryResultWire,
   encodeHostCommandWire,
   encodeHostQueryWire,
@@ -25,14 +24,13 @@ import {
   ENGINE_PROTOCOL,
   HOST_PROTOCOL,
   hostSnapshotSchema,
-  operationRecordSchema,
-  parseHostCommand,
   SNAPSHOT_ENVELOPE_LIMIT,
   type SessionConnection,
   type HostQuery,
   type HostQueryResult,
   type HostSnapshot,
-  type OperationRecord,
+  type CommandResult,
+  type HostCommand,
 } from "./protocol.js";
 
 export const HOST_IDENTITY = Object.freeze({ protocol: HOST_PROTOCOL, engineProtocol: ENGINE_PROTOCOL, hostVersion: "0.1.0", packageVersion: "0.1.0" });
@@ -92,6 +90,7 @@ interface CliOptions {
   tokenFile?: string;
   output?: string;
   includeCode: boolean;
+  retry?: { requestId: string; sessionEpoch: string; expectedDocumentRevision: number };
 }
 
 function usageError(message: string): Error { return Object.assign(new Error(message), { exitCode: 2 }); }
@@ -106,7 +105,7 @@ function errorText(error: unknown): string {
 async function readSessionJson(response: Response): Promise<unknown> {
   const bytes = new Uint8Array(await response.arrayBuffer());
   let value: unknown = null;
-  if (bytes.byteLength > 0) value = parseStrictJson(bytes, { maxBytes: SNAPSHOT_ENVELOPE_LIMIT, maxDepth: 64 });
+  if (bytes.byteLength > 0) value = decodeJsonFrame(bytes, SNAPSHOT_ENVELOPE_LIMIT);
   if (!response.ok) {
     const detail = isRecord(value) ? value : {};
     throw new Error(typeof detail.message === "string" ? detail.message : "session request failed (" + response.status + ")");
@@ -150,6 +149,7 @@ export function parseCli(argv: readonly string[]): CliOptions {
         browser: { type: "boolean" }, headless: { type: "boolean" }, lazy: { type: "boolean" }, "no-run": { type: "boolean" },
         sandbox: { type: "boolean" }, rscript: { type: "string" }, host: { type: "string" }, port: { type: "string" },
         "allowed-origin": { type: "string", multiple: true }, "external-origin": { type: "string" }, "token-file": { type: "string" },
+        "request-id": { type: "string" }, "session-epoch": { type: "string" }, "document-revision": { type: "string" },
         output: { type: "string" }, "include-code": { type: "boolean" }, "list-recoveries": { type: "boolean" }, recover: { type: "string" },
       },
     });
@@ -189,12 +189,23 @@ export function parseCli(argv: readonly string[]): CliOptions {
   if (command === "publish" && typeof values.output !== "string") throw usageError("publish requires --output FILE.html");
   if ((command === "check" || command === "run" || command === "publish" || command === "mcp") && path === null) throw usageError(command + " requires NOTEBOOK.R");
   if (command === "mcp" && (browser || headless)) throw usageError("mcp does not accept --browser or --headless");
+  const retryFlags = [values["request-id"], values["session-epoch"], values["document-revision"]];
+  let retry: CliOptions["retry"];
+  if (retryFlags.some(value => value !== undefined)) {
+    if (command !== "run" && command !== "publish") throw usageError("request retry flags are only valid for run or publish");
+    if (retryFlags.some(value => value === undefined)) throw usageError("--request-id, --session-epoch and --document-revision must be supplied together");
+    const requestId = String(values["request-id"]);
+    const sessionEpoch = String(values["session-epoch"]);
+    const expectedDocumentRevision = Number(values["document-revision"]);
+    if (!requestId || !sessionEpoch || requestId.length > 256 || sessionEpoch.length > 256 || !Number.isSafeInteger(expectedDocumentRevision) || expectedDocumentRevision < 0) throw usageError("invalid command retry identity or document revision");
+    retry = { requestId, sessionEpoch, expectedDocumentRevision };
+  }
   const portText = values.port === undefined ? "0" : String(values.port);
   const port = Number(portText);
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw usageError("--port must be an integer between 0 and 65535");
   const host = values.host === undefined ? "127.0.0.1" : String(values.host);
   if (!["127.0.0.1", "::1"].includes(host)) throw usageError("--host must be 127.0.0.1 or ::1");
-  return { command, path, recover, listRecoveries, browser, headless, rscript: typeof values.rscript === "string" ? values.rscript : undefined, sandbox: values.sandbox === true, lazy: values.lazy === true, noRun: values["no-run"] === true, host, port, allowedOrigins: Array.isArray(values["allowed-origin"]) ? values["allowed-origin"].map(String) : [], externalOrigin, tokenFile, output: typeof values.output === "string" ? values.output : undefined, includeCode: values["include-code"] === true };
+  return { command, path, recover, listRecoveries, browser, headless, rscript: typeof values.rscript === "string" ? values.rscript : undefined, sandbox: values.sandbox === true, lazy: values.lazy === true, noRun: values["no-run"] === true, host, port, allowedOrigins: Array.isArray(values["allowed-origin"]) ? values["allowed-origin"].map(String) : [], externalOrigin, tokenFile, output: typeof values.output === "string" ? values.output : undefined, includeCode: values["include-code"] === true, ...(retry === undefined ? {} : { retry }) };
 }
 
 async function applicationResources(): Promise<ApplicationResources> {
@@ -300,8 +311,6 @@ async function holdSession(connection: SessionConnection): Promise<number> {
   return 0;
 }
 
-const TERMINAL_OPERATION_STATUSES = new Set(["done", "error", "interrupted", "cancelled"]);
-
 async function readOwnerArtifact(connection: SessionConnection, artifact: { handle: string; byteLength: number; chunkBytes: number }): Promise<unknown> {
   const chunks: Buffer[] = [];
   let offset = 0;
@@ -332,7 +341,7 @@ async function ownerQuery(connection: SessionConnection, query: HostQuery): Prom
 }
 
 async function ownerSnapshot(connection: SessionConnection): Promise<HostSnapshot> {
-  const query: HostQuery = { type: "events", epoch: null, cursor: null };
+  const query: HostQuery = { type: "state" };
   const result = (await ownerQuery(connection, query)).result;
   if (!isRecord(result)) throw new Error("owner recovery query did not return an object");
   const recovery = result as Record<string, unknown>;
@@ -340,28 +349,25 @@ async function ownerSnapshot(connection: SessionConnection): Promise<HostSnapsho
   return hostSnapshotSchema.parse(recovery.snapshot) as HostSnapshot;
 }
 
-async function commandOnOwner(connection: SessionConnection, command: Record<string, unknown>): Promise<{ snapshot: HostSnapshot; operation: OperationRecord | null; result: unknown; error: unknown }> {
-  const notebookResult = await ownerQuery(connection, { type: "notebook" });
-  const documentRevision = notebookResult.documentRevision;
-  if (!Number.isSafeInteger(documentRevision) || documentRevision < 0) throw new Error("owner notebook metadata has no document revision");
-  const commandSequence = connection.nextCommandSequence;
-  const body = parseHostCommand({ ...command, operationId: randomUUID(), clientId: connection.clientId, commandSequence, sessionEpoch: connection.epoch, expectedDocumentRevision: documentRevision });
-  const admission = commandAdmissionSchema.parse(await readSessionJson(await connection.request("/api/command", { method: "POST", body: JSON.stringify(encodeHostCommandWire(body)) })));
-  connection.nextCommandSequence = Math.max(connection.nextCommandSequence, admission.nextCommandSequence);
-  const operation = admission.accepted && admission.operation !== null ? await waitOwnerOperation(connection, admission.operationId) : null;
-  const finalSnapshot = await ownerSnapshot(connection);
-  return { snapshot: finalSnapshot, operation, result: operation?.result ?? null, error: operation?.error ?? admission.error };
-}
-
-async function waitOwnerOperation(connection: SessionConnection, operationId: string): Promise<OperationRecord> {
-  const deadline = Date.now() + 120_000;
-  for (;;) {
-    const query: HostQuery = { type: "operation", operationId, clientId: connection.clientId };
-    const result = (await ownerQuery(connection, query)).result;
-    const operation = operationRecordSchema.parse(result) as OperationRecord;
-    if (TERMINAL_OPERATION_STATUSES.has(operation.status)) return operation;
-    if (Date.now() >= deadline) throw new Error("operation_timeout: " + operationId);
-    await new Promise(resolveDelay => setTimeout(resolveDelay, 100));
+type OwnerCommand = { type: "run"; scope: "all"; startup?: boolean } | { type: "publish"; includeCode: boolean; outputPath?: string };
+type OwnerCommandOutcome = (CommandResult | Pick<CommandResult, "requestId" | "epoch" | "result" | "error">) & { request: HostCommand };
+export async function commandOnOwner(connection: SessionConnection, command: OwnerCommand, retry?: CliOptions["retry"]): Promise<OwnerCommandOutcome> {
+  const identity = retry ?? { requestId: randomUUID(), sessionEpoch: connection.epoch, expectedDocumentRevision: (await ownerQuery(connection, { type: "notebook" })).documentRevision };
+  const request: HostCommand = { ...command, ...identity, clientId: connection.clientId };
+  if (identity.sessionEpoch !== connection.epoch) {
+    return { requestId: identity.requestId, epoch: identity.sessionEpoch, result: null, error: { code: "session_replaced", message: "The original backend session ended. This uncertain command will not run again automatically." }, request };
+  }
+  try {
+    const raw = await readSessionJson(await connection.request("/api/command", { method: "POST", body: JSON.stringify(encodeHostCommandWire(request)) }));
+    const completed = commandResultSchema.parse(raw);
+    const artifact = artifactHandleSchema.safeParse(completed.result);
+    const result = artifact.success ? await readOwnerArtifact(connection, artifact.data) : completed.result;
+    return { ...completed, result, request } as OwnerCommandOutcome;
+  } catch (error) {
+    return {
+      requestId: identity.requestId, epoch: identity.sessionEpoch, result: null, request,
+      error: { code: "command_uncertain", message: `${errorText(error)} Retry the identical command with --request-id ${identity.requestId} --session-epoch ${identity.sessionEpoch} --document-revision ${identity.expectedDocumentRevision}.` },
+    };
   }
 }
 
@@ -382,15 +388,14 @@ async function runTool(cli: CliOptions, resources: ApplicationResources): Promis
       const result = (await ownerQuery(connection, query)).result;
       if (!isRecord(result)) throw new Error("owner check query did not return an object");
       const check = result as Record<string, unknown>;
-      writeJson({ epoch: connection.epoch, documentRevision: runtimeSnapshot.documentRevision, dirty: runtimeSnapshot.dirty, disk: runtimeSnapshot.disk, operation: null, result: check, error: null });
+      writeJson({ epoch: connection.epoch, documentRevision: runtimeSnapshot.documentRevision, dirty: runtimeSnapshot.dirty, disk: runtimeSnapshot.disk, result: check, error: null });
       return Array.isArray(check.issues) && check.issues.length > 0 || runtimeSnapshot.runtime.executionBlockedReason !== null ? 1 : 0;
     }
-    const command = cli.command === "run" ? { type: "run", scope: "all" } : { type: "publish", includeCode: cli.includeCode, outputPath: cli.output };
-    const completed = await commandOnOwner(connection, command);
-    writeJson({ epoch: connection.epoch, documentRevision: completed.snapshot.documentRevision, dirty: completed.snapshot.dirty, disk: completed.snapshot.disk, operation: completed.operation, result: completed.result, error: completed.error });
-    const interrupted = completed.operation?.status === "interrupted" || (completed.operation?.status === "cancelled" && isRecord(completed.error) && completed.error.code === "interrupted");
-    if (interrupted) return 130;
-    return completed.error !== null || completed.operation?.status === "error" || completed.operation?.status === "cancelled" ? 1 : 0;
+    const command: OwnerCommand = cli.command === "run" ? { type: "run", scope: "all" } : { type: "publish", includeCode: cli.includeCode, outputPath: cli.output };
+    const completed = await commandOnOwner(connection, command, cli.retry);
+    writeJson(completed);
+    if (completed.error?.code === "interrupted") return 130;
+    return completed.error === null ? 0 : 1;
   } finally { await connection.release(); }
 }
 
@@ -412,7 +417,6 @@ async function runMcp(cli: CliOptions, resources: ApplicationResources): Promise
     const alder: McpInitializationMetadata = {
       clientId: connection.clientId,
       sessionEpoch: connection.epoch,
-      nextCommandSequence: connection.nextCommandSequence,
       documentRevision: notebook.documentRevision,
       capabilities: [...connection.capabilities],
     };
@@ -484,6 +488,7 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
     process.stdout.write("       alder --recover UUID [--browser|--headless]\n");
     process.stdout.write("       alder --list-recoveries\n");
     process.stdout.write("       alder check|run|publish|mcp NOTEBOOK.R\n");
+    process.stdout.write("       alder run|publish NOTEBOOK.R --request-id ID --session-epoch EPOCH --document-revision N\n");
     return 0;
   }
   if (argv.includes("--version")) { process.stdout.write(HOST_IDENTITY.packageVersion + "\n"); return 0; }

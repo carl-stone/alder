@@ -12,7 +12,7 @@ import { z } from "zod/v4";
 
 import { createMcpServer, type AlderMcpOptions, type McpControllerAdapter } from "../src/mcp.js";
 import { connectMcpStdio, drainMcpStdio } from "../src/mcp-stdio.js";
-import type { CommandAdmission, HostCommand, HostQueryResult, HostSnapshot, OperationRecord } from "../src/protocol.js";
+import type { CommandResult, HostCommand, HostQueryResult, HostSnapshot } from "../src/protocol.js";
 
 const cell = {
   id: "cell-1",
@@ -61,13 +61,11 @@ const CANONICAL_TOOL_NAMES = [
   "materialize_output",
   "move_cell",
   "notebook_state",
-  "operation_status",
   "packages_declare",
   "packages_install",
   "packages_status",
   "publish",
   "read_cell",
-  "read_events",
   "read_output",
   "recovery_state",
   "reload_source",
@@ -90,37 +88,37 @@ const CANONICAL_TOOL_NAMES = [
 ] as const;
 
 const REQUIRED_EFFECT_IDENTITY_FIELDS: Record<string, readonly string[]> = {
-  add_cell: ["operationId", "commandSequence", "expectedDocumentRevision"],
-  edit_cell: ["operationId", "commandSequence", "expectedDocumentRevision", "expectedRevision"],
-  delete_cell: ["operationId", "commandSequence", "expectedDocumentRevision", "expectedRevision"],
-  move_cell: ["operationId", "commandSequence", "expectedDocumentRevision"],
-  rename_cell: ["operationId", "commandSequence", "expectedDocumentRevision", "expectedRevision"],
-  disable_cell: ["operationId", "commandSequence", "expectedDocumentRevision", "expectedRevision"],
-  run_cell: ["operationId", "commandSequence", "expectedDocumentRevision"],
-  run_all: ["operationId", "commandSequence", "expectedDocumentRevision"],
-  run_stale: ["operationId", "commandSequence", "expectedDocumentRevision"],
-  interrupt: ["operationId", "commandSequence"],
-  get_value: ["operationId", "commandSequence"],
-  set_widget: ["operationId", "commandSequence", "expectedRevision"],
-  save: ["operationId", "commandSequence", "expectedDocumentRevision"],
-  apply_transaction: ["operationId", "commandSequence", "expectedDocumentRevision"],
-  edit_cell_ranges: ["operationId", "commandSequence", "expectedDocumentRevision", "expectedRevision"],
-  select_r: ["operationId", "commandSequence", "expectedDocumentRevision"],
-  set_runtime: ["operationId", "commandSequence", "expectedDocumentRevision"],
-  reload_source: ["operationId", "commandSequence", "expectedDocumentRevision"],
-  shutdown: ["operationId", "commandSequence", "expectedDocumentRevision"],
-  restart: ["operationId", "commandSequence"],
-  format: ["operationId", "commandSequence", "expectedDocumentRevision"],
-  save_as: ["operationId", "commandSequence", "expectedDocumentRevision"],
-  table_page: ["operationId", "commandSequence"],
-  materialize_output: ["operationId", "commandSequence"],
-  set_config: ["operationId", "commandSequence", "expectedDocumentRevision"],
-  set_layout: ["operationId", "commandSequence", "expectedDocumentRevision"],
-  set_app: ["operationId", "commandSequence", "expectedDocumentRevision"],
-  packages_declare: ["operationId", "commandSequence", "expectedDocumentRevision"],
-  packages_install: ["operationId", "commandSequence", "expectedDocumentRevision"],
-  publish: ["operationId", "commandSequence", "expectedDocumentRevision"],
-  upload_file: ["operationId", "commandSequence"],
+  add_cell: ["requestId", "sessionEpoch", "expectedDocumentRevision"],
+  edit_cell: ["requestId", "sessionEpoch", "expectedDocumentRevision", "expectedRevision"],
+  delete_cell: ["requestId", "sessionEpoch", "expectedDocumentRevision", "expectedRevision"],
+  move_cell: ["requestId", "sessionEpoch", "expectedDocumentRevision"],
+  rename_cell: ["requestId", "sessionEpoch", "expectedDocumentRevision", "expectedRevision"],
+  disable_cell: ["requestId", "sessionEpoch", "expectedDocumentRevision", "expectedRevision"],
+  run_cell: ["requestId", "sessionEpoch", "expectedDocumentRevision"],
+  run_all: ["requestId", "sessionEpoch", "expectedDocumentRevision"],
+  run_stale: ["requestId", "sessionEpoch", "expectedDocumentRevision"],
+  interrupt: ["requestId", "sessionEpoch"],
+  get_value: ["requestId", "sessionEpoch"],
+  set_widget: ["requestId", "sessionEpoch", "expectedRevision"],
+  save: ["requestId", "sessionEpoch", "expectedDocumentRevision"],
+  apply_transaction: ["requestId", "sessionEpoch", "expectedDocumentRevision"],
+  edit_cell_ranges: ["requestId", "sessionEpoch", "expectedDocumentRevision", "expectedRevision"],
+  select_r: ["requestId", "sessionEpoch", "expectedDocumentRevision"],
+  set_runtime: ["requestId", "sessionEpoch", "expectedDocumentRevision"],
+  reload_source: ["requestId", "sessionEpoch", "expectedDocumentRevision"],
+  shutdown: ["requestId", "sessionEpoch", "expectedDocumentRevision"],
+  restart: ["requestId", "sessionEpoch"],
+  format: ["requestId", "sessionEpoch", "expectedDocumentRevision"],
+  save_as: ["requestId", "sessionEpoch", "expectedDocumentRevision"],
+  table_page: ["requestId", "sessionEpoch"],
+  materialize_output: ["requestId", "sessionEpoch"],
+  set_config: ["requestId", "sessionEpoch", "expectedDocumentRevision"],
+  set_layout: ["requestId", "sessionEpoch", "expectedDocumentRevision"],
+  set_app: ["requestId", "sessionEpoch", "expectedDocumentRevision"],
+  packages_declare: ["requestId", "sessionEpoch", "expectedDocumentRevision"],
+  packages_install: ["requestId", "sessionEpoch", "expectedDocumentRevision"],
+  publish: ["requestId", "sessionEpoch", "expectedDocumentRevision"],
+  upload_file: ["requestId", "sessionEpoch"],
 };
 
 function assertToolCatalog(tools: Array<{ name: string; inputSchema: { properties?: Record<string, unknown>; required?: string[] } }>): void {
@@ -148,7 +146,6 @@ const artifactStore: AlderMcpOptions["artifactStore"] = {
 function makeController(overrides: Partial<McpControllerAdapter> = {}): McpControllerAdapter {
   return {
     snapshot: () => snapshot,
-    recover: () => { throw new Error("recovery is not used by this contract test"); },
     query: query => ({
       epoch: snapshot.epoch,
       documentRevision: snapshot.documentRevision,
@@ -169,55 +166,23 @@ function makeController(overrides: Partial<McpControllerAdapter> = {}): McpContr
           sidecars: {},
           runtime: snapshot.runtime,
           capabilities: [],
-          nextCommandSequence: 1,
           activeClientIds: ["client-1"],
           cells: snapshot.cells.map(candidate => ({ id: candidate.id, type: candidate.type, options: candidate.options, revision: candidate.revision })),
         }
+        : query.type === "state"
+          ? { kind: "snapshot", epoch: snapshot.epoch, cursor: snapshot.cursor, snapshot }
         : query.type === "cells"
           ? snapshot.cells.slice(query.offset ?? 0, (query.offset ?? 0) + (query.limit ?? snapshot.cells.length))
           : null,
     } as unknown as HostQueryResult),
     subscribe: () => () => undefined,
-    dispatch: async (command) => {
-      const operation: OperationRecord = {
-        id: command.operationId,
-        clientId: command.clientId,
-        commandSequence: command.commandSequence,
-        kind: command.type === "save" ? "save" : "transaction",
-        status: "accepted",
-        documentRevision: snapshot.documentRevision,
-        runId: null,
-        result: null,
-        error: null,
-        acceptedAt: 10,
-      };
-      return {
-        epoch: snapshot.epoch,
-        clientId: command.clientId,
-        operationId: command.operationId,
-        commandSequence: command.commandSequence,
-        accepted: true,
-        sequenceConsumed: true,
-        operation,
-        error: null,
-        nextCommandSequence: command.commandSequence + 1,
-      };
-    },
-    awaitOperation: async (id) => ({
-      id,
-      clientId: "client-1",
-      commandSequence: 1,
-      kind: "save",
-      status: "done",
-      documentRevision: snapshot.documentRevision,
-      runId: null,
-      result: { saved: true },
-      error: null,
-      acceptedAt: 10,
-      settledAt: 11,
-    }),
+    dispatch: async command => completed(command.requestId, { saved: true }),
     ...overrides,
   };
+}
+
+function completed(requestId: string, result: CommandResult["result"] = null, error: CommandResult["error"] = null): CommandResult {
+  return { requestId, epoch: snapshot.epoch, version: snapshot.version, documentRevision: snapshot.documentRevision, cursor: snapshot.cursor, result, error };
 }
 
 function catalogOptions(controller: McpControllerAdapter, store: AlderMcpOptions["artifactStore"] = artifactStore, extras: Partial<AlderMcpOptions> = {}): AlderMcpOptions {
@@ -338,7 +303,6 @@ test("createMcpServer initializes over the official in-memory transport and list
     const templates = await connection.client.listResourceTemplates();
     assert.deepEqual(templates.resourceTemplates.map(template => template.uriTemplate).sort(), [
       "alder://cell/{cell}/outputs",
-      "alder://operations/{operation}",
       "alder://outputs/{output}",
     ]);
   } finally {
@@ -364,11 +328,10 @@ test("MCP reads and interrupt remain live during startup and resource updates re
     ]);
     assert.equal(state.isError, false);
     const stateResult = (state.structuredContent as { result?: Record<string, unknown> } | undefined)?.result;
-    assert.equal(stateResult?.protocol, "alder-host-v2");
-    assert.equal(Object.hasOwn(stateResult ?? {}, "snapshot"), false);
-    assert.deepEqual(stateResult?.cells, [{ id: "cell-1", type: "code", options: {}, revision: 0 }]);
+    assert.equal(stateResult?.kind, "snapshot");
+    assert.deepEqual((stateResult?.snapshot as HostSnapshot).cells, snapshot.cells);
     const interrupted = await Promise.race([
-      connection.client.callTool({ name: "interrupt", arguments: { operationId: "interrupt-startup", commandSequence: 1 } }),
+      connection.client.callTool({ name: "interrupt", arguments: { requestId: "interrupt-startup", sessionEpoch: snapshot.epoch } }),
       new Promise<never>((_, reject) => setTimeout(() => reject(new Error("interrupt blocked on startup")), 250)),
     ]);
     assert.equal(interrupted.isError, false);
@@ -425,8 +388,8 @@ test("MCP host-only mutations bypass pending runtime startup", async () => {
       connection.client.callTool({
         name: "add_cell",
         arguments: {
-          operationId: "add-while-starting",
-          commandSequence: 1,
+          requestId: "add-while-starting",
+          sessionEpoch: snapshot.epoch,
           expectedDocumentRevision: snapshot.documentRevision,
           after: null,
           body: ["x <- 1"],
@@ -449,7 +412,7 @@ test("MCP runtime mutations follow the current readiness generation", async () =
   try {
     const pending = connection.client.callTool({
       name: "run_all",
-      arguments: { operationId: "wait-runtime", commandSequence: 1, expectedDocumentRevision: snapshot.documentRevision, wait: false },
+      arguments: { requestId: "wait-runtime", sessionEpoch: snapshot.epoch, expectedDocumentRevision: snapshot.documentRevision },
     });
     const remainsPending = await Promise.race([
       pending.then(() => false),
@@ -464,7 +427,7 @@ test("MCP runtime mutations follow the current readiness generation", async () =
     readiness.reject(new Error("replacement runtime failed"));
     const failed = await connection.client.callTool({
       name: "run_all",
-      arguments: { operationId: "failed-runtime", commandSequence: 2, expectedDocumentRevision: snapshot.documentRevision, wait: false },
+      arguments: { requestId: "failed-runtime", sessionEpoch: snapshot.epoch, expectedDocumentRevision: snapshot.documentRevision },
     });
     assert.equal(failed.isError, true);
     assert.equal(failed.content[0]?.text, "replacement runtime failed");
@@ -473,7 +436,7 @@ test("MCP runtime mutations follow the current readiness generation", async () =
     readiness.resolve();
     const recovered = await connection.client.callTool({
       name: "run_all",
-      arguments: { operationId: "recovered-runtime", commandSequence: 3, expectedDocumentRevision: snapshot.documentRevision, wait: false },
+      arguments: { requestId: "recovered-runtime", sessionEpoch: snapshot.epoch, expectedDocumentRevision: snapshot.documentRevision },
     });
     assert.equal(recovered.isError, false);
   } finally {
@@ -493,8 +456,8 @@ test("MCP select_r remains callable when initial runtime startup fails", async (
     const result = await connection.client.callTool({
       name: "select_r",
       arguments: {
-        operationId: "select-r-1",
-        commandSequence: 1,
+        requestId: "select-r-1",
+        sessionEpoch: snapshot.epoch,
         rscript: "/usr/bin/Rscript",
         persistDefault: false,
         expectedDocumentRevision: snapshot.documentRevision,
@@ -532,7 +495,7 @@ test("MCP revocation after progress prevents dispatch", async () => {
   try {
     const pending = connection.client.callTool({
       name: "run_all",
-      arguments: { operationId: "revoked-run", commandSequence: 1, expectedDocumentRevision: snapshot.documentRevision, wait: false },
+      arguments: { requestId: "revoked-run", sessionEpoch: snapshot.epoch, expectedDocumentRevision: snapshot.documentRevision },
     }, undefined, { onprogress: () => undefined });
     await progressSent.promise;
     const closing = connection.server.close().then(() => { closed = true; });
@@ -572,7 +535,7 @@ test("MCP lease revocation after progress prevents dispatch", async () => {
   try {
     const pending = connection.client.callTool({
       name: "run_all",
-      arguments: { operationId: "revoked-run-authoritative", commandSequence: 1, expectedDocumentRevision: snapshot.documentRevision, wait: false },
+      arguments: { requestId: "revoked-run-authoritative", sessionEpoch: snapshot.epoch, expectedDocumentRevision: snapshot.documentRevision },
       _meta: { progressToken: "revocation-barrier" },
     }, undefined, { onprogress: () => undefined });
     await progressSent.promise;
@@ -591,19 +554,7 @@ test("MCP shutdown sends its settled response before closing the transport", asy
   let connection: InMemoryConnection | undefined;
   let shutdownCalled = false;
   const controller = makeController({
-    awaitOperation: async id => ({
-      id,
-      clientId: "client-1",
-      commandSequence: 1,
-      kind: "shutdown",
-      status: "done",
-      documentRevision: snapshot.documentRevision,
-      runId: null,
-      result: { closing: true },
-      error: null,
-      acceptedAt: 10,
-      settledAt: 11,
-    }),
+    dispatch: async command => completed(command.requestId, { closing: true }),
   });
   connection = await connectInMemory(controller, artifactStore, {
     onShutdown: () => {
@@ -615,8 +566,8 @@ test("MCP shutdown sends its settled response before closing the transport", asy
     const result = await connection.client.callTool({
       name: "shutdown",
       arguments: {
-        operationId: "shutdown-1",
-        commandSequence: 1,
+        requestId: "shutdown-1",
+        sessionEpoch: snapshot.epoch,
         expectedDocumentRevision: snapshot.documentRevision,
         expectedClientIds: [],
         confirmed: true,
@@ -630,96 +581,42 @@ test("MCP shutdown sends its settled response before closing the transport", asy
   }
 });
 
-test("MCP cancellation interrupts the matching controller run", async () => {
+test("MCP uncertain completion retains identity and only retries when explicitly called", async () => {
   const commands: HostCommand[] = [];
-  const settled = withResolvers<OperationRecord>();
-  let current: OperationRecord | undefined;
-  const controller = makeController({
-    operation: id => current?.id === id ? current : undefined,
-    dispatch: async command => {
-      commands.push(command);
-      const operation = {
-        id: command.operationId,
-        clientId: command.clientId,
-        commandSequence: command.commandSequence,
-        kind: command.type === "interrupt" ? "interrupt" : "run",
-        status: command.type === "interrupt" ? "done" : "running",
-        documentRevision: snapshot.documentRevision,
-        runId: command.type === "interrupt" ? null : "run-1",
-        result: null,
-        error: null,
-        acceptedAt: 10,
-        ...(command.type === "interrupt" ? { settledAt: 11 } : {}),
-      } as unknown as OperationRecord;
-      if (command.type !== "interrupt") {
-        current = { ...operation, id: command.operationId, status: "running", runId: "run-1" };
-        return { epoch: snapshot.epoch, clientId: command.clientId, operationId: command.operationId, commandSequence: command.commandSequence, accepted: true, sequenceConsumed: true, operation: current, error: null, nextCommandSequence: command.commandSequence + 1 };
-      }
-      current = { ...current!, status: "interrupted", error: { code: "interrupted", message: "run interrupted" }, settledAt: 11 } as unknown as OperationRecord;
-      settled.resolve(current);
-      return { epoch: snapshot.epoch, clientId: command.clientId, operationId: command.operationId, commandSequence: command.commandSequence, accepted: true, sequenceConsumed: true, operation, error: null, nextCommandSequence: command.commandSequence + 1 };
-    },
-    awaitOperation: async () => settled.promise,
-  });
-  const connection = await connectInMemory(controller);
-  const abort = new AbortController();
+  const done = withResolvers<CommandResult>();
+  const controller = makeController({ dispatch: command => { commands.push(command); return done.promise; } });
+  const connection = await connectInMemory(controller, artifactStore, { commandTimeoutMs: 10 });
+  const args = { requestId: "uncertain-run", sessionEpoch: snapshot.epoch, expectedDocumentRevision: 3 };
   try {
-    const pending = connection.client.callTool({ name: "run_all", arguments: { operationId: "run-op", commandSequence: 1, expectedDocumentRevision: 3 } }, undefined, { signal: abort.signal });
-    await new Promise(resolve => setImmediate(resolve));
-    abort.abort();
-    await assert.rejects(pending);
-    await new Promise(resolve => setTimeout(resolve, 20));
-    const interrupt = commands.find(command => command.type === "interrupt");
-    assert.equal(interrupt?.runId, "run-1");
-  } finally {
-    await closeInMemory(connection);
-  }
+    const first = await connection.client.callTool({ name: "run_all", arguments: args });
+    assert.equal(first.isError, true);
+    assert.equal(first.structuredContent?.requestId, args.requestId);
+    assert.equal(first.structuredContent?.epoch, args.sessionEpoch);
+    assert.equal((first.structuredContent?.error as { code: string }).code, "command_uncertain");
+    assert.equal(commands.length, 1);
+    done.resolve(completed(args.requestId, { ran: ["cell-1"] }));
+    const second = await connection.client.callTool({ name: "run_all", arguments: args });
+    assert.equal(second.isError, false);
+    assert.deepEqual(second.structuredContent, completed(args.requestId, { ran: ["cell-1"] }));
+    assert.deepEqual(commands[0], commands[1]);
+  } finally { await closeInMemory(connection); }
 });
-test("MCP cancellation interrupts a run during preparation without waiting for a run id", async () => {
-  const commands: HostCommand[] = [];
-  const settled = withResolvers<OperationRecord>();
-  let current: OperationRecord | undefined;
-  const controller = makeController({
-    operation: id => current?.id === id ? current : undefined,
-    dispatch: async command => {
-      commands.push(command);
-      if (command.type !== "interrupt") {
-        current = {
-          id: command.operationId,
-          clientId: command.clientId,
-          commandSequence: command.commandSequence,
-          kind: "run",
-          status: "running",
-          documentRevision: snapshot.documentRevision,
-          runId: null,
-          result: null,
-          error: null,
-          acceptedAt: 10,
-        } as unknown as OperationRecord;
-        return { epoch: snapshot.epoch, clientId: command.clientId, operationId: command.operationId, commandSequence: command.commandSequence, accepted: true, sequenceConsumed: true, operation: current!, error: null, nextCommandSequence: command.commandSequence + 1 };
-      }
-      assert.equal(command.runId, undefined);
-      current = { ...current!, status: "interrupted", error: { code: "interrupted", message: "run interrupted" }, settledAt: 11 } as unknown as OperationRecord;
-      settled.resolve(current);
-      return { epoch: snapshot.epoch, clientId: command.clientId, operationId: command.operationId, commandSequence: command.commandSequence, accepted: true, sequenceConsumed: true, operation: current, error: null, nextCommandSequence: command.commandSequence + 1 };
-    },
-    awaitOperation: async () => settled.promise,
-  });
+
+test("MCP passes an old epoch unchanged so the backend can reject an uncertain retry", async () => {
+  let dispatched: HostCommand | undefined;
+  const controller = makeController({ dispatch: async command => {
+    dispatched = command;
+    return completed(command.requestId, null, { code: "session_replaced", message: "The original session ended" });
+  } });
   const connection = await connectInMemory(controller);
-  const abort = new AbortController();
   try {
-    const pending = connection.client.callTool({ name: "run_all", arguments: { operationId: "prepare-run", commandSequence: 1, expectedDocumentRevision: 3 } }, undefined, { signal: abort.signal });
-    await new Promise<void>(resolve => setImmediate(resolve));
-    abort.abort();
-    await assert.rejects(pending);
-    await new Promise<void>(resolve => setImmediate(resolve));
-    const interrupt = commands.find(command => command.type === "interrupt");
-    assert.ok(interrupt);
-    assert.equal(interrupt?.runId, undefined);
-  } finally {
-    await closeInMemory(connection);
-  }
+    const result = await connection.client.callTool({ name: "run_all", arguments: { requestId: "prior-run", sessionEpoch: "prior-epoch", expectedDocumentRevision: 3 } });
+    assert.equal(dispatched?.sessionEpoch, "prior-epoch");
+    assert.equal(result.isError, true);
+    assert.equal((result.structuredContent?.error as { code: string }).code, "session_replaced");
+  } finally { await closeInMemory(connection); }
 });
+
 test("MCP forwards logical Markdown range edits without re-encoding them", async () => {
   const markdownCell = { ...cell, type: "markdown", body: ["# # Heading", "#", "# Body text", ""] } as unknown as HostSnapshot["cells"][number];
   let dispatched: HostCommand | undefined;
@@ -730,7 +627,7 @@ test("MCP forwards logical Markdown range edits without re-encoding them", async
   const connection = await connectInMemory(controller);
   const edits = [{ start: { line: 0, character: 2 }, end: { line: 0, character: 9 }, text: "Renamed" }];
   try {
-    const result = await connection.client.callTool({ name: "edit_cell_ranges", arguments: { operationId: "range-1", commandSequence: 1, expectedDocumentRevision: 3, cell: "cell-1", expectedRevision: 0, edits } });
+    const result = await connection.client.callTool({ name: "edit_cell_ranges", arguments: { requestId: "range-1", sessionEpoch: snapshot.epoch, expectedDocumentRevision: 3, cell: "cell-1", expectedRevision: 0, edits } });
     assert.equal(result.isError, false);
     assert.equal(dispatched?.type, "transaction");
     if (dispatched?.type !== "transaction") throw new Error("expected transaction command");
@@ -738,126 +635,37 @@ test("MCP forwards logical Markdown range edits without re-encoding them", async
   } finally { await closeInMemory(connection); }
 });
 
-test("createMcpServer maps query and effect tools to exact structured envelopes", async () => {
+test("MCP returns completed effects directly and reads current snapshots", async () => {
   let dispatched: HostCommand | undefined;
   let queried: unknown;
-  const acceptedOperation: OperationRecord = {
-    id: "op-save",
-    clientId: "client-1",
-    commandSequence: 1,
-    kind: "save",
-    status: "accepted",
-    documentRevision: snapshot.documentRevision,
-    runId: null,
-    result: null,
-    error: null,
-    acceptedAt: 10,
-  };
-  const admission: CommandAdmission = {
-    epoch: snapshot.epoch,
-    clientId: acceptedOperation.clientId,
-    operationId: acceptedOperation.id,
-    commandSequence: acceptedOperation.commandSequence,
-    accepted: true,
-    sequenceConsumed: true,
-    operation: acceptedOperation,
-    error: null,
-    nextCommandSequence: 2,
-  };
-  const settledOperation: OperationRecord = {
-    ...acceptedOperation,
-    status: "done",
-    result: { saved: true },
-    settledAt: 11,
-  };
+  const current = { kind: "snapshot", epoch: snapshot.epoch, cursor: snapshot.cursor, snapshot };
   const controller = makeController({
-    query: query => {
-      queried = query;
-      return {
-        epoch: snapshot.epoch,
-        documentRevision: snapshot.documentRevision,
-        cursor: snapshot.cursor,
-        result: query.type === "notebook"
-          ? { protocol: "alder-host-v2", epoch: snapshot.epoch, documentRevision: snapshot.documentRevision, cursor: snapshot.cursor, cells: [{ id: "cell-1", type: "code", options: {}, revision: 0 }] }
-          : { cells: [cell] },
-      } as unknown as HostQueryResult;
-    },
-    dispatch: async command => {
-      dispatched = command;
-      return admission;
-    },
-    awaitOperation: async id => {
-      assert.equal(id, acceptedOperation.id);
-      return settledOperation;
-    },
+    query: query => { queried = query; return { epoch: snapshot.epoch, documentRevision: snapshot.documentRevision, cursor: snapshot.cursor, result: current } as unknown as HostQueryResult; },
+    dispatch: async command => { dispatched = command; return completed(command.requestId, { saved: true }); },
   });
   const connection = await connectInMemory(controller);
   try {
-    const queryResult = await connection.client.callTool({ name: "list_cells", arguments: {} });
-    const queryEnvelope = { epoch: snapshot.epoch, documentRevision: snapshot.documentRevision, cursor: snapshot.cursor, result: { cells: [cell] } };
-    assert.deepEqual(queryResult.structuredContent, queryEnvelope);
-    assert.equal(queryResult.isError, false);
-    assert.deepEqual(queried, { type: "cells" });
-    const stateResult = await connection.client.callTool({ name: "notebook_state", arguments: {} });
-    assert.deepEqual(stateResult.structuredContent, {
-      epoch: snapshot.epoch,
-      documentRevision: snapshot.documentRevision,
-      cursor: snapshot.cursor,
-      result: { protocol: "alder-host-v2", epoch: snapshot.epoch, documentRevision: snapshot.documentRevision, cursor: snapshot.cursor, cells: [{ id: "cell-1", type: "code", options: {}, revision: 0 }] },
-    });
-    assert.deepEqual(queried, { type: "notebook" });
-
-    const effectResult = await connection.client.callTool({
-      name: "save",
-      arguments: { operationId: acceptedOperation.id, commandSequence: 1, expectedDocumentRevision: snapshot.documentRevision },
-    });
-    const effectEnvelope = {
-      epoch: snapshot.epoch,
-      documentRevision: snapshot.documentRevision,
-      cursor: snapshot.cursor,
-      operation: settledOperation,
-      result: { admission, value: settledOperation.result },
-      error: settledOperation.error,
-    };
-    assert.deepEqual(dispatched, {
-      operationId: acceptedOperation.id,
-      clientId: acceptedOperation.clientId,
-      commandSequence: acceptedOperation.commandSequence,
-      sessionEpoch: snapshot.epoch,
-      type: "save",
-      expectedDocumentRevision: snapshot.documentRevision,
-    });
-    assert.deepEqual(effectResult.structuredContent, effectEnvelope);
-    assert.equal(effectResult.isError, false);
-  } finally {
-    await closeInMemory(connection);
-  }
+    const state = await connection.client.callTool({ name: "notebook_state", arguments: {} });
+    assert.deepEqual(queried, { type: "state" });
+    assert.deepEqual(state.structuredContent?.result, current);
+    const result = await connection.client.callTool({ name: "save", arguments: { requestId: "save-1", sessionEpoch: snapshot.epoch, expectedDocumentRevision: 3 } });
+    assert.deepEqual(dispatched, { requestId: "save-1", clientId: "client-1", sessionEpoch: snapshot.epoch, type: "save", expectedDocumentRevision: 3 });
+    assert.equal(result.isError, false);
+    assert.deepEqual(result.structuredContent, completed("save-1", { saved: true }));
+  } finally { await closeInMemory(connection); }
 });
 
-test("MCP recovery and event queries expose logical Markdown bodies", async () => {
+test("MCP snapshot queries expose logical Markdown bodies", async () => {
   const physicalMarkdown = { ...cell, type: "markdown", body: ["# Heading", "#", "# Body"] };
-  const controller = makeController({
-    query: query => ({
-      epoch: snapshot.epoch,
-      documentRevision: snapshot.documentRevision,
-      cursor: snapshot.cursor,
-      result: query.type === "events"
-        ? { kind: "replay", epoch: snapshot.epoch, cursor: 9, events: [{ payload: { cell: physicalMarkdown } }] }
-        : { kind: "snapshot", epoch: snapshot.epoch, cursor: 9, snapshot: { ...snapshot, cells: [physicalMarkdown] } },
-    } as unknown as HostQueryResult),
-  });
+  const controller = makeController({ query: () => ({ epoch: snapshot.epoch, documentRevision: snapshot.documentRevision, cursor: snapshot.cursor,
+    result: { kind: "snapshot", epoch: snapshot.epoch, cursor: 9, snapshot: { ...snapshot, cells: [physicalMarkdown] } },
+  } as unknown as HostQueryResult) });
   const connection = await connectInMemory(controller);
   try {
-    const events = await connection.client.callTool({ name: "read_events", arguments: { epoch: null, cursor: null } });
-    const eventBody = ((events.structuredContent as { result: { events: Array<{ payload: { cell: { body: string[] } } }> } }).result.events[0]!.payload.cell.body);
-    assert.deepEqual(eventBody, ["Heading", "", "Body"]);
-
-    const recovery = await connection.client.callTool({ name: "recovery_state", arguments: {} });
-    const recoveryBody = ((recovery.structuredContent as { result: { snapshot: { cells: Array<{ body: string[] }> } } }).result.snapshot.cells[0]!.body);
-    assert.deepEqual(recoveryBody, ["Heading", "", "Body"]);
-  } finally {
-    await closeInMemory(connection);
-  }
+    const result = await connection.client.callTool({ name: "notebook_state", arguments: {} });
+    const body = (result.structuredContent as { result: { snapshot: HostSnapshot } }).result.snapshot.cells[0]!.body;
+    assert.deepEqual(body, ["Heading", "", "Body"]);
+  } finally { await closeInMemory(connection); }
 });
 
 test("connectMcpStdio forwards official SDK initialization, catalog listing, and queries", async () => {
@@ -1028,7 +836,7 @@ test("MCP runtime startup timeout is bounded and ignores a late startup result",
   const connection = await connectInMemory(makeController(), artifactStore, { startup: startup.promise, startupTimeoutMs: 20 });
   try {
     const result = await Promise.race([
-      connection.client.callTool({ name: "run_all", arguments: { operationId: "timed-out-startup", commandSequence: 1, expectedDocumentRevision: snapshot.documentRevision, wait: false } }),
+      connection.client.callTool({ name: "run_all", arguments: { requestId: "timed-out-startup", sessionEpoch: snapshot.epoch, expectedDocumentRevision: snapshot.documentRevision } }),
       new Promise<never>((_, reject) => { const timer = setTimeout(() => reject(new Error("runtime startup timeout was not enforced")), 500); timer.unref(); }),
     ]);
     assert.equal(result.isError, true);
@@ -1036,7 +844,7 @@ test("MCP runtime startup timeout is bounded and ignores a late startup result",
 
     startup.resolve();
     await new Promise<void>(resolve => setImmediate(resolve));
-    const late = await connection.client.callTool({ name: "run_all", arguments: { operationId: "late-startup", commandSequence: 2, expectedDocumentRevision: snapshot.documentRevision, wait: false } });
+    const late = await connection.client.callTool({ name: "run_all", arguments: { requestId: "late-startup", sessionEpoch: snapshot.epoch, expectedDocumentRevision: snapshot.documentRevision } });
     assert.equal(late.isError, true);
     assert.equal(late.content[0]?.text, "MCP action timed out");
   } finally {

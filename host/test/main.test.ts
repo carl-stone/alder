@@ -6,7 +6,7 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { browserUrl, desktopUnavailableError, openSystemBrowser, parseCli, waitForRuntimeReadiness } from "../src/main.js";
+import { commandOnOwner, browserUrl, desktopUnavailableError, openSystemBrowser, parseCli, waitForRuntimeReadiness } from "../src/main.js";
 import type { HostSnapshot, SessionConnection } from "../src/protocol.js";
 
 test("headless CLI accepts paired external authentication options", () => {
@@ -169,4 +169,51 @@ test("desktop-unavailable CLI error gives explicit alternatives", () => {
   assert.equal(error.code, "desktop_unavailable");
   assert.match(error.message, /--browser/);
   assert.match(error.message, /--headless/);
+});
+
+
+test("CLI explicit retries require the original request, epoch and revision together", () => {
+  const retry = { requestId: "run-1", sessionEpoch: "epoch-1", expectedDocumentRevision: 3 };
+  assert.deepEqual(parseCli(["run", "notebook.R", "--request-id", retry.requestId, "--session-epoch", retry.sessionEpoch, "--document-revision", "3"]).retry, retry);
+  assert.throws(() => parseCli(["run", "notebook.R", "--request-id", "run-1"]), /must be supplied together/);
+  assert.throws(() => parseCli(["notebook.R", "--request-id", "run-1"]), /only valid for run or publish/);
+});
+
+test("CLI returns a completed command directly without polling receipts", async () => {
+  const requests: Array<{ path: string; body: unknown }> = [];
+  const reply = { requestId: "run-1", epoch: "epoch-1", documentRevision: 3, version: 4, cursor: 5, result: { ran: ["cell-1"] }, error: null };
+  const connection = { clientId: "agent-1", epoch: "epoch-1", request: async (path: string, init?: RequestInit) => {
+    requests.push({ path, body: JSON.parse(String(init?.body)) });
+    return Response.json(reply);
+  } } as unknown as SessionConnection;
+  const result = await commandOnOwner(connection, { type: "run", scope: "all" }, { requestId: "run-1", sessionEpoch: "epoch-1", expectedDocumentRevision: 3 });
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0]!.path, "/api/command");
+  assert.deepEqual(result, { ...reply, request: { type: "run", scope: "all", requestId: "run-1", sessionEpoch: "epoch-1", expectedDocumentRevision: 3, clientId: "agent-1" } });
+});
+
+test("CLI uncertain replies preserve the exact command for an explicit retry", async () => {
+  const sent: unknown[] = [];
+  const connection = { clientId: "agent-1", epoch: "epoch-1", request: async (_path: string, init?: RequestInit) => {
+    sent.push(JSON.parse(String(init?.body)));
+    throw new Error("connection closed");
+  } } as unknown as SessionConnection;
+  const identity = { requestId: "run-uncertain", sessionEpoch: "epoch-1", expectedDocumentRevision: 3 };
+  const result = await commandOnOwner(connection, { type: "run", scope: "all" }, identity);
+  assert.equal(sent.length, 1);
+  assert.deepEqual(sent[0], result.request);
+  assert.equal(result.error?.code, "command_uncertain");
+  assert.match(result.error!.message, /--request-id run-uncertain --session-epoch epoch-1 --document-revision 3/);
+  const retried = await commandOnOwner(connection, { type: "run", scope: "all" }, identity);
+  assert.deepEqual(retried.request, result.request);
+  assert.deepEqual(sent[1], sent[0]);
+});
+
+test("CLI refuses an uncertain run after the original backend epoch ended", async () => {
+  let requests = 0;
+  const connection = { clientId: "agent-2", epoch: "replacement-epoch", request: async () => { requests++; throw new Error("must not send"); } } as unknown as SessionConnection;
+  const result = await commandOnOwner(connection, { type: "run", scope: "all" }, { requestId: "prior-run", sessionEpoch: "old-epoch", expectedDocumentRevision: 3 });
+  assert.equal(requests, 0);
+  assert.equal(result.error?.code, "session_replaced");
+  assert.equal(result.request.sessionEpoch, "old-epoch");
 });

@@ -20,7 +20,7 @@ export interface McpHttpOptions {
   readonly artifactStore: ArtifactStoreBinding;
   readonly version?: string;
   readonly capabilities?: ServerCapabilities;
-  readonly operationTimeoutMs?: number;
+  readonly commandTimeoutMs?: number;
   readonly startup?: AlderMcpOptions["startup"];
   readonly runtimeReady?: AlderMcpOptions["runtimeReady"];
   readonly onShutdown?: AlderMcpOptions["onShutdown"];
@@ -267,12 +267,10 @@ async function makeSession(
     artifactStore: options.artifactStore,
     clientId: auth.clientId,
     sessionEpoch: options.controller.snapshot().epoch,
-    ...(auth.nextCommandSequence === null ? {} : { nextCommandSequence: auth.nextCommandSequence }),
-    ...(auth.updateNextCommandSequence === undefined ? {} : { onNextCommandSequence: auth.updateNextCommandSequence }),
     ...(auth.assertActive === undefined ? {} : { assertActive: auth.assertActive }),
     ...(options.version === undefined ? {} : { version: options.version }),
     ...(options.capabilities === undefined ? {} : { capabilities: options.capabilities }),
-    ...(options.operationTimeoutMs === undefined ? {} : { operationTimeoutMs: options.operationTimeoutMs }),
+    ...(options.commandTimeoutMs === undefined ? {} : { commandTimeoutMs: options.commandTimeoutMs }),
     ...(options.startup === undefined ? {} : { startup: options.startup }),
     ...(options.runtimeReady === undefined ? {} : { runtimeReady: options.runtimeReady }),
     ...(options.onShutdown === undefined ? {} : { onShutdown: options.onShutdown }),

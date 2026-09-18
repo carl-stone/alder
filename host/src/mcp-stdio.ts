@@ -40,7 +40,6 @@ type MessageHandler = (message: JSONRPCMessage) => Promise<void>;
 export interface McpInitializationMetadata {
   readonly clientId: string;
   readonly sessionEpoch: string;
-  readonly nextCommandSequence: number;
   readonly documentRevision: number;
   readonly capabilities: string[];
 }
