@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { fork } from "node:child_process";
 import { once } from "node:events";
-import { mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -93,7 +93,7 @@ if (process.env.ALDER_RECOVERY_CHILD) {
     } finally { await rm(directory, { recursive: true, force: true }); }
   });
 
-  test("periodic snapshot restores unsaved work after its process is killed", async () => {
+  test("periodic snapshot restores unsaved work after its process is killed", { timeout: 10_000 }, async () => {
     const directory = await realpath(await mkdtemp(join(tmpdir(), "alder-recovery-crash-")));
     const child = fork(fileURLToPath(import.meta.url), { execArgv: ["--import", "tsx"], cwd: resolve(dirname(fileURLToPath(import.meta.url)), ".."),
       env: { ...process.env, ALDER_RECOVERY_CHILD: directory }, stdio: ["ignore", "ignore", "pipe", "ipc"] });
@@ -193,6 +193,69 @@ if (process.env.ALDER_RECOVERY_CHILD) {
       await app.closed; app = undefined;
       assert.equal(await readFile(path, "utf8"), "# %%\nx <- 1\n");
     } finally { await app?.close(); await rm(directory, { recursive: true, force: true }); }
+  });
+
+
+  test("external changes keep the saved notebook authoritative and the unsaved draft recoverable", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "alder-document-conflict-")));
+    const path = join(directory, "notebook.R");
+    await writeFile(path, "# %%\nx <- 1\n");
+    let app: RunningHost | undefined;
+    try {
+      app = await startDocument(path, directory);
+      await edit(app, "x <- 2");
+      await app.close(); app = undefined;
+      await writeFile(path, "# %%\nx <- 99\n");
+      app = await startDocument(path, directory);
+      assert.deepEqual(app.controller.snapshot().cells[0]!.body, ["x <- 99"]);
+      assert.equal(app.controller.snapshot().dirty, false);
+      const recovery = await app.controller.query({ type: "recovery" });
+      assert.equal(recovery.result.branches.length, 1);
+      assert.equal(recovery.result.branches[0]!.state, "conflict");
+      await edit(app, "x <- 100");
+      await command(app, { type: "save" });
+      assert.equal(await readFile(path, "utf8"), "# %%\nx <- 100\n");
+      assert.equal((await app.controller.query({ type: "recovery" })).result.branches.length, 1);
+    } finally { await app?.close(); await rm(directory, { recursive: true, force: true }); }
+  });
+
+  test("slow R discovery does not block editing and is canceled when the document closes", { timeout: 10_000 }, async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "alder-document-r-start-")));
+    const path = join(directory, "notebook.R");
+    const rscript = join(directory, "slow-Rscript");
+    const pidPath = join(directory, "probe.pid");
+    await writeFile(path, "# %%\nx <- 1\n");
+    await mkdir(join(directory, "r-library/alder"), { recursive: true });
+    await writeFile(join(directory, "r-library/alder/DESCRIPTION"), "Package: alder\n");
+    await writeFile(rscript, `#!${process.execPath}\nrequire('node:fs').writeFileSync(${JSON.stringify(pidPath)}, String(process.pid)); setInterval(() => {}, 1000);\n`, { mode: 0o755 });
+    const applicationResources = resources(directory);
+    await writeFile(join(directory, "manifest.json"), JSON.stringify({ schemaVersion: 1, kind: "headless", applicationVersion: "0.1.0",
+      resources: { cliLauncher: "alder", hostEntry: "host.mjs", rendererDirectory: "renderer", workerDirectory: "worker", rLibraryDirectory: "r-library",
+        arkExecutable: "ark", airExecutable: "air", nodeExecutable: "node", electronEntry: null } }));
+    let app: RunningHost | undefined;
+    let probePid: number | undefined;
+    try {
+      app = await startHost({ path, resources: applicationResources, rscript, recoveryDirectory: join(directory, "recovery"),
+        session: { runtimeDirectory: join(directory, "sessions") }, runOnStartup: false });
+      const deadline = Date.now() + 3_000;
+      while (probePid === undefined && Date.now() < deadline) {
+        probePid = await readFile(pidPath, "utf8").then(Number).catch(() => undefined);
+        if (probePid === undefined) await new Promise(resolve => setTimeout(resolve, 10));
+      }
+      assert.ok(probePid);
+      await edit(app, "x <- 42");
+      await command(app, { type: "save" });
+      await app.close(); app = undefined;
+      const stopped = Date.now() + 1_000;
+      const alive = () => { try { process.kill(probePid!, 0); return true; } catch { return false; } };
+      while (alive() && Date.now() < stopped) await new Promise(resolve => setTimeout(resolve, 10));
+      assert.equal(alive(), false);
+      assert.equal(await readFile(path, "utf8"), "# %%\nx <- 42\n");
+    } finally {
+      await app?.close();
+      if (probePid !== undefined) { try { process.kill(probePid); } catch {} }
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
 }

@@ -258,6 +258,7 @@ async function startNotebookHost(
   let runtimeError: unknown = null;
   let runtimeBootstrapGeneration = 0;
   let runtimeBootstrap: Promise<void> | undefined;
+  let runtimeAbort: AbortController | undefined;
   let startRuntime: (restart?: boolean) => void = () => {};
   let recoverySidecarError: { kind: "config" | "layout" | "packages"; error: unknown } | null = null;
   let engineIdentity: EngineHandshake | null = null;
@@ -374,6 +375,7 @@ async function startNotebookHost(
 
   const close = (): Promise<void> => closing ??= (async () => {
     publishAbort.abort();
+    runtimeAbort?.abort();
     await Promise.allSettled([...activePublishes]);
     if (ownershipCompromise !== undefined && compromiseTeardown === undefined && emergencyTeardown !== undefined) compromiseTeardown = emergencyTeardown();
     await compromiseTeardown?.catch(() => undefined);
@@ -1249,6 +1251,7 @@ async function startNotebookHost(
         refreshPackageEnvironment: async (): Promise<REnvironment> => {
           const refreshGeneration = runtimeBootstrapGeneration;
           const refreshed = await resolveREnvironment({
+            signal: runtimeAbort?.signal,
             rscript: selectedRscript,
             projectDirectory: notebookDirectory,
             resources: options.resources,
@@ -1285,11 +1288,15 @@ async function startNotebookHost(
         service: async (command, payload) => {
           if (command === "r.select") {
             const selectionGeneration = ++runtimeBootstrapGeneration;
+            runtimeAbort?.abort();
+            runtimeAbort = new AbortController();
+            const selectionSignal = runtimeAbort.signal;
             resetRuntimeReady();
             const resolveSelectionReady = resolveRuntimeReady;
             const rejectSelectionReady = rejectRuntimeReady;
             try {
             const selected = await resolveREnvironment({
+              signal: selectionSignal,
               rscript: z.string().min(1).parse(payload.rscript),
               projectDirectory: notebookDirectory,
               resources: options.resources,
@@ -1540,6 +1547,9 @@ async function startNotebookHost(
     const connectionOrigin = initialOrigin(address.host, address.port);
     await ownership.publishReady(connectionOrigin, { host: address.host, port: address.port, origin: connectionOrigin, browserOrigin: address.origin });
     startRuntime = (restart = false): void => {
+      runtimeAbort?.abort();
+      runtimeAbort = new AbortController();
+      const bootstrapSignal = runtimeAbort.signal;
       const bootstrapGeneration = ++runtimeBootstrapGeneration;
       resetRuntimeReady();
       const resolveBootstrapReady = resolveRuntimeReady;
@@ -1551,6 +1561,7 @@ async function startNotebookHost(
         let nextManager: PackageManager;
         try {
           selected = await resolveREnvironment({
+            signal: bootstrapSignal,
             rscript: selectedRscript,
             projectDirectory: bootstrapDirectory,
             resources: options.resources,
