@@ -118,14 +118,19 @@ export class NativeRecoveryStore {
     });
   }
 
-  async list(keyId: string, prefix: string): Promise<Array<{ name: string; value: unknown }>> {
+  async list(keyId: string, prefix: string): Promise<{ records: Array<{ name: string; value: unknown }>; warning?: string }> {
     if (!["", "cursor", "draft:", "branch:"].includes(prefix)) throw new DesktopRecoveryError("desktop_recovery_invalid", "Invalid recovery record prefix");
     const directory = await this.directory(keyId);
     const records: Array<{ name: string; value: unknown }> = [];
+    let warning: string | undefined;
     for (const file of (await readdir(directory)).filter(name => RECORD_FILE.test(name)).sort()) {
-      const record = await this.readRecord(join(directory, file));
-      if (record?.name.startsWith(prefix)) records.push(record);
+      try {
+        const record = await this.readRecord(join(directory, file));
+        if (record?.name.startsWith(prefix)) records.push(record);
+      } catch {
+        warning = "Some recovery records could not be read and were retained.";
+      }
     }
-    return records;
+    return { records, ...(warning === undefined ? {} : { warning }) };
   }
 }

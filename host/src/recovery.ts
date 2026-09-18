@@ -281,14 +281,32 @@ export class RecoveryWriter {
     const existing = await writer.load();
     if (existing.pending) await writer.forkBranch();
     for (const [id, branch] of this.branches) writer.branches.set(id, clone(branch));
+    const destinationKey = writer.recoveryKey;
     writer.recoveryKey = this.recoveryKey;
     writer.update(target.baseline);
     let adopted = false;
+    let aborted = false;
     return {
       writer, state: writer.state(),
       publish: async () => { await writer.flush(); },
-      adopt: () => { adopted = true; },
-      abort: async () => { if (!adopted) await writer.close(); },
+      adopt: () => {
+        if (adopted) return;
+        if (aborted) throw new RecoveryError("recovery_invalid", "Recovery rebind was aborted");
+        adopted = true;
+        // Renderer drafts follow Save As. Reopening the source needs a distinct identity.
+        if (writer.directory !== this.directory) {
+          this.recoveryKey = randomBytes(32).toString("base64url");
+          this.changed();
+          void this.flush();
+        }
+      },
+      abort: async () => {
+        if (adopted || aborted) return;
+        aborted = true;
+        writer.recoveryKey = destinationKey;
+        writer.changed();
+        await writer.close();
+      },
     };
   }
 

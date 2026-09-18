@@ -31,13 +31,21 @@ async function temporary(): Promise<string> { return realpath(await mkdtemp(join
 test("desktop drafts, branches and cursor survive a new renderer origin and native store instance", async () => {
   const directory = await temporary();
   try {
-    const renderer = new DesktopRecoveryStore(keyId, bridge(new NativeRecoveryStore(directory)));
+    const pending: Promise<unknown>[] = [];
+    const call = bridge(new NativeRecoveryStore(directory));
+    const renderer = new DesktopRecoveryStore(keyId, request => {
+      const operation = call(request);
+      pending.push(operation);
+      return operation;
+    });
     await renderer.save("old-epoch", 17);
+    await Promise.all(pending);
     await renderer.saveDraft(draft);
     await renderer.saveBranch("before-crash", draft);
     // A replacement renderer receives only the stable key; its origin is deliberately irrelevant.
     const reopened = new DesktopRecoveryStore(keyId, bridge(new NativeRecoveryStore(directory)));
-    assert.deepEqual(await reopened.load(), { epoch: "old-epoch", cursor: 17 });
+    assert.equal(await reopened.load(), null, "opening can request a fresh snapshot before disk cursor hydration");
+    assert.deepEqual(await new NativeRecoveryStore(directory).read(keyId, "cursor"), { epoch: "old-epoch", cursor: 17 });
     assert.deepEqual(await reopened.loadDraft(draft.clientId), draft);
     assert.deepEqual(await reopened.listDrafts(), [draft]);
     assert.deepEqual(await reopened.listBranches(), [{ id: "before-crash", draft }]);
@@ -117,4 +125,68 @@ test("the browser adapter reports unavailable storage without modifying its call
   const renderer = new DesktopRecoveryStore(keyId, async () => { throw new Error("Disk unavailable"); });
   await assert.rejects(renderer.saveDraft(draft), /Disk unavailable/);
   assert.deepEqual(draft, before);
+});
+
+
+test("rejected cursor storage leaves reconnect and event progress available", async () => {
+  const renderer = new DesktopRecoveryStore(keyId, async () => { throw new Error("Storage unavailable"); });
+  assert.equal(await renderer.load(), null);
+  await renderer.save("new-session", 1);
+  assert.deepEqual(await renderer.load(), { epoch: "new-session", cursor: 1 });
+  await renderer.save("new-session", 2);
+  assert.deepEqual(await renderer.load(), { epoch: "new-session", cursor: 2 });
+  await renderer.clear();
+  assert.equal(await renderer.load(), null);
+  await assert.rejects(renderer.saveDraft(draft), /Storage unavailable/);
+  await assert.rejects(renderer.saveBranch("branch", draft), /Storage unavailable/);
+});
+
+test("stalled cursor reads, writes and removals cannot block reconnect or events", { timeout: 2_000 }, async () => {
+  const never = new Promise<unknown>(() => {});
+  const renderer = new DesktopRecoveryStore(keyId, () => never);
+  assert.equal(await renderer.load(), null);
+  await renderer.save("new-session", 1);
+  await renderer.save("new-session", 2);
+  assert.deepEqual(await renderer.load(), { epoch: "new-session", cursor: 2 });
+  await renderer.clear();
+  assert.equal(await renderer.load(), null);
+  const removing = new DesktopRecoveryStore(keyId, () => never);
+  await removing.clear();
+  await removing.save("after-stalled-remove", 3);
+  assert.deepEqual(await removing.load(), { epoch: "after-stalled-remove", cursor: 3 });
+});
+
+test("late cursor hydration cannot replace progress made in memory", async () => {
+  let resolveRead!: (value: unknown) => void;
+  const delayed = new Promise<unknown>(resolve => { resolveRead = resolve; });
+  const renderer = new DesktopRecoveryStore(keyId, request => request.action === "read" ? delayed : Promise.resolve());
+  assert.equal(await renderer.load(), null);
+  await renderer.save("new-session", 5);
+  resolveRead({ epoch: "old-session", cursor: 99 });
+  await delayed;
+  assert.deepEqual(await renderer.load(), { epoch: "new-session", cursor: 5 });
+});
+
+test("damaged sibling records do not hide healthy drafts or branches and warn once", async () => {
+  const directory = await temporary();
+  try {
+    const native = new NativeRecoveryStore(directory);
+    await native.write(keyId, "draft:" + draft.clientId, draft);
+    await native.write(keyId, "branch:healthy", draft);
+    await native.write(keyId, "branch:damaged-json", draft);
+    const damagedPath = recordPath(directory, "branch:damaged-json");
+    await writeFile(damagedPath, "{broken", { mode: 0o600 });
+    await native.write(keyId, "draft:invalid-shape", { schemaVersion: 1 });
+    await native.write(keyId, "branch:invalid-shape", { schemaVersion: 1 });
+    const warnings: string[] = [];
+    const renderer = new DesktopRecoveryStore(keyId, bridge(native), message => warnings.push(message));
+    assert.deepEqual(await renderer.listDrafts(), [draft]);
+    assert.deepEqual(await renderer.listBranches(), [{ id: "healthy", draft }]);
+    assert.deepEqual(await renderer.listDrafts(), [draft]);
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0]!, /retained/);
+    assert.equal(await readFile(damagedPath, "utf8"), "{broken");
+    assert.deepEqual(await native.read(keyId, "draft:invalid-shape"), { schemaVersion: 1 });
+    assert.deepEqual(await native.read(keyId, "branch:invalid-shape"), { schemaVersion: 1 });
+  } finally { await rm(directory, { recursive: true, force: true }); }
 });

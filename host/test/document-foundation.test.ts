@@ -258,4 +258,43 @@ if (process.env.ALDER_RECOVERY_CHILD) {
     }
   });
 
+
+  test("Save As transfers the active recovery identity only when adopted and isolates its source", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "alder-recovery-rebind-")));
+    try {
+      const source = await RecoveryWriter.open({ rootDir: directory, key: "source", baseline: baseline("source\n") });
+      const destination = await RecoveryWriter.open({ rootDir: directory, key: "destination", baseline: baseline("destination\n") });
+      const activeKey = source.recoveryKey;
+      const destinationKey = destination.recoveryKey;
+      await destination.close();
+      const target = { rootDir: directory, key: "destination", baseline: baseline("source saved as destination\n", 1) };
+      const canceled = await source.prepareRebind(target);
+      await canceled.publish();
+      assert.equal(source.recoveryKey, activeKey);
+      await canceled.abort();
+      const afterAbort = await RecoveryWriter.open(target);
+      assert.equal(afterAbort.recoveryKey, destinationKey);
+      assert.equal(source.recoveryKey, activeKey);
+      await afterAbort.close();
+      const committed = await source.prepareRebind(target);
+      await committed.publish();
+      assert.equal(source.recoveryKey, activeKey);
+      committed.adopt();
+      assert.equal(committed.writer.recoveryKey, activeKey);
+      const rotated = source.recoveryKey;
+      assert.notEqual(rotated, activeKey);
+      committed.adopt();
+      await committed.abort();
+      assert.equal(source.recoveryKey, rotated, "repeated adoption and late abort do not rotate again");
+      await source.close();
+      await committed.writer.close();
+      const reopenedSource = await RecoveryWriter.open({ rootDir: directory, key: "source", baseline: baseline("source\n") });
+      const reopenedDestination = await RecoveryWriter.open(target);
+      assert.equal(reopenedSource.recoveryKey, rotated);
+      assert.equal(reopenedDestination.recoveryKey, activeKey);
+      await reopenedSource.close();
+      await reopenedDestination.close();
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
 }

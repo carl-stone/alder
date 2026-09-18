@@ -23,11 +23,17 @@ const draftSchema = z.object({
     commandSequence: z.number().int().positive().safe(), expectedDocumentRevision: revision,
     changes: z.array(documentChangeSchema).optional() }).nullable(),
 });
-const recordsSchema = z.array(z.object({ name: z.string(), value: z.unknown() }));
+const recordsSchema = z.object({ records: z.array(z.object({ name: z.string(), value: z.unknown() })), warning: z.string().optional() });
 
 /** A stable recovery key bridges renderer origins without giving the renderer file access. */
 export class DesktopRecoveryStore implements BrowserDraftStore {
-  constructor(private readonly keyId: string, private readonly call: DesktopRecoveryCall) {
+  private cursor: { epoch: string; cursor: number } | null = null;
+  private cursorLoaded = false;
+  private cursorRevision = 0;
+  private cursorWriting = false;
+  private warned = false;
+
+  constructor(private readonly keyId: string, private readonly call: DesktopRecoveryCall, private readonly onWarning?: (message: string) => void) {
     if (!/^[A-Za-z0-9_-]{43}$/.test(keyId)) throw new Error("Invalid desktop recovery identity");
   }
 
@@ -35,13 +41,53 @@ export class DesktopRecoveryStore implements BrowserDraftStore {
     return this.call({ keyId: this.keyId, action, ...extra });
   }
   async load(): Promise<{ epoch: string; cursor: number } | null> {
-    const value = await this.request("read", { name: "cursor" });
-    return value === null ? null : cursorSchema.parse(value);
+    if (!this.cursorLoaded) {
+      this.cursorLoaded = true;
+      const revision = this.cursorRevision;
+      void Promise.resolve().then(() => this.request("read", { name: "cursor" })).then(value => {
+        if (revision === this.cursorRevision && value !== null) this.cursor = cursorSchema.parse(value);
+      }).catch(() => {});
+    }
+    // A cursor only optimizes reconnect; a fresh snapshot always works without it.
+    return this.cursor === null ? null : { ...this.cursor };
   }
   async save(epoch: string, cursor: number): Promise<void> {
-    await this.request("write", { name: "cursor", value: cursorSchema.parse({ epoch, cursor }) });
+    this.cursor = cursorSchema.parse({ epoch, cursor });
+    this.cursorLoaded = true;
+    this.cursorRevision += 1;
+    this.persistCursor();
   }
-  async clear(): Promise<void> { await this.request("remove", { name: "cursor" }); }
+  async clear(): Promise<void> {
+    this.cursor = null;
+    this.cursorLoaded = true;
+    this.cursorRevision += 1;
+    this.persistCursor();
+  }
+
+  private persistCursor(): void {
+    if (this.cursorWriting) return;
+    this.cursorWriting = true;
+    const revision = this.cursorRevision;
+    const value = this.cursor;
+    void Promise.resolve().then(() => value === null
+      ? this.request("remove", { name: "cursor" })
+      : this.request("write", { name: "cursor", value })).catch(() => {}).finally(() => {
+        this.cursorWriting = false;
+        if (revision !== this.cursorRevision) this.persistCursor();
+      });
+  }
+
+  private warn(message: string): void {
+    if (this.warned) return;
+    this.warned = true;
+    this.onWarning?.(message);
+  }
+
+  private async inventory(prefix: string): Promise<Array<{ name: string; value: unknown }>> {
+    const result = recordsSchema.parse(await this.request("list", { prefix }));
+    if (result.warning) this.warn(result.warning);
+    return result.records;
+  }
 
   async loadDraft(clientId?: string): Promise<BrowserRecoveryDraft | null> {
     if (clientId === undefined) return (await this.listDrafts())[0] ?? null;
@@ -52,12 +98,16 @@ export class DesktopRecoveryStore implements BrowserDraftStore {
     return draft;
   }
   async listDrafts(): Promise<BrowserRecoveryDraft[]> {
-    const records = recordsSchema.parse(await this.request("list", { prefix: "draft:" }));
-    return records.map(record => {
-      const draft = draftSchema.parse(record.value);
-      if (record.name !== "draft:" + draft.clientId) throw new Error("Recovery draft identity does not match its record");
-      return draft;
-    });
+    const drafts: BrowserRecoveryDraft[] = [];
+    for (const record of await this.inventory("draft:")) {
+      const parsed = draftSchema.safeParse(record.value);
+      if (!parsed.success || record.name !== "draft:" + parsed.data.clientId) {
+        this.warn("Some recovery drafts could not be read and were retained.");
+        continue;
+      }
+      drafts.push(parsed.data);
+    }
+    return drafts;
   }
   async saveDraft(draft: BrowserRecoveryDraft): Promise<void> {
     await this.request("write", { name: "draft:" + draft.clientId, value: draftSchema.parse(draft) });
@@ -67,11 +117,16 @@ export class DesktopRecoveryStore implements BrowserDraftStore {
     await this.request("write", { name: "branch:" + branchId, value: draftSchema.parse(draft) });
   }
   async listBranches(): Promise<BrowserRecoveryBranch[]> {
-    const records = recordsSchema.parse(await this.request("list", { prefix: "branch:" }));
-    return records.map(record => {
-      if (!record.name.startsWith("branch:") || record.name.length <= 7) throw new Error("Invalid recovery branch identity");
-      return { id: record.name.slice(7), draft: draftSchema.parse(record.value) };
-    });
+    const branches: BrowserRecoveryBranch[] = [];
+    for (const record of await this.inventory("branch:")) {
+      const parsed = draftSchema.safeParse(record.value);
+      if (!parsed.success || !record.name.startsWith("branch:") || record.name.length <= 7) {
+        this.warn("Some recovery drafts could not be read and were retained.");
+        continue;
+      }
+      branches.push({ id: record.name.slice(7), draft: parsed.data });
+    }
+    return branches;
   }
   async deleteBranch(branchId: string): Promise<void> { await this.request("remove", { name: "branch:" + branchId }); }
 }
