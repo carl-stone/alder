@@ -5093,9 +5093,12 @@ export class Controller {
       const response = engineResponseSchema.parse(await this.engine.request("env_snapshot", {}));
       if (this.closed || generation !== this.variableGeneration || !this.kernelAvailable) return;
       if (!response.ok) {
-        if (response.error?.transport) this.failKernel(
-          response.error.message || "R variable snapshot failed",
-        );
+        this.replaceLastActionError(hostError(
+          "inspection_failed",
+          response.error?.message || "R variable snapshot failed",
+          undefined,
+          response.error,
+        ));
         return;
       }
       const variables = parseRuntimeVariables(response.variables, this.graphValue, this.cells);
@@ -5104,7 +5107,10 @@ export class Controller {
       this.bump("variables", clone(variables));
     } catch (error) {
       if (!this.closed && generation === this.variableGeneration && this.kernelAvailable) {
-        this.failKernel(`invalid variable snapshot: ${messageOf(error)}`);
+        this.replaceLastActionError(hostError(
+          "inspection_failed",
+          `invalid variable snapshot: ${messageOf(error)}`,
+        ));
       }
     } finally {
       this.variableRefreshInFlight = false;

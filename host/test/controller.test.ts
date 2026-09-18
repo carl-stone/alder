@@ -3708,6 +3708,48 @@ test("variable snapshots wait for idle input, retain ownership, and reject late 
   await controller.close();
 });
 
+test("variable snapshot failures stay nonfatal and surface inspection errors", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  const engine = new FakeEngine();
+  engine.handshake = {
+    ...HANDSHAKE,
+    capabilities: [...HANDSHAKE.capabilities, "variables"],
+  };
+  engine.requestHandler = async (name) => name === "env_snapshot"
+    ? { ok: false, error: { message: "environment inspection failed", code: "r_error", transport: true } }
+    : { ok: true };
+  const controller = createController({
+    engine,
+    notebook: notebook([["a", "x <- 42"]]),
+    config: resolveSettings({ notebook: { on_startup: false } }),
+  });
+  await controller.start();
+  const run = command(controller, { type: "run", scope: "all", changes: [] });
+  await startCommand(controller, run);
+  const operation = await settle(controller, run.requestId);
+  assert.equal(operation.error, null);
+  context.mock.timers.tick(100);
+  await eventually(() => controller.snapshot().lastActionError?.code === "inspection_failed");
+  assert.equal(controller.snapshot().runtime.executionReady, true);
+  assert.deepEqual(controller.snapshot().lastActionError, {
+    code: "inspection_failed",
+    message: "environment inspection failed",
+    details: { message: "environment inspection failed", code: "r_error", transport: true },
+  });
+
+  engine.requestHandler = async (name) => {
+    if (name === "env_snapshot") throw new Error("snapshot transport closed");
+    return { ok: true };
+  };
+  const rerun = command(controller, { type: "run", scope: "cell", target: { cellId: "a" }, changes: [] });
+  await startCommand(controller, rerun);
+  assert.equal((await settle(controller, rerun.requestId)).error, null);
+  context.mock.timers.tick(100);
+  await eventually(() => controller.snapshot().lastActionError?.message === "invalid variable snapshot: snapshot transport closed");
+  assert.equal(controller.snapshot().runtime.executionReady, true);
+  await controller.close();
+});
+
 test("runtime availability failures survive source edits and save until restart recovery", async () => {
   const engine = new FakeEngine();
   const controller = createController({
