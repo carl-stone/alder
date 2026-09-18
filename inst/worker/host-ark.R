@@ -50,13 +50,6 @@ local({
     stop("validated Alder Ark worker modules are missing or outside resources", call. = FALSE)
   }
 
-  # These values are part of the persistent notebook runtime contract. Ark may
-  # update its own device option, so Alder protects only unrelated user state.
-  protected <- getOption("ark.protected_options", character())
-  options(ark.protected_options = unique(c(
-    protected, "alder.format", "alder.engine", "max.print"
-  )))
-
   runtime <- new.env(parent = globalenv())
   sys.source(runtime_path, envir = runtime, keep.source = FALSE)
   Sys.unsetenv("ALDER_WORKER_DIR")
