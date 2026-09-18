@@ -489,6 +489,10 @@ export class Engine extends EventEmitter implements EngineAdapter {
   }
   get identity(): EngineHandshake | null { return this.handshake ?? null; }
   get outputStore(): OutputStore | undefined { return this.outputStoreValue; }
+  connectArkLsp(): Promise<import("node:net").Socket> {
+    if (this.kernel === undefined || !this.kernel.ready) throw new EngineTransportError("Ark kernel is unavailable");
+    return this.kernel.connectLsp();
+  }
 
   /** Prepare the host-owned artifact store before server publication. */
   prepareOutputStore(identity: Pick<OutputScope, "sessionEpoch" | "documentRevision">): OutputStore {

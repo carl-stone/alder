@@ -142,6 +142,15 @@ async function requestSymbols(session: HttpSession): Promise<string> {
   return body;
 }
 
+async function requestLsp(session: HttpSession, method: string, params: Record<string, unknown>): Promise<{ status: number; body: unknown }> {
+  const response = await fetch(session.origin + "/api/lsp", {
+    method: "POST",
+    headers: { Origin: session.origin, Cookie: session.cookie, "X-CSRF-Token": session.csrf, "Content-Type": "application/json" },
+    body: JSON.stringify({ method, params }),
+  });
+  return { status: response.status, body: await response.json() };
+}
+
 test("editor help synchronizes source only on request or for enabled diagnostics", {
   skip: !APPLICATION_ROOT, timeout: 60_000,
 }, async () => {
@@ -185,6 +194,68 @@ test("editor help synchronizes source only on request or for enabled diagnostics
     assert.match(await requestSymbols(session), /diagnostic_symbol/);
   } finally {
     if (session !== undefined) await closeHttpSession(session);
+    await app?.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("installed Ark editor help follows live R values, source edits and kernel restart", {
+  skip: !APPLICATION_ROOT, timeout: 90_000,
+}, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "alder-help-ark-"));
+  const path = join(directory, "notebook.R");
+  await writeFile(path, "# %%\nmy_table <- data.frame(long_column = 1L)\n# %%\nmy_table$lo\n# %%\nmissing_symbol\n");
+  let app: RunningHost | undefined;
+  let session: HttpSession | undefined;
+  try {
+    app = await startInstalledHost(path);
+    const first = await dispatchHost(app, { type: "run", scope: "cell", target: { cellId: "cell-1" } });
+    assert.equal(first.error, null);
+    session = await openHttpSession(app);
+    const completion = await requestLsp(session, "textDocument/completion", { position: { cell: "cell-2", line: 0, character: 11 } });
+    assert.equal(completion.status, 200);
+    assert.match(JSON.stringify(completion.body), /long_column/);
+    const hover = await requestLsp(session, "textDocument/hover", { position: { cell: "cell-1", line: 0, character: 15 } });
+    assert.equal(hover.status, 200);
+    assert.match(JSON.stringify(hover.body), /Data Frames/);
+    const definition = await requestLsp(session, "textDocument/definition", { position: { cell: "cell-2", line: 0, character: 2 } });
+    assert.equal(definition.status, 200);
+    assert.match(JSON.stringify(definition.body), /"cell-1"/);
+
+    const preference = await dispatchHost(app, { type: "set-preferences", patch: { editor: { live_diagnostics: true } },
+      expectedPreferencesVersion: app.controller.snapshot().preferencesVersion ?? null });
+    assert.equal(preference.error, null);
+    const deadline = Date.now() + 5_000;
+    while (!JSON.stringify(app.controller.snapshot().editorDiagnostics).includes("missing_symbol") && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 25));
+    }
+    assert.match(JSON.stringify(app.controller.snapshot().editorDiagnostics), /missing_symbol/);
+    const restart = await dispatchHost(app, { type: "restart", replay: false });
+    assert.equal(restart.error, null);
+    const afterRestart = await requestLsp(session, "textDocument/definition", { position: { cell: "cell-2", line: 0, character: 2 } });
+    assert.equal(afterRestart.status, 200, JSON.stringify(afterRestart.body));
+    assert.match(JSON.stringify(afterRestart.body), /"cell-1"/);
+
+    const kernelPid = (app.engine as unknown as { kernel?: { processId?: number } }).kernel?.processId;
+    assert.ok(kernelPid);
+    process.kill(kernelPid, "SIGKILL");
+    const failureDeadline = Date.now() + 5_000;
+    while (app.controller.snapshot().runtime.kernelState !== "failed" && Date.now() < failureDeadline) {
+      await new Promise(resolve => setTimeout(resolve, 25));
+    }
+    assert.equal(app.controller.snapshot().runtime.kernelState, "failed");
+    const unavailable = await requestLsp(session, "textDocument/completion", { position: { cell: "cell-2", line: 0, character: 11 } });
+    assert.equal(unavailable.status, 503, JSON.stringify(unavailable.body));
+    const beforeEdit = app.controller.snapshot();
+    const edit = await dispatchHost(app, { type: "transaction", expectedDocumentRevision: beforeEdit.documentRevision,
+      changes: [{ type: "edit", cell: { cellId: "cell-3" }, expectedRevision: beforeEdit.cells[2]!.revision,
+        cellType: "code", body: ['offline_note <- "saved"'] }] });
+    assert.equal(edit.error, null);
+    const save = await dispatchHost(app, { type: "save", expectedDocumentRevision: app.controller.snapshot().documentRevision });
+    assert.equal(save.error, null);
+    assert.match(await readFile(path, "utf8"), /offline_note <- "saved"/);
+  } finally {
+    if (session) await closeHttpSession(session);
     await app?.close();
     await rm(directory, { recursive: true, force: true });
   }

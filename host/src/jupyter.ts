@@ -3,7 +3,7 @@ import { createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypt
 import { EventEmitter } from "node:events";
 import { access, chmod, mkdir, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { createServer } from "node:net";
+import { createConnection, createServer, type Socket as TcpSocket } from "node:net";
 import { TextDecoder } from "node:util";
 
 import type {
@@ -125,6 +125,7 @@ export class ArkKernel extends EventEmitter {
   private readonly shellPending = new Map<string, PendingReply>();
   private readonly controlPending = new Map<string, PendingReply>();
   private readonly executions = new Map<string, PendingExecution>();
+  private readonly lspCommPending = new Map<string, { resolve: (data: unknown) => void; reject: (error: Error) => void }>();
   private executeTail: Promise<void> = Promise.resolve();
   private queuedExecutions = 0;
   private stopped = false;
@@ -298,7 +299,7 @@ export class ArkKernel extends EventEmitter {
       // Auxiliary RPCs use the same serial tail, including channel setup and
       // settlement hooks. They must never bypass an in-flight notebook cell.
       // Auxiliary requests use the same serial tail and ordinary Jupyter
-      // execute_request path; private comm targets are intentionally absent.
+      // execute_request path. The LSP comm uses its own small control handshake.
       return this.executeOnce(code, callbacks, options);
 
     });
@@ -393,6 +394,44 @@ export class ArkKernel extends EventEmitter {
       this.options.startupTimeoutMs,
     );
     return reply.content.status === "ok";
+  }
+
+  async connectLsp(): Promise<TcpSocket> {
+    if (!this.ready || this.shell === undefined) throw new Error("Ark kernel is unavailable");
+    const commId = randomUUID();
+    const response = new Promise<unknown>((resolve, reject) => {
+      this.lspCommPending.set(commId, { resolve, reject });
+    });
+    try {
+      await sendMessage(this.shell, this.key, this.session, "comm_open", {
+        comm_id: commId, target_name: "positron.lsp", data: { ip_address: "127.0.0.1" },
+      }, undefined, this.maxMessageBytes);
+      const data = await withTimeout(response, this.options.startupTimeoutMs, "Ark LSP comm");
+      const message = data as { msg_type?: unknown; content?: { port?: unknown } };
+      const port = message?.content?.port;
+      if (message?.msg_type !== "server_started" || !Number.isInteger(port) || (port as number) < 1 || (port as number) > 65_535) {
+        throw new FrameProtocolError("Ark LSP comm returned an invalid port");
+      }
+      const socket = createConnection({ host: "127.0.0.1", port: port as number });
+      try {
+        await withTimeout(new Promise<void>((resolve, reject) => {
+          socket.once("connect", resolve);
+          socket.once("error", reject);
+        }), this.options.startupTimeoutMs, "Ark LSP socket");
+      } catch (error) {
+        socket.destroy();
+        throw error;
+      }
+      socket.once("close", () => {
+        if (this.shell === undefined || this.stopped) return;
+        void sendMessage(this.shell, this.key, this.session, "comm_close", {
+          comm_id: commId, data: {},
+        }, undefined, this.maxMessageBytes).catch(() => {});
+      });
+      return socket;
+    } finally {
+      this.lspCommPending.delete(commId);
+    }
   }
 
   async terminate(): Promise<void> {
@@ -620,6 +659,16 @@ export class ArkKernel extends EventEmitter {
       this.emit("welcome");
       return;
     }
+    if (message.header.msg_type === "comm_msg" || message.header.msg_type === "comm_close") {
+      const commId = message.content.comm_id;
+      const pending = typeof commId === "string" ? this.lspCommPending.get(commId) : undefined;
+      if (pending !== undefined) {
+        if (message.header.msg_type === "comm_close") pending.reject(new Error("Ark LSP comm closed"));
+        else pending.resolve(message.content.data);
+        this.lspCommPending.delete(commId as string);
+        return;
+      }
+    }
     const parentId = message.parentHeader.msg_id;
     if (typeof parentId !== "string") {
       if (message.header.msg_type === "stream" && message.content.name === "stderr" &&
@@ -789,6 +838,8 @@ export class ArkKernel extends EventEmitter {
     this.shellPending.clear();
     this.controlPending.clear();
     this.executions.clear();
+    for (const pending of this.lspCommPending.values()) pending.reject(error);
+    this.lspCommPending.clear();
   }
 
   private closeSockets(): void {

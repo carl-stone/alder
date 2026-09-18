@@ -774,3 +774,50 @@ test('ordered outputs, lazy detail, progress, and project disk cache appear in t
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test('Ark language help shows live completion and diagnostics in notebook editors', {
+  skip: process.env.ALDER_BROWSER_TEST !== '1', timeout: 90_000,
+}, async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'alder-browser-ark-help-'));
+  const path = join(directory, 'notebook.R');
+  await writeFile(path, '# %%\nmy_table <- data.frame(long_column = 1L)\n# %%\nmy_table$lo\n# %%\nmissing_symbol\n');
+  let app: RunningHost | undefined, browser: Chrome | undefined;
+  try {
+    app = await startInstalledHost(path);
+    browser = await openAuthenticatedBrowser(app);
+    await browser.wait("window.__alderHost?.client.document?.snapshot.runtime.executionReady && document.querySelectorAll('#notebook > .cell[data-cell]').length === 3", 30_000);
+    await browser.click('[data-cell="cell-1"] [data-act=run]');
+    await browser.wait("window.__alderHost.client.document.snapshot.cells[0].status === 'done'", 30_000);
+    await browser.evaluate(`(() => {
+      const editor = [...window.__alderEditors.values()][1];
+      editor.focus();
+      const end = editor.view.state.doc.length;
+      editor.view.dispatch({ selection: { anchor: end, head: end } });
+    })()`);
+    await browser.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9 });
+    await browser.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9 });
+    await browser.wait("document.querySelector('.cm-tooltip-autocomplete')?.textContent.includes('long_column')", 15_000);
+    await browser.evaluate(`(() => {
+      const editor = [...window.__alderEditors.values()][1];
+      editor.closeCompletion();
+      editor.view.dispatch({ selection: { anchor: 2, head: 2 } });
+    })()`);
+    await browser.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'F12', code: 'F12', windowsVirtualKeyCode: 123 });
+    await browser.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'F12', code: 'F12', windowsVirtualKeyCode: 123 });
+    await browser.wait("document.activeElement?.closest('[data-cell=\"cell-1\"]') !== null", 15_000);
+
+    const snapshot = app.controller.snapshot();
+    const preference = await app.controller.dispatch(peerCommand(app, {
+      type: 'set-preferences', patch: { editor: { live_diagnostics: true } },
+      expectedPreferencesVersion: snapshot.preferencesVersion ?? null,
+    }));
+    assert.equal(preference.error, null);
+    await browser.wait("window.__alderHost.client.document.snapshot.editorDiagnostics['cell-3']?.some(d => d.message.includes('missing_symbol'))", 15_000);
+    await browser.wait("document.querySelector('[data-cell=\"cell-3\"] .cm-lintRange') !== null", 15_000);
+    assert.deepEqual(browser.errors, []);
+  } finally {
+    await browser?.close();
+    await app?.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});

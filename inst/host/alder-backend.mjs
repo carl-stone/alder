@@ -7387,7 +7387,7 @@ var require_punycode = __commonJS({
     var damp = 700;
     var initialBias = 72;
     var initialN = 128;
-    var delimiter4 = "-";
+    var delimiter3 = "-";
     var regexPunycode = /^xn--/;
     var regexNonASCII = /[^\0-\x7F]/;
     var regexSeparators = /[\x2E\u3002\uFF0E\uFF61]/g;
@@ -7473,7 +7473,7 @@ var require_punycode = __commonJS({
       let i = 0;
       let n = initialN;
       let bias = initialBias;
-      let basic = input2.lastIndexOf(delimiter4);
+      let basic = input2.lastIndexOf(delimiter3);
       if (basic < 0) {
         basic = 0;
       }
@@ -7533,7 +7533,7 @@ var require_punycode = __commonJS({
       const basicLength = output2.length;
       let handledCPCount = basicLength;
       if (basicLength) {
-        output2.push(delimiter4);
+        output2.push(delimiter3);
       }
       while (handledCPCount < inputLength) {
         let m = maxInt;
@@ -13510,7 +13510,7 @@ var require_util = __commonJS({
       return path3;
     });
     exports.normalize = normalize3;
-    function join22(aRoot, aPath) {
+    function join21(aRoot, aPath) {
       if (aRoot === "") {
         aRoot = ".";
       }
@@ -13542,7 +13542,7 @@ var require_util = __commonJS({
       }
       return joined;
     }
-    exports.join = join22;
+    exports.join = join21;
     exports.isAbsolute = function(aPath) {
       return aPath.charAt(0) === "/" || urlRegexp.test(aPath);
     };
@@ -13756,7 +13756,7 @@ var require_util = __commonJS({
             parsed.path = parsed.path.substring(0, index + 1);
           }
         }
-        sourceURL = join22(urlGenerate(parsed), sourceURL);
+        sourceURL = join21(urlGenerate(parsed), sourceURL);
       }
       return normalize3(sourceURL);
     }
@@ -15197,7 +15197,7 @@ var require_previous_map = __commonJS({
   "../../../../../alder/host/node_modules/postcss/lib/previous-map.js"(exports, module) {
     "use strict";
     var { existsSync, readFileSync, realpathSync } = __require("fs");
-    var { dirname: dirname11, isAbsolute: isAbsolute7, join: join22, relative: relative4, sep: sep4 } = __require("path");
+    var { dirname: dirname11, isAbsolute: isAbsolute7, join: join21, relative: relative4, sep: sep4 } = __require("path");
     var { SourceMapConsumer, SourceMapGenerator } = require_source_map();
     function realPath(path3) {
       try {
@@ -15312,7 +15312,7 @@ var require_previous_map = __commonJS({
           return this.decodeInline(this.annotation);
         } else if (this.annotation) {
           let map2 = this.annotation;
-          if (file2) map2 = join22(dirname11(file2), map2);
+          if (file2) map2 = join21(dirname11(file2), map2);
           let unknown2 = this.loadFile(map2, file2, false);
           if (unknown2) {
             try {
@@ -38870,12 +38870,12 @@ var require_protocol = __commonJS({
       ShutdownRequest3.messageDirection = messages_1.MessageDirection.clientToServer;
       ShutdownRequest3.type = new messages_1.ProtocolRequestType0(ShutdownRequest3.method);
     })(ShutdownRequest2 || (exports.ShutdownRequest = ShutdownRequest2 = {}));
-    var ExitNotification2;
-    (function(ExitNotification3) {
-      ExitNotification3.method = "exit";
-      ExitNotification3.messageDirection = messages_1.MessageDirection.clientToServer;
-      ExitNotification3.type = new messages_1.ProtocolNotificationType0(ExitNotification3.method);
-    })(ExitNotification2 || (exports.ExitNotification = ExitNotification2 = {}));
+    var ExitNotification;
+    (function(ExitNotification2) {
+      ExitNotification2.method = "exit";
+      ExitNotification2.messageDirection = messages_1.MessageDirection.clientToServer;
+      ExitNotification2.type = new messages_1.ProtocolNotificationType0(ExitNotification2.method);
+    })(ExitNotification || (exports.ExitNotification = ExitNotification = {}));
     var DidChangeConfigurationNotification2;
     (function(DidChangeConfigurationNotification3) {
       DidChangeConfigurationNotification3.method = "workspace/didChangeConfiguration";
@@ -38917,12 +38917,12 @@ var require_protocol = __commonJS({
       TelemetryEventNotification2.messageDirection = messages_1.MessageDirection.serverToClient;
       TelemetryEventNotification2.type = new messages_1.ProtocolNotificationType(TelemetryEventNotification2.method);
     })(TelemetryEventNotification || (exports.TelemetryEventNotification = TelemetryEventNotification = {}));
-    var TextDocumentSyncKind2;
-    (function(TextDocumentSyncKind3) {
-      TextDocumentSyncKind3.None = 0;
-      TextDocumentSyncKind3.Full = 1;
-      TextDocumentSyncKind3.Incremental = 2;
-    })(TextDocumentSyncKind2 || (exports.TextDocumentSyncKind = TextDocumentSyncKind2 = {}));
+    var TextDocumentSyncKind;
+    (function(TextDocumentSyncKind2) {
+      TextDocumentSyncKind2.None = 0;
+      TextDocumentSyncKind2.Full = 1;
+      TextDocumentSyncKind2.Incremental = 2;
+    })(TextDocumentSyncKind || (exports.TextDocumentSyncKind = TextDocumentSyncKind = {}));
     var DidOpenTextDocumentNotification2;
     (function(DidOpenTextDocumentNotification3) {
       DidOpenTextDocumentNotification3.method = "textDocument/didOpen";
@@ -42924,8 +42924,8 @@ function emoji() {
 }
 var ipv4 = /^(?:(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])$/;
 var ipv6 = /^(([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,7}:|([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,5}(:[0-9a-fA-F]{1,4}){1,2}|([0-9a-fA-F]{1,4}:){1,4}(:[0-9a-fA-F]{1,4}){1,3}|([0-9a-fA-F]{1,4}:){1,3}(:[0-9a-fA-F]{1,4}){1,4}|([0-9a-fA-F]{1,4}:){1,2}(:[0-9a-fA-F]{1,4}){1,5}|[0-9a-fA-F]{1,4}:((:[0-9a-fA-F]{1,4}){1,6})|:((:[0-9a-fA-F]{1,4}){1,7}|:))$/;
-var mac = (delimiter4) => {
-  const escapedDelim = escapeRegex(delimiter4 ?? ":");
+var mac = (delimiter3) => {
+  const escapedDelim = escapeRegex(delimiter3 ?? ":");
   return new RegExp(`^(?:[0-9A-F]{2}${escapedDelim}){5}[0-9A-F]{2}$|^(?:[0-9a-f]{2}${escapedDelim}){5}[0-9a-f]{2}$`);
 };
 var cidrv4 = /^((25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\/([0-9]|[1-2][0-9]|3[0-2])$/;
@@ -60322,7 +60322,7 @@ var ApplicationPreferences = class _ApplicationPreferences {
 // src/application.ts
 import { createHash as createHash9, randomUUID as randomUUID14 } from "node:crypto";
 import { mkdtemp as mkdtemp5, realpath as realpath11, rm as rm10 } from "node:fs/promises";
-import { basename as basename8, dirname as dirname9, join as join21, resolve as resolve13 } from "node:path";
+import { basename as basename8, dirname as dirname9, join as join20, resolve as resolve13 } from "node:path";
 import { tmpdir as tmpdir6 } from "node:os";
 
 // ../../../../../alder/host/node_modules/chokidar/index.js
@@ -79023,7 +79023,7 @@ import { createHmac, randomBytes, randomUUID as randomUUID5, timingSafeEqual } f
 import { EventEmitter as EventEmitter2 } from "node:events";
 import { access, chmod as chmod2, mkdir as mkdir4, rm as rm3, stat as stat8, writeFile as writeFile2 } from "node:fs/promises";
 import { join as join9 } from "node:path";
-import { createServer } from "node:net";
+import { createConnection, createServer } from "node:net";
 import { TextDecoder as TextDecoder2 } from "node:util";
 var MESSAGE_DELIMITER = Buffer.from("<IDS|MSG>");
 var JUPYTER_VERSION = "5.3";
@@ -79059,6 +79059,7 @@ var ArkKernel = class extends EventEmitter2 {
   shellPending = /* @__PURE__ */ new Map();
   controlPending = /* @__PURE__ */ new Map();
   executions = /* @__PURE__ */ new Map();
+  lspCommPending = /* @__PURE__ */ new Map();
   executeTail = Promise.resolve();
   queuedExecutions = 0;
   stopped = false;
@@ -79283,6 +79284,47 @@ var ArkKernel = class extends EventEmitter2 {
     );
     return reply.content.status === "ok";
   }
+  async connectLsp() {
+    if (!this.ready || this.shell === void 0) throw new Error("Ark kernel is unavailable");
+    const commId = randomUUID5();
+    const response = new Promise((resolve15, reject) => {
+      this.lspCommPending.set(commId, { resolve: resolve15, reject });
+    });
+    try {
+      await sendMessage(this.shell, this.key, this.session, "comm_open", {
+        comm_id: commId,
+        target_name: "positron.lsp",
+        data: { ip_address: "127.0.0.1" }
+      }, void 0, this.maxMessageBytes);
+      const data = await withTimeout(response, this.options.startupTimeoutMs, "Ark LSP comm");
+      const message2 = data;
+      const port = message2?.content?.port;
+      if (message2?.msg_type !== "server_started" || !Number.isInteger(port) || port < 1 || port > 65535) {
+        throw new FrameProtocolError("Ark LSP comm returned an invalid port");
+      }
+      const socket = createConnection({ host: "127.0.0.1", port });
+      try {
+        await withTimeout(new Promise((resolve15, reject) => {
+          socket.once("connect", resolve15);
+          socket.once("error", reject);
+        }), this.options.startupTimeoutMs, "Ark LSP socket");
+      } catch (error61) {
+        socket.destroy();
+        throw error61;
+      }
+      socket.once("close", () => {
+        if (this.shell === void 0 || this.stopped) return;
+        void sendMessage(this.shell, this.key, this.session, "comm_close", {
+          comm_id: commId,
+          data: {}
+        }, void 0, this.maxMessageBytes).catch(() => {
+        });
+      });
+      return socket;
+    } finally {
+      this.lspCommPending.delete(commId);
+    }
+  }
   async terminate() {
     this.stopRequested = true;
     this.terminationPromise ??= this.terminateOnce();
@@ -79492,6 +79534,16 @@ var ArkKernel = class extends EventEmitter2 {
       this.emit("welcome");
       return;
     }
+    if (message2.header.msg_type === "comm_msg" || message2.header.msg_type === "comm_close") {
+      const commId = message2.content.comm_id;
+      const pending2 = typeof commId === "string" ? this.lspCommPending.get(commId) : void 0;
+      if (pending2 !== void 0) {
+        if (message2.header.msg_type === "comm_close") pending2.reject(new Error("Ark LSP comm closed"));
+        else pending2.resolve(message2.content.data);
+        this.lspCommPending.delete(commId);
+        return;
+      }
+    }
     const parentId = message2.parentHeader.msg_id;
     if (typeof parentId !== "string") {
       if (message2.header.msg_type === "stream" && message2.content.name === "stderr" && typeof message2.content.text === "string") {
@@ -79627,6 +79679,8 @@ var ArkKernel = class extends EventEmitter2 {
     this.shellPending.clear();
     this.controlPending.clear();
     this.executions.clear();
+    for (const pending of this.lspCommPending.values()) pending.reject(error61);
+    this.lspCommPending.clear();
   }
   closeSockets() {
     for (const socket of [this.shell, this.control, this.iopub, this.stdin]) {
@@ -79665,9 +79719,9 @@ function decodeMessage(frames, key2, maxMessageBytes = DEFAULT_MAX_FRAME_BYTES) 
       throw new FrameProtocolError("Jupyter message exceeds the configured byte limit");
     }
   }
-  const delimiter4 = frames.findIndex((frame) => frame.equals(MESSAGE_DELIMITER));
-  if (delimiter4 < 0) throw new FrameProtocolError("Jupyter message delimiter is missing");
-  const body = frames.slice(delimiter4 + 1);
+  const delimiter3 = frames.findIndex((frame) => frame.equals(MESSAGE_DELIMITER));
+  if (delimiter3 < 0) throw new FrameProtocolError("Jupyter message delimiter is missing");
+  const body = frames.slice(delimiter3 + 1);
   if (body.length < 5) {
     throw new FrameProtocolError(`Jupyter message has ${body.length} body frames, expected at least 5`);
   }
@@ -79679,7 +79733,7 @@ function decodeMessage(frames, key2, maxMessageBytes = DEFAULT_MAX_FRAME_BYTES) 
   const metadata = asRecord(parseJsonFrame(metadataBytes, "metadata"), "Jupyter metadata");
   const content = asRecord(parseJsonFrame(contentBytes, "content", maxMessageBytes), "Jupyter content");
   return {
-    identities: frames.slice(0, delimiter4),
+    identities: frames.slice(0, delimiter3),
     header,
     parentHeader,
     metadata,
@@ -80180,6 +80234,10 @@ var Engine = class extends EventEmitter3 {
   }
   get outputStore() {
     return this.outputStoreValue;
+  }
+  connectArkLsp() {
+    if (this.kernel === void 0 || !this.kernel.ready) throw new EngineTransportError("Ark kernel is unavailable");
+    return this.kernel.connectLsp();
   }
   /** Prepare the host-owned artifact store before server publication. */
   prepareOutputStore(identity) {
@@ -109785,7 +109843,7 @@ function isAbsoluteNonEmptyPath3(value) {
 // src/lsp.ts
 var import_node12 = __toESM(require_main(), 1);
 var import_vscode_languageserver_protocol = __toESM(require_api2(), 1);
-import { delimiter as delimiter3, join as join18, resolve as resolvePath } from "node:path";
+import { resolve as resolvePath } from "node:path";
 import { pathToFileURL } from "node:url";
 var REQUEST_TYPES = {
   "textDocument/completion": import_vscode_languageserver_protocol.CompletionRequest.type,
@@ -109907,7 +109965,7 @@ var LspClient = class {
     this.diagnosticsEnabled = options.diagnostics === true;
   }
   options;
-  process = null;
+  socket = null;
   connection = null;
   document;
   layout;
@@ -109922,8 +109980,6 @@ var LspClient = class {
   initialized = false;
   failure = null;
   failureReported = false;
-  stderrText = "";
-  processExited = false;
   get uri() {
     return this.documentUri;
   }
@@ -109934,38 +109990,31 @@ var LspClient = class {
     return this.failure;
   }
   alive() {
-    return !this.closed && this.initialized && this.process !== null && this.processAlive(this.process);
+    return !this.closed && this.initialized && this.socket !== null && !this.socket.destroyed;
   }
   async start() {
     if (this.closed) throw new LspClientError("lsp_unavailable", "language server is stopped");
     if (this.connection) return this;
     this.failure = null;
     this.failureReported = false;
-    const child = await this.options.processScope.spawn({
-      executable: this.options.command,
-      args: [...this.options.args ?? []],
-      cwd: this.options.cwd ?? resolvePath(this.documentPath, ".."),
-      environment: stringEnvironment(this.options.env ?? process.env),
-      stdio: "pipes"
-    });
-    this.process = child;
-    this.processExited = false;
-    child.stderr?.on("data", (chunk) => this.retainStderr(chunk));
-    void child.exited.then(({ code: code2, signal }) => {
-      this.processExited = true;
-      if (!this.closed) this.reportFailure(this.failureDetail(languageServerExitMessage(code2, signal)));
-    }).catch((error61) => {
-      this.processExited = true;
-      if (!this.closed) this.reportFailure(this.failureDetail("language server failed: " + (error61 instanceof Error ? error61.message : String(error61))));
+    let socket;
+    try {
+      socket = await this.options.connect();
+    } catch (error61) {
+      throw new LspClientError("lsp_unavailable", `Ark language server is unavailable: ${error61 instanceof Error ? error61.message : String(error61)}`);
+    }
+    this.socket = socket;
+    socket.on("close", () => {
+      if (!this.closed) this.reportFailure("Ark language server connection closed");
     });
     const connection = (0, import_node12.createMessageConnection)(
-      new import_node12.StreamMessageReader(child.stdout),
-      new import_node12.StreamMessageWriter(child.stdin)
+      new import_node12.StreamMessageReader(socket),
+      new import_node12.StreamMessageWriter(socket)
     );
     this.connection = connection;
-    connection.onError(([error61]) => this.reportFailure(this.failureDetail("language server connection failed: " + error61.message)));
+    connection.onError(([error61]) => this.reportFailure("language server connection failed: " + error61.message));
     connection.onClose(() => {
-      if (!this.closed) this.reportFailure(this.failureDetail("language server connection closed"));
+      if (!this.closed) this.reportFailure("language server connection closed");
     });
     connection.onNotification(import_vscode_languageserver_protocol.PublishDiagnosticsNotification.type, (params) => {
       if (params.uri !== this.documentUri) return;
@@ -110018,11 +110067,8 @@ var LspClient = class {
         connection.dispose();
         this.connection = null;
         this.initialized = false;
-        const owned = this.process;
-        this.process = null;
-        this.processExited = true;
-        if (owned) await terminateOwnedProcess(owned, 2e3).catch(() => {
-        });
+        this.socket?.destroy();
+        this.socket = null;
       }
       throw error61;
     }
@@ -110078,10 +110124,10 @@ var LspClient = class {
     this.connection.sendNotification(import_vscode_languageserver_protocol.DidChangeConfigurationNotification.type, { settings: { diagnostics: enabled } });
     if (enabled) {
       this.version += 1;
-      this.acceptVersionlessDiagnostics = false;
-      this.connection.sendNotification(import_vscode_languageserver_protocol.DidChangeTextDocumentNotification.type, {
-        textDocument: { uri: this.documentUri, version: this.version },
-        contentChanges: [{ text: this.layout.text }]
+      this.acceptVersionlessDiagnostics = true;
+      this.connection.sendNotification(import_vscode_languageserver_protocol.DidCloseTextDocumentNotification.type, { textDocument: { uri: this.documentUri } });
+      this.connection.sendNotification(import_vscode_languageserver_protocol.DidOpenTextDocumentNotification.type, {
+        textDocument: { uri: this.documentUri, languageId: "r", version: this.version, text: this.layout.text }
       });
     }
     return true;
@@ -110110,6 +110156,7 @@ var LspClient = class {
       return translateLspResult(result, method2, document, this.documentUri);
     } catch (error61) {
       if (error61 instanceof LspClientError) throw error61;
+      if (!this.alive()) throw new LspClientError("lsp_unavailable", this.failure ?? "Ark language server is unavailable");
       throw new LspClientError("invalid_request", `language server request failed: ${error61 instanceof Error ? error61.message : String(error61)}`);
     } finally {
       cancellation.dispose();
@@ -110151,29 +110198,35 @@ var LspClient = class {
     this.diagnostics.clear();
     this.publishDiagnostics();
     const connection = this.connection;
-    const child = this.process;
-    if (connection && this.initialized && child !== null && this.processAlive(child)) {
+    if (connection && this.initialized && this.socket !== null && !this.socket.destroyed) {
       try {
         connection.sendNotification(import_vscode_languageserver_protocol.DidCloseTextDocumentNotification.type, { textDocument: { uri: this.documentUri } });
         await this.withTimeout(connection.sendRequest(import_vscode_languageserver_protocol.ShutdownRequest.type), 2e3, "shutdown");
-        connection.sendNotification(import_vscode_languageserver_protocol.ExitNotification.type);
       } catch {
       }
     }
+    const socket = this.socket;
+    socket?.end();
     connection?.dispose();
-    if (child && this.processAlive(child)) await terminateOwnedProcess(child, 2e3);
+    if (socket && !socket.destroyed) {
+      await new Promise((resolve15) => {
+        const timer = setTimeout(resolve15, 2e3);
+        timer.unref?.();
+        socket.once("close", () => {
+          clearTimeout(timer);
+          resolve15();
+        });
+      });
+    }
+    socket?.destroy();
+    this.socket = null;
     this.connection = null;
-    this.process = null;
-    this.processExited = true;
     this.initialized = false;
   }
   assertAlive() {
     if (!this.alive() || !this.connection) {
-      throw new LspClientError("lsp_unavailable", this.failureDetail("language server is unavailable"));
+      throw new LspClientError("lsp_unavailable", this.failure ?? "language server is unavailable");
     }
-  }
-  processAlive(_child) {
-    return !this.processExited;
   }
   async withTimeout(promise2, timeoutMs, method2, cancellation) {
     let timer;
@@ -110191,16 +110244,6 @@ var LspClient = class {
     } finally {
       if (timer) clearTimeout(timer);
     }
-  }
-  retainStderr(chunk) {
-    this.stderrText += chunk.toString("utf8");
-    const limit = Math.max(1024, this.options.stderrLimitBytes ?? 16384);
-    const bytes = Buffer.from(this.stderrText);
-    if (bytes.length > limit) this.stderrText = bytes.subarray(bytes.length - limit).toString("utf8");
-  }
-  failureDetail(prefix) {
-    const stderr = this.stderrText.trim();
-    return stderr ? `${prefix} (stderr: ${stderr})` : prefix;
   }
   reportFailure(message2) {
     this.failure = message2;
@@ -110277,67 +110320,11 @@ function boundedUtf8(value, maxBytes) {
   if (low > 0 && /[\uD800-\uDBFF]/.test(value[low - 1])) low -= 1;
   return value.slice(0, low);
 }
-function stringEnvironment(environment) {
-  return Object.fromEntries(Object.entries(environment).filter((entry) => typeof entry[1] === "string"));
-}
-function languageServerExitMessage(code2, signal) {
-  return "language server exited" + (code2 === null ? "" : " with status " + code2) + (signal ? " (" + signal + ")" : "");
-}
-async function terminateOwnedProcess(child, timeoutMs) {
-  let exited = false;
-  const done = child.exited.then(() => {
-    exited = true;
-  }).catch(() => {
-    exited = true;
-  });
-  await Promise.race([done, new Promise((resolveTimeout) => {
-    const timer = setTimeout(resolveTimeout, timeoutMs);
-    timer.unref?.();
-  })]);
-  if (!exited) await child.terminate();
-}
-function isAbsolutePath(value) {
-  return typeof value === "string" && value.length > 0 && (value.startsWith("/") || /^[A-Za-z]:[\\/]/.test(value));
-}
-function trustedRLanguageServerEnvironment(environment, trustedLibraryPaths, trustedResourcesRoot, platform = process.platform) {
-  if (!isAbsolutePath(trustedResourcesRoot)) {
-    throw new LspClientError("invalid_request", "language server requires an absolute trusted resources root");
-  }
-  if (!Array.isArray(trustedLibraryPaths) || trustedLibraryPaths.length === 0 || trustedLibraryPaths.some((path3) => typeof path3 !== "string" || !isAbsolutePath(path3)) || new Set(trustedLibraryPaths).size !== trustedLibraryPaths.length) {
-    throw new LspClientError("invalid_request", "language server requires unique absolute trusted R library paths");
-  }
-  const trusted = [...trustedLibraryPaths];
-  const result = stringEnvironment(environment);
-  if (platform === "darwin") delete result.R_HOME;
-  for (const key2 of Object.keys(result)) if (/^R_LIBS(?:_|$)/.test(key2)) delete result[key2];
-  result.R_LIBS = trusted.join(delimiter3);
-  result.R_LIBS_USER = "";
-  result.R_LIBS_SITE = "";
-  result.ALDER_RESOURCES_ROOT = trustedResourcesRoot;
-  result.ALDER_R_LIBRARIES = JSON.stringify(trusted);
-  return result;
-}
-function validatedRLanguageServerOptions(document, rscript, workerDirectory, processScope) {
-  if (!isAbsolutePath(rscript) || !isAbsolutePath(workerDirectory)) {
-    throw new LspClientError("invalid_request", "Rscript and workerDirectory must be absolute paths");
-  }
-  if (!processScope || typeof processScope.spawn !== "function") {
-    throw new LspClientError("invalid_request", "language server requires the application ProcessScope");
-  }
-  const path3 = resolveDocumentPath(document);
-  return {
-    command: rscript,
-    args: ["--vanilla", join18(workerDirectory, "host-lsp.R")],
-    cwd: resolvePath(path3, ".."),
-    document,
-    processScope
-  };
-}
 
 // src/uploads.ts
 import { randomUUID as randomUUID12 } from "node:crypto";
 import { chmod as chmod4, lstat as lstat8, mkdir as mkdir9, unlink as unlink4, writeFile as writeFile7 } from "node:fs/promises";
-import { join as join19 } from "node:path";
+import { join as join18 } from "node:path";
 var UPLOAD_MAX_FILES = 1024;
 var UPLOAD_MAX_BASE64_BYTES = 16 * 1024 * 1024;
 var UPLOAD_MAX_TOTAL_BYTES = 12 * 1024 * 1024;
@@ -110382,7 +110369,7 @@ var UploadStore = class {
       const value = [];
       for (const file2 of decoded) {
         if (this.closed) throw invalid4("session_stopped", "upload store is closed");
-        const path3 = join19(this.directory, `upload-${randomUUID12()}`);
+        const path3 = join18(this.directory, `upload-${randomUUID12()}`);
         paths.push(path3);
         await writeFile7(path3, file2.bytes, { flag: "wx", mode: 384 });
         await chmod4(path3, 384);
@@ -110523,7 +110510,7 @@ async function createProcessScope(_resources) {
 // src/sessions.ts
 import { createHash as createHash8, randomBytes as randomBytes5, randomUUID as randomUUID13 } from "node:crypto";
 import { realpath as realpath10, lstat as lstat9, chmod as chmod5, rm as rm9, unlink as unlink5, readdir as readdir4, link as link3 } from "node:fs/promises";
-import { basename as basename7, dirname as dirname8, join as join20, resolve as resolve12, sep as sep3 } from "node:path";
+import { basename as basename7, dirname as dirname8, join as join19, resolve as resolve12, sep as sep3 } from "node:path";
 var import_proper_lockfile2 = __toESM(require_proper_lockfile(), 1);
 
 // src/backend-client.ts
@@ -110561,7 +110548,7 @@ function isUntitledRecoveryId(value) {
   return typeof value === "string" && UNTITLED_SESSION_KEY_PATTERN.test(value);
 }
 function untitledRecoveryDescriptorDirectory(dataRoot) {
-  return join20(resolve12(dataRoot ?? envPaths("alder", { suffix: "" }).data), UNTITLED_RECOVERY_DIRECTORY);
+  return join19(resolve12(dataRoot ?? envPaths("alder", { suffix: "" }).data), UNTITLED_RECOVERY_DIRECTORY);
 }
 async function registerUntitledRecoveryDescriptor(id2, projectDirectory, dataRoot, privatePathOptions = {}) {
   const validId = requireUntitledRecoveryId(id2);
@@ -111107,7 +111094,7 @@ function normalizeProjectDirectory(value) {
   return resolve12(value);
 }
 function untitledRecoveryDescriptorPath(directory, id2) {
-  return join20(directory, id2 + ".json");
+  return join19(directory, id2 + ".json");
 }
 async function readUntitledRecoveryDescriptor(path3, id2, privatePathOptions = {}) {
   try {
@@ -111171,18 +111158,18 @@ function privatePathOptionsFor(path3) {
   return selected ?? {};
 }
 async function runtimePaths(explicit, processSupervisorExecutable) {
-  const directory = resolve12(explicit ?? process.env.ALDER_RUNTIME_DIRECTORY ?? join20(envPaths("alder").data, "runtime"));
+  const directory = resolve12(explicit ?? process.env.ALDER_RUNTIME_DIRECTORY ?? join19(envPaths("alder").data, "runtime"));
   const privatePathOptions = { processSupervisorExecutable };
   await ensurePrivateDirectory(directory, privatePathOptions);
   privatePathOptionsByDirectory.set(directory, privatePathOptions);
   return {
     directory,
     privatePathOptions,
-    registryPath: (key2) => join20(directory, `${key2}.json`),
-    lockPath: (key2) => join20(directory, `${key2}.json.lock`),
-    lockTarget: (key2) => join20(directory, `${key2}.json`),
-    recoveryPath: (key2) => join20(directory, `${key2}.recovery`),
-    logPath: (key2) => join20(directory, `${key2}.log`)
+    registryPath: (key2) => join19(directory, `${key2}.json`),
+    lockPath: (key2) => join19(directory, `${key2}.json.lock`),
+    lockTarget: (key2) => join19(directory, `${key2}.json`),
+    recoveryPath: (key2) => join19(directory, `${key2}.recovery`),
+    logPath: (key2) => join19(directory, `${key2}.log`)
   };
 }
 async function canonicalizePath(path3) {
@@ -111192,7 +111179,7 @@ async function canonicalizePath(path3) {
     return await realpath10(absolute);
   } catch (error61) {
     if (error61.code !== "ENOENT") throw error61;
-    return join20(await realpath10(dirname8(absolute)), basename7(absolute));
+    return join19(await realpath10(dirname8(absolute)), basename7(absolute));
   }
 }
 async function sessionKeyFor(path3) {
@@ -111371,8 +111358,8 @@ async function startHost(input2) {
   if (options.internalHost && options.path === null && options.session?.sessionKey === void 0) throw new Error("untitled internal hosts require a parent session key");
   if (options.path !== null) return startNotebookHost(options, options.path, false, options.path);
   if (options.sandbox) throw new Error("sandbox mode requires a notebook file path");
-  const temporary = await realpath11(await mkdtemp5(join21(tmpdir6(), "alder-unsaved-")));
-  const storagePath = join21(temporary, "Untitled.R");
+  const temporary = await realpath11(await mkdtemp5(join20(tmpdir6(), "alder-unsaved-")));
+  const storagePath = join20(temporary, "Untitled.R");
   try {
     const app = await startNotebookHost(options, storagePath, true, null);
     const closed = app.closed.finally(() => rm10(temporary, { recursive: true, force: true }));
@@ -111693,15 +111680,15 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
       lsp = value;
     };
     var setLsp = setLsp2;
-    work = await realpath11(await mkdtemp5(join21(tmpdir6(), "alder-host-")));
-    uploads = new UploadStore(join21(work, "uploads"));
-    cacheDirectory = unsaved ? join21(work, "cache") : join21(notebookDirectory, ".alder", "cache");
+    work = await realpath11(await mkdtemp5(join20(tmpdir6(), "alder-host-")));
+    uploads = new UploadStore(join20(work, "uploads"));
+    cacheDirectory = unsaved ? join20(work, "cache") : join20(notebookDirectory, ".alder", "cache");
     const opened = await DocumentStore.open(storagePath);
     store = opened.store;
     let notebook = opened.notebook;
     if (isUntitled) notebook = { ...notebook, path: null };
     if (options.expectedSource !== void 0 && !store.matchesSource(options.expectedSource)) throw new FileConflict();
-    const projectPath = isUntitled ? join21(notebookDirectory, ".alder", "config.yaml") : projectConfigPath(store.path);
+    const projectPath = isUntitled ? join20(notebookDirectory, ".alder", "config.yaml") : projectConfigPath(store.path);
     projectSettings = await loadProjectSettings(projectPath);
     config3 = configurationFor(notebook);
     projectLayoutIntent = isUntitled ? null : await readLayout(store.path);
@@ -112038,7 +112025,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
         const published = await prepared.publish();
         projectSettings = published.value;
         config3 = configurationFor(context.document);
-        cacheDirectory = config3.cache.dir ? resolve13(notebookDirectory, config3.cache.dir) : join21(notebookDirectory, ".alder", "cache");
+        cacheDirectory = config3.cache.dir ? resolve13(notebookDirectory, config3.cache.dir) : join20(notebookDirectory, ".alder", "cache");
         settingsErrors.delete("project");
         publishSettingsError();
         const sidecars = { ...context.sidecars, config: published.observation };
@@ -112079,7 +112066,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
           const sidecars = { ...context.sidecars, packages: published.observation };
           await checkpointRecovery(context.disk, sidecars);
           publishSource(context, { document: context.document, path: context.path, layout: context.layout, disk: context.disk, sidecars, dirty: context.dirty || recoveryPending, advanceRevision: true });
-          return { ok: true, path: notebookDirectory, metadata: join21(notebookDirectory, ".alder", "packages.yaml"), packages: [...published.value], sidecarVersion: published.observation.version };
+          return { ok: true, path: notebookDirectory, metadata: join20(notebookDirectory, ".alder", "packages.yaml"), packages: [...published.value], sidecarVersion: published.observation.version };
         } catch (error61) {
           const code2 = pendingSidecars.packages ? "sidecar_write_failed" : "recovery_checkpoint_failed";
           return publishSidecarFailure(context, context.document, context.config, context.layout, "packages", error61, code2);
@@ -112117,7 +112104,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
           const destinationDirectory = dirname9(destination);
           const destinationProjectConfig = await loadProjectSettings(projectConfigPath(destination));
           const destinationConfig = configurationFor(context.document, destinationProjectConfig);
-          const destinationCache = destinationConfig.cache.dir ? resolve13(destinationDirectory, destinationConfig.cache.dir) : join21(destinationDirectory, ".alder", "cache");
+          const destinationCache = destinationConfig.cache.dir ? resolve13(destinationDirectory, destinationConfig.cache.dir) : join20(destinationDirectory, ".alder", "cache");
           let destinationLayout = await readLayout(destination);
           let destinationPackages = [];
           try {
@@ -112581,7 +112568,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
             if (publisher === void 0) publisher = createPublishingService({ outputStore: artifactStore, processScope });
             const snapshot = controller.snapshot();
             const requestedPath = typeof payload.outputPath === "string" && payload.outputPath.length > 0 ? payload.outputPath : null;
-            const outputPath = requestedPath ?? join21(work, "publish-" + randomUUID14() + ".html");
+            const outputPath = requestedPath ?? join20(work, "publish-" + randomUUID14() + ".html");
             const pendingPublish = publisher.publishSnapshot(snapshot, { outputPath, includeCode: payload.includeCode === true, signal: publishAbort.signal });
             activePublishes.add(pendingPublish);
             const result = await pendingPublish.finally(() => {
@@ -112650,7 +112637,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
       if (lsp?.alive()) return Promise.resolve(lsp);
       if (lspStarting !== void 0) return lspStarting;
       const generation = ++lspGeneration;
-      const starting = createLsp(generation, () => lspGeneration, controller, runtimeEnvironment, options.resources, notebookDirectory, processScope, childEnvironment, setLsp2);
+      const starting = createLsp(generation, () => lspGeneration, controller, engine, () => runtimeReady, notebookDirectory, setLsp2);
       lspStarting = starting;
       void starting.then(
         () => {
@@ -112664,7 +112651,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
     };
     const scheduleLspSync = () => {
       clearTimeout(lspSyncTimer);
-      if (closing || !lspStarting && !diagnosticsEnabled(controller)) return;
+      if (closing || controller.snapshot().runtime.kernelState !== "ready" || !lspStarting && !diagnosticsEnabled(controller)) return;
       lspSyncTimer = setTimeout(() => {
         const previous = lspSyncRunning ?? Promise.resolve();
         lspSyncRunning = previous.catch(() => {
@@ -112749,6 +112736,12 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
     };
     unsubscribe = controller.subscribe((event) => {
       if (event.type === "cell" || event.type === "notebook") scheduleLspSync();
+      if (event.type === "runtime") {
+        if (controller.snapshot().runtime.kernelState !== "ready") {
+          clearTimeout(lspSyncTimer);
+          if (lsp || lspStarting) void invalidateLsp();
+        } else scheduleLspSync();
+      }
       if (event.type === "operation") scheduleIdle();
     });
     const scheduleIdle = () => {
@@ -112790,7 +112783,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
         recoveryId: recovery.recoveryId
       },
       staticDir: options.resources.rendererDirectory,
-      indexFile: join21(options.resources.rendererDirectory, "index.html"),
+      indexFile: join20(options.resources.rendererDirectory, "index.html"),
       uploads,
       artifactStore,
       mcpHandler: createMcpHttpHandler({ controller, artifactStore, runtimeReady: () => runtimeReady, onShutdown: close }),
@@ -112962,13 +112955,10 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
     throw error61;
   }
 }
-async function createLsp(generation, currentGeneration, controller, runtimeEnvironment, resources2, notebookDirectory, processScope, childEnvironment, setLsp) {
-  if (runtimeEnvironment === null) throw new Error("R runtime is unavailable");
+async function createLsp(generation, currentGeneration, controller, engine, runtimeReady, notebookDirectory, setLsp) {
+  await runtimeReady();
   const document = await lspDocument(controller.snapshot());
-  const options = validatedRLanguageServerOptions(document, runtimeEnvironment.rscript, resources2.workerDirectory, processScope);
-  const baseLibrary = runtimeEnvironment.libraryPaths.at(-1);
-  if (!baseLibrary) throw new Error("R base library is unavailable for language assistance");
-  const client = new LspClient({ ...options, cwd: notebookDirectory, env: trustedRLanguageServerEnvironment({ ...process.env, ...childEnvironment() }, [resources2.rLibraryDirectory, baseLibrary], resources2.root), onFailure: (message2) => controller.publishServiceError("lsp", { code: "lsp_unavailable", message: message2 }), onDiagnostics: (changed, diagnostics) => controller.publishEditorDiagnostics(changed.cells.map((cell) => ({ id: cell.id, revision: cell.revision ?? 0, type: cell.type ?? "code", source: cell.body.join("\n") })), diagnostics) });
+  const client = new LspClient({ document, cwd: notebookDirectory, connect: () => engine.connectArkLsp(), onFailure: (message2) => controller.publishServiceError("lsp", { code: "lsp_unavailable", message: message2 }), onDiagnostics: (changed, diagnostics) => controller.publishEditorDiagnostics(changed.cells.map((cell) => ({ id: cell.id, revision: cell.revision ?? 0, type: cell.type ?? "code", source: cell.body.join("\n") })), diagnostics) });
   try {
     await client.start();
     if (generation !== currentGeneration()) {
@@ -113016,7 +113006,7 @@ function initialOrigin(host, port) {
 async function persistDefaultRscript(rscript, processSupervisorExecutable) {
   const paths = envPaths("alder", { suffix: "" });
   await ensurePrivateDirectory(paths.config, { processSupervisorExecutable });
-  await writePrivateFile(join21(paths.config, "settings.json"), Buffer.from(JSON.stringify({ schemaVersion: 1, rscript }) + "\n", "utf8"), { processSupervisorExecutable });
+  await writePrivateFile(join20(paths.config, "settings.json"), Buffer.from(JSON.stringify({ schemaVersion: 1, rscript }) + "\n", "utf8"), { processSupervisorExecutable });
 }
 
 // src/backend.ts

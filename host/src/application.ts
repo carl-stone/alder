@@ -20,7 +20,7 @@ import { createPublishingService, type PublishingService } from "./publishing.js
 import { createFormattingService, type FormattingService } from "./formatting.js";
 import type { JobCallbacks } from "./jobs.js";
 import { renderHelp } from "./markdown.js";
-import { LspClient, trustedRLanguageServerEnvironment, validatedRLanguageServerOptions } from "./lsp.js";
+import { LspClient } from "./lsp.js";
 import { parseNotebook, restoreNotebookCellIdentity, serializeNotebook, serializeNotebookWithParts, setMetadata, type NotebookDocument } from "./notebook.js";
 import type { ArtifactHandle, EngineHandshake, HostSnapshot, Layout, REnvironment, RecoveryBranch as ProtocolRecoveryBranch, RecoveryState as ProtocolRecoveryState } from "./protocol.js";
 import type { StaticOutputScope } from "./outputs.js";
@@ -1410,7 +1410,7 @@ async function startNotebookHost(
       if (lsp?.alive()) return Promise.resolve(lsp);
       if (lspStarting !== undefined) return lspStarting;
       const generation = ++lspGeneration;
-      const starting = createLsp(generation, () => lspGeneration, controller!, runtimeEnvironment, options.resources, notebookDirectory, processScope!, childEnvironment, setLsp);
+      const starting = createLsp(generation, () => lspGeneration, controller!, engine!, () => runtimeReady, notebookDirectory, setLsp);
       lspStarting = starting;
       void starting.then(
         () => { if (lspStarting === starting) lspStarting = undefined; },
@@ -1421,7 +1421,8 @@ async function startNotebookHost(
     function setLsp(value: LspClient | undefined): void { lsp = value; }
     const scheduleLspSync = (): void => {
       clearTimeout(lspSyncTimer);
-      if (closing || (!lspStarting && !diagnosticsEnabled(controller!))) return;
+      if (closing || controller!.snapshot().runtime.kernelState !== "ready" ||
+          (!lspStarting && !diagnosticsEnabled(controller!))) return;
       lspSyncTimer = setTimeout(() => { const previous = lspSyncRunning ?? Promise.resolve(); lspSyncRunning = previous.catch(() => {}).then(async () => { const client = await getLsp(); if (diagnosticsEnabled(controller!)) await client.syncDocument(await lspDocument(controller!.snapshot())); await client.setDiagnostics(diagnosticsEnabled(controller!)); }).catch(error => { if (!closing) process.stderr.write("Language assistance unavailable: " + errorMessage(error) + "\\n"); }); }, 150);
     };
     const refreshLspForEnvironment = async (expectedGeneration: number): Promise<void> => {
@@ -1492,6 +1493,12 @@ async function startNotebookHost(
     };
     unsubscribe = controller.subscribe(event => {
       if (event.type === "cell" || event.type === "notebook") scheduleLspSync();
+      if (event.type === "runtime") {
+        if (controller!.snapshot().runtime.kernelState !== "ready") {
+          clearTimeout(lspSyncTimer);
+          if (lsp || lspStarting) void invalidateLsp();
+        } else scheduleLspSync();
+      }
       if (event.type === "operation") scheduleIdle();
     });
     const scheduleIdle = (): void => {
@@ -1663,13 +1670,10 @@ async function startNotebookHost(
 
 
 
-async function createLsp(generation: number, currentGeneration: () => number, controller: Controller, runtimeEnvironment: REnvironment | null, resources: ApplicationResources, notebookDirectory: string, processScope: Pick<ProcessScope, "spawn">, childEnvironment: () => Record<string, string>, setLsp: (value: LspClient | undefined) => void): Promise<LspClient> {
-  if (runtimeEnvironment === null) throw new Error("R runtime is unavailable");
+async function createLsp(generation: number, currentGeneration: () => number, controller: Controller, engine: Engine, runtimeReady: () => Promise<void>, notebookDirectory: string, setLsp: (value: LspClient | undefined) => void): Promise<LspClient> {
+  await runtimeReady();
   const document = await lspDocument(controller.snapshot());
-  const options = validatedRLanguageServerOptions(document, runtimeEnvironment.rscript, resources.workerDirectory, processScope);
-  const baseLibrary = runtimeEnvironment.libraryPaths.at(-1);
-  if (!baseLibrary) throw new Error("R base library is unavailable for language assistance");
-  const client = new LspClient({ ...options, cwd: notebookDirectory, env: trustedRLanguageServerEnvironment({ ...process.env, ...childEnvironment() }, [resources.rLibraryDirectory, baseLibrary], resources.root), onFailure: message => controller.publishServiceError("lsp", { code: "lsp_unavailable", message }), onDiagnostics: (changed, diagnostics) => controller.publishEditorDiagnostics(changed.cells.map(cell => ({ id: cell.id, revision: cell.revision ?? 0, type: cell.type ?? "code", source: cell.body.join("\n") })), diagnostics) });
+  const client = new LspClient({ document, cwd: notebookDirectory, connect: () => engine.connectArkLsp(), onFailure: message => controller.publishServiceError("lsp", { code: "lsp_unavailable", message }), onDiagnostics: (changed, diagnostics) => controller.publishEditorDiagnostics(changed.cells.map(cell => ({ id: cell.id, revision: cell.revision ?? 0, type: cell.type ?? "code", source: cell.body.join("\n") })), diagnostics) });
   try {
     await client.start();
     if (generation !== currentGeneration()) {

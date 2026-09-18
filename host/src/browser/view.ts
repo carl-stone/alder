@@ -666,7 +666,7 @@ export class NotebookView {
         onJump: (kind, value) => {
           if (kind === "move") {
             void this.action(() => this.moveCellBy(cell.key, value < 0 ? -1 : 1)).catch((error) => this.showError(error));
-          } else if (kind === "reference") this.jumpReactiveReference(cell, view.editor, value);
+          } else if (kind === "reference") void this.jumpToDefinition(cell, view.editor, value);
         },
         onHover: (_editor, position) => this.lspHover(cell, view.editor, position),
         onSignature: (_editor, position, trigger) => this.lspSignature(cell, view.editor, position, trigger),
@@ -1811,6 +1811,27 @@ export class NotebookView {
     const owner = this.documentValue?.snapshot.cells.find((candidate) =>
       candidate.id !== cell.id && candidate.defs.includes(name));
     if (owner) this.navigateToCell(owner.id);
+  }
+
+  private async jumpToDefinition(cell: LocalCell, editor: EditorHandle | null, position: number): Promise<void> {
+    if (!cell.id || !editor) return;
+    const source = this.sourceText(cell.key);
+    try {
+      const result = await this.lspRequest(`definition:${cell.key}`, "textDocument/definition", {
+        position: editorPosition(editor, cell, position),
+      });
+      if (this.sourceText(cell.key) !== source) return;
+      const location = Array.isArray(result) ? result[0] : result;
+      const range = isObject(location) ? location.targetSelectionRange ?? location.range : null;
+      const start = isObject(range) && isObject(range.start) ? range.start : null;
+      if (start && typeof start.cell === "string" && typeof start.line === "number") {
+        this.navigateToCell(start.cell, start.line);
+        return;
+      }
+    } catch {
+      // Reactive references remain useful when language assistance is unavailable.
+    }
+    this.jumpReactiveReference(cell, editor, position);
   }
 
   private bindNavigation(): void {

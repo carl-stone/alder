@@ -24198,7 +24198,7 @@ var NotebookView = class {
         onJump: (kind, value) => {
           if (kind === "move") {
             void this.action(() => this.moveCellBy(cell.key, value < 0 ? -1 : 1)).catch((error61) => this.showError(error61));
-          } else if (kind === "reference") this.jumpReactiveReference(cell, view2.editor, value);
+          } else if (kind === "reference") void this.jumpToDefinition(cell, view2.editor, value);
         },
         onHover: (_editor, position) => this.lspHover(cell, view2.editor, position),
         onSignature: (_editor, position, trigger) => this.lspSignature(cell, view2.editor, position, trigger)
@@ -25285,6 +25285,25 @@ ${jupyterTrace.map((line, index) => `${index + 1}. ${line}`).join("\n")}` : ""
     if (!name || !cell.server?.refs.includes(name)) return;
     const owner = this.documentValue?.snapshot.cells.find((candidate) => candidate.id !== cell.id && candidate.defs.includes(name));
     if (owner) this.navigateToCell(owner.id);
+  }
+  async jumpToDefinition(cell, editor, position) {
+    if (!cell.id || !editor) return;
+    const source = this.sourceText(cell.key);
+    try {
+      const result = await this.lspRequest(`definition:${cell.key}`, "textDocument/definition", {
+        position: editorPosition(editor, cell, position)
+      });
+      if (this.sourceText(cell.key) !== source) return;
+      const location2 = Array.isArray(result) ? result[0] : result;
+      const range = isObject3(location2) ? location2.targetSelectionRange ?? location2.range : null;
+      const start2 = isObject3(range) && isObject3(range.start) ? range.start : null;
+      if (start2 && typeof start2.cell === "string" && typeof start2.line === "number") {
+        this.navigateToCell(start2.cell, start2.line);
+        return;
+      }
+    } catch {
+    }
+    this.jumpReactiveReference(cell, editor, position);
   }
   bindNavigation() {
     for (const root of [this.dom.getElementById("dataflow-panel"), this.dom.getElementById("minimap")]) {

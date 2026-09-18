@@ -1,5 +1,6 @@
-import { delimiter, join, resolve as resolvePath } from "node:path";
+import { resolve as resolvePath } from "node:path";
 import { pathToFileURL } from "node:url";
+import type { Duplex } from "node:stream";
 import {
   CancellationTokenSource,
   createMessageConnection,
@@ -16,7 +17,6 @@ import {
   DidOpenTextDocumentNotification,
   DidSaveTextDocumentNotification,
   DocumentSymbolRequest,
-  ExitNotification,
   HoverRequest,
   InitializeRequest,
   InitializedNotification,
@@ -24,13 +24,11 @@ import {
   ReferencesRequest,
   ShutdownRequest,
   SignatureHelpRequest,
-  TextDocumentSyncKind,
   type Diagnostic,
   type InitializeParams,
   type Position,
   type Range,
 } from "vscode-languageserver-protocol";
-import type { OwnedProcess, ProcessScope } from "./processes.js";
 import {
   fromFilePosition,
   layoutNotebook,
@@ -69,21 +67,16 @@ export interface CellDiagnostic {
 export type DiagnosticsByCell = Record<string, CellDiagnostic[]>;
 
 export interface LspClientOptions {
-  command: string;
-  args?: readonly string[];
+  connect: () => Promise<Duplex>;
   cwd?: string;
-  env?: NodeJS.ProcessEnv;
   document: NotebookDocument;
   diagnostics?: boolean;
   requestTimeoutMs?: number;
   initializeTimeoutMs?: number;
-  stderrLimitBytes?: number;
   processId?: number | null;
   onFailure?: (message: string) => void;
   /** A full replacement for diagnostics belonging to the supplied source snapshot. */
   onDiagnostics?: (document: NotebookDocument, diagnostics: DiagnosticsByCell) => void;
-  /** Spawn through the host containment boundary. */
-  processScope: Pick<ProcessScope, "spawn">;
 }
 
 const MAX_LSP_DIAGNOSTICS = 1_000;
@@ -209,7 +202,7 @@ export function translateLspResult(
 }
 
 export class LspClient {
-  private process: OwnedProcess | null = null;
+  private socket: Duplex | null = null;
   private connection: MessageConnection | null = null;
   private document: NotebookDocument;
   private layout: NotebookLayout;
@@ -224,8 +217,6 @@ export class LspClient {
   private initialized = false;
   private failure: string | null = null;
   private failureReported = false;
-  private stderrText = "";
-  private processExited = false;
 
   constructor(private readonly options: LspClientOptions) {
     this.document = options.document;
@@ -241,7 +232,7 @@ export class LspClient {
   get failureMessage(): string | null { return this.failure; }
 
   alive(): boolean {
-    return !this.closed && this.initialized && this.process !== null && this.processAlive(this.process);
+    return !this.closed && this.initialized && this.socket !== null && !this.socket.destroyed;
   }
 
   async start(): Promise<this> {
@@ -249,39 +240,28 @@ export class LspClient {
     if (this.connection) return this;
     this.failure = null;
     this.failureReported = false;
-    const child = await this.options.processScope.spawn({
-      executable: this.options.command,
-      args: [...(this.options.args ?? [])],
-      cwd: this.options.cwd ?? resolvePath(this.documentPath, ".."),
-      environment: stringEnvironment(this.options.env ?? process.env),
-      stdio: "pipes",
-    });
-    this.process = child;
-    this.processExited = false;
-    child.stderr?.on("data", (chunk: Buffer) => this.retainStderr(chunk));
-    void child.exited.then(({ code, signal }) => {
-      this.processExited = true;
-      if (!this.closed) this.reportFailure(this.failureDetail(languageServerExitMessage(code, signal)));
-    }).catch(error => {
-      this.processExited = true;
-      if (!this.closed) this.reportFailure(this.failureDetail("language server failed: " + (error instanceof Error ? error.message : String(error))));
-    });
+    let socket: Duplex;
+    try {
+      socket = await this.options.connect();
+    } catch (error) {
+      throw new LspClientError("lsp_unavailable", `Ark language server is unavailable: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    this.socket = socket;
+    socket.on("close", () => { if (!this.closed) this.reportFailure("Ark language server connection closed"); });
     const connection = createMessageConnection(
-      new StreamMessageReader(child.stdout!),
-      new StreamMessageWriter(child.stdin!),
+      new StreamMessageReader(socket),
+      new StreamMessageWriter(socket),
     );
     this.connection = connection;
-    connection.onError(([error]) => this.reportFailure(this.failureDetail("language server connection failed: " + error.message)));
+    connection.onError(([error]) => this.reportFailure("language server connection failed: " + error.message));
     connection.onClose(() => {
-      if (!this.closed) this.reportFailure(this.failureDetail("language server connection closed"));
+      if (!this.closed) this.reportFailure("language server connection closed");
     });
     connection.onNotification(PublishDiagnosticsNotification.type, (params) => {
       if (params.uri !== this.documentUri) return;
       if (params.version !== undefined && params.version !== this.version) return;
       // A versionless result can be associated safely with the initial open,
       // but after didChange an older asynchronous lint task can arrive late.
-      // R languageserver includes versions; for servers that do not, prefer
-      // omitting diagnostics over attaching them to the wrong source.
       if (params.version === undefined && !this.acceptVersionlessDiagnostics) return;
       this.diagnostics.set(params.uri, {
         version: params.version,
@@ -330,10 +310,8 @@ export class LspClient {
         connection.dispose();
         this.connection = null;
         this.initialized = false;
-        const owned = this.process;
-        this.process = null;
-        this.processExited = true;
-        if (owned) await terminateOwnedProcess(owned, 2_000).catch(() => {});
+        this.socket?.destroy();
+        this.socket = null;
       }
       throw error;
     }
@@ -392,10 +370,10 @@ export class LspClient {
     this.connection!.sendNotification(DidChangeConfigurationNotification.type, { settings: { diagnostics: enabled } });
     if (enabled) {
       this.version += 1;
-      this.acceptVersionlessDiagnostics = false;
-      this.connection!.sendNotification(DidChangeTextDocumentNotification.type, {
-        textDocument: { uri: this.documentUri, version: this.version },
-        contentChanges: [{ text: this.layout.text }],
+      this.acceptVersionlessDiagnostics = true;
+      this.connection!.sendNotification(DidCloseTextDocumentNotification.type, { textDocument: { uri: this.documentUri } });
+      this.connection!.sendNotification(DidOpenTextDocumentNotification.type, {
+        textDocument: { uri: this.documentUri, languageId: "r", version: this.version, text: this.layout.text },
       });
     }
     return true;
@@ -430,6 +408,7 @@ export class LspClient {
       return translateLspResult(result, method as AlderLspMethod, document, this.documentUri);
     } catch (error) {
       if (error instanceof LspClientError) throw error;
+      if (!this.alive()) throw new LspClientError("lsp_unavailable", this.failure ?? "Ark language server is unavailable");
       throw new LspClientError("invalid_request", `language server request failed: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
       cancellation.dispose();
@@ -477,32 +456,34 @@ export class LspClient {
     this.diagnostics.clear();
     this.publishDiagnostics();
     const connection = this.connection;
-    const child = this.process;
-    if (connection && this.initialized && child !== null && this.processAlive(child)) {
+    if (connection && this.initialized && this.socket !== null && !this.socket.destroyed) {
       try {
         connection.sendNotification(DidCloseTextDocumentNotification.type, { textDocument: { uri: this.documentUri } });
         await this.withTimeout(connection.sendRequest(ShutdownRequest.type), 2_000, "shutdown");
-        connection.sendNotification(ExitNotification.type);
       } catch {
         // Termination below is the authoritative cleanup path.
       }
     }
+    const socket = this.socket;
+    socket?.end();
     connection?.dispose();
-    if (child && this.processAlive(child)) await terminateOwnedProcess(child, 2_000);
+    if (socket && !socket.destroyed) {
+      await new Promise<void>(resolve => {
+        const timer = setTimeout(resolve, 2_000);
+        timer.unref?.();
+        socket.once("close", () => { clearTimeout(timer); resolve(); });
+      });
+    }
+    socket?.destroy();
+    this.socket = null;
     this.connection = null;
-    this.process = null;
-    this.processExited = true;
     this.initialized = false;
   }
 
   private assertAlive(): void {
     if (!this.alive() || !this.connection) {
-      throw new LspClientError("lsp_unavailable", this.failureDetail("language server is unavailable"));
+      throw new LspClientError("lsp_unavailable", this.failure ?? "language server is unavailable");
     }
-  }
-
-  private processAlive(_child: OwnedProcess): boolean {
-    return !this.processExited;
   }
 
   private async withTimeout<T>(
@@ -526,18 +507,6 @@ export class LspClient {
     } finally {
       if (timer) clearTimeout(timer);
     }
-  }
-
-  private retainStderr(chunk: Buffer): void {
-    this.stderrText += chunk.toString("utf8");
-    const limit = Math.max(1_024, this.options.stderrLimitBytes ?? 16_384);
-    const bytes = Buffer.from(this.stderrText);
-    if (bytes.length > limit) this.stderrText = bytes.subarray(bytes.length - limit).toString("utf8");
-  }
-
-  private failureDetail(prefix: string): string {
-    const stderr = this.stderrText.trim();
-    return stderr ? `${prefix} (stderr: ${stderr})` : prefix;
   }
 
   private reportFailure(message: string): void {
@@ -624,73 +593,3 @@ function boundedUtf8(value: string, maxBytes: number): string {
   if (low > 0 && /[\uD800-\uDBFF]/.test(value[low - 1]!)) low -= 1;
   return value.slice(0, low);
 }
-
-function stringEnvironment(environment: NodeJS.ProcessEnv): Record<string, string> {
-  return Object.fromEntries(Object.entries(environment).filter((entry): entry is [string, string] => typeof entry[1] === "string"));
-}
-
-function languageServerExitMessage(code: number | null, signal: string | null): string {
-  return "language server exited" + (code === null ? "" : " with status " + code) + (signal ? " (" + signal + ")" : "");
-}
-
-async function terminateOwnedProcess(child: OwnedProcess, timeoutMs: number): Promise<void> {
-  let exited = false;
-  const done = child.exited.then(() => { exited = true; }).catch(() => { exited = true; });
-  await Promise.race([done, new Promise<void>(resolveTimeout => {
-    const timer = setTimeout(resolveTimeout, timeoutMs);
-    timer.unref?.();
-  })]);
-  if (!exited) await child.terminate();
-}
-
-function isAbsolutePath(value: string): boolean {
-  return typeof value === "string" && value.length > 0 && (value.startsWith("/") || /^[A-Za-z]:[\\/]/.test(value));
-}
-export function trustedRLanguageServerEnvironment(
-  environment: NodeJS.ProcessEnv,
-  trustedLibraryPaths: readonly string[],
-  trustedResourcesRoot: string,
-  platform: NodeJS.Platform = process.platform,
-): Record<string, string> {
-  if (!isAbsolutePath(trustedResourcesRoot)) {
-    throw new LspClientError("invalid_request", "language server requires an absolute trusted resources root");
-  }
-  if (!Array.isArray(trustedLibraryPaths) || trustedLibraryPaths.length === 0 ||
-      trustedLibraryPaths.some(path => typeof path !== "string" || !isAbsolutePath(path)) ||
-      new Set(trustedLibraryPaths).size !== trustedLibraryPaths.length) {
-    throw new LspClientError("invalid_request", "language server requires unique absolute trusted R library paths");
-  }
-  const trusted = [...trustedLibraryPaths];
-  const result = stringEnvironment(environment);
-  if (platform === "darwin") delete result.R_HOME;
-  for (const key of Object.keys(result)) if (/^R_LIBS(?:_|$)/.test(key)) delete result[key];
-  result.R_LIBS = trusted.join(delimiter);
-  result.R_LIBS_USER = "";
-  result.R_LIBS_SITE = "";
-  result.ALDER_RESOURCES_ROOT = trustedResourcesRoot;
-  result.ALDER_R_LIBRARIES = JSON.stringify(trusted);
-  return result;
-}
-export function validatedRLanguageServerOptions(
-  document: NotebookDocument,
-  rscript: string,
-  workerDirectory: string,
-  processScope: Pick<ProcessScope, "spawn">,
-): LspClientOptions {
-  if (!isAbsolutePath(rscript) || !isAbsolutePath(workerDirectory)) {
-    throw new LspClientError("invalid_request", "Rscript and workerDirectory must be absolute paths");
-  }
-  if (!processScope || typeof processScope.spawn !== "function") {
-    throw new LspClientError("invalid_request", "language server requires the application ProcessScope");
-  }
-  const path = resolveDocumentPath(document);
-  return {
-    command: rscript,
-    args: ["--vanilla", join(workerDirectory, "host-lsp.R")],
-    cwd: resolvePath(path, ".."),
-    document,
-    processScope,
-  };
-}
-
-export { TextDocumentSyncKind };

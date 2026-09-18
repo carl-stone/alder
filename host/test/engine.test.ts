@@ -8,6 +8,7 @@ import { join, resolve } from "node:path";
 import test from "node:test";
 
 import { Engine, type EngineOptions } from "../src/engine.js";
+import { LspClient, type DiagnosticsByCell } from "../src/lsp.js";
 import { createProcessScope, type ProcessScope } from "../src/processes.js";
 import type { ApplicationResources } from "../src/resources.js";
 import { analysisResultSchema, type EvaluationPayload, type REnvironment } from "../src/protocol.js";
@@ -346,6 +347,46 @@ test("stock Ark preserves append, log, progress, and deferred output", integrati
     assert.match(JSON.stringify(expanded.output), /Deferred/);
     assert.match(JSON.stringify(expanded.output), /doubled/);
   } finally {
+    await closeEngine(engine, processScope, directory);
+  }
+});
+test("Ark LSP maps notebook completion, hover, diagnostics and definition", integration, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "alder-engine-ark-lsp-client-"));
+  const { engine, processScope } = await openEngine(directory);
+  const document = { path: join(directory, "notebook.R"), cells: [
+    { id: "cell-1", type: "code" as const, body: ["my_table <- data.frame(long_column = 1L)"] },
+    { id: "cell-2", type: "code" as const, body: ["my_table$lo"] },
+    { id: "cell-3", type: "code" as const, body: ["missing_symbol"] },
+  ] };
+  let diagnostics: DiagnosticsByCell = {};
+  const client = new LspClient({ document, cwd: directory, connect: () => engine.connectArkLsp(), diagnostics: true,
+    onDiagnostics: (_source, next) => { diagnostics = next; } });
+  try {
+    const epoch = (await engine.start()).kernel!.kernelEpoch;
+    assert.equal((await engine.evaluate(payload(epoch, "lsp-live-object", "lsp-live-object", document.cells[0]!.body[0]!))).ok, true);
+    await client.start();
+    const completion = await client.requestDocument("textDocument/completion", { position: { cell: "cell-2", line: 0, character: 11 } }, document);
+    assert.match(JSON.stringify(completion), /long_column/);
+    const hover = await client.requestDocument("textDocument/hover", { position: { cell: "cell-1", line: 0, character: 15 } }, document);
+    assert.match(JSON.stringify(hover), /Data Frames/);
+    const definition = await client.requestDocument("textDocument/definition", { position: { cell: "cell-2", line: 0, character: 2 } }, document);
+    assert.match(JSON.stringify(definition), /"cell":"cell-1"/);
+    const deadline = Date.now() + 5_000;
+    while (!diagnostics["cell-3"]?.some((item) => item.message.includes("missing_symbol")) && Date.now() < deadline) {
+      await new Promise(resolveDelay => setTimeout(resolveDelay, 25));
+    }
+    assert.ok(diagnostics["cell-3"]?.some((item) => item.message.includes("missing_symbol")), JSON.stringify(diagnostics));
+    await client.stop();
+    const reopened = new LspClient({ document, cwd: directory, connect: () => engine.connectArkLsp() });
+    try {
+      await reopened.start();
+      const again = await reopened.requestDocument("textDocument/completion", { position: { cell: "cell-2", line: 0, character: 11 } }, document);
+      assert.match(JSON.stringify(again), /long_column/);
+    } finally {
+      await reopened.stop();
+    }
+  } finally {
+    await client.stop();
     await closeEngine(engine, processScope, directory);
   }
 });

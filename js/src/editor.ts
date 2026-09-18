@@ -268,6 +268,7 @@ export function createEditor({
       {key: "Mod-/", run: toggleComment},
       {key: "Alt-ArrowUp", run: () => { onJump?.("move", -1); return true; }},
       {key: "Alt-ArrowDown", run: () => { onJump?.("move", 1); return true; }},
+      {key: "F12", run: (view) => { onJump?.("reference", view.state.selection.main.head); return true; }},
       ...defaultKeymap,
       ...historyKeymap,
       ...closeBracketsKeymap,
