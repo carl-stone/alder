@@ -193,8 +193,12 @@ export class RecoveryWriter {
           });
           this.validGenerations.push(name);
           if (!restored) {
-            // A clean snapshot is a tombstone: the saved notebook remains authoritative.
+            // Clean recovery never replaces saved source. Keep cell identities when
+            // that source is identical so a lost creation reply can be reconciled.
             if (snapshot.pending) this.baseline = baseline;
+            else if (baseline.physicalBytes === this.baseline.physicalBytes) {
+              this.baseline = { ...this.baseline, cells: baseline.cells, documentRevision: baseline.documentRevision };
+            }
             this.pending = snapshot.pending;
             this.latestFingerprint = snapshot.pending ? snapshot.fingerprint : fingerprint(this.baseline);
             this.branches = new Map(branches.map(branch => [branch.id, branch]));

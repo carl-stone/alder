@@ -1367,7 +1367,7 @@ export function addCell(
   const assignment = assignedCellId(document);
   if (id !== undefined) {
     validateIdentifier(id, "cell id");
-    if (document.cells.some(cell => cell.id === id)) throw new NotebookMutationError("duplicate_cell", "cell already exists: " + id);
+    if (document.cells.some(cell => cell.id === id)) throw new NotebookMutationError("invalid_document", "cell already exists: " + id);
   }
   const cell = createCell(id ?? assignment.id, bodyArray, type, effectivePreferredEol(document));
   const cells = document.cells.map((candidate, cellIndex) => syncCell(candidate, physical.cells[cellIndex]!));
