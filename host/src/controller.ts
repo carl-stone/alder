@@ -1,9 +1,8 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import {
   analysisDiagnosticSchema,
   analysisResultSchema,
-  commandAdmissionSchema,
   documentChangeSchema,
   engineEventSchema,
   engineHandshakeSchema,
@@ -16,7 +15,6 @@ import {
   notebookSourceByteLength,
   operationProgressSchema,
   rEnvironmentSchema,
-  parseHostCommand,
   type AnalysisCellResult,
   type AnalyzerIdentity,
   type AnalysisDiagnostic,
@@ -25,7 +23,6 @@ import {
   outputRecordSchema,
   richOutputPayloadSchema,
   type CellStatus,
-  type CommandAdmission,
   type CommandResult,
   type ControllerServices,
   type DocumentChange,
@@ -67,7 +64,6 @@ const INTERNAL_CLIENT_ID = "internal";
 
 const OPERATION_JOURNAL_LIMIT = 256;
 const COMMAND_DEDUPLICATION_LIMIT = 512;
-const EVENT_JOURNAL_LIMIT = 2_048;
 const MAX_LOG_BYTES = 65_536;
 const MAX_COMPLETED_LOG_BYTES = 1_048_576;
 const LOG_TRUNCATION_MARKER = "[output truncated at 1048576 bytes]";
@@ -91,8 +87,6 @@ export interface ControllerOptions {
   deferStartup?: boolean;
   initialDirty?: boolean;
   epoch?: string;
-  journalLimit?: number;
-  journalByteLimit?: number;
   disk?: HostSnapshot["disk"];
   sidecars?: HostSnapshot["sidecars"];
   rEnvironment?: HostSnapshot["runtime"]["rEnvironment"];
@@ -220,12 +214,9 @@ interface ActiveEvaluation {
 }
 
 interface CommandEntry {
-  operationId: string;
-  clientId: string;
-  commandSequence: number;
   fingerprint: string;
-  admission: Promise<CommandAdmission>;
-  terminal: Promise<unknown>;
+  completion: Promise<CommandResult>;
+  settled: boolean;
 }
 interface AnalysisCacheValue {
   defs: string[];
@@ -293,17 +284,16 @@ export class Controller {
   private readonly outputStore: OutputStore;
   private readonly services: ControllerServices;
   private readonly epochValue: string;
-  private readonly eventJournalLimit: number;
-  private readonly eventJournalByteLimit: number;
   private readonly listeners = new Map<EventListener, readonly HostEventType[] | undefined>();
-  private readonly eventJournal: HostEvent[] = [];
   private readonly operations = new Map<string, OperationRecord>();
   private readonly operationWaiters = new Map<
     string,
     Set<(operation: OperationRecord) => void>
   >();
   private readonly commandEntries = new Map<string, CommandEntry>();
-  private readonly clientHighWater = new Map<string, number>();
+  private readonly executionRequestIds = new Map<string, string>();
+  private runCommandTail: Promise<void> = Promise.resolve();
+  private readonly queuedRunCommands = new Map<string, HostCommand>();
   private readonly activeClients = new Set<string>();
   private readonly analysisCache = new Map<string, AnalysisCacheValue>();
   private analysisCacheBytes = 0;
@@ -349,7 +339,6 @@ export class Controller {
       clientId: string;
     }
   >();
-  private eventJournalBytes = 0;
   private sourceCommitTail: Promise<void> = Promise.resolve();
   private durableCommit?: ControllerOptions["durableCommit"];
   private sourceCommit?: ControllerOptions["sourceCommit"];
@@ -434,14 +423,6 @@ export class Controller {
     this.outputStore = options.outputStore;
     this.services = options.services ?? {};
     this.epochValue = options.epoch ?? randomUUID();
-    this.eventJournalLimit = boundedPositiveInteger(
-      options.journalLimit,
-      EVENT_JOURNAL_LIMIT,
-    );
-    this.eventJournalByteLimit = boundedPositiveInteger(
-      options.journalByteLimit,
-      4 * 1024 * 1024,
-    );
     let notebook: ReturnType<typeof notebookInputSchema.parse>;
     let sourceDocument: NotebookDocument;
     try {
@@ -702,12 +683,11 @@ export class Controller {
         [...this.editorDiagnostics].map(([id, diagnostics]) => [id, clone(diagnostics)]),
       ),
       serviceErrors: clone(this.serviceErrors),
-      operations: [...this.operations.values()].map(clone),
+      operations: [...this.operations.values()].filter((operation) => isExecutionCommand(operation.kind)).map(clone),
       lastValue: clone(this.lastValue) as HostSnapshot["lastValue"],
       lastActionError: clone(this.lastActionError),
       capabilities: [...(this.handshake?.capabilities ?? [])],
       activeClientIds: [...this.activeClients],
-      ...(clientId === undefined ? {} : { nextCommandSequence: (this.clientHighWater.get(clientId) ?? 0) + 1 }),
     };
     return snapshot;
   }
@@ -788,26 +768,6 @@ export class Controller {
     else this.serviceErrors[service] = next;
     this.bump("service-errors", clone(this.serviceErrors));
     return true;
-  }
-
-  recover(epoch: string | null, cursor: number | null): Recovery {
-    if (
-      epoch !== this.epochValue
-      || cursor === null
-      || !Number.isSafeInteger(cursor)
-      || cursor < 0
-      || cursor > this.cursorValue
-    ) {
-      return this.snapshotRecovery();
-    }
-    const earliest = this.eventJournal[0]?.cursor ?? this.cursorValue + 1;
-    if (cursor < earliest - 1) return this.snapshotRecovery();
-    return {
-      kind: "replay",
-      epoch: this.epochValue,
-      cursor: this.cursorValue,
-      events: this.eventJournal.filter((event) => event.cursor > cursor).map(clone),
-    };
   }
 
   subscribe(listener: EventListener, types?: readonly HostEventType[]): () => void {
@@ -916,105 +876,60 @@ export class Controller {
     });
   }
 
-  dispatch(input: HostCommand | unknown): Promise<CommandAdmission> {
+  dispatch(command: HostCommand): Promise<CommandResult> {
     this.assertNotClosed();
-    let command: HostCommand;
-    try {
-      command = parseHostCommand(input);
-    } catch (error) {
-      return Promise.reject(asControllerError(error, "invalid_request", 400));
-    }
     if (command.sessionEpoch !== this.epochValue) {
       return Promise.reject(new ControllerError(
-        "session_epoch_mismatch",
-        "command belongs to a different session epoch",
-        409,
+        "session_epoch_mismatch", "request belongs to a previous backend session; its outcome is unknown", 409,
       ));
     }
-    const key = commandKey(command.clientId, command.operationId);
-    const fingerprint = stableStringify(command);
-    const prior = this.commandEntries.get(key);
+    // Leases change on reconnect. A request keeps its identity across those changes.
+    const { clientId: _clientId, ...request } = command;
+    const fingerprint = createHash("sha256").update(stableStringify(request)).digest("hex");
+    const prior = this.commandEntries.get(command.requestId);
     if (prior !== undefined) {
-      if (prior.fingerprint !== fingerprint || prior.commandSequence !== command.commandSequence) {
-        return Promise.resolve(this.rejectedAdmission(command, hostError(
-          "operation_id_conflict",
-          "operation " + command.operationId + " was already used for a different command",
-          command.operationId,
-        )));
+      if (prior.fingerprint !== fingerprint) {
+        return Promise.reject(new ControllerError(
+          "request_id_conflict", "request ID was already used for a different command", 409,
+        ));
       }
-      return prior.admission;
+      return prior.completion.then(clone);
     }
-    if (command.commandSequence >= Number.MAX_SAFE_INTEGER) {
-      return Promise.resolve(this.rejectedAdmission(command, hostError(
-        'command_sequence_exhausted', 'command sequence counter is exhausted', command.operationId,
-      )));
-    }
-    const previous = this.clientHighWater.get(command.clientId) ?? 0;
-    const expected = previous + 1;
-    if (command.commandSequence <= previous) {
-      return Promise.resolve(this.rejectedAdmission(command, hostError(
-        "operation_expired",
-        "command sequence " + command.commandSequence + " is no longer retained",
-        command.operationId,
-        { expectedCommandSequence: previous + 1, nextCommandSequence: command.commandSequence, sequenceConsumed: false },
-      )));
-    }
-    if (command.commandSequence !== expected) {
-      return Promise.resolve(this.rejectedAdmission(command, hostError(
-        "command_sequence_gap",
-        "expected command sequence " + expected + ", received " + command.commandSequence,
-        command.operationId,
-        { expectedCommandSequence: expected, nextCommandSequence: command.commandSequence, sequenceConsumed: false },
-      )));
-    }
-    if (!this.clientHighWater.has(command.clientId) && this.activeClients.size >= 128) {
-      return Promise.resolve(this.rejectedAdmission(command, hostError(
-        "client_limit", "too many active client sessions", command.operationId,
-      )));
+    const executed = this.executionRequestIds.get(command.requestId);
+    if (executed !== undefined) {
+      return Promise.reject(new ControllerError(
+        executed === fingerprint ? "request_expired" : "request_id_conflict",
+        executed === fingerprint
+          ? "this execution request was already handled; its result is no longer retained"
+          : "request ID was already used for a different command", 409,
+      ));
     }
     this.registerClient(command.clientId);
-    this.clientHighWater.set(command.clientId, command.commandSequence);
-    if (command.type === "run" && command.startup === true && this.startupActivated) {
-      const admission = Promise.resolve(this.rejectedAdmission(command, hostError(
-        "startup_already_activated",
-        "startup activation was already claimed by another client",
-        command.operationId,
-        { sequenceConsumed: true },
-      ), true));
-      this.commandEntries.set(key, {
-        operationId: command.operationId,
-        clientId: command.clientId,
-        commandSequence: command.commandSequence,
-        fingerprint,
-        admission,
-        terminal: Promise.resolve(undefined),
+    this.createOperation(command.requestId, command.type, command.clientId);
+    if (isExecutionCommand(command.type)) this.executionRequestIds.set(command.requestId, fingerprint);
+    const operationCompletion = this.awaitOperation(command.requestId, command.clientId);
+    const execute = (): Promise<CommandResult> => this.executeCommand(command, operationCompletion);
+    let completion: Promise<CommandResult>;
+    if (command.type === "run") {
+      this.queuedRunCommands.set(command.requestId, command);
+      completion = this.runCommandTail.then(() => {
+        this.queuedRunCommands.delete(command.requestId);
+        return execute();
       });
+      this.runCommandTail = completion.then(() => undefined, () => undefined);
+    } else {
+      // Source edits and Stop must remain usable while execution is pending.
+      completion = Promise.resolve().then(execute);
+    }
+    const entry: CommandEntry = {
+      fingerprint, completion, settled: false,
+    };
+    this.commandEntries.set(command.requestId, entry);
+    void completion.finally(() => {
+      entry.settled = true;
       this.trimCommandEntries();
-      return admission;
-    }
-    let operation: OperationRecord;
-    try {
-      operation = this.createOperation(command.operationId, command.type, command.clientId, command.commandSequence);
-    } catch (error) {
-      return Promise.reject(error);
-    }
-    if (command.type === "run" && !this.startupActivated) {
-      this.startupActivated = true;
-      this.emit("runtime", this.runtimeSnapshot(), { operationId: command.operationId, clientId: command.clientId, commandSequence: command.commandSequence });
-    }
-    this.emit("receipt", { operation: clone(operation), commandType: command.type }, {
-      operationId: command.operationId, clientId: command.clientId, commandSequence: command.commandSequence,
-    });
-    const terminal = Promise.resolve().then(() => this.executeCommand(command));
-    void terminal.catch(() => undefined);
-    const admission = Promise.resolve({
-      epoch: this.epochValue, clientId: command.clientId, operationId: command.operationId,
-      commandSequence: command.commandSequence, accepted: true, sequenceConsumed: true,
-      operation: clone(operation), error: null, nextCommandSequence: command.commandSequence + 1,
-    });
-    this.commandEntries.set(key, { operationId: command.operationId, clientId: command.clientId, commandSequence: command.commandSequence, fingerprint, admission, terminal });
-    this.trimCommandEntries();
-    return admission;
+    }).catch(() => undefined);
+    return completion.then(clone);
   }
   /** Register an authenticated client lease exactly once. */
   registerClient(clientId: string): void {
@@ -1027,7 +942,7 @@ export class Controller {
     this.emitActiveClientsChanged(clientId);
   }
 
-  /** Release an authenticated lease without rewinding its high-water mark. */
+  /** Release an authenticated client lease. */
   releaseClient(clientId: string): void {
     if (!this.activeClients.delete(clientId)) return;
     this.emitActiveClientsChanged(clientId);
@@ -1054,7 +969,6 @@ export class Controller {
           sidecars: clone(this.sidecarsValue),
           runtime: this.runtimeSnapshot(),
           capabilities: [...(this.handshake?.capabilities ?? [])],
-          nextCommandSequence: (this.clientHighWater.get(callerClientId ?? "internal") ?? 0) + 1,
           activeClientIds: [...this.activeClients],
           cells: this.cells.map((cell) => ({ id: cell.id, type: cell.type, options: clone(cell.options), revision: cell.revision })),
         };
@@ -1085,11 +999,11 @@ export class Controller {
         const owner = callerClientId ?? query.clientId;
         if (owner === undefined) throw new ControllerError("not_found", "operation owner is required", 404);
         const operation = this.operations.get(commandKey(owner, query.operationId));
-        if (operation === undefined) throw new ControllerError("not_found", "no such operation: " + query.operationId, 404);
+        if (operation === undefined || !isExecutionCommand(operation.kind)) throw new ControllerError("not_found", "no such operation: " + query.operationId, 404);
         result = clone(operation);
         break;
       }
-      case "events": result = this.recover(query.epoch, query.cursor); break;
+      case "state": result = this.snapshotRecovery(); break;
       case "config": result = {
         effective: clone(this.effectiveConfig),
         layers: clone(this.configResolution.layers),
@@ -1192,22 +1106,6 @@ export class Controller {
     }
   }
 
-  private rejectedAdmission(command: HostCommand, error: HostError, sequenceConsumed = false): CommandAdmission {
-    const previous = this.clientHighWater.get(command.clientId) ?? 0;
-    return {
-      epoch: this.epochValue,
-      clientId: command.clientId,
-      operationId: command.operationId,
-      commandSequence: command.commandSequence,
-      accepted: false,
-      sequenceConsumed,
-      operation: null,
-      error: clone(error),
-      nextCommandSequence: sequenceConsumed ? command.commandSequence + 1 : previous + 1,
-    };
-  }
-
-
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
@@ -1263,8 +1161,17 @@ export class Controller {
     this.listeners.clear();
   }
 
-  private async executeCommand(command: HostCommand): Promise<CommandResult> {
+  private async executeCommand(command: HostCommand, completion: Promise<OperationRecord>): Promise<CommandResult> {
     try {
+      if (this.closed || isTerminal(this.operationFor(command.requestId, command.clientId)?.status ?? "error")) {
+        return this.commandResult(command.requestId, await completion);
+      }
+      if (command.type === "run") {
+        if (command.startup === true && this.startupActivated) {
+          throw new ControllerError("startup_already_activated", "startup was already activated", 409);
+        }
+        this.startupActivated = true;
+      }
       if (this.engineRestarting && ["run", "widget", "inspect", "lazy-output", "table-page", "format", "packages-install"].includes(command.type)) {
         throw new ControllerError(
           "operation_in_progress",
@@ -1286,7 +1193,7 @@ export class Controller {
       let deferred = false;
       switch (command.type) {
         case "transaction":
-          result = await this.applyTransaction(command.changes, command.expectedDocumentRevision, command.operationId, false);
+          result = await this.applyTransaction(command.changes, command.expectedDocumentRevision, command.requestId, false);
           break;
         case "run":
           if (command.startup === true && !this.runOnStartup) {
@@ -1300,7 +1207,8 @@ export class Controller {
           result = await this.interruptActiveRun(command.runId);
           break;
         case "restart":
-          result = await this.restartEngine(undefined, command.replay, command.operationId, command.clientId, true);
+          if (command.expectedDocumentRevision !== undefined) this.assertDocumentRevision(command.expectedDocumentRevision);
+          result = await this.restartEngine(undefined, command.replay, command.requestId, command.clientId, true, command.expectedDocumentRevision);
           deferred = command.replay;
           break;
         case "widget":
@@ -1310,12 +1218,12 @@ export class Controller {
           break;
         case "inspect":
           this.assertKernelEpoch(command.kernelEpoch);
-          result = this.startInspection(command.operationId, command.name, command.clientId);
+          result = this.startInspection(command.requestId, command.name, command.clientId);
           deferred = true;
           break;
         case "lazy-output":
           this.assertKernelEpoch(command.kernelEpoch);
-          result = this.startLazyOutput(command.operationId, command.key, command.clientId);
+          result = this.startLazyOutput(command.requestId, command.key, command.clientId);
           deferred = true;
           break;
         case "table-page":
@@ -1324,7 +1232,7 @@ export class Controller {
           deferred = true;
           break;
         case "save":
-          result = await this.saveNotebook(command.expectedDocumentRevision, command.operationId);
+          result = await this.saveNotebook(command.expectedDocumentRevision, command.requestId);
           break;
         case "save-as":
         case "reload-source":
@@ -1341,16 +1249,16 @@ export class Controller {
           break;
         case "format":
           this.assertDocumentRevision(command.expectedDocumentRevision);
-          result = await this.formatSource(command.cellIds, command.expectedRevisions, command.operationId);
+          result = await this.formatSource(command.cellIds, command.expectedRevisions, command.requestId);
           break;
         case "set-runtime":
-          result = await this.setRuntime(command.on_cell_change, command.on_startup, command.expectedDocumentRevision, command.operationId);
+          result = await this.setRuntime(command.on_cell_change, command.on_startup, command.expectedDocumentRevision, command.requestId);
           break;
         case "set-config":
-          result = await this.setConfig(command.patch, command.expectedDocumentRevision, command.expectedSidecarVersion, command.operationId);
+          result = await this.setConfig(command.patch, command.expectedDocumentRevision, command.expectedSidecarVersion, command.requestId);
           break;
         case "set-layout":
-          result = await this.setLayout(command.layout, command.expectedDocumentRevision, command.expectedSidecarVersion, command.operationId);
+          result = await this.setLayout(command.layout, command.expectedDocumentRevision, command.expectedSidecarVersion, command.requestId);
           break;
         case "shutdown":
           this.assertDocumentRevision(command.expectedDocumentRevision);
@@ -1368,26 +1276,30 @@ export class Controller {
           throw assertNever(command);
       }
       if (deferred) {
-        const operation = this.operationFor(command.operationId, command.clientId);
+        const operation = this.operationFor(command.requestId, command.clientId);
         if (operation !== undefined && result !== undefined) operation.result = clone(result) as OperationRecord["result"];
       }
-      if (!deferred) this.completeOperation(command.operationId, result, command.clientId);
-      const settled = this.operationFor(command.operationId, command.clientId);
-      if (settled === undefined) throw new ControllerError("internal_error", "operation missing after execution", 500);
-      return {
-        epoch: this.epochValue, operation: clone(settled), documentRevision: this.documentRevisionValue,
-        version: this.version, cursor: this.cursorValue, nextCommandSequence: (this.clientHighWater.get(command.clientId) ?? command.commandSequence) + 1,
-        result: result === undefined ? null : clone(result) as CommandResult["result"], error: settled.error,
-      };
+      if (!deferred) this.completeOperation(command.requestId, result, command.clientId);
+      const settled = await completion;
+      if (settled.result === null && result !== undefined) settled.result = clone(result) as OperationRecord["result"];
+      return this.commandResult(command.requestId, settled);
     } catch (error) {
       const failure = asControllerError(error);
-      const hostFailure = failure.toJSON(command.operationId);
+      const hostFailure = failure.toJSON(command.requestId);
       if (!this.closed) {
-        this.replaceLastActionError(hostFailure, { operationId: command.operationId });
-        this.failOperation(command.operationId, hostFailure, command.clientId);
+        this.replaceLastActionError(hostFailure, { operationId: command.requestId });
+        this.failOperation(command.requestId, hostFailure, command.clientId);
       }
-      throw failure;
+      return this.commandResult(command.requestId, await completion);
     }
+  }
+
+  private commandResult(requestId: string, operation: OperationRecord): CommandResult {
+    return {
+      requestId, epoch: this.epochValue, documentRevision: this.documentRevisionValue,
+      version: this.version, cursor: this.cursorValue,
+      result: clone(operation.result), error: clone(operation.error),
+    };
   }
 
   /** Return the authoritative physical document with current semantic state applied. */
@@ -1647,8 +1559,6 @@ export class Controller {
             const previousDocumentRevision = this.documentRevisionValue;
             const previousVersion = this.version;
             const previousCursor = this.cursorValue;
-            const previousEventJournalLength = this.eventJournal.length;
-            const previousEventJournalBytes = this.eventJournalBytes;
             const previousRuntimeSignature = this.runtimeSignature;
             try {
               this.applySourcePublication(prepared, request);
@@ -1667,8 +1577,6 @@ export class Controller {
               this.outputStore.setIdentity({ documentRevision: this.documentRevisionValue, kernelEpoch: this.kernelEpochValue });
               this.version = previousVersion;
               this.cursorValue = previousCursor;
-              this.eventJournal.length = previousEventJournalLength;
-              this.eventJournalBytes = previousEventJournalBytes;
               this.runtimeSignature = previousRuntimeSignature;
               throw error;
             }
@@ -2053,7 +1961,7 @@ export class Controller {
     }
     this.runPreparationActive = true;
     const preparation = {
-      operationId: command.operationId,
+      operationId: command.requestId,
       clientId: command.clientId,
       cancelled: false,
     };
@@ -2061,18 +1969,18 @@ export class Controller {
     try {
       let changes: Record<string, unknown> | undefined;
       if ((command.changes?.length ?? 0) > 0) {
-        changes = await this.applyTransaction(command.changes ?? [], command.expectedDocumentRevision, command.operationId, false, preflightStaged) as Record<string, unknown>;
+        changes = await this.applyTransaction(command.changes ?? [], command.expectedDocumentRevision, command.requestId, false, preflightStaged) as Record<string, unknown>;
         if (this.cancelRunPreparation(preparation)) return undefined;
-        const operation = this.operationFor(command.operationId, command.clientId);
+        const operation = this.operationFor(command.requestId, command.clientId);
         if (operation !== undefined && !isTerminal(operation.status)) {
           operation.result = clone(changes) as OperationRecord["result"];
           this.rememberOperation(operation);
         }
-        await this.ensureCurrentAnalysis();
-      } else {
-        this.assertDocumentRevision(command.expectedDocumentRevision);
-        await this.ensureCurrentAnalysis();
       }
+      const runDocumentRevision = changes === undefined ? command.expectedDocumentRevision : Number(changes.documentRevision);
+      this.assertDocumentRevision(runDocumentRevision);
+      await this.ensureCurrentAnalysis();
+      this.assertDocumentRevision(runDocumentRevision);
       if (this.cancelRunPreparation(preparation)) return undefined;
       this.assertNoPackageOperation();
       this.assertExecutionPossible();
@@ -2087,9 +1995,9 @@ export class Controller {
       } else {
         plan = this.graphValue.planStale((id) => this.statusOf(id));
       }
-      const runId = this.launchRun(plan, command.operationId, false, command.clientId);
+      const runId = this.launchRun(plan, command.requestId, false, command.clientId);
       const result = { runId, plan: [...plan], ...(changes === undefined ? {} : changes) };
-      const operation = this.operationFor(command.operationId, command.clientId);
+      const operation = this.operationFor(command.requestId, command.clientId);
       if (operation !== undefined && !isTerminal(operation.status)) operation.result = clone(result) as OperationRecord["result"];
       return result;
     } finally {
@@ -2775,6 +2683,14 @@ export class Controller {
 
   private async interruptActiveRun(targetRunId?: string): Promise<unknown> {
     this.assertStarted();
+    let cancelledQueued = false;
+    if (targetRunId === undefined) {
+      for (const command of this.queuedRunCommands.values()) {
+        this.failOperation(command.requestId, hostError("interrupted", "Interrupted", command.requestId), command.clientId);
+        cancelledQueued = true;
+      }
+      this.queuedRunCommands.clear();
+    }
     const preparation = this.runPreparationCancellation;
     if (preparation !== null && this.runPreparationActive) {
       if (targetRunId !== undefined) {
@@ -2803,6 +2719,7 @@ export class Controller {
         });
         return { runId, requested: true };
       }
+      if (cancelledQueued) return { runId: null, requested: true };
       throw new ControllerError("no_run_in_progress", "no run in progress", 409);
     }
     if (active.cancelMode !== null) {
@@ -2886,6 +2803,7 @@ export class Controller {
     operationId: string,
     clientId = "internal",
     waitForSourceLane = false,
+    expectedDocumentRevision?: number,
   ): Promise<unknown> {
     this.assertRuntimeContextTransitionReady();
     this.engineRestarting = true;
@@ -2951,6 +2869,7 @@ export class Controller {
       }
       this.bump("runtime", this.runtimeSnapshot(), { operationId });
       if (!replay) return { runId: null };
+      if (expectedDocumentRevision !== undefined) this.assertDocumentRevision(expectedDocumentRevision);
       this.assertGraphRunnable();
       const runId = this.launchRun(this.allCodePlan(), operationId, false, clientId);
       return { runId };
@@ -3547,14 +3466,14 @@ export class Controller {
     const draft = widgetPathHasForm(spec ?? {}, command.path) && command.update.submit !== true;
     const key = widgetKey(command.name, command.path);
     const reservedUpload = [...this.pendingUploads.entries()].find(([, pending]) => pending.key === key);
-    const operationKey = this.operationKey(command.clientId, command.operationId);
+    const operationKey = this.operationKey(command.clientId, command.requestId);
     if (this.pendingWidgets.has(key)
       || (reservedUpload !== undefined && reservedUpload[0] !== operationKey)) {
       throw new ControllerError("operation_in_progress", "widget " + command.name + " already has a pending update", 409);
     }
-    this.pendingWidgets.set(key, this.operationKey(command.clientId, command.operationId));
+    this.pendingWidgets.set(key, this.operationKey(command.clientId, command.requestId));
     this.widgetToken += 1;
-    const operation = this.operationFor(command.operationId, command.clientId);
+    const operation = this.operationFor(command.requestId, command.clientId);
     if (operation !== undefined) {
       operation.status = "running";
       operation.token = this.widgetToken;
@@ -3579,14 +3498,14 @@ export class Controller {
       setWidgetOperation(widget, key, {
         token: identity.token,
         draft,
-        operationId: command.operationId,
+        operationId: command.requestId,
         status: "pending",
         error: null,
       });
     }).then((record) => {
       identity.record = record;
       this.bump("cell", this.publicCell(owner), {
-        operationId: command.operationId,
+        operationId: command.requestId,
         cellId: owner.id,
         revision: owner.revision,
       });
@@ -3620,8 +3539,8 @@ export class Controller {
     rawResponse: EngineResponse,
     update: Record<string, unknown>,
   ): Promise<void> {
-    const reconciliationOwner = this.obsoleteWidgetRequests.get(command.operationId);
-    this.obsoleteWidgetRequests.delete(command.operationId);
+    const reconciliationOwner = this.obsoleteWidgetRequests.get(command.requestId);
+    this.obsoleteWidgetRequests.delete(command.requestId);
     if (this.closed || identity.generation !== this.runtimeGeneration) return;
     let response: EngineResponse;
     try {
@@ -3637,7 +3556,7 @@ export class Controller {
     const current = this.findWidget(command.name);
     const owner = this.cellById(identity.owner);
     if (
-      this.pendingWidgets.get(identity.key) !== this.operationKey(command.clientId, command.operationId)
+      this.pendingWidgets.get(identity.key) !== this.operationKey(command.clientId, command.requestId)
       || current === null
       || current.owner !== identity.owner
       || current.record.id !== identity.recordId
@@ -3668,14 +3587,14 @@ export class Controller {
       }
       setWidgetOperation(widget, identity.key, {
         token: identity.token,
-        operationId: command.operationId,
+        operationId: command.requestId,
         status: "done",
         error: null,
       });
     });
     identity.record = next;
     this.pendingWidgets.delete(identity.key);
-    const operationKey = this.operationKey(command.clientId, command.operationId);
+    const operationKey = this.operationKey(command.clientId, command.requestId);
     const pendingUpload = this.pendingUploads.get(operationKey);
     this.pendingUploads.delete(operationKey);
     if (pendingUpload !== undefined && pendingUpload.uploadId !== null) {
@@ -3685,17 +3604,17 @@ export class Controller {
     }
     this.scheduleVariableRefresh();
     this.bump("cell", this.publicCell(owner), {
-      operationId: command.operationId,
+      operationId: command.requestId,
       cellId: owner.id,
       revision: owner.revision,
     });
     if (identity.draft) {
-      this.completeOperation(command.operationId, { token: identity.token, draft: true }, command.clientId);
+      this.completeOperation(command.requestId, { token: identity.token, draft: true }, command.clientId);
     } else if (identity.kind === "run_button" && update.value === true) {
       this.scheduleRunButton(command, identity.owner, identity.revision, identity.record);
     } else {
-      const scheduled = this.scheduleWidgetConsumers(command.name, identity.owner, command.source, command.operationId, command.clientId);
-      if (!scheduled) this.completeOperation(command.operationId, { token: identity.token }, command.clientId);
+      const scheduled = this.scheduleWidgetConsumers(command.name, identity.owner, command.source, command.requestId, command.clientId);
+      if (!scheduled) this.completeOperation(command.requestId, { token: identity.token }, command.clientId);
     }
   }
 
@@ -3714,11 +3633,11 @@ export class Controller {
     code: string,
     message: string,
   ): Promise<void> {
-    if (this.obsoleteWidgetRequests.delete(command.operationId)) return;
+    if (this.obsoleteWidgetRequests.delete(command.requestId)) return;
     if (this.closed || identity.generation !== this.runtimeGeneration) return;
-    if (this.pendingWidgets.get(identity.key) !== this.operationKey(command.clientId, command.operationId)) return;
+    if (this.pendingWidgets.get(identity.key) !== this.operationKey(command.clientId, command.requestId)) return;
     this.pendingWidgets.delete(identity.key);
-    this.discardUpload(this.operationKey(command.clientId, command.operationId));
+    this.discardUpload(this.operationKey(command.clientId, command.requestId));
     const owner = this.cellById(identity.owner);
     if (owner !== undefined && owner.revision === identity.revision && this.statusOf(owner.id) === "done") {
       const current = this.findWidget(identity.name);
@@ -3729,13 +3648,13 @@ export class Controller {
             const widget = findRichOutputRecord(data, (output) => output.kind === "widget" && output.name === identity.name);
             if (widget !== null) setWidgetOperation(widget, identity.key, {
               token: identity.token,
-              operationId: command.operationId,
+              operationId: command.requestId,
               status: "error",
               error: { code, message },
             });
           });
           this.bump("cell", this.publicCell(owner), {
-            operationId: command.operationId,
+            operationId: command.requestId,
             cellId: owner.id,
             revision: owner.revision,
           });
@@ -3744,9 +3663,9 @@ export class Controller {
         }
       }
     }
-    const failure = hostError(code, message, command.operationId);
-    this.replaceLastActionError(failure, { operationId: command.operationId, cellId: identity.owner });
-    this.failOperation(command.operationId, failure, command.clientId);
+    const failure = hostError(code, message, command.requestId);
+    this.replaceLastActionError(failure, { operationId: command.requestId, cellId: identity.owner });
+    this.failOperation(command.requestId, failure, command.clientId);
   }
 
 
@@ -3811,7 +3730,7 @@ export class Controller {
         owner,
         revision,
         record,
-        triggerOperationId: command.operationId,
+        triggerOperationId: command.requestId,
         triggerClientId: command.clientId,
         directConsumers,
         runId: null,
@@ -3825,19 +3744,19 @@ export class Controller {
         for (const descendant of this.graphValue.descendants(reference)) region.add(descendant);
       }
       const statusChanges = this.cancelRunRegion(region, "widget");
-      this.emitCells(statusChanges, { operationId: command.operationId });
-      const runOperationId = "run-button-" + command.operationId;
+      this.emitCells(statusChanges, { operationId: command.requestId });
+      const runOperationId = "run-button-" + command.requestId;
       this.createOperation(runOperationId, "run", command.clientId);
       this.causalWidgetRunParents.set(
         this.operationKey(command.clientId, runOperationId),
-        this.operationKey(command.clientId, command.operationId),
+        this.operationKey(command.clientId, command.requestId),
       );
       try {
         runId = this.launchRun(this.widgetClosure(directConsumers, owner), runOperationId, true, command.clientId);
       } catch (error) {
         this.causalWidgetRunParents.delete(this.operationKey(command.clientId, runOperationId));
         this.failOperation(runOperationId, asControllerError(error).toJSON(runOperationId), command.clientId);
-        this.failOperation(command.operationId, hostError("widget_update_failed", "run button could not schedule consumers", command.operationId), command.clientId);
+        this.failOperation(command.requestId, hostError("widget_update_failed", "run button could not schedule consumers", command.requestId), command.clientId);
         return;
       }
     } else {
@@ -3865,7 +3784,7 @@ export class Controller {
       owner,
       revision,
       record,
-      triggerOperationId: command.operationId,
+      triggerOperationId: command.requestId,
       triggerClientId: command.clientId,
       directConsumers,
       runId,
@@ -4402,14 +4321,14 @@ export class Controller {
     if (kernelEpoch === null) throw new ControllerError("stale_kernel", "R kernel incarnation is unavailable", 503);
     const generation = this.runtimeGeneration;
     this.pendingTablePages.set(command.handle, {
-      operationId: command.operationId,
+      operationId: command.requestId,
       clientId: command.clientId,
       owner: owner.id,
       recordId: location.record.id,
       revision,
       kernelEpoch,
     });
-    const operation = this.operationFor(command.operationId, command.clientId);
+    const operation = this.operationFor(command.requestId, command.clientId);
     if (operation !== undefined) {
       operation.status = "running";
       operation.cellIds = [owner.id];
@@ -4422,16 +4341,16 @@ export class Controller {
       sort_by: command.sortBy,
       sort_desc: command.sortDescending,
       filter: command.filter,
-      token: command.operationId,
+      token: command.requestId,
     }).then(async (raw) => {
-      if (!this.runtimeRequestCurrent(command.operationId, generation, command.clientId)) return;
+      if (!this.runtimeRequestCurrent(command.requestId, generation, command.clientId)) return;
       const response = engineResponseSchema.parse(raw);
       const responsePayload = response as unknown as Record<string, unknown>;
       const pending = this.pendingTablePages.get(command.handle);
       const current = this.findOutput((output) => output.kind === "table" && output.handle === command.handle);
       if (
         pending === undefined
-        || pending.operationId !== command.operationId
+        || pending.operationId !== command.requestId
         || pending.owner !== owner.id
         || pending.recordId !== location.record.id
         || pending.revision !== revision
@@ -4459,14 +4378,14 @@ export class Controller {
         table.page = page;
       });
       this.pendingTablePages.delete(command.handle);
-      this.completeOperation(command.operationId, { handle: command.handle, page: clone(page) }, command.clientId);
-      this.bump("cell", this.publicCell(owner), { operationId: command.operationId, cellId: owner.id, revision });
+      this.completeOperation(command.requestId, { handle: command.handle, page: clone(page) }, command.clientId);
+      this.bump("cell", this.publicCell(owner), { operationId: command.requestId, cellId: owner.id, revision });
     }).catch((error: unknown) => {
-      if (!this.runtimeRequestCurrent(command.operationId, generation, command.clientId)) return;
-      if (this.pendingTablePages.get(command.handle)?.operationId === command.operationId) {
+      if (!this.runtimeRequestCurrent(command.requestId, generation, command.clientId)) return;
+      if (this.pendingTablePages.get(command.handle)?.operationId === command.requestId) {
         this.pendingTablePages.delete(command.handle);
       }
-      this.failOperation(command.operationId, asControllerError(error, "table_request_failed").toJSON(command.operationId), command.clientId);
+      this.failOperation(command.requestId, asControllerError(error, "table_request_failed").toJSON(command.requestId), command.clientId);
     });
     return { handle: command.handle, cellId: owner.id };
   }
@@ -5384,7 +5303,6 @@ export class Controller {
     id: string,
     kind: OperationRecord["kind"],
     clientId = "internal",
-    commandSequence = 1,
   ): OperationRecord {
     if (this.operations.has(this.operationKey(clientId, id))) {
       throw new ControllerError("operation_id_conflict", "operation " + id + " already exists", 409);
@@ -5392,7 +5310,6 @@ export class Controller {
     const operation: OperationRecord = {
       id,
       clientId,
-      commandSequence,
       kind,
       status: "accepted",
       documentRevision: this.documentRevisionValue,
@@ -5408,7 +5325,7 @@ export class Controller {
 
   private rememberOperation(operation: OperationRecord): void {
     this.operations.set(this.operationKey(operation.clientId, operation.id), operation);
-    this.emit("operation", clone(operation), { operationId: operation.id, runId: operation.runId ?? undefined });
+    if (isExecutionCommand(operation.kind)) this.emit("operation", clone(operation), { operationId: operation.id, runId: operation.runId ?? undefined });
     this.trimOperations();
   }
 
@@ -5513,14 +5430,14 @@ export class Controller {
     if (this.pendingWidgets.has(key) || [...this.pendingUploads.values()].some((pending) => pending.key === key)) {
       throw new ControllerError("operation_in_progress", "widget " + command.name + " already has a pending update", 409);
     }
-    const operation = this.operationFor(command.operationId, command.clientId);
+    const operation = this.operationFor(command.requestId, command.clientId);
     if (operation !== undefined) {
       operation.kind = "widget";
       operation.status = "running";
       operation.cellIds = [owner.id];
       this.rememberOperation(operation);
     }
-    this.pendingUploads.set(this.operationKey(command.clientId, command.operationId), {
+    this.pendingUploads.set(this.operationKey(command.clientId, command.requestId), {
       clientId: command.clientId,
       name: command.name,
       path: [...command.path],
@@ -5534,10 +5451,10 @@ export class Controller {
     void this.storeAndApplyUpload(command).catch((error: unknown) => {
       if (this.closed) return;
       const failure = asControllerError(error, "upload_failed");
-      const hostFailure = failure.toJSON(command.operationId);
-      this.replaceLastActionError(hostFailure, { operationId: command.operationId });
-      this.discardUpload(this.operationKey(command.clientId, command.operationId));
-      this.failOperation(command.operationId, hostFailure, command.clientId);
+      const hostFailure = failure.toJSON(command.requestId);
+      this.replaceLastActionError(hostFailure, { operationId: command.requestId });
+      this.discardUpload(this.operationKey(command.clientId, command.requestId));
+      this.failOperation(command.requestId, hostFailure, command.clientId);
     });
     return { accepted: true, command: "upload", owner: owner.id };
   }
@@ -5545,8 +5462,8 @@ export class Controller {
   private async storeAndApplyUpload(command: Extract<HostCommand, { type: "upload" }>): Promise<void> {
     const raw = await this.services.service?.("upload.store", { files: clone(command.files) });
     const response = parseStoredUpload(raw);
-    const pending = this.pendingUploads.get(this.operationKey(command.clientId, command.operationId));
-    if (pending === undefined || this.closed || isTerminal(this.operationFor(command.operationId, command.clientId)?.status ?? "error")) {
+    const pending = this.pendingUploads.get(this.operationKey(command.clientId, command.requestId));
+    if (pending === undefined || this.closed || isTerminal(this.operationFor(command.requestId, command.clientId)?.status ?? "error")) {
       await this.removeUpload(response.uploadId);
       return;
     }
@@ -5562,9 +5479,8 @@ export class Controller {
     pending.record = current.record;
     this.startWidgetOperation({
       type: "widget",
-      operationId: command.operationId,
+      requestId: command.requestId,
       clientId: command.clientId,
-      commandSequence: command.commandSequence,
       sessionEpoch: command.sessionEpoch,
       name: pending.name,
       path: [...pending.path],
@@ -5609,15 +5525,15 @@ export class Controller {
         this.assertDocumentRevision(command.expectedDocumentRevision);
         return this.callService("r.select", { rscript: command.rscript, persistDefault: command.persistDefault });
       case "set-app":
-        return this.setApp(command.patch, command.expectedDocumentRevision, command.operationId);
+        return this.setApp(command.patch, command.expectedDocumentRevision, command.requestId);
       case "packages-declare":
-        return this.declarePackages(command.packages, command.expectedDocumentRevision, command.expectedSidecarVersion, command.operationId);
+        return this.declarePackages(command.packages, command.expectedDocumentRevision, command.expectedSidecarVersion, command.requestId);
       case "packages-install":
         this.assertDocumentRevision(command.expectedDocumentRevision);
         this.assertKernelEpoch(command.kernelEpoch);
         this.assertPackageInstallCanStart();
         this.assertExecutionPossible();
-        return this.runLongService("packages.install", { packages: command.packages }, command.operationId, command.clientId);
+        return this.runLongService("packages.install", { packages: command.packages }, command.requestId, command.clientId);
       case "publish": {
         this.assertDocumentRevision(command.expectedDocumentRevision);
         const reservation = this.reserveRuntimeContext();
@@ -5631,7 +5547,7 @@ export class Controller {
         return this.executeSourceService({
           kind: "save-as",
           expectedDocumentRevision: command.expectedDocumentRevision,
-          operationId: command.operationId,
+          operationId: command.requestId,
           path: command.path,
           expectedDestination: command.expectedDestination === "absent" ? undefined : command.expectedDestination,
           fingerprint: stableStringify({ path: command.path, expectedDestination: command.expectedDestination }),
@@ -5641,7 +5557,7 @@ export class Controller {
           kind: "reload-source",
           expectedDocumentRevision: command.expectedDocumentRevision,
           expectedDisk: { digest: command.expectedDiskDigest, version: command.expectedDiskVersion },
-          operationId: command.operationId,
+          operationId: command.requestId,
           fingerprint: stableStringify({ expectedDiskDigest: command.expectedDiskDigest, expectedDiskVersion: command.expectedDiskVersion }),
         });
       case "upload":
@@ -5652,10 +5568,13 @@ export class Controller {
     }
   }
   private trimCommandEntries(): void {
-    if (this.commandEntries.size <= COMMAND_DEDUPLICATION_LIMIT) return;
-    for (const [key, entry] of this.commandEntries) {
-      if (this.commandEntries.size <= COMMAND_DEDUPLICATION_LIMIT) break;
-      if (isTerminal(this.operationForKey(this.operationKey(entry.clientId, entry.operationId))?.status ?? "done")) this.commandEntries.delete(key);
+    let recent = [...this.commandEntries.values()].filter((entry) => entry.settled).length;
+    for (const [id, entry] of this.commandEntries) {
+      if (recent <= COMMAND_DEDUPLICATION_LIMIT) break;
+      if (entry.settled) {
+        this.commandEntries.delete(id);
+        recent -= 1;
+      }
     }
   }
 
@@ -5710,7 +5629,7 @@ export class Controller {
   private emit(
     type: HostEventType,
     payload: unknown,
-    identity: Partial<Pick<HostEvent, "operationId" | "clientId" | "commandSequence" | "cellId" | "runId" | "kernelEpoch" | "revision" | "sequence">> = {},
+    identity: Partial<Pick<HostEvent, "operationId" | "clientId" | "cellId" | "runId" | "kernelEpoch" | "revision" | "sequence">> = {},
   ): void {
     if (this.closed && type !== "runtime") return;
     if (type === "runtime") {
@@ -5731,23 +5650,11 @@ export class Controller {
     };
     if (identity.operationId !== undefined) event.operationId = identity.operationId;
     if (identity.clientId !== undefined) event.clientId = identity.clientId;
-    if (identity.commandSequence !== undefined) event.commandSequence = identity.commandSequence;
     if (identity.cellId !== undefined) event.cellId = identity.cellId;
     if (identity.runId !== undefined) event.runId = identity.runId;
     if (identity.kernelEpoch !== undefined) event.kernelEpoch = identity.kernelEpoch;
     if (identity.revision !== undefined) event.revision = identity.revision;
     if (identity.sequence !== undefined) event.sequence = identity.sequence;
-    const bytes = jsonBytes(event);
-    this.eventJournal.push(event);
-    this.eventJournalBytes += bytes;
-    while (
-      this.eventJournal.length > this.eventJournalLimit
-      || this.eventJournalBytes > this.eventJournalByteLimit
-    ) {
-      const removed = this.eventJournal.shift();
-      if (removed === undefined) break;
-      this.eventJournalBytes -= jsonBytes(removed);
-    }
     for (const [listener, types] of this.listeners) {
       // Source observers do not need copies of execution/output payloads.
       if (types && !types.includes(type)) continue;
@@ -5783,7 +5690,7 @@ export class Controller {
       executionMode: this.executionMode,
       runOnStartup: this.runOnStartup,
       packageOperationActive: this.packageOperationActive,
-      busy: this.activeEvaluation !== null || this.queue.length > 0 || this.runPreparationActive,
+      busy: this.activeEvaluation !== null || this.queue.length > 0 || this.runPreparationActive || this.queuedRunCommands.size > 0,
       activeRunId: this.activeEvaluation?.job.runId ?? queuedRunId,
     };
   }
@@ -6067,9 +5974,6 @@ function isTerminal(status: OperationRecord["status"]): boolean {
   return status === "done" || status === "error" || status === "interrupted" || status === "cancelled";
 }
 
-function boundedPositiveInteger(value: number | undefined, fallback: number): number {
-  return value !== undefined && Number.isSafeInteger(value) && value > 0 ? value : fallback;
-}
 
 function arrayEqual<T>(left: readonly T[], right: readonly T[]): boolean {
   return left.length === right.length && left.every((value, index) => value === right[index]);
@@ -6593,4 +6497,9 @@ function operationDependsOnRuntime(kind: OperationRecord["kind"]): boolean {
 
 function assertNever(value: never): never {
   throw new ControllerError("invalid_request", `unsupported command: ${String(value)}`, 400);
+}
+
+function isExecutionCommand(type: OperationRecord["kind"]): boolean {
+  return ["run", "restart", "interrupt", "widget", "widget-reset", "upload", "inspect", "lazy-output",
+    "table-page", "packages-install", "publish", "select-r"].includes(type);
 }

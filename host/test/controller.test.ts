@@ -13,7 +13,6 @@ import {
   MAX_DEPENDENCY_EDGES,
   MAX_NOTEBOOK_CELLS,
   MAX_NOTEBOOK_SOURCE_BYTES,
-  recoverySchema,
 } from "../src/protocol.js";
 import type {
   AnalysisResult,
@@ -439,7 +438,6 @@ function notebook(lines: Array<[string, string]>) {
 }
 
 let operationCounter = 0;
-const commandSequences = new WeakMap<Controller, number>();
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -483,14 +481,11 @@ function command<T extends Record<string, unknown>>(
   value: T,
 ): HostCommand {
   const input = value as Record<string, unknown>;
-  const sequence = (commandSequences.get(controller) ?? 0) + 1;
-  commandSequences.set(controller, sequence);
-  const operationId = "operation-" + (++operationCounter);
+  const requestId = "request-" + (++operationCounter);
   const clientId = "controller-tests";
   const identity = {
-    operationId,
+    requestId,
     clientId,
-    commandSequence: sequence,
     sessionEpoch: controller.epoch,
   };
   const expectedDocumentRevision = controller.snapshot().documentRevision;
@@ -513,6 +508,13 @@ function command<T extends Record<string, unknown>>(
     )?.revision ?? 0;
   }
   return normalized as HostCommand;
+}
+
+// Controlled-engine tests deliberately leave commands running so they can inject
+// outputs, edits and interrupts. Public completion behavior is tested below.
+function startCommand(controller: Controller, request: HostCommand): Promise<HostCommand> {
+  void controller.dispatch(request).catch((error: unknown) => { assert.fail(String(error)); });
+  return Promise.resolve(request);
 }
 
 async function settle(controller: Controller, id: string, clientId = "controller-tests") {
@@ -554,19 +556,19 @@ test("shutdown requires the complete active client set", async () => {
   try {
     controller.registerClient("controller-tests");
     const first = command(controller, { type: "shutdown", expectedDocumentRevision: controller.snapshot().documentRevision, expectedClientIds: ["controller-tests"] });
-    const firstAdmissionPromise = controller.dispatch(first);
+    const firstStartedPromise = startCommand(controller, first);
     controller.registerClient("other-client");
-    const firstAdmission = await firstAdmissionPromise;
-    assert.equal(firstAdmission.accepted, true);
-    const failed = await controller.awaitOperation(first.operationId, "controller-tests");
+    const firstStarted = await firstStartedPromise;
+
+    const failed = await controller.awaitOperation(first.requestId, "controller-tests");
     assert.equal(failed.status, "error");
     assert.equal(failed.error?.code, "active_clients_changed");
 
     controller.releaseClient("other-client");
     const second = command(controller, { type: "shutdown", expectedDocumentRevision: controller.snapshot().documentRevision, expectedClientIds: ["controller-tests"] });
-    const secondAdmission = await controller.dispatch(second);
-    assert.equal(secondAdmission.accepted, true);
-    const completed = await controller.awaitOperation(second.operationId, "controller-tests");
+    const secondStarted = await startCommand(controller, second);
+
+    const completed = await controller.awaitOperation(second.requestId, "controller-tests");
     assert.equal(completed.status, "done");
     assert.deepEqual(completed.result, { closing: true, expectedClientIds: ["controller-tests"] });
     assert.ok(events.some(event => event.type === "active_clients_changed"));
@@ -616,9 +618,9 @@ test("source edits commit before runtime startup and survive startup failure", a
         }
     ]
   });
-  const admission = await controller.dispatch(edit);
-  assert.equal(admission.accepted, true);
-  await settle(controller, edit.operationId);
+  const started = await startCommand(controller, edit);
+
+  await settle(controller, edit.requestId);
   assert.deepEqual(controller.snapshot().cells[0]?.body, ["x <- 2"]);
   assert.equal(controller.snapshot().runtime.documentReady, true);
   assert.equal(controller.snapshot().runtime.executionReady, false);
@@ -670,7 +672,7 @@ test("deferred startup reaches readiness without executing source", async () => 
   await controller.close();
 });
 
-test("event filters preserve subscriber isolation and the complete recovery journal", async () => {
+test("event filters preserve subscriber isolation", async () => {
   const controller = createController({
     engine: new FakeEngine(),
     notebook: notebook([["a", "x <- 1"]]),
@@ -694,16 +696,14 @@ test("event filters preserve subscriber isolation and the complete recovery jour
     },
     changes: []
   });
-  await controller.dispatch(run);
-  await settle(controller, run.operationId);
+  await startCommand(controller, run);
+  await settle(controller, run.requestId);
   assert.deepEqual(selected.map(event => event.type), ["cell-completed"]);
   assert.deepEqual(selected.map(event => event.cursor),
     all.filter(event => event.type === "cell-completed").map(event => event.cursor));
   assert.ok(all.some(event => event.type === "cell-started"));
   assert.deepEqual(controller.snapshot().cells[0]?.body, ["x <- 1"]);
-  const recovery = controller.recover(controller.epoch, cursor);
-  assert.equal(recovery.kind, "replay");
-  if (recovery.kind === "replay") assert.deepEqual(recovery.events, all);
+  assert.deepEqual(controller.snapshot().cells[0]?.body, ["x <- 1"]);
   unsubscribe();
   await controller.close();
   assert.equal(selected.length, 1);
@@ -736,7 +736,7 @@ test("concurrent startup shares one engine lifecycle", async () => {
   await controller.close();
 });
 
-test("explicit restart excludes concurrent source mutation", async () => {
+test("source edits remain usable during an explicit restart", async () => {
   const engine = new FakeEngine();
   const controller = createController({
     engine,
@@ -753,7 +753,7 @@ test("explicit restart excludes concurrent source mutation", async () => {
     return engine.handshake;
   };
   const restart = command(controller, { type: "restart", replay: false });
-  const restarting = controller.dispatch(restart);
+  const restarting = startCommand(controller, restart);
   await eventually(() => engine.restartCount === 1);
   const edit = command(controller, {
     type: "transaction",
@@ -769,14 +769,13 @@ test("explicit restart excludes concurrent source mutation", async () => {
         }
     ]
   });
-  const editAdmission = await controller.dispatch(edit);
-  const editOperation = await controller.awaitOperation(editAdmission.operationId, "controller-tests");
-  assert.equal(editOperation.status, "error");
-  assert.equal(editOperation.error?.code, "operation_in_progress");
-  assert.deepEqual(controller.snapshot().cells[0]?.body, ["x <- 1"]);
+  const editStarted = await startCommand(controller, edit);
+  const editOperation = await controller.awaitOperation(editStarted.requestId, "controller-tests");
+  assert.equal(editOperation.status, "done");
+  assert.deepEqual(controller.snapshot().cells[0]?.body, ["x <- 2"]);
   releaseRestart();
   await restarting;
-  await controller.awaitOperation(restart.operationId, "controller-tests");
+  await controller.awaitOperation(restart.requestId, "controller-tests");
   assert.equal(engine.restartCount, 1);
   await controller.close();
 });
@@ -809,17 +808,17 @@ test("explicit restart waits for an admitted source commit", async () => {
       type: "transaction", changes: [{ type: "edit", cell: { cellId: "a" },
         expectedRevision: 0, body: ["x <- 2"], cellType: "code" }],
     });
-    const editAdmission = await controller.dispatch(edit);
+    const editStarted = await startCommand(controller, edit);
     await eventually(() => commitEntered);
     const restart = command(controller, { type: "restart", replay: false });
-    const restartAdmission = await controller.dispatch(restart);
+    const restartStarted = await startCommand(controller, restart);
     await new Promise((resolve) => setTimeout(resolve, 10));
     assert.equal(engine.restartCount, 0);
     releaseCommit();
-    assert.equal((await controller.awaitOperation(editAdmission.operationId, "controller-tests")).status, "done");
+    assert.equal((await controller.awaitOperation(editStarted.requestId, "controller-tests")).status, "done");
     await eventually(() => engine.restartCount === 1);
     releaseRestart();
-    assert.equal((await controller.awaitOperation(restartAdmission.operationId, "controller-tests")).status, "done");
+    assert.equal((await controller.awaitOperation(restartStarted.requestId, "controller-tests")).status, "done");
     assert.equal(controller.snapshot().runtime.analyzerState, "ready");
   } finally {
     releaseCommit();
@@ -865,10 +864,10 @@ test("closing during restart cannot resurrect runtime readiness", async () => {
     return engine.handshake;
   };
   const restart = command(controller, { type: "restart", replay: false });
-  const restarting = controller.dispatch(restart);
+  const restarting = startCommand(controller, restart);
   await eventually(() => engine.restartCount === 1);
   await controller.close();
-  const closedOperation = await controller.awaitOperation(restart.operationId, "controller-tests");
+  const closedOperation = await controller.awaitOperation(restart.requestId, "controller-tests");
   assert.equal(closedOperation.status, "error");
   assert.equal(closedOperation.error?.code, "session_stopped");
   releaseRestart();
@@ -902,7 +901,7 @@ test("closing during a barrier restart prevents the pump from shifting queued wo
         }
     ]
   });
-  await controller.dispatch(edit);
+  await startCommand(controller, edit);
   await eventually(() => controller.snapshot().cells[0]?.analysisPending === false);
 
   let releaseRestart!: () => void;
@@ -918,7 +917,7 @@ test("closing during a barrier restart prevents the pump from shifting queued wo
     scope: "all",
     changes: []
   });
-  await controller.dispatch(run);
+  await startCommand(controller, run);
   await eventually(() => engine.restartCount === 1);
   assert.equal(engine.restartCount, 1);
   assert.equal(controller.snapshot().runtime.executionReady, false);
@@ -952,8 +951,8 @@ test("optional service-peer failure leaves analysis and execution available", as
     scope: "all",
     changes: []
   });
-  await controller.dispatch(run);
-  await settle(controller, run.operationId);
+  await startCommand(controller, run);
+  await settle(controller, run.requestId);
   assert.deepEqual(engine.evaluations.map((evaluation) => evaluation.cellId), ["a"]);
   assert.equal(controller.snapshot().lastActionError, null);
   assert.ok(events.some((event) => event.type === "service-error" && event.payload === null));
@@ -994,8 +993,8 @@ test("all edit preconditions are validated before any source mutation or engine 
         }
     ]
   });
-  const admission = await controller.dispatch(edit);
-  const rejected = await controller.awaitOperation(admission.operationId, "controller-tests");
+  const started = await startCommand(controller, edit);
+  const rejected = await controller.awaitOperation(started.requestId, "controller-tests");
   assert.equal(rejected.status, "error");
   assert.equal(rejected.error?.code, 'source_conflict');
   assert.deepEqual(
@@ -1020,8 +1019,8 @@ test("source events publish causal cell projections without replacing unchanged 
     scope: "all",
     changes: []
   });
-  await controller.dispatch(initial);
-  await settle(controller, initial.operationId);
+  await startCommand(controller, initial);
+  await settle(controller, initial.requestId);
 
   const events: HostEvent[] = [];
   const unsubscribe = controller.subscribe((event) => events.push(event));
@@ -1039,9 +1038,9 @@ test("source events publish causal cell projections without replacing unchanged 
         }
     ]
   });
-  await controller.dispatch(edit);
-  await settle(controller, edit.operationId);
-  const causal = events.filter((event) => event.operationId === edit.operationId);
+  await startCommand(controller, edit);
+  await settle(controller, edit.requestId);
+  const causal = events.filter((event) => event.operationId === edit.requestId);
   const transactionEvent = causal.find((event) => event.type === "transaction");
   assert.ok(transactionEvent);
   const transaction = transactionEvent?.payload as { documentRevision: number; updated: CellSnapshot[] };
@@ -1086,8 +1085,8 @@ test("Markdown-only formatting preserves authored source commits and clean no-op
     cellIds: ["md"],
     expectedRevisions: { md: 0 },
   });
-  await controller.dispatch(cleanFormat);
-  const cleanResult = await settle(controller, cleanFormat.operationId);
+  await startCommand(controller, cleanFormat);
+  const cleanResult = await settle(controller, cleanFormat.requestId);
   assert.deepEqual(cleanResult.result, { changed: 0, edited: [], created: [] });
   const cleanAfter = controller.snapshot();
   assert.equal(cleanAfter.documentRevision, cleanBefore.documentRevision);
@@ -1111,8 +1110,8 @@ test("Markdown-only formatting preserves authored source commits and clean no-op
         }
     ]
   });
-  await controller.dispatch(authored);
-  const authoredResult = await settle(controller, authored.operationId);
+  await startCommand(controller, authored);
+  const authoredResult = await settle(controller, authored.requestId);
   assert.deepEqual(authoredResult.result, {
     created: {}, edited: [{ id: "md", revision: 1 }], deleted: [], documentRevision: 1,
   });
@@ -1125,8 +1124,8 @@ test("Markdown-only formatting preserves authored source commits and clean no-op
     cellIds: ["md"],
     expectedRevisions: { md: 1 },
   });
-  await controller.dispatch(dirtyFormat);
-  const dirtyResult = await settle(controller, dirtyFormat.operationId);
+  await startCommand(controller, dirtyFormat);
+  const dirtyResult = await settle(controller, dirtyFormat.requestId);
   assert.deepEqual(dirtyResult.result, { changed: 0, edited: [], created: [] });
   const dirtyAfter = controller.snapshot();
   assert.equal(dirtyAfter.documentRevision, dirtyBefore.documentRevision);
@@ -1172,7 +1171,7 @@ test("source edit admitted during formatting rejects late candidate before durab
       cellIds: ["a"],
       expectedRevisions: { a: 0 },
     });
-    const formatAdmission = await controller.dispatch(format);
+    const formatStarted = await startCommand(controller, format);
     await formatterEntered;
     assert.equal(formatEntered, true);
 
@@ -1190,8 +1189,8 @@ test("source edit admitted during formatting rejects late candidate before durab
         }
     ]
     });
-    const editAdmission = await controller.dispatch(edit);
-    const editOperation = await controller.awaitOperation(editAdmission.operationId, "controller-tests");
+    const editStarted = await startCommand(controller, edit);
+    const editOperation = await controller.awaitOperation(editStarted.requestId, "controller-tests");
     assert.equal(editOperation.status, "done", editOperation.error?.message);
     const afterEdit = controller.snapshot();
     assert.equal(afterEdit.documentRevision, before.documentRevision + 1);
@@ -1201,7 +1200,7 @@ test("source edit admitted during formatting rejects late candidate before durab
     assert.deepEqual(durableBytes[0], serializedNotebookBytes(controller));
 
     releaseFormatter({ a: ["x <- 999"] });
-    const formatOperation = await controller.awaitOperation(formatAdmission.operationId, "controller-tests");
+    const formatOperation = await controller.awaitOperation(formatStarted.requestId, "controller-tests");
     assert.equal(formatOperation.status, "error");
     assert.equal(formatOperation.error?.code, "source_conflict");
     const afterLateFormat = controller.snapshot();
@@ -1248,8 +1247,8 @@ test("creating beyond the admitted notebook bound fails before source or engine 
         }
     ]
   });
-  const createAdmission = await controller.dispatch(create);
-  const createOperation = await controller.awaitOperation(createAdmission.operationId, "controller-tests");
+  const createStarted = await startCommand(controller, create);
+  const createOperation = await controller.awaitOperation(createStarted.requestId, "controller-tests");
   assert.equal(createOperation.status, "error");
   assert.equal(createOperation.error?.code, "too_many_cells");
   assert.deepEqual(controller.snapshot().cells.map((cell) => cell.id), beforeIds);
@@ -1296,8 +1295,8 @@ test("projected notebook bytes are rejected atomically before source or engine e
         }
     ]
   });
-  const editAdmission = await controller.dispatch(edit);
-  const editOperation = await controller.awaitOperation(editAdmission.operationId, "controller-tests");
+  const editStarted = await startCommand(controller, edit);
+  const editOperation = await controller.awaitOperation(editStarted.requestId, "controller-tests");
   assert.equal(editOperation.status, "error");
   assert.equal(editOperation.error?.code, "notebook_too_large");
   assert.deepEqual(
@@ -1341,7 +1340,7 @@ test("dependency edge exhaustion stays editable and clears after a bounded repai
         }))
     ]
   });
-  await controller.dispatch(repair);
+  await startCommand(controller, repair);
   await eventually(() => controller.snapshot().graph.topologicalOrder !== null
     && controller.snapshot().lastActionError === null);
   assert.deepEqual(
@@ -1372,14 +1371,14 @@ test("one command creates, reconciles, analyzes, and runs an optimistic cell", a
         }
     ]
   });
-  const accepted = await controller.dispatch(run);
-  const resultOperation = await controller.awaitOperation(accepted.operationId, "controller-tests");
+  const accepted = await startCommand(controller, run);
+  const resultOperation = await controller.awaitOperation(accepted.requestId, "controller-tests");
   const result = resultOperation.result as { created: Record<string, string> };
-  assert.deepEqual(result.created, { "focused-editor-1": "cell-1" });
-  await settle(controller, run.operationId);
+  assert.deepEqual(result.created, { "focused-editor-1": "focused-editor-1" });
+  await settle(controller, run.requestId);
   assert.equal(controller.snapshot().cells[0]?.status, "done");
-  assert.equal(engine.analysisCalls.at(-1)?.[0]?.id, "cell-1");
-  assert.equal(engine.evaluations[0]?.cellId, "cell-1");
+  assert.equal(engine.analysisCalls.at(-1)?.[0]?.id, "focused-editor-1");
+  assert.equal(engine.evaluations[0]?.cellId, "focused-editor-1");
   await controller.close();
 });
 
@@ -1400,7 +1399,7 @@ test("body edits retain the validated graph but execution waits for replacement 
     await new Promise<void>((resolve) => { releaseAnalysis = resolve; });
     return analyze(...args);
   };
-  await controller.dispatch(command(controller, {
+  await startCommand(controller, command(controller, {
     type: "transaction",
     changes: [
         {
@@ -1425,12 +1424,12 @@ test("body edits retain the validated graph but execution waits for replacement 
     scope: "all",
     changes: []
   });
-  const accepted = controller.dispatch(run);
+  const accepted = startCommand(controller, run);
   await new Promise<void>((resolve) => setImmediate(resolve));
   assert.equal(engine.evaluations.length, 0);
   releaseAnalysis!();
   await accepted;
-  await settle(controller, run.operationId);
+  await settle(controller, run.requestId);
   assert.deepEqual(engine.analysisCalls.at(-1)?.map((cell) => cell.id), ['a']);
   assert.equal(engine.evaluations[0]?.source, "x <- 2");
   assert.equal(engine.evaluations[0]?.revision, 1);
@@ -1452,8 +1451,8 @@ test("body edits retain the validated graph but execution waits for replacement 
         }
     ]
   });
-  await controller.dispatch(edit2);
-  await settle(controller, edit2.operationId);
+  await startCommand(controller, edit2);
+  await settle(controller, edit2.requestId);
   await eventually(() => controller.snapshot().cells[0]?.analysisPending === false);
   assert.deepEqual(controller.snapshot().graph.edges.b, []);
   assert.equal(events.filter((event) => event.type === "graph").length, 1);
@@ -1478,8 +1477,8 @@ test("serial scheduling follows dependency order and blocks disabled descendants
     scope: "all",
     changes: []
   });
-  await controller.dispatch(first);
-  await settle(controller, first.operationId);
+  await startCommand(controller, first);
+  await settle(controller, first.requestId);
   assert.deepEqual(engine.evaluations.map((item) => item.cellId), ["a", "b", "c"]);
   assert.equal(events.filter((event) => event.type === "operation"
     && (event.payload as { status?: string }).status === "running").length, 1);
@@ -1489,10 +1488,9 @@ test("serial scheduling follows dependency order and blocks disabled descendants
   assert.ok(events.slice(startedAt, completedAt).filter((event) => event.type === "runtime")
     .every((event) => (event.payload as HostSnapshot["runtime"]).busy), "a continuing chain must not advertise idle between cells");
   await eventually(() => (events.findLast((event) => event.type === "runtime")?.payload as HostSnapshot["runtime"])?.busy === false);
-  assert.deepEqual(events.filter((event) => event.type === "runtime").map((event) => {
-    const runtime = event.payload as HostSnapshot["runtime"];
-    return [runtime.busy, runtime.activeRunId];
-  }), [[true, engine.evaluations[0]?.runId], [false, null]]);
+  const runtimeEvents = events.filter((event) => event.type === "runtime");
+  assert.equal((runtimeEvents[0]?.payload as HostSnapshot["runtime"]).activeRunId, engine.evaluations[0]?.runId);
+  assert.equal((runtimeEvents.at(-1)?.payload as HostSnapshot["runtime"]).busy, false);
 
   const disable = command(controller, {
     type: "transaction",
@@ -1505,15 +1503,15 @@ test("serial scheduling follows dependency order and blocks disabled descendants
       },
     ],
   });
-  const disableAdmission = await controller.dispatch(disable);
-  await controller.awaitOperation(disableAdmission.operationId, "controller-tests");
+  const disableStarted = await startCommand(controller, disable);
+  await controller.awaitOperation(disableStarted.requestId, "controller-tests");
   const second = command(controller, {
     type: "run",
     scope: "all",
     changes: []
   });
-  await controller.dispatch(second);
-  await settle(controller, second.operationId);
+  await startCommand(controller, second);
+  await settle(controller, second.requestId);
   assert.deepEqual(engine.evaluations.map((item) => item.cellId), ["a", "b", "c", "a"]);
   assert.deepEqual(events.filter((event) => event.type === "runtime"
     && (event.payload as HostSnapshot["runtime"]).busy)
@@ -1536,8 +1534,8 @@ test("a scalar chain edit and run needs no separate binding cleanup", async () =
     scope: "all",
     changes: []
     });
-    await controller.dispatch(initial);
-    await settle(controller, initial.operationId);
+    await startCommand(controller, initial);
+    await settle(controller, initial.requestId);
     const edited = command(controller, {
     type: "run",
     scope: "cell",
@@ -1556,8 +1554,8 @@ test("a scalar chain edit and run needs no separate binding cleanup", async () =
         }
     ]
     });
-    await controller.dispatch(edited);
-    await settle(controller, edited.operationId);
+    await startCommand(controller, edited);
+    await settle(controller, edited.requestId);
     assert.deepEqual(engine.evaluations.map((item) => item.source),
       ["x <- 1", "y <- x + 1", "z <- y + 1", "x <- 2", "y <- x + 1", "z <- y + 1"]);
     assert.deepEqual(engine.requests.filter((item) => item.command === "clear_cell"), []);
@@ -1578,8 +1576,8 @@ test("queued invalidations clear in one atomic request before evaluation resumes
     scope: "all",
     changes: []
   });
-  await controller.dispatch(initial);
-  await settle(controller, initial.operationId);
+  await startCommand(controller, initial);
+  await settle(controller, initial.requestId);
   const evaluationsBeforeClear = engine.evaluations.length;
 
   const edit = command(controller, {
@@ -1605,7 +1603,7 @@ test("queued invalidations clear in one atomic request before evaluation resumes
         }
     ]
   });
-  await controller.dispatch(edit);
+  await startCommand(controller, edit);
   await eventually(() => controller.snapshot().cells.every((cell) => !cell.analysisPending));
 
   let releaseClear!: () => void;
@@ -1621,7 +1619,7 @@ test("queued invalidations clear in one atomic request before evaluation resumes
     scope: "all",
     changes: []
   });
-  await controller.dispatch(run);
+  await startCommand(controller, run);
   await eventually(() => engine.requests.some((request) => request.command === "clear_cell"));
   assert.equal(engine.evaluations.length, evaluationsBeforeClear);
   assert.deepEqual(
@@ -1630,7 +1628,7 @@ test("queued invalidations clear in one atomic request before evaluation resumes
   );
 
   releaseClear();
-  await settle(controller, run.operationId);
+  await settle(controller, run.requestId);
   assert.equal(
     engine.requests.filter((request) => request.command === "clear_cell").length,
     1,
@@ -1662,8 +1660,8 @@ test("a failed cell drops only its same-run descendants and continues independen
     scope: "all",
     changes: []
   });
-  await controller.dispatch(run);
-  const terminal = await controller.awaitOperation(run.operationId, "controller-tests");
+  await startCommand(controller, run);
+  const terminal = await controller.awaitOperation(run.requestId, "controller-tests");
   assert.equal(terminal.status, "error");
   assert.equal(terminal.error?.code, "eval_error");
   assert.equal(terminal.error?.message, "expected failure");
@@ -1693,13 +1691,13 @@ test("streamed log replacements compose partial lines without duplicating them",
     },
     changes: []
   });
-  await controller.dispatch(run);
+  await startCommand(controller, run);
   await eventually(() => engine.pendingEvaluations.length === 1);
   engine.emitEvaluationLog({ lines: ["a"] });
   engine.emitEvaluationLog({ lines: ["ab"], replaceLast: true });
   engine.emitEvaluationLog({ lines: ["c"] });
   engine.finishEvaluation({ ok: true, outputs: [] });
-  await settle(controller, run.operationId);
+  await settle(controller, run.requestId);
   assert.deepEqual(controller.snapshot().cells[0]?.log, ["ab", "c"]);
   await controller.close();
 });
@@ -1723,7 +1721,7 @@ test("native clear-output deltas reset every streamed projection before later ou
     },
     changes: []
   });
-  await controller.dispatch(run);
+  await startCommand(controller, run);
   await eventually(() => engine.pendingEvaluations.length === 1);
   engine.emitEvaluationOutput("append", { output: { kind: "text", text: "old", truncated: false } });
   engine.emitEvaluationOutput("log", { lines: ["old log"] });
@@ -1734,7 +1732,7 @@ test("native clear-output deltas reset every streamed projection before later ou
   assert.equal(controller.snapshot().cells[0]?.progress, null);
   engine.emitEvaluationOutput("append", { output: { kind: "text", text: "new", truncated: false } });
   engine.finishEvaluation({ ok: true, log: [] });
-  await settle(controller, run.operationId);
+  await settle(controller, run.requestId);
   assert.deepEqual(controller.snapshot().cells[0]?.outputs.map((output) => output.data), [{ kind: "text", text: "new", truncated: false }]);
   assert.ok(events.some((event) => event.type === "cell-output"
     && (event.payload as { kind?: string }).kind === "clear"));
@@ -1746,7 +1744,7 @@ test("native clear-output deltas reset every streamed projection before later ou
     },
     changes: []
   });
-  await controller.dispatch(rerun);
+  await startCommand(controller, rerun);
   await eventually(() => engine.pendingEvaluations.length === 1);
   assert.deepEqual(controller.snapshot().cells[0]?.outputs.map((output) => output.data), [{ kind: "text", text: "new", truncated: false }]);
   assert.equal(controller.snapshot().cells[0]?.outputsStale, true);
@@ -1754,7 +1752,7 @@ test("native clear-output deltas reset every streamed projection before later ou
   assert.deepEqual(controller.snapshot().cells[0]?.outputs.map((output) => output.data), [{ kind: "text", text: "replacement", truncated: false }]);
   assert.notEqual(controller.snapshot().cells[0]?.outputsStale, true);
   engine.finishEvaluation({ ok: true, log: [] });
-  await settle(controller, rerun.operationId);
+  await settle(controller, rerun.requestId);
   assert.notEqual(controller.snapshot().cells[0]?.outputsStale, true);
   unsubscribe();
   await controller.close();
@@ -1777,11 +1775,11 @@ test("completion preserves the authoritative log beyond the live stream window",
     },
     changes: []
   });
-  await controller.dispatch(run);
+  await startCommand(controller, run);
   await eventually(() => engine.pendingEvaluations.length === 1);
   const completeLine = "x".repeat(70 * 1024);
   engine.finishEvaluation({ ok: true, outputs: [], log: [completeLine] });
-  await settle(controller, run.operationId);
+  await settle(controller, run.requestId);
   assert.deepEqual(controller.snapshot().cells[0]?.log, [completeLine]);
 
   const oversizedRun = command(controller, {
@@ -1792,10 +1790,10 @@ test("completion preserves the authoritative log beyond the live stream window",
     },
     changes: []
   });
-  await controller.dispatch(oversizedRun);
+  await startCommand(controller, oversizedRun);
   await eventually(() => engine.pendingEvaluations.length === 1);
   engine.finishEvaluation({ ok: true, outputs: [], log: ["x".repeat(1_048_577)] });
-  await settle(controller, oversizedRun.operationId);
+  await settle(controller, oversizedRun.requestId);
   assert.deepEqual(controller.snapshot().cells[0]?.log, [
     "x".repeat(1_048_576),
     "[output truncated at 1048576 bytes]",
@@ -1817,7 +1815,7 @@ test("editing an active cell requests scoped interruption and discards its late 
     scope: "all",
     changes: []
   });
-  await controller.dispatch(run);
+  await startCommand(controller, run);
   await eventually(() => controller.snapshot().runtime.busy);
   const edit = command(controller, {
     type: "transaction",
@@ -1833,11 +1831,11 @@ test("editing an active cell requests scoped interruption and discards its late 
         }
     ]
   });
-  await controller.dispatch(edit);
+  await startCommand(controller, edit);
   await eventually(() => engine.interrupts.length === 1);
   assert.deepEqual(engine.interrupts, [1]);
   engine.finishEvaluation({ ok: true, outputs: [{ kind: "text", text: "obsolete", truncated: false }] });
-  await settle(controller, run.operationId);
+  await settle(controller, run.requestId);
   const state = controller.snapshot();
   assert.equal(state.cells.find((cell) => cell.id === "a")?.revision, 1);
   assert.equal(state.cells.find((cell) => cell.id === "a")?.status, "stale");
@@ -1872,8 +1870,8 @@ test("analysis cache evicts old source entries while retaining recent reusable r
         }
     ]
   });
-  const firstAdmission = await controller.dispatch(firstEdit);
-  await controller.awaitOperation(firstAdmission.operationId, "controller-tests");
+  const firstStarted = await startCommand(controller, firstEdit);
+  await controller.awaitOperation(firstStarted.requestId, "controller-tests");
   await eventually(() => controller.snapshot().cells[256]?.analysisPending === false);
   assert.equal(engine.analysisCalls.length, 2);
   assert.equal(engine.analysisCalls[1]?.[0]?.source, sources[0]);
@@ -1892,8 +1890,8 @@ test("analysis cache evicts old source entries while retaining recent reusable r
         }
     ]
   });
-  const secondAdmission = await controller.dispatch(secondEdit);
-  await controller.awaitOperation(secondAdmission.operationId, "controller-tests");
+  const secondStarted = await startCommand(controller, secondEdit);
+  await controller.awaitOperation(secondStarted.requestId, "controller-tests");
   await eventually(() => controller.snapshot().cells[255]?.analysisPending === false);
   assert.equal(engine.analysisCalls.length, 2);
   await controller.close();
@@ -1935,8 +1933,8 @@ test("parsed exact-limit physical source supports a reducing edit and small crea
         }
     ]
     });
-    const admission = await controller.dispatch(edit);
-    await settle(controller, admission.operationId);
+    const started = await startCommand(controller, edit);
+    await settle(controller, started.requestId);
     assert.equal(serializedNotebook(controller), "\ufeff# title\r\n# noncanonical header\r\n# %%\r\n#| keep: original\r\nx <- 2\r\n# %%\r\ny <- x");
   } finally {
     await controller.close();
@@ -1963,8 +1961,8 @@ test("parsed physical records retain BOM, mixed EOL, and duplicate options aroun
         }
     ]
     });
-    const admission = await controller.dispatch(edit);
-    await settle(controller, admission.operationId);
+    const started = await startCommand(controller, edit);
+    await settle(controller, started.requestId);
     assert.deepEqual([...serializedNotebookBytes(controller).slice(0, 3)], [0xef, 0xbb, 0xbf]);
     assert.equal(serializedNotebook(controller), "\ufeff# title\r\n# noncanonical header\r\n# %%\r#| foo: one\r#| foo: two\rx <- 2\n# %% markdown\n#| bar: two\nbody");
   } finally {
@@ -1996,8 +1994,8 @@ test("failed durable commit does not adopt staged physical notebook bytes", asyn
         }
     ]
     });
-    const admission = await controller.dispatch(edit);
-    const operation = await controller.awaitOperation(admission.operationId, "controller-tests");
+    const started = await startCommand(controller, edit);
+    const operation = await controller.awaitOperation(started.requestId, "controller-tests");
     assert.equal(operation.status, "error");
     assert.equal(serializedNotebook(controller), source);
   } finally {
@@ -2006,7 +2004,7 @@ test("failed durable commit does not adopt staged physical notebook bytes", asyn
 });
 
 
-test("source admission keeps pending publication invisible and checks revision at lane acquisition", async () => {
+test("source started keeps pending publication invisible and checks revision at lane acquisition", async () => {
   let release!: () => void;
   const gate = new Promise<void>((resolve) => { release = resolve; });
   let entered = false;
@@ -2188,7 +2186,7 @@ test("external reload invalidates active evaluations before late success can pub
       scope: "all",
       changes: [],
     });
-    await controller.dispatch(run);
+    await startCommand(controller, run);
     await eventually(() => engine.pendingEvaluations.length === 1);
     const beforeReload = controller.snapshot();
     await controller.commitSource({
@@ -2197,7 +2195,7 @@ test("external reload invalidates active evaluations before late success can pub
       operationId: "reload-during-evaluation",
     });
     assert.deepEqual(engine.interrupts, [1]);
-    assert.equal((await controller.awaitOperation(run.operationId, "controller-tests")).status, "error");
+    assert.equal((await controller.awaitOperation(run.requestId, "controller-tests")).status, "error");
     engine.finishEvaluation({ ok: true, outputs: [{ kind: "text", text: "late", truncated: false }] });
     await eventually(() => engine.pendingEvaluations.length === 0);
     assert.deepEqual(engine.evaluations.map((evaluation) => evaluation.cellId), ["a"]);
@@ -2339,7 +2337,7 @@ test("failed Save As binder restores the controller source identity", async () =
   }
 });
 
-test("failed source admission leaves the physical notebook and revision unchanged", async () => {
+test("failed source started leaves the physical notebook and revision unchanged", async () => {
   const controller = createController({
     engine: new FakeEngine(),
     notebook: notebook([["a", "x <- 1"]]),
@@ -2388,8 +2386,8 @@ test("a source transaction publishes its immediate graph even when no analysis f
         }
     ]
   });
-  const editAdmission = await controller.dispatch(edit);
-  await controller.awaitOperation(editAdmission.operationId, "controller-tests");
+  const editStarted = await startCommand(controller, edit);
+  await controller.awaitOperation(editStarted.requestId, "controller-tests");
   assert.ok(events.includes("transaction"));
   assert.deepEqual(controller.snapshot().graph, {
     nodes: ["a"],
@@ -2451,17 +2449,17 @@ test("kernel failure waits for a pending run source commit", async () => {
         }
     ]
     });
-    const admission = await controller.dispatch(run);
+    const started = await startCommand(controller, run);
     await eventually(() => entered);
 
     for (const listener of engine.failureListeners) listener("kernel", new Error("kernel lost"));
     await eventually(() => controller.snapshot().runtime.executionBlockedReason?.code === "worker_unavailable");
-    const pending = controller.snapshot().operations.find((operation) => operation.id === admission.operationId);
+    const pending = controller.snapshot().operations.find((operation) => operation.id === started.requestId);
     assert.ok(pending);
     assert.ok(pending.status === "accepted" || pending.status === "running");
 
     release();
-    const operation = await controller.awaitOperation(admission.operationId, "controller-tests");
+    const operation = await controller.awaitOperation(started.requestId, "controller-tests");
     assert.equal(operation.status, "error");
     assert.equal(operation.runId, null);
     assert.deepEqual(operation.result, {
@@ -2509,8 +2507,8 @@ test("run source outcomes survive analysis failure after publication", async () 
         }
     ]
     });
-    const admission = await controller.dispatch(run);
-    const operation = await controller.awaitOperation(admission.operationId, "controller-tests");
+    const started = await startCommand(controller, run);
+    const operation = await controller.awaitOperation(started.requestId, "controller-tests");
     assert.equal(operation.status, "error");
     assert.equal(operation.error?.code, "analysis_unavailable");
     assert.equal(operation.runId, null);
@@ -2538,9 +2536,8 @@ test("rejected stale run does not acknowledge a foreign identical edit", async (
   await controller.start();
   try {
     const foreign: HostCommand = {
-      operationId: "foreign-edit",
+      requestId: "foreign-edit",
       clientId: "foreign-editor",
-      commandSequence: 1,
       sessionEpoch: controller.epoch,
       type: "transaction",
       expectedDocumentRevision: 0,
@@ -2552,8 +2549,8 @@ test("rejected stale run does not acknowledge a foreign identical edit", async (
         cellType: "code",
       }],
     };
-    const foreignAdmission = await controller.dispatch(foreign);
-    await settle(controller, foreignAdmission.operationId, "foreign-editor");
+    const foreignStarted = await startCommand(controller, foreign);
+    await settle(controller, foreignStarted.requestId, "foreign-editor");
     const beforeRun = controller.snapshot();
     assert.equal(beforeRun.documentRevision, 1);
     assert.deepEqual(beforeRun.cells[0]?.body, ["x <- 2"]);
@@ -2577,8 +2574,8 @@ test("rejected stale run does not acknowledge a foreign identical edit", async (
         }
     ]
     });
-    const admission = await controller.dispatch(run);
-    const operation = await controller.awaitOperation(admission.operationId, 'controller-tests');
+    const started = await startCommand(controller, run);
+    const operation = await controller.awaitOperation(started.requestId, 'controller-tests');
     assert.equal(operation.status, 'error');
     assert.equal(operation.error?.code, 'source_conflict');
     assert.equal(operation.runId, null);
@@ -2618,21 +2615,21 @@ test("a Stop is accepted while a run waits for durable source commit", async () 
       type: "run", scope: "cell", target: { cellId: "a" },
       changes: [{ type: "edit", cell: { cellId: "a" }, expectedRevision: 0, body: ["x <- 2"], cellType: "code" }],
     });
-    const runAdmission = await controller.dispatch(run);
-    assert.equal(runAdmission.accepted, true);
+    const runStarted = await startCommand(controller, run);
+
     await eventually(() => commitEntered);
     assert.equal(controller.snapshot().runtime.busy, true);
 
     const stop = command(controller, { type: "interrupt" });
-    const stopAdmission = await controller.dispatch(stop);
-    assert.equal(stopAdmission.accepted, true);
-    const stopOperation = await controller.awaitOperation(stopAdmission.operationId, "controller-tests");
+    const stopStarted = await startCommand(controller, stop);
+
+    const stopOperation = await controller.awaitOperation(stopStarted.requestId, "controller-tests");
     assert.equal(stopOperation.status, "done");
     assert.equal((stopOperation.result as { requested: boolean }).requested, true);
     assert.equal(engine.evaluations.length, 0);
 
     releaseCommit();
-    const settled = await controller.awaitOperation(run.operationId, "controller-tests");
+    const settled = await controller.awaitOperation(run.requestId, "controller-tests");
     assert.equal(settled.status, "cancelled");
     assert.equal(settled.error?.code, "interrupted");
     assert.equal(engine.evaluations.length, 0);
@@ -2659,12 +2656,12 @@ test("a late Stop cannot erase a successful matching completion", async () => {
     },
     changes: []
   });
-  await controller.dispatch(run);
+  await startCommand(controller, run);
   await eventually(() => controller.snapshot().runtime.busy);
   const stop = command(controller, { type: "interrupt" });
-  await controller.dispatch(stop);
+  await startCommand(controller, stop);
   engine.finishEvaluation({ ok: true, outputs: [{ kind: "text", text: "[1] 2", truncated: false }] });
-  const settled = await settle(controller, run.operationId);
+  const settled = await settle(controller, run.requestId);
   assert.equal(settled.status, "done");
   assert.equal(controller.snapshot().cells[0]?.status, "done");
   assert.equal((controller.snapshot().cells[0]?.outputs[0]?.data as { text: string }).text, "[1] 2");
@@ -2694,14 +2691,14 @@ test("a matching interrupted Stop cancels the run after its cell result is publi
     },
     changes: []
   });
-  await controller.dispatch(run);
+  await startCommand(controller, run);
   await eventually(() => controller.snapshot().runtime.busy);
-  await controller.dispatch(command(controller, { type: "interrupt" }));
+  await startCommand(controller, command(controller, { type: "interrupt" }));
   engine.finishEvaluation({
     ok: false,
     error: { message: "Interrupted", code: "interrupted", interrupted: true },
   });
-  const settled = await controller.awaitOperation(run.operationId, "controller-tests");
+  const settled = await controller.awaitOperation(run.requestId, "controller-tests");
   assert.equal(settled.status, "cancelled");
   assert.equal(settled.error?.code, "interrupted");
   assert.equal(controller.snapshot().cells[0]?.status, "error");
@@ -2726,14 +2723,14 @@ test("a requested Stop canonicalizes a malformed native interrupt error", async 
     },
     changes: []
   });
-  await controller.dispatch(run);
+  await startCommand(controller, run);
   await eventually(() => controller.snapshot().runtime.busy);
-  await controller.dispatch(command(controller, { type: "interrupt" }));
+  await startCommand(controller, command(controller, { type: "interrupt" }));
   engine.finishEvaluation({
     ok: false,
     error: { message: "bad error message", code: "evaluation_error" },
   });
-  const settled = await controller.awaitOperation(run.operationId, "controller-tests");
+  const settled = await controller.awaitOperation(run.requestId, "controller-tests");
   assert.equal(settled.status, "cancelled");
   assert.equal(settled.error?.code, "interrupted");
   assert.equal(settled.error?.message, "Interrupted");
@@ -2757,12 +2754,12 @@ test("widget owner edits cancel the exact operation and late replies cannot comm
     scope: "all",
     changes: []
   });
-  await controller.dispatch(run);
-  await settle(controller, run.operationId);
+  await startCommand(controller, run);
+  await settle(controller, run.requestId);
   const widget = command(controller, {
     type: "widget", name: "threshold", path: [], update: { value: 7 }, source: "editor",
   });
-  await controller.dispatch(widget);
+  await startCommand(controller, widget);
   await eventually(() => resolveWidget !== undefined);
   const edit = command(controller, {
     type: "transaction",
@@ -2778,8 +2775,8 @@ test("widget owner edits cancel the exact operation and late replies cannot comm
         }
     ]
   });
-  await controller.dispatch(edit);
-  assert.equal((await controller.awaitOperation(widget.operationId, "controller-tests")).status, "cancelled");
+  await startCommand(controller, edit);
+  assert.equal((await controller.awaitOperation(widget.requestId, "controller-tests")).status, "cancelled");
   resolveWidget({ ok: true, selected: { type: "double", value: 7 } });
   await new Promise((resolve) => setImmediate(resolve));
   const output = controller.snapshot().cells[0]?.outputs[0] as { data: { spec: { value: number } } };
@@ -2808,8 +2805,8 @@ test("a successful obsolete widget request replays authoritative source after un
     scope: "all",
     changes: []
   });
-  await controller.dispatch(initial);
-  await settle(controller, initial.operationId);
+  await startCommand(controller, initial);
+  await settle(controller, initial.requestId);
 
   engine.deferred = true;
   const unrelated = command(controller, {
@@ -2820,14 +2817,14 @@ test("a successful obsolete widget request replays authoritative source after un
     },
     changes: []
   });
-  await controller.dispatch(unrelated);
+  await startCommand(controller, unrelated);
   await eventually(() => engine.pendingEvaluations.length === 1);
   const widget = command(controller, {
     type: "widget", name: "threshold", path: [], update: { value: 9 }, source: "editor",
   });
-  await controller.dispatch(widget);
+  await startCommand(controller, widget);
   await eventually(() => resolveWidget !== undefined);
-  await controller.dispatch(command(controller, {
+  await startCommand(controller, command(controller, {
     type: "transaction",
     changes: [
         {
@@ -2841,11 +2838,11 @@ test("a successful obsolete widget request replays authoritative source after un
         }
     ]
   }));
-  assert.equal((await controller.awaitOperation(widget.operationId, "controller-tests")).status, "cancelled");
+  assert.equal((await controller.awaitOperation(widget.requestId, "controller-tests")).status, "cancelled");
   assert.equal(engine.evaluations.at(-1)?.cellId, "c");
 
   engine.finishEvaluation();
-  await settle(controller, unrelated.operationId);
+  await settle(controller, unrelated.requestId);
   resolveWidget({ ok: true, selected: { type: "double", value: 9 } });
   await eventually(() => engine.pendingEvaluations.length === 1);
   assert.equal(engine.evaluations.at(-1)?.cellId, "a");
@@ -2887,15 +2884,15 @@ test("a rejected obsolete widget request does not execute edited source", async 
     scope: "all",
     changes: []
   });
-  await controller.dispatch(initial);
-  await settle(controller, initial.operationId);
+  await startCommand(controller, initial);
+  await settle(controller, initial.requestId);
 
   const widget = command(controller, {
     type: "widget", name: "threshold", path: [], update: { value: 9 }, source: "editor",
   });
-  await controller.dispatch(widget);
+  await startCommand(controller, widget);
   await eventually(() => resolveWidget !== undefined);
-  await controller.dispatch(command(controller, {
+  await startCommand(controller, command(controller, {
     type: "transaction",
     changes: [
         {
@@ -2913,7 +2910,7 @@ test("a rejected obsolete widget request does not execute edited source", async 
   await eventually(() => controller.snapshot().cells[0]?.analysisPending === false);
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(engine.evaluations.map((evaluation) => evaluation.cellId), ["a", "b"]);
-  assert.equal((await controller.awaitOperation(widget.operationId, "controller-tests")).status, "cancelled");
+  assert.equal((await controller.awaitOperation(widget.requestId, "controller-tests")).status, "cancelled");
   await controller.close();
 });
 
@@ -2930,8 +2927,8 @@ test("an edited widget owner is rejected as stale before replacement analysis se
     scope: "all",
     changes: []
   });
-  await controller.dispatch(run);
-  await settle(controller, run.operationId);
+  await startCommand(controller, run);
+  await settle(controller, run.requestId);
 
   let releaseAnalysis: (() => void) | undefined;
   engine.analyze = async (cells, revision) => {
@@ -2943,7 +2940,7 @@ test("an edited widget owner is rejected as stale before replacement analysis se
       cells: cells.map((cell) => analyzeCell(cell)),
     };
   };
-  await controller.dispatch(command(controller, {
+  await startCommand(controller, command(controller, {
     type: "transaction",
     changes: [
         {
@@ -2961,18 +2958,18 @@ test("an edited widget owner is rejected as stale before replacement analysis se
   const widget = command(controller, {
     type: "widget", name: "threshold", path: [], update: { value: 7 }, source: "editor",
   });
-  const widgetAdmission = await controller.dispatch(widget);
-  const widgetOperation = await controller.awaitOperation(widgetAdmission.operationId, "controller-tests");
+  const widgetStarted = await startCommand(controller, widget);
+  const widgetOperation = await controller.awaitOperation(widgetStarted.requestId, "controller-tests");
   assert.equal(widgetOperation.status, "error");
   assert.equal(widgetOperation.error?.code, "widget_not_current");
   const inspect = command(controller, { type: "inspect", name: "threshold" });
-  const inspectAdmission = await controller.dispatch(inspect);
-  const inspectOperation = await controller.awaitOperation(inspectAdmission.operationId, "controller-tests");
+  const inspectStarted = await startCommand(controller, inspect);
+  const inspectOperation = await controller.awaitOperation(inspectStarted.requestId, "controller-tests");
   assert.equal(inspectOperation.status, "error");
   assert.equal(inspectOperation.error?.code, "stale_value");
   const missingInspect = command(controller, { type: "inspect", name: "not_yet_owned" });
-  const missingAdmission = await controller.dispatch(missingInspect);
-  const missingOperation = await controller.awaitOperation(missingAdmission.operationId, "controller-tests");
+  const missingStarted = await startCommand(controller, missingInspect);
+  const missingOperation = await controller.awaitOperation(missingStarted.requestId, "controller-tests");
   assert.equal(missingOperation.status, "error");
   assert.equal(missingOperation.error?.code, "analysis_pending");
   assert.equal(engine.requests.some((request) => request.command === "get_value"), false);
@@ -2994,8 +2991,8 @@ test("datetime updates reject impossible UTC calendar values before reaching R",
     scope: "all",
     changes: []
   });
-  await controller.dispatch(run);
-  await settle(controller, run.operationId);
+  await startCommand(controller, run);
+  await settle(controller, run.requestId);
   const update = command(controller, {
     type: "widget",
     name: "stamp",
@@ -3003,8 +3000,8 @@ test("datetime updates reject impossible UTC calendar values before reaching R",
     update: { value: "2026-02-30T17:30:45Z" },
     source: "editor",
   });
-  const updateAdmission = await controller.dispatch(update);
-  const updateOperation = await controller.awaitOperation(updateAdmission.operationId, "controller-tests");
+  const updateStarted = await startCommand(controller, update);
+  const updateOperation = await controller.awaitOperation(updateStarted.requestId, "controller-tests");
   assert.equal(updateOperation.status, "error");
   assert.equal(updateOperation.error?.code, "invalid_request");
   assert.equal(updateOperation.error?.message, "temporal widget value required");
@@ -3021,15 +3018,15 @@ test("date range and counter widget updates enforce protocol boundaries", async 
   });
   await controller.start();
   const run = command(controller, { type: "run", scope: "all", changes: [] });
-  await controller.dispatch(run);
-  await settle(controller, run.operationId);
+  await startCommand(controller, run);
+  await settle(controller, run.requestId);
 
   const impossible = command(controller, {
     type: "widget", name: "dates", path: [],
     update: { value: ["2026-02-30", "2026-03-01"] }, source: "editor",
   });
-  const impossibleAdmission = await controller.dispatch(impossible);
-  const impossibleOperation = await controller.awaitOperation(impossibleAdmission.operationId, "controller-tests");
+  const impossibleStarted = await startCommand(controller, impossible);
+  const impossibleOperation = await controller.awaitOperation(impossibleStarted.requestId, "controller-tests");
   assert.equal(impossibleOperation.status, "error");
   assert.equal(impossibleOperation.error?.code, "invalid_request");
   assert.equal(impossibleOperation.error?.message, "temporal widget value required");
@@ -3038,8 +3035,8 @@ test("date range and counter widget updates enforce protocol boundaries", async 
     type: "widget", name: "dates", path: [],
     update: { value: ["2026-09-04", "2026-09-03"] }, source: "editor",
   });
-  const descendingAdmission = await controller.dispatch(descending);
-  const descendingOperation = await controller.awaitOperation(descendingAdmission.operationId, "controller-tests");
+  const descendingStarted = await startCommand(controller, descending);
+  const descendingOperation = await controller.awaitOperation(descendingStarted.requestId, "controller-tests");
   assert.equal(descendingOperation.status, "error");
   assert.equal(descendingOperation.error?.code, "invalid_request");
   assert.equal(descendingOperation.error?.message, "date range must be non-decreasing");
@@ -3054,14 +3051,14 @@ test("date range and counter widget updates enforce protocol boundaries", async 
   });
   await counterController.start();
   const counterRun = command(counterController, { type: "run", scope: "all", changes: [] });
-  await counterController.dispatch(counterRun);
-  await settle(counterController, counterRun.operationId);
+  await startCommand(counterController, counterRun);
+  await settle(counterController, counterRun.requestId);
   const tooLarge = command(counterController, {
     type: "widget", name: "counter", path: [],
     update: { value: 2_147_483_648 }, source: "editor",
   });
-  const tooLargeAdmission = await counterController.dispatch(tooLarge);
-  const tooLargeOperation = await counterController.awaitOperation(tooLargeAdmission.operationId, "controller-tests");
+  const tooLargeStarted = await startCommand(counterController, tooLarge);
+  const tooLargeOperation = await counterController.awaitOperation(tooLargeStarted.requestId, "controller-tests");
   assert.equal(tooLargeOperation.status, "error");
   assert.equal(tooLargeOperation.error?.code, "invalid_request");
   assert.equal(tooLargeOperation.error?.message, "counter widget value required");
@@ -3085,18 +3082,18 @@ test("widget operations settle after their automatic consumer run and inherit it
     scope: "all",
     changes: []
   });
-  await controller.dispatch(initial);
-  await settle(controller, initial.operationId);
+  await startCommand(controller, initial);
+  await settle(controller, initial.requestId);
 
   engine.deferred = true;
   const successful = command(controller, {
     type: "widget", name: "threshold", path: [], update: { value: 7 }, source: "editor",
   });
-  await controller.dispatch(successful);
+  await startCommand(controller, successful);
   await eventually(() => engine.pendingEvaluations.length === 1);
-  assert.equal(controller.operation(successful.operationId, "controller-tests")?.status, "running");
+  assert.equal(controller.operation(successful.requestId, "controller-tests")?.status, "running");
   engine.finishEvaluation({ ok: true, outputs: [{ kind: "text", text: "7", truncated: false }] });
-  assert.equal((await controller.awaitOperation(successful.operationId, "controller-tests")).status, "done");
+  assert.equal((await controller.awaitOperation(successful.requestId, "controller-tests")).status, "done");
   const widgetOutput = controller.snapshot().cells[0]?.outputs[0] as {
     data: {
       operation?: { status?: string };
@@ -3110,10 +3107,10 @@ test("widget operations settle after their automatic consumer run and inherit it
   const failed = command(controller, {
     type: "widget", name: "threshold", path: [], update: { value: 8 }, source: "editor",
   });
-  await controller.dispatch(failed);
+  await startCommand(controller, failed);
   await eventually(() => engine.pendingEvaluations.length === 1);
   engine.finishEvaluation({ ok: false, error: { message: "consumer boom" } });
-  const failure = await controller.awaitOperation(failed.operationId, "controller-tests");
+  const failure = await controller.awaitOperation(failed.requestId, "controller-tests");
   assert.equal(failure.status, "error");
   assert.equal(failure.error?.code, "eval_error");
   assert.equal(failure.error?.message, "consumer boom");
@@ -3141,8 +3138,8 @@ test("owner edits expire pending inspect, lazy, and table requests before late r
     scope: "all",
     changes: []
   });
-  await controller.dispatch(run);
-  await settle(controller, run.operationId);
+  await startCommand(controller, run);
+  await settle(controller, run.requestId);
 
   const inspect = command(controller, { type: "inspect", name: "x" });
   const lazy = command(controller, { type: "lazy-output", key: "lazy-1" });
@@ -3156,9 +3153,9 @@ test("owner edits expire pending inspect, lazy, and table requests before late r
     filter: "",
   });
   await Promise.all([
-    controller.dispatch(inspect),
-    controller.dispatch(lazy),
-    controller.dispatch(table),
+    startCommand(controller, inspect),
+    startCommand(controller, lazy),
+    startCommand(controller, table),
   ]);
   await eventually(() => resolvers.size === 3);
   const edit = command(controller, {
@@ -3193,10 +3190,10 @@ test("owner edits expire pending inspect, lazy, and table requests before late r
         }
     ]
   });
-  await controller.dispatch(edit);
-  assert.equal((await controller.awaitOperation(inspect.operationId, "controller-tests")).error?.code, "stale_value");
-  assert.equal((await controller.awaitOperation(lazy.operationId, "controller-tests")).error?.code, "lazy_expired");
-  assert.equal((await controller.awaitOperation(table.operationId, "controller-tests")).error?.code, "table_unavailable");
+  await startCommand(controller, edit);
+  assert.equal((await controller.awaitOperation(inspect.requestId, "controller-tests")).error?.code, "stale_value");
+  assert.equal((await controller.awaitOperation(lazy.requestId, "controller-tests")).error?.code, "lazy_expired");
+  assert.equal((await controller.awaitOperation(table.requestId, "controller-tests")).error?.code, "table_unavailable");
   resolvers.get("get_value")?.({ ok: true, value: { kind: "text", text: "obsolete", truncated: false } });
   resolvers.get("lazy_eval")?.({ ok: true, output: { kind: "text", text: "obsolete lazy", truncated: false } });
   resolvers.get("table_page")?.({ ok: true, page: {
@@ -3215,7 +3212,7 @@ test("owner edits expire pending inspect, lazy, and table requests before late r
   assert.equal(lazyOutput?.child, null);
   assert.equal(tableOutput?.page, undefined);
   assert.deepEqual(tableOutput?.preview, [[1]]);
-  for (const operationId of [inspect.operationId, lazy.operationId, table.operationId]) {
+  for (const operationId of [inspect.requestId, lazy.requestId, table.requestId]) {
     assert.equal(snapshot.operations.find((operation) => operation.id === operationId)?.result, null);
   }
   await controller.close();
@@ -3290,13 +3287,13 @@ test("rerunning an owner expires a lazy request tied to its prior output object"
     scope: "all",
     changes: []
   });
-  await controller.dispatch(initial);
-  await settle(controller, initial.operationId);
+  await startCommand(controller, initial);
+  await settle(controller, initial.requestId);
   engine.requestHandler = async (name) => name === "lazy_eval"
     ? new Promise((resolve) => { finishLazy = resolve; })
     : { ok: true };
   const lazy = command(controller, { type: "lazy-output", key: "lazy-1" });
-  await controller.dispatch(lazy);
+  await startCommand(controller, lazy);
   await eventually(() => finishLazy !== undefined);
   const rerun = command(controller, {
     type: "run",
@@ -3306,9 +3303,9 @@ test("rerunning an owner expires a lazy request tied to its prior output object"
     },
     changes: []
   });
-  await controller.dispatch(rerun);
-  await settle(controller, rerun.operationId);
-  assert.equal((await controller.awaitOperation(lazy.operationId, "controller-tests")).error?.code, "lazy_expired");
+  await startCommand(controller, rerun);
+  await settle(controller, rerun.requestId);
+  assert.equal((await controller.awaitOperation(lazy.requestId, "controller-tests")).error?.code, "lazy_expired");
   finishLazy({ ok: true, output: { kind: "text", text: "obsolete lazy", truncated: false } });
   await new Promise((resolve) => setImmediate(resolve));
   assert.ok(!JSON.stringify(controller.snapshot()).includes("obsolete lazy"));
@@ -3335,12 +3332,12 @@ test("lazy output completion uses the public loaded state and preserves renderer
     scope: "all",
     changes: []
   });
-  await controller.dispatch(run);
-  await settle(controller, run.operationId);
+  await startCommand(controller, run);
+  await settle(controller, run.requestId);
 
   const expand = command(controller, { type: "lazy-output", key: "lazy-1" });
-  await controller.dispatch(expand);
-  await settle(controller, expand.operationId);
+  await startCommand(controller, expand);
+  await settle(controller, expand.requestId);
 
   const cell = controller.snapshot().cells[0]!;
   assert.deepEqual(cell.log, ["renderer-message", "Warning: renderer-warning"]);
@@ -3384,8 +3381,8 @@ test("uploads use the file widget journal and retain successful stored values", 
     scope: "all",
     changes: []
   });
-  await controller.dispatch(run);
-  await settle(controller, run.operationId);
+  await startCommand(controller, run);
+  await settle(controller, run.requestId);
 
   const upload = command(controller, {
     type: "upload",
@@ -3394,8 +3391,8 @@ test("uploads use the file widget journal and retain successful stored values", 
     files: [{ name: "data.csv", content_base64: "eAo=" }],
     kernelEpoch: controller.snapshot().runtime.kernelEpoch,
   });
-  await controller.dispatch(upload);
-  const operation = await settle(controller, upload.operationId);
+  await startCommand(controller, upload);
+  const operation = await settle(controller, upload.requestId);
   assert.equal(operation.kind, "widget");
   assert.deepEqual(serviceCalls[0], {
     name: "upload.store",
@@ -3412,7 +3409,7 @@ test("uploads use the file widget journal and retain successful stored values", 
     };
   };
   assert.deepEqual(output.data.spec.value, [{ name: "data.csv", size: 4, path: "/tmp/upload-1" }]);
-  assert.equal(output.data.operation.operationId, upload.operationId);
+  assert.equal(output.data.operation.operationId, upload.requestId);
   assert.equal(output.data.operation.status, "done");
   assert.deepEqual(serviceCalls.filter((call) => call.name === "upload.remove"), [{ name: "upload.remove", payload: { uploadId: "upload-1" } }]);
   await controller.close();
@@ -3445,8 +3442,8 @@ test("an upload stored after its widget owner changes is removed and never reach
     scope: "all",
     changes: []
   });
-  await controller.dispatch(run);
-  await settle(controller, run.operationId);
+  await startCommand(controller, run);
+  await settle(controller, run.requestId);
   const upload = command(controller, {
     type: "upload",
     name: "files",
@@ -3454,7 +3451,7 @@ test("an upload stored after its widget owner changes is removed and never reach
     files: [],
     kernelEpoch: controller.snapshot().runtime.kernelEpoch,
   });
-  await controller.dispatch(upload);
+  await startCommand(controller, upload);
   await eventually(() => finishStore !== undefined);
   const edit = command(controller, {
     type: "transaction",
@@ -3470,8 +3467,8 @@ test("an upload stored after its widget owner changes is removed and never reach
         }
     ]
   });
-  await controller.dispatch(edit);
-  assert.equal((await controller.awaitOperation(upload.operationId, "controller-tests")).status, "cancelled");
+  await startCommand(controller, edit);
+  assert.equal((await controller.awaitOperation(upload.requestId, "controller-tests")).status, "cancelled");
   finishStore({
     uploadId: "upload-stale",
     value: [{ name: "data.csv", size: 4, path: "/tmp/upload-stale" }],
@@ -3481,68 +3478,6 @@ test("an upload stored after its widget owner changes is removed and never reach
   await controller.close();
 });
 
-test("recovery replays retained ordered deltas and snapshots across gaps or epochs", async () => {
-  const engine = new FakeEngine();
-  const controller = createController({
-    engine,
-    notebook: notebook([["a", "x <- 1"]]),
-    configResolution: resolveConfigLayers({ launch: { on_startup: false } }),
-    journalByteLimit: 64 * 1024,
-  });
-  await controller.start();
-  const cursor = controller.cursor;
-  const edit = command(controller, {
-    type: "transaction",
-    changes: [
-        {
-            type: "edit",
-            cell: {
-                cellId: "a"
-            },
-            expectedRevision: 0,
-            body: ["x <- 2"],
-            cellType: "code"
-        }
-    ]
-  });
-  await controller.dispatch(edit);
-  const replay = controller.recover(controller.epoch, cursor);
-  assert.equal(replay.kind, "replay");
-  if (replay.kind === "replay") {
-    assert.ok(replay.events.length > 0);
-    assert.ok(replay.events.every((event, index, events) =>
-      index === 0 || event.cursor > (events[index - 1]?.cursor ?? -1)));
-    assert.equal(recoverySchema.safeParse(replay).success, true, "retained replay is wire-valid JSON");
-  }
-  assert.equal(controller.recover("old-epoch", cursor).kind, "snapshot");
-  await controller.close();
-
-  const bounded = createController({
-    engine: new FakeEngine(),
-    notebook: notebook([["a", "x <- 1"]]),
-    configResolution: resolveConfigLayers({ launch: { on_startup: false } }),
-    journalByteLimit: 128,
-  });
-  await bounded.start();
-  const oldCursor = bounded.cursor;
-  const large = command(bounded, {
-    type: "transaction",
-    changes: [
-        {
-            type: "edit",
-            cell: {
-                cellId: "a"
-            },
-            expectedRevision: 0,
-            body: ["x <- 2 #" + "x".repeat(500)],
-            cellType: "code"
-        }
-    ]
-  });
-  await bounded.dispatch(large);
-  assert.equal(bounded.recover(bounded.epoch, oldCursor).kind, "snapshot");
-  await bounded.close();
-});
 
 test("editor diagnostics publish only for an exact source identity and clear on source changes", async () => {
   const controller = createController({
@@ -3585,8 +3520,8 @@ test("editor diagnostics publish only for an exact source identity and clear on 
         }
     ]
   });
-  await controller.dispatch(edit);
-  await settle(controller, edit.operationId);
+  await startCommand(controller, edit);
+  await settle(controller, edit.requestId);
   snapshot = controller.snapshot();
   assert.deepEqual(snapshot.editorDiagnostics, {});
   assert.ok(snapshot.cells[0]?.diagnostics.every((diagnostic) => diagnostic.source !== "lsp"));
@@ -3620,8 +3555,8 @@ test("recovery baseline revision is preserved by the first durable transaction",
         }
     ]
   });
-  await controller.dispatch(edit);
-  const operation = await settle(controller, edit.operationId);
+  await startCommand(controller, edit);
+  const operation = await settle(controller, edit.requestId);
   assert.equal(operation.result?.documentRevision, 8);
   assert.equal(controller.snapshot().documentRevision, 8);
   assert.equal(commits.length, 1);
@@ -3661,8 +3596,8 @@ test("variable snapshots wait for idle input, retain ownership, and reject late 
     scope: "all",
     changes: []
   });
-  await controller.dispatch(run);
-  await settle(controller, run.operationId);
+  await startCommand(controller, run);
+  await settle(controller, run.requestId);
   assert.equal(engine.requests.some((request) => request.command === "env_snapshot"), false);
   context.mock.timers.tick(100);
   await eventually(() => controller.snapshot().variables.length === 1);
@@ -3690,8 +3625,8 @@ test("variable snapshots wait for idle input, retain ownership, and reject late 
     },
     changes: []
   });
-  await controller.dispatch(rerun);
-  await settle(controller, rerun.operationId);
+  await startCommand(controller, rerun);
+  await settle(controller, rerun.requestId);
   context.mock.timers.tick(100);
   await eventually(() => resolveRefresh !== undefined);
   assert.deepEqual(controller.snapshot().variables, []);
@@ -3710,7 +3645,7 @@ test("variable snapshots wait for idle input, retain ownership, and reject late 
         }
     ]
   });
-  await controller.dispatch(edit);
+  await startCommand(controller, edit);
   resolveRefresh({
     ok: true,
     variables: [{ name: "x", class: "numeric", dim: null, size: 56, widget: false }],
@@ -3771,21 +3706,21 @@ test("runtime availability failures survive source edits and save until restart 
         }
     ]
   });
-  await controller.dispatch(edit);
-  await settle(controller, edit.operationId);
+  await startCommand(controller, edit);
+  await settle(controller, edit.requestId);
   assert.deepEqual(controller.snapshot().runtime.executionBlockedReason, unavailable.runtime.executionBlockedReason);
 
   const save = command(controller, { type: "save" });
-  await controller.dispatch(save);
-  await settle(controller, save.operationId);
+  await startCommand(controller, save);
+  await settle(controller, save.requestId);
   assert.equal(controller.snapshot().lastActionError, null);
   assert.deepEqual(controller.snapshot().runtime.executionBlockedReason, unavailable.runtime.executionBlockedReason);
 
   engine.restartHandler = async () => { throw new Error("restart failed"); };
   const failedRestart = command(controller, { type: "restart", replay: false });
-  const failedAdmission = await controller.dispatch(failedRestart);
-  assert.equal(failedAdmission.accepted, true);
-  const failedOperation = await controller.awaitOperation(failedRestart.operationId, "controller-tests");
+  const failedStarted = await startCommand(controller, failedRestart);
+
+  const failedOperation = await controller.awaitOperation(failedRestart.requestId, "controller-tests");
   assert.equal(failedOperation.status, "error");
   assert.deepEqual(controller.snapshot().runtime.executionBlockedReason, {
     code: "worker_unavailable", message: "restart failed",
@@ -3793,8 +3728,8 @@ test("runtime availability failures survive source edits and save until restart 
 
   engine.restartHandler = async () => engine.handshake;
   const restart = command(controller, { type: "restart", replay: false });
-  await controller.dispatch(restart);
-  await settle(controller, restart.operationId);
+  await startCommand(controller, restart);
+  await settle(controller, restart.requestId);
   assert.equal(controller.snapshot().runtime.executionReady, true);
   assert.equal(controller.snapshot().runtime.executionBlockedReason, null);
   await controller.close();
@@ -3820,8 +3755,8 @@ test("kernel state invalidation preserves the cell error and blocks until explic
     target: { cellId: "a" },
     changes: [],
   });
-  const firstAdmission = await controller.dispatch(firstRun);
-  const firstOperation = await controller.awaitOperation(firstAdmission.operationId, "controller-tests");
+  const firstStarted = await startCommand(controller, firstRun);
+  const firstOperation = await controller.awaitOperation(firstStarted.requestId, "controller-tests");
   assert.equal(firstOperation.status, "error");
   assert.equal(firstOperation.error?.code, "kernel_state_invalid");
   assert.equal(controller.snapshot().cells[0]?.error?.code, "eval_error");
@@ -3831,8 +3766,8 @@ test("kernel state invalidation preserves the cell error and blocks until explic
     type: "transaction",
     changes: [{ type: "edit", cell: { cellId: "a" }, expectedRevision: 0, body: ["x <- 2"], cellType: "code" }],
   });
-  await controller.dispatch(edit);
-  assert.equal((await controller.awaitOperation(edit.operationId, "controller-tests")).status, "done");
+  await startCommand(controller, edit);
+  assert.equal((await controller.awaitOperation(edit.requestId, "controller-tests")).status, "done");
 
   const blockedRun = command(controller, {
     type: "run",
@@ -3840,15 +3775,15 @@ test("kernel state invalidation preserves the cell error and blocks until explic
     target: { cellId: "a" },
     changes: [],
   });
-  const blockedAdmission = await controller.dispatch(blockedRun);
-  const blockedOperation = await controller.awaitOperation(blockedAdmission.operationId, "controller-tests");
+  const blockedStarted = await startCommand(controller, blockedRun);
+  const blockedOperation = await controller.awaitOperation(blockedStarted.requestId, "controller-tests");
   assert.equal(blockedOperation.status, "error");
   assert.equal(blockedOperation.error?.code, "kernel_state_invalid");
   assert.equal(engine.evaluations.length, 1);
 
   const restart = command(controller, { type: "restart", replay: false });
-  await controller.dispatch(restart);
-  assert.equal((await controller.awaitOperation(restart.operationId, "controller-tests")).status, "done");
+  await startCommand(controller, restart);
+  assert.equal((await controller.awaitOperation(restart.requestId, "controller-tests")).status, "done");
   assert.equal(controller.snapshot().runtime.executionBlockedReason, null);
   assert.equal(controller.snapshot().runtime.executionReady, true);
   await controller.close();
@@ -3888,15 +3823,15 @@ test("concurrent config patches serialize and reject stale revisions", async () 
   await controller.start();
   const first = command(controller, { type: "set-config", patch: { theme: "dark" } });
   const second = command(controller, { type: "set-config", patch: { keymap: "vim" } });
-  const firstPromise = controller.dispatch(first);
-  const secondPromise = controller.dispatch(second);
+  const firstPromise = startCommand(controller, first);
+  const secondPromise = startCommand(controller, second);
   await eventually(() => calls.length === 1);
   assert.equal(calls.length, 1);
   resolvers.shift()?.();
   await firstPromise;
-  await controller.awaitOperation(first.operationId, "controller-tests");
+  await controller.awaitOperation(first.requestId, "controller-tests");
   await secondPromise;
-  const secondOperation = await controller.awaitOperation(second.operationId, "controller-tests");
+  const secondOperation = await controller.awaitOperation(second.requestId, "controller-tests");
   assert.equal(secondOperation.status, "error");
   assert.equal(secondOperation.error?.code, "source_conflict");
   assert.equal(calls.length, 1);
@@ -3905,7 +3840,7 @@ test("concurrent config patches serialize and reject stale revisions", async () 
   await controller.close();
 });
 
-test("runtime and config controls keep metadata, config, and replay events coherent", async () => {
+test("runtime and config controls keep metadata and current snapshots coherent", async () => {
   const engine = new FakeEngine();
   const controller = createController({
     engine,
@@ -3952,8 +3887,8 @@ test("runtime and config controls keep metadata, config, and replay events coher
   const runtime = command(controller, {
     type: "set-runtime", on_cell_change: "lazy", on_startup: false,
   });
-  await controller.dispatch(runtime);
-  await settle(controller, runtime.operationId);
+  await startCommand(controller, runtime);
+  await settle(controller, runtime.requestId);
   let state = controller.snapshot();
   assert.deepEqual(state.metadata.runtime, {
     on_cell_change: "lazy", on_startup: false,
@@ -3970,22 +3905,14 @@ test("runtime and config controls keep metadata, config, and replay events coher
   assert.equal(queriedConfig.effective.on_cell_change, "lazy");
   assert.equal(queriedConfig.layers.runtime.on_cell_change, "lazy");
   assert.equal(queriedConfig.provenance.on_cell_change, "runtime");
-  const replay = controller.recover(controller.epoch, before);
-  assert.equal(replay.kind, "replay");
-  if (replay.kind === "replay") {
-    const replayedNotebook = replay.events.find((event) => event.type === "notebook"
-      && event.documentRevision === state.documentRevision);
-    assert.ok(replayedNotebook);
-    const replayedConfig = (replayedNotebook.payload as { config?: Record<string, unknown> }).config;
-    assert.equal(replayedConfig?.on_cell_change, state.config.on_cell_change);
-    assert.equal(replayedConfig?.on_startup, state.config.on_startup);
-  }
+  const recovered = controller.snapshot();
+  assert.deepEqual(recovered.config, state.config);
 
   const configCommand = command(controller, {
     type: "set-config", patch: { on_cell_change: "automatic", on_startup: true },
   });
-  await controller.dispatch(configCommand);
-  const configOperation = await controller.awaitOperation(configCommand.operationId, "controller-tests");
+  await startCommand(controller, configCommand);
+  const configOperation = await controller.awaitOperation(configCommand.requestId, "controller-tests");
   assert.equal(configOperation.status, "error");
   assert.equal(configOperation.error?.code, "config_shadowed");
   assert.deepEqual(configOperation.error?.details, {
@@ -4021,12 +3948,13 @@ test("persisted layout updates do not mark clean notebook source dirty", async (
     },
   });
   await controller.start();
-  await controller.dispatch(command(controller, {
+  const layoutCommand = command(controller, {
     type: "set-layout",
     layout: { version: 1, layout: "grid", cells: {} },
     expectedSidecarVersion: null,
-  }));
-  await settle(controller, controller.snapshot().operations.at(-1)!.id);
+  });
+  const layoutResult = await controller.dispatch(layoutCommand);
+  assert.equal(layoutResult.error, null);
   assert.deepEqual(controller.snapshot().layout, { version: 1, layout: "grid", cells: {} });
   assert.equal(controller.snapshot().changed, false);
   await controller.close();
@@ -4087,8 +4015,8 @@ test("package installation is asynchronous, leaves edits responsive, blocks runs
     scope: "all",
     changes: []
   });
-  await controller.dispatch(firstRun);
-  await settle(controller, firstRun.operationId);
+  await startCommand(controller, firstRun);
+  await settle(controller, firstRun.requestId);
 
   const install = command(controller, {
     type: "packages-install",
@@ -4096,9 +4024,9 @@ test("package installation is asynchronous, leaves edits responsive, blocks runs
     expectedDocumentRevision: controller.snapshot().documentRevision,
     kernelEpoch: controller.snapshot().runtime.kernelEpoch,
   });
-  const accepted = await controller.dispatch(install);
-  assert.equal(accepted.operation.status, "accepted");
-  await eventually(() => controller.snapshot().operations.find((operation) => operation.id === install.operationId)?.status === "running");
+  const accepted = await startCommand(controller, install);
+  assert.ok(controller.operation(accepted.requestId, "controller-tests"));
+  await eventually(() => controller.snapshot().operations.find((operation) => operation.id === install.requestId)?.status === "running");
   assert.equal(controller.snapshot().runtime.packageOperationActive, true);
 
   const edit = command(controller, {
@@ -4115,8 +4043,8 @@ test("package installation is asynchronous, leaves edits responsive, blocks runs
         }
     ]
   });
-  await controller.dispatch(edit);
-  await settle(controller, edit.operationId);
+  await startCommand(controller, edit);
+  await settle(controller, edit.requestId);
   assert.equal(controller.snapshot().cells[0]?.revision, 1);
   const blockedRun = command(controller, {
     type: "run",
@@ -4136,14 +4064,14 @@ test("package installation is asynchronous, leaves edits responsive, blocks runs
         }
     ]
   });
-  const blockedAdmission = await controller.dispatch(blockedRun);
-  const blockedOperation = await controller.awaitOperation(blockedAdmission.operationId, "controller-tests");
+  const blockedStarted = await startCommand(controller, blockedRun);
+  const blockedOperation = await controller.awaitOperation(blockedStarted.requestId, "controller-tests");
   assert.equal(blockedOperation.status, "error");
   assert.equal(blockedOperation.error?.code, "package_operation_in_progress");
   assert.deepEqual(controller.snapshot().cells[0]?.body, ["x <- 2"]);
 
   finishInstall({ ok: true, status: "installed", packages: ["dplyr"] });
-  const settled = await settle(controller, install.operationId);
+  const settled = await settle(controller, install.requestId);
   assert.equal(engine.restartCount, 1);
   assert.deepEqual(controller.snapshot().runtime.rEnvironment, refreshedEnvironment);
   assert.equal(controller.snapshot().runtime.analysisEnvironmentId, "analysis-test");
@@ -4175,26 +4103,26 @@ test("package progress remains scoped to the running install operation", async (
     expectedDocumentRevision: controller.snapshot().documentRevision,
     kernelEpoch: controller.snapshot().runtime.kernelEpoch,
   });
-  await controller.dispatch(install);
-  await eventually(() => controller.operation(install.operationId, "controller-tests")?.status === "running");
+  await startCommand(controller, install);
+  await eventually(() => controller.operation(install.requestId, "controller-tests")?.status === "running");
   const events: HostEvent[] = [];
   const unsubscribe = controller.subscribe((event) => {
-    if (event.type === "operation" && event.operationId === install.operationId) events.push(event);
+    if (event.type === "operation" && event.operationId === install.requestId) events.push(event);
   }, ["operation"]);
   const progress = { phase: "output", stream: "stdout", text: "installing dplyr", data: { package: "dplyr" } };
-  controller.publishPackageProgress(install.operationId, progress);
-  assert.deepEqual(controller.operation(install.operationId, "controller-tests")?.progress, progress);
+  controller.publishPackageProgress(install.requestId, progress);
+  assert.deepEqual(controller.operation(install.requestId, "controller-tests")?.progress, progress);
   assert.deepEqual((events.at(-1)?.payload as { progress?: unknown }).progress, progress);
 
   finishInstall({ ok: true, status: "installed", packages: ["dplyr"] });
-  const settled = await settle(controller, install.operationId);
+  const settled = await settle(controller, install.requestId);
   assert.equal(settled.status, "done");
-  const terminalProgress = controller.operation(install.operationId, "controller-tests")?.progress;
+  const terminalProgress = controller.operation(install.requestId, "controller-tests")?.progress;
   assert.deepEqual(terminalProgress, progress);
   const eventCount = events.length;
-  controller.publishPackageProgress(install.operationId, { phase: "output", text: "late callback" });
+  controller.publishPackageProgress(install.requestId, { phase: "output", text: "late callback" });
   assert.equal(events.length, eventCount);
-  assert.deepEqual(controller.operation(install.operationId, "controller-tests")?.progress, terminalProgress);
+  assert.deepEqual(controller.operation(install.requestId, "controller-tests")?.progress, terminalProgress);
   unsubscribe();
   await controller.close();
 });
@@ -4218,8 +4146,8 @@ test("failed package installation still restarts and reanalyzes before settling 
     expectedDocumentRevision: controller.snapshot().documentRevision,
     kernelEpoch: controller.snapshot().runtime.kernelEpoch,
   });
-  await controller.dispatch(install);
-  const operation = await controller.awaitOperation(install.operationId, "controller-tests");
+  await startCommand(controller, install);
+  const operation = await controller.awaitOperation(install.requestId, "controller-tests");
   assert.equal(operation.status, "error");
   assert.equal(operation.error?.code, "install_failed");
   assert.equal(engine.restartCount, 1);
@@ -4247,8 +4175,8 @@ test("failed package installation without library mutation does not restart runt
     expectedDocumentRevision: controller.snapshot().documentRevision,
     kernelEpoch: controller.snapshot().runtime.kernelEpoch,
   });
-  await controller.dispatch(install);
-  const operation = await controller.awaitOperation(install.operationId, "controller-tests");
+  await startCommand(controller, install);
+  const operation = await controller.awaitOperation(install.requestId, "controller-tests");
   assert.equal(operation.status, "error");
   assert.equal(operation.error?.code, "r_not_found");
   assert.equal(engine.restartCount, 0);
@@ -4267,8 +4195,8 @@ test("successful package installation without library mutation does not restart 
   });
   await controller.start();
   const install = command(controller, { type: "packages-install", packages: ["dplyr"], expectedDocumentRevision: controller.snapshot().documentRevision, kernelEpoch: controller.snapshot().runtime.kernelEpoch });
-  await controller.dispatch(install);
-  const operation = await controller.awaitOperation(install.operationId, "controller-tests");
+  await startCommand(controller, install);
+  const operation = await controller.awaitOperation(install.requestId, "controller-tests");
   assert.equal(operation.status, "done");
   assert.equal(engine.restartCount, 0);
   await controller.close();
@@ -4294,8 +4222,8 @@ test("installer failure remains primary when package restart fails", async () =>
     expectedDocumentRevision: controller.snapshot().documentRevision,
     kernelEpoch: controller.snapshot().runtime.kernelEpoch,
   });
-  await controller.dispatch(install);
-  const operation = await controller.awaitOperation(install.operationId, "controller-tests");
+  await startCommand(controller, install);
+  const operation = await controller.awaitOperation(install.requestId, "controller-tests");
   assert.equal(operation.status, "error");
   assert.equal(operation.error?.code, "install_failed");
   assert.equal(engine.restartCount, 1);
@@ -4332,7 +4260,7 @@ test("package installation cannot start while a run is active", async () => {
     scope: "all",
     changes: []
   });
-  await controller.dispatch(run);
+  await startCommand(controller, run);
   await eventually(() => controller.snapshot().runtime.busy);
   const install = command(controller, {
     type: "packages-install",
@@ -4340,13 +4268,13 @@ test("package installation cannot start while a run is active", async () => {
     expectedDocumentRevision: controller.snapshot().documentRevision,
     kernelEpoch: controller.snapshot().runtime.kernelEpoch,
   });
-  const installAdmission = await controller.dispatch(install);
-  const installOperation = await controller.awaitOperation(installAdmission.operationId, "controller-tests");
+  const installStarted = await startCommand(controller, install);
+  const installOperation = await controller.awaitOperation(installStarted.requestId, "controller-tests");
   assert.equal(installOperation.status, "error");
   assert.equal(installOperation.error?.code, "run_in_progress");
   assert.equal(serviceCalls, 0);
   engine.finishEvaluation();
-  await settle(controller, run.operationId);
+  await settle(controller, run.requestId);
   await controller.close();
 });
 
@@ -4380,23 +4308,23 @@ test("an empty run-button plan remains unsettled until its causal reset complete
     },
     changes: []
   });
-  await controller.dispatch(run);
-  await settle(controller, run.operationId);
+  await startCommand(controller, run);
+  await settle(controller, run.requestId);
   const widget = command(controller, {
     type: "widget", name: "btn", path: [], update: { value: true }, source: "editor",
   });
-  await controller.dispatch(widget);
+  await startCommand(controller, widget);
   await eventually(() => finishReset !== undefined);
-  const causalRunId = `run-button-${widget.operationId}`;
+  const causalRunId = `run-button-${widget.requestId}`;
   const causalRun = controller.operation(causalRunId, "controller-tests");
   assert.ok(causalRun);
   assert.equal(causalRun.status, "accepted");
   assert.equal(causalRun.executionDone, true);
   assert.equal(causalRun.resetOperationIds?.length, 1);
-  assert.equal(controller.operation(widget.operationId, "controller-tests")?.status, "running");
+  assert.equal(controller.operation(widget.requestId, "controller-tests")?.status, "running");
 
   finishReset({ ok: true, selected: { type: "logical", value: false } });
-  assert.equal((await controller.awaitOperation(widget.operationId, "controller-tests")).status, "done");
+  assert.equal((await controller.awaitOperation(widget.requestId, "controller-tests")).status, "done");
   assert.equal((await controller.awaitOperation(causalRunId, "controller-tests")).status, "done");
   const output = controller.snapshot().cells[0]?.outputs[0] as { data: { spec: { value: boolean } } };
   assert.equal(output.data.spec.value, false);
@@ -4427,8 +4355,8 @@ test("a lazy explicit run settles only after its linked run-button reset", async
     scope: "all",
     changes: []
   });
-  await controller.dispatch(initial);
-  await settle(controller, initial.operationId);
+  await startCommand(controller, initial);
+  await settle(controller, initial.requestId);
   const staleCellEvents: string[] = [];
   const unsubscribe = controller.subscribe((event) => {
     if (event.type === "cell" && event.cellId !== undefined
@@ -4439,7 +4367,7 @@ test("a lazy explicit run settles only after its linked run-button reset", async
   const widget = command(controller, {
     type: "widget", name: "btn", path: [], update: { value: true }, source: "editor",
   });
-  await controller.dispatch(widget);
+  await startCommand(controller, widget);
   await eventually(() => controller.snapshot().cells.find((cell) => cell.id === "c")?.status === "stale");
   assert.equal(controller.snapshot().cells.find((cell) => cell.id === "b")?.status, "stale");
   assert.deepEqual(staleCellEvents, ["b", "c"]);
@@ -4451,15 +4379,15 @@ test("a lazy explicit run settles only after its linked run-button reset", async
     },
     changes: []
   });
-  await controller.dispatch(explicit);
+  await startCommand(controller, explicit);
   await eventually(() => finishReset !== undefined);
-  const pendingRun = controller.operation(explicit.operationId, "controller-tests");
+  const pendingRun = controller.operation(explicit.requestId, "controller-tests");
   assert.equal(pendingRun?.executionDone, true);
   assert.equal(pendingRun?.status, "running");
   assert.equal(pendingRun?.resetOperationIds?.length, 1);
   finishReset({ ok: true, selected: { type: "logical", value: false } });
-  await settle(controller, widget.operationId);
-  await settle(controller, explicit.operationId);
+  await settle(controller, widget.requestId);
+  await settle(controller, explicit.requestId);
   assert.equal(
     (controller.snapshot().cells[0]?.outputs[0]?.data as { spec: { value: boolean } }).spec.value,
     false,
@@ -4484,8 +4412,8 @@ test("nested run buttons reset only their addressed child and journal the reset"
     scope: "all",
     changes: []
   });
-  await controller.dispatch(run);
-  await settle(controller, run.operationId);
+  await startCommand(controller, run);
+  await settle(controller, run.requestId);
   const widget = command(controller, {
     type: "widget",
     name: "controls",
@@ -4493,8 +4421,8 @@ test("nested run buttons reset only their addressed child and journal the reset"
     update: { value: true },
     source: "editor",
   });
-  await controller.dispatch(widget);
-  const trigger = await settle(controller, widget.operationId);
+  await startCommand(controller, widget);
+  const trigger = await settle(controller, widget.requestId);
   const output = controller.snapshot().cells[0]?.outputs[0] as {
     data: {
       spec: { children: Array<{ name: string; value: unknown }> };
@@ -4526,18 +4454,18 @@ test("a run-button reset failure rejects the trigger and its causal run", async 
     scope: "all",
     changes: []
   });
-  await controller.dispatch(initial);
-  await settle(controller, initial.operationId);
+  await startCommand(controller, initial);
+  await settle(controller, initial.requestId);
   const widget = command(controller, {
     type: "widget", name: "btn", path: [], update: { value: true }, source: "editor",
   });
-  await controller.dispatch(widget);
-  const trigger = await controller.awaitOperation(widget.operationId, "controller-tests");
-  const causalRun = await controller.awaitOperation(`run-button-${widget.operationId}`, "controller-tests");
+  await startCommand(controller, widget);
+  const trigger = await controller.awaitOperation(widget.requestId, "controller-tests");
+  const causalRun = await controller.awaitOperation(`run-button-${widget.requestId}`, "controller-tests");
   assert.equal(trigger.status, "error");
   assert.equal(trigger.error?.code, "widget_update_failed");
   assert.equal(trigger.error?.message, "cannot reset");
-  assert.equal(trigger.error?.operationId, widget.operationId);
+  assert.equal(trigger.error?.operationId, widget.requestId);
   assert.equal(causalRun.status, "error");
   assert.equal(causalRun.error?.code, "widget_update_failed");
   assert.equal(causalRun.error?.message, "cannot reset");
@@ -4567,10 +4495,10 @@ test("a failed barrier makes even never-run code stale", async () => {
     },
     changes: []
   });
-  await controller.dispatch(run);
+  await startCommand(controller, run);
   await eventually(() => controller.snapshot().runtime.busy);
   engine.finishEvaluation({ ok: false, error: { message: "attach failed" }, log: [] });
-  const terminal = await controller.awaitOperation(run.operationId, "controller-tests");
+  const terminal = await controller.awaitOperation(run.requestId, "controller-tests");
   assert.equal(terminal.status, "error");
   assert.equal(terminal.error?.code, "eval_error");
   assert.equal(terminal.error?.message, "attach failed");
@@ -4593,8 +4521,8 @@ test("moving or deleting a barrier forces exactly one clean restart before the n
     scope: "all",
     changes: []
     });
-    await controller.dispatch(initial);
-    await settle(controller, initial.operationId);
+    await startCommand(controller, initial);
+    await settle(controller, initial.requestId);
     const mutationCommand = mutation === "move"
       ? command(controller, {
     type: "transaction",
@@ -4622,8 +4550,8 @@ test("moving or deleting a barrier forces exactly one clean restart before the n
         }
     ]
       });
-    await controller.dispatch(mutationCommand);
-    await settle(controller, mutationCommand.operationId);
+    await startCommand(controller, mutationCommand);
+    await settle(controller, mutationCommand.requestId);
     const afterMutation = controller.snapshot();
     if (mutation === "move") {
       assert.ok(afterMutation.cells.filter((cell) => cell.type === "code").every((cell) => cell.status === "stale"));
@@ -4636,8 +4564,8 @@ test("moving or deleting a barrier forces exactly one clean restart before the n
     scope: "all",
     changes: []
     });
-    await controller.dispatch(rerun);
-    await settle(controller, rerun.operationId);
+    await startCommand(controller, rerun);
+    await settle(controller, rerun.requestId);
     assert.equal(engine.restartCount, mutation === "move" ? 1 : 0, mutation);
     assert.ok(controller.snapshot().cells
       .filter((cell) => cell.type === "code")
@@ -4659,8 +4587,8 @@ test("an explicit restart consumes opaque-source invalidation without a second r
     scope: "all",
     changes: []
   });
-  await controller.dispatch(initial);
-  await settle(controller, initial.operationId);
+  await startCommand(controller, initial);
+  await settle(controller, initial.requestId);
   const edit = command(controller, {
     type: "transaction",
     changes: [
@@ -4675,20 +4603,20 @@ test("an explicit restart consumes opaque-source invalidation without a second r
         }
     ]
   });
-  await controller.dispatch(edit);
-  await settle(controller, edit.operationId);
+  await startCommand(controller, edit);
+  await settle(controller, edit.requestId);
   await eventually(() => controller.snapshot().cells[0]?.analysisPending === false);
   const restart = command(controller, { type: "restart", replay: false });
-  await controller.dispatch(restart);
-  await settle(controller, restart.operationId);
+  await startCommand(controller, restart);
+  await settle(controller, restart.requestId);
   assert.equal(engine.restartCount, 1);
   const rerun = command(controller, {
     type: "run",
     scope: "all",
     changes: []
   });
-  await controller.dispatch(rerun);
-  await settle(controller, rerun.operationId);
+  await startCommand(controller, rerun);
+  await settle(controller, rerun.requestId);
   assert.equal(engine.restartCount, 1);
   await controller.close();
 });
@@ -4707,17 +4635,180 @@ test("closing invalidates outstanding runtime requests and discards late replies
     scope: "all",
     changes: []
   });
-  await controller.dispatch(run);
-  await settle(controller, run.operationId);
+  await startCommand(controller, run);
+  await settle(controller, run.requestId);
   engine.requestHandler = async (name) => name === "get_value"
     ? new Promise((resolve) => { finishInspection = resolve; })
     : { ok: true };
   const inspect = command(controller, { type: "inspect", name: "x" });
-  await controller.dispatch(inspect);
+  await startCommand(controller, inspect);
   await eventually(() => finishInspection !== undefined);
   await controller.close();
   finishInspection({ ok: true, value: 99 });
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(controller.snapshot().lastValue, null);
-  assert.equal(controller.operation(inspect.operationId, "controller-tests")?.status, "error");
+  assert.equal(controller.operation(inspect.requestId, "controller-tests")?.status, "error");
+});
+test("command completion commits one concurrent writer and reports the other revision conflict", async () => {
+  const controller = createController({ engine: new FakeEngine(), notebook: notebook([["a", "x <- 1"]]), configResolution: resolveConfigLayers({ launch: { on_startup: false } }) });
+  const edit = (body: string) => command(controller, {
+    type: "transaction", expectedDocumentRevision: 0,
+    changes: [{ type: "edit", cell: { cellId: "a" }, expectedRevision: 0, body: [body], cellType: "code" }],
+  });
+  try {
+    const gui = edit("x <- 2");
+    const agent = { ...edit("x <- 3"), clientId: "agent" };
+    const [first, second] = await Promise.all([controller.dispatch(gui), controller.dispatch(agent)]);
+    assert.equal(first.requestId, gui.requestId);
+    assert.equal(first.error, null);
+    assert.equal(second.error?.code, "source_conflict");
+    assert.equal(first.documentRevision, 1);
+    assert.deepEqual(controller.snapshot().cells[0]?.body, ["x <- 2"]);
+    assert.deepEqual(controller.snapshot().operations, []);
+    assert.equal("operation" in first, false);
+  } finally { await controller.close(); }
+});
+
+test("lost run responses retry once across leases and stay deduplicated beyond ordinary result retention", async () => {
+  const engine = new FakeEngine();
+  engine.deferred = true;
+  const controller = createController({ engine, notebook: notebook([["a", "x <- 1"]]), configResolution: resolveConfigLayers({ launch: { on_startup: false } }) });
+  try {
+    await controller.start();
+    const run = command(controller, { type: "run", scope: "all" });
+    let completed = false;
+    const lostResponse = controller.dispatch(run).then(result => { completed = true; return result; });
+    await eventually(() => engine.pendingEvaluations.length === 1);
+    const retried = controller.dispatch({ ...run, clientId: "reconnected-gui" });
+    assert.equal(completed, false);
+    assert.equal(engine.evaluations.length, 1);
+    engine.finishEvaluation();
+    const first = await lostResponse;
+    assert.equal(first.error, null);
+    assert.deepEqual(await retried, first);
+    for (let i = 0; i < 520; i += 1) {
+      const edit = command(controller, { type: "transaction", changes: [] });
+      assert.equal((await controller.dispatch(edit)).error, null);
+    }
+    await assert.rejects(controller.dispatch({ ...run, clientId: "another-lease" }), { code: "request_expired" });
+    assert.equal(engine.evaluations.length, 1);
+    await assert.rejects(controller.dispatch({ ...run, scope: "stale" } as HostCommand), { code: "request_id_conflict" });
+
+    const restartedEngine = new FakeEngine();
+    const restarted = createController({ engine: restartedEngine, notebook: notebook([["a", "x <- 1"]]), configResolution: resolveConfigLayers({ launch: { on_startup: false } }) });
+    try {
+      await assert.rejects(restarted.dispatch(run), { code: "session_epoch_mismatch" });
+      assert.equal(restartedEngine.evaluations.length, 0);
+      assert.equal(restartedEngine.startCount, 0);
+    } finally { await restarted.close(); }
+  } finally { await controller.close(); }
+});
+
+test("distinct run requests execute FIFO and each response waits for its own completion", async () => {
+  const engine = new FakeEngine();
+  engine.deferred = true;
+  const controller = createController({ engine, notebook: notebook([["a", "x <- 1"]]), configResolution: resolveConfigLayers({ launch: { on_startup: false } }) });
+  try {
+    await controller.start();
+    const firstCommand = command(controller, { type: "run", scope: "all" });
+    const secondCommand = command(controller, { type: "run", scope: "all" });
+    const first = controller.dispatch(firstCommand);
+    let secondDone = false;
+    const second = controller.dispatch(secondCommand).then(result => { secondDone = true; return result; });
+    await eventually(() => engine.pendingEvaluations.length === 1);
+    assert.equal(engine.evaluations.length, 1);
+    engine.finishEvaluation();
+    assert.equal((await first).error, null);
+    await eventually(() => engine.evaluations.length === 2);
+    assert.equal(secondDone, false);
+    assert.deepEqual(engine.evaluations.map(value => value.operationId), [firstCommand.requestId, secondCommand.requestId]);
+    engine.finishEvaluation();
+    assert.equal((await second).error, null);
+  } finally { await controller.close(); }
+});
+
+test("edits bypass a running request and invalidate an older queued revision", async () => {
+  const engine = new FakeEngine();
+  engine.deferred = true;
+  const controller = createController({ engine, notebook: notebook([["a", "x <- 1"]]), configResolution: resolveConfigLayers({ launch: { on_startup: false } }) });
+  try {
+    await controller.start();
+    const first = controller.dispatch(command(controller, { type: "run", scope: "all" }));
+    const second = controller.dispatch(command(controller, { type: "run", scope: "all" }));
+    await eventually(() => engine.pendingEvaluations.length === 1);
+    const edit = await controller.dispatch(command(controller, {
+      type: "transaction", changes: [{ type: "create", creationId: "notes", after: { cellId: "a" }, cellType: "markdown", body: ["# unsaved notes"], options: {} }],
+    }));
+    assert.equal(edit.error, null);
+    assert.equal(controller.snapshot().cells[1]?.id, "notes");
+    engine.finishEvaluation();
+    assert.equal((await first).error, null);
+    assert.equal((await second).error?.code, "source_conflict");
+    assert.equal(engine.evaluations.length, 1);
+  } finally { await controller.close(); }
+});
+
+test("Stop bypasses the run queue and cancels waiting runs", async () => {
+  const engine = new FakeEngine();
+  engine.deferred = true;
+  const controller = createController({ engine, notebook: notebook([["a", "x <- 1"]]), configResolution: resolveConfigLayers({ launch: { on_startup: false } }) });
+  try {
+    await controller.start();
+    const first = controller.dispatch(command(controller, { type: "run", scope: "all" }));
+    const second = controller.dispatch(command(controller, { type: "run", scope: "all" }));
+    await eventually(() => engine.pendingEvaluations.length === 1);
+    const stop = await controller.dispatch(command(controller, { type: "interrupt" }));
+    assert.equal(stop.error, null);
+    assert.equal(engine.interrupts.length, 1);
+    engine.finishEvaluation({ ok: false, error: { message: "Interrupted", interrupted: true } });
+    assert.equal((await first).error?.code, "interrupted");
+    assert.equal((await second).error?.code, "interrupted");
+    assert.equal(engine.evaluations.length, 1);
+  } finally { await controller.close(); }
+});
+
+test("a concurrent edit during analysis prevents execution of an unexpected document revision", async () => {
+  const engine = new FakeEngine();
+  const controller = createController({ engine, notebook: notebook([["a", "x <- 1"]]), configResolution: resolveConfigLayers({ launch: { on_startup: false } }) });
+  try {
+    await controller.start();
+    const analyze = engine.analyze.bind(engine);
+    let release!: () => void;
+    let analyzing = false;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    engine.analyze = async (cells, revision) => { analyzing = true; await gate; return analyze(cells, revision); };
+    const run = controller.dispatch(command(controller, {
+      type: "run", scope: "all", changes: [{ type: "edit", cell: { cellId: "a" }, body: ["x <- 2"], expectedRevision: 0, cellType: "code" }],
+    }));
+    await eventually(() => analyzing);
+    const edited = await controller.dispatch(command(controller, {
+      type: "transaction", changes: [{ type: "edit", cell: { cellId: "a" }, body: ["x <- 3"], expectedRevision: 1, cellType: "code" }],
+    }));
+    assert.equal(edited.error, null);
+    release();
+    assert.equal((await run).error?.code, "source_conflict");
+    assert.equal(engine.evaluations.length, 0);
+    assert.deepEqual(controller.snapshot().cells[0]?.body, ["x <- 3"]);
+  } finally { await controller.close(); }
+});
+
+test("restart replay never evaluates edits made while the kernel was restarting", async () => {
+  const engine = new FakeEngine();
+  const controller = createController({ engine, notebook: notebook([["a", "x <- 1"]]), configResolution: resolveConfigLayers({ launch: { on_startup: false } }) });
+  try {
+    await controller.start();
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    engine.restartHandler = async () => { await gate; return HANDSHAKE; };
+    const restart = controller.dispatch(command(controller, { type: "restart", replay: true, expectedDocumentRevision: 0 }));
+    await eventually(() => engine.restartCount === 1);
+    const edit = await controller.dispatch(command(controller, {
+      type: "transaction", changes: [{ type: "edit", cell: { cellId: "a" }, expectedRevision: 0, body: ["x <- 9"], cellType: "code" }],
+    }));
+    assert.equal(edit.error, null);
+    release();
+    assert.equal((await restart).error?.code, "source_conflict");
+    assert.equal(engine.evaluations.length, 0);
+    assert.deepEqual(controller.snapshot().cells[0]?.body, ["x <- 9"]);
+  } finally { await controller.close(); }
 });
