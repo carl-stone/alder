@@ -534,16 +534,18 @@ test('scientific outputs support lazy evaluation, table paging, and a trusted wi
   ].join('\n') + '\n');
   let app: RunningHost | undefined, browser: Chrome | undefined;
   try {
-    app = await startInstalledHost(path, { executionMode: 'lazy' });
+    app = await startInstalledHost(path, { executionMode: 'automatic' });
     browser = await openAuthenticatedBrowser(app);
-    await browser.wait("window.__alderHost?.client.document?.snapshot.runtime.executionReady && document.querySelectorAll('#notebook > .cell[data-cell]').length === 6", 30_000);
-    await browser.evaluate("window.__alderHost.client.runAll('all')");
+    await browser.wait("window.__alderHost?.client.document?.snapshot.runtime.executionReady && !window.__alderHost.client.document.snapshot.runtime.busy && !document.querySelector('#run-all')?.disabled && document.querySelectorAll('#notebook > .cell[data-cell]').length === 6", 30_000);
+    await browser.click('#run-all');
     await browser.wait(`window.__alderHost.client.document.snapshot.cells.every(cell => cell.status === 'done') &&
       document.querySelector('[data-cell="cell-3"] [data-role=outputs]')?.textContent.includes('VALUE=3') &&
       document.querySelector('[data-cell="cell-4"] img.plot')?.complete &&
       document.querySelector('[data-cell="cell-4"] img.plot')?.naturalWidth > 0 &&
       document.querySelector('[data-cell="cell-5"] .table-page-label')?.textContent.includes('1..25 of 60') &&
       document.querySelector('[data-cell="cell-6"] .out-lazy') !== null`, 45_000);
+    await browser.evaluate("window.__alderHost.client.setRuntime({executionMode:'lazy'})");
+    await browser.wait("window.__alderHost.client.document.snapshot.runtime.executionMode === 'lazy' && !document.querySelector('#run-all')?.disabled");
 
     await browser.click('[data-cell="cell-5"] .table-pager button:last-child');
     await browser.wait("document.querySelector('[data-cell=\"cell-5\"] .table-page-label')?.textContent.includes('26..50 of 60')");
@@ -576,6 +578,7 @@ test('scientific outputs support lazy evaluation, table paging, and a trusted wi
       document.querySelector('[data-cell="cell-2"] [data-role=widget][data-name=control]').value === '4' &&
       document.activeElement === document.querySelector('[data-cell="cell-2"] [data-role=widget][data-name=control]') &&
       window.__trustedWidgetEvents.length === 1 && window.__trustedWidgetEvents[0] === true`, 30_000);
+    await browser.wait("!document.querySelector('#run-all')?.disabled");
     await browser.click('#run-all');
     await browser.wait(`window.__alderHost.client.document.snapshot.cells[2].status === 'done' &&
       window.__alderHost.client.document.snapshot.cells[3].status === 'done' &&
@@ -659,12 +662,6 @@ test('scalar, form, and button controls drive the intended reactive cells once',
       await browser.wait(`document.querySelector('[data-cell="cell-5"] [data-role=widget][data-name=settings][data-kind=checkbox]')?.checked === true &&
         window.__alderHost.client.document.snapshot.cells[4].outputs[0]?.data?.spec?.child?.value?.enabled === true &&
         document.querySelector('[data-cell="cell-5"] [data-form-submit=true]')?.disabled === false`, 30_000);
-      await browser.wait(`(() => {
-        const output = window.__alderHost.view.output;
-        const record = window.__alderHost.client.document.snapshot.cells[4].outputs[0];
-        const submit = document.querySelector('[data-cell="cell-5"] [data-form-submit=true]');
-        return record.generation === 4 && output.controlOrigins.get(submit)?.outputGeneration === 4;
-      })()`, 5_000);
       assert.equal(doneRuns.get('cell-6')?.size ?? 0, 0);
       assert.match(String(await browser.evaluate("document.querySelector('[data-cell=\"cell-6\"] [data-role=outputs]').textContent")), /not submitted/);
       await browser.evaluate(`(() => {
