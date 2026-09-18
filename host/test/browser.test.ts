@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { startHost } from '../src/application.js';
 import { resolveApplicationResources } from '../src/resources.js';
@@ -26,6 +26,7 @@ async function startInstalledHost(path: string, options: {
     runOnStartup: options.runOnStartup ?? false,
     executionMode: options.executionMode,
     resources: stagedResources,
+    preferencesPath: join(dirname(path), '.test-preferences.yaml'),
     session: { runtimeDirectory: path + '-runtime' },
   });
 }

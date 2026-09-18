@@ -51,6 +51,7 @@ const CANONICAL_TOOL_NAMES = [
   "set_app",
   "set_config",
   "set_layout",
+  "set_preferences",
   "set_runtime",
   "set_widget",
   "shutdown",

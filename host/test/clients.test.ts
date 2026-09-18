@@ -15,7 +15,7 @@ import { BrowserTransport, BrowserTransportError, IndexedDBRecoveryStore, Memory
 import { encodeFilePathUri, fileUri, LspClient, translateLspResult, trustedRLanguageServerEnvironment, validatedRLanguageServerOptions, type DiagnosticsByCell } from "../src/lsp.js";
 import { fromFilePosition, layoutNotebook, parseNotebook, serializeNotebook, toFilePosition, type NotebookDocument } from "../src/notebook.js";
 import { Controller } from "../src/controller.js";
-import { resolveConfigLayers } from "../src/configuration.js";
+import { resolveSettings } from "../src/settings.js";
 import { OutputStore } from "../src/outputs.js";
 import type { EngineAdapter, EngineHandshake, EngineResponse } from "../src/protocol.js";
 import { decodeHostCommandWire, encodeHostEventWire, encodeRecoveryWire, HOST_PROTOCOL, HOST_CLIENT_PROTOCOL_VERSION, type CommandResult, type HostCellState, type HostCommand, type HostEvent, type HostSnapshot, type OperationRecord, type Recovery } from "../src/protocol.js";
@@ -60,7 +60,9 @@ async function withViewDom<T>(callback: (dom: Document, domWindow: Window) => T 
   // Linkedom exposes only the getter; editor controls need the browser setter.
   const selectValue = Object.getOwnPropertyDescriptor(domWindow.HTMLSelectElement.prototype, "value")!;
   Object.defineProperty(domWindow.HTMLSelectElement.prototype, "value", { ...selectValue, set(value: string) {
-    for (const option of this.options) option.selected = option.value === value;
+    for (const option of this.options) option.selected = false;
+    const selected = [...this.options].find(option => option.value === value);
+    if (selected) selected.selected = true;
   } });
   Object.defineProperty(domWindow, "requestAnimationFrame", { configurable: true, value: () => 0 });
   const previous = {
@@ -536,7 +538,7 @@ for (const runControl of ["toolbar", "cell"] as const) {
       };
       const controller = new Controller({ engine, epoch: "epoch-1", outputStore: new OutputStore({ artifactDirectory: directory, sessionEpoch: "epoch-1", documentRevision: 0, kernelEpoch: null }),
         notebook: parseNotebook(new TextEncoder().encode("# %%\nx <- 1\n# %%\ny <- 2\n"), "/tmp/book.R"),
-        configResolution: resolveConfigLayers({ launch: { on_startup: false, on_cell_change: "lazy" } }),
+        config: resolveSettings({ notebook: { on_startup: false, on_cell_change: "lazy" } }),
         sourceCommit: async (request, context) => {
           const document = request.document ?? context.document;
           if (request.kind === "save") savedSource = new TextDecoder().decode(serializeNotebook(document));
@@ -597,6 +599,214 @@ for (const runControl of ["toolbar", "cell"] as const) {
     });
   });
 }
+
+async function installSettingsDom(dom: Document): Promise<void> {
+  const markup = parseHTML(await readFile(new URL("../../inst/app/index.html", import.meta.url), "utf8")).document;
+  for (const id of ["settings-open", "settings", "runtime-select"]) {
+    dom.body.insertAdjacentHTML("beforeend", markup.getElementById(id)!.outerHTML);
+  }
+}
+
+function settingsClient(overrides: Partial<BrowserNotebookClient> = {}): BrowserNotebookClient {
+  return {
+    recoveryState: { status: "none", local: null, branches: [], drafts: [], pending: false, corruption: null, persistenceError: null },
+    subscribeRecovery() { return () => {}; },
+    setPreferences: async () => { throw new Error("unexpected application preference write"); },
+    setRuntime: async () => { throw new Error("unexpected notebook settings write"); },
+    setConfig: async () => { throw new Error("unexpected project settings write"); },
+    ...overrides,
+  } as unknown as BrowserNotebookClient;
+}
+
+test("Settings sends only changed application preferences and preserves the captured version", async () => {
+  await withViewDom(async (dom, domWindow) => {
+    await installSettingsDom(dom);
+    const initial = snapshot([]);
+    initial.preferencesVersion = "preferences-before-open";
+    const notebook = new BrowserDocument(initial);
+    const writes: unknown[] = [];
+    const client = settingsClient({ setPreferences: async (patch, version) => {
+      writes.push({ patch, version });
+      throw new Error("Preferences changed in another notebook. Close and reopen Settings to try again.");
+    } });
+    const view = new NotebookView(client, dom);
+    try {
+      view.render(notebook);
+      dom.getElementById("settings-open")!.dispatchEvent(new domWindow.Event("click"));
+      dom.querySelector<HTMLSelectElement>("#settings-theme")!.value = "dark";
+      dom.querySelector<HTMLInputElement>("#settings-font-size")!.value = "18";
+      const event: HostEvent = { protocol: HOST_PROTOCOL, epoch: initial.epoch, cursor: 1, version: 2, documentRevision: 0, timestamp: 1,
+        type: "notebook", payload: { config: { theme: "light", keymap: "vim" }, preferencesVersion: "preferences-from-peer" } };
+      notebook.applyEvent(event);
+      view.render(notebook, event);
+      assert.equal(dom.documentElement.dataset.theme, "light", "shared preferences apply to the notebook immediately");
+      assert.equal(dom.querySelector<HTMLSelectElement>("#settings-theme")!.value, "dark", "open dialog keeps the user's choice");
+      assert.equal(notebook.snapshot.preferencesVersion, "preferences-from-peer");
+      assert.equal(notebook.snapshot.changed, false, "application changes do not dirty notebook source");
+      dom.getElementById("settings-form")!.dispatchEvent(new domWindow.Event("submit", { cancelable: true }));
+      await waitUntil(() => Boolean(dom.getElementById("settings-error")!.textContent));
+      assert.deepEqual(writes, [{ patch: { theme: "dark", editor: { font_size: 18 } }, version: "preferences-before-open" }]);
+      assert.equal(dom.getElementById("settings")!.hasAttribute("open"), true);
+      assert.match(dom.getElementById("settings-error")!.textContent!, /Close and reopen Settings/);
+      assert.equal(dom.querySelector<HTMLSelectElement>("#settings-theme")!.value, "dark");
+      dom.getElementById("settings-cancel")!.dispatchEvent(new domWindow.Event("click"));
+      dom.getElementById("settings-open")!.dispatchEvent(new domWindow.Event("click"));
+      assert.equal(dom.querySelector<HTMLSelectElement>("#settings-theme")!.value, "light");
+      assert.equal(dom.querySelector<HTMLSelectElement>("#settings-keymap")!.value, "vim");
+    } finally { view.destroy(); }
+  });
+});
+
+test("Settings saves only notebook execution choices while R is unavailable", async () => {
+  await withViewDom(async (dom, domWindow) => {
+    await installSettingsDom(dom);
+    const initial = snapshot([]);
+    initial.runtime.kernelState = "stopped";
+    initial.runtime.executionReady = false;
+    initial.runtime.executionBlockedReason = { code: "engine_unavailable", message: "R is not installed" };
+    const notebook = new BrowserDocument(initial);
+    let writes = 0;
+    const client = settingsClient({ setRuntime: async (patch, revision) => {
+      writes += 1;
+      assert.deepEqual(patch, { executionMode: "lazy", runOnStartup: true, cacheEnabled: false });
+      assert.equal(revision, 0);
+      notebook.applySnapshot({ ...initial, documentRevision: 1, changed: true,
+        config: { cache: { enabled: false } }, runtime: { ...initial.runtime, executionMode: "lazy", runOnStartup: true } });
+      view.render(notebook);
+      return resultFor("settings-runtime", null);
+    } });
+    const view = new NotebookView(client, dom);
+    try {
+      view.render(notebook);
+      assert.equal(dom.querySelector<HTMLSelectElement>("#runtime-select")!.disabled, false);
+      dom.getElementById("settings-open")!.dispatchEvent(new domWindow.Event("click"));
+      dom.querySelector<HTMLSelectElement>("#settings-execution-mode")!.value = "lazy";
+      dom.querySelector<HTMLInputElement>("#settings-run-on-startup")!.checked = true;
+      dom.querySelector<HTMLInputElement>("#settings-cache-enabled")!.checked = false;
+      dom.getElementById("settings-form")!.dispatchEvent(new domWindow.Event("submit", { cancelable: true }));
+      await waitUntil(() => !dom.getElementById("settings")!.hasAttribute("open"));
+      assert.equal(writes, 1);
+      assert.equal(dom.querySelector<HTMLSelectElement>("#runtime-select")!.value, "lazy");
+      assert.equal(dom.querySelector<HTMLButtonElement>("#save")!.disabled, false);
+      assert.equal(dom.querySelector<HTMLButtonElement>("#run-all")!.disabled, true);
+    } finally { view.destroy(); }
+  });
+});
+
+test("Settings keeps failed project writes and malformed-file errors visible without disabling Save", async () => {
+  await withViewDom(async (dom, domWindow) => {
+    await installSettingsDom(dom);
+    const initial = snapshot([]);
+    initial.changed = true;
+    initial.sidecars.config = { ...initial.sidecars.config, version: "project-version" };
+    initial.serviceErrors.settings = { code: "config_invalid", message: "Fix the YAML in /project/.alder/config.yaml, then try again." };
+    const notebook = new BrowserDocument(initial);
+    let writes = 0;
+    const client = settingsClient({ setConfig: async (patch, version, revision) => {
+      writes += 1;
+      assert.deepEqual(patch, { cache: { dir: "cache-here" } });
+      assert.equal(version, "project-version");
+      assert.equal(revision, 0);
+      throw new Error("Cannot write /project/.alder/config.yaml. Check its permissions and try again.");
+    } });
+    const view = new NotebookView(client, dom);
+    try {
+      view.render(notebook);
+      assert.match(dom.getElementById("status")!.textContent!, /Fix the YAML/);
+      assert.equal(dom.querySelector<HTMLButtonElement>("#save")!.disabled, false);
+      dom.getElementById("settings-open")!.dispatchEvent(new domWindow.Event("click"));
+      assert.match(dom.getElementById("settings-error")!.textContent!, /Fix the YAML/);
+      dom.querySelector<HTMLInputElement>("#settings-cache-directory")!.value = "cache-here";
+      dom.getElementById("settings-form")!.dispatchEvent(new domWindow.Event("submit", { cancelable: true }));
+      await waitUntil(() => dom.getElementById("settings-error")!.textContent!.includes("Cannot write"));
+      assert.equal(writes, 1);
+      assert.equal(dom.getElementById("settings")!.hasAttribute("open"), true);
+      assert.equal(dom.querySelector<HTMLInputElement>("#settings-cache-directory")!.value, "cache-here");
+      assert.equal(dom.querySelector<HTMLButtonElement>("#settings-apply")!.disabled, false);
+      assert.equal(dom.querySelector<HTMLButtonElement>("#save")!.disabled, false);
+    } finally { view.destroy(); }
+  });
+});
+
+test("Settings retries only the owner whose write failed", async () => {
+  await withViewDom(async (dom, domWindow) => {
+    await installSettingsDom(dom);
+    const notebook = new BrowserDocument(snapshot([]));
+    let preferenceWrites = 0;
+    let projectWrites = 0;
+    const client = settingsClient({
+      setPreferences: async (patch) => {
+        preferenceWrites += 1;
+        assert.deepEqual(patch, { theme: "dark" });
+        notebook.applySnapshot({ ...notebook.snapshot, config: { theme: "dark" }, preferencesVersion: "saved-preferences" });
+        view.render(notebook);
+        return resultFor("preferences", null);
+      },
+      setConfig: async () => {
+        projectWrites += 1;
+        if (projectWrites === 1) throw new Error("Project settings are not writable.");
+        return resultFor("project-settings", null);
+      },
+    });
+    const view = new NotebookView(client, dom);
+    try {
+      view.render(notebook);
+      dom.getElementById("settings-open")!.dispatchEvent(new domWindow.Event("click"));
+      dom.querySelector<HTMLSelectElement>("#settings-theme")!.value = "dark";
+      dom.querySelector<HTMLInputElement>("#settings-cache-directory")!.value = "cache-here";
+      dom.getElementById("settings-form")!.dispatchEvent(new domWindow.Event("submit", { cancelable: true }));
+      await waitUntil(() => dom.getElementById("settings-error")!.textContent!.includes("not writable"));
+      assert.equal(dom.getElementById("settings")!.hasAttribute("open"), true);
+      assert.equal(dom.documentElement.dataset.theme, "dark");
+      dom.getElementById("settings-form")!.dispatchEvent(new domWindow.Event("submit", { cancelable: true }));
+      await waitUntil(() => !dom.getElementById("settings")!.hasAttribute("open"));
+      assert.equal(preferenceWrites, 1);
+      assert.equal(projectWrites, 2);
+      assert.equal(dom.getElementById("settings-error")!.hidden, true);
+    } finally { view.destroy(); }
+  });
+});
+
+test("format-on-save still saves the notebook when R is unavailable", async () => {
+  await withViewDom(async (dom, domWindow) => {
+    const initial = snapshot([]);
+    initial.changed = true;
+    initial.config = { format: { on_save: true } };
+    initial.runtime.executionReady = false;
+    initial.runtime.kernelState = "stopped";
+    let saves = 0;
+    const client = settingsClient({
+      save: async () => { saves += 1; return resultFor("save", null); },
+      formatCells: async () => { throw new Error("Formatting must not block Save without R."); },
+    });
+    const view = new NotebookView(client, dom);
+    try {
+      view.render(new BrowserDocument(initial));
+      dom.getElementById("save")!.dispatchEvent(new domWindow.Event("click"));
+      await waitUntil(() => saves === 1 && dom.querySelector<HTMLButtonElement>("#save")!.disabled === false);
+      assert.equal(dom.getElementById("status")!.classList.contains("error"), false);
+    } finally { view.destroy(); }
+  });
+});
+
+test("notebook execution control restores the stored value after a failed write", async () => {
+  await withViewDom(async (dom, domWindow) => {
+    await installSettingsDom(dom);
+    const initial = snapshot([]);
+    initial.runtime.executionReady = false;
+    initial.runtime.kernelState = "stopped";
+    const view = new NotebookView(settingsClient({ setRuntime: async () => { throw new Error("Notebook changed; try again."); } }), dom);
+    try {
+      view.render(new BrowserDocument(initial));
+      const runtime = dom.querySelector<HTMLSelectElement>("#runtime-select")!;
+      runtime.value = "lazy";
+      runtime.dispatchEvent(new domWindow.Event("change"));
+      await waitUntil(() => dom.getElementById("status")!.textContent!.includes("Notebook changed"));
+      assert.equal(runtime.value, "automatic");
+      assert.equal(runtime.disabled, false);
+    } finally { view.destroy(); }
+  });
+});
 
 test("browser document applies canonical output deltas without replacing cell identity", () => {
   const previous = { ...cell("c1", ["message('a')"]), outputsStale: true };

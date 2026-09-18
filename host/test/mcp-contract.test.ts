@@ -80,6 +80,7 @@ const CANONICAL_TOOL_NAMES = [
   "set_app",
   "set_config",
   "set_layout",
+  "set_preferences",
   "set_runtime",
   "set_widget",
   "shutdown",
@@ -112,6 +113,7 @@ const REQUIRED_EFFECT_IDENTITY_FIELDS: Record<string, readonly string[]> = {
   save_as: ["requestId", "sessionEpoch", "expectedDocumentRevision"],
   table_page: ["requestId", "sessionEpoch"],
   materialize_output: ["requestId", "sessionEpoch"],
+  set_preferences: ["requestId", "sessionEpoch", "expectedPreferencesVersion"],
   set_config: ["requestId", "sessionEpoch", "expectedDocumentRevision"],
   set_layout: ["requestId", "sessionEpoch", "expectedDocumentRevision"],
   set_app: ["requestId", "sessionEpoch", "expectedDocumentRevision"],
@@ -917,4 +919,46 @@ test("connectMcpStdio bounds client.connect and closes the abandoned upstream", 
     input.destroy();
     output.destroy();
   }
+});
+
+test("MCP settings commands use their writable owners and preserve version preconditions", async () => {
+  const dispatched: HostCommand[] = [];
+  const controller = makeController({ dispatch: async command => { dispatched.push(command); return completed(command.requestId); } });
+  const connection = await connectInMemory(controller);
+  try {
+    const preferences = await connection.client.callTool({ name: "set_preferences", arguments: {
+      requestId: "preferences-1", sessionEpoch: snapshot.epoch, expectedPreferencesVersion: "preferences-v1",
+      patch: { theme: "dark", editor: { font_size: 16 }, table: { page_size: 50 }, autosave: true, format: { on_save: true } },
+    } });
+    assert.equal(preferences.isError, false);
+    assert.deepEqual(dispatched[0], {
+      requestId: "preferences-1", clientId: "client-1", sessionEpoch: snapshot.epoch, type: "set-preferences",
+      expectedPreferencesVersion: "preferences-v1",
+      patch: { theme: "dark", editor: { font_size: 16 }, table: { page_size: 50 }, autosave: true, format: { on_save: true } },
+    });
+    const project = await connection.client.callTool({ name: "set_config", arguments: {
+      requestId: "project-cache-1", sessionEpoch: snapshot.epoch, expectedDocumentRevision: 3,
+      expectedSidecarVersion: "project-v1", patch: { cache: { dir: "analysis-cache" } },
+    } });
+    assert.equal(project.isError, false);
+    assert.deepEqual(dispatched[1], {
+      requestId: "project-cache-1", clientId: "client-1", sessionEpoch: snapshot.epoch, type: "set-config",
+      expectedDocumentRevision: 3, expectedSidecarVersion: "project-v1", patch: { cache: { dir: "analysis-cache" } },
+    });
+    const notebook = await connection.client.callTool({ name: "set_runtime", arguments: {
+      requestId: "notebook-cache-1", sessionEpoch: snapshot.epoch, expectedDocumentRevision: 3, cache_enabled: false,
+    } });
+    assert.equal(notebook.isError, false);
+    assert.equal(dispatched[2]?.type, "set-runtime");
+    if (dispatched[2]?.type === "set-runtime") assert.equal(dispatched[2].cache_enabled, false);
+
+    for (const [name, args] of [
+      ["set_config", { expectedDocumentRevision: 3, expectedSidecarVersion: null, patch: { theme: "light" } }],
+      ["set_preferences", { expectedPreferencesVersion: "preferences-v1", patch: { on_startup: true } }],
+    ] as const) {
+      const rejected = await connection.client.callTool({ name, arguments: { requestId: "wrong-owner", sessionEpoch: snapshot.epoch, ...args } });
+      assert.equal(rejected.isError, true);
+    }
+    assert.equal(dispatched.length, 3);
+  } finally { await closeInMemory(connection); }
 });

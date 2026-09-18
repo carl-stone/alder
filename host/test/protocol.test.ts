@@ -350,7 +350,7 @@ test("shared host response schemas validate complete bounded snapshots and delta
   };
   const snapshot = {
     protocol: HOST_PROTOCOL, epoch: "epoch-1", cursor: 7, version: 3, documentRevision: 7,
-    path: "/tmp/notebook.R", metadata: {}, config: {}, layout: null, dirty: false, changed: false,
+    path: "/tmp/notebook.R", metadata: {}, config: {}, preferencesVersion: null, layout: null, dirty: false, changed: false,
     disk, sidecars: { config: disk, layout: disk, packages: disk },
     runtime: {
       documentReady: true, analyzerState: "ready" as const, kernelState: "ready" as const, executionReady: true,
@@ -404,4 +404,17 @@ test("shared host response schemas validate complete bounded snapshots and delta
   assert.equal(releaseOutputsResponseSchema.safeParse({ ok: true, released: [], missing: undefined, failed: [] }).success, false);
   assert.equal(releaseOutputsResponseSchema.safeParse({ ok: false, error: { code: "invalid_request", message: "bad request" } }).success, true);
   assert.equal(releaseOutputsResponseSchema.safeParse({ ok: true, released: ["../escape"], missing: [], failed: [] }).success, false);
+});
+
+test("settings command schemas separate preferences, project cache paths, and notebook execution", () => {
+  const identity = { requestId: "settings-1", clientId: "client-1", sessionEpoch: "epoch-1" };
+  assert.doesNotThrow(() => parseHostCommand({ ...identity, type: "set-preferences", expectedPreferencesVersion: null,
+    patch: { theme: "dark", editor: { tab_size: 4 }, format: { on_save: true } } }));
+  assert.doesNotThrow(() => parseHostCommand({ ...identity, type: "set-config", expectedDocumentRevision: 1,
+    expectedSidecarVersion: null, patch: { cache: { dir: "analysis-cache" } } }));
+  assert.doesNotThrow(() => parseHostCommand({ ...identity, type: "set-runtime", expectedDocumentRevision: 1, cache_enabled: false }));
+  assert.throws(() => parseHostCommand({ ...identity, type: "set-preferences", patch: { theme: "dark" } }));
+  assert.throws(() => parseHostCommand({ ...identity, type: "set-preferences", expectedPreferencesVersion: null, patch: { on_startup: false } }));
+  assert.throws(() => parseHostCommand({ ...identity, type: "set-config", expectedDocumentRevision: 1,
+    expectedSidecarVersion: null, patch: { editor: { font_size: 18 } } }));
 });

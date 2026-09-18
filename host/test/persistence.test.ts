@@ -89,10 +89,10 @@ test('sidecar staged write rechecks replacement and leaves external partial save
   const dir = await temporaryDirectory('alder-sidecar-');
   try {
     const sidecar = join(dir, '.alder', 'config.yaml');
-    await mkdir(join(dir, '.alder')); await writeFile(sidecar, 'theme: dark\n');
+    await mkdir(join(dir, '.alder')); await writeFile(sidecar, 'cache:\n  dir: cache-a\n');
     const expected = await observeFile(sidecar);
-    await assert.rejects(writeAtomicText(sidecar, 'theme: light\n', { expected, beforeReplace: async (file) => { await writeFile(file, 'external: true\n'); } }), { code: 'source_conflict' });
-    assert.equal(await readFile(sidecar, 'utf8'), 'external: true\n');
+    await assert.rejects(writeAtomicText(sidecar, 'cache:\n  dir: cache-b\n', { expected, beforeReplace: async (file) => { await writeFile(file, 'cache:\n  dir: external-cache\n'); } }), { code: 'source_conflict' });
+    assert.equal(await readFile(sidecar, 'utf8'), 'cache:\n  dir: external-cache\n');
     assert.deepEqual((await readdir(join(dir, '.alder'))).sort(), ['config.yaml']);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });

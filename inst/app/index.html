@@ -43,7 +43,11 @@
         <button id="settings-close" class="btn mini" type="button"
                 aria-label="Close settings">Close</button>
       </div>
-      <div class="settings-grid">
+      <p id="settings-error" class="settings-error" role="alert" hidden></p>
+      <fieldset class="settings-section">
+        <legend>Application</legend>
+        <p>Shared by every open notebook and remembered when Alder restarts.</p>
+        <div class="settings-grid">
         <label for="settings-theme">Theme
           <select id="settings-theme" name="theme">
             <option value="system">System</option>
@@ -93,7 +97,37 @@
           <input id="settings-format-on-save" name="format_on_save" type="checkbox">
           Format before saving
         </label>
-      </div>
+        </div>
+      </fieldset>
+      <fieldset class="settings-section">
+        <legend>This notebook</legend>
+        <p>Saved with this notebook.</p>
+        <div class="settings-grid">
+          <label for="settings-execution-mode">Execution
+            <select id="settings-execution-mode" name="execution_mode">
+              <option value="automatic">Automatic</option>
+              <option value="lazy">Lazy</option>
+            </select>
+          </label>
+          <label class="settings-check" for="settings-run-on-startup">
+            <input id="settings-run-on-startup" name="run_on_startup" type="checkbox">
+            Run when opened
+          </label>
+          <label class="settings-check" for="settings-cache-enabled">
+            <input id="settings-cache-enabled" name="cache_enabled" type="checkbox">
+            Cache cell results
+          </label>
+        </div>
+      </fieldset>
+      <fieldset class="settings-section">
+        <legend>This project</legend>
+        <p>Used by notebooks in this project.</p>
+        <div class="settings-grid">
+          <label class="settings-wide" for="settings-cache-directory">Cache directory
+            <input id="settings-cache-directory" name="cache_directory" type="text" placeholder="Default cache location">
+          </label>
+        </div>
+      </fieldset>
       <div class="settings-actions">
         <button id="settings-cancel" class="btn" type="button">Cancel</button>
         <button id="settings-apply" class="btn primary" type="submit">Apply</button>

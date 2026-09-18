@@ -19688,6 +19688,8 @@ function patchSnapshot(snapshot, event, order) {
   if ((event.type === "notebook" || event.type === "transaction") && isRecord(event.payload)) {
     const payload = event.payload;
     if (isRecord(payload.config)) next.config = payload.config;
+    if (isRecord(payload.runtime)) next.runtime = payload.runtime;
+    if (typeof payload.preferencesVersion === "string" || payload.preferencesVersion === null) next.preferencesVersion = payload.preferencesVersion;
     if (typeof payload.path === "string" || payload.path === null) next.path = payload.path;
     if (isSidecarObservations(payload.sidecars)) next.sidecars = payload.sidecars;
     if ("layout" in payload) next.layout = payload.layout;
@@ -19701,7 +19703,7 @@ function patchSnapshot(snapshot, event, order) {
     if (Array.isArray(deletedIds)) next.cells = next.cells.filter((cell) => !deletedIds.includes(cell.id));
     if (Array.isArray(payload.edited)) next.changed = true;
     if ("updated" in payload) next.changed = true;
-    if (payload.created !== void 0 || payload.deleted !== void 0 || typeof payload.moved === "string" || isRecord(payload.config) || isRecord(payload.metadata) || isRecord(payload.app)) next.changed = true;
+    if (payload.created !== void 0 || payload.deleted !== void 0 || typeof payload.moved === "string" || isRecord(payload.metadata) || isRecord(payload.app)) next.changed = true;
     if (Array.isArray(payload.updated)) {
       const updates = /* @__PURE__ */ new Map();
       for (const value of payload.updated) if (isHostCell(value)) updates.set(value.id, value);
@@ -19860,6 +19862,50 @@ function reconcileDraft(draft, snapshot) {
   }
   return { draft: { ...draft, changes, submission: null }, conflict };
 }
+
+// src/settings.ts
+var editorSchema = external_exports.object({
+  font_size: external_exports.number().int().min(10).max(32),
+  tab_size: external_exports.number().int().min(1).max(8),
+  line_numbers: external_exports.boolean(),
+  completions: external_exports.boolean(),
+  signature_help: external_exports.boolean(),
+  live_diagnostics: external_exports.boolean()
+}).strict();
+var formatSchema = external_exports.object({ on_save: external_exports.boolean() }).strict();
+var tableSchema = external_exports.object({ page_size: external_exports.number().int().min(5).max(200) }).strict();
+var preferencesSchema = external_exports.object({
+  theme: external_exports.enum(["light", "dark", "system"]),
+  keymap: external_exports.enum(["default", "vim"]),
+  autosave: external_exports.boolean(),
+  format: formatSchema,
+  editor: editorSchema,
+  table: tableSchema
+}).strict();
+var preferencesPatchSchema = preferencesSchema.extend({
+  format: formatSchema.partial(),
+  editor: editorSchema.partial(),
+  table: tableSchema.partial()
+}).partial();
+var notebookCacheSchema = external_exports.object({ enabled: external_exports.boolean() }).strict();
+var notebookSettingsSchema = external_exports.object({
+  on_cell_change: external_exports.enum(["automatic", "lazy"]),
+  on_startup: external_exports.boolean(),
+  cache: notebookCacheSchema
+}).strict();
+var notebookSettingsPatchSchema = notebookSettingsSchema.extend({
+  cache: notebookCacheSchema.partial()
+}).partial();
+var projectCacheSchema = external_exports.object({ dir: external_exports.string().min(1).nullable() }).strict();
+var projectSettingsSchema = external_exports.object({ cache: projectCacheSchema }).strict();
+var projectSettingsPatchSchema = projectSettingsSchema.extend({
+  cache: projectCacheSchema.partial()
+}).partial();
+var configSchema = preferencesSchema.extend({
+  on_cell_change: notebookSettingsSchema.shape.on_cell_change,
+  on_startup: notebookSettingsSchema.shape.on_startup,
+  cache: notebookCacheSchema.extend(projectCacheSchema.shape)
+});
 
 // src/protocol.ts
 var HOST_PROTOCOL = "alder-host-v2";
@@ -20508,7 +20554,8 @@ var saveCommandSchema = external_exports.object({ ...commandIdentityShape, type:
 var saveAsCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("save-as"), path: pathSchema, expectedDestination: external_exports.union([external_exports.literal("absent"), external_exports.object({ expectedDiskDigest: external_exports.string().min(1), expectedDiskVersion: external_exports.string().min(1) }).strict()]), expectedDocumentRevision: revisionSchema }).strict();
 var reloadSourceCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("reload-source"), expectedDocumentRevision: revisionSchema, expectedDiskDigest: external_exports.string().regex(/^[0-9a-f]{64}$/), expectedDiskVersion: boundedUtf8StringSchema(MAX_ID_BYTES, true) }).strict();
 var formatCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("format"), cellIds: external_exports.array(idSchema).max(MAX_NOTEBOOK_CELLS).optional(), expectedRevisions: safeStringRecordSchema(revisionSchema), expectedDocumentRevision: revisionSchema }).strict();
-var setConfigCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("set-config"), patch: protocolJsonRecordSchema, expectedSidecarVersion: boundedUtf8StringSchema(MAX_ID_BYTES).nullable(), expectedDocumentRevision: revisionSchema }).strict();
+var setPreferencesCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("set-preferences"), patch: preferencesPatchSchema, expectedPreferencesVersion: boundedUtf8StringSchema(MAX_ID_BYTES).nullable() }).strict();
+var setConfigCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("set-config"), patch: projectSettingsPatchSchema, expectedSidecarVersion: boundedUtf8StringSchema(MAX_ID_BYTES).nullable(), expectedDocumentRevision: revisionSchema }).strict();
 var layoutKey = boundedUtf8StringSchema(MAX_ID_BYTES, true).refine((key) => !key.includes("/") && !key.includes("\\") && key !== "." && key !== "..", "invalid layout cell key");
 var layoutGeometrySchema = external_exports.object({ x: external_exports.number().int().min(0).max(11).safe(), y: external_exports.number().int().min(0).max(1e6).safe(), w: external_exports.number().int().min(1).max(12).safe(), h: external_exports.number().int().min(1).max(1e6).safe() }).strict().superRefine((geometry, context) => {
   if (geometry.x + geometry.w > 12) context.addIssue({ code: "custom", path: ["w"], message: "geometry extends beyond the 12-column grid" });
@@ -20534,7 +20581,7 @@ var layoutSchema = external_exports.object({ version: external_exports.literal(1
   }
 });
 var setLayoutCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("set-layout"), layout: layoutSchema, expectedSidecarVersion: boundedUtf8StringSchema(MAX_ID_BYTES).nullable(), expectedDocumentRevision: revisionSchema }).strict();
-var setRuntimeCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("set-runtime"), on_cell_change: external_exports.enum(["automatic", "lazy"]).optional(), on_startup: external_exports.boolean().optional(), expectedDocumentRevision: revisionSchema }).strict().refine((value) => value.on_cell_change !== void 0 || value.on_startup !== void 0, "at least one runtime setting is required");
+var setRuntimeCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("set-runtime"), on_cell_change: external_exports.enum(["automatic", "lazy"]).optional(), on_startup: external_exports.boolean().optional(), cache_enabled: external_exports.boolean().optional(), expectedDocumentRevision: revisionSchema }).strict().refine((value) => value.on_cell_change !== void 0 || value.on_startup !== void 0 || value.cache_enabled !== void 0, "at least one runtime setting is required");
 var restartCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("restart"), replay: external_exports.boolean().default(false), expectedDocumentRevision: revisionSchema.optional() }).strict().superRefine((value, context) => {
   if (value.replay && value.expectedDocumentRevision === void 0) context.addIssue({ code: "custom", path: ["expectedDocumentRevision"], message: "replay restart requires document revision" });
 });
@@ -20598,6 +20645,7 @@ var hostCommandSchema = external_exports.discriminatedUnion("type", [
   saveAsCommandSchema,
   reloadSourceCommandSchema,
   formatCommandSchema,
+  setPreferencesCommandSchema,
   setConfigCommandSchema,
   setLayoutCommandSchema,
   setRuntimeCommandSchema,
@@ -20611,7 +20659,7 @@ var hostCommandSchema = external_exports.discriminatedUnion("type", [
 ]);
 var cellStatusSchema = external_exports.enum(["idle", "stale", "running", "done", "error", "stopped", "disabled"]);
 var operationStatusSchema = external_exports.enum(["accepted", "running", "done", "error", "interrupted", "cancelled"]);
-var operationKindSchema = external_exports.enum(["transaction", "run", "select-r", "set-app", "packages-declare", "packages-install", "publish", "upload", "save", "save-as", "reload-source", "format", "set-config", "set-layout", "set-runtime", "restart", "widget", "inspect", "lazy-output", "table-page", "interrupt", "shutdown", "widget-reset", "analysis"]);
+var operationKindSchema = external_exports.enum(["transaction", "run", "select-r", "set-app", "packages-declare", "packages-install", "publish", "upload", "save", "save-as", "reload-source", "format", "set-preferences", "set-config", "set-layout", "set-runtime", "restart", "widget", "inspect", "lazy-output", "table-page", "interrupt", "shutdown", "widget-reset", "analysis"]);
 var hostErrorSchema = external_exports.object({ code: boundedUtf8StringSchema(256, true), message: boundedUtf8StringSchema(MAX_FRAME_BYTES), operationId: idSchema.nullable().optional(), details: protocolJsonSchema.optional() }).strict();
 var MAX_OPERATION_PROGRESS_BYTES = 64 * 1024;
 var operationProgressDataSchema = protocolJsonSchema.superRefine((value, context) => {
@@ -20675,8 +20723,8 @@ var dependencyGraphStateSchema = external_exports.object({ nodes: graphCellIds, 
 var runtimeVariableSchema = external_exports.object({ name: boundedUtf8StringSchema(MAX_ANALYSIS_SYMBOL_BYTES, true), owner: idSchema.nullable(), revision: revisionSchema.nullable(), class: boundedUtf8StringSchema(MAX_ANALYSIS_SYMBOL_BYTES, true), dim: external_exports.array(protocolIntegerSchema).max(64).nullable(), size: protocolIntegerSchema, widget: external_exports.boolean(), valueSummary: boundedUtf8StringSchema(160).optional() }).strict();
 var runtimeVariablesSchema = external_exports.array(runtimeVariableSchema).max(MAX_RUNTIME_VARIABLES);
 var editorDiagnosticsSchema = safeStringRecordSchema(external_exports.array(analysisDiagnosticSchema).max(MAX_EDITOR_DIAGNOSTICS));
-var serviceErrorsSchema = external_exports.object({ lsp: hostErrorSchema.optional() }).strict();
-var hostSnapshotSchema = external_exports.object({ protocol: external_exports.literal(HOST_PROTOCOL), epoch: idSchema, cursor: protocolIntegerSchema, version: protocolIntegerSchema, documentRevision: revisionSchema, path: pathSchema.nullable(), metadata: protocolJsonRecordSchema, config: protocolJsonRecordSchema, layout: protocolJsonSchema, dirty: external_exports.boolean(), changed: external_exports.boolean().optional(), disk: diskObservationSchema, sidecars: sidecarObservationsSchema, runtime: hostRuntimeSchema, cells: external_exports.array(hostCellStateSchema).max(MAX_NOTEBOOK_CELLS), graph: dependencyGraphStateSchema, variables: runtimeVariablesSchema, editorDiagnostics: editorDiagnosticsSchema, serviceErrors: serviceErrorsSchema, operations: external_exports.array(operationRecordSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS), lastValue: protocolJsonSchema.nullable(), lastActionError: hostErrorSchema.nullable(), capabilities: external_exports.array(boundedUtf8StringSchema(256)).max(MAX_PROTOCOL_COLLECTION_ITEMS).optional(), activeClientIds: external_exports.array(idSchema).max(128).optional() }).strict();
+var serviceErrorsSchema = external_exports.object({ lsp: hostErrorSchema.optional(), settings: hostErrorSchema.optional() }).strict();
+var hostSnapshotSchema = external_exports.object({ protocol: external_exports.literal(HOST_PROTOCOL), epoch: idSchema, cursor: protocolIntegerSchema, version: protocolIntegerSchema, documentRevision: revisionSchema, path: pathSchema.nullable(), metadata: protocolJsonRecordSchema, config: protocolJsonRecordSchema, preferencesVersion: boundedUtf8StringSchema(MAX_ID_BYTES).nullable().default(null), layout: protocolJsonSchema, dirty: external_exports.boolean(), changed: external_exports.boolean().optional(), disk: diskObservationSchema, sidecars: sidecarObservationsSchema, runtime: hostRuntimeSchema, cells: external_exports.array(hostCellStateSchema).max(MAX_NOTEBOOK_CELLS), graph: dependencyGraphStateSchema, variables: runtimeVariablesSchema, editorDiagnostics: editorDiagnosticsSchema, serviceErrors: serviceErrorsSchema, operations: external_exports.array(operationRecordSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS), lastValue: protocolJsonSchema.nullable(), lastActionError: hostErrorSchema.nullable(), capabilities: external_exports.array(boundedUtf8StringSchema(256)).max(MAX_PROTOCOL_COLLECTION_ITEMS).optional(), activeClientIds: external_exports.array(idSchema).max(128).optional() }).strict();
 var hostEventTypeSchema = external_exports.enum(["transaction", "notebook", "cell", "cell-started", "cell-output", "cell-completed", "diagnostics", "editor-diagnostics", "service-errors", "graph", "variables", "runtime", "operation", "service-error", "active_clients_changed"]);
 var eventBase = { protocol: external_exports.literal(HOST_PROTOCOL), epoch: idSchema, cursor: protocolIntegerSchema, version: protocolIntegerSchema, documentRevision: revisionSchema, timestamp: external_exports.number().finite().nonnegative(), operationId: idSchema.optional(), clientId: idSchema.optional(), cellId: idSchema.optional(), runId: idSchema.optional(), kernelEpoch: idSchema.nullable().optional(), revision: revisionSchema.optional(), sequence: protocolIntegerSchema.optional() };
 var hostEventSchema = external_exports.object({ ...eventBase, type: hostEventTypeSchema, payload: protocolJsonSchema }).strict();
@@ -21987,15 +22035,19 @@ var BrowserNotebookClient = class {
   async inspect(name) {
     return this.dispatchSettled({ type: "inspect", ...this.base("inspect", false), name, kernelEpoch: this.kernelEpoch() });
   }
-  async setRuntime(update) {
+  async setRuntime(update, expectedDocumentRevision = this.requireDocument().snapshot.documentRevision) {
     const change = {};
     if (update.executionMode !== void 0) change.on_cell_change = update.executionMode;
     if (update.runOnStartup !== void 0) change.on_startup = update.runOnStartup;
-    if (change.on_cell_change === void 0 && change.on_startup === void 0) throw new BrowserTransportError("invalid_request", "runtime update is empty");
-    return this.dispatch({ type: "set-runtime", ...this.base("runtime"), ...change });
+    if (update.cacheEnabled !== void 0) change.cache_enabled = update.cacheEnabled;
+    if (Object.keys(change).length === 0) throw new BrowserTransportError("invalid_request", "runtime update is empty");
+    return this.dispatch({ type: "set-runtime", ...this.base("runtime"), expectedDocumentRevision, ...change });
   }
-  async setConfig(patch) {
-    return this.dispatch({ type: "set-config", ...this.base("config"), patch: jsonRecord(patch), expectedSidecarVersion: this.requireDocument().snapshot.sidecars.config.version });
+  async setPreferences(patch, expectedPreferencesVersion) {
+    return this.dispatch({ type: "set-preferences", ...this.base("preferences", false), patch, expectedPreferencesVersion });
+  }
+  async setConfig(patch, expectedSidecarVersion = this.requireDocument().snapshot.sidecars.config.version, expectedDocumentRevision = this.requireDocument().snapshot.documentRevision) {
+    return this.dispatch({ type: "set-config", ...this.base("config"), patch, expectedSidecarVersion, expectedDocumentRevision });
   }
   async setLayout(layout) {
     return this.dispatch({ type: "set-layout", ...this.base("layout"), layout, expectedSidecarVersion: this.requireDocument().snapshot.sidecars.layout.version });
@@ -22360,9 +22412,6 @@ function stringValue2(value) {
 }
 function fileArray(value) {
   return Array.isArray(value) ? value.filter((item) => typeof item === "object" && item !== null && !Array.isArray(item) && typeof item.name === "string" && typeof item.content_base64 === "string") : [];
-}
-function jsonRecord(value) {
-  return value;
 }
 function safeArtifactPath(path) {
   try {
@@ -23620,6 +23669,9 @@ var NotebookView = class {
   outlineCells = /* @__PURE__ */ new Map();
   minimapSignature = "";
   configValue = null;
+  settingsBaseline = null;
+  settingsError = null;
+  settingsSaving = false;
   editorDiagnosticsValue = null;
   editorDiagnosticsVisible = false;
   editorDiagnosticsSourceCurrent = false;
@@ -23686,8 +23738,15 @@ var NotebookView = class {
       this.editorHelpError = null;
     }
     if (this.configValue !== snapshot.config) {
+      const previousPageSize = this.configValue === null ? null : configNumber(this.configValue, ["table", "page_size"], 25);
+      const autosaveChanged = this.configValue !== null && this.configValue.autosave !== snapshot.config.autosave;
       this.configValue = snapshot.config;
       this.applyConfig(snapshot.config);
+      if (autosaveChanged) this.scheduleAutosave();
+      const pageSize = configNumber(snapshot.config, ["table", "page_size"], 25);
+      if (previousPageSize !== null && previousPageSize !== pageSize) {
+        void this.repaginateTables(pageSize).catch((error61) => this.showError(error61));
+      }
     }
     const path = snapshot.path || "untitled notebook";
     if (this.path && this.path.textContent !== path) this.path.textContent = path;
@@ -25345,7 +25404,7 @@ ${jupyterTrace.map((line, index) => `${index + 1}. ${line}`).join("\n")}` : ""
       vim.textContent = keymap === "vim" ? "Vim mode" : "";
     }
     const dialog = this.dom.getElementById("settings");
-    if (!dialog?.open) this.fillSettings(config2);
+    if (!dialog?.hasAttribute("open")) this.fillSettings(config2);
   }
   fillSettings(config2) {
     setSelect(this.dom, "settings-theme", configString(config2, ["theme"], "system"), ["system", "light", "dark"]);
@@ -25359,9 +25418,14 @@ ${jupyterTrace.map((line, index) => `${index + 1}. ${line}`).join("\n")}` : ""
     setChecked(this.dom, "settings-live-diagnostics", nested(config2, ["editor", "live_diagnostics"]) === true);
     setChecked(this.dom, "settings-autosave", config2.autosave === true);
     setChecked(this.dom, "settings-format-on-save", nested(config2, ["format", "on_save"]) === true);
+    setSelect(this.dom, "settings-execution-mode", this.documentValue?.snapshot.runtime.executionMode ?? "automatic", ["automatic", "lazy"]);
+    setChecked(this.dom, "settings-run-on-startup", this.documentValue?.snapshot.runtime.runOnStartup ?? true);
+    setChecked(this.dom, "settings-cache-enabled", nested(config2, ["cache", "enabled"]) !== false);
+    const directory = this.dom.getElementById("settings-cache-directory");
+    if (directory) directory.value = configString(config2, ["cache", "dir"], "");
   }
-  settingsPatch() {
-    return {
+  settingsValues() {
+    const preferences = {
       theme: inputValue(this.dom, "settings-theme", "system"),
       keymap: inputValue(this.dom, "settings-keymap", "default"),
       autosave: inputChecked(this.dom, "settings-autosave"),
@@ -25376,6 +25440,22 @@ ${jupyterTrace.map((line, index) => `${index + 1}. ${line}`).join("\n")}` : ""
       },
       table: { page_size: inputInteger(this.dom, "settings-table-page-size", 25, 5, 200) }
     };
+    return {
+      preferences,
+      runtime: {
+        executionMode: inputValue(this.dom, "settings-execution-mode", "automatic") === "lazy" ? "lazy" : "automatic",
+        runOnStartup: inputChecked(this.dom, "settings-run-on-startup"),
+        cacheEnabled: inputChecked(this.dom, "settings-cache-enabled")
+      },
+      project: { cache: { dir: inputValue(this.dom, "settings-cache-directory", "").trim() || null } }
+    };
+  }
+  renderSettingsError() {
+    const error61 = this.dom.getElementById("settings-error");
+    if (!error61) return;
+    const message2 = this.settingsError ?? this.documentValue?.snapshot.serviceErrors.settings?.message ?? "";
+    error61.textContent = message2;
+    error61.hidden = message2.length === 0;
   }
   bindSettings() {
     const dialog = this.dom.getElementById("settings");
@@ -25385,8 +25465,17 @@ ${jupyterTrace.map((line, index) => `${index + 1}. ${line}`).join("\n")}` : ""
       else dialog.removeAttribute("open");
     };
     this.dom.getElementById("settings-open")?.addEventListener("click", () => {
-      if (!dialog) return;
-      this.fillSettings(this.documentValue?.snapshot.config ?? {});
+      const snapshot = this.documentValue?.snapshot;
+      if (!dialog || !snapshot) return;
+      this.fillSettings(snapshot.config);
+      this.settingsBaseline = {
+        ...this.settingsValues(),
+        preferencesVersion: snapshot.preferencesVersion ?? null,
+        projectVersion: snapshot.sidecars.config.version,
+        documentRevision: snapshot.documentRevision
+      };
+      this.settingsError = null;
+      this.renderSettingsError();
       if (typeof dialog.showModal === "function") {
         if (!dialog.open) dialog.showModal();
       } else dialog.setAttribute("open", "");
@@ -25398,14 +25487,44 @@ ${jupyterTrace.map((line, index) => `${index + 1}. ${line}`).join("\n")}` : ""
     });
     this.dom.getElementById("settings-form")?.addEventListener("submit", (event) => {
       event.preventDefault();
+      const baseline = this.settingsBaseline;
+      if (this.settingsSaving || !baseline) return;
+      const values = this.settingsValues();
+      const preferences = changedSettings(baseline.preferences, values.preferences);
+      const runtime = changedSettings(baseline.runtime, values.runtime);
+      const project = changedSettings(baseline.project, values.project);
+      this.settingsSaving = true;
+      const apply = this.dom.getElementById("settings-apply");
+      if (apply) setDisabled(apply, true);
       void this.action(async () => {
-        const before = configNumber(this.documentValue?.snapshot.config, ["table", "page_size"], 25);
-        const patch = this.settingsPatch();
-        await this.client.setConfig(patch);
-        const after = Number(nested(patch, ["table", "page_size"]));
-        if (Number.isFinite(after) && after !== before) await this.repaginateTables(after);
+        if (Object.keys(preferences).length) {
+          await this.client.setPreferences(preferences, baseline.preferencesVersion);
+          baseline.preferences = values.preferences;
+          baseline.preferencesVersion = this.documentValue?.snapshot.preferencesVersion ?? null;
+        }
+        if (Object.keys(runtime).length) {
+          const result = await this.client.setRuntime(runtime, baseline.documentRevision);
+          baseline.runtime = values.runtime;
+          baseline.documentRevision = result.documentRevision;
+          this.scheduleAutosave();
+        }
+        if (Object.keys(project).length) {
+          const result = await this.client.setConfig(project, baseline.projectVersion, baseline.documentRevision);
+          baseline.project = values.project;
+          baseline.documentRevision = result.documentRevision;
+          baseline.projectVersion = this.documentValue?.snapshot.sidecars.config.version ?? null;
+        }
+        this.settingsError = null;
+        this.renderSettingsError();
         close();
-      }).catch((error61) => this.showError(error61));
+      }).catch((error61) => {
+        this.settingsError = error61 instanceof Error ? error61.message : String(error61);
+        this.renderSettingsError();
+        this.showError(error61);
+      }).finally(() => {
+        this.settingsSaving = false;
+        if (apply) setDisabled(apply, false);
+      });
     });
   }
   async saveNotebook(mode = "explicit") {
@@ -25415,7 +25534,7 @@ ${jupyterTrace.map((line, index) => `${index + 1}. ${line}`).join("\n")}` : ""
     if (mode === "autosave" && !this.documentValue?.snapshot.path) return void 0;
     const destination = !this.documentValue?.snapshot.path && desktop ? await desktop.chooseSavePath() : void 0;
     if (destination === null) return void 0;
-    if (nested(this.documentValue?.snapshot.config, ["format", "on_save"]) === true) {
+    if (this.executionAvailable() && nested(this.documentValue?.snapshot.config, ["format", "on_save"]) === true) {
       await this.client.formatCells();
     }
     return destination === void 0 ? this.client.save() : this.client.saveAs(destination);
@@ -25483,7 +25602,11 @@ ${jupyterTrace.map((line, index) => `${index + 1}. ${line}`).join("\n")}` : ""
     });
     this.dom.getElementById("runtime-select")?.addEventListener("change", (event) => {
       const value = event.currentTarget.value === "lazy" ? "lazy" : "automatic";
-      void this.action(() => this.client.setRuntime({ executionMode: value })).catch((error61) => this.showError(error61));
+      void this.action(() => this.client.setRuntime({ executionMode: value })).then(() => this.scheduleAutosave()).catch((error61) => {
+        const control = this.dom.getElementById("runtime-select");
+        if (control) control.value = this.documentValue?.snapshot.runtime.executionMode ?? "automatic";
+        this.showError(error61);
+      });
     });
     this.status?.addEventListener("click", (event) => {
       const target = event.target?.closest("[data-status-action]");
@@ -25669,19 +25792,22 @@ ${jupyterTrace.map((line, index) => `${index + 1}. ${line}`).join("\n")}` : ""
   }
   renderStatus() {
     if (!this.status) return;
+    this.renderSettingsError();
     const stateError = this.documentValue?.snapshot.lastActionError?.message ?? null;
+    const settingsError = this.documentValue?.snapshot.serviceErrors.settings?.message ?? null;
     const editorHelpError = this.editorHelpError ?? this.documentValue?.snapshot.serviceErrors.lsp?.message ?? null;
     const runtimeBlocked = this.documentValue?.snapshot.runtime.executionBlockedReason ?? null;
     const runtimeMessage = runtimeBlocked === null ? null : "R execution is blocked: " + (runtimeBlocked.message || runtimeBlocked.code);
     const recovery = this.client.recoveryState;
     const recoveryConflict = recovery.status === "conflict" || recovery.branches.some((branch) => branch.state === "conflict") || recovery.corruption !== null;
     const recoveryMessage = recovery.uncertainRun ? "The previous run may have been interrupted. Run explicitly when you are ready." : recovery.local !== null ? recovery.status === "conflict" ? "Recovered edits conflict with newer changes." : "Unsaved edits recovered." : recovery.persistenceError ? "Local edit recovery is not durable." : recovery.drafts.length > 0 ? "A saved draft is available." : recovery.pending ? "Recovering an interrupted local edit\u2026" : recovery.corruption ? "Recovery data needs your review." : recoveryConflict ? "Recovered edits need your review." : null;
-    const message2 = this.hostClosed ? "Notebook host shut down." : this.actionError ?? stateError ?? editorHelpError ?? runtimeMessage ?? this.transportError ?? this.actionNotice ?? recoveryMessage ?? "";
+    const message2 = this.hostClosed ? "Notebook host shut down." : this.actionError ?? stateError ?? settingsError ?? editorHelpError ?? runtimeMessage ?? this.transportError ?? this.actionNotice ?? recoveryMessage ?? "";
     const signature = JSON.stringify({
       runtimeBlocked: runtimeBlocked === null ? null : [runtimeBlocked.code, runtimeBlocked.message],
       message: message2,
       actionError: Boolean(this.actionError),
       stateError: Boolean(stateError),
+      settingsError: Boolean(settingsError),
       editorHelpError: Boolean(editorHelpError),
       transportError: Boolean(this.transportError),
       editorHelpRestarting: this.editorHelpRestarting,
@@ -25702,8 +25828,8 @@ ${jupyterTrace.map((line, index) => `${index + 1}. ${line}`).join("\n")}` : ""
     }
     this.renderRuntimeControls(runtimeBlocked);
     this.renderRecoveryControls();
-    this.status.classList.toggle("error", Boolean(this.actionError || stateError || editorHelpError || runtimeBlocked || recoveryConflict));
-    this.status.classList.toggle("poll-error", Boolean(!this.actionError && !stateError && !editorHelpError && !runtimeBlocked && this.transportError));
+    this.status.classList.toggle("error", Boolean(this.actionError || stateError || settingsError || editorHelpError || runtimeBlocked || recoveryConflict));
+    this.status.classList.toggle("poll-error", Boolean(!this.actionError && !stateError && !settingsError && !editorHelpError && !runtimeBlocked && this.transportError));
   }
   renderRuntimeControls(runtimeBlocked) {
     if (!this.status || runtimeBlocked === null || this.hostClosed) return;
@@ -26106,6 +26232,16 @@ function configNumber(root, path, fallback) {
 function boundedConfig(root, path, fallback, minimum, maximum) {
   const value = Math.round(configNumber(root, path, fallback));
   return Math.max(minimum, Math.min(maximum, value));
+}
+function changedSettings(before, after) {
+  const changed = {};
+  for (const [key, value] of Object.entries(after)) {
+    if (isObject3(value) && isObject3(before[key])) {
+      const nestedChanges = changedSettings(before[key], value);
+      if (Object.keys(nestedChanges).length) changed[key] = nestedChanges;
+    } else if (value !== before[key]) changed[key] = value;
+  }
+  return changed;
 }
 function setSelect(dom, id, value, allowed) {
   const input2 = dom.getElementById(id);

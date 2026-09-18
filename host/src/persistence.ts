@@ -11,7 +11,8 @@ import {
   type NotebookDocument,
   type SourceNotebook,
 } from "./notebook.js";
-import { mergeConfig, parseYamlMapping, readConfigFile, serializeConfigYaml, validateConfigLayer } from "./configuration.js";
+import { parseYamlMapping, readProjectSettings, serializeProjectSettings } from "./configuration.js";
+import type { ProjectSettingsPatch } from "./settings.js";
 import { serializeLayout, validateLayout } from "./layout.js";
 import { packageMetadataPath, serializePackageDeclarations, validatePackageNames } from "./packages.js";
 
@@ -625,14 +626,14 @@ export class DocumentStore {
     return next;
   }
   async prepareConfig(
-    patch: Record<string, unknown>,
+    patch: ProjectSettingsPatch,
     expectedVersion: string | null,
-  ): Promise<PreparedSidecar<Record<string, unknown>>> {
+  ): Promise<PreparedSidecar<ProjectSettingsPatch>> {
     return this.prepareSidecar("config", expectedVersion, async () => {
       const path = this.sidecarPath("config");
-      const current = await readConfigFile(path);
-      const checked = validateConfigLayer(mergeConfig(current, validateConfigLayer(patch)));
-      return { value: checked, bytes: new TextEncoder().encode(serializeConfigYaml(checked)) };
+      const current = await readProjectSettings(path);
+      const next: ProjectSettingsPatch = { cache: { ...current.cache, ...patch.cache } };
+      return { value: next, bytes: new TextEncoder().encode(serializeProjectSettings(next)) };
     });
   }
 

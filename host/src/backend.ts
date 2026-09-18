@@ -2,6 +2,7 @@ import { createServer } from "node:net";
 import { chmod, mkdir } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { ApplicationPreferences } from "./preferences.js";
 import { startHost, type RunningHost } from "./application.js";
 import { resolveApplicationResources, type ApplicationResources } from "./resources.js";
 import type { HostLaunchOptions } from "./sessions.js";
@@ -9,6 +10,7 @@ import type { HostLaunchOptions } from "./sessions.js";
 /** One backend owns desktop documents and outlives any one attached client. */
 export class NotebookBackend {
   private readonly hosts = new Set<RunningHost>();
+  private readonly preferences = ApplicationPreferences.open();
   private opening = 0;
   private readonly openings = new Map<string, Promise<void>>();
   get idle(): boolean { return this.hosts.size === 0 && this.opening === 0; }
@@ -31,6 +33,7 @@ export class NotebookBackend {
         externalOrigin: options.externalOrigin,
         tokenFile: options.tokenFile,
         resources: this.resources,
+        preferences: await this.preferences,
         rscript: options.rscript,
         executionMode: options.executionMode,
         runOnStartup: options.runOnStartup,
@@ -53,6 +56,7 @@ export class NotebookBackend {
 
   async close(): Promise<void> {
     await Promise.allSettled([...this.hosts].map(host => host.close()));
+    await (await this.preferences).close();
   }
 }
 

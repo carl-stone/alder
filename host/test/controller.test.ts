@@ -7,7 +7,7 @@ import test from "node:test";
 
 import { Controller, ControllerError, type ControllerOptions, type SourcePublication } from "../src/controller.js";
 import { parseNotebook, serializeNotebook } from "../src/notebook.js";
-import { assertConfigPatchEffective, resolveConfigLayers, validateConfigLayer } from "../src/configuration.js";
+import { preferenceDefaults, resolveSettings } from "../src/settings.js";
 import { OutputStore } from "../src/outputs.js";
 import {
   MAX_DEPENDENCY_EDGES,
@@ -531,25 +531,12 @@ async function eventually(predicate: () => boolean): Promise<void> {
   assert.fail("condition did not become true");
 }
 
-function mergeTestConfig(base: Record<string, unknown>, patch: Record<string, unknown>): Record<string, unknown> {
-  const output = structuredClone(base);
-  for (const [key, value] of Object.entries(patch)) {
-    const prior = output[key];
-    if (value !== null && typeof value === "object" && !Array.isArray(value)
-      && prior !== null && typeof prior === "object" && !Array.isArray(prior)) {
-      output[key] = mergeTestConfig(prior as Record<string, unknown>, value as Record<string, unknown>);
-    } else {
-      output[key] = structuredClone(value);
-    }
-  }
-  return output;
-}
 
 test("shutdown requires the complete active client set", async () => {
   const controller = createController({
     engine: new FakeEngine(),
     notebook: notebook([]),
-    configResolution: resolveConfigLayers({ launch: { on_startup: false } }),
+    config: resolveSettings({ notebook: { on_startup: false } }),
   });
   const events: Array<{ type: string; payload: unknown }> = [];
   const unsubscribe = controller.subscribe(event => events.push(event));
@@ -586,13 +573,13 @@ test("source edits commit before runtime startup and survive startup failure", a
   const controller = createController({
     engine,
     notebook: notebook([["a", "x <- 1"]]),
-    configResolution: resolveConfigLayers({ launch: { on_startup: false } }),
+    config: resolveSettings({ notebook: { on_startup: false } }),
     sourceCommit: async (request, context) => {
       const document = request.document ?? context.document;
       context.preparePublication({
         document,
         path: document.path ?? context.path,
-        configResolution: context.configResolution,
+        config: context.config,
         layout: context.layout,
         disk: context.disk,
         sidecars: context.sidecars,
@@ -640,7 +627,7 @@ test("configuration identifies the requested Rscript before runtime bootstrap", 
   const controller = createController({
     engine: new FakeEngine(),
     notebook: notebook([]),
-    configResolution: resolveConfigLayers({ launch: { on_startup: false } }),
+    config: resolveSettings({ notebook: { on_startup: false } }),
     requestedRscript: "/opt/R/bin/Rscript",
     deferStartup: true,
   });
@@ -658,7 +645,7 @@ test("deferred startup reaches readiness without executing source", async () => 
   const controller = createController({
     engine,
     notebook: notebook([["a", "x <- 1"]]),
-    configResolution: resolveConfigLayers({ launch: { on_startup: true } }),
+    config: resolveSettings({ notebook: { on_startup: true } }),
     deferStartup: true,
   });
   const ready = await controller.start();
@@ -672,11 +659,51 @@ test("deferred startup reaches readiness without executing source", async () => 
   await controller.close();
 });
 
+test("no-run suppresses this opening's startup without changing settings or explicit Run", async () => {
+  for (const startupPath of ["activation", "command"] as const) {
+    const engine = new FakeEngine();
+    const controller = createController({
+      engine,
+      notebook: { ...notebook([["a", "x <- 1"]]), metadata: { runtime: { on_startup: true } } },
+      config: resolveSettings({ notebook: { on_startup: true } }),
+      suppressStartup: true,
+      deferStartup: startupPath === "command",
+    });
+    try {
+      await controller.start();
+      const before = controller.snapshot();
+      assert.equal(engine.evaluations.length, 0);
+      if (startupPath === "activation") {
+        assert.equal(await controller.activateStartup(), null);
+      } else {
+        const startup = await controller.dispatch(command(controller, { type: "run", scope: "all", startup: true }));
+        assert.equal(startup.error, null);
+      }
+      const suppressed = controller.snapshot();
+      assert.equal(engine.evaluations.length, 0);
+      assert.equal(suppressed.runtime.runOnStartup, true);
+      assert.equal(suppressed.config.on_startup, true);
+      assert.deepEqual(suppressed.metadata, { runtime: { on_startup: true } });
+      assert.deepEqual(suppressed.config, before.config);
+      assert.equal(suppressed.documentRevision, before.documentRevision);
+      assert.equal(suppressed.dirty, before.dirty);
+
+      const explicit = await controller.dispatch(command(controller, { type: "run", scope: "all" }));
+      assert.equal(explicit.error, null);
+      assert.deepEqual(engine.evaluations.map(evaluation => evaluation.cellId), ["a"]);
+      assert.equal(controller.snapshot().cells[0]?.status, "done");
+      assert.equal(controller.snapshot().runtime.runOnStartup, true);
+      assert.deepEqual(controller.snapshot().metadata, before.metadata);
+      assert.deepEqual(controller.snapshot().config, before.config);
+    } finally { await controller.close(); }
+  }
+});
+
 test("event filters preserve subscriber isolation", async () => {
   const controller = createController({
     engine: new FakeEngine(),
     notebook: notebook([["a", "x <- 1"]]),
-    configResolution: resolveConfigLayers({ launch: { on_startup: false } }),
+    config: resolveSettings({ notebook: { on_startup: false } }),
   });
   await controller.start();
   const cursor = controller.cursor;
@@ -722,7 +749,7 @@ test("concurrent startup shares one engine lifecycle", async () => {
   const controller = createController({
     engine,
     notebook: notebook([["a", "x <- 1"]]),
-    configResolution: resolveConfigLayers({ launch: { on_startup: false } }),
+    config: resolveSettings({ notebook: { on_startup: false } }),
   });
   const first = controller.start();
   const second = controller.start();
@@ -741,7 +768,7 @@ test("source edits remain usable during an explicit restart", async () => {
   const controller = createController({
     engine,
     notebook: notebook([["a", "x <- 1"]]),
-    configResolution: resolveConfigLayers({ launch: { on_startup: false } }),
+    config: resolveSettings({ notebook: { on_startup: false } }),
   });
   await controller.start();
   let releaseRestart!: () => void;
@@ -787,13 +814,13 @@ test("explicit restart waits for an admitted source commit", async () => {
   let commitEntered = false;
   const controller = createController({
     engine, notebook: notebook([["a", "x <- 1"]]),
-    configResolution: resolveConfigLayers({ launch: { on_startup: false } }),
+    config: resolveSettings({ notebook: { on_startup: false } }),
     sourceCommit: async (request, context) => {
       commitEntered = true;
       await commitGate;
       const document = request.document ?? context.document;
       context.preparePublication({
-        document, path: document.path ?? context.path, configResolution: context.configResolution,
+        document, path: document.path ?? context.path, config: context.config,
         layout: context.layout, disk: context.disk, sidecars: context.sidecars,
         dirty: true, advanceRevision: true,
       })();
@@ -831,7 +858,7 @@ test("R environment selection rebuilds analysis before readiness", async () => {
   const engine = new FakeEngine();
   const controller = createController({
     engine, notebook: notebook([["a", "x <- 1"]]),
-    configResolution: resolveConfigLayers({ launch: { on_startup: false } }),
+    config: resolveSettings({ notebook: { on_startup: false } }),
   });
   await controller.start();
   const before = engine.analysisCalls.length;
@@ -852,7 +879,7 @@ test("closing during restart cannot resurrect runtime readiness", async () => {
   const controller = createController({
     engine,
     notebook: notebook([["a", "x <- 1"]]),
-    configResolution: resolveConfigLayers({ launch: { on_startup: false } }),
+    config: resolveSettings({ notebook: { on_startup: false } }),
   });
   await controller.start();
   let releaseRestart!: () => void;
@@ -884,7 +911,7 @@ test("closing during a barrier restart prevents the pump from shifting queued wo
   const controller = createController({
     engine,
     notebook: notebook([["a", "library(stats)"]]),
-    configResolution: resolveConfigLayers({ launch: { on_startup: false } }),
+    config: resolveSettings({ notebook: { on_startup: false } }),
   });
   await controller.start();
   const edit = command(controller, {
@@ -933,7 +960,7 @@ test("optional service-peer failure leaves analysis and execution available", as
   const controller = createController({
     engine,
     notebook: notebook([["a", "x <- 1"]]),
-    configResolution: resolveConfigLayers({ launch: { on_startup: false } }),
+    config: resolveSettings({ notebook: { on_startup: false } }),
   });
   await controller.start();
   const events: HostEvent[] = [];
@@ -965,7 +992,7 @@ test("all edit preconditions are validated before any source mutation or engine 
   const controller = createController({
     engine,
     notebook: notebook([["a", "x <- 1"], ["b", "y <- x"]]),
-    configResolution: resolveConfigLayers({ launch: { on_startup: false } }),
+    config: resolveSettings({ notebook: { on_startup: false } }),
   });
   await controller.start();
   const before = controller.snapshot();
@@ -1011,7 +1038,7 @@ test("source events publish causal cell projections without replacing unchanged 
   const controller = createController({
     engine,
     notebook: notebook([["a", "x <- 1"], ["b", "y <- x"]]),
-    configResolution: resolveConfigLayers({ launch: { on_startup: false } }),
+    config: resolveSettings({ notebook: { on_startup: false } }),
   });
   await controller.start();
   const initial = command(controller, {
@@ -1067,7 +1094,7 @@ test("Markdown-only formatting preserves authored source commits and clean no-op
       metadata: {},
       cells: [{ id: "md", type: "markdown", body: ["# before"], options: {}, revision: 0 }],
     },
-    configResolution: resolveConfigLayers({ launch: { on_startup: false } }),
+    config: resolveSettings({ notebook: { on_startup: false } }),
     durableCommit: async (commit) => {
       durableCommits.push(structuredClone(commit));
     },
@@ -1151,7 +1178,7 @@ test("source edit admitted during formatting rejects late candidate before durab
   const controller = createController({
     engine: new FakeEngine(),
     notebook: notebook([["a", "x <- 1"]]),
-    configResolution: resolveConfigLayers({ launch: { on_startup: false } }),
+    config: resolveSettings({ notebook: { on_startup: false } }),
     durableCommit: async ({ delta }) => {
       durableBytes.push(serializeNotebook(delta.document));
     },
@@ -1230,7 +1257,7 @@ test("creating beyond the admitted notebook bound fails before source or engine 
         revision: 0,
       })),
     },
-    configResolution: resolveConfigLayers({ launch: { on_startup: false } }),
+    config: resolveSettings({ notebook: { on_startup: false } }),
   });
   await controller.start();
   const beforeIds = controller.snapshot().cells.map((cell) => cell.id);
@@ -1277,7 +1304,7 @@ test("projected notebook bytes are rejected atomically before source or engine e
         { id: "b", type: "markdown", body: retainedLines, options: {}, revision: 0 },
       ],
     },
-    configResolution: resolveConfigLayers({ launch: { on_startup: false } }),
+    config: resolveSettings({ notebook: { on_startup: false } }),
   });
   await controller.start();
   const before = controller.snapshot();
@@ -1318,7 +1345,7 @@ test("dependency edge exhaustion stays editable and clears after a bounded repai
       `cell-${index}`,
       "library(stats)",
     ] as [string, string])),
-    configResolution: resolveConfigLayers({ launch: { on_startup: false } }),
+    config: resolveSettings({ notebook: { on_startup: false } }),
   });
   await controller.start();
   const exhausted = controller.snapshot();
@@ -1352,7 +1379,7 @@ test("dependency edge exhaustion stays editable and clears after a bounded repai
 
 test("one command creates, reconciles, analyzes, and runs an optimistic cell", async () => {
   const engine = new FakeEngine();
-  const controller = createController({ engine, notebook: notebook([]), configResolution: resolveConfigLayers({ launch: { on_startup: false } }) });
+  const controller = createController({ engine, notebook: notebook([]), config: resolveSettings({ notebook: { on_startup: false } }) });
   await controller.start();
   const run = command(controller, {
     type: "run",
@@ -1387,7 +1414,7 @@ test("body edits retain the validated graph but execution waits for replacement 
   const controller = createController({
     engine,
     notebook: notebook([["a", "x <- 1"], ["b", "y <- x"], ["c", "z <- y"]]),
-    configResolution: resolveConfigLayers({ launch: { on_startup: false } }),
+    config: resolveSettings({ notebook: { on_startup: false } }),
   });
   await controller.start();
   const graph = controller.snapshot().graph;
@@ -1467,7 +1494,7 @@ test("serial scheduling follows dependency order and blocks disabled descendants
   const controller = createController({
     engine,
     notebook: notebook([["a", "x <- 1"], ["b", "y <- x"], ["c", "z <- y"]]),
-    configResolution: resolveConfigLayers({ launch: { on_startup: false } }),
+    config: resolveSettings({ notebook: { on_startup: false } }),
   });
   await controller.start();
   const events: HostEvent[] = [];
@@ -1525,7 +1552,7 @@ test("serial scheduling follows dependency order and blocks disabled descendants
 test("a scalar chain edit and run needs no separate binding cleanup", async () => {
   const engine = new FakeEngine();
   const controller = createController({
-    engine, notebook: notebook([["a", "x <- 1"], ["b", "y <- x + 1"], ["c", "z <- y + 1"]]), configResolution: resolveConfigLayers({ launch: { on_startup: false } }),
+    engine, notebook: notebook([["a", "x <- 1"], ["b", "y <- x + 1"], ["c", "z <- y + 1"]]), config: resolveSettings({ notebook: { on_startup: false } }),
   });
   try {
     await controller.start();
@@ -1568,7 +1595,7 @@ test("queued invalidations clear in one atomic request before evaluation resumes
   const controller = createController({
     engine,
     notebook: notebook([["a", "x <- 1"], ["b", "y <- 2"], ["c", "x + y"]]),
-    configResolution: resolveConfigLayers({ launch: { on_startup: false } }),
+    config: resolveSettings({ notebook: { on_startup: false } }),
   });
   await controller.start();
   const initial = command(controller, {
@@ -1652,7 +1679,7 @@ test("a failed cell drops only its same-run descendants and continues independen
       ["b", "y <- x + 1"],
       ["c", "independent <- 42"],
     ]),
-    configResolution: resolveConfigLayers({ launch: { on_startup: false } }),
+    config: resolveSettings({ notebook: { on_startup: false } }),
   });
   await controller.start();
   const run = command(controller, {
@@ -1680,7 +1707,7 @@ test("streamed log replacements compose partial lines without duplicating them",
   const controller = createController({
     engine,
     notebook: notebook([["a", "cat('ab\\nc\\n')"]]),
-    configResolution: resolveConfigLayers({ launch: { on_startup: false } }),
+    config: resolveSettings({ notebook: { on_startup: false } }),
   });
   await controller.start();
   const run = command(controller, {
@@ -1708,7 +1735,7 @@ test("native clear-output deltas reset every streamed projection before later ou
   const controller = createController({
     engine,
     notebook: notebook([["a", "stream_output()"]]),
-    configResolution: resolveConfigLayers({ launch: { on_startup: false } }),
+    config: resolveSettings({ notebook: { on_startup: false } }),
   });
   await controller.start();
   const events: HostEvent[] = [];
@@ -1764,7 +1791,7 @@ test("completion preserves the authoritative log beyond the live stream window",
   const controller = createController({
     engine,
     notebook: notebook([["a", "cat(large_output)"]]),
-    configResolution: resolveConfigLayers({ launch: { on_startup: false } }),
+    config: resolveSettings({ notebook: { on_startup: false } }),
   });
   await controller.start();
   const run = command(controller, {
@@ -1807,7 +1834,7 @@ test("editing an active cell requests scoped interruption and discards its late 
   const controller = createController({
     engine,
     notebook: notebook([["a", "x <- 1"], ["b", "y <- x"]]),
-    configResolution: resolveConfigLayers({ launch: { on_startup: false } }),
+    config: resolveSettings({ notebook: { on_startup: false } }),
   });
   await controller.start();
   const run = command(controller, {
@@ -1850,7 +1877,7 @@ test("analysis cache evicts old source entries while retaining recent reusable r
   const controller = createController({
     engine,
     notebook: notebook(sources.map((source, index) => [`cell-${index}`, source])),
-    configResolution: resolveConfigLayers({ launch: { on_startup: false } }),
+    config: resolveSettings({ notebook: { on_startup: false } }),
   });
   await controller.start();
   assert.equal(engine.analysisCalls.length, 1);
@@ -1906,7 +1933,7 @@ test('notebook option names colliding with Object.prototype remain editable and 
 test("parsed exact-limit physical source supports a reducing edit and small creation", { timeout: 60_000 }, async () => {
   const source = exactLimitNotebookSource();
   const engine = new FakeEngine();
-  const controller = createController({ engine, notebook: parsedNotebook(source), configResolution: resolveConfigLayers({ launch: { on_startup: false } }) });
+  const controller = createController({ engine, notebook: parsedNotebook(source), config: resolveSettings({ notebook: { on_startup: false } }) });
   await controller.start();
   try {
     const edit = command(controller, {
@@ -1944,7 +1971,7 @@ test("parsed exact-limit physical source supports a reducing edit and small crea
 test("parsed physical records retain BOM, mixed EOL, and duplicate options around an edit", async () => {
   const source = mixedPhysicalSource();
   const engine = new FakeEngine();
-  const controller = createController({ engine, notebook: parsedNotebook(source), configResolution: resolveConfigLayers({ launch: { on_startup: false } }) });
+  const controller = createController({ engine, notebook: parsedNotebook(source), config: resolveSettings({ notebook: { on_startup: false } }) });
   await controller.start();
   try {
     const edit = command(controller, {
@@ -1975,7 +2002,7 @@ test("failed durable commit does not adopt staged physical notebook bytes", asyn
   const controller = createController({
     engine: new FakeEngine(),
     notebook: parsedNotebook(source),
-    configResolution: resolveConfigLayers({ launch: { on_startup: false } }),
+    config: resolveSettings({ notebook: { on_startup: false } }),
     durableCommit: async () => { throw new Error("durable failure"); },
   });
   await controller.start();
@@ -2011,7 +2038,7 @@ test("source started keeps pending publication invisible and checks revision at 
   const controller = createController({
     engine: new FakeEngine(),
     notebook: notebook([["a", "x <- 1"]]),
-    configResolution: resolveConfigLayers({ launch: { on_startup: false } }),
+    config: resolveSettings({ notebook: { on_startup: false } }),
     sourceCommit: async (request, context) => {
       entered = true;
       const document = {
@@ -2023,7 +2050,7 @@ test("source started keeps pending publication invisible and checks revision at 
       const publish = context.preparePublication({
         document,
         path: context.path,
-        configResolution: context.configResolution,
+        config: context.config,
         layout: context.layout,
         disk: context.disk,
         sidecars: context.sidecars,
@@ -2078,7 +2105,7 @@ test("external reloads publish full authoritative cells, graph, and revisions", 
   const controller = createController({
     engine,
     notebook: notebook([["a", "x <- 1"]]),
-    configResolution: resolveConfigLayers({ launch: { on_startup: false } }),
+    config: resolveSettings({ notebook: { on_startup: false } }),
     sourceCommit: async (request, context) => {
       assert.equal(request.kind, "reload-source");
       const next = reloadDocuments[reloadIndex++];
@@ -2096,7 +2123,7 @@ test("external reloads publish full authoritative cells, graph, and revisions", 
       const publish = context.preparePublication({
         document,
         path: context.path,
-        configResolution: context.configResolution,
+        config: context.config,
         layout: context.layout,
         disk: context.disk,
         sidecars: context.sidecars,
@@ -2159,7 +2186,7 @@ test("external reload invalidates active evaluations before late success can pub
   const controller = createController({
     engine,
     notebook: notebook([["a", "x <- 1"], ["b", "y <- 2"], ["c", "z <- 3"]]),
-    configResolution: resolveConfigLayers({ launch: { on_startup: false } }),
+    config: resolveSettings({ notebook: { on_startup: false } }),
     sourceCommit: async (request, context) => {
       assert.equal(request.kind, "reload-source");
       const publish = context.preparePublication({
@@ -2168,7 +2195,7 @@ test("external reload invalidates active evaluations before late success can pub
           cells: context.document.cells.map((cell) => cell.id === "c" ? { ...cell, body: ["z <- 4"] } : cell),
         },
         path: context.path,
-        configResolution: context.configResolution,
+        config: context.config,
         layout: context.layout,
         disk: context.disk,
         sidecars: context.sidecars,
@@ -2214,13 +2241,13 @@ test("closing waits for the durable source lane before engine teardown", async (
   const controller = createController({
     engine: new FakeEngine(),
     notebook: notebook([["a", "x <- 1"]]),
-    configResolution: resolveConfigLayers({ launch: { on_startup: false } }),
+    config: resolveSettings({ notebook: { on_startup: false } }),
     sourceCommit: async (_request, context) => {
       entered = true;
       const publish = context.preparePublication({
         document: context.document,
         path: context.path,
-        configResolution: context.configResolution,
+        config: context.config,
         layout: context.layout,
         disk: context.disk,
         sidecars: context.sidecars,
@@ -2253,14 +2280,14 @@ test("save-as source publication can change path without advancing the document 
   const controller = createController({
     engine: new FakeEngine(),
     notebook: notebook([["a", "x <- 1"]]),
-    configResolution: resolveConfigLayers({ launch: { on_startup: false } }),
+    config: resolveSettings({ notebook: { on_startup: false } }),
     sourceCommit: async (request, context) => {
       assert.equal(request.kind, "save-as");
       const path = request.path ?? "/tmp/destination.alder";
       const publish = context.preparePublication({
         document: { ...context.document, path },
         path,
-        configResolution: context.configResolution,
+        config: context.config,
         layout: context.layout,
         disk: context.disk,
         sidecars: context.sidecars,
@@ -2294,12 +2321,12 @@ test("failed Save As binder restores the controller source identity", async () =
   const controller = createController({
     engine: new FakeEngine(),
     notebook: notebook([["a", "x <- 1"]]),
-    configResolution: resolveConfigLayers({ launch: { on_startup: false } }),
+    config: resolveSettings({ notebook: { on_startup: false } }),
     sourceCommit: async (_request, context) => {
       const publish = context.preparePublication({
         document: { ...context.document, path: "/tmp/destination.alder" },
         path: "/tmp/destination.alder",
-        configResolution: context.configResolution,
+        config: context.config,
         layout: context.layout,
         disk: context.disk,
         sidecars: context.sidecars,
@@ -2341,7 +2368,7 @@ test("failed source started leaves the physical notebook and revision unchanged"
   const controller = createController({
     engine: new FakeEngine(),
     notebook: notebook([["a", "x <- 1"]]),
-    configResolution: resolveConfigLayers({ launch: { on_startup: false } }),
+    config: resolveSettings({ notebook: { on_startup: false } }),
     sourceCommit: async () => { throw new Error("source failure"); },
   });
   await controller.start();
@@ -2367,7 +2394,7 @@ test("a source transaction publishes its immediate graph even when no analysis f
   const controller = createController({
     engine,
     notebook: notebook([["a", "x <- 1"]]),
-    configResolution: resolveConfigLayers({ launch: { on_startup: false } }),
+    config: resolveSettings({ notebook: { on_startup: false } }),
   });
   await controller.start();
   const events: string[] = [];
@@ -2410,14 +2437,14 @@ test("kernel failure waits for a pending run source commit", async () => {
   const controller = createController({
     engine,
     notebook: notebook([["a", "x <- 1"]]),
-    configResolution: resolveConfigLayers({ launch: { on_startup: false } }),
+    config: resolveSettings({ notebook: { on_startup: false } }),
     sourceCommit: async (request, context) => {
       entered = true;
       const document = request.document ?? context.document;
       const publish = context.preparePublication({
         document,
         path: document.path ?? context.path,
-        configResolution: context.configResolution,
+        config: context.config,
         layout: context.layout,
         disk: context.disk,
         sidecars: context.sidecars,
@@ -2484,7 +2511,7 @@ test("run source outcomes survive analysis failure after publication", async () 
   const controller = createController({
     engine,
     notebook: notebook([["a", "x <- 1"]]),
-    configResolution: resolveConfigLayers({ launch: { on_startup: false } }),
+    config: resolveSettings({ notebook: { on_startup: false } }),
   });
   await controller.start();
   try {
@@ -2531,7 +2558,7 @@ test("rejected stale run does not acknowledge a foreign identical edit", async (
   const controller = createController({
     engine: new FakeEngine(),
     notebook: notebook([["a", "x <- 1"]]),
-    configResolution: resolveConfigLayers({ launch: { on_startup: false } }),
+    config: resolveSettings({ notebook: { on_startup: false } }),
   });
   await controller.start();
   try {
@@ -2597,13 +2624,13 @@ test("a Stop is accepted while a run waits for durable source commit", async () 
   const controller = createController({
     engine,
     notebook: notebook([["a", "x <- 1"]]),
-    configResolution: resolveConfigLayers({ launch: { on_startup: false } }),
+    config: resolveSettings({ notebook: { on_startup: false } }),
     sourceCommit: async (request, context) => {
       commitEntered = true;
       await commitGate;
       const document = request.document ?? context.document;
       context.preparePublication({
-        document, path: document.path ?? context.path, configResolution: context.configResolution,
+        document, path: document.path ?? context.path, config: context.config,
         layout: context.layout, disk: context.disk, sidecars: context.sidecars,
         dirty: true, advanceRevision: true,
       })();
@@ -2645,7 +2672,7 @@ test("a late Stop cannot erase a successful matching completion", async () => {
   const controller = createController({
     engine,
     notebook: notebook([["a", "1 + 1"]]),
-    configResolution: resolveConfigLayers({ launch: { on_startup: false } }),
+    config: resolveSettings({ notebook: { on_startup: false } }),
   });
   await controller.start();
   const run = command(controller, {
@@ -2674,7 +2701,7 @@ test("a matching interrupted Stop cancels the run after its cell result is publi
   const controller = createController({
     engine,
     notebook: notebook([["a", "repeat Sys.sleep(1)"]]),
-    configResolution: resolveConfigLayers({ launch: { on_startup: false } }),
+    config: resolveSettings({ notebook: { on_startup: false } }),
   });
   await controller.start();
   const events: string[] = [];
@@ -2712,7 +2739,7 @@ test("a requested Stop canonicalizes a malformed native interrupt error", async 
   const controller = createController({
     engine,
     notebook: notebook([["a", "Sys.sleep(30)"]]),
-    configResolution: resolveConfigLayers({ launch: { on_startup: false } }),
+    config: resolveSettings({ notebook: { on_startup: false } }),
   });
   await controller.start();
   const run = command(controller, {
@@ -2746,7 +2773,7 @@ test("widget owner edits cancel the exact operation and late replies cannot comm
   const controller = createController({
     engine,
     notebook: notebook([["a", "threshold <- ui$slider(0, 10)"]]),
-    configResolution: resolveConfigLayers({ launch: { on_startup: false } }),
+    config: resolveSettings({ notebook: { on_startup: false } }),
   });
   await controller.start();
   const run = command(controller, {
@@ -2797,7 +2824,7 @@ test("a successful obsolete widget request replays authoritative source after un
       ["b", "seen <- threshold"],
       ["c", "Sys.sleep(2)"],
     ]),
-    configResolution: resolveConfigLayers({ launch: { on_startup: false, on_cell_change: "automatic" } }),
+    config: resolveSettings({ notebook: { on_startup: false, on_cell_change: "automatic" } }),
   });
   await controller.start();
   const initial = command(controller, {
@@ -2876,7 +2903,7 @@ test("a rejected obsolete widget request does not execute edited source", async 
       ["a", "threshold <- ui$slider(0, 10)"],
       ["b", "seen <- threshold"],
     ]),
-    configResolution: resolveConfigLayers({ launch: { on_startup: false, on_cell_change: "automatic" } }),
+    config: resolveSettings({ notebook: { on_startup: false, on_cell_change: "automatic" } }),
   });
   await controller.start();
   const initial = command(controller, {
@@ -2919,7 +2946,7 @@ test("an edited widget owner is rejected as stale before replacement analysis se
   const controller = createController({
     engine,
     notebook: notebook([["a", "threshold <- ui$slider(0, 10)"]]),
-    configResolution: resolveConfigLayers({ launch: { on_startup: false } }),
+    config: resolveSettings({ notebook: { on_startup: false } }),
   });
   await controller.start();
   const run = command(controller, {
@@ -2983,7 +3010,7 @@ test("datetime updates reject impossible UTC calendar values before reaching R",
   const controller = createController({
     engine,
     notebook: notebook([["a", "stamp <- ui$datetime()"]]),
-    configResolution: resolveConfigLayers({ launch: { on_startup: false } }),
+    config: resolveSettings({ notebook: { on_startup: false } }),
   });
   await controller.start();
   const run = command(controller, {
@@ -3014,7 +3041,7 @@ test("date range and counter widget updates enforce protocol boundaries", async 
   const controller = createController({
     engine,
     notebook: notebook([["dates", "selected <- ui$date_range()"]]),
-    configResolution: resolveConfigLayers({ launch: { on_startup: false } }),
+    config: resolveSettings({ notebook: { on_startup: false } }),
   });
   await controller.start();
   const run = command(controller, { type: "run", scope: "all", changes: [] });
@@ -3047,7 +3074,7 @@ test("date range and counter widget updates enforce protocol boundaries", async 
   const counterController = createController({
     engine: counterEngine,
     notebook: notebook([["counter", "counter_boundary <- ui$button()"]]),
-    configResolution: resolveConfigLayers({ launch: { on_startup: false } }),
+    config: resolveSettings({ notebook: { on_startup: false } }),
   });
   await counterController.start();
   const counterRun = command(counterController, { type: "run", scope: "all", changes: [] });
@@ -3074,7 +3101,7 @@ test("widget operations settle after their automatic consumer run and inherit it
       ["a", "threshold <- ui$slider(0, 10)"],
       ["b", "seen <- threshold"],
     ]),
-    configResolution: resolveConfigLayers({ launch: { on_startup: false } }),
+    config: resolveSettings({ notebook: { on_startup: false } }),
   });
   await controller.start();
   const initial = command(controller, {
@@ -3130,7 +3157,7 @@ test("owner edits expire pending inspect, lazy, and table requests before late r
       ["b", "lazy_value <- make_lazy()"],
       ["c", "table_value <- make_table()"],
     ]),
-    configResolution: resolveConfigLayers({ launch: { on_startup: false } }),
+    config: resolveSettings({ notebook: { on_startup: false } }),
   });
   await controller.start();
   const run = command(controller, {
@@ -3246,7 +3273,7 @@ test("output queries read bounded artifact pages without user JSON handle collis
   const controller = createController({
     engine: new FakeEngine(),
     notebook: notebook([["a", "x <- 1"]]),
-    configResolution: resolveConfigLayers({ launch: { on_startup: false } }),
+    config: resolveSettings({ notebook: { on_startup: false } }),
     outputStore,
     epoch: sessionEpoch,
   });
@@ -3279,7 +3306,7 @@ test("rerunning an owner expires a lazy request tied to its prior output object"
   const controller = createController({
     engine,
     notebook: notebook([["a", "lazy_value <- make_lazy()"]]),
-    configResolution: resolveConfigLayers({ launch: { on_startup: false } }),
+    config: resolveSettings({ notebook: { on_startup: false } }),
   });
   await controller.start();
   const initial = command(controller, {
@@ -3324,7 +3351,7 @@ test("lazy output completion uses the public loaded state and preserves renderer
   const controller = createController({
     engine,
     notebook: notebook([["a", "lazy_value <- make_lazy()"]]),
-    configResolution: resolveConfigLayers({ launch: { on_startup: false } }),
+    config: resolveSettings({ notebook: { on_startup: false } }),
   });
   await controller.start();
   const run = command(controller, {
@@ -3360,7 +3387,7 @@ test("uploads use the file widget journal and retain successful stored values", 
   const controller = createController({
     engine,
     notebook: notebook([["a", "files <- ui$file()"]]),
-    configResolution: resolveConfigLayers({ launch: { on_startup: false } }),
+    config: resolveSettings({ notebook: { on_startup: false } }),
     services: {
       service: async (name, payload) => {
         serviceCalls.push({ name, payload: structuredClone(payload) });
@@ -3422,7 +3449,7 @@ test("an upload stored after its widget owner changes is removed and never reach
   const controller = createController({
     engine,
     notebook: notebook([["a", "files <- ui$file()"]]),
-    configResolution: resolveConfigLayers({ launch: { on_startup: false } }),
+    config: resolveSettings({ notebook: { on_startup: false } }),
     services: {
       service: async (name) => {
         if (name === "upload.store") {
@@ -3483,7 +3510,7 @@ test("editor diagnostics publish only for an exact source identity and clear on 
   const controller = createController({
     engine: new FakeEngine(),
     notebook: notebook([["a", "x <- 1"]]),
-    configResolution: resolveConfigLayers({ launch: { on_startup: false } }),
+    config: resolveSettings({ notebook: { on_startup: false } }),
   });
   await controller.start();
   const source: CellSnapshot[] = [{ id: "a", revision: 0, type: "code", source: "x <- 1" }];
@@ -3534,7 +3561,7 @@ test("recovery baseline revision is preserved by the first durable transaction",
   const controller = createController({
     engine: new FakeEngine(),
     notebook: notebook([["a", "x <- 1"]]),
-    configResolution: resolveConfigLayers({ launch: { on_startup: false } }),
+    config: resolveSettings({ notebook: { on_startup: false } }),
     initialDocumentRevision: 7,
     durableCommit: async (commit) => { commits.push(commit); },
   });
@@ -3584,7 +3611,7 @@ test("variable snapshots wait for idle input, retain ownership, and reject late 
   const controller = createController({
     engine,
     notebook: notebook([["a", "x <- 42"]]),
-    configResolution: resolveConfigLayers({ launch: { on_startup: false } }),
+    config: resolveSettings({ notebook: { on_startup: false } }),
   });
   const variableEvents: unknown[] = [];
   controller.subscribe((event) => {
@@ -3660,13 +3687,13 @@ test("runtime availability failures survive source edits and save until restart 
   const controller = createController({
     engine,
     notebook: { ...notebook([["a", "x <- 1"]]), path: "/tmp/runtime-init.R" },
-    configResolution: resolveConfigLayers({ launch: { on_startup: false } }),
+    config: resolveSettings({ notebook: { on_startup: false } }),
     sourceCommit: async (request, context) => {
       const document = request.document ?? context.document;
       context.preparePublication({
         document,
         path: document.path ?? context.path,
-        configResolution: context.configResolution,
+        config: context.config,
         layout: context.layout,
         disk: context.disk,
         sidecars: context.sidecars,
@@ -3745,7 +3772,7 @@ test("kernel state invalidation preserves the cell error and blocks until explic
   const controller = createController({
     engine,
     notebook: notebook([["a", "x <- 1"]]),
-    configResolution: resolveConfigLayers({ launch: { on_startup: false } }),
+    config: resolveSettings({ notebook: { on_startup: false } }),
   });
   await controller.start();
 
@@ -3788,156 +3815,113 @@ test("kernel state invalidation preserves the cell error and blocks until explic
   assert.equal(controller.snapshot().runtime.executionReady, true);
   await controller.close();
 });
-test("concurrent config patches serialize and reject stale revisions", async () => {
-  const engine = new FakeEngine();
-  const calls: Array<Record<string, unknown>> = [];
-  const resolvers: Array<() => void> = [];
+test("concurrent project cache changes serialize and reject stale sidecar versions", async () => {
+  const calls: string[] = [];
+  let releaseWrite!: () => void;
   const controller = createController({
-    engine,
+    engine: new FakeEngine(),
     notebook: notebook([]),
-    configResolution: resolveConfigLayers({ launch: { on_startup: false } }),
+    config: resolveSettings({ notebook: { on_startup: false } }),
     sourceCommit: async (request, context) => {
       assert.equal(request.kind, "sidecar");
       assert.equal(request.sidecar, "config");
-      const resolution = resolveConfigLayers({
-        user: context.configResolution.layers.user,
-        project: mergeTestConfig(context.configResolution.layers.project, request.patch ?? {}),
-        runtime: context.configResolution.layers.runtime,
-        launch: context.configResolution.layers.launch,
-      });
-      calls.push({ config: resolution.effective });
-      await new Promise<void>((resolve) => resolvers.push(resolve));
+      const patch = request.patch as { cache: { dir: string } };
+      const config = { ...context.config, cache: { ...context.config.cache, dir: patch.cache.dir } };
+      calls.push(patch.cache.dir);
+      await new Promise<void>(resolve => { releaseWrite = resolve; });
       context.preparePublication({
-        document: context.document,
-        path: context.path,
-        configResolution: resolution,
-        layout: context.layout,
-        disk: context.disk,
-        sidecars: context.sidecars,
-        dirty: true,
-        advanceRevision: true,
+        document: context.document, path: context.path, config,
+        layout: context.layout, disk: context.disk,
+        sidecars: { ...context.sidecars, config: { state: "present", digest: "a".repeat(64), version: "cache-a" } },
+        dirty: false, advanceRevision: false,
       })();
-      return { config: resolution.effective };
+      return { config };
     },
   });
   await controller.start();
-  const first = command(controller, { type: "set-config", patch: { theme: "dark" } });
-  const second = command(controller, { type: "set-config", patch: { keymap: "vim" } });
-  const firstPromise = startCommand(controller, first);
-  const secondPromise = startCommand(controller, second);
+  const first = controller.dispatch(command(controller, { type: "set-config", patch: { cache: { dir: "cache-a" } } }));
+  const second = controller.dispatch(command(controller, { type: "set-config", patch: { cache: { dir: "cache-b" } } }));
   await eventually(() => calls.length === 1);
-  assert.equal(calls.length, 1);
-  resolvers.shift()?.();
-  await firstPromise;
-  await controller.awaitOperation(first.requestId, "controller-tests");
-  await secondPromise;
-  const secondOperation = await controller.awaitOperation(second.requestId, "controller-tests");
-  assert.equal(secondOperation.status, "error");
-  assert.equal(secondOperation.error?.code, "source_conflict");
-  assert.equal(calls.length, 1);
-  assert.equal(controller.snapshot().config.theme, "dark");
-  assert.equal(controller.snapshot().config.keymap, "default");
+  releaseWrite();
+  assert.equal((await first).error, null);
+  assert.equal((await second).error?.code, "source_conflict");
+  assert.deepEqual(calls, ["cache-a"]);
+  assert.equal(controller.snapshot().config.cache.dir, "cache-a");
+  assert.equal(controller.snapshot().config.theme, "system");
+  assert.equal(controller.snapshot().dirty, false);
   await controller.close();
 });
 
-test("runtime and config controls keep metadata and current snapshots coherent", async () => {
-  const engine = new FakeEngine();
+test("runtime controls update notebook metadata and current settings together", async () => {
   const controller = createController({
-    engine,
+    engine: new FakeEngine(),
     notebook: notebook([]),
-    configResolution: resolveConfigLayers({ runtime: { on_cell_change: "automatic", on_startup: true } }),
+    config: resolveSettings({ notebook: { on_cell_change: "automatic", on_startup: true } }),
     sourceCommit: async (request, context) => {
-      if (request.kind === "runtime") {
-        const patch = request.patch ?? {};
-        const resolution = resolveConfigLayers({
-          user: context.configResolution.layers.user,
-          project: context.configResolution.layers.project,
-          runtime: { ...context.configResolution.layers.runtime, ...patch },
-          launch: context.configResolution.layers.launch,
-        });
-        const metadata = isRecord(context.document.metadata) ? structuredClone(context.document.metadata) : {};
-        const priorRuntime = isRecord(metadata.runtime) ? metadata.runtime : {};
-        metadata.runtime = { ...priorRuntime, ...patch };
-        context.preparePublication({
-          document: { ...context.document, metadata },
-          path: context.path,
-          configResolution: resolution,
-          layout: context.layout,
-          disk: context.disk,
-          sidecars: context.sidecars,
-          dirty: true,
-          advanceRevision: true,
-        })();
-        return { config: resolution.effective };
-      }
-      assert.equal(request.kind, "sidecar");
-      assert.equal(request.sidecar, "config");
-      const patch = validateConfigLayer(request.patch ?? {});
-      const resolution = resolveConfigLayers({
-        user: context.configResolution.layers.user,
-        project: mergeTestConfig(context.configResolution.layers.project, request.patch ?? {}),
-        runtime: context.configResolution.layers.runtime,
-        launch: context.configResolution.layers.launch,
-      });
-      assertConfigPatchEffective(resolution, patch, "project");
+      assert.equal(request.kind, "runtime");
+      const patch = request.patch as { on_cell_change: "lazy"; on_startup: false; cache: { enabled: false } };
+      const metadata = { ...context.document.metadata, runtime: patch };
+      const config = { ...context.config, on_cell_change: patch.on_cell_change, on_startup: patch.on_startup,
+        cache: { ...context.config.cache, enabled: patch.cache.enabled } };
+      context.preparePublication({
+        document: { ...context.document, metadata }, path: context.path, config,
+        layout: context.layout, disk: context.disk, sidecars: context.sidecars,
+        dirty: true, advanceRevision: true,
+      })();
+      return { config };
     },
   });
   await controller.start();
-  const before = controller.cursor;
-  const runtime = command(controller, {
-    type: "set-runtime", on_cell_change: "lazy", on_startup: false,
-  });
-  await startCommand(controller, runtime);
-  await settle(controller, runtime.requestId);
-  let state = controller.snapshot();
-  assert.deepEqual(state.metadata.runtime, {
-    on_cell_change: "lazy", on_startup: false,
-  });
+  const result = await controller.dispatch(command(controller, {
+    type: "set-runtime", on_cell_change: "lazy", on_startup: false, cache_enabled: false,
+  }));
+  assert.equal(result.error, null);
+  const state = controller.snapshot();
+  assert.deepEqual(state.metadata.runtime, { on_cell_change: "lazy", on_startup: false, cache: { enabled: false } });
   assert.equal(state.config.on_cell_change, "lazy");
   assert.equal(state.config.on_startup, false);
+  assert.equal(state.config.cache.enabled, false);
   assert.equal(state.changed, true);
-  const configQuery = await controller.query({ type: "config" });
-  const queriedConfig = configQuery.result as {
-    effective: Record<string, unknown>;
-    layers: { runtime: Record<string, unknown> };
-    provenance: Record<string, string>;
-  };
-  assert.equal(queriedConfig.effective.on_cell_change, "lazy");
-  assert.equal(queriedConfig.layers.runtime.on_cell_change, "lazy");
-  assert.equal(queriedConfig.provenance.on_cell_change, "runtime");
-  const recovered = controller.snapshot();
-  assert.deepEqual(recovered.config, state.config);
-
-  const configCommand = command(controller, {
-    type: "set-config", patch: { on_cell_change: "automatic", on_startup: true },
-  });
-  await startCommand(controller, configCommand);
-  const configOperation = await controller.awaitOperation(configCommand.requestId, "controller-tests");
-  assert.equal(configOperation.status, "error");
-  assert.equal(configOperation.error?.code, "config_shadowed");
-  assert.deepEqual(configOperation.error?.details, {
-    key: "on_cell_change", writtenLayer: "project", effectiveLayer: "runtime",
-  });
-  state = controller.snapshot();
+  const queried = (await controller.query({ type: "config" })).result;
+  assert.deepEqual(queried, { config: state.config, preferencesVersion: null, sidecar: state.sidecars.config });
   assert.equal(state.runtime.executionMode, "lazy");
   assert.equal(state.runtime.runOnStartup, false);
-  assert.deepEqual(state.metadata.runtime, {
-    on_cell_change: "lazy", on_startup: false,
-  });
   await controller.close();
 });
+test("application preferences refresh every view without changing notebook settings or source", async () => {
+  const controller = createController({
+    engine: new FakeEngine(), notebook: notebook([["a", "x <- 1"]]),
+    config: resolveSettings({ notebook: { on_startup: false, on_cell_change: "lazy", cache: { enabled: false } }, project: { cache: { dir: "project-cache" } } }),
+    preferencesVersion: "preferences-v1",
+  });
+  const before = controller.snapshot();
+  controller.updatePreferences({ ...preferenceDefaults(), theme: "dark", keymap: "vim" }, "preferences-v2");
+  const after = controller.snapshot();
+  assert.equal(after.config.theme, "dark");
+  assert.equal(after.config.keymap, "vim");
+  assert.equal(after.config.on_cell_change, "lazy");
+  assert.equal(after.config.on_startup, false);
+  assert.deepEqual(after.config.cache, { enabled: false, dir: "project-cache" });
+  assert.equal(after.preferencesVersion, "preferences-v2");
+  assert.equal(after.documentRevision, before.documentRevision);
+  assert.equal(after.dirty, before.dirty);
+  assert.deepEqual(after.metadata, before.metadata);
+  assert.deepEqual(after.cells, before.cells);
+  await controller.close();
+});
+
 test("persisted layout updates do not mark clean notebook source dirty", async () => {
   const controller = createController({
     engine: new FakeEngine(),
     notebook: notebook([]),
-    configResolution: resolveConfigLayers({ launch: { on_startup: false } }),
+    config: resolveSettings({ notebook: { on_startup: false } }),
     sourceCommit: async (request, context) => {
       assert.equal(request.sidecar, "layout");
       const layout = request.layout ?? null;
       context.preparePublication({
         document: context.document,
         path: context.path,
-        configResolution: context.configResolution,
+        config: context.config,
         layout,
         disk: context.disk,
         sidecars: context.sidecars,
@@ -3964,7 +3948,7 @@ test("source query returns the authoritative cell bodies", async () => {
   const controller = createController({
     engine: new FakeEngine(),
     notebook: notebook([["a", "x <- 1"]]),
-    configResolution: resolveConfigLayers({ launch: { on_startup: false } }),
+    config: resolveSettings({ notebook: { on_startup: false } }),
   });
   await controller.start();
   const response = await controller.query({ type: "source" });
@@ -3994,7 +3978,7 @@ test("package installation is asynchronous, leaves edits responsive, blocks runs
   const controller = createController({
     engine,
     notebook: notebook([["a", "x <- 1"]]),
-    configResolution: resolveConfigLayers({ launch: { on_startup: false } }),
+    config: resolveSettings({ notebook: { on_startup: false } }),
     services: {
       refreshPackageEnvironment: async () => refreshedEnvironment,
       service: async (name, payload) => {
@@ -4089,7 +4073,7 @@ test("package progress remains scoped to the running install operation", async (
   const controller = createController({
     engine,
     notebook: notebook([["a", "x <- 1"]]),
-    configResolution: resolveConfigLayers({ launch: { on_startup: false } }),
+    config: resolveSettings({ notebook: { on_startup: false } }),
     services: {
       service: async (name) => name === "packages.install"
         ? new Promise((resolve) => { finishInstall = resolve; })
@@ -4132,7 +4116,7 @@ test("failed package installation still restarts and reanalyzes before settling 
   const controller = createController({
     engine,
     notebook: notebook([["a", "x <- 1"]]),
-    configResolution: resolveConfigLayers({ launch: { on_startup: false } }),
+    config: resolveSettings({ notebook: { on_startup: false } }),
     services: {
       service: async (name) => name === "packages.install"
         ? { ok: false, status: "error", error: { code: "install_failed", message: "no archive" } }
@@ -4161,7 +4145,7 @@ test("failed package installation without library mutation does not restart runt
   const controller = createController({
     engine,
     notebook: notebook([["a", "x <- 1"]]),
-    configResolution: resolveConfigLayers({ launch: { on_startup: false } }),
+    config: resolveSettings({ notebook: { on_startup: false } }),
     services: {
       service: async (name) => name === "packages.install"
         ? { ok: false, status: "error", mutatedLibrary: false, error: { code: "r_not_found", message: "R is unavailable" } }
@@ -4188,7 +4172,7 @@ test("successful package installation without library mutation does not restart 
   const engine = new FakeEngine();
   const controller = createController({
     engine, notebook: notebook([["a", "x <- 1"]]),
-    configResolution: resolveConfigLayers({ launch: { on_startup: false } }),
+    config: resolveSettings({ notebook: { on_startup: false } }),
     services: { service: async (name) => name === "packages.install"
       ? { ok: true, status: "ready", mutatedLibrary: false }
       : { declared: [], installed: [], missing: [] } },
@@ -4208,7 +4192,7 @@ test("installer failure remains primary when package restart fails", async () =>
   const controller = createController({
     engine,
     notebook: notebook([["a", "x <- 1"]]),
-    configResolution: resolveConfigLayers({ launch: { on_startup: false } }),
+    config: resolveSettings({ notebook: { on_startup: false } }),
     services: {
       service: async (name) => name === "packages.install"
         ? { ok: false, status: "error", error: { code: "install_failed", message: "no archive" } }
@@ -4251,7 +4235,7 @@ test("package installation cannot start while a run is active", async () => {
   const controller = createController({
     engine,
     notebook: notebook([["a", "x <- 1"]]),
-    configResolution: resolveConfigLayers({ launch: { on_startup: false } }),
+    config: resolveSettings({ notebook: { on_startup: false } }),
     services: { service: async () => { serviceCalls += 1; return {}; } },
   });
   await controller.start();
@@ -4297,7 +4281,7 @@ test("an empty run-button plan remains unsettled until its causal reset complete
         { id: "b", type: "code", body: ["out <- btn"], options: { disabled: true }, revision: 0 },
       ],
     },
-    configResolution: resolveConfigLayers({ launch: { on_startup: false } }),
+    config: resolveSettings({ notebook: { on_startup: false } }),
   });
   await controller.start();
   const run = command(controller, {
@@ -4347,7 +4331,7 @@ test("a lazy explicit run settles only after its linked run-button reset", async
       ["b", "seen <- btn"],
       ["c", "result <- seen"],
     ]),
-    configResolution: resolveConfigLayers({ launch: { on_cell_change: "lazy", on_startup: false } }),
+    config: resolveSettings({ notebook: { on_cell_change: "lazy", on_startup: false } }),
   });
   await controller.start();
   const initial = command(controller, {
@@ -4404,7 +4388,7 @@ test("nested run buttons reset only their addressed child and journal the reset"
       ["a", "controls <- ui$array(go = ui$button(), level = ui$slider(0, 10))"],
       ["b", "seen <- controls"],
     ]),
-    configResolution: resolveConfigLayers({ launch: { on_startup: false } }),
+    config: resolveSettings({ notebook: { on_startup: false } }),
   });
   await controller.start();
   const run = command(controller, {
@@ -4446,7 +4430,7 @@ test("a run-button reset failure rejects the trigger and its causal run", async 
   const controller = createController({
     engine,
     notebook: notebook([["a", "btn <- ui$button()"], ["b", "seen <- btn"]]),
-    configResolution: resolveConfigLayers({ launch: { on_startup: false } }),
+    config: resolveSettings({ notebook: { on_startup: false } }),
   });
   await controller.start();
   const initial = command(controller, {
@@ -4484,7 +4468,7 @@ test("a failed barrier makes even never-run code stale", async () => {
   const controller = createController({
     engine,
     notebook: notebook([["a", "library(stats)"], ["b", "x <- 1"]]),
-    configResolution: resolveConfigLayers({ launch: { on_startup: false } }),
+    config: resolveSettings({ notebook: { on_startup: false } }),
   });
   await controller.start();
   const run = command(controller, {
@@ -4513,7 +4497,7 @@ test("moving or deleting a barrier forces exactly one clean restart before the n
     const controller = createController({
       engine,
       notebook: notebook([["a", "library(stats)"], ["b", "x <- 1"], ["c", "y <- x"]]),
-      configResolution: resolveConfigLayers({ launch: { on_startup: false } }),
+      config: resolveSettings({ notebook: { on_startup: false } }),
     });
     await controller.start();
     const initial = command(controller, {
@@ -4579,7 +4563,7 @@ test("an explicit restart consumes opaque-source invalidation without a second r
   const controller = createController({
     engine,
     notebook: notebook([["a", "source('helpers.R')"], ["b", "x <- 1"]]),
-    configResolution: resolveConfigLayers({ launch: { on_startup: false } }),
+    config: resolveSettings({ notebook: { on_startup: false } }),
   });
   await controller.start();
   const initial = command(controller, {
@@ -4627,7 +4611,7 @@ test("closing invalidates outstanding runtime requests and discards late replies
   const controller = createController({
     engine,
     notebook: notebook([["a", "x <- 1"]]),
-    configResolution: resolveConfigLayers({ launch: { on_startup: false } }),
+    config: resolveSettings({ notebook: { on_startup: false } }),
   });
   await controller.start();
   const run = command(controller, {
@@ -4650,7 +4634,7 @@ test("closing invalidates outstanding runtime requests and discards late replies
   assert.equal(controller.operation(inspect.requestId, "controller-tests")?.status, "error");
 });
 test("command completion commits one concurrent writer and reports the other revision conflict", async () => {
-  const controller = createController({ engine: new FakeEngine(), notebook: notebook([["a", "x <- 1"]]), configResolution: resolveConfigLayers({ launch: { on_startup: false } }) });
+  const controller = createController({ engine: new FakeEngine(), notebook: notebook([["a", "x <- 1"]]), config: resolveSettings({ notebook: { on_startup: false } }) });
   const edit = (body: string) => command(controller, {
     type: "transaction", expectedDocumentRevision: 0,
     changes: [{ type: "edit", cell: { cellId: "a" }, expectedRevision: 0, body: [body], cellType: "code" }],
@@ -4672,7 +4656,7 @@ test("command completion commits one concurrent writer and reports the other rev
 test("lost run responses retry once across leases and stay deduplicated beyond ordinary result retention", async () => {
   const engine = new FakeEngine();
   engine.deferred = true;
-  const controller = createController({ engine, notebook: notebook([["a", "x <- 1"]]), configResolution: resolveConfigLayers({ launch: { on_startup: false } }) });
+  const controller = createController({ engine, notebook: notebook([["a", "x <- 1"]]), config: resolveSettings({ notebook: { on_startup: false } }) });
   try {
     await controller.start();
     const run = command(controller, { type: "run", scope: "all" });
@@ -4695,7 +4679,7 @@ test("lost run responses retry once across leases and stay deduplicated beyond o
     await assert.rejects(controller.dispatch({ ...run, scope: "stale" } as HostCommand), { code: "request_id_conflict" });
 
     const restartedEngine = new FakeEngine();
-    const restarted = createController({ engine: restartedEngine, notebook: notebook([["a", "x <- 1"]]), configResolution: resolveConfigLayers({ launch: { on_startup: false } }) });
+    const restarted = createController({ engine: restartedEngine, notebook: notebook([["a", "x <- 1"]]), config: resolveSettings({ notebook: { on_startup: false } }) });
     try {
       await assert.rejects(restarted.dispatch(run), { code: "session_epoch_mismatch" });
       assert.equal(restartedEngine.evaluations.length, 0);
@@ -4707,7 +4691,7 @@ test("lost run responses retry once across leases and stay deduplicated beyond o
 test("distinct run requests execute FIFO and each response waits for its own completion", async () => {
   const engine = new FakeEngine();
   engine.deferred = true;
-  const controller = createController({ engine, notebook: notebook([["a", "x <- 1"]]), configResolution: resolveConfigLayers({ launch: { on_startup: false } }) });
+  const controller = createController({ engine, notebook: notebook([["a", "x <- 1"]]), config: resolveSettings({ notebook: { on_startup: false } }) });
   try {
     await controller.start();
     const firstCommand = command(controller, { type: "run", scope: "all" });
@@ -4730,7 +4714,7 @@ test("distinct run requests execute FIFO and each response waits for its own com
 test("edits bypass a running request and invalidate an older queued revision", async () => {
   const engine = new FakeEngine();
   engine.deferred = true;
-  const controller = createController({ engine, notebook: notebook([["a", "x <- 1"]]), configResolution: resolveConfigLayers({ launch: { on_startup: false } }) });
+  const controller = createController({ engine, notebook: notebook([["a", "x <- 1"]]), config: resolveSettings({ notebook: { on_startup: false } }) });
   try {
     await controller.start();
     const first = controller.dispatch(command(controller, { type: "run", scope: "all" }));
@@ -4751,7 +4735,7 @@ test("edits bypass a running request and invalidate an older queued revision", a
 test("Stop bypasses the run queue and cancels waiting runs", async () => {
   const engine = new FakeEngine();
   engine.deferred = true;
-  const controller = createController({ engine, notebook: notebook([["a", "x <- 1"]]), configResolution: resolveConfigLayers({ launch: { on_startup: false } }) });
+  const controller = createController({ engine, notebook: notebook([["a", "x <- 1"]]), config: resolveSettings({ notebook: { on_startup: false } }) });
   try {
     await controller.start();
     const first = controller.dispatch(command(controller, { type: "run", scope: "all" }));
@@ -4769,7 +4753,7 @@ test("Stop bypasses the run queue and cancels waiting runs", async () => {
 
 test("a concurrent edit during analysis prevents execution of an unexpected document revision", async () => {
   const engine = new FakeEngine();
-  const controller = createController({ engine, notebook: notebook([["a", "x <- 1"]]), configResolution: resolveConfigLayers({ launch: { on_startup: false } }) });
+  const controller = createController({ engine, notebook: notebook([["a", "x <- 1"]]), config: resolveSettings({ notebook: { on_startup: false } }) });
   try {
     await controller.start();
     const analyze = engine.analyze.bind(engine);
@@ -4794,7 +4778,7 @@ test("a concurrent edit during analysis prevents execution of an unexpected docu
 
 test("restart replay never evaluates edits made while the kernel was restarting", async () => {
   const engine = new FakeEngine();
-  const controller = createController({ engine, notebook: notebook([["a", "x <- 1"]]), configResolution: resolveConfigLayers({ launch: { on_startup: false } }) });
+  const controller = createController({ engine, notebook: notebook([["a", "x <- 1"]]), config: resolveSettings({ notebook: { on_startup: false } }) });
   try {
     await controller.start();
     let release!: () => void;

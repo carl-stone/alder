@@ -7,6 +7,8 @@ import {
   layoutSchema,
   mcpDocumentChangeSchema,
   setAppCommandSchema,
+  setConfigCommandSchema,
+  setPreferencesCommandSchema,
   textEditSchema,
   widgetUpdateSchema,
   type ArtifactHandle,
@@ -89,7 +91,6 @@ const empty = z.object({}).strict();
 const requestIdentity = { requestId: id, sessionEpoch: id };
 const expectedDocumentRevision = revision;
 const expectedCellRevision = revision;
-const jsonRecord = z.record(z.string(), z.unknown());
 const queryOffset = z.number().int().min(0).max(2_147_483_647).optional();
 
 const commonEffect = { ...requestIdentity };
@@ -116,7 +117,7 @@ const toolSchemas: Record<string, z.ZodType> = {
   edit_cell_ranges: z.object({ ...commonEffect, expectedDocumentRevision, cell: id, edits: z.array(textEditSchema).min(1).max(1_000), expectedRevision: expectedCellRevision }).strict(),
 
   select_r: z.object({ ...commonEffect, rscript: path, persistDefault: z.boolean().default(false), expectedDocumentRevision }).strict(),
-  set_runtime: z.object({ ...commonEffect, on_cell_change: z.enum(["automatic", "lazy"]).optional(), on_startup: z.boolean().optional(), expectedDocumentRevision }).strict().refine((v) => v.on_cell_change !== undefined || v.on_startup !== undefined, "provide a runtime setting"),
+  set_runtime: z.object({ ...commonEffect, on_cell_change: z.enum(["automatic", "lazy"]).optional(), on_startup: z.boolean().optional(), cache_enabled: z.boolean().optional(), expectedDocumentRevision }).strict().refine((v) => v.on_cell_change !== undefined || v.on_startup !== undefined || v.cache_enabled !== undefined, "provide a runtime setting"),
   reload_source: z.object({ ...commonEffect, expectedDocumentRevision, expectedDiskDigest: z.string().regex(/^[0-9a-f]{64}$/), expectedDiskVersion: id }).strict(),
   get_help: z.object({ contents: z.unknown() }).strict(),
   recovery_state: empty,
@@ -128,7 +129,8 @@ const toolSchemas: Record<string, z.ZodType> = {
   table_page: z.object({ ...commonEffect, handle: id, offset: z.number().int().min(0), limit: z.number().int().min(1).max(200), sortBy: z.string().max(256), sortDescending: z.boolean(), filter: z.string().max(32 * 1024), kernelEpoch: id }).strict(),
   materialize_output: z.object({ ...commonEffect, key: id, kernelEpoch: id }).strict(),
   get_config: empty,
-  set_config: z.object({ ...commonEffect, patch: jsonRecord, expectedSidecarVersion: id.nullable(), expectedDocumentRevision }).strict(),
+  set_preferences: z.object({ ...commonEffect, patch: setPreferencesCommandSchema.shape.patch, expectedPreferencesVersion: id.nullable() }).strict(),
+  set_config: z.object({ ...commonEffect, patch: setConfigCommandSchema.shape.patch, expectedSidecarVersion: id.nullable(), expectedDocumentRevision }).strict(),
   get_layout: empty,
   set_layout: z.object({ ...commonEffect, layout: layoutSchema, expectedSidecarVersion: id.nullable(), expectedDocumentRevision }).strict(),
   set_app: z.object({ ...commonEffect, patch: setAppCommandSchema.shape.patch, expectedDocumentRevision }).strict(),
@@ -143,10 +145,10 @@ const descriptions: Record<string, string> = {
   notebook_state: "Return the authoritative notebook snapshot and identity.", list_cells: "List cells in document order.", read_cell: "Read one logical cell.",
   add_cell: "Insert one code or Markdown cell.", edit_cell: "Replace one cell body.", delete_cell: "Delete one cell.", move_cell: "Move one cell.", rename_cell: "Rename one cell.", disable_cell: "Enable or disable one cell.",
   run_cell: "Run one cell and its required dependencies.", run_all: "Run all runnable cells.", run_stale: "Run stale cells.", interrupt: "Interrupt the identified active run.", get_value: "Read one current runtime value.", set_widget: "Apply one widget update.", save: "Save the current notebook.", check: "Analyze the notebook without evaluating source.",
-  apply_transaction: "Apply one atomic transaction.", edit_cell_ranges: "Apply exactly one text range edit.", select_r: "Select the Rscript runtime.", set_runtime: "Set runtime execution settings.", reload_source: "Reload source after checking disk preconditions.", get_help: "Read sanitized help content.", recovery_state: "Read durable recovery state.", shutdown: "Shutdown the host after explicit confirmation.", restart: "Restart the runtime.", format: "Format selected cells.", save_as: "Save the notebook to a new path.", read_output: "Read one bounded output page.", table_page: "Read one table page.", materialize_output: "Materialize one lazy output.", get_config: "Read notebook configuration.", set_config: "Update notebook configuration.", get_layout: "Read notebook layout.", set_layout: "Update notebook layout.", set_app: "Update application settings.", packages_status: "Read package status.", packages_declare: "Declare notebook packages.", packages_install: "Install notebook packages.", publish: "Publish the settled notebook.", upload_file: "Upload files for a widget.",
+  apply_transaction: "Apply one atomic transaction.", edit_cell_ranges: "Apply exactly one text range edit.", select_r: "Select the Rscript runtime.", set_runtime: "Set notebook execution and cache settings, saved in notebook metadata.", reload_source: "Reload source after checking disk preconditions.", get_help: "Read sanitized help content.", recovery_state: "Read durable recovery state.", shutdown: "Shutdown the host after explicit confirmation.", restart: "Restart the runtime.", format: "Format selected cells.", save_as: "Save the notebook to a new path.", read_output: "Read one bounded output page.", table_page: "Read one table page.", materialize_output: "Materialize one lazy output.", get_config: "Read current settings and versions: appearance/editor preferences belong to the application, execution/cache enablement to the notebook, and cache directory to the project.", set_preferences: "Update application appearance and editor preferences for every open notebook, using the current preferences version.", set_config: "Update the project cache directory only, using the current sidecar version and document revision.", get_layout: "Read notebook layout.", set_layout: "Update notebook layout.", set_app: "Update notebook presentation settings, saved in notebook metadata.", packages_status: "Read package status.", packages_declare: "Declare notebook packages.", packages_install: "Install notebook packages.", publish: "Publish the settled notebook.", upload_file: "Upload files for a widget.",
 };
 
-const catalogOrder = ["notebook_state", "list_cells", "read_cell", "add_cell", "edit_cell", "delete_cell", "move_cell", "rename_cell", "disable_cell", "run_cell", "run_all", "run_stale", "interrupt", "get_value", "set_widget", "save", "check", "apply_transaction", "edit_cell_ranges", "select_r", "set_runtime", "reload_source", "get_help", "recovery_state", "shutdown", "restart", "format", "save_as", "read_output", "table_page", "materialize_output", "get_config", "set_config", "get_layout", "set_layout", "set_app", "packages_status", "packages_declare", "packages_install", "publish", "upload_file"] as const;
+const catalogOrder = ["notebook_state", "list_cells", "read_cell", "add_cell", "edit_cell", "delete_cell", "move_cell", "rename_cell", "disable_cell", "run_cell", "run_all", "run_stale", "interrupt", "get_value", "set_widget", "save", "check", "apply_transaction", "edit_cell_ranges", "select_r", "set_runtime", "reload_source", "get_help", "recovery_state", "shutdown", "restart", "format", "save_as", "read_output", "table_page", "materialize_output", "get_config", "set_preferences", "set_config", "get_layout", "set_layout", "set_app", "packages_status", "packages_declare", "packages_install", "publish", "upload_file"] as const;
 const runtimeToolNames = new Set(["run_cell", "run_all", "run_stale", "get_value", "set_widget", "restart", "packages_status", "packages_install", "check"]);
 const staticResourceUris = new Set(["alder://notebook/source", "alder://notebook/dag", "alder://notebook/state"]);
 
@@ -442,7 +444,7 @@ function commandFromTool(options: AlderMcpOptions, name: string, args: Record<st
     case "apply_transaction": return transaction(args.changes as McpDocumentChange[]);
     case "edit_cell_ranges": return transaction([projectRangeEdit(args)]);
     case "select_r": return { ...base, type: "select-r", rscript: args.rscript, persistDefault: args.persistDefault, expectedDocumentRevision: args.expectedDocumentRevision } as HostCommand;
-    case "set_runtime": return { ...base, type: "set-runtime", on_cell_change: args.on_cell_change, on_startup: args.on_startup, expectedDocumentRevision: args.expectedDocumentRevision } as HostCommand;
+    case "set_runtime": return { ...base, type: "set-runtime", on_cell_change: args.on_cell_change, on_startup: args.on_startup, cache_enabled: args.cache_enabled, expectedDocumentRevision: args.expectedDocumentRevision } as HostCommand;
     case "reload_source": return { ...base, type: "reload-source", expectedDocumentRevision: args.expectedDocumentRevision, expectedDiskDigest: args.expectedDiskDigest, expectedDiskVersion: args.expectedDiskVersion } as HostCommand;
     case "shutdown": return { ...base, type: "shutdown", expectedDocumentRevision: args.expectedDocumentRevision, expectedClientIds: args.expectedClientIds } as HostCommand;
     case "restart": return { ...base, type: "restart", replay: args.replay, ...(args.expectedDocumentRevision === undefined ? {} : { expectedDocumentRevision: args.expectedDocumentRevision }) } as HostCommand;
@@ -450,6 +452,7 @@ function commandFromTool(options: AlderMcpOptions, name: string, args: Record<st
     case "save_as": return { ...base, type: "save-as", path: args.path, expectedDestination: args.expectedDestination, expectedDocumentRevision: args.expectedDocumentRevision } as HostCommand;
     case "table_page": return { ...base, type: "table-page", handle: args.handle, offset: args.offset, limit: args.limit, sortBy: args.sortBy, sortDescending: args.sortDescending, filter: args.filter, kernelEpoch: args.kernelEpoch } as HostCommand;
     case "materialize_output": return { ...base, type: "lazy-output", key: args.key, kernelEpoch: args.kernelEpoch } as HostCommand;
+    case "set_preferences": return { ...base, type: "set-preferences", patch: args.patch, expectedPreferencesVersion: args.expectedPreferencesVersion } as HostCommand;
     case "set_config": return { ...base, type: "set-config", patch: args.patch, expectedSidecarVersion: args.expectedSidecarVersion, expectedDocumentRevision: args.expectedDocumentRevision } as HostCommand;
     case "set_layout": return { ...base, type: "set-layout", layout: args.layout, expectedSidecarVersion: args.expectedSidecarVersion, expectedDocumentRevision: args.expectedDocumentRevision } as HostCommand;
     case "set_app": return { ...base, type: "set-app", patch: args.patch, expectedDocumentRevision: args.expectedDocumentRevision } as HostCommand;

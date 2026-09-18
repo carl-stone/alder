@@ -106,6 +106,22 @@ preferences and notebook/project settings with one clear writable owner for
 each setting. Defaults are ordinary fallbacks. Editing a setting must predictably
 change the effective value; do not recreate arbitrary override stacks.
 
+Application preferences own theme, keymap, editor assistance and appearance,
+table page size, autosave and format-on-save. A shared preference change reaches
+all open notebooks and survives relaunch. Notebook metadata owns automatic/lazy
+execution, run-on-startup and cache enablement. Project settings own the cache
+directory. Existing published-notebook layout, width and code visibility remain
+notebook metadata, distinct from application preferences. Each value has one
+owner plus a built-in fallback; launch arguments must not create a hidden,
+permanent settings override. Invalid settings must not prevent opening, editing
+or saving a notebook. Retain the invalid file and report the actionable problem.
+
+`--no-run` suppresses startup execution for that opening only; it does not change
+the notebook's run-on-startup setting. `--lazy` applies a normal, visible notebook
+execution-mode change once. The user can change it immediately afterward, and
+any persistence follows the ordinary document dirty/save workflow, with no
+separate launch-time file rewrite or continuing override.
+
 **R execution.** Let Ark own execution, interruption and native output facilities.
 Keep only the kernel adapter and R helpers required for observable notebook
 behavior, including widgets and necessary cell bookkeeping. Dependency analysis

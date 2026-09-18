@@ -9,7 +9,9 @@ import { Controller, type DurableCommitInput, type SourceCommitContext, type Sou
 import { Engine } from "./engine.js";
 import { createAlderServer, createOriginHost, type AlderServer, type AlderServerAddress } from "./server.js";
 import { createMcpHttpHandler } from "./mcp.js";
-import { appConfig, assertConfigPatchEffective, projectConfigPath, readConfigFile, resolveConfig, setAppConfig, validateConfigLayer, type ConfigResolution } from "./configuration.js";
+import { appConfig, projectConfigPath, readProjectSettings, readNotebookSettings, setNotebookSettings, setAppConfig } from "./configuration.js";
+import { resolveSettings, type Config, type ProjectSettingsPatch, type NotebookSettingsPatch, type PreferencesPatch } from "./settings.js";
+import { ApplicationPreferences } from "./preferences.js";
 import { readLayout, validateLayout } from "./layout.js";
 import { DocumentStore, FileConflict, type PreparedReload, type PreparedSaveAs, type PreparedSidecar } from "./persistence.js";
 import { RecoveryWriter, recoveryObservationMatches, type DiskObservation as RecoveryDiskObservation, type RecoveryBaseline, type RecoveryCellState, type RecoverySidecarObservations } from "./recovery.js";
@@ -90,6 +92,8 @@ const optionsSchema = z.object({
   externalBearerValidated: z.boolean().default(false),
   rscript: z.string().optional(),
   recoveryDirectory: z.string().optional(),
+  preferences: z.custom<ApplicationPreferences>().optional(),
+  preferencesPath: z.string().optional(),
   resources: z.custom<ApplicationResources>(),
   internalHost: z.boolean().default(false),
   session: z.object({
@@ -271,10 +275,36 @@ async function startNotebookHost(
   let recoveryConflict = false;
   let recoveryDocumentRevision = 0;
   let packageDeclarationIntent: string[] = [];
-  let projectConfigLayer: Record<string, unknown> = {};
+  let projectSettings: ProjectSettingsPatch = {};
+  const preferences = options.preferences ?? await ApplicationPreferences.open(options.preferencesPath);
+  let unsubscribePreferences: (() => void) | undefined;
+  const settingsErrors = new Map<string, string>();
+  const publishSettingsError = (): void => {
+    const message = [...settingsErrors.values()].join("\n");
+    controller?.publishServiceError("settings", message ? { code: "settings_invalid", message } : null);
+  };
+  const loadProjectSettings = async (path: string | null): Promise<ProjectSettingsPatch> => {
+    try {
+      const settings = await readProjectSettings(path);
+      settingsErrors.delete("project");
+      publishSettingsError();
+      return settings;
+    } catch (error) {
+      settingsErrors.set("project", `Fix the project settings file ${path}: ${errorMessage(error)}`);
+      publishSettingsError();
+      return {};
+    }
+  };
+  const configurationFor = (document: NotebookDocument, project = projectSettings): Config => {
+    let notebook: NotebookSettingsPatch = {};
+    try { notebook = readNotebookSettings(document.metadata); settingsErrors.delete("notebook"); }
+    catch (error) { settingsErrors.set("notebook", `Fix runtime settings in ${document.path ?? "this notebook"}: ${errorMessage(error)}`); }
+    publishSettingsError();
+    return resolveSettings({ preferences: preferences.snapshot().values, notebook, project });
+  };
   let projectLayoutIntent: Layout | null = null;
-  const pendingSidecars = { config: false, layout: false, packages: false };
-  let configResolution: ConfigResolution | null = null;
+  const pendingSidecars = { layout: false, packages: false };
+  let config: Config | null = null;
   let resolvedLayout: Layout | null = null;
   const packageCallbacks: JobCallbacks = {
     onProgress: event => {
@@ -385,6 +415,8 @@ async function startNotebookHost(
     rejectRuntimeReady(new Error("Alder host closed before runtime startup completed"));
     void runtimeBootstrap?.catch(() => {});
     unsubscribe?.();
+    unsubscribePreferences?.();
+    if (!options.preferences) await preferences.close();
     await sourceWatchRunning?.catch(() => {});
     const errors: unknown[] = [];
     const attempt = async (operation: () => unknown): Promise<void> => { try { await operation(); } catch (error) { errors.push(error); } };
@@ -426,13 +458,9 @@ async function startNotebookHost(
     let notebook = opened.notebook;
     if (isUntitled) notebook = { ...notebook, path: null };
     if (options.expectedSource !== undefined && !store.matchesSource(options.expectedSource)) throw new FileConflict();
-    const launchConfig = {
-      ...(options.executionMode === undefined ? {} : { on_cell_change: options.executionMode }),
-      ...(options.runOnStartup === undefined ? {} : { on_startup: options.runOnStartup }),
-    };
     const projectPath = isUntitled ? join(notebookDirectory, ".alder", "config.yaml") : projectConfigPath(store.path);
-    projectConfigLayer = await readConfigFile(projectPath);
-    configResolution = await resolveConfig({ path: isUntitled ? null : store.path, metadata: notebook.metadata, project: projectConfigLayer, launch: launchConfig });
+    projectSettings = await loadProjectSettings(projectPath);
+    config = configurationFor(notebook);
     projectLayoutIntent = isUntitled ? null : await readLayout(store.path);
     resolvedLayout = projectLayoutIntent;
     processScope = await createProcessScope(options.resources);
@@ -452,7 +480,7 @@ async function startNotebookHost(
       cells: recoveryCellStates(notebook),
       path: notebook.path ?? (isUntitled ? null : store.path),
       project: notebookDirectory,
-      config: projectConfigLayer as never,
+      config: projectSettings as never,
       layout: projectLayoutIntent as never,
       packageDeclarationIntent: packageDeclarationIntent as never,
       notebookDiskObservation: sourceObservation(store),
@@ -472,7 +500,6 @@ async function startNotebookHost(
       const bytes = decodePhysicalBytes(materialized.physicalBytes);
       if (bytes === null) throw new Error("recovery baseline has no physical source bytes");
       notebook = restoreNotebookCellIdentity(parseNotebook(bytes, notebook.path ?? (isUntitled ? null : store.path)), materialized.cells);
-      if (isRecord(materialized.config)) projectConfigLayer = materialized.config as Record<string, unknown>;
       if (materialized.layout !== undefined) projectLayoutIntent = materialized.layout === null ? null : validateLayout(materialized.layout);
       if (Array.isArray(materialized.packageDeclarationIntent) && materialized.packageDeclarationIntent.every(value => typeof value === "string")) {
         packageDeclarationIntent = [...materialized.packageDeclarationIntent] as string[];
@@ -487,13 +514,12 @@ async function startNotebookHost(
         notebook = restoreNotebookCellIdentity(notebook, materialized.cells);
       }
     }
-    configResolution = await resolveConfig({ path: isUntitled ? null : store.path, metadata: notebook.metadata, project: projectConfigLayer, launch: launchConfig });
+    config = configurationFor(notebook);
+    cacheDirectory = config.cache.dir ? resolve(notebookDirectory, config.cache.dir) : cacheDirectory;
     resolvedLayout = projectLayoutIntent;
-    const actualProjectConfig = await readConfigFile(projectPath);
     const actualProjectLayout = isUntitled ? null : await readLayout(store.path);
     let actualProjectPackages: string[] = [];
     try { actualProjectPackages = [...(await readPackageDeclarations(notebookDirectory)).packages]; } catch { actualProjectPackages = []; }
-    pendingSidecars.config = recoveryPending && observationsMatch && !sameSemanticValue(projectConfigLayer, actualProjectConfig);
     pendingSidecars.layout = recoveryPending && observationsMatch && !sameSemanticValue(projectLayoutIntent, actualProjectLayout);
     pendingSidecars.packages = recoveryPending && observationsMatch && !sameSemanticValue(packageDeclarationIntent, actualProjectPackages);
     if (recoveryPending) {
@@ -614,9 +640,9 @@ async function startNotebookHost(
       if (projection !== undefined) publishedRecoveryProjection = projection;
       pendingRecoveryProjection = null;
     };
-    type SourcePublicationInput = Omit<SourcePublication, "configResolution"> & { configResolution?: ConfigResolution };
+    type SourcePublicationInput = Omit<SourcePublication, "config"> & { config?: Config };
     const publishSource = (context: SourceCommitContext, publication: SourcePublicationInput, projection: PublishedRecoveryProjection | null | undefined = undefined): void => {
-      const preparedPublication: SourcePublication = { ...publication, configResolution: publication.configResolution ?? context.configResolution };
+      const preparedPublication: SourcePublication = { ...publication, config: publication.config ?? context.config };
       const binder = context.preparePublication(preparedPublication);
       if (projection === undefined && pendingRecoveryProjection === null) applyPublishedProjection(binder);
       else applyPublishedProjection(binder, projection === undefined ? pendingRecoveryProjection : projection);
@@ -650,26 +676,13 @@ async function startNotebookHost(
         return { sidecars, error: { kind, error } };
       };
       try {
-        if (recoveryPending || pendingSidecars.config || pendingSidecars.layout || pendingSidecars.packages) {
-          activeKind = "config";
-          const actualConfig = await readConfigFile(projectConfigPath(store!.path));
-          pendingSidecars.config = !sameSemanticValue(projectConfigLayer, actualConfig);
+        if (recoveryPending || pendingSidecars.layout || pendingSidecars.packages) {
           activeKind = "layout";
           const actualLayout = await readLayout(store!.path);
           pendingSidecars.layout = !sameSemanticValue(projectLayoutIntent, actualLayout);
           activeKind = "packages";
           const actualPackages = await readPackageDeclarations(notebookDirectory);
           pendingSidecars.packages = !sameSemanticValue(packageDeclarationIntent, actualPackages.packages);
-        }
-        if (pendingSidecars.config) {
-          activeKind = "config";
-          const prepared = await store!.prepareConfig(projectConfigLayer, store!.sidecarObservation("config").version);
-          projectConfigLayer = { ...prepared.value };
-          const published = await prepared.publish();
-          pendingSidecars.config = false;
-          configResolution = await resolveConfig({ path: store!.path, metadata: document.metadata, project: projectConfigLayer, launch: launchConfig });
-          updateObservation("config", published.observation);
-          await checkpointRecovery(disk, sidecars);
         }
         if (pendingSidecars.layout) {
           activeKind = "layout";
@@ -707,7 +720,7 @@ async function startNotebookHost(
     const publishSidecarFailure = (
       context: SourceCommitContext,
       document: NotebookDocument,
-      configResolution: ConfigResolution,
+      config: Config,
       layout: SourcePublication["layout"],
       kind: "config" | "layout" | "packages",
       error: unknown,
@@ -718,7 +731,7 @@ async function startNotebookHost(
         ...context.sidecars,
         [kind]: { ...observed[kind], error: asHostError(error, code, context.operationId) },
       };
-      publishSource(context, { document, path: context.path, configResolution, layout, disk: context.disk, sidecars, dirty: true, advanceRevision: true });
+      publishSource(context, { document, path: context.path, config, layout, disk: context.disk, sidecars, dirty: true, advanceRevision: true });
       return { committed: true, diskError: { code, sidecar: kind, message: errorMessage(error) } };
     };
     const sourceCommit: SourceCommitHandler = async (request, context) => {
@@ -728,7 +741,7 @@ async function startNotebookHost(
         await appendRecovery({
           fromRevision: context.fromRevision,
           document,
-          config: projectConfigLayer,
+          config: projectSettings,
           layout: projectLayoutIntent,
           disk: context.disk,
           sidecars: context.sidecars,
@@ -753,7 +766,7 @@ async function startNotebookHost(
           const sidecars = retry.sidecars;
           let clearError: unknown = null;
           let cleared = false;
-          if (retry.error === null && !pendingSidecars.config && !pendingSidecars.layout && !pendingSidecars.packages && recoveryPending && recoveryFingerprint !== undefined) {
+          if (retry.error === null && !pendingSidecars.layout && !pendingSidecars.packages && recoveryPending && recoveryFingerprint !== undefined) {
             try {
               cleared = await recovery!.clearIfMatch({ documentRevision: context.fromRevision, fingerprint: recoveryFingerprint });
               if (cleared) {
@@ -771,7 +784,6 @@ async function startNotebookHost(
             || clearError !== null
             || checkpointError !== null
             || recoveryPending
-            || pendingSidecars.config
             || pendingSidecars.layout
             || pendingSidecars.packages;
           publishSource(context, { document: context.document, path: store!.path, layout: resolvedLayout, disk, sidecars, dirty, advanceRevision: false }, cleared ? null : undefined);
@@ -786,48 +798,36 @@ async function startNotebookHost(
         }
       }
       if (request.kind === "runtime") {
-        const patch = validateConfigLayer(request.patch ?? {});
-        const document = setMetadata(
-          context.document,
-          "runtime",
-          deepMergeRecord(isRecord(context.document.metadata?.runtime) ? context.document.metadata.runtime : {}, patch),
-        );
-        const nextConfigResolution = await resolveConfig({ path: isUntitled ? null : store!.path, metadata: document.metadata, project: projectConfigLayer, launch: launchConfig });
-        assertConfigPatchEffective(nextConfigResolution, patch, "runtime");
-        await appendRecovery({ fromRevision: context.fromRevision, document, config: projectConfigLayer, layout: projectLayoutIntent, disk: context.disk, sidecars: context.sidecars, fingerprint: request.fingerprint ?? "runtime" });
-        configResolution = nextConfigResolution;
-        publishSource(context, { document, path: context.path, configResolution: nextConfigResolution, layout: context.layout, disk: context.disk, sidecars: context.sidecars, dirty: true, advanceRevision: true });
-        return { effective: nextConfigResolution.effective, layers: nextConfigResolution.layers, provenance: nextConfigResolution.provenance };
+        const updated = setNotebookSettings(context.document, request.patch as NotebookSettingsPatch);
+        const document = setMetadata(context.document, "runtime", updated.metadata?.runtime ?? null);
+        const notebook = readNotebookSettings(document.metadata);
+        const nextConfig = resolveSettings({ preferences: preferences.snapshot().values, notebook, project: projectSettings });
+        await appendRecovery({ fromRevision: context.fromRevision, document, config: projectSettings, layout: projectLayoutIntent, disk: context.disk, sidecars: context.sidecars, fingerprint: request.fingerprint ?? "runtime" });
+        config = nextConfig;
+        publishSource(context, { document, path: context.path, config: nextConfig, layout: context.layout, disk: context.disk, sidecars: context.sidecars, dirty: true, advanceRevision: true });
+        settingsErrors.delete("notebook");
+        publishSettingsError();
+        return { config: nextConfig };
       }
       if (request.kind === "sidecar" && request.sidecar === "config") {
-        if (isUntitled) throw Object.assign(new Error("configuration requires a notebook path"), { code: "notebook_has_no_path" });
-        const patch = validateConfigLayer(request.patch ?? {});
-        const prepared = await store!.prepareConfig(deepMergeRecord(projectConfigLayer, patch), context.sidecars.config.version);
-        const document = context.document;
-        const nextProjectConfig = prepared.value;
-        const nextConfigResolution = await resolveConfig({ path: store!.path, metadata: document.metadata, project: nextProjectConfig, launch: launchConfig });
-        assertConfigPatchEffective(nextConfigResolution, patch, "project");
-        await appendRecovery({ fromRevision: context.fromRevision, document, config: nextProjectConfig, layout: projectLayoutIntent, disk: context.disk, sidecars: context.sidecars, fingerprint: request.fingerprint ?? "config" });
-        projectConfigLayer = { ...nextProjectConfig };
-        configResolution = nextConfigResolution;
-        pendingSidecars.config = true;
-        try {
-          const published = await prepared.publish();
-          pendingSidecars.config = false;
-          const sidecars = { ...context.sidecars, config: published.observation };
-          await checkpointRecovery(context.disk, sidecars);
-          publishSource(context, { document, path: context.path, configResolution: nextConfigResolution, layout: context.layout, disk: context.disk, sidecars, dirty: true, advanceRevision: true });
-          return { effective: nextConfigResolution.effective, layers: nextConfigResolution.layers, provenance: nextConfigResolution.provenance };
-        } catch (error) {
-          const code = pendingSidecars.config ? "sidecar_write_failed" : "recovery_checkpoint_failed";
-          return publishSidecarFailure(context, document, nextConfigResolution, context.layout, "config", error, code);
-        }
+        if (isUntitled) throw Object.assign(new Error("Project settings require a notebook path"), { code: "notebook_has_no_path" });
+        const prepared = await store!.prepareConfig(request.patch as ProjectSettingsPatch, context.sidecars.config.version);
+        const published = await prepared.publish();
+        projectSettings = published.value;
+        config = configurationFor(context.document);
+        cacheDirectory = config.cache.dir ? resolve(notebookDirectory, config.cache.dir) : join(notebookDirectory, ".alder", "cache");
+        settingsErrors.delete("project");
+        publishSettingsError();
+        const sidecars = { ...context.sidecars, config: published.observation };
+        publishSource(context, { document: context.document, path: context.path, config, layout: context.layout, disk: context.disk, sidecars, dirty: context.dirty, advanceRevision: false });
+        await checkpointRecovery(context.disk, sidecars);
+        return { config };
       }
       if (request.kind === "sidecar" && request.sidecar === "layout") {
         if (isUntitled) throw Object.assign(new Error("layout requires a notebook path"), { code: "notebook_has_no_path" });
         const requestedLayout = request.layout ?? null;
         const prepared = await store!.prepareLayout(requestedLayout as never, context.sidecars.layout.version);
-        await appendRecovery({ fromRevision: context.fromRevision, document: context.document, config: projectConfigLayer, layout: prepared.value, disk: context.disk, sidecars: context.sidecars, fingerprint: request.fingerprint ?? "layout" });
+        await appendRecovery({ fromRevision: context.fromRevision, document: context.document, config: projectSettings, layout: prepared.value, disk: context.disk, sidecars: context.sidecars, fingerprint: request.fingerprint ?? "layout" });
         projectLayoutIntent = prepared.value;
         pendingSidecars.layout = true;
         try {
@@ -840,14 +840,14 @@ async function startNotebookHost(
           return { layout: resolvedLayout };
         } catch (error) {
           const code = pendingSidecars.layout ? "sidecar_write_failed" : "recovery_checkpoint_failed";
-          return publishSidecarFailure(context, context.document, context.configResolution, projectLayoutIntent, "layout", error, code);
+          return publishSidecarFailure(context, context.document, context.config, projectLayoutIntent, "layout", error, code);
         }
       }
       if (request.kind === "sidecar" && request.sidecar === "packages") {
         if (isUntitled) throw Object.assign(new Error("packages require a notebook path"), { code: "notebook_has_no_path" });
         const additions = request.packages ?? [];
         const prepared = await store!.preparePackages(additions, context.sidecars.packages.version);
-        await appendRecovery({ fromRevision: context.fromRevision, document: context.document, config: projectConfigLayer, layout: projectLayoutIntent, disk: context.disk, sidecars: context.sidecars, fingerprint: request.fingerprint ?? "packages" });
+        await appendRecovery({ fromRevision: context.fromRevision, document: context.document, config: projectSettings, layout: projectLayoutIntent, disk: context.disk, sidecars: context.sidecars, fingerprint: request.fingerprint ?? "packages" });
         packageDeclarationIntent = [...prepared.value];
         pendingSidecars.packages = true;
         try {
@@ -859,16 +859,16 @@ async function startNotebookHost(
           return { ok: true, path: notebookDirectory, metadata: join(notebookDirectory, ".alder", "packages.yaml"), packages: [...published.value], sidecarVersion: published.observation.version };
         } catch (error) {
           const code = pendingSidecars.packages ? "sidecar_write_failed" : "recovery_checkpoint_failed";
-          return publishSidecarFailure(context, context.document, context.configResolution, context.layout, "packages", error, code);
+          return publishSidecarFailure(context, context.document, context.config, context.layout, "packages", error, code);
         }
       }
       if (request.kind === "sidecar" && request.sidecar === undefined && request.patch !== undefined) {
         const appDocument = setAppConfig(context.document, request.patch);
         const document = setMetadata(context.document, "app", appDocument.metadata?.app ?? null);
-        await appendRecovery({ fromRevision: context.fromRevision, document, config: projectConfigLayer, layout: projectLayoutIntent, disk: context.disk, sidecars: context.sidecars, fingerprint: request.fingerprint ?? "app" });
+        await appendRecovery({ fromRevision: context.fromRevision, document, config: projectSettings, layout: projectLayoutIntent, disk: context.disk, sidecars: context.sidecars, fingerprint: request.fingerprint ?? "app" });
         const appResolution = appConfig(document);
         publishSource(context, { document, path: context.path, layout: context.layout, disk: context.disk, sidecars: context.sidecars, dirty: true, advanceRevision: true });
-        return { effective: appResolution.effective, provenance: appResolution.provenance };
+        return appResolution;
       }
       if (request.kind === "save-as" && request.path !== undefined && !isUntitled
           && await realpath(request.path).catch(() => null) === store!.path) {
@@ -893,9 +893,9 @@ async function startNotebookHost(
           if (preparedSave.destination !== preparedOwner.canonicalPath) throw new Error("Save As destination canonicalization changed during preparation");
           const destination = preparedSave.destination;
           const destinationDirectory = dirname(destination);
-          const destinationCache = join(destinationDirectory, ".alder", "cache");
-          const destinationProjectConfig = await readConfigFile(projectConfigPath(destination));
-          const destinationConfigResolution = await resolveConfig({ path: destination, metadata: context.document.metadata, project: destinationProjectConfig, launch: launchConfig });
+          const destinationProjectConfig = await loadProjectSettings(projectConfigPath(destination));
+          const destinationConfig = configurationFor(context.document, destinationProjectConfig);
+          const destinationCache = destinationConfig.cache.dir ? resolve(destinationDirectory, destinationConfig.cache.dir) : join(destinationDirectory, ".alder", "cache");
           let destinationLayout = await readLayout(destination);
           let destinationPackages: string[] = [];
           try { destinationPackages = [...(await readPackageDeclarations(destinationDirectory)).packages]; } catch { destinationPackages = []; }
@@ -945,7 +945,7 @@ async function startNotebookHost(
           const publicationBinder = context.preparePublication({
             document: { ...context.document, path: destination },
             path: destination,
-            configResolution: destinationConfigResolution,
+            config: destinationConfig,
             layout: destinationLayout,
             disk: destinationDisk,
             sidecars: destinationSidecars,
@@ -959,7 +959,7 @@ async function startNotebookHost(
               const binder = context.preparePublication({
                 document: context.document,
                 path: context.path,
-                configResolution: context.configResolution,
+                config: context.config,
                 layout: context.layout,
                 disk: context.disk,
                 sidecars: context.sidecars,
@@ -981,12 +981,11 @@ async function startNotebookHost(
                 packageManager = nextManager;
                 notebookDirectory = destinationDirectory;
                 cacheDirectory = destinationCache;
-                configResolution = destinationConfigResolution;
-                projectConfigLayer = { ...destinationProjectConfig };
+                config = destinationConfig;
+                projectSettings = { ...destinationProjectConfig };
                 resolvedLayout = destinationLayout;
                 projectLayoutIntent = destinationLayout;
                 packageDeclarationIntent = destinationPackages;
-                pendingSidecars.config = false;
                 pendingSidecars.layout = false;
                 pendingSidecars.packages = false;
                 isUntitled = false;
@@ -1068,21 +1067,20 @@ async function startNotebookHost(
             : { expectedDiskDigest: request.expectedDisk.digest ?? "", expectedDiskVersion: request.expectedDisk.version ?? "" };
           const preparedReload = await store.prepareReload(precondition, context.document);
           const nextDocument = preparedReload.notebook;
-          let nextProjectConfig = projectConfigLayer;
+          let nextProjectConfig = projectSettings;
           let nextLayout = projectLayoutIntent;
           let nextPackageDeclarationIntent = packageDeclarationIntent;
           const nextPendingSidecars = { ...pendingSidecars };
           if (sidecarsChanged) {
             sidecarReadKind = "config";
-            nextProjectConfig = await readConfigFile(projectConfigPath(store.path));
+            nextProjectConfig = await loadProjectSettings(projectConfigPath(store.path));
             sidecarReadKind = "layout";
             nextLayout = await readLayout(store.path);
             sidecarReadKind = null;
           }
-          const nextConfigResolution = sidecarsChanged ? await resolveConfig({ path: store.path, metadata: nextDocument.metadata, project: nextProjectConfig, launch: launchConfig }) : context.configResolution;
+          const nextConfig = configurationFor(nextDocument, nextProjectConfig);
           if (sidecarsChanged) {
             try { nextPackageDeclarationIntent = [...(await readPackageDeclarations(dirname(store.path))).packages]; } catch { nextPackageDeclarationIntent = []; }
-            nextPendingSidecars.config = false;
             nextPendingSidecars.layout = false;
             nextPendingSidecars.packages = false;
           }
@@ -1095,17 +1093,16 @@ async function startNotebookHost(
           preparedReload.adopt();
           store.adoptSidecarObservations(observed.store);
           await observed.store.close();
-          publishSource(context, { document: nextDocument, path: store.path, layout: nextLayout, disk: nextDisk, sidecars: nextSidecars, dirty: false, advanceRevision: sourceChanged || sidecarsChanged, invalidateRuntime: sourceChanged, configResolution: nextConfigResolution });
+          publishSource(context, { document: nextDocument, path: store.path, layout: nextLayout, disk: nextDisk, sidecars: nextSidecars, dirty: false, advanceRevision: sourceChanged || sidecarsChanged, invalidateRuntime: sourceChanged, config: nextConfig });
           notebook = nextDocument;
           if (sidecarsChanged) {
-            projectConfigLayer = { ...nextProjectConfig };
+            projectSettings = { ...nextProjectConfig };
             projectLayoutIntent = nextLayout;
             resolvedLayout = nextLayout;
             packageDeclarationIntent = [...nextPackageDeclarationIntent];
-            pendingSidecars.config = nextPendingSidecars.config;
             pendingSidecars.layout = nextPendingSidecars.layout;
             pendingSidecars.packages = nextPendingSidecars.packages;
-            configResolution = nextConfigResolution;
+            config = nextConfig;
           }
           return { reloaded: true, disk: nextDisk };
         } catch (error) {
@@ -1240,11 +1237,13 @@ async function startNotebookHost(
       engine,
       outputStore: artifactStore,
       notebook,
-      configResolution: configResolution!,
+      config: config!,
       layout: resolvedLayout,
       epoch: ownership.epoch,
       deferStartup: options.deferStartup || recoveredStartup,
+      suppressStartup: options.runOnStartup === false,
       initialDirty: recoveredStartup,
+      preferencesVersion: preferences.snapshot().version,
       initialDocumentRevision: recoveryDocumentRevision,
       rEnvironment: runtimeEnvironment,
       requestedRscript: selectedRscript,
@@ -1298,6 +1297,10 @@ async function startNotebookHost(
           return refreshed;
         },
         service: async (command, payload) => {
+          if (command === "preferences.update") {
+            await preferences.update(payload.patch as PreferencesPatch, payload.expectedPreferencesVersion as string | null);
+            return { config: controller!.snapshot().config, preferencesVersion: preferences.snapshot().version };
+          }
           if (command === "r.select") {
             const selectionGeneration = ++runtimeBootstrapGeneration;
             runtimeAbort?.abort();
@@ -1384,6 +1387,22 @@ async function startNotebookHost(
         },
       },
     });
+    const refreshPreferences = (): void => {
+      const state = preferences.snapshot();
+      if (state.error) settingsErrors.set("preferences", state.error.message);
+      else settingsErrors.delete("preferences");
+      controller!.updatePreferences(state.values, state.version);
+      publishSettingsError();
+    };
+    unsubscribePreferences = preferences.subscribe(refreshPreferences);
+    refreshPreferences();
+    if (options.executionMode !== undefined && options.executionMode !== controller.snapshot().runtime.executionMode) {
+      // The launch choice uses the same dirty/recovery path as the notebook control.
+      const result = await controller.dispatch({ type: "set-runtime", requestId: randomUUID(), clientId: "launch",
+        sessionEpoch: controller.epoch, expectedDocumentRevision: controller.snapshot().documentRevision,
+        on_cell_change: options.executionMode });
+      if (result.error) controller.recordActionError(`Could not apply launch execution mode: ${result.error.message}`, result.error.code);
+    }
     if (runtimeError !== null) controller.recordRuntimeAvailabilityError(asRuntimeHostError(runtimeError)!);
     if (recoveryConflict) controller.recordActionError("notebook changed on disk; recovery draft retained", "recovery_conflict");
     if (recoverySidecarError !== null) controller.recordActionError(errorMessage(recoverySidecarError.error), "sidecar_write_failed");
@@ -1642,14 +1661,7 @@ async function startNotebookHost(
   } catch (error) { try { await close(); } catch (cleanup) { throw new AggregateError([error, cleanup], "Alder startup and cleanup failed"); } throw error; }
 }
 
-function deepMergeRecord(base: Record<string, unknown>, patch: Record<string, unknown>): Record<string, unknown> {
-  const result: Record<string, unknown> = { ...base };
-  for (const [key, value] of Object.entries(patch)) {
-    if (isRecord(result[key]) && isRecord(value)) result[key] = deepMergeRecord(result[key], value);
-    else result[key] = value;
-  }
-  return result;
-}
+
 
 async function createLsp(generation: number, currentGeneration: () => number, controller: Controller, runtimeEnvironment: REnvironment | null, resources: ApplicationResources, notebookDirectory: string, processScope: Pick<ProcessScope, "spawn">, childEnvironment: () => Record<string, string>, setLsp: (value: LspClient | undefined) => void): Promise<LspClient> {
   if (runtimeEnvironment === null) throw new Error("R runtime is unavailable");

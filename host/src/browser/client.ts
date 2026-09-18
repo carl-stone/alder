@@ -1,6 +1,7 @@
 import { BrowserDocument, reconcileDraft, type BrowserRunCommand, type BrowserTransactionCommand, type LocalCell, type SourceCommitOutcome } from "./document.js";
 import { BrowserTransport, BrowserTransportError, type BrowserCommand, type BrowserDraftStore, type BrowserRecoveryDraft, type BrowserTransportOptions } from "./transport.js";
 import { notebookUrl } from "./url.js";
+import type { PreferencesPatch, ProjectSettingsPatch } from "../settings.js";
 import type {
   CellType,
   DocumentChange,
@@ -414,16 +415,21 @@ export class BrowserNotebookClient {
     return this.dispatchSettled({ type: "inspect", ...this.base("inspect", false), name, kernelEpoch: this.kernelEpoch() });
   }
 
-  async setRuntime(update: { executionMode?: "automatic" | "lazy"; runOnStartup?: boolean }): Promise<CommandResult> {
-    const change: { on_cell_change?: "automatic" | "lazy"; on_startup?: boolean } = {};
+  async setRuntime(update: { executionMode?: "automatic" | "lazy"; runOnStartup?: boolean; cacheEnabled?: boolean }, expectedDocumentRevision = this.requireDocument().snapshot.documentRevision): Promise<CommandResult> {
+    const change: { on_cell_change?: "automatic" | "lazy"; on_startup?: boolean; cache_enabled?: boolean } = {};
     if (update.executionMode !== undefined) change.on_cell_change = update.executionMode;
     if (update.runOnStartup !== undefined) change.on_startup = update.runOnStartup;
-    if (change.on_cell_change === undefined && change.on_startup === undefined) throw new BrowserTransportError("invalid_request", "runtime update is empty");
-    return this.dispatch({ type: "set-runtime", ...this.base("runtime"), ...change });
+    if (update.cacheEnabled !== undefined) change.cache_enabled = update.cacheEnabled;
+    if (Object.keys(change).length === 0) throw new BrowserTransportError("invalid_request", "runtime update is empty");
+    return this.dispatch({ type: "set-runtime", ...this.base("runtime"), expectedDocumentRevision, ...change });
   }
 
-  async setConfig(patch: Record<string, unknown>): Promise<CommandResult> {
-    return this.dispatch({ type: "set-config", ...this.base("config"), patch: jsonRecord(patch), expectedSidecarVersion: this.requireDocument().snapshot.sidecars.config.version });
+  async setPreferences(patch: PreferencesPatch, expectedPreferencesVersion: string | null): Promise<CommandResult> {
+    return this.dispatch({ type: "set-preferences", ...this.base("preferences", false), patch, expectedPreferencesVersion });
+  }
+
+  async setConfig(patch: ProjectSettingsPatch, expectedSidecarVersion = this.requireDocument().snapshot.sidecars.config.version, expectedDocumentRevision = this.requireDocument().snapshot.documentRevision): Promise<CommandResult> {
+    return this.dispatch({ type: "set-config", ...this.base("config"), patch, expectedSidecarVersion, expectedDocumentRevision });
   }
 
   async setLayout(layout: unknown): Promise<CommandResult> {

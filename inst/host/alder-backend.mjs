@@ -7256,7 +7256,7 @@ var require_public_api = __commonJS({
         return docs;
       return Object.assign([], { empty: true }, composer$1.streamInfo());
     }
-    function parseDocument4(source, options = {}) {
+    function parseDocument3(source, options = {}) {
       const { lineCounter: lineCounter2, prettyErrors } = parseOptions2(options);
       const parser$1 = new parser.Parser(lineCounter2?.addNewLine);
       const composer$1 = new composer.Composer(options);
@@ -7282,7 +7282,7 @@ var require_public_api = __commonJS({
       } else if (options === void 0 && reviver && typeof reviver === "object") {
         options = reviver;
       }
-      const doc = parseDocument4(src, options);
+      const doc = parseDocument3(src, options);
       if (!doc)
         return null;
       doc.warnings.forEach((warning) => log.warn(doc.options.logLevel, warning));
@@ -7318,7 +7318,7 @@ var require_public_api = __commonJS({
     }
     exports.parse = parse9;
     exports.parseAllDocuments = parseAllDocuments;
-    exports.parseDocument = parseDocument4;
+    exports.parseDocument = parseDocument3;
     exports.stringify = stringify;
   }
 });
@@ -11147,10 +11147,10 @@ __export(dist_exports3, {
   Tokenizer: () => Tokenizer,
   createDocumentStream: () => createDocumentStream,
   getFeed: () => getFeed,
-  parseDocument: () => parseDocument2,
+  parseDocument: () => parseDocument,
   parseFeed: () => parseFeed
 });
-function parseDocument2(data, options) {
+function parseDocument(data, options) {
   const handler4 = new DomHandler(void 0, options);
   new Parser(handler4, options).end(data);
   return handler4.root;
@@ -11160,7 +11160,7 @@ function createDocumentStream(callback, options, elementCallback) {
   return new Parser(handler4, options);
 }
 function parseFeed(feed, options = parseFeedDefaultOptions) {
-  return getFeed(parseDocument2(feed, options).children);
+  return getFeed(parseDocument(feed, options).children);
 }
 var parseFeedDefaultOptions;
 var init_dist6 = __esm({
@@ -11483,9 +11483,9 @@ var require_picocolors = __commonJS({
     var argv = p.argv || [];
     var env2 = p.env || {};
     var isColorSupported = !(!!env2.NO_COLOR || argv.includes("--no-color")) && (!!env2.FORCE_COLOR || argv.includes("--color") || p.platform === "win32" || (p.stdout || {}).isTTY && env2.TERM !== "dumb" || !!env2.CI);
-    var formatter = (open9, close, replace3 = open9) => (input2) => {
-      let string5 = "" + input2, index = string5.indexOf(close, open9.length);
-      return ~index ? open9 + replaceClose(string5, close, replace3, index) + close : open9 + string5 + close;
+    var formatter = (open10, close, replace3 = open10) => (input2) => {
+      let string5 = "" + input2, index = string5.indexOf(close, open10.length);
+      return ~index ? open10 + replaceClose(string5, close, replace3, index) + close : open10 + string5 + close;
     };
     var replaceClose = (string5, close, replace3, index) => {
       let result = "", cursor = 0;
@@ -13466,7 +13466,7 @@ var require_util = __commonJS({
         }
         path3 = url2.path;
       }
-      var isAbsolute8 = exports.isAbsolute(path3);
+      var isAbsolute7 = exports.isAbsolute(path3);
       var parts = [];
       var start = 0;
       var i = 0;
@@ -13501,7 +13501,7 @@ var require_util = __commonJS({
       }
       path3 = parts.join("/");
       if (path3 === "") {
-        path3 = isAbsolute8 ? "/" : ".";
+        path3 = isAbsolute7 ? "/" : ".";
       }
       if (url2) {
         url2.path = path3;
@@ -15197,7 +15197,7 @@ var require_previous_map = __commonJS({
   "../../../../../alder/host/node_modules/postcss/lib/previous-map.js"(exports, module) {
     "use strict";
     var { existsSync, readFileSync, realpathSync } = __require("fs");
-    var { dirname: dirname11, isAbsolute: isAbsolute8, join: join22, relative: relative4, sep: sep4 } = __require("path");
+    var { dirname: dirname11, isAbsolute: isAbsolute7, join: join22, relative: relative4, sep: sep4 } = __require("path");
     var { SourceMapConsumer, SourceMapGenerator } = require_source_map();
     function realPath(path3) {
       try {
@@ -15271,7 +15271,7 @@ var require_previous_map = __commonJS({
           if (!/\.map$/i.test(path3)) return void 0;
           if (!cssFile) return void 0;
           let rel = relative4(realPath(dirname11(cssFile)), realPath(path3));
-          if (rel === ".." || rel.startsWith(".." + sep4) || isAbsolute8(rel)) {
+          if (rel === ".." || rel.startsWith(".." + sep4) || isAbsolute7(rel)) {
             return void 0;
           }
         }
@@ -15342,7 +15342,7 @@ var require_input = __commonJS({
   "../../../../../alder/host/node_modules/postcss/lib/input.js"(exports, module) {
     "use strict";
     var { nanoid: nanoid3 } = require_non_secure();
-    var { isAbsolute: isAbsolute8, resolve: resolve15 } = __require("path");
+    var { isAbsolute: isAbsolute7, resolve: resolve15 } = __require("path");
     var { SourceMapConsumer, SourceMapGenerator } = require_source_map();
     var { fileURLToPath: fileURLToPath2, pathToFileURL: pathToFileURL2 } = __require("url");
     var CssSyntaxError = require_css_syntax_error();
@@ -15350,7 +15350,7 @@ var require_input = __commonJS({
     var terminalHighlight = require_terminal_highlight();
     var lineToIndexCache = /* @__PURE__ */ Symbol("lineToIndexCache");
     var sourceMapAvailable = Boolean(SourceMapConsumer && SourceMapGenerator);
-    var pathAvailable = Boolean(resolve15 && isAbsolute8);
+    var pathAvailable = Boolean(resolve15 && isAbsolute7);
     function getLineToIndex(input2) {
       if (input2[lineToIndexCache]) return input2[lineToIndexCache];
       let lines = input2.css.split("\n");
@@ -15381,7 +15381,7 @@ var require_input = __commonJS({
         this.document = this.css;
         if (opts.document) this.document = opts.document.toString();
         if (opts.from) {
-          if (!pathAvailable || /^\w+:\/\//.test(opts.from) || isAbsolute8(opts.from)) {
+          if (!pathAvailable || /^\w+:\/\//.test(opts.from) || isAbsolute7(opts.from)) {
             this.file = opts.from;
           } else {
             this.file = resolve15(opts.from);
@@ -15521,7 +15521,7 @@ var require_input = __commonJS({
           if (toPosition.source) to = toPosition;
         }
         let fromUrl;
-        if (isAbsolute8(from.source)) {
+        if (isAbsolute7(from.source)) {
           fromUrl = pathToFileURL2(from.source);
         } else {
           fromUrl = new URL(
@@ -16186,7 +16186,7 @@ var require_parser2 = __commonJS({
         let prev;
         let shift;
         let last = false;
-        let open9 = false;
+        let open10 = false;
         let params = [];
         let brackets = [];
         while (!this.tokenizer.endOfFile()) {
@@ -16206,7 +16206,7 @@ var require_parser2 = __commonJS({
               this.semicolon = true;
               break;
             } else if (type === "{") {
-              open9 = true;
+              open10 = true;
               break;
             } else if (type === "}") {
               if (params.length > 0) {
@@ -16248,7 +16248,7 @@ var require_parser2 = __commonJS({
           node2.raws.afterName = "";
           node2.params = "";
         }
-        if (open9) {
+        if (open10) {
           node2.nodes = [];
           this.current = node2;
         }
@@ -21520,7 +21520,7 @@ var require_websocket = __commonJS({
     var http = __require("http");
     var net = __require("net");
     var tls = __require("tls");
-    var { randomBytes: randomBytes6, createHash: createHash9 } = __require("crypto");
+    var { randomBytes: randomBytes6, createHash: createHash10 } = __require("crypto");
     var { Duplex, Readable: Readable3 } = __require("stream");
     var { URL: URL3 } = __require("url");
     var PerMessageDeflate2 = require_permessage_deflate();
@@ -22188,7 +22188,7 @@ var require_websocket = __commonJS({
           abortHandshake(websocket, socket, "Invalid Upgrade header");
           return;
         }
-        const digest = createHash9("sha1").update(key2 + GUID).digest("base64");
+        const digest = createHash10("sha1").update(key2 + GUID).digest("base64");
         if (res.headers["sec-websocket-accept"] !== digest) {
           abortHandshake(websocket, socket, "Invalid Sec-WebSocket-Accept header");
           return;
@@ -22469,7 +22469,7 @@ var require_stream = __commonJS({
       };
       duplex._final = function(callback) {
         if (ws.readyState === ws.CONNECTING) {
-          ws.once("open", function open9() {
+          ws.once("open", function open10() {
             duplex._final(callback);
           });
           return;
@@ -22490,7 +22490,7 @@ var require_stream = __commonJS({
       };
       duplex._write = function(chunk, encoding, callback) {
         if (ws.readyState === ws.CONNECTING) {
-          ws.once("open", function open9() {
+          ws.once("open", function open10() {
             duplex._write(chunk, encoding, callback);
           });
           return;
@@ -22557,7 +22557,7 @@ var require_websocket_server = __commonJS({
     var EventEmitter4 = __require("events");
     var http = __require("http");
     var { Duplex } = __require("stream");
-    var { createHash: createHash9 } = __require("crypto");
+    var { createHash: createHash10 } = __require("crypto");
     var extension2 = require_extension();
     var PerMessageDeflate2 = require_permessage_deflate();
     var subprotocol2 = require_subprotocol();
@@ -22864,7 +22864,7 @@ var require_websocket_server = __commonJS({
           );
         }
         if (this._state > RUNNING) return abortHandshake(socket, 503);
-        const digest = createHash9("sha1").update(key2 + GUID).digest("base64");
+        const digest = createHash10("sha1").update(key2 + GUID).digest("base64");
         const headers = [
           "HTTP/1.1 101 Switching Protocols",
           "Upgrade: websocket",
@@ -36055,10 +36055,10 @@ __export(main_exports, {
   WorkspaceEdit: () => WorkspaceEdit,
   WorkspaceFolder: () => WorkspaceFolder,
   WorkspaceSymbol: () => WorkspaceSymbol,
-  integer: () => integer4,
+  integer: () => integer3,
   uinteger: () => uinteger
 });
-var DocumentUri, URI, integer4, uinteger, Position, Range2, Location, LocationLink, Color, ColorInformation, ColorPresentation, FoldingRangeKind, FoldingRange, DiagnosticRelatedInformation, DiagnosticSeverity, DiagnosticTag, CodeDescription, Diagnostic, Command, TextEdit, ChangeAnnotation, ChangeAnnotationIdentifier, AnnotatedTextEdit, TextDocumentEdit, CreateFile, RenameFile, DeleteFile, WorkspaceEdit, TextEditChangeImpl, SnippetTextEdit, ChangeAnnotations, WorkspaceChange, TextDocumentIdentifier, VersionedTextDocumentIdentifier, OptionalVersionedTextDocumentIdentifier, LanguageKind, TextDocumentItem, MarkupKind, MarkupContent, CompletionItemKind, InsertTextFormat, CompletionItemTag, InsertReplaceEdit, InsertTextMode, ApplyKind, CompletionItemLabelDetails, CompletionItem, CompletionList, MarkedString, Hover, ParameterInformation, SignatureInformation, DocumentHighlightKind, DocumentHighlight, SymbolKind, SymbolTag, SymbolInformation, WorkspaceSymbol, DocumentSymbol, CodeActionKind, CodeActionTriggerKind, CodeActionContext, CodeActionTag, CodeAction, CodeLens, FormattingOptions, DocumentLink, SelectionRange, SemanticTokenTypes, SemanticTokenModifiers, SemanticTokens, InlineValueText, InlineValueVariableLookup, InlineValueEvaluatableExpression, InlineValueContext, InlayHintKind, InlayHintLabelPart, InlayHint, StringValue, InlineCompletionItem, InlineCompletionList, InlineCompletionTriggerKind, SelectedCompletionInfo, InlineCompletionContext, WorkspaceFolder, EOL, TextDocument, FullTextDocument, Is;
+var DocumentUri, URI, integer3, uinteger, Position, Range2, Location, LocationLink, Color, ColorInformation, ColorPresentation, FoldingRangeKind, FoldingRange, DiagnosticRelatedInformation, DiagnosticSeverity, DiagnosticTag, CodeDescription, Diagnostic, Command, TextEdit, ChangeAnnotation, ChangeAnnotationIdentifier, AnnotatedTextEdit, TextDocumentEdit, CreateFile, RenameFile, DeleteFile, WorkspaceEdit, TextEditChangeImpl, SnippetTextEdit, ChangeAnnotations, WorkspaceChange, TextDocumentIdentifier, VersionedTextDocumentIdentifier, OptionalVersionedTextDocumentIdentifier, LanguageKind, TextDocumentItem, MarkupKind, MarkupContent, CompletionItemKind, InsertTextFormat, CompletionItemTag, InsertReplaceEdit, InsertTextMode, ApplyKind, CompletionItemLabelDetails, CompletionItem, CompletionList, MarkedString, Hover, ParameterInformation, SignatureInformation, DocumentHighlightKind, DocumentHighlight, SymbolKind, SymbolTag, SymbolInformation, WorkspaceSymbol, DocumentSymbol, CodeActionKind, CodeActionTriggerKind, CodeActionContext, CodeActionTag, CodeAction, CodeLens, FormattingOptions, DocumentLink, SelectionRange, SemanticTokenTypes, SemanticTokenModifiers, SemanticTokens, InlineValueText, InlineValueVariableLookup, InlineValueEvaluatableExpression, InlineValueContext, InlayHintKind, InlayHintLabelPart, InlayHint, StringValue, InlineCompletionItem, InlineCompletionList, InlineCompletionTriggerKind, SelectedCompletionInfo, InlineCompletionContext, WorkspaceFolder, EOL, TextDocument, FullTextDocument, Is;
 var init_main = __esm({
   "../../../../../alder/host/node_modules/vscode-languageserver-types/lib/esm/main.js"() {
     "use strict";
@@ -36074,14 +36074,14 @@ var init_main = __esm({
       }
       URI2.is = is3;
     })(URI || (URI = {}));
-    (function(integer5) {
-      integer5.MIN_VALUE = -2147483648;
-      integer5.MAX_VALUE = 2147483647;
+    (function(integer4) {
+      integer4.MIN_VALUE = -2147483648;
+      integer4.MAX_VALUE = 2147483647;
       function is3(value) {
-        return typeof value === "number" && integer5.MIN_VALUE <= value && value <= integer5.MAX_VALUE;
+        return typeof value === "number" && integer4.MIN_VALUE <= value && value <= integer4.MAX_VALUE;
       }
-      integer5.is = is3;
-    })(integer4 || (integer4 = {}));
+      integer4.is = is3;
+    })(integer3 || (integer3 = {}));
     (function(uinteger2) {
       uinteger2.MIN_VALUE = 0;
       uinteger2.MAX_VALUE = 2147483647;
@@ -37514,10 +37514,10 @@ var init_main = __esm({
         return toString2.call(value) === "[object Number]" && min <= value && value <= max;
       }
       Is2.numberRange = numberRange;
-      function integer5(value) {
+      function integer4(value) {
         return toString2.call(value) === "[object Number]" && -2147483648 <= value && value <= 2147483647;
       }
-      Is2.integer = integer5;
+      Is2.integer = integer4;
       function uinteger2(value) {
         return toString2.call(value) === "[object Number]" && 0 <= value && value <= 2147483647;
       }
@@ -39947,7 +39947,7 @@ var require_graceful_fs = __commonJS({
       }
       function ReadStream$open() {
         var that = this;
-        open9(that.path, that.flags, that.mode, function(err, fd) {
+        open10(that.path, that.flags, that.mode, function(err, fd) {
           if (err) {
             if (that.autoClose)
               that.destroy();
@@ -39967,7 +39967,7 @@ var require_graceful_fs = __commonJS({
       }
       function WriteStream$open() {
         var that = this;
-        open9(that.path, that.flags, that.mode, function(err, fd) {
+        open10(that.path, that.flags, that.mode, function(err, fd) {
           if (err) {
             that.destroy();
             that.emit("error", err);
@@ -39984,8 +39984,8 @@ var require_graceful_fs = __commonJS({
         return new fs2.WriteStream(path3, options);
       }
       var fs$open = fs2.open;
-      fs2.open = open9;
-      function open9(path3, flags, mode, cb) {
+      fs2.open = open10;
+      function open10(path3, flags, mode, cb) {
         if (typeof mode === "function")
           cb = mode, mode = null;
         return go$open(path3, flags, mode, cb);
@@ -40861,11 +40861,15 @@ import { chmod as chmod6, mkdir as mkdir11 } from "node:fs/promises";
 import { dirname as dirname10, resolve as resolve14 } from "node:path";
 import { fileURLToPath } from "node:url";
 
-// src/application.ts
-import { createHash as createHash8, randomUUID as randomUUID14 } from "node:crypto";
-import { mkdtemp as mkdtemp5, realpath as realpath11, rm as rm10 } from "node:fs/promises";
-import { basename as basename8, dirname as dirname9, join as join21, resolve as resolve13 } from "node:path";
-import { tmpdir as tmpdir6 } from "node:os";
+// src/preferences.ts
+var import_yaml2 = __toESM(require_dist(), 1);
+import { createHash as createHash2 } from "node:crypto";
+import { open as open3 } from "node:fs/promises";
+
+// src/configuration.ts
+import { createHash, randomUUID } from "node:crypto";
+import { mkdir, open as open2, readFile, rename, rm, stat } from "node:fs/promises";
+import { dirname, join, basename } from "node:path";
 
 // ../../../../../alder/host/node_modules/env-paths/index.js
 import path from "node:path";
@@ -40957,1777 +40961,8 @@ function envPaths(name, { suffix = "nodejs" } = {}) {
   return linux(name);
 }
 
-// ../../../../../alder/host/node_modules/chokidar/index.js
-import { EventEmitter } from "node:events";
-import { stat as statcb, Stats } from "node:fs";
-import { readdir as readdir2, stat as stat3 } from "node:fs/promises";
-import * as sp2 from "node:path";
-
-// ../../../../../alder/host/node_modules/readdirp/index.js
-import { lstat, readdir, realpath, stat } from "node:fs/promises";
-import { join as pjoin, resolve as presolve, sep as psep } from "node:path";
-import { Readable } from "node:stream";
-var EntryTypes = {
-  FILE_TYPE: "files",
-  DIR_TYPE: "directories",
-  FILE_DIR_TYPE: "files_directories",
-  EVERYTHING_TYPE: "all"
-};
-var defaultOptions = {
-  root: ".",
-  fileFilter: (_entryInfo) => true,
-  directoryFilter: (_entryInfo) => true,
-  type: EntryTypes.FILE_TYPE,
-  lstat: false,
-  depth: 2147483648,
-  alwaysStat: false,
-  // Throughput is flat from 16 to 65536 (traversal is I/O-bound), but
-  // batches of 1024+ entries survive young-gen GC and bloat RSS ~20-60%.
-  highWaterMark: 256
-};
-Object.freeze(defaultOptions);
-var RECURSIVE_ERROR_CODE = "READDIRP_RECURSIVE_ERROR";
-var NORMAL_FLOW_ERRORS = /* @__PURE__ */ new Set(["ENOENT", "EPERM", "EACCES", "ELOOP", RECURSIVE_ERROR_CODE]);
-var ALL_TYPES = [
-  EntryTypes.DIR_TYPE,
-  EntryTypes.EVERYTHING_TYPE,
-  EntryTypes.FILE_DIR_TYPE,
-  EntryTypes.FILE_TYPE
-];
-var DIR_TYPES = /* @__PURE__ */ new Set([
-  EntryTypes.DIR_TYPE,
-  EntryTypes.EVERYTHING_TYPE,
-  EntryTypes.FILE_DIR_TYPE
-]);
-var FILE_TYPES = /* @__PURE__ */ new Set([
-  EntryTypes.EVERYTHING_TYPE,
-  EntryTypes.FILE_DIR_TYPE,
-  EntryTypes.FILE_TYPE
-]);
-var isNormalFlowError = (error61) => NORMAL_FLOW_ERRORS.has(error61.code);
-var wantBigintFsStats = process.platform === "win32";
-var emptyFn = (_entryInfo) => true;
-var normalizeFilter = (filter3) => {
-  if (filter3 === void 0)
-    return emptyFn;
-  if (typeof filter3 === "function")
-    return filter3;
-  if (typeof filter3 === "string") {
-    const fl = filter3.trim();
-    return (entry) => entry.basename === fl;
-  }
-  if (Array.isArray(filter3)) {
-    const trItems = filter3.map((item) => item.trim());
-    return (entry) => trItems.some((f) => entry.basename === f);
-  }
-  return emptyFn;
-};
-var ReaddirpStream = class extends Readable {
-  /**
-   * Directories discovered but not yet emitted from. Listings are read
-   * lazily (on pop, plus one prefetch) instead of eagerly on discovery:
-   * keeping whole listings for every queued dir balloons RAM on wide trees.
-   */
-  parents;
-  reading;
-  parent;
-  _stat;
-  _maxDepth;
-  _wantsDir;
-  _wantsFile;
-  _wantsEverything;
-  _root;
-  _isDirent;
-  _statsProp;
-  _rdOptions;
-  _fileFilter;
-  _directoryFilter;
-  _relStart;
-  constructor(options = {}) {
-    super({
-      objectMode: true,
-      autoDestroy: true,
-      highWaterMark: options.highWaterMark ?? defaultOptions.highWaterMark
-    });
-    const opts = { ...defaultOptions, ...options };
-    const root = opts.root ?? defaultOptions.root;
-    const type = opts.type ?? defaultOptions.type;
-    this._fileFilter = normalizeFilter(opts.fileFilter);
-    this._directoryFilter = normalizeFilter(opts.directoryFilter);
-    const statMethod = opts.lstat ? lstat : stat;
-    if (wantBigintFsStats) {
-      this._stat = (path3) => statMethod(path3, { bigint: true });
-    } else {
-      this._stat = statMethod;
-    }
-    this._maxDepth = opts.depth != null && Number.isSafeInteger(opts.depth) ? opts.depth : defaultOptions.depth;
-    this._wantsDir = DIR_TYPES.has(type);
-    this._wantsFile = FILE_TYPES.has(type);
-    this._wantsEverything = type === EntryTypes.EVERYTHING_TYPE;
-    this._root = presolve(root);
-    this._relStart = this._root.endsWith(psep) ? this._root.length : this._root.length + 1;
-    this._isDirent = !opts.alwaysStat;
-    this._statsProp = this._isDirent ? "dirent" : "stats";
-    this._rdOptions = { encoding: "utf8", withFileTypes: this._isDirent };
-    const rootDir = { path: this._root, depth: 1 };
-    rootDir.pending = this._exploreDir(this._root, 1);
-    this.parents = [rootDir];
-    this.reading = false;
-    this.parent = void 0;
-  }
-  async _read(batch) {
-    if (this.reading)
-      return;
-    this.reading = true;
-    try {
-      while (!this.destroyed && batch > 0) {
-        const par = this.parent;
-        const fil = par && par.files;
-        if (fil && fil.length > 0) {
-          const { path: path3, depth } = par;
-          const slice = fil.splice(0, batch).map((dirent) => this._formatEntry(dirent, path3));
-          const awaited = this._isDirent ? slice : await Promise.all(slice);
-          for (const entry of awaited) {
-            if (!entry)
-              continue;
-            if (this.destroyed)
-              return;
-            let entryType = this._getEntryType(entry);
-            if (typeof entryType !== "string")
-              entryType = await entryType;
-            if (entryType === "directory" && this._directoryFilter(entry)) {
-              if (depth <= this._maxDepth) {
-                this.parents.push({ path: entry.fullPath, depth: depth + 1 });
-              }
-              if (this._wantsDir) {
-                this.push(entry);
-                batch--;
-              }
-            } else if ((entryType === "file" || this._includeAsFile(entry)) && this._fileFilter(entry)) {
-              if (this._wantsFile) {
-                this.push(entry);
-                batch--;
-              }
-            }
-          }
-        } else {
-          const parent = this.parents.pop();
-          if (!parent) {
-            this.push(null);
-            break;
-          }
-          const dir = parent.pending ?? this._exploreDir(parent.path, parent.depth);
-          const next = this.parents[this.parents.length - 1];
-          if (next && !next.pending) {
-            next.pending = this._exploreDir(next.path, next.depth);
-          }
-          this.parent = await dir;
-          if (this.destroyed)
-            return;
-        }
-      }
-    } catch (error61) {
-      this.destroy(error61);
-    } finally {
-      this.reading = false;
-    }
-  }
-  // NOTE: native `readdir(path, { recursive: true })` was evaluated as a
-  // replacement for this per-directory traversal and rejected:
-  // - Not faster: node implements it in JS, walking directories sequentially
-  //   just like this loop, but with extra path bookkeeping. Benchmarks
-  //   (node 24): ~10% slower on wide trees, ~40% slower on small ones,
-  //   parity on deep ones.
-  // - Much more RAM: it buffers the entire subtree listing in one array,
-  //   instead of one directory at a time, defeating streaming.
-  // - Semantics diverge: it can't limit depth, can't skip directories a
-  //   directoryFilter rejects, doesn't follow symlinked dirs, and fails
-  //   wholesale (all entries lost) if anything in the subtree is unreadable,
-  //   instead of emitting a 'warn' and continuing.
-  async _exploreDir(path3, depth) {
-    let files;
-    try {
-      files = await readdir(path3, this._rdOptions);
-    } catch (error61) {
-      this._onError(error61);
-    }
-    return { files, depth, path: path3 };
-  }
-  // Synchronous in dirent mode; returns a promise only when stats are needed.
-  _formatEntry(dirent, path3) {
-    const basename9 = this._isDirent ? dirent.name : dirent;
-    const fullPath = pjoin(path3, basename9);
-    const entry = { path: fullPath.slice(this._relStart), fullPath, basename: basename9 };
-    if (this._isDirent) {
-      entry.dirent = dirent;
-      return entry;
-    }
-    return this._stat(fullPath).then((stats) => {
-      entry.stats = stats;
-      return entry;
-    }, (err) => {
-      this._onError(err);
-      return void 0;
-    });
-  }
-  _onError(err) {
-    if (isNormalFlowError(err) && !this.destroyed) {
-      this.emit("warn", err);
-    } else {
-      this.destroy(err);
-    }
-  }
-  // Synchronous for regular files and directories; returns a promise only for
-  // symlinks, which need realpath() to be classified.
-  _getEntryType(entry) {
-    if (!entry || !(this._statsProp in entry)) {
-      return "";
-    }
-    const stats = entry[this._statsProp];
-    if (stats.isFile())
-      return "file";
-    if (stats.isDirectory())
-      return "directory";
-    if (stats.isSymbolicLink())
-      return this._getSymlinkEntryType(entry);
-    return "";
-  }
-  async _getSymlinkEntryType(entry) {
-    const full = entry.fullPath;
-    try {
-      const entryRealPath = await realpath(full);
-      const entryRealPathStats = await lstat(entryRealPath);
-      if (entryRealPathStats.isFile()) {
-        return "file";
-      }
-      if (entryRealPathStats.isDirectory()) {
-        const len = entryRealPath.length;
-        if (full.startsWith(entryRealPath) && full[len] === psep) {
-          const recursiveError = new Error(`Circular symlink detected: "${full}" points to "${entryRealPath}"`);
-          recursiveError.code = RECURSIVE_ERROR_CODE;
-          this._onError(recursiveError);
-          return "";
-        }
-        return "directory";
-      }
-    } catch (error61) {
-      this._onError(error61);
-    }
-    return "";
-  }
-  _includeAsFile(entry) {
-    const stats = entry && entry[this._statsProp];
-    return stats && this._wantsEverything && !stats.isDirectory();
-  }
-};
-function readdirp(root, options = {}) {
-  let type = options.entryType || options.type;
-  if (type === "both")
-    type = EntryTypes.FILE_DIR_TYPE;
-  if (!root) {
-    throw new Error("readdirp: root argument is required. Usage: readdirp(root, options)");
-  } else if (typeof root !== "string") {
-    throw new TypeError("readdirp: root argument must be a string. Usage: readdirp(root, options)");
-  } else if (type && !ALL_TYPES.includes(type)) {
-    throw new Error(`readdirp: Invalid type passed. Use one of ${ALL_TYPES.join(", ")}`);
-  }
-  const opts = { ...options, root };
-  if (type)
-    opts.type = type;
-  return new ReaddirpStream(opts);
-}
-
-// ../../../../../alder/host/node_modules/chokidar/handler.js
-import { watch as fs_watch, unwatchFile, watchFile } from "node:fs";
-import { realpath as fsrealpath, lstat as lstat2, open, stat as stat2 } from "node:fs/promises";
-import { type as osType } from "node:os";
-import * as sp from "node:path";
-var STR_DATA = "data";
-var STR_END = "end";
-var STR_CLOSE = "close";
-var EMPTY_FN = () => {
-};
-var pl = process.platform;
-var isWindows = pl === "win32";
-var isMacos = pl === "darwin";
-var isLinux = pl === "linux";
-var isFreeBSD = pl === "freebsd";
-var isIBMi = osType() === "OS400";
-var EVENTS = {
-  ALL: "all",
-  READY: "ready",
-  ADD: "add",
-  CHANGE: "change",
-  ADD_DIR: "addDir",
-  UNLINK: "unlink",
-  UNLINK_DIR: "unlinkDir",
-  RAW: "raw",
-  ERROR: "error"
-};
-var EV = EVENTS;
-var THROTTLE_MODE_WATCH = "watch";
-var statMethods = { lstat: lstat2, stat: stat2 };
-var KEY_LISTENERS = "listeners";
-var KEY_ERR = "errHandlers";
-var KEY_RAW = "rawEmitters";
-var HANDLER_KEYS = [KEY_LISTENERS, KEY_ERR, KEY_RAW];
-var binaryExtensions = /* @__PURE__ */ new Set([
-  "3dm",
-  "3ds",
-  "3g2",
-  "3gp",
-  "7z",
-  "a",
-  "aac",
-  "adp",
-  "afdesign",
-  "afphoto",
-  "afpub",
-  "ai",
-  "aif",
-  "aiff",
-  "alz",
-  "ape",
-  "apk",
-  "appimage",
-  "ar",
-  "arj",
-  "asf",
-  "au",
-  "avi",
-  "bak",
-  "baml",
-  "bh",
-  "bin",
-  "bk",
-  "bmp",
-  "btif",
-  "bz2",
-  "bzip2",
-  "cab",
-  "caf",
-  "cgm",
-  "class",
-  "cmx",
-  "cpio",
-  "cr2",
-  "cur",
-  "dat",
-  "dcm",
-  "deb",
-  "dex",
-  "djvu",
-  "dll",
-  "dmg",
-  "dng",
-  "doc",
-  "docm",
-  "docx",
-  "dot",
-  "dotm",
-  "dra",
-  "DS_Store",
-  "dsk",
-  "dts",
-  "dtshd",
-  "dvb",
-  "dwg",
-  "dxf",
-  "ecelp4800",
-  "ecelp7470",
-  "ecelp9600",
-  "egg",
-  "eol",
-  "eot",
-  "epub",
-  "exe",
-  "f4v",
-  "fbs",
-  "fh",
-  "fla",
-  "flac",
-  "flatpak",
-  "fli",
-  "flv",
-  "fpx",
-  "fst",
-  "fvt",
-  "g3",
-  "gh",
-  "gif",
-  "graffle",
-  "gz",
-  "gzip",
-  "h261",
-  "h263",
-  "h264",
-  "icns",
-  "ico",
-  "ief",
-  "img",
-  "ipa",
-  "iso",
-  "jar",
-  "jpeg",
-  "jpg",
-  "jpgv",
-  "jpm",
-  "jxr",
-  "key",
-  "ktx",
-  "lha",
-  "lib",
-  "lvp",
-  "lz",
-  "lzh",
-  "lzma",
-  "lzo",
-  "m3u",
-  "m4a",
-  "m4v",
-  "mar",
-  "mdi",
-  "mht",
-  "mid",
-  "midi",
-  "mj2",
-  "mka",
-  "mkv",
-  "mmr",
-  "mng",
-  "mobi",
-  "mov",
-  "movie",
-  "mp3",
-  "mp4",
-  "mp4a",
-  "mpeg",
-  "mpg",
-  "mpga",
-  "mxu",
-  "nef",
-  "npx",
-  "numbers",
-  "nupkg",
-  "o",
-  "odp",
-  "ods",
-  "odt",
-  "oga",
-  "ogg",
-  "ogv",
-  "otf",
-  "ott",
-  "pages",
-  "pbm",
-  "pcx",
-  "pdb",
-  "pdf",
-  "pea",
-  "pgm",
-  "pic",
-  "png",
-  "pnm",
-  "pot",
-  "potm",
-  "potx",
-  "ppa",
-  "ppam",
-  "ppm",
-  "pps",
-  "ppsm",
-  "ppsx",
-  "ppt",
-  "pptm",
-  "pptx",
-  "psd",
-  "pya",
-  "pyc",
-  "pyo",
-  "pyv",
-  "qt",
-  "rar",
-  "ras",
-  "raw",
-  "resources",
-  "rgb",
-  "rip",
-  "rlc",
-  "rmf",
-  "rmvb",
-  "rpm",
-  "rtf",
-  "rz",
-  "s3m",
-  "s7z",
-  "scpt",
-  "sgi",
-  "shar",
-  "snap",
-  "sil",
-  "sketch",
-  "slk",
-  "smv",
-  "snk",
-  "so",
-  "stl",
-  "suo",
-  "sub",
-  "swf",
-  "tar",
-  "tbz",
-  "tbz2",
-  "tga",
-  "tgz",
-  "thmx",
-  "tif",
-  "tiff",
-  "tlz",
-  "ttc",
-  "ttf",
-  "txz",
-  "udf",
-  "uvh",
-  "uvi",
-  "uvm",
-  "uvp",
-  "uvs",
-  "uvu",
-  "viv",
-  "vob",
-  "war",
-  "wav",
-  "wax",
-  "wbmp",
-  "wdp",
-  "weba",
-  "webm",
-  "webp",
-  "whl",
-  "wim",
-  "wm",
-  "wma",
-  "wmv",
-  "wmx",
-  "woff",
-  "woff2",
-  "wrm",
-  "wvx",
-  "xbm",
-  "xif",
-  "xla",
-  "xlam",
-  "xls",
-  "xlsb",
-  "xlsm",
-  "xlsx",
-  "xlt",
-  "xltm",
-  "xltx",
-  "xm",
-  "xmind",
-  "xpi",
-  "xpm",
-  "xwd",
-  "xz",
-  "z",
-  "zip",
-  "zipx"
-]);
-var isBinaryPath = (filePath) => binaryExtensions.has(sp.extname(filePath).slice(1).toLowerCase());
-var foreach = (val, fn) => {
-  if (val instanceof Set) {
-    val.forEach(fn);
-  } else {
-    fn(val);
-  }
-};
-var addAndConvert = (main, prop2, item) => {
-  let container = main[prop2];
-  if (!(container instanceof Set)) {
-    main[prop2] = container = /* @__PURE__ */ new Set([container]);
-  }
-  container.add(item);
-};
-var clearItem = (cont) => (key2) => {
-  const set2 = cont[key2];
-  if (set2 instanceof Set) {
-    set2.clear();
-  } else {
-    delete cont[key2];
-  }
-};
-var delFromSet = (main, prop2, item) => {
-  const container = main[prop2];
-  if (container instanceof Set) {
-    container.delete(item);
-  } else if (container === item) {
-    delete main[prop2];
-  }
-};
-var isEmptySet = (val) => val instanceof Set ? val.size === 0 : !val;
-var FsWatchInstances = /* @__PURE__ */ new Map();
-function createFsWatchInstance(path3, options, listener, errHandler, emitRaw) {
-  const handleEvent = (rawEvent, evPath) => {
-    listener(path3);
-    emitRaw(rawEvent, evPath, { watchedPath: path3 });
-    if (evPath && path3 !== evPath) {
-      fsWatchBroadcast(sp.resolve(path3, evPath), KEY_LISTENERS, sp.join(path3, evPath));
-    }
-  };
-  try {
-    return fs_watch(path3, {
-      persistent: options.persistent
-    }, handleEvent);
-  } catch (error61) {
-    errHandler(error61);
-    return void 0;
-  }
-}
-var fsWatchBroadcast = (fullPath, listenerType, val1, val2, val3) => {
-  const cont = FsWatchInstances.get(fullPath);
-  if (!cont)
-    return;
-  foreach(cont[listenerType], (listener) => {
-    listener(val1, val2, val3);
-  });
-};
-var setFsWatchListener = (path3, fullPath, options, handlers) => {
-  const { listener, errHandler, rawEmitter } = handlers;
-  let cont = FsWatchInstances.get(fullPath);
-  let watcher;
-  if (!options.persistent) {
-    watcher = createFsWatchInstance(path3, options, listener, errHandler, rawEmitter);
-    if (!watcher)
-      return;
-    return watcher.close.bind(watcher);
-  }
-  if (cont) {
-    addAndConvert(cont, KEY_LISTENERS, listener);
-    addAndConvert(cont, KEY_ERR, errHandler);
-    addAndConvert(cont, KEY_RAW, rawEmitter);
-  } else {
-    watcher = createFsWatchInstance(
-      path3,
-      options,
-      fsWatchBroadcast.bind(null, fullPath, KEY_LISTENERS),
-      errHandler,
-      // no need to use broadcast here
-      fsWatchBroadcast.bind(null, fullPath, KEY_RAW)
-    );
-    if (!watcher)
-      return;
-    watcher.on(EV.ERROR, async (error61) => {
-      const broadcastErr = fsWatchBroadcast.bind(null, fullPath, KEY_ERR);
-      if (cont)
-        cont.watcherUnusable = true;
-      if (isWindows && error61.code === "EPERM") {
-        try {
-          const fd = await open(path3, "r");
-          await fd.close();
-          broadcastErr(error61);
-        } catch (err) {
-        }
-      } else {
-        broadcastErr(error61);
-      }
-    });
-    cont = {
-      listeners: listener,
-      errHandlers: errHandler,
-      rawEmitters: rawEmitter,
-      watcher
-    };
-    FsWatchInstances.set(fullPath, cont);
-  }
-  return () => {
-    delFromSet(cont, KEY_LISTENERS, listener);
-    delFromSet(cont, KEY_ERR, errHandler);
-    delFromSet(cont, KEY_RAW, rawEmitter);
-    if (isEmptySet(cont.listeners)) {
-      cont.watcher.close();
-      FsWatchInstances.delete(fullPath);
-      HANDLER_KEYS.forEach(clearItem(cont));
-      cont.watcher = void 0;
-      Object.freeze(cont);
-    }
-  };
-};
-var FsWatchFileInstances = /* @__PURE__ */ new Map();
-var setFsWatchFileListener = (path3, fullPath, options, handlers) => {
-  const { listener, rawEmitter } = handlers;
-  let cont = FsWatchFileInstances.get(fullPath);
-  const copts = cont && cont.options;
-  if (copts && (copts.persistent < options.persistent || copts.interval > options.interval)) {
-    unwatchFile(fullPath);
-    cont = void 0;
-  }
-  if (cont) {
-    addAndConvert(cont, KEY_LISTENERS, listener);
-    addAndConvert(cont, KEY_RAW, rawEmitter);
-  } else {
-    cont = {
-      listeners: listener,
-      rawEmitters: rawEmitter,
-      options,
-      watcher: watchFile(fullPath, options, (curr, prev) => {
-        foreach(cont.rawEmitters, (rawEmitter2) => {
-          rawEmitter2(EV.CHANGE, fullPath, { curr, prev });
-        });
-        const currmtime = curr.mtimeMs;
-        if (curr.size !== prev.size || currmtime > prev.mtimeMs || currmtime === 0) {
-          foreach(cont.listeners, (listener2) => listener2(path3, curr));
-        }
-      })
-    };
-    FsWatchFileInstances.set(fullPath, cont);
-  }
-  return () => {
-    delFromSet(cont, KEY_LISTENERS, listener);
-    delFromSet(cont, KEY_RAW, rawEmitter);
-    if (isEmptySet(cont.listeners)) {
-      FsWatchFileInstances.delete(fullPath);
-      unwatchFile(fullPath);
-      cont.options = cont.watcher = void 0;
-      Object.freeze(cont);
-    }
-  };
-};
-var NodeFsHandler = class {
-  fsw;
-  _boundHandleError;
-  constructor(fsW) {
-    this.fsw = fsW;
-    this._boundHandleError = (error61) => fsW._handleError(error61);
-  }
-  /**
-   * Watch file for changes with fs_watchFile or fs_watch.
-   * @param path to file or dir
-   * @param listener on fs change
-   * @returns closer for the watcher instance
-   */
-  _watchWithNodeFs(path3, listener) {
-    const opts = this.fsw.options;
-    const directory = sp.dirname(path3);
-    const basename9 = sp.basename(path3);
-    const parent = this.fsw._getWatchedDir(directory);
-    parent.add(basename9);
-    const absolutePath = sp.resolve(path3);
-    const options = {
-      persistent: opts.persistent
-    };
-    if (!listener)
-      listener = EMPTY_FN;
-    let closer;
-    if (opts.usePolling) {
-      const enableBin = opts.interval !== opts.binaryInterval;
-      options.interval = enableBin && isBinaryPath(basename9) ? opts.binaryInterval : opts.interval;
-      closer = setFsWatchFileListener(path3, absolutePath, options, {
-        listener,
-        rawEmitter: this.fsw._emitRaw
-      });
-    } else {
-      closer = setFsWatchListener(path3, absolutePath, options, {
-        listener,
-        errHandler: this._boundHandleError,
-        rawEmitter: this.fsw._emitRaw
-      });
-    }
-    return closer;
-  }
-  /**
-   * Watch a file and emit add event if warranted.
-   * @returns closer for the watcher instance
-   */
-  _handleFile(file2, stats, initialAdd) {
-    if (this.fsw.closed) {
-      return;
-    }
-    const dirname11 = sp.dirname(file2);
-    const basename9 = sp.basename(file2);
-    const parent = this.fsw._getWatchedDir(dirname11);
-    let prevStats = stats;
-    if (parent.has(basename9))
-      return;
-    const listener = async (path3, newStats) => {
-      if (!this.fsw._throttle(THROTTLE_MODE_WATCH, file2, 5))
-        return;
-      if (!newStats || newStats.mtimeMs === 0) {
-        try {
-          const newStats2 = await stat2(file2);
-          if (this.fsw.closed)
-            return;
-          const at = newStats2.atimeMs;
-          const mt = newStats2.mtimeMs;
-          if (!at || at <= mt || mt !== prevStats.mtimeMs) {
-            this.fsw._emit(EV.CHANGE, file2, newStats2);
-          }
-          if ((isMacos || isLinux || isFreeBSD) && prevStats.ino !== newStats2.ino) {
-            this.fsw._closeFile(path3);
-            prevStats = newStats2;
-            const closer2 = this._watchWithNodeFs(file2, listener);
-            if (closer2)
-              this.fsw._addPathCloser(path3, closer2);
-          } else {
-            prevStats = newStats2;
-          }
-        } catch (error61) {
-          this.fsw._remove(dirname11, basename9);
-        }
-      } else if (parent.has(basename9)) {
-        const at = newStats.atimeMs;
-        const mt = newStats.mtimeMs;
-        if (!at || at <= mt || mt !== prevStats.mtimeMs) {
-          this.fsw._emit(EV.CHANGE, file2, newStats);
-        }
-        prevStats = newStats;
-      }
-    };
-    const closer = this._watchWithNodeFs(file2, listener);
-    if (!(initialAdd && this.fsw.options.ignoreInitial) && this.fsw._isntIgnored(file2)) {
-      if (!this.fsw._throttle(EV.ADD, file2, 0))
-        return;
-      this.fsw._emit(EV.ADD, file2, stats);
-    }
-    return closer;
-  }
-  /**
-   * Handle symlinks encountered while reading a dir.
-   * @param entry returned by readdirp
-   * @param directory path of dir being read
-   * @param path of this item
-   * @param item basename of this item
-   * @returns true if no more processing is needed for this entry.
-   */
-  async _handleSymlink(entry, directory, path3, item) {
-    if (this.fsw.closed) {
-      return;
-    }
-    const full = entry.fullPath;
-    const dir = this.fsw._getWatchedDir(directory);
-    if (!this.fsw.options.followSymlinks) {
-      this.fsw._incrReadyCount();
-      let linkPath;
-      try {
-        linkPath = await fsrealpath(path3);
-      } catch (e) {
-        this.fsw._emitReady();
-        return true;
-      }
-      if (this.fsw.closed)
-        return;
-      if (dir.has(item)) {
-        if (this.fsw._symlinkPaths.get(full) !== linkPath) {
-          this.fsw._symlinkPaths.set(full, linkPath);
-          this.fsw._emit(EV.CHANGE, path3, entry.stats);
-        }
-      } else {
-        dir.add(item);
-        this.fsw._symlinkPaths.set(full, linkPath);
-        this.fsw._emit(EV.ADD, path3, entry.stats);
-      }
-      this.fsw._emitReady();
-      return true;
-    }
-    if (this.fsw._symlinkPaths.has(full)) {
-      return true;
-    }
-    this.fsw._symlinkPaths.set(full, true);
-  }
-  _handleRead(directory, initialAdd, wh, target, dir, depth, throttler) {
-    directory = sp.join(directory, "");
-    const throttleKey = target ? `${directory}:${target}` : directory;
-    throttler = this.fsw._throttle("readdir", throttleKey, 1e3);
-    if (!throttler)
-      return;
-    const previous = this.fsw._getWatchedDir(wh.path);
-    const current = /* @__PURE__ */ new Set();
-    let stream = this.fsw._readdirp(directory, {
-      fileFilter: (entry) => wh.filterPath(entry),
-      directoryFilter: (entry) => wh.filterDir(entry)
-    });
-    if (!stream)
-      return;
-    stream.on(STR_DATA, async (entry) => {
-      if (this.fsw.closed) {
-        stream = void 0;
-        return;
-      }
-      const item = entry.path;
-      let path3 = sp.join(directory, item);
-      current.add(item);
-      if (entry.stats.isSymbolicLink() && await this._handleSymlink(entry, directory, path3, item)) {
-        return;
-      }
-      if (this.fsw.closed) {
-        stream = void 0;
-        return;
-      }
-      if (item === target || !target && !previous.has(item)) {
-        this.fsw._incrReadyCount();
-        path3 = sp.join(dir, sp.relative(dir, path3));
-        this._addToNodeFs(path3, initialAdd, wh, depth + 1);
-      }
-    }).on(EV.ERROR, this._boundHandleError);
-    return new Promise((resolve15, reject) => {
-      if (!stream)
-        return reject();
-      stream.once(STR_END, () => {
-        if (this.fsw.closed) {
-          stream = void 0;
-          return;
-        }
-        const wasThrottled = throttler ? throttler.clear() : false;
-        resolve15(void 0);
-        previous.getChildren().filter((item) => {
-          return item !== directory && !current.has(item);
-        }).forEach((item) => {
-          this.fsw._remove(directory, item);
-        });
-        stream = void 0;
-        if (wasThrottled)
-          this._handleRead(directory, false, wh, target, dir, depth, throttler);
-      });
-    });
-  }
-  /**
-   * Read directory to add / remove files from `@watched` list and re-read it on change.
-   * @param dir fs path
-   * @param stats
-   * @param initialAdd
-   * @param depth relative to user-supplied path
-   * @param target child path targeted for watch
-   * @param wh Common watch helpers for this path
-   * @param realpath
-   * @returns closer for the watcher instance.
-   */
-  async _handleDir(dir, stats, initialAdd, depth, target, wh, realpath12) {
-    const parentDir = this.fsw._getWatchedDir(sp.dirname(dir));
-    const tracked = parentDir.has(sp.basename(dir));
-    if (!(initialAdd && this.fsw.options.ignoreInitial) && !target && !tracked) {
-      this.fsw._emit(EV.ADD_DIR, dir, stats);
-    }
-    parentDir.add(sp.basename(dir));
-    this.fsw._getWatchedDir(dir);
-    let throttler;
-    let closer;
-    const oDepth = this.fsw.options.depth;
-    if ((oDepth == null || depth <= oDepth) && !this.fsw._symlinkPaths.has(realpath12)) {
-      if (!target) {
-        await this._handleRead(dir, initialAdd, wh, target, dir, depth, throttler);
-        if (this.fsw.closed)
-          return;
-      }
-      closer = this._watchWithNodeFs(dir, (dirPath, stats2) => {
-        if (stats2 && stats2.mtimeMs === 0)
-          return;
-        this._handleRead(dirPath, false, wh, target, dir, depth, throttler);
-      });
-    }
-    return closer;
-  }
-  /**
-   * Handle added file, directory, or glob pattern.
-   * Delegates call to _handleFile / _handleDir after checks.
-   * @param path to file or ir
-   * @param initialAdd was the file added at watch instantiation?
-   * @param priorWh depth relative to user-supplied path
-   * @param depth Child path actually targeted for watch
-   * @param target Child path actually targeted for watch
-   */
-  async _addToNodeFs(path3, initialAdd, priorWh, depth, target) {
-    const ready = this.fsw._emitReady;
-    if (this.fsw._isIgnored(path3) || this.fsw.closed) {
-      ready();
-      return false;
-    }
-    const wh = this.fsw._getWatchHelpers(path3);
-    if (priorWh) {
-      wh.filterPath = (entry) => priorWh.filterPath(entry);
-      wh.filterDir = (entry) => priorWh.filterDir(entry);
-    }
-    try {
-      const stats = await statMethods[wh.statMethod](wh.watchPath);
-      if (this.fsw.closed)
-        return;
-      if (this.fsw._isIgnored(wh.watchPath, stats)) {
-        ready();
-        return false;
-      }
-      const follow = this.fsw.options.followSymlinks;
-      let closer;
-      if (stats.isDirectory()) {
-        const absPath = sp.resolve(path3);
-        const targetPath = follow ? await fsrealpath(path3) : path3;
-        if (this.fsw.closed)
-          return;
-        closer = await this._handleDir(wh.watchPath, stats, initialAdd, depth, target, wh, targetPath);
-        if (this.fsw.closed)
-          return;
-        if (absPath !== targetPath && targetPath !== void 0) {
-          this.fsw._symlinkPaths.set(absPath, targetPath);
-        }
-      } else if (stats.isSymbolicLink()) {
-        const targetPath = follow ? await fsrealpath(path3) : path3;
-        if (this.fsw.closed)
-          return;
-        const parent = sp.dirname(wh.watchPath);
-        this.fsw._getWatchedDir(parent).add(wh.watchPath);
-        this.fsw._emit(EV.ADD, wh.watchPath, stats);
-        closer = await this._handleDir(parent, stats, initialAdd, depth, path3, wh, targetPath);
-        if (this.fsw.closed)
-          return;
-        if (targetPath !== void 0) {
-          this.fsw._symlinkPaths.set(sp.resolve(path3), targetPath);
-        }
-      } else {
-        closer = this._handleFile(wh.watchPath, stats, initialAdd);
-      }
-      ready();
-      if (closer)
-        this.fsw._addPathCloser(path3, closer);
-      return false;
-    } catch (error61) {
-      if (this.fsw._handleError(error61)) {
-        ready();
-        return path3;
-      }
-    }
-  }
-};
-
-// ../../../../../alder/host/node_modules/chokidar/index.js
-var SLASH = "/";
-var SLASH_SLASH = "//";
-var ONE_DOT = ".";
-var TWO_DOTS = "..";
-var STRING_TYPE = "string";
-var BACK_SLASH_RE = /\\/g;
-var DOUBLE_SLASH_RE = /\/\//g;
-var DOT_RE = /\..*\.(sw[px])$|~$|\.subl.*\.tmp/;
-var REPLACER_RE = /^\.[/\\]/;
-function arrify(item) {
-  return Array.isArray(item) ? item : [item];
-}
-var isMatcherObject = (matcher) => typeof matcher === "object" && matcher !== null && !(matcher instanceof RegExp);
-function createPattern(matcher) {
-  if (typeof matcher === "function")
-    return matcher;
-  if (typeof matcher === "string")
-    return (string5) => matcher === string5;
-  if (matcher instanceof RegExp)
-    return (string5) => matcher.test(string5);
-  if (typeof matcher === "object" && matcher !== null) {
-    return (string5) => {
-      if (matcher.path === string5)
-        return true;
-      if (matcher.recursive) {
-        const relative4 = sp2.relative(matcher.path, string5);
-        if (!relative4) {
-          return false;
-        }
-        return !relative4.startsWith("..") && !sp2.isAbsolute(relative4);
-      }
-      return false;
-    };
-  }
-  return () => false;
-}
-function normalizePath(path3) {
-  if (typeof path3 !== "string")
-    throw new Error("string expected");
-  path3 = sp2.normalize(path3);
-  path3 = path3.replace(/\\/g, "/");
-  let prepend3 = false;
-  if (path3.startsWith("//"))
-    prepend3 = true;
-  path3 = path3.replace(DOUBLE_SLASH_RE, "/");
-  if (prepend3)
-    path3 = "/" + path3;
-  return path3;
-}
-function matchPatterns(patterns, testString, stats) {
-  const path3 = normalizePath(testString);
-  for (let index = 0; index < patterns.length; index++) {
-    const pattern = patterns[index];
-    if (pattern(path3, stats)) {
-      return true;
-    }
-  }
-  return false;
-}
-function anymatch(matchers, testString) {
-  if (matchers == null) {
-    throw new TypeError("anymatch: specify first argument");
-  }
-  const matchersArray = arrify(matchers);
-  const patterns = matchersArray.map((matcher) => createPattern(matcher));
-  if (testString == null) {
-    return (testString2, stats) => {
-      return matchPatterns(patterns, testString2, stats);
-    };
-  }
-  return matchPatterns(patterns, testString);
-}
-var unifyPaths = (paths_) => {
-  const paths = arrify(paths_).flat();
-  if (!paths.every((p) => typeof p === STRING_TYPE)) {
-    throw new TypeError(`Non-string provided as watch path: ${paths}`);
-  }
-  return paths.map(normalizePathToUnix);
-};
-var toUnix = (string5) => {
-  let str = string5.replace(BACK_SLASH_RE, SLASH);
-  let prepend3 = false;
-  if (str.startsWith(SLASH_SLASH)) {
-    prepend3 = true;
-  }
-  str = str.replace(DOUBLE_SLASH_RE, SLASH);
-  if (prepend3) {
-    str = SLASH + str;
-  }
-  return str;
-};
-var normalizePathToUnix = (path3) => toUnix(sp2.normalize(toUnix(path3)));
-var normalizeIgnored = (cwd = "") => (path3) => {
-  if (typeof path3 === "string") {
-    return normalizePathToUnix(sp2.isAbsolute(path3) ? path3 : sp2.join(cwd, path3));
-  } else {
-    return path3;
-  }
-};
-var getAbsolutePath = (path3, cwd) => {
-  if (sp2.isAbsolute(path3)) {
-    return path3;
-  }
-  return sp2.join(cwd, path3);
-};
-var EMPTY_SET = Object.freeze(/* @__PURE__ */ new Set());
-var DirEntry = class {
-  path;
-  _removeWatcher;
-  items;
-  constructor(dir, removeWatcher) {
-    this.path = dir;
-    this._removeWatcher = removeWatcher;
-    this.items = /* @__PURE__ */ new Set();
-  }
-  add(item) {
-    const { items } = this;
-    if (!items)
-      return;
-    if (item !== ONE_DOT && item !== TWO_DOTS)
-      items.add(item);
-  }
-  async remove(item) {
-    const { items } = this;
-    if (!items)
-      return;
-    items.delete(item);
-    if (items.size > 0)
-      return;
-    const dir = this.path;
-    try {
-      await readdir2(dir);
-    } catch (err) {
-      if (this._removeWatcher) {
-        this._removeWatcher(sp2.dirname(dir), sp2.basename(dir));
-      }
-    }
-  }
-  has(item) {
-    const { items } = this;
-    if (!items)
-      return;
-    return items.has(item);
-  }
-  getChildren() {
-    const { items } = this;
-    if (!items)
-      return [];
-    return [...items.values()];
-  }
-  dispose() {
-    this.items.clear();
-    this.path = "";
-    this._removeWatcher = EMPTY_FN;
-    this.items = EMPTY_SET;
-    Object.freeze(this);
-  }
-};
-var STAT_METHOD_F = "stat";
-var STAT_METHOD_L = "lstat";
-var WatchHelper = class {
-  fsw;
-  path;
-  watchPath;
-  fullWatchPath;
-  dirParts;
-  followSymlinks;
-  statMethod;
-  constructor(path3, follow, fsw) {
-    this.fsw = fsw;
-    const watchPath = path3;
-    this.path = path3 = path3.replace(REPLACER_RE, "");
-    this.watchPath = watchPath;
-    this.fullWatchPath = sp2.resolve(watchPath);
-    this.dirParts = [];
-    this.dirParts.forEach((parts) => {
-      if (parts.length > 1)
-        parts.pop();
-    });
-    this.followSymlinks = follow;
-    this.statMethod = follow ? STAT_METHOD_F : STAT_METHOD_L;
-  }
-  entryPath(entry) {
-    return sp2.join(this.watchPath, sp2.relative(this.watchPath, entry.fullPath));
-  }
-  filterPath(entry) {
-    const { stats } = entry;
-    if (stats && stats.isSymbolicLink())
-      return this.filterDir(entry);
-    const resolvedPath = this.entryPath(entry);
-    return this.fsw._isntIgnored(resolvedPath, stats) && this.fsw._hasReadPermissions(stats);
-  }
-  filterDir(entry) {
-    return this.fsw._isntIgnored(this.entryPath(entry), entry.stats);
-  }
-};
-var FSWatcher = class extends EventEmitter {
-  closed;
-  options;
-  _closers;
-  _ignoredPaths;
-  _throttled;
-  _streams;
-  _symlinkPaths;
-  _watched;
-  _pendingWrites;
-  _pendingUnlinks;
-  _readyCount;
-  _emitReady;
-  _closePromise;
-  _userIgnored;
-  _readyEmitted;
-  _emitRaw;
-  _boundRemove;
-  _nodeFsHandler;
-  // Not indenting methods for history sake; for now.
-  constructor(_opts = {}) {
-    super();
-    this.closed = false;
-    this._closers = /* @__PURE__ */ new Map();
-    this._ignoredPaths = /* @__PURE__ */ new Set();
-    this._throttled = /* @__PURE__ */ new Map();
-    this._streams = /* @__PURE__ */ new Set();
-    this._symlinkPaths = /* @__PURE__ */ new Map();
-    this._watched = /* @__PURE__ */ new Map();
-    this._pendingWrites = /* @__PURE__ */ new Map();
-    this._pendingUnlinks = /* @__PURE__ */ new Map();
-    this._readyCount = 0;
-    this._readyEmitted = false;
-    const awf = _opts.awaitWriteFinish;
-    const DEF_AWF = { stabilityThreshold: 2e3, pollInterval: 100 };
-    const opts = {
-      // Defaults
-      persistent: true,
-      ignoreInitial: false,
-      ignorePermissionErrors: false,
-      interval: 100,
-      binaryInterval: 300,
-      followSymlinks: true,
-      usePolling: false,
-      // useAsync: false,
-      atomic: true,
-      // NOTE: overwritten later (depends on usePolling)
-      ..._opts,
-      // Change format
-      ignored: _opts.ignored ? arrify(_opts.ignored) : arrify([]),
-      awaitWriteFinish: awf === true ? DEF_AWF : typeof awf === "object" ? { ...DEF_AWF, ...awf } : false
-    };
-    if (isIBMi)
-      opts.usePolling = true;
-    if (opts.atomic === void 0)
-      opts.atomic = !opts.usePolling;
-    const envPoll = process.env.CHOKIDAR_USEPOLLING;
-    if (envPoll !== void 0) {
-      const envLower = envPoll.toLowerCase();
-      if (envLower === "false" || envLower === "0")
-        opts.usePolling = false;
-      else if (envLower === "true" || envLower === "1")
-        opts.usePolling = true;
-      else
-        opts.usePolling = !!envLower;
-    }
-    const envInterval = process.env.CHOKIDAR_INTERVAL;
-    if (envInterval)
-      opts.interval = Number.parseInt(envInterval, 10);
-    let readyCalls = 0;
-    this._emitReady = () => {
-      readyCalls++;
-      if (readyCalls >= this._readyCount) {
-        this._emitReady = EMPTY_FN;
-        this._readyEmitted = true;
-        process.nextTick(() => this.emit(EVENTS.READY));
-      }
-    };
-    this._emitRaw = (...args) => this.emit(EVENTS.RAW, ...args);
-    this._boundRemove = this._remove.bind(this);
-    this.options = opts;
-    this._nodeFsHandler = new NodeFsHandler(this);
-    Object.freeze(opts);
-  }
-  _addIgnoredPath(matcher) {
-    if (isMatcherObject(matcher)) {
-      for (const ignored of this._ignoredPaths) {
-        if (isMatcherObject(ignored) && ignored.path === matcher.path && ignored.recursive === matcher.recursive) {
-          return;
-        }
-      }
-    }
-    this._ignoredPaths.add(matcher);
-  }
-  _removeIgnoredPath(matcher) {
-    this._ignoredPaths.delete(matcher);
-    if (typeof matcher === "string") {
-      for (const ignored of this._ignoredPaths) {
-        if (isMatcherObject(ignored) && ignored.path === matcher) {
-          this._ignoredPaths.delete(ignored);
-        }
-      }
-    }
-  }
-  // Public methods
-  /**
-   * Adds paths to be watched on an existing FSWatcher instance.
-   * @param paths_ file or file list. Other arguments are unused
-   */
-  add(paths_, _origAdd, _internal) {
-    const { cwd } = this.options;
-    this.closed = false;
-    this._closePromise = void 0;
-    let paths = unifyPaths(paths_);
-    if (cwd) {
-      paths = paths.map((path3) => {
-        const absPath = getAbsolutePath(path3, cwd);
-        return absPath;
-      });
-    }
-    paths.forEach((path3) => {
-      this._removeIgnoredPath(path3);
-    });
-    this._userIgnored = void 0;
-    if (!this._readyCount)
-      this._readyCount = 0;
-    this._readyCount += paths.length;
-    Promise.all(paths.map(async (path3) => {
-      const res = await this._nodeFsHandler._addToNodeFs(path3, !_internal, void 0, 0, _origAdd);
-      if (res)
-        this._emitReady();
-      return res;
-    })).then((results) => {
-      if (this.closed)
-        return;
-      results.forEach((item) => {
-        if (item)
-          this.add(sp2.dirname(item), sp2.basename(_origAdd || item));
-      });
-    });
-    return this;
-  }
-  /**
-   * Close watchers or start ignoring events from specified paths.
-   */
-  unwatch(paths_) {
-    if (this.closed)
-      return this;
-    const paths = unifyPaths(paths_);
-    const { cwd } = this.options;
-    paths.forEach((path3) => {
-      if (!sp2.isAbsolute(path3) && !this._closers.has(path3)) {
-        if (cwd)
-          path3 = sp2.join(cwd, path3);
-        path3 = sp2.resolve(path3);
-      }
-      this._closePath(path3);
-      this._addIgnoredPath(path3);
-      if (this._watched.has(path3)) {
-        this._addIgnoredPath({
-          path: path3,
-          recursive: true
-        });
-      }
-      this._userIgnored = void 0;
-    });
-    return this;
-  }
-  /**
-   * Close watchers and remove all listeners from watched paths.
-   */
-  close() {
-    if (this._closePromise) {
-      return this._closePromise;
-    }
-    this.closed = true;
-    this.removeAllListeners();
-    const closers = [];
-    this._closers.forEach((closerList) => closerList.forEach((closer) => {
-      const promise2 = closer();
-      if (promise2 instanceof Promise)
-        closers.push(promise2);
-    }));
-    this._streams.forEach((stream) => stream.destroy());
-    this._userIgnored = void 0;
-    this._readyCount = 0;
-    this._readyEmitted = false;
-    this._watched.forEach((dirent) => dirent.dispose());
-    this._closers.clear();
-    this._watched.clear();
-    this._streams.clear();
-    this._symlinkPaths.clear();
-    this._throttled.clear();
-    this._closePromise = closers.length ? Promise.all(closers).then(() => void 0) : Promise.resolve();
-    return this._closePromise;
-  }
-  /**
-   * Expose list of watched paths
-   * @returns for chaining
-   */
-  getWatched() {
-    const watchList = {};
-    this._watched.forEach((entry, dir) => {
-      const key2 = this.options.cwd ? sp2.relative(this.options.cwd, dir) : dir;
-      const index = key2 || ONE_DOT;
-      watchList[index] = entry.getChildren().sort();
-    });
-    return watchList;
-  }
-  emitWithAll(event, args) {
-    this.emit(event, ...args);
-    if (event !== EVENTS.ERROR)
-      this.emit(EVENTS.ALL, event, ...args);
-  }
-  // Common helpers
-  // --------------
-  /**
-   * Normalize and emit events.
-   * Calling _emit DOES NOT MEAN emit() would be called!
-   * @param event Type of event
-   * @param path File or directory path
-   * @param stats arguments to be passed with event
-   * @returns the error if defined, otherwise the value of the FSWatcher instance's `closed` flag
-   */
-  async _emit(event, path3, stats) {
-    if (this.closed)
-      return;
-    const opts = this.options;
-    if (isWindows)
-      path3 = sp2.normalize(path3);
-    if (opts.cwd)
-      path3 = sp2.relative(opts.cwd, path3);
-    const args = [path3];
-    if (stats != null)
-      args.push(stats);
-    const awf = opts.awaitWriteFinish;
-    let pw;
-    if (awf && (pw = this._pendingWrites.get(path3))) {
-      pw.lastChange = /* @__PURE__ */ new Date();
-      return this;
-    }
-    if (opts.atomic) {
-      if (event === EVENTS.UNLINK) {
-        this._pendingUnlinks.set(path3, [event, ...args]);
-        setTimeout(() => {
-          this._pendingUnlinks.forEach((entry, path4) => {
-            this.emit(...entry);
-            this.emit(EVENTS.ALL, ...entry);
-            this._pendingUnlinks.delete(path4);
-          });
-        }, typeof opts.atomic === "number" ? opts.atomic : 100);
-        return this;
-      }
-      if (event === EVENTS.ADD && this._pendingUnlinks.has(path3)) {
-        event = EVENTS.CHANGE;
-        this._pendingUnlinks.delete(path3);
-      }
-    }
-    if (awf && (event === EVENTS.ADD || event === EVENTS.CHANGE) && this._readyEmitted) {
-      const awfEmit = (err, stats2) => {
-        if (err) {
-          event = EVENTS.ERROR;
-          args[0] = err;
-          this.emitWithAll(event, args);
-        } else if (stats2) {
-          if (args.length > 1) {
-            args[1] = stats2;
-          } else {
-            args.push(stats2);
-          }
-          this.emitWithAll(event, args);
-        }
-      };
-      this._awaitWriteFinish(path3, awf.stabilityThreshold, event, awfEmit);
-      return this;
-    }
-    if (event === EVENTS.CHANGE) {
-      const isThrottled = !this._throttle(EVENTS.CHANGE, path3, 50);
-      if (isThrottled)
-        return this;
-    }
-    if (opts.alwaysStat && stats === void 0 && (event === EVENTS.ADD || event === EVENTS.ADD_DIR || event === EVENTS.CHANGE)) {
-      const fullPath = opts.cwd ? sp2.join(opts.cwd, path3) : path3;
-      let stats2;
-      try {
-        stats2 = await stat3(fullPath);
-      } catch (err) {
-      }
-      if (!stats2 || this.closed)
-        return;
-      args.push(stats2);
-    }
-    this.emitWithAll(event, args);
-    return this;
-  }
-  /**
-   * Common handler for errors
-   * @returns The error if defined, otherwise the value of the FSWatcher instance's `closed` flag
-   */
-  _handleError(error61) {
-    const code2 = error61 && error61.code;
-    if (error61 && code2 !== "ENOENT" && code2 !== "ENOTDIR" && (!this.options.ignorePermissionErrors || code2 !== "EPERM" && code2 !== "EACCES")) {
-      this.emit(EVENTS.ERROR, error61);
-    }
-    return error61 || this.closed;
-  }
-  /**
-   * Helper utility for throttling
-   * @param actionType type being throttled
-   * @param path being acted upon
-   * @param timeout duration of time to suppress duplicate actions
-   * @returns tracking object or false if action should be suppressed
-   */
-  _throttle(actionType, path3, timeout) {
-    if (!this._throttled.has(actionType)) {
-      this._throttled.set(actionType, /* @__PURE__ */ new Map());
-    }
-    const action = this._throttled.get(actionType);
-    if (!action)
-      throw new Error("invalid throttle");
-    const actionPath = action.get(path3);
-    if (actionPath) {
-      actionPath.count++;
-      return false;
-    }
-    let timeoutObject;
-    const clear = () => {
-      const item = action.get(path3);
-      const count = item ? item.count : 0;
-      action.delete(path3);
-      clearTimeout(timeoutObject);
-      if (item)
-        clearTimeout(item.timeoutObject);
-      return count;
-    };
-    timeoutObject = setTimeout(clear, timeout);
-    const thr = { timeoutObject, clear, count: 0 };
-    action.set(path3, thr);
-    return thr;
-  }
-  _incrReadyCount() {
-    return this._readyCount++;
-  }
-  /**
-   * Awaits write operation to finish.
-   * Polls a newly created file for size variations. When files size does not change for 'threshold' milliseconds calls callback.
-   * @param path being acted upon
-   * @param threshold Time in milliseconds a file size must be fixed before acknowledging write OP is finished
-   * @param event
-   * @param awfEmit Callback to be called when ready for event to be emitted.
-   */
-  _awaitWriteFinish(path3, threshold, event, awfEmit) {
-    const awf = this.options.awaitWriteFinish;
-    if (typeof awf !== "object")
-      return;
-    const pollInterval = awf.pollInterval;
-    let timeoutHandler;
-    let fullPath = path3;
-    if (this.options.cwd && !sp2.isAbsolute(path3)) {
-      fullPath = sp2.join(this.options.cwd, path3);
-    }
-    const now = /* @__PURE__ */ new Date();
-    const writes = this._pendingWrites;
-    function awaitWriteFinishFn(prevStat) {
-      statcb(fullPath, (err, curStat) => {
-        if (err || !writes.has(path3)) {
-          if (err && err.code !== "ENOENT")
-            awfEmit(err);
-          return;
-        }
-        const now2 = Number(/* @__PURE__ */ new Date());
-        if (prevStat && curStat.size !== prevStat.size) {
-          writes.get(path3).lastChange = now2;
-        }
-        const pw = writes.get(path3);
-        const df = now2 - pw.lastChange;
-        if (df >= threshold) {
-          writes.delete(path3);
-          awfEmit(void 0, curStat);
-        } else {
-          timeoutHandler = setTimeout(awaitWriteFinishFn, pollInterval, curStat);
-        }
-      });
-    }
-    if (!writes.has(path3)) {
-      writes.set(path3, {
-        lastChange: now,
-        cancelWait: () => {
-          writes.delete(path3);
-          clearTimeout(timeoutHandler);
-          return event;
-        }
-      });
-      timeoutHandler = setTimeout(awaitWriteFinishFn, pollInterval);
-    }
-  }
-  /**
-   * Determines whether user has asked to ignore this path.
-   */
-  _isIgnored(path3, stats) {
-    if (this.options.atomic && DOT_RE.test(path3))
-      return true;
-    if (!this._userIgnored) {
-      const { cwd } = this.options;
-      const ign = this.options.ignored;
-      const ignored = (ign || []).map(normalizeIgnored(cwd));
-      const ignoredPaths = [...this._ignoredPaths];
-      const list3 = [...ignoredPaths.map(normalizeIgnored(cwd)), ...ignored];
-      this._userIgnored = anymatch(list3, void 0);
-    }
-    return this._userIgnored(path3, stats);
-  }
-  _isntIgnored(path3, stat15) {
-    return !this._isIgnored(path3, stat15);
-  }
-  /**
-   * Provides a set of common helpers and properties relating to symlink handling.
-   * @param path file or directory pattern being watched
-   */
-  _getWatchHelpers(path3) {
-    return new WatchHelper(path3, this.options.followSymlinks, this);
-  }
-  // Directory helpers
-  // -----------------
-  /**
-   * Provides directory tracking objects
-   * @param directory path of the directory
-   */
-  _getWatchedDir(directory) {
-    const dir = sp2.resolve(directory);
-    if (!this._watched.has(dir))
-      this._watched.set(dir, new DirEntry(dir, this._boundRemove));
-    return this._watched.get(dir);
-  }
-  // File helpers
-  // ------------
-  /**
-   * Check for read permissions: https://stackoverflow.com/a/11781404/1358405
-   */
-  _hasReadPermissions(stats) {
-    if (this.options.ignorePermissionErrors)
-      return true;
-    return Boolean(Number(stats.mode) & 256);
-  }
-  /**
-   * Handles emitting unlink events for
-   * files and directories, and via recursion, for
-   * files and directories within directories that are unlinked
-   * @param directory within which the following item is located
-   * @param item      base path of item/directory
-   */
-  _remove(directory, item, isDirectory) {
-    const path3 = sp2.join(directory, item);
-    const fullPath = sp2.resolve(path3);
-    isDirectory = isDirectory != null ? isDirectory : this._watched.has(path3) || this._watched.has(fullPath);
-    if (!this._throttle("remove", path3, 100))
-      return;
-    if (!isDirectory && this._watched.size === 1) {
-      this.add(directory, item, true);
-    }
-    const wp = this._getWatchedDir(path3);
-    const nestedDirectoryChildren = wp.getChildren();
-    nestedDirectoryChildren.forEach((nested) => this._remove(path3, nested));
-    const parent = this._getWatchedDir(directory);
-    const wasTracked = parent.has(item);
-    parent.remove(item);
-    if (this._symlinkPaths.has(fullPath)) {
-      this._symlinkPaths.delete(fullPath);
-    }
-    let relPath = path3;
-    if (this.options.cwd)
-      relPath = sp2.relative(this.options.cwd, path3);
-    if (this.options.awaitWriteFinish && this._pendingWrites.has(relPath)) {
-      const event = this._pendingWrites.get(relPath).cancelWait();
-      if (event === EVENTS.ADD)
-        return;
-    }
-    this._watched.delete(path3);
-    this._watched.delete(fullPath);
-    const eventName = isDirectory ? EVENTS.UNLINK_DIR : EVENTS.UNLINK;
-    if (wasTracked && !this._isIgnored(path3))
-      this._emit(eventName, path3);
-    this._closePath(path3);
-  }
-  /**
-   * Closes all watchers for a path
-   */
-  _closePath(path3) {
-    this._closeFile(path3);
-    const dir = sp2.dirname(path3);
-    this._getWatchedDir(dir).remove(sp2.basename(path3));
-  }
-  /**
-   * Closes only file-specific watchers
-   */
-  _closeFile(path3) {
-    const closers = this._closers.get(path3);
-    if (!closers)
-      return;
-    closers.forEach((closer) => closer());
-    this._closers.delete(path3);
-  }
-  _addPathCloser(path3, closer) {
-    if (!closer)
-      return;
-    let list3 = this._closers.get(path3);
-    if (!list3) {
-      list3 = [];
-      this._closers.set(path3, list3);
-    }
-    list3.push(closer);
-  }
-  _readdirp(root, opts) {
-    if (this.closed)
-      return;
-    const options = { type: EVENTS.ALL, alwaysStat: true, lstat: true, ...opts, depth: 0 };
-    let stream = readdirp(root, options);
-    this._streams.add(stream);
-    stream.once(STR_CLOSE, () => {
-      stream = void 0;
-    });
-    stream.once(STR_END, () => {
-      if (stream) {
-        this._streams.delete(stream);
-        stream = void 0;
-      }
-    });
-    return stream;
-  }
-};
-function watch(paths, options = {}) {
-  const watcher = new FSWatcher(options);
-  watcher.add(paths);
-  return watcher;
-}
+// src/configuration.ts
+var import_yaml = __toESM(require_dist(), 1);
 
 // ../../../../../alder/host/node_modules/zod/v4/classic/external.js
 var external_exports = {};
@@ -47747,7 +45982,7 @@ function bucketFor(state, inst) {
   return bucket;
 }
 var handoff;
-var open2 = [];
+var open = [];
 var memo = {
   alloc(_inst, payload, empty2) {
     const bucket = handoff;
@@ -47756,7 +45991,7 @@ var memo = {
     handoff = void 0;
     const entry = { value: empty2, issues: null };
     bucket.set(payload.value, entry);
-    open2.push(entry);
+    open.push(entry);
     return empty2;
   },
   guard(inst) {
@@ -47822,10 +46057,10 @@ var memo = {
           return payload;
         }
         handoff = bucket;
-        const depth = open2.length;
+        const depth = open.length;
         const result = base(payload, ctx);
         handoff = void 0;
-        const entry = open2.length > depth ? open2.pop() : void 0;
+        const entry = open.length > depth ? open.pop() : void 0;
         if (result instanceof Promise) {
           return result.then((r) => {
             if (entry)
@@ -61595,8 +59830,2275 @@ function date4(params) {
   return _coercedDate(ZodDate, params);
 }
 
+// src/settings.ts
+var editorSchema = external_exports.object({
+  font_size: external_exports.number().int().min(10).max(32),
+  tab_size: external_exports.number().int().min(1).max(8),
+  line_numbers: external_exports.boolean(),
+  completions: external_exports.boolean(),
+  signature_help: external_exports.boolean(),
+  live_diagnostics: external_exports.boolean()
+}).strict();
+var formatSchema = external_exports.object({ on_save: external_exports.boolean() }).strict();
+var tableSchema = external_exports.object({ page_size: external_exports.number().int().min(5).max(200) }).strict();
+var preferencesSchema = external_exports.object({
+  theme: external_exports.enum(["light", "dark", "system"]),
+  keymap: external_exports.enum(["default", "vim"]),
+  autosave: external_exports.boolean(),
+  format: formatSchema,
+  editor: editorSchema,
+  table: tableSchema
+}).strict();
+var preferencesPatchSchema = preferencesSchema.extend({
+  format: formatSchema.partial(),
+  editor: editorSchema.partial(),
+  table: tableSchema.partial()
+}).partial();
+var notebookCacheSchema = external_exports.object({ enabled: external_exports.boolean() }).strict();
+var notebookSettingsSchema = external_exports.object({
+  on_cell_change: external_exports.enum(["automatic", "lazy"]),
+  on_startup: external_exports.boolean(),
+  cache: notebookCacheSchema
+}).strict();
+var notebookSettingsPatchSchema = notebookSettingsSchema.extend({
+  cache: notebookCacheSchema.partial()
+}).partial();
+var projectCacheSchema = external_exports.object({ dir: external_exports.string().min(1).nullable() }).strict();
+var projectSettingsSchema = external_exports.object({ cache: projectCacheSchema }).strict();
+var projectSettingsPatchSchema = projectSettingsSchema.extend({
+  cache: projectCacheSchema.partial()
+}).partial();
+var configSchema = preferencesSchema.extend({
+  on_cell_change: notebookSettingsSchema.shape.on_cell_change,
+  on_startup: notebookSettingsSchema.shape.on_startup,
+  cache: notebookCacheSchema.extend(projectCacheSchema.shape)
+});
+function preferenceDefaults() {
+  return {
+    theme: "system",
+    keymap: "default",
+    autosave: false,
+    format: { on_save: false },
+    editor: {
+      font_size: 14,
+      tab_size: 2,
+      line_numbers: true,
+      completions: true,
+      signature_help: true,
+      live_diagnostics: false
+    },
+    table: { page_size: 25 }
+  };
+}
+function mergePreferences(current, patch) {
+  return {
+    theme: patch.theme ?? current.theme,
+    keymap: patch.keymap ?? current.keymap,
+    autosave: patch.autosave ?? current.autosave,
+    format: { ...current.format, ...patch.format },
+    editor: { ...current.editor, ...patch.editor },
+    table: { ...current.table, ...patch.table }
+  };
+}
+function configDefaults() {
+  return {
+    ...preferenceDefaults(),
+    on_cell_change: "automatic",
+    on_startup: true,
+    cache: { enabled: true, dir: null }
+  };
+}
+function resolveSettings(options = {}) {
+  const defaults = configDefaults();
+  return {
+    ...mergePreferences(defaults, options.preferences ?? {}),
+    on_cell_change: options.notebook?.on_cell_change ?? defaults.on_cell_change,
+    on_startup: options.notebook?.on_startup ?? defaults.on_startup,
+    cache: {
+      enabled: options.notebook?.cache?.enabled ?? defaults.cache.enabled,
+      dir: options.project?.cache?.dir ?? defaults.cache.dir
+    }
+  };
+}
+
+// src/configuration.ts
+var MAX_YAML_BYTES = 1024 * 1024;
+var ConfigError = class extends Error {
+  constructor(key2, message2) {
+    super(`config_invalid: ${key2}: ${message2}`);
+    this.key = key2;
+    this.name = "ConfigError";
+  }
+  key;
+  code = "config_invalid";
+};
+function clone2(value) {
+  return structuredClone(value);
+}
+function ensureStringPath(path3) {
+  if (typeof path3 !== "string" || path3.length === 0 || path3.includes("\0")) {
+    throw new ConfigError("path", "must be a non-empty path");
+  }
+  return path3;
+}
+function alderPaths() {
+  return envPaths("alder", { suffix: "" });
+}
+function preferencesPath() {
+  return join(alderPaths().config, "preferences.yaml");
+}
+function projectConfigPath(path3) {
+  if (!path3) return null;
+  const directory = path3.endsWith("/") ? path3 : dirname(path3);
+  return join(directory, ".alder", "config.yaml");
+}
+var mappingSchema = external_exports.record(external_exports.string(), external_exports.unknown());
+function parseYamlMapping(text2, kind) {
+  if (Buffer.byteLength(text2, "utf8") > MAX_YAML_BYTES) {
+    throw new ConfigError(kind, `YAML document exceeds the ${MAX_YAML_BYTES}-byte limit`);
+  }
+  let parsed;
+  try {
+    parsed = text2.trim() === "" ? {} : (0, import_yaml.parse)(text2, { maxAliasCount: 100 });
+  } catch (error61) {
+    throw new ConfigError(kind, `malformed YAML: ${error61 instanceof Error ? error61.message : String(error61)}`);
+  }
+  const mapping = mappingSchema.safeParse(parsed);
+  if (!mapping.success) throw new ConfigError(kind, "YAML root must be a mapping");
+  return mapping.data;
+}
+async function readProjectSettings(path3) {
+  if (path3 === null || path3 === void 0) return {};
+  const file2 = ensureStringPath(path3);
+  try {
+    const bytes = await readFile(file2);
+    const value = parseYamlMapping(new TextDecoder("utf-8", { fatal: true }).decode(bytes), file2);
+    return projectSettingsPatchSchema.parse(value);
+  } catch (error61) {
+    if (error61.code === "ENOENT") return {};
+    throw new ConfigError(file2, `cannot read project settings; fix this file and try again: ${error61 instanceof Error ? error61.message : String(error61)}`);
+  }
+}
+function serializeProjectSettings(value) {
+  return (0, import_yaml.stringify)(value, { sortMapEntries: true });
+}
+function metadataMapping(value, name) {
+  const result = mappingSchema.safeParse(value);
+  if (!result.success) throw new ConfigError(name, "must be a mapping");
+  return result.data;
+}
+function readNotebookSettings(metadata) {
+  if (metadata === null || metadata === void 0) return {};
+  const root = metadataMapping(metadata, "metadata");
+  if (root.runtime === null || root.runtime === void 0) return {};
+  const runtime = metadataMapping(root.runtime, "runtime");
+  const known = {};
+  for (const key2 of ["on_cell_change", "on_startup"]) {
+    if (Object.hasOwn(runtime, key2)) known[key2] = runtime[key2];
+  }
+  if (Object.hasOwn(runtime, "cache")) {
+    const cache = metadataMapping(runtime.cache, "runtime.cache");
+    if (Object.hasOwn(cache, "enabled")) known.cache = { enabled: cache.enabled };
+  }
+  const parsed = notebookSettingsPatchSchema.safeParse(known);
+  if (!parsed.success) throw new ConfigError("runtime", parsed.error.message);
+  return parsed.data;
+}
+function setNotebookSettings(notebook, patch) {
+  const metadata = structuredClone(notebook.metadata ?? {});
+  const runtime = metadata.runtime == null ? {} : metadataMapping(metadata.runtime, "runtime");
+  metadata.runtime = {
+    ...runtime,
+    ...patch.on_cell_change === void 0 ? {} : { on_cell_change: patch.on_cell_change },
+    ...patch.on_startup === void 0 ? {} : { on_startup: patch.on_startup },
+    ...patch.cache === void 0 ? {} : {
+      cache: { ...runtime.cache == null ? {} : metadataMapping(runtime.cache, "runtime.cache"), ...patch.cache }
+    }
+  };
+  return { ...notebook, metadata };
+}
+var AtomicWriteConflictError = class extends Error {
+  code = "source_conflict";
+  path;
+  expected;
+  actual;
+  constructor(path3, expected, actual) {
+    super(`source_conflict: sidecar changed while writing \`${path3}\``);
+    this.name = "AtomicWriteConflictError";
+    this.path = path3;
+    this.expected = expected;
+    this.actual = actual;
+  }
+};
+async function observeFile(path3) {
+  try {
+    const info = await stat(path3);
+    if (!info.isFile()) return { state: "unreadable", digest: null, version: null };
+    const bytes = await readFile(path3);
+    const digest = createHash("sha256").update(bytes).digest("hex");
+    const inode = typeof info.ino === "number" ? info.ino : void 0;
+    const identity = inode === void 0 ? null : `${info.dev}:${inode}`;
+    const mode = info.mode & 511;
+    const version2 = `${identity ?? ""}:${mode.toString(8)}:${digest}`;
+    return { state: "present", digest, version: version2, size: info.size, mtimeMs: info.mtimeMs, inode, identity, mode };
+  } catch (error61) {
+    if (error61.code === "ENOENT") {
+      return { state: "absent", digest: null, version: null };
+    }
+    return { state: "unreadable", digest: null, version: null };
+  }
+}
+async function syncDirectory(directory) {
+  let handle;
+  try {
+    handle = await open2(directory, "r");
+    await handle.sync();
+  } catch (error61) {
+    const code2 = error61.code;
+    if (code2 !== "EINVAL" && code2 !== "ENOTSUP" && code2 !== "EBADF") throw error61;
+  } finally {
+    await handle?.close().catch(() => void 0);
+  }
+}
+function expectedObservation(options) {
+  if (Object.hasOwn(options, "expected")) return options.expected;
+  if (Object.hasOwn(options, "expectedVersion")) return options.expectedVersion;
+  if (Object.hasOwn(options, "expectedDigest")) return options.expectedDigest;
+  return void 0;
+}
+function observationsEqual(actual, expected) {
+  if (expected === void 0) return true;
+  if (expected === null) return actual.state === "absent";
+  if (typeof expected === "string") {
+    return actual.digest === expected || actual.version === expected;
+  }
+  if (expected.state !== actual.state) return false;
+  if (expected.digest !== void 0 && expected.digest !== actual.digest) return false;
+  if (expected.version !== void 0 && expected.version !== actual.version) return false;
+  if (expected.identity !== void 0 && expected.identity !== actual.identity) return false;
+  if (expected.mode !== void 0 && expected.mode !== actual.mode) return false;
+  return true;
+}
+async function writeAtomicText(path3, text2, options = {}) {
+  const file2 = ensureStringPath(path3);
+  const parent = dirname(file2);
+  const observe = options.observe ?? observeFile;
+  const expected = expectedObservation(options);
+  const initial = await observe(file2);
+  if (!observationsEqual(initial, expected)) throw new AtomicWriteConflictError(file2, expected, initial);
+  await mkdir(parent, { recursive: true, mode: 448 });
+  const temporary = join(parent, `.alder-write-${process.pid}-${randomUUID()}.tmp`);
+  let handle;
+  try {
+    const mode = initial.mode ?? 384;
+    handle = await open2(temporary, "wx", mode);
+    await handle.chmod(mode);
+    await handle.writeFile(text2, "utf8");
+    await handle.sync();
+    await handle.close();
+    handle = void 0;
+    const current = await observe(file2);
+    if (!observationsEqual(current, expected)) throw new AtomicWriteConflictError(file2, expected, current);
+    await options.beforeReplace?.(file2, current, expected);
+    const beforeRename = await observe(file2);
+    if (!observationsEqual(beforeRename, expected)) throw new AtomicWriteConflictError(file2, expected, beforeRename);
+    await rename(temporary, file2);
+    await syncDirectory(parent);
+    return await observe(file2);
+  } finally {
+    if (handle) await handle.close().catch(() => void 0);
+    await rm(temporary, { force: true }).catch(() => void 0);
+  }
+}
+var appDefaults = { layout: "vertical", width: "medium", include_code: false };
+var appLayoutSchema = external_exports.enum(["vertical", "grid", "slides"]);
+var appWidthSchema = external_exports.enum(["compact", "medium", "full"]);
+var appUpdateSchema = external_exports.object({
+  layout: appLayoutSchema,
+  width: appWidthSchema,
+  include_code: external_exports.boolean()
+}).strict().partial();
+var AppConfigError = class extends Error {
+  code = "invalid_request";
+  constructor(message2) {
+    super(message2);
+    this.name = "AppConfigError";
+  }
+};
+function appRecord(value, message2) {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) throw new AppConfigError(message2);
+  return value;
+}
+function validateAppMetadata(metadata) {
+  const record4 = metadata === null || metadata === void 0 ? {} : appRecord(metadata, "notebook metadata must be a named mapping");
+  const appValue = record4.app;
+  if (appValue === null || appValue === void 0) return {};
+  const app = appRecord(appValue, "app metadata must be a named mapping");
+  if (Object.hasOwn(app, "layout")) {
+    const parsed = appLayoutSchema.safeParse(app.layout);
+    if (!parsed.success) throw new AppConfigError("layout must be one of vertical, grid, slides");
+  }
+  if (Object.hasOwn(app, "width")) {
+    const parsed = appWidthSchema.safeParse(app.width);
+    if (!parsed.success) throw new AppConfigError("width must be one of compact, medium, full");
+  }
+  if (Object.hasOwn(app, "include_code") && typeof app.include_code !== "boolean") {
+    throw new AppConfigError("include_code must be a scalar logical");
+  }
+  return clone2(app);
+}
+function validateAppUpdate(updates) {
+  const record4 = appRecord(updates, "app updates must be a non-empty mapping with unique keys");
+  if (Object.keys(record4).length === 0) throw new AppConfigError("app updates must be a non-empty mapping with unique keys");
+  const parsed = appUpdateSchema.safeParse(record4);
+  if (!parsed.success) {
+    const issue2 = parsed.error.issues[0];
+    if (issue2?.code === "unrecognized_keys" && issue2.keys[0]) throw new AppConfigError("unknown app key: " + issue2.keys[0]);
+    const key2 = issue2?.path[0] ? String(issue2.path[0]) : "app";
+    throw new AppConfigError(key2 + " is invalid");
+  }
+  return parsed.data;
+}
+function appConfig(notebook) {
+  const app = validateAppMetadata(notebook.metadata);
+  return {
+    layout: app.layout ?? appDefaults.layout,
+    width: app.width ?? appDefaults.width,
+    include_code: app.include_code ?? appDefaults.include_code
+  };
+}
+function setAppConfig(notebook, updates) {
+  const checked = validateAppUpdate(updates);
+  const metadata = appRecord(notebook.metadata ?? {}, "notebook metadata must be a named mapping");
+  const app = validateAppMetadata(metadata);
+  const nextMetadata = clone2(metadata);
+  nextMetadata.app = { ...app, ...checked };
+  return { ...notebook, metadata: nextMetadata };
+}
+
+// src/preferences.ts
+var PreferencesFileError = class extends Error {
+  constructor(code2, message2) {
+    super(message2);
+    this.code = code2;
+    this.name = "PreferencesFileError";
+  }
+  code;
+};
+async function readPreferences(path3) {
+  let handle;
+  let observation = { state: "unreadable", digest: null, version: null };
+  try {
+    handle = await open3(path3, "r");
+    const info = await handle.stat();
+    if (!info.isFile()) throw new Error("the destination is not a regular file");
+    if (info.size > MAX_YAML_BYTES) throw new Error(`file exceeds the ${MAX_YAML_BYTES}-byte limit`);
+    const bytes = await handle.readFile();
+    const digest = createHash2("sha256").update(bytes).digest("hex");
+    const identity = `${info.dev}:${info.ino}`;
+    const mode = info.mode & 511;
+    observation = {
+      state: "present",
+      digest,
+      version: `${identity}:${mode.toString(8)}:${digest}`,
+      identity,
+      mode,
+      inode: info.ino,
+      mtimeMs: info.mtimeMs,
+      size: bytes.byteLength
+    };
+    const text2 = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    const patch = preferencesPatchSchema.parse(parseYamlMapping(text2, path3));
+    return { observation, values: mergePreferences(preferenceDefaults(), patch), error: null };
+  } catch (error61) {
+    if (error61.code === "ENOENT") {
+      return {
+        observation: { state: "absent", digest: null, version: null },
+        values: preferenceDefaults(),
+        error: null
+      };
+    }
+    return {
+      observation,
+      error: {
+        code: "config_invalid",
+        message: `Cannot read application preferences at ${path3}. Fix this file and try again: ${error61 instanceof Error ? error61.message : String(error61)}`
+      }
+    };
+  } finally {
+    await handle?.close();
+  }
+}
+var ApplicationPreferences = class _ApplicationPreferences {
+  constructor(path3) {
+    this.path = path3;
+  }
+  path;
+  values = preferenceDefaults();
+  version = null;
+  error = null;
+  pending = Promise.resolve();
+  listeners = /* @__PURE__ */ new Set();
+  static async open(path3 = preferencesPath()) {
+    const preferences = new _ApplicationPreferences(path3);
+    const file2 = await readPreferences(path3);
+    preferences.accept(file2);
+    return preferences;
+  }
+  snapshot() {
+    return {
+      values: structuredClone(this.values),
+      version: this.version,
+      path: this.path,
+      error: this.error === null ? null : { ...this.error }
+    };
+  }
+  subscribe(listener) {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+  update(patch, expectedVersion) {
+    const changes = structuredClone(patch);
+    const operation = this.pending.then(() => this.write(changes, expectedVersion));
+    this.pending = operation.then(() => void 0, () => void 0);
+    return operation;
+  }
+  async close() {
+    await this.pending;
+    this.listeners.clear();
+  }
+  accept(file2) {
+    if (file2.values !== void 0) this.values = file2.values;
+    this.version = file2.observation.version;
+    this.error = file2.error;
+  }
+  notify() {
+    for (const listener of this.listeners) {
+      try {
+        listener(this.snapshot());
+      } catch {
+      }
+    }
+  }
+  async write(patch, expectedVersion) {
+    const current = await readPreferences(this.path);
+    if (current.error !== null) {
+      this.accept(current);
+      this.notify();
+      throw new PreferencesFileError(current.error.code, current.error.message);
+    }
+    if (current.observation.version !== this.version) {
+      const previousVersion = this.version;
+      this.accept(current);
+      this.notify();
+      throw new AtomicWriteConflictError(this.path, previousVersion, current.observation);
+    }
+    if (expectedVersion !== this.version) {
+      throw new AtomicWriteConflictError(this.path, expectedVersion, current.observation);
+    }
+    const next = mergePreferences(current.values, patch);
+    try {
+      const observation = await writeAtomicText(this.path, (0, import_yaml2.stringify)(next, { sortMapEntries: true }), {
+        expected: current.observation
+      });
+      if (observation.state !== "present") throw new Error("cannot read the saved preferences file");
+      this.values = next;
+      this.version = observation.version;
+      this.error = null;
+    } catch (error61) {
+      if (error61 instanceof AtomicWriteConflictError) throw error61;
+      this.error = {
+        code: "preferences_write_failed",
+        message: `Cannot save application preferences to ${this.path}. Check that the folder is writable and try again: ${error61 instanceof Error ? error61.message : String(error61)}`
+      };
+      this.notify();
+      throw new PreferencesFileError(this.error.code, this.error.message);
+    }
+    this.notify();
+    return this.snapshot();
+  }
+};
+
+// src/application.ts
+import { createHash as createHash9, randomUUID as randomUUID14 } from "node:crypto";
+import { mkdtemp as mkdtemp5, realpath as realpath11, rm as rm10 } from "node:fs/promises";
+import { basename as basename8, dirname as dirname9, join as join21, resolve as resolve13 } from "node:path";
+import { tmpdir as tmpdir6 } from "node:os";
+
+// ../../../../../alder/host/node_modules/chokidar/index.js
+import { EventEmitter } from "node:events";
+import { stat as statcb, Stats } from "node:fs";
+import { readdir as readdir2, stat as stat4 } from "node:fs/promises";
+import * as sp2 from "node:path";
+
+// ../../../../../alder/host/node_modules/readdirp/index.js
+import { lstat, readdir, realpath, stat as stat2 } from "node:fs/promises";
+import { join as pjoin, resolve as presolve, sep as psep } from "node:path";
+import { Readable } from "node:stream";
+var EntryTypes = {
+  FILE_TYPE: "files",
+  DIR_TYPE: "directories",
+  FILE_DIR_TYPE: "files_directories",
+  EVERYTHING_TYPE: "all"
+};
+var defaultOptions = {
+  root: ".",
+  fileFilter: (_entryInfo) => true,
+  directoryFilter: (_entryInfo) => true,
+  type: EntryTypes.FILE_TYPE,
+  lstat: false,
+  depth: 2147483648,
+  alwaysStat: false,
+  // Throughput is flat from 16 to 65536 (traversal is I/O-bound), but
+  // batches of 1024+ entries survive young-gen GC and bloat RSS ~20-60%.
+  highWaterMark: 256
+};
+Object.freeze(defaultOptions);
+var RECURSIVE_ERROR_CODE = "READDIRP_RECURSIVE_ERROR";
+var NORMAL_FLOW_ERRORS = /* @__PURE__ */ new Set(["ENOENT", "EPERM", "EACCES", "ELOOP", RECURSIVE_ERROR_CODE]);
+var ALL_TYPES = [
+  EntryTypes.DIR_TYPE,
+  EntryTypes.EVERYTHING_TYPE,
+  EntryTypes.FILE_DIR_TYPE,
+  EntryTypes.FILE_TYPE
+];
+var DIR_TYPES = /* @__PURE__ */ new Set([
+  EntryTypes.DIR_TYPE,
+  EntryTypes.EVERYTHING_TYPE,
+  EntryTypes.FILE_DIR_TYPE
+]);
+var FILE_TYPES = /* @__PURE__ */ new Set([
+  EntryTypes.EVERYTHING_TYPE,
+  EntryTypes.FILE_DIR_TYPE,
+  EntryTypes.FILE_TYPE
+]);
+var isNormalFlowError = (error61) => NORMAL_FLOW_ERRORS.has(error61.code);
+var wantBigintFsStats = process.platform === "win32";
+var emptyFn = (_entryInfo) => true;
+var normalizeFilter = (filter3) => {
+  if (filter3 === void 0)
+    return emptyFn;
+  if (typeof filter3 === "function")
+    return filter3;
+  if (typeof filter3 === "string") {
+    const fl = filter3.trim();
+    return (entry) => entry.basename === fl;
+  }
+  if (Array.isArray(filter3)) {
+    const trItems = filter3.map((item) => item.trim());
+    return (entry) => trItems.some((f) => entry.basename === f);
+  }
+  return emptyFn;
+};
+var ReaddirpStream = class extends Readable {
+  /**
+   * Directories discovered but not yet emitted from. Listings are read
+   * lazily (on pop, plus one prefetch) instead of eagerly on discovery:
+   * keeping whole listings for every queued dir balloons RAM on wide trees.
+   */
+  parents;
+  reading;
+  parent;
+  _stat;
+  _maxDepth;
+  _wantsDir;
+  _wantsFile;
+  _wantsEverything;
+  _root;
+  _isDirent;
+  _statsProp;
+  _rdOptions;
+  _fileFilter;
+  _directoryFilter;
+  _relStart;
+  constructor(options = {}) {
+    super({
+      objectMode: true,
+      autoDestroy: true,
+      highWaterMark: options.highWaterMark ?? defaultOptions.highWaterMark
+    });
+    const opts = { ...defaultOptions, ...options };
+    const root = opts.root ?? defaultOptions.root;
+    const type = opts.type ?? defaultOptions.type;
+    this._fileFilter = normalizeFilter(opts.fileFilter);
+    this._directoryFilter = normalizeFilter(opts.directoryFilter);
+    const statMethod = opts.lstat ? lstat : stat2;
+    if (wantBigintFsStats) {
+      this._stat = (path3) => statMethod(path3, { bigint: true });
+    } else {
+      this._stat = statMethod;
+    }
+    this._maxDepth = opts.depth != null && Number.isSafeInteger(opts.depth) ? opts.depth : defaultOptions.depth;
+    this._wantsDir = DIR_TYPES.has(type);
+    this._wantsFile = FILE_TYPES.has(type);
+    this._wantsEverything = type === EntryTypes.EVERYTHING_TYPE;
+    this._root = presolve(root);
+    this._relStart = this._root.endsWith(psep) ? this._root.length : this._root.length + 1;
+    this._isDirent = !opts.alwaysStat;
+    this._statsProp = this._isDirent ? "dirent" : "stats";
+    this._rdOptions = { encoding: "utf8", withFileTypes: this._isDirent };
+    const rootDir = { path: this._root, depth: 1 };
+    rootDir.pending = this._exploreDir(this._root, 1);
+    this.parents = [rootDir];
+    this.reading = false;
+    this.parent = void 0;
+  }
+  async _read(batch) {
+    if (this.reading)
+      return;
+    this.reading = true;
+    try {
+      while (!this.destroyed && batch > 0) {
+        const par = this.parent;
+        const fil = par && par.files;
+        if (fil && fil.length > 0) {
+          const { path: path3, depth } = par;
+          const slice = fil.splice(0, batch).map((dirent) => this._formatEntry(dirent, path3));
+          const awaited = this._isDirent ? slice : await Promise.all(slice);
+          for (const entry of awaited) {
+            if (!entry)
+              continue;
+            if (this.destroyed)
+              return;
+            let entryType = this._getEntryType(entry);
+            if (typeof entryType !== "string")
+              entryType = await entryType;
+            if (entryType === "directory" && this._directoryFilter(entry)) {
+              if (depth <= this._maxDepth) {
+                this.parents.push({ path: entry.fullPath, depth: depth + 1 });
+              }
+              if (this._wantsDir) {
+                this.push(entry);
+                batch--;
+              }
+            } else if ((entryType === "file" || this._includeAsFile(entry)) && this._fileFilter(entry)) {
+              if (this._wantsFile) {
+                this.push(entry);
+                batch--;
+              }
+            }
+          }
+        } else {
+          const parent = this.parents.pop();
+          if (!parent) {
+            this.push(null);
+            break;
+          }
+          const dir = parent.pending ?? this._exploreDir(parent.path, parent.depth);
+          const next = this.parents[this.parents.length - 1];
+          if (next && !next.pending) {
+            next.pending = this._exploreDir(next.path, next.depth);
+          }
+          this.parent = await dir;
+          if (this.destroyed)
+            return;
+        }
+      }
+    } catch (error61) {
+      this.destroy(error61);
+    } finally {
+      this.reading = false;
+    }
+  }
+  // NOTE: native `readdir(path, { recursive: true })` was evaluated as a
+  // replacement for this per-directory traversal and rejected:
+  // - Not faster: node implements it in JS, walking directories sequentially
+  //   just like this loop, but with extra path bookkeeping. Benchmarks
+  //   (node 24): ~10% slower on wide trees, ~40% slower on small ones,
+  //   parity on deep ones.
+  // - Much more RAM: it buffers the entire subtree listing in one array,
+  //   instead of one directory at a time, defeating streaming.
+  // - Semantics diverge: it can't limit depth, can't skip directories a
+  //   directoryFilter rejects, doesn't follow symlinked dirs, and fails
+  //   wholesale (all entries lost) if anything in the subtree is unreadable,
+  //   instead of emitting a 'warn' and continuing.
+  async _exploreDir(path3, depth) {
+    let files;
+    try {
+      files = await readdir(path3, this._rdOptions);
+    } catch (error61) {
+      this._onError(error61);
+    }
+    return { files, depth, path: path3 };
+  }
+  // Synchronous in dirent mode; returns a promise only when stats are needed.
+  _formatEntry(dirent, path3) {
+    const basename9 = this._isDirent ? dirent.name : dirent;
+    const fullPath = pjoin(path3, basename9);
+    const entry = { path: fullPath.slice(this._relStart), fullPath, basename: basename9 };
+    if (this._isDirent) {
+      entry.dirent = dirent;
+      return entry;
+    }
+    return this._stat(fullPath).then((stats) => {
+      entry.stats = stats;
+      return entry;
+    }, (err) => {
+      this._onError(err);
+      return void 0;
+    });
+  }
+  _onError(err) {
+    if (isNormalFlowError(err) && !this.destroyed) {
+      this.emit("warn", err);
+    } else {
+      this.destroy(err);
+    }
+  }
+  // Synchronous for regular files and directories; returns a promise only for
+  // symlinks, which need realpath() to be classified.
+  _getEntryType(entry) {
+    if (!entry || !(this._statsProp in entry)) {
+      return "";
+    }
+    const stats = entry[this._statsProp];
+    if (stats.isFile())
+      return "file";
+    if (stats.isDirectory())
+      return "directory";
+    if (stats.isSymbolicLink())
+      return this._getSymlinkEntryType(entry);
+    return "";
+  }
+  async _getSymlinkEntryType(entry) {
+    const full = entry.fullPath;
+    try {
+      const entryRealPath = await realpath(full);
+      const entryRealPathStats = await lstat(entryRealPath);
+      if (entryRealPathStats.isFile()) {
+        return "file";
+      }
+      if (entryRealPathStats.isDirectory()) {
+        const len = entryRealPath.length;
+        if (full.startsWith(entryRealPath) && full[len] === psep) {
+          const recursiveError = new Error(`Circular symlink detected: "${full}" points to "${entryRealPath}"`);
+          recursiveError.code = RECURSIVE_ERROR_CODE;
+          this._onError(recursiveError);
+          return "";
+        }
+        return "directory";
+      }
+    } catch (error61) {
+      this._onError(error61);
+    }
+    return "";
+  }
+  _includeAsFile(entry) {
+    const stats = entry && entry[this._statsProp];
+    return stats && this._wantsEverything && !stats.isDirectory();
+  }
+};
+function readdirp(root, options = {}) {
+  let type = options.entryType || options.type;
+  if (type === "both")
+    type = EntryTypes.FILE_DIR_TYPE;
+  if (!root) {
+    throw new Error("readdirp: root argument is required. Usage: readdirp(root, options)");
+  } else if (typeof root !== "string") {
+    throw new TypeError("readdirp: root argument must be a string. Usage: readdirp(root, options)");
+  } else if (type && !ALL_TYPES.includes(type)) {
+    throw new Error(`readdirp: Invalid type passed. Use one of ${ALL_TYPES.join(", ")}`);
+  }
+  const opts = { ...options, root };
+  if (type)
+    opts.type = type;
+  return new ReaddirpStream(opts);
+}
+
+// ../../../../../alder/host/node_modules/chokidar/handler.js
+import { watch as fs_watch, unwatchFile, watchFile } from "node:fs";
+import { realpath as fsrealpath, lstat as lstat2, open as open4, stat as stat3 } from "node:fs/promises";
+import { type as osType } from "node:os";
+import * as sp from "node:path";
+var STR_DATA = "data";
+var STR_END = "end";
+var STR_CLOSE = "close";
+var EMPTY_FN = () => {
+};
+var pl = process.platform;
+var isWindows = pl === "win32";
+var isMacos = pl === "darwin";
+var isLinux = pl === "linux";
+var isFreeBSD = pl === "freebsd";
+var isIBMi = osType() === "OS400";
+var EVENTS = {
+  ALL: "all",
+  READY: "ready",
+  ADD: "add",
+  CHANGE: "change",
+  ADD_DIR: "addDir",
+  UNLINK: "unlink",
+  UNLINK_DIR: "unlinkDir",
+  RAW: "raw",
+  ERROR: "error"
+};
+var EV = EVENTS;
+var THROTTLE_MODE_WATCH = "watch";
+var statMethods = { lstat: lstat2, stat: stat3 };
+var KEY_LISTENERS = "listeners";
+var KEY_ERR = "errHandlers";
+var KEY_RAW = "rawEmitters";
+var HANDLER_KEYS = [KEY_LISTENERS, KEY_ERR, KEY_RAW];
+var binaryExtensions = /* @__PURE__ */ new Set([
+  "3dm",
+  "3ds",
+  "3g2",
+  "3gp",
+  "7z",
+  "a",
+  "aac",
+  "adp",
+  "afdesign",
+  "afphoto",
+  "afpub",
+  "ai",
+  "aif",
+  "aiff",
+  "alz",
+  "ape",
+  "apk",
+  "appimage",
+  "ar",
+  "arj",
+  "asf",
+  "au",
+  "avi",
+  "bak",
+  "baml",
+  "bh",
+  "bin",
+  "bk",
+  "bmp",
+  "btif",
+  "bz2",
+  "bzip2",
+  "cab",
+  "caf",
+  "cgm",
+  "class",
+  "cmx",
+  "cpio",
+  "cr2",
+  "cur",
+  "dat",
+  "dcm",
+  "deb",
+  "dex",
+  "djvu",
+  "dll",
+  "dmg",
+  "dng",
+  "doc",
+  "docm",
+  "docx",
+  "dot",
+  "dotm",
+  "dra",
+  "DS_Store",
+  "dsk",
+  "dts",
+  "dtshd",
+  "dvb",
+  "dwg",
+  "dxf",
+  "ecelp4800",
+  "ecelp7470",
+  "ecelp9600",
+  "egg",
+  "eol",
+  "eot",
+  "epub",
+  "exe",
+  "f4v",
+  "fbs",
+  "fh",
+  "fla",
+  "flac",
+  "flatpak",
+  "fli",
+  "flv",
+  "fpx",
+  "fst",
+  "fvt",
+  "g3",
+  "gh",
+  "gif",
+  "graffle",
+  "gz",
+  "gzip",
+  "h261",
+  "h263",
+  "h264",
+  "icns",
+  "ico",
+  "ief",
+  "img",
+  "ipa",
+  "iso",
+  "jar",
+  "jpeg",
+  "jpg",
+  "jpgv",
+  "jpm",
+  "jxr",
+  "key",
+  "ktx",
+  "lha",
+  "lib",
+  "lvp",
+  "lz",
+  "lzh",
+  "lzma",
+  "lzo",
+  "m3u",
+  "m4a",
+  "m4v",
+  "mar",
+  "mdi",
+  "mht",
+  "mid",
+  "midi",
+  "mj2",
+  "mka",
+  "mkv",
+  "mmr",
+  "mng",
+  "mobi",
+  "mov",
+  "movie",
+  "mp3",
+  "mp4",
+  "mp4a",
+  "mpeg",
+  "mpg",
+  "mpga",
+  "mxu",
+  "nef",
+  "npx",
+  "numbers",
+  "nupkg",
+  "o",
+  "odp",
+  "ods",
+  "odt",
+  "oga",
+  "ogg",
+  "ogv",
+  "otf",
+  "ott",
+  "pages",
+  "pbm",
+  "pcx",
+  "pdb",
+  "pdf",
+  "pea",
+  "pgm",
+  "pic",
+  "png",
+  "pnm",
+  "pot",
+  "potm",
+  "potx",
+  "ppa",
+  "ppam",
+  "ppm",
+  "pps",
+  "ppsm",
+  "ppsx",
+  "ppt",
+  "pptm",
+  "pptx",
+  "psd",
+  "pya",
+  "pyc",
+  "pyo",
+  "pyv",
+  "qt",
+  "rar",
+  "ras",
+  "raw",
+  "resources",
+  "rgb",
+  "rip",
+  "rlc",
+  "rmf",
+  "rmvb",
+  "rpm",
+  "rtf",
+  "rz",
+  "s3m",
+  "s7z",
+  "scpt",
+  "sgi",
+  "shar",
+  "snap",
+  "sil",
+  "sketch",
+  "slk",
+  "smv",
+  "snk",
+  "so",
+  "stl",
+  "suo",
+  "sub",
+  "swf",
+  "tar",
+  "tbz",
+  "tbz2",
+  "tga",
+  "tgz",
+  "thmx",
+  "tif",
+  "tiff",
+  "tlz",
+  "ttc",
+  "ttf",
+  "txz",
+  "udf",
+  "uvh",
+  "uvi",
+  "uvm",
+  "uvp",
+  "uvs",
+  "uvu",
+  "viv",
+  "vob",
+  "war",
+  "wav",
+  "wax",
+  "wbmp",
+  "wdp",
+  "weba",
+  "webm",
+  "webp",
+  "whl",
+  "wim",
+  "wm",
+  "wma",
+  "wmv",
+  "wmx",
+  "woff",
+  "woff2",
+  "wrm",
+  "wvx",
+  "xbm",
+  "xif",
+  "xla",
+  "xlam",
+  "xls",
+  "xlsb",
+  "xlsm",
+  "xlsx",
+  "xlt",
+  "xltm",
+  "xltx",
+  "xm",
+  "xmind",
+  "xpi",
+  "xpm",
+  "xwd",
+  "xz",
+  "z",
+  "zip",
+  "zipx"
+]);
+var isBinaryPath = (filePath) => binaryExtensions.has(sp.extname(filePath).slice(1).toLowerCase());
+var foreach = (val, fn) => {
+  if (val instanceof Set) {
+    val.forEach(fn);
+  } else {
+    fn(val);
+  }
+};
+var addAndConvert = (main, prop2, item) => {
+  let container = main[prop2];
+  if (!(container instanceof Set)) {
+    main[prop2] = container = /* @__PURE__ */ new Set([container]);
+  }
+  container.add(item);
+};
+var clearItem = (cont) => (key2) => {
+  const set2 = cont[key2];
+  if (set2 instanceof Set) {
+    set2.clear();
+  } else {
+    delete cont[key2];
+  }
+};
+var delFromSet = (main, prop2, item) => {
+  const container = main[prop2];
+  if (container instanceof Set) {
+    container.delete(item);
+  } else if (container === item) {
+    delete main[prop2];
+  }
+};
+var isEmptySet = (val) => val instanceof Set ? val.size === 0 : !val;
+var FsWatchInstances = /* @__PURE__ */ new Map();
+function createFsWatchInstance(path3, options, listener, errHandler, emitRaw) {
+  const handleEvent = (rawEvent, evPath) => {
+    listener(path3);
+    emitRaw(rawEvent, evPath, { watchedPath: path3 });
+    if (evPath && path3 !== evPath) {
+      fsWatchBroadcast(sp.resolve(path3, evPath), KEY_LISTENERS, sp.join(path3, evPath));
+    }
+  };
+  try {
+    return fs_watch(path3, {
+      persistent: options.persistent
+    }, handleEvent);
+  } catch (error61) {
+    errHandler(error61);
+    return void 0;
+  }
+}
+var fsWatchBroadcast = (fullPath, listenerType, val1, val2, val3) => {
+  const cont = FsWatchInstances.get(fullPath);
+  if (!cont)
+    return;
+  foreach(cont[listenerType], (listener) => {
+    listener(val1, val2, val3);
+  });
+};
+var setFsWatchListener = (path3, fullPath, options, handlers) => {
+  const { listener, errHandler, rawEmitter } = handlers;
+  let cont = FsWatchInstances.get(fullPath);
+  let watcher;
+  if (!options.persistent) {
+    watcher = createFsWatchInstance(path3, options, listener, errHandler, rawEmitter);
+    if (!watcher)
+      return;
+    return watcher.close.bind(watcher);
+  }
+  if (cont) {
+    addAndConvert(cont, KEY_LISTENERS, listener);
+    addAndConvert(cont, KEY_ERR, errHandler);
+    addAndConvert(cont, KEY_RAW, rawEmitter);
+  } else {
+    watcher = createFsWatchInstance(
+      path3,
+      options,
+      fsWatchBroadcast.bind(null, fullPath, KEY_LISTENERS),
+      errHandler,
+      // no need to use broadcast here
+      fsWatchBroadcast.bind(null, fullPath, KEY_RAW)
+    );
+    if (!watcher)
+      return;
+    watcher.on(EV.ERROR, async (error61) => {
+      const broadcastErr = fsWatchBroadcast.bind(null, fullPath, KEY_ERR);
+      if (cont)
+        cont.watcherUnusable = true;
+      if (isWindows && error61.code === "EPERM") {
+        try {
+          const fd = await open4(path3, "r");
+          await fd.close();
+          broadcastErr(error61);
+        } catch (err) {
+        }
+      } else {
+        broadcastErr(error61);
+      }
+    });
+    cont = {
+      listeners: listener,
+      errHandlers: errHandler,
+      rawEmitters: rawEmitter,
+      watcher
+    };
+    FsWatchInstances.set(fullPath, cont);
+  }
+  return () => {
+    delFromSet(cont, KEY_LISTENERS, listener);
+    delFromSet(cont, KEY_ERR, errHandler);
+    delFromSet(cont, KEY_RAW, rawEmitter);
+    if (isEmptySet(cont.listeners)) {
+      cont.watcher.close();
+      FsWatchInstances.delete(fullPath);
+      HANDLER_KEYS.forEach(clearItem(cont));
+      cont.watcher = void 0;
+      Object.freeze(cont);
+    }
+  };
+};
+var FsWatchFileInstances = /* @__PURE__ */ new Map();
+var setFsWatchFileListener = (path3, fullPath, options, handlers) => {
+  const { listener, rawEmitter } = handlers;
+  let cont = FsWatchFileInstances.get(fullPath);
+  const copts = cont && cont.options;
+  if (copts && (copts.persistent < options.persistent || copts.interval > options.interval)) {
+    unwatchFile(fullPath);
+    cont = void 0;
+  }
+  if (cont) {
+    addAndConvert(cont, KEY_LISTENERS, listener);
+    addAndConvert(cont, KEY_RAW, rawEmitter);
+  } else {
+    cont = {
+      listeners: listener,
+      rawEmitters: rawEmitter,
+      options,
+      watcher: watchFile(fullPath, options, (curr, prev) => {
+        foreach(cont.rawEmitters, (rawEmitter2) => {
+          rawEmitter2(EV.CHANGE, fullPath, { curr, prev });
+        });
+        const currmtime = curr.mtimeMs;
+        if (curr.size !== prev.size || currmtime > prev.mtimeMs || currmtime === 0) {
+          foreach(cont.listeners, (listener2) => listener2(path3, curr));
+        }
+      })
+    };
+    FsWatchFileInstances.set(fullPath, cont);
+  }
+  return () => {
+    delFromSet(cont, KEY_LISTENERS, listener);
+    delFromSet(cont, KEY_RAW, rawEmitter);
+    if (isEmptySet(cont.listeners)) {
+      FsWatchFileInstances.delete(fullPath);
+      unwatchFile(fullPath);
+      cont.options = cont.watcher = void 0;
+      Object.freeze(cont);
+    }
+  };
+};
+var NodeFsHandler = class {
+  fsw;
+  _boundHandleError;
+  constructor(fsW) {
+    this.fsw = fsW;
+    this._boundHandleError = (error61) => fsW._handleError(error61);
+  }
+  /**
+   * Watch file for changes with fs_watchFile or fs_watch.
+   * @param path to file or dir
+   * @param listener on fs change
+   * @returns closer for the watcher instance
+   */
+  _watchWithNodeFs(path3, listener) {
+    const opts = this.fsw.options;
+    const directory = sp.dirname(path3);
+    const basename9 = sp.basename(path3);
+    const parent = this.fsw._getWatchedDir(directory);
+    parent.add(basename9);
+    const absolutePath = sp.resolve(path3);
+    const options = {
+      persistent: opts.persistent
+    };
+    if (!listener)
+      listener = EMPTY_FN;
+    let closer;
+    if (opts.usePolling) {
+      const enableBin = opts.interval !== opts.binaryInterval;
+      options.interval = enableBin && isBinaryPath(basename9) ? opts.binaryInterval : opts.interval;
+      closer = setFsWatchFileListener(path3, absolutePath, options, {
+        listener,
+        rawEmitter: this.fsw._emitRaw
+      });
+    } else {
+      closer = setFsWatchListener(path3, absolutePath, options, {
+        listener,
+        errHandler: this._boundHandleError,
+        rawEmitter: this.fsw._emitRaw
+      });
+    }
+    return closer;
+  }
+  /**
+   * Watch a file and emit add event if warranted.
+   * @returns closer for the watcher instance
+   */
+  _handleFile(file2, stats, initialAdd) {
+    if (this.fsw.closed) {
+      return;
+    }
+    const dirname11 = sp.dirname(file2);
+    const basename9 = sp.basename(file2);
+    const parent = this.fsw._getWatchedDir(dirname11);
+    let prevStats = stats;
+    if (parent.has(basename9))
+      return;
+    const listener = async (path3, newStats) => {
+      if (!this.fsw._throttle(THROTTLE_MODE_WATCH, file2, 5))
+        return;
+      if (!newStats || newStats.mtimeMs === 0) {
+        try {
+          const newStats2 = await stat3(file2);
+          if (this.fsw.closed)
+            return;
+          const at = newStats2.atimeMs;
+          const mt = newStats2.mtimeMs;
+          if (!at || at <= mt || mt !== prevStats.mtimeMs) {
+            this.fsw._emit(EV.CHANGE, file2, newStats2);
+          }
+          if ((isMacos || isLinux || isFreeBSD) && prevStats.ino !== newStats2.ino) {
+            this.fsw._closeFile(path3);
+            prevStats = newStats2;
+            const closer2 = this._watchWithNodeFs(file2, listener);
+            if (closer2)
+              this.fsw._addPathCloser(path3, closer2);
+          } else {
+            prevStats = newStats2;
+          }
+        } catch (error61) {
+          this.fsw._remove(dirname11, basename9);
+        }
+      } else if (parent.has(basename9)) {
+        const at = newStats.atimeMs;
+        const mt = newStats.mtimeMs;
+        if (!at || at <= mt || mt !== prevStats.mtimeMs) {
+          this.fsw._emit(EV.CHANGE, file2, newStats);
+        }
+        prevStats = newStats;
+      }
+    };
+    const closer = this._watchWithNodeFs(file2, listener);
+    if (!(initialAdd && this.fsw.options.ignoreInitial) && this.fsw._isntIgnored(file2)) {
+      if (!this.fsw._throttle(EV.ADD, file2, 0))
+        return;
+      this.fsw._emit(EV.ADD, file2, stats);
+    }
+    return closer;
+  }
+  /**
+   * Handle symlinks encountered while reading a dir.
+   * @param entry returned by readdirp
+   * @param directory path of dir being read
+   * @param path of this item
+   * @param item basename of this item
+   * @returns true if no more processing is needed for this entry.
+   */
+  async _handleSymlink(entry, directory, path3, item) {
+    if (this.fsw.closed) {
+      return;
+    }
+    const full = entry.fullPath;
+    const dir = this.fsw._getWatchedDir(directory);
+    if (!this.fsw.options.followSymlinks) {
+      this.fsw._incrReadyCount();
+      let linkPath;
+      try {
+        linkPath = await fsrealpath(path3);
+      } catch (e) {
+        this.fsw._emitReady();
+        return true;
+      }
+      if (this.fsw.closed)
+        return;
+      if (dir.has(item)) {
+        if (this.fsw._symlinkPaths.get(full) !== linkPath) {
+          this.fsw._symlinkPaths.set(full, linkPath);
+          this.fsw._emit(EV.CHANGE, path3, entry.stats);
+        }
+      } else {
+        dir.add(item);
+        this.fsw._symlinkPaths.set(full, linkPath);
+        this.fsw._emit(EV.ADD, path3, entry.stats);
+      }
+      this.fsw._emitReady();
+      return true;
+    }
+    if (this.fsw._symlinkPaths.has(full)) {
+      return true;
+    }
+    this.fsw._symlinkPaths.set(full, true);
+  }
+  _handleRead(directory, initialAdd, wh, target, dir, depth, throttler) {
+    directory = sp.join(directory, "");
+    const throttleKey = target ? `${directory}:${target}` : directory;
+    throttler = this.fsw._throttle("readdir", throttleKey, 1e3);
+    if (!throttler)
+      return;
+    const previous = this.fsw._getWatchedDir(wh.path);
+    const current = /* @__PURE__ */ new Set();
+    let stream = this.fsw._readdirp(directory, {
+      fileFilter: (entry) => wh.filterPath(entry),
+      directoryFilter: (entry) => wh.filterDir(entry)
+    });
+    if (!stream)
+      return;
+    stream.on(STR_DATA, async (entry) => {
+      if (this.fsw.closed) {
+        stream = void 0;
+        return;
+      }
+      const item = entry.path;
+      let path3 = sp.join(directory, item);
+      current.add(item);
+      if (entry.stats.isSymbolicLink() && await this._handleSymlink(entry, directory, path3, item)) {
+        return;
+      }
+      if (this.fsw.closed) {
+        stream = void 0;
+        return;
+      }
+      if (item === target || !target && !previous.has(item)) {
+        this.fsw._incrReadyCount();
+        path3 = sp.join(dir, sp.relative(dir, path3));
+        this._addToNodeFs(path3, initialAdd, wh, depth + 1);
+      }
+    }).on(EV.ERROR, this._boundHandleError);
+    return new Promise((resolve15, reject) => {
+      if (!stream)
+        return reject();
+      stream.once(STR_END, () => {
+        if (this.fsw.closed) {
+          stream = void 0;
+          return;
+        }
+        const wasThrottled = throttler ? throttler.clear() : false;
+        resolve15(void 0);
+        previous.getChildren().filter((item) => {
+          return item !== directory && !current.has(item);
+        }).forEach((item) => {
+          this.fsw._remove(directory, item);
+        });
+        stream = void 0;
+        if (wasThrottled)
+          this._handleRead(directory, false, wh, target, dir, depth, throttler);
+      });
+    });
+  }
+  /**
+   * Read directory to add / remove files from `@watched` list and re-read it on change.
+   * @param dir fs path
+   * @param stats
+   * @param initialAdd
+   * @param depth relative to user-supplied path
+   * @param target child path targeted for watch
+   * @param wh Common watch helpers for this path
+   * @param realpath
+   * @returns closer for the watcher instance.
+   */
+  async _handleDir(dir, stats, initialAdd, depth, target, wh, realpath12) {
+    const parentDir = this.fsw._getWatchedDir(sp.dirname(dir));
+    const tracked = parentDir.has(sp.basename(dir));
+    if (!(initialAdd && this.fsw.options.ignoreInitial) && !target && !tracked) {
+      this.fsw._emit(EV.ADD_DIR, dir, stats);
+    }
+    parentDir.add(sp.basename(dir));
+    this.fsw._getWatchedDir(dir);
+    let throttler;
+    let closer;
+    const oDepth = this.fsw.options.depth;
+    if ((oDepth == null || depth <= oDepth) && !this.fsw._symlinkPaths.has(realpath12)) {
+      if (!target) {
+        await this._handleRead(dir, initialAdd, wh, target, dir, depth, throttler);
+        if (this.fsw.closed)
+          return;
+      }
+      closer = this._watchWithNodeFs(dir, (dirPath, stats2) => {
+        if (stats2 && stats2.mtimeMs === 0)
+          return;
+        this._handleRead(dirPath, false, wh, target, dir, depth, throttler);
+      });
+    }
+    return closer;
+  }
+  /**
+   * Handle added file, directory, or glob pattern.
+   * Delegates call to _handleFile / _handleDir after checks.
+   * @param path to file or ir
+   * @param initialAdd was the file added at watch instantiation?
+   * @param priorWh depth relative to user-supplied path
+   * @param depth Child path actually targeted for watch
+   * @param target Child path actually targeted for watch
+   */
+  async _addToNodeFs(path3, initialAdd, priorWh, depth, target) {
+    const ready = this.fsw._emitReady;
+    if (this.fsw._isIgnored(path3) || this.fsw.closed) {
+      ready();
+      return false;
+    }
+    const wh = this.fsw._getWatchHelpers(path3);
+    if (priorWh) {
+      wh.filterPath = (entry) => priorWh.filterPath(entry);
+      wh.filterDir = (entry) => priorWh.filterDir(entry);
+    }
+    try {
+      const stats = await statMethods[wh.statMethod](wh.watchPath);
+      if (this.fsw.closed)
+        return;
+      if (this.fsw._isIgnored(wh.watchPath, stats)) {
+        ready();
+        return false;
+      }
+      const follow = this.fsw.options.followSymlinks;
+      let closer;
+      if (stats.isDirectory()) {
+        const absPath = sp.resolve(path3);
+        const targetPath = follow ? await fsrealpath(path3) : path3;
+        if (this.fsw.closed)
+          return;
+        closer = await this._handleDir(wh.watchPath, stats, initialAdd, depth, target, wh, targetPath);
+        if (this.fsw.closed)
+          return;
+        if (absPath !== targetPath && targetPath !== void 0) {
+          this.fsw._symlinkPaths.set(absPath, targetPath);
+        }
+      } else if (stats.isSymbolicLink()) {
+        const targetPath = follow ? await fsrealpath(path3) : path3;
+        if (this.fsw.closed)
+          return;
+        const parent = sp.dirname(wh.watchPath);
+        this.fsw._getWatchedDir(parent).add(wh.watchPath);
+        this.fsw._emit(EV.ADD, wh.watchPath, stats);
+        closer = await this._handleDir(parent, stats, initialAdd, depth, path3, wh, targetPath);
+        if (this.fsw.closed)
+          return;
+        if (targetPath !== void 0) {
+          this.fsw._symlinkPaths.set(sp.resolve(path3), targetPath);
+        }
+      } else {
+        closer = this._handleFile(wh.watchPath, stats, initialAdd);
+      }
+      ready();
+      if (closer)
+        this.fsw._addPathCloser(path3, closer);
+      return false;
+    } catch (error61) {
+      if (this.fsw._handleError(error61)) {
+        ready();
+        return path3;
+      }
+    }
+  }
+};
+
+// ../../../../../alder/host/node_modules/chokidar/index.js
+var SLASH = "/";
+var SLASH_SLASH = "//";
+var ONE_DOT = ".";
+var TWO_DOTS = "..";
+var STRING_TYPE = "string";
+var BACK_SLASH_RE = /\\/g;
+var DOUBLE_SLASH_RE = /\/\//g;
+var DOT_RE = /\..*\.(sw[px])$|~$|\.subl.*\.tmp/;
+var REPLACER_RE = /^\.[/\\]/;
+function arrify(item) {
+  return Array.isArray(item) ? item : [item];
+}
+var isMatcherObject = (matcher) => typeof matcher === "object" && matcher !== null && !(matcher instanceof RegExp);
+function createPattern(matcher) {
+  if (typeof matcher === "function")
+    return matcher;
+  if (typeof matcher === "string")
+    return (string5) => matcher === string5;
+  if (matcher instanceof RegExp)
+    return (string5) => matcher.test(string5);
+  if (typeof matcher === "object" && matcher !== null) {
+    return (string5) => {
+      if (matcher.path === string5)
+        return true;
+      if (matcher.recursive) {
+        const relative4 = sp2.relative(matcher.path, string5);
+        if (!relative4) {
+          return false;
+        }
+        return !relative4.startsWith("..") && !sp2.isAbsolute(relative4);
+      }
+      return false;
+    };
+  }
+  return () => false;
+}
+function normalizePath(path3) {
+  if (typeof path3 !== "string")
+    throw new Error("string expected");
+  path3 = sp2.normalize(path3);
+  path3 = path3.replace(/\\/g, "/");
+  let prepend3 = false;
+  if (path3.startsWith("//"))
+    prepend3 = true;
+  path3 = path3.replace(DOUBLE_SLASH_RE, "/");
+  if (prepend3)
+    path3 = "/" + path3;
+  return path3;
+}
+function matchPatterns(patterns, testString, stats) {
+  const path3 = normalizePath(testString);
+  for (let index = 0; index < patterns.length; index++) {
+    const pattern = patterns[index];
+    if (pattern(path3, stats)) {
+      return true;
+    }
+  }
+  return false;
+}
+function anymatch(matchers, testString) {
+  if (matchers == null) {
+    throw new TypeError("anymatch: specify first argument");
+  }
+  const matchersArray = arrify(matchers);
+  const patterns = matchersArray.map((matcher) => createPattern(matcher));
+  if (testString == null) {
+    return (testString2, stats) => {
+      return matchPatterns(patterns, testString2, stats);
+    };
+  }
+  return matchPatterns(patterns, testString);
+}
+var unifyPaths = (paths_) => {
+  const paths = arrify(paths_).flat();
+  if (!paths.every((p) => typeof p === STRING_TYPE)) {
+    throw new TypeError(`Non-string provided as watch path: ${paths}`);
+  }
+  return paths.map(normalizePathToUnix);
+};
+var toUnix = (string5) => {
+  let str = string5.replace(BACK_SLASH_RE, SLASH);
+  let prepend3 = false;
+  if (str.startsWith(SLASH_SLASH)) {
+    prepend3 = true;
+  }
+  str = str.replace(DOUBLE_SLASH_RE, SLASH);
+  if (prepend3) {
+    str = SLASH + str;
+  }
+  return str;
+};
+var normalizePathToUnix = (path3) => toUnix(sp2.normalize(toUnix(path3)));
+var normalizeIgnored = (cwd = "") => (path3) => {
+  if (typeof path3 === "string") {
+    return normalizePathToUnix(sp2.isAbsolute(path3) ? path3 : sp2.join(cwd, path3));
+  } else {
+    return path3;
+  }
+};
+var getAbsolutePath = (path3, cwd) => {
+  if (sp2.isAbsolute(path3)) {
+    return path3;
+  }
+  return sp2.join(cwd, path3);
+};
+var EMPTY_SET = Object.freeze(/* @__PURE__ */ new Set());
+var DirEntry = class {
+  path;
+  _removeWatcher;
+  items;
+  constructor(dir, removeWatcher) {
+    this.path = dir;
+    this._removeWatcher = removeWatcher;
+    this.items = /* @__PURE__ */ new Set();
+  }
+  add(item) {
+    const { items } = this;
+    if (!items)
+      return;
+    if (item !== ONE_DOT && item !== TWO_DOTS)
+      items.add(item);
+  }
+  async remove(item) {
+    const { items } = this;
+    if (!items)
+      return;
+    items.delete(item);
+    if (items.size > 0)
+      return;
+    const dir = this.path;
+    try {
+      await readdir2(dir);
+    } catch (err) {
+      if (this._removeWatcher) {
+        this._removeWatcher(sp2.dirname(dir), sp2.basename(dir));
+      }
+    }
+  }
+  has(item) {
+    const { items } = this;
+    if (!items)
+      return;
+    return items.has(item);
+  }
+  getChildren() {
+    const { items } = this;
+    if (!items)
+      return [];
+    return [...items.values()];
+  }
+  dispose() {
+    this.items.clear();
+    this.path = "";
+    this._removeWatcher = EMPTY_FN;
+    this.items = EMPTY_SET;
+    Object.freeze(this);
+  }
+};
+var STAT_METHOD_F = "stat";
+var STAT_METHOD_L = "lstat";
+var WatchHelper = class {
+  fsw;
+  path;
+  watchPath;
+  fullWatchPath;
+  dirParts;
+  followSymlinks;
+  statMethod;
+  constructor(path3, follow, fsw) {
+    this.fsw = fsw;
+    const watchPath = path3;
+    this.path = path3 = path3.replace(REPLACER_RE, "");
+    this.watchPath = watchPath;
+    this.fullWatchPath = sp2.resolve(watchPath);
+    this.dirParts = [];
+    this.dirParts.forEach((parts) => {
+      if (parts.length > 1)
+        parts.pop();
+    });
+    this.followSymlinks = follow;
+    this.statMethod = follow ? STAT_METHOD_F : STAT_METHOD_L;
+  }
+  entryPath(entry) {
+    return sp2.join(this.watchPath, sp2.relative(this.watchPath, entry.fullPath));
+  }
+  filterPath(entry) {
+    const { stats } = entry;
+    if (stats && stats.isSymbolicLink())
+      return this.filterDir(entry);
+    const resolvedPath = this.entryPath(entry);
+    return this.fsw._isntIgnored(resolvedPath, stats) && this.fsw._hasReadPermissions(stats);
+  }
+  filterDir(entry) {
+    return this.fsw._isntIgnored(this.entryPath(entry), entry.stats);
+  }
+};
+var FSWatcher = class extends EventEmitter {
+  closed;
+  options;
+  _closers;
+  _ignoredPaths;
+  _throttled;
+  _streams;
+  _symlinkPaths;
+  _watched;
+  _pendingWrites;
+  _pendingUnlinks;
+  _readyCount;
+  _emitReady;
+  _closePromise;
+  _userIgnored;
+  _readyEmitted;
+  _emitRaw;
+  _boundRemove;
+  _nodeFsHandler;
+  // Not indenting methods for history sake; for now.
+  constructor(_opts = {}) {
+    super();
+    this.closed = false;
+    this._closers = /* @__PURE__ */ new Map();
+    this._ignoredPaths = /* @__PURE__ */ new Set();
+    this._throttled = /* @__PURE__ */ new Map();
+    this._streams = /* @__PURE__ */ new Set();
+    this._symlinkPaths = /* @__PURE__ */ new Map();
+    this._watched = /* @__PURE__ */ new Map();
+    this._pendingWrites = /* @__PURE__ */ new Map();
+    this._pendingUnlinks = /* @__PURE__ */ new Map();
+    this._readyCount = 0;
+    this._readyEmitted = false;
+    const awf = _opts.awaitWriteFinish;
+    const DEF_AWF = { stabilityThreshold: 2e3, pollInterval: 100 };
+    const opts = {
+      // Defaults
+      persistent: true,
+      ignoreInitial: false,
+      ignorePermissionErrors: false,
+      interval: 100,
+      binaryInterval: 300,
+      followSymlinks: true,
+      usePolling: false,
+      // useAsync: false,
+      atomic: true,
+      // NOTE: overwritten later (depends on usePolling)
+      ..._opts,
+      // Change format
+      ignored: _opts.ignored ? arrify(_opts.ignored) : arrify([]),
+      awaitWriteFinish: awf === true ? DEF_AWF : typeof awf === "object" ? { ...DEF_AWF, ...awf } : false
+    };
+    if (isIBMi)
+      opts.usePolling = true;
+    if (opts.atomic === void 0)
+      opts.atomic = !opts.usePolling;
+    const envPoll = process.env.CHOKIDAR_USEPOLLING;
+    if (envPoll !== void 0) {
+      const envLower = envPoll.toLowerCase();
+      if (envLower === "false" || envLower === "0")
+        opts.usePolling = false;
+      else if (envLower === "true" || envLower === "1")
+        opts.usePolling = true;
+      else
+        opts.usePolling = !!envLower;
+    }
+    const envInterval = process.env.CHOKIDAR_INTERVAL;
+    if (envInterval)
+      opts.interval = Number.parseInt(envInterval, 10);
+    let readyCalls = 0;
+    this._emitReady = () => {
+      readyCalls++;
+      if (readyCalls >= this._readyCount) {
+        this._emitReady = EMPTY_FN;
+        this._readyEmitted = true;
+        process.nextTick(() => this.emit(EVENTS.READY));
+      }
+    };
+    this._emitRaw = (...args) => this.emit(EVENTS.RAW, ...args);
+    this._boundRemove = this._remove.bind(this);
+    this.options = opts;
+    this._nodeFsHandler = new NodeFsHandler(this);
+    Object.freeze(opts);
+  }
+  _addIgnoredPath(matcher) {
+    if (isMatcherObject(matcher)) {
+      for (const ignored of this._ignoredPaths) {
+        if (isMatcherObject(ignored) && ignored.path === matcher.path && ignored.recursive === matcher.recursive) {
+          return;
+        }
+      }
+    }
+    this._ignoredPaths.add(matcher);
+  }
+  _removeIgnoredPath(matcher) {
+    this._ignoredPaths.delete(matcher);
+    if (typeof matcher === "string") {
+      for (const ignored of this._ignoredPaths) {
+        if (isMatcherObject(ignored) && ignored.path === matcher) {
+          this._ignoredPaths.delete(ignored);
+        }
+      }
+    }
+  }
+  // Public methods
+  /**
+   * Adds paths to be watched on an existing FSWatcher instance.
+   * @param paths_ file or file list. Other arguments are unused
+   */
+  add(paths_, _origAdd, _internal) {
+    const { cwd } = this.options;
+    this.closed = false;
+    this._closePromise = void 0;
+    let paths = unifyPaths(paths_);
+    if (cwd) {
+      paths = paths.map((path3) => {
+        const absPath = getAbsolutePath(path3, cwd);
+        return absPath;
+      });
+    }
+    paths.forEach((path3) => {
+      this._removeIgnoredPath(path3);
+    });
+    this._userIgnored = void 0;
+    if (!this._readyCount)
+      this._readyCount = 0;
+    this._readyCount += paths.length;
+    Promise.all(paths.map(async (path3) => {
+      const res = await this._nodeFsHandler._addToNodeFs(path3, !_internal, void 0, 0, _origAdd);
+      if (res)
+        this._emitReady();
+      return res;
+    })).then((results) => {
+      if (this.closed)
+        return;
+      results.forEach((item) => {
+        if (item)
+          this.add(sp2.dirname(item), sp2.basename(_origAdd || item));
+      });
+    });
+    return this;
+  }
+  /**
+   * Close watchers or start ignoring events from specified paths.
+   */
+  unwatch(paths_) {
+    if (this.closed)
+      return this;
+    const paths = unifyPaths(paths_);
+    const { cwd } = this.options;
+    paths.forEach((path3) => {
+      if (!sp2.isAbsolute(path3) && !this._closers.has(path3)) {
+        if (cwd)
+          path3 = sp2.join(cwd, path3);
+        path3 = sp2.resolve(path3);
+      }
+      this._closePath(path3);
+      this._addIgnoredPath(path3);
+      if (this._watched.has(path3)) {
+        this._addIgnoredPath({
+          path: path3,
+          recursive: true
+        });
+      }
+      this._userIgnored = void 0;
+    });
+    return this;
+  }
+  /**
+   * Close watchers and remove all listeners from watched paths.
+   */
+  close() {
+    if (this._closePromise) {
+      return this._closePromise;
+    }
+    this.closed = true;
+    this.removeAllListeners();
+    const closers = [];
+    this._closers.forEach((closerList) => closerList.forEach((closer) => {
+      const promise2 = closer();
+      if (promise2 instanceof Promise)
+        closers.push(promise2);
+    }));
+    this._streams.forEach((stream) => stream.destroy());
+    this._userIgnored = void 0;
+    this._readyCount = 0;
+    this._readyEmitted = false;
+    this._watched.forEach((dirent) => dirent.dispose());
+    this._closers.clear();
+    this._watched.clear();
+    this._streams.clear();
+    this._symlinkPaths.clear();
+    this._throttled.clear();
+    this._closePromise = closers.length ? Promise.all(closers).then(() => void 0) : Promise.resolve();
+    return this._closePromise;
+  }
+  /**
+   * Expose list of watched paths
+   * @returns for chaining
+   */
+  getWatched() {
+    const watchList = {};
+    this._watched.forEach((entry, dir) => {
+      const key2 = this.options.cwd ? sp2.relative(this.options.cwd, dir) : dir;
+      const index = key2 || ONE_DOT;
+      watchList[index] = entry.getChildren().sort();
+    });
+    return watchList;
+  }
+  emitWithAll(event, args) {
+    this.emit(event, ...args);
+    if (event !== EVENTS.ERROR)
+      this.emit(EVENTS.ALL, event, ...args);
+  }
+  // Common helpers
+  // --------------
+  /**
+   * Normalize and emit events.
+   * Calling _emit DOES NOT MEAN emit() would be called!
+   * @param event Type of event
+   * @param path File or directory path
+   * @param stats arguments to be passed with event
+   * @returns the error if defined, otherwise the value of the FSWatcher instance's `closed` flag
+   */
+  async _emit(event, path3, stats) {
+    if (this.closed)
+      return;
+    const opts = this.options;
+    if (isWindows)
+      path3 = sp2.normalize(path3);
+    if (opts.cwd)
+      path3 = sp2.relative(opts.cwd, path3);
+    const args = [path3];
+    if (stats != null)
+      args.push(stats);
+    const awf = opts.awaitWriteFinish;
+    let pw;
+    if (awf && (pw = this._pendingWrites.get(path3))) {
+      pw.lastChange = /* @__PURE__ */ new Date();
+      return this;
+    }
+    if (opts.atomic) {
+      if (event === EVENTS.UNLINK) {
+        this._pendingUnlinks.set(path3, [event, ...args]);
+        setTimeout(() => {
+          this._pendingUnlinks.forEach((entry, path4) => {
+            this.emit(...entry);
+            this.emit(EVENTS.ALL, ...entry);
+            this._pendingUnlinks.delete(path4);
+          });
+        }, typeof opts.atomic === "number" ? opts.atomic : 100);
+        return this;
+      }
+      if (event === EVENTS.ADD && this._pendingUnlinks.has(path3)) {
+        event = EVENTS.CHANGE;
+        this._pendingUnlinks.delete(path3);
+      }
+    }
+    if (awf && (event === EVENTS.ADD || event === EVENTS.CHANGE) && this._readyEmitted) {
+      const awfEmit = (err, stats2) => {
+        if (err) {
+          event = EVENTS.ERROR;
+          args[0] = err;
+          this.emitWithAll(event, args);
+        } else if (stats2) {
+          if (args.length > 1) {
+            args[1] = stats2;
+          } else {
+            args.push(stats2);
+          }
+          this.emitWithAll(event, args);
+        }
+      };
+      this._awaitWriteFinish(path3, awf.stabilityThreshold, event, awfEmit);
+      return this;
+    }
+    if (event === EVENTS.CHANGE) {
+      const isThrottled = !this._throttle(EVENTS.CHANGE, path3, 50);
+      if (isThrottled)
+        return this;
+    }
+    if (opts.alwaysStat && stats === void 0 && (event === EVENTS.ADD || event === EVENTS.ADD_DIR || event === EVENTS.CHANGE)) {
+      const fullPath = opts.cwd ? sp2.join(opts.cwd, path3) : path3;
+      let stats2;
+      try {
+        stats2 = await stat4(fullPath);
+      } catch (err) {
+      }
+      if (!stats2 || this.closed)
+        return;
+      args.push(stats2);
+    }
+    this.emitWithAll(event, args);
+    return this;
+  }
+  /**
+   * Common handler for errors
+   * @returns The error if defined, otherwise the value of the FSWatcher instance's `closed` flag
+   */
+  _handleError(error61) {
+    const code2 = error61 && error61.code;
+    if (error61 && code2 !== "ENOENT" && code2 !== "ENOTDIR" && (!this.options.ignorePermissionErrors || code2 !== "EPERM" && code2 !== "EACCES")) {
+      this.emit(EVENTS.ERROR, error61);
+    }
+    return error61 || this.closed;
+  }
+  /**
+   * Helper utility for throttling
+   * @param actionType type being throttled
+   * @param path being acted upon
+   * @param timeout duration of time to suppress duplicate actions
+   * @returns tracking object or false if action should be suppressed
+   */
+  _throttle(actionType, path3, timeout) {
+    if (!this._throttled.has(actionType)) {
+      this._throttled.set(actionType, /* @__PURE__ */ new Map());
+    }
+    const action = this._throttled.get(actionType);
+    if (!action)
+      throw new Error("invalid throttle");
+    const actionPath = action.get(path3);
+    if (actionPath) {
+      actionPath.count++;
+      return false;
+    }
+    let timeoutObject;
+    const clear = () => {
+      const item = action.get(path3);
+      const count = item ? item.count : 0;
+      action.delete(path3);
+      clearTimeout(timeoutObject);
+      if (item)
+        clearTimeout(item.timeoutObject);
+      return count;
+    };
+    timeoutObject = setTimeout(clear, timeout);
+    const thr = { timeoutObject, clear, count: 0 };
+    action.set(path3, thr);
+    return thr;
+  }
+  _incrReadyCount() {
+    return this._readyCount++;
+  }
+  /**
+   * Awaits write operation to finish.
+   * Polls a newly created file for size variations. When files size does not change for 'threshold' milliseconds calls callback.
+   * @param path being acted upon
+   * @param threshold Time in milliseconds a file size must be fixed before acknowledging write OP is finished
+   * @param event
+   * @param awfEmit Callback to be called when ready for event to be emitted.
+   */
+  _awaitWriteFinish(path3, threshold, event, awfEmit) {
+    const awf = this.options.awaitWriteFinish;
+    if (typeof awf !== "object")
+      return;
+    const pollInterval = awf.pollInterval;
+    let timeoutHandler;
+    let fullPath = path3;
+    if (this.options.cwd && !sp2.isAbsolute(path3)) {
+      fullPath = sp2.join(this.options.cwd, path3);
+    }
+    const now = /* @__PURE__ */ new Date();
+    const writes = this._pendingWrites;
+    function awaitWriteFinishFn(prevStat) {
+      statcb(fullPath, (err, curStat) => {
+        if (err || !writes.has(path3)) {
+          if (err && err.code !== "ENOENT")
+            awfEmit(err);
+          return;
+        }
+        const now2 = Number(/* @__PURE__ */ new Date());
+        if (prevStat && curStat.size !== prevStat.size) {
+          writes.get(path3).lastChange = now2;
+        }
+        const pw = writes.get(path3);
+        const df = now2 - pw.lastChange;
+        if (df >= threshold) {
+          writes.delete(path3);
+          awfEmit(void 0, curStat);
+        } else {
+          timeoutHandler = setTimeout(awaitWriteFinishFn, pollInterval, curStat);
+        }
+      });
+    }
+    if (!writes.has(path3)) {
+      writes.set(path3, {
+        lastChange: now,
+        cancelWait: () => {
+          writes.delete(path3);
+          clearTimeout(timeoutHandler);
+          return event;
+        }
+      });
+      timeoutHandler = setTimeout(awaitWriteFinishFn, pollInterval);
+    }
+  }
+  /**
+   * Determines whether user has asked to ignore this path.
+   */
+  _isIgnored(path3, stats) {
+    if (this.options.atomic && DOT_RE.test(path3))
+      return true;
+    if (!this._userIgnored) {
+      const { cwd } = this.options;
+      const ign = this.options.ignored;
+      const ignored = (ign || []).map(normalizeIgnored(cwd));
+      const ignoredPaths = [...this._ignoredPaths];
+      const list3 = [...ignoredPaths.map(normalizeIgnored(cwd)), ...ignored];
+      this._userIgnored = anymatch(list3, void 0);
+    }
+    return this._userIgnored(path3, stats);
+  }
+  _isntIgnored(path3, stat15) {
+    return !this._isIgnored(path3, stat15);
+  }
+  /**
+   * Provides a set of common helpers and properties relating to symlink handling.
+   * @param path file or directory pattern being watched
+   */
+  _getWatchHelpers(path3) {
+    return new WatchHelper(path3, this.options.followSymlinks, this);
+  }
+  // Directory helpers
+  // -----------------
+  /**
+   * Provides directory tracking objects
+   * @param directory path of the directory
+   */
+  _getWatchedDir(directory) {
+    const dir = sp2.resolve(directory);
+    if (!this._watched.has(dir))
+      this._watched.set(dir, new DirEntry(dir, this._boundRemove));
+    return this._watched.get(dir);
+  }
+  // File helpers
+  // ------------
+  /**
+   * Check for read permissions: https://stackoverflow.com/a/11781404/1358405
+   */
+  _hasReadPermissions(stats) {
+    if (this.options.ignorePermissionErrors)
+      return true;
+    return Boolean(Number(stats.mode) & 256);
+  }
+  /**
+   * Handles emitting unlink events for
+   * files and directories, and via recursion, for
+   * files and directories within directories that are unlinked
+   * @param directory within which the following item is located
+   * @param item      base path of item/directory
+   */
+  _remove(directory, item, isDirectory) {
+    const path3 = sp2.join(directory, item);
+    const fullPath = sp2.resolve(path3);
+    isDirectory = isDirectory != null ? isDirectory : this._watched.has(path3) || this._watched.has(fullPath);
+    if (!this._throttle("remove", path3, 100))
+      return;
+    if (!isDirectory && this._watched.size === 1) {
+      this.add(directory, item, true);
+    }
+    const wp = this._getWatchedDir(path3);
+    const nestedDirectoryChildren = wp.getChildren();
+    nestedDirectoryChildren.forEach((nested) => this._remove(path3, nested));
+    const parent = this._getWatchedDir(directory);
+    const wasTracked = parent.has(item);
+    parent.remove(item);
+    if (this._symlinkPaths.has(fullPath)) {
+      this._symlinkPaths.delete(fullPath);
+    }
+    let relPath = path3;
+    if (this.options.cwd)
+      relPath = sp2.relative(this.options.cwd, path3);
+    if (this.options.awaitWriteFinish && this._pendingWrites.has(relPath)) {
+      const event = this._pendingWrites.get(relPath).cancelWait();
+      if (event === EVENTS.ADD)
+        return;
+    }
+    this._watched.delete(path3);
+    this._watched.delete(fullPath);
+    const eventName = isDirectory ? EVENTS.UNLINK_DIR : EVENTS.UNLINK;
+    if (wasTracked && !this._isIgnored(path3))
+      this._emit(eventName, path3);
+    this._closePath(path3);
+  }
+  /**
+   * Closes all watchers for a path
+   */
+  _closePath(path3) {
+    this._closeFile(path3);
+    const dir = sp2.dirname(path3);
+    this._getWatchedDir(dir).remove(sp2.basename(path3));
+  }
+  /**
+   * Closes only file-specific watchers
+   */
+  _closeFile(path3) {
+    const closers = this._closers.get(path3);
+    if (!closers)
+      return;
+    closers.forEach((closer) => closer());
+    this._closers.delete(path3);
+  }
+  _addPathCloser(path3, closer) {
+    if (!closer)
+      return;
+    let list3 = this._closers.get(path3);
+    if (!list3) {
+      list3 = [];
+      this._closers.set(path3, list3);
+    }
+    list3.push(closer);
+  }
+  _readdirp(root, opts) {
+    if (this.closed)
+      return;
+    const options = { type: EVENTS.ALL, alwaysStat: true, lstat: true, ...opts, depth: 0 };
+    let stream = readdirp(root, options);
+    this._streams.add(stream);
+    stream.once(STR_CLOSE, () => {
+      stream = void 0;
+    });
+    stream.once(STR_END, () => {
+      if (stream) {
+        this._streams.delete(stream);
+        stream = void 0;
+      }
+    });
+    return stream;
+  }
+};
+function watch(paths, options = {}) {
+  const watcher = new FSWatcher(options);
+  watcher.add(paths);
+  return watcher;
+}
+
 // src/controller.ts
-import { createHash as createHash2, randomUUID as randomUUID3 } from "node:crypto";
+import { createHash as createHash3, randomUUID as randomUUID3 } from "node:crypto";
 
 // src/protocol.ts
 var HOST_PROTOCOL = "alder-host-v2";
@@ -62247,7 +62749,8 @@ var saveCommandSchema = external_exports.object({ ...commandIdentityShape, type:
 var saveAsCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("save-as"), path: pathSchema, expectedDestination: external_exports.union([external_exports.literal("absent"), external_exports.object({ expectedDiskDigest: external_exports.string().min(1), expectedDiskVersion: external_exports.string().min(1) }).strict()]), expectedDocumentRevision: revisionSchema }).strict();
 var reloadSourceCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("reload-source"), expectedDocumentRevision: revisionSchema, expectedDiskDigest: external_exports.string().regex(/^[0-9a-f]{64}$/), expectedDiskVersion: boundedUtf8StringSchema(MAX_ID_BYTES, true) }).strict();
 var formatCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("format"), cellIds: external_exports.array(idSchema).max(MAX_NOTEBOOK_CELLS).optional(), expectedRevisions: safeStringRecordSchema(revisionSchema), expectedDocumentRevision: revisionSchema }).strict();
-var setConfigCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("set-config"), patch: protocolJsonRecordSchema, expectedSidecarVersion: boundedUtf8StringSchema(MAX_ID_BYTES).nullable(), expectedDocumentRevision: revisionSchema }).strict();
+var setPreferencesCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("set-preferences"), patch: preferencesPatchSchema, expectedPreferencesVersion: boundedUtf8StringSchema(MAX_ID_BYTES).nullable() }).strict();
+var setConfigCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("set-config"), patch: projectSettingsPatchSchema, expectedSidecarVersion: boundedUtf8StringSchema(MAX_ID_BYTES).nullable(), expectedDocumentRevision: revisionSchema }).strict();
 var layoutKey = boundedUtf8StringSchema(MAX_ID_BYTES, true).refine((key2) => !key2.includes("/") && !key2.includes("\\") && key2 !== "." && key2 !== "..", "invalid layout cell key");
 var layoutGeometrySchema = external_exports.object({ x: external_exports.number().int().min(0).max(11).safe(), y: external_exports.number().int().min(0).max(1e6).safe(), w: external_exports.number().int().min(1).max(12).safe(), h: external_exports.number().int().min(1).max(1e6).safe() }).strict().superRefine((geometry2, context) => {
   if (geometry2.x + geometry2.w > 12) context.addIssue({ code: "custom", path: ["w"], message: "geometry extends beyond the 12-column grid" });
@@ -62273,7 +62776,7 @@ var layoutSchema = external_exports.object({ version: external_exports.literal(1
   }
 });
 var setLayoutCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("set-layout"), layout: layoutSchema, expectedSidecarVersion: boundedUtf8StringSchema(MAX_ID_BYTES).nullable(), expectedDocumentRevision: revisionSchema }).strict();
-var setRuntimeCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("set-runtime"), on_cell_change: external_exports.enum(["automatic", "lazy"]).optional(), on_startup: external_exports.boolean().optional(), expectedDocumentRevision: revisionSchema }).strict().refine((value) => value.on_cell_change !== void 0 || value.on_startup !== void 0, "at least one runtime setting is required");
+var setRuntimeCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("set-runtime"), on_cell_change: external_exports.enum(["automatic", "lazy"]).optional(), on_startup: external_exports.boolean().optional(), cache_enabled: external_exports.boolean().optional(), expectedDocumentRevision: revisionSchema }).strict().refine((value) => value.on_cell_change !== void 0 || value.on_startup !== void 0 || value.cache_enabled !== void 0, "at least one runtime setting is required");
 var restartCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("restart"), replay: external_exports.boolean().default(false), expectedDocumentRevision: revisionSchema.optional() }).strict().superRefine((value, context) => {
   if (value.replay && value.expectedDocumentRevision === void 0) context.addIssue({ code: "custom", path: ["expectedDocumentRevision"], message: "replay restart requires document revision" });
 });
@@ -62337,6 +62840,7 @@ var hostCommandSchema = external_exports.discriminatedUnion("type", [
   saveAsCommandSchema,
   reloadSourceCommandSchema,
   formatCommandSchema,
+  setPreferencesCommandSchema,
   setConfigCommandSchema,
   setLayoutCommandSchema,
   setRuntimeCommandSchema,
@@ -62350,7 +62854,7 @@ var hostCommandSchema = external_exports.discriminatedUnion("type", [
 ]);
 var cellStatusSchema = external_exports.enum(["idle", "stale", "running", "done", "error", "stopped", "disabled"]);
 var operationStatusSchema = external_exports.enum(["accepted", "running", "done", "error", "interrupted", "cancelled"]);
-var operationKindSchema = external_exports.enum(["transaction", "run", "select-r", "set-app", "packages-declare", "packages-install", "publish", "upload", "save", "save-as", "reload-source", "format", "set-config", "set-layout", "set-runtime", "restart", "widget", "inspect", "lazy-output", "table-page", "interrupt", "shutdown", "widget-reset", "analysis"]);
+var operationKindSchema = external_exports.enum(["transaction", "run", "select-r", "set-app", "packages-declare", "packages-install", "publish", "upload", "save", "save-as", "reload-source", "format", "set-preferences", "set-config", "set-layout", "set-runtime", "restart", "widget", "inspect", "lazy-output", "table-page", "interrupt", "shutdown", "widget-reset", "analysis"]);
 var hostErrorSchema = external_exports.object({ code: boundedUtf8StringSchema(256, true), message: boundedUtf8StringSchema(MAX_FRAME_BYTES), operationId: idSchema.nullable().optional(), details: protocolJsonSchema.optional() }).strict();
 var MAX_OPERATION_PROGRESS_BYTES = 64 * 1024;
 var operationProgressDataSchema = protocolJsonSchema.superRefine((value, context) => {
@@ -62414,8 +62918,8 @@ var dependencyGraphStateSchema = external_exports.object({ nodes: graphCellIds, 
 var runtimeVariableSchema = external_exports.object({ name: boundedUtf8StringSchema(MAX_ANALYSIS_SYMBOL_BYTES, true), owner: idSchema.nullable(), revision: revisionSchema.nullable(), class: boundedUtf8StringSchema(MAX_ANALYSIS_SYMBOL_BYTES, true), dim: external_exports.array(protocolIntegerSchema).max(64).nullable(), size: protocolIntegerSchema, widget: external_exports.boolean(), valueSummary: boundedUtf8StringSchema(160).optional() }).strict();
 var runtimeVariablesSchema = external_exports.array(runtimeVariableSchema).max(MAX_RUNTIME_VARIABLES);
 var editorDiagnosticsSchema = safeStringRecordSchema(external_exports.array(analysisDiagnosticSchema).max(MAX_EDITOR_DIAGNOSTICS));
-var serviceErrorsSchema = external_exports.object({ lsp: hostErrorSchema.optional() }).strict();
-var hostSnapshotSchema = external_exports.object({ protocol: external_exports.literal(HOST_PROTOCOL), epoch: idSchema, cursor: protocolIntegerSchema, version: protocolIntegerSchema, documentRevision: revisionSchema, path: pathSchema.nullable(), metadata: protocolJsonRecordSchema, config: protocolJsonRecordSchema, layout: protocolJsonSchema, dirty: external_exports.boolean(), changed: external_exports.boolean().optional(), disk: diskObservationSchema, sidecars: sidecarObservationsSchema, runtime: hostRuntimeSchema, cells: external_exports.array(hostCellStateSchema).max(MAX_NOTEBOOK_CELLS), graph: dependencyGraphStateSchema, variables: runtimeVariablesSchema, editorDiagnostics: editorDiagnosticsSchema, serviceErrors: serviceErrorsSchema, operations: external_exports.array(operationRecordSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS), lastValue: protocolJsonSchema.nullable(), lastActionError: hostErrorSchema.nullable(), capabilities: external_exports.array(boundedUtf8StringSchema(256)).max(MAX_PROTOCOL_COLLECTION_ITEMS).optional(), activeClientIds: external_exports.array(idSchema).max(128).optional() }).strict();
+var serviceErrorsSchema = external_exports.object({ lsp: hostErrorSchema.optional(), settings: hostErrorSchema.optional() }).strict();
+var hostSnapshotSchema = external_exports.object({ protocol: external_exports.literal(HOST_PROTOCOL), epoch: idSchema, cursor: protocolIntegerSchema, version: protocolIntegerSchema, documentRevision: revisionSchema, path: pathSchema.nullable(), metadata: protocolJsonRecordSchema, config: protocolJsonRecordSchema, preferencesVersion: boundedUtf8StringSchema(MAX_ID_BYTES).nullable().default(null), layout: protocolJsonSchema, dirty: external_exports.boolean(), changed: external_exports.boolean().optional(), disk: diskObservationSchema, sidecars: sidecarObservationsSchema, runtime: hostRuntimeSchema, cells: external_exports.array(hostCellStateSchema).max(MAX_NOTEBOOK_CELLS), graph: dependencyGraphStateSchema, variables: runtimeVariablesSchema, editorDiagnostics: editorDiagnosticsSchema, serviceErrors: serviceErrorsSchema, operations: external_exports.array(operationRecordSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS), lastValue: protocolJsonSchema.nullable(), lastActionError: hostErrorSchema.nullable(), capabilities: external_exports.array(boundedUtf8StringSchema(256)).max(MAX_PROTOCOL_COLLECTION_ITEMS).optional(), activeClientIds: external_exports.array(idSchema).max(128).optional() }).strict();
 var hostEventTypeSchema = external_exports.enum(["transaction", "notebook", "cell", "cell-started", "cell-output", "cell-completed", "diagnostics", "editor-diagnostics", "service-errors", "graph", "variables", "runtime", "operation", "service-error", "active_clients_changed"]);
 var eventBase = { protocol: external_exports.literal(HOST_PROTOCOL), epoch: idSchema, cursor: protocolIntegerSchema, version: protocolIntegerSchema, documentRevision: revisionSchema, timestamp: external_exports.number().finite().nonnegative(), operationId: idSchema.optional(), clientId: idSchema.optional(), cellId: idSchema.optional(), runId: idSchema.optional(), kernelEpoch: idSchema.nullable().optional(), revision: revisionSchema.optional(), sequence: protocolIntegerSchema.optional() };
 var hostEventSchema = external_exports.object({ ...eventBase, type: hostEventTypeSchema, payload: protocolJsonSchema }).strict();
@@ -62945,517 +63449,8 @@ function parseHostQuery(input2) {
   return result.data;
 }
 
-// src/configuration.ts
-import { createHash, randomUUID } from "node:crypto";
-import { mkdir, open as open3, readFile, rename, rm, stat as stat4 } from "node:fs/promises";
-import { dirname as dirname3, join as join3, basename as basename3 } from "node:path";
-var import_yaml = __toESM(require_dist(), 1);
-var MAX_YAML_BYTES = 1024 * 1024;
-var MAX_YAML_DEPTH = 64;
-var configThemeSchema = external_exports.enum(["light", "dark", "system"]);
-var configKeymapSchema = external_exports.enum(["default", "vim"]);
-var configChangeSchema = external_exports.enum(["automatic", "lazy"]);
-var integer2 = (minimum, maximum) => external_exports.number().int().refine(Number.isFinite, "must be finite").min(minimum).max(maximum);
-var configFormatSchema = external_exports.object({
-  on_save: external_exports.boolean()
-}).strict().partial();
-var configEditorSchema = external_exports.object({
-  font_size: integer2(10, 32),
-  tab_size: integer2(1, 8),
-  line_numbers: external_exports.boolean(),
-  completions: external_exports.boolean(),
-  signature_help: external_exports.boolean(),
-  live_diagnostics: external_exports.boolean()
-}).strict().partial();
-var configTableSchema = external_exports.object({
-  page_size: integer2(5, 200)
-}).strict().partial();
-var configCacheSchema = external_exports.object({
-  enabled: external_exports.boolean(),
-  dir: external_exports.string().min(1).or(external_exports.null())
-}).strict().partial();
-var configLayerSchema = external_exports.object({
-  theme: configThemeSchema,
-  keymap: configKeymapSchema,
-  on_cell_change: configChangeSchema,
-  on_startup: external_exports.boolean(),
-  autosave: external_exports.boolean(),
-  format: configFormatSchema,
-  editor: configEditorSchema,
-  table: configTableSchema,
-  cache: configCacheSchema
-}).strict().partial();
-var configSchema = external_exports.object({
-  theme: configThemeSchema,
-  keymap: configKeymapSchema,
-  on_cell_change: configChangeSchema,
-  on_startup: external_exports.boolean(),
-  autosave: external_exports.boolean(),
-  format: external_exports.object({ on_save: external_exports.boolean() }).strict(),
-  editor: external_exports.object({
-    font_size: integer2(10, 32),
-    tab_size: integer2(1, 8),
-    line_numbers: external_exports.boolean(),
-    completions: external_exports.boolean(),
-    signature_help: external_exports.boolean(),
-    live_diagnostics: external_exports.boolean()
-  }).strict(),
-  table: external_exports.object({ page_size: integer2(5, 200) }).strict(),
-  cache: external_exports.object({ enabled: external_exports.boolean(), dir: external_exports.string().min(1).or(external_exports.null()) }).strict()
-}).strict();
-var ConfigError = class extends Error {
-  code = "config_invalid";
-  key;
-  constructor(key2, message2) {
-    super(`config_invalid: key \`${key2 || "config"}\` ${message2}`);
-    this.name = "ConfigError";
-    this.key = key2 || "config";
-  }
-};
-function clone2(value) {
-  if (value === null || typeof value !== "object") return value;
-  if (Array.isArray(value)) return value.map((entry) => clone2(entry));
-  const result = /* @__PURE__ */ Object.create(null);
-  for (const [key2, entry] of Object.entries(value)) {
-    result[key2] = clone2(entry);
-  }
-  return result;
-}
-function issueKey(issue2) {
-  if (issue2.code === "unrecognized_keys" && issue2.keys.length > 0) {
-    return issue2.keys[0] ?? "config";
-  }
-  return issue2.path.length > 0 ? issue2.path.map(String).join(".") : "config";
-}
-function parseConfigLayer(value, partial2) {
-  const result = partial2 ? configLayerSchema.safeParse(value) : configSchema.safeParse(value);
-  if (!result.success) {
-    const issue2 = result.error.issues[0];
-    throw new ConfigError(issueKey(issue2), issue2.message);
-  }
-  return result.data;
-}
-function configDefaults() {
-  return {
-    theme: "system",
-    keymap: "default",
-    on_cell_change: "automatic",
-    on_startup: true,
-    autosave: false,
-    format: { on_save: false },
-    editor: {
-      font_size: 14,
-      tab_size: 2,
-      line_numbers: true,
-      completions: true,
-      signature_help: true,
-      live_diagnostics: false
-    },
-    table: { page_size: 25 },
-    cache: { enabled: true, dir: null }
-  };
-}
-function validateConfigLayer(value) {
-  return parseConfigLayer(value, true);
-}
-function validateConfig(value, options = {}) {
-  if (options.partial === false) {
-    const merged = mergeConfig(configDefaults(), validateConfigLayer(value));
-    return parseConfigLayer(merged, false);
-  }
-  return validateConfigLayer(value);
-}
-function mergeConfig(base, overlay) {
-  const result = clone2(base);
-  for (const [key2, value] of Object.entries(overlay)) {
-    if (value !== null && typeof value === "object" && !Array.isArray(value) && result[key2] !== null && typeof result[key2] === "object" && !Array.isArray(result[key2])) {
-      result[key2] = mergeConfig(
-        result[key2],
-        value
-      );
-    } else {
-      result[key2] = clone2(value);
-    }
-  }
-  return result;
-}
-function ensureStringPath(path3, code2 = "config") {
-  if (typeof path3 !== "string" || path3.length === 0 || path3.includes("\0")) {
-    if (code2 === "layout") throw new LayoutPathError("layout path must be a non-empty path");
-    throw new ConfigError("path", "must be a non-empty path");
-  }
-  return path3;
-}
-function alderPaths() {
-  return envPaths("alder", { suffix: "" });
-}
-function userConfigPath() {
-  return join3(alderPaths().config, "config.yaml");
-}
-function projectDirectory(path3) {
-  if (path3 === null || path3 === void 0 || path3.length === 0) return null;
-  return path3.endsWith("/") || path3.endsWith("\\") ? path3 : dirname3(path3);
-}
-function projectConfigPath(path3) {
-  const directory = projectDirectory(path3);
-  return directory === null ? null : join3(directory, ".alder", "config.yaml");
-}
-function hasUnpairedSurrogate2(value) {
-  for (let index = 0; index < value.length; index += 1) {
-    const code2 = value.charCodeAt(index);
-    if (code2 >= 55296 && code2 <= 56319) {
-      const low = value.charCodeAt(index + 1);
-      if (low < 56320 || low > 57343) return true;
-      index += 1;
-    } else if (code2 >= 56320 && code2 <= 57343) return true;
-  }
-  return false;
-}
-function yamlNodeType(node2) {
-  if (!node2 || typeof node2 !== "object") return void 0;
-  const value = node2;
-  return typeof value.type === "string" ? value.type : typeof value.constructor?.name === "string" ? value.constructor.name : void 0;
-}
-function rejectYamlNode(node2, depth, kind) {
-  if (node2 === null || typeof node2 !== "object") return;
-  if (depth > MAX_YAML_DEPTH) throw new ConfigError(kind, "YAML nesting exceeds depth " + MAX_YAML_DEPTH);
-  const value = node2;
-  const type = yamlNodeType(node2);
-  if (type === "ALIAS" || type === "Alias") throw new ConfigError(kind, "YAML aliases are not allowed");
-  if (Object.hasOwn(value, "anchor")) throw new ConfigError(kind, "YAML anchors are not allowed");
-  if (Object.hasOwn(value, "tag")) throw new ConfigError(kind, "YAML custom tags are not allowed");
-  if (type === "PAIR" || type === "Pair") {
-    rejectYamlNode(value.key, depth, kind);
-    rejectYamlNode(value.value, depth + 1, kind);
-    return;
-  }
-  if (Array.isArray(value.items)) {
-    for (const item of value.items) {
-      const itemType = yamlNodeType(item);
-      rejectYamlNode(item, itemType === "PAIR" || itemType === "Pair" ? depth : depth + 1, kind);
-    }
-  }
-  if (Object.hasOwn(value, "key")) rejectYamlNode(value.key, depth, kind);
-  if (Object.hasOwn(value, "value")) rejectYamlNode(value.value, depth + 1, kind);
-}
-function assertPlainJson(value, depth, kind) {
-  if (depth > MAX_YAML_DEPTH) {
-    throw new ConfigError(kind, `YAML nesting exceeds depth ${MAX_YAML_DEPTH}`);
-  }
-  if (value === null || typeof value === "string" || typeof value === "boolean") return;
-  if (typeof value === "number") {
-    if (!Number.isFinite(value)) throw new ConfigError(kind, "YAML contains a non-finite number");
-    return;
-  }
-  if (Array.isArray(value)) {
-    for (const entry of value) assertPlainJson(entry, depth + 1, kind);
-    return;
-  }
-  if (typeof value !== "object" || Object.getPrototypeOf(value) !== Object.prototype) {
-    throw new ConfigError(kind, "YAML contains a non-JSON value");
-  }
-  for (const [key2, entry] of Object.entries(value)) {
-    if (key2.includes("\0")) throw new ConfigError(kind, "YAML contains an embedded NUL key");
-    assertPlainJson(entry, depth + 1, kind);
-  }
-}
-function parseYamlMapping(text2, kind) {
-  if (typeof text2 !== "string") throw new ConfigError(kind, "YAML input must be text");
-  if (hasUnpairedSurrogate2(text2)) throw new ConfigError(kind, "YAML input contains an unpaired surrogate");
-  if (text2.includes("\0")) throw new ConfigError(kind, "YAML input contains an embedded NUL");
-  const bytes = new TextEncoder().encode(text2).byteLength;
-  if (bytes > MAX_YAML_BYTES) {
-    throw new ConfigError(kind, `YAML document exceeds the ${MAX_YAML_BYTES}-byte limit`);
-  }
-  if (text2.trim().length === 0) return {};
-  let document;
-  try {
-    document = (0, import_yaml.parseDocument)(text2, {
-      version: "1.2",
-      schema: "core",
-      uniqueKeys: true,
-      customTags: [],
-      prettyErrors: false
-    });
-  } catch (error61) {
-    throw new ConfigError(kind, `malformed YAML: ${error61 instanceof Error ? error61.message : String(error61)}`);
-  }
-  if (document.errors.length > 0) {
-    const first = document.errors[0];
-    throw new ConfigError(kind, `malformed YAML: ${first?.message ?? "parse error"}`);
-  }
-  if (document.warnings.length > 0) {
-    const first = document.warnings[0];
-    throw new ConfigError(kind, `malformed YAML: ${first?.message ?? "parse warning"}`);
-  }
-  rejectYamlNode(document.contents, 0, kind);
-  let parsed;
-  try {
-    parsed = document.toJS({ mapAsMap: false });
-  } catch (error61) {
-    throw new ConfigError(kind, `malformed YAML: ${error61 instanceof Error ? error61.message : String(error61)}`);
-  }
-  assertPlainJson(parsed, 0, kind);
-  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new ConfigError(kind, "YAML root must be a mapping");
-  }
-  return parsed;
-}
-function yamlError(path3, error61) {
-  return error61 instanceof ConfigError ? error61 : new ConfigError(path3, error61 instanceof Error ? error61.message : String(error61));
-}
-async function readConfigFile(path3) {
-  if (path3 === null || path3 === void 0) return {};
-  const file2 = ensureStringPath(path3);
-  let bytes;
-  try {
-    bytes = await readFile(file2);
-  } catch (error61) {
-    const code2 = error61.code;
-    if (code2 === "ENOENT") return {};
-    throw new ConfigError("path", `cannot read configuration file \`${file2}\`: ${error61 instanceof Error ? error61.message : String(error61)}`);
-  }
-  if (bytes.byteLength > MAX_YAML_BYTES) {
-    throw new ConfigError("path", `configuration file exceeds the ${MAX_YAML_BYTES}-byte limit`);
-  }
-  try {
-    const value = parseYamlMapping(new TextDecoder("utf-8", { fatal: true }).decode(bytes), "config");
-    return validateConfigLayer(value);
-  } catch (error61) {
-    throw yamlError("config", error61);
-  }
-}
-async function observeFile(path3) {
-  try {
-    const info = await stat4(path3);
-    if (!info.isFile()) return { state: "unreadable", digest: null, version: null };
-    const bytes = await readFile(path3);
-    const digest = createHash("sha256").update(bytes).digest("hex");
-    const inode = typeof info.ino === "number" ? info.ino : void 0;
-    const identity = inode === void 0 ? null : `${info.dev}:${inode}`;
-    const mode = info.mode & 511;
-    const version2 = `${identity ?? ""}:${mode.toString(8)}:${digest}`;
-    return { state: "present", digest, version: version2, size: info.size, mtimeMs: info.mtimeMs, inode, identity, mode };
-  } catch (error61) {
-    if (error61.code === "ENOENT") {
-      return { state: "absent", digest: null, version: null };
-    }
-    return { state: "unreadable", digest: null, version: null };
-  }
-}
-function serializeConfigYaml(value) {
-  const checked = validateConfigLayer(value);
-  const text2 = (0, import_yaml.stringify)(checked, { version: "1.2", schema: "core", sortMapEntries: true });
-  return text2.endsWith("\n") ? text2 : `${text2}
-`;
-}
-var ConfigShadowedError = class extends Error {
-  code = "config_shadowed";
-  key;
-  writtenLayer;
-  effectiveLayer;
-  details;
-  constructor(details) {
-    super("config_shadowed: key `" + details.key + "` written in " + details.writtenLayer + " is overridden by " + details.effectiveLayer);
-    this.name = "ConfigShadowedError";
-    this.key = details.key;
-    this.writtenLayer = details.writtenLayer;
-    this.effectiveLayer = details.effectiveLayer;
-    this.details = { ...details };
-  }
-  toJSON() {
-    return { code: this.code, ...this.details };
-  }
-};
-function runtimeLayer(metadata, explicit) {
-  let value = explicit;
-  if (value === void 0 && metadata !== void 0 && metadata !== null) {
-    if (typeof metadata !== "object" || Array.isArray(metadata)) throw new ConfigError("runtime", "metadata must be a mapping");
-    value = metadata.runtime;
-  }
-  if (value === void 0 || value === null) return {};
-  if (typeof value !== "object" || Array.isArray(value)) throw new ConfigError("runtime", "must be a mapping");
-  return validateConfigLayer(value);
-}
-var CONFIG_LAYER_ORDER = ["defaults", "user", "project", "runtime", "launch"];
-var CONFIG_LAYER_RANK = {
-  defaults: 0,
-  user: 1,
-  project: 2,
-  runtime: 3,
-  launch: 4
-};
-function isConfigRecord(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-function configLeafValues(value, prefix = "", result = []) {
-  if (!isConfigRecord(value)) {
-    if (prefix.length > 0) result.push({ key: prefix, value });
-    return result;
-  }
-  for (const [key2, child] of Object.entries(value)) {
-    const path3 = prefix.length === 0 ? key2 : prefix + "." + key2;
-    if (isConfigRecord(child)) configLeafValues(child, path3, result);
-    else result.push({ key: path3, value: child });
-  }
-  return result;
-}
-function configValueAt(value, path3) {
-  let current = value;
-  for (const key2 of path3.split(".")) {
-    if (!isConfigRecord(current) || !Object.prototype.hasOwnProperty.call(current, key2)) return void 0;
-    current = current[key2];
-  }
-  return current;
-}
-function sameConfigValue(left, right) {
-  if (Object.is(left, right)) return true;
-  if (Array.isArray(left) || Array.isArray(right)) {
-    return Array.isArray(left) && Array.isArray(right) && left.length === right.length && left.every((value, index) => sameConfigValue(value, right[index]));
-  }
-  if (!isConfigRecord(left) || !isConfigRecord(right)) return false;
-  const leftKeys = Object.keys(left);
-  const rightKeys = Object.keys(right);
-  return leftKeys.length === rightKeys.length && leftKeys.every((key2) => Object.prototype.hasOwnProperty.call(right, key2) && sameConfigValue(left[key2], right[key2]));
-}
-async function readConfigLayers(options) {
-  const path3 = options.path ?? null;
-  const user = options.user === void 0 ? await readConfigFile(options.userPath ?? userConfigPath()) : options.user;
-  const projectPath = options.projectPath === void 0 ? projectConfigPath(path3) : options.projectPath;
-  const project = options.project === void 0 ? await readConfigFile(projectPath) : options.project;
-  const runtime = runtimeLayer(options.metadata, options.runtime);
-  const launch = options.launch === void 0 ? {} : options.launch;
-  return { user, project, runtime, launch };
-}
-function resolveConfigLayers(options = {}) {
-  const layers = {
-    defaults: configDefaults(),
-    user: options.user === void 0 ? {} : validateConfigLayer(options.user),
-    project: options.project === void 0 ? {} : validateConfigLayer(options.project),
-    runtime: options.runtime === void 0 ? {} : validateConfigLayer(options.runtime),
-    launch: options.launch === void 0 ? {} : validateConfigLayer(options.launch)
-  };
-  return buildConfigResolution(layers);
-}
-function buildConfigResolution(layers) {
-  let effective = clone2(layers.defaults);
-  const provenance = {};
-  for (const layerName of CONFIG_LAYER_ORDER) {
-    const layer = layers[layerName];
-    for (const { key: key2 } of configLeafValues(layer)) provenance[key2] = layerName;
-    if (layerName !== "defaults") effective = mergeConfig(effective, layer);
-  }
-  effective = validateConfig(effective, { partial: false });
-  return {
-    effective: clone2(effective),
-    layers: {
-      defaults: clone2(layers.defaults),
-      user: clone2(layers.user),
-      project: clone2(layers.project),
-      runtime: clone2(layers.runtime),
-      launch: clone2(layers.launch)
-    },
-    provenance: { ...provenance }
-  };
-}
-function assertConfigPatchEffective(resolution, patch, writtenLayer) {
-  if (writtenLayer !== "project" && writtenLayer !== "runtime") {
-    throw new ConfigError("writtenLayer", "must be project or runtime");
-  }
-  for (const { key: key2, value } of configLeafValues(patch)) {
-    const effectiveLayer = resolution.provenance[key2];
-    if (effectiveLayer === void 0) continue;
-    if (CONFIG_LAYER_RANK[effectiveLayer] > CONFIG_LAYER_RANK[writtenLayer] && !sameConfigValue(configValueAt(resolution.effective, key2), value)) {
-      throw new ConfigShadowedError({ key: key2, writtenLayer, effectiveLayer });
-    }
-  }
-}
-async function resolveConfig(options = {}) {
-  return resolveConfigLayers(await readConfigLayers(options));
-}
-var LayoutPathError = class extends Error {
-  code = "invalid_layout";
-  constructor(message2) {
-    super(message2);
-    this.name = "LayoutPathError";
-  }
-};
-var appDefaults = { layout: "vertical", width: "medium", include_code: false };
-var appLayoutSchema = external_exports.enum(["vertical", "grid", "slides"]);
-var appWidthSchema = external_exports.enum(["compact", "medium", "full"]);
-var appUpdateSchema = external_exports.object({
-  layout: appLayoutSchema,
-  width: appWidthSchema,
-  include_code: external_exports.boolean()
-}).strict().partial();
-var AppConfigError = class extends Error {
-  code = "invalid_request";
-  constructor(message2) {
-    super(message2);
-    this.name = "AppConfigError";
-  }
-};
-function appRecord(value, message2) {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) throw new AppConfigError(message2);
-  return value;
-}
-function validateAppMetadata(metadata) {
-  const record4 = metadata === null || metadata === void 0 ? {} : appRecord(metadata, "notebook metadata must be a named mapping");
-  const appValue = record4.app;
-  if (appValue === null || appValue === void 0) return {};
-  const app = appRecord(appValue, "app metadata must be a named mapping");
-  if (Object.hasOwn(app, "layout")) {
-    const parsed = appLayoutSchema.safeParse(app.layout);
-    if (!parsed.success) throw new AppConfigError("layout must be one of vertical, grid, slides");
-  }
-  if (Object.hasOwn(app, "width")) {
-    const parsed = appWidthSchema.safeParse(app.width);
-    if (!parsed.success) throw new AppConfigError("width must be one of compact, medium, full");
-  }
-  if (Object.hasOwn(app, "include_code") && typeof app.include_code !== "boolean") {
-    throw new AppConfigError("include_code must be a scalar logical");
-  }
-  return clone2(app);
-}
-function validateAppUpdate(updates) {
-  const record4 = appRecord(updates, "app updates must be a non-empty mapping with unique keys");
-  if (Object.keys(record4).length === 0) throw new AppConfigError("app updates must be a non-empty mapping with unique keys");
-  const parsed = appUpdateSchema.safeParse(record4);
-  if (!parsed.success) {
-    const issue2 = parsed.error.issues[0];
-    if (issue2?.code === "unrecognized_keys" && issue2.keys[0]) throw new AppConfigError("unknown app key: " + issue2.keys[0]);
-    const key2 = issue2?.path[0] ? String(issue2.path[0]) : "app";
-    throw new AppConfigError(key2 + " is invalid");
-  }
-  return parsed.data;
-}
-function appConfig(notebook) {
-  const app = validateAppMetadata(notebook?.metadata);
-  const effective = {
-    layout: Object.hasOwn(app, "layout") ? app.layout : appDefaults.layout,
-    width: Object.hasOwn(app, "width") ? app.width : appDefaults.width,
-    include_code: Object.hasOwn(app, "include_code") ? app.include_code : appDefaults.include_code
-  };
-  return {
-    effective,
-    provenance: {
-      layout: Object.hasOwn(app, "layout") ? "app" : "defaults",
-      width: Object.hasOwn(app, "width") ? "app" : "defaults",
-      include_code: Object.hasOwn(app, "include_code") ? "app" : "defaults"
-    }
-  };
-}
-function setAppConfig(notebook, updates) {
-  const checked = validateAppUpdate(updates);
-  const metadata = appRecord(notebook.metadata ?? {}, "notebook metadata must be a named mapping");
-  const app = validateAppMetadata(metadata);
-  const nextMetadata = clone2(metadata);
-  nextMetadata.app = { ...app, ...checked };
-  return { ...notebook, metadata: nextMetadata };
-}
-
 // src/notebook.ts
-var import_yaml2 = __toESM(require_dist(), 1);
+var import_yaml3 = __toESM(require_dist(), 1);
 
 // src/cell-body.ts
 function markdownLogicalLine(line) {
@@ -64395,7 +64390,7 @@ function metadataRecords(metadata, eol) {
   if (Object.keys(metadata).length === 0) return [];
   let rendered;
   try {
-    rendered = (0, import_yaml2.stringify)(metadata, { aliasDuplicateObjects: false, lineWidth: 0 });
+    rendered = (0, import_yaml3.stringify)(metadata, { aliasDuplicateObjects: false, lineWidth: 0 });
   } catch (error61) {
     throw new NotebookMutationError("invalid_input", `metadata cannot be serialized: ${messageOf(error61)}`, error61);
   }
@@ -65714,14 +65709,14 @@ import { constants, unlinkSync } from "node:fs";
 import {
   lstat as lstat3,
   mkdir as mkdir2,
-  open as open4,
+  open as open5,
   realpath as realpath2,
   rename as rename2,
   stat as stat5,
   unlink,
   writeFile
 } from "node:fs/promises";
-import { isAbsolute as isAbsolute3, join as join4, relative as relative3, resolve as resolve3 } from "node:path";
+import { isAbsolute as isAbsolute2, join as join4, relative as relative3, resolve as resolve3 } from "node:path";
 
 // ../../../../../alder/host/node_modules/mdurl/index.mjs
 var mdurl_exports = {};
@@ -66589,8 +66584,8 @@ var REBuilder = class {
   escapeRE(str) {
     return str.replace(/[.?*+^$[\]\\(){}|-]/g, "\\$&");
   }
-  nestedPairRE(open9, close, depth = 4) {
-    const openRE = this.escapeRE(open9);
+  nestedPairRE(open10, close, depth = 4) {
+    const openRE = this.escapeRE(open10);
     const closeRE = this.escapeRE(close);
     const atom = `(?:(?!${this.src_ZCc}|${openRE}|${closeRE}).)`;
     let pair = `${openRE}${atom}{0,1000}${closeRE}`;
@@ -71330,7 +71325,7 @@ var OutputStore = class {
     try {
       before2 = await lstat3(artifact.path);
       if (!before2.isFile()) throw new OutputStoreError("output_expired", "artifact is no longer a retained regular file");
-      file2 = await open4(artifact.path, constants.O_RDONLY | constants.O_NOFOLLOW);
+      file2 = await open5(artifact.path, constants.O_RDONLY | constants.O_NOFOLLOW);
     } catch (error61) {
       throw error61 instanceof OutputStoreError ? error61 : new OutputStoreError("output_expired", "artifact bytes are no longer retained");
     }
@@ -71425,7 +71420,7 @@ var OutputStore = class {
       throw new OutputStoreError("not_found", "artifact source directory is unavailable");
     });
     const candidate = resolve3(root, name);
-    if (!isInside(root, candidate) || isAbsolute3(name)) {
+    if (!isInside(root, candidate) || isAbsolute2(name)) {
       throw new OutputStoreError("output_invalid", "artifact path escapes the source directory");
     }
     const source = await realpath2(candidate).catch(() => {
@@ -71443,7 +71438,7 @@ var OutputStore = class {
     const extension2 = options.extension ?? extensionForMime(mimeType, name);
     let sourceHandle;
     try {
-      sourceHandle = await open4(source, constants.O_RDONLY | constants.O_NOFOLLOW);
+      sourceHandle = await open5(source, constants.O_RDONLY | constants.O_NOFOLLOW);
     } catch {
       throw new OutputStoreError("stale_value", "registered artifact changed during import");
     }
@@ -71477,7 +71472,7 @@ var OutputStore = class {
       let promoted = false;
       let destination;
       try {
-        destination = await open4(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 384);
+        destination = await open5(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 384);
         const chunk = Buffer.allocUnsafe(Math.max(1, Math.min(OUTPUT_ARTIFACT_CHUNK_BYTES, byteLength2)));
         let offset = 0;
         while (offset < byteLength2) {
@@ -72105,7 +72100,7 @@ var OutputStore = class {
     return Buffer.from(value, "utf8");
   }
   assertMIMEInput(value) {
-    if (hasUnpairedSurrogate3(value)) {
+    if (hasUnpairedSurrogate2(value)) {
       throw new OutputStoreError("output_invalid", "MIME output must contain valid Unicode");
     }
     if (byteLength(value) > OUTPUT_RECORD_MAX_BYTES) {
@@ -72297,13 +72292,13 @@ function freezeJson(value) {
   return value;
 }
 function safeId(value) {
-  return typeof value === "string" && value.length > 0 && byteLength(value) <= 256 && !hasUnpairedSurrogate3(value) && !/[\u0000-\u001f\u007f]/.test(value);
+  return typeof value === "string" && value.length > 0 && byteLength(value) <= 256 && !hasUnpairedSurrogate2(value) && !/[\u0000-\u001f\u007f]/.test(value);
 }
 function safeHandle(value) {
   return typeof value === "string" && value.length > 0 && byteLength(value) <= MAX_ARTIFACT_HANDLE_BYTES && safeId(value) && !/[\\/]/.test(value) && !value.includes("..") && !value.startsWith(".");
 }
 function safeMime(value) {
-  return typeof value === "string" && value.length > 0 && byteLength(value) <= MAX_MIME_BYTES && !hasUnpairedSurrogate3(value) && !/[\u0000-\u001f\u007f]/.test(value);
+  return typeof value === "string" && value.length > 0 && byteLength(value) <= MAX_MIME_BYTES && !hasUnpairedSurrogate2(value) && !/[\u0000-\u001f\u007f]/.test(value);
 }
 function normalizeExtension(value) {
   if (typeof value !== "string" || byteLength(value) > MAX_ARTIFACT_EXTENSION_BYTES || !/^\.[A-Za-z0-9]{1,12}$/.test(value)) return ".bin";
@@ -72319,7 +72314,7 @@ function utf8Prefix(value, maximumBytes) {
   while (end > 0 && (bytes[end] & 192) === 128) end -= 1;
   return bytes.subarray(0, end).toString("utf8");
 }
-function hasUnpairedSurrogate3(value) {
+function hasUnpairedSurrogate2(value) {
   for (let index = 0; index < value.length; index += 1) {
     const code2 = value.charCodeAt(index);
     if (code2 >= 55296 && code2 <= 56319) {
@@ -72360,7 +72355,7 @@ function jsonByteLength(value) {
 }
 function isInside(root, candidate) {
   const relativePath = relative3(root, candidate);
-  return relativePath === "" || relativePath !== ".." && !relativePath.startsWith("..") && !isAbsolute3(relativePath);
+  return relativePath === "" || relativePath !== ".." && !relativePath.startsWith("..") && !isAbsolute2(relativePath);
 }
 function extensionForMime(mimeType, name = "") {
   const fromName = /\.[A-Za-z0-9]{1,12}$/.exec(name)?.[0];
@@ -72518,12 +72513,14 @@ var Controller = class {
   graphValue = new ReactiveGraph([]);
   pathValue;
   metadata;
-  configResolution;
+  config;
+  preferencesVersion;
   layout;
   executionMode;
   runOnStartup;
   deferStartup;
   startupActivated = false;
+  suppressStartup;
   changed;
   documentRevisionValue = 0;
   version = 0;
@@ -72619,10 +72616,12 @@ var Controller = class {
     };
     this.sidecarsValue = options.sidecars ?? this.sidecarsValue;
     this.metadata = clone3(notebook.metadata);
-    this.configResolution = clone3(options.configResolution);
+    this.config = clone3(options.config);
+    this.preferencesVersion = options.preferencesVersion ?? null;
+    this.suppressStartup = options.suppressStartup ?? false;
     this.layout = clone3(options.layout ?? null);
-    this.executionMode = this.effectiveConfig.on_cell_change;
-    this.runOnStartup = this.effectiveConfig.on_startup;
+    this.executionMode = this.config.on_cell_change;
+    this.runOnStartup = this.config.on_startup;
     this.deferStartup = options.deferStartup ?? false;
     this.changed = options.initialDirty ?? false;
     this.cells = notebook.cells.map((cell) => ({
@@ -72644,9 +72643,6 @@ var Controller = class {
     this.graphValue = this.rebuildGraph();
     this.installInitialMarkdownOutputs();
     this.documentReady = true;
-  }
-  get effectiveConfig() {
-    return this.configResolution.effective;
   }
   get epoch() {
     return this.epochValue;
@@ -72797,7 +72793,7 @@ var Controller = class {
     this.assertStarted();
     if (this.startupActivated) return null;
     this.startupActivated = true;
-    if (!this.executionReady || !this.runOnStartup) return null;
+    if (!this.executionReady || !this.runOnStartup || this.suppressStartup) return null;
     const operationId = `startup-${randomUUID3()}`;
     this.createOperation(operationId, "run");
     try {
@@ -72819,7 +72815,8 @@ var Controller = class {
       documentRevision: this.documentRevisionValue,
       path: this.pathValue,
       metadata: clone3(this.metadata),
-      config: clone3(this.effectiveConfig),
+      config: clone3(this.config),
+      preferencesVersion: this.preferencesVersion,
       layout: clone3(this.layout),
       dirty: this.changed,
       changed: this.changed,
@@ -72894,6 +72891,12 @@ var Controller = class {
       });
     }
     return true;
+  }
+  updatePreferences(values, version2) {
+    if (this.closed) return;
+    this.config = { ...this.config, ...structuredClone(values) };
+    this.preferencesVersion = version2;
+    this.bump("notebook", { config: clone3(this.config), preferencesVersion: version2 });
   }
   publishServiceError(service, error61) {
     if (this.closed) return false;
@@ -73008,7 +73011,7 @@ var Controller = class {
       ));
     }
     const { clientId: _clientId, ...request } = command;
-    const fingerprint2 = createHash2("sha256").update(stableStringify(request)).digest("hex");
+    const fingerprint2 = createHash3("sha256").update(stableStringify(request)).digest("hex");
     const prior = this.commandEntries.get(command.requestId);
     if (prior !== void 0) {
       if (prior.fingerprint !== fingerprint2) {
@@ -73085,7 +73088,7 @@ var Controller = class {
           documentRevision: this.documentRevisionValue,
           path: this.pathValue,
           metadata: clone3(this.metadata),
-          config: clone3(this.effectiveConfig),
+          config: clone3(this.config),
           dirty: this.changed,
           changed: this.changed,
           disk: clone3(this.diskValue),
@@ -73135,9 +73138,8 @@ var Controller = class {
         break;
       case "config":
         result = {
-          effective: clone3(this.effectiveConfig),
-          layers: clone3(this.configResolution.layers),
-          provenance: clone3(this.configResolution.provenance),
+          config: clone3(this.config),
+          preferencesVersion: this.preferencesVersion,
           sidecar: clone3(this.sidecarsValue.config)
         };
         break;
@@ -73326,7 +73328,7 @@ var Controller = class {
           result = await this.applyTransaction(command.changes, command.expectedDocumentRevision, command.requestId, false);
           break;
         case "run":
-          if (command.startup === true && !this.runOnStartup) {
+          if (command.startup === true && (!this.runOnStartup || this.suppressStartup)) {
             result = { startupActivated: true, run: false };
           } else {
             result = await this.prepareRun(command);
@@ -73382,7 +73384,10 @@ var Controller = class {
           result = await this.formatSource(command.cellIds, command.expectedRevisions, command.requestId);
           break;
         case "set-runtime":
-          result = await this.setRuntime(command.on_cell_change, command.on_startup, command.expectedDocumentRevision, command.requestId);
+          result = await this.setRuntime(command.on_cell_change, command.on_startup, command.cache_enabled, command.expectedDocumentRevision, command.requestId);
+          break;
+        case "set-preferences":
+          result = await this.callService("preferences.update", { patch: command.patch, expectedPreferencesVersion: command.expectedPreferencesVersion });
           break;
         case "set-config":
           result = await this.setConfig(command.patch, command.expectedDocumentRevision, command.expectedSidecarVersion, command.requestId);
@@ -73499,18 +73504,15 @@ var Controller = class {
     if (publication.advanceRevision && request.kind === "save-as" && !publication.dirty) {
       throw new ControllerError("invalid_service_response", "Save As cannot advance a clean source revision", 503);
     }
-    if (publication.configResolution === null || typeof publication.configResolution !== "object" || !isRecord(publication.configResolution.effective) || !isRecord(publication.configResolution.layers) || !isRecord(publication.configResolution.provenance)) {
-      throw new ControllerError("invalid_service_response", "source publication config resolution is invalid", 503);
-    }
     const document = clone3({ ...publication.document, path: publication.path });
-    const configResolution = clone3(publication.configResolution);
+    const config3 = clone3(publication.config);
     const layout = clone3(publication.layout);
     const disk = clone3(publication.disk);
     const sidecars = clone3(publication.sidecars);
     const prepared = {
       document,
       path: publication.path,
-      configResolution,
+      config: config3,
       layout,
       disk,
       sidecars,
@@ -73554,11 +73556,12 @@ var Controller = class {
     }
     this.pathValue = publication.path;
     this.metadata = clone3(publication.document.metadata ?? this.metadata);
-    this.configResolution = clone3(publication.configResolution);
+    const { theme, keymap, editor, table: table2, autosave, format: format2 } = this.config;
+    this.config = { ...clone3(publication.config), theme, keymap, editor, table: table2, autosave, format: format2 };
     const graphChanged = this.graphValue.state !== currentGraph;
-    const configuredMode = this.effectiveConfig.on_cell_change;
+    const configuredMode = this.config.on_cell_change;
     if (configuredMode === "automatic" || configuredMode === "lazy") this.executionMode = configuredMode;
-    if (typeof this.effectiveConfig.on_startup === "boolean") this.runOnStartup = this.effectiveConfig.on_startup;
+    if (typeof this.config.on_startup === "boolean") this.runOnStartup = this.config.on_startup;
     this.layout = clone3(publication.layout);
     this.diskValue = clone3(publication.disk);
     this.sidecarsValue = clone3(publication.sidecars);
@@ -73586,7 +73589,8 @@ var Controller = class {
         deleted: delta?.deleted ?? [],
         order: this.cells.map((cell) => cell.id),
         metadata: clone3(this.metadata),
-        config: clone3(this.effectiveConfig),
+        config: clone3(this.config),
+        runtime: this.runtimeSnapshot(),
         layout: clone3(this.layout),
         analysisPending: this.analysisNeeded.size > 0,
         ...graphChanged ? { graph: clone3(this.graphValue.state) } : {}
@@ -73597,7 +73601,9 @@ var Controller = class {
         sourceCommit: request.kind,
         documentRevision: this.documentRevisionValue,
         path: this.pathValue,
-        config: clone3(this.effectiveConfig),
+        metadata: clone3(this.metadata),
+        config: clone3(this.config),
+        runtime: this.runtimeSnapshot(),
         layout: clone3(this.layout),
         disk: clone3(this.diskValue),
         sidecars: clone3(this.sidecarsValue),
@@ -73607,7 +73613,6 @@ var Controller = class {
           updated: this.cells.map((cell) => this.publicCell(cell)),
           deleted: [...staged.deleted],
           order: this.cells.map((cell) => cell.id),
-          metadata: clone3(this.metadata),
           analysisPending: this.analysisNeeded.size > 0
         } : {},
         ...graphChanged ? { graph: clone3(this.graphValue.state) } : {}
@@ -73636,7 +73641,7 @@ var Controller = class {
         operationId: request.operationId,
         document: this.notebookDocument(),
         path: this.pathValue,
-        configResolution: clone3(this.configResolution),
+        config: clone3(this.config),
         layout: clone3(this.layout),
         disk: clone3(this.diskValue),
         sidecars: clone3(this.sidecarsValue),
@@ -73650,7 +73655,7 @@ var Controller = class {
             const previousCells = clone3(this.cells);
             const previousPath = this.pathValue;
             const previousMetadata = this.metadata;
-            const previousConfigResolution = this.configResolution;
+            const previousConfig = this.config;
             const previousLayout = this.layout;
             const previousDisk = this.diskValue;
             const previousSidecars = this.sidecarsValue;
@@ -73667,7 +73672,7 @@ var Controller = class {
               this.cells = previousCells;
               this.pathValue = previousPath;
               this.metadata = previousMetadata;
-              this.configResolution = previousConfigResolution;
+              this.config = previousConfig;
               this.layout = previousLayout;
               this.diskValue = previousDisk;
               this.sidecarsValue = previousSidecars;
@@ -73735,7 +73740,7 @@ var Controller = class {
           context.preparePublication({
             document: staged.document,
             path: staged.document.path ?? context.path,
-            configResolution: context.configResolution,
+            config: context.config,
             layout: context.layout,
             disk: context.disk,
             sidecars: context.sidecars,
@@ -73746,7 +73751,7 @@ var Controller = class {
           context.preparePublication({
             document: staged.document,
             path: staged.document.path ?? context.path,
-            configResolution: context.configResolution,
+            config: context.config,
             layout: context.layout,
             disk: context.disk,
             sidecars: context.sidecars,
@@ -76126,7 +76131,7 @@ var Controller = class {
     const result = await this.commitSource(request);
     this.assertNotClosed();
     this.replaceLastActionError(null);
-    this.bump("notebook", { saved: true, result: clone3(result) }, { operationId });
+    this.bump("notebook", { saved: true, dirty: this.changed, result: clone3(result) }, { operationId });
     return result;
   }
   async formatSource(requestedIds, expectedRevisions, operationId) {
@@ -76194,11 +76199,12 @@ var Controller = class {
     const result = await this.applySourceChanges(changes, false, operationId);
     return { changed: result.edited.filter((entry) => entry.revision !== expectedRevisions[entry.id]).length, ...result };
   }
-  async setRuntime(executionMode, runOnStartup, expectedDocumentRevision2, operationId) {
+  async setRuntime(executionMode, runOnStartup, cacheEnabled, expectedDocumentRevision2, operationId) {
     this.assertStartedForMutation();
     const patch = {};
     if (executionMode !== void 0) patch.on_cell_change = executionMode;
     if (runOnStartup !== void 0) patch.on_startup = runOnStartup;
+    if (cacheEnabled !== void 0) patch.cache = { enabled: cacheEnabled };
     if (Object.keys(patch).length === 0) {
       throw new ControllerError("invalid_request", "runtime update is empty", 400);
     }
@@ -77450,7 +77456,7 @@ function commandKey(clientId, operationId) {
 function errorStatus(code2) {
   if (code2 === "not_found") return 404;
   if (code2 === "worker_unavailable" || code2 === "analysis_unavailable") return 503;
-  if (code2 === "source_conflict" || code2 === "config_shadowed" || code2 === "run_in_progress" || code2 === "operation_in_progress" || code2 === "package_operation_in_progress" || code2 === "session_epoch_mismatch" || code2 === "graph_invalid") return 409;
+  if (code2 === "source_conflict" || code2 === "run_in_progress" || code2 === "operation_in_progress" || code2 === "package_operation_in_progress" || code2 === "session_epoch_mismatch" || code2 === "graph_invalid") return 409;
   return 400;
 }
 function asControllerError(error61, fallbackCode = "internal_error", fallbackStatus = 500) {
@@ -77543,7 +77549,7 @@ function stableStringify(value) {
   };
   return JSON.stringify(visit2(value));
 }
-function hasUnpairedSurrogate4(value) {
+function hasUnpairedSurrogate3(value) {
   for (let index = 0; index < value.length; index += 1) {
     const code2 = value.charCodeAt(index);
     if (code2 >= 55296 && code2 <= 56319) {
@@ -77772,7 +77778,7 @@ function parseRuntimeVariables(raw, graph, cells) {
   const variables = [];
   const names = /* @__PURE__ */ new Set();
   for (const candidate of raw) {
-    if (!isRecord(candidate) || typeof candidate.name !== "string" || candidate.name.length === 0 || new TextEncoder().encode(candidate.name).byteLength > 1024 || hasUnpairedSurrogate4(candidate.name) || names.has(candidate.name) || typeof candidate.class !== "string" || candidate.class.length === 0 || new TextEncoder().encode(candidate.class).byteLength > 1024 || hasUnpairedSurrogate4(candidate.class) || typeof candidate.size !== "number" || !Number.isSafeInteger(candidate.size) || candidate.size < 0 || typeof candidate.widget !== "boolean") {
+    if (!isRecord(candidate) || typeof candidate.name !== "string" || candidate.name.length === 0 || new TextEncoder().encode(candidate.name).byteLength > 1024 || hasUnpairedSurrogate3(candidate.name) || names.has(candidate.name) || typeof candidate.class !== "string" || candidate.class.length === 0 || new TextEncoder().encode(candidate.class).byteLength > 1024 || hasUnpairedSurrogate3(candidate.class) || typeof candidate.size !== "number" || !Number.isSafeInteger(candidate.size) || candidate.size < 0 || typeof candidate.widget !== "boolean") {
       throw new ControllerError("invalid_engine_response", "variable snapshot is invalid", 503);
     }
     let dim = null;
@@ -77783,7 +77789,7 @@ function parseRuntimeVariables(raw, graph, cells) {
       dim = [...candidate.dim];
     }
     const summary = candidate.value_summary;
-    if (summary !== void 0 && summary !== null && (typeof summary !== "string" || new TextEncoder().encode(summary).byteLength > 160 || hasUnpairedSurrogate4(summary))) {
+    if (summary !== void 0 && summary !== null && (typeof summary !== "string" || new TextEncoder().encode(summary).byteLength > 160 || hasUnpairedSurrogate3(summary))) {
       throw new ControllerError("invalid_engine_response", "variable summary is invalid", 503);
     }
     names.add(candidate.name);
@@ -77858,16 +77864,16 @@ function isExecutionCommand(type) {
 
 // src/engine.ts
 import { EventEmitter as EventEmitter3 } from "node:events";
-import { createHash as createHash4, randomBytes as randomBytes2, randomUUID as randomUUID6 } from "node:crypto";
+import { createHash as createHash5, randomBytes as randomBytes2, randomUUID as randomUUID6 } from "node:crypto";
 import { access as access2, mkdir as mkdir5, mkdtemp, rm as rm4, stat as stat9 } from "node:fs/promises";
 import { rmSync, writeFileSync } from "node:fs";
 import { tmpdir as tmpdir2 } from "node:os";
 import { basename as basename4, extname as extname2, join as join10, resolve as resolve7 } from "node:path";
 
 // src/r-environment.ts
-import { createHash as createHash3 } from "node:crypto";
+import { createHash as createHash4 } from "node:crypto";
 import { realpath as realpath4, stat as stat7 } from "node:fs/promises";
-import { delimiter, isAbsolute as isAbsolute5, join as join7, resolve as resolve6 } from "node:path";
+import { delimiter, isAbsolute as isAbsolute4, join as join7, resolve as resolve6 } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
@@ -78036,7 +78042,7 @@ function parseStrictJson(input2, limits = DEFAULT_STRICT_JSON_LIMITS) {
   validateLimits(limits);
   let text2;
   if (typeof input2 === "string") {
-    if (hasUnpairedSurrogate5(input2)) throw new StrictJsonError("unpaired surrogate", 0);
+    if (hasUnpairedSurrogate4(input2)) throw new StrictJsonError("unpaired surrogate", 0);
     if (new TextEncoder().encode(input2).byteLength > limits.maxBytes) {
       throw new RangeError(`JSON input exceeds ${limits.maxBytes} bytes`);
     }
@@ -78060,7 +78066,7 @@ function validateLimits(limits) {
     throw new RangeError("maxDepth must be a positive safe integer");
   }
 }
-function hasUnpairedSurrogate5(value) {
+function hasUnpairedSurrogate4(value) {
   for (let index = 0; index < value.length; index += 1) {
     const code2 = value.charCodeAt(index);
     if (code2 >= 55296 && code2 <= 56319) {
@@ -78076,7 +78082,7 @@ function hasUnpairedSurrogate5(value) {
 
 // src/resources.ts
 import { readFile as readFile2, realpath as realpath3, stat as stat6 } from "node:fs/promises";
-import { isAbsolute as isAbsolute4, join as join5, resolve as resolve4 } from "node:path";
+import { isAbsolute as isAbsolute3, join as join5, resolve as resolve4 } from "node:path";
 var ResourceValidationError = class extends Error {
   code = "resource_invalid";
   constructor(message2) {
@@ -78120,7 +78126,7 @@ function validateApplicationManifest(value) {
       paths[key2] = null;
       continue;
     }
-    if (typeof path3 !== "string" || !path3 || path3.includes("\0") || isAbsolute4(path3) || path3.includes("\\") || path3.split("/").some((part) => !part || part === "." || part === "..")) {
+    if (typeof path3 !== "string" || !path3 || path3.includes("\0") || isAbsolute3(path3) || path3.includes("\\") || path3.split("/").some((part) => !part || part === "." || part === "..")) {
       throw invalid(`invalid resource path: ${key2}`);
     }
     paths[key2] = path3;
@@ -78233,7 +78239,7 @@ async function inspectExisting(path3, kind, options) {
   validatePrivateStats(info, kind, inspection.path);
   return inspection;
 }
-async function syncDirectory(directory) {
+async function syncDirectory2(directory) {
   let handle;
   try {
     handle = await openFile(directory, constants2.O_RDONLY);
@@ -78337,7 +78343,7 @@ async function writePrivateFile(path3, bytes, options = {}) {
     handle = void 0;
     await chmod(temporary, FILE_MODE);
     await rename3(temporary, inspection.path);
-    await syncDirectory(parent);
+    await syncDirectory2(parent);
   } catch (error61) {
     if (handle !== void 0) await handle.close().catch(() => void 0);
     await rm2(temporary, { force: true }).catch(() => void 0);
@@ -78362,7 +78368,7 @@ async function ensurePrivateFile(path3, options = {}) {
     await handle.close();
     handle = void 0;
     await securePrivateFile(inspection.path, options);
-    await syncDirectory(parent);
+    await syncDirectory2(parent);
   } catch (error61) {
     if (handle !== void 0) await handle.close().catch(() => void 0);
     if (errorCode(error61) === "EEXIST") {
@@ -78620,7 +78626,7 @@ function makeEnvironment(fields, helperAbi, paths) {
   });
 }
 async function optionalDirectory(path3, label) {
-  if (!path3 || !isAbsolute5(path3)) throw invalid3(`${label} must be an absolute path`);
+  if (!path3 || !isAbsolute4(path3)) throw invalid3(`${label} must be an absolute path`);
   let physical;
   try {
     physical = await realpath4(path3);
@@ -78639,7 +78645,7 @@ async function optionalDirectory(path3, label) {
   return physical;
 }
 async function existingDirectory(path3, label) {
-  if (!path3 || !isAbsolute5(path3)) throw invalid3(`${label} must be an absolute path`);
+  if (!path3 || !isAbsolute4(path3)) throw invalid3(`${label} must be an absolute path`);
   const physical = await realpath4(path3).catch((error61) => {
     throw invalid3(`${label} is unavailable: ${path3}: ${messageOf3(error61)}`);
   });
@@ -78672,7 +78678,7 @@ function uniquePaths(paths) {
   return [...new Map(paths.map((path3) => [path3, path3])).values()];
 }
 function createIdentity(value) {
-  return createHash3("sha256").update(JSON.stringify(value)).digest("hex");
+  return createHash4("sha256").update(JSON.stringify(value)).digest("hex");
 }
 function prependPath(prefixes, existing) {
   return [...prefixes, ...existing ? existing.split(delimiter) : []].join(delimiter);
@@ -82130,7 +82136,7 @@ function sameRestartContext(left, right) {
   return left.notebookDirectory === right.notebookDirectory && left.cacheDirectory === right.cacheDirectory && left.environment?.identity === right.environment?.identity;
 }
 function makeAnalysisEnvironmentId(environment, generation) {
-  return createHash4("sha256").update(environment.identity + "\\0" + String(generation)).digest("hex");
+  return createHash5("sha256").update(environment.identity + "\\0" + String(generation)).digest("hex");
 }
 function validatePositiveTimeout(value, name) {
   if (value !== void 0 && (!Number.isFinite(value) || value <= 0)) throw new RangeError(name + " must be a positive finite number");
@@ -95657,7 +95663,6 @@ var empty = external_exports.object({}).strict();
 var requestIdentity = { requestId: id, sessionEpoch: id };
 var expectedDocumentRevision = revision;
 var expectedCellRevision = revision;
-var jsonRecord = external_exports.record(external_exports.string(), external_exports.unknown());
 var queryOffset2 = external_exports.number().int().min(0).max(2147483647).optional();
 var commonEffect = { ...requestIdentity };
 var toolSchemas = {
@@ -95681,7 +95686,7 @@ var toolSchemas = {
   apply_transaction: external_exports.object({ ...commonEffect, changes: external_exports.array(mcpDocumentChangeSchema).min(1).max(1e3), expectedDocumentRevision }).strict(),
   edit_cell_ranges: external_exports.object({ ...commonEffect, expectedDocumentRevision, cell: id, edits: external_exports.array(textEditSchema).min(1).max(1e3), expectedRevision: expectedCellRevision }).strict(),
   select_r: external_exports.object({ ...commonEffect, rscript: path2, persistDefault: external_exports.boolean().default(false), expectedDocumentRevision }).strict(),
-  set_runtime: external_exports.object({ ...commonEffect, on_cell_change: external_exports.enum(["automatic", "lazy"]).optional(), on_startup: external_exports.boolean().optional(), expectedDocumentRevision }).strict().refine((v) => v.on_cell_change !== void 0 || v.on_startup !== void 0, "provide a runtime setting"),
+  set_runtime: external_exports.object({ ...commonEffect, on_cell_change: external_exports.enum(["automatic", "lazy"]).optional(), on_startup: external_exports.boolean().optional(), cache_enabled: external_exports.boolean().optional(), expectedDocumentRevision }).strict().refine((v) => v.on_cell_change !== void 0 || v.on_startup !== void 0 || v.cache_enabled !== void 0, "provide a runtime setting"),
   reload_source: external_exports.object({ ...commonEffect, expectedDocumentRevision, expectedDiskDigest: external_exports.string().regex(/^[0-9a-f]{64}$/), expectedDiskVersion: id }).strict(),
   get_help: external_exports.object({ contents: external_exports.unknown() }).strict(),
   recovery_state: empty,
@@ -95693,7 +95698,8 @@ var toolSchemas = {
   table_page: external_exports.object({ ...commonEffect, handle: id, offset: external_exports.number().int().min(0), limit: external_exports.number().int().min(1).max(200), sortBy: external_exports.string().max(256), sortDescending: external_exports.boolean(), filter: external_exports.string().max(32 * 1024), kernelEpoch: id }).strict(),
   materialize_output: external_exports.object({ ...commonEffect, key: id, kernelEpoch: id }).strict(),
   get_config: empty,
-  set_config: external_exports.object({ ...commonEffect, patch: jsonRecord, expectedSidecarVersion: id.nullable(), expectedDocumentRevision }).strict(),
+  set_preferences: external_exports.object({ ...commonEffect, patch: setPreferencesCommandSchema.shape.patch, expectedPreferencesVersion: id.nullable() }).strict(),
+  set_config: external_exports.object({ ...commonEffect, patch: setConfigCommandSchema.shape.patch, expectedSidecarVersion: id.nullable(), expectedDocumentRevision }).strict(),
   get_layout: empty,
   set_layout: external_exports.object({ ...commonEffect, layout: layoutSchema, expectedSidecarVersion: id.nullable(), expectedDocumentRevision }).strict(),
   set_app: external_exports.object({ ...commonEffect, patch: setAppCommandSchema.shape.patch, expectedDocumentRevision }).strict(),
@@ -95724,7 +95730,7 @@ var descriptions = {
   apply_transaction: "Apply one atomic transaction.",
   edit_cell_ranges: "Apply exactly one text range edit.",
   select_r: "Select the Rscript runtime.",
-  set_runtime: "Set runtime execution settings.",
+  set_runtime: "Set notebook execution and cache settings, saved in notebook metadata.",
   reload_source: "Reload source after checking disk preconditions.",
   get_help: "Read sanitized help content.",
   recovery_state: "Read durable recovery state.",
@@ -95735,18 +95741,19 @@ var descriptions = {
   read_output: "Read one bounded output page.",
   table_page: "Read one table page.",
   materialize_output: "Materialize one lazy output.",
-  get_config: "Read notebook configuration.",
-  set_config: "Update notebook configuration.",
+  get_config: "Read current settings and versions: appearance/editor preferences belong to the application, execution/cache enablement to the notebook, and cache directory to the project.",
+  set_preferences: "Update application appearance and editor preferences for every open notebook, using the current preferences version.",
+  set_config: "Update the project cache directory only, using the current sidecar version and document revision.",
   get_layout: "Read notebook layout.",
   set_layout: "Update notebook layout.",
-  set_app: "Update application settings.",
+  set_app: "Update notebook presentation settings, saved in notebook metadata.",
   packages_status: "Read package status.",
   packages_declare: "Declare notebook packages.",
   packages_install: "Install notebook packages.",
   publish: "Publish the settled notebook.",
   upload_file: "Upload files for a widget."
 };
-var catalogOrder = ["notebook_state", "list_cells", "read_cell", "add_cell", "edit_cell", "delete_cell", "move_cell", "rename_cell", "disable_cell", "run_cell", "run_all", "run_stale", "interrupt", "get_value", "set_widget", "save", "check", "apply_transaction", "edit_cell_ranges", "select_r", "set_runtime", "reload_source", "get_help", "recovery_state", "shutdown", "restart", "format", "save_as", "read_output", "table_page", "materialize_output", "get_config", "set_config", "get_layout", "set_layout", "set_app", "packages_status", "packages_declare", "packages_install", "publish", "upload_file"];
+var catalogOrder = ["notebook_state", "list_cells", "read_cell", "add_cell", "edit_cell", "delete_cell", "move_cell", "rename_cell", "disable_cell", "run_cell", "run_all", "run_stale", "interrupt", "get_value", "set_widget", "save", "check", "apply_transaction", "edit_cell_ranges", "select_r", "set_runtime", "reload_source", "get_help", "recovery_state", "shutdown", "restart", "format", "save_as", "read_output", "table_page", "materialize_output", "get_config", "set_preferences", "set_config", "get_layout", "set_layout", "set_app", "packages_status", "packages_declare", "packages_install", "publish", "upload_file"];
 var runtimeToolNames = /* @__PURE__ */ new Set(["run_cell", "run_all", "run_stale", "get_value", "set_widget", "restart", "packages_status", "packages_install", "check"]);
 var staticResourceUris = /* @__PURE__ */ new Set(["alder://notebook/source", "alder://notebook/dag", "alder://notebook/state"]);
 function canonicalResourceUri(uri) {
@@ -96048,7 +96055,7 @@ function commandFromTool(options, name, args) {
     case "select_r":
       return { ...base, type: "select-r", rscript: args.rscript, persistDefault: args.persistDefault, expectedDocumentRevision: args.expectedDocumentRevision };
     case "set_runtime":
-      return { ...base, type: "set-runtime", on_cell_change: args.on_cell_change, on_startup: args.on_startup, expectedDocumentRevision: args.expectedDocumentRevision };
+      return { ...base, type: "set-runtime", on_cell_change: args.on_cell_change, on_startup: args.on_startup, cache_enabled: args.cache_enabled, expectedDocumentRevision: args.expectedDocumentRevision };
     case "reload_source":
       return { ...base, type: "reload-source", expectedDocumentRevision: args.expectedDocumentRevision, expectedDiskDigest: args.expectedDiskDigest, expectedDiskVersion: args.expectedDiskVersion };
     case "shutdown":
@@ -96063,6 +96070,8 @@ function commandFromTool(options, name, args) {
       return { ...base, type: "table-page", handle: args.handle, offset: args.offset, limit: args.limit, sortBy: args.sortBy, sortDescending: args.sortDescending, filter: args.filter, kernelEpoch: args.kernelEpoch };
     case "materialize_output":
       return { ...base, type: "lazy-output", key: args.key, kernelEpoch: args.kernelEpoch };
+    case "set_preferences":
+      return { ...base, type: "set-preferences", patch: args.patch, expectedPreferencesVersion: args.expectedPreferencesVersion };
     case "set_config":
       return { ...base, type: "set-config", patch: args.patch, expectedSidecarVersion: args.expectedSidecarVersion, expectedDocumentRevision: args.expectedDocumentRevision };
     case "set_layout":
@@ -96699,7 +96708,7 @@ function keyValid(key2, field = "cell key") {
   if (Buffer.byteLength(key2, "utf8") > 256) layoutAbort(`${field} exceeds 256 UTF-8 bytes`);
   return key2;
 }
-function integer3(value, field, minimum, maximum) {
+function integer2(value, field, minimum, maximum) {
   const item = value;
   if (typeof item !== "number" || !Number.isFinite(item) || !Number.isInteger(item) || item < minimum || item > maximum) {
     layoutAbort(`${field} must be a finite integer in [${minimum}, ${maximum}]`);
@@ -96713,10 +96722,10 @@ function geometry(value, key2) {
   if (fields.length !== required2.length || required2.some((field) => !Object.hasOwn(object4, field))) {
     layoutAbort(`geometry for ${key2} must contain only x, y, w, h`);
   }
-  const x = integer3(object4.x, `${key2}.x`, 0, LAYOUT_GRID_COLUMNS - 1);
-  const y = integer3(object4.y, `${key2}.y`, 0, LAYOUT_MAX_ROW);
-  const w = integer3(object4.w, `${key2}.w`, 1, LAYOUT_GRID_COLUMNS);
-  const h = integer3(object4.h, `${key2}.h`, 1, LAYOUT_MAX_HEIGHT);
+  const x = integer2(object4.x, `${key2}.x`, 0, LAYOUT_GRID_COLUMNS - 1);
+  const y = integer2(object4.y, `${key2}.y`, 0, LAYOUT_MAX_ROW);
+  const w = integer2(object4.w, `${key2}.w`, 1, LAYOUT_GRID_COLUMNS);
+  const h = integer2(object4.h, `${key2}.h`, 1, LAYOUT_MAX_HEIGHT);
   if (x + w > LAYOUT_GRID_COLUMNS) layoutAbort(`geometry for ${key2} extends beyond the 12-column grid`);
   return { x, y, w, h };
 }
@@ -96757,7 +96766,7 @@ function validateLayout(value) {
   const unknown2 = Object.keys(object4).find((field) => !allowed.has(field));
   if (unknown2 !== void 0) layoutAbort(`unknown layout field: ${unknown2}`);
   if (!Object.hasOwn(object4, "version")) layoutAbort("layout version is required");
-  const version2 = integer3(object4.version, "version", LAYOUT_VERSION, LAYOUT_VERSION);
+  const version2 = integer2(object4.version, "version", LAYOUT_VERSION, LAYOUT_VERSION);
   const modePresent = Object.hasOwn(object4, "layout");
   let mode;
   if (modePresent) {
@@ -96817,19 +96826,19 @@ async function readLayout(value) {
 }
 
 // src/persistence.ts
-import { createHash as createHash5, randomUUID as randomUUID9 } from "node:crypto";
-import { mkdir as mkdir7, open as open6, readFile as readFile6, realpath as realpath7, rename as rename4, stat as stat13, unlink as unlink2 } from "node:fs/promises";
+import { createHash as createHash6, randomUUID as randomUUID9 } from "node:crypto";
+import { mkdir as mkdir7, open as open7, readFile as readFile6, realpath as realpath7, rename as rename4, stat as stat13, unlink as unlink2 } from "node:fs/promises";
 import { basename as basename5, dirname as dirname6, join as join14, resolve as resolve9 } from "node:path";
 
 // src/packages.ts
-var import_yaml3 = __toESM(require_dist(), 1);
+var import_yaml4 = __toESM(require_dist(), 1);
 import { lstat as lstat6, mkdir as mkdir6, readFile as readFile5, realpath as realpath6, stat as stat12 } from "node:fs/promises";
-import { isAbsolute as isAbsolute7, join as join13 } from "node:path";
+import { isAbsolute as isAbsolute6, join as join13 } from "node:path";
 
 // src/jobs.ts
-import { mkdtemp as mkdtemp2, open as open5, rm as rm5, writeFile as writeFile4 } from "node:fs/promises";
+import { mkdtemp as mkdtemp2, open as open6, rm as rm5, writeFile as writeFile4 } from "node:fs/promises";
 import { tmpdir as tmpdir3 } from "node:os";
-import { isAbsolute as isAbsolute6, join as join12 } from "node:path";
+import { isAbsolute as isAbsolute5, join as join12 } from "node:path";
 import { TextDecoder as TextDecoder3 } from "node:util";
 var MAX_JOB_INPUT_BYTES = 16 * 1024 * 1024;
 var MAX_JOB_OUTPUT_BYTES = 8 * 1024 * 1024;
@@ -97127,7 +97136,7 @@ async function notify(callback, value) {
 async function readBounded(path3, maximum) {
   let handle;
   try {
-    handle = await open5(path3, "r");
+    handle = await open6(path3, "r");
     const info = await handle.stat();
     if (!info.isFile()) throw new Error("worker result is not a regular file");
     if (info.size > maximum) throw new Error("worker result exceeds 8 MiB");
@@ -97149,7 +97158,7 @@ function validateTimeout2(timeout) {
   }
 }
 function isAbsoluteNonEmptyPath(value) {
-  return typeof value === "string" && value.length > 0 && !value.includes("\0") && isAbsolute6(value);
+  return typeof value === "string" && value.length > 0 && !value.includes("\0") && isAbsolute5(value);
 }
 function jobError(code2, message2, details) {
   return new PackageJobError(code2, message2, details);
@@ -97175,11 +97184,11 @@ var PackageError = class extends Error {
   code;
   details;
 };
-function packageMetadataPath(projectDirectory2) {
-  return join13(projectDirectory2, ...PACKAGE_METADATA_RELATIVE_PATH);
+function packageMetadataPath(projectDirectory) {
+  return join13(projectDirectory, ...PACKAGE_METADATA_RELATIVE_PATH);
 }
-function packageLibraryPath(projectDirectory2) {
-  return join13(projectDirectory2, ...PACKAGE_LIBRARY_RELATIVE_PATH);
+function packageLibraryPath(projectDirectory) {
+  return join13(projectDirectory, ...PACKAGE_LIBRARY_RELATIVE_PATH);
 }
 function validatePackageNames(packages, allowEmpty = true) {
   if (!Array.isArray(packages) || packages.some((packageName) => typeof packageName !== "string")) {
@@ -97195,8 +97204,8 @@ function validatePackageNames(packages, allowEmpty = true) {
   }
   return unique2.sort();
 }
-async function readPackageDeclarations(projectDirectory2) {
-  const project = await canonicalProjectDirectory(projectDirectory2);
+async function readPackageDeclarations(projectDirectory) {
+  const project = await canonicalProjectDirectory(projectDirectory);
   const metadata = packageMetadataPath(project);
   const observation = await observeFile(metadata);
   if (observation.state === "absent") {
@@ -97241,7 +97250,7 @@ async function readPackageDeclarations(projectDirectory2) {
 }
 function serializePackageDeclarations(packages) {
   const value = { packages: validatePackageNames(packages) };
-  const text2 = (0, import_yaml3.stringify)(value, {
+  const text2 = (0, import_yaml4.stringify)(value, {
     version: "1.2",
     schema: "core",
     sortMapEntries: true
@@ -97610,7 +97619,7 @@ function uniquePaths2(paths) {
   return [...new Set(paths.filter((path3) => typeof path3 === "string" && path3.length > 0))];
 }
 function isAbsoluteNonEmptyPath2(value) {
-  return typeof value === "string" && value.length > 0 && !value.includes("\0") && isAbsolute7(value);
+  return typeof value === "string" && value.length > 0 && !value.includes("\0") && isAbsolute6(value);
 }
 function isRecord5(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -97644,7 +97653,7 @@ var PersistenceError = class extends Error {
 async function diskVersion(path3, previous) {
   let file2;
   try {
-    file2 = await open6(path3, "r");
+    file2 = await open7(path3, "r");
   } catch (error61) {
     if (error61.code === "ENOENT") {
       const bytes = new Uint8Array();
@@ -97696,7 +97705,7 @@ function concatBytes(chunks, length) {
   return bytes;
 }
 function sha256(bytes) {
-  return createHash5("sha256").update(bytes).digest("hex");
+  return createHash6("sha256").update(bytes).digest("hex");
 }
 function sameBytes2(left, right) {
   if (left.byteLength !== right.byteLength) return false;
@@ -98119,9 +98128,9 @@ var DocumentStore = class _DocumentStore {
   async prepareConfig(patch, expectedVersion) {
     return this.prepareSidecar("config", expectedVersion, async () => {
       const path3 = this.sidecarPath("config");
-      const current = await readConfigFile(path3);
-      const checked = validateConfigLayer(mergeConfig(current, validateConfigLayer(patch)));
-      return { value: checked, bytes: new TextEncoder().encode(serializeConfigYaml(checked)) };
+      const current = await readProjectSettings(path3);
+      const next = { cache: { ...current.cache, ...patch.cache } };
+      return { value: next, bytes: new TextEncoder().encode(serializeProjectSettings(next)) };
     });
   }
   async prepareLayout(layout, expectedVersion) {
@@ -98234,7 +98243,7 @@ async function publishStaged(stage, target, expected, conflictMessage, kind = "s
   const committed = await diskVersion(stage);
   if (!sameDisk(expected, await diskVersion(target))) throw new FileConflict(conflictMessage, kind);
   await rename4(stage, target);
-  await syncDirectory2(dirname6(target));
+  await syncDirectory3(dirname6(target));
   return committed;
 }
 function validateDiskPrecondition(precondition) {
@@ -98242,10 +98251,10 @@ function validateDiskPrecondition(precondition) {
     throw new PersistenceError("invalid_precondition", "disk preconditions are invalid");
   }
 }
-async function syncDirectory2(path3) {
+async function syncDirectory3(path3) {
   let directory;
   try {
-    directory = await open6(path3, "r");
+    directory = await open7(path3, "r");
     await directory.sync();
   } catch (error61) {
     const code2 = error61.code;
@@ -98255,7 +98264,7 @@ async function syncDirectory2(path3) {
   }
 }
 async function writeStaged(path3, bytes, mode) {
-  const file2 = await open6(path3, "wx", mode);
+  const file2 = await open7(path3, "wx", mode);
   try {
     await file2.chmod(mode);
     await file2.writeFile(bytes);
@@ -98275,8 +98284,8 @@ function decodeBase643(value) {
 }
 
 // src/recovery.ts
-import { createHash as createHash6, randomUUID as randomUUID10 } from "node:crypto";
-import { mkdir as mkdir8, open as open7, readdir as readdir3, realpath as realpath8, rename as rename5, rm as rm6 } from "node:fs/promises";
+import { createHash as createHash7, randomUUID as randomUUID10 } from "node:crypto";
+import { mkdir as mkdir8, open as open8, readdir as readdir3, realpath as realpath8, rename as rename5, rm as rm6 } from "node:fs/promises";
 import { join as join15, resolve as resolve10 } from "node:path";
 var RecoveryError = class extends Error {
   constructor(code2, message2, details = null, originals = [], cause) {
@@ -98293,7 +98302,7 @@ var RecoveryError = class extends Error {
 var MAX_SNAPSHOT_BYTES = 256 * 1024 * 1024;
 var SNAPSHOT_NAME = /^snapshot-\d+-[0-9a-f-]+\.json$/;
 var clone4 = (value) => structuredClone(value);
-var hash2 = (value) => createHash6("sha256").update(value).digest("hex");
+var hash2 = (value) => createHash7("sha256").update(value).digest("hex");
 var fingerprint = (value) => hash2(JSON.stringify(value));
 var missing2 = (error61) => error61?.code === "ENOENT";
 function recoveryObservationMatches(expected, actual) {
@@ -98379,7 +98388,7 @@ var RecoveryWriter = class _RecoveryWriter {
         if (missing2(error61)) {
           try {
             const key2 = await readPrivateFile(join15(this.directory, "recovery.key"), { maxBytes: 64 });
-            if (key2.length === 32) this.recoveryId = createHash6("sha256").update(key2).digest("base64url");
+            if (key2.length === 32) this.recoveryId = createHash7("sha256").update(key2).digest("base64url");
           } catch {
           }
           await this.atomicWrite(identityPath, Buffer.from(this.recoveryId));
@@ -98540,7 +98549,7 @@ var RecoveryWriter = class _RecoveryWriter {
   }
   async atomicWrite(path3, bytes) {
     const temporary = path3 + "." + randomUUID10() + ".tmp";
-    const handle = await open7(temporary, "wx", 384);
+    const handle = await open8(temporary, "wx", 384);
     try {
       await handle.writeFile(bytes);
       await handle.sync();
@@ -98651,7 +98660,7 @@ __export(esm_exports3, {
   createDomStream: () => createDomStream,
   getFeed: () => getFeed2,
   parseDOM: () => parseDOM,
-  parseDocument: () => parseDocument3,
+  parseDocument: () => parseDocument2,
   parseFeed: () => parseFeed2
 });
 
@@ -102036,13 +102045,13 @@ function isValidFeed2(value) {
 }
 
 // ../../../../../alder/host/node_modules/htmlparser2/dist/esm/index.js
-function parseDocument3(data, options) {
+function parseDocument2(data, options) {
   const handler4 = new DomHandler2(void 0, options);
   new Parser2(handler4, options).end(data);
   return handler4.root;
 }
 function parseDOM(data, options) {
-  return parseDocument3(data, options).children;
+  return parseDocument2(data, options).children;
 }
 function createDocumentStream2(callback, options, elementCallback) {
   const handler4 = new DomHandler2((error61) => callback(error61, handler4.root), options, elementCallback);
@@ -110449,7 +110458,7 @@ async function createProcessScope(_resources) {
 }
 
 // src/sessions.ts
-import { createHash as createHash7, randomBytes as randomBytes5, randomUUID as randomUUID13 } from "node:crypto";
+import { createHash as createHash8, randomBytes as randomBytes5, randomUUID as randomUUID13 } from "node:crypto";
 import { realpath as realpath10, lstat as lstat9, chmod as chmod5, rm as rm9, unlink as unlink5, readdir as readdir4, link as link3 } from "node:fs/promises";
 import { basename as basename7, dirname as dirname8, join as join20, resolve as resolve12, sep as sep3 } from "node:path";
 var import_proper_lockfile2 = __toESM(require_proper_lockfile(), 1);
@@ -110491,9 +110500,9 @@ function isUntitledRecoveryId(value) {
 function untitledRecoveryDescriptorDirectory(dataRoot) {
   return join20(resolve12(dataRoot ?? envPaths("alder", { suffix: "" }).data), UNTITLED_RECOVERY_DIRECTORY);
 }
-async function registerUntitledRecoveryDescriptor(id2, projectDirectory2, dataRoot, privatePathOptions = {}) {
+async function registerUntitledRecoveryDescriptor(id2, projectDirectory, dataRoot, privatePathOptions = {}) {
   const validId = requireUntitledRecoveryId(id2);
-  const validProjectDirectory = normalizeProjectDirectory(projectDirectory2);
+  const validProjectDirectory = normalizeProjectDirectory(projectDirectory);
   const directory = await ensureUntitledRecoveryDirectory(dataRoot, privatePathOptions);
   const path3 = untitledRecoveryDescriptorPath(directory, validId);
   const current = await readUntitledRecoveryDescriptor(path3, validId, privatePathOptions);
@@ -111125,7 +111134,7 @@ async function canonicalizePath(path3) {
 }
 async function sessionKeyFor(path3) {
   if (path3 === null) return randomUUID13();
-  return createHash7("sha256").update("path:" + path3).digest("hex");
+  return createHash8("sha256").update("path:" + path3).digest("hex");
 }
 async function ownershipSessionKey(canonicalPath, supplied) {
   if (supplied === void 0) return sessionKeyFor(canonicalPath);
@@ -111252,7 +111261,7 @@ function recoveryCellStates(document) {
   return document.cells.map((cell) => ({ id: cell.id, revision: cell.revision ?? 0 }));
 }
 function sourceBytesSha256(bytes) {
-  return createHash8("sha256").update(bytes).digest("hex");
+  return createHash9("sha256").update(bytes).digest("hex");
 }
 function semanticValue(value) {
   if (Array.isArray(value)) return value.map(semanticValue);
@@ -111278,6 +111287,8 @@ var optionsSchema = external_exports.object({
   externalBearerValidated: external_exports.boolean().default(false),
   rscript: external_exports.string().optional(),
   recoveryDirectory: external_exports.string().optional(),
+  preferences: external_exports.custom().optional(),
+  preferencesPath: external_exports.string().optional(),
   resources: external_exports.custom(),
   internalHost: external_exports.boolean().default(false),
   session: external_exports.object({
@@ -111437,10 +111448,40 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
   let recoveryConflict = false;
   let recoveryDocumentRevision = 0;
   let packageDeclarationIntent = [];
-  let projectConfigLayer = {};
+  let projectSettings = {};
+  const preferences = options.preferences ?? await ApplicationPreferences.open(options.preferencesPath);
+  let unsubscribePreferences;
+  const settingsErrors = /* @__PURE__ */ new Map();
+  const publishSettingsError = () => {
+    const message2 = [...settingsErrors.values()].join("\n");
+    controller?.publishServiceError("settings", message2 ? { code: "settings_invalid", message: message2 } : null);
+  };
+  const loadProjectSettings = async (path3) => {
+    try {
+      const settings = await readProjectSettings(path3);
+      settingsErrors.delete("project");
+      publishSettingsError();
+      return settings;
+    } catch (error61) {
+      settingsErrors.set("project", `Fix the project settings file ${path3}: ${errorMessage(error61)}`);
+      publishSettingsError();
+      return {};
+    }
+  };
+  const configurationFor = (document, project = projectSettings) => {
+    let notebook = {};
+    try {
+      notebook = readNotebookSettings(document.metadata);
+      settingsErrors.delete("notebook");
+    } catch (error61) {
+      settingsErrors.set("notebook", `Fix runtime settings in ${document.path ?? "this notebook"}: ${errorMessage(error61)}`);
+    }
+    publishSettingsError();
+    return resolveSettings({ preferences: preferences.snapshot().values, notebook, project });
+  };
   let projectLayoutIntent = null;
-  const pendingSidecars = { config: false, layout: false, packages: false };
-  let configResolution = null;
+  const pendingSidecars = { layout: false, packages: false };
+  let config3 = null;
   let resolvedLayout = null;
   const packageCallbacks = {
     onProgress: (event) => {
@@ -111453,13 +111494,13 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
       });
     }
   };
-  const resolveProjectLibrary = async (base, projectDirectory2) => {
+  const resolveProjectLibrary = async (base, projectDirectory) => {
     if (processScope === void 0) throw new Error("R process scope is unavailable while resolving the project library");
     const temporaryManager = createPackageManager({
       resources: options.resources,
       environment: base,
       processScope,
-      projectDirectory: projectDirectory2
+      projectDirectory
     });
     try {
       return (await temporaryManager.status()).library;
@@ -111541,6 +111582,8 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
     void runtimeBootstrap?.catch(() => {
     });
     unsubscribe?.();
+    unsubscribePreferences?.();
+    if (!options.preferences) await preferences.close();
     await sourceWatchRunning?.catch(() => {
     });
     const errors = [];
@@ -111595,13 +111638,9 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
     let notebook = opened.notebook;
     if (isUntitled) notebook = { ...notebook, path: null };
     if (options.expectedSource !== void 0 && !store.matchesSource(options.expectedSource)) throw new FileConflict();
-    const launchConfig = {
-      ...options.executionMode === void 0 ? {} : { on_cell_change: options.executionMode },
-      ...options.runOnStartup === void 0 ? {} : { on_startup: options.runOnStartup }
-    };
     const projectPath = isUntitled ? join21(notebookDirectory, ".alder", "config.yaml") : projectConfigPath(store.path);
-    projectConfigLayer = await readConfigFile(projectPath);
-    configResolution = await resolveConfig({ path: isUntitled ? null : store.path, metadata: notebook.metadata, project: projectConfigLayer, launch: launchConfig });
+    projectSettings = await loadProjectSettings(projectPath);
+    config3 = configurationFor(notebook);
     projectLayoutIntent = isUntitled ? null : await readLayout(store.path);
     resolvedLayout = projectLayoutIntent;
     processScope = await createProcessScope(options.resources);
@@ -111620,7 +111659,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
       cells: recoveryCellStates(notebook),
       path: notebook.path ?? (isUntitled ? null : store.path),
       project: notebookDirectory,
-      config: projectConfigLayer,
+      config: projectSettings,
       layout: projectLayoutIntent,
       packageDeclarationIntent,
       notebookDiskObservation: sourceObservation(store),
@@ -111639,7 +111678,6 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
       const bytes = decodePhysicalBytes(materialized.physicalBytes);
       if (bytes === null) throw new Error("recovery baseline has no physical source bytes");
       notebook = restoreNotebookCellIdentity(parseNotebook(bytes, notebook.path ?? (isUntitled ? null : store.path)), materialized.cells);
-      if (isRecord8(materialized.config)) projectConfigLayer = materialized.config;
       if (materialized.layout !== void 0) projectLayoutIntent = materialized.layout === null ? null : validateLayout(materialized.layout);
       if (Array.isArray(materialized.packageDeclarationIntent) && materialized.packageDeclarationIntent.every((value) => typeof value === "string")) {
         packageDeclarationIntent = [...materialized.packageDeclarationIntent];
@@ -111652,9 +111690,9 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
         notebook = restoreNotebookCellIdentity(notebook, materialized.cells);
       }
     }
-    configResolution = await resolveConfig({ path: isUntitled ? null : store.path, metadata: notebook.metadata, project: projectConfigLayer, launch: launchConfig });
+    config3 = configurationFor(notebook);
+    cacheDirectory = config3.cache.dir ? resolve13(notebookDirectory, config3.cache.dir) : cacheDirectory;
     resolvedLayout = projectLayoutIntent;
-    const actualProjectConfig = await readConfigFile(projectPath);
     const actualProjectLayout = isUntitled ? null : await readLayout(store.path);
     let actualProjectPackages = [];
     try {
@@ -111662,7 +111700,6 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
     } catch {
       actualProjectPackages = [];
     }
-    pendingSidecars.config = recoveryPending && observationsMatch && !sameSemanticValue(projectConfigLayer, actualProjectConfig);
     pendingSidecars.layout = recoveryPending && observationsMatch && !sameSemanticValue(projectLayoutIntent, actualProjectLayout);
     pendingSidecars.packages = recoveryPending && observationsMatch && !sameSemanticValue(packageDeclarationIntent, actualProjectPackages);
     if (recoveryPending) {
@@ -111742,7 +111779,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
       if (recovery === void 0) return void 0;
       const nextPackageDeclarationIntent = input3.packageDeclarationIntent ?? packageDeclarationIntent;
       const next = serializeNotebookWithParts(input3.document);
-      const fingerprint2 = createHash8("sha256").update(input3.fingerprint, "utf8").digest("hex");
+      const fingerprint2 = createHash9("sha256").update(input3.fingerprint, "utf8").digest("hex");
       const baseline2 = {
         schemaVersion: 1,
         physicalBytes: next.bytes,
@@ -111774,7 +111811,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
       pendingRecoveryProjection = null;
     };
     const publishSource = (context, publication, projection = void 0) => {
-      const preparedPublication = { ...publication, configResolution: publication.configResolution ?? context.configResolution };
+      const preparedPublication = { ...publication, config: publication.config ?? context.config };
       const binder = context.preparePublication(preparedPublication);
       if (projection === void 0 && pendingRecoveryProjection === null) applyPublishedProjection(binder);
       else applyPublishedProjection(binder, projection === void 0 ? pendingRecoveryProjection : projection);
@@ -111806,26 +111843,13 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
         return { sidecars, error: { kind, error: error61 } };
       };
       try {
-        if (recoveryPending || pendingSidecars.config || pendingSidecars.layout || pendingSidecars.packages) {
-          activeKind = "config";
-          const actualConfig = await readConfigFile(projectConfigPath(store.path));
-          pendingSidecars.config = !sameSemanticValue(projectConfigLayer, actualConfig);
+        if (recoveryPending || pendingSidecars.layout || pendingSidecars.packages) {
           activeKind = "layout";
           const actualLayout = await readLayout(store.path);
           pendingSidecars.layout = !sameSemanticValue(projectLayoutIntent, actualLayout);
           activeKind = "packages";
           const actualPackages = await readPackageDeclarations(notebookDirectory);
           pendingSidecars.packages = !sameSemanticValue(packageDeclarationIntent, actualPackages.packages);
-        }
-        if (pendingSidecars.config) {
-          activeKind = "config";
-          const prepared = await store.prepareConfig(projectConfigLayer, store.sidecarObservation("config").version);
-          projectConfigLayer = { ...prepared.value };
-          const published = await prepared.publish();
-          pendingSidecars.config = false;
-          configResolution = await resolveConfig({ path: store.path, metadata: document.metadata, project: projectConfigLayer, launch: launchConfig });
-          updateObservation("config", published.observation);
-          await checkpointRecovery(disk, sidecars);
         }
         if (pendingSidecars.layout) {
           activeKind = "layout";
@@ -111860,13 +111884,13 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
       }
       return { sidecars, error: null };
     };
-    const publishSidecarFailure = (context, document, configResolution2, layout, kind, error61, code2) => {
+    const publishSidecarFailure = (context, document, config4, layout, kind, error61, code2) => {
       const observed = sidecarProtocolObservations(store, false);
       const sidecars = {
         ...context.sidecars,
         [kind]: { ...observed[kind], error: asHostError(error61, code2, context.operationId) }
       };
-      publishSource(context, { document, path: context.path, configResolution: configResolution2, layout, disk: context.disk, sidecars, dirty: true, advanceRevision: true });
+      publishSource(context, { document, path: context.path, config: config4, layout, disk: context.disk, sidecars, dirty: true, advanceRevision: true });
       return { committed: true, diskError: { code: code2, sidecar: kind, message: errorMessage(error61) } };
     };
     const sourceCommit = async (request, context) => {
@@ -111876,7 +111900,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
         await appendRecovery({
           fromRevision: context.fromRevision,
           document,
-          config: projectConfigLayer,
+          config: projectSettings,
           layout: projectLayoutIntent,
           disk: context.disk,
           sidecars: context.sidecars,
@@ -111902,7 +111926,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
           const sidecars = retry.sidecars;
           let clearError = null;
           let cleared = false;
-          if (retry.error === null && !pendingSidecars.config && !pendingSidecars.layout && !pendingSidecars.packages && recoveryPending && recoveryFingerprint !== void 0) {
+          if (retry.error === null && !pendingSidecars.layout && !pendingSidecars.packages && recoveryPending && recoveryFingerprint !== void 0) {
             try {
               cleared = await recovery.clearIfMatch({ documentRevision: context.fromRevision, fingerprint: recoveryFingerprint });
               if (cleared) {
@@ -111921,7 +111945,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
               checkpointError = error61;
             }
           }
-          const dirty = retry.error !== null || clearError !== null || checkpointError !== null || recoveryPending || pendingSidecars.config || pendingSidecars.layout || pendingSidecars.packages;
+          const dirty = retry.error !== null || clearError !== null || checkpointError !== null || recoveryPending || pendingSidecars.layout || pendingSidecars.packages;
           publishSource(context, { document: context.document, path: store.path, layout: resolvedLayout, disk, sidecars, dirty, advanceRevision: false }, cleared ? null : void 0);
           if (retry.error !== null) return { ...result, committed: true, diskError: { code: "sidecar_write_failed", sidecar: retry.error.kind, message: errorMessage(retry.error.error) } };
           if (clearError !== null || checkpointError !== null) return { ...result, committed: true, diskError: { code: "recovery_checkpoint_failed", message: errorMessage(clearError ?? checkpointError) } };
@@ -111934,48 +111958,36 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
         }
       }
       if (request.kind === "runtime") {
-        const patch = validateConfigLayer(request.patch ?? {});
-        const document = setMetadata(
-          context.document,
-          "runtime",
-          deepMergeRecord(isRecord8(context.document.metadata?.runtime) ? context.document.metadata.runtime : {}, patch)
-        );
-        const nextConfigResolution = await resolveConfig({ path: isUntitled ? null : store.path, metadata: document.metadata, project: projectConfigLayer, launch: launchConfig });
-        assertConfigPatchEffective(nextConfigResolution, patch, "runtime");
-        await appendRecovery({ fromRevision: context.fromRevision, document, config: projectConfigLayer, layout: projectLayoutIntent, disk: context.disk, sidecars: context.sidecars, fingerprint: request.fingerprint ?? "runtime" });
-        configResolution = nextConfigResolution;
-        publishSource(context, { document, path: context.path, configResolution: nextConfigResolution, layout: context.layout, disk: context.disk, sidecars: context.sidecars, dirty: true, advanceRevision: true });
-        return { effective: nextConfigResolution.effective, layers: nextConfigResolution.layers, provenance: nextConfigResolution.provenance };
+        const updated = setNotebookSettings(context.document, request.patch);
+        const document = setMetadata(context.document, "runtime", updated.metadata?.runtime ?? null);
+        const notebook2 = readNotebookSettings(document.metadata);
+        const nextConfig = resolveSettings({ preferences: preferences.snapshot().values, notebook: notebook2, project: projectSettings });
+        await appendRecovery({ fromRevision: context.fromRevision, document, config: projectSettings, layout: projectLayoutIntent, disk: context.disk, sidecars: context.sidecars, fingerprint: request.fingerprint ?? "runtime" });
+        config3 = nextConfig;
+        publishSource(context, { document, path: context.path, config: nextConfig, layout: context.layout, disk: context.disk, sidecars: context.sidecars, dirty: true, advanceRevision: true });
+        settingsErrors.delete("notebook");
+        publishSettingsError();
+        return { config: nextConfig };
       }
       if (request.kind === "sidecar" && request.sidecar === "config") {
-        if (isUntitled) throw Object.assign(new Error("configuration requires a notebook path"), { code: "notebook_has_no_path" });
-        const patch = validateConfigLayer(request.patch ?? {});
-        const prepared = await store.prepareConfig(deepMergeRecord(projectConfigLayer, patch), context.sidecars.config.version);
-        const document = context.document;
-        const nextProjectConfig = prepared.value;
-        const nextConfigResolution = await resolveConfig({ path: store.path, metadata: document.metadata, project: nextProjectConfig, launch: launchConfig });
-        assertConfigPatchEffective(nextConfigResolution, patch, "project");
-        await appendRecovery({ fromRevision: context.fromRevision, document, config: nextProjectConfig, layout: projectLayoutIntent, disk: context.disk, sidecars: context.sidecars, fingerprint: request.fingerprint ?? "config" });
-        projectConfigLayer = { ...nextProjectConfig };
-        configResolution = nextConfigResolution;
-        pendingSidecars.config = true;
-        try {
-          const published = await prepared.publish();
-          pendingSidecars.config = false;
-          const sidecars = { ...context.sidecars, config: published.observation };
-          await checkpointRecovery(context.disk, sidecars);
-          publishSource(context, { document, path: context.path, configResolution: nextConfigResolution, layout: context.layout, disk: context.disk, sidecars, dirty: true, advanceRevision: true });
-          return { effective: nextConfigResolution.effective, layers: nextConfigResolution.layers, provenance: nextConfigResolution.provenance };
-        } catch (error61) {
-          const code2 = pendingSidecars.config ? "sidecar_write_failed" : "recovery_checkpoint_failed";
-          return publishSidecarFailure(context, document, nextConfigResolution, context.layout, "config", error61, code2);
-        }
+        if (isUntitled) throw Object.assign(new Error("Project settings require a notebook path"), { code: "notebook_has_no_path" });
+        const prepared = await store.prepareConfig(request.patch, context.sidecars.config.version);
+        const published = await prepared.publish();
+        projectSettings = published.value;
+        config3 = configurationFor(context.document);
+        cacheDirectory = config3.cache.dir ? resolve13(notebookDirectory, config3.cache.dir) : join21(notebookDirectory, ".alder", "cache");
+        settingsErrors.delete("project");
+        publishSettingsError();
+        const sidecars = { ...context.sidecars, config: published.observation };
+        publishSource(context, { document: context.document, path: context.path, config: config3, layout: context.layout, disk: context.disk, sidecars, dirty: context.dirty, advanceRevision: false });
+        await checkpointRecovery(context.disk, sidecars);
+        return { config: config3 };
       }
       if (request.kind === "sidecar" && request.sidecar === "layout") {
         if (isUntitled) throw Object.assign(new Error("layout requires a notebook path"), { code: "notebook_has_no_path" });
         const requestedLayout = request.layout ?? null;
         const prepared = await store.prepareLayout(requestedLayout, context.sidecars.layout.version);
-        await appendRecovery({ fromRevision: context.fromRevision, document: context.document, config: projectConfigLayer, layout: prepared.value, disk: context.disk, sidecars: context.sidecars, fingerprint: request.fingerprint ?? "layout" });
+        await appendRecovery({ fromRevision: context.fromRevision, document: context.document, config: projectSettings, layout: prepared.value, disk: context.disk, sidecars: context.sidecars, fingerprint: request.fingerprint ?? "layout" });
         projectLayoutIntent = prepared.value;
         pendingSidecars.layout = true;
         try {
@@ -111988,14 +112000,14 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
           return { layout: resolvedLayout };
         } catch (error61) {
           const code2 = pendingSidecars.layout ? "sidecar_write_failed" : "recovery_checkpoint_failed";
-          return publishSidecarFailure(context, context.document, context.configResolution, projectLayoutIntent, "layout", error61, code2);
+          return publishSidecarFailure(context, context.document, context.config, projectLayoutIntent, "layout", error61, code2);
         }
       }
       if (request.kind === "sidecar" && request.sidecar === "packages") {
         if (isUntitled) throw Object.assign(new Error("packages require a notebook path"), { code: "notebook_has_no_path" });
         const additions = request.packages ?? [];
         const prepared = await store.preparePackages(additions, context.sidecars.packages.version);
-        await appendRecovery({ fromRevision: context.fromRevision, document: context.document, config: projectConfigLayer, layout: projectLayoutIntent, disk: context.disk, sidecars: context.sidecars, fingerprint: request.fingerprint ?? "packages" });
+        await appendRecovery({ fromRevision: context.fromRevision, document: context.document, config: projectSettings, layout: projectLayoutIntent, disk: context.disk, sidecars: context.sidecars, fingerprint: request.fingerprint ?? "packages" });
         packageDeclarationIntent = [...prepared.value];
         pendingSidecars.packages = true;
         try {
@@ -112007,16 +112019,16 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
           return { ok: true, path: notebookDirectory, metadata: join21(notebookDirectory, ".alder", "packages.yaml"), packages: [...published.value], sidecarVersion: published.observation.version };
         } catch (error61) {
           const code2 = pendingSidecars.packages ? "sidecar_write_failed" : "recovery_checkpoint_failed";
-          return publishSidecarFailure(context, context.document, context.configResolution, context.layout, "packages", error61, code2);
+          return publishSidecarFailure(context, context.document, context.config, context.layout, "packages", error61, code2);
         }
       }
       if (request.kind === "sidecar" && request.sidecar === void 0 && request.patch !== void 0) {
         const appDocument = setAppConfig(context.document, request.patch);
         const document = setMetadata(context.document, "app", appDocument.metadata?.app ?? null);
-        await appendRecovery({ fromRevision: context.fromRevision, document, config: projectConfigLayer, layout: projectLayoutIntent, disk: context.disk, sidecars: context.sidecars, fingerprint: request.fingerprint ?? "app" });
+        await appendRecovery({ fromRevision: context.fromRevision, document, config: projectSettings, layout: projectLayoutIntent, disk: context.disk, sidecars: context.sidecars, fingerprint: request.fingerprint ?? "app" });
         const appResolution = appConfig(document);
         publishSource(context, { document, path: context.path, layout: context.layout, disk: context.disk, sidecars: context.sidecars, dirty: true, advanceRevision: true });
-        return { effective: appResolution.effective, provenance: appResolution.provenance };
+        return appResolution;
       }
       if (request.kind === "save-as" && request.path !== void 0 && !isUntitled && await realpath11(request.path).catch(() => null) === store.path) {
         return sourceCommit({ ...request, kind: "save" }, context);
@@ -112040,9 +112052,9 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
           if (preparedSave.destination !== preparedOwner.canonicalPath) throw new Error("Save As destination canonicalization changed during preparation");
           const destination = preparedSave.destination;
           const destinationDirectory = dirname9(destination);
-          const destinationCache = join21(destinationDirectory, ".alder", "cache");
-          const destinationProjectConfig = await readConfigFile(projectConfigPath(destination));
-          const destinationConfigResolution = await resolveConfig({ path: destination, metadata: context.document.metadata, project: destinationProjectConfig, launch: launchConfig });
+          const destinationProjectConfig = await loadProjectSettings(projectConfigPath(destination));
+          const destinationConfig = configurationFor(context.document, destinationProjectConfig);
+          const destinationCache = destinationConfig.cache.dir ? resolve13(destinationDirectory, destinationConfig.cache.dir) : join21(destinationDirectory, ".alder", "cache");
           let destinationLayout = await readLayout(destination);
           let destinationPackages = [];
           try {
@@ -112096,7 +112108,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
           const publicationBinder = context.preparePublication({
             document: { ...context.document, path: destination },
             path: destination,
-            configResolution: destinationConfigResolution,
+            config: destinationConfig,
             layout: destinationLayout,
             disk: destinationDisk,
             sidecars: destinationSidecars,
@@ -112110,7 +112122,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
               const binder = context.preparePublication({
                 document: context.document,
                 path: context.path,
-                configResolution: context.configResolution,
+                config: context.config,
                 layout: context.layout,
                 disk: context.disk,
                 sidecars: context.sidecars,
@@ -112131,12 +112143,11 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
                 packageManager = nextManager;
                 notebookDirectory = destinationDirectory;
                 cacheDirectory = destinationCache;
-                configResolution = destinationConfigResolution;
-                projectConfigLayer = { ...destinationProjectConfig };
+                config3 = destinationConfig;
+                projectSettings = { ...destinationProjectConfig };
                 resolvedLayout = destinationLayout;
                 projectLayoutIntent = destinationLayout;
                 packageDeclarationIntent = destinationPackages;
-                pendingSidecars.config = false;
                 pendingSidecars.layout = false;
                 pendingSidecars.packages = false;
                 isUntitled = false;
@@ -112220,25 +112231,24 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
           const precondition = request.expectedDisk === void 0 ? { expectedDiskDigest: current.digest ?? "", expectedDiskVersion: current.version ?? "" } : { expectedDiskDigest: request.expectedDisk.digest ?? "", expectedDiskVersion: request.expectedDisk.version ?? "" };
           const preparedReload = await store.prepareReload(precondition, context.document);
           const nextDocument = preparedReload.notebook;
-          let nextProjectConfig = projectConfigLayer;
+          let nextProjectConfig = projectSettings;
           let nextLayout = projectLayoutIntent;
           let nextPackageDeclarationIntent = packageDeclarationIntent;
           const nextPendingSidecars = { ...pendingSidecars };
           if (sidecarsChanged) {
             sidecarReadKind = "config";
-            nextProjectConfig = await readConfigFile(projectConfigPath(store.path));
+            nextProjectConfig = await loadProjectSettings(projectConfigPath(store.path));
             sidecarReadKind = "layout";
             nextLayout = await readLayout(store.path);
             sidecarReadKind = null;
           }
-          const nextConfigResolution = sidecarsChanged ? await resolveConfig({ path: store.path, metadata: nextDocument.metadata, project: nextProjectConfig, launch: launchConfig }) : context.configResolution;
+          const nextConfig = configurationFor(nextDocument, nextProjectConfig);
           if (sidecarsChanged) {
             try {
               nextPackageDeclarationIntent = [...(await readPackageDeclarations(dirname9(store.path))).packages];
             } catch {
               nextPackageDeclarationIntent = [];
             }
-            nextPendingSidecars.config = false;
             nextPendingSidecars.layout = false;
             nextPendingSidecars.packages = false;
           }
@@ -112251,17 +112261,16 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
           preparedReload.adopt();
           store.adoptSidecarObservations(observed.store);
           await observed.store.close();
-          publishSource(context, { document: nextDocument, path: store.path, layout: nextLayout, disk: nextDisk, sidecars: nextSidecars, dirty: false, advanceRevision: sourceChanged || sidecarsChanged, invalidateRuntime: sourceChanged, configResolution: nextConfigResolution });
+          publishSource(context, { document: nextDocument, path: store.path, layout: nextLayout, disk: nextDisk, sidecars: nextSidecars, dirty: false, advanceRevision: sourceChanged || sidecarsChanged, invalidateRuntime: sourceChanged, config: nextConfig });
           notebook = nextDocument;
           if (sidecarsChanged) {
-            projectConfigLayer = { ...nextProjectConfig };
+            projectSettings = { ...nextProjectConfig };
             projectLayoutIntent = nextLayout;
             resolvedLayout = nextLayout;
             packageDeclarationIntent = [...nextPackageDeclarationIntent];
-            pendingSidecars.config = nextPendingSidecars.config;
             pendingSidecars.layout = nextPendingSidecars.layout;
             pendingSidecars.packages = nextPendingSidecars.packages;
-            configResolution = nextConfigResolution;
+            config3 = nextConfig;
           }
           return { reloaded: true, disk: nextDisk };
         } catch (error61) {
@@ -112396,11 +112405,13 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
       engine,
       outputStore: artifactStore,
       notebook,
-      configResolution,
+      config: config3,
       layout: resolvedLayout,
       epoch: ownership.epoch,
       deferStartup: options.deferStartup || recoveredStartup,
+      suppressStartup: options.runOnStartup === false,
       initialDirty: recoveredStartup,
+      preferencesVersion: preferences.snapshot().version,
       initialDocumentRevision: recoveryDocumentRevision,
       rEnvironment: runtimeEnvironment,
       requestedRscript: selectedRscript,
@@ -112453,6 +112464,10 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
           return refreshed;
         },
         service: async (command, payload) => {
+          if (command === "preferences.update") {
+            await preferences.update(payload.patch, payload.expectedPreferencesVersion);
+            return { config: controller.snapshot().config, preferencesVersion: preferences.snapshot().version };
+          }
           if (command === "r.select") {
             const selectionGeneration = ++runtimeBootstrapGeneration;
             runtimeAbort?.abort();
@@ -112545,6 +112560,26 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
         }
       }
     });
+    const refreshPreferences = () => {
+      const state = preferences.snapshot();
+      if (state.error) settingsErrors.set("preferences", state.error.message);
+      else settingsErrors.delete("preferences");
+      controller.updatePreferences(state.values, state.version);
+      publishSettingsError();
+    };
+    unsubscribePreferences = preferences.subscribe(refreshPreferences);
+    refreshPreferences();
+    if (options.executionMode !== void 0 && options.executionMode !== controller.snapshot().runtime.executionMode) {
+      const result = await controller.dispatch({
+        type: "set-runtime",
+        requestId: randomUUID14(),
+        clientId: "launch",
+        sessionEpoch: controller.epoch,
+        expectedDocumentRevision: controller.snapshot().documentRevision,
+        on_cell_change: options.executionMode
+      });
+      if (result.error) controller.recordActionError(`Could not apply launch execution mode: ${result.error.message}`, result.error.code);
+    }
     if (runtimeError !== null) controller.recordRuntimeAvailabilityError(asRuntimeHostError(runtimeError));
     if (recoveryConflict) controller.recordActionError("notebook changed on disk; recovery draft retained", "recovery_conflict");
     if (recoverySidecarError !== null) controller.recordActionError(errorMessage(recoverySidecarError.error), "sidecar_write_failed");
@@ -112864,14 +112899,6 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
     throw error61;
   }
 }
-function deepMergeRecord(base, patch) {
-  const result = { ...base };
-  for (const [key2, value] of Object.entries(patch)) {
-    if (isRecord8(result[key2]) && isRecord8(value)) result[key2] = deepMergeRecord(result[key2], value);
-    else result[key2] = value;
-  }
-  return result;
-}
 async function createLsp(generation, currentGeneration, controller, runtimeEnvironment, resources2, notebookDirectory, processScope, childEnvironment2, setLsp) {
   if (runtimeEnvironment === null) throw new Error("R runtime is unavailable");
   const document = await lspDocument(controller.snapshot());
@@ -112939,6 +112966,7 @@ var NotebookBackend = class {
   resources;
   onIdle;
   hosts = /* @__PURE__ */ new Set();
+  preferences = ApplicationPreferences.open();
   opening = 0;
   openings = /* @__PURE__ */ new Map();
   get idle() {
@@ -112960,6 +112988,7 @@ var NotebookBackend = class {
         externalOrigin: options.externalOrigin,
         tokenFile: options.tokenFile,
         resources: this.resources,
+        preferences: await this.preferences,
         rscript: options.rscript,
         executionMode: options.executionMode,
         runOnStartup: options.runOnStartup,
@@ -112984,6 +113013,7 @@ var NotebookBackend = class {
   }
   async close() {
     await Promise.allSettled([...this.hosts].map((host) => host.close()));
+    await (await this.preferences).close();
   }
 };
 async function serve(socketPath2) {

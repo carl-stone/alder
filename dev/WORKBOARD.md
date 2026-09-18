@@ -9,25 +9,26 @@ copies in other worktrees are snapshots.
 
 ## Current assignment
 
-**Commands and reconnect recovery — Implementing.**
+**Settings — Implementing.**
 
-**Owner:** primary implementer, correcting checkpoint `c2c646b` after lead review.
+**Owner:** primary implementer, starting from accepted checkpoint `c58f4a9`.
 
-Replace command receipts, sequence tracking and event replay with request IDs,
-revision checks, a simple execution queue, snapshot reconnect and recovery of
-unacknowledged edits.
-Replace custom JSON parsing on the boundaries changed by this slice and delete
-superseded paths. Settings and R integration are outside this assignment.
+Replace the five-layer settings system with the owners defined in the architecture:
+application preferences, notebook metadata and project-specific settings. Remove
+override stacks, per-key provenance, shadowed-setting errors, redundant parsing
+and tests that pin those mechanisms. Wire the actual Settings dialog and existing
+execution controls through the new owners. R integration remains outside this slice.
 
-**Accept when:** ordinary edit/save/reopen still works; concurrent GUI/agent edits
-apply at the expected revision or report a conflict; reconnect/restart preserves
-unsent edits without applying them twice; an uncertain execution response never
-silently causes a duplicate run. Preserve the accepted native document behavior.
+**Accept when:** an application preference changes all open notebooks and survives
+relaunch; notebook execution settings persist with that notebook without changing
+another notebook; project paths stay project-specific. Each edit changes the
+effective value without a hidden override. Invalid or unwritable settings preserve
+authored files and leave ordinary notebook editing/saving usable with a clear
+error. Preserve existing conflict handling and accepted document/command behavior.
 
-**Next action:** separate Run's short interaction lock from execution completion.
-The current view keeps Save and add/move/delete controls disabled for the entire
-run. Verify those controls remain usable during a long run, then return the fixed
-checkpoint for review. Other command/recovery checks found no concrete blockers.
+**Next action:** implement one complete settings slice, delete the replaced paths,
+exercise the native settings/reopen workflow with two notebooks, and return a
+reviewable checkpoint with focused checks and a runnable Mac build.
 
 **Blockers / decisions needed from Carl:** none reported.
 
@@ -39,8 +40,8 @@ order; their implementation details are settled when assigned.
 | Work | State | Owner | Finish condition |
 | --- | --- | --- | --- |
 | Mac documents and runtime cleanup | Accepted | Primary implementer | `838e0ba`: native document workflows, shared backend, retired platform/tooling machinery removed |
-| Commands and reconnect recovery | Implementing | Primary implementer | Current acceptance criteria above |
-| Settings | Queued | Unassigned | Clear owners for app and project/notebook settings; remove the five-layer precedence system |
+| Commands and reconnect recovery | Accepted | Primary implementer | `c58f4a9`: simpler commands and snapshot reconnect; edits/Save remain usable during pending runs |
+| Settings | Implementing | Primary implementer | Current acceptance criteria above |
 | Stock Ark and R adapter | Queued | Unassigned | Unmodified Ark; smaller adapter; project packages respected; outputs and interruption work |
 | Reactive notebook behavior | Queued | Unassigned | Correct dependencies, stale results, widgets and useful R API behavior in real notebooks |
 | Optional services and complete Mac experience | Queued | Unassigned | Assistance, inspection, formatting, packages and publishing work without blocking core use; responsive native workflows |
@@ -51,10 +52,16 @@ public distribution/signing awaits a later discussion with Carl.
 
 ## Latest accepted checkpoint
 
-`838e0ba` is the document checkpoint, **without R execution yet**. Lead and focused
-independent review accepted the source changes and native results: save/reopen,
-confirmed replacement, Cancel close/quit, crash/corrupt-snapshot recovery, an agent
-remaining connected after GUI quit, and launch without a Keychain prompt.
+`c58f4a9` is the command/recovery checkpoint, **without R execution yet**. Lead
+accepted the simplified protocol and recovery after fresh review and a correction
+to the view's Run lock. A controlled executor with the actual view/client/controller
+verified editing, Save, Add and Stop while execution was pending; preparation and
+execution errors release controls. The correction passed 52 focused checks, host
+typecheck, native build/signature verification and native editing/save/reopen checks.
+
+It retains the accepted `838e0ba` document foundation: save/reopen, confirmed
+replacement, Cancel close/quit, crash/corrupt-snapshot recovery, an agent remaining
+connected after GUI quit, and launch without a Keychain prompt.
 Temporary window credentials stay in memory; recovery is independent of Keychain.
 Old pre-reset recovery journals remain on disk but are not imported.
 

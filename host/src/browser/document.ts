@@ -885,6 +885,8 @@ function patchSnapshot(snapshot: HostSnapshot, event: HostEvent, order: readonly
   if ((event.type === "notebook" || event.type === "transaction") && isRecord(event.payload)) {
     const payload = event.payload;
     if (isRecord(payload.config)) next.config = payload.config;
+    if (isRecord(payload.runtime)) next.runtime = payload.runtime as unknown as HostSnapshot["runtime"];
+    if (typeof payload.preferencesVersion === "string" || payload.preferencesVersion === null) next.preferencesVersion = payload.preferencesVersion;
     if (typeof payload.path === "string" || payload.path === null) next.path = payload.path;
     if (isSidecarObservations(payload.sidecars)) next.sidecars = payload.sidecars;
     if ("layout" in payload) next.layout = payload.layout;
@@ -898,7 +900,7 @@ function patchSnapshot(snapshot: HostSnapshot, event: HostEvent, order: readonly
     if (Array.isArray(deletedIds)) next.cells = next.cells.filter((cell) => !deletedIds.includes(cell.id));
     if (Array.isArray(payload.edited)) next.changed = true;
     if ("updated" in payload) next.changed = true;
-    if (payload.created !== undefined || payload.deleted !== undefined || typeof payload.moved === "string" || isRecord(payload.config) || isRecord(payload.metadata) || isRecord(payload.app)) next.changed = true;
+    if (payload.created !== undefined || payload.deleted !== undefined || typeof payload.moved === "string" || isRecord(payload.metadata) || isRecord(payload.app)) next.changed = true;
     if (Array.isArray(payload.updated)) {
       const updates = new Map<string, HostCellState>();
       for (const value of payload.updated) if (isHostCell(value)) updates.set(value.id, value);

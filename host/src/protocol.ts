@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { preferencesPatchSchema, projectSettingsPatchSchema } from "./settings.js";
 
 /** The only authoritative wire versions for the Alder host and Ark engine. */
 export const HOST_PROTOCOL = "alder-host-v2" as const;
@@ -739,7 +740,8 @@ export const saveCommandSchema = z.object({ ...commandIdentityShape, type: z.lit
 export const saveAsCommandSchema = z.object({ ...commandIdentityShape, type: z.literal("save-as"), path: pathSchema, expectedDestination: z.union([z.literal("absent"), z.object({ expectedDiskDigest: z.string().min(1), expectedDiskVersion: z.string().min(1) }).strict()]), expectedDocumentRevision: revisionSchema }).strict();
 export const reloadSourceCommandSchema = z.object({ ...commandIdentityShape, type: z.literal("reload-source"), expectedDocumentRevision: revisionSchema, expectedDiskDigest: z.string().regex(/^[0-9a-f]{64}$/), expectedDiskVersion: boundedUtf8StringSchema(MAX_ID_BYTES, true) }).strict();
 export const formatCommandSchema = z.object({ ...commandIdentityShape, type: z.literal("format"), cellIds: z.array(idSchema).max(MAX_NOTEBOOK_CELLS).optional(), expectedRevisions: safeStringRecordSchema(revisionSchema), expectedDocumentRevision: revisionSchema }).strict();
-export const setConfigCommandSchema = z.object({ ...commandIdentityShape, type: z.literal("set-config"), patch: protocolJsonRecordSchema, expectedSidecarVersion: boundedUtf8StringSchema(MAX_ID_BYTES).nullable(), expectedDocumentRevision: revisionSchema }).strict();
+export const setPreferencesCommandSchema = z.object({ ...commandIdentityShape, type: z.literal("set-preferences"), patch: preferencesPatchSchema, expectedPreferencesVersion: boundedUtf8StringSchema(MAX_ID_BYTES).nullable() }).strict();
+export const setConfigCommandSchema = z.object({ ...commandIdentityShape, type: z.literal("set-config"), patch: projectSettingsPatchSchema, expectedSidecarVersion: boundedUtf8StringSchema(MAX_ID_BYTES).nullable(), expectedDocumentRevision: revisionSchema }).strict();
 export type LayoutGeometry = { readonly x: number; readonly y: number; readonly w: number; readonly h: number };
 export type SlideObject = { readonly cells: string[]; readonly title?: string };
 export type SlideGroup = string[] | SlideObject;
@@ -769,7 +771,7 @@ export const layoutSchema = z.object({ version: z.literal(1), cells: layoutCells
   }
 });
 export const setLayoutCommandSchema = z.object({ ...commandIdentityShape, type: z.literal("set-layout"), layout: layoutSchema, expectedSidecarVersion: boundedUtf8StringSchema(MAX_ID_BYTES).nullable(), expectedDocumentRevision: revisionSchema }).strict();
-export const setRuntimeCommandSchema = z.object({ ...commandIdentityShape, type: z.literal("set-runtime"), on_cell_change: z.enum(["automatic", "lazy"]).optional(), on_startup: z.boolean().optional(), expectedDocumentRevision: revisionSchema }).strict().refine((value) => value.on_cell_change !== undefined || value.on_startup !== undefined, "at least one runtime setting is required");
+export const setRuntimeCommandSchema = z.object({ ...commandIdentityShape, type: z.literal("set-runtime"), on_cell_change: z.enum(["automatic", "lazy"]).optional(), on_startup: z.boolean().optional(), cache_enabled: z.boolean().optional(), expectedDocumentRevision: revisionSchema }).strict().refine((value) => value.on_cell_change !== undefined || value.on_startup !== undefined || value.cache_enabled !== undefined, "at least one runtime setting is required");
 export const restartCommandSchema = z.object({ ...commandIdentityShape, type: z.literal("restart"), replay: z.boolean().default(false), expectedDocumentRevision: revisionSchema.optional() }).strict().superRefine((value, context) => {
   if (value.replay && value.expectedDocumentRevision === undefined) context.addIssue({ code: "custom", path: ["expectedDocumentRevision"], message: "replay restart requires document revision" });
 });
@@ -822,7 +824,7 @@ export const shutdownCommandSchema = z.object({ ...commandIdentityShape, type: z
 export const hostCommandSchema = z.discriminatedUnion("type", [
   transactionCommandSchema, runCommandSchema, selectRCommandSchema, setAppCommandSchema, packagesDeclareCommandSchema, packagesInstallCommandSchema,
   publishCommandSchema, uploadCommandSchema, saveCommandSchema, saveAsCommandSchema, reloadSourceCommandSchema, formatCommandSchema,
-  setConfigCommandSchema, setLayoutCommandSchema, setRuntimeCommandSchema, restartCommandSchema, widgetCommandSchema, inspectCommandSchema,
+  setPreferencesCommandSchema, setConfigCommandSchema, setLayoutCommandSchema, setRuntimeCommandSchema, restartCommandSchema, widgetCommandSchema, inspectCommandSchema,
   lazyOutputCommandSchema, tablePageCommandSchema, interruptCommandSchema, shutdownCommandSchema,
 ]);
 export type HostCommand = z.infer<typeof hostCommandSchema>;
@@ -831,7 +833,7 @@ export type CellStatus = "idle" | "stale" | "running" | "done" | "error" | "stop
 export const cellStatusSchema = z.enum(["idle", "stale", "running", "done", "error", "stopped", "disabled"]);
 export type OperationStatus = "accepted" | "running" | "done" | "error" | "interrupted" | "cancelled";
 export const operationStatusSchema = z.enum(["accepted", "running", "done", "error", "interrupted", "cancelled"]);
-export const operationKindSchema = z.enum(["transaction", "run", "select-r", "set-app", "packages-declare", "packages-install", "publish", "upload", "save", "save-as", "reload-source", "format", "set-config", "set-layout", "set-runtime", "restart", "widget", "inspect", "lazy-output", "table-page", "interrupt", "shutdown", "widget-reset", "analysis"]);
+export const operationKindSchema = z.enum(["transaction", "run", "select-r", "set-app", "packages-declare", "packages-install", "publish", "upload", "save", "save-as", "reload-source", "format", "set-preferences", "set-config", "set-layout", "set-runtime", "restart", "widget", "inspect", "lazy-output", "table-page", "interrupt", "shutdown", "widget-reset", "analysis"]);
 export type OperationKind = z.infer<typeof operationKindSchema>;
 export const hostErrorSchema = z.object({ code: boundedUtf8StringSchema(256, true), message: boundedUtf8StringSchema(MAX_FRAME_BYTES), operationId: idSchema.nullable().optional(), details: protocolJsonSchema.optional() }).strict();
 export type HostError = z.infer<typeof hostErrorSchema>;
@@ -917,12 +919,12 @@ export interface RuntimeVariable { name: string; owner: string | null; revision:
 export const runtimeVariableSchema = z.object({ name: boundedUtf8StringSchema(MAX_ANALYSIS_SYMBOL_BYTES, true), owner: idSchema.nullable(), revision: revisionSchema.nullable(), class: boundedUtf8StringSchema(MAX_ANALYSIS_SYMBOL_BYTES, true), dim: z.array(protocolIntegerSchema).max(64).nullable(), size: protocolIntegerSchema, widget: z.boolean(), valueSummary: boundedUtf8StringSchema(160).optional() }).strict();
 export const runtimeVariablesSchema = z.array(runtimeVariableSchema).max(MAX_RUNTIME_VARIABLES);
 export const editorDiagnosticsSchema = safeStringRecordSchema(z.array(analysisDiagnosticSchema).max(MAX_EDITOR_DIAGNOSTICS));
-export const serviceErrorsSchema = z.object({ lsp: hostErrorSchema.optional() }).strict();
+export const serviceErrorsSchema = z.object({ lsp: hostErrorSchema.optional(), settings: hostErrorSchema.optional() }).strict();
 
 export interface HostSnapshot {
-  protocol: typeof HOST_PROTOCOL; epoch: string; cursor: number; version: number; documentRevision: number; path: string | null; metadata: Record<string, JsonValue>; config: Record<string, JsonValue>; layout: JsonValue; dirty: boolean; changed?: boolean; disk: DiskObservation; sidecars: SidecarObservations; runtime: HostRuntime; cells: HostCellState[]; graph: DependencyGraphState; variables: RuntimeVariable[]; editorDiagnostics: Record<string, AnalysisDiagnostic[]>; serviceErrors: { lsp?: HostError }; operations: OperationRecord[]; lastValue: JsonValue | null; lastActionError: HostError | null; capabilities?: string[]; activeClientIds?: string[];
+  protocol: typeof HOST_PROTOCOL; epoch: string; cursor: number; version: number; documentRevision: number; path: string | null; metadata: Record<string, JsonValue>; config: Record<string, JsonValue>; preferencesVersion?: string | null; layout: JsonValue; dirty: boolean; changed?: boolean; disk: DiskObservation; sidecars: SidecarObservations; runtime: HostRuntime; cells: HostCellState[]; graph: DependencyGraphState; variables: RuntimeVariable[]; editorDiagnostics: Record<string, AnalysisDiagnostic[]>; serviceErrors: { lsp?: HostError; settings?: HostError }; operations: OperationRecord[]; lastValue: JsonValue | null; lastActionError: HostError | null; capabilities?: string[]; activeClientIds?: string[];
 }
-export const hostSnapshotSchema = z.object({ protocol: z.literal(HOST_PROTOCOL), epoch: idSchema, cursor: protocolIntegerSchema, version: protocolIntegerSchema, documentRevision: revisionSchema, path: pathSchema.nullable(), metadata: protocolJsonRecordSchema, config: protocolJsonRecordSchema, layout: protocolJsonSchema, dirty: z.boolean(), changed: z.boolean().optional(), disk: diskObservationSchema, sidecars: sidecarObservationsSchema, runtime: hostRuntimeSchema, cells: z.array(hostCellStateSchema).max(MAX_NOTEBOOK_CELLS), graph: dependencyGraphStateSchema, variables: runtimeVariablesSchema, editorDiagnostics: editorDiagnosticsSchema, serviceErrors: serviceErrorsSchema, operations: z.array(operationRecordSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS), lastValue: protocolJsonSchema.nullable(), lastActionError: hostErrorSchema.nullable(), capabilities: z.array(boundedUtf8StringSchema(256)).max(MAX_PROTOCOL_COLLECTION_ITEMS).optional(), activeClientIds: z.array(idSchema).max(128).optional() }).strict();
+export const hostSnapshotSchema = z.object({ protocol: z.literal(HOST_PROTOCOL), epoch: idSchema, cursor: protocolIntegerSchema, version: protocolIntegerSchema, documentRevision: revisionSchema, path: pathSchema.nullable(), metadata: protocolJsonRecordSchema, config: protocolJsonRecordSchema, preferencesVersion: boundedUtf8StringSchema(MAX_ID_BYTES).nullable().default(null), layout: protocolJsonSchema, dirty: z.boolean(), changed: z.boolean().optional(), disk: diskObservationSchema, sidecars: sidecarObservationsSchema, runtime: hostRuntimeSchema, cells: z.array(hostCellStateSchema).max(MAX_NOTEBOOK_CELLS), graph: dependencyGraphStateSchema, variables: runtimeVariablesSchema, editorDiagnostics: editorDiagnosticsSchema, serviceErrors: serviceErrorsSchema, operations: z.array(operationRecordSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS), lastValue: protocolJsonSchema.nullable(), lastActionError: hostErrorSchema.nullable(), capabilities: z.array(boundedUtf8StringSchema(256)).max(MAX_PROTOCOL_COLLECTION_ITEMS).optional(), activeClientIds: z.array(idSchema).max(128).optional() }).strict();
 
 export interface HostEvent { protocol: typeof HOST_PROTOCOL; epoch: string; cursor: number; version: number; documentRevision: number; timestamp: number; type: HostEventType; operationId?: string; clientId?: string; cellId?: string; runId?: string; kernelEpoch?: string | null; revision?: number; sequence?: number; payload: JsonValue; }
 export type HostEventType = "transaction" | "notebook" | "cell" | "cell-started" | "cell-output" | "cell-completed" | "diagnostics" | "editor-diagnostics" | "service-errors" | "graph" | "variables" | "runtime" | "operation" | "service-error" | "active_clients_changed";

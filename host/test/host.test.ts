@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { writeFileSync } from "node:fs";
 import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { startHost } from "../src/application.js";
 import { resolveApplicationResources } from "../src/resources.js";
@@ -23,6 +23,7 @@ async function startInstalledHost(path: string, options: { executionMode?: "auto
     executionMode: options.executionMode,
     idleTimeout: options.idleTimeout,
     resources: stagedResources,
+    preferencesPath: join(dirname(path), ".test-preferences.yaml"),
     session: { runtimeDirectory: path + "-runtime" },
   });
   const deadline = performance.now() + 15_000;
@@ -167,10 +168,9 @@ test("editor help synchronizes source only on request or for enabled diagnostics
 
     const config = app.controller.snapshot();
     const diagnostics = await dispatchHost(app, {
-      type: "set-config",
+      type: "set-preferences",
       patch: { editor: { live_diagnostics: true } },
-      expectedSidecarVersion: config.sidecars.config.version,
-      expectedDocumentRevision: config.documentRevision,
+      expectedPreferencesVersion: config.preferencesVersion ?? null,
     });
     assert.equal(diagnostics.error, null);
     const diagnosticBefore = app.controller.snapshot();
@@ -310,6 +310,7 @@ test("runtime and app metadata survive recovery restart, Save, and Save As", {
     "# app:",
     "#   layout: vertical",
     "#   width: medium",
+    "#   vendor_note: keep me",
     "# ---",
     "# %%",
     "x <- 1",
@@ -337,7 +338,7 @@ test("runtime and app metadata survive recovery restart, Save, and Save As", {
     app = await startInstalledHost(path);
     snapshot = app.controller.snapshot();
     assert.deepEqual(snapshot.metadata?.runtime, { on_cell_change: "lazy", on_startup: false });
-    assert.deepEqual(snapshot.metadata?.app, { layout: "grid", width: "medium" });
+    assert.deepEqual(snapshot.metadata?.app, { layout: "grid", width: "medium", vendor_note: "keep me" });
 
     const save = await dispatchHost(app, { type: "save", expectedDocumentRevision: snapshot.documentRevision });
     assert.equal(save.error, null);
@@ -345,6 +346,7 @@ test("runtime and app metadata survive recovery restart, Save, and Save As", {
     assert.match(saved, /on_cell_change: lazy/);
     assert.match(saved, /on_startup: false/);
     assert.match(saved, /layout: grid/);
+    assert.match(saved, /vendor_note: keep me/);
     assert.doesNotMatch(saved, /on_cell_change: automatic/);
     assert.doesNotMatch(saved, /on_startup: true/);
     assert.doesNotMatch(saved, /layout: vertical/);
@@ -369,6 +371,7 @@ test("runtime and app metadata survive recovery restart, Save, and Save As", {
     assert.match(copied, /on_startup: false/);
     assert.match(copied, /layout: grid/);
     assert.match(copied, /width: full/);
+    assert.match(copied, /vendor_note: keep me/);
     assert.equal(app.controller.snapshot().dirty, false, "a successful Save As must clear the durable recovery draft");
     const saveAsRecovery = await app.controller.query({ type: "recovery" });
     assert.equal(saveAsRecovery.result.pending, false);

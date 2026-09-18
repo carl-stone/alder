@@ -7,6 +7,7 @@ import { BrowserTransportError } from "./transport.js";
 import type { BrowserDocument, EditorSelection, LocalCell } from "./document.js";
 import { OutputRenderer } from "../output-renderer.js";
 import { notebookUrl, notebookViewUrl } from "./url.js";
+import type { PreferencesPatch, ProjectSettingsPatch } from "../settings.js";
 
 import type {
   EditorHandle, EditorCompletionContext, EditorCompletion, EditorDiagnostic, EditorHover, EditorSignature,
@@ -57,6 +58,17 @@ interface PackageOperationTarget {
 }
 
 type DataflowPanelTab = "variables" | "dependencies" | "graph" | "outline";
+type RuntimeSettings = { executionMode: "automatic" | "lazy"; runOnStartup: boolean; cacheEnabled: boolean };
+interface DialogSettings {
+  preferences: PreferencesPatch;
+  runtime: RuntimeSettings;
+  project: ProjectSettingsPatch;
+}
+interface SettingsBaseline extends DialogSettings {
+  preferencesVersion: string | null;
+  projectVersion: string | null;
+  documentRevision: number;
+}
 
 export class NotebookView {
   private readonly notebook: HTMLElement;
@@ -97,6 +109,9 @@ export class NotebookView {
   private readonly outlineCells = new Map<string, string>();
   private minimapSignature = "";
   private configValue: HostSnapshot["config"] | null = null;
+  private settingsBaseline: SettingsBaseline | null = null;
+  private settingsError: string | null = null;
+  private settingsSaving = false;
   private editorDiagnosticsValue: HostSnapshot["editorDiagnostics"] | null = null;
   private editorDiagnosticsVisible = false;
   private editorDiagnosticsSourceCurrent = false;
@@ -229,8 +244,15 @@ export class NotebookView {
       this.editorHelpError = null;
     }
     if (this.configValue !== snapshot.config) {
+      const previousPageSize = this.configValue === null ? null : configNumber(this.configValue, ["table", "page_size"], 25);
+      const autosaveChanged = this.configValue !== null && this.configValue.autosave !== snapshot.config.autosave;
       this.configValue = snapshot.config;
       this.applyConfig(snapshot.config);
+      if (autosaveChanged) this.scheduleAutosave();
+      const pageSize = configNumber(snapshot.config, ["table", "page_size"], 25);
+      if (previousPageSize !== null && previousPageSize !== pageSize) {
+        void this.repaginateTables(pageSize).catch(error => this.showError(error));
+      }
     }
     const path = snapshot.path || "untitled notebook";
     if (this.path && this.path.textContent !== path) this.path.textContent = path;
@@ -1989,7 +2011,7 @@ export class NotebookView {
       vim.textContent = keymap === "vim" ? "Vim mode" : "";
     }
     const dialog = this.dom.getElementById("settings") as HTMLDialogElement | null;
-    if (!dialog?.open) this.fillSettings(config);
+    if (!dialog?.hasAttribute("open")) this.fillSettings(config);
   }
 
   private fillSettings(config: Record<string, unknown>): void {
@@ -2004,12 +2026,17 @@ export class NotebookView {
     setChecked(this.dom, "settings-live-diagnostics", nested(config, ["editor", "live_diagnostics"]) === true);
     setChecked(this.dom, "settings-autosave", config.autosave === true);
     setChecked(this.dom, "settings-format-on-save", nested(config, ["format", "on_save"]) === true);
+    setSelect(this.dom, "settings-execution-mode", this.documentValue?.snapshot.runtime.executionMode ?? "automatic", ["automatic", "lazy"]);
+    setChecked(this.dom, "settings-run-on-startup", this.documentValue?.snapshot.runtime.runOnStartup ?? true);
+    setChecked(this.dom, "settings-cache-enabled", nested(config, ["cache", "enabled"]) !== false);
+    const directory = this.dom.getElementById("settings-cache-directory") as HTMLInputElement | null;
+    if (directory) directory.value = configString(config, ["cache", "dir"], "");
   }
 
-  private settingsPatch(): Record<string, unknown> {
-    return {
-      theme: inputValue(this.dom, "settings-theme", "system"),
-      keymap: inputValue(this.dom, "settings-keymap", "default"),
+  private settingsValues(): DialogSettings {
+    const preferences: PreferencesPatch = {
+      theme: inputValue(this.dom, "settings-theme", "system") as PreferencesPatch["theme"],
+      keymap: inputValue(this.dom, "settings-keymap", "default") as PreferencesPatch["keymap"],
       autosave: inputChecked(this.dom, "settings-autosave"),
       format: { on_save: inputChecked(this.dom, "settings-format-on-save") },
       editor: {
@@ -2022,6 +2049,23 @@ export class NotebookView {
       },
       table: { page_size: inputInteger(this.dom, "settings-table-page-size", 25, 5, 200) },
     };
+    return {
+      preferences,
+      runtime: {
+        executionMode: inputValue(this.dom, "settings-execution-mode", "automatic") === "lazy" ? "lazy" : "automatic",
+        runOnStartup: inputChecked(this.dom, "settings-run-on-startup"),
+        cacheEnabled: inputChecked(this.dom, "settings-cache-enabled"),
+      },
+      project: { cache: { dir: inputValue(this.dom, "settings-cache-directory", "").trim() || null } },
+    };
+  }
+
+  private renderSettingsError(): void {
+    const error = this.dom.getElementById("settings-error");
+    if (!error) return;
+    const message = this.settingsError ?? this.documentValue?.snapshot.serviceErrors.settings?.message ?? "";
+    error.textContent = message;
+    error.hidden = message.length === 0;
   }
 
   private bindSettings(): void {
@@ -2032,8 +2076,13 @@ export class NotebookView {
       else dialog.removeAttribute("open");
     };
     this.dom.getElementById("settings-open")?.addEventListener("click", () => {
-      if (!dialog) return;
-      this.fillSettings(this.documentValue?.snapshot.config ?? {});
+      const snapshot = this.documentValue?.snapshot;
+      if (!dialog || !snapshot) return;
+      this.fillSettings(snapshot.config);
+      this.settingsBaseline = { ...this.settingsValues(), preferencesVersion: snapshot.preferencesVersion ?? null,
+        projectVersion: snapshot.sidecars.config.version, documentRevision: snapshot.documentRevision };
+      this.settingsError = null;
+      this.renderSettingsError();
       if (typeof dialog.showModal === "function") {
         if (!dialog.open) dialog.showModal();
       } else dialog.setAttribute("open", "");
@@ -2043,14 +2092,44 @@ export class NotebookView {
     dialog?.addEventListener("click", (event) => { if (event.target === dialog) close(); });
     this.dom.getElementById("settings-form")?.addEventListener("submit", (event) => {
       event.preventDefault();
+      const baseline = this.settingsBaseline;
+      if (this.settingsSaving || !baseline) return;
+      const values = this.settingsValues();
+      const preferences = changedSettings(baseline.preferences, values.preferences) as PreferencesPatch;
+      const runtime = changedSettings(baseline.runtime, values.runtime) as Partial<RuntimeSettings>;
+      const project = changedSettings(baseline.project, values.project) as ProjectSettingsPatch;
+      this.settingsSaving = true;
+      const apply = this.dom.getElementById("settings-apply") as HTMLButtonElement | null;
+      if (apply) setDisabled(apply, true);
       void this.action(async () => {
-        const before = configNumber(this.documentValue?.snapshot.config, ["table", "page_size"], 25);
-        const patch = this.settingsPatch();
-        await this.client.setConfig(patch);
-        const after = Number(nested(patch, ["table", "page_size"]));
-        if (Number.isFinite(after) && after !== before) await this.repaginateTables(after);
+        if (Object.keys(preferences).length) {
+          await this.client.setPreferences(preferences, baseline.preferencesVersion);
+          baseline.preferences = values.preferences;
+          baseline.preferencesVersion = this.documentValue?.snapshot.preferencesVersion ?? null;
+        }
+        if (Object.keys(runtime).length) {
+          const result = await this.client.setRuntime(runtime, baseline.documentRevision);
+          baseline.runtime = values.runtime;
+          baseline.documentRevision = result.documentRevision;
+          this.scheduleAutosave();
+        }
+        if (Object.keys(project).length) {
+          const result = await this.client.setConfig(project, baseline.projectVersion, baseline.documentRevision);
+          baseline.project = values.project;
+          baseline.documentRevision = result.documentRevision;
+          baseline.projectVersion = this.documentValue?.snapshot.sidecars.config.version ?? null;
+        }
+        this.settingsError = null;
+        this.renderSettingsError();
         close();
-      }).catch((error) => this.showError(error));
+      }).catch((error) => {
+        this.settingsError = error instanceof Error ? error.message : String(error);
+        this.renderSettingsError();
+        this.showError(error);
+      }).finally(() => {
+        this.settingsSaving = false;
+        if (apply) setDisabled(apply, false);
+      });
     });
   }
 
@@ -2063,7 +2142,7 @@ export class NotebookView {
       ? await desktop.chooseSavePath()
       : undefined;
     if (destination === null) return undefined;
-    if (nested(this.documentValue?.snapshot.config, ["format", "on_save"]) === true) {
+    if (this.executionAvailable() && nested(this.documentValue?.snapshot.config, ["format", "on_save"]) === true) {
       await this.client.formatCells();
     }
     return destination === undefined ? this.client.save() : this.client.saveAs(destination);
@@ -2134,7 +2213,11 @@ export class NotebookView {
     });
     this.dom.getElementById("runtime-select")?.addEventListener("change", (event) => {
       const value = (event.currentTarget as HTMLSelectElement).value === "lazy" ? "lazy" : "automatic";
-      void this.action(() => this.client.setRuntime({ executionMode: value })).catch((error) => this.showError(error));
+      void this.action(() => this.client.setRuntime({ executionMode: value })).then(() => this.scheduleAutosave()).catch((error) => {
+        const control = this.dom.getElementById("runtime-select") as HTMLSelectElement | null;
+        if (control) control.value = this.documentValue?.snapshot.runtime.executionMode ?? "automatic";
+        this.showError(error);
+      });
     });
     this.status?.addEventListener("click", (event) => {
       const target = (event.target as Element | null)?.closest("[data-status-action]");
@@ -2336,7 +2419,9 @@ export class NotebookView {
 
   private renderStatus(): void {
     if (!this.status) return;
+    this.renderSettingsError();
     const stateError = this.documentValue?.snapshot.lastActionError?.message ?? null;
+    const settingsError = this.documentValue?.snapshot.serviceErrors.settings?.message ?? null;
     const editorHelpError = this.editorHelpError
       ?? this.documentValue?.snapshot.serviceErrors.lsp?.message
       ?? null;
@@ -2349,12 +2434,13 @@ export class NotebookView {
       : recovery.persistenceError ? "Local edit recovery is not durable."
       : recovery.drafts.length > 0 ? "A saved draft is available."
       : recovery.pending ? "Recovering an interrupted local edit…" : recovery.corruption ? "Recovery data needs your review." : recoveryConflict ? "Recovered edits need your review." : null;
-    const message = this.hostClosed ? "Notebook host shut down." : this.actionError ?? stateError ?? editorHelpError ?? runtimeMessage ?? this.transportError ?? this.actionNotice ?? recoveryMessage ?? "";
+    const message = this.hostClosed ? "Notebook host shut down." : this.actionError ?? stateError ?? settingsError ?? editorHelpError ?? runtimeMessage ?? this.transportError ?? this.actionNotice ?? recoveryMessage ?? "";
     const signature = JSON.stringify({
       runtimeBlocked: runtimeBlocked === null ? null : [runtimeBlocked.code, runtimeBlocked.message],
       message,
       actionError: Boolean(this.actionError),
       stateError: Boolean(stateError),
+      settingsError: Boolean(settingsError),
       editorHelpError: Boolean(editorHelpError),
       transportError: Boolean(this.transportError),
       editorHelpRestarting: this.editorHelpRestarting,
@@ -2375,8 +2461,8 @@ export class NotebookView {
     }
     this.renderRuntimeControls(runtimeBlocked);
     this.renderRecoveryControls();
-    this.status.classList.toggle("error", Boolean(this.actionError || stateError || editorHelpError || runtimeBlocked || recoveryConflict));
-    this.status.classList.toggle("poll-error", Boolean(!this.actionError && !stateError && !editorHelpError && !runtimeBlocked && this.transportError));
+    this.status.classList.toggle("error", Boolean(this.actionError || stateError || settingsError || editorHelpError || runtimeBlocked || recoveryConflict));
+    this.status.classList.toggle("poll-error", Boolean(!this.actionError && !stateError && !settingsError && !editorHelpError && !runtimeBlocked && this.transportError));
   }
 
   private renderRuntimeControls(runtimeBlocked: HostSnapshot["runtime"]["executionBlockedReason"]): void {
@@ -2807,6 +2893,17 @@ function configNumber(root: unknown, path: readonly string[], fallback: number):
 function boundedConfig(root: unknown, path: readonly string[], fallback: number, minimum: number, maximum: number): number {
   const value = Math.round(configNumber(root, path, fallback));
   return Math.max(minimum, Math.min(maximum, value));
+}
+
+function changedSettings(before: Record<string, unknown>, after: Record<string, unknown>): Record<string, unknown> {
+  const changed: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(after)) {
+    if (isObject(value) && isObject(before[key])) {
+      const nestedChanges = changedSettings(before[key], value);
+      if (Object.keys(nestedChanges).length) changed[key] = nestedChanges;
+    } else if (value !== before[key]) changed[key] = value;
+  }
+  return changed;
 }
 
 function setSelect(dom: Document, id: string, value: string, allowed: readonly string[]): void {

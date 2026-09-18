@@ -32690,6 +32690,50 @@ var StdioServerTransport = class {
   }
 };
 
+// src/settings.ts
+var editorSchema = external_exports.object({
+  font_size: external_exports.number().int().min(10).max(32),
+  tab_size: external_exports.number().int().min(1).max(8),
+  line_numbers: external_exports.boolean(),
+  completions: external_exports.boolean(),
+  signature_help: external_exports.boolean(),
+  live_diagnostics: external_exports.boolean()
+}).strict();
+var formatSchema = external_exports.object({ on_save: external_exports.boolean() }).strict();
+var tableSchema = external_exports.object({ page_size: external_exports.number().int().min(5).max(200) }).strict();
+var preferencesSchema = external_exports.object({
+  theme: external_exports.enum(["light", "dark", "system"]),
+  keymap: external_exports.enum(["default", "vim"]),
+  autosave: external_exports.boolean(),
+  format: formatSchema,
+  editor: editorSchema,
+  table: tableSchema
+}).strict();
+var preferencesPatchSchema = preferencesSchema.extend({
+  format: formatSchema.partial(),
+  editor: editorSchema.partial(),
+  table: tableSchema.partial()
+}).partial();
+var notebookCacheSchema = external_exports.object({ enabled: external_exports.boolean() }).strict();
+var notebookSettingsSchema = external_exports.object({
+  on_cell_change: external_exports.enum(["automatic", "lazy"]),
+  on_startup: external_exports.boolean(),
+  cache: notebookCacheSchema
+}).strict();
+var notebookSettingsPatchSchema = notebookSettingsSchema.extend({
+  cache: notebookCacheSchema.partial()
+}).partial();
+var projectCacheSchema = external_exports.object({ dir: external_exports.string().min(1).nullable() }).strict();
+var projectSettingsSchema = external_exports.object({ cache: projectCacheSchema }).strict();
+var projectSettingsPatchSchema = projectSettingsSchema.extend({
+  cache: projectCacheSchema.partial()
+}).partial();
+var configSchema = preferencesSchema.extend({
+  on_cell_change: notebookSettingsSchema.shape.on_cell_change,
+  on_startup: notebookSettingsSchema.shape.on_startup,
+  cache: notebookCacheSchema.extend(projectCacheSchema.shape)
+});
+
 // src/protocol.ts
 var HOST_PROTOCOL = "alder-host-v2";
 var ENGINE_PROTOCOL = "alder-engine-v2";
@@ -33336,7 +33380,8 @@ var saveCommandSchema = external_exports.object({ ...commandIdentityShape, type:
 var saveAsCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("save-as"), path: pathSchema, expectedDestination: external_exports.union([external_exports.literal("absent"), external_exports.object({ expectedDiskDigest: external_exports.string().min(1), expectedDiskVersion: external_exports.string().min(1) }).strict()]), expectedDocumentRevision: revisionSchema }).strict();
 var reloadSourceCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("reload-source"), expectedDocumentRevision: revisionSchema, expectedDiskDigest: external_exports.string().regex(/^[0-9a-f]{64}$/), expectedDiskVersion: boundedUtf8StringSchema(MAX_ID_BYTES, true) }).strict();
 var formatCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("format"), cellIds: external_exports.array(idSchema).max(MAX_NOTEBOOK_CELLS).optional(), expectedRevisions: safeStringRecordSchema(revisionSchema), expectedDocumentRevision: revisionSchema }).strict();
-var setConfigCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("set-config"), patch: protocolJsonRecordSchema, expectedSidecarVersion: boundedUtf8StringSchema(MAX_ID_BYTES).nullable(), expectedDocumentRevision: revisionSchema }).strict();
+var setPreferencesCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("set-preferences"), patch: preferencesPatchSchema, expectedPreferencesVersion: boundedUtf8StringSchema(MAX_ID_BYTES).nullable() }).strict();
+var setConfigCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("set-config"), patch: projectSettingsPatchSchema, expectedSidecarVersion: boundedUtf8StringSchema(MAX_ID_BYTES).nullable(), expectedDocumentRevision: revisionSchema }).strict();
 var layoutKey = boundedUtf8StringSchema(MAX_ID_BYTES, true).refine((key) => !key.includes("/") && !key.includes("\\") && key !== "." && key !== "..", "invalid layout cell key");
 var layoutGeometrySchema = external_exports.object({ x: external_exports.number().int().min(0).max(11).safe(), y: external_exports.number().int().min(0).max(1e6).safe(), w: external_exports.number().int().min(1).max(12).safe(), h: external_exports.number().int().min(1).max(1e6).safe() }).strict().superRefine((geometry, context) => {
   if (geometry.x + geometry.w > 12) context.addIssue({ code: "custom", path: ["w"], message: "geometry extends beyond the 12-column grid" });
@@ -33362,7 +33407,7 @@ var layoutSchema = external_exports.object({ version: external_exports.literal(1
   }
 });
 var setLayoutCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("set-layout"), layout: layoutSchema, expectedSidecarVersion: boundedUtf8StringSchema(MAX_ID_BYTES).nullable(), expectedDocumentRevision: revisionSchema }).strict();
-var setRuntimeCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("set-runtime"), on_cell_change: external_exports.enum(["automatic", "lazy"]).optional(), on_startup: external_exports.boolean().optional(), expectedDocumentRevision: revisionSchema }).strict().refine((value) => value.on_cell_change !== void 0 || value.on_startup !== void 0, "at least one runtime setting is required");
+var setRuntimeCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("set-runtime"), on_cell_change: external_exports.enum(["automatic", "lazy"]).optional(), on_startup: external_exports.boolean().optional(), cache_enabled: external_exports.boolean().optional(), expectedDocumentRevision: revisionSchema }).strict().refine((value) => value.on_cell_change !== void 0 || value.on_startup !== void 0 || value.cache_enabled !== void 0, "at least one runtime setting is required");
 var restartCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("restart"), replay: external_exports.boolean().default(false), expectedDocumentRevision: revisionSchema.optional() }).strict().superRefine((value, context) => {
   if (value.replay && value.expectedDocumentRevision === void 0) context.addIssue({ code: "custom", path: ["expectedDocumentRevision"], message: "replay restart requires document revision" });
 });
@@ -33426,6 +33471,7 @@ var hostCommandSchema = external_exports.discriminatedUnion("type", [
   saveAsCommandSchema,
   reloadSourceCommandSchema,
   formatCommandSchema,
+  setPreferencesCommandSchema,
   setConfigCommandSchema,
   setLayoutCommandSchema,
   setRuntimeCommandSchema,
@@ -33439,7 +33485,7 @@ var hostCommandSchema = external_exports.discriminatedUnion("type", [
 ]);
 var cellStatusSchema = external_exports.enum(["idle", "stale", "running", "done", "error", "stopped", "disabled"]);
 var operationStatusSchema = external_exports.enum(["accepted", "running", "done", "error", "interrupted", "cancelled"]);
-var operationKindSchema = external_exports.enum(["transaction", "run", "select-r", "set-app", "packages-declare", "packages-install", "publish", "upload", "save", "save-as", "reload-source", "format", "set-config", "set-layout", "set-runtime", "restart", "widget", "inspect", "lazy-output", "table-page", "interrupt", "shutdown", "widget-reset", "analysis"]);
+var operationKindSchema = external_exports.enum(["transaction", "run", "select-r", "set-app", "packages-declare", "packages-install", "publish", "upload", "save", "save-as", "reload-source", "format", "set-preferences", "set-config", "set-layout", "set-runtime", "restart", "widget", "inspect", "lazy-output", "table-page", "interrupt", "shutdown", "widget-reset", "analysis"]);
 var hostErrorSchema = external_exports.object({ code: boundedUtf8StringSchema(256, true), message: boundedUtf8StringSchema(MAX_FRAME_BYTES), operationId: idSchema.nullable().optional(), details: protocolJsonSchema.optional() }).strict();
 var MAX_OPERATION_PROGRESS_BYTES = 64 * 1024;
 var operationProgressDataSchema = protocolJsonSchema.superRefine((value, context) => {
@@ -33503,8 +33549,8 @@ var dependencyGraphStateSchema = external_exports.object({ nodes: graphCellIds, 
 var runtimeVariableSchema = external_exports.object({ name: boundedUtf8StringSchema(MAX_ANALYSIS_SYMBOL_BYTES, true), owner: idSchema.nullable(), revision: revisionSchema.nullable(), class: boundedUtf8StringSchema(MAX_ANALYSIS_SYMBOL_BYTES, true), dim: external_exports.array(protocolIntegerSchema).max(64).nullable(), size: protocolIntegerSchema, widget: external_exports.boolean(), valueSummary: boundedUtf8StringSchema(160).optional() }).strict();
 var runtimeVariablesSchema = external_exports.array(runtimeVariableSchema).max(MAX_RUNTIME_VARIABLES);
 var editorDiagnosticsSchema = safeStringRecordSchema(external_exports.array(analysisDiagnosticSchema).max(MAX_EDITOR_DIAGNOSTICS));
-var serviceErrorsSchema = external_exports.object({ lsp: hostErrorSchema.optional() }).strict();
-var hostSnapshotSchema = external_exports.object({ protocol: external_exports.literal(HOST_PROTOCOL), epoch: idSchema, cursor: protocolIntegerSchema, version: protocolIntegerSchema, documentRevision: revisionSchema, path: pathSchema.nullable(), metadata: protocolJsonRecordSchema, config: protocolJsonRecordSchema, layout: protocolJsonSchema, dirty: external_exports.boolean(), changed: external_exports.boolean().optional(), disk: diskObservationSchema, sidecars: sidecarObservationsSchema, runtime: hostRuntimeSchema, cells: external_exports.array(hostCellStateSchema).max(MAX_NOTEBOOK_CELLS), graph: dependencyGraphStateSchema, variables: runtimeVariablesSchema, editorDiagnostics: editorDiagnosticsSchema, serviceErrors: serviceErrorsSchema, operations: external_exports.array(operationRecordSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS), lastValue: protocolJsonSchema.nullable(), lastActionError: hostErrorSchema.nullable(), capabilities: external_exports.array(boundedUtf8StringSchema(256)).max(MAX_PROTOCOL_COLLECTION_ITEMS).optional(), activeClientIds: external_exports.array(idSchema).max(128).optional() }).strict();
+var serviceErrorsSchema = external_exports.object({ lsp: hostErrorSchema.optional(), settings: hostErrorSchema.optional() }).strict();
+var hostSnapshotSchema = external_exports.object({ protocol: external_exports.literal(HOST_PROTOCOL), epoch: idSchema, cursor: protocolIntegerSchema, version: protocolIntegerSchema, documentRevision: revisionSchema, path: pathSchema.nullable(), metadata: protocolJsonRecordSchema, config: protocolJsonRecordSchema, preferencesVersion: boundedUtf8StringSchema(MAX_ID_BYTES).nullable().default(null), layout: protocolJsonSchema, dirty: external_exports.boolean(), changed: external_exports.boolean().optional(), disk: diskObservationSchema, sidecars: sidecarObservationsSchema, runtime: hostRuntimeSchema, cells: external_exports.array(hostCellStateSchema).max(MAX_NOTEBOOK_CELLS), graph: dependencyGraphStateSchema, variables: runtimeVariablesSchema, editorDiagnostics: editorDiagnosticsSchema, serviceErrors: serviceErrorsSchema, operations: external_exports.array(operationRecordSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS), lastValue: protocolJsonSchema.nullable(), lastActionError: hostErrorSchema.nullable(), capabilities: external_exports.array(boundedUtf8StringSchema(256)).max(MAX_PROTOCOL_COLLECTION_ITEMS).optional(), activeClientIds: external_exports.array(idSchema).max(128).optional() }).strict();
 var hostEventTypeSchema = external_exports.enum(["transaction", "notebook", "cell", "cell-started", "cell-output", "cell-completed", "diagnostics", "editor-diagnostics", "service-errors", "graph", "variables", "runtime", "operation", "service-error", "active_clients_changed"]);
 var eventBase = { protocol: external_exports.literal(HOST_PROTOCOL), epoch: idSchema, cursor: protocolIntegerSchema, version: protocolIntegerSchema, documentRevision: revisionSchema, timestamp: external_exports.number().finite().nonnegative(), operationId: idSchema.optional(), clientId: idSchema.optional(), cellId: idSchema.optional(), runId: idSchema.optional(), kernelEpoch: idSchema.nullable().optional(), revision: revisionSchema.optional(), sequence: protocolIntegerSchema.optional() };
 var hostEventSchema = external_exports.object({ ...eventBase, type: hostEventTypeSchema, payload: protocolJsonSchema }).strict();

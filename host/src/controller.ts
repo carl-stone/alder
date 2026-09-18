@@ -50,7 +50,7 @@ import {
   type RecoveryState,
   type OutputRecord,
 } from "./protocol.js";
-import type { ConfigResolution } from "./configuration.js";
+import type { Config, Preferences } from "./settings.js";
 import {
   reconcileNotebook,
   stageDocumentChanges,
@@ -82,9 +82,11 @@ export interface ControllerOptions {
    */
   notebook: NotebookDocument;
   services?: ControllerServices;
-  configResolution: ConfigResolution;
+  config: Config;
+  preferencesVersion?: string | null;
   layout?: unknown;
   deferStartup?: boolean;
+  suppressStartup?: boolean;
   initialDirty?: boolean;
   epoch?: string;
   disk?: HostSnapshot["disk"];
@@ -134,7 +136,7 @@ export interface SourceCommitRequest {
 export interface SourcePublication {
   readonly document: NotebookDocument;
   readonly path: string | null;
-  readonly configResolution: ConfigResolution;
+  readonly config: Config;
   readonly layout: JsonValue;
   readonly disk: HostSnapshot["disk"];
   readonly sidecars: HostSnapshot["sidecars"];
@@ -151,7 +153,7 @@ export interface SourceCommitContext {
   readonly operationId?: string;
   readonly document: NotebookDocument;
   readonly path: string | null;
-  readonly configResolution: ConfigResolution;
+  readonly config: Config;
   readonly layout: JsonValue;
   readonly disk: HostSnapshot["disk"];
   readonly sidecars: HostSnapshot["sidecars"];
@@ -356,12 +358,14 @@ export class Controller {
   private graphValue = new ReactiveGraph([]);
   private pathValue: string | null;
   private metadata: Record<string, unknown>;
-  private configResolution: ConfigResolution;
+  private config: Config;
+  private preferencesVersion: string | null;
   private layout: unknown;
   private executionMode: "automatic" | "lazy";
   private runOnStartup: boolean;
   private readonly deferStartup: boolean;
   private startupActivated = false;
+  private readonly suppressStartup: boolean;
   private changed: boolean;
   private documentRevisionValue = 0;
   private version = 0;
@@ -459,10 +463,12 @@ export class Controller {
     };
     this.sidecarsValue = options.sidecars ?? this.sidecarsValue;
     this.metadata = clone(notebook.metadata);
-    this.configResolution = clone(options.configResolution);
+    this.config = clone(options.config);
+    this.preferencesVersion = options.preferencesVersion ?? null;
+    this.suppressStartup = options.suppressStartup ?? false;
     this.layout = clone(options.layout ?? null);
-    this.executionMode = this.effectiveConfig.on_cell_change;
-    this.runOnStartup = this.effectiveConfig.on_startup;
+    this.executionMode = this.config.on_cell_change;
+    this.runOnStartup = this.config.on_startup;
     this.deferStartup = options.deferStartup ?? false;
     this.changed = options.initialDirty ?? false;
     this.cells = notebook.cells.map((cell) => ({
@@ -486,9 +492,6 @@ export class Controller {
     this.documentReady = true;
   }
 
-  private get effectiveConfig(): ConfigResolution["effective"] {
-    return this.configResolution.effective;
-  }
   get epoch(): string {
     return this.epochValue;
   }
@@ -646,7 +649,7 @@ export class Controller {
     this.assertStarted();
     if (this.startupActivated) return null;
     this.startupActivated = true;
-    if (!this.executionReady || !this.runOnStartup) return null;
+    if (!this.executionReady || !this.runOnStartup || this.suppressStartup) return null;
     const operationId = `startup-${randomUUID()}`;
     this.createOperation(operationId, "run");
     try {
@@ -669,7 +672,8 @@ export class Controller {
       documentRevision: this.documentRevisionValue,
       path: this.pathValue,
       metadata: clone(this.metadata) as HostSnapshot["metadata"],
-      config: clone(this.effectiveConfig) as HostSnapshot["config"],
+      config: clone(this.config) as HostSnapshot["config"],
+      preferencesVersion: this.preferencesVersion,
       layout: clone(this.layout) as HostSnapshot["layout"],
       dirty: this.changed,
       changed: this.changed,
@@ -759,7 +763,14 @@ export class Controller {
     return true;
   }
 
-  publishServiceError(service: "lsp", error: HostError | null): boolean {
+  updatePreferences(values: Preferences, version: string | null): void {
+    if (this.closed) return;
+    this.config = { ...this.config, ...structuredClone(values) };
+    this.preferencesVersion = version;
+    this.bump("notebook", { config: clone(this.config), preferencesVersion: version });
+  }
+
+  publishServiceError(service: "lsp" | "settings", error: HostError | null): boolean {
     if (this.closed) return false;
     const previous = this.serviceErrors[service] ?? null;
     const next = clone(error);
@@ -962,7 +973,7 @@ export class Controller {
           documentRevision: this.documentRevisionValue,
           path: this.pathValue,
           metadata: clone(this.metadata),
-          config: clone(this.effectiveConfig),
+          config: clone(this.config),
           dirty: this.changed,
           changed: this.changed,
           disk: clone(this.diskValue),
@@ -1005,9 +1016,8 @@ export class Controller {
       }
       case "state": result = this.snapshotRecovery(); break;
       case "config": result = {
-        effective: clone(this.effectiveConfig),
-        layers: clone(this.configResolution.layers),
-        provenance: clone(this.configResolution.provenance),
+        config: clone(this.config),
+        preferencesVersion: this.preferencesVersion,
         sidecar: clone(this.sidecarsValue.config),
       }; break;
       case "layout": result = { layout: clone(this.layout), sidecar: clone(this.sidecarsValue.layout) }; break;
@@ -1196,7 +1206,7 @@ export class Controller {
           result = await this.applyTransaction(command.changes, command.expectedDocumentRevision, command.requestId, false);
           break;
         case "run":
-          if (command.startup === true && !this.runOnStartup) {
+          if (command.startup === true && (!this.runOnStartup || this.suppressStartup)) {
             result = { startupActivated: true, run: false };
           } else {
             result = await this.prepareRun(command);
@@ -1252,7 +1262,10 @@ export class Controller {
           result = await this.formatSource(command.cellIds, command.expectedRevisions, command.requestId);
           break;
         case "set-runtime":
-          result = await this.setRuntime(command.on_cell_change, command.on_startup, command.expectedDocumentRevision, command.requestId);
+          result = await this.setRuntime(command.on_cell_change, command.on_startup, command.cache_enabled, command.expectedDocumentRevision, command.requestId);
+          break;
+        case "set-preferences":
+          result = await this.callService("preferences.update", { patch: command.patch, expectedPreferencesVersion: command.expectedPreferencesVersion });
           break;
         case "set-config":
           result = await this.setConfig(command.patch, command.expectedDocumentRevision, command.expectedSidecarVersion, command.requestId);
@@ -1376,24 +1389,15 @@ export class Controller {
     if (publication.advanceRevision && request.kind === "save-as" && !publication.dirty) {
       throw new ControllerError("invalid_service_response", "Save As cannot advance a clean source revision", 503);
     }
-    if (
-      publication.configResolution === null
-      || typeof publication.configResolution !== "object"
-      || !isRecord(publication.configResolution.effective)
-      || !isRecord(publication.configResolution.layers)
-      || !isRecord(publication.configResolution.provenance)
-    ) {
-      throw new ControllerError("invalid_service_response", "source publication config resolution is invalid", 503);
-    }
     const document = clone({ ...publication.document, path: publication.path });
-    const configResolution = clone(publication.configResolution);
+    const config = clone(publication.config);
     const layout = clone(publication.layout) as JsonValue;
     const disk = clone(publication.disk);
     const sidecars = clone(publication.sidecars);
     const prepared: SourcePublication = {
       document,
       path: publication.path,
-      configResolution,
+      config,
       layout,
       disk,
       sidecars,
@@ -1444,11 +1448,12 @@ export class Controller {
     }
     this.pathValue = publication.path;
     this.metadata = clone(publication.document.metadata ?? this.metadata);
-    this.configResolution = clone(publication.configResolution);
+    const { theme, keymap, editor, table, autosave, format } = this.config;
+    this.config = { ...clone(publication.config), theme, keymap, editor, table, autosave, format };
     const graphChanged = this.graphValue.state !== currentGraph;
-    const configuredMode = this.effectiveConfig.on_cell_change;
+    const configuredMode = this.config.on_cell_change;
     if (configuredMode === "automatic" || configuredMode === "lazy") this.executionMode = configuredMode;
-    if (typeof this.effectiveConfig.on_startup === "boolean") this.runOnStartup = this.effectiveConfig.on_startup;
+    if (typeof this.config.on_startup === "boolean") this.runOnStartup = this.config.on_startup;
     this.layout = clone(publication.layout);
     this.diskValue = clone(publication.disk);
     this.sidecarsValue = clone(publication.sidecars);
@@ -1476,7 +1481,8 @@ export class Controller {
         deleted: delta?.deleted ?? [],
         order: this.cells.map((cell) => cell.id),
         metadata: clone(this.metadata),
-        config: clone(this.effectiveConfig),
+        config: clone(this.config),
+        runtime: this.runtimeSnapshot(),
         layout: clone(this.layout),
         analysisPending: this.analysisNeeded.size > 0,
         ...(graphChanged ? { graph: clone(this.graphValue.state) } : {}),
@@ -1487,7 +1493,9 @@ export class Controller {
         sourceCommit: request.kind,
         documentRevision: this.documentRevisionValue,
         path: this.pathValue,
-        config: clone(this.effectiveConfig),
+        metadata: clone(this.metadata),
+        config: clone(this.config),
+        runtime: this.runtimeSnapshot(),
         layout: clone(this.layout),
         disk: clone(this.diskValue),
         sidecars: clone(this.sidecarsValue),
@@ -1497,7 +1505,6 @@ export class Controller {
           updated: this.cells.map((cell) => this.publicCell(cell)),
           deleted: [...staged.deleted],
           order: this.cells.map((cell) => cell.id),
-          metadata: clone(this.metadata),
           analysisPending: this.analysisNeeded.size > 0,
         } : {}),
         ...(graphChanged ? { graph: clone(this.graphValue.state) } : {}),
@@ -1533,7 +1540,7 @@ export class Controller {
         operationId: request.operationId,
         document: this.notebookDocument(),
         path: this.pathValue,
-        configResolution: clone(this.configResolution),
+        config: clone(this.config),
         layout: clone(this.layout) as JsonValue,
         disk: clone(this.diskValue),
         sidecars: clone(this.sidecarsValue),
@@ -1550,7 +1557,7 @@ export class Controller {
             const previousCells = clone(this.cells);
             const previousPath = this.pathValue;
             const previousMetadata = this.metadata;
-            const previousConfigResolution = this.configResolution;
+            const previousConfig = this.config;
             const previousLayout = this.layout;
             const previousDisk = this.diskValue;
             const previousSidecars = this.sidecarsValue;
@@ -1567,7 +1574,7 @@ export class Controller {
               this.cells = previousCells;
               this.pathValue = previousPath;
               this.metadata = previousMetadata;
-              this.configResolution = previousConfigResolution;
+              this.config = previousConfig;
               this.layout = previousLayout;
               this.diskValue = previousDisk;
               this.sidecarsValue = previousSidecars;
@@ -1655,7 +1662,7 @@ export class Controller {
         context.preparePublication({
           document: staged.document,
           path: staged.document.path ?? context.path,
-          configResolution: context.configResolution,
+          config: context.config,
           layout: context.layout,
           disk: context.disk,
           sidecars: context.sidecars,
@@ -1666,7 +1673,7 @@ export class Controller {
         context.preparePublication({
           document: staged.document,
           path: staged.document.path ?? context.path,
-          configResolution: context.configResolution,
+          config: context.config,
           layout: context.layout,
           disk: context.disk,
           sidecars: context.sidecars,
@@ -4407,7 +4414,7 @@ export class Controller {
     const result = await this.commitSource(request);
     this.assertNotClosed();
     this.replaceLastActionError(null);
-    this.bump("notebook", { saved: true, result: clone(result) }, { operationId });
+    this.bump("notebook", { saved: true, dirty: this.changed, result: clone(result) }, { operationId });
     return result;
   }
   private async formatSource(
@@ -4484,6 +4491,7 @@ export class Controller {
   private async setRuntime(
     executionMode: "automatic" | "lazy" | undefined,
     runOnStartup: boolean | undefined,
+    cacheEnabled: boolean | undefined,
     expectedDocumentRevision: number,
     operationId: string,
   ): Promise<unknown> {
@@ -4491,6 +4499,7 @@ export class Controller {
     const patch: Record<string, unknown> = {};
     if (executionMode !== undefined) patch.on_cell_change = executionMode;
     if (runOnStartup !== undefined) patch.on_startup = runOnStartup;
+    if (cacheEnabled !== undefined) patch.cache = { enabled: cacheEnabled };
     if (Object.keys(patch).length === 0) {
       throw new ControllerError("invalid_request", "runtime update is empty", 400);
     }
@@ -5936,7 +5945,6 @@ function errorStatus(code: string): number {
   if (code === "worker_unavailable" || code === "analysis_unavailable") return 503;
   if (
     code === "source_conflict"
-    || code === "config_shadowed"
     || code === "run_in_progress"
     || code === "operation_in_progress"
     || code === "package_operation_in_progress"

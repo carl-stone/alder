@@ -1,346 +1,122 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, open, readFile, rename, rm, stat } from "node:fs/promises";
-import { dirname, isAbsolute, join, basename } from "node:path";
+import { dirname, join, basename } from "node:path";
 import envPaths from "env-paths";
-import { parseDocument, stringify as stringifyYaml } from "yaml";
+import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { z } from "zod";
 import type { NotebookDocument } from "./notebook.js";
+import {
+  notebookSettingsPatchSchema, projectSettingsPatchSchema,
+  type NotebookSettingsPatch, type ProjectSettingsPatch,
+} from "./settings.js";
 
-/** The maximum UTF-8 document accepted by the shared YAML boundary. */
 export const MAX_YAML_BYTES = 1024 * 1024;
-/** The maximum nesting depth accepted by the shared YAML boundary. */
-export const MAX_YAML_DEPTH = 64;
 
-export const configThemeSchema = z.enum(["light", "dark", "system"]);
-export const configKeymapSchema = z.enum(["default", "vim"]);
-export const configChangeSchema = z.enum(["automatic", "lazy"]);
-
-const integer = (minimum: number, maximum: number) =>
-  z.number().int().refine(Number.isFinite, "must be finite").min(minimum).max(maximum);
-
-export const configFormatSchema = z.object({
-  on_save: z.boolean(),
-}).strict().partial();
-
-export const configEditorSchema = z.object({
-  font_size: integer(10, 32),
-  tab_size: integer(1, 8),
-  line_numbers: z.boolean(),
-  completions: z.boolean(),
-  signature_help: z.boolean(),
-  live_diagnostics: z.boolean(),
-}).strict().partial();
-
-export const configTableSchema = z.object({
-  page_size: integer(5, 200),
-}).strict().partial();
-
-export const configCacheSchema = z.object({
-  enabled: z.boolean(),
-  dir: z.string().min(1).or(z.null()),
-}).strict().partial();
-
-/** A user/project/runtime/launch configuration overlay. */
-export const configLayerSchema = z.object({
-  theme: configThemeSchema,
-  keymap: configKeymapSchema,
-  on_cell_change: configChangeSchema,
-  on_startup: z.boolean(),
-  autosave: z.boolean(),
-  format: configFormatSchema,
-  editor: configEditorSchema,
-  table: configTableSchema,
-  cache: configCacheSchema,
-}).strict().partial();
-
-export const configSchema = z.object({
-  theme: configThemeSchema,
-  keymap: configKeymapSchema,
-  on_cell_change: configChangeSchema,
-  on_startup: z.boolean(),
-  autosave: z.boolean(),
-  format: z.object({ on_save: z.boolean() }).strict(),
-  editor: z.object({
-    font_size: integer(10, 32),
-    tab_size: integer(1, 8),
-    line_numbers: z.boolean(),
-    completions: z.boolean(),
-    signature_help: z.boolean(),
-    live_diagnostics: z.boolean(),
-  }).strict(),
-  table: z.object({ page_size: integer(5, 200) }).strict(),
-  cache: z.object({ enabled: z.boolean(), dir: z.string().min(1).or(z.null()) }).strict(),
-}).strict();
-
-export type Config = z.infer<typeof configSchema>;
-export type ConfigLayer = z.infer<typeof configLayerSchema>;
-
-export type ConfigErrorCode = "config_invalid";
-
-/** Errors raised by configuration/YAML validation. */
 export class ConfigError extends Error {
-  readonly code: ConfigErrorCode = "config_invalid";
-  readonly key: string;
-
-  constructor(key: string, message: string) {
-    super(`config_invalid: key \`${key || "config"}\` ${message}`);
+  readonly code = "config_invalid" as const;
+  constructor(readonly key: string, message: string) {
+    super(`config_invalid: ${key}: ${message}`);
     this.name = "ConfigError";
-    this.key = key || "config";
   }
 }
 
 function clone<T>(value: T): T {
-  if (value === null || typeof value !== "object") return value;
-  if (Array.isArray(value)) return value.map((entry) => clone(entry)) as T;
-  const result: Record<string, unknown> = Object.create(null);
-  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
-    result[key] = clone(entry);
-  }
-  return result as T;
+  return structuredClone(value);
 }
 
-function issueKey(issue: z.ZodIssue): string {
-  if (issue.code === "unrecognized_keys" && issue.keys.length > 0) {
-    return issue.keys[0] ?? "config";
-  }
-  return issue.path.length > 0 ? issue.path.map(String).join(".") : "config";
-}
-
-function parseConfigLayer(value: unknown, partial: boolean): ConfigLayer | Config {
-  const result = partial ? configLayerSchema.safeParse(value) : configSchema.safeParse(value);
-  if (!result.success) {
-    const issue = result.error.issues[0];
-    throw new ConfigError(issueKey(issue), issue.message);
-  }
-  return result.data as ConfigLayer | Config;
-}
-
-/** Return a fresh copy of Alder's complete built-in configuration. */
-export function configDefaults(): Config {
-  return {
-    theme: "system",
-    keymap: "default",
-    on_cell_change: "automatic",
-    on_startup: true,
-    autosave: false,
-    format: { on_save: false },
-    editor: {
-      font_size: 14,
-      tab_size: 2,
-      line_numbers: true,
-      completions: true,
-      signature_help: true,
-      live_diagnostics: false,
-    },
-    table: { page_size: 25 },
-    cache: { enabled: true, dir: null },
-  };
-}
-
-/** Validate and normalize one configuration layer. */
-export function validateConfigLayer(value: unknown): ConfigLayer {
-  return parseConfigLayer(value, true) as ConfigLayer;
-}
-
-/**
- * Validate a configuration value. Partial values are overlays; complete values
- * are merged with defaults first, matching the R implementation's behavior.
- */
-export function validateConfig(value: unknown, options: { partial?: boolean } = {}): Config | ConfigLayer {
-  if (options.partial === false) {
-    const merged = mergeConfig(configDefaults(), validateConfigLayer(value));
-    return parseConfigLayer(merged, false) as Config;
-  }
-  return validateConfigLayer(value);
-}
-
-/** Deeply merge an overlay without mutating either input. */
-export function mergeConfig(base: Config | ConfigLayer, overlay: ConfigLayer): Config | ConfigLayer {
-  const result = clone(base) as Record<string, unknown>;
-  for (const [key, value] of Object.entries(overlay)) {
-    if (
-      value !== null && typeof value === "object" && !Array.isArray(value) &&
-      result[key] !== null && typeof result[key] === "object" && !Array.isArray(result[key])
-    ) {
-      result[key] = mergeConfig(
-        result[key] as Config | ConfigLayer,
-        value as ConfigLayer,
-      );
-    } else {
-      result[key] = clone(value);
-    }
-  }
-  return result as Config | ConfigLayer;
-}
-
-function ensureStringPath(path: string | null | undefined, code = "config"): string {
+function ensureStringPath(path: string | null | undefined): string {
   if (typeof path !== "string" || path.length === 0 || path.includes("\0")) {
-    if (code === "layout") throw new LayoutPathError("layout path must be a non-empty path");
     throw new ConfigError("path", "must be a non-empty path");
   }
   return path;
 }
 
-/** Host-owned user paths. R is never invoked to discover these locations. */
 export function alderPaths(): ReturnType<typeof envPaths> {
   return envPaths("alder", { suffix: "" });
 }
 
-export function userConfigPath(): string {
-  return join(alderPaths().config, "config.yaml");
-}
-
-function projectDirectory(path: string | null | undefined): string | null {
-  if (path === null || path === undefined || path.length === 0) return null;
-  return path.endsWith("/") || path.endsWith("\\") ? path : dirname(path);
+export function preferencesPath(): string {
+  return join(alderPaths().config, "preferences.yaml");
 }
 
 export function projectConfigPath(path: string | null | undefined): string | null {
-  const directory = projectDirectory(path);
-  return directory === null ? null : join(directory, ".alder", "config.yaml");
+  if (!path) return null;
+  const directory = path.endsWith("/") ? path : dirname(path);
+  return join(directory, ".alder", "config.yaml");
 }
 
-function hasUnpairedSurrogate(value: string): boolean {
-  for (let index = 0; index < value.length; index += 1) {
-    const code = value.charCodeAt(index);
-    if (code >= 0xd800 && code <= 0xdbff) {
-      const low = value.charCodeAt(index + 1);
-      if (low < 0xdc00 || low > 0xdfff) return true;
-      index += 1;
-    } else if (code >= 0xdc00 && code <= 0xdfff) return true;
-  }
-  return false;
-}
+const mappingSchema = z.record(z.string(), z.unknown());
 
-function yamlNodeType(node: unknown): string | undefined {
-  if (!node || typeof node !== "object") return undefined;
-  const value = node as { type?: unknown; constructor?: { name?: unknown } };
-  return typeof value.type === "string"
-    ? value.type
-    : typeof value.constructor?.name === "string" ? value.constructor.name : undefined;
-}
-
-function rejectYamlNode(node: unknown, depth: number, kind: string): void {
-  if (node === null || typeof node !== "object") return;
-  if (depth > MAX_YAML_DEPTH) throw new ConfigError(kind, "YAML nesting exceeds depth " + MAX_YAML_DEPTH);
-  const value = node as Record<string, unknown>;
-  const type = yamlNodeType(node);
-  if (type === "ALIAS" || type === "Alias") throw new ConfigError(kind, "YAML aliases are not allowed");
-  if (Object.hasOwn(value, "anchor")) throw new ConfigError(kind, "YAML anchors are not allowed");
-  if (Object.hasOwn(value, "tag")) throw new ConfigError(kind, "YAML custom tags are not allowed");
-  if (type === "PAIR" || type === "Pair") {
-    rejectYamlNode(value.key, depth, kind);
-    rejectYamlNode(value.value, depth + 1, kind);
-    return;
-  }
-  if (Array.isArray(value.items)) {
-    for (const item of value.items) {
-      const itemType = yamlNodeType(item);
-      rejectYamlNode(item, itemType === "PAIR" || itemType === "Pair" ? depth : depth + 1, kind);
-    }
-  }
-  if (Object.hasOwn(value, "key")) rejectYamlNode(value.key, depth, kind);
-  if (Object.hasOwn(value, "value")) rejectYamlNode(value.value, depth + 1, kind);
-}
-
-function assertPlainJson(value: unknown, depth: number, kind: string): void {
-  if (depth > MAX_YAML_DEPTH) {
-    throw new ConfigError(kind, `YAML nesting exceeds depth ${MAX_YAML_DEPTH}`);
-  }
-  if (value === null || typeof value === "string" || typeof value === "boolean") return;
-  if (typeof value === "number") {
-    if (!Number.isFinite(value)) throw new ConfigError(kind, "YAML contains a non-finite number");
-    return;
-  }
-  if (Array.isArray(value)) {
-    for (const entry of value) assertPlainJson(entry, depth + 1, kind);
-    return;
-  }
-  if (typeof value !== "object" || Object.getPrototypeOf(value) !== Object.prototype) {
-    throw new ConfigError(kind, "YAML contains a non-JSON value");
-  }
-  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
-    if (key.includes("\0")) throw new ConfigError(kind, "YAML contains an embedded NUL key");
-    assertPlainJson(entry, depth + 1, kind);
-  }
-}
-
-/**
- * Parse one bounded YAML mapping using YAML 1.2 core semantics. This is the
- * sole YAML entry point used by configuration, notebook headers and packages.
- */
+/** Standard YAML parsing shared by settings, notebook headers and packages. */
 export function parseYamlMapping(text: string, kind: string): Record<string, unknown> {
-  if (typeof text !== "string") throw new ConfigError(kind, "YAML input must be text");
-  if (hasUnpairedSurrogate(text)) throw new ConfigError(kind, "YAML input contains an unpaired surrogate");
-  if (text.includes("\0")) throw new ConfigError(kind, "YAML input contains an embedded NUL");
-  const bytes = new TextEncoder().encode(text).byteLength;
-  if (bytes > MAX_YAML_BYTES) {
+  if (Buffer.byteLength(text, "utf8") > MAX_YAML_BYTES) {
     throw new ConfigError(kind, `YAML document exceeds the ${MAX_YAML_BYTES}-byte limit`);
   }
-  if (text.trim().length === 0) return {};
-
-  let document: ReturnType<typeof parseDocument>;
-  try {
-    document = parseDocument(text, {
-      version: "1.2",
-      schema: "core",
-      uniqueKeys: true,
-      customTags: [],
-      prettyErrors: false,
-    });
-  } catch (error) {
-    throw new ConfigError(kind, `malformed YAML: ${error instanceof Error ? error.message : String(error)}`);
-  }
-  if (document.errors.length > 0) {
-    const first = document.errors[0];
-    throw new ConfigError(kind, `malformed YAML: ${first?.message ?? "parse error"}`);
-  }
-  if (document.warnings.length > 0) {
-    const first = document.warnings[0];
-    throw new ConfigError(kind, `malformed YAML: ${first?.message ?? "parse warning"}`);
-  }
-  rejectYamlNode(document.contents, 0, kind);
-
   let parsed: unknown;
   try {
-    parsed = document.toJS({ mapAsMap: false });
+    parsed = text.trim() === "" ? {} : parseYaml(text, { maxAliasCount: 100 });
   } catch (error) {
     throw new ConfigError(kind, `malformed YAML: ${error instanceof Error ? error.message : String(error)}`);
   }
-  assertPlainJson(parsed, 0, kind);
-  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new ConfigError(kind, "YAML root must be a mapping");
-  }
-  return parsed as Record<string, unknown>;
+  const mapping = mappingSchema.safeParse(parsed);
+  if (!mapping.success) throw new ConfigError(kind, "YAML root must be a mapping");
+  return mapping.data;
 }
 
-function yamlError(path: string, error: unknown): ConfigError {
-  return error instanceof ConfigError
-    ? error
-    : new ConfigError(path, error instanceof Error ? error.message : String(error));
-}
-
-/** Read, bound, parse and validate a configuration file. Missing is empty. */
-export async function readConfigFile(path: string | null | undefined): Promise<ConfigLayer> {
+export async function readProjectSettings(path: string | null | undefined): Promise<ProjectSettingsPatch> {
   if (path === null || path === undefined) return {};
   const file = ensureStringPath(path);
-  let bytes: Uint8Array;
   try {
-    bytes = await readFile(file);
+    const bytes = await readFile(file);
+    const value = parseYamlMapping(new TextDecoder("utf-8", { fatal: true }).decode(bytes), file);
+    return projectSettingsPatchSchema.parse(value);
   } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code === "ENOENT") return {};
-    throw new ConfigError("path", `cannot read configuration file \`${file}\`: ${error instanceof Error ? error.message : String(error)}`);
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
+    throw new ConfigError(file, `cannot read project settings; fix this file and try again: ${error instanceof Error ? error.message : String(error)}`);
   }
-  if (bytes.byteLength > MAX_YAML_BYTES) {
-    throw new ConfigError("path", `configuration file exceeds the ${MAX_YAML_BYTES}-byte limit`);
+}
+
+export function serializeProjectSettings(value: ProjectSettingsPatch): string {
+  return stringifyYaml(value, { sortMapEntries: true });
+}
+
+function metadataMapping(value: unknown, name: string): Record<string, unknown> {
+  const result = mappingSchema.safeParse(value);
+  if (!result.success) throw new ConfigError(name, "must be a mapping");
+  return result.data;
+}
+
+/** Read only owned settings; authored extension fields stay in the document. */
+export function readNotebookSettings(metadata: unknown): NotebookSettingsPatch {
+  if (metadata === null || metadata === undefined) return {};
+  const root = metadataMapping(metadata, "metadata");
+  if (root.runtime === null || root.runtime === undefined) return {};
+  const runtime = metadataMapping(root.runtime, "runtime");
+  const known: Record<string, unknown> = {};
+  for (const key of ["on_cell_change", "on_startup"] as const) {
+    if (Object.hasOwn(runtime, key)) known[key] = runtime[key];
   }
-  try {
-    const value = parseYamlMapping(new TextDecoder("utf-8", { fatal: true }).decode(bytes), "config");
-    return validateConfigLayer(value);
-  } catch (error) {
-    throw yamlError("config", error);
+  if (Object.hasOwn(runtime, "cache")) {
+    const cache = metadataMapping(runtime.cache, "runtime.cache");
+    if (Object.hasOwn(cache, "enabled")) known.cache = { enabled: cache.enabled };
   }
+  const parsed = notebookSettingsPatchSchema.safeParse(known);
+  if (!parsed.success) throw new ConfigError("runtime", parsed.error.message);
+  return parsed.data;
+}
+
+export function setNotebookSettings<T extends Pick<NotebookDocument, "metadata">>(notebook: T, patch: NotebookSettingsPatch): T {
+  const metadata: Record<string, unknown> = structuredClone(notebook.metadata ?? {});
+  const runtime = metadata.runtime == null ? {} : metadataMapping(metadata.runtime, "runtime");
+  metadata.runtime = {
+    ...runtime,
+    ...(patch.on_cell_change === undefined ? {} : { on_cell_change: patch.on_cell_change }),
+    ...(patch.on_startup === undefined ? {} : { on_startup: patch.on_startup }),
+    ...(patch.cache === undefined ? {} : {
+      cache: { ...(runtime.cache == null ? {} : metadataMapping(runtime.cache, "runtime.cache")), ...patch.cache },
+    }),
+  };
+  return { ...notebook, metadata };
 }
 
 /**
@@ -471,226 +247,6 @@ export async function writeAtomicText(path: string, text: string, options: Atomi
   }
 }
 
-export interface WriteConfigOptions extends AtomicWriteOptions {
-  /** Replace rather than patch the existing mapping. Defaults to false. */
-  readonly replace?: boolean;
-}
-
-/** Validate, patch and atomically write a project/user configuration file. */
-export async function writeConfigFile(
-  path: string,
-  patch: unknown,
-  options: WriteConfigOptions = {},
-): Promise<ConfigLayer> {
-  const file = ensureStringPath(path);
-  const checked = validateConfigLayer(patch);
-  const current = options.replace ? {} : await readConfigFile(file);
-  const next = validateConfigLayer(mergeConfig(current, checked));
-  const text = serializeConfigYaml(next);
-  await writeAtomicText(file, text, options);
-  return next;
-}
-
-/** Serialize a validated configuration mapping with deterministic YAML and a final newline. */
-export function serializeConfigYaml(value: Record<string, unknown>): string {
-  const checked = validateConfigLayer(value);
-  const text = stringifyYaml(checked, { version: "1.2", schema: "core", sortMapEntries: true });
-  return text.endsWith("\n") ? text : `${text}\n`;
-}
-export interface ResolveConfigOptions {
-  readonly path?: string | null;
-  readonly metadata?: unknown;
-  readonly user?: unknown;
-  readonly project?: unknown;
-  readonly runtime?: unknown;
-  readonly launch?: unknown;
-  readonly userPath?: string;
-  readonly projectPath?: string | null;
-}
-
-export type ConfigLayerName = "defaults" | "user" | "project" | "runtime" | "launch";
-export type ConfigWritableLayer = "project" | "runtime";
-
-export interface ConfigResolutionLayers {
-  readonly defaults: Config;
-  readonly user: ConfigLayer;
-  readonly project: ConfigLayer;
-  readonly runtime: ConfigLayer;
-  readonly launch: ConfigLayer;
-}
-
-export interface ConfigResolution {
-  readonly effective: Config;
-  readonly layers: ConfigResolutionLayers;
-  /** Dot-delimited leaf keys map to the highest-precedence layer that supplies them. */
-  readonly provenance: Readonly<Record<string, ConfigLayerName>>;
-}
-
-export interface ConfigShadowedDetails {
-  readonly key: string;
-  readonly writtenLayer: ConfigWritableLayer;
-  readonly effectiveLayer: ConfigLayerName;
-}
-
-export class ConfigShadowedError extends Error {
-  readonly code = "config_shadowed" as const;
-  readonly key: string;
-  readonly writtenLayer: ConfigWritableLayer;
-  readonly effectiveLayer: ConfigLayerName;
-  readonly details: ConfigShadowedDetails;
-
-  constructor(details: ConfigShadowedDetails) {
-    super("config_shadowed: key `" + details.key + "` written in " + details.writtenLayer + " is overridden by " + details.effectiveLayer);
-    this.name = "ConfigShadowedError";
-    this.key = details.key;
-    this.writtenLayer = details.writtenLayer;
-    this.effectiveLayer = details.effectiveLayer;
-    this.details = { ...details };
-  }
-
-  toJSON(): ConfigShadowedDetails & { readonly code: "config_shadowed" } {
-    return { code: this.code, ...this.details };
-  }
-}
-
-
-function runtimeLayer(metadata: unknown, explicit: unknown): ConfigLayer {
-  let value: unknown = explicit;
-  if (value === undefined && metadata !== undefined && metadata !== null) {
-    if (typeof metadata !== "object" || Array.isArray(metadata)) throw new ConfigError("runtime", "metadata must be a mapping");
-    value = (metadata as Record<string, unknown>).runtime;
-  }
-  if (value === undefined || value === null) return {};
-  if (typeof value !== "object" || Array.isArray(value)) throw new ConfigError("runtime", "must be a mapping");
-  return validateConfigLayer(value);
-}
-
-/** Resolve defaults < user < project < metadata.runtime < launch. */
-const CONFIG_LAYER_ORDER: readonly ConfigLayerName[] = ["defaults", "user", "project", "runtime", "launch"];
-const CONFIG_LAYER_RANK: Readonly<Record<ConfigLayerName, number>> = {
-  defaults: 0,
-  user: 1,
-  project: 2,
-  runtime: 3,
-  launch: 4,
-};
-
-function isConfigRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function configLeafValues(value: unknown, prefix = "", result: Array<{ key: string; value: unknown }> = []): Array<{ key: string; value: unknown }> {
-  if (!isConfigRecord(value)) {
-    if (prefix.length > 0) result.push({ key: prefix, value });
-    return result;
-  }
-  for (const [key, child] of Object.entries(value)) {
-    const path = prefix.length === 0 ? key : prefix + "." + key;
-    if (isConfigRecord(child)) configLeafValues(child, path, result);
-    else result.push({ key: path, value: child });
-  }
-  return result;
-}
-
-function configValueAt(value: unknown, path: string): unknown {
-  let current: unknown = value;
-  for (const key of path.split(".")) {
-    if (!isConfigRecord(current) || !Object.prototype.hasOwnProperty.call(current, key)) return undefined;
-    current = current[key];
-  }
-  return current;
-}
-
-function sameConfigValue(left: unknown, right: unknown): boolean {
-  if (Object.is(left, right)) return true;
-  if (Array.isArray(left) || Array.isArray(right)) {
-    return Array.isArray(left) && Array.isArray(right)
-      && left.length === right.length
-      && left.every((value, index) => sameConfigValue(value, right[index]));
-  }
-  if (!isConfigRecord(left) || !isConfigRecord(right)) return false;
-  const leftKeys = Object.keys(left);
-  const rightKeys = Object.keys(right);
-  return leftKeys.length === rightKeys.length
-    && leftKeys.every((key) => Object.prototype.hasOwnProperty.call(right, key) && sameConfigValue(left[key], right[key]));
-}
-
-export interface ResolveConfigLayersOptions {
-  readonly user?: unknown;
-  readonly project?: unknown;
-  readonly runtime?: unknown;
-  readonly launch?: unknown;
-}
-
-async function readConfigLayers(options: ResolveConfigOptions): Promise<ResolveConfigLayersOptions> {
-  const path = options.path ?? null;
-  const user = options.user === undefined
-    ? await readConfigFile(options.userPath ?? userConfigPath())
-    : options.user;
-  const projectPath = options.projectPath === undefined ? projectConfigPath(path) : options.projectPath;
-  const project = options.project === undefined
-    ? await readConfigFile(projectPath)
-    : options.project;
-  const runtime = runtimeLayer(options.metadata, options.runtime);
-  const launch = options.launch === undefined ? {} : options.launch;
-  return { user, project, runtime, launch };
-}
-
-/** Resolve supplied partial layers synchronously with the canonical precedence and result shape. */
-export function resolveConfigLayers(options: ResolveConfigLayersOptions = {}): ConfigResolution {
-  const layers: ConfigResolutionLayers = {
-    defaults: configDefaults(),
-    user: options.user === undefined ? {} : validateConfigLayer(options.user),
-    project: options.project === undefined ? {} : validateConfigLayer(options.project),
-    runtime: options.runtime === undefined ? {} : validateConfigLayer(options.runtime),
-    launch: options.launch === undefined ? {} : validateConfigLayer(options.launch),
-  };
-  return buildConfigResolution(layers);
-}
-function buildConfigResolution(layers: ConfigResolutionLayers): ConfigResolution {
-  let effective: Config = clone(layers.defaults);
-  const provenance: Record<string, ConfigLayerName> = {};
-  for (const layerName of CONFIG_LAYER_ORDER) {
-    const layer = layers[layerName];
-    for (const { key } of configLeafValues(layer)) provenance[key] = layerName;
-    if (layerName !== "defaults") effective = mergeConfig(effective, layer) as Config;
-  }
-  effective = validateConfig(effective, { partial: false }) as Config;
-  return {
-    effective: clone(effective),
-    layers: {
-      defaults: clone(layers.defaults),
-      user: clone(layers.user),
-      project: clone(layers.project),
-      runtime: clone(layers.runtime),
-      launch: clone(layers.launch),
-    },
-    provenance: { ...provenance },
-  };
-}
-
-/** Reject a patch whose requested leaf value is hidden by a higher layer. */
-export function assertConfigPatchEffective(
-  resolution: ConfigResolution,
-  patch: ConfigLayer,
-  writtenLayer: ConfigWritableLayer,
-): void {
-  if (writtenLayer !== "project" && writtenLayer !== "runtime") {
-    throw new ConfigError("writtenLayer", "must be project or runtime");
-  }
-  for (const { key, value } of configLeafValues(patch)) {
-    const effectiveLayer = resolution.provenance[key];
-    if (effectiveLayer === undefined) continue;
-    if (CONFIG_LAYER_RANK[effectiveLayer] > CONFIG_LAYER_RANK[writtenLayer]
-      && !sameConfigValue(configValueAt(resolution.effective, key), value)) {
-      throw new ConfigShadowedError({ key, writtenLayer, effectiveLayer });
-    }
-  }
-}
-
-export async function resolveConfig(options: ResolveConfigOptions = {}): Promise<ConfigResolution> {
-  return resolveConfigLayers(await readConfigLayers(options));
-}
 /** Minimal layout-path error declaration shared without importing layout.ts. */
 export class LayoutPathError extends Error {
   readonly code = "invalid_layout" as const;
@@ -718,13 +274,6 @@ export interface AppConfig {
   readonly layout: "vertical" | "grid" | "slides";
   readonly width: "compact" | "medium" | "full";
   readonly include_code: boolean;
-}
-
-export type AppLayerName = "defaults" | "app";
-
-export interface AppResolution {
-  readonly effective: AppConfig;
-  readonly provenance: Readonly<Record<keyof AppConfig, AppLayerName>>;
 }
 
 export const appDefaults: AppConfig = { layout: "vertical", width: "medium", include_code: false };
@@ -784,21 +333,13 @@ export function validateAppUpdate(updates: unknown): Partial<AppConfig> {
   return parsed.data as Partial<AppConfig>;
 }
 
-/** Return effective app settings and per-key defaults/app provenance. */
-export function appConfig(notebook: Pick<NotebookDocument, "metadata">): AppResolution {
-  const app = validateAppMetadata(notebook?.metadata);
-  const effective: AppConfig = {
-    layout: Object.hasOwn(app, "layout") ? app.layout as AppConfig["layout"] : appDefaults.layout,
-    width: Object.hasOwn(app, "width") ? app.width as AppConfig["width"] : appDefaults.width,
-    include_code: Object.hasOwn(app, "include_code") ? app.include_code as boolean : appDefaults.include_code,
-  };
+/** Published-notebook presentation belongs to notebook metadata. */
+export function appConfig(notebook: Pick<NotebookDocument, "metadata">): AppConfig {
+  const app = validateAppMetadata(notebook.metadata);
   return {
-    effective,
-    provenance: {
-      layout: Object.hasOwn(app, "layout") ? "app" : "defaults",
-      width: Object.hasOwn(app, "width") ? "app" : "defaults",
-      include_code: Object.hasOwn(app, "include_code") ? "app" : "defaults",
-    },
+    layout: (app.layout as AppConfig["layout"] | undefined) ?? appDefaults.layout,
+    width: (app.width as AppConfig["width"] | undefined) ?? appDefaults.width,
+    include_code: (app.include_code as boolean | undefined) ?? appDefaults.include_code,
   };
 }
 
