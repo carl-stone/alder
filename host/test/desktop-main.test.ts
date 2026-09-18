@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -15,7 +16,6 @@ const resources = {
   root: "/tmp/alder-test-resources",
   nodeExecutable: "/usr/bin/node",
   hostEntry: "/tmp/alder-host.mjs",
-  processSupervisorExecutable: "/tmp/alder-supervisor",
 };
 
 function jsonResponse(value: unknown, status = 200): Response {
@@ -72,6 +72,7 @@ function windowWithLoad(loadURL: (url: string) => Promise<void> = async () => un
   let destroyed = false;
   let focusedCount = 0;
   const titles: string[] = [];
+  const closedListeners: Array<() => void> = [];
   const webRequest = {
     onBeforeSendHeaders: () => undefined,
     onHeadersReceived: () => undefined,
@@ -89,13 +90,13 @@ function windowWithLoad(loadURL: (url: string) => Promise<void> = async () => un
   };
   const window = {
     webContents,
-    on: () => window,
-    once: () => window,
+    on: (event: string, listener: () => void) => { if (event === "closed") closedListeners.push(listener); return window; },
+    once: (event: string, listener: () => void) => { if (event === "closed") closedListeners.push(listener); return window; },
     isDestroyed: () => destroyed,
     focus: () => { focusedCount += 1; },
     show: () => undefined,
     close: () => undefined,
-    destroy: () => { destroyed = true; },
+    destroy: () => { if (!destroyed) { destroyed = true; for (const listener of closedListeners) listener(); } },
     loadURL,
     setTitle: (title: string) => { titles.push(title); },
   };
@@ -138,6 +139,7 @@ function recordFor(
     hostFailureShown: false,
     loadGeneration: 0,
   };
+  window.once("closed", () => { void (main as any).disposeRecord(record); });
   (main as any).records.add(record);
   for (const key of record.keys) (main as any).byKey.set(key, record);
   return record;
@@ -199,7 +201,7 @@ test("desktop identity polling adopts an authoritative Save As and preserves one
   }
 });
 
-test("desktop close remains open when the authoritative dirty-state query fails", async () => {
+test("cancelled close keeps the editor open when the host is unavailable", async () => {
   const oldPath = "/tmp/alder-desktop-dirty-query-failure.R";
   const oldConnection = connection("session-dirty", oldPath, async path => {
     if (path === "/api/identity") return jsonResponse(identity("session-dirty", oldPath));
@@ -215,6 +217,106 @@ test("desktop close remains open when the authoritative dirty-state query fails"
   assert.equal(record.dirty, true);
   assert.equal(record.closing, false);
   assert.equal(window.destroyed, false);
+  assert.equal(oldConnection.releaseCount, 0);
+});
+
+test("discard closes within a bounded time when the host is unavailable and lease release stalls", { timeout: 4_000 }, async () => {
+  const hostConnection = connection("offline-discard", null, async () => {
+    throw new Error("host is unavailable");
+  });
+  let releaseDisposition: string | undefined;
+  hostConnection.release = async disposition => {
+    releaseDisposition = disposition;
+    await new Promise<void>(() => undefined);
+  };
+  const window = windowWithLoad();
+  window.webContents.executeJavaScript = async () => true;
+  const actions: unknown[] = [];
+  window.webContents.send = (_channel, payload) => { actions.push(payload); };
+  const main = new ElectronMain(runtime(1), { resources });
+  const record = recordFor(main, hostConnection, window);
+
+  await (main as any).requestClose(record);
+
+  assert.deepEqual(actions, [{ action: "close" }]);
+  assert.equal(releaseDisposition, "discard");
+  assert.equal(window.destroyed, true);
+  assert.equal(main.windows().length, 0);
+});
+
+test("cancelled quit preserves unsaved windows and a later quit can discard them", { timeout: 4_000 }, async () => {
+  const hostConnection = connection("cancel-quit", null, async () => { throw new Error("host unavailable"); });
+  const window = windowWithLoad();
+  window.webContents.executeJavaScript = async () => true;
+  const actions: unknown[] = [];
+  window.webContents.send = (_channel, payload) => { actions.push(payload); };
+  const electronRuntime = runtime();
+  const events = new Map<string, (...args: any[]) => unknown>();
+  electronRuntime.app.requestSingleInstanceLock = () => true;
+  electronRuntime.app.whenReady = async () => undefined;
+  electronRuntime.app.on = (event, handler) => { events.set(event, handler); return electronRuntime.app; };
+  let quits = 0;
+  electronRuntime.app.quit = () => { quits += 1; };
+  let response = 2;
+  let dialogs = 0;
+  electronRuntime.dialog.showMessageBox = async () => { dialogs += 1; return { response }; };
+  const main = new ElectronMain(electronRuntime, { resources, initialPath: null });
+  main.openNotebook = async () => undefined;
+  recordFor(main, hostConnection, window);
+  await main.start();
+  let prevented = 0;
+  const beforeQuit = events.get("before-quit")!;
+  beforeQuit({ preventDefault: () => { prevented += 1; } });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(dialogs, 1);
+  assert.equal(prevented, 1);
+  assert.equal(quits, 0);
+  assert.equal(window.destroyed, false);
+  assert.equal(hostConnection.releaseCount, 0);
+  assert.deepEqual(actions, []);
+
+  response = 1;
+  beforeQuit({ preventDefault: () => { prevented += 1; } });
+  while (quits === 0) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(dialogs, 2);
+  assert.equal(window.destroyed, true);
+  assert.deepEqual(hostConnection.releaseDispositions, ["discard"]);
+});
+
+test("Save As returns an absent target or the exact explicitly confirmed destination", async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "alder-desktop-save-as-")));
+  try {
+    const destination = join(root, "copy.R");
+    const hostConnection = connection("save-as-dialog", null, async () => { throw new Error("unexpected request"); });
+    const window = windowWithLoad();
+    const handlers = new Map<string, (event: unknown, ...args: unknown[]) => Promise<unknown>>();
+    const electronRuntime = runtime();
+    electronRuntime.BrowserWindow.fromWebContents = () => window;
+    electronRuntime.ipcMain.handle = (channel, handler) => { handlers.set(channel, handler); };
+    electronRuntime.dialog.showSaveDialog = async () => ({ canceled: false, filePath: destination });
+    electronRuntime.dialog.showMessageBox = async () => { throw new Error("the native save panel already confirms replacement"); };
+    const main = new ElectronMain(electronRuntime, { resources });
+    recordFor(main, hostConnection, window);
+    (main as any).installIpcHandlers();
+    const choose = handlers.get("alderDesktop:chooseSavePath")!;
+    const event = { sender: window.webContents, senderFrame: window.webContents.mainFrame };
+    assert.deepEqual(await choose(event), { path: destination, expectedDestination: "absent" });
+
+    const previous = "# %%\nprevious <- 1\n";
+    await writeFile(destination, previous);
+    const info = await stat(destination, { bigint: true });
+    const digest = createHash("sha256").update(previous).digest("hex");
+    assert.deepEqual(await choose(event), {
+      path: destination,
+      expectedDestination: {
+        expectedDiskDigest: digest,
+        expectedDiskVersion: `${info.dev}:${info.ino}:${Number(info.mode & 0o777n).toString(8)}:${digest}`,
+      },
+    });
+    electronRuntime.dialog.showSaveDialog = async () => ({ canceled: true });
+    assert.equal(await choose(event), null);
+    assert.equal(await readFile(destination, "utf8"), previous);
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test("desktop close returns immediately when untitled Save As is cancelled", async () => {
@@ -243,7 +345,7 @@ test("desktop close returns immediately when untitled Save As is cancelled", asy
   assert.equal(window.destroyed, false);
   assert.equal(applicationErrors, 0);
 });
-test("desktop restart releases replacement and closes when replacement and rollback loads fail", async () => {
+test("desktop restart failure preserves the existing editor and releases only the replacement", async () => {
   const oldPath = "/tmp/alder-desktop-restart-failure.R";
   const oldConnection = connection("session-old", oldPath, async path => {
     assert.equal(path, "/api/ticket");
@@ -269,10 +371,10 @@ test("desktop restart releases replacement and closes when replacement and rollb
 
   assert.equal(loadCount, 2);
   assert.equal(nextConnection.releaseCount, 1);
-  assert.equal(oldConnection.releaseCount, 1);
-  assert.equal(record.released, true);
-  assert.equal(main.windows().length, 0);
-  assert.equal(window.destroyed, true);
+  assert.equal(oldConnection.releaseCount, 0);
+  assert.equal(record.released, false);
+  assert.equal(main.windows().length, 1);
+  assert.equal(window.destroyed, false);
 });
 test("desktop host shutdown IPC retires its process tree and window", async () => {
   const notebookPath = "/tmp/alder-desktop-host-shutdown.R";
@@ -310,19 +412,11 @@ test("opening a notebook replaces a clean untitled launch window", async () => {
   let opened: string | null = null;
   (main as any).openNotebook = async (path: string) => { opened = path; };
   (main as any).readWindowState = async () => ({ path: null, dirty: false, platform: process.platform, sessionEpoch: "epoch" });
-  const actions: string[] = [];
-  (main as any).dispatchAction = async (target: any, action: string) => {
-    actions.push(action);
-    await (main as any).disposeRecord(target, "discard");
-    target.window.destroy();
-  };
-
   await (main as any).openReplacingPristineUntitled(record, openedPath);
 
   assert.equal(opened, openedPath);
-  assert.deepEqual(actions, ["close"]);
   assert.equal(untitledConnection.releaseCount, 1);
-  assert.deepEqual(untitledConnection.releaseDispositions, ["discard"]);
+  assert.deepEqual(untitledConnection.releaseDispositions, ["normal"]);
   assert.equal(record.released, true);
   assert.equal(window.destroyed, true);
   assert.equal(main.windows().length, 0);

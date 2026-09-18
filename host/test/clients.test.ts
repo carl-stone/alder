@@ -856,7 +856,7 @@ test('browser submits a startup marker when host startup execution is disabled',
   });
   const baseSnapshot = snapshot();
   const stoppedRuntime = { ...baseSnapshot.runtime, kernelState: 'stopped' as const, executionReady: false, startupActivated: false, kernelEpoch: null };
-  const selectedRuntime = { ...stoppedRuntime, rEnvironment: { rscript: '/usr/bin/Rscript', rHome: '/usr/lib/R', version: '4.6.1', platform: 'linux', arch: 'x64', libraryPaths: ['/tmp/alder-r-library'], identity: 'a'.repeat(64) } };
+  const selectedRuntime = { ...stoppedRuntime, rEnvironment: { rscript: '/usr/bin/Rscript', rHome: '/usr/lib/R', version: '4.6.1', platform: 'darwin', arch: 'x64', libraryPaths: ['/tmp/alder-r-library'], identity: 'a'.repeat(64) } };
   const noRunSnapshot = { ...baseSnapshot, config: { on_startup: false }, runtime: stoppedRuntime };
   try {
     await withBrowserFetch(async () => new Response(JSON.stringify({
@@ -964,6 +964,89 @@ test("an epoch replacement rejects old operation waiters before accepting reused
   } finally {
     client.close();
   }
+});
+
+test("browser opens a saved notebook when recovery inventory cannot be read", async () => {
+  const socket = new FakeSocket();
+  const store = new MemoryRecoveryStore();
+  store.listDrafts = async () => { throw new Error("recovery storage unavailable"); };
+  const client = new BrowserNotebookClient({
+    url: "ws://127.0.0.1/api/socket", reconnect: false, clientId: "browser-no-recovery", leaseId: "lease-1", csrf: "csrf-1",
+    webSocketFactory: () => socket, recoveryStore: store,
+  });
+  try {
+    const connected = client.connect();
+    socket.open();
+    socket.receive(recoverySnapshot(snapshot()));
+    const document = await connected;
+    assert.deepEqual(document.cell("c1")!.desiredBody, ["x <- 1"]);
+    assert.equal(client.recoveryState.persistenceError?.code, "recovery_inventory_failed");
+    client.editCell(document.cell("c1")!.key, "x <- 2");
+    assert.deepEqual(document.pendingSource().changes, [{ type: "edit", cell: { cellId: "c1" }, body: ["x <- 2"], cellType: "code", expectedRevision: 0 }]);
+  } finally { client.close(); }
+});
+
+for (const failure of ["rejects", "stalls"] as const) {
+  test(`browser commits source while recovery storage ${failure}`, { timeout: 2_000 }, async () => {
+    const socket = new FakeSocket();
+    const store = new MemoryRecoveryStore();
+    let writes = 0;
+    store.saveDraft = async () => {
+      writes += 1;
+      if (failure === "rejects") throw new Error("recovery storage full");
+      await new Promise<void>(() => undefined);
+    };
+    const clientId = "browser-storage-" + failure;
+    const client = new BrowserNotebookClient({
+      url: "ws://127.0.0.1/api/socket", reconnect: false, clientId, leaseId: "lease-1", csrf: "csrf-1",
+      webSocketFactory: () => socket, recoveryStore: store,
+    });
+    try {
+      const connected = client.connect();
+      socket.open();
+      socket.receive(recoverySnapshot(snapshot()));
+      const document = await connected;
+      const key = document.cell("c1")!.key;
+      client.editCell(key, "x <- 2");
+      const committing = client.commitEdits();
+      await waitUntil(() => socket.sent.length === 2);
+      const frame = JSON.parse(socket.sent[1]!) as { sequence: number; command: Extract<HostCommand, { type: "transaction" }> };
+      assert.deepEqual(frame.command.changes, [{ type: "edit", cell: { cellId: "c1" }, body: { encoding: "base64", data: Buffer.from("x <- 2").toString("base64"), lines: 1 }, cellType: "code", expectedRevision: 0 }]);
+      socket.receive({ type: "commandResult", sequence: frame.sequence, result: admissionFor(clientId, frame.command.operationId, frame.sequence, "done", {
+        edited: [{ id: "c1", revision: 1 }], created: {}, deleted: [], documentRevision: 1,
+      }) });
+      await committing;
+      assert.ok(writes > 0);
+      assert.deepEqual(document.cell("c1")!.desiredBody, ["x <- 2"]);
+      assert.deepEqual(document.pendingSource().changes, []);
+      client.editCell(key, "x <- 3");
+      assert.equal(document.pendingSource().changes.length, 1);
+    } finally { client.close(); }
+  });
+}
+
+test("browser Save As forwards the exact confirmed replacement precondition", async () => {
+  const socket = new FakeSocket();
+  const clientId = "browser-save-as";
+  const client = new BrowserNotebookClient({
+    url: "ws://127.0.0.1/api/socket", reconnect: false, clientId, leaseId: "lease-1", csrf: "csrf-1",
+    webSocketFactory: () => socket, recoveryStore: new MemoryRecoveryStore(),
+  });
+  try {
+    const connected = client.connect();
+    socket.open();
+    socket.receive(recoverySnapshot(snapshot()));
+    await connected;
+    const expectedDestination = { expectedDiskDigest: "a".repeat(64), expectedDiskVersion: "confirmed-version" };
+    const saving = client.saveAs({ path: "/tmp/existing.R", expectedDestination });
+    await waitUntil(() => socket.sent.length === 2);
+    const frame = JSON.parse(socket.sent[1]!) as { sequence: number; command: Extract<HostCommand, { type: "save-as" }> };
+    assert.equal(frame.command.type, "save-as");
+    assert.equal(frame.command.path, "/tmp/existing.R");
+    assert.deepEqual(frame.command.expectedDestination, expectedDestination);
+    socket.receive({ type: "commandResult", sequence: frame.sequence, result: admissionFor(clientId, frame.command.operationId, frame.sequence) });
+    await saving;
+  } finally { client.close(); }
 });
 
 test("ambiguous structural transport failure retains durable receipt recovery", async () => {
@@ -1214,12 +1297,9 @@ test("interactive deferred requests expose their exact terminal operation", asyn
 });
 
 test("LSP mapping preserves native file URIs and excludes delimiter lines", () => {
-  assert.equal(encodeFilePathUri("C:\\Users\\A B\\café #?%20.R", "win32"), "file:///C:/Users/A%20B/caf%C3%A9%20%23%3F%2520.R");
-  assert.equal(encodeFilePathUri("C:/", "win32"), "file:///C:/");
-  assert.equal(encodeFilePathUri("\\\\server\\share\\a b%20.R", "win32"), "file://///server/share/a%20b%2520.R");
-  assert.equal(encodeFilePathUri("/tmp/café #?%20\\name.R", "linux"), "file:///tmp/caf%C3%A9%20%23%3F%2520%5Cname.R");
-  assert.equal(encodeFilePathUri("/", "linux"), "file:///");
-  assert.equal(fileUri("unsaved # %20.R", "/tmp/alder project", "linux"), "file:///tmp/alder%20project/unsaved%20%23%20%2520.R");
+  assert.equal(encodeFilePathUri("/tmp/café #?%20\\name.R"), "file:///tmp/caf%C3%A9%20%23%3F%2520%5Cname.R");
+  assert.equal(encodeFilePathUri("/"), "file:///");
+  assert.equal(fileUri("unsaved # %20.R", "/tmp/alder project"), "file:///tmp/alder%20project/unsaved%20%23%20%2520.R");
   const notebook = {
     path: "/tmp/notebook.R", header: ["# title"], cells: [
       { id: "a", type: "code" as const, options: { label: "one" }, body: ["x <- 1", "x"] },
@@ -1470,7 +1550,7 @@ test("LSP deferred diagnostics ignore project .lintr and package startup side ef
     "",
   ].join("\n"));
   await writeFile(notebookPath, "x == NA\n");
-  const rExecutable = join(dirname(liveRscript!), process.platform === "win32" ? "R.exe" : "R");
+  const rExecutable = join(dirname(liveRscript!), "R");
   const installerResult = Promise.withResolvers<void>();
   const installer = spawn(rExecutable, ["CMD", "INSTALL", "--no-test-load", "--library=" + projectLibrary, packageDirectory], {
     stdio: ["ignore", "ignore", "pipe"],
