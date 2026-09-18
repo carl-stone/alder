@@ -37,6 +37,44 @@ test_that("reference-like dependencies bypass unsafe cache reuse", {
   expect_identical(cached(5L), 15L)
 })
 
+test_that("referenced helper changes invalidate memory and disk cache", {
+  cache_dir <- tempfile("alder-cache-helper-")
+  dir.create(cache_dir)
+  withr::defer(unlink(cache_dir, recursive = TRUE, force = TRUE))
+
+  helper <- function(x) { message("helper twice"); x * 2L }
+  memo <- alder::cache$memory(function(x) helper(x))
+  saved <- alder::cache$disk(function(x) helper(x), dir = cache_dir)
+  observed <- function(f, x) {
+    messages <- character()
+    value <- withCallingHandlers(f(x), message = function(m) {
+      messages <<- c(messages, conditionMessage(m))
+      invokeRestart("muffleMessage")
+    })
+    list(value = value, messages = messages)
+  }
+  expect_identical(observed(memo, 3L), list(value = 6L, messages = "helper twice\n"))
+  expect_identical(observed(saved, 4L), list(value = 8L, messages = "helper twice\n"))
+  expect_identical(observed(memo, 3L), list(value = 6L, messages = character()))
+  expect_identical(observed(saved, 4L), list(value = 8L, messages = character()))
+  expect_length(list.files(cache_dir, pattern = "^alder-[[:xdigit:]]+\\.rds$"), 1L)
+
+  helper <- function(x) { message("helper thrice"); x * 3L }
+  expect_identical(observed(memo, 3L), list(value = 9L, messages = "helper thrice\n"))
+  expect_identical(observed(saved, 4L), list(value = 12L, messages = "helper thrice\n"))
+  expect_identical(observed(memo, 3L), list(value = 9L, messages = character()))
+  expect_identical(observed(saved, 4L), list(value = 12L, messages = character()))
+  expect_length(list.files(cache_dir, pattern = "^alder-[[:xdigit:]]+\\.rds$"), 2L)
+
+  factor <- 4L
+  helper <- function(x) x * factor
+  expect_identical(memo(3L), 12L)
+  expect_identical(saved(4L), 16L)
+  factor <- 5L
+  expect_identical(memo(3L), 15L)
+  expect_identical(saved(4L), 20L)
+})
+
 test_that("a corrupt disk entry is discarded and atomically replaced", {
   cache_dir <- tempfile("alder-cache-corrupt-")
   dir.create(cache_dir)

@@ -21,22 +21,43 @@ cache_fingerprintable <- function(value, depth = 0L) {
   TRUE
 }
 
-cache_dependency_values <- function(f) {
+cache_function_signature <- function(f, seen, depth) {
+  if (depth > 30L || any(vapply(seen, identical, logical(1), f))) return(NULL)
+  if (is.primitive(f)) return(list(primitive = deparse(f)))
+  env <- environment(f)
+  if (isNamespace(env) || identical(env, baseenv())) {
+    return(list(namespace = environmentName(env),
+                body = deparse(body(f)), formals = deparse(formals(f))))
+  }
+  dependencies <- cache_dependency_values(f, c(seen, list(f)), depth + 1L)
+  if (is.null(dependencies)) return(NULL)
+  list(body = deparse(body(f)), formals = deparse(formals(f)),
+       dependencies = dependencies)
+}
+
+cache_dependency_values <- function(f, seen = list(f), depth = 0L) {
   globals <- tryCatch(
-    codetools::findGlobals(f, merge = FALSE)$variables,
+    codetools::findGlobals(f, merge = FALSE),
     error = function(e) NULL
   )
   if (is.null(globals)) return(NULL)
-  globals <- sort(unique(as.character(globals)))
+  names <- sort(unique(c(globals$variables, globals$functions)))
   env <- environment(f)
-  values <- lapply(globals, function(name) {
+  values <- lapply(names, function(name) {
     if (exists(name, envir = env, inherits = TRUE)) {
-      get(name, envir = env, inherits = TRUE)
+      value <- get(name, envir = env, inherits = TRUE)
+      if (is.function(value)) {
+        signature <- cache_function_signature(value, seen, depth + 1L)
+        if (is.null(signature)) return(NULL)
+        return(list(function_signature = signature))
+      }
+      value
     } else {
       structure(list(), class = "alder_missing_cache_dependency")
     }
   })
-  names(values) <- globals
+  names(values) <- names
+  if (any(vapply(values, is.null, logical(1)))) return(NULL)
   if (!cache_fingerprintable(values)) return(NULL)
   values
 }
@@ -46,8 +67,8 @@ cache_key <- function(f, args) {
   if (is.null(dependencies) || !cache_fingerprintable(args)) return(NULL)
   tryCatch(
     rlang::hash(list(
-      body = body(f),
-      formals = formals(f),
+      body = deparse(body(f)),
+      formals = deparse(formals(f)),
       dependencies = dependencies,
       args = args
     )),

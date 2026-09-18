@@ -404,6 +404,35 @@ test("stock Ark cache reuses values and invalidates changed code and dependencie
     await closeEngine(engine, processScope, directory);
   }
 });
+test("stock Ark memory and disk caches invalidate a redefined helper function", integration, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "alder-engine-cache-helper-"));
+  const { engine, processScope } = await openEngine(directory);
+  try {
+    const epoch = (await engine.start()).kernel!.kernelEpoch;
+    const evaluate = async (id: string, source: string) => {
+      const result = await engine.evaluate(payload(epoch, id, id, source));
+      assert.equal(result.ok, true, result.error?.message);
+      return result;
+    };
+    await evaluate("helper-import", "library(alder)");
+    await evaluate("helper-first", 'helper <- function(x) { message("compute twice"); x * 2L }');
+    await evaluate("helper-caches", "memo <- cache$memory(function(x) helper(x)); saved <- cache$disk(function(x) helper(x))");
+    const first = await evaluate("helper-values-first", "c(memo(3L), saved(4L))");
+    assert.match(JSON.stringify(first.outputs), /6 8/);
+    assert.equal(first.log?.filter((line) => line.includes("compute twice")).length, 2);
+    const reused = await evaluate("helper-values-reused", "c(memo(3L), saved(4L))");
+    assert.match(JSON.stringify(reused.outputs), /6 8/);
+    assert.equal(reused.log?.some((line) => line.includes("compute twice")), false);
+
+    await evaluate("helper-redefined", 'helper <- function(x) { message("compute thrice"); x * 3L }');
+    const changed = await evaluate("helper-values-changed", "c(memo(3L), saved(4L))");
+    assert.match(JSON.stringify(changed.outputs), /9 12/);
+    assert.equal(changed.log?.filter((line) => line.includes("compute thrice")).length, 2);
+    assert.equal((await readdir(join(directory, "cache"))).filter((name) => name.endsWith(".rds")).length, 2);
+  } finally {
+    await closeEngine(engine, processScope, directory);
+  }
+});
 test("Alder log notifications preserve exact OutputLog lines", integration,
   async () => {
     const directory = await mkdtemp(join(tmpdir(), "alder-engine-log-lines-"));
