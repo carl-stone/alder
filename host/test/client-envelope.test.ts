@@ -82,9 +82,6 @@ class SnapshotController implements ControllerAdapter {
   constructor(private readonly state: HostSnapshot) {}
 
   snapshot(_clientId?: string): HostSnapshot { return this.state; }
-  recover(): Recovery {
-    return { kind: "snapshot", epoch: this.state.epoch, cursor: this.state.cursor, snapshot: this.state };
-  }
   subscribe(listener: (event: HostEvent) => void): () => void {
     this.subscribed = true;
     queueMicrotask(() => {
@@ -204,11 +201,10 @@ async function receiveInBrowser(browserOrigin: string, token: string, expectedLi
   }, connectionOrigin, browserOrigin, browserHost);
   assert.equal(sessionResponse.ok, true, "browser session exchange must succeed");
   const session = await sessionResponse.json() as {
-    leaseId?: unknown; clientId?: unknown; nextCommandSequence?: unknown; epoch?: unknown; continuityProof?: unknown; csrf?: unknown;
+    leaseId?: unknown; clientId?: unknown; epoch?: unknown; continuityProof?: unknown; csrf?: unknown;
   };
   assert.equal(typeof session.leaseId, "string");
   assert.equal(typeof session.clientId, "string");
-  assert.equal(typeof session.nextCommandSequence, "number");
   assert.equal(typeof session.epoch, "string");
   assert.equal(typeof session.continuityProof, "string");
   assert.equal(typeof session.csrf, "string");
@@ -226,7 +222,6 @@ async function receiveInBrowser(browserOrigin: string, token: string, expectedLi
     leaseId: session.leaseId as string,
     csrf: session.csrf as string,
     continuityProof: session.continuityProof as string,
-    nextCommandSequence: session.nextCommandSequence as number,
     webSocketFactory: url => new AuthenticatedSocket(url, browserOrigin, browserHost, cookie),
     onSnapshot: value => { receivedLines = value.cells[0]?.body.length ?? -1; },
   });

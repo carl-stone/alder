@@ -7,6 +7,7 @@ import lockfile, { type LockOptions } from "proper-lockfile";
 import { SharedBackend } from "./backend-client.js";
 import {
   HOST_PROTOCOL,
+  decodeJsonFrame,
   MAX_PROTOCOL_COLLECTION_ITEMS,
   attachLeaseRequestSchema,
   hostIdentitySchema,
@@ -19,7 +20,6 @@ import {
   type SessionLease,
   type SessionRegistryMetadata,
 } from "./protocol.js";
-import { parseStrictJson } from "./strict-json.js";
 import { ensurePrivateDirectory, ensurePrivateFile, readPrivateFile, securePrivateDirectory, verifyPrivateDirectory, verifyPrivateFile, writePrivateFile, type PrivatePathOptions } from "./private-paths.js";
 export const STARTUP_TIMEOUT_MS = 120_000;
 export const HEARTBEAT_INTERVAL_MS = 10_000;
@@ -950,7 +950,6 @@ function createConnection(
   capabilities: string[] = [],
 ): SessionConnection {
   let released = false;
-  let nextCommandSequence = lease.nextCommandSequence;
   const authenticatedHeaders = (init: RequestInit = {}): Headers => {
     const headers = new Headers(init.headers);
     headers.set("Authorization", "Bearer " + token);
@@ -974,12 +973,10 @@ function createConnection(
     const response = await request("/api/lease", {
       method: "POST",
       headers: authenticatedJsonHeaders(),
-      body: JSON.stringify(leaseActionRequestSchema.parse({ action: "heartbeat", leaseId: lease.leaseId })),
+      body: JSON.stringify({ action: "heartbeat", leaseId: lease.leaseId }),
     });
     if (!response.ok) throw new SessionUnavailableError("session heartbeat failed (" + response.status + ")");
-    const current = sessionLeaseSchema.parse(await response.json());
-    nextCommandSequence = Math.max(nextCommandSequence, current.nextCommandSequence);
-    connection.nextCommandSequence = nextCommandSequence;
+    sessionLeaseSchema.parse(await response.json());
   };
   let releasePromise: Promise<void> | undefined;
   const release = (disposition: "normal" | "discard" = "normal"): Promise<void> => {
@@ -988,7 +985,7 @@ function createConnection(
       await request("/api/lease", {
         method: "POST",
         headers: authenticatedJsonHeaders(),
-        body: JSON.stringify(leaseActionRequestSchema.parse({ action: "release", leaseId: lease.leaseId, disposition })),
+        body: JSON.stringify({ action: "release", leaseId: lease.leaseId, disposition }),
       }).catch(() => undefined);
       released = true;
     })();
@@ -1006,7 +1003,6 @@ function createConnection(
     continuityProof,
     leaseId: lease.leaseId,
     clientId: lease.clientId,
-    nextCommandSequence,
     capabilities: [...capabilities],
     request,
     heartbeat,
@@ -1144,7 +1140,7 @@ async function requestJson<T>(origin: string, token: string, path: string, init:
   let value: unknown = null;
   if (bytes.length > 0) {
     try {
-      value = parseStrictJson(bytes, { maxBytes: 1024 * 1024, maxDepth: 64 });
+      value = decodeJsonFrame(bytes, 1024 * 1024);
     } catch (error) {
       throw new SessionAuthError(error instanceof Error ? error.message : "session response is not valid JSON");
     }
@@ -1160,7 +1156,7 @@ async function readRegistry(path: string, privatePathOptions: PrivatePathOptions
   try {
     const bytes = await readPrivateFile(path, { ...privatePathOptions, maxBytes: 64 * 1024 });
     if (bytes.byteLength === 0) return null;
-    return sessionRegistryMetadataSchema.parse(parseStrictJson(bytes, { maxBytes: 64 * 1024, maxDepth: 32 }));
+    return sessionRegistryMetadataSchema.parse(decodeJsonFrame(bytes, 64 * 1024));
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code === "ENOENT") return null;
@@ -1209,7 +1205,7 @@ async function readUntitledRecoveryDescriptor(path: string, id: string, privateP
   try {
     const bytes = await readPrivateFile(path, { ...privatePathOptions, maxBytes: UNTITLED_RECOVERY_DESCRIPTOR_MAX_BYTES });
     if (bytes.byteLength === 0) throw new SessionUnavailableError("untitled recovery descriptor is empty", { path });
-    return parseUntitledRecoveryDescriptor(parseStrictJson(bytes, { maxBytes: UNTITLED_RECOVERY_DESCRIPTOR_MAX_BYTES, maxDepth: 16 }), id, path);
+    return parseUntitledRecoveryDescriptor(decodeJsonFrame(bytes, UNTITLED_RECOVERY_DESCRIPTOR_MAX_BYTES), id, path);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
     if (error instanceof SessionUnavailableError) throw error;

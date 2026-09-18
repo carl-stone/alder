@@ -479,6 +479,13 @@ async function startNotebookHost(
       }
     } else if (recoveryPending) {
       recoveryConflict = true;
+    } else {
+      // A saved notebook still needs stable cell IDs when a renderer lost the
+      // response to a create. Reuse identities only for the exact saved source.
+      const savedBytes = decodePhysicalBytes(materialized.physicalBytes);
+      if (savedBytes !== null && Buffer.from(savedBytes).equals(Buffer.from(serializeNotebookWithParts(notebook).bytes))) {
+        notebook = restoreNotebookCellIdentity(notebook, materialized.cells);
+      }
     }
     configResolution = await resolveConfig({ path: isUntitled ? null : store.path, metadata: notebook.metadata, project: projectConfigLayer, launch: launchConfig });
     resolvedLayout = projectLayoutIntent;
@@ -1499,8 +1506,7 @@ async function startNotebookHost(
         continuityProof: ownership.continuityProof,
         token: ownership.token,
         pid: ownership.pid,
-        recoveryKey: recovery!.recoveryKey,
-        recoveryKeyId: createHash("sha256").update(Buffer.from(recovery!.recoveryKey, "base64url")).digest("base64url"),
+        recoveryId: recovery!.recoveryId,
       },
       staticDir: options.resources.rendererDirectory,
       indexFile: join(options.resources.rendererDirectory, "index.html"),

@@ -55,7 +55,6 @@ function connection(
     continuityProof: "proof",
     leaseId: "lease-" + sessionKey,
     clientId: "client-" + sessionKey,
-    nextCommandSequence: 1,
     capabilities: [],
     request,
     heartbeat: async () => undefined,
@@ -362,17 +361,17 @@ test("native recovery IPC accepts the owning main frame and keeps its recovery i
     (main as any).installIpcHandlers();
     const recovery = handlers.get("alderDesktop:recovery")!;
     const event = { sender: window.webContents, senderFrame: window.webContents.mainFrame };
-    const keyId = "a".repeat(43);
+    const recoveryId = "a".repeat(43);
     const name = "draft:client-one";
     const value = { source: "# %%\nx <- 42\n" };
-    await recovery(event, { action: "write", keyId, name, value });
-    assert.deepEqual(await recovery(event, { action: "read", keyId, name }), value);
-    assert.deepEqual(await recovery(event, { action: "list", keyId, prefix: "draft:" }), { records: [{ name, value }] });
-    await assert.rejects(recovery({ ...event, senderFrame: { url: browserOrigin + "/" } }, { action: "read", keyId, name }), /main frame/);
-    await assert.rejects(recovery({ sender: windowWithLoad().webContents }, { action: "read", keyId, name }), /active application window/);
-    await assert.rejects(recovery(event, { action: "read", keyId: "b".repeat(43), name }), /identity changed/);
-    await recovery(event, { action: "remove", keyId, name });
-    assert.equal(await recovery(event, { action: "read", keyId, name }), null);
+    await recovery(event, { action: "write", recoveryId, name, value });
+    assert.deepEqual(await recovery(event, { action: "read", recoveryId, name }), value);
+    assert.deepEqual(await recovery(event, { action: "list", recoveryId, prefix: "draft:" }), { records: [{ name, value }] });
+    await assert.rejects(recovery({ ...event, senderFrame: { url: browserOrigin + "/" } }, { action: "read", recoveryId, name }), /main frame/);
+    await assert.rejects(recovery({ sender: windowWithLoad().webContents }, { action: "read", recoveryId, name }), /active application window/);
+    await assert.rejects(recovery(event, { action: "read", recoveryId: "b".repeat(43), name }), /identity changed/);
+    await recovery(event, { action: "remove", recoveryId, name });
+    assert.equal(await recovery(event, { action: "read", recoveryId, name }), null);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

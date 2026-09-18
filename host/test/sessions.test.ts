@@ -246,7 +246,7 @@ test("session lease release sends one normal release action", async () => {
     documentReady: true,
     configuration: { rscript: null, executionMode: "automatic", runOnStartup: false, deferStartup: false },
   };
-  const lease = { leaseId, clientId, nextCommandSequence: 1, epoch };
+  const lease = { leaseId, clientId, epoch };
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const url = new URL(typeof input === "string" ? input : input.toString());
     const body = typeof init?.body === "string" ? JSON.parse(init.body) as Record<string, unknown> : undefined;
@@ -331,7 +331,7 @@ test("session acquisition waits for a live stopping owner to exit", async () => 
     requests.push(url.pathname);
     const body = url.pathname === "/api/identity"
       ? identity
-      : { leaseId, clientId, nextCommandSequence: 1, epoch };
+      : { leaseId, clientId, epoch };
     return new Response(JSON.stringify(body), {
       status: 200,
       headers: { "Content-Type": "application/json", "X-Alder-Continuity-Proof": continuityProof },

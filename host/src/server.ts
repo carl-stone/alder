@@ -1,4 +1,5 @@
-import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { z } from "zod";
+import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { createServer as createHttpServer, type IncomingMessage, type Server as HttpServer, type ServerResponse } from "node:http";
 import { lstat, readFile, realpath, stat } from "node:fs/promises";
@@ -15,20 +16,23 @@ import {
   SNAPSHOT_ENVELOPE_LIMIT,
   artifactResourceNameSchema,
   artifactResolutionSchema,
-  commandAdmissionSchema,
+  ticketMintRequestSchema,
+  ticketExchangeRequestSchema,
+  attachLeaseRequestSchema,
+  leaseActionRequestSchema,
+  decodeJsonFrame,
   decodeHostCommandWire,
   decodeHostQueryWire,
   encodeHostEventWire,
   encodeHostQueryResultWire,
   encodeRecoveryWire,
-  hostQueryResultSchema,
   mimeEssence,
   parseHostCommand,
   parseArtifactDescriptor,
   parseHostQuery,
   sameArtifactHandle,
   type ArtifactHandle,
-  type CommandAdmission,
+  type CommandResult,
   type HostCommand,
   type HostEvent,
   type HostQuery,
@@ -39,7 +43,6 @@ import {
   type OperationRecord,
   type HostConfiguration,
 } from "./protocol.js";
-import { parseStrictJson, StrictJsonError } from "./strict-json.js";
 import type { ArtifactManifest, ArtifactResourceRead } from "./outputs.js";
 import type { UploadStore } from "./uploads.js";
 import { readPrivateFile } from "./private-paths.js";
@@ -67,9 +70,8 @@ const ORIGIN_HOST_PATTERN = /^[0-9a-f]{32}\.localhost$/;
 
 export interface ControllerAdapter {
   snapshot(clientId?: string): HostSnapshot;
-  recover(epoch: string | null, cursor: number | null): Recovery;
   subscribe(listener: (event: HostEvent) => void): () => void;
-  dispatch(command: HostCommand): Promise<CommandAdmission>;
+  dispatch(command: HostCommand): Promise<CommandResult>;
   registerClient?(clientId: string): void;
   releaseClient?(clientId: string): void;
   query?(query: HostQuery, callerClientId?: string): Promise<HostQueryResult> | HostQueryResult;
@@ -90,9 +92,7 @@ export interface AlderServerSession {
   readonly epoch: string;
   readonly processNonce: string;
   readonly continuityProof?: string;
-  /** Owner-only 256-bit key identifier for authenticated browser recovery encryption. */
-  readonly recoveryKeyId?: string;
-  readonly recoveryKey?: string;
+  readonly recoveryId?: string;
   readonly token: string;
   readonly documentReady?: boolean;
 }
@@ -103,10 +103,8 @@ export interface AuthContext {
   readonly leaseId: string | null;
   readonly clientId: string | null;
   readonly csrf: string | null;
-  readonly nextCommandSequence: number | null;
   /** Authoritative registry check for work that crossed an async boundary. */
   readonly assertActive?: () => void;
-  readonly updateNextCommandSequence?: (next: number) => void;
 }
 
 export interface McpHttpHandler {
@@ -185,16 +183,16 @@ export class HttpBoundaryError extends Error {
   }
 }
 
-export function parseStrictJsonObject(bytes: Uint8Array | string, maxBytes = HTTP_JSON_LIMIT): Record<string, unknown> {
+export function parseJsonObject(bytes: Uint8Array | string, maxBytes = HTTP_JSON_LIMIT): Record<string, unknown> {
   try {
-    const value = parseStrictJson(bytes, { maxBytes, maxDepth: 64 });
+    const value = decodeJsonFrame(bytes, maxBytes);
     if (typeof value !== "object" || value === null || Array.isArray(value)) {
       throw new HttpBoundaryError("invalid_request", "JSON body must be an object", 400);
     }
     return value as Record<string, unknown>;
   } catch (error) {
     if (error instanceof HttpBoundaryError) throw error;
-    const message = error instanceof StrictJsonError ? error.message : error instanceof Error ? error.message : "invalid JSON body";
+    const message = error instanceof Error ? error.message : "invalid JSON body";
     throw new HttpBoundaryError("invalid_request", message, 400);
   }
 }
@@ -232,7 +230,7 @@ export async function readJsonBody(
   if (oversized) throw new HttpBoundaryError("payload_too_large", bodyLimitMessage(maxBytes), 413);
   if (total === 0) throw new HttpBoundaryError("invalid_request", "empty request body", 400);
   try {
-    return parseStrictJsonObject(Buffer.concat(chunks, total), maxBytes);
+    return parseJsonObject(Buffer.concat(chunks, total), maxBytes);
   } catch (error) {
     if (error instanceof HttpBoundaryError) throw error;
     throw new HttpBoundaryError("invalid_request", "invalid JSON body", 400);
@@ -392,7 +390,7 @@ function errorStatus(code: string): number {
     invalid_request: 400, invalid_notebook: 400, config_invalid: 400, invalid_layout: 400, forbidden: 403,
     forbidden_origin: 403, auth_configuration_invalid: 500, not_found: 404, method_not_allowed: 405,
     source_conflict: 409, save_conflict: 409, graph_invalid: 409, graph_blocked: 409, kernel_state_invalid: 409, run_in_progress: 409, operation_in_progress: 409,
-    operation_id_conflict: 409, command_sequence_gap: 409, command_sequence_exhausted: 409, package_operation_in_progress: 409, no_run_in_progress: 409, stale_value: 409, active_clients_changed: 409,
+    request_id_conflict: 409, request_expired: 409, package_operation_in_progress: 409, no_run_in_progress: 409, stale_value: 409, active_clients_changed: 409,
     operation_expired: 410, session_epoch_mismatch: 409, session_not_started: 409, session_stopped: 410, payload_too_large: 413, unsupported_media_type: 415,
     client_limit: 429, ticket_limit: 429, operation_timeout: 504, lsp_unavailable: 503, service_unavailable: 503,
     engine_not_ready: 503, output_expired: 410, output_invalid: 400, output_quota: 503,
@@ -402,6 +400,7 @@ function errorStatus(code: string): number {
 
 function errorPayload(error: unknown): { code: string; message: string; status: number } {
   if (error instanceof HttpBoundaryError) return error;
+  if (error instanceof z.ZodError) return { code: "invalid_request", message: z.prettifyError(error), status: 400 };
   const errorWithCode = error instanceof Error ? error as Error & { readonly code?: unknown } : null;
   const record = errorWithCode ?? (isPlainObject(error) ? error : null);
   if (record !== null) {
@@ -557,7 +556,6 @@ interface Lease {
   readonly leaseId: string;
   readonly clientId: string;
   readonly csrf: string;
-  nextCommandSequence: number;
   lastSeen: number;
   reserved: boolean;
 }
@@ -748,13 +746,6 @@ function validateToken(token: string): string {
   if (!AUTH_TOKEN_PATTERN.test(token)) throw tokenFileError("session bearer token must be a lowercase 64-hex value");
   return token;
 }
-function validateRecoveryCredentials(key: string | undefined, keyId: string | undefined): { key: string | null; keyId: string | null } {
-  if (key === undefined && keyId === undefined) return { key: null, keyId: null };
-  if (key === undefined || keyId === undefined || !/^[A-Za-z0-9_-]{43}$/.test(key) || !/^[A-Za-z0-9_-]{43}$/.test(keyId) || Buffer.from(key, "base64url").byteLength !== 32 || Buffer.from(keyId, "base64url").byteLength !== 32) {
-    throw tokenFileError("session recovery credentials must be 256-bit base64url values");
-  }
-  return { key, keyId };
-}
 function publicOrigin(host: string, port: number): string {
   return `http://${host === "::1" ? "[::1]" : host}:${port}`;
 }
@@ -767,16 +758,13 @@ function parseSocketObject(data: RawData, binary: boolean, maxBytes: number): Re
   if (binary) throw new HttpBoundaryError("invalid_request", "WebSocket messages must be UTF-8 JSON text", 400);
   const buffer = Buffer.isBuffer(data) ? data : Array.isArray(data) ? Buffer.concat(data) : Buffer.from(data);
   if (buffer.length > maxBytes) throw new HttpBoundaryError("payload_too_large", "WebSocket message is too large", 413);
-  return parseStrictJsonObject(buffer, maxBytes);
+  return parseJsonObject(buffer, maxBytes);
 }
 
-function parseSocketConnect(value: Record<string, unknown>): { leaseId: string; clientId: string; csrf: string; epoch: string | null; cursor: number | null } {
-  assertExactFields(value, ["type", "protocolVersion", "leaseId", "clientId", "csrf", "epoch", "cursor"], ["type", "protocolVersion", "leaseId", "clientId", "csrf", "epoch", "cursor"]);
-  if (value.type !== "connect" || value.protocolVersion !== HOST_CLIENT_PROTOCOL_VERSION) throw new HttpBoundaryError("invalid_request", "invalid WebSocket connect message", 400);
-  if (typeof value.leaseId !== "string" || typeof value.clientId !== "string" || typeof value.csrf !== "string") throw new HttpBoundaryError("invalid_request", "invalid WebSocket lease identity", 400);
-  if (!(value.epoch === null || typeof value.epoch === "string") || !(value.cursor === null || (typeof value.cursor === "number" && Number.isSafeInteger(value.cursor) && value.cursor >= 0))) throw new HttpBoundaryError("invalid_request", "invalid WebSocket recovery cursor", 400);
-  return { leaseId: value.leaseId, clientId: value.clientId, csrf: value.csrf, epoch: value.epoch, cursor: value.cursor as number | null };
-}
+const socketConnectSchema = z.object({
+  type: z.literal("connect"), protocolVersion: z.literal(HOST_CLIENT_PROTOCOL_VERSION),
+  leaseId: z.string().min(1).max(256), clientId: z.string().min(1).max(256), csrf: z.string().min(1).max(256),
+}).strict();
 
 export function createAlderServer(options: AlderServerOptions): AlderServer {
   const host = validateLoopbackHost(options.host ?? "127.0.0.1");
@@ -804,8 +792,6 @@ export function createAlderServer(options: AlderServerOptions): AlderServer {
   const shutdown = new AbortController();
   const sockets = new Set<WebSocket>();
   const socketsByLease = new Map<string, WebSocket>();
-  const recoveryCredentials = validateRecoveryCredentials(session.recoveryKey, session.recoveryKeyId);
-  const recoveryKey = recoveryCredentials.key;
   const leases = new Map<string, Lease>();
   const tickets = new Map<string, Ticket>();
   const artifactLeases = new Map<string, { descriptor: ArtifactHandle; expiresAt: number }>();
@@ -1027,7 +1013,7 @@ export function createAlderServer(options: AlderServerOptions): AlderServer {
       browserOrigin: address.browserOrigin,
       address: { host: address.host, port: address.port, origin: address.origin, browserOrigin: address.browserOrigin },
       documentReady: options.documentReady !== false, configuration,
-      ...(lease === null ? {} : { leaseId: lease.leaseId, clientId: lease.clientId, nextCommandSequence: lease.nextCommandSequence }),
+      ...(lease === null ? {} : { leaseId: lease.leaseId, clientId: lease.clientId }),
     };
   }
 
@@ -1063,10 +1049,8 @@ export function createAlderServer(options: AlderServerOptions): AlderServer {
         leaseId: authenticatedLease?.leaseId ?? null,
         clientId: authenticatedLease?.clientId ?? null,
         csrf: authenticatedLease?.csrf ?? null,
-        nextCommandSequence: authenticatedLease?.nextCommandSequence ?? null,
         ...(authenticatedLease === null ? {} : {
           assertActive: () => { assertCurrentHttpLease(authenticatedLease); },
-          updateNextCommandSequence: (next: number) => { authenticatedLease.nextCommandSequence = Math.max(authenticatedLease.nextCommandSequence, next); },
         }),
       },
       lease: authenticatedLease,
@@ -1085,7 +1069,7 @@ export function createAlderServer(options: AlderServerOptions): AlderServer {
   }
 
   function createLease(reserved = false): Lease {
-    return { leaseId: randomUUID(), clientId: randomUUID(), csrf: randomBytes(32).toString("hex"), nextCommandSequence: 1, lastSeen: Date.now(), reserved };
+    return { leaseId: randomUUID(), clientId: randomUUID(), csrf: randomBytes(32).toString("hex"), lastSeen: Date.now(), reserved };
   }
 
   function activateLease(lease: Lease): Lease {
@@ -1127,16 +1111,10 @@ export function createAlderServer(options: AlderServerOptions): AlderServer {
     return { ticket, lease };
   }
 
-  function scheduleShutdown(operationId: string, clientId: string): void {
-    const awaitOperation = options.controller.awaitOperation;
-    if (awaitOperation === undefined || options.onShutdown === undefined) return;
-    // Give the WebSocket implementation one event-loop turn to flush the final
-    // accepted response before host shutdown closes every connection.
+  function scheduleShutdown(result: CommandResult): void {
+    if (result.error || !isPlainObject(result.result) || result.result.closing !== true) return;
     setImmediate(() => {
-      void Promise.resolve().then(() => awaitOperation.call(options.controller, operationId, clientId)).then(operation => {
-        if (operation.status !== "done" || !isPlainObject(operation.result) || operation.result.closing !== true) return;
-        return options.onShutdown?.();
-      }).catch(error => logger("error", "shutdown callback failed: " + (error instanceof Error ? error.message : "unknown")));
+      void Promise.resolve().then(() => options.onShutdown?.()).catch(error => logger("error", "shutdown callback failed: " + (error instanceof Error ? error.message : "unknown")));
     });
   }
 
@@ -1146,10 +1124,8 @@ export function createAlderServer(options: AlderServerOptions): AlderServer {
     if (envelopeBytes <= MAX_ENVELOPE_BYTES) return value;
     if (envelopeBytes > SNAPSHOT_ENVELOPE_LIMIT) throw new HttpBoundaryError("payload_too_large", "response envelope exceeds 128 MiB", 413);
     if (!isPlainObject(value)) throw new HttpBoundaryError("payload_too_large", "response envelope exceeds 1 MiB", 413);
-    const operation = isPlainObject(value.operation) ? value.operation : null;
-    const resultOwner = value.result !== undefined ? value : operation;
-    if (resultOwner === null || resultOwner.result === undefined) throw new HttpBoundaryError("payload_too_large", "response envelope exceeds 1 MiB", 413);
-    const bytes = Buffer.from(JSON.stringify(resultOwner.result));
+    if (value.result === undefined) throw new HttpBoundaryError("payload_too_large", "response envelope exceeds 1 MiB", 413);
+    const bytes = Buffer.from(JSON.stringify(value.result));
     const artifact = retainArtifact(await options.artifactStore.writeArtifact(bytes, "application/json", ".json", {
       sessionEpoch: session.epoch,
       documentRevision: snapshot.documentRevision,
@@ -1158,7 +1134,7 @@ export function createAlderServer(options: AlderServerOptions): AlderServer {
       cellId: null,
       revision: null,
     }));
-    return resultOwner === value ? { ...value, result: artifact } : { ...value, operation: { ...operation, result: artifact } };
+    return { ...value, result: artifact };
   }
 
   async function handleArtifact(request: IncomingMessage, response: ServerResponse, target: string): Promise<void> {
@@ -1307,11 +1283,10 @@ export function createAlderServer(options: AlderServerOptions): AlderServer {
       if (!method(response, request.method ?? "", "POST")) return;
       const supplied = parseBearer(request.headers);
       if (supplied === null || !constantTimeEqual(supplied, configuredBearer ?? bearer)) throw authFailure();
-      const body = await readJsonBody(request, maxJson);
-      assertExactFields(body, ["origin", "parentLeaseId"], ["origin"]);
-      const parentLeaseId = body.parentLeaseId === undefined ? undefined : requiredString(body.parentLeaseId, "parentLeaseId", 256);
+      const body = ticketMintRequestSchema.parse(await readJsonBody(request, maxJson));
+      const parentLeaseId = body.parentLeaseId;
       if (parentLeaseId !== undefined && requireLease(request, true).lease.leaseId !== parentLeaseId) throw authFailure("desktop lease does not match request");
-      const origin = requiredString(body.origin, "origin", 2048);
+      const origin = body.origin;
       if (!origins().includes(origin)) throw new HttpBoundaryError("forbidden_origin", "ticket origin is not configured", 403);
       const ticket = mintTicket(origin, parentLeaseId);
       jsonResponse(response, 200, { ticket: ticket.ticket, expiresAt: new Date(ticket.expiresAt).toISOString() });
@@ -1322,9 +1297,7 @@ export function createAlderServer(options: AlderServerOptions): AlderServer {
       if (!method(response, request.method ?? "", "POST")) return;
       const requestOrigin = singleHeader(request.headers.origin);
       if (requestOrigin === null || !origins().includes(requestOrigin)) throw new HttpBoundaryError("forbidden_origin", "exact session Origin is required", 403);
-      const body = await readJsonBody(request, maxJson);
-      assertExactFields(body, ["ticket"], ["ticket"]);
-      const ticketValue = requiredString(body.ticket, "ticket", 256);
+      const { ticket: ticketValue } = ticketExchangeRequestSchema.parse(await readJsonBody(request, maxJson));
       const ticket = tickets.get(ticketValue);
       if (!ticket || ticket.origin !== requestOrigin) throw authFailure("ticket is invalid or reserved for another origin");
       if (options.acceptingLeases?.() === false) throw new HttpBoundaryError("session_stopping", "notebook host is stopping", 503);
@@ -1334,11 +1307,10 @@ export function createAlderServer(options: AlderServerOptions): AlderServer {
       const credentials = {
         leaseId: exchanged.lease.leaseId,
         clientId: exchanged.lease.clientId,
-        nextCommandSequence: exchanged.lease.nextCommandSequence,
         epoch: session.epoch,
         continuityProof,
         csrf: exchanged.lease.csrf,
-        ...(recoveryKey === null ? {} : { recoveryKey, recoveryKeyId: recoveryCredentials.keyId }),
+        ...(session.recoveryId === undefined ? {} : { recoveryId: session.recoveryId }),
       };
       jsonResponse(response, 200, credentials, { "Set-Cookie": cookie });
       return;
@@ -1355,21 +1327,20 @@ export function createAlderServer(options: AlderServerOptions): AlderServer {
       const body = await readJsonBody(request, maxJson);
       const action = body.action;
       if (action === "attach") {
-        assertExactFields(body, ["action"], ["action"]);
+        attachLeaseRequestSchema.parse(body);
         const supplied = parseBearer(request.headers);
         if (options.acceptingLeases?.() === false) throw new HttpBoundaryError("session_stopping", "notebook host is stopping", 503);
         if (supplied === null || !constantTimeEqual(supplied, configuredBearer ?? bearer)) throw authFailure();
         const lease = activateLease(createLease());
-        jsonResponse(response, 200, { leaseId: lease.leaseId, clientId: lease.clientId, nextCommandSequence: lease.nextCommandSequence, epoch: session.epoch });
+        jsonResponse(response, 200, { leaseId: lease.leaseId, clientId: lease.clientId, epoch: session.epoch });
         return;
       }
       if (action !== "heartbeat" && action !== "release") throw new HttpBoundaryError("invalid_request", "lease action must be attach, heartbeat, or release", 400);
-      assertExactFields(body, action === "release" ? ["action", "leaseId", "disposition"] : ["action", "leaseId"], ["action", "leaseId"]);
+      const leaseAction = leaseActionRequestSchema.parse(body);
       const resolved = requireLease(request, true);
       if (body.leaseId !== resolved.lease.leaseId) throw authFailure("lease identity does not match request");
       if (action === "release") {
-        const disposition = body.disposition === undefined ? "normal" : requiredString(body.disposition, "disposition", 16);
-        if (disposition !== "normal" && disposition !== "discard") throw new HttpBoundaryError("invalid_request", "release disposition must be normal or discard", 400);
+        const disposition = leaseAction.disposition ?? "normal";
         removeLease(resolved.lease.leaseId);
         jsonResponse(response, 200, { released: true });
         if (disposition === "discard" && leases.size === 0) {
@@ -1377,7 +1348,7 @@ export function createAlderServer(options: AlderServerOptions): AlderServer {
         }
       } else {
         resolved.lease.lastSeen = Date.now();
-        jsonResponse(response, 200, { leaseId: resolved.lease.leaseId, clientId: resolved.lease.clientId, nextCommandSequence: resolved.lease.nextCommandSequence, epoch: session.epoch });
+        jsonResponse(response, 200, { leaseId: resolved.lease.leaseId, clientId: resolved.lease.clientId, epoch: session.epoch });
       }
       return;
     }
@@ -1390,12 +1361,14 @@ export function createAlderServer(options: AlderServerOptions): AlderServer {
       if (command.clientId !== resolved.lease.clientId) throw authFailure("command clientId does not match lease");
       if (command.sessionEpoch !== session.epoch) throw new HttpBoundaryError("session_epoch_mismatch", "command belongs to a different session epoch", 409);
       assertCurrentHttpLease(resolved.lease);
-      const admission = commandAdmissionSchema.parse(await options.controller.dispatch(command));
-      resolved.lease.nextCommandSequence = Math.max(resolved.lease.nextCommandSequence, admission.nextCommandSequence);
-      if (command.type === "shutdown" && admission.accepted) scheduleShutdown(command.operationId, resolved.lease.clientId);
-      const snapshot = options.controller.snapshot(resolved.lease.clientId);
-      const bounded = await responseEnvelope(admission, snapshot);
-      jsonResponse(response, admission.accepted ? 200 : errorStatus(admission.error?.code ?? "invalid_request"), bounded);
+      const release = retainMcpLease(resolved.lease);
+      try {
+        const result = await options.controller.dispatch(command);
+        assertCurrentHttpLease(resolved.lease);
+        const bounded = await responseEnvelope(result, options.controller.snapshot(resolved.lease.clientId));
+        jsonResponse(response, 200, bounded);
+        if (command.type === "shutdown") scheduleShutdown(result);
+      } finally { release(); }
       return;
     }
     if (path === "/api/query") {
@@ -1403,7 +1376,7 @@ export function createAlderServer(options: AlderServerOptions): AlderServer {
       const resolved = requireLease(request, true);
       const body = await readHttpLeaseBody(resolved.lease, request, maxJson);
       const query = parseHostQuery(decodeHostQueryWire(body));
-      // The notebook lease authorizes this lookup; the controller still requires any historical clientId to match the receipt owner.
+      // The notebook lease authorizes this lookup; the controller still requires any clientId to match the execution owner.
       if (query.type === "output") {
         if (acceptsArtifactResolution(request.headers)) {
           assertAuthority(request, true);
@@ -1447,7 +1420,7 @@ export function createAlderServer(options: AlderServerOptions): AlderServer {
       if (!options.controller.query) throw new HttpBoundaryError("service_unavailable", "typed host queries are unavailable", 503);
       if (query.type === "operation" && query.clientId !== undefined && query.clientId !== resolved.lease.clientId) throw authFailure("operation query clientId does not match lease");
       assertCurrentHttpLease(resolved.lease);
-      const result = hostQueryResultSchema.parse(await options.controller.query(query, resolved.lease.clientId));
+      const result = await options.controller.query(query, resolved.lease.clientId);
       assertCurrentHttpLease(resolved.lease);
       const wireResult = encodeHostQueryResultWire(query, result);
       const bounded = await responseEnvelope(wireResult, options.controller.snapshot(resolved.lease.clientId));
@@ -1560,7 +1533,6 @@ export function createAlderServer(options: AlderServerOptions): AlderServer {
     let closeTimer: NodeJS.Timeout | null = null;
     let unsubscribed = false;
     let unsubscribe: (() => void) | null = null;
-    let commandChain = Promise.resolve();
     let commandPendingCount = 0;
     let commandPendingBytes = 0;
     const pendingEvents: HostEvent[] = [];
@@ -1589,14 +1561,14 @@ export function createAlderServer(options: AlderServerOptions): AlderServer {
       }
       return current;
     };
-    const sendError = (sequence: unknown, error: unknown, definitive = false): void => {
+    const sendError = (requestId: unknown, error: unknown, definitive = false): void => {
       const detail = error instanceof HttpBoundaryError ? error : errorPayload(error);
-      outbox.send({ type: "error", sequence: Number.isSafeInteger(sequence) ? sequence : null, definitive, error: { code: detail.code, message: detail.message } });
+      outbox.send({ type: "error", requestId: typeof requestId === "string" ? requestId : null, definitive, error: { code: detail.code, message: detail.message } });
     };
-    const sendCurrentError = (sequence: unknown, error: unknown, definitive = false): void => {
+    const sendCurrentError = (requestId: unknown, error: unknown, definitive = false): void => {
       try {
         requireCurrentLease();
-        sendError(sequence, error, definitive);
+        sendError(requestId, error, definitive);
       } catch {
         // Lease revocation closes the socket; do not publish stale failures.
       }
@@ -1619,7 +1591,7 @@ export function createAlderServer(options: AlderServerOptions): AlderServer {
           if (eventBytes > MAX_EVENT_BYTES) {
             const snapshot = options.controller.snapshot(resolved.lease.clientId);
             requireCurrentLease();
-            const recovery = await recoveryTransfer(options.controller.recover(null, null), snapshot);
+            const recovery = await recoveryTransfer({ kind: "snapshot", epoch: snapshot.epoch, cursor: snapshot.cursor, snapshot }, snapshot);
             requireCurrentLease();
             outbox.send({ type: "recovery", protocolVersion: HOST_CLIENT_PROTOCOL_VERSION, continuityProof, recovery });
             return;
@@ -1660,12 +1632,12 @@ export function createAlderServer(options: AlderServerOptions): AlderServer {
       catch (error) { sendError(null, error); socket.close(1007, "invalid WebSocket message"); return; }
       if (!connected) {
         try {
-          const connect = parseSocketConnect(message);
+          const connect = socketConnectSchema.parse(message);
           if (connect.leaseId !== resolved.lease.leaseId || connect.clientId !== resolved.lease.clientId || !constantTimeEqual(connect.csrf, resolved.lease.csrf)) throw authFailure("WebSocket lease or CSRF identity mismatch");
           requireCurrentLease().lastSeen = Date.now();
           unsubscribe = options.controller.subscribe(listener);
-          const recovery = options.controller.recover(connect.epoch, connect.cursor);
           const snapshot = options.controller.snapshot(resolved.lease.clientId);
+          const recovery: Recovery = { kind: "snapshot", epoch: snapshot.epoch, cursor: snapshot.cursor, snapshot };
           connected = true;
           clearTimeout(handshakeTimer);
           const releaseMcpLease = retainMcpLease(resolved.lease);
@@ -1718,8 +1690,7 @@ export function createAlderServer(options: AlderServerOptions): AlderServer {
             return queryHandler.call(options.controller, query, resolved.lease.clientId);
           }).then(async result => {
             requireCurrentLease();
-            const parsed = hostQueryResultSchema.parse(result);
-            const wireResult = encodeHostQueryResultWire(query, parsed);
+            const wireResult = encodeHostQueryResultWire(query, result);
             requireCurrentLease();
             const bounded = await responseEnvelope(wireResult, options.controller.snapshot(resolved.lease.clientId));
             requireCurrentLease();
@@ -1730,7 +1701,7 @@ export function createAlderServer(options: AlderServerOptions): AlderServer {
         if (message.type !== "command" || !isPlainObject(message.command)) throw new HttpBoundaryError("invalid_request", "invalid WebSocket message", 400);
         const command = parseHostCommand(decodeHostCommandWire(message.command));
         if (command.clientId !== resolved.lease.clientId || command.sessionEpoch !== session.epoch) throw authFailure("WebSocket command identity mismatch");
-        if (message.sequence !== undefined && message.sequence !== command.commandSequence) throw new HttpBoundaryError("invalid_request", "WebSocket sequence mismatch", 400);
+        if (message.requestId !== command.requestId) throw new HttpBoundaryError("invalid_request", "WebSocket request ID mismatch", 400);
         const commandBytes = Buffer.byteLength(JSON.stringify(message.command));
         if (commandPendingCount >= SOCKET_COMMAND_QUEUE_LIMIT || commandPendingBytes + commandBytes > maxOutbox) {
           closeForBackpressure();
@@ -1739,36 +1710,26 @@ export function createAlderServer(options: AlderServerOptions): AlderServer {
         commandPendingCount += 1;
         commandPendingBytes += commandBytes;
         const releaseMcpLease = retainMcpLease(resolved.lease);
-        commandChain = commandChain.then(async () => {
+        // Dispatch independently: an outstanding run must not block edit or interrupt.
+        void (async () => {
           try {
             if (transportClosing) return;
-            let admission: CommandAdmission;
-            try {
-              requireCurrentLease();
-              const dispatched = await options.controller.dispatch(command);
-              requireCurrentLease();
-              admission = commandAdmissionSchema.parse(dispatched);
-            } catch (error) {
-              sendCurrentError(command.commandSequence, error, true);
-              return;
-            }
             requireCurrentLease();
-            resolved.lease.nextCommandSequence = Math.max(resolved.lease.nextCommandSequence, admission.nextCommandSequence);
-            const snapshot = options.controller.snapshot(resolved.lease.clientId);
+            const result = await options.controller.dispatch(command);
             requireCurrentLease();
-            const bounded = await responseEnvelope(admission, snapshot);
+            const bounded = await responseEnvelope(result, options.controller.snapshot(resolved.lease.clientId));
             requireCurrentLease();
-            outbox.send({ type: "commandResult", sequence: command.commandSequence, result: bounded });
-            if (command.type === "shutdown" && admission.accepted) scheduleShutdown(command.operationId, resolved.lease.clientId);
+            outbox.send({ type: "commandResult", requestId: command.requestId, result: bounded });
+            if (command.type === "shutdown") scheduleShutdown(result);
           } catch (error) {
-            sendCurrentError(command.commandSequence, error);
+            sendCurrentError(command.requestId, error);
           } finally {
             commandPendingCount -= 1;
             commandPendingBytes -= commandBytes;
             releaseMcpLease();
           }
-        });
-      } catch (error) { sendError(message.sequence, error); }
+        })();
+      } catch (error) { sendError(message.requestId, error); }
     });
     socket.on("close", () => {
       clearTimeout(handshakeTimer);

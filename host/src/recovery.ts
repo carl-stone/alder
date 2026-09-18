@@ -1,4 +1,4 @@
-import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdir, open, readdir, realpath, rename, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { canonicalBase64ByteLength, MAX_NOTEBOOK_CELLS, MAX_NOTEBOOK_SOURCE_BYTES, sidecarObservationsSchema } from "./protocol.js";
@@ -115,7 +115,7 @@ export class RecoveryWriter {
   readonly rootDir: string;
   readonly key: string;
   readonly directory: string;
-  recoveryKey = randomBytes(32).toString("base64url");
+  recoveryId = randomUUID() as string;
   issue: RecoveryError | null = null;
   private baseline: RecoveryBaseline;
   private pending = false;
@@ -158,14 +158,22 @@ export class RecoveryWriter {
   private async restore(): Promise<void> {
     try {
       await mkdir(this.directory, { recursive: true, mode: 0o700 });
-      const keyPath = join(this.directory, "recovery.key");
+      const identityPath = join(this.directory, "document.id");
       try {
-        const key = await readPrivateFile(keyPath, { maxBytes: 64 });
-        if (key.length !== 32) throw new Error("Recovery browser key is invalid");
-        this.recoveryKey = key.toString("base64url");
+        const id = (await readPrivateFile(identityPath, { maxBytes: 128 })).toString("utf8");
+        if (!/^[A-Za-z0-9_-]{1,128}$/.test(id)) throw new Error("Recovery identity is invalid");
+        this.recoveryId = id;
       } catch (error) {
-        if (!missing(error)) this.report(error, "recovery_corrupt", [keyPath]);
-        if (missing(error)) await this.atomicWrite(keyPath, Buffer.from(this.recoveryKey, "base64url"));
+        if (!missing(error)) this.report(error, "recovery_corrupt", [identityPath]);
+        if (missing(error)) {
+          // Preserve the directory containing existing native drafts once; the old
+          // key is no longer used for encryption or sent to a renderer.
+          try {
+            const key = await readPrivateFile(join(this.directory, "recovery.key"), { maxBytes: 64 });
+            if (key.length === 32) this.recoveryId = createHash("sha256").update(key).digest("base64url");
+          } catch { /* new document */ }
+          await this.atomicWrite(identityPath, Buffer.from(this.recoveryId));
+        }
       }
       const names = (await readdir(this.directory)).filter(name => SNAPSHOT_NAME.test(name)).sort().reverse();
       this.timestamp = Number(names[0]?.split("-")[1] ?? 0);
@@ -281,8 +289,8 @@ export class RecoveryWriter {
     const existing = await writer.load();
     if (existing.pending) await writer.forkBranch();
     for (const [id, branch] of this.branches) writer.branches.set(id, clone(branch));
-    const destinationKey = writer.recoveryKey;
-    writer.recoveryKey = this.recoveryKey;
+    const destinationId = writer.recoveryId;
+    writer.recoveryId = this.recoveryId;
     writer.update(target.baseline);
     let adopted = false;
     let aborted = false;
@@ -295,7 +303,7 @@ export class RecoveryWriter {
         adopted = true;
         // Renderer drafts follow Save As. Reopening the source needs a distinct identity.
         if (writer.directory !== this.directory) {
-          this.recoveryKey = randomBytes(32).toString("base64url");
+          this.recoveryId = randomUUID() as string;
           this.changed();
           void this.flush();
         }
@@ -303,7 +311,7 @@ export class RecoveryWriter {
       abort: async () => {
         if (adopted || aborted) return;
         aborted = true;
-        writer.recoveryKey = destinationKey;
+        writer.recoveryId = destinationId;
         writer.changed();
         await writer.close();
       },
@@ -337,7 +345,7 @@ export class RecoveryWriter {
       const generation = `snapshot-${this.timestamp}-${randomUUID()}.json`;
       try {
         await mkdir(this.directory, { recursive: true, mode: 0o700 });
-        await this.atomicWrite(join(this.directory, "recovery.key"), Buffer.from(this.recoveryKey, "base64url"));
+        await this.atomicWrite(join(this.directory, "document.id"), Buffer.from(this.recoveryId));
         const bytes = Buffer.from(JSON.stringify({ snapshot, sha256: hash(JSON.stringify(snapshot)) }));
         if (bytes.length > MAX_SNAPSHOT_BYTES) throw new Error("Recovery snapshot is too large");
         await this.atomicWrite(join(this.directory, generation), bytes);

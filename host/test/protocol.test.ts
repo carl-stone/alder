@@ -3,7 +3,6 @@ import test from "node:test";
 
 import {
   HOST_PROTOCOL,
-  MAX_JSON_DEPTH,
   MAX_NOTEBOOK_CELLS,
   MAX_NOTEBOOK_SOURCE_BYTES,
   canonicalBase64ByteLength,
@@ -35,48 +34,15 @@ import {
 } from "../src/protocol.js";
 import { renderHelp } from "../src/markdown.js";
 
-test("strict JSON frames reject duplicate decoded keys, invalid UTF-8, depth, and trailing input", () => {
-  assert.throws(
-    () => decodeJsonFrame('{"name":1,"\\u006eame":2}'),
-    (error: unknown) => error instanceof ProtocolError && error.code === "duplicate_key",
-  );
-  assert.throws(
-    () => decodeJsonFrame(Uint8Array.from([0x7b, 0x22, 0x78, 0x22, 0x3a, 0xc3, 0x28, 0x7d])),
-    (error: unknown) => error instanceof ProtocolError && error.code === "invalid_utf8",
-  );
-  assert.throws(
-    () => decodeJsonFrame(`${"[".repeat(MAX_JSON_DEPTH + 2)}0${"]".repeat(MAX_JSON_DEPTH + 2)}`),
-    (error: unknown) => error instanceof ProtocolError && error.code === "nesting_too_deep",
-  );
-  assert.throws(
-    () => decodeJsonFrame("{} false"),
-    (error: unknown) => error instanceof ProtocolError && error.code === "invalid_json",
-  );
-  assert.deepEqual(decodeJsonFrame('{"ok":true,"items":[1,null,"x"]}'), {
-    ok: true,
-    items: [1, null, "x"],
-  });
-});
-
-test("JSON structural limits distinguish keys, nested values, and string punctuation", () => {
-  const value = { 'quote"\\': ['{[,:]}', { nested: '"escaped"', repeated: 1 }, { repeated: 2 }], empty: {} };
-  assert.deepEqual(decodeJsonFrame(JSON.stringify(value)), value);
-  for (const source of [
-    '{"outer":{"a":1,"\\u0061":2}}',
-    '[{"a":[],"a":{}}]',
-    '{"a\\\\":1,"a\\u005c":2}',
-    '{"a" \t:1,"\\u0061"\r\n:2}',
-  ]) assert.throws(() => decodeJsonFrame(source), (error: unknown) =>
-    error instanceof ProtocolError && error.code === "duplicate_key");
-  for (const source of ['{"x":}', '[1,]', '{"x" 1}', '"unterminated', '"bad\\q"', 'true false', '']) {
-    assert.throws(() => decodeJsonFrame(source), (error: unknown) =>
-      error instanceof ProtocolError && error.code === "invalid_json");
-  }
-  assert.doesNotThrow(() => decodeJsonFrame('['.repeat(MAX_JSON_DEPTH) + '0' + ']'.repeat(MAX_JSON_DEPTH)));
-  assert.deepEqual(decodeJsonFrame('{"key" \r\n: ["value:", "other"], "nested": {"key": 1}}'),
-    { key: ["value:", "other"], nested: { key: 1 } });
-  assert.throws(() => decodeJsonFrame('['.repeat(MAX_JSON_DEPTH + 1) + '0' + ']'.repeat(MAX_JSON_DEPTH + 1)),
-    (error: unknown) => error instanceof ProtocolError && error.code === "nesting_too_deep");
+test("JSON frames use the standard parser and enforce I/O byte and UTF-8 limits", () => {
+  assert.deepEqual(decodeJsonFrame('{"ok":true,"items":[1,null,"x"]}'), { ok: true, items: [1, null, "x"] });
+  assert.deepEqual(decodeJsonFrame('{"name":1,"name":2}'), { name: 2 });
+  assert.throws(() => decodeJsonFrame(Uint8Array.from([0xc3, 0x28])),
+    (error: unknown) => error instanceof ProtocolError && error.code === "invalid_utf8");
+  assert.throws(() => decodeJsonFrame('{"long":true}', 4),
+    (error: unknown) => error instanceof ProtocolError && error.code === "frame_too_large");
+  assert.throws(() => decodeJsonFrame('{} false'),
+    (error: unknown) => error instanceof ProtocolError && error.code === "invalid_json");
 });
 
 test("source and revision schemas preserve the R integer and physical-line contract", () => {
@@ -171,7 +137,7 @@ test("wire source keeps scalar and line-array identity with strict UTF-8/base64 
   assert.equal(decodeWireSource(largestWire), largestSource);
 
   const command = parseHostCommand({
-    type: "transaction", operationId: "wire-op", clientId: "wire-client", commandSequence: 1, sessionEpoch: "wire-epoch",
+    type: "transaction", requestId: "wire-op", clientId: "wire-client", sessionEpoch: "wire-epoch",
     expectedDocumentRevision: 0,
     changes: [{ type: "create", creationId: "wire-cell", after: null, body: ["x <- 1", "x"], cellType: "code", options: {} }],
   });
@@ -200,7 +166,7 @@ test("wire source keeps scalar and line-array identity with strict UTF-8/base64 
 
 test("cell Run identifies exactly one existing or same-command optimistic creation", () => {
   const base = {
-    operationId: "op", clientId: "client", commandSequence: 1, sessionEpoch: "epoch",
+    requestId: "op", clientId: "client", sessionEpoch: "epoch",
     type: "run" as const, expectedDocumentRevision: 0,
   };
   const existing = parseHostCommand({ ...base, scope: "cell", target: { cellId: "cell-1" } });
@@ -347,9 +313,9 @@ test("evaluation definitions and locals retain analyzer symbol bounds", () => {
 
 test("client service commands cannot reach internal codec, filesystem, or validation services", () => {
   const base = {
-    operationId: "service-op",
+    requestId: "service-op",
     clientId: "client",
-    commandSequence: 1,
+
     sessionEpoch: "epoch",
     expectedDocumentRevision: 0,
   };
@@ -427,16 +393,13 @@ test("shared host response schemas validate complete bounded snapshots and delta
   assert.equal(Object.hasOwn((parsedPrototypeEvent.payload as typeof prototypeGraph).duplicates, "__proto__"), true);
   assert.deepEqual((parsedPrototypeEvent.payload as typeof prototypeGraph).duplicates["__proto__"], ["cell-1", "cell-2"]);
 
-  const operation = {
-    id: "save-1", clientId: "client", commandSequence: 1, kind: "save" as const, status: "done" as const,
-    documentRevision: 7, runId: null, result: null, error: null, acceptedAt: 1, settledAt: 2,
-  };
-  assert.equal(commandResultSchema.safeParse({ epoch: "epoch-1", operation, documentRevision: 7, version: 3, cursor: 8, nextCommandSequence: 2, result: null, error: null }).success, true);
-  assert.equal(commandResultSchema.safeParse({ epoch: "epoch-1", operation: { ...operation, status: "invented" }, documentRevision: 7, version: 3, cursor: 8, nextCommandSequence: 2, result: null, error: null }).success, false);
+  const completion = { requestId: "save-1", epoch: "epoch-1", documentRevision: 7, version: 3, cursor: 8, result: null, error: null };
+  assert.equal(commandResultSchema.safeParse(completion).success, true);
+  assert.equal(commandResultSchema.safeParse({ ...completion, requestId: undefined }).success, false);
 
   assert.equal(recoverySchema.safeParse({ kind: "snapshot", epoch: "epoch-1", cursor: 7, snapshot }).success, true);
   assert.equal(recoverySchema.safeParse({ kind: "snapshot", epoch: "different-epoch", cursor: 7, snapshot: undefined }).success, false);
-  assert.equal(recoverySchema.safeParse({ kind: "replay", epoch: "epoch-1", cursor: 9, events: [variableEvent] }).success, true);
+  assert.equal(recoverySchema.safeParse({ kind: "replay", epoch: "epoch-1", cursor: 9, events: [variableEvent] }).success, false);
   assert.equal(releaseOutputsResponseSchema.safeParse({ ok: true, released: ["artifact.bin"], missing: ["missing.bin"], failed: [] }).success, true);
   assert.equal(releaseOutputsResponseSchema.safeParse({ ok: true, released: [], missing: undefined, failed: [] }).success, false);
   assert.equal(releaseOutputsResponseSchema.safeParse({ ok: false, error: { code: "invalid_request", message: "bad request" } }).success, true);

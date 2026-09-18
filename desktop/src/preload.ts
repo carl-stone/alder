@@ -17,6 +17,7 @@ export const ELECTRON_IPC_CHANNELS = Object.freeze({
   chooseSavePath: "alderDesktop:chooseSavePath",
   chooseRscript: "alderDesktop:chooseRscript",
   getWindowState: "alderDesktop:getWindowState",
+  getDraftId: "alderDesktop:getDraftId",
   hostShutdown: "alderDesktop:hostShutdown",
   saveCancelled: "alderDesktop:saveCancelled",
   rendererReady: "alderDesktop:rendererReady",
@@ -72,6 +73,11 @@ export function createPreloadApi(ipc: IpcRendererLike): PreloadApi {
     },
     chooseRscript: async (): Promise<string | null> =>
       validateSelectedPath(await ipc.invoke(ELECTRON_IPC_CHANNELS.chooseRscript), "chooseRscript"),
+    getDraftId: async (): Promise<string> => {
+      const value = await ipc.invoke(ELECTRON_IPC_CHANNELS.getDraftId);
+      if (typeof value !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(value)) throw new Error("Invalid draft identity");
+      return value;
+    },
     getWindowState: async (): Promise<WindowState> =>
       windowStateSchema.parse(await ipc.invoke(ELECTRON_IPC_CHANNELS.getWindowState)),
     hostShutdown: async (): Promise<void> => {

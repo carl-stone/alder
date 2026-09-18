@@ -389,10 +389,10 @@ test("stageDocumentChanges keeps final creations and base deletions distinct", (
     { type: "delete", cell: { cellId: "cell-1" }, expectedRevision: 0 },
   ]);
 
-  assert.deepEqual(Object.fromEntries(staged.created), { retained: "cell-3" });
+  assert.deepEqual(Object.fromEntries(staged.created), { retained: "retained" });
   assert.deepEqual([...staged.changed], []);
   assert.deepEqual([...staged.deleted], ["cell-1"]);
-  assert.deepEqual(staged.document.cells.map((cell) => cell.id), ["cell-3", "cell-2"]);
+  assert.deepEqual(staged.document.cells.map((cell) => cell.id), ["retained", "cell-2"]);
   assert.deepEqual(staged.document.cells[0]?.body, ["temporary <- FALSE"]);
   assert.equal(staged.document.cells[0]?.options?.name, "temporary");
 });

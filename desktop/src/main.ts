@@ -39,6 +39,7 @@ const IPC_CHANNELS = Object.freeze({
   chooseSavePath: "alderDesktop:chooseSavePath",
   chooseRscript: "alderDesktop:chooseRscript",
   getWindowState: "alderDesktop:getWindowState",
+  getDraftId: "alderDesktop:getDraftId",
   hostShutdown: "alderDesktop:hostShutdown",
   windowAction: "alderDesktop:windowAction",
   saveCancelled: "alderDesktop:saveCancelled",
@@ -205,7 +206,8 @@ interface ElectronWindowRecord {
   rendererReadyGeneration: number;
   rendererReady?: { promise: Promise<void>; resolve: () => void };
   saveCancelled: boolean;
-  recoveryKeyId?: string;
+  recoveryId?: string;
+  readonly draftId: string;
 }
 
 /**
@@ -522,6 +524,7 @@ export class ElectronMain implements ElectronMainApplication {
     const record: ElectronWindowRecord = {
       window,
       keys: new Set<string>(),
+      draftId: randomUUID(),
       connection,
       origin: connection.browserOrigin,
       dirty: false,
@@ -646,16 +649,16 @@ export class ElectronMain implements ElectronMainApplication {
       const record = this.recordForEvent(event);
       if (args.length !== 1) throw new Error("Recovery requires one request");
       const request = desktopRecoveryRequestSchema.parse(args[0]);
-      if (record.recoveryKeyId && request.keyId !== record.recoveryKeyId) throw new Error("Recovery identity changed");
-      record.recoveryKeyId = request.keyId;
+      if (record.recoveryId && request.recoveryId !== record.recoveryId) throw new Error("Recovery identity changed");
+      record.recoveryId = request.recoveryId;
       const userData = this.runtime.app.getPath?.("userData");
       if (!userData) throw new Error("Desktop recovery storage is unavailable");
       const store = this.recoveryStore ??= new NativeRecoveryStore(join(userData, "document-recovery"));
       switch (request.action) {
-        case "read": return store.read(request.keyId, request.name ?? "");
-        case "write": return store.write(request.keyId, request.name ?? "", request.value);
-        case "remove": return store.remove(request.keyId, request.name ?? "");
-        case "list": return store.list(request.keyId, request.prefix ?? "");
+        case "read": return store.read(request.recoveryId, request.name ?? "");
+        case "write": return store.write(request.recoveryId, request.name ?? "", request.value);
+        case "remove": return store.remove(request.recoveryId, request.name ?? "");
+        case "list": return store.list(request.recoveryId, request.prefix ?? "");
       }
     });
     noArguments(IPC_CHANNELS.openNotebook, async (record) => {
@@ -695,6 +698,7 @@ export class ElectronMain implements ElectronMainApplication {
       return selectedPath(result.filePaths[0], "Rscript path");
     });
     noArguments(IPC_CHANNELS.getWindowState, record => this.readWindowState(record));
+    noArguments(IPC_CHANNELS.getDraftId, record => record.draftId);
     noArguments(IPC_CHANNELS.hostShutdown, async (record) => {
       record.closing = true;
       record.hostFailureShown = true;

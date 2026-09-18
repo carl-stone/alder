@@ -29,19 +29,23 @@ const TOKEN = "a".repeat(64);
 const BODY = new TextEncoder().encode("<html><script>document.body.textContent='ok'</script></html>");
 
 
+function commandResult(requestId: string) {
+  return { requestId, epoch: "server-test-epoch", documentRevision: 0, version: 0, cursor: 0, result: null, error: null };
+}
+
 function makeController(): ControllerAdapter {
   const snapshot = {
     epoch: "server-test-epoch",
     documentRevision: 0,
     cursor: 0,
     capabilities: [],
+    cells: [],
   } as unknown as HostSnapshot;
   return {
     snapshot: (_clientId?: string) => snapshot,
     configuration: () => ({ rscript: null, executionMode: "automatic", runOnStartup: false, deferStartup: false }),
-    recover: () => ({ kind: "replay", epoch: snapshot.epoch, cursor: snapshot.cursor, events: [] }),
     subscribe: () => () => {},
-    dispatch: async () => ({ accepted: true }) as never,
+    dispatch: async command => commandResult(command.requestId),
   };
 }
 
@@ -50,7 +54,7 @@ async function startFixture(
   auth: Pick<AlderServerOptions, "externalOrigin" | "externalBearerValidated"> = {},
   controller: ControllerAdapter = makeController(),
   timing: Pick<AlderServerOptions, "leaseExpiryMs" | "leaseSweepIntervalMs" | "onShutdown" | "onLastLeaseDiscard"> = {},
-  recoveryCredentials: { recoveryKey: string; recoveryKeyId: string } | undefined = undefined,
+  recoveryIdentity: { recoveryId: string } | undefined = undefined,
   port = 0,
 ) {
   const root = await mkdtemp(join(tmpdir(), "alder-server-test-"));
@@ -81,7 +85,7 @@ async function startFixture(
       epoch: "server-test-epoch",
       processNonce: "server-test-process",
       token: TOKEN,
-      ...recoveryCredentials,
+      ...recoveryIdentity,
     },
     port,
     ...auth,
@@ -187,7 +191,7 @@ function loopbackSocketTarget(origin: string): { url: string; host: string } {
   return { url: logical.href, host };
 }
 
-type CookieSession = { leaseId: string; clientId: string; csrf: string; epoch: string; continuityProof: string; cookie: string };
+type CookieSession = { leaseId: string; clientId: string; csrf: string; epoch: string; continuityProof: string; cookie: string; recoveryId?: string };
 
 async function createCookieSession(origin: string, parentLeaseId?: string): Promise<CookieSession> {
   const ticketResponse = await fetch(origin + "/api/ticket", {
@@ -223,7 +227,7 @@ async function createCookieSession(origin: string, parentLeaseId?: string): Prom
   const leasedIdentity = hostIdentitySchema.parse(await identityResponse.json());
   assert.equal(leasedIdentity.leaseId, session.leaseId);
   assert.equal(leasedIdentity.clientId, session.clientId);
-  assert.equal(leasedIdentity.nextCommandSequence, session.nextCommandSequence);
+  assert.equal("nextCommandSequence" in leasedIdentity, false);
   const ownerIdentityResponse = await fetch(origin + "/api/identity", { headers: { Authorization: "Bearer " + TOKEN } });
   assert.equal(ownerIdentityResponse.status, 200);
   const identity = hostIdentitySchema.parse(await ownerIdentityResponse.json());
@@ -235,6 +239,7 @@ async function createCookieSession(origin: string, parentLeaseId?: string): Prom
     csrf: session.csrf as string,
     epoch: session.epoch as string,
     continuityProof: session.continuityProof as string,
+    ...(typeof session.recoveryId === "string" ? { recoveryId: session.recoveryId } : {}),
     cookie,
   };
 }
@@ -292,7 +297,7 @@ async function openAuthenticatedSocket(origin: string, session: CookieSession): 
   });
   socket.send(JSON.stringify({
     type: "connect", protocolVersion: HOST_CLIENT_PROTOCOL_VERSION, leaseId: session.leaseId,
-    clientId: session.clientId, csrf: session.csrf, epoch: null, cursor: null,
+    clientId: session.clientId, csrf: session.csrf,
   }));
   await waitForSocketMessage(socket, value => value.type === "recovery");
   return socket;
@@ -388,44 +393,15 @@ test("cookie navigation requires the exact browser authority", async () => {
   }
 });
 
-test("session recovery credentials are exposed only after authenticated ticket exchange", async () => {
-  const recoveryKey = Buffer.from("recovery-key-material-32-bytes-long!!").subarray(0, 32).toString("base64url");
-  const recoveryKeyId = Buffer.from("recovery-key-id-material-32-bytes!!").subarray(0, 32).toString("base64url");
-  const { server, origin, root } = await startFixture(undefined, {}, makeController(), {}, { recoveryKey, recoveryKeyId });
+test("authenticated session exposes a non-secret recovery identity without encryption keys", async () => {
+  const recoveryId = "recovered-document";
+  const { server, origin, root } = await startFixture(undefined, {}, makeController(), {}, { recoveryId });
   try {
-    const ticketResponse = await fetch(origin + "/api/ticket", {
-      method: "POST",
-      headers: bearerHeaders(origin),
-      body: JSON.stringify({ origin }),
-    });
-    assert.equal(ticketResponse.status, 200);
-    const ticketValue = await responseJson(ticketResponse);
-    assert.equal("recoveryKey" in ticketValue, false);
-    assert.equal("recoveryKeyId" in ticketValue, false);
-
-    const rejected = await fetch(origin + "/api/session", {
-      method: "POST",
-      headers: { Origin: origin, "Content-Type": "application/json" },
-      body: JSON.stringify({ ticket: "not-a-ticket" }),
-    });
-    const rejectedText = await rejected.text();
-    assert.notEqual(rejected.status, 200);
-    assert.doesNotMatch(rejectedText, new RegExp(recoveryKey));
-    assert.doesNotMatch(rejectedText, new RegExp(recoveryKeyId));
-
-    const exchanged = await fetch(origin + "/api/session", {
-      method: "POST",
-      headers: { Origin: origin, "Content-Type": "application/json" },
-      body: JSON.stringify({ ticket: ticketValue.ticket }),
-    });
-    assert.equal(exchanged.status, 200);
-    const credentials = await responseJson(exchanged);
-    assert.equal(credentials.recoveryKey, recoveryKey);
-    assert.equal(credentials.recoveryKeyId, recoveryKeyId);
-  } finally {
-    await server.close();
-    await rm(root, { recursive: true, force: true });
-  }
+    const session = await createCookieSession(origin);
+    assert.equal(session.recoveryId, recoveryId);
+    assert.equal("recoveryKey" in session, false);
+    assert.equal("recoveryKeyId" in session, false);
+  } finally { await server.close(); await rm(root, { recursive: true, force: true }); }
 });
 test("prevalidated read-once bearer starts an externally published host without rereading a token file", async () => {
   const { server, origin, root } = await startFixture(undefined, {
@@ -626,9 +602,7 @@ test("WebSocket command pin survives idle sweep and still honors release", { tim
       dispatchStartedResolve();
       await new Promise<void>(resolve => { releaseDispatch = resolve; });
       return {
-        epoch: "server-test-epoch", clientId: command.clientId, operationId: command.operationId,
-        commandSequence: command.commandSequence, accepted: true, sequenceConsumed: true,
-        operation: null, error: null, nextCommandSequence: command.commandSequence + 1,
+        ...commandResult(command.requestId),
       } as never;
     },
   };
@@ -642,10 +616,9 @@ test("WebSocket command pin survives idle sweep and still honors release", { tim
     socket = await openAuthenticatedSocket(origin, session);
     const closed = new Promise<void>(resolve => { socket!.once("close", () => resolve()); });
     const command = {
-      type: "interrupt", operationId: "server-test-operation", clientId: session.clientId,
-      commandSequence: 1, sessionEpoch: session.epoch,
+      type: "interrupt", requestId: "server-test-operation", clientId: session.clientId, sessionEpoch: session.epoch,
     };
-    socket.send(JSON.stringify({ type: "command", sequence: command.commandSequence, command }));
+    socket.send(JSON.stringify({ type: "command", requestId: command.requestId, command }));
     await dispatchStarted;
     await new Promise<void>(resolve => {
       const timer = setTimeout(resolve, 250);
@@ -654,7 +627,7 @@ test("WebSocket command pin survives idle sweep and still honors release", { tim
     assert.equal(socket.readyState, WebSocket.OPEN);
     releaseDispatch!();
     const result = await waitForSocketMessage(socket, value => value.type === "commandResult");
-    assert.equal(result.sequence, command.commandSequence);
+    assert.equal(result.requestId, command.requestId);
     const released = await fetch(origin + "/api/lease", {
       method: "POST",
       headers: { Origin: origin, Cookie: session.cookie, "X-CSRF-Token": session.csrf, "Content-Type": "application/json" },
@@ -670,17 +643,49 @@ test("WebSocket command pin survives idle sweep and still honors release", { tim
   }
 });
 
+test("an outstanding WebSocket run does not block Stop or a source edit", { timeout: 5_000 }, async () => {
+  let finishRun!: () => void;
+  let started!: () => void;
+  const runStarted = new Promise<void>(resolve => { started = resolve; });
+  const seen: string[] = [];
+  const controller: ControllerAdapter = { ...makeController(), dispatch: async command => {
+    seen.push(command.type);
+    if (command.type === "run") {
+      started();
+      await new Promise<void>(resolve => { finishRun = resolve; });
+    }
+    return commandResult(command.requestId);
+  } };
+  const { server, origin, root } = await startFixture(undefined, {}, controller);
+  let socket: WebSocket | undefined;
+  try {
+    const session = await createCookieSession(origin);
+    socket = await openAuthenticatedSocket(origin, session);
+    const send = (requestId: string, details: object) => socket!.send(JSON.stringify({ type: "command", requestId,
+      command: { requestId, clientId: session.clientId, sessionEpoch: session.epoch, ...details } }));
+    send("pending-run", { type: "run", scope: "all", expectedDocumentRevision: 0 });
+    await runStarted;
+    const interrupted = waitForSocketMessage(socket, value => value.requestId === "stop");
+    send("stop", { type: "interrupt" });
+    assert.equal((await interrupted).type, "commandResult");
+    const edited = waitForSocketMessage(socket, value => value.requestId === "edit");
+    send("edit", { type: "transaction", changes: [], expectedDocumentRevision: 0 });
+    assert.equal((await edited).type, "commandResult");
+    assert.deepEqual(seen, ["run", "interrupt", "transaction"]);
+    const finished = waitForSocketMessage(socket, value => value.requestId === "pending-run");
+    finishRun();
+    assert.equal((await finished).type, "commandResult");
+  } finally { finishRun?.(); if (socket) await closeSocket(socket); await server.close(); await rm(root, { recursive: true, force: true }); }
+});
+
 test("WebSocket shutdown schedules host closure after command response", { timeout: 30_000 }, async () => {
   let resolveShutdown!: () => void;
   const shutdown = new Promise<void>(resolve => { resolveShutdown = resolve; });
   const controller: ControllerAdapter = {
     ...makeController(),
     dispatch: async command => ({
-      epoch: "server-test-epoch", clientId: command.clientId, operationId: command.operationId,
-      commandSequence: command.commandSequence, accepted: true, sequenceConsumed: true,
-      operation: null, error: null, nextCommandSequence: command.commandSequence + 1,
+      ...commandResult(command.requestId), result: { closing: true },
     }) as never,
-    awaitOperation: async () => ({ status: "done", result: { closing: true } }) as never,
   };
   const { server, origin, root } = await startFixture(undefined, {}, controller, { onShutdown: () => { resolveShutdown(); } });
   let socket: WebSocket | undefined;
@@ -688,13 +693,12 @@ test("WebSocket shutdown schedules host closure after command response", { timeo
     const session = await createCookieSession(origin);
     socket = await openAuthenticatedSocket(origin, session);
     const command = {
-      type: "shutdown", operationId: "server-test-shutdown", clientId: session.clientId,
-      commandSequence: 1, sessionEpoch: session.epoch, expectedDocumentRevision: 0,
+      type: "shutdown", requestId: "server-test-shutdown", clientId: session.clientId, sessionEpoch: session.epoch, expectedDocumentRevision: 0,
       expectedClientIds: [session.clientId],
     };
-    socket.send(JSON.stringify({ type: "command", sequence: command.commandSequence, command }));
+    socket.send(JSON.stringify({ type: "command", requestId: command.requestId, command }));
     const result = await waitForSocketMessage(socket, value => value.type === "commandResult");
-    assert.equal(result.sequence, command.commandSequence);
+    assert.equal(result.requestId, command.requestId);
     await shutdown;
   } finally {
     if (socket !== undefined) await closeSocket(socket);
@@ -776,7 +780,7 @@ test("socket preserves ordered cell lifecycle events", { timeout: 30_000 }, asyn
       socket!.once("close", onClose);
       socket!.send(JSON.stringify({
         type: "connect", protocolVersion: HOST_CLIENT_PROTOCOL_VERSION, leaseId: session.leaseId,
-        clientId: session.clientId, csrf: session.csrf, epoch: null, cursor: null,
+        clientId: session.clientId, csrf: session.csrf,
       }));
     });
     assert.deepEqual(received, expected);
@@ -793,9 +797,7 @@ test("released lease cannot dispatch a partially received command", { timeout: 3
     dispatch: async command => {
       dispatchCalls += 1;
       return {
-        epoch: "server-test-epoch", clientId: command.clientId, operationId: command.operationId,
-        commandSequence: command.commandSequence, accepted: true, sequenceConsumed: true,
-        operation: null, error: null, nextCommandSequence: command.commandSequence + 1,
+        ...commandResult(command.requestId),
       } as never;
     },
   };
@@ -804,8 +806,7 @@ test("released lease cannot dispatch a partially received command", { timeout: 3
   try {
     const session = await createCookieSession(origin);
     const command = {
-      type: "interrupt", operationId: "server-test-operation", clientId: session.clientId,
-      commandSequence: 1, sessionEpoch: session.epoch,
+      type: "interrupt", requestId: "server-test-operation", clientId: session.clientId, sessionEpoch: session.epoch,
     };
     const text = JSON.stringify(command);
     const split = Math.floor(text.length / 2);
@@ -844,14 +845,11 @@ test("released lease cannot dispatch a partially received command", { timeout: 3
   }
 });
 
-test("command admission maps session_not_started to conflict", { timeout: 30_000 }, async () => {
+test("command completion carries execution failures", { timeout: 30_000 }, async () => {
   const controller: ControllerAdapter = {
     ...makeController(),
     dispatch: async command => ({
-      epoch: "server-test-epoch", clientId: command.clientId, operationId: command.operationId,
-      commandSequence: command.commandSequence, accepted: false, sequenceConsumed: false,
-      operation: null, error: { code: "session_not_started", message: "session has not started" },
-      nextCommandSequence: command.commandSequence,
+      ...commandResult(command.requestId), error: { code: "session_not_started", message: "session has not started" },
     }) as never,
   };
   const { server, origin, root } = await startFixture(undefined, {}, controller);
@@ -861,12 +859,11 @@ test("command admission maps session_not_started to conflict", { timeout: 30_000
       method: "POST",
       headers: { Origin: origin, Cookie: session.cookie, "X-CSRF-Token": session.csrf, "Content-Type": "application/json" },
       body: JSON.stringify({
-        type: "interrupt", operationId: "server-test-operation", clientId: session.clientId,
-        commandSequence: 1, sessionEpoch: session.epoch,
+        type: "interrupt", requestId: "server-test-operation", clientId: session.clientId, sessionEpoch: session.epoch,
       }),
     });
     const text = await response.text();
-    assert.equal(response.status, 409, text);
+    assert.equal(response.status, 200, text);
     assert.equal((JSON.parse(text) as { error?: { code?: unknown } }).error?.code, "session_not_started");
   } finally {
     await server.close();

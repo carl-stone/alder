@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import { RecoveryWriter, type RecoveryBaseline } from "../src/recovery.js";
 import { startHost, type RunningHost } from "../src/application.js";
-import { parseHostCommand } from "../src/protocol.js";
+import { encodeHostCommandWire, parseHostCommand } from "../src/protocol.js";
 import type { ApplicationResources } from "../src/resources.js";
 
 const absent = { state: "absent" as const, digest: null, version: null, error: null };
@@ -29,15 +29,10 @@ async function startDocument(path: string, directory: string, recoveryDirectory 
   return startHost({ path, resources: resources(directory), rscript: join(directory, "no-Rscript"), recoveryDirectory, idleTimeout,
     session: { runtimeDirectory: join(directory, "sessions") }, runOnStartup: false });
 }
-const sequence = new WeakMap<object, number>();
 async function command(app: RunningHost, value: Record<string, unknown>): Promise<void> {
-  const commandSequence = (sequence.get(app) ?? 0) + 1;
-  sequence.set(app, commandSequence);
-  const admission = await app.controller.dispatch(parseHostCommand({ ...value, operationId: randomUUID(), clientId: "document-test",
-    commandSequence, sessionEpoch: app.controller.snapshot().epoch, expectedDocumentRevision: app.controller.snapshot().documentRevision }));
-  assert.ok(admission.operation);
-  const result = await app.controller.awaitOperation(admission.operation.id, "document-test", AbortSignal.timeout(5_000));
-  assert.equal(result.status, "done", JSON.stringify(result));
+  const result = await app.controller.dispatch(parseHostCommand({ ...value, requestId: randomUUID(), clientId: "document-test",
+    sessionEpoch: app.controller.snapshot().epoch, expectedDocumentRevision: app.controller.snapshot().documentRevision }));
+  if (result.error) throw Object.assign(new Error(result.error.message), result.error);
 }
 async function edit(app: RunningHost, body: string): Promise<void> {
   const cell = app.controller.snapshot().cells[0]!;
@@ -107,6 +102,62 @@ if (process.env.ALDER_RECOVERY_CHILD) {
       assert.equal(textOf(await recovered.materializedBaseline()), "unsaved scientific work\n");
       await recovered.close();
     } finally { child.kill(); await rm(directory, { recursive: true, force: true }); }
+  });
+
+  test("GUI and agent edits share revision checks and lost replies can be retried across leases", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "alder-shared-edits-")));
+    const path = join(directory, "notebook.R");
+    await writeFile(path, "# %%\nx <- 1\n");
+    let app: RunningHost | undefined;
+    try {
+      app = await startDocument(path, directory);
+      const address = app.server.address()!;
+      const origin = "http://127.0.0.1:" + address.port;
+      const headers = { Authorization: "Bearer " + app.ownership.token, "Content-Type": "application/json" };
+      const attach = async () => {
+        const response = await fetch(origin + "/api/lease", { method: "POST", headers, body: JSON.stringify({ action: "attach" }) });
+        assert.equal(response.ok, true);
+        return await response.json() as { leaseId: string; clientId: string; epoch: string };
+      };
+      const gui = await attach();
+      const agent = await attach();
+      const post = async (lease: typeof gui, command: object) => {
+        const response = await fetch(origin + "/api/command", { method: "POST", headers: { ...headers, "X-Alder-Lease-Id": lease.leaseId },
+          body: JSON.stringify(encodeHostCommandWire(parseHostCommand({ ...command, clientId: lease.clientId, sessionEpoch: lease.epoch }))) });
+        assert.equal(response.status, 200);
+        return await response.json() as { error: { code: string } | null; documentRevision: number };
+      };
+      const change = (requestId: string, value: number) => ({ requestId, type: "transaction", expectedDocumentRevision: 0,
+        changes: [{ type: "edit", cell: { cellId: "cell-1" }, cellType: "code", body: ["x <- " + value], expectedRevision: 0 }] });
+      const replies = await Promise.all([post(gui, change("gui-edit", 2)), post(agent, change("agent-edit", 3))]);
+      assert.equal(replies.filter(reply => reply.error === null).length, 1);
+      assert.equal(replies.find(reply => reply.error !== null)?.error?.code, "source_conflict");
+      const creation = { requestId: "lost-create-response", type: "transaction", expectedDocumentRevision: 1,
+        changes: [{ type: "create", creationId: "new-cell", after: { cellId: "cell-1" }, cellType: "code", body: ["y <- 4"], options: {} }] };
+      await post(gui, creation); // The renderer can lose this response after commit.
+      const retry = await post(agent, creation);
+      assert.equal(retry.error, null);
+      assert.equal(retry.documentRevision, 2);
+      assert.equal(app.controller.snapshot().documentRevision, 2);
+      assert.deepEqual(app.controller.snapshot().cells.map(cell => cell.id), ["cell-1", "new-cell"]);
+    } finally { await app?.close(); await rm(directory, { recursive: true, force: true }); }
+  });
+
+  test("created cell identity survives saving and reopening after an uncertain response", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "alder-stable-cell-")));
+    const path = join(directory, "notebook.R");
+    await writeFile(path, "# %%\nx <- 1\n");
+    let app: RunningHost | undefined;
+    try {
+      app = await startDocument(path, directory);
+      await command(app, { type: "transaction", changes: [{ type: "create", creationId: "gui-created-cell",
+        after: { cellId: "cell-1" }, cellType: "code", body: ["y <- 2"], options: {} }] });
+      await command(app, { type: "save" });
+      await app.close();
+      app = await startDocument(path, directory);
+      assert.deepEqual(app.controller.snapshot().cells.map(cell => cell.id), ["cell-1", "gui-created-cell"]);
+      assert.equal(app.controller.snapshot().dirty, false);
+    } finally { await app?.close(); await rm(directory, { recursive: true, force: true }); }
   });
 
   test("saved document opens, edits, saves and reopens while R and recovery storage are unavailable", async () => {
@@ -264,34 +315,34 @@ if (process.env.ALDER_RECOVERY_CHILD) {
     try {
       const source = await RecoveryWriter.open({ rootDir: directory, key: "source", baseline: baseline("source\n") });
       const destination = await RecoveryWriter.open({ rootDir: directory, key: "destination", baseline: baseline("destination\n") });
-      const activeKey = source.recoveryKey;
-      const destinationKey = destination.recoveryKey;
+      const activeKey = source.recoveryId;
+      const destinationKey = destination.recoveryId;
       await destination.close();
       const target = { rootDir: directory, key: "destination", baseline: baseline("source saved as destination\n", 1) };
       const canceled = await source.prepareRebind(target);
       await canceled.publish();
-      assert.equal(source.recoveryKey, activeKey);
+      assert.equal(source.recoveryId, activeKey);
       await canceled.abort();
       const afterAbort = await RecoveryWriter.open(target);
-      assert.equal(afterAbort.recoveryKey, destinationKey);
-      assert.equal(source.recoveryKey, activeKey);
+      assert.equal(afterAbort.recoveryId, destinationKey);
+      assert.equal(source.recoveryId, activeKey);
       await afterAbort.close();
       const committed = await source.prepareRebind(target);
       await committed.publish();
-      assert.equal(source.recoveryKey, activeKey);
+      assert.equal(source.recoveryId, activeKey);
       committed.adopt();
-      assert.equal(committed.writer.recoveryKey, activeKey);
-      const rotated = source.recoveryKey;
+      assert.equal(committed.writer.recoveryId, activeKey);
+      const rotated = source.recoveryId;
       assert.notEqual(rotated, activeKey);
       committed.adopt();
       await committed.abort();
-      assert.equal(source.recoveryKey, rotated, "repeated adoption and late abort do not rotate again");
+      assert.equal(source.recoveryId, rotated, "repeated adoption and late abort do not rotate again");
       await source.close();
       await committed.writer.close();
       const reopenedSource = await RecoveryWriter.open({ rootDir: directory, key: "source", baseline: baseline("source\n") });
       const reopenedDestination = await RecoveryWriter.open(target);
-      assert.equal(reopenedSource.recoveryKey, rotated);
-      assert.equal(reopenedDestination.recoveryKey, activeKey);
+      assert.equal(reopenedSource.recoveryId, rotated);
+      assert.equal(reopenedDestination.recoveryId, activeKey);
       await reopenedSource.close();
       await reopenedDestination.close();
     } finally { await rm(directory, { recursive: true, force: true }); }
@@ -312,9 +363,9 @@ if (process.env.ALDER_RECOVERY_CHILD) {
       const response = await fetch(origin + "/api/session", { method: "POST", headers: {
         Origin: origin, "Content-Type": "application/json" }, body: JSON.stringify({ ticket: ticket.ticket }) });
       assert.equal(response.ok, true);
-      const session = await response.json() as { recoveryKeyId?: string };
-      assert.equal(typeof session.recoveryKeyId, "string");
-      return session.recoveryKeyId!;
+      const session = await response.json() as { recoveryId?: string };
+      assert.equal(typeof session.recoveryId, "string");
+      return session.recoveryId!;
     };
     let active: RunningHost | undefined;
     let reopenedSource: RunningHost | undefined;
