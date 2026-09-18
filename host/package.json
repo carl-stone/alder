@@ -6,6 +6,15 @@
   "engines": {
     "node": ">=24.20.0"
   },
+  "config": {
+    "ark": {
+      "version": "0.1.252",
+      "sha256": {
+        "darwin-arm64": "aa1186f6e1ad271abaf246fd76e0aa9039cdeeff2cb52147e8887060afd5fb07",
+        "darwin-x64": "a8df8b55d951732b73fd05e8857b9c4b185b8dc9d6bc307f2ae5dcb84d4cc913"
+      }
+    }
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json --noEmit && node scripts/build.mjs",
     "check": "tsc -p tsconfig.json --noEmit",

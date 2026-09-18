@@ -227,11 +227,7 @@ export class OutputStore {
     this.documentRevision = nextDocumentRevision;
     this.kernelEpoch = identity.kernelEpoch;
   }
-  /**
-   * Normalize one public Jupyter display-data map. Alder event MIME is control
-   * traffic for the Engine and is rejected here unless the Engine has consumed
-   * it first; no control-shaped value is rendered as user output.
-   */
+  /** Normalize one public Jupyter display-data map. */
 
   async ingestDisplay(
     data: Record<string, JsonValue>,
@@ -251,11 +247,6 @@ export class OutputStore {
     data = checkedData as Record<string, JsonValue>;
     metadata = checkedMetadata as Record<string, JsonValue>;
 
-    // The Engine owns validation/dispatch of control fields (token, request,
-    // sequence, and full identity). Never turn an object event into visible text.
-    if (Object.prototype.hasOwnProperty.call(data, "application/vnd.alder.event+json")) {
-      throw new OutputStoreError("output_invalid", "Alder control MIME must be validated by the Engine before output ingestion");
-    }
     const full = this.completeIdentity(identity);
     this.assertIdentity(full, true);
     const rich = data["application/vnd.alder.output+json"];

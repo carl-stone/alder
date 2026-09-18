@@ -1,9 +1,11 @@
 import { execFileSync } from 'node:child_process';
-import { chmod, cp, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, cp, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { createRequire } from 'node:module';
+import { stageArk } from './fetch-ark.mjs';
+import { tmpdir } from 'node:os';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const { values } = parseArgs({ options: {
@@ -41,6 +43,25 @@ try {
   await cp(resolve(values.node), join(applicationRoot, 'bin/node'));
   await chmod(join(applicationRoot, 'bin/node'), 0o755);
   await cp(join(root, 'host/licenses/Node.txt'), join(applicationRoot, 'host/licenses/Node.txt'));
+  await stageArk({ output: join(applicationRoot, 'runtime') });
+  const rPackageBuild = await mkdtemp(join(tmpdir(), 'alder-r-package-'));
+  try {
+    execFileSync('R', ['--slave', '--vanilla', '-e',
+      'if (getRversion() < "4.6.0" || getRversion() >= "4.7.0") stop("Alder requires R 4.6.x for its bundled helper")'],
+    { stdio: 'inherit' });
+    execFileSync('R', ['CMD', 'build', root, '--no-build-vignettes', '--no-manual'], {
+      cwd: rPackageBuild, stdio: 'inherit',
+    });
+    const archives = (await readdir(rPackageBuild)).filter(name => /^alder_[^/]+[.]tar[.]gz$/.test(name));
+    if (archives.length !== 1) throw new Error('R package build did not produce one Alder archive');
+    const library = join(applicationRoot, 'r-library');
+    await mkdir(library);
+    execFileSync('R', ['CMD', 'INSTALL', `--library=${library}`, join(rPackageBuild, archives[0])], {
+      stdio: 'inherit',
+    });
+  } finally {
+    await rm(rPackageBuild, { recursive: true, force: true });
+  }
   // Preserve the package loaders but ship only the native Mac runtime.
   for (const name of ['zeromq', 'cmake-ts']) {
     const source = join(root, 'host/node_modules', name);
@@ -75,8 +96,7 @@ try {
       electronEntry: values.kind === 'desktop' ? 'desktop' : null,
     },
   };
-  // Optional runtime resources can be added by the execution slice. Editing only
-  // needs the files above, so staging never starts R or downloads a kernel.
+  // Optional services can be added independently of the execution kernel.
   await writeFile(join(applicationRoot, 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n');
   const launcher = '#!/bin/sh\nroot=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)\nexec "$root/bin/node" "$root/host/alder-host.mjs" "$@"\n';
   await writeFile(join(applicationRoot, 'bin/alder'), launcher, { mode: 0o755 });

@@ -137,8 +137,6 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
   KERNEL_STATE <- new.env(parent = emptyenv())
   KERNEL_STATE$invalid <- FALSE
   KERNEL_STATE$cleanup_failures <- list()
-  WARMING <- new.env(parent = emptyenv())
-  WARMING$value <- FALSE
   LAZY_ENV <- new.env(parent = emptyenv())
   EMITTED_OUTPUTS <- new.env(parent = emptyenv())
   EMITTED_OUTPUTS$value <- list()
@@ -201,29 +199,6 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
   tryCatch(setHook(packageEvent("alder", "attach"),
                    function(...) inject_runtime()), error = function(e) NULL)
 
-  # Ark sources --startup-file before tools:positron is installed. Resolve the
-  # public publisher on the first actual execution instead of failing kernel
-  # startup while that integration environment is still being created.
-  ark_publish_mimebundle <- NULL
-  resolve_ark_publisher <- function() {
-    if (is.function(ark_publish_mimebundle)) return(ark_publish_mimebundle)
-    POSITRON_ENV <- tryCatch(as.environment("tools:positron"),
-                             error = function(error) NULL)
-    if (is.null(POSITRON_ENV) ||
-        !exists("ark_publish_mimebundle", envir = POSITRON_ENV,
-                inherits = FALSE)) {
-      stop("Ark public MIME publisher is unavailable after kernel startup",
-           call. = FALSE)
-    }
-    publisher <- get("ark_publish_mimebundle", envir = POSITRON_ENV,
-                     inherits = FALSE)
-    if (!is.function(publisher)) {
-      stop("Ark public MIME publisher is invalid", call. = FALSE)
-    }
-    ark_publish_mimebundle <<- publisher
-    publisher
-  }
-
   mark_kernel_invalid <- function(failures) {
     KERNEL_STATE$invalid <- TRUE
     if (length(failures)) {
@@ -239,6 +214,18 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
       code = "kernel_state_invalid",
       details = list(cleanup = KERNEL_STATE$cleanup_failures)
     ), class = c("alder_kernel_state_invalid", "error", "condition"))
+  }
+
+  # R's message sink replaces stderr(), including for user code that calls
+  # sink(type = "message"). Ark captures the process stderr descriptor, so a
+  # fresh public file connection to that descriptor keeps control events on
+  # Jupyter IOPub without disturbing the user's sink.
+  write_ark_event <- function(frame) {
+    connection <- file("/dev/fd/2", open = "wb", raw = TRUE)
+    on.exit(close(connection), add = TRUE)
+    cat(frame, file = connection)
+    flush(connection)
+    invisible()
   }
 
   ark_emit <- function(value) {
@@ -308,12 +295,12 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
       revision = CURRENT_REVISION %||% NULL,
       payload = payload
     )
-    data <- list()
-    data[["application/vnd.alder.event+json"]] <- event
-    data_json <- jsonlite::toJSON(data, auto_unbox = TRUE, null = "null",
+    data_json <- jsonlite::toJSON(event, auto_unbox = TRUE, null = "null",
                                   na = "null", force = TRUE)
-    publisher <- resolve_ark_publisher()
-    if (!isTRUE(WARMING$value)) publisher(data_json, "{}", "{}")
+    frame <- paste0("\036ALDER:", ark_event_token, ":",
+                    base64enc::base64encode(charToRaw(enc2utf8(data_json))),
+                    ":\036\n")
+    write_ark_event(frame)
     invisible()
   }
 
@@ -2394,56 +2381,6 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
 
   initialize_ark_runtime <- function() {
     inject_runtime()
-    loadNamespace("graphics")
-    loadNamespace("grDevices")
-    # R 4.6.1's dev.hold() validates a character-valued default device by
-    # looking in .GlobalEnv and grDevices, while Ark keeps its graphics entry
-    # point in tools:positron. Make the existing Ark function discoverable
-    # without replacing Ark's native device or publisher path.
-    positron <- tryCatch(as.environment("tools:positron"),
-                         error = function(error) NULL)
-    if (is.null(positron) ||
-        !exists(".ark.graphics.device", envir = positron,
-                inherits = FALSE)) {
-      stop("Ark graphics device entry point is unavailable", call. = FALSE)
-    }
-    device <- get(".ark.graphics.device", envir = positron,
-                  inherits = FALSE)
-    if (!is.function(device)) {
-      stop("Ark graphics device entry point is invalid", call. = FALSE)
-    }
-    assign(".ark.graphics.device", device, envir = globalenv())
-    # The adapter is sourced at kernel startup, so these closures do not pass
-    # through package installation's byte compiler. Compile our private helpers
-    # before readiness, including inspection and cleanup: their first JIT can
-    # otherwise occupy the serial kernel just as the next Run arrives.
-    target <- environment(ark_eval_cell)
-    for (name in ls(target, all.names = TRUE)) {
-      helper <- get(name, envir = target, inherits = FALSE)
-      if (is.function(helper) && identical(environment(helper), target)) {
-        assign(name, compiler::cmpfun(helper), envir = target)
-      }
-    }
-    # Exercise the exact scalar evaluator before readiness. Byte-compiling the
-    # closures avoids compilation itself, but R and package lazy-load paths are
-    # still initialized on their first call and would otherwise delay the first
-    # user-visible Run. Events stay private and the reserved binding is removed
-    # before the runtime API is published.
-    capture_connection(1L)
-    warm_id <- ".alder-runtime-warmup"
-    warm_name <- ".alder_runtime_warmup"
-    WARMING$value <- TRUE
-    on.exit(WARMING$value <- FALSE, add = TRUE)
-    ark_eval_cell(list(
-      id = warm_id, code = paste0(warm_name, " <- 1L\n", warm_name),
-      request = warm_id, run_id = warm_id, session_epoch = warm_id,
-      kernel_epoch = warm_id, operation_id = warm_id, revision = 0L,
-      defs = list(warm_name), locals = list(), opaque = FALSE))
-    cleanup <- clear_cell(list(ids = list(warm_id)))
-    WARMING$value <- FALSE
-    if (!isTRUE(cleanup$ok) || isTRUE(KERNEL_STATE$invalid)) {
-      stop("Alder runtime warmup cleanup failed", call. = FALSE)
-    }
     runtime <- get("RUNTIME", envir = asNamespace("alder"), inherits = FALSE)
     if (!is.environment(runtime)) {
       stop("Alder runtime API container is invalid", call. = FALSE)

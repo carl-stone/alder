@@ -15,7 +15,7 @@ const APPLICATION_ROOT = process.env.ALDER_APPLICATION_ROOT;
 const SELECTED_APPLICATION_ROOT = APPLICATION_ROOT === undefined ? undefined : resolve(APPLICATION_ROOT);
 const ARK = SELECTED_APPLICATION_ROOT === undefined
   ? "alder-application-root-not-selected"
-  : join(SELECTED_APPLICATION_ROOT, "resources", "runtime", "ark");
+  : join(SELECTED_APPLICATION_ROOT, "runtime", "ark");
 const NO_SPAWN_SCOPE = {
   spawn: async (): Promise<never> => { throw new Error("spawn not expected"); },
   close: async (): Promise<void> => {},
@@ -73,14 +73,14 @@ function resourcesFor(root: string): ApplicationResources {
   return {
     root,
     cliLauncher: join(root, "bin", "alder"),
-    hostEntry: join(root, "resources", "host", "alder-host.mjs"),
-    rendererDirectory: join(root, "resources", "app"),
-    workerDirectory: join(root, "resources", "worker"),
-    rLibraryDirectory: join(root, "resources", "r-library"),
-    arkExecutable: join(root, "resources", "runtime", "ark"),
-    airExecutable: join(root, "resources", "runtime", "air"),
-    nodeExecutable: join(root, "resources", "runtime", "node"),
-    processSupervisorExecutable: join(root, "resources", "runtime", "alder-process-supervisor"),
+    hostEntry: join(root, "host", "alder-host.mjs"),
+    rendererDirectory: join(root, "app"),
+    workerDirectory: join(root, "worker"),
+    rLibraryDirectory: join(root, "r-library"),
+    arkExecutable: join(root, "runtime", "ark"),
+    airExecutable: join(root, "runtime", "air"),
+    nodeExecutable: join(root, "bin", "node"),
+    processSupervisorExecutable: join(root, "runtime", "alder-process-supervisor"),
     electronEntry: null,
   };
 }
@@ -194,8 +194,7 @@ test("live Ark cancellation settles the request and cannot poison the next execu
   try {
     const [firstInfo, secondInfo] = await Promise.all([kernel.start(), kernel.start()]);
     assert.equal(firstInfo.implementation.toLowerCase(), "ark");
-    assert.equal(firstInfo.buildVersion, "0.1.252-alder.1");
-    assert.equal(firstInfo.mimePublisher, "alder-json-v1");
+    assert.equal(firstInfo.implementationVersion, "0.1.252");
     assert.deepEqual(secondInfo, firstInfo);
     assert.equal(kernel.ready, true);
     assert.ok(ownedProcess !== undefined);

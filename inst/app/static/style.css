@@ -589,6 +589,7 @@ main { max-width: 920px; margin: 24px auto; padding: 0 16px; }
 }
 
 .log-area { padding: 2px 12px 9px; color: var(--muted); font: 11.5px/1.45 var(--mono); white-space: pre-wrap; }
+.ordered-log { padding: 0; }
 .log-error, .output-error { color: var(--danger); }
 .error-details { margin-top: 5px; color: var(--text); }
 .error-details summary { cursor: pointer; font-family: var(--mono); }

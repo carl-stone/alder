@@ -28,44 +28,6 @@ ALDER_HOST_MAX_SOURCE_BYTES <- 32L * 1024L * 1024L
   value
 }
 
-.alder_runtime_absolute_directory <- function(path, label = "library path") {
-  if (!is.character(path) || length(path) != 1L || is.na(path) ||
-      !nzchar(path) || !validUTF8(path) ||
-      .alder_runtime_has_control(path)) {
-    stop(label, " must be a non-empty absolute directory", call. = FALSE)
-  }
-  absolute <- startsWith(path, "/")
-  if (!absolute) stop(label, " must be absolute", call. = FALSE)
-  resolved <- tryCatch(normalizePath(path, mustWork = TRUE, winslash = "/"),
-                       error = function(error) NULL)
-  if (is.null(resolved) || !dir.exists(resolved) ||
-      file.access(resolved, 4L) != 0L) {
-    stop(label, " must be an existing readable directory", call. = FALSE)
-  }
-  resolved
-}
-
-# The host owns library selection. R only validates the complete ordered list
-# and applies it without adding site/user defaults or interpreting path syntax.
-alder_apply_library_paths <- function(paths) {
-  if (!is.character(paths) || !length(paths) || anyNA(paths) ||
-      any(!nzchar(paths))) {
-    stop("library paths must be a non-empty character array", call. = FALSE)
-  }
-  resolved <- vapply(paths, .alder_runtime_absolute_directory, "",
-                     label = "library path")
-  if (anyDuplicated(resolved)) {
-    stop("library paths must be unique", call. = FALSE)
-  }
-  if ("include.site" %in% names(formals(base::.libPaths))) {
-    base::.libPaths(unname(resolved), include.site = FALSE)
-  } else {
-    assign(".lib.loc", unique(unname(resolved)),
-           envir = environment(base::.libPaths))
-  }
-  invisible(unname(resolved))
-}
-
 alder_host_decode_encoded_source <- function(encoded, error_message) {
   invalid <- function() stop(error_message, call. = FALSE)
   if (!is.character(encoded) || length(encoded) != 1L || is.na(encoded) ||

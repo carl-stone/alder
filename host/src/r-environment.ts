@@ -113,6 +113,9 @@ export function rEnvironmentVariables(
     ALDER_RESOURCES_ROOT: resources.root,
     ALDER_R_LIBRARIES: JSON.stringify(environment.libraryPaths),
     ALDER_WORKER_DIR: resources.workerDirectory,
+    R_LIBS: environment.libraryPaths.join(delimiter),
+    R_LIBS_SITE: "",
+    R_LIBS_USER: "",
   };
   const loaderDirectories = [join(environment.rHome, "lib"), join(environment.rHome, "lib", "R")];
   values.DYLD_LIBRARY_PATH = prependPath(loaderDirectories, process.env.DYLD_LIBRARY_PATH);

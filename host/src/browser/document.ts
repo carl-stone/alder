@@ -683,17 +683,24 @@ export class BrowserDocument {
   private applyOutput(id: string, payload: Record<string, unknown>): void {
     const cell = this.cell(id);
     if (!cell?.server) return;
-    const next: HostCellState = { ...cell.server, outputs: [...cell.server.outputs], log: [...cell.server.log] };
+    const next: HostCellState = {
+      ...cell.server, outputs: [...cell.server.outputs], log: [...cell.server.log],
+      displayOrder: (cell.server.displayOrder ?? []).map((part) => ({ ...part })),
+    };
     if (payload.kind === "clear") {
       next.outputs = [];
       next.outputsStale = false;
       next.log = [];
+      next.displayOrder = [];
       next.progress = null;
     } else if (payload.kind === "append") {
       const value = isRecord(payload.payload) && "output" in payload.payload ? payload.payload.output : payload.payload;
       if (next.outputsStale) next.outputs = [];
       next.outputsStale = false;
-      if (isOutputRecord(value)) next.outputs.push(value);
+      if (isOutputRecord(value)) {
+        next.outputs.push(value);
+        next.displayOrder?.push({ kind: "output", id: value.id });
+      }
     } else if (payload.kind === "progress") {
       const progress = isRecord(payload.payload) && "progress" in payload.payload ? payload.payload.progress : payload.payload;
       next.progress = progress as HostCellState["progress"];
@@ -703,6 +710,12 @@ export class BrowserDocument {
       const lines = Array.isArray(value) ? value.map(String) : [String(value)];
       const previous = detail?.replaceLast === true && next.log.length > 0 ? next.log.slice(0, -1) : next.log;
       next.log = boundedLog([...previous, ...lines]);
+      const raw = detail && typeof detail.raw === "string" ? detail.raw : lines.join("\n");
+      if (raw.length > 0) {
+        const last = next.displayOrder?.at(-1);
+        if (last?.kind === "log") last.text += raw;
+        else next.displayOrder?.push({ kind: "log", text: raw });
+      }
     }
     cell.server = next;
     const index = this.snapshotValue.cells.findIndex((candidate) => candidate.id === id);

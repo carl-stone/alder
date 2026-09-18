@@ -36,8 +36,6 @@ const HANDSHAKE: EngineHandshake = {
   kernel: {
     name: "ark",
     version: "test",
-    buildVersion: "0.1.252-alder.1",
-    mimePublisher: "alder-json-v1",
     protocol: "ark-protocol-v2",
     kernelEpoch: "kernel-test",
   },
@@ -1726,6 +1724,34 @@ test("streamed log replacements compose partial lines without duplicating them",
   engine.finishEvaluation({ ok: true, outputs: [] });
   await settle(controller, run.requestId);
   assert.deepEqual(controller.snapshot().cells[0]?.log, ["ab", "c"]);
+  await controller.close();
+});
+
+test("mixed rich output and console text retain emission order", async () => {
+  const engine = new FakeEngine();
+  engine.deferred = true;
+  const controller = createController({
+    engine,
+    notebook: notebook([["a", "out$append('first'); cat('second\\n'); out$append('third')"]]),
+    config: resolveSettings({ notebook: { on_startup: false } }),
+  });
+  await controller.start();
+  const run = command(controller, { type: "run", scope: "cell", target: { cellId: "a" }, changes: [] });
+  await startCommand(controller, run);
+  await eventually(() => engine.pendingEvaluations.length === 1);
+  engine.emitEvaluationOutput("append", { output: { kind: "text", text: "first", truncated: false } });
+  engine.emitEvaluationLog({ lines: ["second"], raw: "second\n" });
+  engine.emitEvaluationOutput("append", { output: { kind: "text", text: "third", truncated: false } });
+  engine.finishEvaluation({ ok: true });
+  await settle(controller, run.requestId);
+  const cell = controller.snapshot().cells[0]!;
+  const outputs = new Map(cell.outputs.map((output) => [output.id, output.data]));
+  assert.deepEqual(cell.displayOrder?.map((part) => part.kind === "log"
+    ? part.text : outputs.get(part.id)), [
+      { kind: "text", text: "first", truncated: false },
+      "second\n",
+      { kind: "text", text: "third", truncated: false },
+    ]);
   await controller.close();
 });
 

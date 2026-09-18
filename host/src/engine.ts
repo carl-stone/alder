@@ -183,6 +183,7 @@ interface ActiveEvaluation {
   kernelStateInvalid?: EngineResponse["kernelStateInvalid"],
   messageTail: Promise<void>;
   messageError?: Error;
+  eventStream: ArkEventStreamDecoder;
   batch?: ActiveBatch;
 }
 
@@ -669,7 +670,8 @@ export class Engine extends EventEmitter implements EngineAdapter {
     }
     const requestId = this.nextRequestId();
     const wire = evaluationWire(value);
-    const state = makeEvaluation(requestId, value, onEvent, kernelGeneration);
+    const state = makeEvaluation(requestId, value, onEvent, kernelGeneration,
+      this.arkEventToken, this.maxArkPayloadBytes());
     this.evaluations.set(requestId, state);
     const traceSpan = this.trace.begin("host.engine.request", requestTraceFields(
       "kernel", "eval_cell", { req: requestId, ...wire },
@@ -694,6 +696,7 @@ export class Engine extends EventEmitter implements EngineAdapter {
       }, { storeHistory: true, signal });
       await state.messageTail;
       if (state.messageError !== undefined) throw state.messageError;
+      state.eventStream.finish();
       if (state.deferredArtifactReleases.size > 0) {
         const artifacts = [...state.deferredArtifactReleases];
         await this.releaseDeferredArtifacts(artifacts);
@@ -791,7 +794,8 @@ export class Engine extends EventEmitter implements EngineAdapter {
       writeFileSync(batch.permit, "", { flag: "wx", mode: 0o600 });
       batch.states = values.map((value) => ({ ...makeEvaluation(requestId!, value, (event) => {
         callbacks = callbacks.then(() => onEvent?.(event));
-      }, kernelGeneration), batch }));
+      }, kernelGeneration, this.arkEventToken, this.maxArkPayloadBytes()), batch }));
+      const eventStream = new ArkEventStreamDecoder(this.arkEventToken, this.maxArkPayloadBytes());
       this.evaluations.set(requestId, batch.states[0]!);
       const code = values.map((value, offset) => arkCall("evaluate", encodeArkRequest({
         request: String(requestId), ...evaluationWire(value),
@@ -808,7 +812,12 @@ export class Engine extends EventEmitter implements EngineAdapter {
       const execution = await this.kernel!.execute(code, {
         onMessage: (message) => {
           tail = tail.then(async () => {
-            const event = decodeArkEvent(message, this.arkEventToken, this.maxArkPayloadBytes());
+            const parts = message.header.msg_type === "stream"
+              ? eventStream.push(streamText(message)).map((part) => part.event === undefined
+                ? { text: part.text } : { event: part.event })
+              : [{ message }];
+            for (const part of parts) {
+            const event = "event" in part ? part.event : undefined;
             if (event?.type === "batch_end") { ended = true; return; }
             if (event?.type === "started") {
               if (ended || (index >= 0 && !batch.states[index]!.finished) || ++index >= values.length) {
@@ -825,7 +834,10 @@ export class Engine extends EventEmitter implements EngineAdapter {
               throw new FrameProtocolError(`batch output (${message.header.msg_type}) arrived before its first cell`);
             }
             if (ended && state.finished) return;
-            if (event === undefined) await this.processEvaluationMessage(state, message);
+            if (event === undefined && "text" in part) {
+              await this.applyPendingClear(state);
+              this.appendLog(state, part.text!);
+            } else if (event === undefined) await this.processEvaluationMessage(state, message);
             else await this.applyArkEvent(state, event);
             await callbacks;
             if (state.messageError !== undefined) throw state.messageError;
@@ -833,6 +845,7 @@ export class Engine extends EventEmitter implements EngineAdapter {
             // final cell still waits for execute_reply + IOPub idle below.
             if (event?.type === "finished" && index < values.length - 1) {
               await complete(state, successfulExecution(message));
+            }
             }
           }).catch((error) => {
             messageError ??= asError(error);
@@ -849,6 +862,7 @@ export class Engine extends EventEmitter implements EngineAdapter {
       }, { storeHistory: true, signal });
       await tail;
       if (messageError !== undefined) throw messageError;
+      eventStream.finish();
       for (const [offset, state] of batch.states.entries()) {
         if (!state.started || responses[offset] !== undefined) continue;
         if (ended && batch.interrupted && !state.finished) {
@@ -1158,9 +1172,6 @@ export class Engine extends EventEmitter implements EngineAdapter {
       kernel.on("failed", (error: Error) => this.kernelFailed(generation, error));
       const info = await kernel.start();
       this.kernelInfo = info;
-      if (!kernel.publicMimePublisherReady) {
-        throw new EngineTransportError("Ark public MIME publisher probe did not complete", "kernel");
-      }
     } catch (error) {
       if (kernel !== undefined) await kernel.terminate().catch(() => {});
       if (this.kernel === kernel) this.kernel = undefined;
@@ -1179,51 +1190,6 @@ export class Engine extends EventEmitter implements EngineAdapter {
     }
   }
 
-  private async warmEvaluationPath(): Promise<void> {
-    const kernelEpoch = this.kernelEpoch;
-    if (kernelEpoch === null) throw new EngineTransportError("kernel epoch is unavailable during warmup", "kernel");
-    const identity = randomUUID();
-    const retainOutputs = this.outputStoreValue !== undefined && this.outputSessionEpoch !== undefined;
-    const makePayload = (index: number, source: string, definitions: string[] = []): EvaluationPayload => ({
-      sessionEpoch: this.outputSessionEpoch ?? `warmup-session-${identity}`, kernelEpoch,
-      operationId: `warmup-operation-${identity}`, runId: `warmup-run-${identity}`,
-      cellId: `cell-internal-warmup-${index}`, revision: 0, documentRevision: this.outputDocumentRevision ?? 0,
-      source, definitions, locals: [], opaque: false,
-    });
-    const valuePayload = (index: number): EvaluationPayload => {
-      if (retainOutputs) return makePayload(index, "1L");
-      const binding = `.alder_runtime_warmup_${index}`;
-      return makePayload(index, `${binding} <- if (exists(".Last.value", envir = baseenv(), inherits = FALSE)) get(".Last.value", envir = baseenv(), inherits = FALSE) else NULL\ninvisible(${binding})`, [binding]);
-    };
-    const single = valuePayload(0);
-    const batch = [valuePayload(1), valuePayload(2), valuePayload(3)];
-    const reset = retainOutputs ? makePayload(4, "invisible(NULL)") : undefined;
-    const outputs: OutputRecord[] = [];
-    const responses: Array<EngineResponse | undefined> = [];
-    let cleanup: EngineResponse | undefined;
-    const recordResponse = (response: EngineResponse | undefined): void => {
-      responses.push(response);
-      outputs.push(...(response?.outputs ?? []));
-    };
-    try {
-      recordResponse(await this.evaluate(single, undefined, undefined, true));
-      for (const response of await this.evaluateBatch(batch, undefined, undefined, true)) recordResponse(response);
-      if (reset !== undefined) recordResponse(await this.evaluate(reset, undefined, undefined, true));
-    } finally {
-      try {
-        cleanup = await this.request("clear_cell", {
-          ids: [single, ...batch, ...(reset === undefined ? [] : [reset])].map(value => value.cellId),
-        }, undefined, true);
-      } finally {
-        if (outputs.length > 0) await this.discardEvaluationOutputs(outputs);
-      }
-    }
-    const failed = responses.find(value => value?.ok !== true);
-    if (failed !== undefined || cleanup?.ok !== true) {
-      throw new EngineTransportError(
-        failed?.error?.message ?? cleanup?.error?.message ?? "kernel evaluation warmup failed", "kernel");
-    }
-  }
   private async startFresh(): Promise<EngineHandshake> {
     const startupAbort = new AbortController();
     this.startupAbort = startupAbort;
@@ -1243,13 +1209,11 @@ export class Engine extends EventEmitter implements EngineAdapter {
           ping.r_version !== analyzer.rVersion || !kernel.languageVersion.includes(analyzer.rVersion)) {
         throw new EngineTransportError("kernel and analyzer identities do not match");
       }
-      await this.warmEvaluationPath();
       const capabilities = [...new Set([
         "ark",
         "evaluation",
         "jupyter-iopub",
         "jupyter-control-interrupt",
-        "mimePublisher:alder-json-v1",
         "native-graphics",
         "native-htmlwidgets",
         "variables",
@@ -1269,8 +1233,6 @@ export class Engine extends EventEmitter implements EngineAdapter {
           version: kernel.implementationVersion,
           protocol: kernel.protocolVersion,
           kernelEpoch: this.kernelEpoch,
-          buildVersion: kernel.buildVersion,
-          mimePublisher: kernel.mimePublisher,
         },
       });
       this.state = "ready";
@@ -1550,10 +1512,13 @@ export class Engine extends EventEmitter implements EngineAdapter {
     this.assertEvaluationCurrent(state);
     const type = message.header.msg_type;
     if (type === "stream") {
-      const text = message.content.text;
-      if (typeof text !== "string") throw new FrameProtocolError("Ark stream text is invalid");
-      await this.applyPendingClear(state);
-      this.appendLog(state, text);
+      for (const part of state.eventStream.push(streamText(message))) {
+        if (part.event !== undefined) await this.applyArkEvent(state, part.event);
+        else if (part.text !== undefined && part.text.length > 0) {
+          await this.applyPendingClear(state);
+          this.appendLog(state, part.text);
+        }
+      }
       return;
     }
     if (type === "error") {
@@ -1567,11 +1532,6 @@ export class Engine extends EventEmitter implements EngineAdapter {
       return;
     }
     if (type !== "execute_result" && type !== "display_data" && type !== "update_display_data") return;
-    const event = decodeArkEvent(message, this.arkEventToken, this.maxArkPayloadBytes());
-    if (event !== undefined) {
-      await this.applyArkEvent(state, event);
-      return;
-    }
     await this.applyPendingClear(state);
     const records = await this.ingestDisplay(state, message);
     for (const record of records) {
@@ -1704,6 +1664,7 @@ export class Engine extends EventEmitter implements EngineAdapter {
   }
   private appendLog(state: ActiveEvaluation, text: string): void {
     text = redactEngineSecrets(text, this.arkEventToken);
+    const priorBytes = state.console.bytes;
     const delta = state.console.append(text);
     state.log = state.console.lines;
     state.truncated ||= state.console.truncated;
@@ -1712,7 +1673,7 @@ export class Engine extends EventEmitter implements EngineAdapter {
       type: "output",
       sequence: ++state.sequence,
       kind: "log",
-      payload: delta,
+      payload: { ...delta, raw: Buffer.from(text, "utf8").subarray(0, state.console.bytes - priorBytes).toString("utf8") },
     });
   }
 
@@ -1724,7 +1685,7 @@ export class Engine extends EventEmitter implements EngineAdapter {
       type: "output",
       sequence: ++state.sequence,
       kind: "log",
-      payload: delta,
+      payload: { ...delta, raw: LOG_TRUNCATION_MARKER },
     });
   }
 
@@ -1910,13 +1871,16 @@ export class Engine extends EventEmitter implements EngineAdapter {
     let result: Record<string, unknown> | undefined;
     let messageError: Error | undefined;
     let messageTail = Promise.resolve();
+    const eventStream = new ArkEventStreamDecoder(this.arkEventToken, this.maxArkPayloadBytes());
     try {
       const encoded = encodeArkRequest({ request: marker, command, payload }, this.maxArkPayloadBytes());
       const execution = await kernel.execute(arkCall("request", encoded), {
         onMessage: (message) => {
           messageTail = messageTail.then(() => {
-            const event = decodeArkEvent(message, this.arkEventToken, this.maxArkPayloadBytes());
-            if (event === undefined) return;
+            if (message.header.msg_type !== "stream") return;
+            for (const part of eventStream.push(streamText(message))) {
+            const event = part.event;
+            if (event === undefined) continue;
             if (event.type !== "command_result" || event.request !== marker ||
                 result !== undefined) {
               throw new FrameProtocolError("invalid Alder Ark command result");
@@ -1930,11 +1894,13 @@ export class Engine extends EventEmitter implements EngineAdapter {
                   return marker === null ? { ...response, error } : { ...response, error, kernelStateInvalid: marker };
                 })()
               : response;
+            }
           }).catch((error) => { messageError ??= asError(error); });
         },
       }, { storeHistory: false, auxiliary: command === "env_snapshot" });
       await messageTail;
       if (messageError !== undefined) throw messageError;
+      eventStream.finish();
       if (execution.reply.content.status !== "ok") {
         throw new EngineTransportError(jupyterError(execution.reply.content).message, "kernel");
       }
@@ -2386,6 +2352,8 @@ function makeEvaluation(
   payload: EvaluationPayload,
   onEvent: ((event: EngineEvent) => void) | undefined,
   kernelGeneration: number,
+  token: string,
+  maxBytes: number,
 ): ActiveEvaluation {
   return {
     requestId, payload, onEvent, kernelGeneration, started: false, sequence: 0, rSequence: 0,
@@ -2393,6 +2361,7 @@ function makeEvaluation(
     console: new OutputLog(MAX_LOG_BYTES), truncated: false, stopped: false,
     finished: false, kernelTerminal: false, interruptSent: false, clearPending: false,
     deferredArtifactReleases: new Set(), messageTail: Promise.resolve(),
+    eventStream: new ArkEventStreamDecoder(token, maxBytes),
   };
 }
 
@@ -2416,26 +2385,70 @@ function encodeArkRequest(value: unknown, maxBytes: number): string {
   return encoded;
 }
 
-function decodeArkEvent(
-  message: JupyterMessage,
-  token: string,
-  maxBytes: number,
-): Record<string, unknown> | undefined {
-  if (message.header.msg_type !== "display_data" && message.header.msg_type !== "update_display_data") return undefined;
-  const data = optionalRecord(message.content.data);
-  const raw = data?.["application/vnd.alder.event+json"];
-  if (raw === undefined) return undefined;
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
-    throw new FrameProtocolError("Alder Ark event MIME value must be an object");
+function streamText(message: JupyterMessage): string {
+  const text = message.content.text;
+  if (typeof text !== "string") throw new FrameProtocolError("Ark stream text is invalid");
+  return text;
+}
+
+type ArkStreamPart = { text: string; event?: never } | { event: Record<string, unknown>; text?: never };
+
+class ArkEventStreamDecoder {
+  private pending = "";
+  private readonly prefix: string;
+  private readonly end = ":\u001e\n";
+
+  constructor(private readonly token: string, private readonly maxBytes: number) {
+    this.prefix = `\u001eALDER:${token}:`;
   }
-  let event: Record<string, unknown>;
-  try {
-    const text = JSON.stringify(raw);
-    if (Buffer.byteLength(text, "utf8") > maxBytes) throw new Error("event exceeds the configured byte limit");
-    event = asRecord(parseStrictJson(text), "Alder Ark event");
-  } catch (error) {
-    throw new FrameProtocolError("invalid Alder Ark event: " + asError(error).message);
+
+  push(text: string): ArkStreamPart[] {
+    this.pending += text;
+    const parts: ArkStreamPart[] = [];
+    while (this.pending.length > 0) {
+      const start = this.pending.indexOf(this.prefix);
+      if (start > 0) {
+        parts.push({ text: this.pending.slice(0, start) });
+        this.pending = this.pending.slice(start);
+      } else if (start < 0) {
+        let retained = 0;
+        for (let length = Math.min(this.pending.length, this.prefix.length - 1); length > 0; length--) {
+          if (this.pending.endsWith(this.prefix.slice(0, length))) { retained = length; break; }
+        }
+        const ordinary = this.pending.slice(0, this.pending.length - retained);
+        if (ordinary) parts.push({ text: ordinary });
+        this.pending = this.pending.slice(this.pending.length - retained);
+        break;
+      }
+      if (!this.pending.startsWith(this.prefix)) continue;
+      const end = this.pending.indexOf(this.end, this.prefix.length);
+      if (end < 0) {
+        if (this.pending.length > Math.ceil(this.maxBytes * 4 / 3) + this.prefix.length + this.end.length + 4) {
+          throw new FrameProtocolError("Alder Ark event exceeds the configured byte limit");
+        }
+        break;
+      }
+      const encoded = this.pending.slice(this.prefix.length, end);
+      if (!/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)) throw new FrameProtocolError("invalid Alder Ark event base64");
+      let event: Record<string, unknown>;
+      try {
+        event = asRecord(parseStrictJson(decodeBase64(encoded, this.maxBytes).toString("utf8")), "Alder Ark event");
+      } catch (error) {
+        throw new FrameProtocolError("invalid Alder Ark event: " + asError(error).message);
+      }
+      validateArkEvent(event, this.token);
+      parts.push({ event });
+      this.pending = this.pending.slice(end + this.end.length);
+    }
+    return parts;
   }
+
+  finish(): void {
+    if (this.pending.length > 0) throw new FrameProtocolError("incomplete Alder Ark event frame");
+  }
+}
+
+function validateArkEvent(event: Record<string, unknown>, token: string): void {
   if (event.token !== token || typeof event.token !== "string") throw new FrameProtocolError("Alder Ark event token does not match");
   if (!(typeof event.request === "string" || (typeof event.request === "number" && Number.isSafeInteger(event.request)))) throw new FrameProtocolError("Alder Ark event request is invalid");
   if (typeof event.type !== "string" || !["started", "append", "progress", "log", "result", "condition", "finished", "cell_meta", "command_result", "batch_end"].includes(event.type)) throw new FrameProtocolError("Alder Ark event type is invalid");
@@ -2449,7 +2462,6 @@ function decodeArkEvent(
     throw new FrameProtocolError("Alder Ark event revision is invalid");
   }
   if (typeof event.payload !== "object" || event.payload === null || Array.isArray(event.payload)) throw new FrameProtocolError("Alder Ark event payload is invalid");
-  return event;
 }
 
 function decodeBase64(value: string, maxBytes: number): Buffer {

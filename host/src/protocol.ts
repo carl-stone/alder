@@ -541,8 +541,6 @@ export const engineHandshakeSchema = z.object({
   kernel: z.object({
     name: z.literal("ark"),
     version: boundedUtf8StringSchema(256, true),
-    buildVersion: z.literal("0.1.252-alder.1"),
-    mimePublisher: z.literal("alder-json-v1"),
     protocol: boundedUtf8StringSchema(256, true),
     kernelEpoch: idSchema,
   }).strict().optional(),
@@ -906,10 +904,15 @@ export const hostConfigurationSchema = z.object({
 export type HostConfiguration = z.infer<typeof hostConfigurationSchema>;
 
 const protocolStringArraySchema = z.array(boundedUtf8StringSchema(MAX_FRAME_BYTES)).max(MAX_PROTOCOL_COLLECTION_ITEMS);
+const cellDisplayPartSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("output"), id: idSchema }).strict(),
+  z.object({ kind: z.literal("log"), text: boundedUtf8StringSchema(MAX_FRAME_BYTES, true) }).strict(),
+]);
+export type CellDisplayPart = z.infer<typeof cellDisplayPartSchema>;
 export interface HostCellState {
-  id: string; type: CellType; body: string[]; options: Record<string, CellOption>; revision: number; status: CellStatus; outputs: OutputRecord[]; outputsStale?: boolean; progress: JsonValue | null; log: string[]; error: EngineError | null; defs: string[]; refs: string[]; selfRefs: string[]; locals: string[]; barrier: boolean; opaque: boolean; diagnostics: AnalysisDiagnostic[]; analysisPending: boolean;
+  id: string; type: CellType; body: string[]; options: Record<string, CellOption>; revision: number; status: CellStatus; outputs: OutputRecord[]; outputsStale?: boolean; progress: JsonValue | null; log: string[]; displayOrder?: CellDisplayPart[]; error: EngineError | null; defs: string[]; refs: string[]; selfRefs: string[]; locals: string[]; barrier: boolean; opaque: boolean; diagnostics: AnalysisDiagnostic[]; analysisPending: boolean;
 }
-export const hostCellStateSchema = z.object({ id: idSchema, type: cellTypeSchema, body: sourceLinesSchema, options: storedCellOptionsSchema, revision: revisionSchema, status: cellStatusSchema, outputs: z.array(z.lazy(() => outputRecordSchema)).max(MAX_PROTOCOL_COLLECTION_ITEMS), outputsStale: z.boolean().optional(), progress: protocolJsonSchema.nullable(), log: z.array(boundedUtf8StringSchema(MAX_FRAME_BYTES)).max(1_048_578), error: engineErrorSchema.nullable(), defs: protocolStringArraySchema, refs: protocolStringArraySchema, selfRefs: protocolStringArraySchema, locals: protocolStringArraySchema, barrier: z.boolean(), opaque: z.boolean(), diagnostics: z.array(analysisDiagnosticSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS), analysisPending: z.boolean() }).strict();
+export const hostCellStateSchema = z.object({ id: idSchema, type: cellTypeSchema, body: sourceLinesSchema, options: storedCellOptionsSchema, revision: revisionSchema, status: cellStatusSchema, outputs: z.array(z.lazy(() => outputRecordSchema)).max(MAX_PROTOCOL_COLLECTION_ITEMS), outputsStale: z.boolean().optional(), progress: protocolJsonSchema.nullable(), log: z.array(boundedUtf8StringSchema(MAX_FRAME_BYTES)).max(1_048_578), displayOrder: z.array(cellDisplayPartSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS).optional(), error: engineErrorSchema.nullable(), defs: protocolStringArraySchema, refs: protocolStringArraySchema, selfRefs: protocolStringArraySchema, locals: protocolStringArraySchema, barrier: z.boolean(), opaque: z.boolean(), diagnostics: z.array(analysisDiagnosticSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS), analysisPending: z.boolean() }).strict();
 
 export interface DependencyGraphState { nodes: string[]; edges: Record<string, string[]>; reverseEdges: Record<string, string[]>; duplicates: Record<string, string[]>; cycles: string[]; topologicalOrder: string[] | null; }
 const graphCellIds = z.array(idSchema).max(MAX_NOTEBOOK_CELLS);

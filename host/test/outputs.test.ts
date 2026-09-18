@@ -25,14 +25,9 @@ function runtimeIdentity(overrides: Record<string, unknown> = {}) {
   return { sessionEpoch: "session-1", documentRevision: 0, kernelEpoch: "kernel-1", ...identity, ...overrides };
 }
 
-test("keeps control MIME out of visible output and assigns HTML provenance", async () => {
+test("assigns HTML provenance to normalized output", async () => {
   const { directory, store } = await makeStore();
   try {
-    await assert.rejects(
-      store.ingestDisplay({ "application/vnd.alder.event+json": "not-an-object" }, {}, runtimeIdentity()),
-      (error: unknown) => error instanceof OutputStoreError && error.code === "output_invalid",
-    );
-    assert.equal(store.records().length, 0);
     const markdown = await store.ingestAlder({ kind: "markdown", text: "# title" }, runtimeIdentity(), { presentation: "sandbox" });
     assert.equal(markdown.metadata.presentation, "inline");
     const html = await store.ingestAlder({ kind: "html", html: "<p>ok</p><script>bad()</script>" }, runtimeIdentity());

@@ -30,10 +30,10 @@ The Mac command builds the editor, shared Node backend and Electron shell, stage
 resources and license notices, and signs the local app. Quit the staged app before
 rebuilding it. Local signing is separate from public notarization.
 
-The accepted document build opens, edits, saves and recovers notebooks without R.
-It does not yet include an R execution runtime; consult the board for the current
-assignment. R helper installation alone does not add execution to this build.
-Open a notebook with File > Open or **Open notebook…**.
+The app opens, edits, saves and recovers notebooks without R. With R 4.6.x
+available, it runs cells through the unchanged, pinned Ark kernel and the Alder
+R helper installed in the staged app. Open a notebook with File > Open or
+**Open notebook…**.
 
 ## Focused checks
 
@@ -78,6 +78,8 @@ being edited; a private test library avoids picking up an unrelated installation
 - [Iris](../inst/examples/iris.R): base-R example.
 - [Demo](../demo.R): small ggplot2 notebook.
 - [Output parity](parity-demo.R): scientific output and interaction fixture.
+- [Ark execution examples](examples/ark-scalar-dependency.R): scalar dependencies,
+  errors, plots, Stop and project packages in ordinary R scripts.
 - [Bulk differential expression](examples/bulk-differential-expression.R):
   simulated data with edgeR, statmod and ggplot2.
 

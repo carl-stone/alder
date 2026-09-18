@@ -45,8 +45,8 @@ recovery persistence is independent of credential storage.
 **User constraint: unmodified Ark.** Use upstream Ark without a fork, source or
 binary patches, or runtime replacement of Ark internals. Ark is the R kernel
 that evaluates code; Alder owns its notebook adapter
-and ordinary R helpers outside that boundary. Do not replace the current patch
-with reliance on private Ark hooks. This constraint is Carl's decision and is
+and ordinary R helpers outside that boundary. Do not rely on private Ark hooks.
+This constraint is Carl's decision and is
 not subject to the lead's discretion over the working design below.
 
 **Platform scope.** Mac is the sole active delivery target. Delete Linux and

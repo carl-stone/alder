@@ -120,10 +120,9 @@
     analysis_environment_id <- NULL
   }
 
-  # Establish the private application library and R base library before the
-  # package is resolved. The host-ordered paths are applied only after this
-  # package identity is fixed.
-  .alder_worker_set_libpaths(unique(c(private_library, .Library)))
+  # Keep Alder's private package first while resolving its imports from the
+  # selected project's library. R_LIBS is seeded by the host before startup.
+  .alder_worker_set_libpaths(unique(c(private_library, .libPaths())))
   Sys.unsetenv(c(
     "ALDER_WORKER_DIR", "ALDER_RESOURCES_ROOT", "ALDER_R_PRIVATE_LIBRARY", "ALDER_R_LIBRARIES",
     "ALDER_HOST_FRAMING", "ALDER_HOST_PROTOCOL", "ALDER_HOST_ROLE",
@@ -132,8 +131,6 @@
 
   framing <- new.env(parent = baseenv())
   sys.source(framing_path, envir = framing, keep.source = FALSE)
-  suppressPackageStartupMessages(base::library("alder"))
-
   payload <- tryCatch({
     framing$check_json_text(encoded)
     value <- jsonlite::fromJSON(encoded, simplifyVector = FALSE)
@@ -152,8 +149,12 @@
   if (anyDuplicated(paths)) {
     stop("ALDER_R_LIBRARIES must contain unique library paths", call. = FALSE)
   }
-
-  get("alder_apply_library_paths", asNamespace("alder"))(paths)
+  if (!identical(paths[[1L]], private_library)) {
+    stop("ALDER_R_LIBRARIES must begin with the private Alder library",
+         call. = FALSE)
+  }
+  .alder_worker_set_libpaths(paths)
+  suppressPackageStartupMessages(base::library("alder"))
   list(workerDirectory = worker_dir, privateLibrary = private_library,
        libraryPaths = unname(paths), policy = policy,
        analysisEnvironmentId = analysis_environment_id)

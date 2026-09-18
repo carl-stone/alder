@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, rm } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -15,23 +15,23 @@ import { analysisResultSchema, type EvaluationPayload, type REnvironment } from 
 const applicationRoot = resolve(
   process.env.ALDER_APPLICATION_ROOT ?? process.env.ALDER_STAGED_ROOT ?? join(process.cwd(), ".application"),
 );
-const resourcesAvailable = existsSync(join(applicationRoot, "resources", "runtime", "ark")) &&
-  existsSync(join(applicationRoot, "resources", "worker", "host-ark.R")) &&
-  existsSync(join(applicationRoot, "resources", "r-library"));
+const resourcesAvailable = existsSync(join(applicationRoot, "runtime", "ark")) &&
+  existsSync(join(applicationRoot, "worker", "host-ark.R")) &&
+  existsSync(join(applicationRoot, "r-library"));
 const integration = { skip: !resourcesAvailable, timeout: 120_000 };
 
 function resourcesFor(root: string): ApplicationResources {
   return {
     root,
     cliLauncher: join(root, "bin", "alder"),
-    hostEntry: join(root, "resources", "host", "alder-host.mjs"),
-    rendererDirectory: join(root, "resources", "app"),
-    workerDirectory: join(root, "resources", "worker"),
-    rLibraryDirectory: join(root, "resources", "r-library"),
-    arkExecutable: join(root, "resources", "runtime", "ark"),
-    airExecutable: join(root, "resources", "runtime", "air"),
-    nodeExecutable: join(root, "resources", "runtime", "node"),
-    processSupervisorExecutable: join(root, "resources", "runtime", "alder-process-supervisor"),
+    hostEntry: join(root, "host", "alder-host.mjs"),
+    rendererDirectory: join(root, "app"),
+    workerDirectory: join(root, "worker"),
+    rLibraryDirectory: join(root, "r-library"),
+    arkExecutable: join(root, "runtime", "ark"),
+    airExecutable: join(root, "runtime", "air"),
+    nodeExecutable: join(root, "bin", "node"),
+    processSupervisorExecutable: join(root, "runtime", "alder-process-supervisor"),
     electronEntry: null,
   };
 }
@@ -130,8 +130,6 @@ test("live v2 Engine starts analyzer and kernel independently, analyzes ranges, 
       assert.equal(handshake.captureReady, true);
       assert.equal(handshake.kernel?.kernelEpoch, kernel.kernelEpoch);
       assert.equal(handshake.kernel?.version, "0.1.252");
-      assert.equal(handshake.kernel?.buildVersion, "0.1.252-alder.1");
-      assert.equal(handshake.kernel?.mimePublisher, "alder-json-v1");
       const outputStore = engine.prepareOutputStore({
         sessionEpoch: "engine-v2-test-session", documentRevision: 1,
       });
@@ -346,13 +344,15 @@ test("Engine rejects an authenticated Ark event with a wrong request identity", 
         runtime <- get("RUNTIME", envir = asNamespace("alder"), inherits = FALSE)
         target <- environment(runtime$ark_evaluate)
         token <- get("ark_event_token", envir = target, inherits = FALSE)
-        publish <- get("ark_publish_mimebundle", envir = as.environment("tools:positron"), inherits = FALSE)
         event <- list(token = token, request = "wrong-request", sequence = 1L,
           type = "progress", session_epoch = "engine-v2-test-session", kernel_epoch = ${JSON.stringify(epoch)},
           run_id = "run-correlate", operation_id = "correlate", cell_id = "correlate", revision = 1L,
           payload = list(progress = list(kind = "progress", value = 1, total = NULL, label = "", done = FALSE)))
-        data <- list(); data[["application/vnd.alder.event+json"]] <- event
-        publish(jsonlite::toJSON(data, auto_unbox = TRUE, null = "null", force = TRUE))
+        encoded <- base64enc::base64encode(charToRaw(as.character(jsonlite::toJSON(
+          event, auto_unbox = TRUE, null = "null", force = TRUE))))
+        marker <- intToUtf8(30L)
+        cat(marker, "ALDER:", token, ":", encoded, ":", marker, "\n",
+          sep = "", file = stderr())
       })`;
       await assert.rejects(
         engine.evaluate(payload(epoch, "correlate", "correlate", source)),
@@ -362,6 +362,49 @@ test("Engine rejects an authenticated Ark event with a wrong request identity", 
       await closeEngine(engine, processScope, directory);
     }
   });
+
+test("R message sinks do not swallow Alder cell events", integration, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "alder-engine-message-sink-"));
+  const { engine, processScope } = await openEngine(directory);
+  try {
+    const epoch = (await engine.start()).kernel!.kernelEpoch;
+    const redirected = await engine.evaluate(payload(epoch, "message-sink", "message-sink",
+      'con <- file(tempfile(), "w"); sink(con, type = "message"); 42L'));
+    assert.equal(redirected.ok, true);
+    assert.match(JSON.stringify(redirected.outputs), /42/);
+    const restored = await engine.evaluate(payload(epoch, "message-restore", "message-restore",
+      'sink(type = "message"); close(con); 7L'));
+    assert.equal(restored.ok, true);
+    assert.match(JSON.stringify(restored.outputs), /7/);
+  } finally {
+    await closeEngine(engine, processScope, directory);
+  }
+});
+
+test("project package versions win before Alder imports load", integration, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "alder-engine-project-import-"));
+  const projectLibrary = join(directory, "project-library");
+  await mkdir(projectLibrary);
+  const resources = resourcesFor(applicationRoot);
+  const selected = selectedEnvironment(resources);
+  const jsonlitePath = execFileSync(selected.rscript, ["--vanilla", "--slave", "-e",
+    'cat(find.package("jsonlite"))'], { encoding: "utf8", env: cleanEnvironment() }).trim();
+  await cp(jsonlitePath, join(projectLibrary, "jsonlite"), { recursive: true });
+  const environment = {
+    ...selected,
+    libraryPaths: [selected.libraryPaths[0]!, projectLibrary, ...selected.libraryPaths.slice(1)],
+  };
+  const { engine, processScope } = await openEngine(directory, { environment });
+  try {
+    const epoch = (await engine.start()).kernel!.kernelEpoch;
+    const evaluated = await engine.evaluate(payload(epoch, "project-import", "project-import",
+      'getNamespaceInfo("jsonlite", "path")'));
+    assert.equal(evaluated.ok, true);
+    assert.match(JSON.stringify(evaluated.outputs), /project-library/);
+  } finally {
+    await closeEngine(engine, processScope, directory);
+  }
+});
 
 test("Engine rejects malformed authenticated progress before emitting it", integration,
   async () => {

@@ -18,10 +18,6 @@ import {
 } from "./framing.js";
 import { DEFAULT_STRICT_JSON_LIMITS, parseStrictJson } from "./strict-json.js";
 
-const ARK_BUILD_VERSION = "0.1.252-alder.1" as const;
-const ARK_VERSION_PROBE_TIMEOUT_MS = 10_000;
-const MAX_ARK_VERSION_OUTPUT_BYTES = 64 * 1024;
-
 const MESSAGE_DELIMITER = Buffer.from("<IDS|MSG>");
 const JUPYTER_VERSION = "5.3";
 const MAX_PENDING_REQUESTS = 1_024;
@@ -54,10 +50,8 @@ export interface JupyterMessage {
 export interface ArkKernelInfo {
   implementation: string;
   implementationVersion: string;
-  buildVersion: typeof ARK_BUILD_VERSION;
   languageVersion: string;
   protocolVersion: string;
-  mimePublisher: "alder-json-v1";
 }
 
 export interface ArkExecution {
@@ -147,7 +141,6 @@ export class ArkKernel extends EventEmitter {
   private startPromise: Promise<ArkKernelInfo> | undefined;
   private stopRequested = false;
   private childExited = false;
-  private publisherReady = false;
 
   constructor(private readonly options: ArkKernelOptions) {
     super();
@@ -177,9 +170,6 @@ export class ArkKernel extends EventEmitter {
   get processId(): number | undefined {
     return this.child?.pid;
   }
-  get publicMimePublisherReady(): boolean {
-    return this.publisherReady;
-  }
   start(): Promise<ArkKernelInfo> {
     if (this.stopRequested || this.stopped) {
       return Promise.reject(new Error("Ark kernel is closed"));
@@ -199,8 +189,6 @@ export class ArkKernel extends EventEmitter {
         mkdir(this.options.connectionDirectory, { recursive: true }),
       ]);
       this.assertStartAllowed();
-      const buildVersion = await probeArkBuildVersion(this.options);
-
       let zmq: ZeroMqModule;
       try {
         // Keep the native module out of the single-file host bundle. Release
@@ -252,56 +240,19 @@ export class ArkKernel extends EventEmitter {
           content.implementation_version,
           "kernel implementation version",
         ),
-        buildVersion,
         languageVersion: requiredString(
           asRecord(content.language_info, "kernel language info").version,
           "R language version",
         ),
         protocolVersion: requiredString(content.protocol_version, "Jupyter protocol version"),
-        mimePublisher: "alder-json-v1" as const,
       };
       this.assertStartAllowed();
-      await this.probePublicPublisher();
       await this.initializeStartup();
-      this.publisherReady = true;
       return info;
     } catch (error) {
       await this.terminate().catch(() => {});
       const detail = this.failure ?? asError(error);
       throw new Error(`${detail.message}${this.diagnosticText()}`);
-    }
-  }
-  private async probePublicPublisher(): Promise<void> {
-    this.assertStartAllowed();
-    const nonce = randomUUID();
-    const dataJson = JSON.stringify({
-      "application/vnd.alder.probe+json": { nonce },
-    });
-    const code = 'get("ark_publish_mimebundle", envir=as.environment("tools:positron"), inherits=FALSE)' +
-      '(' + JSON.stringify(dataJson) + ')';
-    let matches = 0;
-    const execution = await withTimeout(this.executeOnce(code, {
-      onMessage: (message) => {
-        if (message.header.msg_type !== "display_data" &&
-            message.header.msg_type !== "update_display_data") return;
-        const data = message.content.data;
-        if (typeof data !== "object" || data === null || Array.isArray(data)) return;
-        const probe = (data as Record<string, unknown>)["application/vnd.alder.probe+json"];
-        if (probe === undefined) return;
-        matches += 1;
-        if (matches > 1) throw new FrameProtocolError("Ark publisher probe emitted duplicate replies");
-        if (typeof probe !== "object" || probe === null || Array.isArray(probe) ||
-            (probe as Record<string, unknown>).nonce !== nonce) {
-          throw new FrameProtocolError("Ark publisher probe nonce does not match");
-        }
-      },
-    }, { silent: false, storeHistory: false }), this.options.startupTimeoutMs,
-    "Ark public MIME publisher probe");
-    if (execution.reply.content.status !== "ok") {
-      throw new FrameProtocolError("Ark public MIME publisher probe failed");
-    }
-    if (matches !== 1) {
-      throw new FrameProtocolError("Ark public MIME publisher probe reply was missing");
     }
   }
   private async initializeStartup(): Promise<void> {
@@ -874,15 +825,6 @@ export class ArkKernel extends EventEmitter {
   }
 }
 
-export async function probeArkPublicPublisher(options: ArkKernelOptions): Promise<ArkKernelInfo> {
-  const kernel = new ArkKernel(options);
-  try {
-    return await kernel.start();
-  } finally {
-    await kernel.terminate();
-  }
-}
-
 export function decodeMessage(
   frames: readonly Buffer[],
   key: string,
@@ -1018,65 +960,6 @@ function requiredString(value: unknown, label: string): string {
   return value;
 }
 
-async function probeArkBuildVersion(options: ArkKernelOptions): Promise<typeof ARK_BUILD_VERSION> {
-  if (options.processScope === undefined) {
-    throw new FrameProtocolError("Ark build probe requires a process scope");
-  }
-  let child: OwnedProcess;
-  try {
-    child = await options.processScope.spawn({
-      executable: options.executable,
-      args: ["--version"],
-      cwd: options.cwd,
-      environment: childEnvironment(options.environment),
-      stdio: "pipes",
-    });
-  } catch (error) {
-    throw new FrameProtocolError("Ark build probe could not start: " + messageOf(error));
-  }
-  if (child.stdout === null || child.stderr === null) {
-    await child.terminate().catch(() => {});
-    throw new FrameProtocolError("Ark build probe did not provide output pipes");
-  }
-  let exit: { code: number | null; signal: string | null } | undefined;
-  try {
-    const stdout = readBoundedArkOutput(child.stdout);
-    const stderr = readBoundedArkOutput(child.stderr);
-    const result = await withTimeout(
-      Promise.all([stdout, stderr, child.exited]),
-      ARK_VERSION_PROBE_TIMEOUT_MS,
-      "Ark build probe",
-    );
-    exit = result[2];
-    if (exit.code !== 0) {
-      throw new FrameProtocolError("Ark build probe exited unsuccessfully");
-    }
-    const output = result[0].trim();
-    const match = /^Ark\s+([^\s,]+)(?:,\s+an R Kernel\.)?\s*$/.exec(output);
-    if (match === null || match[1] !== ARK_BUILD_VERSION) {
-      throw new FrameProtocolError("Ark build version is not the qualified Alder build");
-    }
-    return ARK_BUILD_VERSION;
-  } finally {
-    await child.terminate().catch(() => {});
-  }
-}
-
-async function readBoundedArkOutput(
-  stream: NonNullable<OwnedProcess["stdout"]>,
-): Promise<string> {
-  const chunks: Buffer[] = [];
-  let bytes = 0;
-  for await (const chunk of stream) {
-    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-    bytes += buffer.byteLength;
-    if (bytes > MAX_ARK_VERSION_OUTPUT_BYTES) {
-      throw new FrameProtocolError("Ark build probe output exceeds the limit");
-    }
-    chunks.push(buffer);
-  }
-  return Buffer.concat(chunks).toString("utf8");
-}
 async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
   let timer: NodeJS.Timeout | undefined;
   try {

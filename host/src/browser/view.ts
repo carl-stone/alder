@@ -1,5 +1,5 @@
 import { artifactHandleSchema } from "../protocol.js";
-import type { AnalysisDiagnostic, ArtifactHandle, CommandResult, HostEvent, HostQueryResult, HostSnapshot, OperationRecord } from "../protocol.js";
+import type { AnalysisDiagnostic, ArtifactHandle, CommandResult, HostCellState, HostEvent, HostQueryResult, HostSnapshot, OperationRecord, OutputRecord } from "../protocol.js";
 import { dependencyLevels, reachableNodes } from "../graph.js";
 import { toLogicalCellBody } from "../cell-body.js";
 import { BrowserNotebookClient } from "./client.js";
@@ -517,6 +517,8 @@ export class NotebookView {
     );
     const outputArea = this.outputArea(element);
     this.output.render(outputArea, server?.outputs ?? [], server?.progress ?? null);
+    const displayOrder = server?.status === "error" ? [] : server?.displayOrder ?? [];
+    this.renderOrderedOutput(outputArea, server?.outputs ?? [], displayOrder);
     const retainedOutput = server?.outputsStale === true && Boolean(server.outputs.length);
     outputArea.classList.toggle("retained-output", retainedOutput);
     let retainedLabel = outputArea.querySelector<HTMLElement>(":scope > .retained-output-label");
@@ -527,13 +529,14 @@ export class NotebookView {
     } else if (!retainedOutput) retainedLabel?.remove();
     if (retainedOutput && retainedLabel) retainedLabel.textContent = server?.status === "running"
       ? "Previous output — updating" : "Previous output — stale";
-    outputArea.hidden = !this.appView && !server?.outputs.length && !server?.progress;
+    outputArea.hidden = !this.appView && !server?.outputs.length && !server?.progress && !displayOrder.length;
     outputArea.dataset.cell = cell.id ?? "";
     outputArea.dataset.revision = String(cell.serverRevision);
     const outputRunId = server?.outputs.at(-1)?.runId;
     if (outputRunId) outputArea.dataset.runId = outputRunId;
     else delete outputArea.dataset.runId;
-    this.renderLog(element.querySelector<HTMLElement>("[data-role=log]"), server?.log ?? [], server?.error);
+    this.renderLog(element.querySelector<HTMLElement>("[data-role=log]"),
+      displayOrder.length ? [] : server?.log ?? [], displayOrder.length ? null : server?.error);
     this.renderCellActions(element, cell, status, undefined, true);
     if (conflictChanged) this.renderConflict(element, cell);
   }
@@ -874,6 +877,50 @@ export class NotebookView {
     }
     area.appendChild(list);
     area.hidden = diagnostics.length === 0 && (!cell.conflict || cell.tombstone);
+  }
+
+  private renderOrderedOutput(
+    area: HTMLElement,
+    outputs: readonly OutputRecord[],
+    order: NonNullable<HostCellState["displayOrder"]>,
+  ): void {
+    const ids = new Map(outputs.map((record, index) => [record.id, index]));
+    const desired: HTMLElement[] = [];
+    const used = new Set<HTMLElement>();
+    order.forEach((part, index) => {
+      if (part.kind === "output") {
+        const outputIndex = ids.get(part.id);
+        if (outputIndex === undefined) return;
+        const slot = Array.from(area.children).find((child): child is HTMLElement =>
+          (child as HTMLElement).dataset.recordKey === `output-${outputIndex}`);
+        if (slot && !used.has(slot)) { desired.push(slot); used.add(slot); }
+      } else {
+        let slot = Array.from(area.children).find((child): child is HTMLElement =>
+          child.classList.contains("ordered-log") &&
+          (child as HTMLElement).dataset.timelineIndex === String(index));
+        if (!slot) {
+          slot = this.dom.createElement("div");
+          slot.className = "ordered-log log-area";
+          slot.dataset.timelineIndex = String(index);
+        }
+        const content = part.text.replaceAll("\r\n", "\n").replaceAll("\r", "\n");
+        if (slot.textContent !== content) slot.textContent = content;
+        desired.push(slot);
+        used.add(slot);
+      }
+    });
+    for (const child of Array.from(area.children)) {
+      if (child.classList.contains("ordered-log") && !used.has(child as HTMLElement)) child.remove();
+    }
+    for (const child of Array.from(area.children)) {
+      if (child.classList.contains("out-record") && !used.has(child as HTMLElement)) desired.push(child as HTMLElement);
+    }
+    const retainedLabel = area.querySelector<HTMLElement>(":scope > .retained-output-label");
+    let cursor = retainedLabel?.nextElementSibling ?? area.firstElementChild;
+    for (const slot of desired) {
+      if (slot !== cursor) area.insertBefore(slot, cursor);
+      cursor = slot.nextElementSibling;
+    }
   }
 
   private renderLog(area: HTMLElement | null, logs: readonly string[], rawError: unknown): void {

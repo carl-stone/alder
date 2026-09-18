@@ -19502,17 +19502,26 @@ var BrowserDocument = class {
   applyOutput(id, payload) {
     const cell = this.cell(id);
     if (!cell?.server) return;
-    const next = { ...cell.server, outputs: [...cell.server.outputs], log: [...cell.server.log] };
+    const next = {
+      ...cell.server,
+      outputs: [...cell.server.outputs],
+      log: [...cell.server.log],
+      displayOrder: (cell.server.displayOrder ?? []).map((part) => ({ ...part }))
+    };
     if (payload.kind === "clear") {
       next.outputs = [];
       next.outputsStale = false;
       next.log = [];
+      next.displayOrder = [];
       next.progress = null;
     } else if (payload.kind === "append") {
       const value = isRecord(payload.payload) && "output" in payload.payload ? payload.payload.output : payload.payload;
       if (next.outputsStale) next.outputs = [];
       next.outputsStale = false;
-      if (isOutputRecord(value)) next.outputs.push(value);
+      if (isOutputRecord(value)) {
+        next.outputs.push(value);
+        next.displayOrder?.push({ kind: "output", id: value.id });
+      }
     } else if (payload.kind === "progress") {
       const progress = isRecord(payload.payload) && "progress" in payload.payload ? payload.payload.progress : payload.payload;
       next.progress = progress;
@@ -19522,6 +19531,12 @@ var BrowserDocument = class {
       const lines = Array.isArray(value) ? value.map(String) : [String(value)];
       const previous = detail?.replaceLast === true && next.log.length > 0 ? next.log.slice(0, -1) : next.log;
       next.log = boundedLog([...previous, ...lines]);
+      const raw = detail && typeof detail.raw === "string" ? detail.raw : lines.join("\n");
+      if (raw.length > 0) {
+        const last = next.displayOrder?.at(-1);
+        if (last?.kind === "log") last.text += raw;
+        else next.displayOrder?.push({ kind: "log", text: raw });
+      }
     }
     cell.server = next;
     const index = this.snapshotValue.cells.findIndex((candidate) => candidate.id === id);
@@ -20394,8 +20409,6 @@ var engineHandshakeSchema = external_exports.object({
   kernel: external_exports.object({
     name: external_exports.literal("ark"),
     version: boundedUtf8StringSchema(256, true),
-    buildVersion: external_exports.literal("0.1.252-alder.1"),
-    mimePublisher: external_exports.literal("alder-json-v1"),
     protocol: boundedUtf8StringSchema(256, true),
     kernelEpoch: idSchema
   }).strict().optional(),
@@ -20716,7 +20729,11 @@ var hostConfigurationSchema = external_exports.object({
   deferStartup: external_exports.boolean()
 }).strict();
 var protocolStringArraySchema = external_exports.array(boundedUtf8StringSchema(MAX_FRAME_BYTES)).max(MAX_PROTOCOL_COLLECTION_ITEMS);
-var hostCellStateSchema = external_exports.object({ id: idSchema, type: cellTypeSchema, body: sourceLinesSchema, options: storedCellOptionsSchema, revision: revisionSchema, status: cellStatusSchema, outputs: external_exports.array(external_exports.lazy(() => outputRecordSchema)).max(MAX_PROTOCOL_COLLECTION_ITEMS), outputsStale: external_exports.boolean().optional(), progress: protocolJsonSchema.nullable(), log: external_exports.array(boundedUtf8StringSchema(MAX_FRAME_BYTES)).max(1048578), error: engineErrorSchema.nullable(), defs: protocolStringArraySchema, refs: protocolStringArraySchema, selfRefs: protocolStringArraySchema, locals: protocolStringArraySchema, barrier: external_exports.boolean(), opaque: external_exports.boolean(), diagnostics: external_exports.array(analysisDiagnosticSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS), analysisPending: external_exports.boolean() }).strict();
+var cellDisplayPartSchema = external_exports.discriminatedUnion("kind", [
+  external_exports.object({ kind: external_exports.literal("output"), id: idSchema }).strict(),
+  external_exports.object({ kind: external_exports.literal("log"), text: boundedUtf8StringSchema(MAX_FRAME_BYTES, true) }).strict()
+]);
+var hostCellStateSchema = external_exports.object({ id: idSchema, type: cellTypeSchema, body: sourceLinesSchema, options: storedCellOptionsSchema, revision: revisionSchema, status: cellStatusSchema, outputs: external_exports.array(external_exports.lazy(() => outputRecordSchema)).max(MAX_PROTOCOL_COLLECTION_ITEMS), outputsStale: external_exports.boolean().optional(), progress: protocolJsonSchema.nullable(), log: external_exports.array(boundedUtf8StringSchema(MAX_FRAME_BYTES)).max(1048578), displayOrder: external_exports.array(cellDisplayPartSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS).optional(), error: engineErrorSchema.nullable(), defs: protocolStringArraySchema, refs: protocolStringArraySchema, selfRefs: protocolStringArraySchema, locals: protocolStringArraySchema, barrier: external_exports.boolean(), opaque: external_exports.boolean(), diagnostics: external_exports.array(analysisDiagnosticSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS), analysisPending: external_exports.boolean() }).strict();
 var graphCellIds = external_exports.array(idSchema).max(MAX_NOTEBOOK_CELLS);
 var graphMap = safeStringRecordSchema(graphCellIds);
 var dependencyGraphStateSchema = external_exports.object({ nodes: graphCellIds, edges: graphMap, reverseEdges: graphMap, duplicates: graphMap, cycles: graphCellIds, topologicalOrder: graphCellIds.nullable() }).strict();
@@ -23995,6 +24012,8 @@ var NotebookView = class {
     );
     const outputArea = this.outputArea(element3);
     this.output.render(outputArea, server?.outputs ?? [], server?.progress ?? null);
+    const displayOrder = server?.status === "error" ? [] : server?.displayOrder ?? [];
+    this.renderOrderedOutput(outputArea, server?.outputs ?? [], displayOrder);
     const retainedOutput = server?.outputsStale === true && Boolean(server.outputs.length);
     outputArea.classList.toggle("retained-output", retainedOutput);
     let retainedLabel = outputArea.querySelector(":scope > .retained-output-label");
@@ -24004,13 +24023,17 @@ var NotebookView = class {
       outputArea.prepend(retainedLabel);
     } else if (!retainedOutput) retainedLabel?.remove();
     if (retainedOutput && retainedLabel) retainedLabel.textContent = server?.status === "running" ? "Previous output \u2014 updating" : "Previous output \u2014 stale";
-    outputArea.hidden = !this.appView && !server?.outputs.length && !server?.progress;
+    outputArea.hidden = !this.appView && !server?.outputs.length && !server?.progress && !displayOrder.length;
     outputArea.dataset.cell = cell.id ?? "";
     outputArea.dataset.revision = String(cell.serverRevision);
     const outputRunId = server?.outputs.at(-1)?.runId;
     if (outputRunId) outputArea.dataset.runId = outputRunId;
     else delete outputArea.dataset.runId;
-    this.renderLog(element3.querySelector("[data-role=log]"), server?.log ?? [], server?.error);
+    this.renderLog(
+      element3.querySelector("[data-role=log]"),
+      displayOrder.length ? [] : server?.log ?? [],
+      displayOrder.length ? null : server?.error
+    );
     this.renderCellActions(element3, cell, status, void 0, true);
     if (conflictChanged) this.renderConflict(element3, cell);
   }
@@ -24322,6 +24345,45 @@ var NotebookView = class {
     }
     area.appendChild(list2);
     area.hidden = diagnostics.length === 0 && (!cell.conflict || cell.tombstone);
+  }
+  renderOrderedOutput(area, outputs, order) {
+    const ids = new Map(outputs.map((record2, index) => [record2.id, index]));
+    const desired = [];
+    const used = /* @__PURE__ */ new Set();
+    order.forEach((part, index) => {
+      if (part.kind === "output") {
+        const outputIndex = ids.get(part.id);
+        if (outputIndex === void 0) return;
+        const slot = Array.from(area.children).find((child) => child.dataset.recordKey === `output-${outputIndex}`);
+        if (slot && !used.has(slot)) {
+          desired.push(slot);
+          used.add(slot);
+        }
+      } else {
+        let slot = Array.from(area.children).find((child) => child.classList.contains("ordered-log") && child.dataset.timelineIndex === String(index));
+        if (!slot) {
+          slot = this.dom.createElement("div");
+          slot.className = "ordered-log log-area";
+          slot.dataset.timelineIndex = String(index);
+        }
+        const content = part.text.replaceAll("\r\n", "\n").replaceAll("\r", "\n");
+        if (slot.textContent !== content) slot.textContent = content;
+        desired.push(slot);
+        used.add(slot);
+      }
+    });
+    for (const child of Array.from(area.children)) {
+      if (child.classList.contains("ordered-log") && !used.has(child)) child.remove();
+    }
+    for (const child of Array.from(area.children)) {
+      if (child.classList.contains("out-record") && !used.has(child)) desired.push(child);
+    }
+    const retainedLabel = area.querySelector(":scope > .retained-output-label");
+    let cursor = retainedLabel?.nextElementSibling ?? area.firstElementChild;
+    for (const slot of desired) {
+      if (slot !== cursor) area.insertBefore(slot, cursor);
+      cursor = slot.nextElementSibling;
+    }
   }
   renderLog(area, logs, rawError) {
     if (!area) return;

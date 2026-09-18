@@ -23,6 +23,7 @@ import {
   outputRecordSchema,
   richOutputPayloadSchema,
   type CellStatus,
+  type CellDisplayPart,
   type CommandResult,
   type ControllerServices,
   type DocumentChange,
@@ -187,6 +188,7 @@ interface CellRecord {
   outputsStale?: boolean;
   progress: unknown | null;
   log: string[];
+  displayOrder?: CellDisplayPart[];
   error: EngineResponse["error"] | null;
   analysis: AnalysisCellResult | null;
 }
@@ -2226,6 +2228,7 @@ export class Controller {
       cell.outputsStale = cell.outputs.length > 0;
       cell.progress = null;
       cell.log = [];
+      cell.displayOrder = [];
       cell.error = null;
       this.activeEvaluation = {
         queuedCancellation: new AbortController(),
@@ -2297,6 +2300,7 @@ export class Controller {
             cell.outputsStale = cell.outputs.length > 0;
             cell.progress = null;
             cell.log = [];
+            cell.displayOrder = [];
             cell.error = null;
           }
         }
@@ -2539,6 +2543,7 @@ export class Controller {
       cell.outputsStale = false;
       cell.progress = null;
       cell.log = [];
+      cell.displayOrder = [];
     } else if (event.kind === "append") {
       if (canonicalOutput === undefined) {
         throw new ControllerError("invalid_engine_event", "R kernel append omitted its canonical output", 503);
@@ -2550,6 +2555,7 @@ export class Controller {
       cell.outputsStale = false;
       active.streamedOutputs.push(canonicalOutput);
       cell.outputs.push(canonicalOutput);
+      (cell.displayOrder ??= []).push({ kind: "output", id: canonicalOutput.id });
     } else if (event.kind === "progress") {
       cell.progress = isRecord(event.payload) && "progress" in event.payload
         ? clone(event.payload.progress)
@@ -2563,6 +2569,14 @@ export class Controller {
         ? cell.log.slice(0, -1)
         : cell.log;
       cell.log = boundedLog([...prior, ...lines]);
+      const raw = isRecord(event.payload) && typeof event.payload.raw === "string"
+        ? event.payload.raw : lines.join("\n");
+      if (raw.length > 0) {
+        const displayOrder = cell.displayOrder ??= [];
+        const last = displayOrder.at(-1);
+        if (last?.kind === "log") last.text += raw;
+        else displayOrder.push({ kind: "log", text: raw });
+      }
     }
     this.bump("cell-output", {
       kind: event.kind,
@@ -2611,6 +2625,7 @@ export class Controller {
     this.outputStore.discardExact(cell.outputs);
     cell.status = "error";
     cell.outputs = [];
+    cell.displayOrder = [];
     cell.outputsStale = false;
     cell.progress = null;
     cell.error = clone(error);
@@ -4866,6 +4881,7 @@ export class Controller {
       ...(cell.type === "code" && cell.outputsStale && cell.outputs.length ? { outputsStale: true } : {}),
       progress: clone(cell.progress) as HostCellState["progress"],
       log: [...cell.log],
+      ...(cell.displayOrder === undefined ? {} : { displayOrder: clone(cell.displayOrder) }),
       error: clone(cell.error) as unknown as HostCellState["error"],
       defs: [...analysis.defs],
       refs: [...analysis.refs],
