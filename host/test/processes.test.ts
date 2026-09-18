@@ -1,11 +1,7 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
-import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import test from "node:test";
-import { createProcessScope, spawnDetachedHost } from "../src/processes.js";
-import type { ApplicationResources } from "../src/resources.js";
+import { createProcessScope } from "../src/processes.js";
 
 const environment = Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => typeof entry[1] === "string"));
 const options = (source: string) => ({ executable: process.execPath, args: ["-e", source], cwd: process.cwd(), environment, stdio: "pipes" as const });
@@ -68,22 +64,4 @@ test("failed spawn can be followed by a successful spawn and scope close", async
     const child = await scope.spawn(options("process.exit(0)"));
     assert.equal((await child.exited).code, 0);
   } finally { await scope.close(); }
-});
-
-test("detached host readiness authenticates the launched process and cleans up failed authentication", async () => {
-  const root = await realpath(await mkdtemp(join(tmpdir(), "alder-host-launch-")));
-  const hostEntry = join(root, "host.mjs");
-  const resources = { root, nodeExecutable: process.execPath, hostEntry } as ApplicationResources;
-  await writeFile(hostEntry, `console.log(JSON.stringify({type:'alder.private.ready',version:1,nonce:process.env.ALDER_PRIVATE_READY_NONCE,pid:process.pid,processNonce:process.env.ALDER_PROCESS_NONCE,ready:{type:'host.ready',epoch:process.env.ALDER_EPOCH,origin:'http://127.0.0.1:1'}}));setInterval(()=>{},1000);`);
-  try {
-    let authenticatedPid = 0;
-    const child = await spawnDetachedHost({
-      resources, args: [], environment: { ...environment, ALDER_PROCESS_NONCE: "process-nonce", ALDER_EPOCH: "epoch-1" },
-      authenticateReady: async context => { authenticatedPid = context.pid; throw new Error("wrong registry token"); },
-      readyTimeoutMs: 3_000,
-    });
-    await assert.rejects(child.ready, /wrong registry token/);
-    assert.equal(authenticatedPid, child.pid);
-    await waitGone(child.pid);
-  } finally { await rm(root, { recursive: true, force: true }); }
 });

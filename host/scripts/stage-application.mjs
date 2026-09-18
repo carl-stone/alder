@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { chmod, cp, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, cp, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
@@ -46,6 +46,11 @@ try {
     const source = join(root, 'host/node_modules', name);
     const destination = join(applicationRoot, 'host/node_modules', name);
     await cp(source, destination, { recursive: true, filter: path => !/\/(?:test|tests|vendor|src|script)(?:\/|$)/.test(path) });
+    const hasNotice = (await readdir(destination)).some(name => /^(licen[cs]e|copying|notice)([.\-_]|$)/i.test(name));
+    if (!hasNotice) {
+      const pkg = JSON.parse(await readFile(join(source, 'package.json'), 'utf8'));
+      await cp(join(root, 'host/licenses', `${name}@${pkg.version}`, 'LICENSE'), join(destination, 'LICENSE'));
+    }
     if (name === 'zeromq') {
       for (const platform of ['linux', 'win32']) await rm(join(destination, 'build', platform), { recursive: true, force: true });
       const nativeManifestPath = join(destination, 'build/manifest.json');

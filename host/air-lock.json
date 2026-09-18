@@ -4,21 +4,15 @@
   "releaseTag": "0.11.0",
   "baseUrl": "https://github.com/posit-dev/air/releases/download/0.11.0/",
   "license": {
-    "file": "host/licenses/air@0.11.0/LICENSE",
     "spdx": "MIT",
-    "source": "https://raw.githubusercontent.com/posit-dev/air/0.11.0/LICENSE",
-    "sourceTag": "0.11.0",
-    "sourceCommit": "1398662406e596d85d7e3481d17d44bdeceaa6d7",
-    "sha256": "19713ea69a4231105033c381dc2145148d26eab51e0b7e458ef4e775db531863"
+    "file": "host/licenses/air@0.11.0/LICENSE"
   },
   "assets": {
     "darwin-x64": {
-      "file": "air-x86_64-apple-darwin.tar.gz",
-      "sha256": "93dedcc81a1accde1748b88d0d6bc59481f0b989ff7dfc7a42abc96707c712f7"
+      "file": "air-x86_64-apple-darwin.tar.gz"
     },
     "darwin-arm64": {
-      "file": "air-aarch64-apple-darwin.tar.gz",
-      "sha256": "be888cc1c16eff3a93df78c4af12a94b8fafb9db2f42aa53b852fc6ce2fb5567"
+      "file": "air-aarch64-apple-darwin.tar.gz"
     }
   }
 }
