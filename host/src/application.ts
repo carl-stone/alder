@@ -876,7 +876,7 @@ async function startNotebookHost(
         let nextManager: PackageManager | undefined;
         try {
           preparedOwner = await ownership.prepareRekey(request.path);
-          preparedSave = await oldStore.prepareSaveAs(request.path, context.document);
+          preparedSave = await oldStore.prepareSaveAs(request.path, context.document, request.expectedDestination);
           if (preparedSave.destination !== preparedOwner.canonicalPath) throw new Error("Save As destination canonicalization changed during preparation");
           const destination = preparedSave.destination;
           const destinationDirectory = dirname(destination);
