@@ -256,7 +256,7 @@ export class BrowserNotebookClient {
     if (document.hasSourceConflicts) throw new BrowserTransportError("source_conflict", "resolve deleted or conflicting local source before continuing");
     const command = document.buildTransactionCommand(operationId("transaction"), this.transport.id);
     if (command === null) return null;
-    return this.dispatchSource(command, true);
+    return this.dispatchSource(command);
   }
 
   async runCell(key: string, input?: Event | { timeStamp: number }): Promise<CommandResult> {
@@ -338,7 +338,7 @@ export class BrowserNotebookClient {
       const command: BrowserTransactionCommand = {
         type: "transaction", ...this.base("delete"), changes: [{ type: "delete", cell: { cellId: cell.id }, expectedRevision: cell.serverRevision }],
       };
-      return this.dispatchSource(command, true);
+      return this.dispatchSource(command);
     });
   }
 
@@ -371,7 +371,7 @@ export class BrowserNotebookClient {
       const command: BrowserTransactionCommand = {
         type: "transaction", ...this.base("move"), changes: [{ type: "move", cell: { cellId: cell.id }, after: after ? { cellId: after } : null }],
       };
-      return this.dispatchSource(command, true);
+      return this.dispatchSource(command);
     });
   }
 
@@ -382,7 +382,7 @@ export class BrowserNotebookClient {
       const command: BrowserTransactionCommand = {
         type: "transaction", ...this.base("options"), changes: [{ type: "options", cell: { cellId: cell.id }, expectedRevision: cell.serverRevision, patch: { disabled } }],
       };
-      return this.dispatchSource(command, true);
+      return this.dispatchSource(command);
     });
   }
 
@@ -553,14 +553,14 @@ export class BrowserNotebookClient {
 
   private restoreDraft(draft: BrowserRecoveryDraft): void {
     const document = this.requireDocument();
-    this.uncertainRun ??= draft.pendingRun;
+    if (draft.pendingRun && !this.activeRuns.has(draft.pendingRun.requestId)) this.uncertainRun ??= draft.pendingRun;
     this.pendingRun ??= draft.pendingRun;
     const reconciled = reconcileDraft(draft, document.snapshot);
     if (reconciled.draft.changes.length) document.restoreDraft(reconciled.draft, reconciled.conflict);
     if (!reconciled.conflict) document.rebaseDraftToSnapshot();
     this.draftSubmission = null;
     const local = document.recoveryDraft(this.draftId);
-    this.recoveryStateValue = { ...this.recoveryStateValue, local, uncertainRun: this.pendingRun !== null, status: local ? reconciled.conflict ? "conflict" : "restored" : "none" };
+    this.recoveryStateValue = { ...this.recoveryStateValue, local, uncertainRun: this.uncertainRun !== null, status: local ? reconciled.conflict ? "conflict" : "restored" : "none" };
     this.queueDraftPersistence();
     this.notifyRecovery();
     this.notify();
@@ -605,7 +605,7 @@ export class BrowserNotebookClient {
     return { completed: command.changes?.length ? this.dispatchSource(command) : this.dispatch(command) };
   }
 
-  private async dispatchSource(command: SourceCommand, _waitForSettlement = true): Promise<CommandResult> {
+  private async dispatchSource(command: SourceCommand): Promise<CommandResult> {
     const document = this.requireDocument();
     const changes = command.changes ?? [];
     document.stageRecoveryIntent(changes);
@@ -644,6 +644,7 @@ export class BrowserNotebookClient {
     try {
       const result = await this.transport.dispatch(command);
       this.activeRuns.delete(command.requestId);
+      if (this.uncertainRun?.requestId === command.requestId) this.uncertainRun = null;
       if (executes) this.updatePendingRun();
       this.options.onCommand?.(command, result);
       if (result.error) throw new BrowserTransportError(result.error.code, result.error.message, true);

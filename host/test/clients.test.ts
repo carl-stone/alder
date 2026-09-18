@@ -815,6 +815,24 @@ test("queued Run cannot hold up newer edits and Save behind an active run", asyn
   } finally { client.close(); }
 });
 
+test("a current snapshot during a live run does not turn its known completion into an uncertain run", async () => {
+  const store = new MemoryRecoveryStore();
+  const { client, socket } = await browserClient(store);
+  try {
+    const running = client.runAll();
+    await waitUntil(() => socket.commands().length === 1);
+    const current = snapshot(); current.cursor = 1; current.version = 2;
+    socket.receive(recoverySnapshot(current));
+    await waitUntil(() => client.document!.snapshot.cursor === 1);
+    assert.equal(client.recoveryState.uncertainRun, false);
+    socket.reply(socket.commands()[0]!, { runId: "completed" });
+    await running;
+    await client.flushDraftPersistence();
+    assert.equal(client.recoveryState.uncertainRun, false);
+    assert.equal((await store.listDrafts()).length, 0);
+  } finally { client.close(); }
+});
+
 test("an older run result cannot clear a newer in-flight edit's recovery comparison", async () => {
   const { client, socket, sockets } = await browserClient(undefined, snapshot(), { reconnect: true });
   try {
