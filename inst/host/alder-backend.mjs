@@ -74057,7 +74057,7 @@ var Controller = class {
       } else {
         plan = this.graphValue.planStale((id2) => this.statusOf(id2));
       }
-      if (this.executionMode === "automatic" && this.barrierRestartRequired) {
+      if (this.executionMode === "automatic" && this.sourceBarrierPending([...this.reactivePending])) {
         plan = this.allCodePlan();
       }
       const runId = this.launchRun(plan, command.requestId, false, command.clientId);
@@ -74164,6 +74164,12 @@ var Controller = class {
   reactiveRunReady() {
     return !this.closed && this.executionMode === "automatic" && this.reactivePending.size > 0 && this.kernelAvailable && this.executionReady && this.analyzerAvailable && !this.engineRestarting && this.analysisNeeded.size === 0 && this.analysisInFlight === null && this.activeEvaluation === null && this.queue.length === 0 && !this.runPreparationActive && this.queuedRunCommands.size === 0 && !this.packageOperationActive && this.runtimeContextReservation === void 0;
   }
+  sourceBarrierPending(pending) {
+    return this.barrierRestartRequired && pending.some((id2) => {
+      const cell = this.cellById(id2);
+      return cell?.type === "code" && cell.status !== "error" && (cell.analysis?.barrier === true || cell.analysis?.opaque === true);
+    });
+  }
   scheduleReactiveRun() {
     if (this.reactiveScheduled || !this.reactiveRunReady()) return;
     this.reactiveScheduled = true;
@@ -74175,7 +74181,7 @@ var Controller = class {
       try {
         this.assertGraphRunnable();
         const blocked = this.graphValue.blockedByDisabled();
-        const plan = new Set(this.barrierRestartRequired ? this.allCodePlan() : []);
+        const plan = new Set(this.sourceBarrierPending(pending) ? this.allCodePlan() : []);
         for (const id2 of pending) {
           const cell = this.cellById(id2);
           if (cell?.type !== "code" || blocked.has(id2)) continue;

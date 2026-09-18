@@ -2023,7 +2023,7 @@ export class Controller {
       } else {
         plan = this.graphValue.planStale((id) => this.statusOf(id));
       }
-      if (this.executionMode === "automatic" && this.barrierRestartRequired) {
+      if (this.executionMode === "automatic" && this.sourceBarrierPending([...this.reactivePending])) {
         plan = this.allCodePlan();
       }
       const runId = this.launchRun(plan, command.requestId, false, command.clientId);
@@ -2163,6 +2163,14 @@ export class Controller {
       && this.runtimeContextReservation === undefined;
   }
 
+  private sourceBarrierPending(pending: readonly string[]): boolean {
+    return this.barrierRestartRequired && pending.some((id) => {
+      const cell = this.cellById(id);
+      return cell?.type === "code" && cell.status !== "error"
+        && (cell.analysis?.barrier === true || cell.analysis?.opaque === true);
+    });
+  }
+
   private scheduleReactiveRun(): void {
     if (this.reactiveScheduled || !this.reactiveRunReady()) return;
     this.reactiveScheduled = true;
@@ -2174,7 +2182,7 @@ export class Controller {
       try {
         this.assertGraphRunnable();
         const blocked = this.graphValue.blockedByDisabled();
-        const plan = new Set<string>(this.barrierRestartRequired ? this.allCodePlan() : []);
+        const plan = new Set<string>(this.sourceBarrierPending(pending) ? this.allCodePlan() : []);
         for (const id of pending) {
           const cell = this.cellById(id);
           if (cell?.type !== "code" || blocked.has(id)) continue;

@@ -1841,6 +1841,37 @@ test("an ordinary automatic cell Run keeps its dependency scope", async () => {
   } finally { await controller.close(); }
 });
 
+test("an independent cell Run recovers after a barrier evaluation failure", async () => {
+  const engine = new FakeEngine();
+  const controller = createController({
+    engine, notebook: reactiveExample("reactive-barrier.R"),
+    config: resolveSettings({ notebook: { on_startup: false, on_cell_change: "automatic" } }),
+  });
+  try {
+    await controller.start();
+    const ids = controller.snapshot().cells.map((cell) => cell.id);
+    const initial = command(controller, { type: "run", scope: "all" });
+    await startCommand(controller, initial);
+    await settle(controller, initial.requestId);
+    engine.evaluationHandler = (payload) => payload.cellId === ids[1]
+      ? { ok: false, error: { message: "barrier failed" } }
+      : engine.rawResponseFor(payload);
+    const failed = command(controller, { type: "run", scope: "cell", target: { cellId: ids[1]! } });
+    await startCommand(controller, failed);
+    assert.equal((await controller.awaitOperation(failed.requestId, "controller-tests")).status, "error");
+    assert.equal(controller.snapshot().cells[1]?.status, "error");
+
+    const independent = command(controller, { type: "run", scope: "cell", target: { cellId: ids[0]! } });
+    await startCommand(controller, independent);
+    const recovered = await settle(controller, independent.requestId);
+    assert.deepEqual((recovered.result as { plan: string[] }).plan, [ids[0]]);
+    assert.equal(engine.evaluations.at(-1)?.cellId, ids[0]);
+    assert.equal(engine.restartCount, 1);
+    assert.equal(controller.snapshot().cells[0]?.status, "done");
+    assert.equal(controller.snapshot().cells[1]?.status, "error");
+  } finally { await controller.close(); }
+});
+
 test("moving a barrier automatically rebuilds the reordered notebook", async () => {
   const engine = new FakeEngine();
   const controller = createController({
