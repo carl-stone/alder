@@ -13,13 +13,10 @@ import {
   securePrivateFile,
   verifyPrivateFile,
   writePrivateFile,
-  type PrivatePathNativeResult,
 } from "../src/private-paths.js";
-import { overshareWindowsPath, secureWindowsPath } from "./windows-fixtures.js";
 
 async function temporaryDirectory(prefix: string): Promise<string> {
   const root = await realpath(await mkdtemp(join(tmpdir(), prefix)));
-  await secureWindowsPath("directory", root);
   return root;
 }
 
@@ -27,21 +24,17 @@ function privatePathFailure(code: PrivatePathError["code"]): (error: unknown) =>
   return (error: unknown): boolean => error instanceof PrivatePathError && error.code === code;
 }
 
-const windowsPrivateOptions = process.platform === "win32"
-  ? { processSupervisorExecutable: resolve(fileURLToPath(new URL("../.application/resources/runtime/alder-process-supervisor.exe", import.meta.url))) }
-  : {};
+const privateOptions = {};
 
 test("ensurePrivateFile preserves an existing private file and rejects oversharing", async () => {
   const root = await temporaryDirectory("alder-private-file-");
   const path = join(root, "state");
   try {
     await writeFile(path, "before", { mode: 0o600 });
-    await secureWindowsPath("file", path);
-    await ensurePrivateFile(path, windowsPrivateOptions);
+    await ensurePrivateFile(path, privateOptions);
     assert.equal((await readFile(path, "utf8")), "before");
-    if (process.platform === "win32") await overshareWindowsPath(path);
-    else await chmod(path, 0o644);
-    await assert.rejects(() => ensurePrivateFile(path, windowsPrivateOptions), privatePathFailure(process.platform === "win32" ? "private_path_native" : "private_path_overshared"));
+    await chmod(path, 0o644);
+    await assert.rejects(() => ensurePrivateFile(path, privateOptions), privatePathFailure("private_path_overshared"));
     assert.equal(await readFile(path, "utf8"), "before");
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -53,13 +46,11 @@ test("readPrivateFile rejects metadata changes between fstats", async () => {
   const path = join(root, "state");
   try {
     await writeFile(path, "before", { mode: 0o600 });
-    await secureWindowsPath("file", path);
     await assert.rejects(
       () => readPrivateFile(path, {
-        ...windowsPrivateOptions,
+        ...privateOptions,
         beforeRead: async () => {
           await writeFile(path, "after", { mode: 0o600 });
-          await secureWindowsPath("file", path);
         },
       }),
       privatePathFailure("private_path_invalid"),
@@ -73,9 +64,7 @@ test("writePrivateFile refuses to replace an overshared target", async () => {
   const path = join(root, "state");
   try {
     await writeFile(path, "before", { mode: 0o644 });
-    await secureWindowsPath("file", path);
-    if (process.platform === "win32") await overshareWindowsPath(path);
-    await assert.rejects(() => writePrivateFile(path, Buffer.from("after"), windowsPrivateOptions), privatePathFailure(process.platform === "win32" ? "private_path_native" : "private_path_overshared"));
+    await assert.rejects(() => writePrivateFile(path, Buffer.from("after"), privateOptions), privatePathFailure("private_path_overshared"));
     assert.equal(await readFile(path, "utf8"), "before");
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -93,55 +82,6 @@ test("private paths reject a symlinked parent before creating state", async () =
       privatePathFailure("private_path_reparse"),
     );
     await assert.rejects(() => lstat(join(alias, "state")));
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
-test("Windows private reads cross the native supervisor boundary", async () => {
-  const root = await temporaryDirectory("alder-private-native-");
-  const path = join(root, "state");
-  const calls: Array<{ executable: string; args: readonly string[] }> = [];
-  const invokeNative = async (executable: string, args: readonly string[]): Promise<PrivatePathNativeResult> => {
-    calls.push({ executable, args: [...args] });
-    return { status: 0, stdout: args[1] === "read" ? Uint8Array.from([1, 2, 3]) : new Uint8Array(), stderr: "" };
-  };
-  try {
-    await writeFile(path, "placeholder", { mode: 0o644 });
-    await secureWindowsPath("file", path);
-    const options = {
-      platform: "win32" as const,
-      processSupervisorExecutable: "alder-process-supervisor.exe",
-      invokeNative,
-    };
-    assert.deepEqual(await readPrivateFile(path, { ...options, maxBytes: 3 }), Buffer.from([1, 2, 3]));
-    await verifyPrivateFile(path, options);
-    await securePrivateFile(path, options);
-    assert.deepEqual(calls.map(call => [call.executable, ...call.args]), [
-      ["alder-process-supervisor.exe", "--private-path", "read", resolve(path)],
-      ["alder-process-supervisor.exe", "--private-path", "verify", "file", resolve(path)],
-      ["alder-process-supervisor.exe", "--private-path", "secure", "file", resolve(path)],
-    ]);
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
-test("Windows native read enforces its byte limit at the TypeScript boundary", async () => {
-  const root = await temporaryDirectory("alder-private-native-limit-");
-  const path = join(root, "state");
-  try {
-    await writeFile(path, "placeholder", { mode: 0o600 });
-    await secureWindowsPath("file", path);
-    await assert.rejects(
-      () => readPrivateFile(path, {
-        platform: "win32",
-        processSupervisorExecutable: "alder-process-supervisor.exe",
-        invokeNative: async (): Promise<PrivatePathNativeResult> => ({ status: 0, stdout: Uint8Array.from([1, 2]), stderr: "" }),
-        maxBytes: 1,
-      }),
-      privatePathFailure("private_path_too_large"),
-    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }

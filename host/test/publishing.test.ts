@@ -13,7 +13,6 @@ import {
   type PublishingProcessScope,
 } from "../src/publishing.js";
 import { OutputStore } from "../src/outputs.js";
-import { secureWindowsPath, testNodeExecutable } from "./windows-fixtures.js";
 import type { HostCellState, HostSnapshot, OutputRecord } from "../src/protocol.js";
 const epoch = "epoch-publish";
 const kernelEpoch = "kernel-publish";
@@ -28,10 +27,9 @@ type ParsedHtmlNode = {
 function directProcessScope(): PublishingProcessScope {
   return {
     async spawn(options): Promise<PublishingOwnedProcess> {
-      // Windows cannot execute an extensionless shebang fixture directly.
-      const child = spawn(
-        process.platform === "win32" ? testNodeExecutable() : options.executable,
-        process.platform === "win32" ? [options.executable, ...options.args] : [...options.args],
+        const child = spawn(
+        options.executable,
+        [...options.args],
         {
           cwd: options.cwd,
           env: options.environment,
@@ -155,10 +153,8 @@ async function fakeQuarto(directory: string, mode: "normal" | "external" | "enti
                 : "fs.writeFileSync(path.join(process.cwd(), output), '<!doctype html><html><body><p>rendered</p></body></html>');",
   ].join("\n");
   await mkdir(directory, { recursive: true });
-  await secureWindowsPath("directory", directory);
   await writeFile(executable, source, { encoding: "utf8", mode: 0o755 });
-  await secureWindowsPath("file", executable);
-  if (process.platform !== "win32") await chmod(executable, 0o755);
+  await chmod(executable, 0o755);
   return executable;
 }
 

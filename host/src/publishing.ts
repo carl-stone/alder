@@ -524,7 +524,7 @@ async function readArtifactReference(
 
 async function findQuartoExecutable(): Promise<string> {
   const path = process.env.PATH ?? "";
-  const names = process.platform === "win32" ? ["quarto.exe", "quarto.cmd", QUARTO_COMMAND] : [QUARTO_COMMAND];
+  const names = [QUARTO_COMMAND];
   for (const directory of path.split(delimiter).filter(Boolean)) {
     for (const name of names) {
       const candidate = resolve(directory, name);

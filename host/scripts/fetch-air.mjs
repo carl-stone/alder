@@ -38,12 +38,12 @@ export async function stageAir({ output = join(root, 'host/.runtime'), archive }
   try {
     if (targetLock.file.endsWith('.zip')) execFileSync('unzip', ['-q', archivePath, '-d', staging]);
     else execFileSync('tar', ['--extract', '--gzip', '--file', archivePath, '--directory', staging, '--no-same-owner']);
-    const executableName = process.platform === 'win32' ? 'air.exe' : 'air';
+    const executableName = 'air';
     const executable = await findFile(staging, executableName);
     const destination = resolve(output);
     await mkdir(destination, { recursive: true });
     await cp(executable, join(destination, executableName));
-    if (process.platform !== 'win32') await chmod(join(destination, executableName), 0o755);
+    await chmod(join(destination, executableName), 0o755);
     await writeFile(join(destination, 'AIR_LICENSE'), pinnedLicenseBytes, { mode: 0o644 });
     const manifest = {
       schemaVersion: 1,

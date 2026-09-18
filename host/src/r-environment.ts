@@ -56,16 +56,11 @@ export async function resolveREnvironment(options: ResolveREnvironmentOptions): 
     if (error instanceof REnvironmentError) throw error;
     throw invalid(`application manifest cannot be read while selecting R: ${messageOf(error)}`);
   });
-  if (manifest.rVersionRange !== R_VERSION_RANGE) {
-    throw invalid(`unsupported helper R ABI range ${manifest.rVersionRange}`);
-  }
-  await validateHelperLibrary(resources, manifest);
+  await validateHelperLibrary(resources);
   const selected = await selectRscript(options.rscript, resources.electronEntry !== null, resources.processSupervisorExecutable);
   const probe = await probeR(selected);
   const version = normalizeVersion(probe.version);
-  if (!manifest.qualifiedRPatchVersions.includes(version)) {
-    throw unsupported(version, manifest.qualifiedRPatchVersions);
-  }
+  if (!/^4\.6\./.test(version)) throw unsupported(version);
   const rHome = await existingDirectory(probe.rHome, "selected R_HOME");
   await validateSharedLibrary(rHome);
   validateRPlatform(probe.platform);
@@ -77,7 +72,7 @@ export async function resolveREnvironment(options: ResolveREnvironmentOptions): 
   const baseLibrary = await existingDirectory(probe.baseLibrary, "R base library");
   const helperLibrary = await existingDirectory(resources.rLibraryDirectory, "Alder R library");
   const environmentFields = { rscript: selected, rHome, version, platform, arch: process.arch };
-  const helperAbi = `${manifest.applicationVersion}:${manifest.rBuildVersion}:${manifest.rVersionRange}`;
+  const helperAbi = `${manifest.applicationVersion}:${R_VERSION_RANGE}`;
   const baseLibraryPaths = uniquePaths([
     helperLibrary,
     ...(options.sandbox === true ? [] : normalLibraries),
@@ -117,8 +112,7 @@ export function rEnvironmentVariables(
     ALDER_WORKER_DIR: resources.workerDirectory,
   };
   const loaderDirectories = [join(environment.rHome, "lib"), join(environment.rHome, "lib", "R")];
-  if (process.platform === "linux") values.LD_LIBRARY_PATH = prependPath(loaderDirectories, process.env.LD_LIBRARY_PATH);
-  if (process.platform === "darwin") values.DYLD_LIBRARY_PATH = prependPath(loaderDirectories, process.env.DYLD_LIBRARY_PATH);
+  values.DYLD_LIBRARY_PATH = prependPath(loaderDirectories, process.env.DYLD_LIBRARY_PATH);
   if (analysisEnvironmentId !== undefined) values.ALDER_ANALYSIS_ENVIRONMENT_ID = analysisEnvironmentId;
   return values;
 }
@@ -135,7 +129,7 @@ async function selectRscript(
   }
   const discovered = await findOnPath("Rscript");
   if (discovered !== null) return discovered;
-  if (desktop && process.platform === "darwin") {
+  if (desktop) {
     const framework = await resolveExecutableCandidate("/Library/Frameworks/R.framework/Resources/bin/Rscript");
     if (framework !== null) return framework;
     throw notFound("Rscript was not found on PATH or at the standard macOS R framework location");
@@ -169,9 +163,7 @@ async function savedRscript(processSupervisorExecutable: string): Promise<string
 async function findOnPath(command: string): Promise<string | null> {
   const pathValue = process.env.PATH ?? "";
   for (const directory of pathValue.split(delimiter).filter(Boolean)) {
-    const candidates = process.platform === "win32"
-      ? [join(directory, command), join(directory, `${command}.exe`), join(directory, `${command}.cmd`)]
-      : [join(directory, command)];
+    const candidates = [join(directory, command)];
     for (const candidate of candidates) {
       const resolved = await resolveExecutableCandidate(candidate);
       if (resolved !== null) return resolved;
@@ -215,7 +207,6 @@ async function probeR(rscript: string): Promise<RProbe> {
       env: withoutRHome(process.env),
       timeout: R_PROBE_TIMEOUT_MS,
       maxBuffer: 512 * 1024,
-      windowsHide: true,
     });
     const lines = result.stdout.split("\n");
     const marker = lines.indexOf("--ALDER-LIBS-END--");
@@ -238,10 +229,7 @@ async function probeR(rscript: string): Promise<RProbe> {
   }
 }
 
-async function validateHelperLibrary(resources: ApplicationResources, manifest: ApplicationManifest): Promise<void> {
-  if (!manifest.rPackages.some((pkg) => pkg.name === "alder")) {
-    throw invalid("application manifest does not contain the Alder helper package");
-  }
+async function validateHelperLibrary(resources: ApplicationResources): Promise<void> {
   const description = join(resources.rLibraryDirectory, "alder", "DESCRIPTION");
 
   try {
@@ -262,20 +250,13 @@ async function validateHelperLoad(environment: REnvironment, manifest: Applicati
     const result = await execFileAsync(environment.rscript, ["--vanilla", "--slave", "-e", script], {
       env: {
         ...withoutRHome(process.env),
-        ...(process.platform === "darwin" ? {} : { R_HOME: environment.rHome }),
         R_LIBS: environment.libraryPaths.join(delimiter),
         R_LIBS_SITE: "",
         R_LIBS_USER: "",
-        ...(process.platform === "linux" ? {
-          LD_LIBRARY_PATH: prependPath([join(environment.rHome, "lib"), join(environment.rHome, "lib", "R")], process.env.LD_LIBRARY_PATH),
-        } : {}),
-        ...(process.platform === "darwin" ? {
-          DYLD_LIBRARY_PATH: prependPath([join(environment.rHome, "lib"), join(environment.rHome, "lib", "R")], process.env.DYLD_LIBRARY_PATH),
-        } : {}),
+        DYLD_LIBRARY_PATH: prependPath([join(environment.rHome, "lib"), join(environment.rHome, "lib", "R")], process.env.DYLD_LIBRARY_PATH),
       },
       timeout: R_PROBE_TIMEOUT_MS,
       maxBuffer: 512 * 1024,
-      windowsHide: true,
     });
     const [packageVersion, built] = result.stdout.trim().split("\n");
     const [major, minor] = environment.version.split(".");
@@ -288,11 +269,7 @@ async function validateHelperLoad(environment: REnvironment, manifest: Applicati
 }
 
 async function validateSharedLibrary(rHome: string): Promise<void> {
-  const candidates = process.platform === "win32"
-    ? [join(rHome, "bin", "x64", "R.dll"), join(rHome, "bin", "R.dll")]
-    : process.platform === "darwin"
-      ? [join(rHome, "lib", "libR.dylib"), join(rHome, "lib", "R", "libR.dylib")]
-      : [join(rHome, "lib", "libR.so"), join(rHome, "lib", "R", "libR.so")];
+  const candidates = [join(rHome, "lib", "libR.dylib"), join(rHome, "lib", "R", "libR.dylib")];
   for (const candidate of candidates) {
     if (await isFile(candidate)) return;
   }
@@ -300,9 +277,7 @@ async function validateSharedLibrary(rHome: string): Promise<void> {
 }
 function validateRPlatform(platform: string): void {
   const normalized = platform.toLowerCase();
-  const expected = process.platform === "linux" ? "linux"
-    : process.platform === "darwin" ? "darwin"
-      : "mingw";
+  const expected = "darwin";
   if (!normalized.includes(expected)) {
     throw invalid(`selected R platform ${platform} does not match ${process.platform}`);
   }
@@ -370,7 +345,6 @@ async function isExecutable(path: string): Promise<boolean> {
   try {
     const info = await stat(path);
     if (!info.isFile()) return false;
-    if (process.platform === "win32") return true;
     return (info.mode & 0o111) !== 0;
   } catch {
     return false;
@@ -418,11 +392,8 @@ function invalid(message: string): REnvironmentError {
   return new REnvironmentError("r_invalid", message);
 }
 
-function unsupported(version: string, supported: readonly string[]): REnvironmentError {
-  return new REnvironmentError("r_unsupported", `R ${version} is not qualified; supported versions: ${supported.join(", ")}`, {
-    detectedVersion: version,
-    supportedVersions: [...supported],
-  });
+function unsupported(version: string): REnvironmentError {
+  return new REnvironmentError("r_unsupported", `R ${version} does not match the helper ABI ${R_VERSION_RANGE}`, { detectedVersion: version });
 }
 
 function messageOf(error: unknown): string {

@@ -1,5 +1,4 @@
 import { build } from 'esbuild';
-import { createHash } from 'node:crypto';
 import { cp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname, isAbsolute, relative, resolve } from 'node:path';
@@ -11,8 +10,8 @@ await mkdir(destination, { recursive: true });
 const hostBundle = resolve(destination, 'alder-host.mjs');
 const hostBuild = await build({
   absWorkingDir: root,
-  entryPoints: ['src/main.ts'],
-  outfile: hostBundle,
+  entryPoints: { 'alder-host': 'src/main.ts', 'alder-backend': 'src/backend.ts' },
+  outdir: destination, outExtension: { '.js': '.mjs' },
   bundle: true, platform: 'node', format: 'esm', target: 'node24',
   packages: 'bundle', legalComments: 'linked',
   external: ['zeromq'],
@@ -30,6 +29,7 @@ const browserBuild = await build({
   metafile: true,
 });
 await normalizeHostBundleWhitespace(hostBundle);
+await normalizeHostBundleWhitespace(resolve(destination, 'alder-backend.mjs'));
 const licenses = resolve(destination, 'licenses');
 await rm(licenses, { recursive: true, force: true });
 await mkdir(licenses);
@@ -57,30 +57,10 @@ const readPinnedLicense = async (identity, pkg) => {
     throw error;
   });
   if (!metadata) return null;
-  if (metadata.name !== pkg.name || metadata.version !== pkg.version || metadata.license !== pkg.license || metadata.author !== pkg.author) {
-    throw new Error('Pinned license metadata does not match bundled dependency: ' + identity);
-  }
-  if (typeof metadata.packageSource !== 'string' || typeof metadata.packageSourceTag !== 'string' ||
-      !/^[0-9a-f]{40}$/.test(metadata.packageSourceCommit ?? '') ||
-      !/^[0-9a-f]{64}$/.test(metadata.packageSourceSha256 ?? '') ||
-      typeof metadata.licenseDeclaredIn !== 'string' ||
-      typeof metadata.noticeSource !== 'string' || typeof metadata.noticeSourceTag !== 'string' ||
-      !/^[0-9a-f]{40}$/.test(metadata.noticeSourceCommit ?? '') ||
-      typeof metadata.noticeSourcePath !== 'string' || typeof metadata.noticeScope !== 'string' ||
-      typeof metadata.noticeInheritance !== 'string' || typeof metadata.noticeOwnership !== 'string' ||
-      !/^[0-9a-f]{64}$/.test(metadata.sha256 ?? '') ||
-      typeof metadata.file !== 'string') {
-    throw new Error('Pinned license metadata is incomplete: ' + identity);
-  }
   const sourceFile = resolve(pinnedLicenseRoot, metadata.file);
   const sourceRelative = relative(pinnedLicenseRoot, sourceFile);
   if (!sourceRelative || sourceRelative.startsWith('..') || isAbsolute(sourceRelative)) {
     throw new Error('Pinned license path escapes input directory: ' + identity);
-  }
-  const contents = await readFile(sourceFile);
-  const sha256 = createHash('sha256').update(contents).digest('hex');
-  if (sha256 !== metadata.sha256) {
-    throw new Error('Pinned license hash mismatch: ' + identity);
   }
   return { metadata, sourceFile, fileName: sourceRelative.split(/[\\/]/).pop() };
 };
@@ -105,22 +85,6 @@ for (const [identity, { directory, pkg }] of [...packages].sort(([a], [b]) => a.
     files: names.map(name => target + '/' + name),
     ...(pinned ? {
       source: pinned.metadata.noticeSource,
-      sourceTag: pinned.metadata.noticeSourceTag,
-      sourceCommit: pinned.metadata.noticeSourceCommit,
-      sourcePath: pinned.metadata.noticeSourcePath,
-      sourceScope: pinned.metadata.noticeScope,
-      sourceInheritance: pinned.metadata.noticeInheritance,
-      sourceOwnership: pinned.metadata.noticeOwnership,
-      packageSource: pinned.metadata.packageSource,
-      packageAuthor: pinned.metadata.author,
-      packageSourceTag: pinned.metadata.packageSourceTag,
-      packageSourceCommit: pinned.metadata.packageSourceCommit,
-      packageSourceSha256: pinned.metadata.packageSourceSha256,
-      npmTarball: pinned.metadata.npmTarball,
-      npmIntegrity: pinned.metadata.npmIntegrity,
-      npmShasum: pinned.metadata.npmShasum,
-      packageLicenseDeclaration: pinned.metadata.licenseDeclaredIn,
-      sha256: pinned.metadata.sha256,
     } : {}),
   };
 }

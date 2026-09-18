@@ -1,32 +1,23 @@
-import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { access, constants, mkdtemp, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import WebSocket from 'ws';
-const DEFAULT_CHROME_CANDIDATES: Record<string, string[]> = {
-  linux: ['/usr/bin/google-chrome-stable', '/usr/bin/google-chrome', '/usr/bin/chromium', '/usr/bin/chromium-browser'],
-  darwin: ['/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', '/Applications/Chromium.app/Contents/MacOS/Chromium'],
-  win32: [
-    join(process.env.PROGRAMFILES ?? 'C:/Program Files', 'Google/Chrome/Application/chrome.exe'),
-    join(process.env['PROGRAMFILES(X86)'] ?? 'C:/Program Files (x86)', 'Google/Chrome/Application/chrome.exe'),
-    join(process.env.LOCALAPPDATA ?? join(process.env.USERPROFILE ?? 'C:/Users/runneradmin', 'AppData/Local'), 'Google/Chrome/Application/chrome.exe'),
-  ],
-};
+const DEFAULT_CHROME_CANDIDATES = [
+  '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+  '/Applications/Chromium.app/Contents/MacOS/Chromium',
+];
 
 export async function resolveChromeExecutable(): Promise<string> {
   const configured = [process.env.CHROME_BIN, process.env.CHROME_PATH].filter((value): value is string => Boolean(value));
-  const candidates = [...configured, ...(DEFAULT_CHROME_CANDIDATES[process.platform] ?? [])];
+  const candidates = [...configured, ...DEFAULT_CHROME_CANDIDATES];
   for (const candidate of candidates) {
     const info = await stat(candidate).catch(() => null);
     if (info?.isFile()) {
-      if (process.platform !== 'win32') await access(candidate, constants.X_OK);
+      await access(candidate, constants.X_OK);
       return candidate;
     }
   }
-  const command = process.platform === 'win32' ? 'where' : 'which';
-  const lookup = spawnSync(command, process.platform === 'win32' ? ['chrome'] : ['google-chrome'], { encoding: 'utf8', windowsHide: true });
-  const resolved = lookup.status === 0 ? String(lookup.stdout).split(/\\r?\\n/u).map(line => line.trim()).find(Boolean) : undefined;
-  if (resolved) return resolved;
   throw new Error('No Chrome/Chromium executable was provisioned for ' + process.platform + '/' + process.arch + '; set CHROME_BIN or CHROME_PATH');
 }
 
@@ -79,7 +70,7 @@ export class Chrome {
       '--disable-extensions', '--disable-default-apps', '--disable-sync',
       '--no-default-browser-check', '--remote-debugging-port=0', '--user-data-dir=' + directory,
       'about:blank',
-    ], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+    ], { stdio: ['pipe', 'pipe', 'pipe'] });
     child.stdout.resume();
     let socket: WebSocket | undefined;
     try {
@@ -101,7 +92,7 @@ export class Chrome {
       const browserVersion = await browser.send('Browser.getVersion', {}, '');
       const product = String(browserVersion?.product ?? '');
       if (!/Chrome|Chromium/u.test(product)) throw new Error('Provisioned browser is not Chromium: ' + product);
-      const expectedToken = process.platform === 'win32' ? 'Windows' : process.platform === 'darwin' ? 'Macintosh' : 'Linux';
+      const expectedToken = 'Macintosh';
       if (!String(browserVersion?.userAgent ?? '').includes(expectedToken)) throw new Error('Provisioned browser platform identity mismatch');
 
       const target = await browser.send('Target.createTarget', { url: 'about:blank' }, '');
