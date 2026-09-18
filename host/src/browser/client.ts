@@ -1,18 +1,16 @@
-import { BrowserDocument, type BrowserRunCommand, type BrowserTransactionCommand, type LocalCell, type SourceCommitOutcome } from "./document.js";
-import { BrowserTransport, BrowserTransportError, type BrowserCommand, type BrowserDraftStore, type BrowserRecoveryBranch, type BrowserRecoveryDraft, type BrowserTransportOptions } from "./transport.js";
+import { BrowserDocument, reconcileDraft, type BrowserRunCommand, type BrowserTransactionCommand, type LocalCell, type SourceCommitOutcome } from "./document.js";
+import { BrowserTransport, BrowserTransportError, type BrowserCommand, type BrowserDraftStore, type BrowserRecoveryDraft, type BrowserTransportOptions } from "./transport.js";
 import { notebookUrl } from "./url.js";
 import type {
   CellType,
   DocumentChange,
   JsonValue,
-  CommandAdmission,
   CommandResult,
   HostCommand,
   HostEvent,
   HostQuery,
   HostQueryResult,
   HostSnapshot,
-  OperationRecord,
   ArtifactHandle,
   Recovery,
   RecoveryBranch,
@@ -46,6 +44,8 @@ export interface VisibleResultObservation {
 }
 
 export interface NotebookClientOptions extends Omit<BrowserTransportOptions, "onSnapshot" | "onEvent"> {
+  draftId?: string;
+  restoreSingleDraft?: boolean;
   onVisibleResult?: (observation: VisibleResultObservation) => void;
   onCommand?: (command: HostCommand, result: CommandResult) => void;
   requestAnimationFrame?: (callback: FrameRequestCallback) => number;
@@ -59,17 +59,6 @@ interface RunIntent {
   handlerTimestamp: number;
 }
 
-interface OperationWaiter {
-  resolve(operation: OperationRecord): void;
-  reject(error: BrowserTransportError): void;
-  timer: ReturnType<typeof setTimeout>;
-}
-interface SourceCommitWaiter {
-  resolve(): void;
-  reject(error: BrowserTransportError): void;
-  timer: ReturnType<typeof setTimeout>;
-}
-
 interface ArtifactCacheEntry {
   url: string;
   expiresAt: number;
@@ -81,14 +70,13 @@ type DocumentListener = (
   localCellKeys?: readonly string[],
 ) => void;
 
-export type BrowserRecoveryStatus = "none" | "restored" | "conflict" | "resubmitting" | "kept";
 export interface BrowserRecoveryState {
-  status: BrowserRecoveryStatus;
+  status: "none" | "restored" | "conflict";
   local: BrowserRecoveryDraft | null;
+  drafts: BrowserRecoveryDraft[];
   branches: RecoveryBranch[];
-  keptBranches: BrowserRecoveryBranch[];
-  foreignDrafts: number;
   pending: boolean;
+  uncertainRun: boolean;
   corruption: HostError | null;
   persistenceError: HostError | null;
 }
@@ -103,26 +91,23 @@ export class BrowserNotebookClient {
   private documentValue: BrowserDocument | null = null;
   private listeners = new Set<DocumentListener>();
   private runs = new Map<string, RunIntent>();
-  private operations = new Map<string, OperationRecord>();
-  private operationWaiters = new Map<string, Set<OperationWaiter>>();
-  private sourceCommitWaiters = new Map<string, SourceCommitWaiter>();
   private sourceQueue: Promise<void> = Promise.resolve();
   private readonly frame: (callback: FrameRequestCallback) => number;
   private readonly now: () => number;
   private artifactCache = new Map<string, ArtifactCacheEntry>();
-  private recoveryStateValue: BrowserRecoveryState = { status: "none", local: null, branches: [], keptBranches: [], foreignDrafts: 0, pending: false, corruption: null, persistenceError: null };
+  private recoveryStateValue: BrowserRecoveryState = { status: "none", local: null, branches: [], drafts: [], pending: false, uncertainRun: false, corruption: null, persistenceError: null };
   private recoveryListeners = new Set<RecoveryListener>();
-  private draftOperation: BrowserRecoveryDraft["operation"] = null;
+  private readonly activeRuns = new Map<string, { requestId: string; epoch: string }>();
+  private uncertainRun: BrowserRecoveryDraft["pendingRun"] = null;
+  private pendingRun: BrowserRecoveryDraft["pendingRun"] = null;
+  private draftSubmission: BrowserRecoveryDraft["submission"] = null;
   private draftPersistence: Promise<void> = Promise.resolve();
   private draftGeneration = 0;
   private draftPersistenceError: Error | null = null;
   private recoveryAttempted = false;
-  private releaseDraftOwnership: (() => void) | null = null;
   private browserRecoveryInspected = false;
   private hostRecoveryInspected = false;
-  private keptRecoveryInspected = false;
   private startupActivated = false;
-  private draftOwnershipReady: Promise<void> = Promise.resolve();
 
   constructor(private readonly options: NotebookClientOptions = {}) {
     this.frame = options.requestAnimationFrame ?? ((callback) => requestAnimationFrame(callback));
@@ -136,15 +121,16 @@ export class BrowserNotebookClient {
         if (state === "open" && this.recoveryAttempted) void this.refreshRecoveryState();
       },
     });
-    this.draftOwnershipReady = this.holdDraftOwnership();
   }
+
+  get draftId(): string { return this.options.draftId ?? this.transport.id; }
 
   get document(): BrowserDocument | null { return this.documentValue; }
 
   async connect(): Promise<BrowserDocument> {
     const recovery = await this.transport.connect();
     if (!this.documentValue && recovery.kind === "snapshot") this.receiveSnapshot(recovery.snapshot);
-    if (!this.documentValue) throw new BrowserTransportError("recovery_requires_snapshot", "browser has no base snapshot for replay recovery");
+    if (!this.documentValue) throw new BrowserTransportError("recovery_requires_snapshot", "Notebook snapshot has not arrived.");
     if (!this.recoveryAttempted) this.recoveryAttempted = true;
     if (!this.browserRecoveryInspected) {
       try {
@@ -157,8 +143,7 @@ export class BrowserNotebookClient {
       }
     }
     if (!this.hostRecoveryInspected) this.hostRecoveryInspected = await this.refreshRecoveryState();
-    if (!this.keptRecoveryInspected) this.keptRecoveryInspected = await this.refreshKeptBranches();
-    await this.activateStartupIfSafe();
+    void this.activateStartupIfSafe();
     return this.documentValue;
   }
 
@@ -173,13 +158,8 @@ export class BrowserNotebookClient {
   }
 
   private finishClose(): void {
-    this.rejectOperationWaiters(new BrowserTransportError("transport_closed", "browser transport is closed"));
-    this.rejectSourceCommitWaiters(new BrowserTransportError("transport_closed", "browser transport is closed"));
-    this.operations.clear();
     this.runs.clear();
     this.artifactCache.clear();
-    this.releaseDraftOwnership?.();
-    this.releaseDraftOwnership = null;
   }
 
   subscribe(listener: DocumentListener): () => void {
@@ -203,75 +183,35 @@ export class BrowserNotebookClient {
     if (this.draftPersistenceError) throw this.draftPersistenceError;
   }
 
-  async keepAsRecovery(): Promise<void> {
-    await this.beginDraftMutation();
+  async restoreSavedDraft(draftId: string): Promise<void> {
     const store = this.draftStore();
-    const draft = this.documentValue?.recoveryDraft(this.transport.id, null) ?? await store?.loadDraft(this.transport.id).catch(() => null) ?? null;
-    if (draft && store) {
-      await store.saveBranch("browser-" + operationId("branch"), draft);
-      await store.clearDraft(this.transport.id);
-    }
-    this.draftGeneration += 1;
+    const draft = this.recoveryStateValue.drafts.find(candidate => candidate.draftId === draftId);
+    if (!draft) return;
+    await this.beginDraftMutation();
+    const current = this.documentValue?.recoveryDraft(this.draftId, this.draftSubmission, this.pendingRun);
+    // Choosing another draft must not erase the text currently on screen.
+    if (current) await store.saveDraft({ ...current, draftId: operationId("saved") });
     this.resetAuthoritativeDocument();
-    await this.refreshKeptBranches();
-    this.recoveryStateValue = { ...this.recoveryStateValue, status: "kept", local: null };
-    this.notifyRecovery();
-    this.notify();
-    await this.activateStartupIfSafe();
+    this.restoreDraft(draft);
+    await this.flushDraftPersistence();
+    if (draftId !== this.draftId) await store.clearDraft(draftId);
+    await this.refreshSavedDrafts();
   }
 
-  async restoreKeptRecovery(branchId: string): Promise<void> {
-    await this.beginDraftMutation();
-    const store = this.draftStore();
-    const branch = this.recoveryStateValue.keptBranches.find((candidate) => candidate.id === branchId);
-    if (!store || !branch) return;
-    const active = this.documentValue?.recoveryDraft(this.transport.id, null) ?? null;
-    if (active) await store.saveBranch("browser-" + operationId("swap"), active);
-    let recovered = branch.draft;
-    let acknowledgedRevision: number | null = null;
-    if (recovered.operation) {
-      try {
-        const owner = recovered.operation.clientId ?? recovered.clientId;
-        const queried = await this.query({ type: "operation", operationId: recovered.operation.operationId, clientId: owner });
-        if (isOperation(queried.result) && queried.result.clientId === owner && queried.result.status === "done") {
-          acknowledgedRevision = recovered.operation.expectedDocumentRevision;
-          recovered = this.reconcileAcknowledgedCreations(recovered, queried.result);
-        }
-      } catch {}
-    }
-    this.draftGeneration += 1;
-    this.resetAuthoritativeDocument();
-    const conflict = acknowledgedRevision === null
-      ? !this.recoveryBaseMatches(recovered)
-      : this.requireDocument().snapshot.documentRevision > acknowledgedRevision + 1;
-    this.requireDocument().restoreDraft(recovered, conflict);
-    if (!conflict) this.requireDocument().rebaseDraftToSnapshot();
-    const local = this.requireDocument().recoveryDraft(this.transport.id, null);
-    if (local) await store.saveDraft(local); else await store.clearDraft(this.transport.id);
-    await store.deleteBranch(branchId);
-    await this.refreshKeptBranches();
-    this.recoveryStateValue = { ...this.recoveryStateValue, status: local === null ? "none" : conflict ? "conflict" : "restored", local };
-    this.notifyRecovery();
-    this.notify();
-    await this.activateStartupIfSafe();
-  }
-
-  async discardKeptRecovery(branchId: string): Promise<void> {
-    const store = this.draftStore();
-    if (!store) return;
-    await store.deleteBranch(branchId);
-    await this.refreshKeptBranches();
-    await this.activateStartupIfSafe();
+  async discardSavedDraft(draftId: string): Promise<void> {
+    await this.draftStore().clearDraft(draftId);
+    await this.refreshSavedDrafts();
   }
 
   async discardRecovery(): Promise<void> {
     await this.beginDraftMutation();
-    await this.draftStore()?.clearDraft(this.transport.id);
+    await this.draftStore().clearDraft(this.draftId);
     this.draftGeneration += 1;
     this.resetAuthoritativeDocument();
     this.recoveryStateValue = { ...this.recoveryStateValue, status: "none", local: null };
     this.notifyRecovery();
     this.notify();
+    this.queueDraftPersistence();
     await this.activateStartupIfSafe();
   }
 
@@ -288,12 +228,6 @@ export class BrowserNotebookClient {
       throw new BrowserTransportError("document_conflict", "Authoritative reload was refused because the host document has unsaved changes", true);
     }
     await this.discardRecovery();
-  }
-
-  cancelRecovery(): void {
-    if (this.recoveryStateValue.local === null) return;
-    this.recoveryStateValue = { ...this.recoveryStateValue, status: this.recoveryStateValue.status === "resubmitting" ? "resubmitting" : "conflict" };
-    this.notifyRecovery();
   }
 
   createCell(afterKey: string | null, type: CellType = "code", body: readonly string[] = []): LocalCell {
@@ -334,10 +268,10 @@ export class BrowserNotebookClient {
       handlerTimestamp: this.now(),
     });
     try {
-      return await this.withSourceLock(() => {
-        const command = this.requireDocument().buildRunCommand({ operationId: id, clientId: this.transport.id, scope: "cell", targetKey: key });
-        return this.dispatchSource(command, false);
-      });
+      const { completed } = await this.withSourceLock(() => this.startRun(
+        this.requireDocument().buildRunCommand({ requestId: id, clientId: this.transport.id, scope: "cell", targetKey: key }),
+      ));
+      return await completed;
     } catch (error) {
       this.runs.delete(id);
       throw error;
@@ -347,10 +281,10 @@ export class BrowserNotebookClient {
   async runAll(scope: "all" | "stale" = "all", input?: Event | { timeStamp: number }): Promise<CommandResult> {
     const id = operationId("run");
     void input;
-    return this.withSourceLock(() => {
-      const command = this.requireDocument().buildRunCommand({ operationId: id, clientId: this.transport.id, scope });
-      return this.dispatchSource(command, false);
-    });
+    const { completed } = await this.withSourceLock(() => this.startRun(
+      this.requireDocument().buildRunCommand({ requestId: id, clientId: this.transport.id, scope }),
+    ));
+    return completed;
   }
 
   async interrupt(runId?: string): Promise<CommandResult> {
@@ -358,7 +292,7 @@ export class BrowserNotebookClient {
   }
 
   async restart(replay = true): Promise<CommandResult> {
-    const command = { type: "restart", replay, ...this.base("restart"), ...(replay ? { expectedDocumentRevision: this.requireDocument().snapshot.documentRevision } : {}) } as Omit<Extract<HostCommand, { type: "restart" }>, "commandSequence">;
+    const command = { type: "restart", replay, ...this.base("restart"), ...(replay ? { expectedDocumentRevision: this.requireDocument().snapshot.documentRevision } : {}) } as Extract<HostCommand, { type: "restart" }>;
     return replay ? this.dispatchSettled(command) : this.dispatch(command);
   }
 
@@ -388,8 +322,6 @@ export class BrowserNotebookClient {
   async shutdown(): Promise<CommandResult> {
     const document = this.requireDocument();
     const expectedClientIds = document.snapshot.activeClientIds ?? [this.transport.id];
-    // The accepted response is the final message that this host can guarantee:
-    // successful shutdown closes the transport before an operation update arrives.
     return this.dispatch({ type: "shutdown", ...this.base("shutdown"), expectedClientIds });
   }
 
@@ -564,82 +496,21 @@ export class BrowserNotebookClient {
     return hostQueryResultSchema.parse(decodeHostQueryResultWire(query, value));
   }
   private async activateStartupIfSafe(): Promise<void> {
-    if (this.startupActivated) return;
+    if (this.startupActivated || !this.browserRecoveryInspected || !this.hostRecoveryInspected) return;
     const state = this.recoveryStateValue;
-    if (!this.browserRecoveryInspected || !this.hostRecoveryInspected || !this.keptRecoveryInspected) return;
-    if (state.local !== null || (state.keptBranches.length > 0 && state.status !== 'kept') || state.foreignDrafts > 0 || state.branches.some(branch => branch.state !== 'clean') || state.pending || state.corruption !== null) return;
+    if (this.pendingRun || state.local || state.drafts.length || state.branches.some(branch => branch.state !== "clean") || state.pending || state.corruption) return;
     const snapshot = this.requireDocument().snapshot;
-    if (snapshot.runtime.startupActivated) {
-      this.startupActivated = true;
-      return;
-    }
+    if (snapshot.runtime.startupActivated) { this.startupActivated = true; return; }
     if (!snapshot.runtime.documentReady || snapshot.runtime.rEnvironment === null) return;
     this.startupActivated = true;
-    try {
-      await this.dispatchSettled({ type: 'run', ...this.base('startup'), scope: 'all', startup: true });
-    } catch (error) {
-      if (error instanceof BrowserTransportError && error.code === 'startup_already_activated') return;
-      this.startupActivated = false;
-      throw error;
+    try { await this.dispatch({ type: "run", ...this.base("startup"), scope: "all", startup: true }); }
+    catch (error) {
+      // An uncertain startup run must never be automatically repeated.
+      if (error instanceof BrowserTransportError && error.definitive && error.code !== "startup_already_activated") this.startupActivated = false;
     }
   }
 
-  awaitOperation(id: string, timeoutMs = 120_000): Promise<OperationRecord> {
-    const current = this.operations.get(id);
-    if (current && operationSettled(current)) return Promise.resolve(current);
-    return new Promise<OperationRecord>((resolve, reject) => {
-      const waiter: OperationWaiter = {
-        resolve,
-        reject,
-        timer: globalThis.setTimeout(() => {
-          this.removeOperationWaiter(id, waiter);
-          reject(new BrowserTransportError("operation_timeout", `operation ${id} did not settle in time`));
-        }, timeoutMs),
-      };
-      const waiters = this.operationWaiters.get(id) ?? new Set<OperationWaiter>();
-      waiters.add(waiter);
-      this.operationWaiters.set(id, waiters);
-    });
-  }
-
-  private holdDraftOwnership(): Promise<void> {
-    const locks = typeof navigator === "undefined" ? undefined : navigator.locks;
-    if (!locks) return Promise.resolve();
-    return new Promise((ready) => {
-      void locks.request("alder-draft:" + this.transport.id, async () => {
-        await new Promise<void>((release) => {
-          this.releaseDraftOwnership = release;
-          ready();
-        });
-      }).catch(() => ready());
-    });
-  }
-
-  private tryClaimDraftOwnership(clientId: string): Promise<(() => void) | null> {
-    const locks = typeof navigator === "undefined" ? undefined : navigator.locks;
-    if (!locks) return Promise.resolve(null);
-    return new Promise((resolve) => {
-      let settled = false;
-      void locks.request("alder-draft:" + clientId, { ifAvailable: true }, async (lock) => {
-        if (lock === null) {
-          settled = true;
-          resolve(null);
-          return;
-        }
-        await new Promise<void>((release) => {
-          settled = true;
-          resolve(release);
-        });
-      }).catch(() => {
-        if (!settled) resolve(null);
-      });
-    });
-  }
-
-  private draftStore(): BrowserDraftStore | null {
-    const store = this.transport.recoveryStore;
-    return isBrowserDraftStore(store) ? store : null;
-  }
+  private draftStore(): BrowserDraftStore { return this.transport.recoveryStore; }
 
   private queueDraftPersistence(): void {
     const store = this.draftStore();
@@ -647,9 +518,9 @@ export class BrowserNotebookClient {
     const generation = this.draftGeneration;
     this.draftPersistence = this.draftPersistence.catch(() => undefined).then(async () => {
       if (generation !== this.draftGeneration) return;
-      const draft = this.documentValue?.recoveryDraft(this.transport.id, this.draftOperation) ?? null;
+      const draft = this.documentValue?.recoveryDraft(this.draftId, this.draftSubmission, this.pendingRun) ?? null;
       if (draft) await store.saveDraft(draft);
-      else await store.clearDraft(this.transport.id);
+      else await store.clearDraft(this.draftId);
       this.draftPersistenceError = null;
       if (this.recoveryStateValue.persistenceError !== null) {
         this.recoveryStateValue = { ...this.recoveryStateValue, persistenceError: null };
@@ -668,189 +539,37 @@ export class BrowserNotebookClient {
   }
 
   private async restoreBrowserRecovery(): Promise<void> {
-    const store = this.draftStore();
-    if (!store || !this.documentValue) throw new BrowserTransportError("recovery_store_unavailable", "browser recovery store is unavailable");
-    await this.draftOwnershipReady;
-    const drafts = await store.listDrafts();
-    let draft = drafts.find((candidate) => candidate.clientId === this.transport.id) ?? null;
-    let selectedOriginalId = this.transport.id;
-    if (draft === null) {
-      for (const candidate of drafts) {
-        const release = await this.tryClaimDraftOwnership(candidate.clientId);
-        if (release === null) continue;
-        try {
-          selectedOriginalId = candidate.clientId;
-          draft = { ...candidate, clientId: this.transport.id };
-          await store.saveDraft(draft);
-          await store.clearDraft(candidate.clientId);
-        } finally {
-          release();
-        }
-        break;
-      }
+    const drafts = await this.draftStore().listDrafts();
+    const own = drafts.find(draft => draft.draftId === this.draftId);
+    const selected = own ?? (this.options.restoreSingleDraft && drafts.length === 1 ? drafts[0] : undefined);
+    this.recoveryStateValue = { ...this.recoveryStateValue, drafts: drafts.filter(draft => draft !== selected) };
+    if (selected) {
+      this.restoreDraft(selected);
+      await this.flushDraftPersistence();
+      if (selected.draftId !== this.draftId) await this.draftStore().clearDraft(selected.draftId);
     }
-    if (!draft) {
-      this.recoveryStateValue = { ...this.recoveryStateValue, foreignDrafts: drafts.length };
-      this.notifyRecovery();
-      return;
-    }
-    for (const candidate of drafts) {
-      if (candidate.clientId === selectedOriginalId || candidate.clientId === this.transport.id) continue;
-      const release = await this.tryClaimDraftOwnership(candidate.clientId);
-      if (release === null) continue;
-      try {
-        await store.saveBranch("browser-" + operationId("orphan"), candidate);
-        await store.clearDraft(candidate.clientId);
-      } finally {
-        release();
-      }
-    }
-    const remainingDrafts = await store.listDrafts();
-    this.recoveryStateValue = { ...this.recoveryStateValue, foreignDrafts: remainingDrafts.filter((candidate) => candidate.clientId !== this.transport.id).length };
     this.notifyRecovery();
-    let receipt: OperationRecord | null = null;
-    if (draft.operation) {
-      try {
-        const receiptClientId = draft.operation.clientId ?? selectedOriginalId;
-        const queryResult = await this.query({ type: "operation", operationId: draft.operation.operationId, clientId: receiptClientId });
-        receipt = isOperation(queryResult.result) && queryResult.result.clientId === receiptClientId ? queryResult.result : null;
-      } catch (error) {
-        if (!(error instanceof BrowserTransportError) || error.code !== "query_not_found") {
-          await this.restoreLocalDraft(store, draft, true, "conflict");
-          return;
-        }
-      }
-      if (receipt !== null) {
-        if (receipt.status === "done") {
-          const submitted = draft.operation.changes;
-          if (submitted !== undefined && sameChanges(draft.changes, submitted)) {
-            await store.clearDraft(draft.clientId);
-            this.resetAuthoritativeDocument();
-            this.recoveryStateValue = { ...this.recoveryStateValue, status: "none", local: null };
-            this.notifyRecovery();
-            this.notify();
-            return;
-          }
-          this.resetAuthoritativeDocument();
-          const recovered = this.reconcileAcknowledgedCreations(draft, receipt);
-          const conflict = submitted === undefined || this.requireDocument().snapshot.documentRevision > draft.operation.expectedDocumentRevision + 1;
-          await this.restoreLocalDraft(store, recovered, conflict, conflict ? "conflict" : "restored");
-          return;
-        }
-        await this.restoreLocalDraft(store, draft, true, "conflict");
-        return;
-      }
-    }
-    const conflict = !this.recoveryBaseMatches(draft);
-    await this.restoreLocalDraft(store, draft, conflict, conflict ? "conflict" : draft.operation ? "resubmitting" : "restored");
-    if (draft.operation && !conflict) await this.resubmitRecoveredDraft();
-  }
-  private reconcileAcknowledgedCreations(draft: BrowserRecoveryDraft, receipt: OperationRecord): BrowserRecoveryDraft {
-    const result = isRecord(receipt.result) ? receipt.result : {};
-    const created = isRecord(result.created) ? result.created : {};
-    const submitted = draft.operation?.changes ?? [];
-    const changes: DocumentChange[] = [];
-    for (const change of draft.changes) {
-      if (change.type === "create") {
-        const cellId = created[change.creationId];
-        if (typeof cellId === "string") {
-          changes.push({
-            type: "edit",
-            cell: { cellId },
-            body: [...change.body],
-            cellType: change.cellType,
-            expectedRevision: this.requireDocument().cell(cellId)?.serverRevision ?? 0,
-          });
-        } else {
-          changes.push(cloneChange(change));
-        }
-        continue;
-      }
-      if (submitted.some((sent) => sameChanges([change], [sent]))) continue;
-      changes.push(cloneChange(change));
-    }
-    return { ...draft, changes, operation: null };
   }
 
-
-  private async restoreLocalDraft(store: BrowserDraftStore, draft: BrowserRecoveryDraft, conflict: boolean, status: BrowserRecoveryStatus): Promise<void> {
-    this.requireDocument().restoreDraft(draft, conflict);
-    if (!conflict) this.requireDocument().rebaseDraftToSnapshot();
-    const local = this.requireDocument().recoveryDraft(this.transport.id, null);
-    if (local) await store.saveDraft(local); else await store.clearDraft(this.transport.id);
-    if (draft.clientId !== this.transport.id) await store.clearDraft(draft.clientId);
-    this.recoveryStateValue = { ...this.recoveryStateValue, status: local === null ? "none" : status, local };
+  private restoreDraft(draft: BrowserRecoveryDraft): void {
+    const document = this.requireDocument();
+    this.uncertainRun ??= draft.pendingRun;
+    this.pendingRun ??= draft.pendingRun;
+    const reconciled = reconcileDraft(draft, document.snapshot);
+    if (reconciled.draft.changes.length) document.restoreDraft(reconciled.draft, reconciled.conflict);
+    if (!reconciled.conflict) document.rebaseDraftToSnapshot();
+    this.draftSubmission = null;
+    const local = document.recoveryDraft(this.draftId);
+    this.recoveryStateValue = { ...this.recoveryStateValue, local, uncertainRun: this.pendingRun !== null, status: local ? reconciled.conflict ? "conflict" : "restored" : "none" };
+    this.queueDraftPersistence();
     this.notifyRecovery();
     this.notify();
-  }
-  private recoveryBaseMatches(draft: BrowserRecoveryDraft): boolean {
-    const snapshot = this.requireDocument().snapshot;
-    if (snapshot.epoch !== draft.base.epoch || snapshot.documentRevision !== draft.base.documentRevision || snapshot.cells.length !== draft.base.cells.length) return false;
-    return draft.base.cells.every((baseCell, index) => {
-      const current = snapshot.cells[index];
-      return current !== undefined && current.id === baseCell.id && current.revision === baseCell.revision && current.type === baseCell.type && sameLines(current.body, baseCell.body);
-    });
-  }
-
-  private async resubmitRecoveredDraft(): Promise<void> {
-    const document = this.requireDocument();
-    let command: BrowserTransactionCommand | null;
-    try {
-      command = document.buildTransactionCommand(operationId("recovery"), this.transport.id);
-    } catch {
-      this.recoveryStateValue = { ...this.recoveryStateValue, status: "conflict" };
-      this.notifyRecovery();
-      return;
-    }
-    if (command === null) {
-      await this.draftStore()?.clearDraft(this.transport.id);
-      this.recoveryStateValue = { ...this.recoveryStateValue, status: "none", local: null };
-      this.notifyRecovery();
-      return;
-    }
-    const submitted = { ...command, commandSequence: this.transport.commandSequence } as HostCommand;
-    this.draftOperation = {
-      operationId: command.operationId,
-      clientId: this.transport.id,
-      kind: "transaction",
-      commandSequence: this.transport.commandSequence,
-      expectedDocumentRevision: command.expectedDocumentRevision,
-      changes: document.recoveryDraft(this.transport.id, null)?.changes ?? [],
-    };
-    document.noteSubmitted(command.operationId, submitted);
-    this.queueDraftPersistence();
-    let accepted: CommandResult;
-    try {
-      accepted = await this.dispatch(command);
-    } catch (error) {
-      this.handleSourceFailure(command, error);
-      return;
-    }
-    this.recoveryStateValue = { ...this.recoveryStateValue, status: "resubmitting", local: document.recoveryDraft(this.transport.id, this.draftOperation) };
-    this.notifyRecovery();
-    void this.finishRecoveredDraft(command, accepted);
-  }
-
-  private async finishRecoveredDraft(command: BrowserTransactionCommand, accepted: CommandResult): Promise<void> {
-    const document = this.requireDocument();
-    try {
-      const operation = operationSettled(accepted.operation) ? accepted.operation : await this.awaitOperation(accepted.operation.id);
-      if (operation.status === "error" || operation.status === "cancelled") throw new BrowserTransportError(operation.error?.code ?? "recovery_failed", operation.error?.message ?? "recovered source could not be committed", true);
-      document.acknowledge(settledCommandResult(accepted, operation));
-      this.draftOperation = null;
-      this.queueDraftPersistence();
-      this.recoveryStateValue = { ...this.recoveryStateValue, status: "none", local: null };
-      this.notifyRecovery();
-      this.notify(undefined, sourceCellKeys(command, document));
-    } catch (error) {
-      this.handleSourceFailure(command, error);
-    }
   }
 
   private resetAuthoritativeDocument(): void {
     if (!this.documentValue) return;
     this.documentValue = new BrowserDocument(this.documentValue.snapshot);
-    this.draftOperation = null;
+    this.draftSubmission = null;
   }
 
   private async refreshRecoveryState(): Promise<boolean> {
@@ -871,155 +590,107 @@ export class BrowserNotebookClient {
     }
   }
 
-  private async refreshKeptBranches(): Promise<boolean> {
-    const store = this.draftStore();
-    if (!store) return false;
-    try {
-      const keptBranches = await store.listBranches();
-      this.recoveryStateValue = { ...this.recoveryStateValue, keptBranches };
-      this.notifyRecovery();
-      return true;
-    } catch {
-      return false;
-    }
+  private async refreshSavedDrafts(): Promise<void> {
+    this.recoveryStateValue = { ...this.recoveryStateValue, drafts: (await this.draftStore().listDrafts()).filter(draft => draft.draftId !== this.draftId) };
+    this.notifyRecovery();
   }
 
   private notifyRecovery(): void {
     for (const listener of this.recoveryListeners) listener(this.recoveryStateValue);
   }
 
-  private async dispatchSource(command: SourceCommand, waitForSettlement: boolean): Promise<CommandResult> {
-    if (this.draftOperation !== null) {
-      throw new BrowserTransportError("recovery_receipt_pending", "source changes are blocked until the previous operation receipt is reconciled");
-    }
+  private startRun(command: BrowserRunCommand): { completed: Promise<CommandResult> } {
+    // The backend checks this source revision when queued execution begins.
+    // Waiting here would let an earlier long run hold up subsequent edits and Save.
+    return { completed: command.changes?.length ? this.dispatchSource(command) : this.dispatch(command) };
+  }
+
+  private async dispatchSource(command: SourceCommand, _waitForSettlement = true): Promise<CommandResult> {
     const document = this.requireDocument();
-    const submitted = { ...command, commandSequence: this.transport.commandSequence } as HostCommand;
-    const commandChanges = command.changes ?? [];
-    document.stageRecoveryIntent(commandChanges);
-    const draftOperation: BrowserRecoveryDraft["operation"] = {
-      operationId: command.operationId,
-      clientId: this.transport.id,
-      kind: command.type,
-      commandSequence: this.transport.commandSequence,
-      expectedDocumentRevision: command.expectedDocumentRevision,
-      changes: commandChanges.map((change) => cloneChange(change)),
-    };
-    this.draftOperation = draftOperation;
-    // Recovery is best effort and must not gate the authoritative in-memory edit.
+    const changes = command.changes ?? [];
+    document.stageRecoveryIntent(changes);
+    this.draftSubmission = { requestId: command.requestId, kind: command.type, changes: changes.map(change => structuredClone(change)) };
+    document.noteSubmitted(command.requestId, command);
     this.queueDraftPersistence();
-    document.noteSubmitted(command.operationId, submitted);
-    const sourceCommit = command.type === "run" && (command.changes?.length ?? 0) > 0
-      ? this.awaitSourceCommit(command.operationId)
-      : null;
     try {
-      const accepted = await this.dispatch(command);
-      if (sourceCommit !== null) {
-        await sourceCommit;
-        this.draftOperation = null;
-        this.queueDraftPersistence();
-        this.notify(undefined, sourceCellKeys(command, document));
-        return { ...accepted, documentRevision: document.snapshot.documentRevision, version: document.snapshot.version, cursor: document.cursor };
-      }
-      const operation = waitForSettlement && !operationSettled(accepted.operation)
-        ? await this.awaitOperation(accepted.operation.id)
-        : accepted.operation;
-      if (operation.status === "error" || operation.status === "cancelled") {
-        throw new BrowserTransportError(operation.error?.code ?? (command.type + "_failed"), operation.error?.message ?? (command.type + " operation failed"), true);
-      }
-      const result = settledCommandResult(accepted, operation);
+      const result = await this.dispatch(command);
       document.acknowledge(result);
-      this.draftOperation = null;
+      if (this.draftSubmission?.requestId === command.requestId) this.draftSubmission = null;
       this.queueDraftPersistence();
+      this.recoveryStateValue = { ...this.recoveryStateValue, local: document.recoveryDraft(this.draftId), status: "none" };
+      this.notifyRecovery();
       this.notify(undefined, sourceCellKeys(command, document));
       return result;
     } catch (error) {
-      this.removeSourceCommitWaiter(command.operationId);
-      this.handleSourceFailure(command, error);
+      if (error instanceof BrowserTransportError && error.definitive) {
+        document.reject(command.requestId, error.code);
+        if (this.draftSubmission?.requestId === command.requestId) this.draftSubmission = null;
+      }
+      this.queueDraftPersistence();
+      const local = document.recoveryDraft(this.draftId, this.draftSubmission);
+      this.recoveryStateValue = { ...this.recoveryStateValue, status: local ? "conflict" : "none", local };
+      this.notifyRecovery(); this.notify();
       throw error;
     }
-
-  }
-
-  private handleSourceFailure(command: SourceCommand, error: unknown): void {
-    const document = this.requireDocument();
-    if (this.draftOperation === null) {
-      this.queueDraftPersistence();
-      const local = document.recoveryDraft(this.transport.id, null);
-      this.recoveryStateValue = { ...this.recoveryStateValue, status: local === null ? "none" : "conflict", local };
-      this.notifyRecovery();
-      this.notify();
-      return;
-    }
-    const definitive = error instanceof BrowserTransportError && error.definitive;
-    if (definitive) {
-      document.reject(command.operationId, error.code);
-      this.draftOperation = null;
-    } else if ((command.changes ?? []).some((change) => !["create", "edit", "text-edit"].includes(change.type))) {
-      document.markStructuralRecoveryConflict();
-    }
-    this.queueDraftPersistence();
-    this.recoveryStateValue = {
-      ...this.recoveryStateValue,
-      status: "conflict",
-      local: document.recoveryDraft(this.transport.id, this.draftOperation),
-    };
-    this.notifyRecovery();
-    this.notify();
   }
 
   private async dispatch(command: BrowserCommand): Promise<CommandResult> {
-    const admission = await this.transport.dispatch(command);
-    const commandWithSequence = { ...command, clientId: this.transport.id, sessionEpoch: this.requireDocument().epoch, commandSequence: admission.commandSequence } as HostCommand;
-    const admitted = admission.operation;
-    if (admitted && !this.operations.has(admitted.id)) this.captureOperation(admitted);
-    const retained = admitted ? this.operations.get(admitted.id) ?? admitted : null;
-    const result = admissionResult(admission, this.requireDocument().snapshot, this.transport.cursor, commandWithSequence, retained);
-    this.options.onCommand?.(commandWithSequence, result);
-    if (!admission.accepted || admission.operation === null) {
-      throw new BrowserTransportError(admission.error?.code ?? "command_rejected", admission.error?.message ?? (command.type + " command was rejected"), true);
+    const executes = command.type === "run" || command.type === "restart" && command.replay;
+    if (executes) {
+      this.uncertainRun = null;
+      this.activeRuns.set(command.requestId, { requestId: command.requestId, epoch: command.sessionEpoch });
+      this.updatePendingRun();
     }
-    return result;
+    try {
+      const result = await this.transport.dispatch(command);
+      this.activeRuns.delete(command.requestId);
+      if (executes) this.updatePendingRun();
+      this.options.onCommand?.(command, result);
+      if (result.error) throw new BrowserTransportError(result.error.code, result.error.message, true);
+      return result;
+    } catch (error) {
+      if (executes) {
+        this.activeRuns.delete(command.requestId);
+        if (!(error instanceof BrowserTransportError) || !error.definitive) this.uncertainRun = { requestId: command.requestId, epoch: command.sessionEpoch };
+        this.updatePendingRun();
+      }
+      throw error;
+    }
   }
 
-  private async dispatchSettled(command: BrowserCommand, onAccepted?: (operationId: string) => void): Promise<CommandResult> {
-    const accepted = await this.dispatch(command);
-    onAccepted?.(accepted.operation.id);
-    const operation = operationSettled(accepted.operation) ? accepted.operation : await this.awaitOperation(accepted.operation.id);
-    if (operation.status === "error" || operation.status === "cancelled") throw new BrowserTransportError(operation.error?.code ?? (command.type + "_failed"), operation.error?.message ?? (command.type + " operation failed"));
-    return settledCommandResult(accepted, operation);
+  private updatePendingRun(): void {
+    this.pendingRun = this.uncertainRun ?? this.activeRuns.values().next().value ?? null;
+    this.recoveryStateValue = { ...this.recoveryStateValue, uncertainRun: this.uncertainRun !== null };
+    this.queueDraftPersistence(); this.notifyRecovery();
+  }
+
+  private dispatchSettled(command: BrowserCommand, onStarted?: (requestId: string) => void): Promise<CommandResult> {
+    onStarted?.(command.requestId);
+    return this.dispatch(command);
   }
 
   private receiveSnapshot(snapshot: HostSnapshot): void {
-    if (this.documentValue !== null && this.documentValue.epoch !== snapshot.epoch) {
-      const error = new BrowserTransportError("session_replaced", "notebook session was replaced while the operation was pending");
-      this.rejectOperationWaiters(error);
-      this.rejectSourceCommitWaiters(error);
-      this.operations.clear();
-      this.runs.clear();
-      this.artifactCache.clear();
-      this.draftOperation = null;
-      this.queueDraftPersistence();
-    }
-    if (this.documentValue) this.documentValue.applySnapshot(snapshot);
-    else this.documentValue = new BrowserDocument(snapshot);
-    snapshot.operations.forEach((operation) => this.captureOperation(operation));
-    this.notify();
+    const draft = this.documentValue?.recoveryDraft(this.draftId, this.draftSubmission, this.pendingRun);
+    if (this.documentValue?.epoch !== snapshot.epoch) { this.runs.clear(); this.artifactCache.clear(); }
+    this.documentValue = new BrowserDocument(snapshot);
+    if (draft) this.restoreDraft(draft);
+    else this.notify();
   }
 
   private receiveEvent(event: HostEvent): void {
     const document = this.documentValue;
-    if (!document) throw new BrowserTransportError("invalid_server_message", "received event without a notebook snapshot");
+    if (!document) throw new BrowserTransportError("invalid_server_message", "Received an update before the notebook.");
     document.applyEvent(event);
+    // Live source acknowledgment preserves typing made after the request was sent.
     if (event.type === "transaction" && event.operationId) {
       const outcome = sourceCommitOutcome(event.payload);
-      if (outcome !== null) this.acknowledgeSourceCommit(event.operationId, outcome);
-    }
-    if (event.type === "receipt" || event.type === "operation") {
-      const operation = operationFromEventPayload(event.payload);
-      if (operation) this.captureOperation(operation);
+      if (outcome && document.acknowledgeSourceCommit(event.operationId, outcome)) {
+        if (this.draftSubmission?.requestId === event.operationId) this.draftSubmission = null;
+        this.queueDraftPersistence();
+      }
     }
     this.notify(event);
-    if (event.type === "runtime") void this.activateStartupIfSafe().catch(() => {});
+    if (event.type === "runtime") void this.activateStartupIfSafe();
     if (event.type === "cell-completed" && event.operationId) this.observeCompletion(event);
   }
   private observeCompletion(event: HostEvent): void {
@@ -1033,11 +704,11 @@ export class BrowserNotebookClient {
     }));
   }
 
-  private base(label: string): { operationId: string; clientId: string; sessionEpoch: string; expectedDocumentRevision: number };
-  private base(label: string, documentRevision: false): { operationId: string; clientId: string; sessionEpoch: string };
-  private base(label: string, documentRevision = true): { operationId: string; clientId: string; sessionEpoch: string; expectedDocumentRevision?: number } {
+  private base(label: string): { requestId: string; clientId: string; sessionEpoch: string; expectedDocumentRevision: number };
+  private base(label: string, documentRevision: false): { requestId: string; clientId: string; sessionEpoch: string };
+  private base(label: string, documentRevision = true): { requestId: string; clientId: string; sessionEpoch: string; expectedDocumentRevision?: number } {
     const document = this.requireDocument();
-    return { operationId: operationId(label), clientId: this.transport.id, sessionEpoch: document.epoch, ...(documentRevision ? { expectedDocumentRevision: document.snapshot.documentRevision } : {}) };
+    return { requestId: operationId(label), clientId: this.transport.id, sessionEpoch: document.epoch, ...(documentRevision ? { expectedDocumentRevision: document.snapshot.documentRevision } : {}) };
   }
 
   private kernelEpoch(): string {
@@ -1072,92 +743,7 @@ export class BrowserNotebookClient {
     for (const listener of this.listeners) listener(this.documentValue, event, localCellKeys);
   }
 
-  private captureOperation(operation: OperationRecord): void {
-    this.operations.set(operation.id, operation);
-    this.trySourceCommitFromOperation(operation);
-    if (!operationSettled(operation)) return;
-    const waiters = this.operationWaiters.get(operation.id);
-    if (!waiters) return;
-    this.operationWaiters.delete(operation.id);
-    for (const waiter of waiters) {
-      globalThis.clearTimeout(waiter.timer);
-      waiter.resolve(operation);
-    }
-  }
-  private removeOperationWaiter(id: string, waiter: OperationWaiter): void {
-    const waiters = this.operationWaiters.get(id);
-    waiters?.delete(waiter);
-    if (waiters?.size === 0) this.operationWaiters.delete(id);
-  }
-
-  private rejectOperationWaiters(error: BrowserTransportError): void {
-    for (const waiters of this.operationWaiters.values()) {
-      for (const waiter of waiters) {
-        globalThis.clearTimeout(waiter.timer);
-        waiter.reject(error);
-      }
-    }
-    this.operationWaiters.clear();
-  }
-  private acknowledgeSourceCommit(operationId: string, outcome: SourceCommitOutcome): void {
-    const document = this.documentValue;
-    if (!document || !this.sourceCommitWaiters.has(operationId)) return;
-    if (document.acknowledgeSourceCommit(operationId, outcome)) this.resolveSourceCommit(operationId);
-  }
-
-  private trySourceCommitFromOperation(operation: OperationRecord): void {
-    const document = this.documentValue;
-    const waiter = this.sourceCommitWaiters.get(operation.id);
-    if (!document || !waiter) return;
-    const outcome = sourceCommitOutcome(operation.result);
-    if (outcome !== null) {
-      if (document.acknowledgeSourceCommit(operation.id, outcome)) this.resolveSourceCommit(operation.id);
-      return;
-    }
-    if (operationSettled(operation)) {
-      this.rejectSourceCommit(operation.id, new BrowserTransportError(operation.error?.code ?? "source_commit_unconfirmed", operation.error?.message ?? "run source changes were not committed"));
-    }
-  }
-  private awaitSourceCommit(operationId: string): Promise<void> {
-    return new Promise<void>((resolve, reject) => {
-      const timer = globalThis.setTimeout(() => {
-        this.removeSourceCommitWaiter(operationId);
-        reject(new BrowserTransportError("source_commit_timeout", "run source changes did not receive a commit acknowledgement in time"));
-      }, 120_000);
-      this.sourceCommitWaiters.set(operationId, { resolve, reject, timer });
-    });
-  }
-
-  private removeSourceCommitWaiter(operationId: string): void {
-    const waiter = this.sourceCommitWaiters.get(operationId);
-    if (!waiter) return;
-    globalThis.clearTimeout(waiter.timer);
-    this.sourceCommitWaiters.delete(operationId);
-  }
-
-  private resolveSourceCommit(operationId: string): void {
-    const waiter = this.sourceCommitWaiters.get(operationId);
-    if (!waiter) return;
-    this.removeSourceCommitWaiter(operationId);
-    waiter.resolve();
-  }
-
-  private rejectSourceCommit(operationId: string, error: BrowserTransportError): void {
-    const waiter = this.sourceCommitWaiters.get(operationId);
-    if (!waiter) return;
-    this.removeSourceCommitWaiter(operationId);
-    waiter.reject(error);
-  }
-
-  private rejectSourceCommitWaiters(error: BrowserTransportError): void {
-    for (const [operationId, waiter] of this.sourceCommitWaiters) {
-      globalThis.clearTimeout(waiter.timer);
-      waiter.reject(error);
-      this.sourceCommitWaiters.delete(operationId);
-    }
-  }
-
-  private async withSourceLock<T>(operation: () => Promise<T>): Promise<T> {
+  private async withSourceLock<T>(operation: () => Promise<T> | T): Promise<T> {
     const predecessor = this.sourceQueue;
     let release!: () => void;
     this.sourceQueue = new Promise<void>((resolve) => { release = resolve; });
@@ -1167,22 +753,6 @@ export class BrowserNotebookClient {
   }
 }
 
-function admissionResult(admission: CommandAdmission, snapshot: HostSnapshot, cursor: number | null, command: HostCommand, operation: OperationRecord | null = admission.operation): CommandResult {
-  if (operation === null) throw new BrowserTransportError(admission.error?.code ?? "command_rejected", admission.error?.message ?? `${command.type} command was rejected`, true);
-  return {
-    epoch: admission.epoch,
-    operation,
-    documentRevision: operation.documentRevision,
-    version: snapshot.version,
-    cursor: cursor ?? snapshot.cursor,
-    nextCommandSequence: admission.nextCommandSequence,
-    result: operation.result,
-    error: operation.error,
-  };
-}
-function settledCommandResult(accepted: CommandResult, operation: OperationRecord): CommandResult {
-  return { ...accepted, operation, documentRevision: operation.documentRevision, result: operation.result, error: operation.error };
-}
 function sourceCellKeys(command: SourceCommand, document: BrowserDocument): string[] {
   const changes = command.changes ?? [];
   return changes.flatMap((change) => {
@@ -1224,7 +794,7 @@ function fileArray(value: unknown): Array<{ name: string; content_base64: string
   return Array.isArray(value) ? value.filter((item): item is { name: string; content_base64: string } => typeof item === "object" && item !== null && !Array.isArray(item) && typeof (item as Record<string, unknown>).name === "string" && typeof (item as Record<string, unknown>).content_base64 === "string") : [];
 }
 function jsonRecord(value: Record<string, unknown>): Record<string, JsonValue> {
-  return JSON.parse(JSON.stringify(value)) as Record<string, JsonValue>;
+  return value as Record<string, JsonValue>;
 }
 
 function safeArtifactPath(path: string): string {
@@ -1247,28 +817,9 @@ function normalizeInputTimestamp(timestamp: number | undefined, now: number): nu
   if (timestamp! > 1e12 && typeof performance.timeOrigin === "number") return timestamp! - performance.timeOrigin;
   return timestamp!;
 }
-function cloneChange(change: DocumentChange): DocumentChange { return JSON.parse(JSON.stringify(change)) as DocumentChange; }
 function operationId(label: string): string {
   try { return `${label}-${crypto.randomUUID()}`; } catch { return `${label}-${Date.now()}-${Math.random().toString(16).slice(2)}`; }
 }
 function sameLines(left: readonly string[], right: readonly string[]): boolean { return left.length === right.length && left.every((line, index) => line === right[index]); }
-function operationSettled(operation: OperationRecord): boolean { return operation.status === "done" || operation.status === "error" || operation.status === "interrupted" || operation.status === "cancelled"; }
 function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }
-function isOperation(value: unknown): value is OperationRecord {
-  return typeof value === "object" && value !== null && !Array.isArray(value) && typeof (value as Record<string, unknown>).id === "string" && typeof (value as Record<string, unknown>).status === "string";
-}
-
-function operationFromEventPayload(value: unknown): OperationRecord | null {
-  if (isOperation(value)) return value;
-  if (isRecord(value) && isOperation(value.operation)) return value.operation;
-  return null;
-}
-
-function isBrowserDraftStore(value: { load(): Promise<unknown>; save(epoch: string, cursor: number): Promise<void>; clear(): Promise<void> }): value is BrowserDraftStore {
-  const candidate = value as Partial<BrowserDraftStore>;
-  return typeof candidate.loadDraft === "function" && typeof candidate.listDrafts === "function" && typeof candidate.saveDraft === "function" && typeof candidate.clearDraft === "function" && typeof candidate.saveBranch === "function" && typeof candidate.listBranches === "function" && typeof candidate.deleteBranch === "function";
-}
-function sameChanges(left: BrowserRecoveryDraft["changes"], right: BrowserRecoveryDraft["changes"]): boolean {
-  return JSON.stringify(left) === JSON.stringify(right);
-}
 export type { Recovery };

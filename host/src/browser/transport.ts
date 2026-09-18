@@ -1,473 +1,105 @@
+import { z } from "zod";
 import {
-  HOST_CLIENT_PROTOCOL_VERSION,
-  artifactHandleSchema,
-  commandAdmissionSchema,
-  decodeHostEventWire,
-  canonicalBase64ByteLength,
-  decodeJsonFrame,
-  decodeRecoveryWire,
-  encodeHostCommandWire,
-  hostEventSchema,
-  recoverySchema,
-  documentChangeSchema,
-  SNAPSHOT_ENVELOPE_LIMIT,
-  type ArtifactHandle,
-  type CommandAdmission,
-  type HostCommand,
-  type HostEvent,
-  type HostSnapshot,
-  type Recovery,
-  type DocumentChange,
+  HOST_CLIENT_PROTOCOL_VERSION, artifactHandleSchema, commandResultSchema,
+  decodeHostEventWire, canonicalBase64ByteLength, decodeJsonFrame, decodeRecoveryWire,
+  encodeHostCommandWire, hostEventSchema, recoverySchema, documentChangeSchema,
+  SNAPSHOT_ENVELOPE_LIMIT, type ArtifactHandle, type CommandResult, type HostCommand,
+  type HostEvent, type HostSnapshot, type Recovery, type DocumentChange,
 } from "../protocol.js";
 import { notebookSocketUrl, notebookUrl } from "./url.js";
 
 export class BrowserTransportError extends Error {
   constructor(readonly code: string, message: string, readonly definitive = false) {
-    super(message);
-    this.name = "BrowserTransportError";
+    super(message); this.name = "BrowserTransportError";
   }
 }
 
-export interface RecoveryStore {
-  load(): Promise<{ epoch: string; cursor: number } | null>;
-  save(epoch: string, cursor: number): Promise<void>;
-  clear(): Promise<void>;
-}
+const revision = z.number().int().nonnegative().safe();
+const draftBaseSchema = z.object({
+  epoch: z.string(), documentRevision: revision,
+  cells: z.array(z.object({ id: z.string(), revision, type: z.enum(["code", "markdown"]), body: z.array(z.string()) })),
+});
+export const recoveryDraftSchema = z.object({
+  schemaVersion: z.literal(2), draftId: z.string().min(1), updatedAt: z.number(),
+  base: draftBaseSchema, changes: z.array(documentChangeSchema),
+  pendingRun: z.object({ requestId: z.string(), epoch: z.string() }).nullable().default(null),
+  submission: z.object({ requestId: z.string(), kind: z.enum(["transaction", "run"]), changes: z.array(documentChangeSchema) }).nullable(),
+});
+export type BrowserRecoveryDraft = z.infer<typeof recoveryDraftSchema>;
 
-/**
- * A renderer-local draft contains only logical source intent and the
- * authoritative identity it was based on. Session credentials deliberately
- * do not belong in this value: a fresh browser ticket is required after a
- * renderer restart.
- */
-export interface BrowserRecoveryDraft {
-  schemaVersion: 1;
-  clientId: string;
-  base: {
-    epoch: string;
-    cursor: number;
-    version: number;
-    documentRevision: number;
-    cells: Array<{ id: string; revision: number; type: "code" | "markdown"; body: string[] }>;
-  };
-  changes: DocumentChange[];
-  operation: {
-    operationId: string;
-    clientId?: string;
-    kind: "transaction" | "run";
-    commandSequence: number;
-    expectedDocumentRevision: number;
-    changes?: DocumentChange[];
-  } | null;
+/** Old native drafts are read as source only; an interrupted run is never replayed. */
+export function readRecoveryDraft(value: unknown, legacyId?: string): BrowserRecoveryDraft | null {
+  const current = recoveryDraftSchema.safeParse(value);
+  if (current.success) return current.data;
+  const legacy = z.object({ schemaVersion: z.literal(1), clientId: z.string(), base: draftBaseSchema,
+    changes: z.array(documentChangeSchema), operation: z.object({ operationId: z.string(), kind: z.enum(["transaction", "run"]), changes: z.array(documentChangeSchema).optional() }).nullable().optional(),
+  }).safeParse(value);
+  if (!legacy.success) return null;
+  return { schemaVersion: 2, draftId: legacyId ?? legacy.data.clientId, updatedAt: 0,
+    base: legacy.data.base, changes: legacy.data.changes,
+    pendingRun: legacy.data.operation?.kind === "run" ? { requestId: legacy.data.operation.operationId, epoch: legacy.data.base.epoch } : null,
+    submission: legacy.data.operation ? { requestId: legacy.data.operation.operationId, kind: legacy.data.operation.kind, changes: legacy.data.operation.changes ?? legacy.data.changes } : null };
 }
-export interface BrowserRecoveryBranch { id: string; draft: BrowserRecoveryDraft; }
-
-export interface BrowserDraftStore extends RecoveryStore {
-  loadDraft(clientId?: string): Promise<BrowserRecoveryDraft | null>;
+export interface BrowserDraftStore {
   listDrafts(): Promise<BrowserRecoveryDraft[]>;
   saveDraft(draft: BrowserRecoveryDraft): Promise<void>;
-  clearDraft(clientId: string): Promise<void>;
-  saveBranch(branchId: string, draft: BrowserRecoveryDraft): Promise<void>;
-  listBranches(): Promise<BrowserRecoveryBranch[]>;
-  deleteBranch(branchId: string): Promise<void>;
+  clearDraft(draftId: string): Promise<void>;
 }
-
 export class MemoryRecoveryStore implements BrowserDraftStore {
-  private value: { epoch: string; cursor: number } | null = null;
   private readonly drafts = new Map<string, BrowserRecoveryDraft>();
-  private readonly branches = new Map<string, BrowserRecoveryDraft>();
-
-  async load(): Promise<{ epoch: string; cursor: number } | null> {
-    return this.value === null ? null : { ...this.value };
-  }
-
-  async save(epoch: string, cursor: number): Promise<void> {
-    this.value = { epoch, cursor };
-  }
-
-  async clear(): Promise<void> {
-    this.value = null;
-  }
-
-  async loadDraft(clientId?: string): Promise<BrowserRecoveryDraft | null> {
-    const draft = clientId === undefined ? this.drafts.values().next().value : this.drafts.get(clientId);
-    return draft === undefined ? null : cloneDraft(draft);
-  }
-
-  async listDrafts(): Promise<BrowserRecoveryDraft[]> {
-    return [...this.drafts.values()].map(cloneDraft);
-  }
-
-  async saveDraft(draft: BrowserRecoveryDraft): Promise<void> {
-    this.drafts.set(draft.clientId, cloneDraft(draft));
-  }
-
-  async clearDraft(clientId: string): Promise<void> {
-    this.drafts.delete(clientId);
-  }
-
-  async saveBranch(branchId: string, draft: BrowserRecoveryDraft): Promise<void> {
-    this.branches.set(branchId, cloneDraft(draft));
-  }
-
-  async listBranches(): Promise<BrowserRecoveryBranch[]> {
-    return [...this.branches].map(([id, draft]) => ({ id, draft: cloneDraft(draft) }));
-  }
-
-  async deleteBranch(branchId: string): Promise<void> {
-    this.branches.delete(branchId);
-  }
+  async listDrafts(): Promise<BrowserRecoveryDraft[]> { return [...this.drafts.values()].map(value => structuredClone(value)); }
+  async saveDraft(draft: BrowserRecoveryDraft): Promise<void> { this.drafts.set(draft.draftId, structuredClone(draft)); }
+  async clearDraft(draftId: string): Promise<void> { this.drafts.delete(draftId); }
 }
 
-/**
- * Browser durable storage for reconnect cursors and renderer-local drafts.
- * The database is keyed by a notebook URL identity, while the record itself
- * contains no lease, CSRF, ticket, or bearer credential.
- */
-interface EncryptedRecoveryValue {
-  schemaVersion: 1;
-  keyId: string;
-  algorithm: "AES-256-GCM";
-  iv: Uint8Array;
-  ciphertext: Uint8Array;
-}
-
-const RECOVERY_ENVELOPE_VERSION = 1 as const;
-const RECOVERY_ALGORITHM = "AES-256-GCM" as const;
-const RECOVERY_IV_BYTES = 12;
-const RECOVERY_KEY_BYTES = 32;
-const RECOVERY_KEY_PATTERN = /^[A-Za-z0-9_-]{43}$/;
-
-function decodeRecoveryKey(value: string | undefined): Uint8Array | null {
-  if (value === undefined || !RECOVERY_KEY_PATTERN.test(value)) return null;
-  try {
-    const normalized = value.replace(/-/g, "+").replace(/_/g, "/") + "=".repeat((4 - value.length % 4) % 4);
-    const binary = globalThis.atob(normalized);
-    if (binary.length !== RECOVERY_KEY_BYTES) return null;
-    return Uint8Array.from(binary, (character) => character.charCodeAt(0));
-  } catch {
-    return null;
-  }
-}
-
-function isEncryptedRecoveryValue(value: unknown): value is EncryptedRecoveryValue {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
-  const record = value as Record<string, unknown>;
-  const keys = Object.keys(record).sort();
-  return keys.length === 5 && keys[0] === "algorithm" && keys[1] === "ciphertext" && keys[2] === "iv" && keys[3] === "keyId" && keys[4] === "schemaVersion" &&
-    record.schemaVersion === RECOVERY_ENVELOPE_VERSION && record.algorithm === RECOVERY_ALGORITHM && typeof record.keyId === "string" &&
-    RECOVERY_KEY_PATTERN.test(record.keyId) && record.iv instanceof Uint8Array && record.iv.byteLength === RECOVERY_IV_BYTES &&
-    record.ciphertext instanceof Uint8Array && record.ciphertext.byteLength > 16;
-}
-
-function recoveryAad(recordKey: string): Uint8Array {
-  return new TextEncoder().encode("alder-browser-recovery:v1:" + recordKey);
-}
-
+/** Credentials never enter draft storage. Desktop uses its native store instead. */
 export class IndexedDBRecoveryStore implements BrowserDraftStore {
-  private static readonly databaseName = "alder-browser-recovery";
-  private static readonly databaseVersion = 2;
-  private static readonly objectStoreName = "state";
-  private readonly memory = new MemoryRecoveryStore();
-  private readonly key: string;
-  private readonly recoveryKey: Uint8Array | null;
-  private readonly recoveryKeyId: string | null;
-  private databasePromise: Promise<IDBDatabase | null> | null = null;
-  private disabled: boolean;
-  private cryptoKeyPromise: Promise<CryptoKey | null> | null = null;
-
-  constructor(key: string, recoveryKey?: string, recoveryKeyId?: string) {
-    this.key = key || "/";
-    this.recoveryKey = decodeRecoveryKey(recoveryKey);
-    this.recoveryKeyId = recoveryKey !== undefined && recoveryKeyId !== undefined && RECOVERY_KEY_PATTERN.test(recoveryKeyId) ? recoveryKeyId : null;
-    this.disabled = typeof globalThis.indexedDB === "undefined" || this.recoveryKey === null || this.recoveryKeyId === null || globalThis.crypto?.subtle === undefined;
-  }
-
-  async load(): Promise<{ epoch: string; cursor: number } | null> {
-    const stored = await this.read("cursor");
-    if (isCursorState(stored)) return stored;
-    return this.memory.load();
-  }
-
-  async save(epoch: string, cursor: number): Promise<void> {
-    await this.memory.save(epoch, cursor);
-    await this.write("cursor", { epoch, cursor });
-  }
-
-  async clear(): Promise<void> {
-    await this.memory.clear();
-    await this.remove("cursor");
-  }
-
-  async loadDraft(clientId?: string): Promise<BrowserRecoveryDraft | null> {
-    if (clientId !== undefined) {
-      const stored = await this.read("draft:" + clientId);
-      if (isRecoveryDraft(stored)) return cloneDraft(stored);
-      return this.memory.loadDraft(clientId);
-    }
-    const drafts = await this.listDrafts();
-    return drafts[0] ?? null;
-  }
-
-  async listDrafts(): Promise<BrowserRecoveryDraft[]> {
-    const stored = await this.readDrafts();
-    return stored.length > 0 ? stored : this.memory.listDrafts();
-  }
-
-  async saveDraft(draft: BrowserRecoveryDraft): Promise<void> {
-    await this.memory.saveDraft(draft);
-    await this.write("draft:" + draft.clientId, cloneDraft(draft));
-  }
-
-  async clearDraft(clientId: string): Promise<void> {
-    await this.memory.clearDraft(clientId);
-    await this.remove("draft:" + clientId);
-  }
-
-  async saveBranch(branchId: string, draft: BrowserRecoveryDraft): Promise<void> {
-    if (!branchId) return;
-    await this.memory.saveBranch(branchId, draft);
-    await this.write("branch:" + branchId, cloneDraft(draft));
-  }
-
-  async listBranches(): Promise<BrowserRecoveryBranch[]> {
-    const stored = await this.readBranches();
-    return stored.length > 0 ? stored : this.memory.listBranches();
-  }
-
-  async deleteBranch(branchId: string): Promise<void> {
-    await this.memory.deleteBranch(branchId);
-    await this.remove("branch:" + branchId);
-  }
-
-  private database(): Promise<IDBDatabase | null> {
-    if (this.disabled) return Promise.resolve(null);
-    if (this.databasePromise !== null) return this.databasePromise;
-    this.databasePromise = new Promise<IDBDatabase | null>((resolve) => {
-      let request: IDBOpenDBRequest;
-      try {
-        request = globalThis.indexedDB.open(IndexedDBRecoveryStore.databaseName, IndexedDBRecoveryStore.databaseVersion);
-      } catch {
-        this.disabled = true;
-        resolve(null);
-        return;
-      }
-      request.onupgradeneeded = (event) => {
-        if (!request.result.objectStoreNames.contains(IndexedDBRecoveryStore.objectStoreName)) {
-          request.result.createObjectStore(IndexedDBRecoveryStore.objectStoreName);
-        }
-        if ((event as IDBVersionChangeEvent).oldVersion < 2) request.transaction?.objectStore(IndexedDBRecoveryStore.objectStoreName).clear();
-      };
+  private database: Promise<IDBDatabase> | null = null;
+  private memory = new MemoryRecoveryStore();
+  constructor(private readonly identity: string) {}
+  private open(): Promise<IDBDatabase> {
+    return this.database ??= new Promise((resolve, reject) => {
+      const request = indexedDB.open("alder-document-drafts", 1);
+      request.onupgradeneeded = () => request.result.createObjectStore("drafts");
       request.onsuccess = () => resolve(request.result);
-      request.onerror = () => { this.disabled = true; resolve(null); };
-      request.onblocked = () => { this.disabled = true; resolve(null); };
-    });
-    return this.databasePromise;
-  }
-
-  private cryptoKey(): Promise<CryptoKey | null> {
-    if (this.recoveryKey === null || this.recoveryKeyId === null || this.disabled) return Promise.resolve(null);
-    if (this.cryptoKeyPromise !== null) return this.cryptoKeyPromise;
-    this.cryptoKeyPromise = globalThis.crypto.subtle.importKey("raw", this.recoveryKey as BufferSource, { name: "AES-GCM" }, false, ["encrypt", "decrypt"])
-      .catch(() => { this.disabled = true; return null; });
-    return this.cryptoKeyPromise;
-  }
-
-  private async encrypt(name: string, value: unknown): Promise<EncryptedRecoveryValue | null> {
-    if (this.disabled || this.recoveryKeyId === null) return null;
-    const key = await this.cryptoKey();
-    if (key === null) return null;
-    try {
-      const iv = globalThis.crypto.getRandomValues(new Uint8Array(RECOVERY_IV_BYTES));
-      const plaintext = new TextEncoder().encode(JSON.stringify(value));
-      const ciphertext = await globalThis.crypto.subtle.encrypt({ name: "AES-GCM", iv: iv as BufferSource, additionalData: recoveryAad(this.recordKey(name)) as BufferSource, tagLength: 128 }, key, plaintext as BufferSource);
-      return { schemaVersion: RECOVERY_ENVELOPE_VERSION, keyId: this.recoveryKeyId, algorithm: RECOVERY_ALGORITHM, iv, ciphertext: new Uint8Array(ciphertext) };
-    } catch {
-      this.disabled = true;
-      return null;
-    }
-  }
-
-  private async decrypt(name: string, value: unknown): Promise<unknown | null> {
-    if (!isEncryptedRecoveryValue(value) || this.recoveryKeyId === null || value.keyId !== this.recoveryKeyId) return null;
-    const key = await this.cryptoKey();
-    if (key === null) return null;
-    try {
-      const plaintext = await globalThis.crypto.subtle.decrypt({ name: "AES-GCM", iv: value.iv as BufferSource, additionalData: recoveryAad(this.recordKey(name)) as BufferSource, tagLength: 128 }, key, value.ciphertext as BufferSource);
-      return JSON.parse(new TextDecoder().decode(plaintext)) as unknown;
-    } catch {
-      return null;
-    }
-  }
-
-  private async read(name: string): Promise<unknown> {
-    const database = await this.database();
-    if (database === null) return null;
-    return new Promise((resolve) => {
-      try {
-        const transaction = database.transaction(IndexedDBRecoveryStore.objectStoreName, "readonly");
-        const request = transaction.objectStore(IndexedDBRecoveryStore.objectStoreName).get(this.recordKey(name));
-        request.onsuccess = () => {
-          const raw = request.result;
-          void this.decrypt(name, raw).then((value) => {
-            if (raw !== undefined && value === null) void this.remove(name).catch(() => undefined);
-            resolve(value);
-          });
-        };
-        request.onerror = () => { this.disabled = true; resolve(null); };
-      } catch {
-        this.disabled = true;
-        resolve(null);
-      }
+      request.onerror = () => reject(request.error);
     });
   }
-  private async write(name: string, value: unknown): Promise<void> {
-    const encrypted = await this.encrypt(name, value);
-    if (encrypted === null) return;
-    const database = await this.database();
-    if (database === null) return;
-    await new Promise<void>((resolve, reject) => {
-      try {
-        const transaction = database.transaction(IndexedDBRecoveryStore.objectStoreName, "readwrite");
-        transaction.objectStore(IndexedDBRecoveryStore.objectStoreName).put(encrypted, this.recordKey(name));
-        transaction.oncomplete = () => resolve();
-        transaction.onabort = () => reject(transaction.error ?? new Error("IndexedDB write transaction aborted"));
-        transaction.onerror = () => reject(transaction.error ?? new Error("IndexedDB write transaction failed"));
-      } catch (error) {
-        reject(error);
-      }
-    });
-  }
-
-  private async remove(name: string): Promise<void> {
-    const database = await this.database();
-    if (database === null) return;
-    await new Promise<void>((resolve, reject) => {
-      try {
-        const transaction = database.transaction(IndexedDBRecoveryStore.objectStoreName, "readwrite");
-        transaction.objectStore(IndexedDBRecoveryStore.objectStoreName).delete(this.recordKey(name));
-        transaction.oncomplete = () => resolve();
-        transaction.onabort = () => reject(transaction.error ?? new Error("IndexedDB delete transaction aborted"));
-        transaction.onerror = () => reject(transaction.error ?? new Error("IndexedDB delete transaction failed"));
-      } catch (error) {
-        reject(error);
-      }
-    });
-  }
-  private async readDrafts(): Promise<BrowserRecoveryDraft[]> {
-    const database = await this.database();
-    if (database === null) return [];
+  async listDrafts(): Promise<BrowserRecoveryDraft[]> {
+    if (typeof indexedDB === "undefined") return this.memory.listDrafts();
+    const database = await this.open();
     return new Promise((resolve, reject) => {
-      try {
-        const transaction = database.transaction(IndexedDBRecoveryStore.objectStoreName, "readonly");
-        const store = transaction.objectStore(IndexedDBRecoveryStore.objectStoreName);
-        const keys = store.getAllKeys();
-        const values = store.getAll();
-        transaction.oncomplete = () => {
-          const entries = keys.result.map((key, index) => ({ key, value: values.result[index] }));
-          void Promise.all(entries.map(async (entry) => {
-            if (typeof entry.key !== "string") return null;
-            const name = this.recordName(entry.key);
-            if (name === null || !name.startsWith("draft:")) return null;
-            const decoded = await this.decrypt(name, entry.value);
-            if (decoded === null) {
-              void this.remove(name).catch(() => undefined);
-              return null;
-            }
-            return isRecoveryDraft(decoded) ? cloneDraft(decoded) : null;
-          })).then((drafts) => {
-            const unique = new Map<string, BrowserRecoveryDraft>();
-            for (const draft of drafts) if (draft !== null) unique.set(draft.clientId, draft);
-            resolve([...unique.values()]);
-          }).catch(() => resolve([]));
-        };
-        transaction.onabort = () => reject(transaction.error ?? new Error("IndexedDB draft inventory transaction aborted"));
-        transaction.onerror = () => reject(transaction.error ?? new Error("IndexedDB draft inventory transaction failed"));
-      } catch (error) {
-        reject(error);
-      }
+      const request = database.transaction("drafts").objectStore("drafts").openCursor();
+      const drafts: BrowserRecoveryDraft[] = [];
+      request.onsuccess = () => {
+        const cursor = request.result;
+        if (!cursor) { resolve(drafts); return; }
+        if (String(cursor.key).startsWith(this.identity + ":")) {
+          const draft = readRecoveryDraft(cursor.value); if (draft) drafts.push(draft);
+        }
+        cursor.continue();
+      };
+      request.onerror = () => reject(request.error);
     });
   }
-
-  private async readBranches(): Promise<BrowserRecoveryBranch[]> {
-    const database = await this.database();
-    if (database === null) return [];
-    return new Promise((resolve, reject) => {
-      try {
-        const transaction = database.transaction(IndexedDBRecoveryStore.objectStoreName, "readonly");
-        const store = transaction.objectStore(IndexedDBRecoveryStore.objectStoreName);
-        const keys = store.getAllKeys();
-        const values = store.getAll();
-        transaction.oncomplete = () => {
-          const entries = keys.result.map((key, index) => ({ key, value: values.result[index] }));
-          void Promise.all(entries.map(async (entry) => {
-            if (typeof entry.key !== "string") return null;
-            const name = this.recordName(entry.key);
-            if (name === null || !name.startsWith("branch:")) return null;
-            const decoded = await this.decrypt(name, entry.value);
-            if (decoded === null) {
-              void this.remove(name).catch(() => undefined);
-              return null;
-            }
-            return isRecoveryDraft(decoded) ? { id: name.slice("branch:".length), draft: cloneDraft(decoded) } : null;
-          })).then((branches) => resolve(branches.filter((branch): branch is BrowserRecoveryBranch => branch !== null))).catch(() => resolve([]));
-        };
-        transaction.onabort = () => reject(transaction.error ?? new Error("IndexedDB branch inventory transaction aborted"));
-        transaction.onerror = () => reject(transaction.error ?? new Error("IndexedDB branch inventory transaction failed"));
-      } catch (error) {
-        reject(error);
-      }
+  async saveDraft(draft: BrowserRecoveryDraft): Promise<void> {
+    if (typeof indexedDB === "undefined") return this.memory.saveDraft(draft);
+    await this.write(draft.draftId, draft);
+  }
+  async clearDraft(draftId: string): Promise<void> {
+    if (typeof indexedDB === "undefined") return this.memory.clearDraft(draftId);
+    await this.write(draftId, null);
+  }
+  private async write(draftId: string, draft: BrowserRecoveryDraft | null): Promise<void> {
+    const database = await this.open();
+    await new Promise<void>((resolve, reject) => {
+      const transaction = database.transaction("drafts", "readwrite");
+      const store = transaction.objectStore("drafts");
+      if (draft === null) store.delete(this.identity + ":" + draftId); else store.put(draft, this.identity + ":" + draftId);
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = transaction.onabort = () => reject(transaction.error);
     });
   }
-
-  private recordKey(name: string): string {
-    return this.key + ":" + name;
-  }
-
-  private recordName(value: string): string | null {
-    const prefix = this.key + ":";
-    return value.startsWith(prefix) ? value.slice(prefix.length) : null;
-  }
-}
-
-function cloneDraft(draft: BrowserRecoveryDraft): BrowserRecoveryDraft {
-  return JSON.parse(JSON.stringify(draft)) as BrowserRecoveryDraft;
-}
-
-function isCursorState(value: unknown): value is { epoch: string; cursor: number } {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
-  const record = value as Record<string, unknown>;
-  return typeof record.epoch === "string" && record.epoch.length > 0 && Number.isSafeInteger(record.cursor) && (record.cursor as number) >= 0;
-}
-
-function isRecoveryDraft(value: unknown): value is BrowserRecoveryDraft {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
-  const record = value as Record<string, unknown>;
-  const base = record.base;
-  if (record.schemaVersion !== 1 || typeof record.clientId !== "string" || record.clientId.length === 0 || !Array.isArray(record.changes) ||
-    typeof base !== "object" || base === null || Array.isArray(base) || !Array.isArray((base as Record<string, unknown>).cells)) return false;
-  const identity = base as Record<string, unknown>;
-  if (typeof identity.epoch !== "string" || !Number.isSafeInteger(identity.cursor) || (identity.cursor as number) < 0 ||
-    !Number.isSafeInteger(identity.version) || (identity.version as number) < 0 || !Number.isSafeInteger(identity.documentRevision) ||
-    (identity.documentRevision as number) < 0) return false;
-  if (!(identity.cells as unknown[]).every((cell) => {
-    if (typeof cell !== "object" || cell === null || Array.isArray(cell)) return false;
-    const item = cell as Record<string, unknown>;
-    return typeof item.id === "string" && item.id.length > 0 && Number.isSafeInteger(item.revision) && (item.revision as number) >= 0 &&
-      (item.type === "code" || item.type === "markdown") && Array.isArray(item.body) && (item.body as unknown[]).every((line) => typeof line === "string");
-  })) return false;
-  if (!(record.changes as unknown[]).every((change) => documentChangeSchema.safeParse(change).success)) return false;
-  const operation = record.operation;
-  if (operation !== null && operation !== undefined) {
-    if (typeof operation !== "object" || Array.isArray(operation)) return false;
-    const item = operation as Record<string, unknown>;
-    if (typeof item.operationId !== "string" || item.operationId.length === 0 || (item.kind !== "transaction" && item.kind !== "run") ||
-      !Number.isSafeInteger(item.commandSequence) || (item.commandSequence as number) < 1 || !Number.isSafeInteger(item.expectedDocumentRevision) ||
-      (item.expectedDocumentRevision as number) < 0) return false;
-    if (item.clientId !== undefined && (typeof item.clientId !== "string" || item.clientId.length === 0)) return false;
-    if (item.changes !== undefined && (!Array.isArray(item.changes) || !item.changes.every((change) => documentChangeSchema.safeParse(change).success))) return false;
-  }
-  return true;
 }
 
 export interface WebSocketLike {
@@ -487,9 +119,7 @@ export interface BrowserTransportOptions {
   leaseId?: string;
   csrf?: string;
   continuityProof?: string;
-  nextCommandSequence?: number;
-  recoveryStore?: RecoveryStore;
-  resumeFromStore?: boolean;
+  recoveryStore?: BrowserDraftStore;
   reconnect?: boolean;
   reconnectDelayMs?: number;
   maxReconnectDelayMs?: number;
@@ -501,15 +131,12 @@ export interface BrowserTransportOptions {
   onState?: (state: "connecting" | "open" | "recovering" | "closed", error?: Error) => void;
 }
 
-export type BrowserCommand = {
-  [Kind in HostCommand["type"]]: Omit<Extract<HostCommand, { type: Kind }>, "commandSequence">
-}[HostCommand["type"]];
-
+export type BrowserCommand = HostCommand;
 interface PendingCommand {
   command: HostCommand;
-  resolve(admission: CommandAdmission): void;
+  resolve(result: CommandResult): void;
   reject(error: BrowserTransportError): void;
-  sentGeneration: number;
+  sent: boolean;
 }
 interface ConnectionAttempt {
   generation: number;
@@ -521,15 +148,10 @@ interface ConnectionAttempt {
 const OPEN = 1;
 const HANDSHAKE_TIMEOUT_MS = 10_000;
 
-/**
- * Authenticated browser transport for the host v2 protocol. Commands retain
- * their assigned commandSequence across reconnects; only the host admission
- * advances the lease high-water mark.
- */
+/** Authenticated live updates, with a fresh snapshot after every connection. */
 export class BrowserTransport {
   private socket: WebSocketLike | null = null;
-  private readonly pending = new Map<number, PendingCommand>();
-  private nextSequence: number;
+  private readonly pending = new Map<string, PendingCommand>();
   private epochValue: string | null = null;
   private cursorValue: number | null = null;
   private recovered = false;
@@ -543,11 +165,9 @@ export class BrowserTransport {
   private reconnectAttempts = 0;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private lastRecovery: Recovery | null = null;
-  readonly recoveryStore: RecoveryStore;
+  readonly recoveryStore: BrowserDraftStore;
 
   constructor(private readonly options: BrowserTransportOptions = {}) {
-    const sequence = options.nextCommandSequence ?? 1;
-    this.nextSequence = Number.isSafeInteger(sequence) && sequence > 0 ? sequence : 1;
     this.recoveryStore = options.recoveryStore ?? new MemoryRecoveryStore();
   }
 
@@ -563,7 +183,6 @@ export class BrowserTransport {
   }
   get epoch(): string | null { return this.epochValue; }
   get cursor(): number | null { return this.cursorValue; }
-  get commandSequence(): number { return this.nextSequence; }
   get url(): string { return this.options.url ?? notebookSocketUrl(); }
 
   connect(): Promise<Recovery> {
@@ -580,24 +199,14 @@ export class BrowserTransport {
     return this.connectPromise;
   }
 
-  dispatch(command: BrowserCommand): Promise<CommandAdmission> {
-    if (this.stopped) return Promise.reject(new BrowserTransportError("transport_closed", "browser transport is closed", true));
-    if (this.pending.size >= (this.options.maxQueuedCommands ?? 1_000)) return Promise.reject(new BrowserTransportError("client_backpressure", "too many browser commands are pending", true));
-    if (!this.id || !this.leaseId || !this.csrf) return Promise.reject(new BrowserTransportError("session_credentials_missing", "browser session credentials are missing", true));
-    const sequence = this.nextSequence;
-    if (!Number.isSafeInteger(sequence) || sequence < 1) return Promise.reject(new BrowserTransportError("command_sequence_exhausted", "browser command sequence is exhausted", true));
-    const sessionEpoch = this.epochValue ?? command.sessionEpoch;
-    if (!sessionEpoch) return Promise.reject(new BrowserTransportError("not_ready", "browser session epoch is not known", true));
-    const wireCommand = {
-      ...command,
-      operationId: command.operationId,
-      clientId: this.id,
-      commandSequence: sequence,
-      sessionEpoch,
-    } as HostCommand;
-    this.nextSequence = sequence + 1;
-    return new Promise<CommandAdmission>((resolve, reject) => {
-      this.pending.set(sequence, { command: wireCommand, resolve, reject, sentGeneration: -1 });
+  dispatch(command: BrowserCommand): Promise<CommandResult> {
+    if (this.stopped || !this.recovered || this.socket?.readyState !== OPEN) return Promise.reject(new BrowserTransportError("transport_closed", "Reconnect before sending this request.", true));
+    if (this.pending.size >= (this.options.maxQueuedCommands ?? 100)) return Promise.reject(new BrowserTransportError("client_backpressure", "Too many requests are pending.", true));
+    if (this.pending.has(command.requestId)) return Promise.reject(new BrowserTransportError("request_pending", "This request is already pending.", true));
+    if (command.sessionEpoch !== this.epochValue) return Promise.reject(new BrowserTransportError("session_replaced", "This request belongs to a previous backend session and cannot be repeated.", true));
+    const wireCommand = { ...command, clientId: this.id } as HostCommand;
+    return new Promise<CommandResult>((resolve, reject) => {
+      this.pending.set(command.requestId, { command: wireCommand, resolve, reject, sent: false });
       this.flush();
     });
   }
@@ -628,7 +237,7 @@ export class BrowserTransport {
     const error = new BrowserTransportError("transport_closed", "browser transport is closed");
     this.rejectConnect?.(error);
     this.clearConnectPromise();
-    for (const pending of this.pending.values()) pending.reject(new BrowserTransportError(error.code, error.message, pending.sentGeneration < 0));
+    for (const pending of this.pending.values()) pending.reject(new BrowserTransportError(error.code, error.message, !pending.sent));
     this.pending.clear();
     this.options.onState?.("closed", error);
   }
@@ -658,7 +267,7 @@ export class BrowserTransport {
     socket.onopen = () => {
       if (!this.isCurrent(attempt)) return;
       try {
-        socket.send(JSON.stringify({ type: "connect", protocolVersion: HOST_CLIENT_PROTOCOL_VERSION, leaseId: this.leaseId, clientId: this.id, csrf: this.csrf, epoch: this.epochValue, cursor: this.cursorValue }));
+        socket.send(JSON.stringify({ type: "connect", protocolVersion: HOST_CLIENT_PROTOCOL_VERSION, leaseId: this.leaseId, clientId: this.id, csrf: this.csrf }));
         this.options.onState?.("recovering");
       } catch (error) {
         this.handleAttemptFailure(generation, asError(error, "browser WebSocket handshake failed"));
@@ -666,12 +275,8 @@ export class BrowserTransport {
     };
     socket.onmessage = (event) => {
       if (!this.isCurrent(attempt)) return;
-      if (this.recovered) {
-        attempt.receiveChain = this.receive(event.data).catch((error) => this.handleAttemptFailure(generation, asError(error, "invalid host message")));
-        return;
-      }
       attempt.receiveChain = attempt.receiveChain.then(async () => {
-        if (this.isCurrent(attempt)) await this.receive(event.data);
+        if (this.isCurrent(attempt)) await this.receive(event.data, attempt);
       }).catch((error) => this.handleAttemptFailure(generation, asError(error, "invalid host message")));
     };
     socket.onerror = () => {
@@ -699,6 +304,9 @@ export class BrowserTransport {
     this.recovered = false;
     this.clearHeartbeat();
     if (socket !== null) socket.close();
+    const interrupted = new BrowserTransportError("request_uncertain", "The connection was interrupted. The request may have completed; it has not been sent again.");
+    for (const pending of this.pending.values()) pending.reject(interrupted);
+    this.pending.clear();
     this.options.onState?.("closed", error);
     if (this.options.reconnect !== false) {
       this.scheduleReconnect();
@@ -738,7 +346,7 @@ export class BrowserTransport {
     this.rejectConnect = null;
   }
 
-  private async receive(raw: unknown): Promise<void> {
+  private async receive(raw: unknown, attempt: ConnectionAttempt): Promise<void> {
     if (typeof raw !== "string" && !(raw instanceof Uint8Array)) throw new BrowserTransportError("invalid_server_message", "host message is not a JSON frame");
     const message = decodeJsonFrame(raw, SNAPSHOT_ENVELOPE_LIMIT) as Record<string, unknown>;
     if (!this.recovered && message.type !== "recovery") throw new BrowserTransportError("host_identity_mismatch", "host sent data before proving its process identity");
@@ -746,6 +354,7 @@ export class BrowserTransport {
       if (message.protocolVersion !== HOST_CLIENT_PROTOCOL_VERSION) throw new BrowserTransportError("protocol_mismatch", "host and browser protocol versions differ");
       if (this.continuityProof && message.continuityProof !== this.continuityProof) throw new BrowserTransportError("host_identity_mismatch", "browser reconnected to a different host process");
       const recovery = await this.loadRecovery(message.recovery);
+      if (!this.isCurrent(attempt)) return;
       await this.applyRecovery(recovery);
       this.recovered = true;
       if (this.attempt !== null) clearTimeout(this.attempt.handshakeTimer);
@@ -763,30 +372,21 @@ export class BrowserTransport {
       if (event.epoch !== this.epochValue || event.cursor <= (this.cursorValue ?? -1)) return;
       this.options.onEvent?.(event);
       this.cursorValue = event.cursor;
-      await this.recoveryStore.save(event.epoch, event.cursor);
       return;
     }
     if (message.type === "commandResult") {
-      if (!Number.isSafeInteger(message.sequence)) throw new BrowserTransportError("invalid_server_message", "command result has no sequence");
-      const sequence = message.sequence as number;
-      const pending = this.pending.get(sequence);
-      if (!pending) return;
-      const admission = commandAdmissionSchema.safeParse(message.result);
-      if (!admission.success) throw new BrowserTransportError("invalid_server_message", "invalid command admission");
-      this.pending.delete(sequence);
-      this.nextSequence = Math.max(this.nextSequence, admission.data.nextCommandSequence);
-      pending.resolve(admission.data);
+      const result = commandResultSchema.parse(message.result);
+      if (message.requestId !== result.requestId) throw new BrowserTransportError("invalid_server_message", "Request result identity differs.");
+      const pending = this.pending.get(result.requestId);
+      if (pending) { this.pending.delete(result.requestId); pending.resolve(result); }
       return;
     }
     if (message.type === "error") {
-      const sequence = Number.isSafeInteger(message.sequence) ? message.sequence as number : null;
       const detail = asErrorDetail(message.error);
-      if (sequence === null) throw new BrowserTransportError(detail.code, detail.message);
-      const pending = this.pending.get(sequence);
-      if (pending) {
-        this.pending.delete(sequence);
-        pending.reject(new BrowserTransportError(detail.code, detail.message, message.definitive === true));
-      }
+      const pending = typeof message.requestId === "string" ? this.pending.get(message.requestId) : undefined;
+      if (!pending) throw new BrowserTransportError(detail.code, detail.message);
+      this.pending.delete(message.requestId as string);
+      pending.reject(new BrowserTransportError(detail.code, detail.message, message.definitive === true));
       return;
     }
     if (message.type === "heartbeat" || message.type === "pong") return;
@@ -851,45 +451,18 @@ export class BrowserTransport {
   }
 
   private async applyRecovery(recovery: Recovery): Promise<void> {
-    const priorEpoch = this.epochValue;
-    if (recovery.kind === "snapshot") {
-      this.epochValue = recovery.epoch;
-      this.cursorValue = recovery.cursor;
-      if (priorEpoch !== null && priorEpoch !== recovery.epoch) {
-        const error = new BrowserTransportError("session_replaced", "notebook session was replaced while reconnecting");
-        for (const pending of this.pending.values()) pending.reject(error);
-        this.pending.clear();
-      }
-      this.options.onSnapshot?.(recovery.snapshot);
-      await this.recoveryStore.save(recovery.epoch, recovery.cursor);
-      return;
-    }
-    if (this.epochValue !== null && recovery.epoch !== this.epochValue) throw new BrowserTransportError("recovery_base_mismatch", "replay recovery belongs to another session epoch");
-    const stored = this.options.resumeFromStore === false ? null : await this.recoveryStore.load();
-    if (stored !== null && (stored.epoch !== recovery.epoch || stored.cursor > recovery.cursor)) throw new BrowserTransportError("recovery_base_mismatch", "stored browser recovery cursor does not match host replay");
     this.epochValue = recovery.epoch;
-    let cursor = this.cursorValue ?? -1;
-    for (const event of recovery.events) {
-      if (event.epoch !== this.epochValue || event.cursor <= cursor) continue;
-      this.options.onEvent?.(event);
-      cursor = event.cursor;
-      this.cursorValue = cursor;
-    }
-    this.cursorValue = Math.max(cursor, recovery.cursor);
-    await this.recoveryStore.save(this.epochValue, this.cursorValue);
+    this.cursorValue = recovery.cursor;
+    this.options.onSnapshot?.(recovery.snapshot);
   }
 
   private flush(): void {
     if (!this.recovered || this.socket?.readyState !== OPEN) return;
-    for (const [sequence, pending] of this.pending) {
-      if (pending.sentGeneration === this.generation) continue;
-      pending.sentGeneration = this.generation;
-      try {
-        this.socket.send(JSON.stringify({ type: "command", sequence, command: encodeHostCommandWire(pending.command) }));
-      } catch (error) {
-        this.handleAttemptFailure(this.generation, asError(error, "browser command send failed"));
-        return;
-      }
+    for (const [requestId, pending] of this.pending) {
+      if (pending.sent) continue;
+      pending.sent = true;
+      try { this.socket.send(JSON.stringify({ type: "command", requestId, command: encodeHostCommandWire(pending.command) })); }
+      catch (error) { this.handleAttemptFailure(this.generation, asError(error, "Request could not be sent.")); return; }
     }
   }
 

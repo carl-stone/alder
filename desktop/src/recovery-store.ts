@@ -3,7 +3,7 @@ import { constants } from "node:fs";
 import { chmod, lstat, mkdir, open, readdir, rename, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
-const KEY_ID = /^[A-Za-z0-9_-]{43}$/;
+const RECOVERY_ID = /^[A-Za-z0-9_-]{1,128}$/;
 const RECORD_NAME = /^(?:cursor|(?:draft|branch):[A-Za-z0-9][A-Za-z0-9._:-]{0,255})$/;
 const RECORD_FILE = /^[0-9a-f]{64}\.json$/;
 const MAX_BYTES = 256 * 1024 * 1024;
@@ -24,15 +24,15 @@ export class NativeRecoveryStore {
 
   constructor(rootDir: string) { this.rootDir = resolve(rootDir); }
 
-  private validKey(keyId: string): void {
-    if (typeof keyId !== "string" || !KEY_ID.test(keyId)) throw new DesktopRecoveryError("desktop_recovery_invalid", "Invalid recovery identity");
+  private validKey(recoveryId: string): void {
+    if (typeof recoveryId !== "string" || !RECOVERY_ID.test(recoveryId)) throw new DesktopRecoveryError("desktop_recovery_invalid", "Invalid recovery identity");
   }
 
-  private async directory(keyId: string): Promise<string> {
-    this.validKey(keyId);
+  private async directory(recoveryId: string): Promise<string> {
+    this.validKey(recoveryId);
     await mkdir(this.rootDir, { recursive: true, mode: 0o700 });
     await chmod(this.rootDir, 0o700);
-    const directory = join(this.rootDir, keyId);
+    const directory = join(this.rootDir, recoveryId);
     await mkdir(directory, { mode: 0o700 }).catch(error => { if (error.code !== "EEXIST") throw error; });
     const info = await lstat(directory);
     if (!info.isDirectory() || info.isSymbolicLink()) throw new DesktopRecoveryError("desktop_recovery_invalid", "Invalid recovery directory");
@@ -61,9 +61,9 @@ export class NativeRecoveryStore {
     } finally { await handle.close(); }
   }
 
-  async read(keyId: string, name: string): Promise<unknown | null> {
+  async read(recoveryId: string, name: string): Promise<unknown | null> {
     this.validName(name);
-    const directory = await this.directory(keyId);
+    const directory = await this.directory(recoveryId);
     return (await this.readRecord(join(directory, fileName(name))))?.value ?? null;
   }
 
@@ -82,15 +82,15 @@ export class NativeRecoveryStore {
     }
   }
 
-  async write(keyId: string, name: string, value: unknown): Promise<void> {
+  async write(recoveryId: string, name: string, value: unknown): Promise<void> {
     this.validName(name);
     const text = JSON.stringify({ name, value });
     if (value === undefined || Buffer.byteLength(text) > MAX_BYTES) throw new DesktopRecoveryError("desktop_recovery_invalid", "Recovery record cannot be stored");
-    this.validKey(keyId);
-    const directory = join(this.rootDir, keyId);
+    this.validKey(recoveryId);
+    const directory = join(this.rootDir, recoveryId);
     const path = join(directory, fileName(name));
     await this.enqueue(path, async () => {
-      await this.directory(keyId);
+      await this.directory(recoveryId);
       const temporary = join(directory, ".pending-" + randomUUID());
       const handle = await open(temporary, "wx", 0o600);
       try {
@@ -106,21 +106,21 @@ export class NativeRecoveryStore {
     });
   }
 
-  async remove(keyId: string, name: string): Promise<void> {
+  async remove(recoveryId: string, name: string): Promise<void> {
     this.validName(name);
-    this.validKey(keyId);
-    const directory = join(this.rootDir, keyId);
+    this.validKey(recoveryId);
+    const directory = join(this.rootDir, recoveryId);
     const path = join(directory, fileName(name));
     await this.enqueue(path, async () => {
-      await this.directory(keyId);
+      await this.directory(recoveryId);
       await this.retainCorrupt(path, directory);
       await rm(path, { force: true });
     });
   }
 
-  async list(keyId: string, prefix: string): Promise<{ records: Array<{ name: string; value: unknown }>; warning?: string }> {
+  async list(recoveryId: string, prefix: string): Promise<{ records: Array<{ name: string; value: unknown }>; warning?: string }> {
     if (!["", "cursor", "draft:", "branch:"].includes(prefix)) throw new DesktopRecoveryError("desktop_recovery_invalid", "Invalid recovery record prefix");
-    const directory = await this.directory(keyId);
+    const directory = await this.directory(recoveryId);
     const records: Array<{ name: string; value: unknown }> = [];
     let warning: string | undefined;
     for (const file of (await readdir(directory)).filter(name => RECORD_FILE.test(name)).sort()) {

@@ -16,7 +16,6 @@ declare global {
   interface Window {
     __alderEditors?: Map<string, EditorHandle>;
     __alderHost?: { client: BrowserNotebookClient; view: NotebookView };
-    __alderObserveRender?: (phase: "start" | "end", version: number) => void;
   }
 }
 
@@ -229,7 +228,6 @@ export class NotebookView {
     if (event?.type === "service-errors" && snapshot.serviceErrors.lsp === undefined) {
       this.editorHelpError = null;
     }
-    window.__alderObserveRender?.("start", snapshot.version);
     if (this.configValue !== snapshot.config) {
       this.configValue = snapshot.config;
       this.applyConfig(snapshot.config);
@@ -290,7 +288,6 @@ export class NotebookView {
     // event, so avoid serializing the whole graph on every keystroke.
     if (!canTargetLocal) this.renderDataflow(snapshot, event);
     this.renderStatus();
-    window.__alderObserveRender?.("end", snapshot.version);
     if (event) {
       window.dispatchEvent(new CustomEvent<HostEvent>("alder:host-event", { detail: event }));
     }
@@ -1043,7 +1040,7 @@ export class NotebookView {
       return;
     }
     if (event && [
-      "receipt", "cell-started", "cell-output", "cell-completed", "diagnostics",
+      "cell-started", "cell-output", "cell-completed", "diagnostics",
       "editor-diagnostics", "service-errors", "operation", "service-error", "active_clients_changed",
     ].includes(event.type)) return;
     if (!event) {
@@ -2348,11 +2345,11 @@ export class NotebookView {
     const runtimeMessage = runtimeBlocked === null ? null : "R execution is blocked: " + (runtimeBlocked.message || runtimeBlocked.code);
     const recovery = this.client.recoveryState;
     const recoveryConflict = recovery.status === "conflict" || recovery.branches.some((branch) => branch.state === "conflict") || recovery.corruption !== null;
-    const recoveryMessage = recovery.local !== null
-      ? recovery.status === "resubmitting" ? "Resubmitting recovered local edits…" : "Recovered local edits need your review."
+    const recoveryMessage = recovery.uncertainRun ? "The previous run may have been interrupted. Run explicitly when you are ready." : recovery.local !== null
+      ? recovery.status === "conflict" ? "Recovered edits conflict with newer changes." : "Unsaved edits recovered."
       : recovery.persistenceError ? "Local edit recovery is not durable."
-      : recovery.foreignDrafts > 0 ? "Another renderer retains a local recovery branch."
-      : recovery.pending ? "Recovering an interrupted local edit…" : recovery.corruption ? "Recovery data needs your review." : recoveryConflict ? "A recovery branch needs your review." : null;
+      : recovery.drafts.length > 0 ? "A saved draft is available."
+      : recovery.pending ? "Recovering an interrupted local edit…" : recovery.corruption ? "Recovery data needs your review." : recoveryConflict ? "Recovered edits need your review." : null;
     const message = this.hostClosed ? "Notebook host shut down." : this.actionError ?? stateError ?? editorHelpError ?? runtimeMessage ?? this.transportError ?? this.actionNotice ?? recoveryMessage ?? "";
     const signature = JSON.stringify({
       runtimeBlocked: runtimeBlocked === null ? null : [runtimeBlocked.code, runtimeBlocked.message],
@@ -2363,7 +2360,7 @@ export class NotebookView {
       transportError: Boolean(this.transportError),
       editorHelpRestarting: this.editorHelpRestarting,
       actionCount: this.actionCount,
-      recovery: { status: recovery.status, local: recovery.local !== null, branches: recovery.branches.map((branch) => [branch.id, branch.state, branch.documentRevision]), keptBranches: recovery.keptBranches.map((branch) => branch.id), foreignDrafts: recovery.foreignDrafts, pending: recovery.pending, corruption: recovery.corruption?.code ?? null, persistenceError: recovery.persistenceError?.code ?? null },
+      recovery: { status: recovery.status, local: recovery.local !== null, branches: recovery.branches.map((branch) => [branch.id, branch.state, branch.documentRevision]), drafts: recovery.drafts.map((draft) => draft.draftId), pending: recovery.pending, uncertainRun: recovery.uncertainRun, corruption: recovery.corruption?.code ?? null, persistenceError: recovery.persistenceError?.code ?? null },
     });
     if (signature === this.statusSignature) return;
     this.statusSignature = signature;
@@ -2403,39 +2400,28 @@ export class NotebookView {
   private renderRecoveryControls(): void {
     if (!this.status) return;
     const state = this.client.recoveryState;
-    const hasBranch = state.branches.length > 0;
-    if (state.local === null && state.keptBranches.length === 0 && state.foreignDrafts === 0 && !hasBranch && !state.pending && state.corruption === null && state.persistenceError === null) return;
+    if (!state.local && !state.drafts.length && !state.branches.length && !state.pending && !state.uncertainRun && !state.corruption && !state.persistenceError) return;
     const panel = elementNode(this.dom, "div", "recovery-panel", "") as HTMLDivElement;
-    panel.dataset.recovery = "true";
-    panel.dataset.recoveryPanel = "true";
-    panel.setAttribute("role", "alert");
-    const detail = state.local !== null
-      ? "The renderer retained an unacknowledged editing intent."
-      : state.keptBranches.length > 0
-        ? "The renderer retained a browser recovery branch."
-        : state.persistenceError?.message
-          ?? (state.foreignDrafts > 0 ? "Another open renderer retains a browser recovery branch." : state.corruption?.message ?? (hasBranch ? "The host retained a recovery branch. Save As to preserve the current document before resolving it." : "Recovery is in progress."));
+    panel.dataset.recovery = "true"; panel.dataset.recoveryPanel = "true"; panel.setAttribute("role", "alert");
+    const detail = state.uncertainRun ? "The previous run may have been interrupted. It has not been run again." : state.local ? state.status === "conflict"
+      ? "Your edits are preserved. Review the conflicting cells before saving."
+      : "Your unsaved edits have been recovered."
+      : state.persistenceError?.message ?? state.corruption?.message ?? (state.drafts.length ? "Saved edits are available to restore." : "Unsaved changes were recovered.");
     panel.appendChild(elementNode(this.dom, "div", "recovery-message", detail));
     const actions = elementNode(this.dom, "div", "recovery-actions", "") as HTMLDivElement;
-    const add = (label: string, action: () => void | Promise<void>): void => {
+    const add = (label: string, action: () => Promise<void>): void => {
       const button = elementNode(this.dom, "button", "btn mini", label) as HTMLButtonElement;
-      button.type = "button";
-      button.dataset.recovery = "true";
-      button.disabled = this.actionCount > 0 || state.status === "resubmitting";
-      button.addEventListener("click", () => { void this.action(async () => { await action(); }).catch((error) => this.showError(error)); });
+      button.type = "button"; button.dataset.recovery = "true"; button.disabled = this.actionCount > 0;
+      button.addEventListener("click", () => { void this.action(action).catch(error => this.showError(error)); });
       actions.appendChild(button);
     };
-    if (state.local !== null) {
-      add("Reload authoritative", () => this.client.reloadAuthoritativeRecovery());
-      add("Keep as recovery", () => this.client.keepAsRecovery());
-      add("Discard local branch", () => this.client.discardRecovery());
-      add("Cancel", () => this.client.cancelRecovery());
-    }
-    for (const branch of state.keptBranches) {
-      add("Restore kept branch", () => this.client.restoreKeptRecovery(branch.id));
-      add("Discard kept branch", () => this.client.discardKeptRecovery(branch.id));
-    }
-    if (actions.childElementCount > 0) panel.appendChild(actions);
+    if (state.local) add("Discard recovered edits", () => this.client.discardRecovery());
+    state.drafts.forEach((draft, index) => {
+      const label = state.drafts.length === 1 ? "draft" : "draft " + (index + 1);
+      add("Restore " + label, () => this.client.restoreSavedDraft(draft.draftId));
+      add("Discard " + label, () => this.client.discardSavedDraft(draft.draftId));
+    });
+    if (actions.childElementCount) panel.appendChild(actions);
     this.status.appendChild(panel);
   }
 
@@ -2865,13 +2851,11 @@ function visitTableOutputs(cells: readonly HostSnapshot["cells"][number][], visi
 }
 
 function operationPayload(result: CommandResult | HostQueryResult): Record<string, unknown> {
-  if ("operation" in result && isObject(result.operation.result)) return result.operation.result;
   return isObject(result.result) ? result.result : {};
 }
 
 function artifactHandleFromResult(result: CommandResult | HostQueryResult): ArtifactHandle | null {
   const candidates: unknown[] = [];
-  if ("operation" in result) candidates.push(result.operation.result);
   candidates.push(result.result);
   for (const candidate of candidates) if (isArtifactHandle(candidate)) return candidate;
   return null;

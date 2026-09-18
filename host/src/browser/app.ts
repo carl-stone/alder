@@ -1,3 +1,4 @@
+import { z } from "zod";
 import { BrowserNotebookClient } from "./client.js";
 import { DesktopRecoveryStore } from "./desktop-recovery.js";
 import { IndexedDBRecoveryStore } from "./transport.js";
@@ -9,16 +10,11 @@ import { blocksNotebookNavigation, notebookUrl } from "./url.js";
 let view: NotebookView | null = null;
 let client: BrowserNotebookClient | null = null;
 
-interface BrowserSessionCredentials {
-  leaseId: string;
-  clientId: string;
-  nextCommandSequence: number;
-  epoch: string;
-  continuityProof: string;
-  csrf: string;
-  recoveryKey?: string;
-  recoveryKeyId?: string;
-}
+const browserSessionSchema = z.object({
+  leaseId: z.string(), clientId: z.string(), epoch: z.string(),
+  continuityProof: z.string().min(1), csrf: z.string(), recoveryId: z.string().optional(),
+});
+type BrowserSessionCredentials = z.infer<typeof browserSessionSchema>;
 const pendingRenders = new Map<string, HostEvent>();
 const pendingStarts = new Map<string, number>();
 let renderFrame: number | null = null;
@@ -150,27 +146,28 @@ async function bootstrapSession(): Promise<BrowserSessionCredentials> {
     body: JSON.stringify({ ticket }),
   });
   const value: unknown = await response.json().catch(() => null);
-  if (!response.ok || !isSessionCredentials(value)) throw new Error("browser session ticket exchange was rejected");
-  return value;
+  if (!response.ok || !browserSessionSchema.safeParse(value).success) throw new Error("browser session ticket exchange was rejected");
+  return browserSessionSchema.parse(value);
 }
 
 async function start(): Promise<void> {
   const session = await bootstrapSession();
   const desktop = (globalThis as typeof globalThis & { alderDesktop?: PreloadApi }).alderDesktop;
   const options: BrowserTransportOptions = {
-    recoveryStore: desktop && session.recoveryKeyId
-      ? new DesktopRecoveryStore(session.recoveryKeyId, request => desktop.recovery(request), message => view?.showError(new Error(message)))
-      : new IndexedDBRecoveryStore(recoveryIdentity(), session.recoveryKey, session.recoveryKeyId),
+    recoveryStore: desktop && session.recoveryId
+      ? new DesktopRecoveryStore(session.recoveryId, request => desktop.recovery(request), message => view?.showError(new Error(message)))
+      : new IndexedDBRecoveryStore(session.recoveryId ?? recoveryIdentity()),
     clientId: session.clientId,
     leaseId: session.leaseId,
     csrf: session.csrf,
     continuityProof: session.continuityProof,
-    nextCommandSequence: session.nextCommandSequence,
     reconnect: true,
     onState: (state, error) => view?.setTransportState(state, error),
   };
   const next = new BrowserNotebookClient({
     ...options,
+    restoreSingleDraft: Boolean(desktop),
+    draftId: desktop ? await desktop.getDraftId() : browserDraftId(),
     onCommand: (command, result) => window.dispatchEvent(new CustomEvent("alder:host-command", { detail: { command, result } })),
     onVisibleResult: (observation) => window.dispatchEvent(new CustomEvent("alder:visible-result", { detail: observation })),
   });
@@ -191,13 +188,9 @@ function recoveryIdentity(): string {
   current.searchParams.delete("view");
   return current.origin + current.pathname + current.search;
 }
-function isSessionCredentials(value: unknown): value is BrowserSessionCredentials {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
-  const record = value as Record<string, unknown>;
-  const recoveryKey = record.recoveryKey;
-  const recoveryKeyId = record.recoveryKeyId;
-  const recoveryPairValid = recoveryKey === undefined && recoveryKeyId === undefined ||
-    typeof recoveryKey === "string" && /^[A-Za-z0-9_-]{43}$/.test(recoveryKey) &&
-    typeof recoveryKeyId === "string" && /^[A-Za-z0-9_-]{43}$/.test(recoveryKeyId);
-  return recoveryPairValid && typeof record.leaseId === "string" && typeof record.clientId === "string" && Number.isSafeInteger(record.nextCommandSequence) && (record.nextCommandSequence as number) > 0 && typeof record.epoch === "string" && typeof record.continuityProof === "string" && record.continuityProof.length > 0 && typeof record.csrf === "string";
+function browserDraftId(): string {
+  const key = "alder-draft:" + recoveryIdentity();
+  let id = sessionStorage.getItem(key);
+  if (!id) { id = crypto.randomUUID(); sessionStorage.setItem(key, id); }
+  return id;
 }

@@ -64,14 +64,14 @@ export interface SourceCommitOutcome {
 }
 
 export interface RunCommandOptions {
-  operationId: string;
+  requestId: string;
   clientId: string;
   scope: "cell" | "all" | "stale";
   targetKey?: string;
 }
 
-export type BrowserTransactionCommand = Omit<Extract<HostCommand, { type: "transaction" }>, "commandSequence">;
-export type BrowserRunCommand = Omit<Extract<HostCommand, { type: "run" }>, "commandSequence">;
+export type BrowserTransactionCommand = Omit<Extract<HostCommand, { type: "transaction" }>, never>;
+export type BrowserRunCommand = Omit<Extract<HostCommand, { type: "run" }>, never>;
 
 export class BrowserDocument {
   private ordered: LocalCell[] = [];
@@ -252,19 +252,21 @@ export class BrowserDocument {
   }
 
 
-  recoveryDraft(clientId: string, operation: BrowserRecoveryDraft["operation"] = null): BrowserRecoveryDraft | null {
+  recoveryDraft(draftId: string, submission: BrowserRecoveryDraft["submission"] = null, pendingRun: BrowserRecoveryDraft["pendingRun"] = null): BrowserRecoveryDraft | null {
     const changes = this.recoveryChanges();
-    if (changes.length === 0) {
+    if (changes.length === 0 && pendingRun === null) {
       this.draftBaseValue = null;
       return null;
     }
     const base = this.draftBaseValue ?? this.snapshotBase();
     return {
-      schemaVersion: 1,
-      clientId,
+      schemaVersion: 2,
+      draftId,
+      updatedAt: Date.now(),
       base: cloneDraftBase(base),
       changes,
-      operation,
+      submission,
+      pendingRun,
     };
   }
 
@@ -334,8 +336,6 @@ export class BrowserDocument {
   private snapshotBase(): BrowserRecoveryDraft["base"] {
     return {
       epoch: this.snapshotValue.epoch,
-      cursor: this.snapshotValue.cursor,
-      version: this.snapshotValue.version,
       documentRevision: this.snapshotValue.documentRevision,
       cells: this.snapshotValue.cells.map((cell) => ({ id: cell.id, revision: cell.revision, type: cell.type, body: [...cell.body] })),
     };
@@ -386,7 +386,7 @@ export class BrowserDocument {
     const changes = this.pendingSource().changes;
     if (changes.length === 0) return null;
     return {
-      type: "transaction", operationId, clientId, sessionEpoch: this.epochValue,
+      type: "transaction", requestId: operationId, clientId, sessionEpoch: this.epochValue,
       expectedDocumentRevision: this.snapshotValue.documentRevision,
       changes,
     };
@@ -406,7 +406,7 @@ export class BrowserDocument {
         : undefined;
     return {
       type: "run",
-      operationId: options.operationId,
+      requestId: options.requestId,
       clientId: options.clientId,
       sessionEpoch: this.epochValue,
       scope: options.scope,
@@ -457,14 +457,14 @@ export class BrowserDocument {
       version: Math.max(this.snapshotValue.version, result.version),
       documentRevision: Math.max(this.snapshotValue.documentRevision, result.documentRevision),
     };
-    const submitted = this.submitted.get(result.operation.id);
+    const submitted = this.submitted.get(result.requestId);
     const change = isRecord(result.result) ? result.result : {};
     this.reconcileCreated(change.created);
     this.reconcileEdited(change.edited, submitted);
     if (submitted) this.reconcileSubmittedCreations(change.created, submitted);
     if (submitted) this.recoveredStructuralConflict = false;
     if (submitted) this.recoveredStructural = [];
-    this.submitted.delete(result.operation.id);
+    this.submitted.delete(result.requestId);
     this.reassertLocalDirty();
     this.rebaseDraftToSnapshot();
   }
@@ -498,7 +498,7 @@ export class BrowserDocument {
     if (submitted && code === "source_conflict") {
       for (const [key, sent] of submitted.cells) {
         const cell = this.byKey.get(key);
-        if (cell && (cell.serverType !== sent.type || !sameLines(cell.serverBody, sent.body))) cell.conflict = true;
+        if (cell && cell.generation <= sent.generation && cell.generation > cell.acknowledgedGeneration && (cell.serverType !== sent.type || !sameLines(cell.serverBody, sent.body))) cell.conflict = true;
       }
     }
     if (submitted && submitted.structural.length > 0) {
@@ -860,8 +860,6 @@ export class BrowserDocument {
 function cloneDraftBase(base: BrowserRecoveryDraft["base"]): BrowserRecoveryDraft["base"] {
   return {
     epoch: base.epoch,
-    cursor: base.cursor,
-    version: base.version,
     documentRevision: base.documentRevision,
     cells: base.cells.map((cell) => ({ ...cell, body: [...cell.body] })),
   };
@@ -880,7 +878,7 @@ function patchSnapshot(snapshot: HostSnapshot, event: HostEvent, order: readonly
   if (event.type === "editor-diagnostics" && isRecord(event.payload)) next.editorDiagnostics = event.payload as HostSnapshot["editorDiagnostics"];
   if (event.type === "service-errors" && isRecord(event.payload)) next.serviceErrors = event.payload as HostSnapshot["serviceErrors"];
   if (event.type === "service-error") next.lastActionError = isRecord(event.payload) ? event.payload as unknown as HostSnapshot["lastActionError"] : null;
-  if (event.type === "receipt" || event.type === "operation") {
+  if (event.type === "operation") {
     const operation = operationFromEventPayload(event.payload);
     if (operation) next.operations = upsertOperation(next.operations, operation);
   }
@@ -975,7 +973,7 @@ function sameChange(left: DocumentChange, right: DocumentChange): boolean { retu
 function createdEntry(value: unknown, creationId: string): { creationId: string; id: string; revision: number } | null {
   return createdEntries(value).find((item) => item.creationId === creationId) ?? null;
 }
-function cloneChange(change: DocumentChange): DocumentChange { return JSON.parse(JSON.stringify(change)) as DocumentChange; }
+function cloneChange(change: DocumentChange): DocumentChange { return structuredClone(change); }
 
 function isOperation(value: unknown): value is OperationRecord {
   return isRecord(value) && typeof value.id === "string" && typeof value.kind === "string" && typeof value.status === "string";
@@ -1023,4 +1021,55 @@ function sameLines(left: readonly string[], right: readonly string[]): boolean {
 
 function boundedLog(lines: readonly string[]): string[] {
   return tailLog(lines, MAX_LOG_BYTES);
+}
+
+/** Compare source snapshots, not transport history, before recovering unacknowledged edits. */
+export function reconcileDraft(draft: BrowserRecoveryDraft, snapshot: HostSnapshot): { draft: BrowserRecoveryDraft; conflict: boolean } {
+  const sameCell = (cell: { type: CellType; body: string[] } | undefined, type: CellType, body: string[]) => cell !== undefined && cell.type === type && sameLines(cell.body, body);
+  const current = new Map(snapshot.cells.map(cell => [cell.id, cell]));
+  const base = new Map(draft.base.cells.map(cell => [cell.id, cell]));
+  const unchanged = draft.base.cells.length === snapshot.cells.length && draft.base.cells.every((cell, index) => {
+    const next = snapshot.cells[index];
+    return next?.id === cell.id && sameCell(next, cell.type, cell.body);
+  });
+  let conflict = false;
+  const changes: DocumentChange[] = [];
+  for (const original of draft.changes) {
+    let change = structuredClone(original);
+    if (change.type === "create") {
+      const cell = current.get(change.creationId);
+      if (cell) {
+        if (sameCell(cell, change.cellType, change.body)) continue;
+        const creationId = change.creationId;
+        const sent = draft.submission?.changes.find(item => item.type === "create" && item.creationId === creationId);
+        if (!sent || sent.type !== "create" || !sameCell(cell, sent.cellType, sent.body)) conflict = true;
+        change = { type: "edit", cell: { cellId: cell.id }, cellType: change.cellType, body: change.body, expectedRevision: cell.revision };
+      } else if (!unchanged) conflict = true;
+    } else if (change.type === "edit" && "cellId" in change.cell) {
+      const cell = current.get(change.cell.cellId);
+      if (sameCell(cell, change.cellType, change.body)) continue;
+      const old = base.get(change.cell.cellId);
+      const cellId = change.cell.cellId;
+      const sent = draft.submission?.changes.find(item => item.type === "edit" && "cellId" in item.cell && item.cell.cellId === cellId);
+      const matchesBase = old && sameCell(cell, old.type, old.body);
+      const matchesSent = sent?.type === "edit" && sameCell(cell, sent.cellType, sent.body);
+      if (!matchesBase && !matchesSent) conflict = true;
+      if (cell) change.expectedRevision = cell.revision;
+    } else if (change.type === "delete" && "cellId" in change.cell && !current.has(change.cell.cellId)) {
+      continue;
+    } else if (change.type === "move" && "cellId" in change.cell) {
+      const cellId = change.cell.cellId;
+      const index = snapshot.cells.findIndex(cell => cell.id === cellId);
+      const previous = index <= 0 ? null : snapshot.cells[index - 1]!.id;
+      const desired = change.after === null ? null : "cellId" in change.after ? change.after.cellId : change.after.creationId;
+      if (index >= 0 && previous === desired) continue;
+      if (!unchanged) conflict = true;
+    } else if (change.type === "options" && "cellId" in change.cell) {
+      const cell = current.get(change.cell.cellId);
+      if (cell && Object.entries(change.patch).every(([key, value]) => cell.options[key] === value)) continue;
+      if (!unchanged) conflict = true;
+    } else if (!unchanged) conflict = true;
+    changes.push(change);
+  }
+  return { draft: { ...draft, changes, submission: null }, conflict };
 }

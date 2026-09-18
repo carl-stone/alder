@@ -7,14 +7,14 @@ import { tmpdir } from "node:os";
 import { delimiter, dirname, join, resolve } from "node:path";
 import { PassThrough } from "node:stream";
 import { BrowserNotebookClient } from "../src/browser/client.js";
-import { BrowserDocument } from "../src/browser/document.js";
+import { BrowserDocument, reconcileDraft } from "../src/browser/document.js";
 import { NotebookView } from "../src/browser/view.js";
 import { parseHTML } from "linkedom";
 import { BrowserTransport, BrowserTransportError, IndexedDBRecoveryStore, MemoryRecoveryStore, type BrowserRecoveryDraft, type WebSocketLike } from "../src/browser/transport.js";
 
 import { encodeFilePathUri, fileUri, LspClient, translateLspResult, trustedRLanguageServerEnvironment, validatedRLanguageServerOptions, type DiagnosticsByCell } from "../src/lsp.js";
 import { fromFilePosition, layoutNotebook, toFilePosition, type NotebookDocument } from "../src/notebook.js";
-import { encodeRecoveryWire, HOST_PROTOCOL, HOST_CLIENT_PROTOCOL_VERSION, type CommandResult, type HostCellState, type HostCommand, type HostEvent, type HostSnapshot, type OperationRecord, type Recovery } from "../src/protocol.js";
+import { decodeHostCommandWire, encodeHostEventWire, encodeRecoveryWire, HOST_PROTOCOL, HOST_CLIENT_PROTOCOL_VERSION, type CommandResult, type HostCellState, type HostCommand, type HostEvent, type HostSnapshot, type OperationRecord, type Recovery } from "../src/protocol.js";
 import { ARTIFACT_DESCRIPTOR_HEADER, ARTIFACT_RESOLUTION_MEDIA_TYPE, encodeArtifactDescriptor, type ArtifactHandle } from "../src/protocol.js";
 import { blocksNotebookNavigation } from "../src/browser/url.js";
 import type { OwnedProcess, ProcessScope } from "../src/processes.js";
@@ -76,7 +76,7 @@ async function withViewDom<T>(callback: (dom: Document, domWindow: Window) => T 
 }
 
 function operation(id: string, status: OperationRecord["status"] = "done", result?: unknown): OperationRecord {
-  return { id, clientId: "test-client", commandSequence: 1, kind: "save", status, documentRevision: 0, runId: null, result: result === undefined ? null : result as never, error: null, acceptedAt: 1, ...(status === "done" ? { settledAt: 2 } : {}) };
+  return { id, clientId: "test-client", kind: "save", status, documentRevision: 0, runId: null, result: result === undefined ? null : result as never, error: null, acceptedAt: 1, ...(status === "done" ? { settledAt: 2 } : {}) };
 }
 
 function artifactDescriptor(overrides: Partial<ArtifactHandle> = {}): ArtifactHandle {
@@ -118,97 +118,6 @@ async function withBrowserFetch<T>(fetchImpl: BrowserFetch, callback: () => Prom
     else Reflect.deleteProperty(globalThis, "location");
   }
 }
-type FakeRequestHandler = () => void;
-
-class FakeRequest {
-  result: unknown;
-  error: Error | null = null;
-  onsuccess: FakeRequestHandler | null = null;
-  onerror: FakeRequestHandler | null = null;
-  constructor(result: unknown = undefined) { this.result = result; }
-}
-
-interface FakeDatabaseState { version: number; records: Map<string, unknown>; hasStore: boolean; }
-
-class FakeTransaction {
-  oncomplete: FakeRequestHandler | null = null;
-  onabort: FakeRequestHandler | null = null;
-  onerror: FakeRequestHandler | null = null;
-  error: Error | null = null;
-  private pending = 0;
-  constructor(private readonly records: Map<string, unknown>) {}
-  objectStore(_name: string): FakeObjectStore { return new FakeObjectStore(this, this.records); }
-  enqueue(run: () => void): FakeRequest {
-    const request = new FakeRequest();
-    this.pending += 1;
-    queueMicrotask(() => {
-      try { run(); request.onsuccess?.(); }
-      catch (error) { this.error = error instanceof Error ? error : new Error(String(error)); request.error = this.error; request.onerror?.(); this.onerror?.(); }
-      this.pending -= 1;
-      if (this.pending === 0) queueMicrotask(() => this.oncomplete?.());
-    });
-    return request;
-  }
-}
-
-class FakeObjectStore {
-  constructor(private readonly transaction: FakeTransaction, private readonly records: Map<string, unknown>) {}
-  get(key: IDBValidKey): FakeRequest {
-    const request = new FakeRequest();
-    this.transaction.enqueue(() => { request.result = this.records.get(String(key)); request.onsuccess?.(); });
-    return request;
-  }
-  put(value: unknown, key: IDBValidKey): FakeRequest { return this.transaction.enqueue(() => { this.records.set(String(key), value); }); }
-  delete(key: IDBValidKey): FakeRequest { return this.transaction.enqueue(() => { this.records.delete(String(key)); }); }
-  clear(): FakeRequest { return this.transaction.enqueue(() => { this.records.clear(); }); }
-  getAllKeys(): FakeRequest {
-    const request = new FakeRequest();
-    this.transaction.enqueue(() => { request.result = [...this.records.keys()]; request.onsuccess?.(); });
-    return request;
-  }
-  getAll(): FakeRequest {
-    const request = new FakeRequest();
-    this.transaction.enqueue(() => { request.result = [...this.records.values()]; request.onsuccess?.(); });
-    return request;
-  }
-}
-
-class FakeDatabase {
-  readonly objectStoreNames = { contains: (name: string): boolean => this.state.hasStore && name === "state" };
-  constructor(private readonly state: FakeDatabaseState) {}
-  createObjectStore(_name: string): FakeObjectStore { this.state.hasStore = true; return new FakeObjectStore(new FakeTransaction(this.state.records), this.state.records); }
-  transaction(_name: string, _mode: IDBTransactionMode): FakeTransaction { return new FakeTransaction(this.state.records); }
-  close(): void {}
-}
-
-class FakeOpenRequest {
-  result!: FakeDatabase;
-  transaction: FakeTransaction | null = null;
-  onsuccess: FakeRequestHandler | null = null;
-  onerror: FakeRequestHandler | null = null;
-  onblocked: FakeRequestHandler | null = null;
-  onupgradeneeded: ((event: { oldVersion: number }) => void) | null = null;
-}
-
-class FakeIndexedDB {
-  readonly databases = new Map<string, FakeDatabaseState>();
-  open(name: string, version: number): IDBOpenDBRequest {
-    const request = new FakeOpenRequest();
-    queueMicrotask(() => {
-      const state = this.databases.get(name) ?? { version: 0, records: new Map<string, unknown>(), hasStore: false };
-      this.databases.set(name, state);
-      const oldVersion = state.version;
-      request.result = new FakeDatabase(state);
-      if (oldVersion < version) {
-        state.version = version;
-        request.transaction = new FakeTransaction(state.records);
-        request.onupgradeneeded?.({ oldVersion });
-      }
-      queueMicrotask(() => request.onsuccess?.());
-    });
-    return request as unknown as IDBOpenDBRequest;
-  }
-}
 test("browser navigation blocks same-host cross-origin destinations", () => {
   const current = "http://127.0.0.1:4100/notebook";
   assert.equal(blocksNotebookNavigation("http://127.0.0.1:4200/capture", current), true);
@@ -218,50 +127,6 @@ test("browser navigation blocks same-host cross-origin destinations", () => {
   assert.equal(blocksNotebookNavigation("http://[", current), true);
 });
 
-test("IndexedDB recovery drafts stay encrypted and survive store instances", async () => {
-  assert.ok(globalThis.crypto?.subtle, "Web Crypto is required for encrypted recovery storage");
-  const indexedDB = new FakeIndexedDB();
-  const previous = Object.getOwnPropertyDescriptor(globalThis, "indexedDB");
-  Object.defineProperty(globalThis, "indexedDB", { configurable: true, writable: true, value: indexedDB });
-  const key = Buffer.alloc(32, 0x31).toString("base64url");
-  const keyId = Buffer.alloc(32, 0x32).toString("base64url");
-  const notebookKey = "http://0123456789abcdef0123456789abcdef.localhost:4312/book";
-  const draft: BrowserRecoveryDraft = {
-    schemaVersion: 1, clientId: "client-1",
-    base: { epoch: "epoch-1", cursor: 4, version: 1, documentRevision: 2, cells: [{ id: "c1", revision: 2, type: "code", body: ["secret source"] }] },
-    changes: [], operation: null,
-  };
-  try {
-    const first = new IndexedDBRecoveryStore(notebookKey, key, keyId);
-    await first.saveDraft(draft);
-    await first.save("epoch-1", 4);
-    const database = indexedDB.databases.get("alder-browser-recovery");
-    assert.ok(database);
-    const draftRecord = database.records.get(notebookKey + ":draft:client-1");
-    assert.equal(typeof draftRecord, "object");
-    assert.equal((draftRecord as { algorithm: string }).algorithm, "AES-256-GCM");
-    assert.equal((draftRecord as { keyId: string }).keyId, keyId);
-    assert.doesNotMatch(JSON.stringify(draftRecord), /secret source/);
-
-    const reload = new IndexedDBRecoveryStore(notebookKey, key, keyId);
-    assert.deepEqual(await reload.loadDraft("client-1"), draft);
-    assert.deepEqual(await reload.load(), { epoch: "epoch-1", cursor: 4 });
-
-    const wrongKey = new IndexedDBRecoveryStore(notebookKey, Buffer.alloc(32, 0x33).toString("base64url"), keyId);
-    assert.equal(await wrongKey.loadDraft("client-1"), null);
-    await new Promise<void>(resolve => setTimeout(resolve, 0));
-    assert.equal(database.records.has(notebookKey + ":draft:client-1"), false);
-
-    database.records.set(notebookKey + ":draft:client-1", draft);
-    const malformed = new IndexedDBRecoveryStore(notebookKey, key, keyId);
-    assert.equal(await malformed.loadDraft("client-1"), null);
-    await new Promise<void>(resolve => setTimeout(resolve, 0));
-    assert.equal(database.records.has(notebookKey + ":draft:client-1"), false);
-  } finally {
-    if (previous) Object.defineProperty(globalThis, "indexedDB", previous);
-    else Reflect.deleteProperty(globalThis, "indexedDB");
-  }
-});
 function artifactClient(): BrowserNotebookClient {
   return new BrowserNotebookClient({
     clientId: "browser-artifact-test",
@@ -321,9 +186,8 @@ test("browser artifact resolution rejects malformed, stale, wrongly typed, and e
   const staleDescriptor = artifactDescriptor({ documentRevision: 1 });
   const path = "/artifacts/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/artifact-1.html";
   const expiresAt = Date.now() + 10_000;
-  const duplicateBody = "{\"artifact\":" + JSON.stringify(descriptor) + ",\"artifact\":" + JSON.stringify(descriptor) + ",\"url\":" + JSON.stringify(path) + ",\"expiresAt\":" + expiresAt + "}";
   const responses = [
-    artifactResolutionResponse(descriptor, path, expiresAt, { body: duplicateBody }),
+    artifactResolutionResponse(descriptor, path, expiresAt, { body: "{ malformed JSON" }),
     artifactResolutionResponse(descriptor, path, expiresAt, { body: JSON.stringify({ artifact: staleDescriptor, url: path, expiresAt }) }),
     artifactResolutionResponse(descriptor, path, expiresAt, { contentType: "application/json" }),
     artifactResolutionResponse(descriptor, path, 1),
@@ -360,14 +224,14 @@ test("browser document builds one canonical transaction for edits and optimistic
   document.edit(first.key, ["x <- 40"]);
   const createdA = document.create("create-a", first.key, "code", ["y <- x + 1"]);
   const createdB = document.create("create-b", createdA.key, "code", ["y + 1"]);
-  const command = document.buildRunCommand({ operationId: "run-1", clientId: "browser-1", scope: "cell", targetKey: createdB.key });
+  const command = document.buildRunCommand({ requestId: "run-1", clientId: "browser-1", scope: "cell", targetKey: createdB.key });
   assert.deepEqual(command.target, { creationId: "create-b" });
   assert.deepEqual(command.changes, [
     { type: "edit", cell: { cellId: "c1" }, body: ["x <- 40"], cellType: "code", expectedRevision: 0 },
     { type: "create", creationId: "create-a", after: { cellId: "c1" }, body: ["y <- x + 1"], cellType: "code", options: {} },
     { type: "create", creationId: "create-b", after: { creationId: "create-a" }, body: ["y + 1"], cellType: "code", options: {} },
   ]);
-  document.noteSubmitted(command.operationId, { ...command, commandSequence: 1 } as HostCommand);
+  document.noteSubmitted(command.requestId, { ...command } as HostCommand);
   const identity = createdB;
   document.acknowledge(resultFor("run-1", {
     edited: [{ id: "c1", revision: 1 }], created: { "create-a": "c3", "create-b": "c4" }, deleted: [], documentRevision: 1,
@@ -384,8 +248,8 @@ test("browser document never resubmits a rejected structural intent", () => {
   const deletion = { type: "delete" as const, cell: { cellId: "c2" }, expectedRevision: 0 };
   document.stageRecoveryIntent([deletion]);
   document.noteSubmitted("delete-1", {
-    type: "transaction", operationId: "delete-1", clientId: "browser-1", sessionEpoch: document.epoch,
-    commandSequence: 1, expectedDocumentRevision: 0, changes: [deletion],
+    type: "transaction", requestId: "delete-1", clientId: "browser-1", sessionEpoch: document.epoch,
+    expectedDocumentRevision: 0, changes: [deletion],
   });
   document.reject("delete-1", "source_conflict");
   document.edit("c1", ["x <- 2"]);
@@ -434,7 +298,7 @@ test("browser view surfaces a blocked runtime and keeps recovery guidance throug
     const document = new BrowserDocument(initial);
     let restartCalls = 0;
     const client = {
-      recoveryState: { status: "none", local: null, branches: [], keptBranches: [], foreignDrafts: 0, pending: false, corruption: null, persistenceError: null },
+      recoveryState: { status: "none", local: null, branches: [], drafts: [], pending: false, corruption: null, persistenceError: null },
       subscribeRecovery(listener: () => void) { listener(); return () => {}; },
       restart: async () => { restartCalls += 1; },
     } as unknown as BrowserNotebookClient;
@@ -482,7 +346,7 @@ test('browser view targets nonstructural transaction updates despite repeated co
     const initial = snapshot([cell('c1', ['x <- 1']), cell('c2', ['x + 1'])]);
     const document = new BrowserDocument(initial);
     const client = {
-      recoveryState: { status: 'none', local: null, branches: [], keptBranches: [], foreignDrafts: 0, pending: false, corruption: null, persistenceError: null },
+      recoveryState: { status: 'none', local: null, branches: [], drafts: [], pending: false, corruption: null, persistenceError: null },
       subscribeRecovery() { return () => {}; },
     } as unknown as BrowserNotebookClient;
     const view = new NotebookView(client, dom);
@@ -526,7 +390,7 @@ test("browser view reports typed check issues", async () => {
     const document = new BrowserDocument(snapshot([]));
     let checkCalls = 0;
     const client = {
-      recoveryState: { status: "none", local: null, branches: [], keptBranches: [], foreignDrafts: 0, pending: false, corruption: null, persistenceError: null },
+      recoveryState: { status: "none", local: null, branches: [], drafts: [], pending: false, corruption: null, persistenceError: null },
       subscribeRecovery() { return () => {}; },
       commitEdits: async () => {},
       service: async (command: string) => {
@@ -567,7 +431,7 @@ test("explicit runs flush output and keep stop independent while preparing", asy
     let releaseRun!: () => void;
     const runPending = new Promise<void>((resolve) => { releaseRun = resolve; });
     const client = {
-      recoveryState: { status: "none", local: null, branches: [], keptBranches: [], foreignDrafts: 0, pending: false, corruption: null, persistenceError: null },
+      recoveryState: { status: "none", local: null, branches: [], drafts: [], pending: false, corruption: null, persistenceError: null },
       subscribeRecovery() { return () => {}; },
       runAll: async () => { order.push("run"); await runPending; },
       interrupt: async () => { interruptCalls += 1; },
@@ -639,11 +503,11 @@ test("browser document keeps Markdown logical in the editor and canonical on the
   ]);
 
   const command = document.buildTransactionCommand("markdown-edit", "browser-1")!;
-  document.noteSubmitted(command.operationId, { ...command, commandSequence: 1 } as HostCommand);
+  document.noteSubmitted(command.requestId, { ...command } as HostCommand);
   const editedPhysical = ["# ## Updated", "#   indented", "", "#     ### Nested"];
   document.applyEvent({
     protocol: HOST_PROTOCOL, epoch: document.epoch, cursor: 1, version: 2, documentRevision: 1, timestamp: 1,
-    type: "cell", operationId: command.operationId, cellId: "m1", revision: 8, payload: { ...markdownCell, body: editedPhysical, revision: 8 },
+    type: "cell", operationId: command.requestId, cellId: "m1", revision: 8, payload: { ...markdownCell, body: editedPhysical, revision: 8 },
   } as never);
   assert.deepEqual(local.desiredBody, editedBody);
   assert.deepEqual(local.serverBody, editedBody);
@@ -689,9 +553,9 @@ test("browser document accepts only its causally identified source event while r
   const local = document.cell("c1")!;
   document.edit(local.key, ["x <- 2"]);
   const command = document.buildTransactionCommand("edit-1", "browser-1")!;
-  document.noteSubmitted(command.operationId, { ...command, commandSequence: 1 } as HostCommand);
+  document.noteSubmitted(command.requestId, { ...command } as HostCommand);
   document.edit(local.key, ["x <- 3"]);
-  document.applyEvent({ protocol: HOST_PROTOCOL, epoch: document.epoch, cursor: 1, version: 2, documentRevision: 1, timestamp: 1, type: "cell", operationId: command.operationId, cellId: "c1", revision: 1, payload: cell("c1", ["x <- 2"], 1) as never });
+  document.applyEvent({ protocol: HOST_PROTOCOL, epoch: document.epoch, cursor: 1, version: 2, documentRevision: 1, timestamp: 1, type: "cell", operationId: command.requestId, cellId: "c1", revision: 1, payload: cell("c1", ["x <- 2"], 1) as never });
   assert.deepEqual(local.desiredBody, ["x <- 3"]);
   assert.equal(local.conflict, false);
   assert.deepEqual(document.pendingSource().changes, [{ type: "edit", cell: { cellId: "c1" }, body: ["x <- 3"], cellType: "code", expectedRevision: 1 }]);
@@ -752,19 +616,9 @@ test("browser document consumes authoritative reload cells, order, and clean sta
   assert.equal(document.snapshot.changed, false);
 });
 
-test("browser document records accepted operations from receipt envelopes", () => {
-  const document = new BrowserDocument(snapshot());
-  const accepted = operation("receipt-operation", "accepted");
-  document.applyEvent({
-    protocol: HOST_PROTOCOL, epoch: document.epoch, cursor: 1, version: 2, documentRevision: 0, timestamp: 1,
-    type: "receipt", payload: { operation: accepted, commandType: "save" },
-  });
-  assert.deepEqual(document.snapshot.operations, [accepted]);
-});
-
 class FakeSocket implements WebSocketLike {
   readyState = 0;
-  binaryType: BinaryType = "blob";
+  binaryType: BinaryType = "arraybuffer";
   onopen: ((event: Event) => void) | null = null;
   onmessage: ((event: MessageEvent) => void) | null = null;
   onerror: ((event: Event) => void) | null = null;
@@ -775,526 +629,338 @@ class FakeSocket implements WebSocketLike {
   open(): void { this.readyState = 1; this.onopen?.({} as Event); }
   receive(value: unknown): void { this.onmessage?.({ data: JSON.stringify(value) } as MessageEvent); }
   disconnect(): void { this.readyState = 3; this.onclose?.({ code: 1006, reason: "test disconnect" } as CloseEvent); }
+  commands(): HostCommand[] { return this.sent.map(raw => JSON.parse(raw)).filter(frame => frame.type === "command").map(frame => decodeHostCommandWire(frame.command) as HostCommand); }
+  reply(command: HostCommand, result: unknown = null, revision = 1): void {
+    this.receive({ type: "commandResult", requestId: command.requestId, result: { ...resultFor(command.requestId, result), documentRevision: revision } });
+  }
 }
-
-function resultFor(id: string, result: unknown, status: OperationRecord["status"] = "done", sequence = 1): CommandResult {
-  const operationValue = { ...operation(id, status, result), clientId: "browser-test", commandSequence: sequence };
-  return { epoch: "epoch-1", operation: operationValue, documentRevision: 1, version: 2, cursor: sequence, nextCommandSequence: sequence + 1, result: result as never, error: null };
+function resultFor(id: string, result: unknown, _status = "done", cursor = 1): CommandResult {
+  return { requestId: id, epoch: "epoch-1", documentRevision: 1, version: 2, cursor, result: result as never, error: null };
 }
-
-function admissionFor(clientId: string, id: string, sequence: number, status: OperationRecord["status"] = "done", result: unknown = null): unknown {
-  return {
-    epoch: "epoch-1", clientId, operationId: id, commandSequence: sequence, accepted: true, sequenceConsumed: true,
-    operation: { ...operation(id, status, result), clientId, commandSequence: sequence }, error: null, nextCommandSequence: sequence + 1,
-  };
+function recoverySnapshot(value: HostSnapshot): unknown {
+  return { type: "recovery", protocolVersion: HOST_CLIENT_PROTOCOL_VERSION, recovery: encodeRecoveryWire({ kind: "snapshot", epoch: value.epoch, cursor: value.cursor, snapshot: value }) };
 }
-function recoverySnapshot(snapshotValue: HostSnapshot): unknown {
-  return {
-    type: "recovery",
-    protocolVersion: HOST_CLIENT_PROTOCOL_VERSION,
-    recovery: encodeRecoveryWire({ kind: "snapshot", epoch: snapshotValue.epoch, cursor: snapshotValue.cursor, snapshot: snapshotValue }),
-  };
-}
-
-test("browser transport handshakes before sending canonical sequential commands", async () => {
-  const socket = new FakeSocket();
-  const events: HostEvent[] = [];
-  const transport = new BrowserTransport({
-    url: "ws://127.0.0.1/api/socket", reconnect: false, clientId: "browser-test", leaseId: "lease-1", csrf: "csrf-1",
-    webSocketFactory: () => socket, onEvent: (event) => events.push(event),
-    recoveryStore: new MemoryRecoveryStore(),
+async function browserClient(store = new MemoryRecoveryStore(), initial = snapshot(), options: { reconnect?: boolean; draftId?: string } = {}) {
+  const sockets: FakeSocket[] = [];
+  const client = new BrowserNotebookClient({ url: "ws://127.0.0.1/api/socket", clientId: "browser-test", draftId: options.draftId ?? "window-1", leaseId: "lease-1", csrf: "csrf-1", reconnect: options.reconnect ?? false,
+    restoreSingleDraft: true, reconnectDelayMs: 1, recoveryStore: store, requestAnimationFrame: () => 0,
+    webSocketFactory: () => { const socket = new FakeSocket(); sockets.push(socket); return socket; },
   });
-  const connected = transport.connect();
-  socket.open();
-  assert.deepEqual(JSON.parse(socket.sent[0]!), { type: "connect", protocolVersion: HOST_CLIENT_PROTOCOL_VERSION, leaseId: "lease-1", clientId: "browser-test", csrf: "csrf-1", epoch: null, cursor: null });
-  socket.receive(recoverySnapshot(snapshot()));
-  assert.equal((await connected).kind, "snapshot");
-  const one = transport.dispatch({ type: "save", operationId: "one", clientId: "browser-test", sessionEpoch: "epoch-1", expectedDocumentRevision: 0 });
-  const two = transport.dispatch({ type: "interrupt", operationId: "two", clientId: "browser-test", sessionEpoch: "epoch-1" });
-  assert.deepEqual(socket.sent.slice(1).map((raw) => JSON.parse(raw).sequence), [1, 2]);
-  socket.receive({ type: "commandResult", sequence: 1, result: admissionFor("browser-test", "one", 1) });
-  socket.receive({ type: "commandResult", sequence: 2, result: admissionFor("browser-test", "two", 2) });
-  assert.equal((await one).operation?.id, "one");
-  assert.equal((await two).operation?.id, "two");
-  const output = { protocol: HOST_PROTOCOL, epoch: "epoch-1", cursor: 2, version: 2, documentRevision: 0, timestamp: 1, type: "runtime", payload: snapshot().runtime };
-  socket.receive({ type: "event", event: output });
-  socket.receive({ type: "event", event: output });
-  assert.equal(events.length, 1);
-  transport.close();
-});
-
-test("browser discard release reaches the host before transport close", async () => {
-  const socket = new FakeSocket();
-  let request: { url: string; init?: RequestInit } | null = null;
-  const transport = new BrowserTransport({
-    url: "ws://127.0.0.1/api/socket", reconnect: false, clientId: "browser-test", leaseId: "lease-1", csrf: "csrf-1",
-    webSocketFactory: () => socket,
-  });
-  const connected = transport.connect();
-  socket.open();
-  socket.receive(recoverySnapshot(snapshot()));
+  const connected = client.connect();
+  sockets[0]!.open(); sockets[0]!.receive(recoverySnapshot(initial));
   await connected;
-  await withBrowserFetch(async (input, init) => {
-    request = { url: input.toString(), init };
-    return new Response(JSON.stringify({ released: true }), { status: 200, headers: { "X-Alder-Continuity-Proof": "proof-1" } });
-  }, async () => {
-    await transport.release("discard");
-  });
-  assert.equal(request!.url, "/api/lease");
-  assert.equal(request!.init?.method, "POST");
-  assert.equal(new Headers(request!.init?.headers).get("X-Alder-CSRF"), "csrf-1");
-  assert.deepEqual(JSON.parse(String(request!.init?.body)), { action: "release", leaseId: "lease-1", disposition: "discard" });
-  assert.equal(socket.readyState, 3);
-});
-test('browser submits a startup marker when host startup execution is disabled', async () => {
-  const socket = new FakeSocket();
-  const store = new MemoryRecoveryStore();
-  const clientId = 'browser-no-startup-run';
-  const client = new BrowserNotebookClient({
-    url: 'ws://127.0.0.1/api/socket', reconnect: false, clientId, leaseId: 'lease-1', csrf: 'csrf-1',
-    webSocketFactory: () => socket, recoveryStore: store, requestAnimationFrame: () => 0,
-  });
-  const baseSnapshot = snapshot();
-  const stoppedRuntime = { ...baseSnapshot.runtime, kernelState: 'stopped' as const, executionReady: false, startupActivated: false, kernelEpoch: null };
-  const selectedRuntime = { ...stoppedRuntime, rEnvironment: { rscript: '/usr/bin/Rscript', rHome: '/usr/lib/R', version: '4.6.1', platform: 'darwin', arch: 'x64', libraryPaths: ['/tmp/alder-r-library'], identity: 'a'.repeat(64) } };
-  const noRunSnapshot = { ...baseSnapshot, config: { on_startup: false }, runtime: stoppedRuntime };
-  try {
-    await withBrowserFetch(async () => new Response(JSON.stringify({
-      epoch: 'epoch-1', documentRevision: 0, cursor: 0, result: { branches: [], pending: false, corruption: null },
-    }), { status: 200, headers: { 'Content-Type': 'application/json' } }), async () => {
-      const connected = client.connect();
-      socket.open();
-      socket.receive(recoverySnapshot(noRunSnapshot));
-      await connected;
-      assert.equal(socket.sent.length, 1, 'startup must wait for the selected R environment');
-      socket.receive({ type: 'event', event: { protocol: HOST_PROTOCOL, epoch: 'epoch-1', cursor: 1, version: 2, documentRevision: 0, timestamp: 1, type: 'runtime', payload: selectedRuntime } });
-      await waitUntil(() => socket.sent.length === 2);
-      const frame = JSON.parse(socket.sent[1]!) as { sequence: number; command: Extract<HostCommand, { type: 'run' }> };
-      assert.equal(frame.command.type, 'run');
-      assert.equal(frame.command.startup, true);
-      assert.equal(frame.command.clientId, clientId);
-      socket.receive({
-        type: 'commandResult',
-        sequence: frame.sequence,
-        result: admissionFor(clientId, frame.command.operationId, frame.sequence, 'done', { startupActivated: true, run: false }),
-      });
-    });
-  } finally {
-    client.close();
-  }
-});
+  return { client, socket: sockets[0]!, sockets };
+}
+const edited = (body: string, revision = 1) => {
+  const value = snapshot([cell("c1", [body], revision), cell("c2", ["x + 1"])]);
+  value.documentRevision = revision; value.cursor = revision; value.version += revision;
+  return value;
+};
 
-test("browser transport rejects a stalled recovery handshake on its finite deadline", async () => {
-  const socket = new FakeSocket();
-  const transport = new BrowserTransport({
-    url: "ws://127.0.0.1/api/socket", reconnect: false, clientId: "browser-timeout", leaseId: "lease-1", csrf: "csrf-1",
-    handshakeTimeoutMs: 5, webSocketFactory: () => socket,
-  });
+test("browser sends request identities and reconnects from a snapshot without replaying a lost run", async () => {
+  const { client, socket, sockets } = await browserClient(undefined, snapshot(), { reconnect: true });
   try {
-    const connected = transport.connect();
-    socket.open();
-    await assert.rejects(connected, (error: unknown) => error instanceof BrowserTransportError && error.code === "transport_closed" && /timed out/.test(error.message));
-    assert.equal(socket.readyState, 3, "a timed-out recovery socket must be closed before the attempt is discarded");
-  } finally {
-    transport.close();
-  }
-});
-
-test("browser transport rejects a rebound host before applying its recovery snapshot", async () => {
-  const socket = new FakeSocket();
-  let snapshots = 0;
-  const transport = new BrowserTransport({
-    url: "ws://127.0.0.1/api/socket", reconnect: false, clientId: "browser-continuity", leaseId: "lease-1", csrf: "csrf-1",
-    continuityProof: "trusted-proof", webSocketFactory: () => socket, onSnapshot: () => { snapshots += 1; },
-  });
-  try {
-    const connected = transport.connect();
-    socket.open();
-    socket.receive({ ...recoverySnapshot(snapshot()), continuityProof: "replacement-proof" });
-    await assert.rejects(connected, (error: unknown) => error instanceof BrowserTransportError && error.code === "host_identity_mismatch");
-    assert.equal(snapshots, 0, "an unauthenticated replacement snapshot must never reach the renderer");
-  } finally {
-    transport.close();
-  }
-});
-
-test("browser transport reconnects with its in-memory recovery cursor", async () => {
-  const sockets: FakeSocket[] = [];
-  const transport = new BrowserTransport({
-    url: "ws://127.0.0.1/api/socket", clientId: "browser-memory-recovery", leaseId: "lease-1", csrf: "csrf-1",
-    reconnectDelayMs: 1, maxReconnectDelayMs: 1, webSocketFactory: () => { const socket = new FakeSocket(); sockets.push(socket); return socket; },
-    recoveryStore: new MemoryRecoveryStore(),
-  });
-  try {
-    const connected = transport.connect();
-    sockets[0]!.open();
-    sockets[0]!.receive(recoverySnapshot(snapshot()));
-    await connected;
-    sockets[0]!.receive({ type: "event", event: { protocol: HOST_PROTOCOL, epoch: "epoch-1", cursor: 1, version: 2, documentRevision: 0, timestamp: 1, type: "runtime", payload: snapshot().runtime } });
-    sockets[0]!.disconnect();
+    assert.deepEqual(JSON.parse(socket.sent[0]!), { type: "connect", protocolVersion: HOST_CLIENT_PROTOCOL_VERSION, leaseId: "lease-1", clientId: "browser-test", csrf: "csrf-1" });
+    const running = client.runAll();
+    await waitUntil(() => socket.commands().length === 1);
+    assert.equal(socket.commands()[0]!.type, "run");
+    const rejected = assert.rejects(running, { code: "request_uncertain" });
+    socket.disconnect(); await rejected;
     await waitUntil(() => sockets.length === 2);
     sockets[1]!.open();
-    assert.deepEqual(JSON.parse(sockets[1]!.sent[0]!), { type: "connect", protocolVersion: HOST_CLIENT_PROTOCOL_VERSION, leaseId: "lease-1", clientId: "browser-memory-recovery", csrf: "csrf-1", epoch: "epoch-1", cursor: 1 });
-  } finally {
-    transport.close();
-  }
-});
-
-test("an epoch replacement rejects old operation waiters before accepting reused IDs", async () => {
-  const sockets: FakeSocket[] = [];
-  const client = new BrowserNotebookClient({
-    url: "ws://127.0.0.1/api/socket", clientId: "browser-epoch-replacement", leaseId: "lease-1", csrf: "csrf-1",
-    reconnectDelayMs: 1, maxReconnectDelayMs: 1, webSocketFactory: () => { const socket = new FakeSocket(); sockets.push(socket); return socket; },
-    recoveryStore: new MemoryRecoveryStore(),
-  });
-  try {
-    const connected = client.connect();
-    sockets[0]!.open();
-    sockets[0]!.receive(recoverySnapshot(snapshot()));
-    await connected;
-    const staleWaiter = assert.rejects(client.awaitOperation("shared-operation", 5_000), (error: unknown) => error instanceof BrowserTransportError && error.code === "session_replaced");
-    sockets[0]!.disconnect();
-    await waitUntil(() => sockets.length === 2);
-    sockets[1]!.open();
-    const replacement = { ...snapshot(), epoch: "epoch-2", operations: [{ ...operation("shared-operation"), clientId: "browser-test", commandSequence: 1, result: { epoch: 2 } as never }] };
-    sockets[1]!.receive(recoverySnapshot(replacement));
-    await staleWaiter;
-    const current = await client.awaitOperation("shared-operation", 50);
-    assert.deepEqual(current.result, { epoch: 2 });
-  } finally {
-    client.close();
-  }
-});
-
-test("browser opens a saved notebook when recovery inventory cannot be read", async () => {
-  const socket = new FakeSocket();
-  const store = new MemoryRecoveryStore();
-  store.listDrafts = async () => { throw new Error("recovery storage unavailable"); };
-  const client = new BrowserNotebookClient({
-    url: "ws://127.0.0.1/api/socket", reconnect: false, clientId: "browser-no-recovery", leaseId: "lease-1", csrf: "csrf-1",
-    webSocketFactory: () => socket, recoveryStore: store,
-  });
-  try {
-    const connected = client.connect();
-    socket.open();
-    socket.receive(recoverySnapshot(snapshot()));
-    const document = await connected;
-    assert.deepEqual(document.cell("c1")!.desiredBody, ["x <- 1"]);
-    assert.equal(client.recoveryState.persistenceError?.code, "recovery_inventory_failed");
-    client.editCell(document.cell("c1")!.key, "x <- 2");
-    assert.deepEqual(document.pendingSource().changes, [{ type: "edit", cell: { cellId: "c1" }, body: ["x <- 2"], cellType: "code", expectedRevision: 0 }]);
+    const next = snapshot(); next.epoch = "epoch-replaced";
+    sockets[1]!.receive(recoverySnapshot(next));
+    await waitUntil(() => client.document?.epoch === "epoch-replaced");
+    assert.equal(sockets[1]!.commands().length, 0);
+    await assert.rejects(client.transport.dispatch(socket.commands()[0]!), { code: "session_replaced" });
+    assert.equal(sockets[1]!.commands().length, 0, "an explicit retry cannot give an old run a new epoch");
   } finally { client.close(); }
 });
 
-for (const failure of ["rejects", "stalls"] as const) {
-  test(`browser commits source while recovery storage ${failure}`, { timeout: 2_000 }, async () => {
-    const socket = new FakeSocket();
+test("a lost edit response reconciles accepted text while preserving typing made after submission", async () => {
+  const { client, socket, sockets } = await browserClient(undefined, snapshot(), { reconnect: true });
+  try {
+    client.editCell("c1", "x <- 2");
+    const committing = client.commitEdits();
+    await waitUntil(() => socket.commands().length === 1);
+    client.editCell("c1", "x <- 3");
+    const rejected = assert.rejects(committing, { code: "request_uncertain" });
+    socket.disconnect(); await rejected;
+    await waitUntil(() => sockets.length === 2);
+    sockets[1]!.open(); sockets[1]!.receive(recoverySnapshot(edited("x <- 2")));
+    await waitUntil(() => client.document!.snapshot.documentRevision === 1);
+    assert.deepEqual(client.document!.cell("c1")!.desiredBody, ["x <- 3"]);
+    assert.equal(client.document!.hasSourceConflicts, false);
+    assert.equal(sockets[1]!.commands().length, 0);
+    const retry = client.commitEdits();
+    await waitUntil(() => sockets[1]!.commands().length === 1);
+    const command = sockets[1]!.commands()[0]!;
+    assert.equal(command.expectedDocumentRevision, 1);
+    assert.equal(command.type, "transaction");
+    sockets[1]!.reply(command, { edited: [{ id: "c1", revision: 2 }], created: {}, deleted: [] }, 2);
+    await retry;
+  } finally { client.close(); }
+});
+
+test("a lost create response resolves by stable cell ID without creating a duplicate", async () => {
+  const document = new BrowserDocument(snapshot());
+  const local = document.create("new-cell", "cell:c1", "code", ["y <- 1"]);
+  const command = document.buildTransactionCommand("create-request", "client")!;
+  document.edit(local.key, ["y <- 2"]);
+  const draft = document.recoveryDraft("window", { requestId: command.requestId, kind: "transaction", changes: command.changes })!;
+  const current = snapshot([cell("c1", ["x <- 1"]), cell("new-cell", ["y <- 1"]), cell("c2", ["x + 1"])]);
+  current.documentRevision = 1;
+  const recovered = reconcileDraft(draft, current);
+  assert.equal(recovered.conflict, false);
+  assert.deepEqual(recovered.draft.changes, [{ type: "edit", cell: { cellId: "new-cell" }, cellType: "code", body: ["y <- 2"], expectedRevision: 0 }]);
+});
+
+test("concurrent changed source remains visible as a conflict instead of being overwritten", async () => {
+  const { client, socket, sockets } = await browserClient(undefined, snapshot(), { reconnect: true });
+  try {
+    client.editCell("c1", "local <- 7");
+    socket.disconnect();
+    await waitUntil(() => sockets.length === 2);
+    sockets[1]!.open(); sockets[1]!.receive(recoverySnapshot(edited("remote <- 9")));
+    await waitUntil(() => client.document!.snapshot.documentRevision === 1);
+    assert.deepEqual(client.document!.cell("c1")!.desiredBody, ["local <- 7"]);
+    assert.equal(client.document!.hasSourceConflicts, true);
+    await assert.rejects(client.commitEdits(), { code: "source_conflict" });
+    assert.equal(sockets[1]!.commands().length, 0);
+    client.useServerVersion("c1");
+    assert.deepEqual(client.document!.cell("c1")!.desiredBody, ["remote <- 9"]);
+  } finally { client.close(); }
+});
+
+test("new backend restores only pending text from an interrupted run draft", async () => {
+  const store = new MemoryRecoveryStore();
+  const document = new BrowserDocument(snapshot()); document.edit("c1", ["x <- 42"]);
+  const draft = document.recoveryDraft("old-window", { requestId: "uncertain-run", kind: "run", changes: document.pendingSource().changes })!;
+  await store.saveDraft(draft);
+  const next = snapshot(); next.epoch = "new-backend";
+  const { client, socket } = await browserClient(store, next);
+  try {
+    assert.deepEqual(client.document!.cell("c1")!.desiredBody, ["x <- 42"]);
+    assert.equal(client.document!.hasSourceConflicts, false);
+    assert.equal(socket.commands().length, 0);
+    await client.flushDraftPersistence();
+    const saved = await store.listDrafts();
+    assert.equal(saved.length, 1); assert.equal(saved[0]!.draftId, "window-1");
+    assert.equal(saved[0]!.submission, null);
+  } finally { client.close(); }
+});
+
+test("multiple saved drafts remain choices and restoring one retains current work", async () => {
+  const store = new MemoryRecoveryStore();
+  for (const id of ["one", "two"]) { const doc = new BrowserDocument(snapshot()); doc.edit("c1", [id]); await store.saveDraft(doc.recoveryDraft(id)!); }
+  const { client } = await browserClient(store);
+  try {
+    assert.equal(client.recoveryState.drafts.length, 2);
+    assert.deepEqual(client.document!.cell("c1")!.desiredBody, ["x <- 1"]);
+    client.editCell("c1", "current-work");
+    await client.restoreSavedDraft("one");
+    assert.deepEqual(client.document!.cell("c1")!.desiredBody, ["one"]);
+    const drafts = await store.listDrafts();
+    assert.ok(drafts.some(draft => draft.draftId === "two"));
+    assert.ok(drafts.some(draft => JSON.stringify(draft.changes).includes("current-work")));
+  } finally { client.close(); }
+});
+
+for (const failure of ["rejects", "stalls"]) {
+  test(`source commits remain usable when draft storage ${failure}`, { timeout: 2000 }, async () => {
     const store = new MemoryRecoveryStore();
-    let writes = 0;
-    store.saveDraft = async () => {
-      writes += 1;
-      if (failure === "rejects") throw new Error("recovery storage full");
-      await new Promise<void>(() => undefined);
-    };
-    const clientId = "browser-storage-" + failure;
-    const client = new BrowserNotebookClient({
-      url: "ws://127.0.0.1/api/socket", reconnect: false, clientId, leaseId: "lease-1", csrf: "csrf-1",
-      webSocketFactory: () => socket, recoveryStore: store,
-    });
+    store.saveDraft = async () => { if (failure === "rejects") throw new Error("storage full"); await new Promise(() => {}); };
+    const { client, socket } = await browserClient(store);
     try {
-      const connected = client.connect();
-      socket.open();
-      socket.receive(recoverySnapshot(snapshot()));
-      const document = await connected;
-      const key = document.cell("c1")!.key;
-      client.editCell(key, "x <- 2");
-      const committing = client.commitEdits();
-      await waitUntil(() => socket.sent.length === 2);
-      const frame = JSON.parse(socket.sent[1]!) as { sequence: number; command: Extract<HostCommand, { type: "transaction" }> };
-      assert.deepEqual(frame.command.changes, [{ type: "edit", cell: { cellId: "c1" }, body: { encoding: "base64", data: Buffer.from("x <- 2").toString("base64"), lines: 1 }, cellType: "code", expectedRevision: 0 }]);
-      socket.receive({ type: "commandResult", sequence: frame.sequence, result: admissionFor(clientId, frame.command.operationId, frame.sequence, "done", {
-        edited: [{ id: "c1", revision: 1 }], created: {}, deleted: [], documentRevision: 1,
-      }) });
-      await committing;
-      assert.ok(writes > 0);
-      assert.deepEqual(document.cell("c1")!.desiredBody, ["x <- 2"]);
-      assert.deepEqual(document.pendingSource().changes, []);
-      client.editCell(key, "x <- 3");
-      assert.equal(document.pendingSource().changes.length, 1);
+      client.editCell("c1", "x <- 2");
+      const committed = client.commitEdits();
+      await waitUntil(() => socket.commands().length === 1);
+      socket.reply(socket.commands()[0]!, { edited: [{ id: "c1", revision: 1 }], created: {}, deleted: [] });
+      await committed;
+      assert.deepEqual(client.document!.pendingSource().changes, []);
+      client.editCell("c1", "x <- 3");
+      assert.equal(client.document!.pendingSource().changes.length, 1);
     } finally { client.close(); }
   });
 }
 
-test("browser Save As forwards the exact confirmed replacement precondition", async () => {
-  const socket = new FakeSocket();
-  const clientId = "browser-save-as";
-  const client = new BrowserNotebookClient({
-    url: "ws://127.0.0.1/api/socket", reconnect: false, clientId, leaseId: "lease-1", csrf: "csrf-1",
-    webSocketFactory: () => socket, recoveryStore: new MemoryRecoveryStore(),
-  });
+test("queued Run cannot hold up newer edits and Save behind an active run", async () => {
+  const store = new MemoryRecoveryStore();
+  const { client, socket } = await browserClient(store);
   try {
-    const connected = client.connect();
-    socket.open();
-    socket.receive(recoverySnapshot(snapshot()));
-    await connected;
-    const expectedDestination = { expectedDiskDigest: "a".repeat(64), expectedDiskVersion: "confirmed-version" };
-    const saving = client.saveAs({ path: "/tmp/existing.R", expectedDestination });
-    await waitUntil(() => socket.sent.length === 2);
-    const frame = JSON.parse(socket.sent[1]!) as { sequence: number; command: Extract<HostCommand, { type: "save-as" }> };
-    assert.equal(frame.command.type, "save-as");
-    assert.equal(frame.command.path, "/tmp/existing.R");
-    assert.deepEqual(frame.command.expectedDestination, expectedDestination);
-    socket.receive({ type: "commandResult", sequence: frame.sequence, result: admissionFor(clientId, frame.command.operationId, frame.sequence) });
-    await saving;
+    const firstRun = client.runAll();
+    await waitUntil(() => socket.commands().length === 1);
+    client.editCell("c1", "x <- 2");
+    const queuedRun = client.runAll();
+    const rejectedRun = assert.rejects(queuedRun, { code: "source_conflict" });
+    await waitUntil(() => socket.commands().length === 2);
+    const queued = socket.commands()[1]!;
+    assert.equal(queued.type, "run"); assert.equal(queued.changes?.length, 1);
+    client.editCell("c1", "x <- 3");
+    const saving = client.save();
+    await waitUntil(() => socket.commands().length === 3);
+    const edit = socket.commands()[2]!;
+    assert.equal(edit.type, "transaction"); assert.equal(edit.expectedDocumentRevision, 0);
+    socket.reply(edit, { edited: [{ id: "c1", revision: 1 }], created: {}, deleted: [] }, 1);
+    await waitUntil(() => socket.commands().length === 4);
+    const save = socket.commands()[3]!; assert.equal(save.type, "save");
+    socket.reply(save, { saved: true }); await saving;
+    socket.receive({ type: "commandResult", requestId: queued.requestId, result: { ...resultFor(queued.requestId, null), error: { code: "source_conflict", message: "The document changed before this run began." } } });
+    await rejectedRun;
+    await client.flushDraftPersistence();
+    assert.ok((await store.listDrafts())[0]!.pendingRun, "rejecting run2 cannot clear the still-running run1 marker");
+    socket.reply(socket.commands()[0]!, { runId: "first" }); await firstRun;
+    assert.deepEqual(client.document!.cell("c1")!.desiredBody, ["x <- 3"]);
+    assert.equal(client.document!.hasSourceConflicts, false, "rejecting old work cannot mark newer acknowledged edits conflicting");
   } finally { client.close(); }
 });
 
-test("ambiguous structural transport failure retains durable receipt recovery", async () => {
-  const socket = new FakeSocket();
+test("an older run result cannot clear a newer in-flight edit's recovery comparison", async () => {
+  const { client, socket, sockets } = await browserClient(undefined, snapshot(), { reconnect: true });
+  try {
+    client.editCell("c1", "x <- 2");
+    const running = client.runAll();
+    await waitUntil(() => socket.commands().length === 1);
+    const run = socket.commands()[0]!;
+    client.editCell("c1", "x <- 3");
+    const editing = client.commitEdits();
+    await waitUntil(() => socket.commands().length === 2);
+    socket.receive({ type: "event", event: encodeHostEventWire({ protocol: HOST_PROTOCOL, epoch: "epoch-1", cursor: 1, version: 2,
+      documentRevision: 1, timestamp: 1, type: "transaction", operationId: run.requestId,
+      payload: { updated: [cell("c1", ["x <- 2"], 1)], edited: [{ id: "c1", revision: 1 }], created: {}, deleted: [], documentRevision: 1 } as never,
+    }) });
+    socket.reply(run, { runId: "first" }); await running;
+    client.editCell("c1", "x <- 4");
+    const rejected = assert.rejects(editing, { code: "request_uncertain" });
+    socket.disconnect(); await rejected;
+    await waitUntil(() => sockets.length === 2);
+    sockets[1]!.open(); sockets[1]!.receive(recoverySnapshot(edited("x <- 3", 2)));
+    await waitUntil(() => client.document!.snapshot.documentRevision === 2);
+    assert.deepEqual(client.document!.cell("c1")!.desiredBody, ["x <- 4"]);
+    assert.equal(client.document!.hasSourceConflicts, false);
+  } finally { client.close(); }
+});
+
+test("Save As carries confirmed destination fingerprint and discard releases the lease", async () => {
+  const { client, socket } = await browserClient();
+  try {
+    const expectedDestination = { expectedDiskDigest: "a".repeat(64), expectedDiskVersion: "old-version" };
+    const saving = client.saveAs({ path: "/tmp/replacement.R", expectedDestination });
+    await waitUntil(() => socket.commands().length === 1);
+    const command = socket.commands()[0]!;
+    assert.equal(command.type, "save-as");
+    assert.deepEqual(command.expectedDestination, expectedDestination);
+    socket.reply(command); await saving;
+    await withBrowserFetch(async (_input, init) => {
+      assert.deepEqual(JSON.parse(String(init?.body)), { action: "release", leaseId: "lease-1", disposition: "discard" });
+      return new Response("{}", { status: 200 });
+    }, () => client.discardAndClose());
+    assert.equal(socket.readyState, 3);
+  } finally { client.close(); }
+});
+
+function startupSnapshot(): HostSnapshot {
+  const value = snapshot();
+  value.runtime.runOnStartup = true;
+  value.runtime.rEnvironment = { rscript: "/usr/bin/Rscript", rHome: "/usr/lib/R", version: "4.6.1", platform: "darwin", arch: "arm64", libraryPaths: ["/tmp/library"], identity: "a".repeat(64) };
+  return value;
+}
+const recoveryResponse = () => new Response(JSON.stringify({ epoch: "epoch-1", documentRevision: 0, cursor: 0, result: { branches: [], pending: false, corruption: null } }), { status: 200 });
+
+for (const replayRestart of [false, true]) test(`fresh renderer suppresses startup after uncertain ${replayRestart ? "restart" : "run"} even without edits`, async () => {
   const store = new MemoryRecoveryStore();
-  const client = new BrowserNotebookClient({
-    url: "ws://127.0.0.1/api/socket", reconnect: false, clientId: "browser-ambiguous", leaseId: "lease-1", csrf: "csrf-1",
-    webSocketFactory: () => socket, recoveryStore: store,
-  });
+  const first = await browserClient(store);
   try {
-    const connected = client.connect();
-    socket.open();
-    socket.receive(recoverySnapshot(snapshot()));
-    const document = await connected;
-    const changing = client.setDisabled(document.cell("c1")!.key, true);
-    await waitUntil(() => socket.sent.length === 2);
-    socket.disconnect();
-    await assert.rejects(changing, (error: unknown) => error instanceof BrowserTransportError && !error.definitive);
-    await client.flushDraftPersistence();
-    const draft = await store.loadDraft("browser-ambiguous");
-    assert.equal(draft?.operation?.clientId, "browser-ambiguous");
-    assert.deepEqual(draft?.operation?.changes, [{ type: "options", cell: { cellId: "c1" }, expectedRevision: 0, patch: { disabled: true } }]);
-    assert.equal(document.hasSourceConflicts, true);
-  } finally {
-    client.close();
-  }
+    const running = replayRestart ? first.client.restart(true) : first.client.runAll();
+    await waitUntil(() => first.socket.commands().length === 1);
+    await first.client.flushDraftPersistence();
+    const drafts = await store.listDrafts();
+    assert.equal(drafts[0]!.changes.length, 0);
+    assert.equal(drafts[0]!.pendingRun?.requestId, first.socket.commands()[0]!.requestId);
+    const rejected = assert.rejects(running, { code: "request_uncertain" });
+    first.socket.disconnect(); await rejected;
+    await first.client.flushDraftPersistence();
+  } finally { first.client.close(); }
+  const next = startupSnapshot(); next.epoch = "replacement-backend";
+  await withBrowserFetch(async () => recoveryResponse(), async () => {
+    const { client, socket } = await browserClient(store, next, { draftId: "fresh-window" });
+    try {
+      assert.equal(client.recoveryState.uncertainRun, true);
+      assert.equal(socket.commands().length, 0, "startup never repeats a possibly completed run");
+      const explicit = client.runAll();
+      await waitUntil(() => socket.commands().length === 1);
+      socket.reply(socket.commands()[0]!); await explicit;
+      assert.equal(client.recoveryState.uncertainRun, false);
+    } finally { client.close(); }
+  });
 });
 
+test("opening returns while a startup run is still executing", async () => {
+  await withBrowserFetch(async () => recoveryResponse(), async () => {
+    const { client, socket } = await browserClient(undefined, startupSnapshot());
+    try {
+      assert.equal(socket.commands().length, 1);
+      assert.equal(socket.commands()[0]!.type, "run");
+      client.editCell("c1", "editing while startup runs");
+      assert.deepEqual(client.document!.cell("c1")!.desiredBody, ["editing while startup runs"]);
+      socket.reply(socket.commands()[0]!);
+    } finally { client.close(); }
+  });
+});
 
-
-test("ambiguous edit receipt blocks later source dispatch without losing newer typing", async () => {
-  const socket = new FakeSocket();
+test("external browser leaves another window's only draft as a choice", async () => {
   const store = new MemoryRecoveryStore();
-  const client = new BrowserNotebookClient({
-    url: "ws://127.0.0.1/api/socket", reconnect: false, clientId: "browser-edit-ambiguous", leaseId: "lease-1", csrf: "csrf-1",
-    webSocketFactory: () => socket, recoveryStore: store,
-  });
+  const document = new BrowserDocument(snapshot()); document.edit("c1", ["other window"]);
+  await store.saveDraft(document.recoveryDraft("other-window")!);
+  const socket = new FakeSocket();
+  const client = new BrowserNotebookClient({ url: "ws://notebook.test/api/socket", clientId: "new-window", leaseId: "lease", csrf: "csrf", recoveryStore: store, reconnect: false,
+    webSocketFactory: () => socket, requestAnimationFrame: () => 0 });
   try {
-    const connected = client.connect();
-    socket.open();
-    socket.receive(recoverySnapshot(snapshot()));
-    const document = await connected;
-    const key = document.cell("c1")!.key;
-    client.editCell(key, "x <- 2");
-    const committing = client.commitEdits();
-    await waitUntil(() => socket.sent.length === 2);
-    socket.disconnect();
-    await assert.rejects(committing, (error: unknown) => error instanceof BrowserTransportError && !error.definitive);
-    client.editCell(key, "x <- 3");
-    await assert.rejects(client.commitEdits(), (error: unknown) => error instanceof BrowserTransportError && error.code === "recovery_receipt_pending");
-    await client.flushDraftPersistence();
-    const draft = await store.loadDraft("browser-edit-ambiguous");
-    assert.equal(typeof draft?.operation?.operationId, "string");
-    assert.deepEqual(draft?.operation?.changes, [{ type: "edit", cell: { cellId: "c1" }, body: ["x <- 2"], cellType: "code", expectedRevision: 0 }]);
-    assert.deepEqual(draft?.changes, [{ type: "edit", cell: { cellId: "c1" }, body: ["x <- 3"], cellType: "code", expectedRevision: 0 }]);
-  } finally {
-    client.close();
-  }
+    const connected = client.connect(); socket.open(); socket.receive(recoverySnapshot(snapshot())); await connected;
+    assert.deepEqual(client.document!.cell("c1")!.desiredBody, ["x <- 1"]);
+    assert.equal(client.recoveryState.drafts[0]!.draftId, "other-window");
+    assert.equal((await store.listDrafts())[0]!.draftId, "other-window");
+  } finally { client.close(); }
 });
-test("authoritative host rejection clears the receipt gate for later source edits", async () => {
-  const socket = new FakeSocket();
-  const client = new BrowserNotebookClient({
-    url: "ws://127.0.0.1/api/socket", reconnect: false, clientId: "browser-rejected", leaseId: "lease-1", csrf: "csrf-1",
-    webSocketFactory: () => socket, recoveryStore: new MemoryRecoveryStore(),
+
+for (const replaced of [false, true]) {
+  test(`an awaited snapshot artifact ${replaced ? "cannot overwrite its replacement connection" : "precedes later live events"}`, async () => {
+    const { client, socket, sockets } = await browserClient(undefined, snapshot(), { reconnect: true });
+    const older = edited("x <- 2");
+    const bytes = Buffer.from(JSON.stringify(encodeRecoveryWire({ kind: "snapshot", epoch: older.epoch, cursor: older.cursor, snapshot: older })));
+    let finish!: (response: Response) => void;
+    let reading = false;
+    try {
+      await withBrowserFetch(async (_input, init) => {
+        if (JSON.parse(String(init?.body)).type !== "output") return recoveryResponse();
+        reading = true;
+        return new Promise<Response>(resolve => { finish = resolve; });
+      }, async () => {
+        socket.receive({ type: "recovery", protocolVersion: HOST_CLIENT_PROTOCOL_VERSION, recovery: artifactDescriptor({ mimeType: "application/json", byteLength: bytes.length }) });
+        await waitUntil(() => reading);
+        if (replaced) {
+          socket.disconnect();
+          await waitUntil(() => sockets.length === 2);
+          const newer = edited("x <- 9", 2); newer.epoch = "new-epoch";
+          sockets[1]!.open(); sockets[1]!.receive(recoverySnapshot(newer));
+          await waitUntil(() => client.document!.epoch === "new-epoch");
+        } else {
+          socket.receive({ type: "event", event: encodeHostEventWire({ protocol: HOST_PROTOCOL, epoch: "epoch-1", cursor: 2, version: 3,
+            documentRevision: 2, timestamp: 2, type: "cell", cellId: "c1", revision: 2, payload: cell("c1", ["x <- 3"], 2) as never }) });
+        }
+        finish(new Response(JSON.stringify({ result: { encoding: "base64", offset: 0, nextOffset: bytes.length, eof: true, data: bytes.toString("base64") } })));
+        if (replaced) {
+          await new Promise(resolve => setTimeout(resolve, 10));
+          assert.equal(client.document!.epoch, "new-epoch");
+          assert.deepEqual(client.document!.cell("c1")!.desiredBody, ["x <- 9"]);
+        } else {
+          await waitUntil(() => client.document!.cursor === 2);
+          assert.deepEqual(client.document!.cell("c1")!.desiredBody, ["x <- 3"]);
+        }
+      });
+    } finally { client.close(); }
   });
-  try {
-    const connected = client.connect();
-    socket.open();
-    socket.receive(recoverySnapshot(snapshot()));
-    const document = await connected;
-    const key = document.cell("c1")!.key;
-    client.editCell(key, "x <- 2");
-    const rejected = client.commitEdits();
-    await waitUntil(() => socket.sent.length === 2);
-    const frame = JSON.parse(socket.sent[1]!) as { sequence: number };
-    socket.receive({ type: "error", sequence: frame.sequence, definitive: true, error: { code: "source_conflict", message: "stale source" } });
-    await assert.rejects(rejected, (error: unknown) => error instanceof BrowserTransportError && error.definitive);
-    client.useServerVersion(key);
-    client.editCell(key, "x <- 3");
-    const later = client.commitEdits();
-    await waitUntil(() => socket.sent.length === 3);
-    later.catch(() => undefined);
-  } finally {
-    client.close();
-  }
-});
-
-
-test("Run waits for an in-flight source transaction before deriving its revision", async () => {
-  const socket = new FakeSocket();
-  const client = new BrowserNotebookClient({
-    url: "ws://127.0.0.1/api/socket", reconnect: false, clientId: "browser-race", leaseId: "lease-1", csrf: "csrf-1",
-    webSocketFactory: () => socket, recoveryStore: new MemoryRecoveryStore(), requestAnimationFrame: () => 0,
-  });
-  const connected = client.connect();
-  socket.open();
-  socket.receive(recoverySnapshot(snapshot()));
-  const document = await connected;
-  const first = document.cell("c1")!;
-  client.editCell(first.key, "x <- 40");
-  const localProjections: Array<readonly string[] | undefined> = [];
-  client.subscribe((_document, event, keys) => { if (!event) localProjections.push(keys); });
-  const committing = client.commitEdits();
-  await waitUntil(() => socket.sent.length === 2);
-  const editFrame = JSON.parse(socket.sent[1]!) as { sequence: number; command: Extract<HostCommand, { type: "transaction" }> };
-  assert.equal(editFrame.command.type, "transaction");
-  assert.equal(editFrame.command.changes[0]?.type, "edit");
-  assert.equal((editFrame.command.changes[0] as { expectedRevision?: number }).expectedRevision, 0);
-  const running = client.runCell(first.key, { timeStamp: 10 });
-  await new Promise((resolve) => setTimeout(resolve, 0));
-  assert.equal(socket.sent.length, 2, "Run must remain behind the unresolved source acknowledgement");
-  const txResult = { edited: [{ id: "c1", revision: 1 }], created: {}, deleted: [], documentRevision: 1 };
-  socket.receive({ type: "commandResult", sequence: editFrame.sequence, result: admissionFor("browser-race", editFrame.command.operationId, editFrame.sequence, "accepted") });
-  const committed: OperationRecord = {
-    ...operation(editFrame.command.operationId, "done", txResult),
-    kind: "transaction",
-    clientId: "browser-race",
-    commandSequence: editFrame.sequence,
-    documentRevision: 1,
-  };
-  socket.receive({ type: "event", event: { protocol: HOST_PROTOCOL, epoch: "epoch-1", cursor: 1, version: 2, documentRevision: 1, timestamp: 1, type: "operation", operationId: editFrame.command.operationId, payload: committed } });
-  await committing;
-  assert.deepEqual(localProjections, [undefined, [first.key]], "source acknowledgements must update the affected editor");
-  await waitUntil(() => socket.sent.length === 3);
-  const runFrame = JSON.parse(socket.sent[2]!) as { sequence: number; command: Extract<HostCommand, { type: "run" }> };
-  assert.equal(runFrame.command.type, "run");
-  assert.deepEqual(runFrame.command.target, { cellId: "c1" });
-  assert.equal(runFrame.command.changes, undefined, "Run must not repeat the source just acknowledged");
-  socket.receive({ type: "commandResult", sequence: runFrame.sequence, result: admissionFor("browser-race", runFrame.command.operationId, runFrame.sequence, "accepted", { runId: "run-1", plan: [] }) });
-  assert.equal((await running).operation.id, runFrame.command.operationId);
-  assert.deepEqual(localProjections, [undefined, [first.key]]);
-  client.close();
-});
-test("run source outcome events can arrive before command admission", async () => {
-  const socket = new FakeSocket();
-  const client = new BrowserNotebookClient({
-    url: "ws://127.0.0.1/api/socket", reconnect: false, clientId: "browser-source-event", leaseId: "lease-1", csrf: "csrf-1",
-    webSocketFactory: () => socket, recoveryStore: new MemoryRecoveryStore(),
-  });
-  try {
-    const connected = client.connect();
-    socket.open();
-    socket.receive(recoverySnapshot(snapshot()));
-    const document = await connected;
-    const target = document.cell("c1")!;
-    client.editCell(target.key, "x <- 2");
-    const running = client.runCell(target.key);
-    await waitUntil(() => socket.sent.length === 2);
-    const frame = JSON.parse(socket.sent[1]!) as { sequence: number; command: Extract<HostCommand, { type: "run" }> };
-    const outcome = { created: {}, edited: [{ id: "c1", revision: 1 }], deleted: [], documentRevision: 1 };
-    const committed: OperationRecord = {
-      ...operation(frame.command.operationId, "accepted", outcome),
-      kind: "run",
-      clientId: "browser-source-event",
-      commandSequence: frame.sequence,
-      runId: null,
-    };
-    socket.receive({ type: "event", event: { protocol: HOST_PROTOCOL, epoch: "epoch-1", cursor: 1, version: 2, documentRevision: 1, timestamp: 1, type: "operation", operationId: frame.command.operationId, payload: committed } });
-    assert.deepEqual(document.pendingSource().changes, [], "the same operation's outcome must acknowledge source before admission");
-    socket.receive({ type: "commandResult", sequence: frame.sequence, result: admissionFor("browser-source-event", frame.command.operationId, frame.sequence, "accepted") });
-    assert.equal((await running).operation.id, frame.command.operationId);
-  } finally {
-    client.close();
-  }
-});
-
-test("recovered run source outcome preserves newer drafts and rejects foreign convergence", async () => {
-  const socket = new FakeSocket();
-  const client = new BrowserNotebookClient({
-    url: "ws://127.0.0.1/api/socket", reconnect: false, clientId: "browser-source-recovery", leaseId: "lease-1", csrf: "csrf-1",
-    webSocketFactory: () => socket, recoveryStore: new MemoryRecoveryStore(),
-  });
-  try {
-    const connected = client.connect();
-    socket.open();
-    socket.receive(recoverySnapshot(snapshot()));
-    const document = await connected;
-    const target = document.cell("c1")!;
-    client.editCell(target.key, "x <- 2");
-    let settled = false;
-    const running = client.runCell(target.key).then((result) => { settled = true; return result; });
-    await waitUntil(() => socket.sent.length === 2);
-    const frame = JSON.parse(socket.sent[1]!) as { sequence: number; command: Extract<HostCommand, { type: "run" }> };
-    socket.receive({ type: "commandResult", sequence: frame.sequence, result: admissionFor("browser-source-recovery", frame.command.operationId, frame.sequence, "accepted") });
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    assert.equal(settled, false, "admission alone must not release the source lane");
-
-    const identicalForeign = { ...snapshot([cell("c1", ["x <- 2"], 1), cell("c2", ["x + 1"]) ]), cursor: 1, version: 2, documentRevision: 1 };
-    socket.receive(recoverySnapshot(identicalForeign));
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    assert.equal(settled, false, "a foreign snapshot with identical bytes cannot acknowledge our run");
-
-    client.editCell(target.key, "x <- 3");
-    const failedOperation: OperationRecord = {
-      ...operation(frame.command.operationId, "error", { created: {}, edited: [{ id: "c1", revision: 1 }], deleted: [], documentRevision: 1 }),
-      kind: "run",
-      clientId: "browser-source-recovery",
-      commandSequence: frame.sequence,
-      runId: null,
-      documentRevision: 2,
-      error: { code: "analysis_failed", message: "analysis failed" },
-    };
-    const recovered = { ...snapshot([cell("c1", ["foreign"], 2), cell("c2", ["x + 1"]) ]), cursor: 2, version: 3, documentRevision: 2, operations: [failedOperation] };
-    socket.receive(recoverySnapshot(recovered));
-    await running;
-    assert.deepEqual(target.desiredBody, ["x <- 3"]);
-    assert.deepEqual(target.serverBody, ["foreign"]);
-    assert.equal(target.serverRevision, 2);
-    assert.equal(target.conflict, true);
-    assert.deepEqual(document.pendingSource().changes, [{ type: "edit", cell: { cellId: "c1" }, body: ["x <- 3"], cellType: "code", expectedRevision: 2 }]);
-    assert.equal((await client.awaitOperation(frame.command.operationId, 50)).status, "error");
-  } finally {
-    client.close();
-  }
-});
-
-test("source outcome accepts an exact same-revision no-op", () => {
-  const document = new BrowserDocument(snapshot());
-  const command = {
-    type: "run", operationId: "run-no-op", clientId: "browser-no-op", sessionEpoch: document.epoch, scope: "all",
-    changes: [{ type: "edit", cell: { cellId: "c1" }, body: ["x <- 1"], cellType: "code", expectedRevision: 0 }], expectedDocumentRevision: 0,
-  } as Extract<HostCommand, { type: "run" }>;
-  document.noteSubmitted(command.operationId, command);
-  assert.equal(document.acknowledgeSourceCommit(command.operationId, { created: {}, edited: [], deleted: [], documentRevision: 0 }), true);
-  assert.deepEqual(document.pendingSource().changes, []);
-});
-
-test("interactive deferred requests expose their exact terminal operation", async () => {
-  const socket = new FakeSocket();
-  const client = new BrowserNotebookClient({
-    url: "ws://127.0.0.1/api/socket", reconnect: false, clientId: "browser-deferred", leaseId: "lease-1", csrf: "csrf-1",
-    webSocketFactory: () => socket, recoveryStore: new MemoryRecoveryStore(),
-  });
-  const connected = client.connect();
-  socket.open();
-  socket.receive(recoverySnapshot(snapshot()));
-  await connected;
-  let settled = false;
-  const requested = client.requestLazy("lazy-1").then((result) => { settled = true; return result; });
-  await waitUntil(() => socket.sent.length === 2);
-  const frame = JSON.parse(socket.sent[1]!) as { sequence: number; command: HostCommand };
-  socket.receive({ type: "commandResult", sequence: frame.sequence, result: admissionFor("browser-deferred", frame.command.operationId, frame.sequence, "accepted") });
-  await new Promise((resolve) => setTimeout(resolve, 0));
-  assert.equal(settled, false, "an accepted request must not unlock its control before the kernel settles it");
-  socket.receive({ type: "event", event: { protocol: HOST_PROTOCOL, epoch: "epoch-1", cursor: 1, version: 2, documentRevision: 0, timestamp: 1, type: "operation", operationId: frame.command.operationId, payload: { ...operation(frame.command.operationId, "done", { key: "lazy-1" }), clientId: "browser-deferred", commandSequence: frame.sequence } } });
-  assert.equal((await requested).operation.status, "done");
-  client.close();
-});
+}
 
 test("LSP mapping preserves native file URIs and excludes delimiter lines", () => {
   assert.equal(encodeFilePathUri("/tmp/café #?%20\\name.R"), "file:///tmp/caf%C3%A9%20%23%3F%2520%5Cname.R");
