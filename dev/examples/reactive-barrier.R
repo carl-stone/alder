@@ -15,7 +15,7 @@ marker <- 1L
 marker
 
 # %%
-result <- seed + marker
+result <- marker + 5L
 result
 
 # Ordinary R, top to bottom: 5, 1, 6.

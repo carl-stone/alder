@@ -74057,6 +74057,9 @@ var Controller = class {
       } else {
         plan = this.graphValue.planStale((id2) => this.statusOf(id2));
       }
+      if (this.executionMode === "automatic" && this.barrierRestartRequired) {
+        plan = this.allCodePlan();
+      }
       const runId = this.launchRun(plan, command.requestId, false, command.clientId);
       const result = { runId, plan: [...plan], ...changes === void 0 ? {} : changes };
       const operation = this.operationFor(command.requestId, command.clientId);

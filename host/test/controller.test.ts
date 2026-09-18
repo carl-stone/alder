@@ -1789,6 +1789,58 @@ test("automatic barrier edits rebuild earlier bindings after one restart", async
   } finally { await controller.close(); }
 });
 
+test("an automatic cell Run with a barrier edit rebuilds earlier bindings once", async () => {
+  const engine = new FakeEngine();
+  const controller = createController({
+    engine, notebook: reactiveExample("reactive-barrier.R"),
+    config: resolveSettings({ notebook: { on_startup: false, on_cell_change: "automatic" } }),
+  });
+  try {
+    await controller.start();
+    const ids = controller.snapshot().cells.map((cell) => cell.id);
+    const initial = command(controller, { type: "run", scope: "all" });
+    await startCommand(controller, initial);
+    await settle(controller, initial.requestId);
+    const earlierOutput = controller.snapshot().cells[0]?.outputs[0]?.id;
+
+    const editedRun = command(controller, {
+      type: "run", scope: "cell", target: { cellId: ids[1]! },
+      changes: [{ type: "edit", cell: { cellId: ids[1]! }, expectedRevision: 0,
+        body: ["library(stats)", "marker <- 2L", "marker"], cellType: "code" }],
+    });
+    await startCommand(controller, editedRun);
+    const completed = await settle(controller, editedRun.requestId);
+    assert.deepEqual((completed.result as { plan: string[] }).plan, ids);
+    assert.equal(engine.restartCount, 1);
+    assert.deepEqual(engine.evaluations.slice(3).map((item) => item.cellId), ids);
+    assert.ok(controller.snapshot().cells.every((cell) => cell.status === "done"));
+    assert.notEqual(controller.snapshot().cells[0]?.outputs[0]?.id, earlierOutput);
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    assert.equal(engine.evaluations.length, 6);
+  } finally { await controller.close(); }
+});
+
+test("an ordinary automatic cell Run keeps its dependency scope", async () => {
+  const engine = new FakeEngine();
+  const controller = createController({
+    engine, notebook: reactiveExample("reactive-barrier.R"),
+    config: resolveSettings({ notebook: { on_startup: false, on_cell_change: "automatic" } }),
+  });
+  try {
+    await controller.start();
+    const ids = controller.snapshot().cells.map((cell) => cell.id);
+    const initial = command(controller, { type: "run", scope: "all" });
+    await startCommand(controller, initial);
+    await settle(controller, initial.requestId);
+    const run = command(controller, { type: "run", scope: "cell", target: { cellId: ids[1]! } });
+    await startCommand(controller, run);
+    const completed = await settle(controller, run.requestId);
+    assert.deepEqual((completed.result as { plan: string[] }).plan, ids.slice(1));
+    assert.deepEqual(engine.evaluations.slice(3).map((item) => item.cellId), ids.slice(1));
+    assert.equal(engine.restartCount, 0);
+  } finally { await controller.close(); }
+});
+
 test("moving a barrier automatically rebuilds the reordered notebook", async () => {
   const engine = new FakeEngine();
   const controller = createController({

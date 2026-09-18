@@ -2023,6 +2023,9 @@ export class Controller {
       } else {
         plan = this.graphValue.planStale((id) => this.statusOf(id));
       }
+      if (this.executionMode === "automatic" && this.barrierRestartRequired) {
+        plan = this.allCodePlan();
+      }
       const runId = this.launchRun(plan, command.requestId, false, command.clientId);
       const result = { runId, plan: [...plan], ...(changes === undefined ? {} : changes) };
       const operation = this.operationFor(command.requestId, command.clientId);
