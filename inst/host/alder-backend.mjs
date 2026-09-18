@@ -73819,6 +73819,9 @@ var Controller = class {
         for (const descendant of this.graphValue.descendants(id2)) affected.add(descendant);
       }
     }
+    if (movedBarrier) {
+      for (const cell of this.cells) if (cell.type === "code") affected.add(cell.id);
+    }
     for (const id2 of affected) this.cancelRunRegion(/* @__PURE__ */ new Set([id2]), "source");
     this.clearEditorDiagnostics(true);
     this.clearVariables(true);
@@ -74169,7 +74172,7 @@ var Controller = class {
       try {
         this.assertGraphRunnable();
         const blocked = this.graphValue.blockedByDisabled();
-        const plan = /* @__PURE__ */ new Set();
+        const plan = new Set(this.barrierRestartRequired ? this.allCodePlan() : []);
         for (const id2 of pending) {
           const cell = this.cellById(id2);
           if (cell?.type !== "code" || blocked.has(id2)) continue;
@@ -74794,6 +74797,7 @@ var Controller = class {
         if (this.runtimeContextReservation === token) {
           this.runtimeContextReservation = void 0;
           this.scheduleWidgetReconciliation();
+          this.scheduleReactiveRun();
         }
       }
     };
@@ -76420,6 +76424,7 @@ var Controller = class {
       this.packageOperationActive = false;
       this.packageOperationClientId = void 0;
       this.bump("runtime", this.runtimeSnapshot(), { operationId });
+      this.scheduleReactiveRun();
     }
   }
   async runPackageInstall(payload, operationId, clientId) {
@@ -76532,6 +76537,11 @@ var Controller = class {
       this.bump("runtime", this.runtimeSnapshot(), { operationId });
     } finally {
       this.analysisRestarting = false;
+      if (this.executionMode === "automatic" && this.reactivePending.size > 0) {
+        for (const cell of this.cells) {
+          if (cell.type === "code") this.reactivePending.add(cell.id);
+        }
+      }
       if (!this.closed && this.analysisNeeded.size > 0 && this.analyzerAvailable) {
         this.scheduleAnalysis();
       }

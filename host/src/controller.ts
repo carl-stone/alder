@@ -1750,6 +1750,9 @@ export class Controller {
         for (const descendant of this.graphValue.descendants(id)) affected.add(descendant);
       }
     }
+    if (movedBarrier) {
+      for (const cell of this.cells) if (cell.type === "code") affected.add(cell.id);
+    }
     for (const id of affected) this.cancelRunRegion(new Set([id]), "source");
     this.clearEditorDiagnostics(true);
     this.clearVariables(true);
@@ -2168,7 +2171,7 @@ export class Controller {
       try {
         this.assertGraphRunnable();
         const blocked = this.graphValue.blockedByDisabled();
-        const plan = new Set<string>();
+        const plan = new Set<string>(this.barrierRestartRequired ? this.allCodePlan() : []);
         for (const id of pending) {
           const cell = this.cellById(id);
           if (cell?.type !== "code" || blocked.has(id)) continue;
@@ -2870,6 +2873,7 @@ export class Controller {
         if (this.runtimeContextReservation === token) {
           this.runtimeContextReservation = undefined;
           this.scheduleWidgetReconciliation();
+          this.scheduleReactiveRun();
         }
       },
     };
@@ -4763,6 +4767,7 @@ export class Controller {
       this.packageOperationActive = false;
       this.packageOperationClientId = undefined;
       this.bump("runtime", this.runtimeSnapshot(), { operationId });
+      this.scheduleReactiveRun();
     }
   }
 
@@ -4885,6 +4890,11 @@ export class Controller {
       this.bump("runtime", this.runtimeSnapshot(), { operationId });
     } finally {
       this.analysisRestarting = false;
+      if (this.executionMode === "automatic" && this.reactivePending.size > 0) {
+        for (const cell of this.cells) {
+          if (cell.type === "code") this.reactivePending.add(cell.id);
+        }
+      }
       if (!this.closed && this.analysisNeeded.size > 0 && this.analyzerAvailable) {
         this.scheduleAnalysis();
       }
