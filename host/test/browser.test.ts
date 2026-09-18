@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { startHost } from '../src/application.js';
 import { resolveApplicationResources } from '../src/resources.js';
 import type { HostCommand } from '../src/protocol.js';
@@ -52,16 +53,11 @@ async function openAuthenticatedBrowser(app: RunningHost): Promise<Chrome> {
   return Chrome.open(origin + '/#ticket=' + encodeURIComponent(value.ticket as string));
 }
 
-let peerOperationSequence = 0;
-const peerCommandSequences = new WeakMap<object, number>();
 function peerCommand(app: RunningHost, command: Record<string, unknown>): HostCommand {
-  const commandSequence = (peerCommandSequences.get(app) ?? 0) + 1;
-  peerCommandSequences.set(app, commandSequence);
   return {
     ...command,
-    operationId: 'browser-peer-' + (++peerOperationSequence),
+    requestId: typeof command.requestId === 'string' ? command.requestId : 'browser-peer-' + randomUUID(),
     clientId: 'browser-peer',
-    commandSequence,
     sessionEpoch: app.controller.epoch,
   } as HostCommand;
 }
@@ -95,23 +91,33 @@ test('trusted browser edit-and-Run presents the current chain and creation retai
         if (!event.isTrusted) throw new Error('Run event was not trusted');
         measurement.input = event.timeStamp; measurement.handler = performance.now();
       } }, {capture:true, once:true});
-      window.addEventListener('alder:host-command', event => { if (event.detail.command.type === 'run') measurement.command = event.detail.command; });
+      window.addEventListener('alder:host-command', event => { if (event.detail.command.type === 'run') { measurement.command = event.detail.command; measurement.result = event.detail.result; } });
       measurement.done = new Promise((resolve,reject) => {
-        const timer = setTimeout(() => reject(new Error('no current chain result')), 15000);
-        const unsubscribe = window.__alderHost.client.subscribe((document,event) => {
-          if (event?.type !== 'cell-completed' || event.cellId !== 'cell-3') return;
-          measurement.completed = event;
+        const cleanup = () => { clearTimeout(timer); unsubscribe(); window.removeEventListener('alder:host-command', onResult); };
+        const timer = setTimeout(() => { cleanup(); reject(new Error('no current chain result')); }, 15000);
+        const finish = () => {
+          if (!measurement.command || !measurement.completed) return;
+          const event = measurement.completed;
           requestAnimationFrame(() => requestAnimationFrame(() => {
             try {
+              const document = window.__alderHost.client.document;
               const output = window.document.querySelector('[data-cell="cell-3"] [data-role=outputs]');
-              if (!measurement.command || event.operationId !== measurement.command.operationId) throw new Error('wrong operation');
+              if (event.operationId !== measurement.command.requestId) throw new Error('wrong request');
+              if (measurement.result.error !== null) throw new Error('Run failed: ' + JSON.stringify(measurement.result.error));
               if (!output || !output.textContent.includes('42') || output.dataset.runId !== event.runId) throw new Error('wrong visible result');
               if (document.snapshot.cells[0].revision !== 1 || document.snapshot.cells[0].body[0] !== 'a <- 40') throw new Error('wrong source');
               if (output.getBoundingClientRect().height <= 0) throw new Error('result hidden');
-              clearTimeout(timer); unsubscribe();
+              cleanup();
               resolve({duration:performance.now()-measurement.input, inputDelay:measurement.handler-measurement.input, runId:event.runId, revision:document.snapshot.cells[0].revision});
-            } catch(error) { clearTimeout(timer); unsubscribe(); reject(error); }
+            } catch(error) { cleanup(); reject(error); }
           }));
+        };
+        const onResult = event => { if (event.detail.command.type === 'run') finish(); };
+        window.addEventListener('alder:host-command', onResult);
+        const unsubscribe = window.__alderHost.client.subscribe((_document,event) => {
+          if (event?.type !== 'cell-completed' || event.cellId !== 'cell-3') return;
+          measurement.completed = event;
+          finish();
         });
       });
     })()`);
@@ -184,12 +190,12 @@ test('trusted browser edit-and-Run presents the current chain and creation retai
     await browser.send('Input.dispatchKeyEvent', { type: 'keyDown', key: ' ', code: 'Space', windowsVirtualKeyCode: 32, modifiers: 2 });
     await browser.send('Input.dispatchKeyEvent', { type: 'keyUp', key: ' ', code: 'Space', windowsVirtualKeyCode: 32, modifiers: 2 });
     await browser.wait('window.__pendingCompletionSignal && !window.__pendingCompletionSignal.aborted');
-    const priorRuns = await browser.evaluate("window.__alderHost.client.document.snapshot.operations.filter(operation => operation.kind === 'run').length");
+    const priorRunRequestId = await browser.evaluate("window.__measurement.command.requestId");
     await browser.click('[data-cell="cell-1"] [data-act=run]');
     assert.equal(await browser.evaluate('window.__pendingCompletionSignal.aborted'), true,
       'Run must also abort a completion request that already started');
-    await browser.wait(`window.__alderHost.client.document.snapshot.operations.filter(operation => operation.kind === 'run').length > ${priorRuns} &&
-      window.__alderHost.client.document.snapshot.operations.findLast(operation => operation.kind === 'run')?.status === 'done'`);
+    await browser.wait(`window.__measurement.command.requestId !== ${JSON.stringify(priorRunRequestId)} &&
+      window.__measurement.result.error === null`);
     await browser.click('[data-cell="cell-1"] .cm-content');
     await replaceFocusedEditor(browser, 'Sys.sleep(5)\na <- 40\na');
     await browser.click('[data-cell="cell-1"] [data-act=run]');
@@ -292,12 +298,12 @@ test('long notebooks virtualize editors while preserving focused source through 
     const peer80Snapshot = app.controller.snapshot();
     const peer80 = peer80Snapshot.cells.find(cell => cell.id === 'cell-80');
     assert.ok(peer80);
-    await app.controller.dispatch(peerCommand(app, {
+    assert.equal((await app.controller.dispatch(peerCommand(app, {
       type: 'transaction', expectedDocumentRevision: peer80Snapshot.documentRevision, changes: [{
         type: 'edit', cell: { cellId: 'cell-80' }, expectedRevision: peer80.revision, cellType: 'code',
         body: ['value_80 <- 8000', 'value_80'],
       }],
-    }));
+    }))).error, null);
     await browser.send('Network.emulateNetworkConditions', {
       offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1,
     });
@@ -375,22 +381,22 @@ test('long notebooks virtualize editors while preserving focused source through 
     const renameSnapshot = app.controller.snapshot();
     const renameCell = renameSnapshot.cells.find(cell => cell.id === 'cell-90');
     assert.ok(renameCell);
-    await app.controller.dispatch(peerCommand(app, {
+    assert.equal((await app.controller.dispatch(peerCommand(app, {
       type: 'transaction', expectedDocumentRevision: renameSnapshot.documentRevision, changes: [{
         type: 'options', cell: { cellId: 'cell-90' }, expectedRevision: renameCell.revision, patch: { name: 'tail' },
       }],
-    }));
+    }))).error, null);
     await browser.wait(`document.querySelector('#panel-graph [data-target-cell="cell-90"]')?.textContent.includes('tail') &&
       document.querySelector('#minimap [data-target-cell="cell-90"]')?.getAttribute('aria-label').includes('tail')`);
     await browser.wait(`document.querySelector('#panel-outline [data-target-cell="cell-90"]')?.textContent === 'tail'`);
     const peer90Snapshot = app.controller.snapshot();
     const peer90 = peer90Snapshot.cells.find(cell => cell.id === 'cell-90');
     assert.ok(peer90);
-    await app.controller.dispatch(peerCommand(app, {
+    assert.equal((await app.controller.dispatch(peerCommand(app, {
       type: 'transaction', expectedDocumentRevision: peer90Snapshot.documentRevision, changes: [{
         type: 'edit', cell: { cellId: 'cell-90' }, expectedRevision: peer90.revision, cellType: 'markdown', body: ['# # Current heading'],
       }],
-    }));
+    }))).error, null);
     await browser.wait(`document.querySelector('#panel-outline .outline-heading[data-target-cell="cell-90"]')?.textContent === 'Current heading' &&
       window.__alderHost.client.document.cell('cell-90').desiredType === 'markdown'`);
     assert.equal(await browser.evaluate(`document.querySelector('[data-cell="cell-75"]') === window.__longCell &&
@@ -433,20 +439,20 @@ test('source conflicts and peer deletion retain the exact local draft until expl
     const conflictSnapshot = app.controller.snapshot();
     const conflictCell = conflictSnapshot.cells.find(cell => cell.id === 'cell-1');
     assert.ok(conflictCell);
-    await app.controller.dispatch(peerCommand(app, {
+    assert.equal((await app.controller.dispatch(peerCommand(app, {
       type: 'transaction', expectedDocumentRevision: conflictSnapshot.documentRevision, changes: [{
         type: 'edit', cell: { cellId: 'cell-1' }, expectedRevision: 0, cellType: 'code', body: ['peer <- 9', 'peer'],
       }],
-    }));
+    }))).error, null);
     await browser.wait(`document.querySelector('[data-cell="cell-1"]')?.classList.contains('source-conflict') &&
       window.__conflictEditor.getDoc() === 'local <- 2\\nlocal'`);
     await browser.send('Input.insertText', { text: '\n# retained' });
     await browser.wait(`window.__conflictEditor.getDoc() === 'local <- 2\\nlocal\\n# retained' &&
       window.__alderHost.client.document.cell('cell-1').conflict === true`);
-    const operationCount = app.controller.snapshot().operations.length;
+    const conflictRevision = app.controller.snapshot().documentRevision;
     await browser.click('[data-cell="cell-1"] [data-act=run]');
     await browser.wait("document.querySelector('#status')?.textContent.includes('resolve deleted or conflicting local source')");
-    assert.equal(app.controller.snapshot().operations.length, operationCount);
+    assert.equal(app.controller.snapshot().documentRevision, conflictRevision);
     assert.deepEqual(app.controller.snapshot().cells[0]!.body, ['peer <- 9', 'peer']);
     assert.equal(app.controller.snapshot().cells[0]!.revision, 1);
 
@@ -462,11 +468,11 @@ test('source conflicts and peer deletion retain the exact local draft until expl
     const deleteSnapshot = app.controller.snapshot();
     const deleteCell = deleteSnapshot.cells.find(cell => cell.id === 'cell-1');
     assert.ok(deleteCell);
-    await app.controller.dispatch(peerCommand(app, {
+    assert.equal((await app.controller.dispatch(peerCommand(app, {
       type: 'transaction', expectedDocumentRevision: deleteSnapshot.documentRevision, changes: [{
         type: 'delete', cell: { cellId: 'cell-1' }, expectedRevision: deleteCell.revision,
       }],
-    }));
+    }))).error, null);
     await browser.wait(`document.querySelector('[data-cell="cell-1"]')?.classList.contains('tombstone') &&
       window.__conflictEditor.getDoc() === 'draft <- 123\\ndraft' &&
       document.activeElement === window.__draftEditorNode`);
@@ -483,18 +489,17 @@ test('source conflicts and peer deletion retain the exact local draft until expl
       window.__alderEditors.get('cell:cell-1') === window.__conflictEditor &&
       window.__conflictEditor.getDoc() === 'draft <- 123\\ndraft'`), true);
     assert.deepEqual(app.controller.snapshot().cells[0]!.body, ['draft <- 123', 'draft']);
-    assert.equal(app.controller.snapshot().operations.at(-1)?.kind, 'transaction');
     await browser.click(`[data-cell="${restoredId}"] .cm-content`);
     await replaceFocusedEditor(browser, 'discarded <- 456');
     const restored = app.controller.snapshot().cells[0]!;
     const deleteRestoredSnapshot = app.controller.snapshot();
     const deleteRestoredCell = deleteRestoredSnapshot.cells.find(cell => cell.id === restored.id);
     assert.ok(deleteRestoredCell);
-    await app.controller.dispatch(peerCommand(app, {
+    assert.equal((await app.controller.dispatch(peerCommand(app, {
       type: 'transaction', expectedDocumentRevision: deleteRestoredSnapshot.documentRevision, changes: [{
         type: 'delete', cell: { cellId: restored.id }, expectedRevision: deleteRestoredCell.revision,
       }],
-    }));
+    }))).error, null);
     await browser.wait(`document.querySelector('[data-cell="${restoredId}"]')?.classList.contains('tombstone')`);
     await browser.click(`[data-cell="${restoredId}"] [data-recovery]:last-child`);
     await browser.wait("window.__alderHost.client.document.cells.length === 0 && document.querySelectorAll('.cell').length === 0");

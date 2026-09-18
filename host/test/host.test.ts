@@ -7,12 +7,11 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { startHost } from "../src/application.js";
 import { resolveApplicationResources } from "../src/resources.js";
-import { parseHostCommand, widgetOutputSchema, type HostCommand } from "../src/protocol.js";
+import { widgetOutputSchema, type CommandResult, type HostCommand } from "../src/protocol.js";
 
 type RunningHost = Awaited<ReturnType<typeof startHost>>;
 const APPLICATION_ROOT = process.env.ALDER_APPLICATION_ROOT;
 let stagedResources: Awaited<ReturnType<typeof resolveApplicationResources>> | undefined;
-const commandSequences = new WeakMap<object, number>();
 
 async function startInstalledHost(path: string, options: { executionMode?: "automatic" | "lazy"; runOnStartup?: boolean; idleTimeout?: number } = {}): Promise<RunningHost> {
   if (!APPLICATION_ROOT) throw new Error("ALDER_APPLICATION_ROOT is required for installed host tests");
@@ -33,36 +32,25 @@ async function startInstalledHost(path: string, options: { executionMode?: "auto
   return app;
 }
 
-function nextCommandSequence(controller: object): number {
-  const next = (commandSequences.get(controller) ?? 0) + 1;
-  commandSequences.set(controller, next);
-  return next;
-}
-
 function hostCommand(app: RunningHost, value: Record<string, unknown>): HostCommand {
   const snapshot = app.controller.snapshot();
   const type = String(value.type);
   const needsRevision = ["transaction", "run", "publish", "save", "save-as", "reload-source", "format", "set-app", "set-config", "set-layout", "set-runtime"].includes(type);
-  return parseHostCommand({
+  return {
     ...value,
-    operationId: typeof value.operationId === "string" ? value.operationId : randomUUID(),
+    requestId: typeof value.requestId === "string" ? value.requestId : randomUUID(),
     clientId: typeof value.clientId === "string" ? value.clientId : "host-tests",
-    commandSequence: nextCommandSequence(app.controller),
     sessionEpoch: snapshot.epoch,
     ...(needsRevision && value.expectedDocumentRevision === undefined ? { expectedDocumentRevision: snapshot.documentRevision } : {}),
     ...(type === "set-config" && value.expectedSidecarVersion === undefined ? { expectedSidecarVersion: snapshot.sidecars.config.version } : {}),
     ...(type === "set-layout" && value.expectedSidecarVersion === undefined ? { expectedSidecarVersion: snapshot.sidecars.layout.version } : {}),
-  });
+  } as HostCommand;
 }
 
 async function dispatchHost(app: RunningHost, value: Record<string, unknown>) {
   return app.controller.dispatch(hostCommand(app, value));
 }
 
-async function settledHost(app: RunningHost, admission: { operation?: { id: string } | null }, signal?: AbortSignal) {
-  assert.ok(admission.operation);
-  return app.controller.awaitOperation(admission.operation.id, "host-tests", signal);
-}
 type HttpSession = { origin: string; cookie: string; csrf: string; leaseId: string };
 
 async function openHttpSession(app: RunningHost): Promise<HttpSession> {
@@ -117,7 +105,7 @@ test("discarding the last lease removes unsaved recovery", {
       changes: [{ type: "edit", cell: { cellId: before.cells[0]!.id }, expectedRevision: before.cells[0]!.revision,
         cellType: "code", body: ["x <- 2"] }],
     });
-    assert.equal((await settledHost(app, edit)).status, "done");
+    assert.equal(edit.error, null);
     assert.equal(app.controller.snapshot().dirty, true);
 
     session = await openHttpSession(app);
@@ -173,7 +161,7 @@ test("editor help synchronizes source only on request or for enabled diagnostics
       changes: [{ type: "edit", cell: { cellId: "cell-1" }, expectedRevision: before.cells[0]!.revision,
         cellType: "code", body: ["fresh_symbol <- function() 2"] }],
     });
-    assert.equal((await settledHost(app, edited)).status, "done");
+    assert.equal(edited.error, null);
     await new Promise(resolve => setTimeout(resolve, 350));
     assert.match(await requestSymbols(session), /fresh_symbol/);
 
@@ -184,7 +172,7 @@ test("editor help synchronizes source only on request or for enabled diagnostics
       expectedSidecarVersion: config.sidecars.config.version,
       expectedDocumentRevision: config.documentRevision,
     });
-    assert.equal((await settledHost(app, diagnostics)).status, "done");
+    assert.equal(diagnostics.error, null);
     const diagnosticBefore = app.controller.snapshot();
     const diagnosticEdit = await dispatchHost(app, {
       type: "transaction",
@@ -192,7 +180,7 @@ test("editor help synchronizes source only on request or for enabled diagnostics
       changes: [{ type: "edit", cell: { cellId: "cell-1" }, expectedRevision: diagnosticBefore.cells[0]!.revision,
         cellType: "code", body: ["diagnostic_symbol <- function() 2"] }],
     });
-    assert.equal((await settledHost(app, diagnosticEdit)).status, "done");
+    assert.equal(diagnosticEdit.error, null);
     await new Promise(resolve => setTimeout(resolve, 350));
     assert.match(await requestSymbols(session), /diagnostic_symbol/);
   } finally {
@@ -225,14 +213,13 @@ test("clean external reload does not create recovery startup deferral", {
     assert.notEqual(observed.disk.digest, null);
     assert.notEqual(observed.disk.version, null);
 
-    const admission = await dispatchHost(app, {
+    const result = await dispatchHost(app, {
       type: "reload-source",
       expectedDocumentRevision: observed.documentRevision,
       expectedDiskDigest: observed.disk.digest!,
       expectedDiskVersion: observed.disk.version!,
     });
-    const result = await settledHost(app, admission);
-    assert.equal(result.status, "done", JSON.stringify(result));
+    assert.equal(result.error, null, JSON.stringify(result));
     const clean = app.controller.snapshot();
     assert.equal(clean.dirty, false);
     assert.equal(clean.runtime.startupActivated, true);
@@ -270,14 +257,13 @@ test("installed host runs exact edited source, saves bytes and publishes committ
     const snapshot = controller.snapshot();
     assert.equal(snapshot.runtime.executionReady, true);
     assert.equal(snapshot.cells.length, 3);
-    const receipt = await dispatchHost(app, {
+    const run = await dispatchHost(app, {
       type: "run", scope: "all",
       changes: [{ type: "edit", cell: { cellId: "cell-1" }, expectedRevision: 0,
         cellType: "code", body: ["a <- 40", "a"] }],
       expectedDocumentRevision: snapshot.documentRevision,
     });
-    const operation = await settledHost(app, receipt);
-    assert.equal(operation.status, "done");
+    assert.equal(run.error, null);
     const completed = controller.snapshot();
     assert.equal(completed.cells[0]!.revision, 1);
     assert.deepEqual(completed.cells.map(cell => cell.status), ["done", "done", "done"]);
@@ -285,7 +271,7 @@ test("installed host runs exact edited source, saves bytes and publishes committ
 
 
     const save = await dispatchHost(app, { type: "save", expectedDocumentRevision: completed.documentRevision });
-    assert.equal((await settledHost(app, save)).status, "done");
+    assert.equal(save.error, null);
     assert.equal(controller.snapshot().dirty, false, 'a successful Save must clear the durable recovery draft');
     assert.equal(await readFile(path, "utf8"), "# title\r\n# %%\r\na <- 40\r\na\r\n# %%\r\nb <- a + 1\nb\r\n# %%\r\nc <- b + 1\nc");
 
@@ -293,9 +279,8 @@ test("installed host runs exact edited source, saves bytes and publishes committ
     const publishDocumentRevision = controller.snapshot().documentRevision;
     const publish = await dispatchHost(app, { type: "publish", includeCode: true, outputPath: publishedPath,
       expectedDocumentRevision: publishDocumentRevision });
-    const published = await settledHost(app, publish);
-    assert.equal(published.status, "done");
-    assert.deepEqual(published.result, { path: publishedPath, documentRevision: publishDocumentRevision });
+    assert.equal(publish.error, null);
+    assert.deepEqual(publish.result, { path: publishedPath, documentRevision: publishDocumentRevision });
     assert.match(await readFile(publishedPath, "utf8"), /42/);
 
     const stale = await dispatchHost(app, {
@@ -304,9 +289,7 @@ test("installed host runs exact edited source, saves bytes and publishes committ
         cellType: "code", body: ["a <- -1"] }],
       expectedDocumentRevision: controller.snapshot().documentRevision,
     });
-    const staleResult = await settledHost(app, stale);
-    assert.equal(staleResult.status, "error");
-    assert.equal(staleResult.error?.code, 'source_conflict', JSON.stringify(staleResult.error));
+    assert.equal(stale.error?.code, 'source_conflict', JSON.stringify(stale.error));
     assert.equal(controller.snapshot().cells[0]!.body[0], 'a <- 40');
   } finally {
     await app?.close();
@@ -341,12 +324,12 @@ test("runtime and app metadata survive recovery restart, Save, and Save As", {
       type: "set-runtime", on_cell_change: "lazy", on_startup: false,
       expectedDocumentRevision: snapshot.documentRevision,
     });
-    assert.equal((await settledHost(app, runtime)).status, "done");
+    assert.equal(runtime.error, null);
     snapshot = app.controller.snapshot();
     const appUpdate = await dispatchHost(app, {
       type: "set-app", patch: { layout: "grid" }, expectedDocumentRevision: snapshot.documentRevision,
     });
-    assert.equal((await settledHost(app, appUpdate)).status, "done");
+    assert.equal(appUpdate.error, null);
     assert.equal(await readFile(path, "utf8"), original);
     await app.close();
     app = undefined;
@@ -357,7 +340,7 @@ test("runtime and app metadata survive recovery restart, Save, and Save As", {
     assert.deepEqual(snapshot.metadata?.app, { layout: "grid", width: "medium" });
 
     const save = await dispatchHost(app, { type: "save", expectedDocumentRevision: snapshot.documentRevision });
-    assert.equal((await settledHost(app, save)).status, "done");
+    assert.equal(save.error, null);
     const saved = await readFile(path, "utf8");
     assert.match(saved, /on_cell_change: lazy/);
     assert.match(saved, /on_startup: false/);
@@ -370,18 +353,17 @@ test("runtime and app metadata survive recovery restart, Save, and Save As", {
     const nextRuntime = await dispatchHost(app, {
       type: "set-runtime", on_cell_change: "automatic", expectedDocumentRevision: snapshot.documentRevision,
     });
-    assert.equal((await settledHost(app, nextRuntime)).status, "done");
+    assert.equal(nextRuntime.error, null);
     snapshot = app.controller.snapshot();
     const nextApp = await dispatchHost(app, {
       type: "set-app", patch: { width: "full" }, expectedDocumentRevision: snapshot.documentRevision,
     });
-    assert.equal((await settledHost(app, nextApp)).status, "done");
+    assert.equal(nextApp.error, null);
     snapshot = app.controller.snapshot();
     const saveAs = await dispatchHost(app, {
       type: "save-as", path: destination, expectedDestination: "absent", expectedDocumentRevision: snapshot.documentRevision,
     });
-    const settledSaveAs = await settledHost(app, saveAs);
-    assert.equal(settledSaveAs.status, "done", JSON.stringify(settledSaveAs.error));
+    assert.equal(saveAs.error, null, JSON.stringify(saveAs.error));
     const copied = await readFile(destination, "utf8");
     assert.match(copied, /on_cell_change: automatic/);
     assert.match(copied, /on_startup: false/);
@@ -433,7 +415,7 @@ test("idle shutdown waits for a real save before closing", {
       changes: [{ type: "edit", cell: { cellId: before.cells[0]!.id }, expectedRevision: before.cells[0]!.revision,
         cellType: "code", body: ["x <- 2"] }],
     });
-    assert.equal((await settledHost(app, edit)).status, "done");
+    assert.equal(edit.error, null);
     assert.equal(controller.snapshot().dirty, true);
 
     session = await openHttpSession(app);
@@ -487,7 +469,7 @@ test("editing a queued batch cell prevents its old effects and retains unaffecte
   try {
     app = await startInstalledHost(path, { executionMode: "lazy" });
     const controller = app.controller;
-    let edited: Promise<unknown> | undefined;
+    let edited: Promise<CommandResult> | undefined;
     controller.subscribe(event => {
       if (event.type !== "cell-started" || event.cellId !== "cell-1" || edited !== undefined) return;
       const state = controller.snapshot();
@@ -498,16 +480,14 @@ test("editing a queued batch cell prevents its old effects and retains unaffecte
           cellType: "code", body: ["c <- b + 20; c"] }],
       });
     });
-    const run = async () => {
-      const receipt = await dispatchHost(app!, { type: "run", scope: "all", expectedDocumentRevision: controller.snapshot().documentRevision });
-      return settledHost(app!, receipt);
-    };
-    assert.equal((await run()).status, "done");
-    await edited;
+    const run = () => dispatchHost(app!, { type: "run", scope: "all", expectedDocumentRevision: controller.snapshot().documentRevision });
+    assert.equal((await run()).error, null);
+    assert.ok(edited, "the source edit must occur while the batch is running");
+    assert.equal((await edited).error, null);
     await assert.rejects(access(marker));
     assert.deepEqual(controller.snapshot().cells.slice(0, 2).map(cell => cell.status), ["done", "done"]);
     assert.deepEqual(controller.snapshot().cells[2]!.body, ["c <- b + 20; c"]);
-    assert.equal((await run()).status, "done");
+    assert.equal((await run()).error, null);
     assert.match(JSON.stringify(controller.snapshot().cells[2]!.outputs), /22/);
     assert.equal(controller.snapshot().runtime.busy, false);
     await assert.rejects(access(marker));
@@ -529,9 +509,9 @@ test("a batched consumer run settles its run-button reset", {
     app = await startInstalledHost(path, { executionMode: "lazy" });
     const controller = app.controller;
     const initial = await dispatchHost(app, { type: "run", scope: "all", expectedDocumentRevision: controller.snapshot().documentRevision });
-    assert.equal((await settledHost(app, initial)).status, "done");
+    assert.equal(initial.error, null);
     const beforeWidget = controller.snapshot();
-    const widget = await dispatchHost(app, {
+    const widget = dispatchHost(app, {
       type: "widget", name: "btn", path: [], update: { value: true }, source: "editor",
       kernelEpoch: beforeWidget.runtime.kernelEpoch!, expectedRevision: beforeWidget.cells[0]!.revision,
     });
@@ -544,14 +524,12 @@ test("a batched consumer run settles its run-button reset", {
       type: "run", scope: "cell", target: { cellId: "cell-3" },
       expectedDocumentRevision: controller.snapshot().documentRevision,
     });
-    const run = await settledHost(app, explicit);
-    assert.equal(run.status, "done");
-    assert.equal(run.resetOperationIds?.length, 1);
-    assert.equal((await settledHost(app, widget)).status, "done");
+    assert.equal(explicit.error, null);
+    assert.equal((await widget).error, null);
     const state = controller.snapshot();
     const widgetRecord = state.cells[0]!.outputs.find(record => widgetOutputSchema.safeParse(record.data).success);
     if (widgetRecord === undefined) {
-      assert.fail("button widget output missing: outputs=" + JSON.stringify(state.cells[0]!.outputs) + " error=" + JSON.stringify(state.cells[0]!.error) + " operation=" + JSON.stringify(state.operations.find(operation => operation.id === widget.operation?.id)?.error ?? null));
+      assert.fail("button widget output missing: outputs=" + JSON.stringify(state.cells[0]!.outputs) + " error=" + JSON.stringify(state.cells[0]!.error));
     }
     const widgetData = widgetOutputSchema.parse(widgetRecord.data);
     assert.equal(widgetData.name, "btn");
@@ -593,26 +571,32 @@ test("Stop cancels a single evaluation queued behind automatic inspection before
       type: "run", scope: "cell", target: { cellId: "cell-1" },
       expectedDocumentRevision: controller.snapshot().documentRevision,
     });
-    assert.equal((await settledHost(app, first, AbortSignal.timeout(15_000))).status, "done");
+    assert.equal(first.error, null);
     const deadline = performance.now() + 5_000;
     while (!await access(entered).then(() => true, () => false)) {
       assert.ok(performance.now() < deadline, "automatic inspection did not begin");
       await new Promise(resolve => setTimeout(resolve, 10));
     }
-    const queued = await dispatchHost(app, {
+    const queued = dispatchHost(app, {
       type: "run", scope: "cell", target: { cellId: "cell-2" },
       expectedDocumentRevision: controller.snapshot().documentRevision,
     });
-    await dispatchHost(app, { type: "interrupt" });
-    const operation = await settledHost(app, queued, AbortSignal.timeout(2_000));
+    const queueDeadline = performance.now() + 5_000;
+    while (controller.snapshot().cells[1]!.status !== "running") {
+      assert.ok(performance.now() < queueDeadline, "evaluation did not enter the queue");
+      await new Promise(resolve => setTimeout(resolve, 5));
+    }
+    const stop = await dispatchHost(app, { type: "interrupt" });
+    assert.equal(stop.error, null);
+    const stopped = await queued;
     await writeFile(release, "release");
     await assert.rejects(access(effect), "cancelled source must not execute");
-    assert.equal(operation.status, "cancelled", "queued stop status=" + operation.status + " error=" + JSON.stringify(operation.error) + " cell=" + JSON.stringify(controller.snapshot().cells[1]));
+    assert.equal(stopped.error?.code, "interrupted", "queued stop error=" + JSON.stringify(stopped.error) + " cell=" + JSON.stringify(controller.snapshot().cells[1]));
     const recovery = await dispatchHost(app, {
       type: "run", scope: "cell", target: { cellId: "cell-3" },
       expectedDocumentRevision: controller.snapshot().documentRevision,
     });
-    assert.equal((await settledHost(app, recovery, AbortSignal.timeout(15_000))).status, "done");
+    assert.equal(recovery.error, null);
     assert.equal(controller.snapshot().runtime.executionReady, true);
   } finally {
     await writeFile(release, "release");
