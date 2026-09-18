@@ -1718,6 +1718,8 @@ export function createAlderServer(options: AlderServerOptions): AlderServer {
             const result = await options.controller.dispatch(command);
             requireCurrentLease();
             const bounded = await responseEnvelope(result, options.controller.snapshot(resolved.lease.clientId));
+            // The result acknowledges its cursor; deliver those source updates first.
+            await eventChain;
             requireCurrentLease();
             outbox.send({ type: "commandResult", requestId: command.requestId, result: bounded });
             if (command.type === "shutdown") scheduleShutdown(result);

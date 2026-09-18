@@ -643,6 +643,32 @@ test("WebSocket command pin survives idle sweep and still honors release", { tim
   }
 });
 
+test("command completion follows every preceding document event on the socket", { timeout: 5_000 }, async () => {
+  let listener: (event: HostEvent) => void = () => {};
+  const controller: ControllerAdapter = { ...makeController(), subscribe: callback => { listener = callback; return () => {}; },
+    dispatch: async command => {
+      for (let cursor = 1; cursor <= 8; cursor++) listener({ protocol: HOST_PROTOCOL, epoch: "server-test-epoch", cursor,
+        version: cursor, documentRevision: 1, timestamp: Date.now(), type: "transaction", payload: {} });
+      return { ...commandResult(command.requestId), cursor: 8, version: 8, documentRevision: 1 };
+    } };
+  const { server, origin, root } = await startFixture(undefined, {}, controller);
+  let socket: WebSocket | undefined;
+  try {
+    const session = await createCookieSession(origin);
+    socket = await openAuthenticatedSocket(origin, session);
+    const order: string[] = [];
+    socket.on("message", data => {
+      const value = decodeSocketMessage(data);
+      order.push(value.type === "event" ? "event:" + (value.event as HostEvent).cursor : String(value.type));
+    });
+    const complete = waitForSocketMessage(socket, value => value.type === "commandResult");
+    socket.send(JSON.stringify({ type: "command", requestId: "ordered", command: { type: "interrupt", requestId: "ordered",
+      clientId: session.clientId, sessionEpoch: session.epoch } }));
+    await complete;
+    assert.deepEqual(order, [...Array.from({ length: 8 }, (_, i) => "event:" + (i + 1)), "commandResult"]);
+  } finally { if (socket) await closeSocket(socket); await server.close(); await rm(root, { recursive: true, force: true }); }
+});
+
 test("an outstanding WebSocket run does not block Stop or a source edit", { timeout: 5_000 }, async () => {
   let finishRun!: () => void;
   let started!: () => void;
