@@ -1,14 +1,14 @@
 # ---
-# title: alder parity demo
+# title: Alder outputs and widgets
 # ---
 
 # %% [markdown]
-# # alder parity demo
+# # Alder outputs and widgets
 #
-# Exercises the marimo-parity feature surface: streaming progress,
+# Exercises Alder output and widget behavior: streaming progress,
 # appended outputs, base graphics capture, rich tables, database-ready R,
 # disk caching, composite widget forms, disabled and tested cells,
-# lazy outputs and media. Runnable as plain Rscript (ADR 0001).
+# lazy outputs and media. Requires Alder and testthat for its tested cell.
 
 # %%
 library(alder)

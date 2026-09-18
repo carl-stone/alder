@@ -232,6 +232,25 @@ test("ordinary R errors preserve condition metadata and leave the kernel usable"
       await closeEngine(engine, processScope, directory);
     }
   });
+
+test("stock Ark starts, repeats evaluations, and returns native plot output", integration,
+  async () => {
+    const directory = await mkdtemp(join(tmpdir(), "alder-engine-ark-plot-"));
+    const { engine, processScope } = await openEngine(directory);
+    try {
+      const epoch = (await engine.start()).kernel!.kernelEpoch;
+      for (const [index, source] of [
+        "plot(c(1, 2, 3), type = 'b')",
+        "plot(c(3, 2, 1), type = 'b')",
+      ].entries()) {
+        const result = await engine.evaluate(payload(epoch, `plot-${index}`, `plot-${index}`, source));
+        assert.equal(result.ok, true);
+        assert.ok(result.outputs?.some((output) => output.data.kind === "image"));
+      }
+    } finally {
+      await closeEngine(engine, processScope, directory);
+    }
+  });
 test("Alder log notifications preserve exact OutputLog lines", integration,
   async () => {
     const directory = await mkdtemp(join(tmpdir(), "alder-engine-log-lines-"));
@@ -376,6 +395,72 @@ test("R message sinks do not swallow Alder cell events", integration, async () =
       'sink(type = "message"); close(con); 7L'));
     assert.equal(restored.ok, true);
     assert.match(JSON.stringify(restored.outputs), /7/);
+  } finally {
+    await closeEngine(engine, processScope, directory);
+  }
+});
+
+test("automatic variable snapshots leave promises and user methods untouched", integration, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "alder-engine-snapshot-passive-"));
+  const { engine, processScope } = await openEngine(directory);
+  try {
+    const epoch = (await engine.start()).kernel!.kernelEpoch;
+    const setup = await engine.evaluate(payload(epoch, "snapshot-setup", "snapshot-setup", `
+      snapshot_forced <- FALSE
+      delayedAssign("snapshot_promise", { snapshot_forced <<- TRUE; 7L }, assign.env = .GlobalEnv)
+      snapshot_method_calls <- 0L
+      dim.snapshot_probe <- function(x) { snapshot_method_calls <<- snapshot_method_calls + 1L; NULL }
+      object.size.snapshot_probe <- function(x) { snapshot_method_calls <<- snapshot_method_calls + 1L; 1L }
+      snapshot_object <- structure(1L, class = "snapshot_probe")
+    `));
+    assert.equal(setup.ok, true);
+    const snapshot = await engine.request("env_snapshot", {});
+    assert.equal(snapshot.ok, true);
+    assert.ok(snapshot.variables?.some((variable) => variable.name === "snapshot_promise"));
+    assert.ok(snapshot.variables?.some((variable) => variable.name === "snapshot_object"));
+    const state = await engine.evaluate(payload(epoch, "snapshot-state", "snapshot-state",
+      'stopifnot(!snapshot_forced, identical(snapshot_method_calls, 0L)); "untouched"'));
+    assert.equal(state.ok, true);
+    assert.match(JSON.stringify(state.outputs), /untouched/);
+    const explicit = await engine.request("get_value", { name: "snapshot_promise" }, {
+      outputScope: {
+        sessionEpoch: "engine-v2-test-session", documentRevision: 1, kernelEpoch: epoch,
+        runId: null, cellId: null, revision: null,
+      },
+    });
+    assert.equal(explicit.ok, true);
+    const forced = await engine.evaluate(payload(epoch, "snapshot-forced", "snapshot-forced", "snapshot_forced"));
+    assert.match(JSON.stringify(forced.outputs), /TRUE/);
+  } finally {
+    await closeEngine(engine, processScope, directory);
+  }
+});
+
+test("nested output conversion preserves malformed child errors", integration, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "alder-engine-output-walk-"));
+  const { engine, processScope } = await openEngine(directory);
+  try {
+    const epoch = (await engine.start()).kernel!.kernelEpoch;
+    const result = await engine.evaluate(payload(epoch, "nested-output", "nested-output", `
+      structure(list(kind = "layout", layout = "hstack",
+        attrs = list(gap = 0, align = "start", justify = "start"),
+        children = list(
+          list(kind = "text", text = "kept", truncated = FALSE),
+          list(kind = "image", artifact = "../forged.png"))),
+        class = c("alder_output", "list"))
+    `));
+    assert.equal(result.ok, true);
+    assert.equal(result.outputs?.[0]?.data.kind, "layout");
+    assert.match(JSON.stringify(result.outputs), /kept/);
+    assert.match(JSON.stringify(result.outputs), /alder output artifact is unavailable/);
+    const deep = await engine.evaluate(payload(epoch, "deep-output", "deep-output", `
+      node <- list(kind = "text", text = "leaf", truncated = FALSE)
+      for (i in seq_len(40L)) node <- list(kind = "layout", layout = "callout",
+        attrs = list(variant = "info"), children = list(node))
+      structure(node, class = c("alder_output", "list"))
+    `));
+    assert.equal(deep.ok, true);
+    assert.match(JSON.stringify(deep.outputs), /alder output nesting limit exceeded/);
   } finally {
     await closeEngine(engine, processScope, directory);
   }

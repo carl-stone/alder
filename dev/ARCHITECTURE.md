@@ -182,7 +182,7 @@ with observable completion criteria and a runnable Mac build.
 | Execution foundation | Ark execution, outputs, interruption and recovery in the project environment |
 | Reactive notebook | Correct dependencies, stale states, widgets and useful public R API behavior |
 | Shared access | Desktop and agents coordinate correctly through the same owner |
-| Optional services and distribution | Assistance, inspection, formatting, packages, publishing and Mac packaging work without compromising the core |
+| Optional services and Mac delivery | Assistance, inspection, formatting, packages, publishing and Mac packaging work without compromising the core |
 
 Each slice ends with a runnable native Mac build and checks of the affected user
 journey and failure behavior. Preserve a recoverable checkpoint of existing

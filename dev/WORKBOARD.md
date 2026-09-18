@@ -11,7 +11,7 @@ copies in other worktrees are snapshots.
 
 **Stock Ark and R adapter — Implementing.**
 
-**Owner:** primary implementer, starting from accepted settings checkpoint `83fc0c7`.
+**Owner:** primary implementer, correcting checkpoint `fdfa3d0` after lead review.
 
 Restore R execution in the Mac app using unmodified upstream Ark. Replace the
 patched MIME publisher and its build/staging machinery. Right-size the adapter
@@ -26,9 +26,15 @@ packages. Preserve responsive edit/save/recovery while R is absent or unhealthy.
 Output/widget transport needs no Ark patch or private hook. The replaced runtime
 policy/warm-up/validation paths and patched-Ark tooling are removed.
 
-**Next action:** implement a runnable execution foundation with small independent
-R examples and expected results, then return source/bundle changes, focused R
-and host checks, native run/interrupt/restart evidence and a Mac build for review.
+**Next action:** remove the remaining `ark.protected_options` integration; make
+automatic variable refresh inspect names without forcing promises or calling user
+methods, and keep an inspection failure from failing a healthy kernel. Collapse
+the redundant recursive validation in the output adapter into one boundary pass.
+Run affected checks and native execution, then return a corrected checkpoint.
+
+**Lead documentation sync:** wording updates to the architecture and output
+example are copied into the implementation checkout at this checkpoint. The
+development README will be reconciled when execution is accepted.
 
 **Blockers / decisions needed from Carl:** none reported.
 

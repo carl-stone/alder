@@ -808,81 +808,79 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
       (is.null(extensions) || tolower(tools::file_ext(name)) %in% extensions) &&
       file.exists(file.path(artifact_dir, name))
   }
-  validate_rendered_output <- function(value) {
-    if (!is.list(value) || !is.character(value$kind) ||
-        length(value$kind) != 1L) {
-      return(list(kind = "error", message = "invalid alder output record"))
-    }
-    # Keep inline HTML raw until Engine OutputStore ingress can sanitize and
-    # materialize it; rendered artifact outputs still require ownership checks.
-    kind <- value$kind
-    if (kind %in% c("image", "media") ||
-        (kind == "html" && !is.null(value$artifact))) {
-      extensions <- if (kind == "image") "png" else if (kind == "html") "html" else NULL
-      if (!artifact_name_ok(value$artifact, extensions)) {
-        return(list(kind = "error", message = "alder output artifact is unavailable"))
-      }
-    } else if (kind == "html" &&
-               (!is.character(value$html) || length(value$html) != 1L ||
-                is.na(value$html))) {
-      return(list(kind = "error", message = "alder HTML output is invalid"))
-    }
-    if (identical(kind, "layout")) {
-      value$children <- lapply(value$children %||% list(), validate_rendered_output)
-    } else if (identical(kind, "lazy") && !is.null(value$child)) {
-      value$child <- validate_rendered_output(value$child)
-    }
-    value
-  }
-
   # Alder's R output helpers intentionally keep widget construction lightweight.
   # Before any output crosses the Ark boundary, recursively convert those raw
   # widget lists through the same wire-spec builder used for top-level values.
+  # Conversion and validation share one bounded traversal.
   canonicalize_rendered_output <- function(value, cell_id = CURRENT_CELL,
                                             name = "", path = character()) {
-    if (!is.list(value) || !is.character(value$kind) ||
-        length(value$kind) != 1L) {
-      return(list(kind = "error", message = "invalid alder output record"))
+    remaining <- 4096L
+    walk <- function(value, name, path, depth) {
+      remaining <<- remaining - 1L
+      if (remaining < 0L || depth > 12L) {
+        return(list(kind = "error", message = "alder output nesting limit exceeded"))
+      }
+      if (!is.list(value) || !is.character(value$kind) ||
+          length(value$kind) != 1L || is.na(value$kind) || !nzchar(value$kind)) {
+        return(list(kind = "error", message = "invalid alder output record"))
+      }
+      kind <- value$kind
+      if (identical(kind, "widget")) {
+        spec <- value$spec
+        if (!is.list(spec) || !is.character(spec$kind) ||
+            length(spec$kind) != 1L || is.na(spec$kind) || !nzchar(spec$kind)) {
+          return(list(kind = "error", message = "invalid alder widget specification"))
+        }
+        output_name <- value$name %||% name
+        output_path <- value$path %||% path
+        if (!is.character(output_name) || length(output_name) != 1L ||
+            is.na(output_name) || !nzchar(output_name) ||
+            !is.character(output_path) || anyNA(output_path) ||
+            any(!nzchar(output_path))) {
+          return(list(kind = "error", message = "invalid alder widget identity"))
+        }
+        wire <- tryCatch(
+          widget_wire_spec(spec, cell_id, output_name, output_path),
+          error = function(error) NULL)
+        if (is.null(wire)) {
+          return(list(kind = "error", message = "invalid alder widget specification"))
+        }
+        value$name <- output_name
+        value$owner <- value$owner %||% cell_id
+        value$path <- output_path
+        value$commit_token <- value$commit_token %||% NULL
+        value$operation <- value$operation %||% NULL
+        value$spec <- wire
+      } else if (identical(kind, "layout")) {
+        children <- value$children %||% list()
+        if (!is.list(children)) {
+          return(list(kind = "error", message = "invalid alder layout children"))
+        }
+        if (length(children) > remaining) {
+          return(list(kind = "error", message = "alder output nesting limit exceeded"))
+        }
+        value$children <- lapply(children, walk, name = "", path = path,
+                                  depth = depth + 1L)
+      } else if (identical(kind, "lazy") && !is.null(value$child)) {
+        value$child <- walk(value$child, name = name, path = path,
+                            depth = depth + 1L)
+      }
+      # Keep inline HTML raw until Engine OutputStore ingress can sanitize and
+      # materialize it; rendered artifacts still need an existing local file.
+      if (kind %in% c("image", "media") ||
+          (kind == "html" && !is.null(value$artifact))) {
+        extensions <- if (kind == "image") "png" else if (kind == "html") "html" else NULL
+        if (!artifact_name_ok(value$artifact, extensions)) {
+          return(list(kind = "error", message = "alder output artifact is unavailable"))
+        }
+      } else if (kind == "html" &&
+                 (!is.character(value$html) || length(value$html) != 1L ||
+                  is.na(value$html))) {
+        return(list(kind = "error", message = "alder HTML output is invalid"))
+      }
+      value
     }
-    kind <- value$kind
-    if (identical(kind, "widget")) {
-      spec <- value$spec
-      if (!is.list(spec) || !is.character(spec$kind) ||
-          length(spec$kind) != 1L || is.na(spec$kind) || !nzchar(spec$kind)) {
-        return(list(kind = "error", message = "invalid alder widget specification"))
-      }
-      output_name <- value$name %||% name
-      output_path <- value$path %||% path
-      if (!is.character(output_name) || length(output_name) != 1L ||
-          is.na(output_name) || !nzchar(output_name) ||
-          !is.character(output_path) || anyNA(output_path) ||
-          any(!nzchar(output_path))) {
-        return(list(kind = "error", message = "invalid alder widget identity"))
-      }
-      wire <- tryCatch(
-        widget_wire_spec(spec, cell_id, output_name, output_path),
-        error = function(error) NULL)
-      if (is.null(wire)) {
-        return(list(kind = "error", message = "invalid alder widget specification"))
-      }
-      value$name <- output_name
-      value$owner <- value$owner %||% cell_id
-      value$path <- output_path
-      value$commit_token <- value$commit_token %||% NULL
-      value$operation <- value$operation %||% NULL
-      value$spec <- wire
-    } else if (identical(kind, "layout")) {
-      children <- value$children %||% list()
-      if (!is.list(children)) {
-        return(list(kind = "error", message = "invalid alder layout children"))
-      }
-      value$children <- lapply(children, canonicalize_rendered_output,
-                                cell_id = cell_id, name = "", path = path)
-    } else if (identical(kind, "lazy") && !is.null(value$child)) {
-      value$child <- canonicalize_rendered_output(
-        value$child, cell_id = cell_id, name = name, path = path)
-    }
-    validate_rendered_output(value)
+    walk(value, name, path, 0L)
   }
 
   open_png_device <- function(f) {
@@ -1490,52 +1488,17 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
     nms <- nms[!startsWith(nms, ".alder_local_") &
                  nms != ".alder_ark_runtime"]
     if (length(nms) > 2000L) nms <- nms[seq_len(2000L)]
-    value_summary <- function(value) {
-      dims <- dim(value)
-      if (!is.null(dims)) {
-        return(bounded_chr(paste0("<", typeof(value), " ",
-          paste(dims, collapse = " x "), ">"), 160L)[[1L]])
-      }
-      if (is.function(value)) return("<function>")
-      if (is.environment(value)) return("<environment>")
-      if (!is.atomic(value)) {
-        return(bounded_chr(paste0("<", typeof(value), "[", length(value), "]>"),
-                           160L)[[1L]])
-      }
-      raw_value <- unclass(value)
-      shown <- utils::head(raw_value, 3L)
-      parts <- if (is.character(shown)) {
-        ifelse(is.na(shown), "NA", encodeString(shown, quote = '"'))
-      } else {
-        as.character(shown)
-      }
-      text <- paste(parts, collapse = ", ")
-      if (length(raw_value) > length(shown)) text <- paste0(text, ", …")
-      bounded_chr(text, 160L)[[1L]]
-    }
     variables <- lapply(nms, function(name) {
-      # Reading an active binding can evaluate arbitrary user code. Variable
-      # refresh is auxiliary notebook traffic, so describe the binding without
-      # invoking its getter or delaying the execution queue.
-      if (bindingIsActive(name, NB_ENV)) {
-        return(list(
-          name = name,
-          class = "active_binding",
-          dim = NULL,
-          size = 0,
-          widget = FALSE,
-          value_summary = "<active binding>"
-        ))
-      }
-      value <- get(name, envir = NB_ENV, inherits = FALSE)
-      classes <- class(value)
+      active <- bindingIsActive(name, NB_ENV)
+      # Even a regular binding can be a promise. Leave inspection to the
+      # explicit get_value request so refresh never runs user code or methods.
       list(
         name = name,
-        class = if (length(classes)) classes[[1L]] else typeof(value),
-        dim = dim(value),
-        size = as.numeric(utils::object.size(value)),
-        widget = UI_ENV$is_widget(value),
-        value_summary = value_summary(value)
+        class = if (active) "active_binding" else "binding",
+        dim = NULL,
+        size = 0,
+        widget = FALSE,
+        value_summary = if (active) "<active binding>" else "<not inspected>"
       )
     })
     list(ok = TRUE, variables = variables)
