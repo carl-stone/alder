@@ -12,14 +12,14 @@ import { createMcpHttpHandler } from "./mcp.js";
 import { appConfig, assertConfigPatchEffective, projectConfigPath, readConfigFile, resolveConfig, setAppConfig, validateConfigLayer, type ConfigResolution } from "./configuration.js";
 import { readLayout, validateLayout } from "./layout.js";
 import { DocumentStore, FileConflict, type PreparedReload, type PreparedSaveAs, type PreparedSidecar } from "./persistence.js";
-import { RecoveryWriter, recoveryObservationMatches, type DiskObservation as RecoveryDiskObservation, type RecoveryBaseline, type RecoveryBytePiece, type RecoveryCellState, type RecoverySidecarObservations, type RecoverySourceDelta } from "./recovery.js";
+import { RecoveryWriter, recoveryObservationMatches, type DiskObservation as RecoveryDiskObservation, type RecoveryBaseline, type RecoveryCellState, type RecoverySidecarObservations } from "./recovery.js";
 import { createPackageManager, readPackageDeclarations, type PackageManager } from "./packages.js";
 import { createPublishingService, type PublishingService } from "./publishing.js";
 import { createFormattingService, type FormattingService } from "./formatting.js";
 import type { JobCallbacks } from "./jobs.js";
 import { renderHelp } from "./markdown.js";
 import { LspClient, trustedRLanguageServerEnvironment, validatedRLanguageServerOptions } from "./lsp.js";
-import { parseNotebook, restoreNotebookCellIdentity, serializeNotebook, serializeNotebookWithParts, setMetadata, type NotebookDocument, type SerializedNotebook } from "./notebook.js";
+import { parseNotebook, restoreNotebookCellIdentity, serializeNotebook, serializeNotebookWithParts, setMetadata, type NotebookDocument } from "./notebook.js";
 import type { ArtifactHandle, EngineHandshake, HostSnapshot, Layout, REnvironment, RecoveryBranch as ProtocolRecoveryBranch, RecoveryState as ProtocolRecoveryState } from "./protocol.js";
 import type { StaticOutputScope } from "./outputs.js";
 import { UploadStore } from "./uploads.js";
@@ -65,21 +65,6 @@ function sourceBytesSha256(bytes: Uint8Array): string {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
-function sourcePartHash(bytes: Readonly<Uint8Array>): string {
-  let first = 2_166_136_261;
-  let second = 2_166_136_261;
-  for (const byte of bytes) {
-    first = Math.imul(first ^ byte, 16_777_619);
-    second = Math.imul(second ^ (byte + 31), 2_246_822_519);
-  }
-  return bytes.byteLength + ":" + (first >>> 0) + ":" + (second >>> 0);
-}
-
-function sameSourceBytes(left: Readonly<Uint8Array>, right: Readonly<Uint8Array>): boolean {
-  if (left.byteLength !== right.byteLength) return false;
-  for (let index = 0; index < left.byteLength; index += 1) if (left[index] !== right[index]) return false;
-  return true;
-}
 function semanticValue(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(semanticValue);
   if (isRecord(value)) return Object.fromEntries(Object.keys(value).sort().map(key => [key, semanticValue(value[key])]));
@@ -88,56 +73,6 @@ function semanticValue(value: unknown): unknown {
 
 function sameSemanticValue(left: unknown, right: unknown): boolean {
   return JSON.stringify(semanticValue(left)) === JSON.stringify(semanticValue(right));
-}
-interface RecoveryPartCandidate {
-  readonly offset: number;
-  readonly bytes: Readonly<Uint8Array>;
-  used: boolean;
-}
-
-function recoveryBytePieces(previous: SerializedNotebook, next: SerializedNotebook): RecoveryBytePiece[] {
-  const candidates = new Map<string, RecoveryPartCandidate[]>();
-  let previousOffset = 0;
-  for (const part of previous.parts) {
-    if (part.bytes.byteLength > 0) {
-      const key = sourcePartHash(part.bytes);
-      const bucket = candidates.get(key);
-      const candidate = { offset: previousOffset, bytes: part.bytes, used: false };
-      if (bucket === undefined) candidates.set(key, [candidate]);
-      else bucket.push(candidate);
-    }
-    previousOffset += part.bytes.byteLength;
-  }
-  const pieces: RecoveryBytePiece[] = [];
-  let literalStart: number | null = null;
-  const appendCopy = (offset: number, length: number): void => {
-    if (length === 0) return;
-    const last = pieces.at(-1);
-    if (last?.kind === "copy" && last.offset + last.length === offset) {
-      pieces[pieces.length - 1] = { kind: "copy", offset: last.offset, length: last.length + length };
-    } else pieces.push({ kind: "copy", offset, length });
-  };
-  const flushLiteral = (end: number): void => {
-    if (literalStart === null || end <= literalStart) return;
-    pieces.push({ kind: "literal", data: Buffer.from(next.bytes.subarray(literalStart, end)).toString("base64") });
-    literalStart = null;
-  };
-  let nextOffset = 0;
-  for (const part of next.parts) {
-    const length = part.bytes.byteLength;
-    if (length > 0) {
-      const bucket = candidates.get(sourcePartHash(part.bytes));
-      const candidate = bucket?.find(item => !item.used && sameSourceBytes(item.bytes, part.bytes));
-      if (candidate !== undefined) {
-        flushLiteral(nextOffset);
-        candidate.used = true;
-        appendCopy(candidate.offset, length);
-      } else if (literalStart === null) literalStart = nextOffset;
-    }
-    nextOffset += length;
-  }
-  flushLiteral(nextOffset);
-  return pieces;
 }
 const optionsSchema = z.object({
   path: z.string().min(1).nullable().default(null),
@@ -154,6 +89,7 @@ const optionsSchema = z.object({
   tokenFile: z.string().optional(),
   externalBearerValidated: z.boolean().default(false),
   rscript: z.string().optional(),
+  recoveryDirectory: z.string().optional(),
   resources: z.custom<ApplicationResources>(),
   internalHost: z.boolean().default(false),
   session: z.object({
@@ -289,8 +225,10 @@ async function startNotebookHost(
         untitledRecoveryDescriptor = await registerUntitledRecoveryDescriptor(untitledRecoveryId, notebookDirectory, undefined, privatePathOptions);
       }
     } catch (error) {
-      await ownership.close().catch(() => {});
-      throw error;
+      if (requestedRecoveryId !== undefined) {
+        await ownership.close().catch(() => {});
+        throw error;
+      }
     }
   }
 
@@ -320,6 +258,7 @@ async function startNotebookHost(
   let runtimeError: unknown = null;
   let runtimeBootstrapGeneration = 0;
   let runtimeBootstrap: Promise<void> | undefined;
+  let startRuntime: (restart?: boolean) => void = () => {};
   let recoverySidecarError: { kind: "config" | "layout" | "packages"; error: unknown } | null = null;
   let engineIdentity: EngineHandshake | null = null;
   let formatter: FormattingService | undefined;
@@ -330,7 +269,6 @@ async function startNotebookHost(
   let recoveryPending = false;
   let recoveryConflict = false;
   let recoveryDocumentRevision = 0;
-  let recoverySerialized: SerializedNotebook | undefined;
   let packageDeclarationIntent: string[] = [];
   let projectConfigLayer: Record<string, unknown> = {};
   let projectLayoutIntent: Layout | null = null;
@@ -369,7 +307,6 @@ async function startNotebookHost(
   let leaseCount = 0;
   let everConnected = false;
   let browserActivity = 0;
-  let idleCommandSequence = 1;
   let idleTimer: NodeJS.Timeout | undefined;
   let cacheDirectory = "";
   let work = "";
@@ -444,7 +381,7 @@ async function startNotebookHost(
     clearTimeout(lspSyncTimer);
     clearTimeout(sourceWatchTimer);
     rejectRuntimeReady(new Error("Alder host closed before runtime startup completed"));
-    await runtimeBootstrap?.catch(() => {});
+    void runtimeBootstrap?.catch(() => {});
     unsubscribe?.();
     await sourceWatchRunning?.catch(() => {});
     const errors: unknown[] = [];
@@ -466,16 +403,9 @@ async function startNotebookHost(
     if (errors.length > 0) throw new AggregateError(errors, "Alder shutdown failed");
   })().finally(resolveClosed);
   const discardAndClose = async (): Promise<void> => {
-    if (recoveryPending) {
-      if (recovery === undefined || recoveryFingerprint === undefined) {
-        throw new Error("active recovery cannot be discarded without an exact fingerprint");
-      }
-      await recovery.flush();
-      const cleared = await recovery.clearIfMatch({
-        documentRevision: recoveryDocumentRevision,
-        fingerprint: recoveryFingerprint,
-      });
-      if (!cleared) throw new Error("active recovery changed before discard completed");
+    if (recovery !== undefined) {
+      const state = await recovery.load();
+      if (state.fingerprint !== null) await recovery.clearIfMatch({ documentRevision: state.documentRevision, fingerprint: state.fingerprint });
       recoveryPending = false;
       recoveryFingerprint = undefined;
     }
@@ -489,7 +419,6 @@ async function startNotebookHost(
     work = await realpath(await mkdtemp(join(tmpdir(), "alder-host-")));
     uploads = new UploadStore(join(work, "uploads"));
     cacheDirectory = unsaved ? join(work, "cache") : join(notebookDirectory, ".alder", "cache");
-    await ensurePrivateDirectory(cacheDirectory, { processSupervisorExecutable: options.resources.processSupervisorExecutable });
     const opened = await DocumentStore.open(storagePath);
     store = opened.store;
     let notebook = opened.notebook;
@@ -514,7 +443,6 @@ async function startNotebookHost(
 
     const initialSidecarObservations = sidecarObservations(store);
     const initialSerialized = serializeNotebookWithParts(notebook);
-    recoverySerialized = initialSerialized;
     const baseline: RecoveryBaseline = {
       schemaVersion: 1,
       documentRevision: 0,
@@ -528,9 +456,9 @@ async function startNotebookHost(
       notebookDiskObservation: sourceObservation(store),
       sidecarObservations: initialSidecarObservations,
     };
-    recovery = await RecoveryWriter.open({ rootDir: envPaths("alder", { suffix: "" }).data, key: ownership.sessionKey, baseline, processSupervisorExecutable: options.resources.processSupervisorExecutable });
+    recovery = await RecoveryWriter.open({ rootDir: options.recoveryDirectory ?? envPaths("alder", { suffix: "" }).data, key: ownership.sessionKey, baseline, processSupervisorExecutable: options.resources.processSupervisorExecutable });
     const loadedRecoveryState = await recovery.load();
-    recoveryPending = loadedRecoveryState.documentRevision > 0;
+    recoveryPending = loadedRecoveryState.pending;
     recoveryFingerprint = recoveryPending ? loadedRecoveryState.fingerprint ?? undefined : undefined;
     const materialized = await recovery.materializedBaseline();
     const currentObservation = sourceObservation(store);
@@ -538,17 +466,16 @@ async function startNotebookHost(
     recoveryDocumentRevision = materialized.documentRevision;
     const observationsMatch = recoveryObservationMatches(materialized.notebookDiskObservation, currentObservation)
       && recoverySidecarObservationsMatch(materialized.sidecarObservations, currentSidecarObservations);
-    if (observationsMatch && materialized.documentRevision > 0) {
+    if (observationsMatch && recoveryPending) {
       const bytes = decodePhysicalBytes(materialized.physicalBytes);
       if (bytes === null) throw new Error("recovery baseline has no physical source bytes");
       notebook = restoreNotebookCellIdentity(parseNotebook(bytes, notebook.path ?? (isUntitled ? null : store.path)), materialized.cells);
-      recoverySerialized = serializeNotebookWithParts(notebook);
       if (isRecord(materialized.config)) projectConfigLayer = materialized.config as Record<string, unknown>;
       if (materialized.layout !== undefined) projectLayoutIntent = materialized.layout === null ? null : validateLayout(materialized.layout);
       if (Array.isArray(materialized.packageDeclarationIntent) && materialized.packageDeclarationIntent.every(value => typeof value === "string")) {
         packageDeclarationIntent = [...materialized.packageDeclarationIntent] as string[];
       }
-    } else if (materialized.documentRevision > 0) {
+    } else if (recoveryPending) {
       recoveryConflict = true;
     }
     configResolution = await resolveConfig({ path: isUntitled ? null : store.path, metadata: notebook.metadata, project: projectConfigLayer, launch: launchConfig });
@@ -560,7 +487,7 @@ async function startNotebookHost(
     pendingSidecars.config = recoveryPending && observationsMatch && !sameSemanticValue(projectConfigLayer, actualProjectConfig);
     pendingSidecars.layout = recoveryPending && observationsMatch && !sameSemanticValue(projectLayoutIntent, actualProjectLayout);
     pendingSidecars.packages = recoveryPending && observationsMatch && !sameSemanticValue(packageDeclarationIntent, actualProjectPackages);
-    if (recoveryPending && materialized.documentRevision > 0) {
+    if (recoveryPending) {
       const baselineFingerprint = recoveryFingerprint ?? "active-recovery";
       publishedRecoveryProjection = {
         baseline: materialized,
@@ -568,10 +495,18 @@ async function startNotebookHost(
         state: recoveryConflict || !observationsMatch ? "conflict" : "dirty",
       };
     }
+    if (recoveryConflict) {
+      await recovery.forkBranch({ baseline: materialized });
+      recovery.update({ ...baseline, documentRevision: recoveryDocumentRevision });
+      await recovery.clearIfMatch({ documentRevision: recoveryDocumentRevision, fingerprint: (await recovery.load()).fingerprint! });
+      recoveryPending = false;
+      recoveryFingerprint = undefined;
+      publishedRecoveryProjection = null;
+    }
     const childEnvironment = (): Record<string, string> => runtimeEnvironment === null ? {} : rEnvironmentVariables(runtimeEnvironment, options.resources);
     engine = new Engine({ resources: options.resources, processScope, environment: runtimeEnvironment ?? undefined, notebookDirectory, artifactDirectory: work, cacheDirectory });
     packageManager = createPackageManager({ resources: options.resources, environment: runtimeEnvironment, processScope, projectDirectory: notebookDirectory, callbacks: packageCallbacks });
-    if (materialized.documentRevision > 0 && observationsMatch && packageDeclarationIntent.length > 0) {
+    if (recoveryPending && observationsMatch && packageDeclarationIntent.length > 0) {
       try {
         const current = await packageManager.declarations();
         if (current.packages.join("\\0") !== packageDeclarationIntent.join("\\0")) {
@@ -581,7 +516,7 @@ async function startNotebookHost(
           const repairedSidecars = sidecarObservations(store);
           const repairedState = await recovery.checkpoint({ notebookDiskObservation: sourceObservation(store), sidecarObservations: repairedSidecars });
           recoveryDocumentRevision = repairedState.documentRevision;
-          recoveryPending = repairedState.documentRevision > 0;
+          recoveryPending = repairedState.pending;
           recoveryFingerprint = recoveryPending ? repairedState.fingerprint ?? undefined : undefined;
           if (publishedRecoveryProjection !== null) {
             publishedRecoveryProjection = {
@@ -605,7 +540,7 @@ async function startNotebookHost(
       if (recovery === undefined) return;
       const state = await recovery.checkpoint({ notebookDiskObservation: recoveryObservation(disk), sidecarObservations: sidecars });
       recoveryDocumentRevision = state.documentRevision;
-      recoveryPending = recoveryPending || state.documentRevision > 0;
+      recoveryPending = state.pending;
       recoveryFingerprint = recoveryPending ? state.fingerprint ?? recoveryFingerprint : undefined;
       const checkpointDisk = recoveryObservation(disk);
       const checkpointSidecars = {
@@ -638,15 +573,12 @@ async function startNotebookHost(
     }): Promise<string | undefined> => {
       if (recovery === undefined) return undefined;
       const nextPackageDeclarationIntent = input.packageDeclarationIntent ?? packageDeclarationIntent;
-      const previous = recoverySerialized ?? serializeNotebookWithParts(notebook);
       const next = serializeNotebookWithParts(input.document);
-      const delta: RecoverySourceDelta = {
-        kind: "source",
-        baseLength: previous.bytes.byteLength,
-        baseSha256: sourceBytesSha256(previous.bytes),
-        resultLength: next.bytes.byteLength,
-        resultSha256: sourceBytesSha256(next.bytes),
-        pieces: recoveryBytePieces(previous, next),
+      const fingerprint = createHash("sha256").update(input.fingerprint, "utf8").digest("hex");
+      const baseline: RecoveryBaseline = {
+        schemaVersion: 1,
+        physicalBytes: next.bytes,
+        documentRevision: input.fromRevision + 1,
         cells: recoveryCellStates(input.document),
         path: input.document.path ?? (isUntitled ? null : store!.path),
         project: notebookDirectory,
@@ -660,34 +592,12 @@ async function startNotebookHost(
           packages: recoveryObservation(input.sidecars.packages),
         },
       };
-      const fingerprint = createHash("sha256").update(input.fingerprint, "utf8").digest("hex");
-      const record = await recovery.append({ schemaVersion: 1, fromRevision: input.fromRevision, toRevision: input.fromRevision + 1, delta, fingerprint });
+      recovery.update(baseline, fingerprint);
       notebook = input.document;
-      recoverySerialized = next;
       recoveryFingerprint = fingerprint;
-      recoveryDocumentRevision = record.toRevision;
+      recoveryDocumentRevision = baseline.documentRevision;
       recoveryPending = true;
-      pendingRecoveryProjection = {
-        baseline: {
-          schemaVersion: 1,
-          physicalBytes: Buffer.from(next.bytes).toString('base64'),
-          documentRevision: record.toRevision,
-          cells: recoveryCellStates(input.document),
-          path: input.document.path ?? (isUntitled ? null : store!.path),
-          project: notebookDirectory,
-          config: input.config as never,
-          layout: input.layout as never,
-          packageDeclarationIntent: nextPackageDeclarationIntent as never,
-          notebookDiskObservation: recoveryObservation(input.disk),
-          sidecarObservations: {
-            config: recoveryObservation(input.sidecars.config),
-            layout: recoveryObservation(input.sidecars.layout),
-            packages: recoveryObservation(input.sidecars.packages),
-          },
-        },
-        fingerprint,
-        state: 'dirty',
-      };
+      pendingRecoveryProjection = { baseline, fingerprint, state: "dirty" };
       return fingerprint;
     };
     const applyPublishedProjection = (binder: () => void, projection: PublishedRecoveryProjection | null | undefined = undefined): void => {
@@ -827,7 +737,6 @@ async function startNotebookHost(
       }
       if (request.kind === "save") {
         if (isUntitled) throw Object.assign(new Error("notebook has no path"), { code: "notebook_has_no_path" });
-        await recovery?.flush();
         try {
           const result = await store!.save(context.document);
           const disk = sourceProtocolObservation(store!);
@@ -844,7 +753,6 @@ async function startNotebookHost(
               }
             } catch (error) { clearError = error; }
           }
-          recoverySerialized = serializeNotebookWithParts(context.document);
           let checkpointError: unknown = null;
           if (!cleared) {
             try { await checkpointRecovery(disk, sidecars); }
@@ -965,7 +873,6 @@ async function startNotebookHost(
         let savePublication: Awaited<ReturnType<PreparedSaveAs["publish"]>> | undefined;
         let destinationStore: DocumentStore | undefined;
         let preparedRecovery: Awaited<ReturnType<RecoveryWriter["prepareRebind"]>> | undefined;
-        let branch: Awaited<ReturnType<RecoveryWriter["forkBranch"]>> | undefined;
         let nextManager: PackageManager | undefined;
         try {
           preparedOwner = await ownership.prepareRekey(request.path);
@@ -974,24 +881,13 @@ async function startNotebookHost(
           const destination = preparedSave.destination;
           const destinationDirectory = dirname(destination);
           const destinationCache = join(destinationDirectory, ".alder", "cache");
-          await ensurePrivateDirectory(destinationCache, { processSupervisorExecutable: options.resources.processSupervisorExecutable });
           const destinationProjectConfig = await readConfigFile(projectConfigPath(destination));
           const destinationConfigResolution = await resolveConfig({ path: destination, metadata: context.document.metadata, project: destinationProjectConfig, launch: launchConfig });
           let destinationLayout = await readLayout(destination);
           let destinationPackages: string[] = [];
           try { destinationPackages = [...(await readPackageDeclarations(destinationDirectory)).packages]; } catch { destinationPackages = []; }
-          let destinationRuntime: REnvironment | null = null;
-          let destinationRuntimeError: unknown = null;
-          try {
-            destinationRuntime = await resolveREnvironment({
-              rscript: selectedRscript,
-              projectDirectory: destinationDirectory,
-              resources: options.resources,
-              sandbox: options.sandbox,
-              resolveProjectLibrary: base => resolveProjectLibrary(base, destinationDirectory),
-            });
-          }
-          catch (error) { destinationRuntimeError = error; }
+          const runtimeChanged = destinationDirectory !== notebookDirectory || destinationCache !== cacheDirectory;
+          const destinationRuntime = runtimeChanged ? null : runtimeEnvironment;
           savePublication = await preparedSave.publish();
           destinationStore = savePublication.store;
           if (destinationLayout === null && context.layout !== null) {
@@ -1024,26 +920,15 @@ async function startNotebookHost(
               packages: recoveryObservation(destinationSidecars.packages),
             },
           };
-          if (context.dirty || recoveryPending || pendingSidecars.config || pendingSidecars.layout || pendingSidecars.packages) { await oldRecovery.flush(); branch = await oldRecovery.forkBranch(); }
-          preparedRecovery = await oldRecovery.prepareRebind({ rootDir: envPaths("alder", { suffix: "" }).data, key: preparedOwner.sessionKey, baseline: destinationBaseline });
+          preparedRecovery = await oldRecovery.prepareRebind({ rootDir: options.recoveryDirectory ?? envPaths("alder", { suffix: "" }).data, key: preparedOwner.sessionKey, baseline: destinationBaseline });
           const destinationRecoveryFingerprint = preparedRecovery.state.fingerprint ?? sourceBytesSha256(destinationSerialized.bytes);
           await preparedRecovery.publish();
-          if (branch !== undefined) {
-            const dropped = await preparedRecovery.writer.dropBranch(branch.id, {
-              documentRevision: branch.documentRevision,
-              fingerprint: branch.fingerprint,
-            });
-            if (!dropped) throw new Error("Save As recovery branch changed before publication");
-          }
           const recoveryCleared = await preparedRecovery.writer.clearIfMatch({
             documentRevision: destinationRevision,
             fingerprint: destinationRecoveryFingerprint,
           });
           if (!recoveryCleared) throw new Error("Save As recovery state changed before publication");
           const destinationRecoveryProjection: PublishedRecoveryProjection | null = null;
-          const pathChanged = destinationDirectory !== notebookDirectory;
-          const environmentChanged = runtimeEnvironment?.identity !== destinationRuntime?.identity;
-          const runtimeChanged = pathChanged || environmentChanged;
           const publicationBinder = context.preparePublication({
             document: { ...context.document, path: destination },
             path: destination,
@@ -1057,11 +942,6 @@ async function startNotebookHost(
             rEnvironment: destinationRuntime,
           });
           await preparedOwner.commit(async () => {
-            if (runtimeChanged) {
-              try {
-                await controller!.restartRuntimeContext({ ...(destinationRuntime === null ? {} : { environment: destinationRuntime }), notebookDirectory: destinationDirectory, cacheDirectory: destinationCache }, request.operationId ?? randomUUID());
-              } catch { }
-            }
             const rollbackControllerPublication = (): void => {
               const binder = context.preparePublication({
                 document: context.document,
@@ -1081,7 +961,6 @@ async function startNotebookHost(
               try {
                 // Apply the controller publication before adopting any destination state.
                 applyPublishedProjection(publicationBinder, destinationRecoveryProjection);
-                ++runtimeBootstrapGeneration;
                 preparedSave!.adopt();
                 preparedRecovery!.adopt();
                 store = destinationStore;
@@ -1099,8 +978,7 @@ async function startNotebookHost(
                 pendingSidecars.packages = false;
                 isUntitled = false;
                 runtimeEnvironment = destinationRuntime;
-                runtimeError = destinationRuntimeError;
-                recoverySerialized = destinationSerialized;
+                runtimeError = null;
                 recoveryDocumentRevision = destinationRevision;
                 recoveryPending = false;
                 recoveryFingerprint = undefined;
@@ -1114,7 +992,8 @@ async function startNotebookHost(
                 if (runtimeError !== null) controller!.recordRuntimeAvailabilityError(asRuntimeHostError(runtimeError)!);
                 if (untitledRecoveryDescriptor !== undefined) void retireUntitledRecoveryDescriptor(untitledRecoveryDescriptor, undefined, privatePathOptions).catch(error => controller?.recordActionError(errorMessage(error), "recovery_checkpoint_failed"));
                 void oldStore.close().catch(() => {});
-                void oldRecovery.close().catch(() => {});
+                void oldRecovery.load().then(state => oldRecovery.clearIfMatch({ documentRevision: state.documentRevision, fingerprint: state.fingerprint! })).then(() => oldRecovery.close()).catch(() => {});
+                if (runtimeChanged) startRuntime(true);
                 void oldManager?.close().catch(() => {});
               } catch (error) {
                 try {
@@ -1135,7 +1014,6 @@ async function startNotebookHost(
           await preparedOwner?.abort().catch(() => {});
           await nextManager?.close().catch(() => {});
           if (destinationStore !== undefined && destinationStore !== store) await destinationStore.close().catch(() => {});
-          if (branch !== undefined) await oldRecovery.dropBranch(branch.id, { documentRevision: branch.documentRevision, fingerprint: branch.fingerprint }).catch(() => {});
           throw error;
         }
       }
@@ -1205,7 +1083,6 @@ async function startNotebookHost(
           await observed.store.close();
           publishSource(context, { document: nextDocument, path: store.path, layout: nextLayout, disk: nextDisk, sidecars: nextSidecars, dirty: false, advanceRevision: sourceChanged || sidecarsChanged, invalidateRuntime: sourceChanged, configResolution: nextConfigResolution });
           notebook = nextDocument;
-          recoverySerialized = serializeNotebookWithParts(nextDocument);
           if (sidecarsChanged) {
             projectConfigLayer = { ...nextProjectConfig };
             projectLayoutIntent = nextLayout;
@@ -1298,7 +1175,7 @@ async function startNotebookHost(
         };
       }
       const branches: ProtocolRecoveryBranch[] = [];
-      let corruption: ProtocolRecoveryState["corruption"] = null;
+      let corruption: ProtocolRecoveryState["corruption"] = recovery?.issue ? asHostError(recovery.issue, recovery.issue.code) : null;
       for (const branch of loaded) {
         let baseline: RecoveryBaseline;
         try {
@@ -1344,7 +1221,7 @@ async function startNotebookHost(
         error: asHostError(recoverySidecarError.error, "sidecar_write_failed"),
       };
     }
-    const recoveredStartup = recoveryDocumentRevision > 0;
+    const recoveredStartup = recoveryPending;
     controller = new Controller({
       engine,
       outputStore: artifactStore,
@@ -1587,17 +1464,8 @@ async function startNotebookHost(
         idleTimer = undefined;
         void (async () => {
           if (activity !== browserActivity || clientCount !== 0 || leaseCount !== 0 || controller?.hasActiveOperations() === true || closing) return;
-          if (controller!.snapshot().dirty && !isUntitled) {
-            const admission = await controller!.dispatch({ type: "save", operationId: randomUUID(), clientId: "idle", commandSequence: idleCommandSequence, sessionEpoch: controller!.epoch, expectedDocumentRevision: controller!.snapshot().documentRevision });
-            if (!admission.accepted || admission.operation === null) { if (admission.error !== null) controller!.recordActionError(admission.error.message, admission.error.code); return; }
-            idleCommandSequence = admission.nextCommandSequence;
-            const settled = await controller!.awaitOperation(admission.operation.id, "idle");
-            if (settled.status !== "done") return;
-          }
-          if (activity !== browserActivity || clientCount !== 0 || leaseCount !== 0 || controller?.hasActiveOperations() === true || closing) return;
-          if (controller!.snapshot().dirty) { scheduleIdle(); return; }
           await close();
-        })().catch(error => { if (!closing) controller!.recordActionError(errorMessage(error), "idle_save_failed"); });
+        })().catch(error => { if (!closing) controller!.recordActionError(errorMessage(error), "idle_close_failed"); });
       }, options.idleTimeout * 1000);
     };
 
@@ -1671,65 +1539,69 @@ async function startNotebookHost(
     await watcherReady;
     const connectionOrigin = initialOrigin(address.host, address.port);
     await ownership.publishReady(connectionOrigin, { host: address.host, port: address.port, origin: connectionOrigin, browserOrigin: address.origin });
-    const bootstrapGeneration = ++runtimeBootstrapGeneration;
-    resetRuntimeReady();
-    const resolveBootstrapReady = resolveRuntimeReady;
-    const rejectBootstrapReady = rejectRuntimeReady;
-    const bootstrapDirectory = notebookDirectory;
-    const bootstrapUntitled = isUntitled;
-    runtimeBootstrap = (async () => {
-      let selected: REnvironment;
-      let nextManager: PackageManager;
-      try {
-        selected = await resolveREnvironment({
-          rscript: selectedRscript,
-          projectDirectory: bootstrapDirectory,
-          resources: options.resources,
-          sandbox: options.sandbox,
-          resolveProjectLibrary: base => resolveProjectLibrary(base, bootstrapDirectory),
-        });
-        if (closing || bootstrapGeneration !== runtimeBootstrapGeneration || bootstrapUntitled !== isUntitled || bootstrapDirectory !== notebookDirectory) {
-          rejectBootstrapReady(new Error("runtime bootstrap superseded"));
+    startRuntime = (restart = false): void => {
+      const bootstrapGeneration = ++runtimeBootstrapGeneration;
+      resetRuntimeReady();
+      const resolveBootstrapReady = resolveRuntimeReady;
+      const rejectBootstrapReady = rejectRuntimeReady;
+      const bootstrapDirectory = notebookDirectory;
+      const bootstrapUntitled = isUntitled;
+      runtimeBootstrap = (async () => {
+        let selected: REnvironment;
+        let nextManager: PackageManager;
+        try {
+          selected = await resolveREnvironment({
+            rscript: selectedRscript,
+            projectDirectory: bootstrapDirectory,
+            resources: options.resources,
+            sandbox: options.sandbox,
+            resolveProjectLibrary: base => resolveProjectLibrary(base, bootstrapDirectory),
+          });
+          if (closing || bootstrapGeneration !== runtimeBootstrapGeneration || bootstrapUntitled !== isUntitled || bootstrapDirectory !== notebookDirectory) {
+            rejectBootstrapReady(new Error("runtime bootstrap superseded"));
+            return;
+          }
+          nextManager = createPackageManager({ resources: options.resources, environment: selected, processScope: processScope!, projectDirectory: bootstrapDirectory, callbacks: packageCallbacks });
+          if (!restart) engine!.setEnvironment(selected);
+        } catch (error) {
+          if (closing || bootstrapGeneration !== runtimeBootstrapGeneration || bootstrapUntitled !== isUntitled || bootstrapDirectory !== notebookDirectory) {
+            rejectBootstrapReady(new Error("runtime bootstrap superseded"));
+            return;
+          }
+          runtimeError = error;
+          controller!.recordRuntimeAvailabilityError(asRuntimeHostError(error)!);
+          rejectBootstrapReady(error);
           return;
         }
-        nextManager = createPackageManager({ resources: options.resources, environment: selected, processScope: processScope!, projectDirectory: bootstrapDirectory, callbacks: packageCallbacks });
-        engine!.setEnvironment(selected);
-      } catch (error) {
-        if (closing || bootstrapGeneration !== runtimeBootstrapGeneration || bootstrapUntitled !== isUntitled || bootstrapDirectory !== notebookDirectory) {
-          rejectBootstrapReady(new Error("runtime bootstrap superseded"));
+        try {
+          if (restart) await controller!.restartRuntimeContext({ environment: selected, notebookDirectory: bootstrapDirectory, cacheDirectory });
+          else if (options.deferStartup) await controller!.startAnalyzer();
+          else await controller!.start();
+          engineIdentity = engine!.identity;
+        } catch (error) {
+          rejectBootstrapReady(error);
+          await nextManager.close().catch(() => {});
           return;
         }
-        runtimeError = error;
+        if (closing || bootstrapGeneration !== runtimeBootstrapGeneration || bootstrapUntitled !== isUntitled || bootstrapDirectory !== notebookDirectory) {
+          rejectBootstrapReady(new Error("runtime bootstrap superseded"));
+          await nextManager.close().catch(() => {});
+          return;
+        }
+        const previousManager = packageManager;
+        packageManager = nextManager;
+        runtimeEnvironment = selected;
+        runtimeError = null;
+        resolveBootstrapReady();
+        await previousManager?.close();
+        scheduleLspSync();
+      })().catch(error => {
+        if (closing) return;
+        rejectBootstrapReady(error);
         controller!.recordRuntimeAvailabilityError(asRuntimeHostError(error)!);
-        rejectBootstrapReady(error);
-        return;
-      }
-      try {
-        if (options.deferStartup) await controller!.startAnalyzer();
-        else await controller!.start();
-        engineIdentity = engine!.identity;
-      } catch (error) {
-        rejectBootstrapReady(error);
-        await nextManager.close().catch(() => {});
-        return;
-      }
-      if (closing || bootstrapGeneration !== runtimeBootstrapGeneration || bootstrapUntitled !== isUntitled || bootstrapDirectory !== notebookDirectory) {
-        rejectBootstrapReady(new Error("runtime bootstrap superseded"));
-        await nextManager.close().catch(() => {});
-        return;
-      }
-      const previousManager = packageManager;
-      packageManager = nextManager;
-      runtimeEnvironment = selected;
-      runtimeError = null;
-      resolveBootstrapReady();
-      await previousManager?.close();
-      scheduleLspSync();
-    })().catch(error => {
-      if (closing) return;
-      rejectBootstrapReady(error);
-      controller!.recordRuntimeAvailabilityError(asRuntimeHostError(error)!);
-    });
+      });
+    };
+    startRuntime();
     const ready = { type: "host.ready" as const, origin: address.origin, epoch: ownership.epoch, capabilities: [...(controller.snapshot().capabilities ?? [])] };
     scheduleLspSync();
     return {
