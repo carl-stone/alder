@@ -75,6 +75,37 @@ test_that("referenced helper changes invalidate memory and disk cache", {
   expect_identical(saved(4L), 20L)
 })
 
+test_that("NULL free variables remain valid memory and disk cache dependencies", {
+  cache_dir <- tempfile("alder-cache-null-")
+  dir.create(cache_dir)
+  withr::defer(unlink(cache_dir, recursive = TRUE, force = TRUE))
+
+  optional <- NULL
+  f <- function(x) {
+    message("computed")
+    if (is.null(optional)) x else x + optional
+  }
+  memo <- alder::cache$memory(f)
+  saved <- alder::cache$disk(f, dir = cache_dir)
+  observe <- function(fn) {
+    value <- NULL
+    messages <- capture.output(value <- fn(1L), type = "message")
+    list(value = value, messages = messages)
+  }
+  expect_identical(observe(memo), list(value = 1L, messages = "computed"))
+  expect_identical(observe(saved), list(value = 1L, messages = "computed"))
+  expect_identical(observe(memo), list(value = 1L, messages = character()))
+  expect_identical(observe(saved), list(value = 1L, messages = character()))
+  expect_length(list.files(cache_dir, pattern = "^alder-[[:xdigit:]]+\\.rds$"), 1L)
+
+  optional <- 2L
+  expect_identical(observe(memo), list(value = 3L, messages = "computed"))
+  expect_identical(observe(saved), list(value = 3L, messages = "computed"))
+  expect_identical(observe(memo), list(value = 3L, messages = character()))
+  expect_identical(observe(saved), list(value = 3L, messages = character()))
+  expect_length(list.files(cache_dir, pattern = "^alder-[[:xdigit:]]+\\.rds$"), 2L)
+})
+
 test_that("a corrupt disk entry is discarded and atomically replaced", {
   cache_dir <- tempfile("alder-cache-corrupt-")
   dir.create(cache_dir)

@@ -404,7 +404,7 @@ test("stock Ark cache reuses values and invalidates changed code and dependencie
     await closeEngine(engine, processScope, directory);
   }
 });
-test("stock Ark memory and disk caches invalidate a redefined helper function", integration, async () => {
+test("stock Ark caches track helper functions and NULL free variables", integration, async () => {
   const directory = await mkdtemp(join(tmpdir(), "alder-engine-cache-helper-"));
   const { engine, processScope } = await openEngine(directory);
   try {
@@ -429,6 +429,19 @@ test("stock Ark memory and disk caches invalidate a redefined helper function", 
     assert.match(JSON.stringify(changed.outputs), /9 12/);
     assert.equal(changed.log?.filter((line) => line.includes("compute thrice")).length, 2);
     assert.equal((await readdir(join(directory, "cache"))).filter((name) => name.endsWith(".rds")).length, 2);
+
+    await evaluate("optional-null", "optional <- NULL");
+    await evaluate("optional-caches", 'memoOptional <- cache$memory(function(x) { message("compute optional memory"); if (is.null(optional)) x else x + optional }); savedOptional <- cache$disk(function(x) { message("compute optional disk"); if (is.null(optional)) x else x + optional })');
+    const firstOptional = await evaluate("optional-first", "c(memoOptional(1L), savedOptional(1L))");
+    assert.match(JSON.stringify(firstOptional.outputs), /1 1/);
+    assert.equal(firstOptional.log?.filter((line) => line.includes("compute optional")).length, 2);
+    const reusedOptional = await evaluate("optional-reused", "c(memoOptional(1L), savedOptional(1L))");
+    assert.match(JSON.stringify(reusedOptional.outputs), /1 1/);
+    assert.equal(reusedOptional.log?.some((line) => line.includes("compute optional")), false);
+    await evaluate("optional-changed", "optional <- 2L");
+    const changedOptional = await evaluate("optional-new-value", "c(memoOptional(1L), savedOptional(1L))");
+    assert.match(JSON.stringify(changedOptional.outputs), /3 3/);
+    assert.equal(changedOptional.log?.filter((line) => line.includes("compute optional")).length, 2);
   } finally {
     await closeEngine(engine, processScope, directory);
   }

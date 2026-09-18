@@ -43,21 +43,22 @@ cache_dependency_values <- function(f, seen = list(f), depth = 0L) {
   if (is.null(globals)) return(NULL)
   names <- sort(unique(c(globals$variables, globals$functions)))
   env <- environment(f)
-  values <- lapply(names, function(name) {
+  resolved <- lapply(names, function(name) {
     if (exists(name, envir = env, inherits = TRUE)) {
       value <- get(name, envir = env, inherits = TRUE)
       if (is.function(value)) {
         signature <- cache_function_signature(value, seen, depth + 1L)
         if (is.null(signature)) return(NULL)
-        return(list(function_signature = signature))
+        return(list(value = list(function_signature = signature)))
       }
-      value
+      list(value = value)
     } else {
-      structure(list(), class = "alder_missing_cache_dependency")
+      list(value = structure(list(), class = "alder_missing_cache_dependency"))
     }
   })
+  if (any(vapply(resolved, is.null, logical(1)))) return(NULL)
+  values <- lapply(resolved, `[[`, "value")
   names(values) <- names
-  if (any(vapply(values, is.null, logical(1)))) return(NULL)
   if (!cache_fingerprintable(values)) return(NULL)
   values
 }
