@@ -1,4 +1,3 @@
-import { parseStrictJson } from "./strict-json.js";
 import { z } from "zod";
 
 /** The only authoritative wire versions for the Alder host and Ark engine. */
@@ -699,9 +698,8 @@ export const mcpDocumentChangeSchema = z.discriminatedUnion("type", [
 export type McpDocumentChange = z.infer<typeof mcpDocumentChangeSchema>;
 
 const commandIdentityShape = {
-  operationId: idSchema,
+  requestId: idSchema,
   clientId: idSchema,
-  commandSequence: positiveIntegerSchema,
   sessionEpoch: idSchema,
 };
 export const commandIdentitySchema = z.object(commandIdentityShape).strict();
@@ -864,7 +862,6 @@ export const operationProgressSchema = z.object({
 export interface OperationRecord {
   id: string;
   clientId: string;
-  commandSequence: number;
   kind: OperationKind;
   status: OperationStatus;
   documentRevision: number;
@@ -880,16 +877,11 @@ export interface OperationRecord {
   progress?: OperationProgress;
 }
 export const operationRecordSchema = z.object({
-  id: idSchema, clientId: idSchema, commandSequence: positiveIntegerSchema, kind: operationKindSchema, status: operationStatusSchema,
+  id: idSchema, clientId: idSchema, kind: operationKindSchema, status: operationStatusSchema,
   documentRevision: revisionSchema, runId: idSchema.nullable(), result: protocolJsonSchema.nullable(), error: hostErrorSchema.nullable(),
   acceptedAt: z.number().finite().nonnegative().optional(), settledAt: z.number().finite().nonnegative().optional(), cellIds: z.array(idSchema).max(MAX_NOTEBOOK_CELLS).optional(),
   token: protocolIntegerSchema.optional(), executionDone: z.boolean().optional(), resetOperationIds: z.array(idSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS).optional(), progress: operationProgressSchema.optional(),
 }).strict();
-export const commandAdmissionSchema = z.object({
-  epoch: idSchema, clientId: idSchema, operationId: idSchema, commandSequence: positiveIntegerSchema, accepted: z.boolean(), sequenceConsumed: z.boolean(), operation: operationRecordSchema.nullable(), error: hostErrorSchema.nullable(), nextCommandSequence: positiveIntegerSchema,
-}).strict();
-export type CommandAdmission = z.infer<typeof commandAdmissionSchema>;
-
 export const runtimeStateSchema = z.object({
   documentReady: z.boolean(), analyzerState: z.enum(["stopped", "starting", "ready", "failed"]), kernelState: z.enum(["stopped", "starting", "ready", "failed"]), executionReady: z.boolean(), startupActivated: z.boolean(), executionBlockedReason: hostErrorSchema.nullable(), kernelEpoch: idSchema.nullable(), rEnvironment: rEnvironmentSchema.nullable(), analysisEnvironmentId: analysisEnvironmentIdSchema.nullable(),
 }).strict();
@@ -928,14 +920,14 @@ export const editorDiagnosticsSchema = safeStringRecordSchema(z.array(analysisDi
 export const serviceErrorsSchema = z.object({ lsp: hostErrorSchema.optional() }).strict();
 
 export interface HostSnapshot {
-  protocol: typeof HOST_PROTOCOL; epoch: string; cursor: number; version: number; documentRevision: number; path: string | null; metadata: Record<string, JsonValue>; config: Record<string, JsonValue>; layout: JsonValue; dirty: boolean; changed?: boolean; disk: DiskObservation; sidecars: SidecarObservations; runtime: HostRuntime; cells: HostCellState[]; graph: DependencyGraphState; variables: RuntimeVariable[]; editorDiagnostics: Record<string, AnalysisDiagnostic[]>; serviceErrors: { lsp?: HostError }; operations: OperationRecord[]; lastValue: JsonValue | null; lastActionError: HostError | null; capabilities?: string[]; nextCommandSequence?: number; activeClientIds?: string[];
+  protocol: typeof HOST_PROTOCOL; epoch: string; cursor: number; version: number; documentRevision: number; path: string | null; metadata: Record<string, JsonValue>; config: Record<string, JsonValue>; layout: JsonValue; dirty: boolean; changed?: boolean; disk: DiskObservation; sidecars: SidecarObservations; runtime: HostRuntime; cells: HostCellState[]; graph: DependencyGraphState; variables: RuntimeVariable[]; editorDiagnostics: Record<string, AnalysisDiagnostic[]>; serviceErrors: { lsp?: HostError }; operations: OperationRecord[]; lastValue: JsonValue | null; lastActionError: HostError | null; capabilities?: string[]; activeClientIds?: string[];
 }
-export const hostSnapshotSchema = z.object({ protocol: z.literal(HOST_PROTOCOL), epoch: idSchema, cursor: protocolIntegerSchema, version: protocolIntegerSchema, documentRevision: revisionSchema, path: pathSchema.nullable(), metadata: protocolJsonRecordSchema, config: protocolJsonRecordSchema, layout: protocolJsonSchema, dirty: z.boolean(), changed: z.boolean().optional(), disk: diskObservationSchema, sidecars: sidecarObservationsSchema, runtime: hostRuntimeSchema, cells: z.array(hostCellStateSchema).max(MAX_NOTEBOOK_CELLS), graph: dependencyGraphStateSchema, variables: runtimeVariablesSchema, editorDiagnostics: editorDiagnosticsSchema, serviceErrors: serviceErrorsSchema, operations: z.array(operationRecordSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS), lastValue: protocolJsonSchema.nullable(), lastActionError: hostErrorSchema.nullable(), capabilities: z.array(boundedUtf8StringSchema(256)).max(MAX_PROTOCOL_COLLECTION_ITEMS).optional(), nextCommandSequence: positiveIntegerSchema.optional(), activeClientIds: z.array(idSchema).max(128).optional() }).strict();
+export const hostSnapshotSchema = z.object({ protocol: z.literal(HOST_PROTOCOL), epoch: idSchema, cursor: protocolIntegerSchema, version: protocolIntegerSchema, documentRevision: revisionSchema, path: pathSchema.nullable(), metadata: protocolJsonRecordSchema, config: protocolJsonRecordSchema, layout: protocolJsonSchema, dirty: z.boolean(), changed: z.boolean().optional(), disk: diskObservationSchema, sidecars: sidecarObservationsSchema, runtime: hostRuntimeSchema, cells: z.array(hostCellStateSchema).max(MAX_NOTEBOOK_CELLS), graph: dependencyGraphStateSchema, variables: runtimeVariablesSchema, editorDiagnostics: editorDiagnosticsSchema, serviceErrors: serviceErrorsSchema, operations: z.array(operationRecordSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS), lastValue: protocolJsonSchema.nullable(), lastActionError: hostErrorSchema.nullable(), capabilities: z.array(boundedUtf8StringSchema(256)).max(MAX_PROTOCOL_COLLECTION_ITEMS).optional(), activeClientIds: z.array(idSchema).max(128).optional() }).strict();
 
-export interface HostEvent { protocol: typeof HOST_PROTOCOL; epoch: string; cursor: number; version: number; documentRevision: number; timestamp: number; type: HostEventType; operationId?: string; clientId?: string; commandSequence?: number; cellId?: string; runId?: string; kernelEpoch?: string | null; revision?: number; sequence?: number; payload: JsonValue; }
-export type HostEventType = "receipt" | "transaction" | "notebook" | "cell" | "cell-started" | "cell-output" | "cell-completed" | "diagnostics" | "editor-diagnostics" | "service-errors" | "graph" | "variables" | "runtime" | "operation" | "service-error" | "active_clients_changed";
-export const hostEventTypeSchema = z.enum(["receipt", "transaction", "notebook", "cell", "cell-started", "cell-output", "cell-completed", "diagnostics", "editor-diagnostics", "service-errors", "graph", "variables", "runtime", "operation", "service-error", "active_clients_changed"]);
-const eventBase = { protocol: z.literal(HOST_PROTOCOL), epoch: idSchema, cursor: protocolIntegerSchema, version: protocolIntegerSchema, documentRevision: revisionSchema, timestamp: z.number().finite().nonnegative(), operationId: idSchema.optional(), clientId: idSchema.optional(), commandSequence: positiveIntegerSchema.optional(), cellId: idSchema.optional(), runId: idSchema.optional(), kernelEpoch: idSchema.nullable().optional(), revision: revisionSchema.optional(), sequence: protocolIntegerSchema.optional() };
+export interface HostEvent { protocol: typeof HOST_PROTOCOL; epoch: string; cursor: number; version: number; documentRevision: number; timestamp: number; type: HostEventType; operationId?: string; clientId?: string; cellId?: string; runId?: string; kernelEpoch?: string | null; revision?: number; sequence?: number; payload: JsonValue; }
+export type HostEventType = "transaction" | "notebook" | "cell" | "cell-started" | "cell-output" | "cell-completed" | "diagnostics" | "editor-diagnostics" | "service-errors" | "graph" | "variables" | "runtime" | "operation" | "service-error" | "active_clients_changed";
+export const hostEventTypeSchema = z.enum(["transaction", "notebook", "cell", "cell-started", "cell-output", "cell-completed", "diagnostics", "editor-diagnostics", "service-errors", "graph", "variables", "runtime", "operation", "service-error", "active_clients_changed"]);
+const eventBase = { protocol: z.literal(HOST_PROTOCOL), epoch: idSchema, cursor: protocolIntegerSchema, version: protocolIntegerSchema, documentRevision: revisionSchema, timestamp: z.number().finite().nonnegative(), operationId: idSchema.optional(), clientId: idSchema.optional(), cellId: idSchema.optional(), runId: idSchema.optional(), kernelEpoch: idSchema.nullable().optional(), revision: revisionSchema.optional(), sequence: protocolIntegerSchema.optional() };
 export const hostEventSchema = z.object({ ...eventBase, type: hostEventTypeSchema, payload: protocolJsonSchema }).strict();
 
 export interface RecoveryBranch { id: string; documentRevision: number; baseDisk: DiskObservation; sourceHandle: ArtifactHandle; state: "clean" | "dirty" | "conflict"; conflict: HostError | null; }
@@ -945,18 +937,18 @@ export const recoveryStateSchema = z.object({ branches: z.array(recoveryBranchSc
 export type RecoveryDelta = { kind: "source" | "sidecar"; value: JsonValue };
 export type RecoveryBaseline = { documentRevision: number; disk: DiskObservation };
 export type RecoveryDiskObservations = SidecarObservations;
-export type Recovery = { kind: "replay"; epoch: string; cursor: number; events: HostEvent[] } | { kind: "snapshot"; epoch: string; cursor: number; snapshot: HostSnapshot };
-export const recoverySchema = z.discriminatedUnion("kind", [z.object({ kind: z.literal("replay"), epoch: idSchema, cursor: protocolIntegerSchema, events: z.array(hostEventSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS) }).strict(), z.object({ kind: z.literal("snapshot"), epoch: idSchema, cursor: protocolIntegerSchema, snapshot: hostSnapshotSchema }).strict()]);
+export type Recovery = { kind: "snapshot"; epoch: string; cursor: number; snapshot: HostSnapshot };
+export const recoverySchema = z.object({ kind: z.literal("snapshot"), epoch: idSchema, cursor: protocolIntegerSchema, snapshot: hostSnapshotSchema }).strict();
 
-export interface CommandResult { epoch: string; operation: OperationRecord; documentRevision: number; version: number; cursor: number; nextCommandSequence: number; result: JsonValue | null; error: HostError | null; }
-export const commandResultSchema = z.object({ epoch: idSchema, operation: operationRecordSchema, documentRevision: revisionSchema, version: protocolIntegerSchema, cursor: protocolIntegerSchema, nextCommandSequence: positiveIntegerSchema, result: protocolJsonSchema.nullable(), error: hostErrorSchema.nullable() }).strict();
+export interface CommandResult { requestId: string; epoch: string; documentRevision: number; version: number; cursor: number; result: JsonValue | null; error: HostError | null; }
+export const commandResultSchema = z.object({ requestId: idSchema, epoch: idSchema, documentRevision: revisionSchema, version: protocolIntegerSchema, cursor: protocolIntegerSchema, result: protocolJsonSchema.nullable(), error: hostErrorSchema.nullable() }).strict();
 
 const queryOffset = protocolIntegerSchema.optional();
 const cellQueryLimit = z.number().int().min(1).max(1_000).safe().optional();
 const outputQueryLimit = z.number().int().min(1).max(262_144).safe().optional();
 const artifactHandleIdSchema = idSchema.pipe(boundedUtf8StringSchema(MAX_ARTIFACT_HANDLE_BYTES, true)).refine((value) => !/[\\/]/.test(value) && !value.includes("..") && !value.startsWith("."), "invalid artifact handle");
 export const hostQuerySchema = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("notebook") }).strict(), z.object({ type: z.literal("cells"), offset: queryOffset, limit: cellQueryLimit }).strict(), z.object({ type: z.literal("cell"), cellId: idSchema }).strict(), z.object({ type: z.literal("graph") }).strict(), z.object({ type: z.literal("outputs"), cellId: idSchema.optional() }).strict(), z.object({ type: z.literal("output"), handle: artifactHandleIdSchema, offset: queryOffset, limit: outputQueryLimit }).strict(), z.object({ type: z.literal("operation"), operationId: idSchema, clientId: idSchema.optional() }).strict(), z.object({ type: z.literal("events"), epoch: idSchema.nullable(), cursor: protocolIntegerSchema.nullable() }).strict(), z.object({ type: z.literal("config") }).strict(), z.object({ type: z.literal("layout") }).strict(), z.object({ type: z.literal("packages-status") }).strict(), z.object({ type: z.literal("check") }).strict(), z.object({ type: z.literal("source") }).strict(), z.object({ type: z.literal("help"), contents: protocolJsonSchema }).strict(), z.object({ type: z.literal("recovery") }).strict(),
+  z.object({ type: z.literal("notebook") }).strict(), z.object({ type: z.literal("cells"), offset: queryOffset, limit: cellQueryLimit }).strict(), z.object({ type: z.literal("cell"), cellId: idSchema }).strict(), z.object({ type: z.literal("graph") }).strict(), z.object({ type: z.literal("outputs"), cellId: idSchema.optional() }).strict(), z.object({ type: z.literal("output"), handle: artifactHandleIdSchema, offset: queryOffset, limit: outputQueryLimit }).strict(), z.object({ type: z.literal("operation"), operationId: idSchema, clientId: idSchema.optional() }).strict(), z.object({ type: z.literal("state") }).strict(), z.object({ type: z.literal("config") }).strict(), z.object({ type: z.literal("layout") }).strict(), z.object({ type: z.literal("packages-status") }).strict(), z.object({ type: z.literal("check") }).strict(), z.object({ type: z.literal("source") }).strict(), z.object({ type: z.literal("help"), contents: protocolJsonSchema }).strict(), z.object({ type: z.literal("recovery") }).strict(),
 ]);
 export type HostQuery = z.infer<typeof hostQuerySchema>;
 const notebookCellDescriptorSchema = z.object({ id: idSchema, type: cellTypeSchema, options: storedCellOptionsSchema, revision: revisionSchema }).strict();
@@ -965,7 +957,7 @@ export const notebookQueryResultSchema = z.object({
   path: pathSchema.nullable(), metadata: protocolJsonRecordSchema, config: protocolJsonRecordSchema, dirty: z.boolean(), changed: z.boolean().optional(),
   disk: diskObservationSchema, sidecars: sidecarObservationsSchema, runtime: hostRuntimeSchema,
   capabilities: z.array(boundedUtf8StringSchema(256, true)).max(MAX_PROTOCOL_COLLECTION_ITEMS),
-  nextCommandSequence: positiveIntegerSchema, activeClientIds: z.array(idSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS),
+  activeClientIds: z.array(idSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS),
   cells: z.array(notebookCellDescriptorSchema).max(MAX_NOTEBOOK_CELLS),
 }).strict();
 export type NotebookQueryResult = z.infer<typeof notebookQueryResultSchema>;
@@ -1268,9 +1260,7 @@ export function encodeArtifactDescriptor(descriptor: ArtifactHandle): string {
 export function parseArtifactDescriptor(encoded: string): ArtifactHandle {
   if (typeof encoded !== "string" || encoded.length === 0 || encoded.length > MAX_ARTIFACT_DESCRIPTOR_HEADER_BYTES ||
       /[^\x21-\x7e]/.test(encoded)) throw new Error("invalid artifact descriptor header");
-  const descriptor = artifactHandleSchema.parse(parseStrictJson(decodeURIComponent(encoded), {
-    maxBytes: MAX_ARTIFACT_DESCRIPTOR_HEADER_BYTES, maxDepth: 8,
-  }));
+  const descriptor = artifactHandleSchema.parse(decodeJsonFrame(decodeURIComponent(encoded), MAX_ARTIFACT_DESCRIPTOR_HEADER_BYTES));
   if (encodeArtifactDescriptor(descriptor) !== encoded) throw new Error("artifact descriptor header is not canonical");
   return descriptor;
 }
@@ -1291,7 +1281,7 @@ export const sessionIdentitySchema = z.object({ sessionKey: idSchema, canonicalP
 export type SessionIdentity = z.infer<typeof sessionIdentitySchema>;
 export const sessionRegistryMetadataSchema = z.object({ state: z.enum(["starting", "ready", "stopping"]), pid: positiveIntegerSchema, processNonce: idSchema, continuityProof: idSchema, startIdentity: idSchema, canonicalPath: pathSchema.nullable(), origin: boundedUtf8StringSchema(2_048, true), epoch: idSchema, token: z.string().regex(/^[0-9a-f]{64}$/), protocol: z.literal(HOST_PROTOCOL), address: z.object({ host: boundedUtf8StringSchema(256, true), port: z.number().int().min(0).max(65_535).safe(), origin: boundedUtf8StringSchema(2_048, true), browserOrigin: boundedUtf8StringSchema(2_048, true) }).strict().optional() }).strict();
 export type SessionRegistryMetadata = z.infer<typeof sessionRegistryMetadataSchema>;
-export const sessionLeaseSchema = z.object({ leaseId: idSchema, clientId: idSchema, nextCommandSequence: positiveIntegerSchema, epoch: idSchema }).strict();
+export const sessionLeaseSchema = z.object({ leaseId: idSchema, clientId: idSchema, epoch: idSchema }).strict();
 export type SessionLease = z.infer<typeof sessionLeaseSchema>;
 export const attachLeaseRequestSchema = z.object({ action: z.literal("attach") }).strict();
 export type AttachLeaseRequest = z.infer<typeof attachLeaseRequestSchema>;
@@ -1305,15 +1295,15 @@ export const ticketMintResponseSchema = z.object({ ticket: idSchema, expiresAt: 
 export type TicketMintResponse = z.infer<typeof ticketMintResponseSchema>;
 export const ticketExchangeRequestSchema = z.object({ ticket: idSchema }).strict();
 export type TicketExchangeRequest = z.infer<typeof ticketExchangeRequestSchema>;
-export const ticketExchangeResponseSchema = z.object({ leaseId: idSchema, clientId: idSchema, nextCommandSequence: positiveIntegerSchema, epoch: idSchema, continuityProof: idSchema, csrf: idSchema, recoveryKey: z.string().regex(/^[A-Za-z0-9_-]{43}$/).optional(), recoveryKeyId: z.string().regex(/^[A-Za-z0-9_-]{43}$/).optional() }).strict();
+export const ticketExchangeResponseSchema = z.object({ leaseId: idSchema, clientId: idSchema, epoch: idSchema, continuityProof: idSchema, csrf: idSchema, recoveryId: idSchema.optional() }).strict();
 export type TicketExchangeResponse = z.infer<typeof ticketExchangeResponseSchema>;
-export const hostIdentitySchema = z.object({ protocol: z.literal(HOST_PROTOCOL), epoch: idSchema, processNonce: idSchema, continuityProof: idSchema, sessionKey: idSchema, canonicalPath: pathSchema.nullable(), capabilities: z.array(boundedUtf8StringSchema(256, true)).max(MAX_PROTOCOL_COLLECTION_ITEMS), origin: boundedUtf8StringSchema(2_048, true), browserOrigin: boundedUtf8StringSchema(2_048, true), address: z.object({ host: boundedUtf8StringSchema(256, true), port: z.number().int().min(0).max(65_535).safe(), origin: boundedUtf8StringSchema(2_048, true), browserOrigin: boundedUtf8StringSchema(2_048, true) }).strict().optional(), leaseId: idSchema.optional(), clientId: idSchema.optional(), nextCommandSequence: positiveIntegerSchema.optional(), documentReady: z.boolean(), configuration: hostConfigurationSchema }).strict();
+export const hostIdentitySchema = z.object({ protocol: z.literal(HOST_PROTOCOL), epoch: idSchema, processNonce: idSchema, continuityProof: idSchema, sessionKey: idSchema, canonicalPath: pathSchema.nullable(), capabilities: z.array(boundedUtf8StringSchema(256, true)).max(MAX_PROTOCOL_COLLECTION_ITEMS), origin: boundedUtf8StringSchema(2_048, true), browserOrigin: boundedUtf8StringSchema(2_048, true), address: z.object({ host: boundedUtf8StringSchema(256, true), port: z.number().int().min(0).max(65_535).safe(), origin: boundedUtf8StringSchema(2_048, true), browserOrigin: boundedUtf8StringSchema(2_048, true) }).strict().optional(), leaseId: idSchema.optional(), clientId: idSchema.optional(), documentReady: z.boolean(), configuration: hostConfigurationSchema }).strict();
 export type HostIdentity = z.infer<typeof hostIdentitySchema>;
 export type SessionRequest = (path: string, init?: RequestInit) => Promise<Response>;
-export interface SessionConnectionData { sessionKey: string; canonicalPath: string | null; origin: string; browserOrigin: string; epoch: string; processNonce: string; continuityProof: string; leaseId: string; clientId: string; nextCommandSequence: number; capabilities: string[]; }
+export interface SessionConnectionData { sessionKey: string; canonicalPath: string | null; origin: string; browserOrigin: string; epoch: string; processNonce: string; continuityProof: string; leaseId: string; clientId: string; capabilities: string[]; }
 export type SessionReleaseDisposition = "normal" | "discard";
 export interface SessionConnection extends SessionConnectionData { request: SessionRequest; heartbeat(): Promise<void>; release(disposition?: SessionReleaseDisposition): Promise<void>; }
-export const sessionConnectionSchema = z.object({ sessionKey: idSchema, canonicalPath: pathSchema.nullable(), origin: boundedUtf8StringSchema(2_048, true), browserOrigin: boundedUtf8StringSchema(2_048, true), epoch: idSchema, processNonce: idSchema, continuityProof: idSchema, leaseId: idSchema, clientId: idSchema, nextCommandSequence: positiveIntegerSchema, capabilities: z.array(boundedUtf8StringSchema(256, true)).max(MAX_PROTOCOL_COLLECTION_ITEMS) }).strict();
+export const sessionConnectionSchema = z.object({ sessionKey: idSchema, canonicalPath: pathSchema.nullable(), origin: boundedUtf8StringSchema(2_048, true), browserOrigin: boundedUtf8StringSchema(2_048, true), epoch: idSchema, processNonce: idSchema, continuityProof: idSchema, leaseId: idSchema, clientId: idSchema, capabilities: z.array(boundedUtf8StringSchema(256, true)).max(MAX_PROTOCOL_COLLECTION_ITEMS) }).strict();
 
 export const windowActionSchema = z.enum(["new", "open", "save", "save-as", "publish", "run-cell", "run-all", "run-stale", "interrupt", "restart", "settings", "select-r", "close"]);
 export type WindowAction = z.infer<typeof windowActionSchema>;
@@ -1322,32 +1312,22 @@ export const windowStateSchema = z.object({ path: pathSchema.nullable(), dirty: 
 export type WindowState = z.infer<typeof windowStateSchema>;
 export interface SaveDestination { path: string; expectedDestination: "absent" | { expectedDiskDigest: string; expectedDiskVersion: string }; }
 export const desktopRecoveryRequestSchema = z.object({
-  keyId: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
+  recoveryId: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/),
   action: z.enum(["read", "write", "remove", "list"]),
   name: z.string().max(256).optional(), prefix: z.string().max(256).optional(), value: z.unknown().optional(),
 }).strict();
 export type DesktopRecoveryRequest = z.infer<typeof desktopRecoveryRequestSchema>;
-export interface PreloadApi { recovery(request: DesktopRecoveryRequest): Promise<unknown>; openNotebook(): Promise<void>; chooseSavePath(): Promise<SaveDestination | null>; chooseRscript(): Promise<string | null>; getWindowState(): Promise<WindowState>; hostShutdown(): Promise<void>; saveCancelled(): Promise<void>; rendererReady(): Promise<void>; onWindowAction(callback: (action: WindowAction) => void): () => void; }
+export interface PreloadApi { recovery(request: DesktopRecoveryRequest): Promise<unknown>; openNotebook(): Promise<void>; chooseSavePath(): Promise<SaveDestination | null>; chooseRscript(): Promise<string | null>; getWindowState(): Promise<WindowState>; getDraftId(): Promise<string>; hostShutdown(): Promise<void>; saveCancelled(): Promise<void>; rendererReady(): Promise<void>; onWindowAction(callback: (action: WindowAction) => void): () => void; }
 
 export class ProtocolError extends Error { readonly code: string; constructor(code: string, message: string) { super(message); this.name = "ProtocolError"; this.code = code; } }
 export function decodeJsonFrame(input: string | Uint8Array, maxBytes = MAX_FRAME_BYTES): unknown {
-  try { return parseStrictJson(input, { maxBytes, maxDepth: MAX_JSON_DEPTH }); }
-  catch (error) {
-    const value = error as { code?: unknown; message?: unknown };
-    const message = typeof value.message === "string" ? value.message : "frame is not valid JSON";
-    const code = typeof value.code === "string"
-      ? value.code
-      : message.startsWith("duplicate object key")
-        ? "duplicate_key"
-        : message.startsWith("invalid UTF-8")
-          ? "invalid_utf8"
-          : message.startsWith("JSON nesting limit exceeded")
-            ? "nesting_too_deep"
-            : message.startsWith("JSON input exceeds")
-              ? "frame_too_large"
-              : "invalid_json";
-    throw new ProtocolError(code, message);
-  }
+  const bytes = typeof input === "string" ? new TextEncoder().encode(input) : input;
+  if (bytes.byteLength > maxBytes) throw new ProtocolError("frame_too_large", "JSON input exceeds byte limit");
+  let text: string;
+  try { text = typeof input === "string" ? input : new TextDecoder("utf-8", { fatal: true }).decode(input); }
+  catch { throw new ProtocolError("invalid_utf8", "Frame is not valid UTF-8"); }
+  try { return JSON.parse(text); }
+  catch { throw new ProtocolError("invalid_json", "Frame is not valid JSON"); }
 }
 export function sourceLinesByteLength(lines: readonly string[]): number { let bytes = 0; for (const [index, line] of lines.entries()) { bytes += new TextEncoder().encode(line).byteLength + Number(index > 0); if (bytes > Number.MAX_SAFE_INTEGER) return Number.MAX_SAFE_INTEGER; } return bytes; }
 export function notebookSourceByteLength(cells: readonly { body: readonly string[] }[]): number { let bytes = 0; for (const cell of cells) { bytes += sourceLinesByteLength(cell.body); if (bytes > Number.MAX_SAFE_INTEGER) return Number.MAX_SAFE_INTEGER; } return bytes; }
@@ -1475,9 +1455,7 @@ export function decodeHostEventWire(value: unknown): unknown {
   return eventCellPayload(event.type) ? { ...event, payload: decodeCellWire(event.payload) } : { ...event };
 }
 
-export type WireRecovery =
-  | { kind: "replay"; epoch: string; cursor: number; events: unknown[] }
-  | { kind: "snapshot"; epoch: string; cursor: number; snapshot: unknown };
+export type WireRecovery = { kind: "snapshot"; epoch: string; cursor: number; snapshot: unknown };
 export type RecoveryTransfer = WireRecovery | ArtifactHandle;
 
 function isArtifactHandle(value: unknown): value is ArtifactHandle {
@@ -1486,14 +1464,12 @@ function isArtifactHandle(value: unknown): value is ArtifactHandle {
 
 export function encodeRecoveryWire(recovery: Recovery | ArtifactHandle): RecoveryTransfer {
   if (isArtifactHandle(recovery)) return recovery;
-  if (recovery.kind === "replay") return { ...recovery, events: recovery.events.map(encodeHostEventWire) };
   return { ...recovery, snapshot: encodeHostSnapshotWire(recovery.snapshot) };
 }
 
 export function decodeRecoveryWire(value: unknown): unknown {
   if (isArtifactHandle(value)) return value;
   const recovery = wireRecord(value, "recovery");
-  if (recovery.kind === "replay") return { ...recovery, events: wireArray(recovery.events, "recovery events").map(decodeHostEventWire) };
   if (recovery.kind === "snapshot") return { ...recovery, snapshot: decodeHostSnapshotWire(recovery.snapshot) };
   throw new ProtocolError("invalid_request", "invalid recovery transfer");
 }
@@ -1521,7 +1497,7 @@ function mapQueryResultWire(queryType: unknown, result: unknown, encode: boolean
     case "cells": return wireArray(result, "cells query result").map(encode ? encodeCellWire : decodeCellWire);
     case "cell": return encode ? encodeCellWire(result) : decodeCellWire(result);
     case "source": return wireArray(result, "source query result").map(encode ? encodeCellWire : decodeCellWire);
-    case "events": return encode ? encodeRecoveryWire(result as Recovery) : decodeRecoveryWire(result);
+    case "state": return encode ? encodeRecoveryWire(result as Recovery) : decodeRecoveryWire(result);
     default: return result;
   }
 }

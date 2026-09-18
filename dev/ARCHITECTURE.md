@@ -37,6 +37,11 @@ The app runs trusted R code with the user's permissions. Keep renderer isolation
 authenticated local APIs and ordinary child-process cleanup. Deliberate escape
 by hostile R code is outside this product's containment promise.
 
+Temporary desktop session credentials live in memory and are regenerated as
+needed. Do not persist them through Keychain or an unencrypted cookie store.
+Ordinary notebook launch, editing and draft recovery require no Keychain approval;
+recovery persistence is independent of credential storage.
+
 **User constraint: unmodified Ark.** Use upstream Ark without a fork, source or
 binary patches, or runtime replacement of Ark internals. Alder owns its adapter
 and ordinary R helpers outside that boundary. Do not replace the current patch

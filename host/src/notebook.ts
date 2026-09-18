@@ -1347,6 +1347,7 @@ export function addCell(
   body: readonly string[] | string = [],
   type: "code" | "markdown" = "code",
   after: string | null = null,
+  id?: string,
 ): NotebookDocument {
   validateCellType(type);
   const bodyArray = typeof body === "string" ? [body] : validateBody(body, "<new cell>");
@@ -1364,7 +1365,11 @@ export function addCell(
     index += 1;
   }
   const assignment = assignedCellId(document);
-  const cell = createCell(assignment.id, bodyArray, type, effectivePreferredEol(document));
+  if (id !== undefined) {
+    validateIdentifier(id, "cell id");
+    if (document.cells.some(cell => cell.id === id)) throw new NotebookMutationError("duplicate_cell", "cell already exists: " + id);
+  }
+  const cell = createCell(id ?? assignment.id, bodyArray, type, effectivePreferredEol(document));
   const cells = document.cells.map((candidate, cellIndex) => syncCell(candidate, physical.cells[cellIndex]!));
   cells.splice(index, 0, cell);
   const next = documentWith(document, cells, physical.header, { nextCellNumber: assignment.next });
@@ -1951,7 +1956,7 @@ export function stageDocumentChanges(
       }
       const after = change.after === null ? null : resolveStageRef(document, change.after, created, deleted).id;
       const beforeIds = new Set(document.cells.map((cell) => cell.id));
-      document = addCell(document, change.body, change.cellType, after);
+      document = addCell(document, change.body, change.cellType, after, change.creationId);
       const added = document.cells.find((cell) => !beforeIds.has(cell.id));
       if (added === undefined) throw stageInvalid("cell creation did not produce a cell");
       created.set(change.creationId, added.id);

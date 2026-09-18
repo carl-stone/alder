@@ -29,6 +29,13 @@ lead's restrictions are specific to the lead task. Only Carl may change this
 mandate. These instructions are a working agreement, not a verified tool-level
 write restriction.
 
+Keep one bounded current assignment stable until its checkpoint. Record new
+accepted work in the queued backlog here; a decision or documentation update is
+not itself an instruction to expand the active slice. Batch the next assignment
+after reviewing the current result. Interrupt work only for a correction that
+materially changes the current slice, a blocker, or Carl's explicit reprioritization;
+state what changes and what it replaces. Avoid overlapping follow-up briefs.
+
 Keep exploratory ideas separate from accepted decisions. Worker reports are
 reported results until the lead checks and accepts them. Reviewers can challenge
 requirements and complexity; they cannot create new product obligations by
@@ -75,13 +82,28 @@ Updated: 2026-09-18.
   is recorded in ARCHITECTURE.md. These are implementation targets, not optional
   cleanup; preserve notebook behavior rather than old internal protocols.
 - **Primary implementation task:** `01a0b5a6-22ac-7480-9394-5cc4c1ba807d`, local
-  host, active. Worktree: `/Users/carlstone/.codex/worktrees/ebd6/alder`;
-  branch `codex/mac-document-foundation`. Baseline checkpoint: `01077ad`.
-- **Assigned now:** Delete retired platform/verification machinery; simplify
-  lifecycle/build infrastructure and deliver the Mac document slice. The primary
-  owns desktop/backend integration and delegates saves, recovery and tooling in
-  bounded separate worktrees.
+  host. Worktree: `/Users/carlstone/.codex/worktrees/ebd6/alder`;
+  branch `codex/mac-document-foundation`. Accepted checkpoint: `838e0ba`.
+- **Assigned now:** Replace the oversized command and reconnect/recovery protocol
+  with request IDs, document revision checks, a simple execution queue, snapshot
+  reconnect and straightforward recovery of unacknowledged edits. Replace custom
+  JSON parsing/repeated validation on the boundaries changed by this slice. Own
+  the integrated desktop/host/agent behavior and remove replaced paths and tests.
+  Preserve the accepted Mac document behavior; settings and R integration stay
+  queued. Report one complete runnable checkpoint or a material blocker.
   The original checkout remains the lead's documentation workspace.
+- **Resolved in document slice:** The `@alder/Safe Storage` prompt was addressed
+  with ephemeral window partitions and no encrypted cookie persistence. Native
+  launches and recovery showed no prompt; existing recovery and browser databases
+  were retained. Local API authentication remains enabled.
+- **Decided by Carl:** Remove persistence of temporary desktop session credentials;
+  keep them in memory and regenerate as needed. Notebook recovery stays independent
+  of Keychain. Merely saving the same credentials unencrypted is not the solution.
+- **Queued, approved but not assigned now:** Collapse settings ownership;
+  right-size the R adapter and replace patched Ark in the execution slice. Remove
+  custom parsing/validation and dependency certification remaining outside the
+  active slice as their owning components are replaced. The lead assigns the next
+  slice after review; this backlog does not expand the active assignment.
 - **Completed now:** Lead routing and resumption record; replacement product and
   development guidance; retirement of obsolete architectural mandates; current
   checkout imported and checkpointed in the primary worktree.
@@ -90,17 +112,21 @@ Updated: 2026-09-18.
   sessions. R/kernel readiness stays optional for document use. Existing notebook
   endpoints may remain simple routing surfaces; frontend lifetime must not
   become ownership of another attached client's work.
-- **Implementation acceptance:** No reset implementation slice has been accepted.
-- **Next checkpoint:** Review the integrated runnable first slice; the primary
-  reports a runnable no-R Mac build and is checking native interactions. Then
-  simplify commands/recovery, JSON boundaries and settings; remove remaining
-  dependency certification. Right-size the R adapter with the unmodified Ark
-  execution slice. Keep focused checks for behavior.
-- **First slice acceptance:** A real Mac window can open and edit a plain `.R`
-  notebook, save atomically, confirm replacement on Save As, reopen exact contents,
-  close, and offer useful recovery after a crash or corrupt recovery snapshot.
-- **Unresolved engineering work:** Prove the shared backend ownership design in
-  the first slices; separate kernel dependencies from service dependencies.
+- **Implementation accepted:** Mac document slice at `838e0ba`, after lead source
+  and native-result review plus a focused independent persistence/recovery review
+  with no blockers. Native typing/save/reopen, confirmed Save As replacement,
+  Cancel close/quit, recovery across backend restart/corrupt snapshots, no Keychain
+  prompt, and an agent connection surviving GUI quit were demonstrated. Shared
+  backend ownership and ordinary child cleanup replace the Rust supervisor;
+  retired platform and verification machinery was removed. Focused tests passed.
+  App: `host/.application-desktop/Alder.app` in the implementation worktree.
+  This is a document checkpoint, without an R execution runtime. Old pre-reset
+  recovery journals remain on disk but are not imported by the new snapshots.
+- **Next checkpoint:** Review the simplified command/recovery slice for ordinary
+  editing/save, concurrent GUI/agent changes, reconnect with unsent edits, and
+  uncertain execution retries without duplicate runs. Recheck relevant native
+  behavior; do not rebuild an exhaustive gate suite.
+- **Unresolved engineering work:** Separate kernel dependencies from service dependencies.
   Choose and implement an unpatched Ark integration in the execution slice,
   preserving output ordering, widgets and interruption. The transport remains
   open; whether to retain the patch does not. Detailed protocols and
