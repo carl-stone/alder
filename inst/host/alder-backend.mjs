@@ -108639,24 +108639,26 @@ var LspClient = class {
     this.publishDiagnostics();
     const connection = this.connection;
     if (connection && this.initialized && this.socket !== null && !this.socket.destroyed) {
+      let gracePeriodEnded = false;
       try {
-        await this.trackWrite(connection.sendNotification(import_vscode_languageserver_protocol.DidCloseTextDocumentNotification.type, { textDocument: { uri: this.documentUri } }));
-        await this.withTimeout(this.trackWrite(connection.sendRequest(import_vscode_languageserver_protocol.ShutdownRequest.type)), 2e3, "shutdown");
+        await this.withTimeout((async () => {
+          await this.trackWrite(connection.sendNotification(import_vscode_languageserver_protocol.DidCloseTextDocumentNotification.type, { textDocument: { uri: this.documentUri } }));
+          if (gracePeriodEnded) return;
+          await this.trackWrite(connection.sendRequest(import_vscode_languageserver_protocol.ShutdownRequest.type));
+        })(), 2e3, "shutdown");
       } catch {
+      } finally {
+        gracePeriodEnded = true;
       }
     }
     const socket = this.socket;
-    connection?.dispose();
-    connection?.end();
-    if (socket && !socket.destroyed) {
-      await new Promise((resolve15) => {
-        const timer = setTimeout(resolve15, 2e3);
-        timer.unref?.();
-        socket.once("close", () => {
-          clearTimeout(timer);
-          resolve15();
-        });
-      });
+    try {
+      connection?.dispose();
+    } catch {
+    }
+    try {
+      connection?.end();
+    } catch {
     }
     socket?.destroy();
     await this.settlePendingWrites();

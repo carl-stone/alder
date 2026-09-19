@@ -464,23 +464,22 @@ export class LspClient {
     this.publishDiagnostics();
     const connection = this.connection;
     if (connection && this.initialized && this.socket !== null && !this.socket.destroyed) {
+      let gracePeriodEnded = false;
       try {
-        await this.trackWrite(connection.sendNotification(DidCloseTextDocumentNotification.type, { textDocument: { uri: this.documentUri } }));
-        await this.withTimeout(this.trackWrite(connection.sendRequest(ShutdownRequest.type)), 2_000, "shutdown");
+        await this.withTimeout((async () => {
+          await this.trackWrite(connection.sendNotification(DidCloseTextDocumentNotification.type, { textDocument: { uri: this.documentUri } }));
+          if (gracePeriodEnded) return;
+          await this.trackWrite(connection.sendRequest(ShutdownRequest.type));
+        })(), 2_000, "shutdown");
       } catch {
         // Termination below is the authoritative cleanup path.
+      } finally {
+        gracePeriodEnded = true;
       }
     }
     const socket = this.socket;
-    connection?.dispose();
-    connection?.end();
-    if (socket && !socket.destroyed) {
-      await new Promise<void>(resolve => {
-        const timer = setTimeout(resolve, 2_000);
-        timer.unref?.();
-        socket.once("close", () => { clearTimeout(timer); resolve(); });
-      });
-    }
+    try { connection?.dispose(); } catch {}
+    try { connection?.end(); } catch {}
     socket?.destroy();
     await this.settlePendingWrites();
     this.socket = null;
