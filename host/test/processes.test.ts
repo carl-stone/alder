@@ -57,6 +57,29 @@ test("concurrent child cancellation and scope close stop the owned process tree"
   await Promise.all([waitGone(child.pid), waitGone(descendant)]);
 });
 
+test("denied process-group signals escalate a TERM-ignoring owned child directly", async () => {
+  const scope = await createProcessScope();
+  const child = await scope.spawn(options("process.on('SIGTERM', () => {}); console.log('ready'); setInterval(() => {}, 1000)"));
+  await once(child.stdout!, "data");
+  const originalKill = process.kill;
+  process.kill = ((pid: number, signal?: NodeJS.Signals | number) => {
+    if (pid < 0) {
+      const error = new Error("process-group signaling denied") as NodeJS.ErrnoException;
+      error.code = "EPERM";
+      throw error;
+    }
+    return originalKill(pid, signal as NodeJS.Signals | number);
+  }) as typeof process.kill;
+  try {
+    await child.terminate();
+    assert.equal((await child.exited).signal, "SIGKILL");
+    assert.equal(exists(child.pid), false);
+  } finally {
+    process.kill = originalKill;
+    await scope.close();
+  }
+});
+
 test("a child that ignores SIGTERM is stopped with bounded escalation", async () => {
   const scope = await createProcessScope();
   try {

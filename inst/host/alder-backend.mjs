@@ -110097,9 +110097,6 @@ function signalGroup(pid, signal) {
   }
   return "signalled";
 }
-function groupExists(pid) {
-  return signalGroup(pid, 0) === "signalled";
-}
 function signalChild(child, signal) {
   try {
     child.kill(signal);
@@ -110108,29 +110105,42 @@ function signalChild(child, signal) {
     if (code2 !== "ESRCH" && code2 !== "EPERM") throw error61;
   }
 }
-async function stopGroup(pid, child) {
-  if (signalGroup(pid, "SIGTERM") === "denied") signalChild(child, "SIGTERM");
-  const deadline = Date.now() + 1e3;
-  while (groupExists(pid) && Date.now() < deadline) {
-    await new Promise((resolve15) => setTimeout(resolve15, 20));
-  }
-  if (groupExists(pid) && signalGroup(pid, "SIGKILL") === "denied") {
-    signalChild(child, "SIGKILL");
-  }
-}
-async function settleExit(exited) {
+async function waitForExit2(exited, timeoutMs) {
   let timer;
   try {
-    await Promise.race([
-      exited.then(() => void 0, () => void 0),
+    return await Promise.race([
+      exited.then(() => true, () => true),
       new Promise((resolve15) => {
-        timer = setTimeout(resolve15, 1e3);
+        timer = setTimeout(() => resolve15(false), timeoutMs);
         timer.unref();
       })
     ]);
   } finally {
     if (timer !== void 0) clearTimeout(timer);
   }
+}
+async function stopChild(child, exited, termFirst) {
+  if (termFirst) {
+    signalChild(child, "SIGTERM");
+    if (await waitForExit2(exited, 1e3)) return;
+  }
+  signalChild(child, "SIGKILL");
+  if (!await waitForExit2(exited, 1e3)) {
+    throw new Error(`owned process ${child.pid ?? "unknown"} did not exit after SIGKILL`);
+  }
+}
+async function stopGroup(pid, child, exited) {
+  const term = signalGroup(pid, "SIGTERM");
+  if (term === "gone") return;
+  if (term === "denied") return stopChild(child, exited, true);
+  const deadline = Date.now() + 1e3;
+  while (Date.now() < deadline) {
+    const state = signalGroup(pid, 0);
+    if (state === "gone") return;
+    if (state === "denied") return stopChild(child, exited, true);
+    await new Promise((resolve15) => setTimeout(resolve15, 20));
+  }
+  if (signalGroup(pid, "SIGKILL") === "denied") return stopChild(child, exited, false);
 }
 async function spawnChild(options) {
   const child = spawn(options.executable, [...options.args], {
@@ -110148,10 +110158,12 @@ async function spawnChild(options) {
   await once(child, "spawn");
   const pid = child.pid;
   let stopping;
-  const stop = () => stopping ??= stopGroup(pid, child);
+  const stop = () => stopping ??= stopGroup(pid, child, exited);
   const terminate = async () => {
     await stop();
-    await settleExit(exited);
+    if (!await waitForExit2(exited, 1e3)) {
+      throw new Error(`owned process ${pid} remained alive after termination`);
+    }
     child.stdin?.destroy();
   };
   return {
