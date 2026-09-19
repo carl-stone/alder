@@ -25,9 +25,9 @@ MASK_VERBS <- c("subset", "with", "within", "transform", "filter", "mutate",
 # Plotting verbs whose arguments are all data-mask columns.
 AES_VERBS <- c("aes", "aes_string")
 
-# Operations whose notebook bindings cannot be determined safely; a cell
-# using any of them (bare or namespace-qualified) is blocked from dispatch.
-BLOCKED_DYNAMIC <- c(
+# Operations whose notebook effects are not inferred. Their ordinary argument
+# expressions are still scanned, but no binding or dependency is invented.
+DYNAMIC_CALLS <- c(
   "eval", "evalq", "eval.parent", "source", "sys.source", "load",
   "attach", "detach", "delayedAssign", "makeActiveBinding",
   "assign", "remove", "get", "get0", "mget", "exists", "dynGet",
@@ -42,7 +42,7 @@ is_reserved <- function(nm) nm %in% RESERVED
 # The statically identifiable bare root name of an assignment LHS
 # (`x`, `x[i]`, `x$y`, `x@y`, `names(x)`, `attr(x, ...)`, and nested
 # combinations). Returns NULL when no static root exists (dynamic/deparsed
-# target), which is a blocking diagnostic.
+# target), which static analysis leaves unresolved.
 lhs_root_name <- function(lhs) {
   while (is.call(lhs) && length(lhs) >= 2L) {
     h <- lhs[[1L]]
@@ -80,8 +80,8 @@ qualified_name <- function(node) {
 
 # A literal target/name argument. For the get-family the argument is a NAME,
 # so only a scalar character constant is truly literal (a bare symbol is an
-# unknown name and must block). For do.call the argument is a function, so a
-# bare symbol names a known function reference and is accepted.
+# unknown name). For do.call the argument is a function, so a bare symbol is a
+# directly visible reference.
 literal_name_of <- function(node, string_only = FALSE) {
   if (string_only) {
     if (is.character(node) && length(node) == 1L && !is.na(node) &&
@@ -303,10 +303,9 @@ literal_assign_parts <- function(node) {
   diagnostics
 }
 cell_defs_refs <- function(code) {
-  # Returns list(defs, refs, selfRefs, locals, barrier, diagnostics, error, ranges).
+  # Returns the notebook-level definitions and references static analysis can establish.
   empty <- list(defs = character(), refs = character(),
                 selfRefs = character(), locals = character(),
-                barrier = FALSE, opaque = FALSE,
                 diagnostics = list(), error = NULL, ranges = list())
   if (length(code) == 0L) return(empty)
   text <- enc2utf8(paste(code, collapse = "\n"))
@@ -327,8 +326,6 @@ cell_defs_refs <- function(code) {
   state$defs <- unique(p1$defs)
   state$refs <- character()
   state$selfRefs <- character()
-  state$barrier <- FALSE
-  state$opaque <- FALSE
   state$diagnostics <- list()
   state$mask_warned <- character()
 
@@ -341,8 +338,7 @@ cell_defs_refs <- function(code) {
   ranges <- .analysis_parse_ranges(text, exprs, defs, refs, self_refs)
   diagnostics <- .analysis_diagnostic_ranges(state$diagnostics, ranges)
   list(defs = defs, refs = refs, selfRefs = self_refs,
-       locals = locals, barrier = isTRUE(state$barrier),
-       opaque = isTRUE(state$opaque), diagnostics = diagnostics,
+       locals = locals, diagnostics = diagnostics,
        error = NULL, ranges = ranges)
 }
 
@@ -371,15 +367,8 @@ collect_top_defs <- function(node, p1) {
       }
       return(invisible())
     }
-    literal <- literal_eval_nodes(node, q$name)
-    if (!is.null(literal)) {
-      for (expr in literal) collect_top_defs(expr, p1)
-      return(invisible())
-    }
     if (identical(q$name, "rm") ||
         (identical(q$pkg, "base") && identical(q$name, "remove"))) {
-      nms <- rm_target_names(node)
-      if (!is.null(nms)) p1$defs <- c(p1$defs, nms)
       return(invisible())
     }
     if (q$name %in% c(MASK_VERBS, AES_VERBS)) {
@@ -389,11 +378,6 @@ collect_top_defs <- function(node, p1) {
     for (j in seq_along(node)[-1L]) {
       if (!is.null(node[[j]])) collect_top_defs(node[[j]], p1)
     }
-    return(invisible())
-  }
-  literal <- literal_eval_nodes(node, hn)
-  if (!is.null(literal)) {
-    for (expr in literal) collect_top_defs(expr, p1)
     return(invisible())
   }
   if (identical(hn, "assign")) {
@@ -409,8 +393,6 @@ collect_top_defs <- function(node, p1) {
     return(invisible())
   }
   if (hn %in% c("rm", "remove")) {
-    nms <- rm_target_names(node)
-    if (!is.null(nms)) p1$defs <- c(p1$defs, nms)
     return(invisible())
   }
   if (hn %in% c(MASK_VERBS, AES_VERBS) || hn == "~") {
@@ -564,23 +546,16 @@ rm_target_names <- function(node) {
 walk_rm <- function(node, frame, state) {
   nms <- rm_target_names(node)
   if (is.null(nms)) {
-    add_block(state, "rm",
-              paste0("rm() requires bare names or scalar string literals and ",
-                     "only the default evaluation environment; use ",
-                     "rm(\"name\") when the target is statically known"))
+    walk_call_arguments(node, frame, new_ctx(), state)
     return(character())
   }
-  for (nm in nms) define_name(nm, frame)
-  nms
+  character()
 }
 
 walk_assign <- function(node, frame, ctx, state) {
   parts <- literal_assign_parts(node)
   if (is.null(parts)) {
-    add_block(state, "assign",
-              paste0("assign() requires a scalar string literal name and only ",
-                     "the default evaluation environment; use name <- value ",
-                     "when possible"))
+    walk_call_arguments(node, frame, ctx, state)
     return(character())
   }
   if (is.call(parts$value) && is.symbol(parts$value[[1L]]) &&
@@ -591,22 +566,6 @@ walk_assign <- function(node, frame, ctx, state) {
   }
   define_name(parts$name, frame)
   parts$name
-}
-
-add_block <- function(state, symbol, message) {
-  state$diagnostics <- c(state$diagnostics, list(list(
-    level = "error", code = "dynamic-dependency",
-    message = message, symbol = symbol)))
-  invisible()
-}
-
-add_opaque <- function(state, symbol, message) {
-  state$opaque <- TRUE
-  state$barrier <- TRUE
-  state$diagnostics <- c(state$diagnostics, list(list(
-    level = "warning", code = "opaque-dependency",
-    message = message, symbol = symbol)))
-  invisible()
 }
 
 # Walk one expression in evaluation order. Mutates `frame$defined` (direct
@@ -755,11 +714,10 @@ walk_expr <- function(node, frame, ctx, state) {
   if (identical(hn, "assign")) {
     return(walk_assign(node, frame, ctx, state))
   }
-  if (hn %in% BLOCKED_DYNAMIC) {
-    return(walk_blocked(node, hn, frame, ctx, state))
+  if (hn %in% DYNAMIC_CALLS) {
+    return(walk_dynamic(node, frame, ctx, state))
   }
   if (hn %in% c("library", "require")) {
-    if (!ctx$deferred) state$barrier <- TRUE
     # arg 1 is the package name under NSE, never a notebook reference
     for (j in seq_along(node)[-(1:2)]) {
       if (!is.null(node[[j]])) walk_lazy_arg(node[[j]], frame, ctx, state)
@@ -834,11 +792,10 @@ walk_qualified <- function(node, name, frame, ctx, state, package = NULL) {
   if (identical(package, "base") && identical(name, "assign")) {
     return(walk_assign(node, frame, ctx, state))
   }
-  if (name %in% BLOCKED_DYNAMIC) {
-    return(walk_blocked(node, name, frame, ctx, state))
+  if (name %in% DYNAMIC_CALLS) {
+    return(walk_dynamic(node, frame, ctx, state))
   }
   if (name %in% c("library", "require")) {
-    if (!ctx$deferred) state$barrier <- TRUE
     for (j in seq_along(node)[-(1:2)]) {
       if (!is.null(node[[j]])) walk_lazy_arg(node[[j]], frame, ctx, state)
     }
@@ -848,8 +805,7 @@ walk_qualified <- function(node, name, frame, ctx, state, package = NULL) {
   character()
 }
 
-# Superassignment never creates a binding in the current environment and is
-# a blocking dynamic mutation.
+# Superassignment does not create a statically owned notebook binding.
 walk_assignment <- function(node, hn, frame, ctx, state) {
   right <- hn %in% c("->", "->>")
   if (right) {
@@ -860,9 +816,7 @@ walk_assignment <- function(node, hn, frame, ctx, state) {
     value <- node[[3L]]
   }
   if (hn %in% c("<<-", "->>")) {
-    r <- lhs_root_name(target)
-    add_block(state, if (length(r) && nzchar(r)) r else NULL,
-              "superassignment (<<- / ->>) cannot be analysed safely")
+    walk_expr(value, frame, ctx, state)
     return(character())
   }
   if (is.call(value) && is.symbol(value[[1L]]) &&
@@ -878,8 +832,6 @@ walk_assignment <- function(node, hn, frame, ctx, state) {
   if (is.call(target)) walk_expr(target, frame, ctx, state)
   r <- lhs_root_name(target)
   if (is.null(r)) {
-    add_block(state, NULL,
-              "compound assignment with no statically identifiable root")
     return(character())
   }
   if (is_reserved(r) || ctx$mask > 0L) return(character())
@@ -915,76 +867,9 @@ walk_function <- function(node, frame, ctx, state, recname = "") {
   invisible()
 }
 
-# Blocked dynamic operations, with support for literal lookup/do.call names.
-walk_blocked <- function(node, name, frame, ctx, state) {
-  literal <- literal_eval_nodes(node, name)
-  if (!is.null(literal)) {
-    out <- character()
-    for (expr in literal) {
-      out <- c(out, walk_expr(expr, frame, ctx, state))
-    }
-    return(unique(out))
-  }
-  if (identical(name, "source") && length(node) >= 2L &&
-      !is.null(literal_name_of(node[[2L]], string_only = TRUE))) {
-    add_opaque(
-      state, "source",
-      "source() reads a literal file at runtime; this cell is conservatively ordered"
-    )
-    for (j in seq_along(node)[-(1:2)]) {
-      if (!is.null(node[[j]])) walk_lazy_arg(node[[j]], frame, ctx, state)
-    }
-    return(character())
-  }
-  if (name %in% c("get", "get0", "mget", "exists", "dynGet") &&
-      length(node) >= 2L && !is.null(node[[2L]])) {
-    lit <- literal_name_of(node[[2L]], string_only = TRUE)
-    if (!is.null(lit)) {
-      record_read(lit, frame, ctx, state)
-      for (j in seq_along(node)[-(1:2)]) {
-        if (!is.null(node[[j]])) walk_lazy_arg(node[[j]], frame, ctx, state)
-      }
-      return(character())
-    }
-  }
-  if (name == "do.call" && length(node) >= 2L && !is.null(node[[2L]])) {
-    lit <- literal_name_of(node[[2L]])
-    if (!is.null(lit)) {
-      if (lit %in% c(BLOCKED_DYNAMIC, "rm")) {
-        add_block(state, lit,
-                  paste0("non-literal or blocked target in do.call: ", lit))
-        return(character())
-      }
-      if (lit %in% c("library", "require")) {
-        if (!ctx$deferred) state$barrier <- TRUE
-        for (j in seq_along(node)[-(1:2)]) {
-          if (!is.null(node[[j]])) walk_lazy_arg(node[[j]], frame, ctx, state)
-        }
-        return(character())
-      }
-      # ordinary literal do.call: the target is a function reference
-      record_read(lit, frame, ctx, state)
-      for (j in seq_along(node)[-(1:2)]) {
-        if (!is.null(node[[j]])) walk_lazy_arg(node[[j]], frame, ctx, state)
-      }
-      return(character())
-    }
-  }
-  add_block(state, name,
-            paste0(name, "() cannot be analysed safely"))
+# Dynamic calls execute as ordinary R; only their evaluated argument expressions
+# contribute facts that the analyzer can establish directly.
+walk_dynamic <- function(node, frame, ctx, state) {
+  walk_call_arguments(node, frame, ctx, state)
   character()
-}
-
-# Return expressions whose default-environment eval is statically visible.
-# Explicit `envir`/`enclos` arguments remain blocked because their binding
-# effects do not belong to the notebook environment.
-literal_eval_nodes <- function(node, name) {
-  if (!name %in% c("eval", "evalq") || length(node) != 2L) return(NULL)
-  arg <- node[[2L]]
-  if (identical(name, "evalq")) return(list(arg))
-  if (!is.call(arg) || !is.symbol(arg[[1L]])) return(NULL)
-  head <- as.character(arg[[1L]])
-  if (identical(head, "quote") && length(arg) == 2L) return(list(arg[[2L]]))
-  if (identical(head, "expression")) return(as.list(arg)[-1L])
-  NULL
 }

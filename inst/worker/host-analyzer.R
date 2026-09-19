@@ -178,7 +178,7 @@ local({
   empty_analysis <- function() {
     list(defs = I(character()), refs = I(character()),
          selfRefs = I(character()),
-         barrier = FALSE, opaque = FALSE, diagnostics = I(list()),
+         diagnostics = I(list()),
          ranges = I(list()), error = NULL)
   }
 
@@ -238,7 +238,6 @@ local({
            refs = I(or_else(analysis$refs, character())),
            selfRefs = I(or_else(analysis$selfRefs, character())),
            locals = I(or_else(analysis$locals, character())),
-           barrier = isTRUE(analysis$barrier), opaque = isTRUE(analysis$opaque),
            diagnostics = I(normalize_diagnostics(analysis$diagnostics)),
            ranges = I(or_else(analysis$ranges, list())),
            error = or_else(analysis$error, NULL))

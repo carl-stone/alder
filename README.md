@@ -69,9 +69,11 @@ filtered
 Use `# %% [markdown]` for Markdown cells and `#| key: value` for cell options.
 The intended execution behavior is to run stale dependencies in dependency
 order; lazy mode leaves descendants stale until requested. Widget changes are
-reactive inputs, and unsupported dynamic dependencies produce a diagnostic.
-These workflows and the R help describe the feature contracts being restored;
-check the workboard for their implementation status.
+reactive inputs. Dependency analysis is best effort: dynamic R such as `get`,
+`assign`, `source`, `load`, `do.call`, and generated `eval` expressions runs
+normally, but hidden dependencies may require an explicit cell or notebook rerun.
+Statically recognized notebook globals must have one defining cell, and known
+dependencies must be acyclic; diagnostics identify only the cells involved.
 
 ## Contributing
 

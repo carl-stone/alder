@@ -20203,8 +20203,6 @@ var analysisCellResultSchema = external_exports.object({
   refs: analysisSymbolArraySchema,
   selfRefs: analysisSymbolArraySchema,
   locals: analysisSymbolArraySchema,
-  barrier: external_exports.boolean(),
-  opaque: external_exports.boolean(),
   diagnostics: external_exports.array(analysisDiagnosticSchema).max(MAX_EDITOR_DIAGNOSTICS),
   error: boundedUtf8StringSchema(MAX_FRAME_BYTES).nullable(),
   ranges: safeStringRecordSchema(external_exports.array(sourceRangeSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS)).optional()
@@ -20341,8 +20339,7 @@ var evaluationPayloadSchema = external_exports.object({
   documentRevision: revisionSchema,
   source: sourceTextSchema,
   definitions: analysisSymbolArraySchema,
-  locals: analysisSymbolArraySchema,
-  opaque: external_exports.boolean()
+  locals: analysisSymbolArraySchema
 }).strict();
 var engineEventIdentitySchema = external_exports.object({
   requestId: positiveIntegerSchema,
@@ -20733,7 +20730,7 @@ var cellDisplayPartSchema = external_exports.discriminatedUnion("kind", [
   external_exports.object({ kind: external_exports.literal("output"), id: idSchema }).strict(),
   external_exports.object({ kind: external_exports.literal("log"), text: boundedUtf8StringSchema(MAX_FRAME_BYTES, true) }).strict()
 ]);
-var hostCellStateSchema = external_exports.object({ id: idSchema, type: cellTypeSchema, body: sourceLinesSchema, options: storedCellOptionsSchema, revision: revisionSchema, status: cellStatusSchema, outputs: external_exports.array(external_exports.lazy(() => outputRecordSchema)).max(MAX_PROTOCOL_COLLECTION_ITEMS), outputsStale: external_exports.boolean().optional(), progress: protocolJsonSchema.nullable(), log: external_exports.array(boundedUtf8StringSchema(MAX_FRAME_BYTES)).max(1048578), displayOrder: external_exports.array(cellDisplayPartSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS).optional(), error: engineErrorSchema.nullable(), defs: protocolStringArraySchema, refs: protocolStringArraySchema, selfRefs: protocolStringArraySchema, locals: protocolStringArraySchema, barrier: external_exports.boolean(), opaque: external_exports.boolean(), diagnostics: external_exports.array(analysisDiagnosticSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS), analysisPending: external_exports.boolean() }).strict();
+var hostCellStateSchema = external_exports.object({ id: idSchema, type: cellTypeSchema, body: sourceLinesSchema, options: storedCellOptionsSchema, revision: revisionSchema, status: cellStatusSchema, outputs: external_exports.array(external_exports.lazy(() => outputRecordSchema)).max(MAX_PROTOCOL_COLLECTION_ITEMS), outputsStale: external_exports.boolean().optional(), progress: protocolJsonSchema.nullable(), log: external_exports.array(boundedUtf8StringSchema(MAX_FRAME_BYTES)).max(1048578), displayOrder: external_exports.array(cellDisplayPartSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS).optional(), error: engineErrorSchema.nullable(), defs: protocolStringArraySchema, refs: protocolStringArraySchema, selfRefs: protocolStringArraySchema, locals: protocolStringArraySchema, diagnostics: external_exports.array(analysisDiagnosticSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS), analysisPending: external_exports.boolean() }).strict();
 var graphCellIds = external_exports.array(idSchema).max(MAX_NOTEBOOK_CELLS);
 var graphMap = safeStringRecordSchema(graphCellIds);
 var dependencyGraphStateSchema = external_exports.object({ nodes: graphCellIds, edges: graphMap, reverseEdges: graphMap, duplicates: graphMap, cycles: graphCellIds, topologicalOrder: graphCellIds.nullable() }).strict();
@@ -22478,39 +22475,31 @@ var DesktopRecoveryStore = class {
 
 // src/graph.ts
 function dependencyLevels(edges, nodes) {
-  const known = new Set(nodes);
-  const dependencyCounts = /* @__PURE__ */ new Map();
-  const dependents = new Map(nodes.map((node2) => [node2, []]));
-  const levels = /* @__PURE__ */ new Map();
+  const known = new Set(nodes), counts = /* @__PURE__ */ new Map(), dependents = new Map(nodes.map((node2) => [node2, []])), levels = /* @__PURE__ */ new Map();
   const queue = [];
   for (const node2 of nodes) {
-    const dependencies = new Set(
-      (edges[node2] ?? []).filter((dependency) => known.has(dependency))
-    );
-    dependencyCounts.set(node2, dependencies.size);
+    const dependencies = new Set((edges[node2] ?? []).filter((value) => known.has(value)));
+    counts.set(node2, dependencies.size);
     levels.set(node2, 0);
     if (dependencies.size === 0) queue.push(node2);
     for (const dependency of dependencies) dependents.get(dependency)?.push(node2);
   }
-  let head = 0;
-  while (head < queue.length) {
-    const dependency = queue[head++];
+  for (let head = 0; head < queue.length; head += 1) {
+    const dependency = queue[head];
     const nextLevel = (levels.get(dependency) ?? 0) + 1;
     for (const dependent of dependents.get(dependency) ?? []) {
       levels.set(dependent, Math.max(levels.get(dependent) ?? 0, nextLevel));
-      const remaining = (dependencyCounts.get(dependent) ?? 0) - 1;
-      dependencyCounts.set(dependent, remaining);
+      const remaining = (counts.get(dependent) ?? 0) - 1;
+      counts.set(dependent, remaining);
       if (remaining === 0) queue.push(dependent);
     }
   }
   return queue.length === nodes.length ? levels : null;
 }
 function reachableNodes(adjacency, start2) {
-  const seen = /* @__PURE__ */ new Set();
-  const queue = [...adjacency[start2] ?? []];
-  let head = 0;
-  while (head < queue.length) {
-    const current = queue[head++];
+  const seen = /* @__PURE__ */ new Set(), queue = [...adjacency[start2] ?? []];
+  for (let head = 0; head < queue.length; head += 1) {
+    const current = queue[head];
     if (current === void 0 || seen.has(current)) continue;
     seen.add(current);
     queue.push(...adjacency[current] ?? []);

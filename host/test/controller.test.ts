@@ -251,8 +251,6 @@ function analyzeCell(cell: CellSnapshot) {
     refs: [...new Set(references)],
     selfRefs: [],
     locals: [],
-    barrier: /\b(?:library|source)\s*\(/.test(cell.source),
-    opaque: /\bsource\s*\(/.test(cell.source),
     diagnostics: [],
     error: null,
   };
@@ -920,55 +918,6 @@ test("closing during restart cannot resurrect runtime readiness", async () => {
   assert.notEqual(closed.runtime.analyzerState, "ready");
 });
 
-test("closing during a barrier restart prevents the pump from shifting queued work", async () => {
-  const engine = new FakeEngine();
-  const controller = createController({
-    engine,
-    notebook: notebook([["a", "library(stats)"]]),
-    config: resolveSettings({ notebook: { on_startup: false } }),
-  });
-  await controller.start();
-  const edit = command(controller, {
-    type: "transaction",
-    changes: [
-        {
-            type: "edit",
-            cell: {
-                cellId: "a"
-            },
-            expectedRevision: 0,
-            body: ["library(stats); x <- 1"],
-            cellType: "code"
-        }
-    ]
-  });
-  await startCommand(controller, edit);
-  await eventually(() => controller.snapshot().cells[0]?.analysisPending === false);
-
-  let releaseRestart!: () => void;
-  const restartGate = new Promise<void>((resolve) => {
-    releaseRestart = resolve;
-  });
-  engine.restartHandler = async () => {
-    await restartGate;
-    return engine.handshake;
-  };
-  const run = command(controller, {
-    type: "run",
-    scope: "all",
-    changes: []
-  });
-  await startCommand(controller, run);
-  await eventually(() => engine.restartCount === 1);
-  assert.equal(engine.restartCount, 1);
-  assert.equal(controller.snapshot().runtime.executionReady, false);
-  await controller.close();
-  releaseRestart();
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(engine.evaluations.length, 0);
-  assert.equal(controller.snapshot().runtime.executionReady, false);
-});
-
 test("optional service-peer failure leaves analysis and execution available", async () => {
   const engine = new FakeEngine();
   const controller = createController({
@@ -1350,47 +1299,6 @@ test("projected notebook bytes are rejected atomically before source or engine e
   await controller.close();
 });
 
-test("dependency edge exhaustion stays editable and clears after a bounded repair", { timeout: 30_000 }, async () => {
-  const count = Math.ceil((1 + Math.sqrt(1 + 8 * MAX_DEPENDENCY_EDGES)) / 2);
-  const engine = new FakeEngine();
-  const controller = createController({
-    engine,
-    notebook: notebook(Array.from({ length: count }, (_, index) => [
-      `cell-${index}`,
-      "library(stats)",
-    ] as [string, string])),
-    config: resolveSettings({ notebook: { on_startup: false } }),
-  });
-  await controller.start();
-  const exhausted = controller.snapshot();
-  assert.equal(exhausted.graph.topologicalOrder, null);
-  assert.equal(exhausted.lastActionError?.code, "graph_blocked");
-  assert.ok(exhausted.cells.every((cell) => cell.status === "stale"));
-
-  const repair = command(controller, {
-    type: "transaction",
-    changes: [
-        ...exhausted.cells.map((cell, index) => ({
-            type: "edit",
-            cell: {
-                cellId: cell.id
-            },
-            expectedRevision: cell.revision,
-            body: [`value_${index} <- ${index}`],
-            cellType: "code" as const
-        }))
-    ]
-  });
-  await startCommand(controller, repair);
-  await eventually(() => controller.snapshot().graph.topologicalOrder !== null
-    && controller.snapshot().lastActionError === null);
-  assert.deepEqual(
-    controller.snapshot().graph.topologicalOrder,
-    exhausted.cells.map((cell) => cell.id),
-  );
-  await controller.close();
-});
-
 test("one command creates, reconciles, analyzes, and runs an optimistic cell", async () => {
   const engine = new FakeEngine();
   const controller = createController({ engine, notebook: notebook([]), config: resolveSettings({ notebook: { on_startup: false } }) });
@@ -1423,7 +1331,7 @@ test("one command creates, reconciles, analyzes, and runs an optimistic cell", a
   await controller.close();
 });
 
-test("body edits retain the validated graph but execution waits for replacement analysis", async () => {
+test("body edits rebuild current static facts while execution waits for replacement analysis", async () => {
   const engine = new FakeEngine();
   const controller = createController({
     engine,
@@ -1431,7 +1339,6 @@ test("body edits retain the validated graph but execution waits for replacement 
     config: resolveSettings({ notebook: { on_startup: false } }),
   });
   await controller.start();
-  const graph = controller.snapshot().graph;
   const events: HostEvent[] = [];
   controller.subscribe((event) => events.push(event));
   const analyze = engine.analyze.bind(engine);
@@ -1455,10 +1362,11 @@ test("body edits retain the validated graph but execution waits for replacement 
     ]
   }));
   await eventually(() => releaseAnalysis !== undefined);
-  assert.deepEqual(controller.snapshot().graph, graph);
+  assert.deepEqual(controller.snapshot().graph.edges, { a: [], b: [], c: ["b"] });
   const sourceTransaction = events.find((event) => event.type === 'transaction');
   assert.ok(sourceTransaction);
-  assert.equal(Object.hasOwn(sourceTransaction.payload as object, 'graph'), false);
+  assert.deepEqual((sourceTransaction.payload as { graph: { edges: Record<string, string[]> } }).graph.edges,
+    { a: [], b: [], c: ["b"] });
   assert.equal(controller.snapshot().cells[0]?.analysisPending, true);
   const run = command(controller, {
     type: "run",
@@ -1475,7 +1383,7 @@ test("body edits retain the validated graph but execution waits for replacement 
   assert.equal(engine.evaluations[0]?.source, "x <- 2");
   assert.equal(engine.evaluations[0]?.revision, 1);
   assert.deepEqual(engine.evaluations.map((evaluation) => evaluation.cellId), ["a", "b", "c"]);
-  assert.equal(events.filter((event) => event.type === "graph").length, 0);
+  assert.equal(events.filter((event) => event.type === "graph").length, 1);
 
   engine.analyze = analyze;
   const edit2 = command(controller, {
@@ -1496,7 +1404,7 @@ test("body edits retain the validated graph but execution waits for replacement 
   await settle(controller, edit2.requestId);
   await eventually(() => controller.snapshot().cells[0]?.analysisPending === false);
   assert.deepEqual(controller.snapshot().graph.edges.b, []);
-  assert.equal(events.filter((event) => event.type === "graph").length, 1);
+  assert.equal(events.filter((event) => event.type === "graph").length, 2);
   assert.ok(events.findIndex((event) => event.type === "graph") < events.findLastIndex((event) =>
     event.type === "cell" && event.cellId === "a" && event.revision === 2
       && (event.payload as { analysisPending: boolean }).analysisPending === false));
@@ -1768,69 +1676,10 @@ test("reactive errors leave descendants stale and recover after an edit", async 
   } finally { await controller.close(); }
 });
 
-test("automatic barrier edits rebuild earlier bindings after one restart", async () => {
-  const engine = new FakeEngine();
-  const controller = createController({
-    engine, notebook: reactiveExample("reactive-barrier.R"),
-    config: resolveSettings({ notebook: { on_startup: false, on_cell_change: "automatic" } }),
-  });
-  try {
-    await controller.start();
-    const ids = controller.snapshot().cells.map((cell) => cell.id);
-    const initial = command(controller, { type: "run", scope: "all" });
-    await startCommand(controller, initial);
-    await settle(controller, initial.requestId);
-    const earlierOutput = controller.snapshot().cells[0]?.outputs[0]?.id;
-
-    const edit = command(controller, { type: "transaction", changes: [{
-      type: "edit", cell: { cellId: ids[1]! }, expectedRevision: 0,
-      body: ["library(stats)", "marker <- 2L", "marker"], cellType: "code",
-    }] });
-    await startCommand(controller, edit);
-    await settle(controller, edit.requestId);
-    await eventuallyTimed(() => engine.evaluations.length === 6);
-    assert.equal(engine.restartCount, 1);
-    assert.deepEqual(engine.evaluations.slice(3).map((item) => item.cellId), ids);
-    assert.ok(controller.snapshot().cells.every((cell) => cell.status === "done"));
-    assert.notEqual(controller.snapshot().cells[0]?.outputs[0]?.id, earlierOutput);
-  } finally { await controller.close(); }
-});
-
-test("an automatic cell Run with a barrier edit rebuilds earlier bindings once", async () => {
-  const engine = new FakeEngine();
-  const controller = createController({
-    engine, notebook: reactiveExample("reactive-barrier.R"),
-    config: resolveSettings({ notebook: { on_startup: false, on_cell_change: "automatic" } }),
-  });
-  try {
-    await controller.start();
-    const ids = controller.snapshot().cells.map((cell) => cell.id);
-    const initial = command(controller, { type: "run", scope: "all" });
-    await startCommand(controller, initial);
-    await settle(controller, initial.requestId);
-    const earlierOutput = controller.snapshot().cells[0]?.outputs[0]?.id;
-
-    const editedRun = command(controller, {
-      type: "run", scope: "cell", target: { cellId: ids[1]! },
-      changes: [{ type: "edit", cell: { cellId: ids[1]! }, expectedRevision: 0,
-        body: ["library(stats)", "marker <- 2L", "marker"], cellType: "code" }],
-    });
-    await startCommand(controller, editedRun);
-    const completed = await settle(controller, editedRun.requestId);
-    assert.deepEqual((completed.result as { plan: string[] }).plan, ids);
-    assert.equal(engine.restartCount, 1);
-    assert.deepEqual(engine.evaluations.slice(3).map((item) => item.cellId), ids);
-    assert.ok(controller.snapshot().cells.every((cell) => cell.status === "done"));
-    assert.notEqual(controller.snapshot().cells[0]?.outputs[0]?.id, earlierOutput);
-    await new Promise((resolve) => setTimeout(resolve, 80));
-    assert.equal(engine.evaluations.length, 6);
-  } finally { await controller.close(); }
-});
-
 test("an ordinary automatic cell Run keeps its dependency scope", async () => {
   const engine = new FakeEngine();
   const controller = createController({
-    engine, notebook: reactiveExample("reactive-barrier.R"),
+    engine, notebook: notebook([["a", "x <- 1"], ["b", "y <- x + 1"], ["c", "z <- y + 1"]]),
     config: resolveSettings({ notebook: { on_startup: false, on_cell_change: "automatic" } }),
   });
   try {
@@ -1848,87 +1697,61 @@ test("an ordinary automatic cell Run keeps its dependency scope", async () => {
   } finally { await controller.close(); }
 });
 
-test("an independent cell Run recovers after a barrier evaluation failure", async () => {
+test("duplicate globals block their defining cells while an unrelated cell runs", async () => {
   const engine = new FakeEngine();
   const controller = createController({
-    engine, notebook: reactiveExample("reactive-barrier.R"),
-    config: resolveSettings({ notebook: { on_startup: false, on_cell_change: "automatic" } }),
+    engine,
+    notebook: notebook([
+      ["first", "shared <- 1"],
+      ["second", "shared <- 2"],
+      ["unrelated", "other <- 3"],
+    ]),
+    config: resolveSettings({ notebook: { on_startup: false } }),
   });
   try {
     await controller.start();
-    const ids = controller.snapshot().cells.map((cell) => cell.id);
-    const initial = command(controller, { type: "run", scope: "all" });
-    await startCommand(controller, initial);
-    await settle(controller, initial.requestId);
-    engine.evaluationHandler = (payload) => payload.cellId === ids[1]
-      ? { ok: false, error: { message: "barrier failed" } }
-      : engine.rawResponseFor(payload);
-    const failed = command(controller, { type: "run", scope: "cell", target: { cellId: ids[1]! } });
-    await startCommand(controller, failed);
-    assert.equal((await controller.awaitOperation(failed.requestId, "controller-tests")).status, "error");
-    assert.equal(controller.snapshot().cells[1]?.status, "error");
+    const snapshot = controller.snapshot();
+    assert.match(snapshot.cells[0]?.diagnostics[0]?.message ?? "", /global shared.*first, second/);
+    assert.match(snapshot.cells[1]?.diagnostics[0]?.message ?? "", /global shared.*first, second/);
+    assert.deepEqual(snapshot.cells[2]?.diagnostics, []);
 
-    const independent = command(controller, { type: "run", scope: "cell", target: { cellId: ids[0]! } });
-    await startCommand(controller, independent);
-    const recovered = await settle(controller, independent.requestId);
-    assert.deepEqual((recovered.result as { plan: string[] }).plan, [ids[0]]);
-    assert.equal(engine.evaluations.at(-1)?.cellId, ids[0]);
-    assert.equal(engine.restartCount, 1);
-    assert.equal(controller.snapshot().cells[0]?.status, "done");
-    assert.equal(controller.snapshot().cells[1]?.status, "error");
+    const all = command(controller, { type: "run", scope: "all" });
+    await startCommand(controller, all);
+    const completed = await settle(controller, all.requestId);
+    assert.deepEqual((completed.result as { plan: string[] }).plan, ["unrelated"]);
+    assert.deepEqual(engine.evaluations.map((item) => item.cellId), ["unrelated"]);
+
+    const blocked = command(controller, { type: "run", scope: "cell", target: { cellId: "first" } });
+    await startCommand(controller, blocked);
+    const failed = await controller.awaitOperation(blocked.requestId, "controller-tests");
+    assert.equal(failed.status, "error");
+    assert.equal(failed.error?.code, "graph_invalid");
   } finally { await controller.close(); }
 });
 
-test("moving a barrier automatically rebuilds the reordered notebook", async () => {
+test("cycle members stay blocked while an unrelated cell runs", async () => {
   const engine = new FakeEngine();
   const controller = createController({
-    engine, notebook: reactiveExample("reactive-barrier.R"),
-    config: resolveSettings({ notebook: { on_startup: false, on_cell_change: "automatic" } }),
+    engine,
+    notebook: notebook([
+      ["a", "x <- y"],
+      ["b", "y <- x"],
+      ["unrelated", "other <- 3"],
+    ]),
+    config: resolveSettings({ notebook: { on_startup: false } }),
   });
   try {
     await controller.start();
-    const ids = controller.snapshot().cells.map((cell) => cell.id);
-    const initial = command(controller, { type: "run", scope: "all" });
-    await startCommand(controller, initial);
-    await settle(controller, initial.requestId);
-    const move = command(controller, { type: "transaction", changes: [{
-      type: "move", cell: { cellId: ids[1]! }, after: null,
-    }] });
-    await startCommand(controller, move);
-    await settle(controller, move.requestId);
-    await eventuallyTimed(() => engine.evaluations.length === 6);
-    assert.equal(engine.restartCount, 1);
-    assert.deepEqual(engine.evaluations.slice(3).map((item) => item.cellId), [ids[1], ids[0], ids[2]]);
-    assert.ok(controller.snapshot().cells.every((cell) => cell.status === "done"));
-  } finally { await controller.close(); }
-});
+    const snapshot = controller.snapshot();
+    assert.match(snapshot.cells[0]?.diagnostics[0]?.message ?? "", /cells: a, b/);
+    assert.match(snapshot.cells[1]?.diagnostics[0]?.message ?? "", /cells: a, b/);
+    assert.deepEqual(snapshot.cells[2]?.diagnostics, []);
 
-test("a failing automatic barrier does not keep restarting", async () => {
-  const engine = new FakeEngine();
-  const controller = createController({
-    engine, notebook: reactiveExample("reactive-barrier.R"),
-    config: resolveSettings({ notebook: { on_startup: false, on_cell_change: "automatic" } }),
-  });
-  try {
-    await controller.start();
-    const ids = controller.snapshot().cells.map((cell) => cell.id);
-    const initial = command(controller, { type: "run", scope: "all" });
-    await startCommand(controller, initial);
-    await settle(controller, initial.requestId);
-    engine.evaluationHandler = (payload) => payload.cellId === ids[1]
-      ? { ok: false, error: { message: "barrier failed" } }
-      : engine.rawResponseFor(payload);
-    const edit = command(controller, { type: "transaction", changes: [{
-      type: "edit", cell: { cellId: ids[1]! }, expectedRevision: 0,
-      body: ["library(stats)", "marker <- 2L", "marker"], cellType: "code",
-    }] });
-    await startCommand(controller, edit);
-    await settle(controller, edit.requestId);
-    await eventuallyTimed(() => controller.snapshot().cells[1]?.status === "error");
-    const evaluations = engine.evaluations.length;
-    await new Promise((resolve) => setTimeout(resolve, 100));
-    assert.equal(engine.evaluations.length, evaluations);
-    assert.equal(engine.restartCount, 1);
+    const all = command(controller, { type: "run", scope: "all" });
+    await startCommand(controller, all);
+    const completed = await settle(controller, all.requestId);
+    assert.deepEqual((completed.result as { plan: string[] }).plan, ["unrelated"]);
+    assert.deepEqual(engine.evaluations.map((item) => item.cellId), ["unrelated"]);
   } finally { await controller.close(); }
 });
 
@@ -5068,149 +4891,6 @@ test("a run-button reset failure rejects the trigger and its causal run", async 
   };
   assert.equal(output.data.operation.status, "error");
   assert.equal(output.data.operation.error.code, "widget_update_failed");
-  await controller.close();
-});
-
-test("a failed barrier makes even never-run code stale", async () => {
-  const engine = new FakeEngine();
-  engine.deferred = true;
-  const controller = createController({
-    engine,
-    notebook: notebook([["a", "library(stats)"], ["b", "x <- 1"]]),
-    config: resolveSettings({ notebook: { on_startup: false } }),
-  });
-  await controller.start();
-  const run = command(controller, {
-    type: "run",
-    scope: "cell",
-    target: {
-        cellId: "a"
-    },
-    changes: []
-  });
-  await startCommand(controller, run);
-  await eventually(() => controller.snapshot().runtime.busy);
-  engine.finishEvaluation({ ok: false, error: { message: "attach failed" }, log: [] });
-  const terminal = await controller.awaitOperation(run.requestId, "controller-tests");
-  assert.equal(terminal.status, "error");
-  assert.equal(terminal.error?.code, "eval_error");
-  assert.equal(terminal.error?.message, "attach failed");
-  assert.equal(controller.snapshot().cells.find((cell) => cell.id === "a")?.status, "error");
-  assert.equal(controller.snapshot().cells.find((cell) => cell.id === "b")?.status, "stale");
-  await controller.close();
-});
-
-test("moving or deleting a barrier forces exactly one clean restart before the next run", async () => {
-  for (const mutation of ["move", "delete"] as const) {
-    const engine = new FakeEngine();
-    const controller = createController({
-      engine,
-      notebook: notebook([["a", "library(stats)"], ["b", "x <- 1"], ["c", "y <- x"]]),
-      config: resolveSettings({ notebook: { on_startup: false } }),
-    });
-    await controller.start();
-    const initial = command(controller, {
-    type: "run",
-    scope: "all",
-    changes: []
-    });
-    await startCommand(controller, initial);
-    await settle(controller, initial.requestId);
-    const mutationCommand = mutation === "move"
-      ? command(controller, {
-    type: "transaction",
-    changes: [
-        {
-            type: "move",
-            cell: {
-                cellId: "a"
-            },
-            after: {
-                cellId: "c"
-            }
-        }
-    ]
-      })
-      : command(controller, {
-    type: "transaction",
-    changes: [
-        {
-            type: "delete",
-            cell: {
-                cellId: "a"
-            },
-            expectedRevision: 0
-        }
-    ]
-      });
-    await startCommand(controller, mutationCommand);
-    await settle(controller, mutationCommand.requestId);
-    const afterMutation = controller.snapshot();
-    if (mutation === "move") {
-      assert.ok(afterMutation.cells.filter((cell) => cell.type === "code").every((cell) => cell.status === "stale"));
-    } else {
-      assert.equal(afterMutation.cells.find((cell) => cell.id === "b")?.status, "done");
-      assert.equal(afterMutation.cells.find((cell) => cell.id === "c")?.status, "stale");
-    }
-    const rerun = command(controller, {
-    type: "run",
-    scope: "all",
-    changes: []
-    });
-    await startCommand(controller, rerun);
-    await settle(controller, rerun.requestId);
-    assert.equal(engine.restartCount, mutation === "move" ? 1 : 0, mutation);
-    assert.ok(controller.snapshot().cells
-      .filter((cell) => cell.type === "code")
-      .every((cell) => cell.status === "done"));
-    await controller.close();
-  }
-});
-
-test("an explicit restart consumes opaque-source invalidation without a second restart", async () => {
-  const engine = new FakeEngine();
-  const controller = createController({
-    engine,
-    notebook: notebook([["a", "source('helpers.R')"], ["b", "x <- 1"]]),
-    config: resolveSettings({ notebook: { on_startup: false } }),
-  });
-  await controller.start();
-  const initial = command(controller, {
-    type: "run",
-    scope: "all",
-    changes: []
-  });
-  await startCommand(controller, initial);
-  await settle(controller, initial.requestId);
-  const edit = command(controller, {
-    type: "transaction",
-    changes: [
-        {
-            type: "edit",
-            cell: {
-                cellId: "a"
-            },
-            expectedRevision: 0,
-            body: ["source('other.R')"],
-            cellType: "code"
-        }
-    ]
-  });
-  await startCommand(controller, edit);
-  await settle(controller, edit.requestId);
-  await eventually(() => controller.snapshot().cells[0]?.analysisPending === false);
-  const restart = command(controller, { type: "restart", replay: false });
-  await startCommand(controller, restart);
-  await settle(controller, restart.requestId);
-  assert.equal(engine.restartCount, 1);
-  const rerun = command(controller, {
-    type: "run",
-    scope: "all",
-    changes: []
-  });
-  await startCommand(controller, rerun);
-  await settle(controller, rerun.requestId);
-  assert.equal(engine.restartCount, 1);
   await controller.close();
 });
 

@@ -2129,8 +2129,6 @@ function mapAnalysisResult(
       refs: cell.refs,
       selfRefs: cell.selfRefs,
       locals: cell.locals,
-      barrier: cell.barrier,
-      opaque: cell.opaque,
       diagnostics,
       error: cell.error ?? null,
       ...(cell.ranges === undefined ? {} : { ranges: mapAnalysisRanges(cell.ranges, source) }),
@@ -2379,7 +2377,7 @@ function evaluationWire(value: EvaluationPayload, controlDirectory: string): Rec
     session_epoch: value.sessionEpoch, kernel_epoch: value.kernelEpoch,
     operation_id: value.operationId,
     ...source,
-    defs: value.definitions, locals: value.locals, opaque: value.opaque,
+    defs: value.definitions, locals: value.locals,
   };
 }
 

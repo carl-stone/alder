@@ -1309,71 +1309,15 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
     }, error = function(error) cleanup_failure(name, action, error))
   }
 
-  capture_binding_values <- function(names) {
-    values <- list()
-    failures <- list()
-    for (name in names) {
-      if (!exists(name, envir = NB_ENV, inherits = FALSE)) next
-      active <- tryCatch(bindingIsActive(name, NB_ENV), error = function(error) {
-        failures <<- c(failures, list(cleanup_failure(name, "snapshot", error)))
-        NA
-      })
-      if (isTRUE(active)) next
-      value_ok <- TRUE
-      value <- tryCatch(get(name, envir = NB_ENV, inherits = FALSE),
-                        error = function(error) {
-                          value_ok <<- FALSE
-                          failures <<- c(failures,
-                            list(cleanup_failure(name, "snapshot", error)))
-                          NULL
-                        })
-      if (isTRUE(value_ok)) values[name] <- list(value)
-    }
-    list(values = values, failures = failures)
-  }
-
   # Remove definitions and private locals a failed/interrupted cell created.
   # Removal never invokes active-binding getters; locked/active cleanup errors
   # are retained and invalidate this kernel without masking the cell error.
-  cleanup_failed_defs <- function(defs, pre, local_names = character(), id = NULL,
-                                  pre_values = NULL) {
+  cleanup_failed_defs <- function(defs, pre, local_names = character(), id = NULL) {
     failures <- list()
     current <- ls(NB_ENV, all.names = TRUE)
     for (nm in unique(c(setdiff(defs, pre), setdiff(current, pre)))) {
       failure <- remove_binding(nm)
       if (!is.null(failure)) failures <- c(failures, list(failure))
-    }
-    if (!is.null(pre_values)) {
-      for (nm in names(pre_values)) {
-        if (!exists(nm, envir = NB_ENV, inherits = FALSE)) {
-          failure <- tryCatch({
-            assign(nm, pre_values[[nm]], envir = NB_ENV)
-            NULL
-          }, error = function(error) cleanup_failure(nm, "restore", error))
-          if (!is.null(failure)) failures <- c(failures, list(failure))
-          next
-        }
-        active <- tryCatch(bindingIsActive(nm, NB_ENV), error = function(error) {
-          failures <<- c(failures, list(cleanup_failure(nm, "restore", error)))
-          NA
-        })
-        # Never force an active binding while comparing/restoring a baseline.
-        if (isTRUE(active)) next
-        same <- tryCatch(identical(get(nm, envir = NB_ENV, inherits = FALSE),
-                                   pre_values[[nm]]),
-                         error = function(error) {
-                           failures <<- c(failures,
-                             list(cleanup_failure(nm, "restore", error)))
-                           TRUE
-                         })
-        if (!isTRUE(same)) {
-          failure <- tryCatch({
-            assign(nm, pre_values[[nm]], envir = NB_ENV)
-            NULL
-          }, error = function(error) cleanup_failure(nm, "restore", error))
-          if (!is.null(failure)) failures <- c(failures, list(failure))
-        }
-      }
     }
     for (nm in local_names) {
       failure <- remove_binding(nm, "remove_local")
@@ -2029,7 +1973,6 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
     code <- if (is.character(code_raw) && length(code_raw) == 1L) code_raw else ""
     defs <- normalize_defs(req[["defs"]])
     locals <- normalize_defs(req[["locals"]])
-    opaque <- req[["opaque"]] %||% FALSE
     scalar_identity <- function(value) {
       is.character(value) && length(value) == 1L && !is.na(value) && nzchar(value)
     }
@@ -2040,8 +1983,7 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
         !scalar_identity(request_raw) || !scalar_identity(run_id_raw) ||
         !scalar_identity(session_epoch_raw) || !scalar_identity(kernel_epoch_raw) ||
         !scalar_identity(operation_id_raw) || !valid_revision ||
-        is.null(defs) || is.null(locals) || !is.logical(opaque) ||
-        length(opaque) != 1L || is.na(opaque)) {
+        is.null(defs) || is.null(locals)) {
       stop("invalid Alder Ark cell request", call. = FALSE)
     }
     revision <- as.integer(revision_raw)
@@ -2071,7 +2013,7 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
             clear_owned_bindings(id, previous_defs, previous_locals)
           }
           if (baseline_captured) {
-            cleanup_failed_defs(defs, pre, local_names, id, pre_values)
+            cleanup_failed_defs(defs, pre, local_names, id)
           } else {
             CELL_LOCALS[[id]] <- NULL
           }
@@ -2129,15 +2071,6 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
     if (!isTRUE(initial_clear$ok)) stop(kernel_state_condition())
 
     pre <- ls(NB_ENV, all.names = TRUE)
-    pre_values <- NULL
-    if (isTRUE(opaque) && length(pre)) {
-      snapshot <- capture_binding_values(pre)
-      if (length(snapshot$failures)) {
-        mark_kernel_invalid(snapshot$failures)
-        stop(kernel_state_condition())
-      }
-      pre_values <- snapshot$values
-    }
     baseline_captured <- TRUE
 
     exprs <- parse(text = code, keep.source = TRUE)
@@ -2164,7 +2097,7 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
     }, alder_stop = identity)
 
     if (inherits(stopped, "alder_stop")) {
-      cleanup <- cleanup_failed_defs(defs, pre, local_names, id, pre_values)
+      cleanup <- cleanup_failed_defs(defs, pre, local_names, id)
       if (!isTRUE(cleanup$ok)) {
         ark_emit(list(type = "condition", error = condition_payload(
           kernel_state_condition(), "kernel state invalid", sys.calls())))
@@ -2181,24 +2114,6 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
       return(invisible(NULL))
     }
 
-    if (isTRUE(opaque)) {
-      post <- ls(NB_ENV, all.names = TRUE)
-      added <- setdiff(post, pre)
-      common <- intersect(post, pre)
-      changed <- common[vapply(common, function(nm) {
-        if (binding_active(nm)) return(FALSE)
-        value <- tryCatch(get(nm, envir = NB_ENV, inherits = FALSE),
-                          error = function(error) {
-                            mark_kernel_invalid(list(cleanup_failure(nm, "compare", error)))
-                            NULL
-                          })
-        if (isTRUE(KERNEL_STATE$invalid)) return(FALSE)
-        !identical(value, pre_values[[nm]])
-      }, logical(1))]
-      if (isTRUE(KERNEL_STATE$invalid)) stop(kernel_state_condition())
-      defs <- unique(c(defs, setdiff(c(added, changed),
-        c(".Random.seed", ".Last.value", ".Traceback"))))
-    }
     new_owned <- character()
     for (nm in defs) {
       if (!exists(nm, envir = NB_ENV, inherits = FALSE)) next

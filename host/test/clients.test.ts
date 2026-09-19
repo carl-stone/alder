@@ -25,7 +25,7 @@ function cell(id: string, body: string[] = [], revision = 0): HostCellState {
   return {
     id, body, revision, type: "code", options: {}, status: "idle", outputs: [],
     progress: null, log: [], error: null, defs: [], refs: [], selfRefs: [],
-    locals: [], barrier: false, opaque: false, diagnostics: [], analysisPending: false,
+    locals: [], diagnostics: [], analysisPending: false,
   };
 }
 
@@ -552,7 +552,7 @@ for (const runControl of ["toolbar", "cell"] as const) {
       const engine: EngineAdapter = {
         start: async () => handshake,
         restart: async () => handshake,
-        analyze: async (cells, revision) => ({ revision, analysisEnvironmentId: "analysis-test", analyzer: { packageVersion: "test", rVersion: "test", policy: "test", analysisEnvironmentId: "analysis-test" }, cells: cells.map(value => ({ id: value.id, revision: value.revision, defs: [], refs: [], selfRefs: [], locals: [], barrier: false, opaque: false, diagnostics: [], error: null })) }),
+        analyze: async (cells, revision) => ({ revision, analysisEnvironmentId: "analysis-test", analyzer: { packageVersion: "test", rVersion: "test", policy: "test", analysisEnvironmentId: "analysis-test" }, cells: cells.map(value => ({ id: value.id, revision: value.revision, defs: [], refs: [], selfRefs: [], locals: [], diagnostics: [], error: null })) }),
         evaluate: async (payload, onEvent) => {
           executing = true;
           onEvent?.({ type: "started", requestId: 1, sessionEpoch: payload.sessionEpoch, kernelEpoch: payload.kernelEpoch, documentRevision: payload.documentRevision, operationId: payload.operationId, runId: payload.runId, cellId: payload.cellId, revision: payload.revision, sequence: 0 });

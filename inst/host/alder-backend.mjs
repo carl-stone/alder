@@ -62387,8 +62387,6 @@ var analysisCellResultSchema = external_exports.object({
   refs: analysisSymbolArraySchema,
   selfRefs: analysisSymbolArraySchema,
   locals: analysisSymbolArraySchema,
-  barrier: external_exports.boolean(),
-  opaque: external_exports.boolean(),
   diagnostics: external_exports.array(analysisDiagnosticSchema).max(MAX_EDITOR_DIAGNOSTICS),
   error: boundedUtf8StringSchema(MAX_FRAME_BYTES).nullable(),
   ranges: safeStringRecordSchema(external_exports.array(sourceRangeSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS)).optional()
@@ -62525,8 +62523,7 @@ var evaluationPayloadSchema = external_exports.object({
   documentRevision: revisionSchema,
   source: sourceTextSchema,
   definitions: analysisSymbolArraySchema,
-  locals: analysisSymbolArraySchema,
-  opaque: external_exports.boolean()
+  locals: analysisSymbolArraySchema
 }).strict();
 var engineEventIdentitySchema = external_exports.object({
   requestId: positiveIntegerSchema,
@@ -62917,7 +62914,7 @@ var cellDisplayPartSchema = external_exports.discriminatedUnion("kind", [
   external_exports.object({ kind: external_exports.literal("output"), id: idSchema }).strict(),
   external_exports.object({ kind: external_exports.literal("log"), text: boundedUtf8StringSchema(MAX_FRAME_BYTES, true) }).strict()
 ]);
-var hostCellStateSchema = external_exports.object({ id: idSchema, type: cellTypeSchema, body: sourceLinesSchema, options: storedCellOptionsSchema, revision: revisionSchema, status: cellStatusSchema, outputs: external_exports.array(external_exports.lazy(() => outputRecordSchema)).max(MAX_PROTOCOL_COLLECTION_ITEMS), outputsStale: external_exports.boolean().optional(), progress: protocolJsonSchema.nullable(), log: external_exports.array(boundedUtf8StringSchema(MAX_FRAME_BYTES)).max(1048578), displayOrder: external_exports.array(cellDisplayPartSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS).optional(), error: engineErrorSchema.nullable(), defs: protocolStringArraySchema, refs: protocolStringArraySchema, selfRefs: protocolStringArraySchema, locals: protocolStringArraySchema, barrier: external_exports.boolean(), opaque: external_exports.boolean(), diagnostics: external_exports.array(analysisDiagnosticSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS), analysisPending: external_exports.boolean() }).strict();
+var hostCellStateSchema = external_exports.object({ id: idSchema, type: cellTypeSchema, body: sourceLinesSchema, options: storedCellOptionsSchema, revision: revisionSchema, status: cellStatusSchema, outputs: external_exports.array(external_exports.lazy(() => outputRecordSchema)).max(MAX_PROTOCOL_COLLECTION_ITEMS), outputsStale: external_exports.boolean().optional(), progress: protocolJsonSchema.nullable(), log: external_exports.array(boundedUtf8StringSchema(MAX_FRAME_BYTES)).max(1048578), displayOrder: external_exports.array(cellDisplayPartSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS).optional(), error: engineErrorSchema.nullable(), defs: protocolStringArraySchema, refs: protocolStringArraySchema, selfRefs: protocolStringArraySchema, locals: protocolStringArraySchema, diagnostics: external_exports.array(analysisDiagnosticSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS), analysisPending: external_exports.boolean() }).strict();
 var graphCellIds = external_exports.array(idSchema).max(MAX_NOTEBOOK_CELLS);
 var graphMap = safeStringRecordSchema(graphCellIds);
 var dependencyGraphStateSchema = external_exports.object({ nodes: graphCellIds, edges: graphMap, reverseEdges: graphMap, duplicates: graphMap, cycles: graphCellIds, topologicalOrder: graphCellIds.nullable() }).strict();
@@ -65046,12 +65043,8 @@ function nullRecord(nodes) {
   return Object.fromEntries(nodes.map((node2) => [node2, []]));
 }
 function detectCycleNodes(edges, nodes) {
-  const known = new Set(nodes);
-  const indexes = /* @__PURE__ */ new Map();
-  const lowlinks = /* @__PURE__ */ new Map();
-  const onStack = /* @__PURE__ */ new Set();
+  const known = new Set(nodes), indexes = /* @__PURE__ */ new Map(), lowlinks = /* @__PURE__ */ new Map(), onStack = /* @__PURE__ */ new Set(), members2 = /* @__PURE__ */ new Set();
   const stack = [];
-  const members2 = /* @__PURE__ */ new Set();
   let nextIndex = 0;
   const visit2 = (node2, parent, frames) => {
     nextIndex += 1;
@@ -65059,12 +65052,7 @@ function detectCycleNodes(edges, nodes) {
     lowlinks.set(node2, nextIndex);
     stack.push(node2);
     onStack.add(node2);
-    frames.push({
-      node: node2,
-      parent,
-      dependencies: (edges[node2] ?? []).filter((dependency) => known.has(dependency)),
-      next: 0
-    });
+    frames.push({ node: node2, parent, dependencies: (edges[node2] ?? []).filter((value) => known.has(value)), next: 0 });
   };
   for (const root of nodes) {
     if (indexes.has(root)) continue;
@@ -65075,23 +65063,12 @@ function detectCycleNodes(edges, nodes) {
       const dependency = frame.dependencies[frame.next];
       if (dependency !== void 0) {
         frame.next += 1;
-        if (!indexes.has(dependency)) {
-          visit2(dependency, frame.node, frames);
-        } else if (onStack.has(dependency)) {
-          lowlinks.set(
-            frame.node,
-            Math.min(lowlinks.get(frame.node), indexes.get(dependency))
-          );
-        }
+        if (!indexes.has(dependency)) visit2(dependency, frame.node, frames);
+        else if (onStack.has(dependency)) lowlinks.set(frame.node, Math.min(lowlinks.get(frame.node), indexes.get(dependency)));
         continue;
       }
       frames.pop();
-      if (frame.parent !== null) {
-        lowlinks.set(
-          frame.parent,
-          Math.min(lowlinks.get(frame.parent), lowlinks.get(frame.node))
-        );
-      }
+      if (frame.parent !== null) lowlinks.set(frame.parent, Math.min(lowlinks.get(frame.parent), lowlinks.get(frame.node)));
       if (lowlinks.get(frame.node) !== indexes.get(frame.node)) continue;
       const component = [];
       for (; ; ) {
@@ -65101,37 +65078,28 @@ function detectCycleNodes(edges, nodes) {
         component.push(member);
         if (member === frame.node) break;
       }
-      const selfLoop = component.length === 1 && (edges[frame.node] ?? []).includes(frame.node);
-      if (component.length > 1 || selfLoop) {
-        for (const member of component) members2.add(member);
-      }
+      if (component.length > 1 || (edges[frame.node] ?? []).includes(frame.node)) for (const member of component) members2.add(member);
     }
   }
   return nodes.filter((node2) => members2.has(node2));
 }
 function dependencyLevels(edges, nodes) {
-  const known = new Set(nodes);
-  const dependencyCounts = /* @__PURE__ */ new Map();
-  const dependents = new Map(nodes.map((node2) => [node2, []]));
-  const levels = /* @__PURE__ */ new Map();
+  const known = new Set(nodes), counts = /* @__PURE__ */ new Map(), dependents = new Map(nodes.map((node2) => [node2, []])), levels = /* @__PURE__ */ new Map();
   const queue = [];
   for (const node2 of nodes) {
-    const dependencies = new Set(
-      (edges[node2] ?? []).filter((dependency) => known.has(dependency))
-    );
-    dependencyCounts.set(node2, dependencies.size);
+    const dependencies = new Set((edges[node2] ?? []).filter((value) => known.has(value)));
+    counts.set(node2, dependencies.size);
     levels.set(node2, 0);
     if (dependencies.size === 0) queue.push(node2);
     for (const dependency of dependencies) dependents.get(dependency)?.push(node2);
   }
-  let head = 0;
-  while (head < queue.length) {
-    const dependency = queue[head++];
+  for (let head = 0; head < queue.length; head += 1) {
+    const dependency = queue[head];
     const nextLevel = (levels.get(dependency) ?? 0) + 1;
     for (const dependent of dependents.get(dependency) ?? []) {
       levels.set(dependent, Math.max(levels.get(dependent) ?? 0, nextLevel));
-      const remaining = (dependencyCounts.get(dependent) ?? 0) - 1;
-      dependencyCounts.set(dependent, remaining);
+      const remaining = (counts.get(dependent) ?? 0) - 1;
+      counts.set(dependent, remaining);
       if (remaining === 0) queue.push(dependent);
     }
   }
@@ -65141,18 +65109,13 @@ function topologicalOrder(edges, nodes) {
   const levels = dependencyLevels(edges, nodes);
   if (levels === null) return null;
   const layers = [];
-  for (const node2 of nodes) {
-    const level = levels.get(node2) ?? 0;
-    (layers[level] ??= []).push(node2);
-  }
+  for (const node2 of nodes) (layers[levels.get(node2) ?? 0] ??= []).push(node2);
   return layers.flat();
 }
 function reachableNodes(adjacency, start) {
-  const seen = /* @__PURE__ */ new Set();
-  const queue = [...adjacency[start] ?? []];
-  let head = 0;
-  while (head < queue.length) {
-    const current = queue[head++];
+  const seen = /* @__PURE__ */ new Set(), queue = [...adjacency[start] ?? []];
+  for (let head = 0; head < queue.length; head += 1) {
+    const current = queue[head];
     if (current === void 0 || seen.has(current)) continue;
     seen.add(current);
     queue.push(...adjacency[current] ?? []);
@@ -65160,40 +65123,14 @@ function reachableNodes(adjacency, start) {
   return [...seen];
 }
 var ReactiveGraph = class {
-  cellsValue;
-  stateValue;
-  cellById;
-  position;
+  cellsValue = [];
+  stateValue = { nodes: [], edges: {}, reverseEdges: {}, duplicates: {}, cycles: [], topologicalOrder: [] };
+  cellById = /* @__PURE__ */ new Map();
+  position = /* @__PURE__ */ new Map();
   owners = /* @__PURE__ */ new Map();
-  referrers = /* @__PURE__ */ new Map();
-  edgeIndex = /* @__PURE__ */ new Map();
-  barrierPositions = [];
-  opaquePositions = [];
-  codePositions = [];
   complexityExceeded = false;
   constructor(cells) {
-    this.cellsValue = cells.map(normalizeCell);
-    assertUniqueCellIds(this.cellsValue);
-    this.cellById = new Map(this.cellsValue.map((cell) => [cell.id, cell]));
-    this.position = new Map(this.cellsValue.map((cell, index) => [cell.id, index]));
-    ({
-      barrier: this.barrierPositions,
-      opaque: this.opaquePositions,
-      code: this.codePositions
-    } = orderingPositions(this.cellsValue));
-    for (const cell of this.cellsValue) this.addToIndexes(cell);
-    let dependencies = 0;
-    for (const cell of this.cellsValue) {
-      const cellDependencies = this.dependenciesOf(cell);
-      dependencies += cellDependencies.length;
-      if (dependencies > MAX_DEPENDENCY_EDGES) {
-        this.edgeIndex.clear();
-        this.complexityExceeded = true;
-        break;
-      }
-      this.edgeIndex.set(cell.id, cellDependencies);
-    }
-    this.stateValue = this.deriveState();
+    this.replace(cells);
   }
   get cells() {
     return this.cellsValue;
@@ -65204,133 +65141,45 @@ var ReactiveGraph = class {
   get resourceLimited() {
     return this.complexityExceeded;
   }
-  refreshCellsIfTopologyUnchanged(cells) {
-    const normalized = cells.map(normalizeCell);
-    if (normalized.some((cell) => !sameGraphCell(this.cellById.get(cell.id), cell))) return false;
-    this.cellsValue = [...this.cellsValue];
-    for (const cell of normalized) {
-      const index = this.position.get(cell.id);
-      if (index === void 0) return false;
-      this.cellsValue[index] = cell;
-      this.cellById.set(cell.id, cell);
-    }
-    return true;
-  }
   update(cells) {
-    const nextCells = cells.map(normalizeCell);
-    assertUniqueCellIds(nextCells);
-    const nextById = new Map(nextCells.map((cell) => [cell.id, cell]));
-    const priorNodes = this.cellsValue.map((cell) => cell.id);
-    const nextNodes = nextCells.map((cell) => cell.id);
-    const priorSet = new Set(priorNodes);
-    const nextSet = new Set(nextNodes);
-    const added = new Set(nextNodes.filter((id2) => !priorSet.has(id2)));
-    const removed = new Set(priorNodes.filter((id2) => !nextSet.has(id2)));
-    const priorCommon = priorNodes.filter((id2) => nextSet.has(id2));
-    const nextCommon = nextNodes.filter((id2) => priorSet.has(id2));
-    const reordered = /* @__PURE__ */ new Set();
-    if (!sameArray(priorCommon, nextCommon)) {
-      const priorCommonPosition = new Map(priorCommon.map((id2, index) => [id2, index]));
-      for (let index = 0; index < nextCommon.length; index += 1) {
-        const id2 = nextCommon[index];
-        if (id2 !== void 0 && priorCommonPosition.get(id2) !== index) reordered.add(id2);
-      }
+    this.replace(cells);
+    return this;
+  }
+  replace(cells) {
+    const normalized = cells.map(normalizeCell);
+    if (new Set(normalized.map((cell) => cell.id)).size !== normalized.length) throw new Error("dependency graph contains duplicate cell ids");
+    const position = new Map(normalized.map((cell, index) => [cell.id, index])), owners = /* @__PURE__ */ new Map();
+    for (const cell of normalized) for (const symbol2 of cell.defs) {
+      const values = owners.get(symbol2) ?? /* @__PURE__ */ new Set();
+      values.add(cell.id);
+      owners.set(symbol2, values);
     }
-    const changed = /* @__PURE__ */ new Set();
-    for (const id2 of /* @__PURE__ */ new Set([...priorNodes, ...nextNodes])) {
-      if (!sameGraphCell(this.cellById.get(id2), nextById.get(id2))) changed.add(id2);
-    }
-    if (changed.size === 0 && reordered.size === 0) {
-      this.cellsValue = nextCells;
-      this.cellById = nextById;
-      return this;
-    }
-    const priorCells = this.cellsValue;
-    const priorPosition = this.position;
-    const nextPosition = new Map(nextCells.map((cell, index) => [cell.id, index]));
-    const nextOwners = cloneIndex(this.owners);
-    const nextReferrers = cloneIndex(this.referrers);
-    const changedDefinitions = /* @__PURE__ */ new Set();
-    const affected = this.complexityExceeded ? new Set(nextNodes) : /* @__PURE__ */ new Set([...changed, ...reordered]);
-    for (const id2 of changed) {
-      const prior = this.cellById.get(id2);
-      const next = nextById.get(id2);
-      for (const symbol2 of prior?.defs ?? []) changedDefinitions.add(symbol2);
-      for (const symbol2 of next?.defs ?? []) changedDefinitions.add(symbol2);
-      if (prior !== void 0) removeCellFromIndexes(nextOwners, nextReferrers, prior);
-      if (next !== void 0) addCellToIndexes(nextOwners, nextReferrers, next);
-    }
-    for (const id2 of reordered) {
-      for (const symbol2 of this.cellById.get(id2)?.defs ?? []) changedDefinitions.add(symbol2);
-    }
-    for (const symbol2 of changedDefinitions) {
-      for (const id2 of this.referrers.get(symbol2) ?? []) affected.add(id2);
-      for (const id2 of nextReferrers.get(symbol2) ?? []) affected.add(id2);
-    }
-    const structuralSources = /* @__PURE__ */ new Set([...added, ...removed, ...reordered]);
-    for (const id2 of changed) {
-      const prior = this.cellById.get(id2);
-      const next = nextById.get(id2);
-      if (prior?.type !== next?.type || prior?.barrier !== next?.barrier || prior?.opaque !== next?.opaque) structuralSources.add(id2);
-    }
-    for (const id2 of structuralSources) {
-      const prior = this.cellById.get(id2);
-      if (prior !== void 0) {
-        addOrderingDependents(prior, priorPosition.get(id2), priorCells, affected);
-      }
-    }
-    for (const id2 of structuralSources) {
-      const next = nextById.get(id2);
-      if (next !== void 0) {
-        addOrderingDependents(next, nextPosition.get(id2), nextCells, affected);
-      }
-    }
-    const ordering = orderingPositions(nextCells);
-    const nextEdgeIndex = this.complexityExceeded ? /* @__PURE__ */ new Map() : new Map(this.edgeIndex);
-    let dependencyCount = edgeCount(nextEdgeIndex);
-    for (const id2 of affected) {
-      dependencyCount -= nextEdgeIndex.get(id2)?.length ?? 0;
-      nextEdgeIndex.delete(id2);
-    }
-    let complexityExceeded = false;
-    for (const id2 of affected) {
-      const cell = nextById.get(id2);
-      if (cell === void 0) continue;
-      const dependencies = dependenciesFor(cell, {
-        cells: nextCells,
-        position: nextPosition,
-        owners: nextOwners,
-        barrierPositions: ordering.barrier,
-        opaquePositions: ordering.opaque,
-        codePositions: ordering.code
-      });
-      dependencyCount += dependencies.length;
-      if (dependencyCount > MAX_DEPENDENCY_EDGES) {
-        complexityExceeded = true;
+    const nodes = normalized.map((cell) => cell.id), edges = nullRecord(nodes);
+    let count = 0, limited = false;
+    for (const cell of normalized) {
+      const dependencies = /* @__PURE__ */ new Set();
+      for (const reference2 of cell.refs) for (const owner of owners.get(reference2) ?? []) if (owner !== cell.id) dependencies.add(owner);
+      if (cell.selfRefs.length > 0) dependencies.add(cell.id);
+      count += dependencies.size;
+      if (count > MAX_DEPENDENCY_EDGES) {
+        limited = true;
         break;
       }
-      nextEdgeIndex.set(id2, dependencies);
+      edges[cell.id] = [...dependencies].sort((a, b) => (position.get(a) ?? 0) - (position.get(b) ?? 0));
     }
-    if (complexityExceeded) nextEdgeIndex.clear();
-    const nextState = deriveGraphState(
-      nextCells,
-      nextEdgeIndex,
-      nextOwners,
-      nextPosition,
-      complexityExceeded
-    );
-    this.cellsValue = nextCells;
-    this.cellById = nextById;
-    this.position = nextPosition;
-    this.owners = nextOwners;
-    this.referrers = nextReferrers;
-    this.edgeIndex = nextEdgeIndex;
-    this.barrierPositions = ordering.barrier;
-    this.opaquePositions = ordering.opaque;
-    this.codePositions = ordering.code;
-    this.complexityExceeded = complexityExceeded;
-    this.stateValue = nextState;
-    return this;
+    if (limited) for (const node2 of nodes) edges[node2] = [];
+    const reverseEdges = nullRecord(nodes);
+    if (!limited) for (const dependent of nodes) for (const dependency of edges[dependent] ?? []) reverseEdges[dependency]?.push(dependent);
+    const duplicates = Object.fromEntries([...owners.entries()].filter(([, ids]) => ids.size > 1).sort(([a], [b]) => a.localeCompare(b)).map(([symbol2, ids]) => [symbol2, [...ids].sort((a, b) => (position.get(a) ?? 0) - (position.get(b) ?? 0))]));
+    const cycles = limited ? [] : detectCycleNodes(edges, nodes), blocked = /* @__PURE__ */ new Set([...cycles, ...Object.values(duplicates).flat()]);
+    const runnable = nodes.filter((node2) => !blocked.has(node2));
+    const runnableEdges = Object.fromEntries(runnable.map((node2) => [node2, (edges[node2] ?? []).filter((dependency) => !blocked.has(dependency))]));
+    this.cellsValue = normalized;
+    this.cellById = new Map(normalized.map((cell) => [cell.id, cell]));
+    this.position = position;
+    this.owners = owners;
+    this.complexityExceeded = limited;
+    this.stateValue = { nodes, edges, reverseEdges, duplicates, cycles, topologicalOrder: limited ? null : topologicalOrder(runnableEdges, runnable) };
   }
   has(id2) {
     return this.cellById.has(id2);
@@ -65345,34 +65194,25 @@ var ReactiveGraph = class {
     return this.closure(this.state.reverseEdges, id2);
   }
   definitionOwners(symbol2) {
-    return [...this.owners.get(symbol2) ?? []].sort(
-      (left, right) => (this.position.get(left) ?? 0) - (this.position.get(right) ?? 0)
-    );
+    return [...this.owners.get(symbol2) ?? []].sort((a, b) => (this.position.get(a) ?? 0) - (this.position.get(b) ?? 0));
   }
   definitionOwner(symbol2) {
     const owners = this.definitionOwners(symbol2);
     return owners.length === 1 ? owners[0] : void 0;
   }
+  blockedCellIds() {
+    return /* @__PURE__ */ new Set([...this.state.cycles, ...Object.values(this.state.duplicates).flat()]);
+  }
+  issuesForCell(id2) {
+    return this.validate().filter((issue2) => issue2.cellId === id2 || issue2.cellId === void 0);
+  }
   blockedByDisabled(disabled) {
-    const roots = disabled ?? new Set(
-      this.cells.filter((cell) => cell.disabled).map((cell) => cell.id)
-    );
-    const blocked = /* @__PURE__ */ new Set();
-    const queue = [];
-    for (const root of roots) {
-      if (!this.has(root)) continue;
-      blocked.add(root);
-      queue.push(root);
-    }
-    let head = 0;
-    while (head < queue.length) {
-      const current = queue[head++];
-      if (current === void 0) continue;
-      for (const descendant of this.state.reverseEdges[current] ?? []) {
-        if (blocked.has(descendant)) continue;
-        blocked.add(descendant);
-        queue.push(descendant);
-      }
+    const roots = disabled ?? new Set(this.cells.filter((cell) => cell.disabled).map((cell) => cell.id));
+    const blocked = /* @__PURE__ */ new Set(), queue = [...roots].filter((id2) => this.has(id2));
+    for (const id2 of queue) blocked.add(id2);
+    for (let head = 0; head < queue.length; head += 1) for (const descendant of this.state.reverseEdges[queue[head]] ?? []) if (!blocked.has(descendant)) {
+      blocked.add(descendant);
+      queue.push(descendant);
     }
     return blocked;
   }
@@ -65381,272 +65221,52 @@ var ReactiveGraph = class {
     return (this.state.topologicalOrder ?? []).filter((id2) => selected.has(id2));
   }
   validate() {
+    if (this.complexityExceeded) return [{ code: "graph_blocked", message: `cannot run: dependency graph exceeds ${MAX_DEPENDENCY_EDGES} edge limit` }];
     const issues = [];
-    if (this.complexityExceeded) {
-      issues.push({
-        code: "graph_blocked",
-        message: `cannot run: dependency graph exceeds ${MAX_DEPENDENCY_EDGES} edge limit`
-      });
-    }
+    for (const [symbol2, ids] of Object.entries(this.state.duplicates)) for (const cellId of ids) issues.push({ code: "duplicate-definition", cellId, symbol: symbol2, message: `global ${symbol2} is defined by multiple cells: ${ids.join(", ")}` });
     if (this.state.cycles.length > 0) {
-      issues.push({
-        code: "dependency-cycle",
-        message: `cannot run: dependency cycle: ${this.state.cycles.join(", ")}`
-      });
+      const message2 = `dependency cycle involves cells: ${this.state.cycles.join(", ")}`;
+      for (const cellId of this.state.cycles) issues.push({ code: "dependency-cycle", cellId, message: message2 });
     }
-    const duplicateSymbols = Object.keys(this.state.duplicates).sort();
-    if (duplicateSymbols.length > 0) {
-      issues.push({
-        code: "duplicate-definition",
-        message: `cannot run: duplicate definitions: ${duplicateSymbols.join(", ")}`
-      });
-    }
-    for (const cell of this.cells) {
-      if (cell.error !== null) {
-        issues.push({
-          code: "syntax-error",
-          cellId: cell.id,
-          message: `cannot run: ${cell.id} has a syntax error: ${cell.error}`
-        });
-      }
-      for (const raw of cell.diagnostics) {
-        if (!isErrorDiagnostic(raw)) continue;
-        issues.push({
-          code: "analysis-error",
-          cellId: cell.id,
-          message: `cannot run: ${cell.id} cannot be analyzed safely: ${raw.message}`
-        });
-      }
-    }
-    const seen = /* @__PURE__ */ new Set();
-    return issues.sort((left, right) => left.message.localeCompare(right.message)).filter((issue2) => {
-      if (seen.has(issue2.message)) return false;
-      seen.add(issue2.message);
-      return true;
-    });
-  }
-  addToIndexes(cell) {
-    for (const symbol2 of cell.defs) addIndexValue(this.owners, symbol2, cell.id);
-    for (const symbol2 of cell.refs) addIndexValue(this.referrers, symbol2, cell.id);
-  }
-  removeFromIndexes(cell) {
-    for (const symbol2 of cell.defs) removeIndexValue(this.owners, symbol2, cell.id);
-    for (const symbol2 of cell.refs) removeIndexValue(this.referrers, symbol2, cell.id);
-  }
-  dependenciesOf(cell) {
-    return dependenciesFor(cell, {
-      cells: this.cellsValue,
-      position: this.position,
-      owners: this.owners,
-      barrierPositions: this.barrierPositions,
-      opaquePositions: this.opaquePositions,
-      codePositions: this.codePositions
-    });
-  }
-  deriveState() {
-    return deriveGraphState(
-      this.cellsValue,
-      this.edgeIndex,
-      this.owners,
-      this.position,
-      this.complexityExceeded
-    );
+    return issues;
   }
   planCell(id2, status, mode, source = "editor") {
     const cell = this.cellById.get(id2);
     if (cell === void 0) throw new Error(`no such cell: ${id2}`);
-    if (cell.type === "markdown") return [];
+    const graphBlocked = this.blockedCellIds();
+    if (cell.type === "markdown" || graphBlocked.has(id2)) return [];
     const required2 = (candidate) => ["idle", "stale", "error", "stopped"].includes(status(candidate));
-    const plan = new Set(this.ancestors(id2).filter(required2));
+    const plan = new Set(this.ancestors(id2).filter((candidate) => !graphBlocked.has(candidate) && required2(candidate)));
     plan.add(id2);
-    if (mode === "automatic" || source === "app") {
-      this.expandClosure(plan, required2, true);
-    }
+    if (mode === "automatic" || source === "app") this.expandClosure(plan, required2, true);
     return this.orderOf(plan);
   }
   planStale(status) {
-    const required2 = (id2) => ["idle", "stale", "error", "stopped"].includes(status(id2));
-    const plan = new Set(
-      this.cells.filter((cell) => cell.type === "code" && required2(cell.id)).map((cell) => cell.id)
-    );
+    const blocked = this.blockedCellIds(), required2 = (id2) => ["idle", "stale", "error", "stopped"].includes(status(id2));
+    const plan = new Set(this.cells.filter((cell) => cell.type === "code" && !blocked.has(cell.id) && required2(cell.id)).map((cell) => cell.id));
     this.expandClosure(plan, required2, false);
     return this.orderOf(plan);
   }
   closure(adjacency, id2) {
-    return reachableNodes(adjacency, id2).sort(
-      (left, right) => (this.position.get(left) ?? 0) - (this.position.get(right) ?? 0)
-    );
+    return reachableNodes(adjacency, id2).sort((a, b) => (this.position.get(a) ?? 0) - (this.position.get(b) ?? 0));
   }
   expandClosure(plan, required2, includeDescendants) {
-    const queue = [...plan];
-    const expanded = /* @__PURE__ */ new Set();
-    const ancestorQueue = [];
-    const ancestorsScanned = /* @__PURE__ */ new Set();
-    let head = 0;
-    while (head < queue.length) {
-      const id2 = queue[head++];
-      if (id2 === void 0 || expanded.has(id2)) continue;
-      expanded.add(id2);
-      if (includeDescendants) {
-        for (const descendant of this.state.reverseEdges[id2] ?? []) {
-          if (plan.has(descendant)) continue;
-          plan.add(descendant);
-          queue.push(descendant);
-        }
+    const blocked = this.blockedCellIds(), queue = [...plan];
+    for (let head = 0; head < queue.length; head += 1) {
+      const id2 = queue[head];
+      for (const candidate of includeDescendants ? this.state.reverseEdges[id2] ?? [] : []) if (!blocked.has(candidate) && !plan.has(candidate)) {
+        plan.add(candidate);
+        queue.push(candidate);
       }
-      ancestorQueue.push(id2);
-      let ancestorHead = 0;
-      while (ancestorHead < ancestorQueue.length) {
-        const current = ancestorQueue[ancestorHead++];
-        if (current === void 0 || ancestorsScanned.has(current)) continue;
-        ancestorsScanned.add(current);
-        for (const ancestor of this.state.edges[current] ?? []) {
-          ancestorQueue.push(ancestor);
-          if (!required2(ancestor) || plan.has(ancestor)) continue;
-          plan.add(ancestor);
-          queue.push(ancestor);
-        }
+      for (const ancestor of this.ancestors(id2)) if (!blocked.has(ancestor) && required2(ancestor) && !plan.has(ancestor)) {
+        plan.add(ancestor);
+        queue.push(ancestor);
       }
-      ancestorQueue.length = 0;
     }
   }
 };
-function dependenciesFor(cell, context) {
-  const dependencies = /* @__PURE__ */ new Set();
-  for (const reference2 of cell.refs) {
-    const owners = [...context.owners.get(reference2) ?? []].sort(
-      (left, right) => (context.position.get(left) ?? 0) - (context.position.get(right) ?? 0)
-    );
-    for (const owner of owners) {
-      if (owner !== cell.id) dependencies.add(owner);
-    }
-  }
-  if (cell.selfRefs.length > 0) dependencies.add(cell.id);
-  const index = context.position.get(cell.id);
-  if (index === void 0) return [...dependencies];
-  if (cell.type === "code") {
-    addPriorCells(dependencies, context.cells, context.barrierPositions, index);
-    addPriorCells(dependencies, context.cells, context.opaquePositions, index);
-  }
-  if (cell.opaque) {
-    addPriorCells(dependencies, context.cells, context.codePositions, index);
-  }
-  return [...dependencies];
-}
-function addPriorCells(target, cells, positions, before2) {
-  for (const position of positions) {
-    if (position >= before2) break;
-    const cell = cells[position];
-    if (cell !== void 0) target.add(cell.id);
-  }
-}
-function orderingPositions(cells) {
-  const barrier = [];
-  const opaque = [];
-  const code2 = [];
-  for (const [index, cell] of cells.entries()) {
-    if (cell.barrier) barrier.push(index);
-    if (cell.opaque) opaque.push(index);
-    if (cell.type === "code") code2.push(index);
-  }
-  return { barrier, opaque, code: code2 };
-}
-function deriveGraphState(cells, edgeIndex, owners, position, complexityExceeded) {
-  const nodes = cells.map((cell) => cell.id);
-  const edges = Object.fromEntries(nodes.map((id2) => [
-    id2,
-    complexityExceeded ? [] : [...edgeIndex.get(id2) ?? []]
-  ]));
-  const reverseEdges = nullRecord(nodes);
-  if (!complexityExceeded) {
-    for (const dependent of nodes) {
-      for (const dependency of edges[dependent] ?? []) reverseEdges[dependency]?.push(dependent);
-    }
-  }
-  const duplicateEntries = [];
-  for (const symbol2 of [...owners.keys()].sort()) {
-    const definitions = [...owners.get(symbol2) ?? []].sort(
-      (left, right) => (position.get(left) ?? 0) - (position.get(right) ?? 0)
-    );
-    if (definitions.length > 1) duplicateEntries.push([symbol2, definitions]);
-  }
-  const duplicates = Object.fromEntries(duplicateEntries);
-  return {
-    nodes,
-    edges,
-    reverseEdges,
-    duplicates,
-    cycles: complexityExceeded ? [] : detectCycleNodes(edges, nodes),
-    topologicalOrder: complexityExceeded ? null : topologicalOrder(edges, nodes)
-  };
-}
-function edgeCount(index) {
-  let count = 0;
-  for (const edges of index.values()) count += edges.length;
-  return count;
-}
-function cloneIndex(index) {
-  return new Map([...index].map(([key2, values]) => [key2, new Set(values)]));
-}
-function addCellToIndexes(owners, referrers, cell) {
-  for (const symbol2 of cell.defs) addIndexValue(owners, symbol2, cell.id);
-  for (const symbol2 of cell.refs) addIndexValue(referrers, symbol2, cell.id);
-}
-function removeCellFromIndexes(owners, referrers, cell) {
-  for (const symbol2 of cell.defs) removeIndexValue(owners, symbol2, cell.id);
-  for (const symbol2 of cell.refs) removeIndexValue(referrers, symbol2, cell.id);
-}
 function normalizeCell(cell) {
-  return {
-    ...cell,
-    defs: unique(cell.defs),
-    refs: unique(cell.refs),
-    selfRefs: unique(cell.selfRefs),
-    locals: unique(cell.locals),
-    diagnostics: [...cell.diagnostics]
-  };
-}
-function assertUniqueCellIds(cells) {
-  if (new Set(cells.map((cell) => cell.id)).size !== cells.length) {
-    throw new Error("dependency graph contains duplicate cell ids");
-  }
-}
-function sameGraphCell(left, right) {
-  if (left === void 0 || right === void 0) return left === right;
-  return left.id === right.id && left.type === right.type && left.disabled === right.disabled && left.barrier === right.barrier && left.opaque === right.opaque && sameArray(left.defs, right.defs) && sameArray(left.refs, right.refs) && sameArray(left.selfRefs, right.selfRefs);
-}
-function sameArray(left, right) {
-  return left.length === right.length && left.every((value, index) => value === right[index]);
-}
-function addIndexValue(index, key2, id2) {
-  const values = index.get(key2) ?? /* @__PURE__ */ new Set();
-  values.add(id2);
-  index.set(key2, values);
-}
-function removeIndexValue(index, key2, id2) {
-  const values = index.get(key2);
-  if (values === void 0) return;
-  values.delete(id2);
-  if (values.size === 0) index.delete(key2);
-}
-function addOrderingDependents(source, sourcePosition, cells, affected) {
-  affected.add(source.id);
-  if (sourcePosition === void 0) return;
-  if (source.barrier || source.opaque) {
-    for (let index = sourcePosition + 1; index < cells.length; index += 1) {
-      const target = cells[index];
-      if (target?.type === "code") affected.add(target.id);
-    }
-  }
-  if (source.type === "code") {
-    for (let index = sourcePosition + 1; index < cells.length; index += 1) {
-      const target = cells[index];
-      if (target?.opaque) affected.add(target.id);
-    }
-  }
-}
-function isErrorDiagnostic(value) {
-  return typeof value === "object" && value !== null && value.level === "error" && typeof value.message === "string";
+  return { ...cell, defs: unique(cell.defs), refs: unique(cell.refs), selfRefs: unique(cell.selfRefs), locals: unique(cell.locals), diagnostics: [...cell.diagnostics] };
 }
 
 // src/output-log.ts
@@ -72480,7 +72100,6 @@ var Controller = class {
   analysisNeeded = /* @__PURE__ */ new Set();
   reactivePending = /* @__PURE__ */ new Set();
   reactiveScheduled = false;
-  barrierAnalysisCandidates = /* @__PURE__ */ new Set();
   clearBeforeEvaluation = /* @__PURE__ */ new Set();
   invalidatedDefinitionsByCell = /* @__PURE__ */ new Map();
   runOperationById = /* @__PURE__ */ new Map();
@@ -72554,7 +72173,6 @@ var Controller = class {
   activeBatch = null;
   interruptedRuns = /* @__PURE__ */ new Map();
   pumpPromise = null;
-  barrierRestartRequired = false;
   packageOperationActive = false;
   packageOperationClientId;
   runPreparationActive = false;
@@ -73794,10 +73412,6 @@ var Controller = class {
     const priorOrder = new Map(priorRetainedOrder.map((id2, index) => [id2, index]));
     const nextOrder = new Map(nextRetainedOrder.map((id2, index) => [id2, index]));
     const movedIds = new Set(nextRetainedOrder.filter((id2) => priorOrder.get(id2) !== nextOrder.get(id2)));
-    const movedBarrier = [...movedIds].some((id2) => {
-      const analysis = this.cellById(id2)?.analysis;
-      return analysis?.barrier === true || analysis?.opaque === true;
-    });
     const prior = new Map(this.cells.map((cell) => [cell.id, cell]));
     const changedIds = new Set(staged.changed);
     const affected = /* @__PURE__ */ new Set();
@@ -73807,23 +73421,13 @@ var Controller = class {
       for (const descendant of this.graphValue.descendants(id2)) affected.add(descendant);
     }
     for (const id2 of staged.deleted) {
-      const removed = this.cellById(id2);
-      if (removed?.analysis?.barrier || removed?.analysis?.opaque) {
-        const removedIndex = this.cells.findIndex((cell) => cell.id === id2);
-        const successor = this.cells.slice(removedIndex + 1).find((cell) => cell.type === "code");
-        if (successor !== void 0) for (const descendant of this.graphValue.descendants(successor.id)) affected.add(descendant);
-      } else {
-        for (const descendant of this.graphValue.descendants(id2)) affected.add(descendant);
-      }
+      for (const descendant of this.graphValue.descendants(id2)) affected.add(descendant);
     }
-    if (orderChanged && !movedBarrier) {
+    if (orderChanged) {
       for (const id2 of movedIds) {
         affected.add(id2);
         for (const descendant of this.graphValue.descendants(id2)) affected.add(descendant);
       }
-    }
-    if (movedBarrier) {
-      for (const cell of this.cells) if (cell.type === "code") affected.add(cell.id);
     }
     for (const id2 of affected) this.cancelRunRegion(/* @__PURE__ */ new Set([id2]), "source");
     this.clearEditorDiagnostics(true);
@@ -73835,7 +73439,6 @@ var Controller = class {
       for (const operation of this.cancelOwnedOperations(id2)) this.obsoleteWidgetRequests.set(operation, id2);
       this.outputStore.discardExact(removed.outputs);
       this.analysisNeeded.delete(id2);
-      this.barrierAnalysisCandidates.delete(id2);
       this.clearBeforeEvaluation.add(id2);
     }
     const nextCells = [];
@@ -73873,25 +73476,17 @@ var Controller = class {
     for (const cell of this.cells) {
       if (cell.type !== "code") {
         this.analysisNeeded.delete(cell.id);
-        this.barrierAnalysisCandidates.delete(cell.id);
         continue;
       }
       const old = prior.get(cell.id);
       if (old === void 0 || changedIds.has(cell.id) || old.type !== "code") {
         this.analysisNeeded.add(cell.id);
-        this.barrierAnalysisCandidates.add(cell.id);
       }
     }
     this.analysisGeneration = nextRevision(this.analysisGeneration);
-    const cellTypeChanged = this.cells.some((cell) => prior.get(cell.id)?.type !== cell.type);
-    if (staged.created.size > 0 || staged.deleted.size > 0 || orderChanged || cellTypeChanged) {
-      this.graphValue = this.rebuildGraph();
-    }
-    if (movedBarrier) this.invalidateForBarrier();
-    else {
-      if (orderChanged) for (const id2 of movedIds) for (const descendant of this.graphValue.descendants(id2)) affected.add(descendant);
-      for (const id2 of affected) if (this.cellById(id2) !== void 0) this.markStale(id2);
-    }
+    this.graphValue = this.rebuildGraph();
+    if (orderChanged) for (const id2 of movedIds) for (const descendant of this.graphValue.descendants(id2)) affected.add(descendant);
+    for (const id2 of affected) if (this.cellById(id2) !== void 0) this.markStale(id2);
     this.changed = true;
     this.refreshValueFreshness();
     this.publishGraphResourceError({ operationId }, true);
@@ -73936,9 +73531,6 @@ var Controller = class {
     }
     for (const candidate of this.graphValue.descendants(id2)) {
       if (this.markStale(candidate)) statusChanges.add(candidate);
-    }
-    if (moved.analysis?.barrier || moved.analysis?.opaque) {
-      for (const changedId of this.invalidateForBarrier()) statusChanges.add(changedId);
     }
     this.changed = true;
     this.bump("notebook", {
@@ -74060,9 +73652,6 @@ var Controller = class {
       } else {
         plan = this.graphValue.planStale((id2) => this.statusOf(id2));
       }
-      if (this.executionMode === "automatic" && this.sourceBarrierPending([...this.reactivePending])) {
-        plan = this.allCodePlan();
-      }
       const runId = this.launchRun(plan, command.requestId, false, command.clientId);
       const result = { runId, plan: [...plan], ...changes === void 0 ? {} : changes };
       const operation = this.operationFor(command.requestId, command.clientId);
@@ -74091,6 +73680,10 @@ var Controller = class {
   planCellRun(id2, source) {
     const cell = this.cellById(id2);
     if (cell === void 0) throw new ControllerError("not_found", `no such cell: ${id2}`, 404);
+    const issues = this.graphValue.issuesForCell(id2);
+    if (issues.length > 0) {
+      throw new ControllerError("graph_invalid", issues.map((issue2) => issue2.message).join("\n"), 409, { issues });
+    }
     return this.graphValue.planCell(
       id2,
       (candidate) => this.statusOf(candidate),
@@ -74130,7 +73723,6 @@ var Controller = class {
         source: joinSource(cell.body),
         definitions: [...analysis.defs],
         locals: [...analysis.locals],
-        opaque: analysis.opaque,
         runId,
         operationId,
         clientId
@@ -74167,12 +73759,6 @@ var Controller = class {
   reactiveRunReady() {
     return !this.closed && this.executionMode === "automatic" && this.reactivePending.size > 0 && this.kernelAvailable && this.executionReady && this.analyzerAvailable && !this.engineRestarting && this.analysisNeeded.size === 0 && this.analysisInFlight === null && this.activeEvaluation === null && this.queue.length === 0 && !this.runPreparationActive && this.queuedRunCommands.size === 0 && !this.packageOperationActive && this.runtimeContextReservation === void 0;
   }
-  sourceBarrierPending(pending) {
-    return this.barrierRestartRequired && pending.some((id2) => {
-      const cell = this.cellById(id2);
-      return cell?.type === "code" && cell.status !== "error" && (cell.analysis?.barrier === true || cell.analysis?.opaque === true);
-    });
-  }
   scheduleReactiveRun() {
     if (this.reactiveScheduled || !this.reactiveRunReady()) return;
     this.reactiveScheduled = true;
@@ -74184,7 +73770,7 @@ var Controller = class {
       try {
         this.assertGraphRunnable();
         const blocked = this.graphValue.blockedByDisabled();
-        const plan = new Set(this.sourceBarrierPending(pending) ? this.allCodePlan() : []);
+        const plan = /* @__PURE__ */ new Set();
         for (const id2 of pending) {
           const cell = this.cellById(id2);
           if (cell?.type !== "code" || blocked.has(id2)) continue;
@@ -74210,40 +73796,6 @@ var Controller = class {
       if (!this.kernelAvailable) {
         this.failKernel("R kernel is unavailable");
         return;
-      }
-      if (this.barrierRestartRequired) {
-        const generation = this.runtimeGeneration;
-        try {
-          this.kernelAvailable = false;
-          this.executionReady = false;
-          this.analysisEnvironmentIdValue = null;
-          this.emit("runtime", this.runtimeSnapshot());
-          const restarted = await this.engine.restart();
-          if (this.closed || generation !== this.runtimeGeneration) return;
-          const handshake = engineHandshakeSchema.parse(restarted);
-          this.handshake = handshake;
-          this.kernelEpochValue = handshake.kernel?.kernelEpoch ?? (handshake.kernelReady ? randomUUID3() : null);
-          this.outputStore.setIdentity({ documentRevision: this.documentRevisionValue, kernelEpoch: this.kernelEpochValue });
-          this.kernelAvailable = handshake.kernelReady && handshake.captureReady;
-          this.analyzerAvailable = handshake.analyzerReady;
-          if (!this.kernelAvailable || !this.analyzerAvailable) {
-            throw new ControllerError(
-              "engine_not_ready",
-              "R engine did not become ready after barrier restart",
-              503
-            );
-          }
-          this.barrierRestartRequired = false;
-          this.clearBeforeEvaluation.clear();
-          this.invalidatedDefinitionsByCell.clear();
-          this.clearRuntimeAvailabilityError();
-          this.executionReady = true;
-          this.emit("runtime", this.runtimeSnapshot());
-        } catch (error61) {
-          if (this.closed || generation !== this.runtimeGeneration) return;
-          this.failKernel(`R kernel restart failed: ${messageOf2(error61)}`);
-          return;
-        }
       }
       const next = this.queue[0];
       const nextCell = next === void 0 ? void 0 : this.cellById(next.id);
@@ -74277,7 +73829,7 @@ var Controller = class {
           this.failKernel(`could not clear old cell bindings: ${messageOf2(error61)}`);
           return;
         }
-        if (this.barrierRestartRequired || this.clearBeforeEvaluation.size > 0) continue;
+        if (this.clearBeforeEvaluation.size > 0) continue;
       }
       const job = this.queue.shift();
       if (job === void 0) return;
@@ -74339,16 +73891,15 @@ var Controller = class {
       documentRevision: this.documentRevisionValue,
       source: job.source,
       definitions: [...job.definitions],
-      locals: [...job.locals],
-      opaque: job.opaque
+      locals: [...job.locals]
     };
   }
   selectBatch(first) {
     const jobs = [first];
-    if (this.engine.evaluateBatch === void 0 || this.engine.invalidateBatch === void 0 || first.opaque || this.cellById(first.id)?.analysis?.barrier) return jobs;
+    if (this.engine.evaluateBatch === void 0 || this.engine.invalidateBatch === void 0) return jobs;
     for (const job of this.queue.slice(0, 3)) {
       const cell = this.cellById(job.id);
-      if (job.runId !== first.runId || job.operationId !== first.operationId || job.opaque || cell?.type !== "code" || cell.revision !== job.revision || cell.analysis?.barrier || this.graphValue.blockedByDisabled().has(job.id) || !this.graphValue.descendants(jobs.at(-1).id).includes(job.id)) break;
+      if (job.runId !== first.runId || job.operationId !== first.operationId || cell?.type !== "code" || cell.revision !== job.revision || this.graphValue.blockedByDisabled().has(job.id) || !this.graphValue.descendants(jobs.at(-1).id).includes(job.id)) break;
       jobs.push(job);
     }
     return jobs;
@@ -74665,12 +74216,6 @@ var Controller = class {
       { operationId: job.operationId, runId: job.runId }
     );
     if (dropDescendants) this.dropRunDescendants(job.id, job.runId);
-    if (cell.analysis?.barrier) {
-      this.emitCells(this.invalidateForBarrier(job.id), {
-        operationId: job.operationId,
-        runId: job.runId
-      });
-    }
   }
   dropRunDescendants(id2, runId) {
     const descendants = new Set(this.graphValue.descendants(id2));
@@ -74892,7 +74437,6 @@ var Controller = class {
         this.recordRuntimeAvailabilityError(failure2);
         throw new ControllerError("engine_not_ready", failure2.message, 503);
       }
-      this.barrierRestartRequired = false;
       this.clearBeforeEvaluation.clear();
       this.invalidatedDefinitionsByCell.clear();
       this.clearRuntimeAvailabilityError();
@@ -75292,17 +74836,7 @@ var Controller = class {
     }
     this.analyzerAvailable = true;
     const previousGraphState = this.graphValue.state;
-    const refreshedCells = invalidationRoots.flatMap((id2) => {
-      const cell = this.cellById(id2);
-      return cell === void 0 ? [] : [{
-        ...cell.analysis ?? emptyAnalysis(cell.id, cell.revision),
-        type: cell.type,
-        disabled: cell.options.disabled === true
-      }];
-    });
-    if (!this.graphValue.refreshCellsIfTopologyUnchanged(refreshedCells)) {
-      this.graphValue = this.rebuildGraph();
-    }
+    this.graphValue = this.rebuildGraph();
     const statusChanges = /* @__PURE__ */ new Set();
     for (const changedId of this.invalidateForGraphLimit()) statusChanges.add(changedId);
     for (const root of invalidationRoots) {
@@ -75312,10 +74846,6 @@ var Controller = class {
           this.reactivePending.add(descendant);
         }
       }
-      if (this.barrierAnalysisCandidates.has(root) && this.cellById(root)?.analysis?.barrier) {
-        for (const changedId of this.invalidateForBarrier()) statusChanges.add(changedId);
-      }
-      this.barrierAnalysisCandidates.delete(root);
     }
     this.refreshValueFreshness();
     this.refreshButtonResets();
@@ -75381,11 +74911,10 @@ var Controller = class {
         409
       );
     }
-    const issues = this.graphValue.validate();
-    if (issues.length > 0) {
-      const blocked = issues.some((issue2) => issue2.code === "graph_blocked");
+    if (this.graphValue.resourceLimited) {
+      const issues = this.graphValue.validate();
       throw new ControllerError(
-        blocked ? "graph_blocked" : "graph_invalid",
+        "graph_blocked",
         issues.map((issue2) => issue2.message).join("\n"),
         409,
         { issues }
@@ -75407,34 +74936,6 @@ var Controller = class {
       if (this.statusOf(id2) !== before2) changed.add(id2);
     }
     this.refreshValueFreshness();
-    return changed;
-  }
-  invalidateForBarrier(preserveErrorCellId) {
-    const changed = /* @__PURE__ */ new Set();
-    this.runtimeGeneration = nextRevision(this.runtimeGeneration);
-    this.lastValue = null;
-    this.clearVariables();
-    for (const cell of this.cells) {
-      if (cell.type !== "code") continue;
-      this.cancelOwnedOperations(cell.id);
-      if (cell.id !== preserveErrorCellId && cell.status !== "running") {
-        const before2 = this.statusOf(cell.id);
-        cell.status = "stale";
-        if (this.statusOf(cell.id) !== before2) changed.add(cell.id);
-      }
-    }
-    if (this.pendingInspection !== null) {
-      const pending = this.pendingInspection;
-      pending.cancellation.abort();
-      this.pendingInspection = null;
-      this.failOperation(
-        pending.operationId,
-        hostError("stale_value", staleValueMessage(pending.name), pending.operationId),
-        pending.clientId
-      );
-    }
-    this.refreshValueFreshness();
-    this.barrierRestartRequired = true;
     return changed;
   }
   startWidgetOperation(command) {
@@ -75973,13 +75474,6 @@ var Controller = class {
   }
   startInspection(operationId, name, clientId) {
     this.assertStarted();
-    if (this.barrierRestartRequired) {
-      throw new ControllerError(
-        "stale_value",
-        "values are not current until the R runtime restarts",
-        409
-      );
-    }
     const ownerId = this.graphValue.definitionOwner(name);
     const owner = ownerId === void 0 ? void 0 : this.cellById(ownerId);
     if (owner !== void 0 && this.statusOf(owner.id) !== "done" || this.definitionIsInvalidated(name)) {
@@ -76524,7 +76018,6 @@ var Controller = class {
         this.analysisNeeded.add(cell.id);
       }
       this.graphValue = this.rebuildGraph();
-      this.barrierRestartRequired = false;
       this.clearBeforeEvaluation.clear();
       this.invalidatedDefinitionsByCell.clear();
       this.executionReady = false;
@@ -76658,8 +76151,6 @@ var Controller = class {
       refs: [...analysis.refs],
       selfRefs: [...analysis.selfRefs],
       locals: [...analysis.locals],
-      barrier: analysis.barrier,
-      opaque: analysis.opaque,
       diagnostics: this.cellDiagnostics(cell),
       analysisPending: cell.type === "code" && (cell.analysis === null || cell.analysis.revision !== cell.revision)
     };
@@ -76691,24 +76182,14 @@ var Controller = class {
       const parsed = analysisDiagnosticSchema.safeParse(raw);
       if (parsed.success) diagnostics.push(parsed.data);
     }
-    if (this.graphValue.state.cycles.includes(cell.id)) {
+    for (const issue2 of this.graphValue.issuesForCell(cell.id)) {
+      if (issue2.code === "graph_blocked") continue;
       diagnostics.push({
         source: "alder",
         level: "error",
-        code: "dependency-cycle",
-        message: `dependency cycle: ${this.graphValue.state.cycles.join(", ")}`,
-        symbol: null,
-        range: null
-      });
-    }
-    const duplicateDefinitions = Object.keys(this.graphValue.state.duplicates).filter((symbol2) => analysis?.defs.includes(symbol2));
-    if (duplicateDefinitions.length > 0) {
-      diagnostics.push({
-        source: "alder",
-        level: "error",
-        code: "duplicate-definition",
-        message: `duplicate definition: ${duplicateDefinitions.join(", ")}`,
-        symbol: null,
+        code: issue2.code,
+        message: issue2.message,
+        symbol: issue2.symbol ?? null,
         range: null
       });
     }
@@ -77526,8 +77007,6 @@ function emptyAnalysis(id2, revision2) {
     refs: [],
     selfRefs: [],
     locals: [],
-    barrier: false,
-    opaque: false,
     diagnostics: [],
     error: null
   };
@@ -77538,8 +77017,6 @@ function analysisCacheValue(result) {
     refs: [...result.refs],
     selfRefs: [...result.selfRefs],
     locals: [...result.locals],
-    barrier: result.barrier,
-    opaque: result.opaque,
     diagnostics: clone3(result.diagnostics),
     error: result.error
   };
@@ -81765,8 +81242,6 @@ function mapAnalysisResult(raw, sources) {
       refs: cell.refs,
       selfRefs: cell.selfRefs,
       locals: cell.locals,
-      barrier: cell.barrier,
-      opaque: cell.opaque,
       diagnostics,
       error: cell.error ?? null,
       ...cell.ranges === void 0 ? {} : { ranges: mapAnalysisRanges(cell.ranges, source) }
@@ -81979,8 +81454,7 @@ function evaluationWire(value, controlDirectory) {
     operation_id: value.operationId,
     ...source,
     defs: value.definitions,
-    locals: value.locals,
-    opaque: value.opaque
+    locals: value.locals
   };
 }
 function makeEvaluation(requestId, payload, onEvent, kernelGeneration, token, maxBytes) {

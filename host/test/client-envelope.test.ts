@@ -268,8 +268,6 @@ function snapshot(body: string[]): HostSnapshot {
     refs: [],
     selfRefs: [],
     locals: [],
-    barrier: false,
-    opaque: false,
     diagnostics: [],
     analysisPending: false,
   };

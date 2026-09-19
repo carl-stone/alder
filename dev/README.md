@@ -79,6 +79,9 @@ being edited; a private test library avoids picking up an unrelated installation
 - [Outputs and widgets](parity-demo.R): scientific output and interaction fixture.
 - [Ark execution examples](examples/ark-scalar-dependency.R): scalar dependencies,
   errors, plots, Stop and project packages in ordinary R scripts.
+- [Ordinary dynamic R](examples/ordinary-dynamic-r.R): dynamic lookup,
+  assignment, sourcing, loading, calls and evaluation with explicit reruns for
+  dependencies that static analysis cannot see.
 - [Bulk differential expression](examples/bulk-differential-expression.R):
   simulated data with edgeR, statmod and ggplot2.
 

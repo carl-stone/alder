@@ -200,7 +200,6 @@ interface EvaluationJob {
   source: string;
   definitions: string[];
   locals: string[];
-  opaque: boolean;
   runId: string;
   operationId: string;
   clientId: string;
@@ -228,8 +227,6 @@ interface AnalysisCacheValue {
   refs: string[];
   selfRefs: string[];
   locals: string[];
-  barrier: boolean;
-  opaque: boolean;
   diagnostics: unknown[];
   error: string | null;
 }
@@ -305,7 +302,6 @@ export class Controller {
   private readonly analysisNeeded = new Set<string>();
   private readonly reactivePending = new Set<string>();
   private reactiveScheduled = false;
-  private readonly barrierAnalysisCandidates = new Set<string>();
   private readonly clearBeforeEvaluation = new Set<string>();
   private readonly invalidatedDefinitionsByCell = new Map<string, Set<string>>();
   private readonly runOperationById = new Map<string, string>();
@@ -406,7 +402,6 @@ export class Controller {
   private activeBatch: Map<string, ActiveEvaluation> | null = null;
   private readonly interruptedRuns = new Map<string, NonNullable<EngineResponse["error"]>>();
   private pumpPromise: Promise<void> | null = null;
-  private barrierRestartRequired = false;
   private packageOperationActive = false;
   private packageOperationClientId: string | undefined;
   private runPreparationActive = false;
@@ -1728,7 +1723,6 @@ export class Controller {
     const priorOrder = new Map(priorRetainedOrder.map((id, index) => [id, index]));
     const nextOrder = new Map(nextRetainedOrder.map((id, index) => [id, index]));
     const movedIds = new Set(nextRetainedOrder.filter(id => priorOrder.get(id) !== nextOrder.get(id)));
-    const movedBarrier = [...movedIds].some(id => { const analysis = this.cellById(id)?.analysis; return analysis?.barrier === true || analysis?.opaque === true; });
     const prior = new Map(this.cells.map((cell) => [cell.id, cell]));
     const changedIds = new Set(staged.changed);
     const affected = new Set<string>();
@@ -1738,23 +1732,13 @@ export class Controller {
       for (const descendant of this.graphValue.descendants(id)) affected.add(descendant);
     }
     for (const id of staged.deleted) {
-      const removed = this.cellById(id);
-      if (removed?.analysis?.barrier || removed?.analysis?.opaque) {
-        const removedIndex = this.cells.findIndex(cell => cell.id === id);
-        const successor = this.cells.slice(removedIndex + 1).find(cell => cell.type === "code");
-        if (successor !== undefined) for (const descendant of this.graphValue.descendants(successor.id)) affected.add(descendant);
-      } else {
-        for (const descendant of this.graphValue.descendants(id)) affected.add(descendant);
-      }
+      for (const descendant of this.graphValue.descendants(id)) affected.add(descendant);
     }
-    if (orderChanged && !movedBarrier) {
+    if (orderChanged) {
       for (const id of movedIds) {
         affected.add(id);
         for (const descendant of this.graphValue.descendants(id)) affected.add(descendant);
       }
-    }
-    if (movedBarrier) {
-      for (const cell of this.cells) if (cell.type === "code") affected.add(cell.id);
     }
     for (const id of affected) this.cancelRunRegion(new Set([id]), "source");
     this.clearEditorDiagnostics(true);
@@ -1766,7 +1750,6 @@ export class Controller {
       for (const operation of this.cancelOwnedOperations(id)) this.obsoleteWidgetRequests.set(operation, id);
       this.outputStore.discardExact(removed.outputs);
       this.analysisNeeded.delete(id);
-      this.barrierAnalysisCandidates.delete(id);
       this.clearBeforeEvaluation.add(id);
     }
     const nextCells: CellRecord[] = [];
@@ -1807,25 +1790,17 @@ export class Controller {
     for (const cell of this.cells) {
       if (cell.type !== 'code') {
         this.analysisNeeded.delete(cell.id);
-        this.barrierAnalysisCandidates.delete(cell.id);
         continue;
       }
       const old = prior.get(cell.id);
       if (old === undefined || changedIds.has(cell.id) || old.type !== 'code') {
         this.analysisNeeded.add(cell.id);
-        this.barrierAnalysisCandidates.add(cell.id);
       }
     }
     this.analysisGeneration = nextRevision(this.analysisGeneration);
-    const cellTypeChanged = this.cells.some((cell) => prior.get(cell.id)?.type !== cell.type);
-    if (staged.created.size > 0 || staged.deleted.size > 0 || orderChanged || cellTypeChanged) {
-      this.graphValue = this.rebuildGraph();
-    }
-    if (movedBarrier) this.invalidateForBarrier();
-    else {
-      if (orderChanged) for (const id of movedIds) for (const descendant of this.graphValue.descendants(id)) affected.add(descendant);
-      for (const id of affected) if (this.cellById(id) !== undefined) this.markStale(id);
-    }
+    this.graphValue = this.rebuildGraph();
+    if (orderChanged) for (const id of movedIds) for (const descendant of this.graphValue.descendants(id)) affected.add(descendant);
+    for (const id of affected) if (this.cellById(id) !== undefined) this.markStale(id);
     this.changed = true;
     this.refreshValueFreshness();
     this.publishGraphResourceError({ operationId }, true);
@@ -1881,9 +1856,6 @@ export class Controller {
     }
     for (const candidate of this.graphValue.descendants(id)) {
       if (this.markStale(candidate)) statusChanges.add(candidate);
-    }
-    if (moved.analysis?.barrier || moved.analysis?.opaque) {
-      for (const changedId of this.invalidateForBarrier()) statusChanges.add(changedId);
     }
     this.changed = true;
     this.bump("notebook", {
@@ -2026,9 +1998,6 @@ export class Controller {
       } else {
         plan = this.graphValue.planStale((id) => this.statusOf(id));
       }
-      if (this.executionMode === "automatic" && this.sourceBarrierPending([...this.reactivePending])) {
-        plan = this.allCodePlan();
-      }
       const runId = this.launchRun(plan, command.requestId, false, command.clientId);
       const result = { runId, plan: [...plan], ...(changes === undefined ? {} : changes) };
       const operation = this.operationFor(command.requestId, command.clientId);
@@ -2066,6 +2035,10 @@ export class Controller {
   ): string[] {
     const cell = this.cellById(id);
     if (cell === undefined) throw new ControllerError("not_found", `no such cell: ${id}`, 404);
+    const issues = this.graphValue.issuesForCell(id);
+    if (issues.length > 0) {
+      throw new ControllerError("graph_invalid", issues.map(issue => issue.message).join("\n"), 409, { issues });
+    }
     return this.graphValue.planCell(
       id,
       (candidate) => this.statusOf(candidate),
@@ -2112,7 +2085,6 @@ export class Controller {
         source: joinSource(cell.body),
         definitions: [...analysis.defs],
         locals: [...analysis.locals],
-        opaque: analysis.opaque,
         runId,
         operationId,
         clientId,
@@ -2166,14 +2138,6 @@ export class Controller {
       && this.runtimeContextReservation === undefined;
   }
 
-  private sourceBarrierPending(pending: readonly string[]): boolean {
-    return this.barrierRestartRequired && pending.some((id) => {
-      const cell = this.cellById(id);
-      return cell?.type === "code" && cell.status !== "error"
-        && (cell.analysis?.barrier === true || cell.analysis?.opaque === true);
-    });
-  }
-
   private scheduleReactiveRun(): void {
     if (this.reactiveScheduled || !this.reactiveRunReady()) return;
     this.reactiveScheduled = true;
@@ -2185,7 +2149,7 @@ export class Controller {
       try {
         this.assertGraphRunnable();
         const blocked = this.graphValue.blockedByDisabled();
-        const plan = new Set<string>(this.sourceBarrierPending(pending) ? this.allCodePlan() : []);
+        const plan = new Set<string>();
         for (const id of pending) {
           const cell = this.cellById(id);
           if (cell?.type !== "code" || blocked.has(id)) continue;
@@ -2212,40 +2176,6 @@ export class Controller {
       if (!this.kernelAvailable) {
         this.failKernel("R kernel is unavailable");
         return;
-      }
-      if (this.barrierRestartRequired) {
-        const generation = this.runtimeGeneration;
-        try {
-          this.kernelAvailable = false;
-          this.executionReady = false;
-          this.analysisEnvironmentIdValue = null;
-          this.emit("runtime", this.runtimeSnapshot());
-          const restarted = await this.engine.restart();
-          if (this.closed || generation !== this.runtimeGeneration) return;
-          const handshake = engineHandshakeSchema.parse(restarted);
-          this.handshake = handshake;
-          this.kernelEpochValue = handshake.kernel?.kernelEpoch ?? (handshake.kernelReady ? randomUUID() : null);
-          this.outputStore.setIdentity({ documentRevision: this.documentRevisionValue, kernelEpoch: this.kernelEpochValue });
-          this.kernelAvailable = handshake.kernelReady && handshake.captureReady;
-          this.analyzerAvailable = handshake.analyzerReady;
-          if (!this.kernelAvailable || !this.analyzerAvailable) {
-            throw new ControllerError(
-              "engine_not_ready",
-              "R engine did not become ready after barrier restart",
-              503,
-            );
-          }
-          this.barrierRestartRequired = false;
-          this.clearBeforeEvaluation.clear();
-          this.invalidatedDefinitionsByCell.clear();
-          this.clearRuntimeAvailabilityError();
-          this.executionReady = true;
-          this.emit("runtime", this.runtimeSnapshot());
-        } catch (error) {
-          if (this.closed || generation !== this.runtimeGeneration) return;
-          this.failKernel(`R kernel restart failed: ${messageOf(error)}`);
-          return;
-        }
       }
       // Evaluation clears its own prior definitions and locals, including on
       // interruption. Other invalidated cells must still be cleared before it
@@ -2285,7 +2215,7 @@ export class Controller {
           this.failKernel(`could not clear old cell bindings: ${messageOf(error)}`);
           return;
         }
-        if (this.barrierRestartRequired || this.clearBeforeEvaluation.size > 0) continue;
+        if (this.clearBeforeEvaluation.size > 0) continue;
       }
 
       const job = this.queue.shift();
@@ -2344,20 +2274,18 @@ export class Controller {
     return {
       sessionEpoch: this.epochValue, kernelEpoch, operationId: job.operationId, runId: job.runId,
       cellId: job.id, revision: job.revision, documentRevision: this.documentRevisionValue, source: job.source,
-      definitions: [...job.definitions], locals: [...job.locals], opaque: job.opaque,
+      definitions: [...job.definitions], locals: [...job.locals],
     };
   }
   private selectBatch(first: EvaluationJob): EvaluationJob[] {
     const jobs = [first];
-    if (this.engine.evaluateBatch === undefined || this.engine.invalidateBatch === undefined ||
-        first.opaque || this.cellById(first.id)?.analysis?.barrier) return jobs;
+    if (this.engine.evaluateBatch === undefined || this.engine.invalidateBatch === undefined) return jobs;
     // A bounded dependency chain can stop as a unit on error or out$stop().
-    // Independent cells and dynamic barriers retain ordinary serial scheduling.
     for (const job of this.queue.slice(0, 3)) {
       const cell = this.cellById(job.id);
       if (job.runId !== first.runId || job.operationId !== first.operationId ||
-          job.opaque || cell?.type !== "code" || cell.revision !== job.revision ||
-          cell.analysis?.barrier || this.graphValue.blockedByDisabled().has(job.id) ||
+          cell?.type !== "code" || cell.revision !== job.revision ||
+          this.graphValue.blockedByDisabled().has(job.id) ||
           !this.graphValue.descendants(jobs.at(-1)!.id).includes(job.id)) break;
       jobs.push(job);
     }
@@ -2729,12 +2657,6 @@ export class Controller {
       { operationId: job.operationId, runId: job.runId },
     );
     if (dropDescendants) this.dropRunDescendants(job.id, job.runId);
-    if (cell.analysis?.barrier) {
-      this.emitCells(this.invalidateForBarrier(job.id), {
-        operationId: job.operationId,
-        runId: job.runId,
-      });
-    }
   }
 
   private dropRunDescendants(id: string, runId: string): void {
@@ -2982,7 +2904,6 @@ export class Controller {
         this.recordRuntimeAvailabilityError(failure);
         throw new ControllerError("engine_not_ready", failure.message, 503);
       }
-      this.barrierRestartRequired = false;
       this.clearBeforeEvaluation.clear();
       this.invalidatedDefinitionsByCell.clear();
       this.clearRuntimeAvailabilityError();
@@ -3418,17 +3339,7 @@ export class Controller {
     }
     this.analyzerAvailable = true;
     const previousGraphState = this.graphValue.state;
-    const refreshedCells = invalidationRoots.flatMap((id): GraphCellInput[] => {
-      const cell = this.cellById(id);
-      return cell === undefined ? [] : [{
-        ...(cell.analysis ?? emptyAnalysis(cell.id, cell.revision)),
-        type: cell.type,
-        disabled: cell.options.disabled === true,
-      }];
-    });
-    if (!this.graphValue.refreshCellsIfTopologyUnchanged(refreshedCells)) {
-      this.graphValue = this.rebuildGraph();
-    }
+    this.graphValue = this.rebuildGraph();
     const statusChanges = new Set<string>();
     for (const changedId of this.invalidateForGraphLimit()) statusChanges.add(changedId);
     for (const root of invalidationRoots) {
@@ -3438,11 +3349,6 @@ export class Controller {
           this.reactivePending.add(descendant);
         }
       }
-      if (this.barrierAnalysisCandidates.has(root)
-        && this.cellById(root)?.analysis?.barrier) {
-        for (const changedId of this.invalidateForBarrier()) statusChanges.add(changedId);
-      }
-      this.barrierAnalysisCandidates.delete(root);
     }
     this.refreshValueFreshness();
     this.refreshButtonResets();
@@ -3518,11 +3424,10 @@ export class Controller {
         409,
       );
     }
-    const issues = this.graphValue.validate();
-    if (issues.length > 0) {
-      const blocked = issues.some((issue) => issue.code === "graph_blocked");
+    if (this.graphValue.resourceLimited) {
+      const issues = this.graphValue.validate();
       throw new ControllerError(
-        blocked ? "graph_blocked" : "graph_invalid",
+        "graph_blocked",
         issues.map((issue) => issue.message).join("\n"),
         409,
         { issues },
@@ -3545,35 +3450,6 @@ export class Controller {
       if (this.statusOf(id) !== before) changed.add(id);
     }
     this.refreshValueFreshness();
-    return changed;
-  }
-
-  private invalidateForBarrier(preserveErrorCellId?: string): Set<string> {
-    const changed = new Set<string>();
-    this.runtimeGeneration = nextRevision(this.runtimeGeneration);
-    this.lastValue = null;
-    this.clearVariables();
-    for (const cell of this.cells) {
-      if (cell.type !== "code") continue;
-      this.cancelOwnedOperations(cell.id);
-      if (cell.id !== preserveErrorCellId && cell.status !== "running") {
-        const before = this.statusOf(cell.id);
-        cell.status = "stale";
-        if (this.statusOf(cell.id) !== before) changed.add(cell.id);
-      }
-    }
-    if (this.pendingInspection !== null) {
-      const pending = this.pendingInspection;
-      pending.cancellation.abort();
-      this.pendingInspection = null;
-      this.failOperation(
-        pending.operationId,
-        hostError("stale_value", staleValueMessage(pending.name), pending.operationId),
-        pending.clientId,
-      );
-    }
-    this.refreshValueFreshness();
-    this.barrierRestartRequired = true;
     return changed;
   }
 
@@ -4245,13 +4121,6 @@ export class Controller {
 
   private startInspection(operationId: string, name: string, clientId: string): unknown {
     this.assertStarted();
-    if (this.barrierRestartRequired) {
-      throw new ControllerError(
-        "stale_value",
-        "values are not current until the R runtime restarts",
-        409,
-      );
-    }
     const ownerId = this.graphValue.definitionOwner(name);
     const owner = ownerId === undefined ? undefined : this.cellById(ownerId);
     if ((owner !== undefined && this.statusOf(owner.id) !== "done")
@@ -4881,7 +4750,6 @@ export class Controller {
         this.analysisNeeded.add(cell.id);
       }
       this.graphValue = this.rebuildGraph();
-      this.barrierRestartRequired = false;
       this.clearBeforeEvaluation.clear();
       this.invalidatedDefinitionsByCell.clear();
       this.executionReady = false;
@@ -5019,8 +4887,6 @@ export class Controller {
       refs: [...analysis.refs],
       selfRefs: [...analysis.selfRefs],
       locals: [...analysis.locals],
-      barrier: analysis.barrier,
-      opaque: analysis.opaque,
       diagnostics: this.cellDiagnostics(cell),
       analysisPending: cell.type === "code"
         && (cell.analysis === null || cell.analysis.revision !== cell.revision),
@@ -5054,25 +4920,14 @@ export class Controller {
       const parsed = analysisDiagnosticSchema.safeParse(raw);
       if (parsed.success) diagnostics.push(parsed.data);
     }
-    if (this.graphValue.state.cycles.includes(cell.id)) {
+    for (const issue of this.graphValue.issuesForCell(cell.id)) {
+      if (issue.code === "graph_blocked") continue;
       diagnostics.push({
         source: "alder",
         level: "error",
-        code: "dependency-cycle",
-        message: `dependency cycle: ${this.graphValue.state.cycles.join(", ")}`,
-        symbol: null,
-        range: null,
-      });
-    }
-    const duplicateDefinitions = Object.keys(this.graphValue.state.duplicates)
-      .filter((symbol) => analysis?.defs.includes(symbol));
-    if (duplicateDefinitions.length > 0) {
-      diagnostics.push({
-        source: "alder",
-        level: "error",
-        code: "duplicate-definition",
-        message: `duplicate definition: ${duplicateDefinitions.join(", ")}`,
-        symbol: null,
+        code: issue.code,
+        message: issue.message,
+        symbol: issue.symbol ?? null,
         range: null,
       });
     }
@@ -6021,8 +5876,6 @@ function emptyAnalysis(id: string, revision: number): AnalysisCellResult {
     refs: [],
     selfRefs: [],
     locals: [],
-    barrier: false,
-    opaque: false,
     diagnostics: [],
     error: null,
   };
@@ -6034,8 +5887,6 @@ function analysisCacheValue(result: AnalysisCellResult): AnalysisCacheValue {
     refs: [...result.refs],
     selfRefs: [...result.selfRefs],
     locals: [...result.locals],
-    barrier: result.barrier,
-    opaque: result.opaque,
     diagnostics: clone(result.diagnostics),
     error: result.error,
   };

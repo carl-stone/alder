@@ -10,11 +10,7 @@ import {
   topologicalOrder,
   type GraphCellInput,
 } from "../src/graph.js";
-import {
-  MAX_DEPENDENCY_EDGES,
-  MAX_NOTEBOOK_CELLS,
-} from "../src/protocol.js";
-
+import { MAX_DEPENDENCY_EDGES, MAX_NOTEBOOK_CELLS } from "../src/protocol.js";
 
 function cell(
   id: string,
@@ -29,24 +25,13 @@ function cell(
     refs: [],
     selfRefs: [],
     locals: [],
-    barrier: false,
-    opaque: false,
     diagnostics: [],
     error: null,
     ...values,
   };
 }
 
-test('metadata-only graph refresh preserves topology and updates validation', () => {
-  const graph = new ReactiveGraph([cell('a', { defs: ['x'] }), cell('b', { refs: ['x'] })]);
-  const state = graph.state;
-  assert.equal(graph.refreshCellsIfTopologyUnchanged([cell('a', { defs: ['x'], error: 'invalid source' })]), true);
-  assert.strictEqual(graph.state, state);
-  assert.equal(graph.validate().some((issue) => issue.code === 'syntax-error'), true);
-  assert.equal(graph.refreshCellsIfTopologyUnchanged([cell('a', { defs: ['other'] })]), false);
-});
-
-test("graph reproduces definition edges, duplicate owners, cycles, and deterministic order", () => {
+test("static definitions and references produce deterministic dependency edges", () => {
   const graph = buildDependencyGraph([
     cell("a", { defs: ["x"] }),
     cell("b", { defs: ["y"], refs: ["x"] }),
@@ -55,42 +40,62 @@ test("graph reproduces definition edges, duplicate owners, cycles, and determini
   assert.deepEqual(graph.edges, { a: [], b: ["a"], c: ["a", "b"] });
   assert.deepEqual(graph.reverseEdges, { a: ["b", "c"], b: ["c"], c: [] });
   assert.deepEqual(graph.topologicalOrder, ["a", "b", "c"]);
+});
 
-  const duplicate = buildDependencyGraph([
-    cell("a", { defs: ["x"] }),
-    cell("b", { defs: ["x"] }),
+test("duplicate globals block only their defining cells", () => {
+  const graph = new ReactiveGraph([
+    cell("first", { defs: ["shared"] }),
+    cell("second", { defs: ["shared"] }),
+    cell("dependent", { refs: ["shared"] }),
+    cell("unrelated", { defs: ["other"] }),
   ]);
-  assert.deepEqual(duplicate.duplicates, { x: ["a", "b"] });
+  assert.deepEqual(graph.state.duplicates, { shared: ["first", "second"] });
+  assert.deepEqual(graph.state.topologicalOrder, ["dependent", "unrelated"]);
+  assert.deepEqual([...graph.blockedCellIds()], ["first", "second"]);
+  assert.match(graph.issuesForCell("first")[0]?.message ?? "", /global shared.*first, second/);
+  assert.deepEqual(graph.issuesForCell("unrelated"), []);
+});
 
-  const cyclic = buildDependencyGraph([
+test("cycle diagnostics block cycle members while unrelated cells remain runnable", () => {
+  const graph = new ReactiveGraph([
     cell("a", { defs: ["x"], refs: ["y"] }),
     cell("b", { defs: ["y"], refs: ["x"] }),
-    cell("c", { refs: ["x"] }),
+    cell("unrelated", { defs: ["z"] }),
   ]);
-  assert.deepEqual(cyclic.cycles, ["a", "b"]);
-  assert.equal(cyclic.topologicalOrder, null);
-  assert.deepEqual(detectCycleNodes(cyclic.edges, cyclic.nodes), ["a", "b"]);
-  assert.equal(topologicalOrder(cyclic.edges, cyclic.nodes), null);
+  assert.deepEqual(graph.state.cycles, ["a", "b"]);
+  assert.deepEqual(graph.state.topologicalOrder, ["unrelated"]);
+  assert.deepEqual(detectCycleNodes(graph.state.edges, graph.state.nodes), ["a", "b"]);
+  assert.equal(topologicalOrder(graph.state.edges, graph.state.nodes), null);
+  assert.match(graph.issuesForCell("a")[0]?.message ?? "", /cells: a, b/);
+  assert.deepEqual(graph.issuesForCell("unrelated"), []);
 });
 
-test("self references cycle while package and opaque barriers preserve R ordering", () => {
-  const graph = buildDependencyGraph([
-    cell("before", { defs: ["x"] }),
-    cell("package", { barrier: true }),
-    cell("note", {}, "markdown"),
-    cell("opaque", { barrier: true, opaque: true }),
-    cell("after"),
-    cell("self", { defs: ["counter"], selfRefs: ["counter"] }),
+test("parse and analyzer diagnostics do not become graph execution errors", () => {
+  const graph = new ReactiveGraph([
+    cell("parse", { error: "unexpected end of input" }),
+    cell("dynamic", { diagnostics: [{ level: "error", message: "unknown effect" }] }),
   ]);
-  assert.deepEqual(graph.edges.package, []);
-  assert.deepEqual(graph.edges.note, []);
-  assert.deepEqual(graph.edges.opaque, ["package", "before"]);
-  assert.deepEqual(graph.edges.after, ["package", "opaque"]);
-  assert.ok(graph.edges.self?.includes("self"));
-  assert.deepEqual(graph.cycles, ["self"]);
+  assert.deepEqual(graph.validate(), []);
+  assert.deepEqual(graph.state.topologicalOrder, ["parse", "dynamic"]);
 });
 
-test("disabled cells block their complete descendant region and planning respects mode", () => {
+test("every update rebuilds ownership and topology from the accepted cells", () => {
+  const graph = new ReactiveGraph([
+    cell("a", { defs: ["x"] }),
+    cell("b", { refs: ["x"] }),
+  ]);
+  assert.deepEqual(graph.state.edges.b, ["a"]);
+  graph.update([
+    cell("a", { defs: ["other"] }),
+    cell("b", { refs: ["x"] }),
+    cell("c", { defs: ["x"] }),
+  ]);
+  assert.deepEqual(graph.state, buildDependencyGraph(graph.cells));
+  assert.deepEqual(graph.state.edges.b, ["c"]);
+  assert.deepEqual(graph.definitionOwners("x"), ["c"]);
+});
+
+test("disabled descendants and automatic versus lazy planning retain their behavior", () => {
   const graph = new ReactiveGraph([
     cell("a", { defs: ["x"] }),
     cell("b", { defs: ["y"], refs: ["x"] }),
@@ -102,112 +107,12 @@ test("disabled cells block their complete descendant region and planning respect
   assert.deepEqual([...graph.blockedByDisabled(new Set(["b"]))], ["b", "c"]);
 
   const statuses = new Map<string, import("../src/protocol.js").CellStatus>([
-    ["a", "stale"],
-    ["b", "done"],
-    ["c", "done"],
-    ["unrelated", "done"],
-  ] as const);
-  assert.deepEqual(
-    graph.planCell("a", (id) => statuses.get(id) ?? "idle", "lazy"),
-    ["a"],
-  );
-  assert.deepEqual(
-    graph.planCell("a", (id) => statuses.get(id) ?? "idle", "automatic"),
-    ["a", "b", "c"],
-  );
-  assert.deepEqual(
-    graph.planCell("c", (id) => statuses.get(id) ?? "idle", "lazy"),
-    ["a", "c"],
-  );
-});
-
-test("only analyzer error diagnostics block dispatch; warnings remain runnable", () => {
-  const warning = new ReactiveGraph([
-    cell("a", { diagnostics: [{ level: "warning", message: "conservative" }] }),
+    ["a", "stale"], ["b", "done"], ["c", "done"], ["unrelated", "done"],
   ]);
-  assert.deepEqual(warning.validate(), []);
-  const invalid = new ReactiveGraph([
-    cell("syntax", { error: "unexpected end of input" }),
-    cell("dynamic", { diagnostics: [{ level: "error", message: "assign target is dynamic" }] }),
-  ]);
-  assert.deepEqual(
-    invalid.validate().map((issue) => issue.code),
-    ["analysis-error", "syntax-error"],
-  );
-});
-
-test("unchanged dependencies retain graph state while validation metadata advances", () => {
-  const graph = new ReactiveGraph([cell("a", { defs: ["x"] }), cell("b", { refs: ["x"] })]);
-  const state = graph.state;
-  graph.update([cell("a", {
-    revision: 1, defs: ["x"], locals: ["scratch"], error: "invalid replacement",
-    diagnostics: [{ level: "error", message: "unsafe analysis" }],
-  }), cell("b", { refs: ["x"] })]);
-  assert.equal(graph.state, state);
-  assert.equal(graph.cells[0]?.revision, 1);
-  assert.deepEqual(graph.cells[0]?.locals, ["scratch"]);
-  assert.deepEqual(graph.validate().map((issue) => issue.code).sort(), ["analysis-error", "syntax-error"]);
-  graph.update([cell("a", { revision: 2, defs: ["x"] }), cell("b", { refs: ["x"] })]);
-  assert.equal(graph.state, state);
-  assert.deepEqual(graph.validate(), []);
-});
-
-test("persistent graph updates match a fresh graph across ownership and structural changes", () => {
-  let cells = [
-    cell("a", { defs: ["x"] }),
-    cell("b", { defs: ["y"], refs: ["x"] }),
-    cell("c", { refs: ["y"] }),
-    cell("note", {}, "markdown"),
-  ];
-  const graph = new ReactiveGraph(cells);
-  const identity = graph;
-
-  const check = (next: GraphCellInput[]): void => {
-    cells = next;
-    assert.equal(graph.update(cells), identity);
-    const fresh = new ReactiveGraph(cells);
-    assert.deepEqual(graph.state, buildDependencyGraph(cells));
-    assert.deepEqual(graph.state, fresh.state);
-    const symbols = new Set(cells.flatMap((item) => [...item.defs, ...item.refs]));
-    for (const symbol of symbols) {
-      assert.deepEqual(graph.definitionOwners(symbol), fresh.definitionOwners(symbol));
-    }
-    assert.deepEqual([...graph.blockedByDisabled()], [...fresh.blockedByDisabled()]);
-  };
-
-  check(cells.map((item) => item.id === "a"
-    ? cell("a", { defs: ["z"] })
-    : item));
-  check(cells.map((item) => item.id === "b"
-    ? cell("b", { defs: ["y"], refs: ["z"] })
-    : item));
-  check([
-    ...cells.slice(0, 1),
-    cell("d", { defs: ["z"] }),
-    ...cells.slice(1),
-  ]);
-  check([
-    cells.find((item) => item.id === "d")!,
-    ...cells.filter((item) => item.id !== "d"),
-  ]);
-  check(cells.map((item) => item.id === "d"
-    ? cell("d", { defs: ["z"], barrier: true })
-    : item));
-  check(cells.map((item) => item.id === "c"
-    ? cell("c", { refs: ["y"], opaque: true })
-    : item));
-  check([
-    cells.find((item) => item.id === "d")!,
-    cells.find((item) => item.id === "c")!,
-    ...cells.filter((item) => item.id !== "d" && item.id !== "c"),
-  ]);
-  check(cells.map((item) => item.id === "a"
-    ? { ...item, disabled: true }
-    : item));
-  check(cells.filter((item) => item.id !== "d"));
-  check(cells.map((item) => item.id === "b"
-    ? cell("b", { defs: ["y"], refs: ["z"] }, "markdown")
-    : item));
+  const status = (id: string) => statuses.get(id) ?? "idle";
+  assert.deepEqual(graph.planCell("a", status, "lazy"), ["a"]);
+  assert.deepEqual(graph.planCell("a", status, "automatic"), ["a", "b", "c"]);
+  assert.deepEqual(graph.planCell("c", status, "lazy"), ["a", "c"]);
 });
 
 test("accepted-depth chains and cycles do not consume the JavaScript call stack", () => {
@@ -218,17 +123,13 @@ test("accepted-depth chains and cycles do not consume the JavaScript call stack"
   }));
   const graph = new ReactiveGraph(cells);
   assert.deepEqual(graph.state.topologicalOrder, nodes);
-  const descendants = graph.descendants(nodes[0]!);
-  assert.equal(descendants.length, MAX_NOTEBOOK_CELLS - 1);
-  assert.equal(descendants[0], nodes[1]);
-  assert.equal(descendants.at(-1), nodes.at(-1));
+  assert.equal(graph.descendants(nodes[0]!).length, MAX_NOTEBOOK_CELLS - 1);
 
-  const cyclic = cells.map((item, index) => index === 0
+  graph.update(cells.map((item, index) => index === 0
     ? cell(item.id, { defs: [...item.defs], refs: [`value_${MAX_NOTEBOOK_CELLS - 1}`] })
-    : item);
-  graph.update(cyclic);
-  assert.equal(graph.state.topologicalOrder, null);
+    : item));
   assert.deepEqual(graph.state.cycles, nodes);
+  assert.deepEqual(graph.state.topologicalOrder, []);
 });
 
 test("graph helpers preserve iterative reachability and layered order", () => {
@@ -241,21 +142,21 @@ test("graph helpers preserve iterative reachability and layered order", () => {
   ]);
 });
 
-test("aggregate edge admission is coherent and recovers transactionally", () => {
+test("static edge exhaustion fails coherently and clears after a bounded repair", () => {
   const count = Math.ceil((1 + Math.sqrt(1 + 8 * MAX_DEPENDENCY_EDGES)) / 2);
-  const dense = Array.from({ length: count }, (_, index) => cell(`barrier-${index}`, {
-    barrier: true,
+  const symbols = Array.from({ length: count }, (_, index) => `value_${index}`);
+  const dense = symbols.map((symbol, index) => cell(`cell-${index}`, {
+    defs: [symbol],
+    refs: symbols.slice(0, index),
   }));
   const graph = new ReactiveGraph(dense);
   assert.equal(graph.resourceLimited, true);
   assert.equal(graph.state.topologicalOrder, null);
-  assert.ok(Object.values(graph.state.edges).every((dependencies) => dependencies.length === 0));
   assert.deepEqual(graph.validate().map((issue) => issue.code), ["graph_blocked"]);
 
-  const sparse = dense.map((item) => ({ ...item, barrier: false }));
+  const sparse = dense.map((item) => cell(item.id, { defs: [...item.defs] }));
   graph.update(sparse);
   assert.equal(graph.resourceLimited, false);
-  assert.deepEqual(graph.state, buildDependencyGraph(sparse));
   assert.deepEqual(graph.state.topologicalOrder, sparse.map((item) => item.id));
 });
 

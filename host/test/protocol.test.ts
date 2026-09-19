@@ -298,7 +298,6 @@ test("evaluation definitions and locals retain analyzer symbol bounds", () => {
     source: "x <- 1",
     definitions: ["x"],
     locals: [],
-    opaque: false,
   };
   assert.equal(evaluationPayloadSchema.safeParse(payload).success, true);
   assert.equal(evaluationPayloadSchema.safeParse({
@@ -346,7 +345,7 @@ test("shared host response schemas validate complete bounded snapshots and delta
   const cell = {
     id: "cell-1", type: "code" as const, body: ["x <- 1"], options: {}, revision: 0, status: "done" as const,
     outputs: [output, widgetOutput], progress: null, log: [], error: null, defs: ["x"], refs: [], selfRefs: [], locals: [],
-    barrier: false, opaque: false, diagnostics: [], analysisPending: false,
+    diagnostics: [], analysisPending: false,
   };
   const snapshot = {
     protocol: HOST_PROTOCOL, epoch: "epoch-1", cursor: 7, version: 3, documentRevision: 7,

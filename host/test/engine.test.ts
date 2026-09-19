@@ -114,7 +114,6 @@ function payload(kernelEpoch: string, operationId: string, cellId: string, sourc
     source,
     definitions: [],
     locals: [],
-    opaque: false,
   };
 }
 
@@ -153,6 +152,23 @@ test("live v2 Engine starts analyzer and kernel independently, analyzes ranges, 
       assert.equal(checked.analysisEnvironmentId, analyzer.analysisEnvironmentId);
       assert.deepEqual(checked.cells[3]?.selfRefs, ["x"]);
       assert.deepEqual(checked.cells[0]?.defs, ["value"]);
+      const ordinaryAnalysis = analysisResultSchema.parse(await engine.analyze([
+        {
+          id: "dynamic-r", revision: 1, type: "code",
+          source: 'name <- "hidden"; assign(name, 10L); get(name); do.call("sum", list(1L, 2L)); eval(parse(text = "4L + 5L")); source("helper.R", local = TRUE); load("values.RData")',
+        },
+        {
+          id: "function-locals", revision: 1, type: "code",
+          source: "f <- function(argument) { local_value <- argument; local_value }",
+        },
+        { id: "notebook-global", revision: 1, type: "code", source: "local_value <- 2L" },
+      ], 9));
+      assert.equal(ordinaryAnalysis.cells[0]?.error, null);
+      assert.deepEqual(ordinaryAnalysis.cells[0]?.diagnostics, []);
+      assert.deepEqual(ordinaryAnalysis.cells[1]?.defs, ["f"]);
+      assert.ok(!ordinaryAnalysis.cells[1]?.defs.includes("argument"));
+      assert.ok(!ordinaryAnalysis.cells[1]?.defs.includes("local_value"));
+      assert.deepEqual(ordinaryAnalysis.cells[2]?.defs, ["local_value"]);
       const firstRange = checked.cells[0]?.ranges?.value?.[0];
       assert.deepEqual(firstRange?.start, { line: 0, character: 0 });
       assert.deepEqual(firstRange?.end, { line: 0, character: 5 });
@@ -188,6 +204,25 @@ test("live v2 Engine starts analyzer and kernel independently, analyzes ranges, 
       const evaluated = await engine.evaluate(payload(kernel.kernelEpoch, "eval", "unicode", "1 + 1"));
       assert.equal(evaluated.ok, true);
       assert.match(JSON.stringify(evaluated.outputs), /2/);
+      await writeFile(join(directory, "helper.R"), "sourced_value <- 7L\n", "utf8");
+      const ordinary = await engine.evaluate(payload(kernel.kernelEpoch, "ordinary-dynamic-r", "ordinary-dynamic-r", `
+        name <- "hidden_value"
+        assign(name, 10L)
+        stopifnot(identical(get(name), 10L))
+        stopifnot(identical(do.call("sum", list(1L, 2L, 3L)), 6L))
+        stopifnot(identical(eval(parse(text = "40L + 2L")), 42L))
+        source("helper.R", local = TRUE)
+        stopifnot(identical(sourced_value, 7L))
+        image_file <- tempfile(fileext = ".RData")
+        saved_value <- 9L
+        save(saved_value, file = image_file)
+        rm(saved_value)
+        load(image_file)
+        stopifnot(identical(saved_value, 9L))
+        "ordinary dynamic R works"
+      `));
+      assert.equal(ordinary.ok, true);
+      assert.match(JSON.stringify(ordinary.outputs), /ordinary dynamic R works/);
       const batchFirst = payload(kernel.kernelEpoch, "batch", "batch-a", "x <- 40", []);
       batchFirst.definitions = ["x"];
       const batchSecond = payload(kernel.kernelEpoch, "batch", "batch-b", "x + 2", []);
