@@ -89,6 +89,45 @@ test("same-named widgets in distinct output records dispatch against their own c
   await renderer.flush();
 });
 
+test("a replacement widget in the same slot cannot inherit its retired request", async () => {
+  const { document, window } = parseHTML("<!doctype html><html><body><div id=outputs></div></body></html>");
+  const calls: Array<{ origin: import("../src/output-renderer.js").WidgetOrigin; resolve: (value: unknown) => void }> = [];
+  const renderer = new OutputRenderer({
+    mode: "interactive", document, resolveArtifact: async () => ({ kind: "html", html: "" }),
+    actions: {
+      widget: async (_name, _path, _update, origin) => new Promise(resolve => calls.push({ origin, resolve })),
+      upload: async () => undefined, lazy: async () => undefined, table: async () => undefined,
+      error: () => {}, pageSize: () => 25, widgetAvailable: () => true,
+    },
+  });
+  const output = (id: string, generation: number): import("../src/protocol.js").OutputRecord => ({
+    id, generation, sessionEpoch: "epoch-1", kernelEpoch: "kernel-1", runId: "run-1", cellId: "c1", revision: 0, sequence: 1,
+    data: { kind: "widget", name: "shared", owner: "c1", path: [], commit_token: null, operation: null,
+      spec: { kind: "slider", value: 1, min: 0, max: 10, step: 1 } },
+    metadata: { presentation: "inline" }, truncated: false,
+  });
+  const container = document.getElementById("outputs")!;
+  renderer.render(container, [output("old-output", 0)], null);
+  const oldControl = container.querySelector<HTMLInputElement>("input")!;
+  oldControl.value = "2"; oldControl.dispatchEvent(new window.Event("input", { bubbles: true }));
+  await waitUntil(() => calls.length === 1);
+
+  renderer.render(container, [output("new-output", 0)], null);
+  const newControl = container.querySelector<HTMLInputElement>("input")!;
+  newControl.value = "3"; newControl.dispatchEvent(new window.Event("input", { bubbles: true }));
+  await waitUntil(() => calls.length === 2);
+  assert.deepEqual(calls.slice(0, 2).map(call => call.origin.outputId), ["old-output", "new-output"]);
+
+  calls[0]!.resolve({ result: { outputRecordId: "retired-result", outputGeneration: 1 } });
+  calls[1]!.resolve({ result: { outputRecordId: "new-result", outputGeneration: 1 } });
+  await renderer.flush();
+  newControl.value = "4"; newControl.dispatchEvent(new window.Event("input", { bubbles: true }));
+  await waitUntil(() => calls.length === 3);
+  assert.equal(calls[2]!.origin.outputId, "new-result");
+  calls[2]!.resolve({ result: { outputRecordId: "newer-result", outputGeneration: 2 } });
+  await renderer.flush();
+});
+
 async function withViewDom<T>(callback: (dom: Document, domWindow: Window) => T | PromiseLike<T>): Promise<T> {
   const canonical = parseHTML(await readFile(new URL("../../inst/app/index.html", import.meta.url), "utf8")).document;
   const cellTemplate = canonical.getElementById("cell-tpl")!.outerHTML;

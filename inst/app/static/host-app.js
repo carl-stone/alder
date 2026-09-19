@@ -22626,8 +22626,6 @@ var OutputRenderer = class {
   structures = /* @__PURE__ */ new WeakMap();
   widgetOrigins = /* @__PURE__ */ new WeakMap();
   controlOrigins = /* @__PURE__ */ new WeakMap();
-  outputInstances = /* @__PURE__ */ new WeakMap();
-  nextOutputInstance = 0;
   pendingWidgets = /* @__PURE__ */ new Map();
   pendingForms = /* @__PURE__ */ new Map();
   pendingUploads = /* @__PURE__ */ new Set();
@@ -22690,12 +22688,12 @@ var OutputRenderer = class {
         kernelEpoch: output2.kernelEpoch
       }));
     }
-    this.updateValueSlot(container, key, value, index, progress, retained, stableJson(output2));
+    this.updateValueSlot(container, key, value, index, progress, retained, stableJson(output2), outputInstanceKey(output2));
   }
   updateProgressSlot(container, key, progress, retained) {
-    this.updateValueSlot(container, key, { kind: "progress", ...progress }, null, true, retained, stableJson(progress));
+    this.updateValueSlot(container, key, { kind: "progress", ...progress }, null, true, retained, stableJson(progress), null);
   }
-  updateValueSlot(container, key, value, index, progress, retained, signature) {
+  updateValueSlot(container, key, value, index, progress, retained, signature, outputInstance) {
     let slot = Array.from(container.children).find(
       (child) => isElement(child) && child.classList.contains("out-record") && child.dataset.recordKey === key
     );
@@ -22706,6 +22704,8 @@ var OutputRenderer = class {
     }
     if (index === null) delete slot.dataset.index;
     else slot.dataset.index = String(index);
+    if (outputInstance === null) delete slot.dataset.outputInstance;
+    else slot.dataset.outputInstance = outputInstance;
     slot.classList.toggle("out-progress", progress);
     const kind = isObject2(value) ? string4(value.kind) : "";
     const structure = stableJson(outputStructure(value));
@@ -23313,11 +23313,11 @@ var OutputRenderer = class {
         this.interactiveActions().error(error61);
       } finally {
         this.pendingWidgets.delete(key);
-        if (pending.failure !== null && pending.authoritative) {
+        if (pending.failure !== null && pending.authoritative && this.hasWidgetInstance(pending.authoritative.node, pending.instance)) {
           const { node: node2, widget: authoritativeWidget, spec, path: authoritativePath } = pending.authoritative;
           this.patchWidget(node2, authoritativeWidget, spec, authoritativePath, true);
         }
-        if (oneShot) control.removeAttribute("disabled");
+        if (oneShot && this.hasWidgetInstance(control, pending.instance)) control.removeAttribute("disabled");
         pending.resolveDone();
       }
     })();
@@ -23343,7 +23343,7 @@ var OutputRenderer = class {
     })().catch(() => {
     }).finally(() => {
       if (this.pendingForms.get(key) === request) this.pendingForms.delete(key);
-      this.patchWidget(node2, widget, spec, path);
+      if (this.hasWidgetInstance(node2, instance)) this.patchWidget(node2, widget, spec, path);
     });
     this.pendingForms.set(key, request);
   }
@@ -23359,11 +23359,12 @@ var OutputRenderer = class {
   widgetInstance(control) {
     const output2 = control.closest(".out-record");
     if (output2 === null) throw new Error("widget output is no longer current");
-    const existing = this.outputInstances.get(output2);
-    if (existing !== void 0) return existing;
-    const created = ++this.nextOutputInstance;
-    this.outputInstances.set(output2, created);
-    return created;
+    const instance = output2.dataset.outputInstance;
+    if (instance === void 0) throw new Error("widget output has no canonical identity");
+    return instance;
+  }
+  hasWidgetInstance(control, instance) {
+    return control.closest(".out-record")?.dataset.outputInstance === instance;
   }
   buildWidgetTable(node2, widget, spec, kind, path) {
     const page = object2(spec.page);
@@ -23430,7 +23431,7 @@ var OutputRenderer = class {
         this.controlOrigins.set(control2, origin);
       }
     }
-    const key = widgetKey(widget, kind, path);
+    const key = widgetOperationKey(widget, kind, path, this.widgetInstance(node2));
     const operation = this.pendingWidgets.get(key);
     const pending = operation !== void 0;
     if (operation) operation.authoritative = { node: node2, widget, spec, path: [...path] };
@@ -23643,6 +23644,9 @@ function widgetKey(widget, kind, path) {
 }
 function widgetOperationKey(widget, kind, path, instance) {
   return `${string4(widget.name)}\0${kind}\0${path.join("")}\0${instance}`;
+}
+function outputInstanceKey(output2) {
+  return `${output2.id}\0${output2.generation ?? 0}`;
 }
 function safePart(value) {
   return encodeURIComponent(string4(value)).replaceAll("%", "_");

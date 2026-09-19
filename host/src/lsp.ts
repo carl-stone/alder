@@ -217,6 +217,8 @@ export class LspClient {
   private initialized = false;
   private failure: string | null = null;
   private failureReported = false;
+  private readonly pendingWrites = new Set<Promise<unknown>>();
+  private stopPromise: Promise<void> | null = null;
 
   constructor(private readonly options: LspClientOptions) {
     this.document = options.document;
@@ -289,28 +291,30 @@ export class LspClient {
     };
     try {
       await this.withTimeout(
-        connection.sendRequest(InitializeRequest.type, initialize),
+        this.trackWrite(connection.sendRequest(InitializeRequest.type, initialize)),
         this.options.initializeTimeoutMs ?? 30_000,
         "initialize",
       );
-      connection.sendNotification(InitializedNotification.type, {});
-      connection.sendNotification(DidChangeConfigurationNotification.type, { settings: { diagnostics: this.diagnosticsEnabled } });
-      connection.sendNotification(DidOpenTextDocumentNotification.type, {
+      await this.trackWrite(connection.sendNotification(InitializedNotification.type, {}));
+      await this.trackWrite(connection.sendNotification(DidChangeConfigurationNotification.type, { settings: { diagnostics: this.diagnosticsEnabled } }));
+      await this.trackWrite(connection.sendNotification(DidOpenTextDocumentNotification.type, {
         textDocument: {
           uri: this.documentUri,
           languageId: "r",
           version: this.version,
           text: this.layout.text,
         },
-      });
+      }));
       this.initialized = true;
       return this;
     } catch (error) {
       if (!this.closed && this.connection === connection) {
         connection.dispose();
+        connection.end();
         this.connection = null;
         this.initialized = false;
         this.socket?.destroy();
+        await this.settlePendingWrites();
         this.socket = null;
       }
       throw error;
@@ -324,7 +328,7 @@ export class LspClient {
     const nextLayout = layoutNotebook(document);
     const previousText = this.layout.text;
     if (nextUri !== this.documentUri) {
-      this.connection!.sendNotification(DidCloseTextDocumentNotification.type, { textDocument: { uri: this.documentUri } });
+      await this.trackWrite(this.connection!.sendNotification(DidCloseTextDocumentNotification.type, { textDocument: { uri: this.documentUri } }));
       this.diagnostics.delete(this.documentUri);
       this.documentPath = nextPath;
       this.documentUri = nextUri;
@@ -333,9 +337,9 @@ export class LspClient {
       this.document = document;
       this.layout = nextLayout;
       this.publishDiagnostics();
-      this.connection!.sendNotification(DidOpenTextDocumentNotification.type, {
+      await this.trackWrite(this.connection!.sendNotification(DidOpenTextDocumentNotification.type, {
         textDocument: { uri: nextUri, languageId: "r", version: this.version, text: nextLayout.text },
-      });
+      }));
       return true;
     }
     this.document = document;
@@ -344,20 +348,20 @@ export class LspClient {
     this.version += 1;
     this.acceptVersionlessDiagnostics = false;
     this.diagnostics.delete(this.documentUri);
-    this.connection!.sendNotification(DidChangeTextDocumentNotification.type, {
+    await this.trackWrite(this.connection!.sendNotification(DidChangeTextDocumentNotification.type, {
       textDocument: { uri: this.documentUri, version: this.version },
       contentChanges: [{ text: nextLayout.text }],
-    });
+    }));
     this.publishDiagnostics();
     return true;
   }
 
   async didSave(): Promise<void> {
     this.assertAlive();
-    this.connection!.sendNotification(DidSaveTextDocumentNotification.type, {
+    await this.trackWrite(this.connection!.sendNotification(DidSaveTextDocumentNotification.type, {
       textDocument: { uri: this.documentUri },
       text: this.layout.text,
-    });
+    }));
   }
 
   async setDiagnostics(enabled: boolean): Promise<boolean> {
@@ -367,14 +371,14 @@ export class LspClient {
     this.diagnosticsEnabled = enabled;
     this.diagnostics.clear();
     this.publishDiagnostics();
-    this.connection!.sendNotification(DidChangeConfigurationNotification.type, { settings: { diagnostics: enabled } });
+    await this.trackWrite(this.connection!.sendNotification(DidChangeConfigurationNotification.type, { settings: { diagnostics: enabled } }));
     if (enabled) {
       this.version += 1;
       this.acceptVersionlessDiagnostics = true;
-      this.connection!.sendNotification(DidCloseTextDocumentNotification.type, { textDocument: { uri: this.documentUri } });
-      this.connection!.sendNotification(DidOpenTextDocumentNotification.type, {
+      await this.trackWrite(this.connection!.sendNotification(DidCloseTextDocumentNotification.type, { textDocument: { uri: this.documentUri } }));
+      await this.trackWrite(this.connection!.sendNotification(DidOpenTextDocumentNotification.type, {
         textDocument: { uri: this.documentUri, languageId: "r", version: this.version, text: this.layout.text },
-      });
+      }));
     }
     return true;
   }
@@ -400,7 +404,7 @@ export class LspClient {
     const cancellation = new CancellationTokenSource();
     try {
       const result = await this.withTimeout(
-        this.connection!.sendRequest(method, params, cancellation.token),
+        this.trackWrite(this.connection!.sendRequest(method, params, cancellation.token)),
         timeoutMs,
         method,
         cancellation,
@@ -451,22 +455,25 @@ export class LspClient {
   }
 
   async stop(): Promise<void> {
-    if (this.closed) return;
+    return this.stopPromise ??= this.stopOnce();
+  }
+
+  private async stopOnce(): Promise<void> {
     this.closed = true;
     this.diagnostics.clear();
     this.publishDiagnostics();
     const connection = this.connection;
     if (connection && this.initialized && this.socket !== null && !this.socket.destroyed) {
       try {
-        connection.sendNotification(DidCloseTextDocumentNotification.type, { textDocument: { uri: this.documentUri } });
-        await this.withTimeout(connection.sendRequest(ShutdownRequest.type), 2_000, "shutdown");
+        await this.trackWrite(connection.sendNotification(DidCloseTextDocumentNotification.type, { textDocument: { uri: this.documentUri } }));
+        await this.withTimeout(this.trackWrite(connection.sendRequest(ShutdownRequest.type)), 2_000, "shutdown");
       } catch {
         // Termination below is the authoritative cleanup path.
       }
     }
     const socket = this.socket;
-    socket?.end();
     connection?.dispose();
+    connection?.end();
     if (socket && !socket.destroyed) {
       await new Promise<void>(resolve => {
         const timer = setTimeout(resolve, 2_000);
@@ -475,9 +482,20 @@ export class LspClient {
       });
     }
     socket?.destroy();
+    await this.settlePendingWrites();
     this.socket = null;
     this.connection = null;
     this.initialized = false;
+  }
+
+  private trackWrite<T>(promise: Promise<T>): Promise<T> {
+    this.pendingWrites.add(promise);
+    void promise.finally(() => this.pendingWrites.delete(promise)).catch(() => {});
+    return promise;
+  }
+
+  private async settlePendingWrites(): Promise<void> {
+    while (this.pendingWrites.size) await Promise.allSettled([...this.pendingWrites]);
   }
 
   private assertAlive(): void {

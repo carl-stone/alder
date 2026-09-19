@@ -12,7 +12,7 @@ export interface WidgetOrigin {
 
 interface PendingWidget {
   widget: JsonObject;
-  readonly instance: number;
+  readonly instance: string;
   origin: WidgetOrigin;
   path: readonly string[];
   update: JsonObject | null;
@@ -66,8 +66,6 @@ export class OutputRenderer {
   private readonly structures = new WeakMap<Element, string>();
   private readonly widgetOrigins = new WeakMap<JsonObject, WidgetOrigin>();
   private readonly controlOrigins = new WeakMap<WidgetControl, WidgetOrigin>();
-  private readonly outputInstances = new WeakMap<Element, number>();
-  private nextOutputInstance = 0;
   private readonly pendingWidgets = new Map<string, PendingWidget>();
   private readonly pendingForms = new Map<string, Promise<void>>();
   private readonly pendingUploads = new Set<Promise<void>>();
@@ -144,7 +142,7 @@ export class OutputRenderer {
         kernelEpoch: output.kernelEpoch!,
       }));
     }
-    this.updateValueSlot(container, key, value, index, progress, retained, stableJson(output));
+    this.updateValueSlot(container, key, value, index, progress, retained, stableJson(output), outputInstanceKey(output));
   }
 
   private updateProgressSlot(
@@ -153,7 +151,7 @@ export class OutputRenderer {
     progress: JsonObject,
     retained: Set<Element>,
   ): void {
-    this.updateValueSlot(container, key, { kind: "progress", ...progress }, null, true, retained, stableJson(progress));
+    this.updateValueSlot(container, key, { kind: "progress", ...progress }, null, true, retained, stableJson(progress), null);
   }
 
   private updateValueSlot(
@@ -164,6 +162,7 @@ export class OutputRenderer {
     progress: boolean,
     retained: Set<Element>,
     signature: string,
+    outputInstance: string | null,
   ): void {
     let slot = Array.from(container.children).find((child): child is HTMLElement =>
       isElement(child) && child.classList.contains("out-record") && child.dataset.recordKey === key,
@@ -175,6 +174,8 @@ export class OutputRenderer {
     }
     if (index === null) delete slot.dataset.index;
     else slot.dataset.index = String(index);
+    if (outputInstance === null) delete slot.dataset.outputInstance;
+    else slot.dataset.outputInstance = outputInstance;
     slot.classList.toggle("out-progress", progress);
     const kind = isObject(value) ? string(value.kind) : "";
     const structure = stableJson(outputStructure(value));
@@ -793,11 +794,11 @@ export class OutputRenderer {
         this.interactiveActions().error(error);
       } finally {
         this.pendingWidgets.delete(key);
-        if (pending.failure !== null && pending.authoritative) {
+        if (pending.failure !== null && pending.authoritative && this.hasWidgetInstance(pending.authoritative.node, pending.instance)) {
           const { node, widget: authoritativeWidget, spec, path: authoritativePath } = pending.authoritative;
           this.patchWidget(node, authoritativeWidget, spec, authoritativePath, true);
         }
-        if (oneShot) control.removeAttribute("disabled");
+        if (oneShot && this.hasWidgetInstance(control, pending.instance)) control.removeAttribute("disabled");
         pending.resolveDone();
       }
     })();
@@ -826,12 +827,12 @@ export class OutputRenderer {
       // currently waiting for these inputs.
     }).finally(() => {
       if (this.pendingForms.get(key) === request) this.pendingForms.delete(key);
-      this.patchWidget(node, widget, spec, path);
+      if (this.hasWidgetInstance(node, instance)) this.patchWidget(node, widget, spec, path);
     });
     this.pendingForms.set(key, request);
   }
 
-  private async flushWidgetSubtree(name: string, path: readonly string[], instance: number): Promise<void> {
+  private async flushWidgetSubtree(name: string, path: readonly string[], instance: string): Promise<void> {
     for (;;) {
       const pending = Array.from(this.pendingWidgets.values()).filter((operation) =>
         string(operation.widget.name) === name && operation.instance === instance
@@ -843,14 +844,16 @@ export class OutputRenderer {
     }
   }
 
-  private widgetInstance(control: WidgetControl): number {
-    const output = control.closest(".out-record");
+  private widgetInstance(control: Element): string {
+    const output = control.closest<HTMLElement>(".out-record");
     if (output === null) throw new Error("widget output is no longer current");
-    const existing = this.outputInstances.get(output);
-    if (existing !== undefined) return existing;
-    const created = ++this.nextOutputInstance;
-    this.outputInstances.set(output, created);
-    return created;
+    const instance = output.dataset.outputInstance;
+    if (instance === undefined) throw new Error("widget output has no canonical identity");
+    return instance;
+  }
+
+  private hasWidgetInstance(control: Element, instance: string): boolean {
+    return control.closest<HTMLElement>(".out-record")?.dataset.outputInstance === instance;
   }
 
   private buildWidgetTable(node: HTMLElement, widget: JsonObject, spec: JsonObject, kind: string, path: readonly string[]): void {
@@ -930,7 +933,7 @@ export class OutputRenderer {
         this.controlOrigins.set(control, origin);
       }
     }
-    const key = widgetKey(widget, kind, path);
+    const key = widgetOperationKey(widget, kind, path, this.widgetInstance(node));
     const operation = this.pendingWidgets.get(key);
     const pending = operation !== undefined;
     if (operation) operation.authoritative = { node, widget, spec, path: [...path] };
@@ -1163,8 +1166,12 @@ function widgetKey(widget: JsonObject, kind: string, path: readonly string[]): s
   return `${string(widget.name)}\0${kind}\0${path.join("\u0001")}`;
 }
 
-function widgetOperationKey(widget: JsonObject, kind: string, path: readonly string[], instance: number): string {
+function widgetOperationKey(widget: JsonObject, kind: string, path: readonly string[], instance: string): string {
   return `${string(widget.name)}\0${kind}\0${path.join("\u0001")}\0${instance}`;
+}
+
+function outputInstanceKey(output: OutputRecord): string {
+  return `${output.id}\0${output.generation ?? 0}`;
 }
 
 

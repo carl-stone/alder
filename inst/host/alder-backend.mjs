@@ -106699,8 +106699,6 @@ var OutputRenderer = class {
   structures = /* @__PURE__ */ new WeakMap();
   widgetOrigins = /* @__PURE__ */ new WeakMap();
   controlOrigins = /* @__PURE__ */ new WeakMap();
-  outputInstances = /* @__PURE__ */ new WeakMap();
-  nextOutputInstance = 0;
   pendingWidgets = /* @__PURE__ */ new Map();
   pendingForms = /* @__PURE__ */ new Map();
   pendingUploads = /* @__PURE__ */ new Set();
@@ -106763,12 +106761,12 @@ var OutputRenderer = class {
         kernelEpoch: output2.kernelEpoch
       }));
     }
-    this.updateValueSlot(container, key2, value, index, progress, retained, stableJson(output2));
+    this.updateValueSlot(container, key2, value, index, progress, retained, stableJson(output2), outputInstanceKey(output2));
   }
   updateProgressSlot(container, key2, progress, retained) {
-    this.updateValueSlot(container, key2, { kind: "progress", ...progress }, null, true, retained, stableJson(progress));
+    this.updateValueSlot(container, key2, { kind: "progress", ...progress }, null, true, retained, stableJson(progress), null);
   }
-  updateValueSlot(container, key2, value, index, progress, retained, signature) {
+  updateValueSlot(container, key2, value, index, progress, retained, signature, outputInstance) {
     let slot = Array.from(container.children).find(
       (child) => isElement(child) && child.classList.contains("out-record") && child.dataset.recordKey === key2
     );
@@ -106779,6 +106777,8 @@ var OutputRenderer = class {
     }
     if (index === null) delete slot.dataset.index;
     else slot.dataset.index = String(index);
+    if (outputInstance === null) delete slot.dataset.outputInstance;
+    else slot.dataset.outputInstance = outputInstance;
     slot.classList.toggle("out-progress", progress);
     const kind = isObject2(value) ? string4(value.kind) : "";
     const structure = stableJson(outputStructure(value));
@@ -107386,11 +107386,11 @@ var OutputRenderer = class {
         this.interactiveActions().error(error61);
       } finally {
         this.pendingWidgets.delete(key2);
-        if (pending.failure !== null && pending.authoritative) {
+        if (pending.failure !== null && pending.authoritative && this.hasWidgetInstance(pending.authoritative.node, pending.instance)) {
           const { node: node2, widget: authoritativeWidget, spec, path: authoritativePath } = pending.authoritative;
           this.patchWidget(node2, authoritativeWidget, spec, authoritativePath, true);
         }
-        if (oneShot) control.removeAttribute("disabled");
+        if (oneShot && this.hasWidgetInstance(control, pending.instance)) control.removeAttribute("disabled");
         pending.resolveDone();
       }
     })();
@@ -107416,7 +107416,7 @@ var OutputRenderer = class {
     })().catch(() => {
     }).finally(() => {
       if (this.pendingForms.get(key2) === request) this.pendingForms.delete(key2);
-      this.patchWidget(node2, widget, spec, path3);
+      if (this.hasWidgetInstance(node2, instance)) this.patchWidget(node2, widget, spec, path3);
     });
     this.pendingForms.set(key2, request);
   }
@@ -107432,11 +107432,12 @@ var OutputRenderer = class {
   widgetInstance(control) {
     const output2 = control.closest(".out-record");
     if (output2 === null) throw new Error("widget output is no longer current");
-    const existing = this.outputInstances.get(output2);
-    if (existing !== void 0) return existing;
-    const created = ++this.nextOutputInstance;
-    this.outputInstances.set(output2, created);
-    return created;
+    const instance = output2.dataset.outputInstance;
+    if (instance === void 0) throw new Error("widget output has no canonical identity");
+    return instance;
+  }
+  hasWidgetInstance(control, instance) {
+    return control.closest(".out-record")?.dataset.outputInstance === instance;
   }
   buildWidgetTable(node2, widget, spec, kind, path3) {
     const page = object3(spec.page);
@@ -107503,7 +107504,7 @@ var OutputRenderer = class {
         this.controlOrigins.set(control2, origin);
       }
     }
-    const key2 = widgetKey2(widget, kind, path3);
+    const key2 = widgetOperationKey(widget, kind, path3, this.widgetInstance(node2));
     const operation = this.pendingWidgets.get(key2);
     const pending = operation !== void 0;
     if (operation) operation.authoritative = { node: node2, widget, spec, path: [...path3] };
@@ -107716,6 +107717,9 @@ function widgetKey2(widget, kind, path3) {
 }
 function widgetOperationKey(widget, kind, path3, instance) {
   return `${string4(widget.name)}\0${kind}\0${path3.join("")}\0${instance}`;
+}
+function outputInstanceKey(output2) {
+  return `${output2.id}\0${output2.generation ?? 0}`;
 }
 function safePart(value) {
   return encodeURIComponent(string4(value)).replaceAll("%", "_");
@@ -108410,6 +108414,8 @@ var LspClient = class {
   initialized = false;
   failure = null;
   failureReported = false;
+  pendingWrites = /* @__PURE__ */ new Set();
+  stopPromise = null;
   get uri() {
     return this.documentUri;
   }
@@ -108476,28 +108482,30 @@ var LspClient = class {
     };
     try {
       await this.withTimeout(
-        connection.sendRequest(import_vscode_languageserver_protocol.InitializeRequest.type, initialize),
+        this.trackWrite(connection.sendRequest(import_vscode_languageserver_protocol.InitializeRequest.type, initialize)),
         this.options.initializeTimeoutMs ?? 3e4,
         "initialize"
       );
-      connection.sendNotification(import_vscode_languageserver_protocol.InitializedNotification.type, {});
-      connection.sendNotification(import_vscode_languageserver_protocol.DidChangeConfigurationNotification.type, { settings: { diagnostics: this.diagnosticsEnabled } });
-      connection.sendNotification(import_vscode_languageserver_protocol.DidOpenTextDocumentNotification.type, {
+      await this.trackWrite(connection.sendNotification(import_vscode_languageserver_protocol.InitializedNotification.type, {}));
+      await this.trackWrite(connection.sendNotification(import_vscode_languageserver_protocol.DidChangeConfigurationNotification.type, { settings: { diagnostics: this.diagnosticsEnabled } }));
+      await this.trackWrite(connection.sendNotification(import_vscode_languageserver_protocol.DidOpenTextDocumentNotification.type, {
         textDocument: {
           uri: this.documentUri,
           languageId: "r",
           version: this.version,
           text: this.layout.text
         }
-      });
+      }));
       this.initialized = true;
       return this;
     } catch (error61) {
       if (!this.closed && this.connection === connection) {
         connection.dispose();
+        connection.end();
         this.connection = null;
         this.initialized = false;
         this.socket?.destroy();
+        await this.settlePendingWrites();
         this.socket = null;
       }
       throw error61;
@@ -108510,7 +108518,7 @@ var LspClient = class {
     const nextLayout = layoutNotebook(document);
     const previousText = this.layout.text;
     if (nextUri !== this.documentUri) {
-      this.connection.sendNotification(import_vscode_languageserver_protocol.DidCloseTextDocumentNotification.type, { textDocument: { uri: this.documentUri } });
+      await this.trackWrite(this.connection.sendNotification(import_vscode_languageserver_protocol.DidCloseTextDocumentNotification.type, { textDocument: { uri: this.documentUri } }));
       this.diagnostics.delete(this.documentUri);
       this.documentPath = nextPath;
       this.documentUri = nextUri;
@@ -108519,9 +108527,9 @@ var LspClient = class {
       this.document = document;
       this.layout = nextLayout;
       this.publishDiagnostics();
-      this.connection.sendNotification(import_vscode_languageserver_protocol.DidOpenTextDocumentNotification.type, {
+      await this.trackWrite(this.connection.sendNotification(import_vscode_languageserver_protocol.DidOpenTextDocumentNotification.type, {
         textDocument: { uri: nextUri, languageId: "r", version: this.version, text: nextLayout.text }
-      });
+      }));
       return true;
     }
     this.document = document;
@@ -108530,19 +108538,19 @@ var LspClient = class {
     this.version += 1;
     this.acceptVersionlessDiagnostics = false;
     this.diagnostics.delete(this.documentUri);
-    this.connection.sendNotification(import_vscode_languageserver_protocol.DidChangeTextDocumentNotification.type, {
+    await this.trackWrite(this.connection.sendNotification(import_vscode_languageserver_protocol.DidChangeTextDocumentNotification.type, {
       textDocument: { uri: this.documentUri, version: this.version },
       contentChanges: [{ text: nextLayout.text }]
-    });
+    }));
     this.publishDiagnostics();
     return true;
   }
   async didSave() {
     this.assertAlive();
-    this.connection.sendNotification(import_vscode_languageserver_protocol.DidSaveTextDocumentNotification.type, {
+    await this.trackWrite(this.connection.sendNotification(import_vscode_languageserver_protocol.DidSaveTextDocumentNotification.type, {
       textDocument: { uri: this.documentUri },
       text: this.layout.text
-    });
+    }));
   }
   async setDiagnostics(enabled) {
     if (typeof enabled !== "boolean") throw new LspClientError("invalid_request", "diagnostics must be a boolean");
@@ -108551,14 +108559,14 @@ var LspClient = class {
     this.diagnosticsEnabled = enabled;
     this.diagnostics.clear();
     this.publishDiagnostics();
-    this.connection.sendNotification(import_vscode_languageserver_protocol.DidChangeConfigurationNotification.type, { settings: { diagnostics: enabled } });
+    await this.trackWrite(this.connection.sendNotification(import_vscode_languageserver_protocol.DidChangeConfigurationNotification.type, { settings: { diagnostics: enabled } }));
     if (enabled) {
       this.version += 1;
       this.acceptVersionlessDiagnostics = true;
-      this.connection.sendNotification(import_vscode_languageserver_protocol.DidCloseTextDocumentNotification.type, { textDocument: { uri: this.documentUri } });
-      this.connection.sendNotification(import_vscode_languageserver_protocol.DidOpenTextDocumentNotification.type, {
+      await this.trackWrite(this.connection.sendNotification(import_vscode_languageserver_protocol.DidCloseTextDocumentNotification.type, { textDocument: { uri: this.documentUri } }));
+      await this.trackWrite(this.connection.sendNotification(import_vscode_languageserver_protocol.DidOpenTextDocumentNotification.type, {
         textDocument: { uri: this.documentUri, languageId: "r", version: this.version, text: this.layout.text }
-      });
+      }));
     }
     return true;
   }
@@ -108578,7 +108586,7 @@ var LspClient = class {
     const cancellation = new import_node12.CancellationTokenSource();
     try {
       const result = await this.withTimeout(
-        this.connection.sendRequest(method2, params, cancellation.token),
+        this.trackWrite(this.connection.sendRequest(method2, params, cancellation.token)),
         timeoutMs,
         method2,
         cancellation
@@ -108623,21 +108631,23 @@ var LspClient = class {
     return result;
   }
   async stop() {
-    if (this.closed) return;
+    return this.stopPromise ??= this.stopOnce();
+  }
+  async stopOnce() {
     this.closed = true;
     this.diagnostics.clear();
     this.publishDiagnostics();
     const connection = this.connection;
     if (connection && this.initialized && this.socket !== null && !this.socket.destroyed) {
       try {
-        connection.sendNotification(import_vscode_languageserver_protocol.DidCloseTextDocumentNotification.type, { textDocument: { uri: this.documentUri } });
-        await this.withTimeout(connection.sendRequest(import_vscode_languageserver_protocol.ShutdownRequest.type), 2e3, "shutdown");
+        await this.trackWrite(connection.sendNotification(import_vscode_languageserver_protocol.DidCloseTextDocumentNotification.type, { textDocument: { uri: this.documentUri } }));
+        await this.withTimeout(this.trackWrite(connection.sendRequest(import_vscode_languageserver_protocol.ShutdownRequest.type)), 2e3, "shutdown");
       } catch {
       }
     }
     const socket = this.socket;
-    socket?.end();
     connection?.dispose();
+    connection?.end();
     if (socket && !socket.destroyed) {
       await new Promise((resolve15) => {
         const timer = setTimeout(resolve15, 2e3);
@@ -108649,9 +108659,19 @@ var LspClient = class {
       });
     }
     socket?.destroy();
+    await this.settlePendingWrites();
     this.socket = null;
     this.connection = null;
     this.initialized = false;
+  }
+  trackWrite(promise2) {
+    this.pendingWrites.add(promise2);
+    void promise2.finally(() => this.pendingWrites.delete(promise2)).catch(() => {
+    });
+    return promise2;
+  }
+  async settlePendingWrites() {
+    while (this.pendingWrites.size) await Promise.allSettled([...this.pendingWrites]);
   }
   assertAlive() {
     if (!this.alive() || !this.connection) {
