@@ -35,7 +35,6 @@ function directProcessScope(): ProcessScope {
     });
     return {
       pid: child.pid!,
-      startIdentity: "format-test",
       stdin: child.stdin,
       stdout: child.stdout,
       stderr: child.stderr,

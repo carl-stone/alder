@@ -46,6 +46,17 @@ test("closing while a spawn starts cannot leave a child running", async () => {
   await closing;
 });
 
+test("concurrent child cancellation and scope close stop the owned process tree", async () => {
+  const scope = await createProcessScope();
+  const child = await scope.spawn(options("const c = require('node:child_process').spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {stdio:'ignore'}); console.log(c.pid); setInterval(() => {}, 1000)"));
+  const [bytes] = await once(child.stdout!, "data");
+  const descendant = Number(bytes.toString().trim());
+  assert.ok(exists(descendant));
+
+  await Promise.all([child.terminate(), scope.close()]);
+  await Promise.all([waitGone(child.pid), waitGone(descendant)]);
+});
+
 test("a child that ignores SIGTERM is stopped with bounded escalation", async () => {
   const scope = await createProcessScope();
   try {

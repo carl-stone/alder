@@ -21520,7 +21520,7 @@ var require_websocket = __commonJS({
     var http = __require("http");
     var net = __require("net");
     var tls = __require("tls");
-    var { randomBytes: randomBytes6, createHash: createHash10 } = __require("crypto");
+    var { randomBytes: randomBytes5, createHash: createHash10 } = __require("crypto");
     var { Duplex, Readable: Readable3 } = __require("stream");
     var { URL: URL3 } = __require("url");
     var PerMessageDeflate2 = require_permessage_deflate();
@@ -22058,7 +22058,7 @@ var require_websocket = __commonJS({
         }
       }
       const defaultPort = isSecure ? 443 : 80;
-      const key2 = randomBytes6(16).toString("base64");
+      const key2 = randomBytes5(16).toString("base64");
       const request = isSecure ? https.request : http.request;
       const protocolSet = /* @__PURE__ */ new Set();
       let perMessageDeflate;
@@ -110084,32 +110084,53 @@ var UploadStore = class {
 };
 
 // src/processes.ts
-import { randomBytes as randomBytes4 } from "node:crypto";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 function signalGroup(pid, signal) {
   try {
     process.kill(-pid, signal);
   } catch (error61) {
-    if (error61.code !== "ESRCH") throw error61;
-  }
-}
-function groupExists(pid) {
-  try {
-    process.kill(-pid, 0);
-    return true;
-  } catch (error61) {
-    if (error61.code === "ESRCH") return false;
+    const code2 = error61.code;
+    if (code2 === "ESRCH") return "gone";
+    if (code2 === "EPERM") return "denied";
     throw error61;
   }
+  return "signalled";
 }
-async function stopGroup(pid) {
-  signalGroup(pid, "SIGTERM");
+function groupExists(pid) {
+  return signalGroup(pid, 0) === "signalled";
+}
+function signalChild(child, signal) {
+  try {
+    child.kill(signal);
+  } catch (error61) {
+    const code2 = error61.code;
+    if (code2 !== "ESRCH" && code2 !== "EPERM") throw error61;
+  }
+}
+async function stopGroup(pid, child) {
+  if (signalGroup(pid, "SIGTERM") === "denied") signalChild(child, "SIGTERM");
   const deadline = Date.now() + 1e3;
   while (groupExists(pid) && Date.now() < deadline) {
     await new Promise((resolve15) => setTimeout(resolve15, 20));
   }
-  if (groupExists(pid)) signalGroup(pid, "SIGKILL");
+  if (groupExists(pid) && signalGroup(pid, "SIGKILL") === "denied") {
+    signalChild(child, "SIGKILL");
+  }
+}
+async function settleExit(exited) {
+  let timer;
+  try {
+    await Promise.race([
+      exited.then(() => void 0, () => void 0),
+      new Promise((resolve15) => {
+        timer = setTimeout(resolve15, 1e3);
+        timer.unref();
+      })
+    ]);
+  } finally {
+    if (timer !== void 0) clearTimeout(timer);
+  }
 }
 async function spawnChild(options) {
   const child = spawn(options.executable, [...options.args], {
@@ -110127,16 +110148,15 @@ async function spawnChild(options) {
   await once(child, "spawn");
   const pid = child.pid;
   let stopping;
-  const stop = () => stopping ??= stopGroup(pid);
+  const stop = () => stopping ??= stopGroup(pid, child);
   const terminate = async () => {
     await stop();
-    await exited;
+    await settleExit(exited);
     child.stdin?.destroy();
   };
   return {
     child,
     pid,
-    startIdentity: `pid:${pid}:${options.environment.ALDER_PROCESS_NONCE ?? randomBytes4(16).toString("hex")}`,
     stdin: child.stdin,
     stdout: child.stdout,
     stderr: child.stderr,
@@ -110195,7 +110215,7 @@ async function createProcessScope(_resources) {
 }
 
 // src/sessions.ts
-import { createHash as createHash8, randomBytes as randomBytes5, randomUUID as randomUUID13 } from "node:crypto";
+import { createHash as createHash8, randomBytes as randomBytes4, randomUUID as randomUUID13 } from "node:crypto";
 import { realpath as realpath10, lstat as lstat9, chmod as chmod5, rm as rm9, unlink as unlink5, readdir as readdir4, link as link3 } from "node:fs/promises";
 import { basename as basename7, dirname as dirname8, join as join19, resolve as resolve12, sep as sep3 } from "node:path";
 var import_proper_lockfile2 = __toESM(require_proper_lockfile(), 1);
@@ -110333,10 +110353,10 @@ async function acquireNotebookOwnership(options) {
   const pid = options.pid ?? process.pid;
   const epoch = options.epoch ?? randomUUID13();
   const processNonce = options.processNonce ?? randomUUID13();
-  const continuityProof = options.continuityProof ?? randomBytes5(32).toString("hex");
+  const continuityProof = options.continuityProof ?? randomBytes4(32).toString("hex");
   const startIdentity = options.startIdentity ?? await currentProcessStartIdentity(pid, options.processSupervisorExecutable) ?? `pid:${pid}:${processNonce}`;
   let currentOrigin = options.origin ?? "http://127.0.0.1:0";
-  const token = options.token ?? randomBytes5(32).toString("hex");
+  const token = options.token ?? randomBytes4(32).toString("hex");
   let closed = false;
   let currentPath = canonicalPath;
   let currentKey = sessionKey;

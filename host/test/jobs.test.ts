@@ -77,7 +77,6 @@ test("closing during a delayed package spawn waits for and terminates the eventu
   let terminations = 0;
   const child: OwnedProcess = {
     pid: 101,
-    startIdentity: "delayed-child",
     stdin: null,
     stdout: null,
     stderr: null,
@@ -117,7 +116,6 @@ test("a progress callback failure terminates and awaits the spawned package chil
   let terminated = false;
   const child: OwnedProcess = {
     pid: 102,
-    startIdentity: "progress-child",
     stdin: null,
     stdout: null,
     stderr: null,

@@ -1,4 +1,3 @@
-import { randomBytes } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
 import type { Readable, Writable } from "node:stream";
@@ -14,7 +13,6 @@ export interface ProcessSpawnOptions {
 
 export interface OwnedProcess {
   readonly pid: number;
-  readonly startIdentity: string;
   readonly stdin: Writable | null;
   readonly stdout: Readable | null;
   readonly stderr: Readable | null;
@@ -32,23 +30,52 @@ interface ChildHandle extends OwnedProcess {
   stop(): Promise<void>;
 }
 
-function signalGroup(pid: number, signal: NodeJS.Signals): void {
+type SignalResult = "signalled" | "gone" | "denied";
+
+function signalGroup(pid: number, signal: NodeJS.Signals | 0): SignalResult {
   try { process.kill(-pid, signal); }
-  catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error; }
+  catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ESRCH") return "gone";
+    if (code === "EPERM") return "denied";
+    throw error;
+  }
+  return "signalled";
 }
 
 function groupExists(pid: number): boolean {
-  try { process.kill(-pid, 0); return true; }
-  catch (error) { if ((error as NodeJS.ErrnoException).code === "ESRCH") return false; throw error; }
+  return signalGroup(pid, 0) === "signalled";
 }
 
-async function stopGroup(pid: number): Promise<void> {
-  signalGroup(pid, "SIGTERM");
+function signalChild(child: ChildProcess, signal: NodeJS.Signals): void {
+  try { child.kill(signal); }
+  catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== "ESRCH" && code !== "EPERM") throw error;
+  }
+}
+
+async function stopGroup(pid: number, child: ChildProcess): Promise<void> {
+  if (signalGroup(pid, "SIGTERM") === "denied") signalChild(child, "SIGTERM");
   const deadline = Date.now() + 1_000;
   while (groupExists(pid) && Date.now() < deadline) {
     await new Promise(resolve => setTimeout(resolve, 20));
   }
-  if (groupExists(pid)) signalGroup(pid, "SIGKILL");
+  if (groupExists(pid) && signalGroup(pid, "SIGKILL") === "denied") {
+    signalChild(child, "SIGKILL");
+  }
+}
+
+async function settleExit(exited: OwnedProcess["exited"]): Promise<void> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    await Promise.race([
+      exited.then(() => undefined, () => undefined),
+      new Promise<void>(resolve => { timer = setTimeout(resolve, 1_000); timer.unref(); }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
 }
 
 async function spawnChild(options: ProcessSpawnOptions): Promise<ChildHandle> {
@@ -65,14 +92,14 @@ async function spawnChild(options: ProcessSpawnOptions): Promise<ChildHandle> {
   await once(child, "spawn");
   const pid = child.pid!;
   let stopping: Promise<void> | undefined;
-  const stop = (): Promise<void> => stopping ??= stopGroup(pid);
+  const stop = (): Promise<void> => stopping ??= stopGroup(pid, child);
   const terminate = async (): Promise<void> => {
     await stop();
-    await exited;
+    await settleExit(exited);
     child.stdin?.destroy();
   };
   return {
-    child, pid, startIdentity: `pid:${pid}:${options.environment.ALDER_PROCESS_NONCE ?? randomBytes(16).toString("hex")}`,
+    child, pid,
     stdin: child.stdin, stdout: child.stdout, stderr: child.stderr, exited, terminate, stop,
   };
 }
