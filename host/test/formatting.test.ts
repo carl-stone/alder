@@ -4,7 +4,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { access, chmod, mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createFormattingService, FormattingError } from "../src/formatting.js";
+import { FormattingService, FormattingError } from "../src/formatting.js";
 import type { OwnedProcess, ProcessScope } from "../src/processes.js";
 
 async function fakeAir(source: string): Promise<{ directory: string; executable: string }> {
@@ -69,7 +69,7 @@ test("Air formatting returns code edits with notebook identity and revision", as
   const fake = await fakeAir(["#!/usr/bin/env node", "const fs = require('node:fs');", "const path = process.argv[3];", "fs.writeFileSync(path, fs.readFileSync(path, 'utf8').replace('x<-1', 'x <- 1'));"].join("\n"));
   const scope = directProcessScope();
   try {
-    const edits = await createFormattingService(fake.executable, scope).formatCells(document, ["code-1", "markdown-1"]);
+    const edits = await new FormattingService(fake.executable, scope).formatCells(document, ["code-1", "markdown-1"]);
     assert.deepEqual(edits, [{
       type: "edit",
       cell: { cellId: "code-1" },
@@ -88,7 +88,7 @@ test("formatter failure is surfaced instead of falling back", async () => {
   const scope = directProcessScope();
   try {
     await assert.rejects(
-      createFormattingService(fake.executable, scope).formatCells(document, ["code-1"]),
+      new FormattingService(fake.executable, scope).formatCells(document, ["code-1"]),
       (error: unknown) => error instanceof FormattingError && error.code === "format_failed" && /bad formatter/.test(error.message),
     );
   } finally {
@@ -111,7 +111,7 @@ test("cancelling formatting terminates its Air child", async () => {
   const scope = directProcessScope();
   const cancellation = new AbortController();
   try {
-    const formatting = createFormattingService(fake.executable, scope).formatCells(document, ["code-1"], cancellation.signal);
+    const formatting = new FormattingService(fake.executable, scope).formatCells(document, ["code-1"], cancellation.signal);
     for (let attempt = 0; attempt < 100; attempt += 1) {
       try { await access(started); break; }
       catch { await new Promise((resolve) => setTimeout(resolve, 5)); }

@@ -16,9 +16,9 @@ import { ApplicationPreferences } from "./preferences.js";
 import { readLayout } from "./layout.js";
 import { DocumentStore, FileConflict, type PreparedSaveAs } from "./persistence.js";
 import { RecoveryWriter, recoveryObservationMatches, type DiskObservation as RecoveryDiskObservation, type RecoveryBaseline, type RecoveryCellState } from "./recovery.js";
-import { createPackageManager, readPackageDeclarations, type PackageManager } from "./packages.js";
-import { createPublishingService, type PublicationSnapshot, type PublishingService } from "./publishing.js";
-import { createFormattingService, type FormattingService } from "./formatting.js";
+import { PackageManager, readPackageDeclarations } from "./packages.js";
+import { PublishingService, type PublicationSnapshot } from "./publishing.js";
+import { FormattingService } from "./formatting.js";
 import type { PackageProgress } from "./jobs.js";
 import { renderHelp } from "./markdown.js";
 import { LspClient } from "./lsp.js";
@@ -79,24 +79,17 @@ function publicationSnapshot(saved: NotebookDocument, current: HostSnapshot): Pu
 }
 const optionsSchema = z.object({
   path: z.string().min(1).nullable().default(null),
-  host: z.literal("127.0.0.1").default("127.0.0.1"),
-  port: z.number().int().min(0).max(65535).default(0),
   executionMode: z.enum(["automatic", "lazy"]).optional(),
   runOnStartup: z.boolean().optional(),
-  sandbox: z.boolean().default(false),
   idleTimeout: z.number().nonnegative().finite().default(0),
   deferStartup: z.boolean().default(false),
-  expectedSource: z.string().optional(),
-  allowedOrigins: z.array(z.string()).optional(),
   externalOrigin: z.string().optional(),
   tokenFile: z.string().optional(),
-  externalBearerValidated: z.boolean().default(false),
   recoveryDirectory: z.string().optional(),
   preferences: z.custom<ApplicationPreferences>().optional(),
   preferencesPath: z.string().optional(),
   resources: z.custom<ApplicationResources>(),
   diagnostics: z.custom<DiagnosticSink>().optional(),
-  internalHost: z.boolean().default(false),
   session: z.object({
     sessionKey: z.string().optional(),
     epoch: z.string().optional(),
@@ -132,9 +125,7 @@ export interface RunningHost {
 
 export async function startHost(input: HostOptions): Promise<RunningHost> {
   const options = optionsSchema.parse(input);
-  if (options.internalHost && options.path === null && options.session?.sessionKey === undefined) throw new Error("untitled internal hosts require a parent session key");
   if (options.path !== null) return startNotebookHost(options, options.path, false, options.path);
-  if (options.sandbox) throw new Error("sandbox mode requires a notebook file path");
   const temporary = await realpath(await mkdtemp(join(tmpdir(), "alder-unsaved-")));
   const storagePath = join(temporary, "Untitled.R");
   try {
@@ -180,7 +171,7 @@ async function startNotebookHost(
   }
   const ownership = await acquireNotebookOwnership({
     path: ownershipPath,
-    origin: initialOrigin(options.host, options.port),
+    origin: initialOrigin("127.0.0.1", 0),
     epoch: options.session?.epoch,
     continuityProof: options.session?.continuityProof,
     token: configuredToken,
@@ -293,7 +284,7 @@ async function startNotebookHost(
   };
   const resolveProjectLibrary = async (base: REnvironment, projectDirectory: string): Promise<string | null> => {
     if (processScope === undefined) throw new Error("R process scope is unavailable while resolving the project library");
-    const temporaryManager = createPackageManager({
+    const temporaryManager = new PackageManager({
       resources: options.resources,
       environment: base,
       processScope,
@@ -407,7 +398,6 @@ async function startNotebookHost(
     store = opened.store;
     let notebook = opened.notebook;
     if (isUntitled) notebook = { ...notebook, path: null };
-    if (options.expectedSource !== undefined && !store.matchesSource(options.expectedSource)) throw new FileConflict();
     const projectPath = isUntitled ? join(notebookDirectory, ".alder", "config.yaml") : projectConfigPath(store.path);
     projectSettings = await loadProjectSettings(projectPath);
     config = configurationFor(notebook);
@@ -457,8 +447,8 @@ async function startNotebookHost(
     pendingSidecars.layout = false;
     pendingSidecars.packages = false;
     engine = new Engine({ resources: options.resources, processScope, environment: runtimeEnvironment ?? undefined, notebookDirectory, artifactDirectory: work, cacheDirectory });
-    packageManager = createPackageManager({ resources: options.resources, environment: runtimeEnvironment, processScope, projectDirectory: notebookDirectory, onProgress: onPackageProgress });
-    formatter = createFormattingService(options.resources.airExecutable, processScope);
+    packageManager = new PackageManager({ resources: options.resources, environment: runtimeEnvironment, processScope, projectDirectory: notebookDirectory, onProgress: onPackageProgress });
+    formatter = new FormattingService(options.resources.airExecutable, processScope);
 
     const appendRecovery = async (input: {
       fromRevision: number;
@@ -759,7 +749,7 @@ async function startNotebookHost(
           }
           savePublication = await preparedSave.publish();
           destinationStore = savePublication.store;
-          nextManager = createPackageManager({ resources: options.resources, environment: destinationRuntime, processScope: processScope!, projectDirectory: destinationDirectory, onProgress: onPackageProgress });
+          nextManager = new PackageManager({ resources: options.resources, environment: destinationRuntime, processScope: processScope!, projectDirectory: destinationDirectory, onProgress: onPackageProgress });
           const destinationDisk = destinationStore.observation();
           const destinationSidecars = sidecarProtocolObservations(destinationStore, false);
           const destinationSerialized = serializeNotebookWithParts(destinationStore.currentDocument);
@@ -816,7 +806,6 @@ async function startNotebookHost(
                 destinationRecoveryAdopted = true;
                 // Apply the controller publication before adopting any destination state.
                 publicationBinder();
-                preparedSave!.adopt();
                 store = destinationStore;
                 recovery = destinationRecovery;
                 packageManager = nextManager;
@@ -1031,7 +1020,6 @@ async function startNotebookHost(
             rscript: selectedRscript,
             projectDirectory: notebookDirectory,
             resources: options.resources,
-            sandbox: options.sandbox,
             resolveProjectLibrary: base => resolveProjectLibrary(base, notebookDirectory),
           });
           const isCurrent = (): boolean => !closing
@@ -1040,7 +1028,7 @@ async function startNotebookHost(
             && processScope !== undefined;
           const superseded = (): Error => Object.assign(new Error("R package environment refresh was superseded"), { code: "operation_in_progress" });
           if (!isCurrent()) throw superseded();
-          const nextManager = createPackageManager({
+          const nextManager = new PackageManager({
             resources: options.resources,
             environment: refreshed,
             processScope: processScope!,
@@ -1080,7 +1068,6 @@ async function startNotebookHost(
               rscript: z.string().min(1).parse(payload.rscript),
               projectDirectory: notebookDirectory,
               resources: options.resources,
-              sandbox: options.sandbox,
               resolveProjectLibrary: base => resolveProjectLibrary(base, notebookDirectory),
             });
             if (selectionGeneration !== runtimeBootstrapGeneration) throw Object.assign(new Error("R environment selection was superseded"), { code: "operation_in_progress" });
@@ -1088,7 +1075,7 @@ async function startNotebookHost(
             if (current.runtime.busy || current.runtime.activeRunId !== null) throw Object.assign(new Error("cannot select R while the notebook is busy"), { code: "busy" });
             selectedRscript = selected.rscript;
             await preferences.update({ rscript: selected.rscript }, preferences.snapshot().version);
-            const nextManager = createPackageManager({ resources: options.resources, environment: selected, processScope: processScope!, projectDirectory: notebookDirectory, onProgress: onPackageProgress });
+            const nextManager = new PackageManager({ resources: options.resources, environment: selected, processScope: processScope!, projectDirectory: notebookDirectory, onProgress: onPackageProgress });
             try {
               await controller!.restartRuntimeContext({ environment: selected, notebookDirectory, cacheDirectory }, stringValue(payload.operationId) ?? randomUUID());
             } catch (error) {
@@ -1116,7 +1103,7 @@ async function startNotebookHost(
           });
           if (command === "publish") {
             if (activePublishes.size > 0) throw Object.assign(new Error("a publication is already in progress"), { code: "operation_in_progress" });
-            if (publisher === undefined) publisher = createPublishingService({ outputStore: artifactStore, processScope: processScope!, quartoExecutable: options.resources.quartoExecutable });
+            if (publisher === undefined) publisher = new PublishingService({ outputStore: artifactStore, processScope: processScope!, quartoExecutable: options.resources.quartoExecutable });
             const liveSnapshot = controller!.snapshot();
             if (store === undefined) throw Object.assign(new Error("notebook has no saved source"), { code: "notebook_has_no_path" });
             const snapshot = publicationSnapshot(store.currentDocument, liveSnapshot);
@@ -1294,13 +1281,11 @@ async function startNotebookHost(
 
     const serverOptions = {
       controller,
-      host: options.host,
+      host: "127.0.0.1",
       originHost: browserOriginHost,
-      port: options.port,
-      allowedOrigins: options.allowedOrigins,
+      port: 0,
       externalOrigin: options.externalOrigin,
       tokenFile: options.tokenFile,
-      externalBearerValidated: options.externalBearerValidated,
       session: {
         get sessionKey() { return ownership.sessionKey; },
         get canonicalPath() { return ownership.canonicalPath; },
@@ -1381,7 +1366,6 @@ async function startNotebookHost(
             rscript: selectedRscript,
             projectDirectory: bootstrapDirectory,
             resources: options.resources,
-            sandbox: options.sandbox,
             resolveProjectLibrary: base => resolveProjectLibrary(base, bootstrapDirectory),
           });
           diagnostics?.record("info", "r.environment.ready", {
@@ -1391,7 +1375,7 @@ async function startNotebookHost(
             rejectBootstrapReady(new Error("runtime bootstrap superseded"));
             return;
           }
-          nextManager = createPackageManager({ resources: options.resources, environment: selected, processScope: processScope!, projectDirectory: bootstrapDirectory, onProgress: onPackageProgress });
+          nextManager = new PackageManager({ resources: options.resources, environment: selected, processScope: processScope!, projectDirectory: bootstrapDirectory, onProgress: onPackageProgress });
           if (!restart) engine!.setEnvironment(selected);
         } catch (error) {
           if (closing || bootstrapGeneration !== runtimeBootstrapGeneration || bootstrapUntitled !== isUntitled || bootstrapDirectory !== notebookDirectory) {

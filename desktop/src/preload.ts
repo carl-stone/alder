@@ -10,20 +10,7 @@ import {
   type SaveDestination,
   saveAsCommandSchema,
 } from "../../host/src/protocol.js";
-
-/** Private, fixed IPC channels. They are deliberately not exposed to the page. */
-export const ELECTRON_IPC_CHANNELS = Object.freeze({
-  recovery: "alderDesktop:recovery",
-  openNotebook: "alderDesktop:openNotebook",
-  chooseSavePath: "alderDesktop:chooseSavePath",
-  chooseRscript: "alderDesktop:chooseRscript",
-  getDraftId: "alderDesktop:getDraftId",
-  rendererReady: "alderDesktop:rendererReady",
-  diagnostic: "alderDesktop:diagnostic",
-  windowState: "alderDesktop:windowState",
-  commandResult: "alderDesktop:commandResult",
-  desktopCommand: "alderDesktop:desktopCommand",
-} as const);
+import { IPC_CHANNELS } from "./ipc.js";
 
 interface IpcRendererLike {
   invoke(channel: string, ...args: unknown[]): Promise<unknown>;
@@ -59,12 +46,12 @@ function validateVoid(value: unknown, label: string): void {
  */
 export function createPreloadApi(ipc: IpcRendererLike): PreloadApi {
   const api: PreloadApi = {
-    recovery: request => ipc.invoke(ELECTRON_IPC_CHANNELS.recovery, desktopRecoveryRequestSchema.parse(request)),
+    recovery: request => ipc.invoke(IPC_CHANNELS.recovery, desktopRecoveryRequestSchema.parse(request)),
     openNotebook: async (): Promise<void> => {
-      validateVoid(await ipc.invoke(ELECTRON_IPC_CHANNELS.openNotebook), "openNotebook");
+      validateVoid(await ipc.invoke(IPC_CHANNELS.openNotebook), "openNotebook");
     },
     chooseSavePath: async (): Promise<SaveDestination | null> => {
-      const value = await ipc.invoke(ELECTRON_IPC_CHANNELS.chooseSavePath);
+      const value = await ipc.invoke(IPC_CHANNELS.chooseSavePath);
       if (value === null) return null;
       const candidate = value as SaveDestination;
       const path = validateSelectedPath(candidate.path, "chooseSavePath");
@@ -73,23 +60,23 @@ export function createPreloadApi(ipc: IpcRendererLike): PreloadApi {
       return { path, expectedDestination };
     },
     chooseRscript: async (): Promise<string | null> =>
-      validateSelectedPath(await ipc.invoke(ELECTRON_IPC_CHANNELS.chooseRscript), "chooseRscript"),
+      validateSelectedPath(await ipc.invoke(IPC_CHANNELS.chooseRscript), "chooseRscript"),
     getDraftId: async (): Promise<string> => {
-      const value = await ipc.invoke(ELECTRON_IPC_CHANNELS.getDraftId);
+      const value = await ipc.invoke(IPC_CHANNELS.getDraftId);
       if (typeof value !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(value)) throw new Error("Invalid draft identity");
       return value;
     },
     rendererReady: async (): Promise<void> => {
-      validateVoid(await ipc.invoke(ELECTRON_IPC_CHANNELS.rendererReady), "rendererReady");
+      validateVoid(await ipc.invoke(IPC_CHANNELS.rendererReady), "rendererReady");
     },
     reportDiagnostic: async (event): Promise<void> => {
-      validateVoid(await ipc.invoke(ELECTRON_IPC_CHANNELS.diagnostic, desktopDiagnosticSchema.parse(event)), "reportDiagnostic");
+      validateVoid(await ipc.invoke(IPC_CHANNELS.diagnostic, desktopDiagnosticSchema.parse(event)), "reportDiagnostic");
     },
     updateWindowState: async (state): Promise<void> => {
-      validateVoid(await ipc.invoke(ELECTRON_IPC_CHANNELS.windowState, windowStateSchema.parse(state)), "updateWindowState");
+      validateVoid(await ipc.invoke(IPC_CHANNELS.windowState, windowStateSchema.parse(state)), "updateWindowState");
     },
     completeDesktopCommand: async (result): Promise<void> => {
-      validateVoid(await ipc.invoke(ELECTRON_IPC_CHANNELS.commandResult, desktopCommandResultSchema.parse(result)), "completeDesktopCommand");
+      validateVoid(await ipc.invoke(IPC_CHANNELS.commandResult, desktopCommandResultSchema.parse(result)), "completeDesktopCommand");
     },
     onDesktopCommand: (callback: (command: DesktopCommand) => void): (() => void) => {
       if (typeof callback !== "function") throw new TypeError("onDesktopCommand callback must be a function");
@@ -99,11 +86,11 @@ export function createPreloadApi(ipc: IpcRendererLike): PreloadApi {
         const parsed = desktopCommandSchema.safeParse(value);
         if (parsed.success) callback(parsed.data);
       };
-      ipc.on(ELECTRON_IPC_CHANNELS.desktopCommand, listener);
+      ipc.on(IPC_CHANNELS.desktopCommand, listener);
       return (): void => {
         if (!subscribed) return;
         subscribed = false;
-        ipc.removeListener(ELECTRON_IPC_CHANNELS.desktopCommand, listener);
+        ipc.removeListener(IPC_CHANNELS.desktopCommand, listener);
       };
     },
   };

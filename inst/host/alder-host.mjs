@@ -33373,7 +33373,7 @@ var publishCommandSchema = external_exports.object({ ...commandIdentityShape, ty
 var uploadFileSchema = external_exports.object({ name: pathSchema, content_base64: boundedUtf8StringSchema(16 * 1024 * 1024, true) }).strict();
 var uploadCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("upload"), name: idSchema, path: external_exports.array(idSchema).max(256), files: external_exports.array(uploadFileSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS), kernelEpoch: idSchema }).strict();
 var saveCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("save"), expectedDocumentRevision: revisionSchema }).strict();
-var saveAsCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("save-as"), path: pathSchema, expectedDestination: external_exports.union([external_exports.literal("absent"), external_exports.object({ expectedDiskDigest: external_exports.string().min(1), expectedDiskVersion: external_exports.string().min(1) }).strict()]), expectedDocumentRevision: revisionSchema }).strict();
+var saveAsCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("save-as"), path: pathSchema, expectedDestination: external_exports.union([external_exports.literal("absent"), external_exports.object({ expectedDiskDigest: external_exports.string().regex(/^[0-9a-f]{64}$/), expectedDiskVersion: boundedUtf8StringSchema(MAX_ID_BYTES, true) }).strict()]), expectedDocumentRevision: revisionSchema }).strict();
 var reloadSourceCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("reload-source"), expectedDocumentRevision: revisionSchema, expectedDiskDigest: external_exports.string().regex(/^[0-9a-f]{64}$/), expectedDiskVersion: boundedUtf8StringSchema(MAX_ID_BYTES, true), discardRecovery: external_exports.boolean().optional() }).strict();
 var formatCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("format"), cellIds: external_exports.array(idSchema).max(MAX_NOTEBOOK_CELLS).optional(), expectedRevisions: safeStringRecordSchema(revisionSchema), expectedDocumentRevision: revisionSchema }).strict();
 var setPreferencesCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("set-preferences"), patch: preferencesPatchSchema, expectedPreferencesVersion: boundedUtf8StringSchema(MAX_ID_BYTES).nullable() }).strict();
@@ -35204,9 +35204,7 @@ async function acquireNotebookSession(options) {
   const sessionKey = canonicalPath === null ? selectedRecovery?.id ?? randomUUID2() : sessionKeyFor(canonicalPath);
   let projectDirectory = canonicalPath === null ? selectedRecovery?.projectDirectory ?? resolve3(options.untitledProjectDirectory ?? process.cwd()) : void 0;
   if (projectDirectory !== void 0) projectDirectory = (await registerUntitledRecoveryDescriptor(sessionKey, projectDirectory)).projectDirectory;
-  const { root, nodeExecutable, hostEntry } = options.resources;
-  if (!root || !nodeExecutable || !hostEntry) throw new SessionUnavailableError("bundled document service is unavailable");
-  const backend = new SharedBackend({ root, nodeExecutable, hostEntry }, options.runtimeDirectory);
+  const backend = new SharedBackend(options.resources, options.runtimeDirectory);
   const descriptor = await backend.connect({
     path: canonicalPath,
     sessionKey,
@@ -35290,11 +35288,10 @@ function createConnection(descriptor, lease) {
 }
 async function assertAttachConfiguration(identity, requested, sessionKey) {
   const active = identity.configuration;
-  const join6 = requested.requestedConfiguration;
   const selected = {
-    executionMode: join6?.executionMode ?? requested.executionMode,
-    runOnStartup: join6?.runOnStartup ?? requested.runOnStartup,
-    deferStartup: join6?.deferStartup
+    executionMode: requested.executionMode,
+    runOnStartup: requested.runOnStartup,
+    deferStartup: requested.deferStartup
   };
   const comparisons = [
     ["executionMode", selected.executionMode, active.executionMode],
@@ -35500,10 +35497,6 @@ function parseCli(argv) {
         headless: { type: "boolean" },
         lazy: { type: "boolean" },
         "no-run": { type: "boolean" },
-        sandbox: { type: "boolean" },
-        host: { type: "string" },
-        port: { type: "string" },
-        "allowed-origin": { type: "string", multiple: true },
         "external-origin": { type: "string" },
         "token-file": { type: "string" },
         "request-id": { type: "string" },
@@ -35519,7 +35512,7 @@ function parseCli(argv) {
     throw usageError(errorText(error61));
   }
   const values = parsed.values;
-  if (values.help === true) return { command: "desktop", path: null, recover: void 0, listRecoveries: false, browser: false, headless: false, sandbox: false, lazy: false, noRun: false, host: "127.0.0.1", port: 0, allowedOrigins: [], externalOrigin: void 0, tokenFile: void 0, output: void 0, includeCode: false };
+  if (values.help === true) return { command: "desktop", path: null, recover: void 0, listRecoveries: false, browser: false, headless: false, lazy: false, noRun: false, externalOrigin: void 0, tokenFile: void 0, output: void 0, includeCode: false };
   const positionals = parsed.positionals;
   const first = positionals[0];
   const command = first === "check" || first === "run" || first === "publish" || first === "mcp" ? first : "desktop";
@@ -35531,7 +35524,7 @@ function parseCli(argv) {
   const recover = values.recover === void 0 ? void 0 : String(values.recover);
   if (browser && headless) throw usageError("--browser and --headless are mutually exclusive");
   if (listRecoveries) {
-    if (positionals.length > 0 || recover !== void 0 || browser || headless || values.lazy === true || values["no-run"] === true || values.sandbox === true || values.host !== void 0 || values.port !== void 0 || values["allowed-origin"] !== void 0 || values["external-origin"] !== void 0 || values["token-file"] !== void 0 || values.output !== void 0 || values["include-code"] === true || values["host-info"] === true) {
+    if (positionals.length > 0 || recover !== void 0 || browser || headless || values.lazy === true || values["no-run"] === true || values["external-origin"] !== void 0 || values["token-file"] !== void 0 || values.output !== void 0 || values["include-code"] === true || values["host-info"] === true) {
       throw usageError("--list-recoveries cannot be combined with other command or session options");
     }
   }
@@ -35539,14 +35532,13 @@ function parseCli(argv) {
     if (!isUntitledRecoveryId(recover)) throw usageError("--recover requires a UUID");
     if (command !== "desktop") throw usageError("--recover is only valid for a desktop session");
     if (path2 !== null) throw usageError("--recover cannot be combined with NOTEBOOK.R");
-    if (values.sandbox === true) throw usageError("--recover cannot be combined with --sandbox");
   }
   const externalOrigin = typeof values["external-origin"] === "string" ? values["external-origin"] : void 0;
   const tokenFile = typeof values["token-file"] === "string" ? values["token-file"] : void 0;
   validateExternalAuthOptions2(externalOrigin, tokenFile);
-  const sessionOnly = browser || headless || values.lazy === true || values["no-run"] === true || values.host !== void 0 || values.port !== void 0 || values["allowed-origin"] !== void 0 || values["external-origin"] !== void 0 || values["token-file"] !== void 0;
+  const sessionOnly = browser || headless || values.lazy === true || values["no-run"] === true || values["external-origin"] !== void 0 || values["token-file"] !== void 0;
   if (command !== "desktop" && sessionOnly) throw usageError("session flags are not valid for " + command);
-  if (command === "desktop" && !browser && !headless && (values.sandbox === true || values.host !== void 0 || values.port !== void 0 || values["allowed-origin"] !== void 0 || values["external-origin"] !== void 0 || values["token-file"] !== void 0)) {
+  if (command === "desktop" && !browser && !headless && (values["external-origin"] !== void 0 || values["token-file"] !== void 0)) {
     throw usageError("native desktop launch does not accept headless session flags");
   }
   if (command !== "publish" && (values.output !== void 0 || values["include-code"] === true)) throw usageError("publish flags are only valid for publish");
@@ -35564,12 +35556,7 @@ function parseCli(argv) {
     if (!requestId || !sessionEpoch || requestId.length > 256 || sessionEpoch.length > 256 || !Number.isSafeInteger(expectedDocumentRevision) || expectedDocumentRevision < 0) throw usageError("invalid command retry identity or document revision");
     retry = { requestId, sessionEpoch, expectedDocumentRevision };
   }
-  const portText = values.port === void 0 ? "0" : String(values.port);
-  const port = Number(portText);
-  if (!Number.isInteger(port) || port < 0 || port > 65535) throw usageError("--port must be an integer between 0 and 65535");
-  const host = values.host === void 0 ? "127.0.0.1" : String(values.host);
-  if (!["127.0.0.1", "::1"].includes(host)) throw usageError("--host must be 127.0.0.1 or ::1");
-  return { command, path: path2, recover, listRecoveries, browser, headless, sandbox: values.sandbox === true, lazy: values.lazy === true, noRun: values["no-run"] === true, host, port, allowedOrigins: Array.isArray(values["allowed-origin"]) ? values["allowed-origin"].map(String) : [], externalOrigin, tokenFile, output: typeof values.output === "string" ? values.output : void 0, includeCode: values["include-code"] === true, ...retry === void 0 ? {} : { retry } };
+  return { command, path: path2, recover, listRecoveries, browser, headless, lazy: values.lazy === true, noRun: values["no-run"] === true, externalOrigin, tokenFile, output: typeof values.output === "string" ? values.output : void 0, includeCode: values["include-code"] === true, ...retry === void 0 ? {} : { retry } };
 }
 async function applicationResources() {
   const root = process.env.ALDER_APPLICATION_ROOT ?? resolve4(dirname4(fileURLToPath(import.meta.url)), "..");

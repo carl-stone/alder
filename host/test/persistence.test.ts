@@ -96,7 +96,7 @@ test('sidecar staged write rechecks replacement and leaves external partial save
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
-test('Save As preserves exact bytes and leaves a successful save after later abort', async () => {
+test('Save As preserves exact bytes and leaves a successful save durable', async () => {
   const dir = await temporaryDirectory('alder-save-as-');
   try {
     const path = join(dir, 'source.R'), destination = join(dir, 'copy.R');
@@ -112,8 +112,6 @@ test('Save As preserves exact bytes and leaves a successful save after later abo
     const published = await prepared.publish();
     assert.equal(published.result.changed, true);
     assert.deepEqual(await readFile(destination), bytes);
-    published.adopt();
-    await published.abort();
     assert.deepEqual(await readFile(destination), bytes);
     const reopened = await DocumentStore.open(destination);
     assert.deepEqual(Buffer.from(reopened.store.sourceVersion.bytes), bytes);
@@ -136,7 +134,6 @@ test('Save As replaces only the exact destination explicitly confirmed by the ca
     const prepared = await store.prepareSaveAs(destination, store.currentDocument, replacement);
     assert.equal(await readFile(destination, 'utf8'), '# %%\nprevious\n');
     const published = await prepared.publish();
-    await published.abort();
     assert.equal(await readFile(destination, 'utf8'), '# %%\nsource\n');
     assert.equal((await stat(destination)).mode & 0o777, 0o640);
     assert.equal(await readFile(path, 'utf8'), '# %%\nsource\n');
@@ -293,7 +290,7 @@ test('prepared sidecar publication preserves an external edit', async () => {
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
-test('prepareReload requires bounded disk preconditions and preserves Controller document identities', async () => {
+test('prepareReload enforces the observed disk version and preserves Controller document identities', async () => {
   const dir = await temporaryDirectory('alder-reload-');
   try {
     const path = join(dir, 'notebook.R');
@@ -310,7 +307,6 @@ test('prepareReload requires bounded disk preconditions and preserves Controller
     const expectedDiskVersion = current.identity + ':' + current.mode.toString(8) + ':' + current.digest;
     const aborted = await store.prepareReload({ expectedDiskDigest: current.digest, expectedDiskVersion }, controllerDocument);
     assert.equal(aborted.observation.digest, current.digest);
-    aborted.abort();
     assert.equal(store.currentDocument.cells.length, 2);
     const prepared = await store.prepareReload({ expectedDiskDigest: current.digest, expectedDiskVersion }, controllerDocument);
     const reloaded = prepared.notebook;

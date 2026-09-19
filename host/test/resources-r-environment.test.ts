@@ -59,9 +59,8 @@ test("R selection is explicit and environment serialization is deterministic", a
       rscript: fixture.rscript,
       projectDirectory: fixture.root,
       resources: fixture.resources,
-      sandbox: true,
       resolveProjectLibrary: async base => {
-        assert.deepEqual(base.libraryPaths, [fixture.resources.rLibraryDirectory, fixture.baseLibrary]);
+        assert.deepEqual(base.libraryPaths, [fixture.normalLibrary, fixture.baseLibrary, fixture.resources.rLibraryDirectory]);
         return projectLibrary;
       },
     });
@@ -69,9 +68,10 @@ test("R selection is explicit and environment serialization is deterministic", a
     assert.equal(selected.rscript, fixture.rscript);
     assert.equal(selected.rHome, fixture.rHome);
     assert.deepEqual(selected.libraryPaths, [
+      fixture.normalLibrary,
+      fixture.baseLibrary,
       projectLibrary,
       fixture.resources.rLibraryDirectory,
-      fixture.baseLibrary,
     ]);
     const service = rServiceEnvironmentVariables(selected, fixture.resources, "analysis-1");
     assert.deepEqual(JSON.parse(service.ALDER_R_LIBRARIES!), [fixture.resources.rLibraryDirectory]);
@@ -91,7 +91,7 @@ test("R selection is explicit and environment serialization is deterministic", a
   }
 });
 
-test("sandbox resolution does not create a missing project package library", async () => {
+test("resolution does not add a missing project package library", async () => {
   const fixture = await makeFixture();
   try {
     const projectLibrary = join(fixture.root, ".alder", "library");
@@ -99,10 +99,9 @@ test("sandbox resolution does not create a missing project package library", asy
       rscript: fixture.rscript,
       projectDirectory: fixture.root,
       resources: fixture.resources,
-      sandbox: true,
       resolveProjectLibrary: async () => projectLibrary,
     });
-    assert.deepEqual(selected.libraryPaths, [fixture.resources.rLibraryDirectory, fixture.baseLibrary]);
+    assert.deepEqual(selected.libraryPaths, [fixture.normalLibrary, fixture.baseLibrary, fixture.resources.rLibraryDirectory]);
     await assert.rejects(stat(projectLibrary), { code: "ENOENT" });
   } finally {
     await removeFixture(fixture);

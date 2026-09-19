@@ -5,11 +5,11 @@ import { StructuredDiagnostics, exportDiagnosticBundle } from "../../host/src/di
 import { realpath } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { IPC_CHANNELS } from "./ipc.js";
 
 import {
   acquireNotebookSession,
   type AcquireNotebookSessionOptions,
-  type SessionResources,
 } from "../../host/src/sessions.js";
 import {
   resolveApplicationResources,
@@ -36,19 +36,6 @@ import {
   type WindowAction,
   type WindowState,
 } from "../../host/src/protocol.js";
-
-const IPC_CHANNELS = Object.freeze({
-  recovery: "alderDesktop:recovery",
-  openNotebook: "alderDesktop:openNotebook",
-  chooseSavePath: "alderDesktop:chooseSavePath",
-  chooseRscript: "alderDesktop:chooseRscript",
-  getDraftId: "alderDesktop:getDraftId",
-  rendererReady: "alderDesktop:rendererReady",
-  diagnostic: "alderDesktop:diagnostic",
-  windowState: "alderDesktop:windowState",
-  commandResult: "alderDesktop:commandResult",
-  desktopCommand: "alderDesktop:desktopCommand",
-} as const);
 
 const APP_NAME = ALDER_APP_NAME;
 const MAX_TICKET_RESPONSE_BYTES = 64 * 1024;
@@ -191,13 +178,6 @@ export interface ElectronMainOptions {
   readonly diagnostics?: StructuredDiagnostics;
 }
 
-export interface ElectronMainApplication {
-  start(): Promise<boolean>;
-  stop(): Promise<void>;
-  openNotebook(path: string | null, options?: { newWindow?: boolean }): Promise<void>;
-  windows(): readonly ElectronWindow[];
-}
-
 interface ElectronWindowRecord {
   readonly windowId: string;
   readonly openedAt: number;
@@ -312,14 +292,6 @@ function loadElectronRuntime(): ElectronRuntime {
   return require("electron") as ElectronRuntime;
 }
 
-function sessionResources(resources: ApplicationResources): SessionResources {
-  return {
-    root: resources.root,
-    nodeExecutable: resources.nodeExecutable,
-    hostEntry: resources.hostEntry,
-  };
-}
-
 function appRootFromProcess(): string {
   const resourcesPath = typeof process.resourcesPath === "string" && process.resourcesPath.length > 0
     ? process.resourcesPath : resolve(__dirname, "..");
@@ -331,7 +303,7 @@ function selectedPath(value: unknown, label: string): string | null {
   try { return validateNotebookPath(value); } catch { throw new Error(`${label} returned an invalid path`); }
 }
 
-export class ElectronMain implements ElectronMainApplication {
+export class ElectronMain {
   private readonly runtime: ElectronRuntime;
   private readonly options: ElectronMainOptions;
   private readonly records = new Set<ElectronWindowRecord>();
@@ -476,7 +448,7 @@ export class ElectronMain implements ElectronMainApplication {
       connection = await acquire({
         path,
         ...(path === null ? { untitledProjectDirectory: this.runtime.app.getPath?.("home") ?? process.cwd() } : {}),
-        resources: sessionResources(resources),
+        resources,
         ...(this.options.executionMode === undefined ? {} : { executionMode: this.options.executionMode }),
         ...(this.options.runOnStartup === undefined ? {} : { runOnStartup: this.options.runOnStartup }),
         deferStartup: this.options.deferStartup ?? true,
@@ -1070,7 +1042,7 @@ export class ElectronMain implements ElectronMainApplication {
       next = await acquire({
         path: old.canonicalPath,
         ...(old.canonicalPath === null ? { untitledRecoveryId: old.sessionKey } : {}),
-        resources: sessionResources(resources),
+        resources,
         ...(this.options.executionMode === undefined ? {} : { executionMode: this.options.executionMode }),
         ...(this.options.runOnStartup === undefined ? {} : { runOnStartup: this.options.runOnStartup }),
         deferStartup: this.options.deferStartup ?? true,
@@ -1289,13 +1261,13 @@ export class ElectronMain implements ElectronMainApplication {
   }
 }
 
-export async function startElectronMain(options: ElectronMainOptions = {}): Promise<ElectronMainApplication> {
+export async function startElectronMain(options: ElectronMainOptions = {}): Promise<ElectronMain> {
   const application = new ElectronMain(options.runtime ?? loadElectronRuntime(), options);
   await application.start();
   return application;
 }
 
-export async function startPackagedElectronMain(argv: readonly string[] = process.argv.slice(1)): Promise<ElectronMainApplication> {
+export async function startPackagedElectronMain(argv: readonly string[] = process.argv.slice(1)): Promise<ElectronMain> {
   const runtime = loadElectronRuntime();
   return startElectronMain({
     runtime,

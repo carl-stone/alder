@@ -19,7 +19,7 @@ import type { EngineAdapter, EngineHandshake, EngineResponse } from "../src/prot
 import { decodeHostCommandWire, encodeHostEventWire, encodeRecoveryWire, HOST_PROTOCOL, HOST_CLIENT_PROTOCOL_VERSION, type CommandResult, type HostCellState, type HostCommand, type HostEvent, type HostSnapshot, type OperationRecord, type Recovery } from "../src/protocol.js";
 import { ARTIFACT_DESCRIPTOR_HEADER, ARTIFACT_RESOLUTION_MEDIA_TYPE, encodeArtifactDescriptor, type ArtifactHandle } from "../src/protocol.js";
 import { blocksNotebookNavigation } from "../src/browser/url.js";
-import { createFormattingService } from "../src/formatting.js";
+import { FormattingService } from "../src/formatting.js";
 import { createProcessScope } from "../src/processes.js";
 
 function cell(id: string, body: string[] = [], revision = 0): HostCellState {
@@ -1312,7 +1312,7 @@ test("format-on-save still saves the current draft when Air fails", async () => 
       initial.dirty = true;
       initial.config = { format: { on_save: true } };
       const document = new BrowserDocument(initial);
-      const formatter = createFormattingService("/usr/bin/false", processScope);
+      const formatter = new FormattingService("/usr/bin/false", processScope);
       const formattingDocument = parseNotebook(Buffer.from("# %%\ncurrent <- 42\n", "utf8"));
       const client = settingsClient({
         formatCells: async () => {

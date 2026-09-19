@@ -20,7 +20,6 @@ export interface ResolveREnvironmentOptions {
   rscript?: string;
   projectDirectory: string;
   resources: ApplicationResources;
-  sandbox?: boolean;
   resolveProjectLibrary?: (base: REnvironment) => Promise<string | null>;
 }
 
@@ -73,11 +72,11 @@ export async function resolveREnvironment(options: ResolveREnvironmentOptions): 
   const helperLibrary = await existingDirectory(resources.rLibraryDirectory, "Alder R library");
   const environmentFields = { rscript: selected, rHome, version, platform, arch: process.arch };
   const helperAbi = `${manifest.applicationVersion}:${R_VERSION_RANGE}`;
-  const baseLibraryPaths = uniquePaths([...(options.sandbox === true ? [] : normalLibraries), helperLibrary, baseLibrary]);
+  const baseLibraryPaths = uniquePaths([...normalLibraries, helperLibrary, baseLibrary]);
   const baseEnvironment = makeEnvironment(environmentFields, helperAbi, baseLibraryPaths);
   await validateHelperLoad(baseEnvironment, manifest, helperLibrary, options.signal);
   const requestedProjectLibrary = options.resolveProjectLibrary === undefined
-    ? options.sandbox === true ? join(options.projectDirectory, ".alder", "library") : null
+    ? null
     : await options.resolveProjectLibrary(baseEnvironment);
   if (requestedProjectLibrary !== null && typeof requestedProjectLibrary !== "string") {
     throw invalid("project package library resolver must return a path or null");
@@ -86,7 +85,7 @@ export async function resolveREnvironment(options: ResolveREnvironmentOptions): 
     ? null
     : await optionalDirectory(requestedProjectLibrary, "project package library");
   const libraryPaths = uniquePaths([
-    ...(options.sandbox === true ? [] : normalLibraries),
+    ...normalLibraries,
     ...(projectLibrary === null ? [] : [projectLibrary]),
     helperLibrary,
     baseLibrary,

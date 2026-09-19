@@ -13,6 +13,7 @@ import {
   type SessionLease,
 } from "./protocol.js";
 import { ensurePrivateDirectory, readPrivateFile, verifyPrivateFile, writePrivateFile } from "./private-paths.js";
+import type { ApplicationResources } from "./resources.js";
 
 export const STARTUP_TIMEOUT_MS = 120_000;
 export const HEARTBEAT_INTERVAL_MS = 10_000;
@@ -21,12 +22,6 @@ const IDENTITY_REQUEST_TIMEOUT_MS = 4_000;
 const SESSION_KEY_PATTERN = /^[0-9a-f]{64}$/;
 const UNTITLED_SESSION_KEY_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const TOKEN_PATTERN = /^[0-9a-f]{64}$/;
-
-export interface SessionResources {
-  readonly root?: string;
-  readonly nodeExecutable?: string;
-  readonly hostEntry?: string;
-}
 
 export const UNTITLED_RECOVERY_SCHEMA_VERSION = 1 as const;
 const UNTITLED_RECOVERY_DIRECTORY = "untitled-recoveries";
@@ -65,15 +60,10 @@ export interface AcquireNotebookSessionOptions {
   readonly path: string | null;
   readonly untitledRecoveryId?: string;
   readonly untitledProjectDirectory?: string;
-  readonly resources: SessionResources;
+  readonly resources: Pick<ApplicationResources, "root" | "nodeExecutable" | "hostEntry">;
   readonly executionMode?: "automatic" | "lazy";
   readonly runOnStartup?: boolean;
   readonly deferStartup?: boolean;
-  readonly requestedConfiguration?: {
-    readonly executionMode?: "automatic" | "lazy";
-    readonly runOnStartup?: boolean;
-    readonly deferStartup?: boolean;
-  };
   readonly startupTimeoutMs?: number;
   readonly runtimeDirectory?: string;
   readonly externalOrigin?: string;
@@ -147,9 +137,7 @@ export async function acquireNotebookSession(options: AcquireNotebookSessionOpti
   const sessionKey = canonicalPath === null ? selectedRecovery?.id ?? randomUUID() : sessionKeyFor(canonicalPath);
   let projectDirectory = canonicalPath === null ? selectedRecovery?.projectDirectory ?? resolve(options.untitledProjectDirectory ?? process.cwd()) : undefined;
   if (projectDirectory !== undefined) projectDirectory = (await registerUntitledRecoveryDescriptor(sessionKey, projectDirectory)).projectDirectory;
-  const { root, nodeExecutable, hostEntry } = options.resources;
-  if (!root || !nodeExecutable || !hostEntry) throw new SessionUnavailableError("bundled document service is unavailable");
-  const backend = new SharedBackend({ root, nodeExecutable, hostEntry }, options.runtimeDirectory);
+  const backend = new SharedBackend(options.resources, options.runtimeDirectory);
   const descriptor = await backend.connect({
     path: canonicalPath, sessionKey, projectDirectory,
     executionMode: options.executionMode,
@@ -282,11 +270,10 @@ export async function acquireNotebookOwnership(options: NotebookOwnershipOptions
 
 async function assertAttachConfiguration(identity: ReturnType<typeof hostIdentitySchema.parse>, requested: AcquireNotebookSessionOptions, sessionKey: string): Promise<void> {
   const active = identity.configuration;
-  const join = requested.requestedConfiguration;
   const selected = {
-    executionMode: join?.executionMode ?? requested.executionMode,
-    runOnStartup: join?.runOnStartup ?? requested.runOnStartup,
-    deferStartup: join?.deferStartup,
+    executionMode: requested.executionMode,
+    runOnStartup: requested.runOnStartup,
+    deferStartup: requested.deferStartup,
   };
   const comparisons: Array<[string, unknown, unknown]> = [
     ["executionMode", selected.executionMode, active.executionMode], ["runOnStartup", selected.runOnStartup, active.runOnStartup], ["deferStartup", selected.deferStartup, active.deferStartup],

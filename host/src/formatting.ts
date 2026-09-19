@@ -9,10 +9,6 @@ import type { DocumentChange } from "./protocol.js";
 
 export type EditChange = Extract<DocumentChange, { type: "edit" }>;
 
-export interface FormattingService {
-  formatCells(document: NotebookDocument, cellIds: readonly string[], signal?: AbortSignal): Promise<EditChange[]>;
-}
-
 export class FormattingError extends Error {
   constructor(readonly code: "format_failed" | "format_unavailable" | "cancelled", message: string) {
     super(message);
@@ -22,19 +18,21 @@ export class FormattingError extends Error {
 const MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
 const MAX_LINE_BYTES = 1024 * 1024;
 
-/** Bind formatting to the immutable application Air executable and process scope. */
-export function createFormattingService(airExecutable: string, processScope: Pick<ProcessScope, "spawn">): FormattingService {
-  if (!isAbsoluteNonEmptyPath(airExecutable)) {
-    throw new Error("Air executable must be an absolute path");
+/** Formatting bound to the application's Air executable and owned process scope. */
+export class FormattingService {
+  constructor(
+    private readonly airExecutable: string,
+    private readonly processScope: Pick<ProcessScope, "spawn">,
+  ) {
+    if (!isAbsoluteNonEmptyPath(airExecutable)) throw new Error("Air executable must be an absolute path");
+    if (!processScope || typeof processScope.spawn !== "function") throw new Error("formatting requires the application ProcessScope");
   }
-  if (!processScope || typeof processScope.spawn !== "function") {
-    throw new Error("formatting requires the application ProcessScope");
-  }
-  const formatCells = async (
+
+  async formatCells(
     document: NotebookDocument,
     cellIds: readonly string[],
     signal?: AbortSignal,
-  ): Promise<EditChange[]> => {
+  ): Promise<EditChange[]> {
     if (!Array.isArray(cellIds)) throw new FormattingError("format_failed", "cellIds must be an array");
     const wanted = new Set<string>();
     for (const id of cellIds) {
@@ -52,7 +50,7 @@ export function createFormattingService(airExecutable: string, processScope: Pic
     for (const cell of cells) {
       if (cell.type === "markdown") continue;
       if (signal?.aborted) throw new FormattingError("cancelled", "formatting was cancelled");
-      const body = await formatOne(airExecutable, processScope, cell.body, signal);
+      const body = await formatOne(this.airExecutable, this.processScope, cell.body, signal);
       edits.push({
         type: "edit",
         cell: { cellId: cell.id },
@@ -62,8 +60,7 @@ export function createFormattingService(airExecutable: string, processScope: Pic
       } as EditChange);
     }
     return edits;
-  };
-  return { formatCells };
+  }
 }
 
 async function formatOne(

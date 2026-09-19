@@ -71,10 +71,6 @@ export interface PublishSnapshotResult {
   unsavedChangesExcluded: boolean;
 }
 
-export interface PublishingService {
-  publishSnapshot(snapshot: PublicationSnapshot, options: PublishSnapshotOptions): Promise<PublishSnapshotResult>;
-}
-
 export type PublishingErrorCode =
   | "tool_not_found"
   | "destination_exists"
@@ -90,12 +86,15 @@ export class PublishingError extends Error {
   }
 }
 
-export function createPublishingService(options: PublishingServiceOptions): PublishingService {
-  if (!(options?.outputStore instanceof OutputStore)) throw new TypeError("publishing requires the canonical OutputStore");
-  if (!options.processScope || typeof options.processScope.spawn !== "function") throw new TypeError("publishing requires the application ProcessScope");
-  return {
-    publishSnapshot: (snapshot, publishOptions) => publishSnapshot(options.outputStore, options.processScope, options.quartoExecutable, snapshot, publishOptions, options.quartoTimeoutMs),
-  };
+export class PublishingService {
+  constructor(private readonly options: PublishingServiceOptions) {
+    if (!(options?.outputStore instanceof OutputStore)) throw new TypeError("publishing requires the canonical OutputStore");
+    if (!options.processScope || typeof options.processScope.spawn !== "function") throw new TypeError("publishing requires the application ProcessScope");
+  }
+
+  publishSnapshot(snapshot: PublicationSnapshot, publishOptions: PublishSnapshotOptions): Promise<PublishSnapshotResult> {
+    return publishSnapshot(this.options.outputStore, this.options.processScope, this.options.quartoExecutable, snapshot, publishOptions, this.options.quartoTimeoutMs);
+  }
 }
 
 async function publishSnapshot(

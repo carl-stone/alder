@@ -52,15 +52,12 @@ export interface PublishedSaveAsResult {
 export interface PublishedSaveAs {
   readonly store: DocumentStore;
   readonly result: PublishedSaveAsResult;
-  adopt(): void;
-  abort(): Promise<void>;
 }
 
 export interface PreparedSaveAs {
   readonly destination: string;
   readonly digest: string;
   publish(): Promise<PublishedSaveAs>;
-  adopt(): void;
   abort(): Promise<void>;
 }
 
@@ -73,7 +70,6 @@ export interface PreparedReload {
   readonly notebook: NotebookDocument;
   readonly observation: DiskObservation;
   adopt(): void;
-  abort(): void;
 }
 
 export interface SidecarPublication<T> {
@@ -232,12 +228,6 @@ function sidecarVersion(version: DiskVersion): string | null {
   return version.identity === null ? null : diskVersionToken(version);
 }
 
-function validateExpectedSidecarVersion(value: unknown): asserts value is string | null {
-  if (value !== null && (typeof value !== "string" || value.length === 0 || value.length > 512 || value.includes("\0"))) {
-    throw new PersistenceError("invalid_precondition", "sidecar version precondition is invalid");
-  }
-}
-
 function packageDeclarationsFromVersion(version: DiskVersion): string[] {
   if (version.identity === null) return [];
   let mapping: Record<string, unknown>;
@@ -379,15 +369,6 @@ export class DocumentStore {
     return diskVersionToken(version);
   }
 
-  matchesSource(value: string | Uint8Array): boolean {
-    const bytes = typeof value === "string" ? decodeBase64(value) : value;
-    return bytes !== null && sameBytes(this.version.bytes, bytes);
-  }
-
-  async document(snapshot: SourceNotebook | NotebookDocument): Promise<NotebookDocument> {
-    return cloneNotebook(this.candidate(snapshot));
-  }
-
   private candidate(snapshot: SourceNotebook | NotebookDocument): NotebookDocument {
     let candidate: NotebookDocument;
     if (isNotebookDocument(snapshot)) {
@@ -475,7 +456,6 @@ export class DocumentStore {
           throw new PersistenceError("destination_exists", "Confirm replacement of the existing Save As destination", { path: spelling });
         }
       } else {
-        validateDiskPrecondition(replacement);
         if (expected.identity === null || expected.digest !== replacement.expectedDiskDigest
           || diskVersionToken(expected) !== replacement.expectedDiskVersion) {
           throw new FileConflict("Save As destination changed since replacement was confirmed");
@@ -512,17 +492,9 @@ export class DocumentStore {
       const digest = sha256(bytes);
       let aborted = false;
       let publication: Promise<PublishedSaveAs> | null = null;
-      let published = false;
       const result: PublishedSaveAs = {
         store: destinationStore,
         result: { path: destination, changed: true, digest },
-        adopt: () => {
-          if (!published) throw new PersistenceError("publication_invalid", "Save As must publish before adoption");
-        },
-        abort: async () => {
-          // A completed save survives later session or recovery failures.
-          await removeStage();
-        },
       };
       return {
         destination,
@@ -538,7 +510,6 @@ export class DocumentStore {
               destinationStore.version = committed;
               destinationStore.observedVersion = cloneDiskVersion(committed);
               destinationStore.documentValue = cloneNotebook(candidate);
-              published = true;
               return result;
             } finally {
               await removeStage();
@@ -546,7 +517,6 @@ export class DocumentStore {
           })();
           return publication;
         },
-        adopt: result.adopt,
         abort: async () => {
           if (publication !== null) await publication.catch(() => undefined);
           aborted = true;
@@ -560,10 +530,6 @@ export class DocumentStore {
   /** Prepare a read-only reload candidate; adoption is a synchronous binder mutation. */
   prepareReload(precondition: ReloadPrecondition, previousDocument: NotebookDocument): Promise<PreparedReload> {
     const next = this.queue.then(async () => {
-      validateDiskPrecondition(precondition);
-      if (previousDocument === null || typeof previousDocument !== "object" || !Array.isArray(previousDocument.cells)) {
-        throw new PersistenceError("invalid_precondition", "reload previous document is invalid");
-      }
       const expectedStoreVersion = this.versionToken(this.version);
       const current = await diskVersion(this.path);
       let canonical: string;
@@ -577,7 +543,6 @@ export class DocumentStore {
       const parsed = parseNotebook(current.bytes, this.path);
       const priorIds = new Set<string>();
       for (const cell of previousDocument.cells) {
-        if (cell === null || typeof cell !== "object" || typeof cell.id !== "string") throw new PersistenceError("invalid_precondition", "reload previous document is invalid");
         priorIds.add(cell.id);
       }
       const transientIds = new Set<string>();
@@ -604,20 +569,16 @@ export class DocumentStore {
       const reconciled = restoreNotebookCellIdentity(parsed, identities);
       const candidate = cloneNotebook(reconciled);
       let adopted = false;
-      let aborted = false;
       const prepared: PreparedReload = {
         notebook: cloneNotebook(candidate),
         observation: diskObservation(current),
         adopt: () => {
-          if (adopted || aborted) return;
+          if (adopted) return;
           if (this.versionToken(this.version) !== expectedStoreVersion) throw new FileConflict("Notebook changed before reload adoption");
           this.version = current;
           this.observedVersion = cloneDiskVersion(current);
           this.documentValue = cloneNotebook(candidate);
           adopted = true;
-        },
-        abort: () => {
-          aborted = true;
         },
       };
       return prepared;
@@ -666,7 +627,6 @@ export class DocumentStore {
   ): Promise<PreparedSidecar<T>> {
     const path = this.sidecarPath(kind);
     const next = this.queue.then(async () => {
-      validateExpectedSidecarVersion(expectedVersion);
       const cached = this.sidecars.get(path) ?? emptyDiskVersion();
       const expected = cloneDiskVersion(cached);
       const target = this.sidecarTargets.get(path) ?? await canonicalDestination(path);
@@ -772,17 +732,6 @@ async function publishStaged(
   return committed;
 }
 
-function validateDiskPrecondition(precondition: ReloadPrecondition): void {
-  if (precondition === null || typeof precondition !== "object" || Array.isArray(precondition)
-    || Object.keys(precondition).sort().join(",") !== "expectedDiskDigest,expectedDiskVersion"
-    || typeof precondition.expectedDiskDigest !== "string"
-    || !/^[0-9a-f]{64}$/.test(precondition.expectedDiskDigest)
-    || typeof precondition.expectedDiskVersion !== "string" || precondition.expectedDiskVersion.length === 0
-    || precondition.expectedDiskVersion.length > 512 || precondition.expectedDiskVersion.includes("\0")) {
-    throw new PersistenceError("invalid_precondition", "disk preconditions are invalid");
-  }
-}
-
 /** Observe a Save As target before presenting an explicit replacement confirmation. */
 export async function observeSaveAsDestination(path: string): Promise<DiskObservation> {
   if (typeof path !== "string" || path.length === 0 || path.includes("\0")) {
@@ -812,16 +761,6 @@ async function writeStaged(path: string, bytes: Uint8Array, mode: number): Promi
     await file.sync();
   } finally {
     await file.close();
-  }
-}
-
-function decodeBase64(value: string): Uint8Array | null {
-  try {
-    const bytes = Buffer.from(value, "base64");
-    if (bytes.toString("base64") !== value || bytes.byteLength > MAX_NOTEBOOK_BYTES) return null;
-    return bytes;
-  } catch {
-    return null;
   }
 }
 

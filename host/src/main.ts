@@ -79,12 +79,8 @@ interface CliOptions {
   listRecoveries: boolean;
   browser: boolean;
   headless: boolean;
-  sandbox: boolean;
   lazy: boolean;
   noRun: boolean;
-  host: string;
-  port: number;
-  allowedOrigins: string[];
   externalOrigin?: string;
   tokenFile?: string;
   output?: string;
@@ -146,15 +142,14 @@ export function parseCli(argv: readonly string[]): CliOptions {
       options: {
         help: { type: "boolean" }, version: { type: "boolean" }, "host-info": { type: "boolean" },
         browser: { type: "boolean" }, headless: { type: "boolean" }, lazy: { type: "boolean" }, "no-run": { type: "boolean" },
-        sandbox: { type: "boolean" }, host: { type: "string" }, port: { type: "string" },
-        "allowed-origin": { type: "string", multiple: true }, "external-origin": { type: "string" }, "token-file": { type: "string" },
+        "external-origin": { type: "string" }, "token-file": { type: "string" },
         "request-id": { type: "string" }, "session-epoch": { type: "string" }, "document-revision": { type: "string" },
         output: { type: "string" }, "include-code": { type: "boolean" }, "list-recoveries": { type: "boolean" }, recover: { type: "string" },
       },
     });
   } catch (error) { throw usageError(errorText(error)); }
   const values = parsed.values as Record<string, unknown>;
-  if (values.help === true) return { command: "desktop", path: null, recover: undefined, listRecoveries: false, browser: false, headless: false, sandbox: false, lazy: false, noRun: false, host: "127.0.0.1", port: 0, allowedOrigins: [], externalOrigin: undefined, tokenFile: undefined, output: undefined, includeCode: false };
+  if (values.help === true) return { command: "desktop", path: null, recover: undefined, listRecoveries: false, browser: false, headless: false, lazy: false, noRun: false, externalOrigin: undefined, tokenFile: undefined, output: undefined, includeCode: false };
   const positionals = parsed.positionals;
   const first = positionals[0];
   const command = first === "check" || first === "run" || first === "publish" || first === "mcp" ? first : "desktop";
@@ -166,7 +161,7 @@ export function parseCli(argv: readonly string[]): CliOptions {
   const recover = values.recover === undefined ? undefined : String(values.recover);
   if (browser && headless) throw usageError("--browser and --headless are mutually exclusive");
   if (listRecoveries) {
-    if (positionals.length > 0 || recover !== undefined || browser || headless || values.lazy === true || values["no-run"] === true || values.sandbox === true || values.host !== undefined || values.port !== undefined || values["allowed-origin"] !== undefined || values["external-origin"] !== undefined || values["token-file"] !== undefined || values.output !== undefined || values["include-code"] === true || values["host-info"] === true) {
+    if (positionals.length > 0 || recover !== undefined || browser || headless || values.lazy === true || values["no-run"] === true || values["external-origin"] !== undefined || values["token-file"] !== undefined || values.output !== undefined || values["include-code"] === true || values["host-info"] === true) {
       throw usageError("--list-recoveries cannot be combined with other command or session options");
     }
   }
@@ -174,14 +169,13 @@ export function parseCli(argv: readonly string[]): CliOptions {
     if (!isUntitledRecoveryId(recover)) throw usageError("--recover requires a UUID");
     if (command !== "desktop") throw usageError("--recover is only valid for a desktop session");
     if (path !== null) throw usageError("--recover cannot be combined with NOTEBOOK.R");
-    if (values.sandbox === true) throw usageError("--recover cannot be combined with --sandbox");
   }
   const externalOrigin = typeof values["external-origin"] === "string" ? values["external-origin"] : undefined;
   const tokenFile = typeof values["token-file"] === "string" ? values["token-file"] : undefined;
   validateExternalAuthOptions(externalOrigin, tokenFile);
-  const sessionOnly = browser || headless || values.lazy === true || values["no-run"] === true || values.host !== undefined || values.port !== undefined || values["allowed-origin"] !== undefined || values["external-origin"] !== undefined || values["token-file"] !== undefined;
+  const sessionOnly = browser || headless || values.lazy === true || values["no-run"] === true || values["external-origin"] !== undefined || values["token-file"] !== undefined;
   if (command !== "desktop" && sessionOnly) throw usageError("session flags are not valid for " + command);
-  if (command === "desktop" && !browser && !headless && (values.sandbox === true || values.host !== undefined || values.port !== undefined || values["allowed-origin"] !== undefined || values["external-origin"] !== undefined || values["token-file"] !== undefined)) {
+  if (command === "desktop" && !browser && !headless && (values["external-origin"] !== undefined || values["token-file"] !== undefined)) {
     throw usageError("native desktop launch does not accept headless session flags");
   }
   if (command !== "publish" && (values.output !== undefined || values["include-code"] === true)) throw usageError("publish flags are only valid for publish");
@@ -199,12 +193,7 @@ export function parseCli(argv: readonly string[]): CliOptions {
     if (!requestId || !sessionEpoch || requestId.length > 256 || sessionEpoch.length > 256 || !Number.isSafeInteger(expectedDocumentRevision) || expectedDocumentRevision < 0) throw usageError("invalid command retry identity or document revision");
     retry = { requestId, sessionEpoch, expectedDocumentRevision };
   }
-  const portText = values.port === undefined ? "0" : String(values.port);
-  const port = Number(portText);
-  if (!Number.isInteger(port) || port < 0 || port > 65535) throw usageError("--port must be an integer between 0 and 65535");
-  const host = values.host === undefined ? "127.0.0.1" : String(values.host);
-  if (!["127.0.0.1", "::1"].includes(host)) throw usageError("--host must be 127.0.0.1 or ::1");
-  return { command, path, recover, listRecoveries, browser, headless, sandbox: values.sandbox === true, lazy: values.lazy === true, noRun: values["no-run"] === true, host, port, allowedOrigins: Array.isArray(values["allowed-origin"]) ? values["allowed-origin"].map(String) : [], externalOrigin, tokenFile, output: typeof values.output === "string" ? values.output : undefined, includeCode: values["include-code"] === true, ...(retry === undefined ? {} : { retry }) };
+  return { command, path, recover, listRecoveries, browser, headless, lazy: values.lazy === true, noRun: values["no-run"] === true, externalOrigin, tokenFile, output: typeof values.output === "string" ? values.output : undefined, includeCode: values["include-code"] === true, ...(retry === undefined ? {} : { retry }) };
 }
 
 async function applicationResources(): Promise<ApplicationResources> {

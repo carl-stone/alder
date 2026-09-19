@@ -139,8 +139,6 @@ export class PackageManager {
   }
 }
 
-export function createPackageManager(options: PackageServiceOptions): PackageManager { return new PackageManager(options); }
-
 async function canonicalProjectDirectory(value: string): Promise<string> {
   if (!isAbsoluteNonEmptyPath(value)) throw new PackageError("invalid_request", "project directory must be an absolute path");
   try { const path = await realpath(value); if (!(await stat(path)).isDirectory()) throw new Error("not a directory"); return path; }
