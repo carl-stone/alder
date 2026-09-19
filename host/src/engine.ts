@@ -1,10 +1,9 @@
 import { EventEmitter } from "node:events";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { access, mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, rm, stat } from "node:fs/promises";
 import { rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, dirname, extname, join, resolve } from "node:path";
-import { TextDecoder } from "node:util";
+import { basename, extname, join, resolve } from "node:path";
 import type { ApplicationResources } from "./resources.js";
 
 import { rKernelEnvironmentVariables, rServiceEnvironmentVariables } from "./r-environment.js";
@@ -453,7 +452,6 @@ export class Engine extends EventEmitter implements EngineAdapter {
   private runtime: RuntimePaths | undefined;
   private outputStoreValue: OutputStore | undefined;
   private outputSessionEpoch: string | undefined;
-  private outputDocumentRevision: number | undefined;
   private kernelEpoch: string | null = null;
   private peerGeneration = 0;
   private analyzerGeneration = 0;
@@ -506,14 +504,12 @@ export class Engine extends EventEmitter implements EngineAdapter {
       });
       this.outputStoreValue = created;
       this.outputSessionEpoch = identity.sessionEpoch;
-      this.outputDocumentRevision = identity.documentRevision;
       return created;
     }
     if (this.outputSessionEpoch !== identity.sessionEpoch) {
       throw new EngineTransportError("output store session epoch cannot change");
     }
     existing.setIdentity({ documentRevision: identity.documentRevision, kernelEpoch: this.kernelEpoch });
-    this.outputDocumentRevision = identity.documentRevision;
     return existing;
   }
   setEnvironment(environment: REnvironment): void {
@@ -1047,7 +1043,6 @@ export class Engine extends EventEmitter implements EngineAdapter {
       } finally {
         this.outputStoreValue = undefined;
         this.outputSessionEpoch = undefined;
-        this.outputDocumentRevision = undefined;
       }
       for (const directory of this.paths?.ownedDirectories ?? []) {
         await rm(directory, { recursive: true, force: true }).catch(() => {});
@@ -1280,11 +1275,6 @@ export class Engine extends EventEmitter implements EngineAdapter {
         if (generation === this.peerGeneration) this.peerFailed(peerRole, error, intentional);
       },
     );
-  }
-
-  private async ensureStarted(): Promise<void> {
-    await this.ensureAnalyzer();
-    await this.ensureKernel();
   }
 
   private async ensureAnalyzer(): Promise<void> {
@@ -1825,9 +1815,7 @@ export class Engine extends EventEmitter implements EngineAdapter {
     if (this.pendingKernelRequests + this.evaluations.size >= MAX_PENDING_REQUESTS) {
       throw new EngineTransportError("engine request queue is full", "kernel");
     }
-    const requestId = this.nextRequestId();
     const marker = randomUUID();
-    const wire = { req: requestId, command, ...payload };
     this.pendingKernelRequests += 1;
     let result: Record<string, unknown> | undefined;
     let messageError: Error | undefined;
@@ -2464,14 +2452,6 @@ function artifactHandle(value: unknown): value is string {
     extname(value).length > 1;
 }
 
-function stringArray(value: unknown): string[] {
-  if (!Array.isArray(value) || value.some((entry) => typeof entry !== "string")) {
-    throw new FrameProtocolError("artifact response contains an invalid list");
-  }
-  return [...value] as string[];
-}
-
-
 function jsonByteSize(value: unknown): number {
   const encoded = JSON.stringify(value);
   return Buffer.byteLength(encoded ?? "null", "utf8");
@@ -2578,9 +2558,6 @@ async function requireFile(path: string, label: string): Promise<void> {
   }
 }
 
-async function isFile(path: string): Promise<boolean> {
-  try { return (await stat(path)).isFile(); } catch { return false; }
-}
 function strictEnvironment(value: NodeJS.ProcessEnv): Record<string, string> {
   const result: Record<string, string> = {};
   for (const [key, entry] of Object.entries(value)) if (entry !== undefined) result[key] = entry;

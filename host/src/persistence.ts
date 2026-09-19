@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, open, readFile, realpath, rename, stat, unlink } from "node:fs/promises";
+import { mkdir, open, realpath, rename, unlink } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { MAX_NOTEBOOK_SOURCE_BYTES } from "./protocol.js";
 import type { DiskObservation, Layout } from "./protocol.js";
@@ -823,21 +823,6 @@ function decodeBase64(value: string): Uint8Array | null {
   } catch {
     return null;
   }
-}
-
-export async function sameFile(first: string, second: string): Promise<boolean> {
-  if (resolve(first) === resolve(second)) return true;
-  try {
-    const [left, right] = await Promise.all([stat(first, { bigint: true }), stat(second, { bigint: true })]);
-    return left.dev === right.dev && left.ino === right.ino;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
-    throw error;
-  }
-}
-
-export async function readJsonFile(path: string): Promise<unknown> {
-  return JSON.parse(await readFile(path, "utf8"));
 }
 
 export { diskVersion, sameDisk, canonicalDestination };

@@ -1,10 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmod, mkdtemp, readFile, realpath, writeFile, rm, symlink, link, rename, readdir, stat, mkdir } from 'node:fs/promises';
+import { chmod, mkdtemp, readFile, realpath, writeFile, rm, symlink, rename, readdir, stat, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
-import { DocumentStore, FileConflict, sameFile, diskVersion, observeSaveAsDestination } from '../src/persistence.js';
+import { DocumentStore, FileConflict, diskVersion, observeSaveAsDestination } from '../src/persistence.js';
 import { observeFile, writeAtomicText } from '../src/configuration.js';
 
 async function temporaryDirectory(prefix: string): Promise<string> {
@@ -75,9 +75,8 @@ test('new source save and external replacement preserve source_conflict and dirt
 test('source symlink aliases are canonical and retargeting cannot replace another target', async () => {
   const dir = await temporaryDirectory('alder-source-link-');
   try {
-    const first = join(dir, 'first.R'), second = join(dir, 'second.R'), alias = join(dir, 'notebook.R'), hard = join(dir, 'hard.R');
-    await writeFile(first, '# %%\nfirst\n'); await writeFile(second, '# %%\nsecond\n'); await symlink(first, alias); await link(first, hard);
-    assert.equal(await sameFile(first, alias), true); assert.equal(await sameFile(first, hard), true);
+    const first = join(dir, 'first.R'), second = join(dir, 'second.R'), alias = join(dir, 'notebook.R');
+    await writeFile(first, '# %%\nfirst\n'); await writeFile(second, '# %%\nsecond\n'); await symlink(first, alias);
     const { store, notebook } = await DocumentStore.open(alias);
     await rm(alias); await symlink(second, alias);
     await assert.rejects(store.save({ ...notebook, cells: [{ ...notebook.cells[0]!, body: ['local'] }] }), { code: 'source_conflict' });

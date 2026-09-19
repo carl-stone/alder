@@ -3,7 +3,6 @@ import test from "node:test";
 
 import {
   ReactiveGraph,
-  buildDependencyGraph,
   dependencyLevels,
   detectCycleNodes,
   reachableNodes,
@@ -31,11 +30,11 @@ function cell(
 }
 
 test("static definitions and references produce deterministic dependency edges", () => {
-  const graph = buildDependencyGraph([
+  const graph = new ReactiveGraph([
     cell("a", { defs: ["x"] }),
     cell("b", { defs: ["y"], refs: ["x"] }),
     cell("c", { defs: ["z"], refs: ["x", "y"] }),
-  ]);
+  ]).state;
   assert.deepEqual(graph.edges, { a: [], b: ["a"], c: ["a", "b"] });
   assert.deepEqual(graph.reverseEdges, { a: ["b", "c"], b: ["c"], c: [] });
   assert.deepEqual(graph.topologicalOrder, ["a", "b", "c"]);
@@ -93,7 +92,7 @@ test("every update rebuilds ownership and topology from the accepted cells", () 
     cell("b", { refs: ["x"] }),
     cell("c", { defs: ["x"] }),
   ]);
-  assert.deepEqual(graph.state, buildDependencyGraph(graph.cells));
+  assert.deepEqual(graph.state, new ReactiveGraph(graph.cells).state);
   assert.deepEqual(graph.state.edges.b, ["c"]);
   assert.deepEqual(graph.definitionOwners("x"), ["c"]);
 });
@@ -164,10 +163,10 @@ test("static edge exhaustion fails coherently and clears after a bounded repair"
 });
 
 test("prototype-shaped R symbols remain ordinary duplicate-definition keys", () => {
-  const graph = buildDependencyGraph([
+  const graph = new ReactiveGraph([
     cell("a", { defs: ["__proto__"] }),
     cell("b", { defs: ["__proto__"] }),
-  ]);
+  ]).state;
   assert.equal(Object.hasOwn(graph.duplicates, "__proto__"), true);
   assert.deepEqual(graph.duplicates["__proto__"], ["a", "b"]);
 });

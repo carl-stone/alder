@@ -13,7 +13,6 @@
     "@codemirror/view": "^6.36.5",
     "@lezer/highlight": "^1.2.3",
     "@replit/codemirror-vim": "^6.4.0",
-    "codemirror": "^6.0.2",
     "esbuild": "^0.28.2",
     "typescript": "5.9.3"
   },

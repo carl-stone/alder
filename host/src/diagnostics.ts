@@ -636,19 +636,6 @@ async function pruneSegmentsLocked(rootDir: string, options: {
   return total + options.reserveBytes <= options.totalBytes && count + addedCount <= options.maxSegments;
 }
 
-export async function pruneDiagnosticSegments(rootDir: string, options: { maxAgeMs?: number; maxSegments?: number; totalBytes?: number; preserve?: string } = {}): Promise<void> {
-  await withDirectoryLock(resolve(rootDir), async () => {
-    await normalizeDeadActiveSegments(resolve(rootDir));
-    await pruneSegmentsLocked(resolve(rootDir), {
-      maxAgeMs: options.maxAgeMs ?? DIAGNOSTIC_MAX_AGE_MS,
-      maxSegments: options.maxSegments ?? DIAGNOSTIC_MAX_SEGMENTS,
-      totalBytes: options.totalBytes ?? DIAGNOSTIC_TOTAL_BYTES,
-      reserveBytes: 0,
-      prospectivePath: options.preserve,
-    });
-  });
-}
-
 export interface DiagnosticBundleContext {
   appVersion?: string;
   buildId?: string;

@@ -12,7 +12,6 @@ import {
   exportDiagnosticBundle,
   persistEmergencyDiagnostic,
   pruneCorruptRecoveryCopies,
-  pruneDiagnosticSegments,
 } from "../src/diagnostics.js";
 
 async function logText(root: string): Promise<string> {
@@ -42,19 +41,6 @@ test("structured diagnostics rotate, retain bounded segments, and drop a saturat
   const bytes = (await Promise.all(segments.map(name => stat(join(root, name))))).reduce((sum, info) => sum + info.size, 0);
   assert.ok(bytes <= 1_680, `retained ${bytes} bytes`);
   await logger.close();
-});
-
-test("diagnostic retention removes expired and excess segments", async () => {
-  const root = await mkdtemp(join(tmpdir(), "alder-diagnostics-retention-"));
-  for (let index = 0; index < 7; index++) {
-    const path = join(root, `diagnostics-old-backend-id-${index}.jsonl`);
-    await writeFile(path, "x".repeat(40));
-    const time = new Date(Date.now() - (index + 1) * 10_000);
-    await utimes(path, time, time);
-  }
-  await pruneDiagnosticSegments(root, { maxAgeMs: 25_000, maxSegments: 5, totalBytes: 120 });
-  const retained = (await readdir(root)).filter(name => name.endsWith(".jsonl"));
-  assert.ok(retained.length <= 3);
 });
 
 test("diagnostic storage failure is non-blocking and reported once", async () => {

@@ -2,12 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  DEFAULT_MAX_ENGINE_FRAME_BYTES,
   FrameDecoder,
   FrameProtocolError,
   encodeFrame,
 } from "../src/framing.js";
 import { parseJson } from "../src/json.js";
+import { DEFAULT_MAX_ENGINE_FRAME_BYTES } from "../src/protocol.js";
 
 test("framed JSON survives arbitrary chunk boundaries and coalescing", () => {
   const values = [

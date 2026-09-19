@@ -17,12 +17,6 @@ export interface GraphValidationIssue {
 function unique(values: readonly string[]): string[] { return [...new Set(values)]; }
 function nullRecord(nodes: readonly string[]): Record<string, string[]> { return Object.fromEntries(nodes.map(node => [node, []])); }
 
-export function buildDependencyGraph(cells: readonly GraphCellInput[]): DependencyGraphState {
-  const graph = new ReactiveGraph(cells);
-  if (graph.resourceLimited) throw new Error(`dependency graph exceeds ${MAX_DEPENDENCY_EDGES} edge limit`);
-  return graph.state;
-}
-
 /** Iterative Tarjan traversal with cycle members returned in notebook order. */
 export function detectCycleNodes(edges: Readonly<Record<string, readonly string[]>>, nodes: readonly string[]): string[] {
   interface Frame { node: string; parent: string | null; dependencies: readonly string[]; next: number; }

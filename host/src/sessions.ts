@@ -16,9 +16,6 @@ import { ensurePrivateDirectory, readPrivateFile, verifyPrivateFile, writePrivat
 
 export const STARTUP_TIMEOUT_MS = 120_000;
 export const HEARTBEAT_INTERVAL_MS = 10_000;
-export const LEASE_EXPIRY_MS = 30_000;
-export const MAX_ACTIVE_LEASES = 128;
-export const MAX_LIVE_TICKETS = 128;
 const LOOPBACK_HOSTS = new Set(["127.0.0.1"]);
 const IDENTITY_REQUEST_TIMEOUT_MS = 4_000;
 const SESSION_KEY_PATTERN = /^[0-9a-f]{64}$/;
@@ -226,8 +223,6 @@ function createConnection(descriptor: BackendSessionDescriptor, lease: SessionLe
     release: async disposition => { clearInterval(interval); await release(disposition); },
   };
 }
-
-export async function releaseNotebookSession(connection: SessionConnection): Promise<void> { await connection.release(); }
 
 interface Claim { ownership: NotebookOwnership; }
 const claims = new Map<string, Claim>();

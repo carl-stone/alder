@@ -489,7 +489,6 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
   }
   if (argv.includes("--version")) { process.stdout.write(HOST_IDENTITY.packageVersion + "\n"); return 0; }
   if (cli.listRecoveries) {
-    const resources = await applicationResources();
     writeJson(await listUntitledRecoveryDescriptors());
     return 0;
   }

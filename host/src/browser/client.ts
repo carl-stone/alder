@@ -6,7 +6,6 @@ import type { PreferencesPatch, ProjectSettingsPatch } from "../settings.js";
 import type {
   CellType,
   DocumentChange,
-  JsonValue,
   CommandResult,
   HostCommand,
   HostEvent,
@@ -912,10 +911,6 @@ function stringValue(value: unknown): string { return typeof value === "string" 
 function fileArray(value: unknown): Array<{ name: string; content_base64: string }> {
   return Array.isArray(value) ? value.filter((item): item is { name: string; content_base64: string } => typeof item === "object" && item !== null && !Array.isArray(item) && typeof (item as Record<string, unknown>).name === "string" && typeof (item as Record<string, unknown>).content_base64 === "string") : [];
 }
-function jsonRecord(value: Record<string, unknown>): Record<string, JsonValue> {
-  return value as Record<string, JsonValue>;
-}
-
 function safeArtifactPath(path: string): string {
   try {
     const current = new URL(location.href);

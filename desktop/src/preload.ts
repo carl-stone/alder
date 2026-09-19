@@ -7,7 +7,6 @@ import {
   windowStateSchema,
   type PreloadApi,
   type DesktopCommand,
-  type WindowState,
   type SaveDestination,
   saveAsCommandSchema,
 } from "../../host/src/protocol.js";

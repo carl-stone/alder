@@ -929,7 +929,6 @@ function patchSnapshot(snapshot: HostSnapshot, event: HostEvent, order: readonly
     else if (isHostCell(event.payload)) {
       const payload = event.payload;
       const index = next.cells.findIndex((cell) => cell.id === payload.id);
-      const prior = index < 0 ? null : next.cells[index]!;
       next.cells = [...next.cells];
       if (index < 0) {
         next.cells.push(payload);

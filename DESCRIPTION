@@ -20,7 +20,6 @@ Imports:
     mime,
     rlang
 Suggests:
-    microbenchmark,
     processx,
     testthat (>= 3.0.0),
     withr

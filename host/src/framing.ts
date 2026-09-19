@@ -1,10 +1,6 @@
 import { parseJson } from "./json.js";
 
 export const DEFAULT_MAX_FRAME_BYTES = 8 * 1024 * 1024;
-// A codec request can contain both the immutable 32 MiB disk version and the
-// current 32 MiB source snapshot. Their exact per-line base64 representation
-// needs about 90 MiB before bounded structural metadata.
-export const DEFAULT_MAX_ENGINE_FRAME_BYTES = 128 * 1024 * 1024;
 
 export class FrameProtocolError extends Error {
   constructor(message: string) {

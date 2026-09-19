@@ -4,7 +4,7 @@ import {
   decodeHostEventWire, canonicalBase64ByteLength, decodeJsonFrame, decodeRecoveryWire,
   encodeHostCommandWire, hostEventSchema, recoverySchema, documentChangeSchema,
   SNAPSHOT_ENVELOPE_LIMIT, type ArtifactHandle, type CommandResult, type HostCommand,
-  type HostEvent, type HostSnapshot, type Recovery, type DocumentChange,
+  type HostEvent, type HostSnapshot, type Recovery,
 } from "../protocol.js";
 import { notebookSocketUrl, notebookUrl } from "./url.js";
 

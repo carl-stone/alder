@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, open, readFile, rename, rm, stat } from "node:fs/promises";
-import { dirname, join, basename } from "node:path";
+import { dirname, join } from "node:path";
 import envPaths from "env-paths";
 import { parseDocument as parseYamlDocument, stringify as stringifyYaml } from "yaml";
 import { z } from "zod";
@@ -251,29 +251,6 @@ export async function writeAtomicText(path: string, text: string, options: Atomi
   }
 }
 
-/** Minimal layout-path error declaration shared without importing layout.ts. */
-export class LayoutPathError extends Error {
-  readonly code = "invalid_layout" as const;
-  constructor(message: string) {
-    super(message);
-    this.name = "LayoutPathError";
-  }
-}
-
-/** Kept private to configuration's implementation; exported for layout.ts. */
-export function requireNotebookPath(path: string | null | undefined): string {
-  if (path === null || path === undefined || path.length === 0) {
-    const error = new Error("notebook has no path") as Error & { code?: string };
-    error.code = "notebook_has_no_path";
-    throw error;
-  }
-  return ensureStringPath(path);
-}
-
-export function notebookBasename(path: string): string {
-  return basename(path);
-}
-
 export interface AppConfig {
   readonly layout: "vertical" | "grid" | "slides";
   readonly width: "compact" | "medium" | "full";
@@ -355,34 +332,4 @@ export function setAppConfig<T extends Pick<NotebookDocument, "metadata">>(noteb
   const nextMetadata = clone(metadata);
   nextMetadata.app = { ...app, ...checked };
   return { ...notebook, metadata: nextMetadata } as T;
-}
-
-/** Return a deterministic app title from metadata, notebook path, or fallback. */
-export function appTitle(notebook: Pick<NotebookDocument, "path" | "metadata">): string {
-  const metadata = notebook?.metadata;
-  const title = metadata && typeof metadata === "object" && !Array.isArray(metadata)
-    ? (metadata as Record<string, unknown>).title
-    : undefined;
-  if (typeof title === "string" && title.trim().length > 0) return title;
-  if (typeof notebook?.path === "string" && notebook.path.length > 0) {
-    const name = basename(notebook.path).replace(/\.[^./\\]+$/, "");
-    if (name.length > 0) return name;
-  }
-  return "Untitled notebook";
-}
-
-/** Return the first Markdown cell's compact, bounded description. */
-export function appDescription(notebook: Pick<NotebookDocument, "cells">): string {
-  const cells = notebook?.cells;
-  if (!Array.isArray(cells)) return "";
-  const markdown = cells.find((cell) => {
-    if (cell === null || typeof cell !== "object" || Array.isArray(cell)) return false;
-    return (cell as Record<string, unknown>).type === "markdown";
-  });
-  if (markdown === undefined || markdown === null || typeof markdown !== "object" || Array.isArray(markdown)) return "";
-  const body = (markdown as Record<string, unknown>).body;
-  if (!Array.isArray(body)) return "";
-  const lines = body.map((line) => typeof line === "string" ? line.replace(/^\s*#\s?/, "") : "");
-  const text = lines.join(" ").replace(/\s+/g, " ").trim();
-  return Array.from(text).slice(0, 240).join("");
 }

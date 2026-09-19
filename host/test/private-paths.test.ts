@@ -7,7 +7,6 @@ import test from "node:test";
 
 import {
   ensurePrivateDirectory,
-  ensurePrivateFile,
   PrivatePathError,
   readPrivateFile,
   securePrivateFile,
@@ -25,21 +24,6 @@ function privatePathFailure(code: PrivatePathError["code"]): (error: unknown) =>
 }
 
 const privateOptions = {};
-
-test("ensurePrivateFile preserves an existing private file and rejects oversharing", async () => {
-  const root = await temporaryDirectory("alder-private-file-");
-  const path = join(root, "state");
-  try {
-    await writeFile(path, "before", { mode: 0o600 });
-    await ensurePrivateFile(path, privateOptions);
-    assert.equal((await readFile(path, "utf8")), "before");
-    await chmod(path, 0o644);
-    await assert.rejects(() => ensurePrivateFile(path, privateOptions), privatePathFailure("private_path_overshared"));
-    assert.equal(await readFile(path, "utf8"), "before");
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-});
 
 test("readPrivateFile rejects metadata changes between fstats", async () => {
   const root = await temporaryDirectory("alder-private-read-change-");

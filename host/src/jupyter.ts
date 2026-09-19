@@ -1095,13 +1095,6 @@ function asError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
 }
 
-function childEnvironment(value: NodeJS.ProcessEnv): Record<string, string> {
-  const result: Record<string, string> = {};
-  for (const [key, entry] of Object.entries(value)) {
-    if (entry !== undefined) result[key] = entry;
-  }
-  return result;
-}
 function messageOf(error: unknown): string {
   return asError(error).message;
 }

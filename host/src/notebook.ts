@@ -128,8 +128,6 @@ export class NotebookError extends Error {
     this.cause = cause;
   }
 }
-
-export class NotebookCodecError extends NotebookError {}
 export class NotebookParseError extends NotebookError {}
 export class NotebookMutationError extends NotebookError {}
 
@@ -916,35 +914,6 @@ export function restoreNotebookCellIdentity(
   });
   return { ...document, cells };
 }
-function cloneDocumentShallow(document: NotebookDocument): {
-  document: NotebookDocument;
-  cells: InternalCell[];
-  header: InternalRecord[];
-} {
-  const preferredEol = effectivePreferredEol(document);
-  const physical = allPhysicalRecords(document);
-  const cells = document.cells.map((cell, index) => {
-    const records = physical.cells[index]!;
-    return syncCell(cell, records);
-  });
-  return {
-    document: {
-      ...document,
-      text: undefined,
-      cells,
-      header: physical.header.map((record) => record.text),
-      headerRecords: physical.header,
-      metadata: effectiveMetadata(document),
-      preferredEol,
-      finalNewline: effectiveFinalNewline(document),
-      nextCellNumber: effectiveNextCellNumber(document),
-      bom: document.bom ?? false,
-    },
-    cells,
-    header: physical.header,
-  };
-}
-
 function documentWith(
   document: NotebookDocument,
   cells: readonly InternalCell[],
@@ -1286,8 +1255,6 @@ export function setMetadata(
   return normalizeBoundary(next, [], true);
 }
 
-export const setNotebookMetadata = setMetadata;
-
 export function setCellOption(
   document: NotebookDocument,
   id: string,
@@ -1614,38 +1581,12 @@ export function reconcileNotebook(
   return normalizeBoundary(next, [...new Set(changedRegions)], currentCells.length > 0 && source.cells.length === 0);
 }
 
-/** Return zero-based physical file lines occupied by a cell's body records. */
-export function physicalBodyLines(document: NotebookDocument, id: string): number[] {
-  validateIdentifier(id, "cell id");
-  const preferredEol = effectivePreferredEol(document);
-  const header = headerRecordsFor(document, preferredEol);
-  const physical = allPhysicalRecords(document);
-  let line = header.length;
-  for (let index = 0; index < document.cells.length; index += 1) {
-    const cell = document.cells[index]!;
-    const records = physical.cells[index]!;
-    const lines: number[] = [];
-    let bodyLine = 0;
-    for (const record of records) {
-      if (record.kind === "body") {
-        lines.push(line);
-        bodyLine += 1;
-      }
-      line += 1;
-    }
-    if (cell.id === id) return lines;
-    void bodyLine;
-  }
-  return [];
-}
-
 /** Translate a zero-based physical file line to a cell/body line. */
 export function logicalBodyPosition(
   document: NotebookDocument,
   physicalLine: number,
 ): { id: string; line: number } | null {
   if (!Number.isSafeInteger(physicalLine) || physicalLine < 0) return null;
-  const preferredEol = effectivePreferredEol(document);
   const physical = allPhysicalRecords(document);
   let line = physical.header.length;
   for (let index = 0; index < document.cells.length; index += 1) {
@@ -1658,12 +1599,10 @@ export function logicalBodyPosition(
       line += 1;
     }
   }
-  void preferredEol;
   return null;
 }
 
 export function layoutNotebook(document: NotebookDocument): NotebookLayout {
-  const preferredEol = effectivePreferredEol(document);
   const physical = allPhysicalRecords(document);
   const lineMap: Array<{ cell: string; line: number } | null> = [];
   const cellLines = new Map<string, number[]>();

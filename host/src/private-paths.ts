@@ -266,33 +266,3 @@ export async function writePrivateFile(
     throw error;
   }
 }
-
-export async function ensurePrivateFile(path: string): Promise<void> {
-  const inspection = await inspectPath(path, null);
-  const parent = dirname(inspection.path);
-  await ensurePrivateDirectory(parent);
-  if (inspection.exists) {
-    await verifyPrivateFile(inspection.path);
-    return;
-  }
-  const flags = constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0);
-  let handle: Awaited<ReturnType<typeof openFile>> | undefined;
-  try {
-    handle = await openFile(inspection.path, flags, FILE_MODE);
-    const info = await handle.stat();
-    validatePrivateStats(info, "file", inspection.path);
-    await handle.sync();
-    await handle.close();
-    handle = undefined;
-    await securePrivateFile(inspection.path);
-    await syncDirectory(parent);
-  } catch (error) {
-    if (handle !== undefined) await handle.close().catch(() => undefined);
-    if (errorCode(error) === "EEXIST") {
-      await verifyPrivateFile(inspection.path);
-      return;
-    }
-    await rm(inspection.path, { force: true }).catch(() => undefined);
-    throw error;
-  }
-}

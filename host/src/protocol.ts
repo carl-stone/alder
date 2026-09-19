@@ -19,7 +19,6 @@ export const MAX_RUNTIME_VARIABLES = 2_000;
 export const MAX_EDITOR_DIAGNOSTICS = 2_000;
 export const MAX_PROTOCOL_COLLECTION_ITEMS = 100_000;
 export const MAX_MCP_REQUEST_BYTES = 16 * 1024 * 1024;
-export const MAX_MCP_RESULT_BYTES = 1 * 1024 * 1024;
 export const OUTPUT_CHUNK_BYTES = 262_144;
 export const MAX_ARTIFACT_BYTES = 512 * 1024 * 1024;
 export const MAX_ARTIFACT_HANDLE_BYTES = 128;
@@ -284,12 +283,10 @@ export const sourcePositionSchema = z.object({
   line: protocolIntegerSchema,
   character: protocolIntegerSchema,
 }).strict();
-export type SourcePosition = z.infer<typeof sourcePositionSchema>;
 export const sourceRangeSchema = z.object({
   start: sourcePositionSchema,
   end: sourcePositionSchema,
 }).strict();
-export type SourceRange = z.infer<typeof sourceRangeSchema>;
 
 export const cellSnapshotSchema = z.object({
   id: idSchema,
@@ -369,21 +366,17 @@ export const rawConditionErrorSchema = z.object({
   trace: rawConditionTraceSchema,
   ...rawErrorCommonShape,
 }).strict();
-export type RawConditionError = z.infer<typeof rawConditionErrorSchema>;
 
 export const rawValidationErrorSchema = z.object({
   message: boundedUtf8StringSchema(MAX_FRAME_BYTES),
   ...rawErrorCommonShape,
 }).strict();
-export type RawValidationError = z.infer<typeof rawValidationErrorSchema>;
 
 export const rawEngineErrorSchema = z.union([
   rawConditionErrorSchema,
   rawValidationErrorSchema,
 ]);
-export type RawEngineError = z.infer<typeof rawEngineErrorSchema>;
 export const clearCellRequestSchema = (protocolJsonSchema as z.ZodTypeAny).pipe(clearCellRequestShape);
-export type ClearCellRequest = z.infer<typeof clearCellRequestShape>;
 const releaseArtifactNameSchema = boundedUtf8StringSchema(1_024, true).refine(
   (value) => !value.startsWith(".") && !/[\\/]/.test(value),
   "invalid artifact handle",
@@ -400,7 +393,6 @@ export const releaseOutputsResponseSchema = z.object({
     context.addIssue({ code: "custom", message: "successful release_outputs responses require released, missing, and failed arrays" });
   }
 });
-export type ReleaseOutputsResponse = z.infer<typeof releaseOutputsResponseSchema>;
 const tablePageSchema = z.lazy(() => tablePageShape);
 export const richOutputPayloadSchema = z.lazy(() => richOutputShape) as unknown as z.ZodType<RichOutputPayload>;
 const arkCleanupFailureSchema = z.object({
@@ -444,7 +436,6 @@ export type EngineResponse = z.infer<typeof engineResponseSchema>;
 export const R_ENVIRONMENT_PLATFORMS = [
   "aix", "android", "darwin", "freebsd", "haiku", "linux", "openbsd", "sunos", "win32",
 ] as const;
-export type REnvironmentPlatform = typeof R_ENVIRONMENT_PLATFORMS[number];
 export const rEnvironmentSchema = z.object({
   rscript: pathSchema,
   rHome: pathSchema,
@@ -629,7 +620,6 @@ export const notebookCellInputSchema = z.object({
   options: cellOptionsSchema.optional().default({}),
   revision: revisionSchema.optional().default(0),
 }).strict().superRefine((cell, context) => validateCellBody(cell.type, cell.body, context, ["body"]));
-export type NotebookCellInput = z.input<typeof notebookCellInputSchema>;
 export const notebookInputSchema = z.object({
   path: pathSchema.nullable().optional(),
   metadata: protocolJsonRecordSchema.optional().default({}),
@@ -644,11 +634,6 @@ export const notebookInputSchema = z.object({
     context.addIssue({ code: "custom", path: ["cells"], message: "notebook source exceeds byte limit" });
   }
 });
-export interface NotebookInput {
-  path?: string | null;
-  metadata?: Record<string, unknown>;
-  cells: Array<{ id: string; type: CellType; body: string[]; options?: Record<string, unknown>; revision?: number }>;
-}
 
 export const cellRefSchema = z.union([
   z.object({ cellId: idSchema }).strict(),
@@ -663,8 +648,6 @@ export const textEditSchema = z.object({
     if (text.includes("\0")) context.addIssue({ code: "custom", message: "text edit contains NUL" });
   }),
 }).strict();
-export type TextEdit = z.infer<typeof textEditSchema>;
-const documentChangeBase = z.object({ type: z.string() });
 export const createDocumentChangeSchema = z.object({
   type: z.literal("create"), creationId: idSchema, after: cellRefSchema.nullable(), cellType: cellTypeSchema,
   body: markdownPhysicalBodySchema, options: cellOptionsSchema,
@@ -697,8 +680,6 @@ const commandIdentityShape = {
   clientId: idSchema,
   sessionEpoch: idSchema,
 };
-export const commandIdentitySchema = z.object(commandIdentityShape).strict();
-export type CommandIdentity = z.infer<typeof commandIdentitySchema>;
 const sourceChangeArraySchema = z.array(documentChangeSchema).max(MAX_NOTEBOOK_CELLS);
 function sourceChangeBytes(changes: readonly DocumentChange[]): number {
   let bytes = 0;
@@ -804,7 +785,6 @@ export const widgetUpdateSchema = z.object({
   if (primary.length !== 1) context.addIssue({ code: "custom", message: "widget update requires exactly one primary field" });
   if (update.paused !== undefined && primary.length !== 1) context.addIssue({ code: "custom", message: "paused is only valid with a primary update" });
 });
-export type WidgetUpdate = z.infer<typeof widgetUpdateSchema>;
 export const widgetCommandSchema = z.object({ ...commandIdentityShape, type: z.literal("widget"), name: idSchema, path: z.array(idSchema).max(256), update: widgetUpdateSchema, source: z.enum(["editor", "app", "mcp", "cli"]), kernelEpoch: idSchema, expectedRevision: revisionSchema, expectedOutputId: idSchema.optional(), expectedOutputGeneration: revisionSchema.optional() }).strict();
 export const inspectCommandSchema = z.object({ ...commandIdentityShape, type: z.literal("inspect"), name: idSchema, kernelEpoch: idSchema }).strict();
 export const lazyOutputCommandSchema = z.object({ ...commandIdentityShape, type: z.literal("lazy-output"), key: idSchema, kernelEpoch: idSchema }).strict();
@@ -882,7 +862,6 @@ export const operationRecordSchema = z.object({
 export const runtimeStateSchema = z.object({
   documentReady: z.boolean(), analyzerState: z.enum(["stopped", "starting", "ready", "failed"]), kernelState: z.enum(["stopped", "starting", "ready", "failed"]), executionReady: z.boolean(), startupActivated: z.boolean(), executionBlockedReason: hostErrorSchema.nullable(), kernelEpoch: idSchema.nullable(), rEnvironment: rEnvironmentSchema.nullable(), analysisEnvironmentId: analysisEnvironmentIdSchema.nullable(),
 }).strict();
-export type RuntimeState = z.infer<typeof runtimeStateSchema>;
 export const runtimeModeSchema = z.enum(["automatic", "lazy"]);
 export const hostRuntimeSchema = runtimeStateSchema.extend({ executionMode: runtimeModeSchema, runOnStartup: z.boolean(), busy: z.boolean(), activeRunId: idSchema.nullable() }).strict();
 export type HostRuntime = z.infer<typeof hostRuntimeSchema>;
@@ -936,9 +915,6 @@ export interface RecoveryCandidate { documentRevision: number; state: "restored"
 export const recoveryCandidateSchema = z.object({ documentRevision: revisionSchema, state: z.enum(["restored", "conflict"]) }).strict();
 export interface RecoveryState { candidate: RecoveryCandidate | null; corruption: HostError | null; }
 export const recoveryStateSchema = z.object({ candidate: recoveryCandidateSchema.nullable(), corruption: hostErrorSchema.nullable() }).strict();
-export type RecoveryDelta = { kind: "source" | "sidecar"; value: JsonValue };
-export type RecoveryBaseline = { documentRevision: number; disk: DiskObservation };
-export type RecoveryDiskObservations = SidecarObservations;
 export type Recovery = { kind: "snapshot"; epoch: string; cursor: number; snapshot: HostSnapshot };
 export const recoverySchema = z.object({ kind: z.literal("snapshot"), epoch: idSchema, cursor: protocolIntegerSchema, snapshot: hostSnapshotSchema }).strict();
 
@@ -1123,7 +1099,6 @@ export const mediaOutputSchema = (protocolJsonSchema as z.ZodTypeAny).pipe(
     }),
 );
 
-const widgetKindSchema = z.enum(["slider", "range_slider", "number", "dropdown", "radio", "multiselect", "text_input", "text_area", "checkbox", "switch", "run_button", "button", "date", "date_range", "datetime", "code_editor", "refresh", "file", "table", "dataframe", "array", "dictionary", "form"]);
 const widgetLabelSchema = boundedUtf8StringSchema(4_096).nullable().optional();
 const widgetNameSchema = boundedUtf8StringSchema(MAX_ID_BYTES).optional();
 const widgetChoiceSchema = z.union([boundedUtf8StringSchema(4_096), finiteNumberSchema, z.boolean()]);
@@ -1252,7 +1227,6 @@ export const artifactResolutionSchema = z.object({
     .regex(new RegExp("^/artifacts/[A-Za-z0-9_-]{43}/" + artifactResourceNamePattern + "(?![\\s\\S])")),
   expiresAt: positiveIntegerSchema,
 }).strict();
-export type ArtifactResolution = z.infer<typeof artifactResolutionSchema>;
 
 export function encodeArtifactDescriptor(descriptor: ArtifactHandle): string {
   const encoded = encodeURIComponent(JSON.stringify(artifactHandleSchema.parse(descriptor)));
@@ -1283,21 +1257,13 @@ export type OutputRecord = z.infer<typeof outputRecordSchema>;
 export const sessionLeaseSchema = z.object({ leaseId: idSchema, clientId: idSchema, epoch: idSchema }).strict();
 export type SessionLease = z.infer<typeof sessionLeaseSchema>;
 export const attachLeaseRequestSchema = z.object({ action: z.literal("attach") }).strict();
-export type AttachLeaseRequest = z.infer<typeof attachLeaseRequestSchema>;
 export const leaseActionRequestSchema = z.object({ action: z.enum(["heartbeat", "release"]), leaseId: idSchema, disposition: z.enum(["normal", "discard"]).optional() }).strict().superRefine((value, context) => {
   if (value.action === "heartbeat" && value.disposition !== undefined) context.addIssue({ code: "custom", path: ["disposition"], message: "heartbeat cannot have a release disposition" });
 });
-export type LeaseActionRequest = z.infer<typeof leaseActionRequestSchema>;
 export const ticketMintRequestSchema = z.object({ origin: boundedUtf8StringSchema(2_048, true), parentLeaseId: idSchema.optional() }).strict();
-export type TicketMintRequest = z.infer<typeof ticketMintRequestSchema>;
 export const ticketMintResponseSchema = z.object({ ticket: idSchema, expiresAt: boundedUtf8StringSchema(256, true) }).strict();
-export type TicketMintResponse = z.infer<typeof ticketMintResponseSchema>;
 export const ticketExchangeRequestSchema = z.object({ ticket: idSchema }).strict();
-export type TicketExchangeRequest = z.infer<typeof ticketExchangeRequestSchema>;
-export const ticketExchangeResponseSchema = z.object({ leaseId: idSchema, clientId: idSchema, epoch: idSchema, continuityProof: idSchema, csrf: idSchema, recoveryId: idSchema.optional() }).strict();
-export type TicketExchangeResponse = z.infer<typeof ticketExchangeResponseSchema>;
 export const hostIdentitySchema = z.object({ protocol: z.literal(HOST_PROTOCOL), epoch: idSchema, continuityProof: idSchema, sessionKey: idSchema, canonicalPath: pathSchema.nullable(), capabilities: z.array(boundedUtf8StringSchema(256, true)).max(MAX_PROTOCOL_COLLECTION_ITEMS), origin: boundedUtf8StringSchema(2_048, true), browserOrigin: boundedUtf8StringSchema(2_048, true), address: z.object({ host: boundedUtf8StringSchema(256, true), port: z.number().int().min(0).max(65_535).safe(), origin: boundedUtf8StringSchema(2_048, true), browserOrigin: boundedUtf8StringSchema(2_048, true) }).strict().optional(), leaseId: idSchema.optional(), clientId: idSchema.optional(), documentReady: z.boolean(), configuration: hostConfigurationSchema }).strict();
-export type HostIdentity = z.infer<typeof hostIdentitySchema>;
 export type SessionRequest = (path: string, init?: RequestInit) => Promise<Response>;
 export interface SessionConnectionData { sessionKey: string; canonicalPath: string | null; origin: string; browserOrigin: string; epoch: string; continuityProof: string; leaseId: string; clientId: string; capabilities: string[]; }
 export type SessionReleaseDisposition = "normal" | "discard";

@@ -4,7 +4,7 @@ import { observeSaveAsDestination } from "../../host/src/persistence.js";
 import { StructuredDiagnostics, exportDiagnosticBundle } from "../../host/src/diagnostics.js";
 import { realpath } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
-import { basename, dirname, extname, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 
 import {
   acquireNotebookSession,
@@ -1122,13 +1122,6 @@ export class ElectronMain implements ElectronMainApplication {
     }
   }
 
-  private async closeAfterFailedRestart(record: ElectronWindowRecord): Promise<void> {
-    if (record.released) return;
-    this.finishClose(record);
-    await this.disposeRecord(record).catch(() => undefined);
-    if (!record.window.isDestroyed()) record.window.destroy();
-  }
-
   private async disposeRecord(record: ElectronWindowRecord, disposition: "normal" | "discard" = "normal"): Promise<void> {
     if (record.released) return;
     record.released = true;
@@ -1261,7 +1254,6 @@ export class ElectronMain implements ElectronMainApplication {
   }
 
   private firstRecord(): ElectronWindowRecord | undefined { return this.records.values().next().value as ElectronWindowRecord | undefined; }
-  private firstWindow(): ElectronWindow { return this.firstRecord()?.window ?? (this.runtime.BrowserWindow.getAllWindows?.()[0] as ElectronWindow | undefined)!; }
   private focusedRecord(): ElectronWindowRecord | undefined {
     return [...this.records].find(record => record.window.isFocused?.()) ?? this.firstRecord();
   }

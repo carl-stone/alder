@@ -30,7 +30,7 @@ import {
   indentWithTab,
   toggleComment
 } from "@codemirror/commands";
-import {indentOnInput, bracketMatching, foldGutter, foldKeymap, HighlightStyle, StreamLanguage, syntaxHighlighting} from "@codemirror/language";
+import {indentOnInput, foldGutter, foldKeymap, HighlightStyle, StreamLanguage, syntaxHighlighting} from "@codemirror/language";
 import {markdown} from "@codemirror/lang-markdown";
 import {
   acceptCompletion,
@@ -221,7 +221,6 @@ export function createEditor({
   keymap: keymapName = "default",
   onChange,
   onRun,
-  onRunAll,
   onSave,
   onFormat,
   onJump,

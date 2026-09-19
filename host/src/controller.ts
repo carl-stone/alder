@@ -9,10 +9,7 @@ import {
   engineResponseSchema,
   HOST_PROTOCOL,
   MAX_DEPENDENCY_EDGES,
-  MAX_NOTEBOOK_CELLS,
-  MAX_NOTEBOOK_SOURCE_BYTES,
   notebookInputSchema,
-  notebookSourceByteLength,
   operationProgressSchema,
   rEnvironmentSchema,
   type AnalysisCellResult,
@@ -666,7 +663,7 @@ export class Controller {
     return clone(this.operationFor(operationId, INTERNAL_CLIENT_ID) ?? null);
   }
 
-  snapshot(clientId?: string): HostSnapshot {
+  snapshot(): HostSnapshot {
     const snapshot: HostSnapshot = {
       protocol: HOST_PROTOCOL,
       epoch: this.epochValue,
@@ -1899,113 +1896,6 @@ export class Controller {
       edited: result.edited,
       created: Object.entries(result.created).map(([creationId, id]) => ({ creationId, id, revision: 0 })),
     };
-  }
-
-  private moveCell(id: string, after: string | null, operationId: string): unknown {
-    this.assertStartedForMutation();
-    const from = this.cells.findIndex((cell) => cell.id === id);
-    if (from < 0) throw new ControllerError("not_found", `no such cell: ${id}`, 404);
-    if (after === id) throw new ControllerError("invalid_request", "cannot move a cell after itself", 400);
-    if (after !== null && this.cellById(after) === undefined) {
-      throw new ControllerError("not_found", `no such cell: ${after}`, 404);
-    }
-    const previousOrder = this.cells.map((cell) => cell.id);
-    const oldGraph = this.graphValue;
-    const oldAffected = oldGraph.resourceLimited
-      ? new Set(this.cells.filter((cell) => cell.type === "code").map((cell) => cell.id))
-      : new Set([id, ...oldGraph.descendants(id)]);
-    const statusChanges = new Set<string>();
-    const nextCells = [...this.cells];
-    const [moved] = nextCells.splice(from, 1);
-    if (moved === undefined) throw new ControllerError("internal_error", "cell move failed", 500);
-    const target = after === null
-      ? 0
-      : nextCells.findIndex((cell) => cell.id === after) + 1;
-    nextCells.splice(target, 0, moved);
-    if (arrayEqual(previousOrder, nextCells.map((cell) => cell.id))) return { id, after };
-    for (const changedId of this.cancelRunRegion(oldAffected, "source")) {
-      statusChanges.add(changedId);
-    }
-    this.clearEditorDiagnostics();
-    this.clearVariables();
-    this.cells = nextCells;
-    this.graphValue = this.rebuildGraph();
-    for (const changedId of this.invalidateForGraphLimit()) statusChanges.add(changedId);
-    for (const candidate of oldAffected) {
-      if (this.markStale(candidate)) statusChanges.add(candidate);
-    }
-    for (const candidate of this.graphValue.descendants(id)) {
-      if (this.markStale(candidate)) statusChanges.add(candidate);
-    }
-    this.changed = true;
-    this.bump("notebook", {
-      moved: id,
-      after,
-      order: this.cells.map((cell) => cell.id),
-    }, { operationId });
-    this.emitGraph({ operationId });
-    this.emitCells(statusChanges, { operationId });
-    return { id, after };
-  }
-
-  private async setCellDisabled(
-    id: string,
-    disabled: boolean,
-    expectedRevision: number | undefined,
-    operationId: string,
-  ): Promise<unknown> {
-    this.assertStartedForMutation();
-    const cell = this.requireCell(id);
-    if (expectedRevision !== undefined && cell.revision !== expectedRevision) {
-      throw new ControllerError("source_conflict", `cell ${id} changed on the server`, 409);
-    }
-    const prior = cell.options.disabled === true;
-    if (prior === disabled) return { id, disabled, runId: null };
-    this.clearEditorDiagnostics();
-    this.clearVariables();
-    const affected = this.graphValue.resourceLimited
-      ? new Set(this.cells.filter((candidate) => candidate.type === "code").map((candidate) => candidate.id))
-      : new Set([id, ...this.graphValue.descendants(id)]);
-    const statusChanges = disabled
-      ? this.cancelRunRegion(affected, "source")
-      : new Set<string>();
-    cell.options = { ...cell.options, disabled };
-    this.graphValue = this.rebuildGraph();
-    for (const changedId of this.invalidateForGraphLimit()) statusChanges.add(changedId);
-    for (const candidateId of affected) {
-      const candidate = this.cellById(candidateId);
-      if (candidate?.type === "code" && candidate.status !== "running") {
-        const before = this.statusOf(candidateId);
-        candidate.status = "stale";
-        if (this.statusOf(candidateId) !== before) statusChanges.add(candidateId);
-      }
-      this.cancelRuntimeRequestsOwnedBy(candidateId, "stale_value");
-    }
-    this.refreshValueFreshness();
-    this.changed = true;
-    this.bump("graph", clone(this.graphValue.state), { operationId });
-    this.publishGraphResourceError({ operationId });
-    this.emit("cell", this.publicCell(cell), {
-      operationId,
-      cellId: id,
-      revision: cell.revision,
-    });
-    statusChanges.delete(id);
-    this.emitCells(statusChanges, { operationId });
-
-    let runId: string | null = null;
-    if (
-      !disabled
-      && cell.type === "code"
-      && this.executionMode === "automatic"
-      && this.activeEvaluation === null
-      && this.queue.length === 0
-    ) {
-      await this.ensureCurrentAnalysis();
-      const plan = this.planCellRun(id, "app");
-      if (plan.length > 0) runId = this.launchRun(plan, operationId);
-    }
-    return { id, disabled, runId };
   }
 
   private async prepareRun(command: Extract<HostCommand, { type: "run" }>): Promise<unknown> {
@@ -4852,7 +4742,7 @@ export class Controller {
     if (operation !== undefined && operation.status === "accepted") operation.status = "running";
     if (operation !== undefined) this.rememberOperation(operation);
     try {
-      return await this.runCancelableOptionalOperation(operationId, clientId, (context) => this.runPackageInstall(payload, operationId, clientId, context));
+      return await this.runCancelableOptionalOperation(operationId, clientId, (context) => this.runPackageInstall(payload, operationId, context));
     } finally {
       this.scheduleReactiveRun();
     }
@@ -4861,7 +4751,6 @@ export class Controller {
   private async runPackageInstall(
     payload: Record<string, unknown>,
     operationId: string,
-    clientId: string,
     context: { operationId: string; signal: AbortSignal },
   ): Promise<unknown> {
     let packages = Array.isArray(payload.packages) ? [...payload.packages] as string[] : [];
@@ -4888,7 +4777,7 @@ export class Controller {
       this.packageRestartPending = true;
       try {
         if (this.pumpPromise !== null) await this.pumpPromise;
-        await this.restartAfterPackageInstall(operationId, clientId);
+        await this.restartAfterPackageInstall(operationId);
       } catch (error) {
         restartFailure = asControllerError(error, "worker_unavailable", 503);
       } finally {
@@ -4911,7 +4800,7 @@ export class Controller {
     return { result: clone(result), status: clone(status) };
   }
 
-  private async restartAfterPackageInstall(operationId: string, clientId: string): Promise<void> {
+  private async restartAfterPackageInstall(operationId: string): Promise<void> {
     this.analysisRestarting = true;
     try {
       const pendingAnalysis = this.analysisInFlight;
@@ -5151,17 +5040,6 @@ export class Controller {
     const cell = this.cellById(id);
     if (cell === undefined) throw new ControllerError("not_found", `no such cell: ${id}`, 404);
     return cell;
-  }
-
-  private nextCellId(): string {
-    const ids = new Set(this.cells.map((cell) => cell.id));
-    let number = 1;
-    for (const id of ids) {
-      const match = /^cell-(\d+)$/.exec(id);
-      if (match !== null) number = Math.max(number, Number(match[1]) + 1);
-    }
-    while (ids.has(`cell-${number}`)) number += 1;
-    return `cell-${number}`;
   }
 
   private markStale(id: string): boolean {
@@ -5437,15 +5315,6 @@ export class Controller {
     }
     return null;
   }
-  private findCanonicalOutputById(id: string): OutputRecord | null {
-    for (const cell of this.cells) {
-      const record = cell.outputs.find((candidate) => candidate.id === id);
-      if (record !== undefined && this.outputStore.getRecord(record.id) === record) return record;
-    }
-    return null;
-  }
-
-
   private async updateOutputRecord(
     owner: CellRecord,
     expected: OutputRecord,
@@ -6514,47 +6383,6 @@ function integerArray(value: unknown, positive: boolean): value is number[] {
     && new Set(value).size === value.length;
 }
 
-
-function isLongService(command: string): boolean {
-  return command === "publish"
-    || command === "upload"
-    || command === "packages.install";
-}
-
-function packageNames(payload: Record<string, unknown>, allowEmpty: boolean): string[] {
-  const values: unknown[] = [];
-  if (payload.package !== undefined) values.push(payload.package);
-  if (payload.packages !== undefined) {
-    if (!Array.isArray(payload.packages)) {
-      throw new ControllerError(
-        "invalid_request",
-        "packages must be an array of package names",
-        400,
-      );
-    }
-    values.push(...payload.packages);
-  }
-  if (!values.every((value) => typeof value === "string")) {
-    throw new ControllerError(
-      "invalid_request",
-      "packages must be an array of package names",
-      400,
-    );
-  }
-  const packages = uniqueStrings(values as string[]).sort();
-  const invalid = packages.filter((name) => !/^[A-Za-z][A-Za-z0-9.]*[A-Za-z0-9]$/.test(name));
-  if (invalid.length > 0) {
-    throw new ControllerError(
-      "invalid_request",
-      `invalid package name: ${invalid.join(", ")}`,
-      400,
-    );
-  }
-  if (!allowEmpty && packages.length === 0) {
-    throw new ControllerError("invalid_request", "at least one package is required", 400);
-  }
-  return packages;
-}
 
 function packageMissing(value: unknown): string[] {
   if (!isRecord(value) || !Array.isArray(value.missing)) return [];

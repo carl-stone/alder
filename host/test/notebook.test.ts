@@ -5,7 +5,6 @@ import {
   layoutNotebook,
   logicalBodyPosition,
   parseNotebook,
-  physicalBodyLines,
   serializeNotebook,
   stageDocumentChanges,
   toFilePosition,
@@ -142,8 +141,6 @@ test("Markdown logical and physical ranges exclude delimiters/options exactly", 
     "#   indented",
   ]);
 
-  assert.deepEqual(physicalBodyLines(document, "cell-1"), [2, 4, 5]);
-  assert.deepEqual(physicalBodyLines(document, "cell-2"), [7]);
   assert.deepEqual(logicalBodyPosition(document, 2), { id: "cell-1", line: 0 });
   assert.deepEqual(logicalBodyPosition(document, 4), { id: "cell-1", line: 1 });
   assert.deepEqual(logicalBodyPosition(document, 5), { id: "cell-1", line: 2 });

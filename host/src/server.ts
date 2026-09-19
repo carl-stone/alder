@@ -52,7 +52,6 @@ export const HTTP_UPLOAD_LIMIT = 16 * 1024 * 1024;
 export const HTTP_SOURCE_LIMIT = SNAPSHOT_ENVELOPE_LIMIT;
 export const WEBSOCKET_MESSAGE_LIMIT = SNAPSHOT_ENVELOPE_LIMIT;
 export const DEFAULT_OUTBOX_LIMIT = 2 * SNAPSHOT_ENVELOPE_LIMIT;
-export const BROWSER_PROTOCOL_VERSION = HOST_CLIENT_PROTOCOL_VERSION;
 export const TICKET_TTL_MS = 60_000;
 export const HEARTBEAT_INTERVAL_MS = 10_000;
 export const LEASE_EXPIRY_MS = 30_000;
@@ -273,12 +272,6 @@ export function validateRequestHost(headers: IncomingMessage["headers"], origins
   return authorities.has(host);
 }
 
-export function validateRequestOrigin(headers: IncomingMessage["headers"], origins: readonly string[]): boolean {
-  if (!validateRequestHost(headers, origins)) return false;
-  const origin = singleHeader(headers.origin);
-  return origin === null || origins.includes(origin);
-}
-
 function validateOrigin(value: string): string {
   let parsed: URL;
   try {
@@ -466,12 +459,6 @@ function leaseHeader(headers: IncomingMessage["headers"]): string | null {
 
 function clientHeader(headers: IncomingMessage["headers"]): string | null {
   return singleHeader(headers["x-alder-client-id"]);
-}
-
-function setDifference(value: unknown, allowed: readonly string[]): string | null {
-  if (!isPlainObject(value)) return "body must be an object";
-  const permitted = new Set(allowed);
-  return Object.keys(value).find(key => !permitted.has(key)) ?? null;
 }
 
 function eventCursor(value: unknown): number | null {

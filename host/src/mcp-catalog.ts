@@ -353,10 +353,6 @@ export function createMcpServer(options: AlderMcpOptions): McpServer {
   return server;
 }
 
-export async function drainMcpServer(server: McpServer): Promise<void> {
-  await drainByServer.get(server)?.();
-}
-
 async function executeTool(options: AlderMcpOptions, name: string, args: Record<string, unknown>, signal: AbortSignal, extra: McpRequestExtra): Promise<unknown> {
   const controller = options.controller;
   const query = async (input: HostQuery): Promise<HostQueryResult> => {
@@ -746,5 +742,3 @@ async function boundedResource(options: AlderMcpOptions, bytes: Uint8Array, mime
   options.assertActive?.();
   return { text: JSON.stringify({ artifact }), mimeType: "application/vnd.alder.artifact-handle+json", artifact };
 }
-
-export const MCP_TOOL_NAMES = catalogOrder;

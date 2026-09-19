@@ -6,9 +6,9 @@ import envPaths from "env-paths";
 import type { DiagnosticSink } from "./diagnostics.js";
 import { watch, type FSWatcher } from "chokidar";
 import { z } from "zod";
-import { Controller, type DurableCommitInput, type SourceCommitContext, type SourceCommitHandler, type SourcePublication } from "./controller.js";
+import { Controller, type SourceCommitContext, type SourceCommitHandler, type SourcePublication } from "./controller.js";
 import { Engine } from "./engine.js";
-import { createAlderServer, createOriginHost, type AlderServer, type AlderServerAddress } from "./server.js";
+import { createAlderServer, createOriginHost, type AlderServer } from "./server.js";
 import { createMcpHttpHandler } from "./mcp.js";
 import { appConfig, projectConfigPath, readProjectSettings, readNotebookSettings, setNotebookSettings, setAppConfig } from "./configuration.js";
 import { resolveSettings, type Config, type ProjectSettingsPatch, type NotebookSettingsPatch, type PreferencesPatch } from "./settings.js";
@@ -128,10 +128,6 @@ export interface RunningHost {
   readonly artifactDirectory: string;
   readonly closed: Promise<void>;
   close(): Promise<void>;
-}
-
-export function parseHostOptions(input: unknown): HostOptions {
-  return optionsSchema.parse(input);
 }
 
 export async function startHost(input: HostOptions): Promise<RunningHost> {
@@ -510,8 +506,6 @@ async function startNotebookHost(
     };
 
     const retryPendingSidecars = async (
-      document: NotebookDocument,
-      disk: HostSnapshot["disk"],
       operationId?: string,
     ): Promise<{ sidecars: HostSnapshot["sidecars"]; error: { kind: "config" | "layout" | "packages"; error: unknown } | null }> => {
       let sidecars = sidecarProtocolObservations(store!, false);
@@ -621,7 +615,7 @@ async function startNotebookHost(
             operationId: request.operationId ?? null, phase: "publication", documentRevision: context.fromRevision,
           });
           const disk = sourceProtocolObservation(store!);
-          const retry = await retryPendingSidecars(context.document, disk, request.operationId);
+          const retry = await retryPendingSidecars(request.operationId);
           const sidecars = retry.sidecars;
           let clearError: unknown = null;
           let cleared = false;

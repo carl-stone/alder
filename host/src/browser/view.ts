@@ -3,7 +3,6 @@ import type { AnalysisDiagnostic, ArtifactHandle, CommandResult, HostCellState, 
 import { dependencyLevels, reachableNodes } from "../graph.js";
 import { toLogicalCellBody } from "../cell-body.js";
 import { BrowserNotebookClient } from "./client.js";
-import { BrowserTransportError } from "./transport.js";
 import type { BrowserDocument, EditorSelection, LocalCell } from "./document.js";
 import { OutputRenderer } from "../output-renderer.js";
 import { notebookUrl, notebookViewUrl } from "./url.js";
@@ -709,11 +708,6 @@ export class NotebookView {
           }).then(() => {
             this.scheduleAutosave();
             if (next) this.focusAdjacentCell(cell.key, 1);
-          }).catch((error) => this.showError(error));
-        },
-        onRunAll: () => {
-          void this.runExplicit(() => this.client.startRunAll(this.runScope())).then(() => {
-            this.scheduleAutosave();
           }).catch((error) => this.showError(error));
         },
         onSave: () => void this.action(() => this.saveNotebook()).catch((error) => this.showError(error)),
@@ -3330,12 +3324,6 @@ function outlineCellSignature(cell: HostSnapshot["cells"][number]): string {
 function cellLabelAt(cell: HostSnapshot["cells"][number], index: number): string {
   const name = cellName(cell);
   return name ? `Cell ${index + 1} · ${name}` : `Cell ${index + 1}`;
-}
-
-function cellLabel(snapshot: HostSnapshot, id: string): string {
-  const cell = snapshot.cells.find((candidate) => candidate.id === id);
-  if (!cell) return id;
-  return cellLabelAt(cell, snapshot.cells.indexOf(cell));
 }
 
 function markdownHeadings(body: readonly string[]): Array<{ level: number; text: string; line: number }> {

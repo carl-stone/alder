@@ -56,9 +56,7 @@ export const configSchema = preferencesSchema.extend({
 export type Preferences = z.infer<typeof preferencesSchema>;
 export type PreferencesPatch = z.infer<typeof preferencesPatchSchema>;
 export type StoredPreferencesPatch = z.infer<typeof storedPreferencesPatchSchema>;
-export type NotebookSettings = z.infer<typeof notebookSettingsSchema>;
 export type NotebookSettingsPatch = z.infer<typeof notebookSettingsPatchSchema>;
-export type ProjectSettings = z.infer<typeof projectSettingsSchema>;
 export type ProjectSettingsPatch = z.infer<typeof projectSettingsPatchSchema>;
 export type Config = z.infer<typeof configSchema>;
 

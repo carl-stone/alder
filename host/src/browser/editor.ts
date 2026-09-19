@@ -47,7 +47,6 @@ export interface EditorFactoryOptions {
   signatureHelpEnabled?: boolean;
   onChange?(text: string, update?: unknown): void;
   onRun?(next?: boolean): void;
-  onRunAll?(): void;
   onSave?(): void;
   onFormat?(): void;
   onJump?(kind: "move" | "reference", value: number): void;
