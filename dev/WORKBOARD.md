@@ -31,22 +31,14 @@ reactive, service and recovery behavior. Validate with representative notebook
 screens/states, behavior-led interaction checks and a signed Mac build without
 taking over Carl's desktop.
 
-**Checkpoint 1:** `d656cd4` (`Restructure notebook interactions`) on accepted
-`d88ca7d`.
+**Base for checkpoint 2:** accepted interaction checkpoint `dbfa1df` (`Correct
+notebook interaction structure`) on accepted `d88ca7d`.
 
-**Correction target:** make Help/R Documentation either invoke focused-editor help
-or stop intercepting F1; remove production Reload/DevTools and add standard Mac
-About/Services/Hide/Hide Others/Show All roles. Replace hidden legacy service menus
-with visible scoped Format and Packages progress/cancel and the single accepted
-Publish flow, then delete duplicate machinery. Restore deleted cells at their exact
-first/middle/last positions with surfaced async failure. Move Selected R into
-Application settings; make shortcut help a durable dialog/popover; delete stale
-Shutdown/runtime/service CSS and legacy `view=app`. Add behavior coverage for
-Shift-Enter focus/creation, positional Undo, every conflict/recovery and dirty
-publish choice, missing-R/reconnect actions, Preview and F1/shortcut behavior.
-
-**Next action:** primary implementer corrects interaction checkpoint 1 at
-`d656cd4`, then returns it for focused re-review before visual phase 2.
+**Next action:** primary implementer applies one cohesive quiet-Mac visual system:
+editor theme, hierarchy, cell/output chrome, responsive inspector/disclosures,
+light/dark and accessibility states. Delete obsolete presentation paths, produce
+the representative non-visible screenshot matrix, and return checkpoint 2 for
+fresh visual and behavior review.
 
 **Testing constraint:** do not take over Carl's visible desktop. Use background
 or isolated Mac GUI checks where native interaction matters. The in-app browser
@@ -77,7 +69,7 @@ order; their implementation details are settled when assigned.
 | Mac runtime and settings cleanup | Accepted | Primary implementer | `cc80261`: one R preference path, canonical project recovery, verified/staged Ark/Air/Quarto, accurate Mac claims and real packaged acceptance |
 | Residual architecture and test cleanup | Accepted | Primary implementer | `8990292`: removed trace/strict-JSON/platform/state debris, retained cohesive owners and rebuilt a five-second behavior-led host suite |
 | Targeted generative verification | Accepted | Primary implementer | `d88ca7d`: bounded independent graph/document/recovery/state/R verification with real crash durability and replayable failures |
-| UI/UX review and polish | Implementing | Primary implementer | Correct native help/menus, replace hidden service UI, fix positional Undo and complete phase-1 interaction coverage at `d656cd4` |
+| UI/UX review and polish | Implementing | Primary implementer | Apply cohesive editor/visual/responsive/accessibility system and screenshot matrix on accepted interaction checkpoint `dbfa1df` |
 | Complete Mac app and final acceptance | Queued | Unassigned | Deliver a usable Mac app; exercise the packaged native app through launch/open/type/run/interrupt/save/Save As/reopen/recover/close, multiple notebooks, concurrent GUI/agent edits, client detach and backend failure/recovery; check optional-service failures and observable stalls |
 
 The following requirements apply to the relevant slices and are checked again
@@ -138,7 +130,17 @@ part of this queue.
 
 ## Latest accepted checkpoint
 
-`d88ca7d` is the targeted generative-verification checkpoint. Lead accepted a
+`dbfa1df` is the UI/UX interaction-structure checkpoint. Lead accepted typed native
+document/save state, conventional production Mac menus and accelerators, same-file
+focus with explicit shared-session windows, a compact document/cell command
+hierarchy, Shift-Enter creation, exact positional Undo, separated document/R/
+connection/recovery/service state, product-language R and reconnect actions,
+non-destructive conflict/recovery choices, dirty-publish decisions, Notebook/
+Outline and Preview semantics, and visible independently cancellable service
+dialogs. The full host suite passes 407 tests in under five seconds, the signed Mac
+package verifies and no children leak.
+
+It retains `d88ca7d`, the targeted generative-verification checkpoint. Lead accepted a
 seeded independent graph oracle, bounded notebook/recovery mutation, varied
 state-machine recovery sequences and packaged Alder-versus-`Rscript` differential
 checks. Recovery durability is inspected on disk after acknowledgement and before

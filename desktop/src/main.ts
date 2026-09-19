@@ -465,6 +465,8 @@ export class ElectronMain implements ElectronMainApplication {
     const window = new this.runtime.BrowserWindow({
       width: 1440,
       height: 960,
+      minWidth: 720,
+      minHeight: 600,
       show: false,
       title: APP_NAME,
       webPreferences: {

@@ -133,8 +133,10 @@ export class NotebookView {
   private formatCancelButton: HTMLButtonElement | null = null;
   private packageCancelButton: HTMLButtonElement | null = null;
   private draggedKey: string | null = null;
+  private panelReturnFocus: HTMLElement | null = null;
+  private readonly dialogReturnFocus = new WeakMap<HTMLDialogElement, HTMLElement>();
   private deletedCell: { index: number; type: "code" | "markdown"; body: readonly string[]; timer: number } | null = null;
-  private readonly resizeHandler = (): void => this.updateTopbarInset();
+  private readonly resizeHandler = (): void => { this.updateTopbarInset(); this.applyPanelState(); };
   private readonly preserveRunFocus = (event: MouseEvent): void => {
     if (event.button === 0 && event.target instanceof Element &&
       event.target.closest("#run-all, .cell-head [data-act=run]")) event.preventDefault();
@@ -148,7 +150,7 @@ export class NotebookView {
     this.path = dom.getElementById("path");
     this.appView = new URLSearchParams(location.search).get("view") === "preview";
     const panelPreference = loadPanelPreference(window);
-    this.panelOpen = panelPreference.open;
+    this.panelOpen = window.matchMedia?.("(max-width: 900px)").matches === true ? false : panelPreference.open;
     this.panelTab = panelPreference.tab;
     const appLink = dom.getElementById("app-mode") as HTMLAnchorElement | null;
     const editLink = dom.getElementById("edit-mode") as HTMLAnchorElement | null;
@@ -195,6 +197,7 @@ export class NotebookView {
     this.bindNavigation();
     this.bindDragAndDrop();
     this.bindServiceDialogs();
+    this.bindDisclosureBehavior();
     this.recoveryUnsubscribe = client.subscribeRecovery(() => this.renderStatus());
     this.applyPanelState();
     this.updateTopbarInset();
@@ -239,9 +242,12 @@ export class NotebookView {
 
   setTransportState(state: "connecting" | "open" | "recovering" | "closed", error?: Error): void {
     if (this.hostClosed) return;
+    const previous = this.transportState;
     this.transportState = state;
     this.transportError = state === "closed" && error ? error.message : state === "open" ? null : state === "connecting" ? (this.documentValue ? "Reconnecting…" : "Opening notebook…") : "Reconnecting…";
     this.renderStatus();
+    if (state === "closed") this.announce("Connection lost. Reconnect is available.");
+    else if (state === "open" && previous !== "open") this.announce("Notebook connected.");
   }
 
   render(
@@ -322,6 +328,10 @@ export class NotebookView {
     // event, so avoid serializing the whole graph on every keystroke.
     if (!canTargetLocal) this.renderDataflow(snapshot, event);
     this.renderStatus();
+    if (event?.type === "cell-completed" && target?.server) {
+      const label = cellName(target.server) || `Cell ${notebook.cells.indexOf(target) + 1}`;
+      this.announce(target.server.status === "error" ? `${label} failed.` : `${label} completed.`);
+    }
     if (event) {
       window.dispatchEvent(new CustomEvent<HostEvent>("alder:host-event", { detail: event }));
     }
@@ -350,7 +360,8 @@ export class NotebookView {
 
   private createCell(cell: LocalCell): CellView {
     const template = this.dom.getElementById("cell-tpl") as HTMLTemplateElement | null;
-    const element = template?.content.firstElementChild?.cloneNode(true) as HTMLElement | null ?? fallbackCell(this.dom);
+    const element = template?.content.firstElementChild?.cloneNode(true) as HTMLElement | null;
+    if (!element) throw new Error("Alder page is missing the canonical #cell-tpl template");
     if (this.appView) element.querySelectorAll<HTMLElement>("[data-editor-only]").forEach((node) => node.remove());
     const view: CellView = {
       element,
@@ -828,15 +839,8 @@ export class NotebookView {
   }
 
   private outputArea(cell: HTMLElement): HTMLElement {
-    let output = cell.querySelector<HTMLElement>("[data-role=outputs]");
-    if (output) return output;
-    output = cell.querySelector<HTMLElement>("[data-role=output]");
-    if (!output) {
-      output = element(this.dom, "div", "output-area");
-      const log = cell.querySelector("[data-role=log]");
-      cell.insertBefore(output, log);
-    }
-    output.dataset.role = "outputs";
+    const output = cell.querySelector<HTMLElement>("[data-role=output]");
+    if (!output) throw new Error("Canonical cell template is missing [data-role=output]");
     return output;
   }
 
@@ -1788,7 +1792,7 @@ export class NotebookView {
         if (id) this.navigateToCell(id, line === undefined ? undefined : Number(line));
       });
       root?.addEventListener("keydown", (event) => {
-        if (!(event instanceof KeyboardEvent) || (event.key !== "Enter" && event.key !== " ")) return;
+        if (event.key !== "Enter" && event.key !== " ") return;
         const target = (event.target as Element | null)?.closest("[data-target-cell]");
         if (!target) return;
         event.preventDefault();
@@ -1866,8 +1870,7 @@ export class NotebookView {
     const close = (buttonId: string, dialogId: string): void => {
       this.dom.getElementById(buttonId)?.addEventListener("click", () => {
         const target = dialog(dialogId);
-        if (typeof target?.close === "function") target.close();
-        else target?.removeAttribute("open");
+        if (target) this.closeDialog(target);
       });
     };
     close("format-close", "format-dialog");
@@ -2087,17 +2090,13 @@ export class NotebookView {
       projectVersion: snapshot.sidecars.config.version, documentRevision: snapshot.documentRevision };
     this.settingsError = null;
     this.renderSettingsError();
-    if (typeof dialog.showModal === "function") {
-      if (!dialog.open) dialog.showModal();
-    } else dialog.setAttribute("open", "");
+    this.openDialog("settings");
   }
 
   private bindSettings(): void {
     const dialog = this.dom.getElementById("settings") as HTMLDialogElement | null;
     const close = (): void => {
-      if (!dialog) return;
-      if (typeof dialog.close === "function" && dialog.open) dialog.close();
-      else dialog.removeAttribute("open");
+      if (dialog) this.closeDialog(dialog);
     };
     this.dom.getElementById("settings-open")?.addEventListener("click", () => this.openSettings());
     this.dom.getElementById("settings-close")?.addEventListener("click", close);
@@ -2108,7 +2107,6 @@ export class NotebookView {
         if (this.documentValue) this.fillSettings(this.documentValue.snapshot.config);
       }).catch(error => this.showError(error));
     });
-    dialog?.addEventListener("click", (event) => { if (event.target === dialog) close(); });
     this.dom.getElementById("settings-form")?.addEventListener("submit", (event) => {
       event.preventDefault();
       const baseline = this.settingsBaseline;
@@ -2244,8 +2242,53 @@ export class NotebookView {
   private openDialog(id: string): void {
     const dialog = this.dom.getElementById(id) as HTMLDialogElement | null;
     if (!dialog || dialog.hasAttribute("open")) return;
+    const active = this.dom.activeElement;
+    if (active && typeof (active as HTMLElement).focus === "function") this.dialogReturnFocus.set(dialog, active as HTMLElement);
     if (typeof dialog.showModal === "function") dialog.showModal();
     else dialog.setAttribute("open", "");
+    window.requestAnimationFrame(() => firstFocusable(dialog)?.focus());
+  }
+
+  private closeDialog(dialog: HTMLDialogElement): void {
+    if (typeof dialog.close === "function" && dialog.open) dialog.close();
+    else {
+      dialog.removeAttribute("open");
+      const EventConstructor = this.dom.defaultView?.Event ?? Event;
+      dialog.dispatchEvent(new EventConstructor("close"));
+    }
+  }
+
+  private bindDisclosureBehavior(): void {
+    for (const dialog of Array.from(this.dom.querySelectorAll<HTMLDialogElement>("dialog"))) {
+      dialog.addEventListener("click", (event) => {
+        if (event.target === dialog) this.closeDialog(dialog);
+      });
+      dialog.addEventListener("keydown", (event) => {
+        if (event.key === "Escape") {
+          event.preventDefault();
+          this.closeDialog(dialog);
+        } else if (event.key === "Tab") trapTabKey(event, dialog);
+      });
+      dialog.addEventListener("close", () => {
+        const target = this.dialogReturnFocus.get(dialog);
+        this.dialogReturnFocus.delete(dialog);
+        target?.focus({ preventScroll: true });
+      });
+    }
+    this.dom.addEventListener("click", (event) => {
+      const target = event.target as Element | null;
+      for (const disclosure of Array.from(this.dom.querySelectorAll<HTMLDetailsElement>("details.cell-overflow[open]"))) {
+        if (!target || !disclosure.contains(target)) disclosure.removeAttribute("open");
+      }
+    });
+    this.dom.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape") return;
+      const disclosure = (event.target as Element | null)?.closest<HTMLDetailsElement>("details.cell-overflow[open]");
+      if (!disclosure) return;
+      event.preventDefault();
+      disclosure.removeAttribute("open");
+      disclosure.querySelector<HTMLElement>("summary")?.focus();
+    });
   }
 
   private bindPublishDialog(): void {
@@ -2256,8 +2299,7 @@ export class NotebookView {
       const operationId = this.activePublishOperationId;
       if (operationId) {
         void this.client.cancelOperation(operationId).catch(error => this.showError(error));
-      } else if (typeof dialog?.close === "function") dialog.close();
-      else dialog?.removeAttribute("open");
+      } else if (dialog) this.closeDialog(dialog);
     });
     form?.addEventListener("submit", (event) => {
       event.preventDefault();
@@ -2281,8 +2323,7 @@ export class NotebookView {
         this.actionNotice = operationPayload(result).unsavedChangesExcluded === true
           ? "Published the last saved version. Unsaved changes were not included."
           : "Published HTML downloaded.";
-        if (typeof dialog?.close === "function") dialog.close();
-        else dialog?.removeAttribute("open");
+        if (dialog) this.closeDialog(dialog);
       }).catch(error => this.showError(error)).finally(() => {
         if (submit) setDisabled(submit, false);
         if (progress) progress.textContent = "";
@@ -2375,9 +2416,9 @@ export class NotebookView {
       });
     });
     this.dom.getElementById("panel-toggle")?.addEventListener("click", () => this.togglePanel());
+    this.dom.getElementById("panel-scrim")?.addEventListener("click", () => this.togglePanel(false));
     this.dom.getElementById("panel-close")?.addEventListener("click", () => {
       this.togglePanel(false);
-      this.dom.getElementById("panel-toggle")?.focus();
     });
     const panelTabs = Array.from(this.dom.querySelectorAll<HTMLButtonElement>("[data-panel-tab]"));
     for (const tab of panelTabs) {
@@ -2395,11 +2436,17 @@ export class NotebookView {
       });
     }
     this.dom.getElementById("dataflow-panel")?.addEventListener("keydown", (event) => {
-      if (!(event instanceof KeyboardEvent) || event.key !== "Escape" || !this.graphExpanded) return;
-      event.preventDefault();
-      this.graphExpanded = false;
-      this.applyPanelState();
-      if (this.documentValue) this.renderGraph(this.documentValue.snapshot);
+      if (event.key === "Escape") {
+        event.preventDefault();
+        if (this.graphExpanded) {
+          this.graphExpanded = false;
+          this.applyPanelState();
+          if (this.documentValue) this.renderGraph(this.documentValue.snapshot);
+        } else if (this.isInspectorDrawer()) this.togglePanel(false);
+        return;
+      }
+      if (event.key !== "Tab" || !this.isInspectorDrawer()) return;
+      trapTabKey(event, this.dom.getElementById("dataflow-panel") as HTMLElement);
     });
     this.dom.getElementById("app-mode")?.addEventListener("click", (event) => {
       event.preventDefault();
@@ -2415,7 +2462,9 @@ export class NotebookView {
   }
 
   private togglePanel(force?: boolean): void {
-    this.panelOpen = force ?? !this.panelOpen;
+    const opening = force ?? !this.panelOpen;
+    if (opening && this.isInspectorDrawer()) this.panelReturnFocus = this.dom.activeElement as HTMLElement | null;
+    this.panelOpen = opening;
     if (!this.panelOpen) {
       this.graphExpanded = false;
       this.cancelVariablesProjection();
@@ -2423,6 +2472,14 @@ export class NotebookView {
     savePanelPreference(window, { open: this.panelOpen, tab: this.panelTab });
     this.applyPanelState();
     if (this.panelOpen && this.documentValue) this.renderSelectedPanel(this.documentValue.snapshot);
+    if (this.panelOpen && this.isInspectorDrawer()) window.requestAnimationFrame(() => {
+      (this.dom.querySelector("#dataflow-panel [aria-selected=true]") as HTMLElement | null)?.focus();
+    });
+    if (!this.panelOpen && this.panelReturnFocus) {
+      const target = this.panelReturnFocus;
+      this.panelReturnFocus = null;
+      target.focus({ preventScroll: true });
+    }
     window.requestAnimationFrame(() => this.updateTopbarInset());
   }
 
@@ -2458,7 +2515,12 @@ export class NotebookView {
     if (!panel || this.appView) return;
     panel.hidden = !this.panelOpen;
     this.dom.body.classList.toggle("panel-closed", !this.panelOpen);
-    this.dom.body.classList.toggle("mobile-panel-open", this.panelOpen && window.matchMedia?.("(max-width: 900px)").matches === true);
+    const drawer = this.isInspectorDrawer();
+    panel.setAttribute("role", drawer ? "dialog" : "complementary");
+    if (drawer) panel.setAttribute("aria-modal", "true");
+    else panel.removeAttribute("aria-modal");
+    const scrim = this.dom.getElementById("panel-scrim") as HTMLButtonElement | null;
+    if (scrim) scrim.hidden = !(drawer && this.panelOpen);
     this.dom.getElementById("panel-toggle")?.setAttribute("aria-expanded", String(this.panelOpen));
     for (const tab of Array.from(this.dom.querySelectorAll<HTMLButtonElement>("[data-panel-tab]"))) {
       const selected = tab.dataset.panelTab === this.panelTab;
@@ -2473,6 +2535,10 @@ export class NotebookView {
       this.graphExpanded = false;
     }
     panel.classList.toggle("graph-expanded", this.graphExpanded && this.panelTab === "graph");
+  }
+
+  private isInspectorDrawer(): boolean {
+    return window.matchMedia?.("(max-width: 900px)").matches === true;
   }
 
   private updateTopbarInset(): void {
@@ -2608,6 +2674,13 @@ export class NotebookView {
     this.renderRecoveryControls();
     this.status.classList.toggle("error", Boolean(this.actionError || stateError || settingsError || editorHelpError || runtimeBlocked || recoveryConflict));
     this.status.classList.toggle("poll-error", Boolean(!this.actionError && !stateError && !settingsError && !editorHelpError && !runtimeBlocked && this.transportError));
+  }
+
+  private announce(message: string): void {
+    const announcer = this.dom.getElementById("announcer");
+    if (!announcer) return;
+    announcer.textContent = "";
+    window.requestAnimationFrame(() => { announcer.textContent = message; });
   }
 
   private renderRuntimeControls(runtimeBlocked: HostSnapshot["runtime"]["executionBlockedReason"]): void {
@@ -2876,10 +2949,29 @@ export class NotebookView {
   }
 }
 
-function fallbackCell(dom: Document): HTMLElement {
-  const cell = element(dom, "section", "cell idle");
-  cell.innerHTML = `<div class="cell-head" data-editor-only><div class="cell-meta"><strong data-role="cell-title"></strong><select data-role="type"><option value="code">Code</option><option value="markdown">Markdown</option></select><span data-role="badge"></span></div><div data-role="cell-actions"><button data-act="run">Run</button><button data-act="disable">Disable</button><button data-act="move-up">Up</button><button data-act="move-down">Down</button><button data-act="delete">Delete</button></div></div><div class="source-area code-area" data-role="source-area"><div class="cm-host" data-role="source"></div></div><div class="diagnostics-area" data-role="diagnostics"></div><div class="output-area" data-role="outputs"></div><div class="log-area" data-role="log"></div>`;
-  return cell;
+function focusableElements(root: HTMLElement): HTMLElement[] {
+  return Array.from(root.querySelectorAll<HTMLElement>(
+    'button:not([disabled]):not([tabindex="-1"]), [href]:not([tabindex="-1"]), input:not([disabled]):not([tabindex="-1"]), select:not([disabled]):not([tabindex="-1"]), textarea:not([disabled]):not([tabindex="-1"]), [tabindex]:not([tabindex="-1"])',
+  )).filter((element) => !element.closest("[hidden], [aria-hidden=true]"));
+}
+
+function firstFocusable(root: HTMLElement): HTMLElement | undefined {
+  return focusableElements(root)[0];
+}
+
+function trapTabKey(event: KeyboardEvent, root: HTMLElement): void {
+  const focusable = focusableElements(root);
+  if (focusable.length === 0) return;
+  const first = focusable[0]!;
+  const last = focusable.at(-1)!;
+  const active = root.ownerDocument.activeElement;
+  if (event.shiftKey && (active === first || !root.contains(active))) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && (active === last || !root.contains(active))) {
+    event.preventDefault();
+    first.focus();
+  }
 }
 
 function diagnosticsForEditor(diagnostics: readonly AnalysisDiagnostic[], source: string): EditorDiagnostic[] {

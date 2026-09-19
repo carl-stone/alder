@@ -106881,7 +106881,9 @@ var OutputRenderer = class {
       }
       progress.value = number4(value.value) ?? 0;
       progress.setAttribute("value", String(progress.value));
-      row.append(progress, element(this.document, "div", "progress-label", string4(value.label)));
+      const labelText = string4(value.label) || "Operation in progress";
+      progress.setAttribute("aria-label", labelText);
+      row.append(progress, element(this.document, "div", "progress-label", labelText));
       container.appendChild(row);
       return;
     }

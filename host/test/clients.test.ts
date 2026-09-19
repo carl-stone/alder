@@ -54,7 +54,9 @@ function snapshot(cells: HostCellState[] = [cell("c1", ["x <- 1"]), cell("c2", [
 }
 
 async function withViewDom<T>(callback: (dom: Document, domWindow: Window) => T | PromiseLike<T>): Promise<T> {
-  const { window: domWindow, document: dom } = parseHTML('<!doctype html><html><body><div id="topbar"></div><div id="notebook"></div><div id="status" role="status"></div><div id="path"></div><button id="run-all">Run all</button><button id="stop">Stop</button><button id="save">Save</button></body></html>');
+  const canonical = parseHTML(await readFile(new URL("../../inst/app/index.html", import.meta.url), "utf8")).document;
+  const cellTemplate = canonical.getElementById("cell-tpl")!.outerHTML;
+  const { window: domWindow, document: dom } = parseHTML(`<!doctype html><html><body><div id="topbar"></div><div id="notebook"></div><div id="status" role="status"></div><div id="announcer"></div><div id="path"></div><button id="run-all">Run all</button><button id="stop">Stop</button><button id="save">Save</button>${cellTemplate}</body></html>`);
   // Linkedom exposes only the getter; editor controls need the browser setter.
   const selectValue = Object.getOwnPropertyDescriptor(domWindow.HTMLSelectElement.prototype, "value")!;
   Object.defineProperty(domWindow.HTMLSelectElement.prototype, "value", { ...selectValue, set(value: string) {
@@ -69,21 +71,32 @@ async function withViewDom<T>(callback: (dom: Document, domWindow: Window) => T 
     document: Object.getOwnPropertyDescriptor(globalThis, "document"),
     location: Object.getOwnPropertyDescriptor(globalThis, "location"),
     customEvent: Object.getOwnPropertyDescriptor(globalThis, "CustomEvent"),
+    element: Object.getOwnPropertyDescriptor(globalThis, "Element"),
+    htmlElement: Object.getOwnPropertyDescriptor(globalThis, "HTMLElement"),
   };
   const location = { search: "?view=preview", href: "http://notebook.test/book.R?view=preview", origin: "http://notebook.test" };
   Object.defineProperty(globalThis, "window", { configurable: true, writable: true, value: domWindow });
   Object.defineProperty(globalThis, "document", { configurable: true, writable: true, value: dom });
   Object.defineProperty(globalThis, "location", { configurable: true, writable: true, value: location });
   Object.defineProperty(globalThis, "CustomEvent", { configurable: true, writable: true, value: domWindow.CustomEvent });
+  Object.defineProperty(globalThis, "Element", { configurable: true, writable: true, value: domWindow.Element });
+  Object.defineProperty(globalThis, "HTMLElement", { configurable: true, writable: true, value: domWindow.HTMLElement });
   try {
     return await callback(dom, domWindow);
   } finally {
     Object.defineProperty(domWindow.HTMLSelectElement.prototype, "value", selectValue);
     for (const [name, descriptor] of Object.entries(previous)) {
-      if (descriptor) Object.defineProperty(globalThis, name, descriptor);
-      else Reflect.deleteProperty(globalThis, name);
+      const globalName = name === "customEvent" ? "CustomEvent" : name === "element" ? "Element" : name === "htmlElement" ? "HTMLElement" : name;
+      if (descriptor) Object.defineProperty(globalThis, globalName, descriptor);
+      else Reflect.deleteProperty(globalThis, globalName);
     }
   }
+}
+
+function keyboardEvent(domWindow: Window, key: string, shiftKey = false): Event {
+  const event = new domWindow.Event("keydown", { bubbles: true, cancelable: true });
+  Object.defineProperties(event, { key: { value: key }, shiftKey: { value: shiftKey } });
+  return event;
 }
 
 function operation(id: string, status: OperationRecord["status"] = "done", result?: unknown): OperationRecord {
@@ -558,6 +571,92 @@ test("native actions open visible Format, Packages, and keyboard shortcut surfac
     } finally {
       view.destroy();
     }
+  });
+});
+
+test("canonical cell template and output role are required", async () => {
+  await withViewDom(async (dom) => {
+    Object.defineProperty(globalThis, "location", { configurable: true, writable: true, value: { search: "?view=editor", href: "http://notebook.test/book.R?view=editor", origin: "http://notebook.test" } });
+    dom.getElementById("cell-tpl")!.remove();
+    const view = new NotebookView(settingsClient(), dom);
+    try {
+      assert.throws(() => view.render(new BrowserDocument(snapshot([cell("c1", ["1"])]))), /canonical #cell-tpl/);
+    } finally { view.destroy(); }
+  });
+});
+
+test("narrow inspector traps focus, closes with Escape, and returns focus", async () => {
+  await withViewDom(async (dom, domWindow) => {
+    const markup = parseHTML(await readFile(new URL("../../inst/app/index.html", import.meta.url), "utf8")).document;
+    dom.getElementById("topbar")!.insertAdjacentHTML("beforeend", markup.getElementById("panel-toggle")!.outerHTML);
+    dom.body.insertAdjacentHTML("beforeend", `<div id="editor-workspace">${markup.getElementById("dataflow-panel")!.outerHTML}${markup.getElementById("panel-scrim")!.outerHTML}</div>`);
+    Object.defineProperty(domWindow, "matchMedia", { configurable: true, value: () => ({ matches: true }) });
+    Object.defineProperty(globalThis, "location", { configurable: true, writable: true, value: { search: "?view=editor", href: "http://notebook.test/book.R?view=editor", origin: "http://notebook.test" } });
+    const view = new NotebookView(settingsClient(), dom);
+    try {
+      const opener = dom.getElementById("panel-toggle") as HTMLButtonElement;
+      let active: Element | null = null;
+      Object.defineProperty(dom, "activeElement", { configurable: true, get: () => active });
+      opener.focus = () => { active = opener; };
+      opener.focus();
+      opener.dispatchEvent(new domWindow.Event("click", { bubbles: true }));
+      const panel = dom.getElementById("dataflow-panel")!;
+      assert.equal(panel.hidden, false);
+      assert.equal(panel.getAttribute("role"), "dialog");
+      assert.equal(panel.getAttribute("aria-modal"), "true");
+      assert.equal(dom.getElementById("panel-scrim")!.hidden, false);
+      const focusable = [...panel.querySelectorAll<HTMLElement>('button:not([disabled]), [tabindex]:not([tabindex="-1"])')];
+      for (const element of focusable) element.focus = () => { active = element; };
+      focusable.at(-1)!.focus();
+      focusable.at(-1)!.dispatchEvent(keyboardEvent(domWindow, "Tab"));
+      assert.ok(active === focusable[0]);
+      panel.dispatchEvent(keyboardEvent(domWindow, "Escape"));
+      assert.equal(panel.hidden, true);
+      assert.ok(active === opener);
+    } finally { view.destroy(); }
+  });
+});
+
+test("dialogs and cell overflow light-dismiss and restore focus", async () => {
+  await withViewDom(async (dom, domWindow) => {
+    await installInteractionDialogs(dom);
+    Object.defineProperty(globalThis, "location", { configurable: true, writable: true, value: { search: "?view=editor", href: "http://notebook.test/book.R?view=editor", origin: "http://notebook.test" } });
+    const opener = dom.createElement("button"); opener.textContent = "Open packages"; dom.body.appendChild(opener);
+    const view = new NotebookView(settingsClient(), dom);
+    try {
+      view.render(new BrowserDocument(snapshot([cell("c1", ["1"])])));
+      let active: Element | null = null;
+      Object.defineProperty(dom, "activeElement", { configurable: true, get: () => active });
+      opener.focus = () => { active = opener; };
+      opener.focus();
+      await view.performDesktopAction("packages");
+      const dialog = dom.getElementById("packages-dialog") as HTMLDialogElement;
+      const focusable = [...dialog.querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled])')];
+      for (const element of focusable) element.focus = () => { active = element; };
+      focusable.at(-1)!.focus();
+      focusable.at(-1)!.dispatchEvent(keyboardEvent(domWindow, "Tab"));
+      assert.ok(active === focusable[0]);
+      dialog.dispatchEvent(new domWindow.Event("click", { bubbles: true }));
+      assert.equal(dialog.hasAttribute("open"), false);
+      assert.ok(active === opener);
+
+      opener.focus();
+      await view.performDesktopAction("packages");
+      dialog.dispatchEvent(keyboardEvent(domWindow, "Escape"));
+      assert.equal(dialog.hasAttribute("open"), false);
+      assert.ok(active === opener);
+
+      const disclosure = dom.querySelector<HTMLDetailsElement>("details.cell-overflow")!;
+      disclosure.setAttribute("open", "");
+      const menuButton = disclosure.querySelector<HTMLButtonElement>("button")!;
+      const summary = disclosure.querySelector<HTMLElement>("summary")!;
+      menuButton.focus = () => { active = menuButton; };
+      summary.focus = () => { active = summary; };
+      menuButton.focus();
+      menuButton.dispatchEvent(keyboardEvent(domWindow, "Escape"));
+      assert.equal(disclosure.hasAttribute("open"), false);
+      assert.ok(active === summary);
+    } finally { view.destroy(); }
   });
 });
 

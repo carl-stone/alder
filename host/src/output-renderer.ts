@@ -322,7 +322,9 @@ export class OutputRenderer {
       }
       progress.value = number(value.value) ?? 0;
       progress.setAttribute("value", String(progress.value));
-      row.append(progress, element(this.document,"div", "progress-label", string(value.label)));
+      const labelText = string(value.label) || "Operation in progress";
+      progress.setAttribute("aria-label", labelText);
+      row.append(progress, element(this.document,"div", "progress-label", labelText));
       container.appendChild(row);
       return;
     }
