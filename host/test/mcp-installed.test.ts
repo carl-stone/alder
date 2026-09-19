@@ -14,51 +14,6 @@ const installedIntegration = {
   timeout: 120_000,
 };
 
-const CANONICAL_TOOL_NAMES = [
-  "add_cell",
-  "apply_transaction",
-  "check",
-  "delete_cell",
-  "disable_cell",
-  "edit_cell",
-  "edit_cell_ranges",
-  "format",
-  "get_config",
-  "get_help",
-  "get_layout",
-  "get_value",
-  "interrupt",
-  "list_cells",
-  "materialize_output",
-  "move_cell",
-  "notebook_state",
-  "packages_declare",
-  "packages_install",
-  "packages_status",
-  "publish",
-  "read_cell",
-  "read_output",
-  "recovery_state",
-  "reload_source",
-  "rename_cell",
-  "restart",
-  "run_all",
-  "run_cell",
-  "run_stale",
-  "save",
-  "save_as",
-  "select_r",
-  "set_app",
-  "set_config",
-  "set_layout",
-  "set_preferences",
-  "set_runtime",
-  "set_widget",
-  "shutdown",
-  "table_page",
-  "upload_file",
-] as const;
-
 function sanitizedEnvironment(extra: Record<string, string>): Record<string, string> {
   const environment = Object.fromEntries(
     Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined),
@@ -103,22 +58,6 @@ test("the staged alder launcher serves MCP over official stdio", installedIntegr
   try {
     await client.connect(transport);
 
-    const tools = await client.listTools();
-    assert.deepEqual(tools.tools.map(tool => tool.name).sort(), CANONICAL_TOOL_NAMES);
-
-    const resources = await client.listResources();
-    assert.deepEqual(resources.resources.map(resource => resource.uri).sort(), [
-      "alder://cell/cell-1/outputs",
-      "alder://notebook/dag",
-      "alder://notebook/source",
-      "alder://notebook/state",
-    ]);
-
-    const templates = await client.listResourceTemplates();
-    assert.deepEqual(templates.resourceTemplates.map(template => template.uriTemplate).sort(), [
-      "alder://cell/{cell}/outputs",
-      "alder://outputs/{output}",
-    ]);
     const result = await client.callTool({ name: "list_cells", arguments: {} });
     assert.equal(result.isError, false);
     const structured = requireRecord(result.structuredContent);

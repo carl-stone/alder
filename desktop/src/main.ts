@@ -207,7 +207,7 @@ interface ElectronWindowRecord {
  * Electron never trusts a renderer frame merely because it belongs to a known
  * BrowserWindow: its current URL must still be the authenticated host origin.
  */
-export function isTrustedApplicationOrigin(value: string, expectedOrigin: string): boolean {
+function isTrustedApplicationOrigin(value: string, expectedOrigin: string): boolean {
   try {
     const actual = new URL(value);
     const expected = new URL(expectedOrigin);
@@ -226,7 +226,7 @@ function isStrictNonceLocalhostHost(value: string, parsed: URL): boolean {
   return rawHost === parsed.hostname && NONCE_LOCALHOST_HOST.test(rawHost);
 }
 
-export function isLoopbackHttpOrigin(value: string): boolean {
+function isLoopbackHttpOrigin(value: string): boolean {
   try {
     const parsed = new URL(value);
     return parsed.protocol === "http:" && parsed.username === "" && parsed.password === "" &&
@@ -262,7 +262,7 @@ export function validateNotebookPath(value: unknown): string {
   return value;
 }
 
-export function authenticatedNotebookUrl(origin: string, ticket: string): string {
+function authenticatedNotebookUrl(origin: string, ticket: string): string {
   if (!isLoopbackHttpOrigin(origin)) throw new Error("desktop host origin is not a loopback HTTP origin");
   if (typeof ticket !== "string" || !/^[0-9a-f]{64}$/.test(ticket)) throw new Error("desktop bootstrap ticket is invalid");
   const url = new URL("/index.html", origin);

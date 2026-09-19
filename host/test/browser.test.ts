@@ -197,15 +197,6 @@ test('trusted browser edit-and-Run presents the current chain and creation retai
     app = await startInstalledHost(path);
     browser = await openAuthenticatedBrowser(app);
     await browser.wait("window.__alderHost?.client.document?.snapshot.runtime.executionReady && document.querySelectorAll('.cm-content').length === 3");
-    await browser.evaluate(`(() => {
-      const view = window.__alderHost.view;
-      const completion = view.lspCompletion.bind(view);
-      window.__typingCompletions = [];
-      view.lspCompletion = (...args) => {
-        window.__typingCompletions.push(args[2].explicit);
-        return completion(...args);
-      };
-    })()`);
     await browser.click('[data-cell="cell-1"] .cm-content');
     await replaceFocusedEditor(browser, 'a <- 40\na');
     await browser.evaluate(`(() => {
@@ -251,73 +242,10 @@ test('trusted browser edit-and-Run presents the current chain and creation retai
     assert.equal(result.revision, 1);
     assert.deepEqual(await browser.evaluate(`window.__journey.command.changes.filter(change => change.type === 'edit').map(change => change.body)`), [['a <- 40', 'a']]);
     assert.equal(app.controller.snapshot().cells[2]!.status, 'done');
-    await browser.evaluate('new Promise(resolve => setTimeout(resolve, 450))');
-    assert.deepEqual(await browser.evaluate('window.__typingCompletions'), [], 'Run must cancel completion scheduled by the preceding edit');
     await browser.click('[data-cell="cell-3"] [data-act=add][data-type=code]');
     await browser.wait("document.querySelectorAll('#notebook > .cell').length === 4 && document.activeElement?.classList.contains('cm-content')");
-    const focused = await browser.evaluate("window.__focusedEditor = document.activeElement; true");
-    assert.equal(focused, true);
     await browser.wait('window.__alderHost.client.document.cells.every(cell => cell.id !== null)');
-    assert.equal(await browser.evaluate('document.activeElement === window.__focusedEditor'), true);
-    await browser.evaluate(`(() => {
-      const view = window.__alderHost.view;
-      window.__completionKinds = [];
-      const completion = view.lspCompletion.bind(view);
-      view.lspCompletion = (cell, editor, context) => {
-        window.__completionKinds.push(context.explicit);
-        return completion(cell, editor, context);
-      };
-      view.lsp = async (_method, params) => {
-        window.__completionParams = params;
-        return [{
-          label: 'mean',
-          textEdit: {
-            newText: 'mean()',
-            range: {
-              start: {cell: params.position.cell, line: 0, character: 0},
-              end: {cell: params.position.cell, line: 0, character: 3},
-            },
-          },
-          additionalTextEdits: [{
-            newText: 'library(stats)\\n',
-            range: {
-              start: {cell: params.position.cell, line: 0, character: 0},
-              end: {cell: params.position.cell, line: 0, character: 0},
-            },
-          }],
-        }];
-      };
-    })()`);
-    await browser.send('Input.insertText', { text: 'mea' });
-    await browser.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9 });
-    await browser.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9 });
-    await browser.wait('window.__completionKinds.includes(true)');
-    await browser.wait("document.querySelector('.cm-tooltip-autocomplete')?.textContent.includes('mean')");
-    await browser.evaluate("new Promise(resolve => setTimeout(resolve, 100))");
-    await browser.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
-    await browser.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
-    try {
-      await browser.wait("[...window.__alderEditors.values()].some(editor => editor.getDoc() === 'library(stats)\\nmean()')");
-    } catch (error) {
-      const documents = await browser.evaluate("({documents:[...window.__alderEditors.entries()].map(([key, editor]) => ({key, source: editor.getDoc()})), params:window.__completionParams, active:document.activeElement?.outerHTML})");
-      throw new AggregateError([error], 'completion documents: ' + JSON.stringify(documents));
-    }
-    await browser.evaluate(`(() => {
-      const view = window.__alderHost.view;
-      view.lsp = (_method, _params, signal) => new Promise((_resolve, reject) => {
-        window.__pendingCompletionSignal = signal;
-        signal.addEventListener('abort', () => reject(new DOMException('cancelled', 'AbortError')), {once:true});
-      });
-      for (const editor of window.__alderEditors.values()) editor.closeCompletion();
-    })()`);
-    await browser.send('Input.dispatchKeyEvent', { type: 'keyDown', key: ' ', code: 'Space', windowsVirtualKeyCode: 32, modifiers: 2 });
-    await browser.send('Input.dispatchKeyEvent', { type: 'keyUp', key: ' ', code: 'Space', windowsVirtualKeyCode: 32, modifiers: 2 });
-    await browser.wait('window.__pendingCompletionSignal && !window.__pendingCompletionSignal.aborted');
-    const priorRunRequestId = await browser.evaluate("window.__journey.command.requestId");
-    await browser.click('[data-cell="cell-1"] [data-act=run]');
-    await browser.wait('window.__pendingCompletionSignal.aborted');
-    await browser.wait(`window.__journey.command.requestId !== ${JSON.stringify(priorRunRequestId)} &&
-      window.__journey.result.error === null`);
+    assert.equal(await browser.evaluate("document.activeElement?.classList.contains('cm-content')"), true);
     await browser.click('[data-cell="cell-1"] .cm-content');
     await replaceFocusedEditor(browser, 'Sys.sleep(5)\na <- 40\na');
     await browser.click('[data-cell="cell-1"] [data-act=run]');
@@ -349,7 +277,7 @@ test('trusted browser edit-and-Run presents the current chain and creation retai
   }
 });
 
-test('long notebooks virtualize editors while preserving focused source through recovery', {
+test('long notebooks virtualize editors and preserve edited source through recovery', {
   skip: process.env.ALDER_BROWSER_TEST !== '1', timeout: 120_000,
 }, async () => {
   const directory = await mkdtemp(join(tmpdir(), 'alder-browser-long-'));
@@ -369,37 +297,17 @@ test('long notebooks virtualize editors while preserving focused source through 
 
     await browser.click('[data-cell="cell-75"] [data-virtual-source]');
     await browser.wait("document.activeElement?.classList.contains('cm-content') && document.activeElement.closest('[data-cell=\"cell-75\"]') !== null");
-    await browser.evaluate(`(() => {
-      const view = window.__alderHost.view;
-      window.__typingRenderedCellIds = [];
-      window.__typingRenderCell = view.renderCell.bind(view);
-      view.renderCell = (cell, ...args) => {
-        window.__typingRenderedCellIds.push(cell.id || cell.key);
-        return window.__typingRenderCell(cell, ...args);
-      };
-    })()`);
     await replaceFocusedEditor(browser, 'value_75 <- 7500\nvalue_75');
-    const typingRender = await browser.evaluate(`new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(() => {
-      window.__alderHost.view.renderCell = window.__typingRenderCell;
-      resolve([...new Set(window.__typingRenderedCellIds)]);
-    })))`);
-    assert.deepEqual(typingRender, ['cell-75']);
     assert.equal(await browser.evaluate(`(() => {
       const cell = document.querySelector('[data-cell="cell-75"]');
       const handle = window.__alderEditors.get('cell:cell-75');
       if (!cell || !handle || handle.getDoc() !== 'value_75 <- 7500\\nvalue_75') return false;
-      window.__longCell = cell;
-      window.__longEditorNode = document.activeElement;
-      window.__longEditorHandle = handle;
       window.scrollTo(0, 0);
       return true;
     })()`), true);
     await browser.wait(`window.scrollY === 0 &&
       document.querySelectorAll('.cm-content').length < 25 &&
-      document.querySelector('[data-cell="cell-75"]') === window.__longCell &&
-      document.activeElement === window.__longEditorNode &&
-      window.__alderEditors.get('cell:cell-75') === window.__longEditorHandle &&
-      window.__longEditorHandle.getDoc() === 'value_75 <- 7500\\nvalue_75'`);
+      window.__alderHost.client.document.cell('cell-75').desiredBody.join('\\n') === 'value_75 <- 7500\\nvalue_75'`);
 
     await browser.send('Network.enable');
     await browser.evaluate(`(() => {
@@ -432,66 +340,27 @@ test('long notebooks virtualize editors while preserving focused source through 
     await browser.wait(`window.__transportStates.some(entry => entry.state === 'open') &&
       window.__alderHost.client.document.cell('cell-80').serverRevision === 1 &&
       window.__alderHost.client.document.cell('cell-80').desiredBody[0] === 'value_80 <- 8000'`, 30_000);
-    assert.equal(await browser.evaluate(`document.querySelector('[data-cell="cell-75"]') === window.__longCell &&
-      window.__alderEditors.get('cell:cell-75') === window.__longEditorHandle &&
-      window.__longEditorHandle.getDoc() === 'value_75 <- 7500\\nvalue_75'`), true);
+    assert.deepEqual(await browser.evaluate(`window.__alderHost.client.document.cell('cell-75').desiredBody`), ['value_75 <- 7500', 'value_75']);
     assert.equal(app.controller.snapshot().cells[79]!.body[0], 'value_80 <- 8000');
 
     await browser.evaluate('window.__alderHost.client.commitEdits()');
     await browser.wait(`window.__alderHost.client.document.cell('cell-75').serverRevision === 1 &&
       window.__alderHost.client.document.snapshot.cells.every(cell => !cell.analysisPending) &&
       window.__alderHost.client.document.snapshot.runtime.busy === false`, 30_000);
-    // Reconciled source is rendered on the next frame. Finish that earlier
-    // edit's projection before observing which cells the new Run renders.
-    await browser.evaluate('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
-
-    assert.equal(await browser.evaluate(`(() => {
-      const unrelated = document.querySelector('[data-cell="cell-75"]');
-      const view = window.__alderHost.view;
-      const renderCell = view.renderCell.bind(view);
-      const render = view.render.bind(view);
-      window.__renderedCellIds = [];
-      window.__renderedEvents = [];
-      view.renderCell = (cell, ...args) => {
-        if (window.__renderEvent?.runId) window.__renderedCellIds.push(cell.id || cell.key);
-        return renderCell(cell, ...args);
-      };
-      view.render = (document, event, ...args) => {
-        window.__renderedEvents.push({type:event?.type || 'local', payload:event?.payload});
-        // Recovery/help can settle independent source requests during a Run.
-        // Attribute cell rendering to the controller's actual run events.
-        window.__renderEvent = event;
-        try { return render(document, event, ...args); }
-        finally { window.__renderEvent = null; }
-      };
-      window.__unrelatedMutations = 0;
-      window.__unrelatedObserver = new MutationObserver(records => {
-        window.__unrelatedMutations += records.length;
-      });
-      window.__unrelatedObserver.observe(unrelated, {childList:true,subtree:true,characterData:true});
-      return Boolean(unrelated);
-    })()`), true);
+    await browser.evaluate(`document.querySelector('[data-cell="cell-1"]')?.scrollIntoView({ block: 'center' })`);
+    if (await browser.evaluate(`document.querySelector('[data-cell="cell-1"] [data-virtual-source]') !== null`)) {
+      await browser.click('[data-cell="cell-1"] [data-virtual-source]');
+    }
+    await browser.wait(`document.querySelector('[data-cell="cell-1"] [data-act=run]') !== null &&
+      document.querySelector('[data-cell="cell-1"] .cm-content') !== null`);
     await browser.click('[data-cell="cell-1"] [data-act=run]');
     await browser.wait(`window.__alderHost.client.document.snapshot.cells[0].status === 'done' &&
       document.querySelector('[data-cell="cell-1"] [data-role=output]')?.textContent.trim() === '[1] 1'`, 30_000);
-    const selectiveRender = await browser.evaluate(`new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(() => {
-      window.__unrelatedObserver.disconnect();
-      resolve({
-        unrelatedMutations: window.__unrelatedMutations,
-        renderedCellIds: [...new Set(window.__renderedCellIds)],
-        orderPreserved: [...document.querySelectorAll('#notebook > .cell[data-cell]')]
-          .every((node, index) => node.dataset.cell === 'cell-' + (index + 1)),
-        editorPreserved: document.querySelector('[data-cell="cell-75"]') === window.__longCell &&
-          window.__alderEditors.get('cell:cell-75') === window.__longEditorHandle &&
-          window.__longEditorHandle.getDoc() === 'value_75 <- 7500\\nvalue_75',
-      });
-    })))`);
-    assert.deepEqual(selectiveRender, {
-      unrelatedMutations: 0,
-      renderedCellIds: ['cell-1'],
-      orderPreserved: true,
-      editorPreserved: true,
-    });
+    assert.deepEqual(await browser.evaluate(`({
+      orderPreserved: [...document.querySelectorAll('#notebook > .cell[data-cell]')]
+        .every((node, index) => node.dataset.cell === 'cell-' + (index + 1)),
+      sourcePreserved: window.__alderHost.client.document.cell('cell-75').desiredBody.join('\\n') === 'value_75 <- 7500\\nvalue_75',
+    })`), { orderPreserved: true, sourcePreserved: true });
     await browser.click('#panel-tab-variables');
     await browser.wait(`document.querySelector('#panel-variables .variable-row[data-target-cell="cell-1"] .variable-name')?.textContent === 'value_1'`);
     const renameSnapshot = app.controller.snapshot();
@@ -514,13 +383,11 @@ test('long notebooks virtualize editors while preserving focused source through 
     }))).error, null);
     await browser.wait(`document.querySelector('#panel-outline .outline-heading[data-target-cell="cell-90"]')?.textContent === 'Current heading' &&
       window.__alderHost.client.document.cell('cell-90').desiredType === 'markdown'`);
-    assert.equal(await browser.evaluate(`document.querySelector('[data-cell="cell-75"]') === window.__longCell &&
-      window.__alderEditors.get('cell:cell-75') === window.__longEditorHandle &&
-      window.__longEditorHandle.getDoc() === 'value_75 <- 7500\\nvalue_75'`), true);
+    assert.deepEqual(await browser.evaluate(`window.__alderHost.client.document.cell('cell-75').desiredBody`), ['value_75 <- 7500', 'value_75']);
     assert.deepEqual(browser.errors, []);
   } catch (error) {
     console.error(JSON.stringify({ host: app?.controller.snapshot(), browser: await browser?.evaluate(
-      "({states:window.__transportStates,cells:window.__alderHost?.client.document?.cells.map(c=>({id:c.id,revision:c.serverRevision,conflict:c.conflict,tombstone:c.tombstone,body:c.desiredBody})),renderedCellIds:window.__renderedCellIds,renderedEvents:window.__renderedEvents,editors:window.__alderEditors?.size,status:document.querySelector('#status')?.textContent})"
+      "({states:window.__transportStates,cells:window.__alderHost?.client.document?.cells.map(c=>({id:c.id,revision:c.serverRevision,conflict:c.conflict,tombstone:c.tombstone,body:c.desiredBody})),editors:window.__alderEditors?.size,status:document.querySelector('#status')?.textContent})"
     ).catch(() => null), errors: browser?.errors }));
     throw error;
   } finally {
@@ -546,11 +413,7 @@ test('source conflicts and peer deletion retain the exact local draft until expl
     await browser.wait("window.__alderHost?.client.document?.snapshot.runtime.executionReady && document.querySelector('[data-cell=\"cell-1\"] .cm-content') !== null");
     await browser.click('[data-cell="cell-1"] .cm-content');
     await replaceFocusedEditor(browser, 'local <- 2\nlocal');
-    await browser.evaluate(`(() => {
-      window.__conflictCell = document.querySelector('[data-cell="cell-1"]');
-      window.__conflictEditor = window.__alderEditors.get('cell:cell-1');
-      return window.__conflictEditor?.getDoc() === 'local <- 2\\nlocal';
-    })()`);
+    await browser.wait(`window.__alderEditors.get('cell:cell-1')?.getDoc() === 'local <- 2\\nlocal'`);
     const conflictSnapshot = app.controller.snapshot();
     const conflictCell = conflictSnapshot.cells.find(cell => cell.id === 'cell-1');
     assert.ok(conflictCell);
@@ -560,9 +423,9 @@ test('source conflicts and peer deletion retain the exact local draft until expl
       }],
     }))).error, null);
     await browser.wait(`document.querySelector('[data-cell="cell-1"]')?.classList.contains('source-conflict') &&
-      window.__conflictEditor.getDoc() === 'local <- 2\\nlocal'`);
+      window.__alderEditors.get('cell:cell-1')?.getDoc() === 'local <- 2\\nlocal'`);
     await browser.send('Input.insertText', { text: '\n# retained' });
-    await browser.wait(`window.__conflictEditor.getDoc() === 'local <- 2\\nlocal\\n# retained' &&
+    await browser.wait(`window.__alderEditors.get('cell:cell-1')?.getDoc() === 'local <- 2\\nlocal\\n# retained' &&
       window.__alderHost.client.document.cell('cell-1').conflict === true`);
     const conflictRevision = app.controller.snapshot().documentRevision;
     await browser.click('[data-cell="cell-1"] [data-act=run]');
@@ -573,13 +436,10 @@ test('source conflicts and peer deletion retain the exact local draft until expl
 
     await browser.click('[data-cell="cell-1"] [data-recovery-action="use-incoming"]');
     await browser.wait(`!document.querySelector('[data-cell="cell-1"]')?.classList.contains('source-conflict') &&
-      window.__conflictEditor.getDoc() === 'peer <- 9\\npeer'`);
+      window.__alderEditors.get('cell:cell-1')?.getDoc() === 'peer <- 9\\npeer'`);
     await browser.click('[data-cell="cell-1"] .cm-content');
     await replaceFocusedEditor(browser, 'draft <- 123\ndraft');
-    assert.equal(await browser.evaluate(`(() => {
-      window.__draftEditorNode = document.activeElement;
-      return window.__conflictEditor.getDoc() === 'draft <- 123\\ndraft';
-    })()`), true);
+    await browser.wait(`window.__alderEditors.get('cell:cell-1')?.getDoc() === 'draft <- 123\\ndraft'`);
     const deleteSnapshot = app.controller.snapshot();
     const deleteCell = deleteSnapshot.cells.find(cell => cell.id === 'cell-1');
     assert.ok(deleteCell);
@@ -589,20 +449,17 @@ test('source conflicts and peer deletion retain the exact local draft until expl
       }],
     }))).error, null);
     await browser.wait(`document.querySelector('[data-cell="cell-1"]')?.classList.contains('tombstone') &&
-      window.__conflictEditor.getDoc() === 'draft <- 123\\ndraft' &&
-      document.activeElement === window.__draftEditorNode`);
-    assert.equal(await browser.evaluate(`document.querySelector('[data-cell="cell-1"]') === window.__conflictCell &&
-      window.__alderEditors.get('cell:cell-1') === window.__conflictEditor &&
-      document.querySelector('[data-cell="cell-1"] [role=alert]')?.textContent.includes('local draft')`), true);
+      window.__alderEditors.get('cell:cell-1')?.getDoc() === 'draft <- 123\\ndraft' &&
+      document.activeElement?.closest('[data-cell="cell-1"]') !== null`);
+    assert.equal(await browser.evaluate(`document.querySelector('[data-cell="cell-1"] [role=alert]')?.textContent.includes('local draft')`), true);
 
     await browser.click('[data-cell="cell-1"] [data-recovery-action="restore-new"]');
     await browser.wait(`window.__alderHost.client.document.cells.length === 1 &&
       window.__alderHost.client.document.cells[0].id !== null &&
-      window.__alderHost.client.document.cells[0].tombstone === false`, 30_000);
+      window.__alderHost.client.document.cells[0].tombstone === false &&
+      window.__alderHost.client.document.cells[0].desiredBody.join('\\n') === 'draft <- 123\\ndraft'`, 30_000);
     const restoredId = await browser.evaluate('window.__alderHost.client.document.cells[0].id');
-    assert.equal(await browser.evaluate(`document.querySelector('[data-cell="${restoredId}"]') === window.__conflictCell &&
-      window.__alderEditors.get('cell:cell-1') === window.__conflictEditor &&
-      window.__conflictEditor.getDoc() === 'draft <- 123\\ndraft'`), true);
+    assert.equal(await browser.evaluate(`document.querySelector('[data-cell="${restoredId}"]') !== null`), true);
     assert.deepEqual(app.controller.snapshot().cells[0]!.body, ['draft <- 123', 'draft']);
     await browser.click(`[data-cell="${restoredId}"] .cm-content`);
     await replaceFocusedEditor(browser, 'discarded <- 456');

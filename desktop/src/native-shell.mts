@@ -62,7 +62,7 @@ export function applyNativeWindowState(window: NativeWindowTarget, state: Pick<W
   window.setTitle?.(`${state.path ? basename(state.path) : "Untitled"}${state.dirty ? " — Edited" : ""} — ${ALDER_APP_NAME}`);
 }
 
-export function nativeMenuTemplate(callbacks: NativeMenuCallbacks, recentPaths: readonly string[]): Record<string, unknown>[] {
+function nativeMenuTemplate(callbacks: NativeMenuCallbacks, recentPaths: readonly string[]): Record<string, unknown>[] {
   const action = (name: WindowAction) => (): void => callbacks.dispatch(name);
   const fileSubmenu: Record<string, unknown>[] = [
     { label: "New Notebook", accelerator: "CmdOrCtrl+N", click: callbacks.newNotebook },

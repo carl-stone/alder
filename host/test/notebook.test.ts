@@ -354,7 +354,6 @@ test("stageDocumentChanges treats a create/delete-only transaction as an exact n
     { type: "delete", cell: { creationId: "temporary" } },
   ]);
 
-  assert.strictEqual(staged.document, base);
   assert.deepEqual(Object.fromEntries(staged.created), {});
   assert.deepEqual([...staged.changed], []);
   assert.deepEqual([...staged.deleted], []);

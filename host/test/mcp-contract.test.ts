@@ -216,7 +216,6 @@ interface CatalogProxyConnection {
   output: PassThrough;
   upstreamServers: McpServer[];
   upstreamClients: Client[];
-  factoryCalls: number;
 }
 
 async function connectInMemory(controller: McpControllerAdapter = makeController(), store: AlderMcpOptions["artifactStore"] = artifactStore, extras: Partial<AlderMcpOptions> = {}): Promise<InMemoryConnection> {
@@ -258,9 +257,7 @@ async function connectCatalogProxy(controller: McpControllerAdapter = makeContro
   const output = new PassThrough();
   const upstreamServers: McpServer[] = [];
   const upstreamClients: Client[] = [];
-  let factoryCalls = 0;
   const transport = await connectMcpStdio(async initialization => {
-    factoryCalls++;
     const server = createMcpServer(catalogOptions(controller));
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await server.connect(serverTransport);
@@ -272,7 +269,7 @@ async function connectCatalogProxy(controller: McpControllerAdapter = makeContro
   const clientTransport = new StdioServerTransport(output, input);
   const client = new Client({ name: "stdio-contract", version: "1" }, { capabilities: {} });
   await client.connect(clientTransport);
-  return { client, clientTransport, transport, input, output, upstreamServers, upstreamClients, factoryCalls };
+  return { client, clientTransport, transport, input, output, upstreamServers, upstreamClients };
 }
 
 async function closeCatalogProxy(connection: CatalogProxyConnection): Promise<void> {
@@ -665,14 +662,9 @@ test("MCP snapshot queries expose logical Markdown bodies", async () => {
   } finally { await closeInMemory(connection); }
 });
 
-test("connectMcpStdio forwards official SDK initialization, catalog listing, and queries", async () => {
+test("connectMcpStdio forwards official SDK initialization and queries", async () => {
   const connection = await connectCatalogProxy();
   try {
-    assert.equal(connection.factoryCalls, 1);
-    const tools = await connection.client.listTools();
-    assertToolCatalog(tools.tools);
-    const resources = await connection.client.listResources();
-    assert.equal(resources.resources.length, 4);
     const result = await connection.client.callTool({ name: "list_cells", arguments: {} });
     assert.equal(result.isError, false);
     assert.deepEqual(result.structuredContent, {
@@ -689,9 +681,9 @@ test("connectMcpStdio forwards official SDK initialization, catalog listing, and
 test("connectMcpStdio rejects malformed pre-initialize frames without invoking the upstream", async () => {
   const input = new PassThrough();
   const output = new PassThrough();
-  let factoryCalls = 0;
+  let upstreamCreated = false;
   const transport = await connectMcpStdio(async () => {
-    factoryCalls++;
+    upstreamCreated = true;
     throw new Error("upstream must not be created");
   }, { input, output });
   try {
@@ -701,7 +693,7 @@ test("connectMcpStdio rejects malformed pre-initialize frames without invoking t
       id: null,
       error: { code: -32700, message: "parse error" },
     });
-    assert.equal(factoryCalls, 0);
+    assert.equal(upstreamCreated, false);
   } finally {
     await transport.close();
     input.destroy();

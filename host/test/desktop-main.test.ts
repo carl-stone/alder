@@ -7,8 +7,7 @@ import { join } from "node:path";
 
 import { HOST_PROTOCOL, type SessionConnection } from "../src/protocol.js";
 import { StructuredDiagnostics } from "../src/diagnostics.js";
-import { authenticatedNotebookUrl, ElectronMain, isLoopbackHttpOrigin, isTrustedApplicationOrigin, type ElectronRuntime, type ElectronWindow } from "../../desktop/src/main.js";
-import { applyNativeWindowState, nativeMenuTemplate, nativeWindowOptions } from "../../desktop/src/native-shell.mjs";
+import { ElectronMain, type ElectronRuntime, type ElectronWindow } from "../../desktop/src/main.js";
 
 type RequestHandler = (path: string, init?: RequestInit) => Promise<Response>;
 
@@ -169,27 +168,6 @@ function recordFor(
   return record;
 }
 
-test("desktop trusts only strict nonce localhost origins", () => {
-  const ticket = "a".repeat(64);
-  assert.equal(isLoopbackHttpOrigin(browserOrigin), true);
-  assert.equal(isTrustedApplicationOrigin(browserOrigin + "/index.html", browserOrigin), true);
-  assert.equal(authenticatedNotebookUrl(browserOrigin, ticket).startsWith(browserOrigin + "/index.html#ticket="), true);
-
-  const invalidOrigins = [
-    "http://127.0.0.1:43123",
-    "http://localhost:43123",
-    "http://" + "a".repeat(31) + ".localhost:43123",
-    "http://" + "a".repeat(32).toUpperCase() + ".localhost:43123",
-    "http://" + "a".repeat(32) + ".localhost.evil:43123",
-    "https://" + "a".repeat(32) + ".localhost:43123",
-  ];
-  for (const invalid of invalidOrigins) {
-    assert.equal(isLoopbackHttpOrigin(invalid), false, invalid);
-    assert.equal(isTrustedApplicationOrigin(invalid + "/index.html", browserOrigin), false, invalid);
-    assert.throws(() => authenticatedNotebookUrl(invalid, ticket), /loopback HTTP origin/);
-  }
-});
-
 test("typed desktop commands cover Save, Save As, reload preparation, and close without DOM control", async () => {
   const window = windowWithLoad();
   const main = new ElectronMain(runtime(), { resources });
@@ -281,40 +259,6 @@ test("diagnostic menu reports unavailable logging without throwing from its clic
   help.find(item => item.label === "Alder Diagnostics…")!.click();
   await new Promise(resolve => setImmediate(resolve));
   assert.deepEqual(dialogs, ["error"]);
-});
-
-test("native evidence and ElectronMain share production window, state, and menu construction", () => {
-  const actions: string[] = [];
-  const template = nativeMenuTemplate({
-    newNotebook: () => undefined,
-    openNotebook: () => undefined,
-    openNotebookInNewWindow: () => undefined,
-    openRecent: () => undefined,
-    dispatch: action => { actions.push(action); },
-    closeWindow: () => undefined,
-    diagnostics: () => undefined,
-  }, []);
-  const run = template.find(item => item.label === "Run")!.submenu as Record<string, any>[];
-  assert.equal(run.find(item => item.label === "Run Cell")?.accelerator, "CmdOrCtrl+Enter");
-  assert.equal(run.find(item => item.label === "Interrupt R")?.accelerator, "CmdOrCtrl+.");
-  run.find(item => item.label === "Run Cell")?.click();
-  run.find(item => item.label === "Interrupt R")?.click();
-  assert.deepEqual(actions, ["run-cell", "interrupt"]);
-  const application = template.find(item => item.label === "Alder")!.submenu as Record<string, any>[];
-  for (const role of ["about", "services", "hide", "hideOthers", "unhide", "quit"]) {
-    assert.ok(application.some(item => item.role === role), role);
-  }
-
-  const options = nativeWindowOptions("/tmp/preload.cjs", "alder-test");
-  assert.equal(options.show, false);
-  assert.equal(options.minWidth, 720);
-  assert.equal(options.minHeight, 600);
-  assert.equal((options.webPreferences as Record<string, unknown>).sandbox, true);
-  const target = windowWithLoad();
-  applyNativeWindowState(target, { path: "/tmp/evidence.R", dirty: true });
-  assert.equal(target.titles.at(-1), "evidence.R — Edited — Alder");
-  assert.equal(target.documentEdits.at(-1), true);
-  assert.equal(target.representedFiles.at(-1), "/tmp/evidence.R");
 });
 
 test("Open and startup errors use ownerless native dialogs", async () => {

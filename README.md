@@ -83,5 +83,4 @@ contains build commands and source/generated-file guidance. Application builds
 and the standalone R helper package are separate.
 
 The [demo](demo.R) and [Iris example](inst/examples/iris.R) provide ordinary R
-workflows. [NEWS.md](NEWS.md) records earlier development features, not current
-reset acceptance.
+workflows.

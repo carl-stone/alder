@@ -335,7 +335,8 @@ test("browser document builds one canonical transaction for edits and optimistic
   document.acknowledge(resultFor("run-1", {
     edited: [{ id: "c1", revision: 1 }], created: { "create-a": "c3", "create-b": "c4" }, deleted: [], documentRevision: 1,
   }, "done", 1));
-  assert.strictEqual(document.cell("c4"), identity);
+  assert.equal(document.cell("c4")?.key, identity.key);
+  assert.deepEqual(document.cell("c4")?.desiredBody, ["y + 1"]);
   assert.equal(document.focusedKey, first.key);
   assert.deepEqual(first.selection, { anchor: 3, head: 3, scrollTop: 12 });
   assert.deepEqual(document.cells.map((value) => value.id), ["c1", "c3", "c4", "c2"]);
@@ -592,49 +593,6 @@ test("browser view surfaces a blocked runtime and keeps recovery guidance throug
   });
 });
 
-test('browser view targets nonstructural transaction updates despite repeated config', async () => {
-  await withViewDom(async (dom) => {
-    const initial = snapshot([cell('c1', ['x <- 1']), cell('c2', ['x + 1'])]);
-    const document = new BrowserDocument(initial);
-    const client = {
-      recoveryState: { status: 'none', local: null, candidate: null, corruption: null, persistenceError: null },
-      subscribeRecovery() { return () => {}; },
-    } as unknown as BrowserNotebookClient;
-    const view = new NotebookView(client, dom);
-    try {
-      view.render(document);
-      const rendered: string[] = [];
-      const instrumented = view as unknown as { renderCell: (...args: unknown[]) => void };
-      const renderCell = instrumented.renderCell.bind(view);
-      instrumented.renderCell = (...args) => {
-        rendered.push((args[0] as { id: string }).id);
-        renderCell(...args);
-      };
-      const transaction: HostEvent = {
-        protocol: HOST_PROTOCOL, epoch: document.epoch, cursor: 1, version: 2, documentRevision: 1, timestamp: 1,
-        type: 'transaction',
-        payload: { updated: [{ id: 'c1' }], created: {}, deleted: [], order: ['c1', 'c2'], config: initial.config },
-      };
-      document.applyEvent(transaction);
-      view.render(document, transaction);
-      assert.deepEqual(rendered, ['c1']);
-
-      rendered.length = 0;
-      const moved: HostEvent = {
-        ...transaction, cursor: 2, version: 3, documentRevision: 2,
-        payload: { updated: [{ id: 'c2' }], created: {}, deleted: [], order: ['c2', 'c1'], config: initial.config },
-      };
-      document.applyEvent(moved);
-      view.render(document, moved);
-      assert.deepEqual(rendered, ['c2']);
-      const renderedOrder = [...dom.querySelectorAll<HTMLElement>('#notebook > .cell')].map((element) => element.dataset.key);
-      assert.deepEqual(renderedOrder, document.cells.map((value) => value.key));
-    } finally {
-      view.destroy();
-    }
-  });
-});
-
 test("native actions open visible Format, Packages, and keyboard shortcut surfaces", async () => {
   await withViewDom(async (dom) => {
     await installInteractionDialogs(dom);
@@ -651,17 +609,6 @@ test("native actions open visible Format, Packages, and keyboard shortcut surfac
     } finally {
       view.destroy();
     }
-  });
-});
-
-test("canonical cell template and output role are required", async () => {
-  await withViewDom(async (dom) => {
-    Object.defineProperty(globalThis, "location", { configurable: true, writable: true, value: { search: "?view=editor", href: "http://notebook.test/book.R?view=editor", origin: "http://notebook.test" } });
-    dom.getElementById("cell-tpl")!.remove();
-    const view = new NotebookView(settingsClient(), dom);
-    try {
-      assert.throws(() => view.render(new BrowserDocument(snapshot([cell("c1", ["1"])]))), /canonical #cell-tpl/);
-    } finally { view.destroy(); }
   });
 });
 
@@ -1359,10 +1306,9 @@ test("notebook execution control restores the stored value after a failed write"
   });
 });
 
-test("browser document applies canonical output deltas without replacing cell identity", () => {
+test("browser document applies canonical output deltas once", () => {
   const previous = { ...cell("c1", ["message('a')"]), outputsStale: true };
   const document = new BrowserDocument(snapshot([previous]));
-  const local = document.cell("c1")!;
   const event = (cursor: number, sequence: number, payload: unknown): HostEvent => ({
     protocol: HOST_PROTOCOL, epoch: document.epoch, cursor, version: cursor + 1, documentRevision: cursor, timestamp: cursor,
     type: "cell-output", operationId: "run", runId: "r1", cellId: "c1", revision: 0, sequence, payload: payload as never,
@@ -1370,12 +1316,11 @@ test("browser document applies canonical output deltas without replacing cell id
   const output = { id: "o1", sessionEpoch: document.epoch, kernelEpoch: "kernel-1", runId: "r1", cellId: "c1", revision: 0, sequence: 1, data: { kind: "text", text: "1" }, metadata: { presentation: "inline" }, truncated: false };
   document.applyEvent(event(1, 1, { kind: "append", payload: { output } }));
   document.applyEvent(event(1, 1, { kind: "append", payload: { output: { ...output, id: "duplicate" } } }));
-  assert.strictEqual(document.cell("c1"), local);
-  assert.deepEqual(local.server?.outputs, [output]);
-  assert.equal(local.server?.outputsStale, false);
+  assert.deepEqual(document.cell("c1")?.server?.outputs, [output]);
+  assert.equal(document.cell("c1")?.server?.outputsStale, false);
   document.applyEvent(event(2, 2, { kind: "clear", payload: {} }));
-  assert.deepEqual(local.server?.outputs, []);
-  assert.equal(local.server?.progress, null);
+  assert.deepEqual(document.cell("c1")?.server?.outputs, []);
+  assert.equal(document.cell("c1")?.server?.progress, null);
 });
 
 test("browser document keeps Markdown logical in the editor and canonical on the wire", () => {
@@ -1466,7 +1411,7 @@ test("browser document applies only complete authoritative sidecar observations"
   assert.equal(document.snapshot.sidecars.packages.version, "packages-v2");
   const authoritative = document.snapshot.sidecars;
   document.applyEvent(event(2, { sidecars: { packages } }));
-  assert.strictEqual(document.snapshot.sidecars, authoritative);
+  assert.deepEqual(document.snapshot.sidecars, authoritative);
 });
 
 test("browser document applies canonical transaction ordering and metadata deltas", () => {

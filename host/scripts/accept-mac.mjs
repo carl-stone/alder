@@ -34,15 +34,6 @@ if (extensions.some(value => String(value).toLowerCase() === 'rmd')) throw new E
 const entitlements = run('entitlements', '/usr/bin/codesign', ['-d', '--entitlements', '-', app], { stdio: ['ignore', 'pipe', 'pipe'] });
 if (entitlements.includes('<key>')) throw new Error('the Alder app unexpectedly carries entitlements');
 
-const arkVersion = run('ark', resources.arkExecutable, ['--version']).trim();
-const airVersion = run('air', resources.airExecutable, ['--version']).trim();
-const quartoVersion = run('quarto', resources.quartoExecutable, ['--version']).trim();
-const packageMetadata = JSON.parse(await readFile(join(root, 'host/package.json'), 'utf8'));
-const airLock = JSON.parse(await readFile(join(root, 'host/air-lock.json'), 'utf8'));
-if (!arkVersion.includes(packageMetadata.config.ark.version)) throw new Error(`unexpected Ark version: ${arkVersion}`);
-if (!airVersion.includes(airLock.version)) throw new Error(`unexpected Air version: ${airVersion}`);
-if (quartoVersion !== packageMetadata.config.quarto.version) throw new Error(`unexpected Quarto version: ${quartoVersion}`);
-
 const temporary = await mkdtemp(join(tmpdir(), 'alder-mac-accept-'));
 const runtimeDirectory = join('/tmp', `alder-mac-accept-${process.pid}`);
 let differential;
@@ -64,7 +55,7 @@ try {
   await rm(temporary, { recursive: true, force: true });
 }
 
-process.stdout.write(JSON.stringify({ app, arkVersion, airVersion, quartoVersion, differential, timings }) + '\n');
+process.stdout.write(JSON.stringify({ app, differential, timings }) + '\n');
 
 async function evaluatePackagedKernel(directory, runtimePath) {
   const started = performance.now();

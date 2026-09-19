@@ -2,7 +2,6 @@
 ^\.lintr$
 ^AGENTS\.md$
 ^tests/AGENTS\.md$
-^alder-evidence($|[-_.])
 ^[^/]+[.]tar([.](gz|bz2|xz|zst))?$
 ^[^/]+[.](tgz|zip)$
 ^dev$
@@ -30,9 +29,6 @@
 ^\.renv
 ^\.pak
 ^\.air
-^evidence
-^handoff
-^artifacts?
 ^cache
 ^tmp
 ^Rcheck
