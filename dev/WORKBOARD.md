@@ -9,49 +9,59 @@ copies in other worktrees are snapshots.
 
 ## Current assignment
 
-**Complete Mac app and final acceptance — Accepted.**
+**Local diagnostics and observability — Accepted.**
 
-**Owner:** primary implementer in the listed implementation worktree.
+**Owner:** primary implementer; independently reviewed and accepted by the lead.
 
-Qualify the signed Mac application as one integrated scientific notebook and fix
-any remaining user-visible failure before release readiness.
+Assess whether the accepted Mac app records enough bounded, local evidence to
+diagnose bugs, hangs, crashes, latency, resource growth and child-process failures
+without slowing ordinary notebook work, filling the disk or retaining notebook
+content and secrets unnecessarily.
 
-**Accept when:** a clean signed app launches, creates and opens notebooks, edits by
-mouse and keyboard, runs ordinary/reactive R, interrupts and recovers, renders all
-supported outputs/widgets, supplies language help, saves atomically, Save As keeps
-project ownership correct, closes/reopens without false dirty state, and restores
-accepted work after renderer/backend/process failure. Two notebooks remain isolated;
-two clients on one notebook share revisions without lost work and either can detach.
-External edits and source/recovery conflicts preserve inspectable copies. Missing/
-invalid R and failed Ark/Air/Quarto/package/publish/inspection operations leave core
-editing and saving usable. Settings, menus, shortcuts, Preview, narrow/dark UI and
-native document state behave as accepted. The fast suite, generative checks and one
-documented final installed-app command all exit within bounds, clean every owned
-child and verify the current signed package. No known P1 product defect, hanging
-process, false passing test or unclassified failure remains.
+**Accept when:** desktop and backend write private structured lifecycle and terminal
+diagnostics with app/backend/session/operation/run/child correlation; the detached
+backend can no longer lose fatal evidence; coarse edit/save/run/startup/service timing
+and long-running phases are reconstructable; cleanup, renderer, MCP and subprocess
+failures have bounded metadata; logs rotate under a fixed total cap; corrupt recovery
+copies are pruned; and Help can export a local previewable diagnostic bundle. Default
+records and exports contain no notebook source/output/value/widget/upload content,
+credentials, environment values or absolute user paths. Logging failure never blocks
+open, edit, run, save, close, recovery or cleanup. No remote telemetry, per-keystroke/
+stream-chunk tracing, duplicated recovery history or fixed latency release gate is added.
 
-**Accepted candidate:** `8a1381ce` (`Bound LSP transport shutdown`) on rejected
-`3339b677`, itself on
-rejected `6911e1d7` and accepted UI/UX checkpoint `dd9d60f`.
+**Baseline:** accepted app `8a1381ce`; docs-only workboard commit `3345823`.
 
-**Review target:** verify ordinary R package precedence and absence of notebook AST
-rewriting/private-namespace collision; immediate CodeMirror Save ordering and stale
-run suppression; widget generation ordering; removal of all production acceptance
-hooks/private-global/DOM automation; external trusted-CDP packaged journey covering
-20 immediate saves, Run-to-Save, interrupt, peer detach, Ark failure/reopen and
-quit/relaunch; installed empty-cell behavior; bounded deliberate-failure cleanup;
-and honest layered coverage of remaining conflict/Save As/optional/UI matrices.
-Independently run one clean uninterrupted final command, classify every skip,
-verify source/bundle freshness, licenses, strict signing and zero children.
+**Accepted checkpoint:** `ea21b96` (`Add bounded local diagnostics`). It supersedes
+rejected candidates `1e75e27` and `5bef3df`.
 
-**Next action:** no engineering assignment is active. Carl can use the accepted signed
-Mac build; public distribution and notarization remain deferred until requested.
+**Original review findings:** the accepted baseline discarded detached backend stderr; desktop and
+renderer crashes have no durable evidence; strong host IDs and terminal operation state
+remain in memory only; useful child stderr disappears or is too sensitive to persist;
+cleanup and MCP failures can be swallowed; Quarto has no deadline; the existing
+input-to-visible timing seam is test-only; there is no diagnostic export; and corrupt
+recovery copies can accumulate. Existing output, artifact, operation and recovery bounds
+are useful and must remain separate from diagnostics.
+
+**Next action:** begin the queued dead-code and dependency-removal checkpoint after the
+lead/user process retrospective establishes any changes to the working method.
 
 **Testing constraint:** do not take over Carl's visible desktop. Use background
 or isolated Mac GUI checks where native interaction matters. The in-app browser
 blocked Alder's localhost URL, so it did not establish native behavior.
 
-**Blocker:** none.
+**Acceptance evidence:** runtime/privacy and performance/storage reviewers both pass
+`ea21b96`. Staged fatal evidence survives indefinite retention-lock contention without
+raw error content; 40 concurrent first-run writers converge on one private identity;
+1,500 saturated operation lifecycles leave no active timers; a 2,500-record close drains
+fully; two concurrent writers remain under the shared cap; production events retain
+their typed categories; batching materially reduces persistence cost; and the simplified
+benchmark reports reconciled event counts, retained size and wall/CPU timing.
+One uninterrupted signed-app acceptance passed in 347.96 seconds: R helpers 164; fast
+suite 441 with 41 classified source-only skips; installed Engine 19, Jupyter 5, Host 11
+and MCP 1; browser journeys 9; native cleanup and full packaged journey; strict signing,
+62 dependency licenses and required runtime notices; no owned children. A separate
+hidden packaged journey exported private diagnostics from 543 events with none of the
+planted source, output, path, filename, identifier, token, cookie or environment secrets.
 
 ## Work queue
 
@@ -78,6 +88,10 @@ order; their implementation details are settled when assigned.
 | Targeted generative verification | Accepted | Primary implementer | `d88ca7d`: bounded independent graph/document/recovery/state/R verification with real crash durability and replayable failures |
 | UI/UX review and polish | Accepted | Primary implementer | `dd9d60f`: coherent Mac interaction and visual system, real responsive/accessibility behavior, truthful production evidence and safe native harness |
 | Complete Mac app and final acceptance | Accepted | Primary implementer | `8a1381ce`: exact clean candidate passed independent code review and complete signed-app acceptance |
+| Local diagnostics and observability | Accepted | Primary implementer | `ea21b96`: bounded private local diagnostics, safe export, durable fatal evidence, truthful timings and full signed-app acceptance |
+| Dead code and dependency removal | Queued | Unassigned | After observability, delete unreachable production code, unused exports/files/assets/scripts and unused dependencies across TypeScript, native and R surfaces; retain a runnable signed Mac app |
+| Production-path simplification | Queued | Unassigned | Replace pass-through layers, duplicate ownership and unnecessary policy machinery in the remaining live paths with the smallest cohesive implementation that preserves accepted notebook behavior |
+| Simplification verification and acceptance | Queued | Unassigned | Rebuild affected tests around user-visible behavior, remove obsolete fixtures/tooling, and pass focused workflows plus the complete signed-app acceptance on the simplified tree |
 
 The following requirements apply to the relevant slices and are checked again
 when accepting the complete app:
@@ -134,6 +148,46 @@ Representative R notebooks and expected results belong to their implementation
 slices; final Mac acceptance exercises the integrated app. Other platforms and
 public distribution/notarization remain deferred. Local runnable Mac delivery is
 part of this queue.
+
+## Dead-code and simplification campaign
+
+Begin this campaign only after local diagnostics and observability is accepted.
+Work through it as three runnable checkpoints rather than one unreviewable rewrite.
+
+1. **Remove code that has no live responsibility.** Establish the real packaged,
+   development, test and generated entry points. Use language-native compiler and
+   linter checks plus project-level import/export, file and dependency reachability
+   analysis to find candidates. Include stale feature flags, unreachable error and
+   compatibility branches, unused protocol members, orphaned assets and scripts,
+   obsolete R helpers, unused packages and source files represented only by generated
+   copies. Classify reflection, Electron IPC, native menu, worker/child entry points
+   and string-addressed protocol handlers before deletion. Delete confirmed dead code
+   and its mechanism-only tests and dependencies; do not add suppressions merely to
+   make an analyzer quiet.
+2. **Simplify the code that remains live.** Review the surviving paths by product
+   responsibility: document/session ownership, renderer/native bridge, execution and
+   output, optional services, persistence/recovery, diagnostics and packaging. Remove
+   pass-through wrappers, duplicate state and validation, speculative extension
+   points, one-implementation interfaces, obsolete configuration, unnecessary retry
+   and fallback layers, and abstractions whose only callers can be expressed directly.
+   Prefer deleting or rewriting a confused component over preserving its internal API.
+   Do not use line count or a complexity score as a target; require fewer owners and
+   fewer state transitions for the same behavior.
+3. **Rebuild verification around the smaller product.** Replace tests that refer to
+   deleted symbols, call counts or internal layer boundaries with checks of observable
+   behavior. Remove redundant mocks, fixtures, snapshots, scripts and dependencies.
+   Keep the focused invariants already named on this board, exercise representative
+   native Mac workflows and failure recovery, and finish with the exact signed-app
+   acceptance command. Compare startup, edit/save/run responsiveness, diagnostic
+   overhead, bundle size and owned-child cleanup with the accepted observability
+   checkpoint; investigate material regressions without imposing arbitrary numeric
+   gates.
+
+Static reachability, coverage and diagnostics are evidence, not independent product
+requirements. Public or dynamically addressed code is retained only when a real Alder
+entry point or accepted behavior needs it. Each checkpoint must remove replaced paths
+completely, leave generated artifacts reproducible from source, and end with a clean
+commit that the next stage can safely simplify.
 
 ## Latest accepted checkpoint
 

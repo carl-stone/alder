@@ -250,6 +250,30 @@ duplicate qualification layers and tests that only pin superseded designs. Do
 not recreate their scope under new names. Use ordinary process cleanup through
 platform facilities; retire the former custom supervisor and containment framework.
 
+**Local diagnostics.** Keep one small structured JSONL diagnostics facility shared by
+the desktop and backend. It records bounded lifecycle, terminal, failure and coarse
+timing events correlated across app launch, backend, session, operation, run and child
+process. It never records notebook source or output, values, widgets, uploads, command
+arguments, environment values, credentials, raw errors or absolute user paths.
+Caller-controlled identifiers become keyed one-way pseudonyms at the persistence
+boundary; fixed internal categories retain the kind of failure without its content.
+
+Diagnostics writes remain asynchronous and best effort during ordinary work. Logging
+failure cannot block editing, saving, execution, recovery or cleanup. Batch persistence
+and bounded queues prevent event recording from becoming a foreground latency or disk
+workload. Private segments rotate under a five-file, seven-day and approximately 25 MiB
+total cap. Fatal desktop or backend evidence uses a minimal lock-independent private
+segment before exit and joins the same retention and export inventory afterward.
+Concurrent processes atomically establish one per-install pseudonymization key.
+
+Help can save a local, previewable diagnostics bundle after coordinating desktop and
+backend drains. Export remains an explicit local action and contains a privacy manifest;
+there is no remote telemetry, database, crash dump, per-keystroke or stream-chunk trace.
+Measure and report scientific project-cache size separately, but do not make diagnostics
+responsible for deleting user-created cache data. Performance evidence reports event
+counts, retained size and wall/CPU cost without checksum or byte-accounting machinery
+that is unrelated to an actual integrity boundary.
+
 ## Delivery and acceptance
 
 These are capability areas, not an assignment sequence. The workboard determines
