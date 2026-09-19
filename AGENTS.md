@@ -38,6 +38,10 @@ Work is coordinated across separate Codex conversations, called tasks. One
   per shared boundary; use separate worktrees for independent writers.
 - Workers cannot change roles, expand their authority or approve their own
   completion. Send shared-design questions and completion reports to the lead.
+- A completion report names the exact commit and clean-tree state, describes the
+  observable change, lists focused checks and unresolved concerns, and says whether
+  generated or packaged assets were updated. Completion makes a candidate ready for
+  review; it does not accept the work.
 - Preserve unrelated work. Keep generated evidence and caches out of Git.
   Update the existing docs instead of accumulating ledgers or review transcripts.
 

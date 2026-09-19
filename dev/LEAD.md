@@ -33,6 +33,24 @@ bounded workers or fresh review where useful, with explicit ownership. Choose
 agent capabilities for the work; a model label or reviewer approval does not
 replace checking the actual result.
 
+## Report task state precisely
+
+Before telling Carl that work is running, ready for review or complete, check the
+task status and the implementation worktree. A successful dispatch means only
+**dispatched**; it does not prove the task started. Use these terms consistently:
+
+- **Dispatched:** the assignment was delivered.
+- **Running:** current task status was checked and is active.
+- **Candidate ready:** an exact clean commit exists and the task is idle.
+- **Passed review:** a reviewer completed against that exact commit and supplied
+  relevant evidence.
+- **Accepted:** every required gate passed on the same commit.
+
+Do not wait indefinitely for a completion message. When a task becomes idle, inspect
+its latest turn and branch directly. An implementation handoff is sufficient when it
+identifies the exact commit, clean-tree state, observable changes, focused checks,
+known unresolved concerns and whether generated or packaged assets were updated.
+
 ## Assign and review
 
 Keep at most one board item in Implementing or Review. Bounded workers belong to
@@ -50,6 +68,19 @@ consequential changes for correctness and unnecessary complexity. Reviewers can
 challenge a decision but cannot introduce product obligations by declaring them
 necessary. Use actual app behavior and the relevant checks described in the design.
 
+Filter every requested check or correction through engineering judgment before
+assigning it. Retain it when it prevents a user-visible failure, protects an approved
+architectural invariant or verifies a real release-integrity boundary. Drop incidental
+proof work, arbitrary counters, checksum inventories and exact-byte comparisons that
+do not serve one of those purposes. Static-analysis output, coverage and benchmark
+metrics are evidence to interpret, not requirements by themselves.
+
+Partition reviewers by question and minimize duplicate broad validation. Run focused
+implementation checks first, then independent boundary reviews, then corrections.
+Run the complete signed-app acceptance only after the focused reviews pass, and run it
+once on the exact candidate intended for acceptance. A later source change invalidates
+that acceptance even when described as harmless.
+
 A blocker is an annotation, not another state: record its concrete reason,
 who can resolve it and the next action. Preserve the current work state.
 
@@ -66,6 +97,8 @@ does not expand a worker's assignment.
 - Keep assignments, acceptance criteria, blockers, next actions, queue and latest
   accepted build on the board. Update entries in place; older detail lives in Git
   and the implementation task.
+- Keep the board scannable. Retain concise evidence for the latest accepted checkpoint
+  and the current campaign; remove accumulated narratives for older accepted slices.
 - Keep stable product decisions in ARCHITECTURE.md and shared agent instructions
   in AGENTS.md. Do not duplicate them on the board.
 - Sync guidance to the implementation worktree at assignment checkpoints. Avoid
