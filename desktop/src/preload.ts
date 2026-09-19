@@ -1,10 +1,11 @@
 import { contextBridge, ipcRenderer } from "electron";
 import {
   desktopRecoveryRequestSchema,
-  windowActionMessageSchema,
+  desktopCommandResultSchema,
+  desktopCommandSchema,
   windowStateSchema,
   type PreloadApi,
-  type WindowAction,
+  type DesktopCommand,
   type WindowState,
   type SaveDestination,
   saveAsCommandSchema,
@@ -16,13 +17,11 @@ export const ELECTRON_IPC_CHANNELS = Object.freeze({
   openNotebook: "alderDesktop:openNotebook",
   chooseSavePath: "alderDesktop:chooseSavePath",
   chooseRscript: "alderDesktop:chooseRscript",
-  getWindowState: "alderDesktop:getWindowState",
   getDraftId: "alderDesktop:getDraftId",
-  hostShutdown: "alderDesktop:hostShutdown",
-  saveCancelled: "alderDesktop:saveCancelled",
   rendererReady: "alderDesktop:rendererReady",
-  rendererDraftFlushed: "alderDesktop:rendererDraftFlushed",
-  windowAction: "alderDesktop:windowAction",
+  windowState: "alderDesktop:windowState",
+  commandResult: "alderDesktop:commandResult",
+  desktopCommand: "alderDesktop:desktopCommand",
 } as const);
 
 interface IpcRendererLike {
@@ -79,33 +78,28 @@ export function createPreloadApi(ipc: IpcRendererLike): PreloadApi {
       if (typeof value !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(value)) throw new Error("Invalid draft identity");
       return value;
     },
-    getWindowState: async (): Promise<WindowState> =>
-      windowStateSchema.parse(await ipc.invoke(ELECTRON_IPC_CHANNELS.getWindowState)),
-    hostShutdown: async (): Promise<void> => {
-      validateVoid(await ipc.invoke(ELECTRON_IPC_CHANNELS.hostShutdown), "hostShutdown");
-    },
-    saveCancelled: async (): Promise<void> => {
-      validateVoid(await ipc.invoke(ELECTRON_IPC_CHANNELS.saveCancelled), "saveCancelled");
-    },
     rendererReady: async (): Promise<void> => {
       validateVoid(await ipc.invoke(ELECTRON_IPC_CHANNELS.rendererReady), "rendererReady");
     },
-    rendererDraftFlushed: async (): Promise<void> => {
-      validateVoid(await ipc.invoke(ELECTRON_IPC_CHANNELS.rendererDraftFlushed), "rendererDraftFlushed");
+    updateWindowState: async (state): Promise<void> => {
+      validateVoid(await ipc.invoke(ELECTRON_IPC_CHANNELS.windowState, windowStateSchema.parse(state)), "updateWindowState");
     },
-    onWindowAction: (callback: (action: WindowAction) => void): (() => void) => {
-      if (typeof callback !== "function") throw new TypeError("onWindowAction callback must be a function");
+    completeDesktopCommand: async (result): Promise<void> => {
+      validateVoid(await ipc.invoke(ELECTRON_IPC_CHANNELS.commandResult, desktopCommandResultSchema.parse(result)), "completeDesktopCommand");
+    },
+    onDesktopCommand: (callback: (command: DesktopCommand) => void): (() => void) => {
+      if (typeof callback !== "function") throw new TypeError("onDesktopCommand callback must be a function");
       let subscribed = true;
       const listener = (_event: unknown, value: unknown): void => {
         if (!subscribed) return;
-        const parsed = windowActionMessageSchema.safeParse(value);
-        if (parsed.success) callback(parsed.data.action);
+        const parsed = desktopCommandSchema.safeParse(value);
+        if (parsed.success) callback(parsed.data);
       };
-      ipc.on(ELECTRON_IPC_CHANNELS.windowAction, listener);
+      ipc.on(ELECTRON_IPC_CHANNELS.desktopCommand, listener);
       return (): void => {
         if (!subscribed) return;
         subscribed = false;
-        ipc.removeListener(ELECTRON_IPC_CHANNELS.windowAction, listener);
+        ipc.removeListener(ELECTRON_IPC_CHANNELS.desktopCommand, listener);
       };
     },
   };

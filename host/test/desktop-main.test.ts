@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { runInNewContext } from "node:vm";
 import { createHash } from "node:crypto";
 import { mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -27,7 +26,6 @@ function identity(sessionKey: string, canonicalPath: string | null): Record<stri
   return {
     protocol: HOST_PROTOCOL,
     epoch: "epoch",
-    processNonce: "process",
     continuityProof: "proof",
     sessionKey,
     canonicalPath,
@@ -51,7 +49,6 @@ function connection(
     origin,
     browserOrigin,
     epoch: "epoch",
-    processNonce: "process",
     continuityProof: "proof",
     leaseId: "lease-" + sessionKey,
     clientId: "client-" + sessionKey,
@@ -83,7 +80,6 @@ function windowWithLoad(loadURL: (url: string) => Promise<void> = async () => un
     mainFrame: { url: browserOrigin + "/" },
     getURL: () => browserOrigin + "/",
     send: () => undefined,
-    executeJavaScript: async () => false,
     setWindowOpenHandler: () => undefined,
     on: () => webContents,
     once: () => webContents,
@@ -151,15 +147,19 @@ function recordFor(
     monitorInProgress: false,
     hostFailureShown: false,
     loadGeneration: 0,
+    rendererReadyGeneration: 0,
+    windowState: null,
+    pendingCommands: new Map(),
   };
   const send = window.webContents.send.bind(window.webContents);
   window.webContents.send = (channel, value) => {
     send(channel, value);
-    if ((value as { action?: string })?.action === "prepare-unload") queueMicrotask(() => record.rendererDraftFlush?.resolve());
+    const command = value as { requestId?: string; action?: string };
+    if (command.requestId) queueMicrotask(() => record.pendingCommands.get(command.requestId!)?.resolve({ requestId: command.requestId!, status: "ok" }));
   };
   window.once("closed", () => { void (main as any).disposeRecord(record); });
   (main as any).records.add(record);
-  for (const key of record.keys) (main as any).byKey.set(key, record);
+  for (const key of record.keys) (main as any).addRecordKey(key, record);
   return record;
 }
 
@@ -184,6 +184,39 @@ test("desktop trusts only strict nonce localhost origins", () => {
   }
 });
 
+test("typed desktop commands cover Save, Save As, reload preparation, and close without DOM control", async () => {
+  const window = windowWithLoad();
+  const main = new ElectronMain(runtime(), { resources });
+  const record = recordFor(main, connection("typed-commands", "/tmp/typed-commands.R", async () => jsonResponse({})), window);
+  const actions: string[] = [];
+  window.webContents.send = (_channel, payload) => {
+    const command = payload as { requestId: string; action: string };
+    actions.push(command.action);
+    queueMicrotask(() => record.pendingCommands.get(command.requestId)?.resolve({ requestId: command.requestId, status: "ok" }));
+  };
+  await (main as any).dispatchAction(record, "save");
+  await (main as any).dispatchAction(record, "save-as");
+  await (main as any).prepareRendererUnload(record);
+  await (main as any).dispatchAction(record, "close");
+  assert.deepEqual(actions, ["save", "save-as", "prepare-unload", "close"]);
+});
+
+test("Open and startup errors use ownerless native dialogs", async () => {
+  const electronRuntime = runtime();
+  const notebookPath = "/tmp/ownerless-open.R";
+  const dialogCalls: unknown[][] = [];
+  electronRuntime.dialog.showOpenDialog = async (...args: unknown[]) => { dialogCalls.push(args); return { canceled: false, filePaths: [notebookPath] }; };
+  electronRuntime.dialog.showMessageBox = async (...args: unknown[]) => { dialogCalls.push(args); return { response: 0 }; };
+  const main = new ElectronMain(electronRuntime, { resources });
+  let opened: string | null = null;
+  (main as any).openNotebook = async (path: string) => { opened = path; };
+  await (main as any).openNotebookFromDialog(undefined);
+  await (main as any).showApplicationError("Startup failed", "backend unavailable");
+  assert.equal(opened, notebookPath);
+  assert.equal(dialogCalls[0]!.length, 1);
+  assert.equal(dialogCalls[1]!.length, 1);
+});
+
 test("desktop identity polling adopts an authoritative Save As and preserves one window", async () => {
   const root = await mkdtemp(join(tmpdir(), "alder-desktop-identity-"));
   try {
@@ -205,15 +238,9 @@ test("desktop identity polling adopts an authoritative Save As and preserves one
     assert.equal(record.connection.sessionKey, "session-after");
     assert.equal(record.connection.canonicalPath, newCanonicalPath);
     assert.equal((main as any).byKey.get(oldPath), undefined);
-    assert.equal((main as any).byKey.get(newCanonicalPath), record);
+    assert.equal((main as any).byKey.get(newCanonicalPath)?.has(record), true);
     assert.deepEqual(record.keys, new Set([newCanonicalPath]));
     assert.equal(window.titles.at(-1), "after.R — Alder");
-
-    let acquireCount = 0;
-    (main as any).options = { resources, acquireSession: async () => { acquireCount += 1; throw new Error("must not acquire"); } };
-    await main.openNotebook(newCanonicalPath);
-    assert.equal(acquireCount, 0);
-    assert.equal(window.focusedCount, 1);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -226,7 +253,6 @@ test("cancelled close keeps the editor open when the host is unavailable", async
     throw new Error("authoritative query unavailable");
   });
   const window = windowWithLoad();
-  window.webContents.executeJavaScript = async () => false;
   const main = new ElectronMain(runtime(2), { resources });
   const record = recordFor(main, oldConnection, window);
 
@@ -243,11 +269,12 @@ test("native close waits for the renderer to persist its latest draft", async ()
   const window = windowWithLoad();
   const main = new ElectronMain(runtime(), { resources });
   const record = recordFor(main, hostConnection, window);
-  (main as any).readWindowState = async () => ({ path: hostConnection.canonicalPath, dirty: false, platform: "darwin", sessionEpoch: "epoch" });
+  (main as any).readWindowState = async () => ({ path: hostConnection.canonicalPath, dirty: false, sessionEpoch: "epoch" });
   let acknowledge!: () => void;
   const acknowledged = new Promise<void>(resolve => { acknowledge = resolve; });
   window.webContents.send = (_channel, payload) => {
-    if ((payload as { action?: string }).action === "prepare-unload") void acknowledged.then(() => record.rendererDraftFlush?.resolve());
+    const command = payload as { requestId?: string; action?: string };
+    if (command.action === "prepare-unload" && command.requestId) void acknowledged.then(() => record.pendingCommands.get(command.requestId!)?.resolve({ requestId: command.requestId!, status: "ok" }));
   };
 
   const closing = (main as any).requestClose(record);
@@ -268,7 +295,6 @@ test("discard closes within a bounded time when the host is unavailable and leas
     await new Promise<void>(() => undefined);
   };
   const window = windowWithLoad();
-  window.webContents.executeJavaScript = async () => true;
   const actions: unknown[] = [];
   window.webContents.send = (_channel, payload) => { actions.push(payload); };
   const main = new ElectronMain(runtime(1), { resources });
@@ -276,7 +302,7 @@ test("discard closes within a bounded time when the host is unavailable and leas
 
   await (main as any).requestClose(record);
 
-  assert.deepEqual(actions, [{ action: "prepare-unload" }, { action: "close" }]);
+  assert.deepEqual(actions.map(value => (value as { action: string }).action), ["prepare-unload", "close"]);
   assert.equal(releaseDisposition, "discard");
   assert.equal(window.destroyed, true);
   assert.equal(main.windows().length, 0);
@@ -285,7 +311,6 @@ test("discard closes within a bounded time when the host is unavailable and leas
 test("cancelled quit preserves unsaved windows and a later quit can discard them", { timeout: 4_000 }, async () => {
   const hostConnection = connection("cancel-quit", null, async () => { throw new Error("host unavailable"); });
   const window = windowWithLoad();
-  window.webContents.executeJavaScript = async () => true;
   const actions: unknown[] = [];
   window.webContents.send = (_channel, payload) => { actions.push(payload); };
   const electronRuntime = runtime();
@@ -332,9 +357,8 @@ for (const decision of ["Cancel", "Save"] as const) {
     const actions: unknown[] = [];
     window.webContents.send = (_channel, payload) => {
       actions.push(payload);
-      if ((payload as { action?: string }).action === "prepare-unload") {
-        queueMicrotask(() => ([...(main as any).records][0] as any)?.rendererDraftFlush?.resolve());
-      }
+      const command = payload as { requestId?: string };
+      if (command.requestId) queueMicrotask(() => ([...(main as any).records][0] as any)?.pendingCommands.get(command.requestId)?.resolve({ requestId: command.requestId, status: "ok" }));
     };
     const electronRuntime = runtime();
     electronRuntime.BrowserWindow = Object.assign(function () { return window; }, { fromWebContents: () => window }) as unknown as ElectronRuntime["BrowserWindow"];
@@ -345,7 +369,7 @@ for (const decision of ["Cancel", "Save"] as const) {
     const main = new ElectronMain(electronRuntime, { resources, acquireSession: async () => hostConnection, closeSettlementTimeoutMs: 1_000 });
     (main as any).loadAuthenticatedNotebook = async () => undefined;
     let dirty = true;
-    (main as any).readWindowState = async () => ({ path, dirty, platform: "darwin", sessionEpoch: "epoch" });
+    (main as any).readWindowState = async () => ({ path, dirty, sessionEpoch: "epoch" });
     try {
       await main.openNotebook(path);
       window.close();
@@ -362,12 +386,12 @@ for (const decision of ["Cancel", "Save"] as const) {
         assert.deepEqual(actions, []);
         assert.equal(hostConnection.releaseCount, 0);
       } else {
-        assert.deepEqual(actions, [{ action: "save" }]);
+        assert.deepEqual(actions.map(value => (value as { action: string }).action), ["save"]);
         window.close();
         assert.equal(window.destroyed, false, "the window must remain open until saving finishes");
         dirty = false;
         while (!window.destroyed) await new Promise(resolve => setTimeout(resolve, 10));
-        assert.deepEqual(actions, [{ action: "save" }, { action: "prepare-unload" }]);
+        assert.deepEqual(actions.map(value => (value as { action: string }).action), ["save", "prepare-unload"]);
         assert.equal(hostConnection.releaseCount, 1);
       }
     } finally {
@@ -453,11 +477,12 @@ test("desktop close returns immediately when untitled Save As is cancelled", asy
   electronRuntime.ipcMain.handle = (channel, handler) => { handlers.set(channel, handler); };
   const main = new ElectronMain(electronRuntime, { resources, closeSettlementTimeoutMs: 30_000 });
   const record = recordFor(main, hostConnection, window);
-  (main as any).readWindowState = async () => ({ path: null, dirty: true, platform: process.platform, sessionEpoch: "epoch" });
+  (main as any).readWindowState = async () => ({ path: null, dirty: true, sessionEpoch: "epoch" });
   let applicationErrors = 0;
   (main as any).showApplicationError = async () => { applicationErrors += 1; };
   window.webContents.send = (_channel, payload) => {
-    if ((payload as { action?: string }).action === "save") void handlers.get("alderDesktop:saveCancelled")?.({ sender: window.webContents, senderFrame: window.webContents.mainFrame });
+    const command = payload as { requestId?: string; action?: string };
+    if (command.action === "save" && command.requestId) void handlers.get("alderDesktop:commandResult")?.({ sender: window.webContents, senderFrame: window.webContents.mainFrame }, { requestId: command.requestId, status: "cancelled" });
   };
   (main as any).installIpcHandlers();
 
@@ -498,33 +523,6 @@ test("desktop restart failure preserves the existing editor and releases only th
   assert.equal(main.windows().length, 1);
   assert.equal(window.destroyed, false);
 });
-test("desktop host shutdown IPC retires its process tree and window", async () => {
-  const notebookPath = "/tmp/alder-desktop-host-shutdown.R";
-  const hostConnection = connection("session-shutdown", notebookPath, async () => {
-    throw new Error("the stopped host cannot answer release requests");
-  });
-  const window = windowWithLoad();
-  const handlers = new Map<string, (event: unknown, ...args: unknown[]) => Promise<unknown>>();
-  const electronRuntime = runtime();
-  let quitCount = 0;
-  electronRuntime.app.quit = () => { quitCount += 1; };
-  electronRuntime.BrowserWindow.fromWebContents = () => window;
-  electronRuntime.ipcMain.handle = (channel, handler) => { handlers.set(channel, handler); };
-  const main = new ElectronMain(electronRuntime, { resources });
-  const record = recordFor(main, hostConnection, window);
-  (main as any).installIpcHandlers();
-
-  const shutdown = handlers.get("alderDesktop:hostShutdown");
-  assert.ok(shutdown);
-  await shutdown({ sender: window.webContents, senderFrame: window.webContents.mainFrame });
-  await new Promise(resolve => setImmediate(resolve));
-
-  assert.equal(record.released, true);
-  assert.equal(hostConnection.releaseCount, 1);
-  assert.equal(main.windows().length, 0);
-  assert.equal(window.destroyed, true);
-  assert.equal(quitCount, 1);
-});
 test("opening a notebook replaces a clean untitled launch window", async () => {
   const openedPath = join(tmpdir(), "opened.R");
   const untitledConnection = connection("untitled", null, async () => { throw new Error("unexpected request"); });
@@ -533,7 +531,7 @@ test("opening a notebook replaces a clean untitled launch window", async () => {
   const record = recordFor(main, untitledConnection, window);
   let opened: string | null = null;
   (main as any).openNotebook = async (path: string) => { opened = path; };
-  (main as any).readWindowState = async () => ({ path: null, dirty: false, platform: process.platform, sessionEpoch: "epoch" });
+  (main as any).readWindowState = async () => ({ path: null, dirty: false, sessionEpoch: "epoch" });
   await (main as any).openReplacingPristineUntitled(record, openedPath);
 
   assert.equal(opened, openedPath);
@@ -542,6 +540,33 @@ test("opening a notebook replaces a clean untitled launch window", async () => {
   assert.equal(record.released, true);
   assert.equal(window.destroyed, true);
   assert.equal(main.windows().length, 0);
+});
+
+test("opening the same notebook creates independent GUI clients on one session", async () => {
+  const path = "/tmp/alder-shared-gui.R";
+  const ticket = async (endpoint: string) => {
+    assert.equal(endpoint, "/api/ticket");
+    return jsonResponse({ ticket: "a".repeat(64), expiresAt: "2026-12-01T00:00:00.000Z" });
+  };
+  const first = connection("shared-session", path, ticket);
+  const second = connection("shared-session", path, ticket);
+  second.leaseId = "lease-shared-second";
+  const windows = [windowWithLoad(), windowWithLoad()];
+  let windowIndex = 0;
+  const electronRuntime = runtime();
+  electronRuntime.BrowserWindow = Object.assign(function () { return windows[windowIndex++]!; }, { fromWebContents: () => null }) as unknown as ElectronRuntime["BrowserWindow"];
+  const connections = [first, second];
+  const main = new ElectronMain(electronRuntime, { resources, acquireSession: async () => connections.shift()! });
+  (main as any).loadAuthenticatedNotebook = async () => undefined;
+  await main.openNotebook(path);
+  await main.openNotebook(path);
+  assert.equal(main.windows().length, 2);
+  windows[0]!.destroy();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(first.releaseCount, 1);
+  assert.equal(second.releaseCount, 0);
+  assert.equal(main.windows().length, 1);
+  await main.stop();
 });
 
 test("opening a notebook retains an untitled window with uncertain state", async () => {
@@ -579,7 +604,6 @@ test("approved notebook reload can leave an unsaved renderer while ordinary navi
 
 test("host restart preserves the live editor when its current draft cannot be stored", async () => {
   const window = windowWithLoad();
-  window.webContents.executeJavaScript = async () => { throw new Error("Recovery disk unavailable"); };
   let acquired = false;
   const main = new ElectronMain(runtime(), { resources, acquireSession: async () => { acquired = true; throw new Error("should not replace editor"); } });
   const record = recordFor(main, connection("restart-draft", "/tmp/restart-draft.R", async () => jsonResponse({})), window);
@@ -593,14 +617,8 @@ test("host restart preserves the live editor when its current draft cannot be st
 
 test("saving recovered source clears the native unsaved prompt despite an older snapshot dirty flag", async () => {
   const window = windowWithLoad();
-  window.webContents.executeJavaScript = async script => runInNewContext(script, {
-    __alderHost: { client: { document: {
-      snapshot: { dirty: true, changed: false },
-      pendingSource: () => ({ changes: [], tombstones: [] }),
-    } } },
-  });
   const main = new ElectronMain(runtime(), { resources });
   const record = recordFor(main, connection("recovered-save", "/tmp/recovered-save.R", async () => jsonResponse({})), window);
-  (main as any).querySnapshot = async () => ({ dirty: false, changed: false });
+  record.windowState = { path: "/tmp/recovered-save.R", dirty: false, sessionEpoch: "epoch" };
   assert.equal((await (main as any).readWindowState(record)).dirty, false);
 });

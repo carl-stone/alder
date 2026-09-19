@@ -83,7 +83,6 @@ async function startFixture(
       sessionKey: "server-test-session",
       canonicalPath: null,
       epoch: "server-test-epoch",
-      processNonce: "server-test-process",
       token: TOKEN,
       ...recoveryIdentity,
     },

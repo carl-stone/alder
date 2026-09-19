@@ -1,86 +1,78 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { NotebookBackend } from "../src/backend.js";
 import { RecoveryWriter } from "../src/recovery.js";
-import { acquireNotebookOwnership, acquireNotebookSession, SessionUnavailableError, type HostLaunchOptions } from "../src/sessions.js";
-import type { SessionConnection } from "../src/protocol.js";
+import { connectBackendSession, type AcquireNotebookSessionOptions, type HostLaunchOptions } from "../src/sessions.js";
+import { decodeHostQueryResultWire, encodeHostCommandWire, encodeHostQueryWire, hostQueryResultSchema, notebookQueryResultSchema, parseHostCommand, type SessionConnection } from "../src/protocol.js";
 import type { ApplicationResources } from "../src/resources.js";
 
-function sessionKey(path: string): string {
-  return createHash("sha256").update("path:" + path).digest("hex");
-}
-
-test("shared backend deduplicates simultaneous opens and owns distinct documents in one process", { timeout: 15_000 }, async context => {
+async function fixture(context: test.TestContext) {
   const root = await realpath(await mkdtemp(join(tmpdir(), "alder-shared-backend-")));
-  const runtimeDirectory = join(root, "runtime");
-  const rendererDirectory = join(root, "renderer");
-  const workerDirectory = join(root, "worker");
-  await mkdir(rendererDirectory);
-  await mkdir(workerDirectory);
+  const rendererDirectory = join(root, "renderer"), workerDirectory = join(root, "worker");
+  await mkdir(rendererDirectory); await mkdir(workerDirectory);
   await writeFile(join(rendererDirectory, "index.html"), "<!doctype html><title>Alder</title>");
-  const firstPath = join(root, "first.R"), secondPath = join(root, "second.R");
-  await writeFile(firstPath, "# %%\nfirst <- 1\n");
-  await writeFile(secondPath, "# %%\nsecond <- 2\n");
   const resources: ApplicationResources = {
-    root, rendererDirectory, workerDirectory,
-    nodeExecutable: process.execPath,
-    hostEntry: join(root, "host.mjs"),
-    cliLauncher: join(root, "alder"),
-    rLibraryDirectory: join(root, "no-r-library"),
-    arkExecutable: join(root, "no-ark"),
-    airExecutable: join(root, "no-air"),
-    electronEntry: null,
-    processSupervisorExecutable: "",
+    root, rendererDirectory, workerDirectory, nodeExecutable: process.execPath, hostEntry: join(root, "host.mjs"), cliLauncher: join(root, "alder"),
+    rLibraryDirectory: join(root, "no-r-library"), arkExecutable: join(root, "no-ark"), airExecutable: join(root, "no-air"), electronEntry: null, processSupervisorExecutable: "",
   };
-  // Keep the real recovery writer inside this fixture's temporary directory.
   const openRecovery = RecoveryWriter.open.bind(RecoveryWriter);
   context.mock.method(RecoveryWriter, "open", options => openRecovery({ ...options, rootDir: join(root, "recovery") }));
-  const backend = new NotebookBackend(resources);
-  const connections: SessionConnection[] = [];
-  const options = (path: string): HostLaunchOptions => ({
-    path, sessionKey: sessionKey(path), runtimeDirectory,
-    rscript: join(root, "no-Rscript"), deferStartup: true, runOnStartup: false,
-  });
-  const attach = async (path: string): Promise<SessionConnection> => {
-    const connection = await acquireNotebookSession({
-      path, runtimeDirectory, resources, startupTimeoutMs: 2_000,
-      launchHost: async () => { throw new Error("backend document should already be open"); },
-    });
-    connections.push(connection);
-    return connection;
-  };
-  try {
-    await Promise.all([backend.open(options(firstPath)), backend.open(options(firstPath)), backend.open(options(firstPath))]);
-    const first = await attach(firstPath);
-    const same = await attach(firstPath);
-    assert.equal(first.epoch, same.epoch);
-    assert.equal(first.sessionKey, same.sessionKey);
-    assert.notEqual(first.leaseId, same.leaseId);
-    await assert.rejects(acquireNotebookOwnership({ path: firstPath, runtimeDirectory }), SessionUnavailableError);
+  const options = (path: string): HostLaunchOptions => ({ path, sessionKey: createHash("sha256").update("path:" + path).digest("hex"), rscript: join(root, "no-Rscript"), deferStartup: true, runOnStartup: false });
+  const clientOptions = (path: string): AcquireNotebookSessionOptions => ({ path, resources });
+  const connect = async (backend: NotebookBackend, path: string): Promise<SessionConnection> => connectBackendSession(await backend.open(options(path)), clientOptions(path));
+  return { root, resources, options, connect };
+}
 
-    await backend.open(options(secondPath));
-    const second = await attach(secondPath);
-    const firstRegistry = JSON.parse(await readFile(join(runtimeDirectory, sessionKey(firstPath) + ".json"), "utf8"));
-    const secondRegistry = JSON.parse(await readFile(join(runtimeDirectory, sessionKey(secondPath) + ".json"), "utf8"));
-    assert.equal(firstRegistry.pid, process.pid);
-    assert.equal(secondRegistry.pid, firstRegistry.pid);
-    assert.notEqual(first.epoch, second.epoch);
-    assert.notEqual(first.origin, second.origin);
-    assert.deepEqual((await readdir(runtimeDirectory)).filter(name => name.endsWith(".json")).sort(), [sessionKey(firstPath) + ".json", sessionKey(secondPath) + ".json"].sort());
-    for (const [connection, path] of [[first, firstPath], [second, secondPath]] as const) {
-      const identityResponse = await connection.request("/api/identity");
-      assert.equal(identityResponse.status, 200);
-      const identity = await identityResponse.json() as { canonicalPath: string; documentReady: boolean };
-      assert.equal(identity.canonicalPath, path);
-      assert.equal(identity.documentReady, true);
-    }
-  } finally {
-    await Promise.allSettled(connections.map(connection => connection.release()));
+async function notebook(connection: SessionConnection) {
+  const query = { type: "notebook" } as const;
+  const response = await connection.request("/api/query", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(encodeHostQueryWire(query)) });
+  assert.equal(response.status, 200);
+  const envelope = hostQueryResultSchema.parse(decodeHostQueryResultWire(query, await response.json()));
+  return notebookQueryResultSchema.parse(envelope.result);
+}
+
+async function editFirstCell(connection: SessionConnection, body: string): Promise<void> {
+  const snapshot = await notebook(connection); const cell = snapshot.cells[0]!;
+  const command = parseHostCommand({ requestId: randomUUID(), clientId: connection.clientId, sessionEpoch: connection.epoch,
+    expectedDocumentRevision: snapshot.documentRevision, type: "transaction",
+    changes: [{ type: "edit", cell: { cellId: cell.id }, expectedRevision: cell.revision, cellType: "code", body: [body] }] });
+  const response = await connection.request("/api/command", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(encodeHostCommandWire(command)) });
+  const text = await response.text();
+  assert.equal(response.status, 200, text);
+  const result = JSON.parse(text) as { error?: unknown };
+  assert.equal(result.error, null);
+}
+
+test("same-notebook clients detach independently while different notebooks stay isolated", { timeout: 15_000 }, async context => {
+  const value = await fixture(context); const firstPath = join(value.root, "first.R"), secondPath = join(value.root, "second.R");
+  await writeFile(firstPath, "# %%\nfirst <- 1\n"); await writeFile(secondPath, "# %%\nsecond <- 2\n");
+  const backend = new NotebookBackend(value.resources); const clients: SessionConnection[] = [];
+  try {
+    const first = await value.connect(backend, firstPath); const peer = await value.connect(backend, firstPath); const second = await value.connect(backend, secondPath);
+    clients.push(first, peer, second);
+    assert.equal(first.epoch, peer.epoch); assert.notEqual(first.leaseId, peer.leaseId); assert.notEqual(first.epoch, second.epoch);
+    await first.release();
+    assert.equal((await notebook(peer)).path, firstPath);
+    assert.equal((await notebook(second)).path, secondPath);
+    await peer.release();
+    assert.equal((await notebook(second)).path, secondPath);
+  } finally { await Promise.allSettled(clients.map(client => client.release())); await backend.close(); await rm(value.root, { recursive: true, force: true }); }
+});
+
+test("a replacement backend restores acknowledged work from the document journal", { timeout: 15_000 }, async context => {
+  const value = await fixture(context); const path = join(value.root, "recovered.R"); await writeFile(path, "# %%\nx <- 1\n");
+  let backend = new NotebookBackend(value.resources); let connection: SessionConnection | undefined;
+  try {
+    connection = await value.connect(backend, path); await editFirstCell(connection, "x <- 42"); await connection.release(); connection = undefined;
     await backend.close();
-    await rm(root, { recursive: true, force: true });
-  }
+    backend = new NotebookBackend(value.resources); connection = await value.connect(backend, path);
+    const sourceQuery = { type: "source" } as const;
+    const response = await connection.request("/api/query", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(encodeHostQueryWire(sourceQuery)) });
+    const envelope = hostQueryResultSchema.parse(decodeHostQueryResultWire(sourceQuery, await response.json()));
+    assert.match(JSON.stringify(envelope.result), /x <- 42/);
+  } finally { await connection?.release().catch(() => {}); await backend.close(); await rm(value.root, { recursive: true, force: true }); }
 });

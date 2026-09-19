@@ -4,7 +4,7 @@ import { DesktopRecoveryStore } from "./desktop-recovery.js";
 import { IndexedDBRecoveryStore } from "./transport.js";
 import type { BrowserTransportOptions } from "./transport.js";
 import { NotebookView } from "./view.js";
-import type { HostEvent, PreloadApi, WindowAction } from "../protocol.js";
+import type { DesktopCommand, HostEvent, PreloadApi, WindowState } from "../protocol.js";
 import { blocksNotebookNavigation, notebookUrl } from "./url.js";
 
 let view: NotebookView | null = null;
@@ -60,29 +60,31 @@ function bindDesktopActions(next: BrowserNotebookClient): void {
       void desktop.openNotebook().catch((error) => view?.showError(error));
     });
   }
-  desktopUnsubscribe = desktop.onWindowAction((action: WindowAction) => {
-    let operation: Promise<unknown> | undefined;
-    if (action === "prepare-unload") {
-      operation = next.flushDraftPersistence().then(() => desktop.rendererDraftFlushed());
-    } else if (action === "save") {
-      operation = view?.saveForDesktop().then(async (outcome) => {
-        if (outcome === "cancelled") await desktop.saveCancelled();
-      });
-    } else if (action === "close") {
-      operation = (async () => {
-        await next.discardAndClose();
-        await desktop.hostShutdown();
-      })();
-    } else if (action === "save-as") {
-      operation = desktop.chooseSavePath().then((path) => path === null ? undefined : next.saveAs(path));
-    } else if (action === "run-all") {
-      operation = view?.runExplicit(() => next.startRunAll("all"));
-    } else if (action === "run-stale") {
-      operation = view?.runExplicit(() => next.startRunAll("stale"));
-    } else if (action === "select-r") {
-      operation = desktop.chooseRscript().then((path) => path === null ? undefined : next.selectR(path, true));
-    }
-    void operation?.catch((error) => view?.showError(error));
+  desktopUnsubscribe = desktop.onDesktopCommand((command: DesktopCommand) => {
+    const run = async (): Promise<"ok" | "cancelled"> => {
+      if (command.action === "prepare-unload") { await next.flushDraftPersistence(); return "ok"; }
+      if (command.action === "close") { await next.discardAndClose(); return "ok"; }
+      if (command.action === "save-as") {
+        const path = await desktop.chooseSavePath();
+        if (path === null) return "cancelled";
+        await next.saveAs(path);
+        return "ok";
+      }
+      if (command.action === "select-r") {
+        const path = await desktop.chooseRscript();
+        if (path === null) return "cancelled";
+        await next.selectR(path, true);
+        return "ok";
+      }
+      return await view?.performDesktopAction(command.action) ?? "ok";
+    };
+    void run().then(
+      status => desktop.completeDesktopCommand({ requestId: command.requestId, status }),
+      async error => {
+        view?.showError(error);
+        await desktop.completeDesktopCommand({ requestId: command.requestId, status: "error", message: error instanceof Error ? error.message : String(error) });
+      },
+    );
   });
 }
 
@@ -95,6 +97,10 @@ window.addEventListener("pagehide", () => {
 function bindClient(next: BrowserNotebookClient): void {
   client = next;
   next.subscribe((document, event, localCellKeys) => {
+    const desktop = (globalThis as typeof globalThis & { alderDesktop?: PreloadApi }).alderDesktop;
+    const pending = document.pendingSource();
+    const state: WindowState = { path: document.snapshot.path, dirty: document.snapshot.dirty || document.snapshot.changed || pending.changes.length > 0, sessionEpoch: document.epoch };
+    void desktop?.updateWindowState(state).catch((error) => view?.showError(error));
     if (!event) {
       flushRenders();
       view?.render(document, event, localCellKeys);

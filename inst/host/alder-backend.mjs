@@ -4009,10 +4009,10 @@ var require_resolve_block_map = __commonJS({
       let offset = bm.offset;
       let commentEnd = null;
       for (const collItem of bm.items) {
-        const { start, key: key2, sep: sep4, value } = collItem;
+        const { start, key: key2, sep: sep3, value } = collItem;
         const keyProps = resolveProps.resolveProps(start, {
           indicator: "explicit-key-ind",
-          next: key2 ?? sep4?.[0],
+          next: key2 ?? sep3?.[0],
           offset,
           onError,
           parentIndent: bm.indent,
@@ -4026,7 +4026,7 @@ var require_resolve_block_map = __commonJS({
             else if ("indent" in key2 && key2.indent !== bm.indent)
               onError(offset, "BAD_INDENT", startColMsg);
           }
-          if (!keyProps.anchor && !keyProps.tag && !sep4) {
+          if (!keyProps.anchor && !keyProps.tag && !sep3) {
             commentEnd = keyProps.end;
             if (keyProps.comment) {
               if (map2.comment)
@@ -4050,7 +4050,7 @@ var require_resolve_block_map = __commonJS({
         ctx.atKey = false;
         if (utilMapIncludes.mapIncludes(ctx, map2.items, keyNode))
           onError(keyStart, "DUPLICATE_KEY", "Map keys must be unique");
-        const valueProps = resolveProps.resolveProps(sep4 ?? [], {
+        const valueProps = resolveProps.resolveProps(sep3 ?? [], {
           indicator: "map-value-ind",
           next: value,
           offset: keyNode.range[2],
@@ -4066,7 +4066,7 @@ var require_resolve_block_map = __commonJS({
             if (ctx.options.strict && keyProps.start < valueProps.found.offset - 1024)
               onError(keyNode.range, "KEY_OVER_1024_CHARS", "The : indicator must be at most 1024 chars after the start of an implicit block mapping key");
           }
-          const valueNode = value ? composeNode(ctx, value, valueProps, onError) : composeEmptyNode(ctx, offset, sep4, null, valueProps, onError);
+          const valueNode = value ? composeNode(ctx, value, valueProps, onError) : composeEmptyNode(ctx, offset, sep3, null, valueProps, onError);
           if (ctx.schema.compat)
             utilFlowIndentCheck.flowIndentCheck(bm.indent, value, onError);
           offset = valueNode.range[2];
@@ -4157,7 +4157,7 @@ var require_resolve_end = __commonJS({
       let comment = "";
       if (end) {
         let hasSpace = false;
-        let sep4 = "";
+        let sep3 = "";
         for (const token of end) {
           const { source, type } = token;
           switch (type) {
@@ -4171,13 +4171,13 @@ var require_resolve_end = __commonJS({
               if (!comment)
                 comment = cb;
               else
-                comment += sep4 + cb;
-              sep4 = "";
+                comment += sep3 + cb;
+              sep3 = "";
               break;
             }
             case "newline":
               if (comment)
-                sep4 += source;
+                sep3 += source;
               hasSpace = true;
               break;
             default:
@@ -4220,18 +4220,18 @@ var require_resolve_flow_collection = __commonJS({
       let offset = fc.offset + fc.start.source.length;
       for (let i = 0; i < fc.items.length; ++i) {
         const collItem = fc.items[i];
-        const { start, key: key2, sep: sep4, value } = collItem;
+        const { start, key: key2, sep: sep3, value } = collItem;
         const props = resolveProps.resolveProps(start, {
           flow: fcName,
           indicator: "explicit-key-ind",
-          next: key2 ?? sep4?.[0],
+          next: key2 ?? sep3?.[0],
           offset,
           onError,
           parentIndent: fc.indent,
           startOnNewline: false
         });
         if (!props.found) {
-          if (!props.anchor && !props.tag && !sep4 && !value) {
+          if (!props.anchor && !props.tag && !sep3 && !value) {
             if (i === 0 && props.comma)
               onError(props.comma, "UNEXPECTED_TOKEN", `Unexpected , in ${fcName}`);
             else if (i < fc.items.length - 1)
@@ -4285,8 +4285,8 @@ var require_resolve_flow_collection = __commonJS({
             }
           }
         }
-        if (!isMap && !sep4 && !props.found) {
-          const valueNode = value ? composeNode(ctx, value, props, onError) : composeEmptyNode(ctx, props.end, sep4, null, props, onError);
+        if (!isMap && !sep3 && !props.found) {
+          const valueNode = value ? composeNode(ctx, value, props, onError) : composeEmptyNode(ctx, props.end, sep3, null, props, onError);
           coll.items.push(valueNode);
           offset = valueNode.range[2];
           if (isBlock(value))
@@ -4298,7 +4298,7 @@ var require_resolve_flow_collection = __commonJS({
           if (isBlock(key2))
             onError(keyNode.range, "BLOCK_IN_FLOW", blockMsg);
           ctx.atKey = false;
-          const valueProps = resolveProps.resolveProps(sep4 ?? [], {
+          const valueProps = resolveProps.resolveProps(sep3 ?? [], {
             flow: fcName,
             indicator: "map-value-ind",
             next: value,
@@ -4309,8 +4309,8 @@ var require_resolve_flow_collection = __commonJS({
           });
           if (valueProps.found) {
             if (!isMap && !props.found && ctx.options.strict) {
-              if (sep4)
-                for (const st of sep4) {
+              if (sep3)
+                for (const st of sep3) {
                   if (st === valueProps.found)
                     break;
                   if (st.type === "newline") {
@@ -4327,7 +4327,7 @@ var require_resolve_flow_collection = __commonJS({
             else
               onError(valueProps.start, "MISSING_CHAR", `Missing , or : between ${fcName} items`);
           }
-          const valueNode = value ? composeNode(ctx, value, valueProps, onError) : valueProps.found ? composeEmptyNode(ctx, valueProps.end, sep4, null, valueProps, onError) : null;
+          const valueNode = value ? composeNode(ctx, value, valueProps, onError) : valueProps.found ? composeEmptyNode(ctx, valueProps.end, sep3, null, valueProps, onError) : null;
           if (valueNode) {
             if (isBlock(value))
               onError(valueNode.range, "BLOCK_IN_FLOW", blockMsg);
@@ -4507,7 +4507,7 @@ var require_resolve_block_scalar = __commonJS({
           chompStart = i + 1;
       }
       let value = "";
-      let sep4 = "";
+      let sep3 = "";
       let prevMoreIndented = false;
       for (let i = 0; i < contentStart; ++i)
         value += lines[i][0].slice(trimIndent) + "\n";
@@ -4524,24 +4524,24 @@ var require_resolve_block_scalar = __commonJS({
           indent = "";
         }
         if (type === Scalar.Scalar.BLOCK_LITERAL) {
-          value += sep4 + indent.slice(trimIndent) + content;
-          sep4 = "\n";
+          value += sep3 + indent.slice(trimIndent) + content;
+          sep3 = "\n";
         } else if (indent.length > trimIndent || content[0] === "	") {
-          if (sep4 === " ")
-            sep4 = "\n";
-          else if (!prevMoreIndented && sep4 === "\n")
-            sep4 = "\n\n";
-          value += sep4 + indent.slice(trimIndent) + content;
-          sep4 = "\n";
+          if (sep3 === " ")
+            sep3 = "\n";
+          else if (!prevMoreIndented && sep3 === "\n")
+            sep3 = "\n\n";
+          value += sep3 + indent.slice(trimIndent) + content;
+          sep3 = "\n";
           prevMoreIndented = true;
         } else if (content === "") {
-          if (sep4 === "\n")
+          if (sep3 === "\n")
             value += "\n";
           else
-            sep4 = "\n";
+            sep3 = "\n";
         } else {
-          value += sep4 + content;
-          sep4 = " ";
+          value += sep3 + content;
+          sep3 = " ";
           prevMoreIndented = false;
         }
       }
@@ -4723,25 +4723,25 @@ var require_resolve_flow_scalar = __commonJS({
       if (!match)
         return source;
       let res = match[1];
-      let sep4 = " ";
+      let sep3 = " ";
       let pos = first.lastIndex;
       line.lastIndex = pos;
       while (match = line.exec(source)) {
         if (match[1] === "") {
-          if (sep4 === "\n")
-            res += sep4;
+          if (sep3 === "\n")
+            res += sep3;
           else
-            sep4 = "\n";
+            sep3 = "\n";
         } else {
-          res += sep4 + match[1];
-          sep4 = " ";
+          res += sep3 + match[1];
+          sep3 = " ";
         }
         pos = line.lastIndex;
       }
       const last = /[ \t]*(.*)/sy;
       last.lastIndex = pos;
       match = last.exec(source);
-      return res + sep4 + (match?.[1] ?? "");
+      return res + sep3 + (match?.[1] ?? "");
     }
     function doubleQuotedValue(source, onError) {
       let res = "";
@@ -5551,14 +5551,14 @@ var require_cst_stringify = __commonJS({
         }
       }
     }
-    function stringifyItem({ start, key: key2, sep: sep4, value }) {
+    function stringifyItem({ start, key: key2, sep: sep3, value }) {
       let res = "";
       for (const st of start)
         res += st.source;
       if (key2)
         res += stringifyToken(key2);
-      if (sep4)
-        for (const st of sep4)
+      if (sep3)
+        for (const st of sep3)
           res += st.source;
       if (value)
         res += stringifyToken(value);
@@ -6725,18 +6725,18 @@ var require_parser = __commonJS({
         if (this.type === "map-value-ind") {
           const prev = getPrevProps(this.peek(2));
           const start = getFirstKeyStartProps(prev);
-          let sep4;
+          let sep3;
           if (scalar.end) {
-            sep4 = scalar.end;
-            sep4.push(this.sourceToken);
+            sep3 = scalar.end;
+            sep3.push(this.sourceToken);
             delete scalar.end;
           } else
-            sep4 = [this.sourceToken];
+            sep3 = [this.sourceToken];
           const map2 = {
             type: "block-map",
             offset: scalar.offset,
             indent: scalar.indent,
-            items: [{ start, key: scalar, sep: sep4 }]
+            items: [{ start, key: scalar, sep: sep3 }]
           };
           this.onKeyLine = true;
           this.stack[this.stack.length - 1] = map2;
@@ -6889,15 +6889,15 @@ var require_parser = __commonJS({
                 } else if (isFlowToken(it.key) && !includesToken(it.sep, "newline")) {
                   const start2 = getFirstKeyStartProps(it.start);
                   const key2 = it.key;
-                  const sep4 = it.sep;
-                  sep4.push(this.sourceToken);
+                  const sep3 = it.sep;
+                  sep3.push(this.sourceToken);
                   delete it.key;
                   delete it.sep;
                   this.stack.push({
                     type: "block-map",
                     offset: this.offset,
                     indent: this.indent,
-                    items: [{ start: start2, key: key2, sep: sep4 }]
+                    items: [{ start: start2, key: key2, sep: sep3 }]
                   });
                 } else if (start.length > 0) {
                   it.sep = it.sep.concat(start, this.sourceToken);
@@ -7091,13 +7091,13 @@ var require_parser = __commonJS({
             const prev = getPrevProps(parent);
             const start = getFirstKeyStartProps(prev);
             fixFlowSeqItems(fc);
-            const sep4 = fc.end.splice(1, fc.end.length);
-            sep4.push(this.sourceToken);
+            const sep3 = fc.end.splice(1, fc.end.length);
+            sep3.push(this.sourceToken);
             const map2 = {
               type: "block-map",
               offset: fc.offset,
               indent: fc.indent,
-              items: [{ start, key: fc, sep: sep4 }]
+              items: [{ start, key: fc, sep: sep3 }]
             };
             this.onKeyLine = true;
             this.stack[this.stack.length - 1] = map2;
@@ -11483,9 +11483,9 @@ var require_picocolors = __commonJS({
     var argv = p.argv || [];
     var env2 = p.env || {};
     var isColorSupported = !(!!env2.NO_COLOR || argv.includes("--no-color")) && (!!env2.FORCE_COLOR || argv.includes("--color") || p.platform === "win32" || (p.stdout || {}).isTTY && env2.TERM !== "dumb" || !!env2.CI);
-    var formatter = (open9, close, replace3 = open9) => (input2) => {
-      let string5 = "" + input2, index = string5.indexOf(close, open9.length);
-      return ~index ? open9 + replaceClose(string5, close, replace3, index) + close : open9 + string5 + close;
+    var formatter = (open8, close, replace3 = open8) => (input2) => {
+      let string5 = "" + input2, index = string5.indexOf(close, open8.length);
+      return ~index ? open8 + replaceClose(string5, close, replace3, index) + close : open8 + string5 + close;
     };
     var replaceClose = (string5, close, replace3, index) => {
       let result = "", cursor = 0;
@@ -15197,7 +15197,7 @@ var require_previous_map = __commonJS({
   "../../../../../alder/host/node_modules/postcss/lib/previous-map.js"(exports, module) {
     "use strict";
     var { existsSync, readFileSync, realpathSync } = __require("fs");
-    var { dirname: dirname12, isAbsolute: isAbsolute6, join: join21, relative: relative4, sep: sep4 } = __require("path");
+    var { dirname: dirname12, isAbsolute: isAbsolute6, join: join21, relative: relative4, sep: sep3 } = __require("path");
     var { SourceMapConsumer, SourceMapGenerator } = require_source_map();
     function realPath(path3) {
       try {
@@ -15271,7 +15271,7 @@ var require_previous_map = __commonJS({
           if (!/\.map$/i.test(path3)) return void 0;
           if (!cssFile) return void 0;
           let rel = relative4(realPath(dirname12(cssFile)), realPath(path3));
-          if (rel === ".." || rel.startsWith(".." + sep4) || isAbsolute6(rel)) {
+          if (rel === ".." || rel.startsWith(".." + sep3) || isAbsolute6(rel)) {
             return void 0;
           }
         }
@@ -15704,8 +15704,8 @@ var require_rule = __commonJS({
       }
       set selectors(values) {
         let match = this.selector ? this.selector.match(/,\s*/) : null;
-        let sep4 = match ? match[0] : "," + this.raw("between", "beforeOpen");
-        this.selector = values.join(sep4);
+        let sep3 = match ? match[0] : "," + this.raw("between", "beforeOpen");
+        this.selector = values.join(sep3);
       }
       constructor(defaults) {
         super(defaults);
@@ -15817,12 +15817,12 @@ var require_fromJSON = __commonJS({
 var require_map_generator = __commonJS({
   "../../../../../alder/host/node_modules/postcss/lib/map-generator.js"(exports, module) {
     "use strict";
-    var { dirname: dirname12, relative: relative4, resolve: resolve15, sep: sep4 } = __require("path");
+    var { dirname: dirname12, relative: relative4, resolve: resolve15, sep: sep3 } = __require("path");
     var { SourceMapConsumer, SourceMapGenerator } = require_source_map();
     var { pathToFileURL: pathToFileURL2 } = __require("url");
     var Input = require_input();
     var sourceMapAvailable = Boolean(SourceMapConsumer && SourceMapGenerator);
-    var pathAvailable = Boolean(dirname12 && resolve15 && relative4 && sep4);
+    var pathAvailable = Boolean(dirname12 && resolve15 && relative4 && sep3);
     var MapGenerator = class {
       constructor(stringify, root, opts, cssString) {
         this.stringify = stringify;
@@ -16127,7 +16127,7 @@ var require_map_generator = __commonJS({
       toUrl(path3) {
         let cached2 = this.memoizedURLs.get(path3);
         if (cached2) return cached2;
-        if (sep4 === "\\") {
+        if (sep3 === "\\") {
           path3 = path3.replace(/\\/g, "/");
         }
         let url2 = encodeURI(path3).replace(/[#?]/g, encodeURIComponent);
@@ -16186,7 +16186,7 @@ var require_parser2 = __commonJS({
         let prev;
         let shift;
         let last = false;
-        let open9 = false;
+        let open8 = false;
         let params = [];
         let brackets = [];
         while (!this.tokenizer.endOfFile()) {
@@ -16206,7 +16206,7 @@ var require_parser2 = __commonJS({
               this.semicolon = true;
               break;
             } else if (type === "{") {
-              open9 = true;
+              open8 = true;
               break;
             } else if (type === "}") {
               if (params.length > 0) {
@@ -16248,7 +16248,7 @@ var require_parser2 = __commonJS({
           node2.raws.afterName = "";
           node2.params = "";
         }
-        if (open9) {
+        if (open8) {
           node2.nodes = [];
           this.current = node2;
         }
@@ -22469,7 +22469,7 @@ var require_stream = __commonJS({
       };
       duplex._final = function(callback) {
         if (ws.readyState === ws.CONNECTING) {
-          ws.once("open", function open9() {
+          ws.once("open", function open8() {
             duplex._final(callback);
           });
           return;
@@ -22490,7 +22490,7 @@ var require_stream = __commonJS({
       };
       duplex._write = function(chunk, encoding, callback) {
         if (ws.readyState === ws.CONNECTING) {
-          ws.once("open", function open9() {
+          ws.once("open", function open8() {
             duplex._write(chunk, encoding, callback);
           });
           return;
@@ -31538,12 +31538,12 @@ var require_CSSValueExpression = __commonJS({
         return false;
       }
     };
-    CSSOM.CSSValueExpression.prototype._parseJSString = function(token, idx, sep4) {
-      var endIdx = this._findMatchedIdx(token, idx, sep4), text2;
+    CSSOM.CSSValueExpression.prototype._parseJSString = function(token, idx, sep3) {
+      var endIdx = this._findMatchedIdx(token, idx, sep3), text2;
       if (endIdx === -1) {
         return false;
       } else {
-        text2 = token.substring(idx, endIdx + sep4.length);
+        text2 = token.substring(idx, endIdx + sep3.length);
         return {
           idx: endIdx,
           text: text2
@@ -31583,15 +31583,15 @@ var require_CSSValueExpression = __commonJS({
       if (!isLegal) {
         return false;
       } else {
-        var sep4 = "/";
-        return this._parseJSString(token, idx, sep4);
+        var sep3 = "/";
+        return this._parseJSString(token, idx, sep3);
       }
     };
-    CSSOM.CSSValueExpression.prototype._findMatchedIdx = function(token, idx, sep4) {
+    CSSOM.CSSValueExpression.prototype._findMatchedIdx = function(token, idx, sep3) {
       var startIdx = idx, endIdx;
       var NOT_FOUND = -1;
       while (true) {
-        endIdx = token.indexOf(sep4, startIdx + 1);
+        endIdx = token.indexOf(sep3, startIdx + 1);
         if (endIdx === -1) {
           endIdx = NOT_FOUND;
           break;
@@ -39345,7 +39345,7 @@ var require_polyfills = __commonJS({
       }
       if (platform === "win32") {
         fs.rename = typeof fs.rename !== "function" ? fs.rename : (function(fs$rename) {
-          function rename7(from, to, cb) {
+          function rename6(from, to, cb) {
             var start = Date.now();
             var backoff = 0;
             fs$rename(from, to, function CB(er) {
@@ -39365,8 +39365,8 @@ var require_polyfills = __commonJS({
               if (cb) cb(er);
             });
           }
-          if (Object.setPrototypeOf) Object.setPrototypeOf(rename7, fs$rename);
-          return rename7;
+          if (Object.setPrototypeOf) Object.setPrototypeOf(rename6, fs$rename);
+          return rename6;
         })(fs.rename);
       }
       fs.read = typeof fs.read !== "function" ? fs.read : (function(fs$read) {
@@ -39787,8 +39787,8 @@ var require_graceful_fs = __commonJS({
         }
       }
       var fs$writeFile = fs2.writeFile;
-      fs2.writeFile = writeFile9;
-      function writeFile9(path3, data, options, cb) {
+      fs2.writeFile = writeFile8;
+      function writeFile8(path3, data, options, cb) {
         if (typeof options === "function")
           cb = options, options = null;
         return go$writeFile(path3, data, options, cb);
@@ -39947,7 +39947,7 @@ var require_graceful_fs = __commonJS({
       }
       function ReadStream$open() {
         var that = this;
-        open9(that.path, that.flags, that.mode, function(err, fd) {
+        open8(that.path, that.flags, that.mode, function(err, fd) {
           if (err) {
             if (that.autoClose)
               that.destroy();
@@ -39967,7 +39967,7 @@ var require_graceful_fs = __commonJS({
       }
       function WriteStream$open() {
         var that = this;
-        open9(that.path, that.flags, that.mode, function(err, fd) {
+        open8(that.path, that.flags, that.mode, function(err, fd) {
           if (err) {
             that.destroy();
             that.emit("error", err);
@@ -39984,8 +39984,8 @@ var require_graceful_fs = __commonJS({
         return new fs2.WriteStream(path3, options);
       }
       var fs$open = fs2.open;
-      fs2.open = open9;
-      function open9(path3, flags, mode, cb) {
+      fs2.open = open8;
+      function open8(path3, flags, mode, cb) {
         if (typeof mode === "function")
           cb = mode, mode = null;
         return go$open(path3, flags, mode, cb);
@@ -40823,27 +40823,27 @@ var require_adapter = __commonJS({
 var require_proper_lockfile = __commonJS({
   "../../../../../alder/host/node_modules/proper-lockfile/index.js"(exports, module) {
     "use strict";
-    var lockfile3 = require_lockfile();
+    var lockfile2 = require_lockfile();
     var { toPromise, toSync, toSyncOptions } = require_adapter();
     async function lock(file2, options) {
-      const release = await toPromise(lockfile3.lock)(file2, options);
+      const release = await toPromise(lockfile2.lock)(file2, options);
       return toPromise(release);
     }
     function lockSync(file2, options) {
-      const release = toSync(lockfile3.lock)(file2, toSyncOptions(options));
+      const release = toSync(lockfile2.lock)(file2, toSyncOptions(options));
       return toSync(release);
     }
     function unlock(file2, options) {
-      return toPromise(lockfile3.unlock)(file2, options);
+      return toPromise(lockfile2.unlock)(file2, options);
     }
     function unlockSync(file2, options) {
-      return toSync(lockfile3.unlock)(file2, toSyncOptions(options));
+      return toSync(lockfile2.unlock)(file2, toSyncOptions(options));
     }
     function check2(file2, options) {
-      return toPromise(lockfile3.check)(file2, options);
+      return toPromise(lockfile2.check)(file2, options);
     }
     function checkSync(file2, options) {
-      return toSync(lockfile3.check)(file2, toSyncOptions(options));
+      return toSync(lockfile2.check)(file2, toSyncOptions(options));
     }
     module.exports = lock;
     module.exports.lock = lock;
@@ -40857,7 +40857,7 @@ var require_proper_lockfile = __commonJS({
 
 // src/backend.ts
 import { createServer as createServer2 } from "node:net";
-import { chmod as chmod6, mkdir as mkdir11 } from "node:fs/promises";
+import { chmod as chmod5, mkdir as mkdir10, readFile as readFile11 } from "node:fs/promises";
 import { dirname as dirname11, resolve as resolve14 } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -60325,7 +60325,7 @@ var ApplicationPreferences = class _ApplicationPreferences {
 
 // src/application.ts
 import { randomUUID as randomUUID14 } from "node:crypto";
-import { mkdtemp as mkdtemp5, realpath as realpath11, rm as rm10 } from "node:fs/promises";
+import { mkdtemp as mkdtemp5, realpath as realpath11, rm as rm9 } from "node:fs/promises";
 import { basename as basename8, dirname as dirname10, join as join20, resolve as resolve13 } from "node:path";
 import { tmpdir as tmpdir6 } from "node:os";
 
@@ -63260,8 +63260,6 @@ var outputRecordShape = external_exports.object({ id: idSchema, sessionEpoch: id
   }
 });
 var outputRecordSchema = protocolJsonSchema.pipe(outputRecordShape);
-var sessionIdentitySchema = external_exports.object({ sessionKey: idSchema, canonicalPath: pathSchema.nullable(), origin: boundedUtf8StringSchema(2048, true), browserOrigin: boundedUtf8StringSchema(2048, true), epoch: idSchema, processNonce: idSchema }).strict();
-var sessionRegistryMetadataSchema = external_exports.object({ state: external_exports.enum(["starting", "ready", "stopping"]), pid: positiveIntegerSchema, processNonce: idSchema, continuityProof: idSchema, startIdentity: idSchema, canonicalPath: pathSchema.nullable(), origin: boundedUtf8StringSchema(2048, true), epoch: idSchema, token: external_exports.string().regex(/^[0-9a-f]{64}$/), protocol: external_exports.literal(HOST_PROTOCOL), address: external_exports.object({ host: boundedUtf8StringSchema(256, true), port: external_exports.number().int().min(0).max(65535).safe(), origin: boundedUtf8StringSchema(2048, true), browserOrigin: boundedUtf8StringSchema(2048, true) }).strict().optional() }).strict();
 var sessionLeaseSchema = external_exports.object({ leaseId: idSchema, clientId: idSchema, epoch: idSchema }).strict();
 var attachLeaseRequestSchema = external_exports.object({ action: external_exports.literal("attach") }).strict();
 var leaseActionRequestSchema = external_exports.object({ action: external_exports.enum(["heartbeat", "release"]), leaseId: idSchema, disposition: external_exports.enum(["normal", "discard"]).optional() }).strict().superRefine((value, context) => {
@@ -63271,11 +63269,11 @@ var ticketMintRequestSchema = external_exports.object({ origin: boundedUtf8Strin
 var ticketMintResponseSchema = external_exports.object({ ticket: idSchema, expiresAt: boundedUtf8StringSchema(256, true) }).strict();
 var ticketExchangeRequestSchema = external_exports.object({ ticket: idSchema }).strict();
 var ticketExchangeResponseSchema = external_exports.object({ leaseId: idSchema, clientId: idSchema, epoch: idSchema, continuityProof: idSchema, csrf: idSchema, recoveryId: idSchema.optional() }).strict();
-var hostIdentitySchema = external_exports.object({ protocol: external_exports.literal(HOST_PROTOCOL), epoch: idSchema, processNonce: idSchema, continuityProof: idSchema, sessionKey: idSchema, canonicalPath: pathSchema.nullable(), capabilities: external_exports.array(boundedUtf8StringSchema(256, true)).max(MAX_PROTOCOL_COLLECTION_ITEMS), origin: boundedUtf8StringSchema(2048, true), browserOrigin: boundedUtf8StringSchema(2048, true), address: external_exports.object({ host: boundedUtf8StringSchema(256, true), port: external_exports.number().int().min(0).max(65535).safe(), origin: boundedUtf8StringSchema(2048, true), browserOrigin: boundedUtf8StringSchema(2048, true) }).strict().optional(), leaseId: idSchema.optional(), clientId: idSchema.optional(), documentReady: external_exports.boolean(), configuration: hostConfigurationSchema }).strict();
-var sessionConnectionSchema = external_exports.object({ sessionKey: idSchema, canonicalPath: pathSchema.nullable(), origin: boundedUtf8StringSchema(2048, true), browserOrigin: boundedUtf8StringSchema(2048, true), epoch: idSchema, processNonce: idSchema, continuityProof: idSchema, leaseId: idSchema, clientId: idSchema, capabilities: external_exports.array(boundedUtf8StringSchema(256, true)).max(MAX_PROTOCOL_COLLECTION_ITEMS) }).strict();
+var hostIdentitySchema = external_exports.object({ protocol: external_exports.literal(HOST_PROTOCOL), epoch: idSchema, continuityProof: idSchema, sessionKey: idSchema, canonicalPath: pathSchema.nullable(), capabilities: external_exports.array(boundedUtf8StringSchema(256, true)).max(MAX_PROTOCOL_COLLECTION_ITEMS), origin: boundedUtf8StringSchema(2048, true), browserOrigin: boundedUtf8StringSchema(2048, true), address: external_exports.object({ host: boundedUtf8StringSchema(256, true), port: external_exports.number().int().min(0).max(65535).safe(), origin: boundedUtf8StringSchema(2048, true), browserOrigin: boundedUtf8StringSchema(2048, true) }).strict().optional(), leaseId: idSchema.optional(), clientId: idSchema.optional(), documentReady: external_exports.boolean(), configuration: hostConfigurationSchema }).strict();
 var windowActionSchema = external_exports.enum(["new", "open", "save", "save-as", "publish", "run-cell", "run-all", "run-stale", "interrupt", "restart", "settings", "select-r", "close", "prepare-unload"]);
-var windowActionMessageSchema = external_exports.object({ action: windowActionSchema }).strict();
-var windowStateSchema = external_exports.object({ path: pathSchema.nullable(), dirty: external_exports.boolean(), platform: boundedUtf8StringSchema(64, true), sessionEpoch: idSchema }).strict();
+var desktopCommandSchema = external_exports.object({ requestId: idSchema, action: windowActionSchema }).strict();
+var desktopCommandResultSchema = external_exports.object({ requestId: idSchema, status: external_exports.enum(["ok", "cancelled", "error"]), message: boundedUtf8StringSchema(8192, true).optional() }).strict();
+var windowStateSchema = external_exports.object({ path: pathSchema.nullable(), dirty: external_exports.boolean(), sessionEpoch: idSchema }).strict();
 var desktopRecoveryRequestSchema = external_exports.object({
   recoveryId: external_exports.string().regex(/^[A-Za-z0-9_-]{1,128}$/),
   action: external_exports.enum(["read", "write", "remove"]),
@@ -66589,8 +66587,8 @@ var REBuilder = class {
   escapeRE(str) {
     return str.replace(/[.?*+^$[\]\\(){}|-]/g, "\\$&");
   }
-  nestedPairRE(open9, close, depth = 4) {
-    const openRE = this.escapeRE(open9);
+  nestedPairRE(open8, close, depth = 4) {
+    const openRE = this.escapeRE(open8);
     const closeRE = this.escapeRE(close);
     const atom = `(?:(?!${this.src_ZCc}|${openRE}|${closeRE}).)`;
     let pair = `${openRE}${atom}{0,1000}${closeRE}`;
@@ -66735,9 +66733,9 @@ var tlds_default = "biz|com|edu|gov|net|org|pro|web|xxx|aero|asia|coop|info|muse
 function unpackTlds() {
   const result = tlds_default.split("|");
   tlds_2ch.split("|").forEach((item) => {
-    const sep4 = item.indexOf(":");
-    const prefix = item.slice(0, sep4);
-    for (const suffix of item.slice(sep4 + 1)) result.push(prefix + suffix);
+    const sep3 = item.indexOf(":");
+    const prefix = item.slice(0, sep3);
+    for (const suffix of item.slice(sep3 + 1)) result.push(prefix + suffix);
   });
   return result;
 }
@@ -69535,9 +69533,9 @@ function linkify(state, silent) {
   while (protoStart > protoMin && isSchemeChar(state.src.charCodeAt(protoStart - 1))) protoStart--;
   if (protoStart === pos || !isAsciiAlpha(state.src.charCodeAt(protoStart))) return false;
   const protoLength = pos - protoStart;
-  const link4 = state.md.linkify.matchAtStart(state.src.slice(protoStart));
-  if (!link4) return false;
-  let url2 = link4.url;
+  const link3 = state.md.linkify.matchAtStart(state.src.slice(protoStart));
+  if (!link3) return false;
+  let url2 = link3.url;
   if (url2.length <= protoLength) return false;
   let urlEnd = url2.length;
   while (urlEnd > 0 && url2.charCodeAt(urlEnd - 1) === 42) urlEnd--;
@@ -78392,11 +78390,6 @@ async function securePrivateDirectory(path3, options = {}) {
   await chmod(inspection.path, DIRECTORY_MODE);
   await verifyPrivateDirectory(inspection.path, options);
 }
-async function securePrivateFile(path3, options = {}) {
-  const inspection = await inspectExisting(path3, "file", options);
-  await chmod(inspection.path, FILE_MODE);
-  await verifyPrivateFile(inspection.path, options);
-}
 async function ensurePrivateDirectory(path3, options = {}) {
   const inspection = await inspectPath(path3);
   if (inspection.exists) {
@@ -78474,35 +78467,6 @@ async function writePrivateFile(path3, bytes, options = {}) {
   } catch (error61) {
     if (handle !== void 0) await handle.close().catch(() => void 0);
     await rm2(temporary, { force: true }).catch(() => void 0);
-    throw error61;
-  }
-}
-async function ensurePrivateFile(path3, options = {}) {
-  const inspection = await inspectPath(path3, null);
-  const parent = dirname4(inspection.path);
-  await ensurePrivateDirectory(parent, options);
-  if (inspection.exists) {
-    await verifyPrivateFile(inspection.path, options);
-    return;
-  }
-  const flags = constants2.O_WRONLY | constants2.O_CREAT | constants2.O_EXCL | (constants2.O_NOFOLLOW ?? 0);
-  let handle;
-  try {
-    handle = await openFile(inspection.path, flags, FILE_MODE);
-    const info = await handle.stat();
-    validatePrivateStats(info, "file", inspection.path);
-    await handle.sync();
-    await handle.close();
-    handle = void 0;
-    await securePrivateFile(inspection.path, options);
-    await syncDirectory2(parent);
-  } catch (error61) {
-    if (handle !== void 0) await handle.close().catch(() => void 0);
-    if (errorCode(error61) === "EEXIST") {
-      await verifyPrivateFile(inspection.path, options);
-      return;
-    }
-    await rm2(inspection.path, { force: true }).catch(() => void 0);
     throw error61;
   }
 }
@@ -82928,11 +82892,10 @@ function createAlderServer(options) {
     sessionKey: randomUUID7(),
     canonicalPath: null,
     epoch: randomUUID7(),
-    processNonce: randomUUID7(),
     token: randomBytes3(32).toString("hex")
   };
   const bearer = validateToken(session.token);
-  const cookieName = `alder_session_${session.processNonce}`;
+  const cookieName = `alder_session_${session.epoch}`;
   const nonce = randomBytes3(24).toString("base64url");
   const continuityProof = session.continuityProof ?? randomBytes3(32).toString("hex");
   const shutdown = new AbortController();
@@ -83141,7 +83104,6 @@ function createAlderServer(options) {
     return {
       protocol: HOST_PROTOCOL,
       epoch: session.epoch,
-      processNonce: session.processNonce,
       continuityProof,
       sessionKey: session.sessionKey,
       canonicalPath: session.canonicalPath,
@@ -110137,21 +110099,13 @@ async function createProcessScope(_resources) {
 
 // src/sessions.ts
 import { createHash as createHash8, randomBytes as randomBytes4, randomUUID as randomUUID13 } from "node:crypto";
-import { realpath as realpath10, lstat as lstat9, chmod as chmod5, rm as rm9, unlink as unlink5, readdir as readdir3, link as link3 } from "node:fs/promises";
-import { basename as basename7, dirname as dirname9, join as join19, resolve as resolve12, sep as sep3 } from "node:path";
-var import_proper_lockfile2 = __toESM(require_proper_lockfile(), 1);
+import { readdir as readdir3, realpath as realpath10, unlink as unlink5 } from "node:fs/promises";
+import { basename as basename7, dirname as dirname9, join as join19, resolve as resolve12 } from "node:path";
 
 // src/backend-client.ts
 var import_proper_lockfile = __toESM(require_proper_lockfile(), 1);
 
 // src/sessions.ts
-var STARTUP_TIMEOUT_MS = 12e4;
-var LOCK_UPDATE_MS = 1e4;
-var POLL_INTERVAL_MS = 100;
-var RUNTIME_MODE = 448;
-var LOOPBACK_HOSTS2 = /* @__PURE__ */ new Set(["127.0.0.1"]);
-var IDENTITY_REQUEST_TIMEOUT_MS = 2e3;
-var SESSION_KEY_PATTERN = /^[0-9a-f]{64}$/;
 var UNTITLED_SESSION_KEY_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 var UNTITLED_RECOVERY_SCHEMA_VERSION = 1;
 var UNTITLED_RECOVERY_DIRECTORY = "untitled-recoveries";
@@ -110172,6 +110126,79 @@ var SessionAuthError = class extends Error {
     this.name = "SessionAuthError";
   }
 };
+var claims = /* @__PURE__ */ new Map();
+async function acquireNotebookOwnership(options) {
+  let canonicalPath = await canonicalizePath(options.path);
+  let sessionKey = canonicalPath === null ? requireUntitledRecoveryId(options.sessionKey) : sessionKeyFor(canonicalPath);
+  let claimKey = canonicalPath === null ? "untitled:" + sessionKey : "path:" + canonicalPath;
+  if (claims.has(claimKey)) throw new SessionUnavailableError("notebook is already open", { canonicalPath });
+  let closed = false;
+  let origin2 = options.origin ?? "http://127.0.0.1:0";
+  let browserOrigin = origin2;
+  const epoch = options.epoch ?? randomUUID13();
+  const continuityProof = options.continuityProof ?? randomBytes4(32).toString("hex");
+  const token = options.token ?? randomBytes4(32).toString("hex");
+  const ownership = {
+    get sessionKey() {
+      return sessionKey;
+    },
+    get canonicalPath() {
+      return canonicalPath;
+    },
+    epoch,
+    continuityProof,
+    token,
+    get origin() {
+      return origin2;
+    },
+    get browserOrigin() {
+      return browserOrigin;
+    },
+    publishReady: async (nextOrigin, address) => {
+      origin2 = nextOrigin;
+      browserOrigin = address?.browserOrigin ?? nextOrigin;
+    },
+    prepareRekey: async (path3) => {
+      if (closed) throw new SessionUnavailableError("notebook ownership is closed");
+      const destination = await canonicalizeDestination(path3);
+      const destinationKey = "path:" + destination;
+      const destinationSessionKey = sessionKeyFor(destination);
+      if (destinationKey !== claimKey && claims.has(destinationKey)) throw new SessionUnavailableError("Save As destination is already open", { canonicalPath: destination });
+      const reservation = { ownership };
+      if (destinationKey !== claimKey) claims.set(destinationKey, reservation);
+      let phase = "prepared";
+      const abort = async () => {
+        if (phase !== "prepared") return;
+        phase = "aborted";
+        if (destinationKey !== claimKey && claims.get(destinationKey) === reservation) claims.delete(destinationKey);
+      };
+      const commit = async (preparePublication) => {
+        if (phase !== "prepared") throw new SessionUnavailableError("prepared Save As ownership is no longer available");
+        try {
+          const publish = await preparePublication();
+          await publish();
+          if (destinationKey !== claimKey && claims.get(claimKey)?.ownership === ownership) claims.delete(claimKey);
+          canonicalPath = destination;
+          sessionKey = destinationSessionKey;
+          claimKey = destinationKey;
+          claims.set(claimKey, { ownership });
+          phase = "committed";
+        } catch (error61) {
+          await abort();
+          throw error61;
+        }
+      };
+      return { canonicalPath: destination, sessionKey: destinationSessionKey, commit, abort };
+    },
+    close: async () => {
+      if (closed) return;
+      closed = true;
+      if (claims.get(claimKey)?.ownership === ownership) claims.delete(claimKey);
+    }
+  };
+  claims.set(claimKey, { ownership });
+  return ownership;
+}
 function isUntitledRecoveryId(value) {
   return typeof value === "string" && UNTITLED_SESSION_KEY_PATTERN.test(value);
 }
@@ -110185,734 +110212,86 @@ async function registerUntitledRecoveryDescriptor(id2, projectDirectory, dataRoo
   const path3 = untitledRecoveryDescriptorPath(directory, validId);
   const current = await readUntitledRecoveryDescriptor(path3, validId, privatePathOptions);
   if (current !== null) {
-    if (current.projectDirectory !== validProjectDirectory) {
-      throw new SessionUnavailableError("untitled recovery identity belongs to another project", { id: validId });
-    }
+    if (current.projectDirectory !== validProjectDirectory) throw new SessionUnavailableError("untitled recovery identity belongs to another project", { id: validId });
     return current;
   }
-  const descriptor = {
-    schemaVersion: UNTITLED_RECOVERY_SCHEMA_VERSION,
-    id: validId,
-    projectDirectory: validProjectDirectory,
-    createdAt: (/* @__PURE__ */ new Date()).toISOString()
-  };
-  await atomicWriteUntitledRecoveryDescriptor(path3, descriptor, privatePathOptions);
-  const written = await readUntitledRecoveryDescriptor(path3, validId, privatePathOptions);
-  if (written === null) throw new SessionUnavailableError("untitled recovery descriptor disappeared after registration", { id: validId });
-  if (written.projectDirectory !== validProjectDirectory) {
-    throw new SessionUnavailableError("untitled recovery identity changed during registration", { id: validId });
-  }
-  return written;
+  const descriptor = { schemaVersion: UNTITLED_RECOVERY_SCHEMA_VERSION, id: validId, projectDirectory: validProjectDirectory, createdAt: (/* @__PURE__ */ new Date()).toISOString() };
+  await writePrivateFile(path3, Buffer.from(JSON.stringify(descriptor)), privatePathOptions);
+  return descriptor;
 }
 async function selectUntitledRecoveryDescriptor(id2, dataRoot, privatePathOptions = {}) {
   const validId = requireUntitledRecoveryId(id2);
   const directory = await ensureUntitledRecoveryDirectory(dataRoot, privatePathOptions);
-  const descriptor = await readUntitledRecoveryDescriptor(untitledRecoveryDescriptorPath(directory, validId), validId, privatePathOptions);
-  if (descriptor === null) throw new SessionUnavailableError("untitled recovery descriptor was not found", { id: validId });
-  return descriptor;
+  const value = await readUntitledRecoveryDescriptor(untitledRecoveryDescriptorPath(directory, validId), validId, privatePathOptions);
+  if (!value) throw new SessionUnavailableError("untitled recovery descriptor was not found", { id: validId });
+  return value;
 }
 async function retireUntitledRecoveryDescriptor(expected, dataRoot, privatePathOptions = {}) {
-  const validId = requireUntitledRecoveryId(expected?.id);
+  const id2 = requireUntitledRecoveryId(expected.id);
   const directory = await ensureUntitledRecoveryDirectory(dataRoot, privatePathOptions);
-  const path3 = untitledRecoveryDescriptorPath(directory, validId);
-  const expectedDescriptor = parseUntitledRecoveryDescriptor(expected, validId, path3);
-  const descriptor = await readUntitledRecoveryDescriptor(path3, validId, privatePathOptions);
-  if (descriptor === null) return;
-  if (descriptor.schemaVersion !== expectedDescriptor.schemaVersion || descriptor.id !== expectedDescriptor.id || descriptor.projectDirectory !== expectedDescriptor.projectDirectory || descriptor.createdAt !== expectedDescriptor.createdAt) {
-    throw new SessionUnavailableError("untitled recovery descriptor changed before retirement", { id: validId });
-  }
+  const path3 = untitledRecoveryDescriptorPath(directory, id2);
+  const current = await readUntitledRecoveryDescriptor(path3, id2, privatePathOptions);
+  if (!current) return;
+  if (JSON.stringify(current) !== JSON.stringify(expected)) throw new SessionUnavailableError("untitled recovery descriptor changed before retirement", { id: id2 });
   await verifyPrivateFile(path3, privatePathOptions);
   await unlink5(path3).catch((error61) => {
     if (error61.code !== "ENOENT") throw error61;
   });
 }
-var lockOptions = {
-  realpath: false,
-  // proper-lockfile's stale check only knows about mtime. Ownership is
-  // reclaimable only after the registry owner has failed an authenticated
-  // health probe and its recorded PID is proven dead, so never let the
-  // library reclaim one of these locks on mtime alone.
-  stale: Number.MAX_SAFE_INTEGER,
-  update: LOCK_UPDATE_MS,
-  retries: { retries: 0 },
-  // An asynchronous compromise callback cannot safely throw into the caller
-  // that acquired the lock. Per-lock callbacks below record the compromise
-  // and operations turn it into a typed unavailable error instead.
-  onCompromised: () => void 0
-};
-var reservationLockOptions = {
-  ...lockOptions,
-  stale: Number.MAX_SAFE_INTEGER,
-  update: 1e3
-};
-function lockOptionsFor(target, base = lockOptions, onCompromised) {
-  return {
-    ...base,
-    onCompromised: (error61) => {
-      try {
-        const result = onCompromised?.(error61);
-        if (result !== void 0) void Promise.resolve(result).catch(() => void 0);
-      } catch {
-      }
-    }
-  };
-}
-function sameRegistryAddress(left, right) {
-  if (left === void 0 || right === void 0) return left === right;
-  return left.host === right.host && left.port === right.port && left.origin === right.origin && left.browserOrigin === right.browserOrigin;
-}
-function sameRegistryOwner(left, right) {
-  return left.pid === right.pid && left.startIdentity === right.startIdentity && left.processNonce === right.processNonce && left.continuityProof === right.continuityProof && left.epoch === right.epoch && left.token === right.token && left.protocol === right.protocol && left.canonicalPath === right.canonicalPath && left.origin === right.origin && sameRegistryAddress(left.address, right.address);
-}
-async function acquireNotebookOwnership(options) {
-  const canonicalPath = await canonicalizePath(options.path);
-  const runtime = await runtimePaths(options.runtimeDirectory, options.processSupervisorExecutable);
-  const sessionKey = await ownershipSessionKey(canonicalPath, options.sessionKey);
-  const registryPath = runtime.registryPath(sessionKey);
-  const lockPath = runtime.lockPath(sessionKey);
-  const deadline = Date.now() + STARTUP_TIMEOUT_MS;
-  const pid = options.pid ?? process.pid;
-  const epoch = options.epoch ?? randomUUID13();
-  const processNonce = options.processNonce ?? randomUUID13();
-  const continuityProof = options.continuityProof ?? randomBytes4(32).toString("hex");
-  const startIdentity = options.startIdentity ?? await currentProcessStartIdentity(pid, options.processSupervisorExecutable) ?? `pid:${pid}:${processNonce}`;
-  let currentOrigin = options.origin ?? "http://127.0.0.1:0";
-  const token = options.token ?? randomBytes4(32).toString("hex");
-  let closed = false;
-  let currentPath = canonicalPath;
-  let currentKey = sessionKey;
-  let currentRegistry = registryPath;
-  let currentLock = lockPath;
-  let compromiseError;
-  const handleCompromise = (error61) => {
-    if (compromiseError !== void 0) return;
-    compromiseError = error61;
-    return options.onCompromised?.(error61);
-  };
-  const throwIfCompromised = () => {
-    if (compromiseError === void 0) return;
-    throw new SessionUnavailableError("notebook ownership lock was compromised; owned work is unavailable", {
-      lockPath: currentLock,
-      cause: compromiseError.message
-    });
-  };
-  const ownershipLockOptions = (target, base = lockOptions) => lockOptionsFor(target, base, handleCompromise);
-  const metadataFor = (state, path3, origin2, address) => sessionRegistryMetadataSchema.parse({
-    state,
-    pid,
-    processNonce,
-    continuityProof,
-    startIdentity,
-    origin: origin2,
-    canonicalPath: path3,
-    epoch,
-    token,
-    protocol: options.protocol ?? HOST_PROTOCOL,
-    ...address === void 0 ? {} : { address }
-  });
-  const metadata = (state, address) => metadataFor(state, currentPath, currentOrigin, address);
-  await ensureRegistryFile(registryPath);
-  await ensureRegistryFile(runtime.recoveryPath(sessionKey));
-  let releaseLock;
-  const activeRekeyCommits = /* @__PURE__ */ new Set();
-  let lastError;
-  for (; ; ) {
-    throwIfCompromised();
-    let releaseRecovery;
-    try {
-      try {
-        releaseRecovery = await acquirePrivateLock(runtime.recoveryPath(sessionKey), ownershipLockOptions(runtime.recoveryPath(sessionKey)), runtime.privatePathOptions);
-      } catch (error61) {
-        lastError = error61;
-        const current = await readRegistry(registryPath);
-        if (current !== null) await assertReclaimable(current, lockPath, sessionKey);
-        else if (await lockPresent(lockPath)) throw unavailableLock(registryPath, lockPath, lastError);
-        if (Date.now() >= deadline) throw unavailableLock(registryPath, lockPath, lastError);
-        await delay(POLL_INTERVAL_MS);
-        continue;
-      }
-      throwIfCompromised();
-      const observed = await readRegistry(registryPath);
-      if (observed !== null) {
-        await assertReclaimable(observed, lockPath, sessionKey);
-      } else if (await lockPresent(lockPath)) {
-        throw unavailableLock(registryPath, lockPath, new Error("owner metadata is missing"));
-      }
-      let candidateRelease;
-      try {
-        candidateRelease = await acquirePrivateLock(runtime.lockTarget(sessionKey), ownershipLockOptions(runtime.lockTarget(sessionKey)), runtime.privatePathOptions);
-      } catch (error61) {
-        lastError = error61;
-        const current = await readRegistry(registryPath);
-        if (current !== null) {
-          await assertReclaimable(current, lockPath, sessionKey);
-          await reclaimOwnerLock(lockPath, runtime.privatePathOptions);
-        } else if (await lockPresent(lockPath)) throw unavailableLock(registryPath, lockPath, lastError);
-        if (Date.now() >= deadline) throw unavailableLock(registryPath, lockPath, lastError);
-        await delay(POLL_INTERVAL_MS);
-        continue;
-      }
-      throwIfCompromised();
-      try {
-        const current = await readRegistry(registryPath);
-        const changed = observed === null !== (current === null) || observed !== null && current !== null && !sameRegistryOwner(current, observed);
-        if (changed) {
-          throw unavailableLock(registryPath, lockPath, new Error("owner metadata changed during stale-claim recovery"));
-        }
-        if (current !== null) await assertReclaimable(current, lockPath, sessionKey);
-        await atomicWriteRegistry(registryPath, metadata("starting"));
-        releaseLock = candidateRelease;
-        candidateRelease = void 0;
-        break;
-      } finally {
-        await candidateRelease?.().catch(() => void 0);
-      }
-    } finally {
-      await releaseRecovery?.().catch(() => void 0);
-    }
-  }
-  const publishReady = async (readyOrigin, address) => {
-    throwIfCompromised();
-    if (closed) throw new SessionUnavailableError("notebook ownership is closed");
-    if (address === void 0 || address.origin !== readyOrigin) throw new SessionAuthError("readiness must publish the numeric connection origin and browser origin together");
-    await withRecoveryMutex(runtime, currentKey, async () => {
-      if (closed) throw new SessionUnavailableError("notebook ownership is closed");
-      const current = await readRegistry(currentRegistry);
-      const expected = current === null ? null : metadataFor(current.state, currentPath, currentOrigin, current.address);
-      if (current === null || current.state !== "starting" && current.state !== "ready" || expected === null || !sameRegistryOwner(current, expected)) {
-        throw new SessionUnavailableError("notebook ownership changed before readiness publication", { registryPath: currentRegistry });
-      }
-      currentOrigin = readyOrigin;
-      await atomicWriteRegistry(currentRegistry, metadata("ready", address));
-    }, handleCompromise);
-  };
-  const prepareRekey = async (path3) => {
-    throwIfCompromised();
-    if (closed) throw new SessionUnavailableError("notebook ownership is closed");
-    if (typeof path3 !== "string" || path3.length === 0 || path3.includes("\0")) {
-      throw new TypeError("Save As destination path must be a non-empty path");
-    }
-    const spelling = resolve12(path3);
-    const destination = await canonicalizePath(spelling);
-    if (destination === null) throw new TypeError("Save As requires a destination path");
-    if (destination === currentPath) {
-      throw new SessionUnavailableError("Save As destination is already the active notebook", { path: destination });
-    }
-    const destinationKey = await sessionKeyFor(destination);
-    if (destinationKey === currentKey) {
-      throw new SessionUnavailableError("Save As destination is already the active notebook", { path: destination });
-    }
-    const destinationRegistry = runtime.registryPath(destinationKey);
-    const destinationLock = runtime.lockPath(destinationKey);
-    if (await pathPresent(destinationRegistry)) {
-      throw unavailableLock(destinationRegistry, destinationLock, new Error("destination ownership metadata already exists"));
-    }
-    if (await lockPresent(destinationLock)) {
-      throw unavailableLock(destinationRegistry, destinationLock, new Error("destination ownership lock already exists"));
-    }
-    const targetOrigin = currentOrigin;
-    const reservationMetadata = metadataFor("starting", destination, targetOrigin);
-    let releaseDestination;
-    let reservationWriteAttempted = false;
-    let reservationReleased = false;
-    let phase = "prepared";
-    let commitPublished = false;
-    let commitPromise;
-    const removeReservationArtifact = async () => {
-      if (!reservationWriteAttempted) return;
-      try {
-        const current = await readRegistry(destinationRegistry);
-        if (current !== null && (current.state === "starting" || current.state === "ready") && sameRegistryOwner(current, reservationMetadata)) {
-          await unlink5(destinationRegistry).catch(() => void 0);
-        }
-      } catch {
-      }
-    };
-    try {
-      releaseDestination = await acquirePrivateLock(destinationRegistry, ownershipLockOptions(destinationRegistry, reservationLockOptions), runtime.privatePathOptions);
-      if (await pathPresent(destinationRegistry)) {
-        const existing = await readRegistry(destinationRegistry);
-        throw unavailableLock(destinationRegistry, destinationLock, new Error(existing === null ? "destination ownership metadata appeared during reservation" : "destination ownership metadata is already claimed"));
-      }
-      reservationWriteAttempted = true;
-      await atomicWriteRegistry(destinationRegistry, reservationMetadata);
-    } catch (error61) {
-      await removeReservationArtifact();
-      await releaseDestination?.().catch(() => void 0);
-      throw error61;
-    }
-    const releaseDestinationLock = async () => {
-      if (reservationReleased) return;
-      reservationReleased = true;
-      const release = releaseDestination;
-      releaseDestination = void 0;
-      await release?.().catch(() => void 0);
-    };
-    const cleanupReservation = async () => {
-      await removeReservationArtifact();
-      await releaseDestinationLock();
-    };
-    const abort = async () => {
-      if (phase === "committed" || phase === "aborted") return;
-      if (commitPromise !== void 0) {
-        await commitPromise.catch(() => void 0);
-        return;
-      }
-      phase = "aborted";
-      await cleanupReservation();
-    };
-    const commit = (preparePublication) => {
-      throwIfCompromised();
-      if (phase !== "prepared") throw new SessionUnavailableError("prepared Save As ownership is no longer available");
-      if (typeof preparePublication !== "function") throw new TypeError("Save As publication preparation is required");
-      const operation = (async () => {
-        phase = "committing";
-        try {
-          const oldRegistry = currentRegistry;
-          const oldPath = currentPath;
-          const oldKey = currentKey;
-          const oldRelease = releaseLock;
-          await withRecoveryMutex(runtime, oldKey, async () => {
-            const oldMetadata = await readRegistry(oldRegistry);
-            if (closed || oldMetadata === null || oldMetadata.state !== "ready" || !sameRegistryOwner(oldMetadata, metadataFor("ready", oldPath, targetOrigin, oldMetadata.address))) {
-              throw new SessionUnavailableError("active notebook ownership changed before Save As commit");
-            }
-            const reserved = await readRegistry(destinationRegistry);
-            if (reserved === null || reserved.state !== "starting" || !sameRegistryOwner(reserved, reservationMetadata)) {
-              throw new SessionUnavailableError("prepared Save As ownership reservation changed");
-            }
-            const publishBinding = await preparePublication();
-            if (typeof publishBinding !== "function") throw new TypeError("Save As publication preparation returned no binder");
-            if (closed) throw new SessionUnavailableError("notebook ownership is closed");
-            let destinationReady;
-            await withRecoveryMutex(runtime, destinationKey, async () => {
-              const stillOld = await readRegistry(oldRegistry);
-              if (stillOld === null || stillOld.state !== "ready" || !sameRegistryOwner(stillOld, metadataFor("ready", oldPath, targetOrigin, stillOld.address))) {
-                throw new SessionUnavailableError("active notebook ownership changed during Save As preparation");
-              }
-              const stillReserved = await readRegistry(destinationRegistry);
-              if (stillReserved === null || stillReserved.state !== "starting" || !sameRegistryOwner(stillReserved, reservationMetadata)) {
-                throw new SessionUnavailableError("prepared Save As ownership reservation changed");
-              }
-              destinationReady = metadataFor("ready", destination, targetOrigin, stillOld.address);
-              await atomicWriteRegistry(destinationRegistry, destinationReady);
-            }, handleCompromise);
-            try {
-              await publishBinding();
-            } catch (error61) {
-              if (destinationReady !== void 0) await removeExactRegistry(destinationRegistry, destinationReady);
-              await releaseDestinationLock();
-              throw error61;
-            }
-            commitPublished = true;
-            phase = "committed";
-            currentPath = destination;
-            currentKey = destinationKey;
-            currentRegistry = destinationRegistry;
-            currentLock = destinationLock;
-            releaseLock = releaseDestination;
-            releaseDestination = void 0;
-            await removeExactRegistry(oldRegistry, oldMetadata);
-            await oldRelease?.().catch(() => void 0);
-          }, handleCompromise);
-        } catch (error61) {
-          if (!commitPublished) {
-            phase = "aborted";
-            await cleanupReservation();
-          }
-          throw error61;
-        }
-      })();
-      commitPromise = operation;
-      activeRekeyCommits.add(operation);
-      void operation.finally(() => {
-        if (commitPromise === operation) commitPromise = void 0;
-        activeRekeyCommits.delete(operation);
-      }).catch(() => void 0);
-      return operation;
-    };
-    return { canonicalPath: destination, sessionKey: destinationKey, commit, abort };
-  };
-  const close = async () => {
-    if (closed) return;
-    closed = true;
-    const rekeyCommits = [...activeRekeyCommits];
-    if (rekeyCommits.length > 0) await Promise.allSettled(rekeyCommits);
-    const closeKey = currentKey;
-    const closePath = currentPath;
-    const closeRegistry = currentRegistry;
-    const closeOrigin = currentOrigin;
-    await withRecoveryMutex(runtime, closeKey, async () => {
-      const current = await readRegistry(closeRegistry);
-      const expected = current === null ? null : metadataFor(current.state, closePath, closeOrigin, current.address);
-      if (current === null || current.state !== "starting" && current.state !== "ready" || expected === null || !sameRegistryOwner(current, expected)) return;
-      const stopping = metadataFor("stopping", closePath, closeOrigin, current.address);
-      await atomicWriteRegistry(closeRegistry, stopping).catch(() => void 0);
-      await removeExactRegistry(closeRegistry, stopping);
-    }, handleCompromise).catch(() => void 0);
-    await releaseLock?.().catch(() => void 0);
-    releaseLock = void 0;
-  };
-  return {
-    get sessionKey() {
-      return currentKey;
-    },
-    get canonicalPath() {
-      return currentPath;
-    },
-    get registryPath() {
-      return currentRegistry;
-    },
-    get lockPath() {
-      return currentLock;
-    },
-    epoch,
-    processNonce,
-    token,
-    continuityProof,
-    pid,
-    lockRelease: async () => {
-      await releaseLock?.();
-    },
-    publishReady,
-    prepareRekey,
-    close
-  };
-}
-async function assertReclaimable(metadata, lockPath, sessionKey) {
-  const alive = await ownerLiveness(metadata);
-  if (alive !== false) {
-    throw new SessionUnavailableError("notebook owner liveness is alive or unknown; manual stale-lock recovery is required", {
-      lockPath,
-      pid: metadata.pid,
-      state: metadata.state
-    });
-  }
-  if (await authenticatedHealth(metadata, sessionKey)) {
-    throw new SessionUnavailableError("authenticated notebook owner remains active", { lockPath, pid: metadata.pid });
-  }
-}
-async function authenticatedHealth(metadata, sessionKey) {
-  if (metadata.state !== "ready" || metadata.address === void 0 || metadata.address.origin !== metadata.origin || metadata.address.browserOrigin.length === 0) return false;
-  try {
-    const value = hostIdentitySchema.parse(await requestJson(metadata.address.origin, metadata.token, "/api/identity", { method: "GET", signal: AbortSignal.timeout(IDENTITY_REQUEST_TIMEOUT_MS) }, metadata.continuityProof));
-    return (sessionKey === void 0 || value.sessionKey === sessionKey) && value.processNonce === metadata.processNonce && value.continuityProof === metadata.continuityProof && value.epoch === metadata.epoch && value.canonicalPath === metadata.canonicalPath && value.origin === metadata.origin && value.browserOrigin === metadata.address.browserOrigin && value.address !== void 0 && value.address.host === metadata.address.host && value.address.port === metadata.address.port && value.address.origin === metadata.address.origin && value.address.browserOrigin === metadata.address.browserOrigin;
-  } catch {
-    return false;
-  }
-}
-async function ownerLiveness(metadata) {
-  const pidState = await pidAlive(metadata.pid);
-  if (pidState !== true) return pidState;
-  const observed = await processStartIdentity(metadata.pid);
-  if (observed === null) return null;
-  return observed === metadata.startIdentity ? true : null;
-}
-async function requestRaw(origin2, token, path3, init = {}) {
-  if (!path3.startsWith("/") || path3.startsWith("//")) throw new TypeError("session request path must be origin-relative");
-  let base;
-  try {
-    base = new URL(origin2);
-  } catch {
-    throw new SessionAuthError("session registry origin is invalid");
-  }
-  const hostname3 = base.hostname.replace(/^\[|\]$/g, "");
-  if (base.protocol !== "http:" || !LOOPBACK_HOSTS2.has(hostname3) || base.username !== "" || base.password !== "" || base.pathname !== "/" || base.search !== "" || base.hash !== "") {
-    throw new SessionAuthError("session registry origin is not a loopback HTTP origin");
-  }
-  const url2 = new URL(path3, base);
-  if (url2.origin !== base.origin) throw new TypeError("session request may not change origin");
-  const headers = new Headers(init.headers);
-  headers.set("Authorization", "Bearer " + token);
-  if (init.body !== void 0 && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
-  return fetch(url2, { ...init, headers, redirect: "error" });
-}
-async function readBoundedResponse(response, maxBytes) {
-  const declared = response.headers.get("Content-Length");
-  if (declared !== null && (!/^(?:0|[1-9][0-9]*)$/.test(declared) || Number(declared) > maxBytes)) {
-    await response.body?.cancel().catch(() => void 0);
-    throw new SessionAuthError("session response exceeds the byte limit");
-  }
-  if (response.body === null) return new Uint8Array();
-  const reader = response.body.getReader();
-  const chunks = [];
-  let length = 0;
-  try {
-    for (; ; ) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      length += value.byteLength;
-      if (length > maxBytes) {
-        await reader.cancel();
-        throw new SessionAuthError("session response exceeds the byte limit");
-      }
-      chunks.push(value);
-    }
-  } finally {
-    reader.releaseLock();
-  }
-  const bytes = new Uint8Array(length);
-  let offset = 0;
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return bytes;
-}
-async function requestJson(origin2, token, path3, init = {}, expectedProof) {
-  const response = await requestRaw(origin2, token, path3, init);
-  if (expectedProof !== void 0 && response.headers.get("X-Alder-Continuity-Proof") !== expectedProof) {
-    await response.body?.cancel().catch(() => void 0);
-    throw new SessionAuthError("host HTTP continuity proof changed");
-  }
-  const bytes = await readBoundedResponse(response, 1024 * 1024);
-  let value = null;
-  if (bytes.length > 0) {
-    try {
-      value = decodeJsonFrame(bytes, 1024 * 1024);
-    } catch (error61) {
-      throw new SessionAuthError(error61 instanceof Error ? error61.message : "session response is not valid JSON");
-    }
-  }
-  if (!response.ok) {
-    const detail = value && typeof value === "object" && !Array.isArray(value) ? value : {};
-    throw new SessionAuthError(typeof detail.message === "string" ? detail.message : "session request failed (" + response.status + ")");
-  }
-  return value;
-}
-async function readRegistry(path3, privatePathOptions = privatePathOptionsFor(path3)) {
-  try {
-    const bytes = await readPrivateFile(path3, { ...privatePathOptions, maxBytes: 64 * 1024 });
-    if (bytes.byteLength === 0) return null;
-    return sessionRegistryMetadataSchema.parse(decodeJsonFrame(bytes, 64 * 1024));
-  } catch (error61) {
-    const code2 = error61.code;
-    if (code2 === "ENOENT") return null;
-    throw new SessionUnavailableError("notebook registry metadata is corrupt; manual stale-lock recovery is required", { path: path3 });
-  }
-}
-async function atomicWriteRegistry(path3, value, privatePathOptions = privatePathOptionsFor(path3)) {
-  const bytes = Buffer.from(JSON.stringify(value));
-  try {
-    await writePrivateFile(path3, bytes, privatePathOptions);
-  } catch (error61) {
-    throw new SessionUnavailableError("notebook registry metadata could not be written safely", { path: path3, cause: error61 instanceof Error ? error61.message : String(error61) });
-  }
-}
 async function ensureUntitledRecoveryDirectory(dataRoot, privatePathOptions = {}) {
   const directory = untitledRecoveryDescriptorDirectory(dataRoot);
-  try {
-    await ensurePrivateDirectory(directory, privatePathOptions);
-  } catch (error61) {
-    throw new SessionUnavailableError("untitled recovery descriptor directory must be private and owner-controlled", {
-      directory,
-      cause: error61 instanceof Error ? error61.message : String(error61)
-    });
-  }
+  await ensurePrivateDirectory(directory, privatePathOptions);
   return directory;
 }
 function requireUntitledRecoveryId(value) {
-  if (!isUntitledRecoveryId(value)) throw new SessionUnavailableError("untitled recovery identity is invalid", { id: value });
+  if (!isUntitledRecoveryId(value)) throw new SessionAuthError("untitled recovery identity is invalid");
   return value;
 }
 function normalizeProjectDirectory(value) {
-  if (typeof value !== "string" || value.length === 0 || value.includes("\0")) {
-    throw new SessionUnavailableError("untitled recovery project directory is invalid");
-  }
+  if (typeof value !== "string" || !value || value.includes("\0")) throw new SessionUnavailableError("untitled project directory is invalid");
   return resolve12(value);
 }
 function untitledRecoveryDescriptorPath(directory, id2) {
   return join19(directory, id2 + ".json");
 }
-async function readUntitledRecoveryDescriptor(path3, id2, privatePathOptions = {}) {
+async function readUntitledRecoveryDescriptor(path3, id2, options) {
+  let bytes;
   try {
-    const bytes = await readPrivateFile(path3, { ...privatePathOptions, maxBytes: UNTITLED_RECOVERY_DESCRIPTOR_MAX_BYTES });
-    if (bytes.byteLength === 0) throw new SessionUnavailableError("untitled recovery descriptor is empty", { path: path3 });
-    return parseUntitledRecoveryDescriptor(decodeJsonFrame(bytes, UNTITLED_RECOVERY_DESCRIPTOR_MAX_BYTES), id2, path3);
+    bytes = await readPrivateFile(path3, { ...options, maxBytes: UNTITLED_RECOVERY_DESCRIPTOR_MAX_BYTES });
   } catch (error61) {
     if (error61.code === "ENOENT") return null;
-    if (error61 instanceof SessionUnavailableError) throw error61;
-    throw new SessionUnavailableError("untitled recovery descriptor is corrupt", { path: path3 });
+    throw error61;
   }
-}
-function parseUntitledRecoveryDescriptor(value, id2, path3) {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) throw new SessionUnavailableError("untitled recovery descriptor is not an object", { path: path3 });
-  const record4 = value;
-  const keys2 = Object.keys(record4).sort();
-  if (keys2.join("\0") !== "createdAt\0id\0projectDirectory\0schemaVersion") throw new SessionUnavailableError("untitled recovery descriptor has unexpected fields", { path: path3 });
-  if (record4.schemaVersion !== UNTITLED_RECOVERY_SCHEMA_VERSION || record4.id !== id2 || !isUntitledRecoveryId(record4.id)) throw new SessionUnavailableError("untitled recovery descriptor identity is invalid", { path: path3 });
-  if (typeof record4.projectDirectory !== "string" || record4.projectDirectory.length === 0 || record4.projectDirectory.includes("\0") || resolve12(record4.projectDirectory) !== record4.projectDirectory) {
-    throw new SessionUnavailableError("untitled recovery descriptor project directory is invalid", { path: path3 });
-  }
-  if (typeof record4.createdAt !== "string" || !isIsoTimestamp(record4.createdAt)) throw new SessionUnavailableError("untitled recovery descriptor timestamp is invalid", { path: path3 });
-  return { schemaVersion: UNTITLED_RECOVERY_SCHEMA_VERSION, id: id2, projectDirectory: record4.projectDirectory, createdAt: record4.createdAt };
-}
-function isIsoTimestamp(value) {
-  const parsed = new Date(value);
-  return Number.isFinite(parsed.getTime()) && parsed.toISOString() === value;
-}
-async function atomicWriteUntitledRecoveryDescriptor(path3, descriptor, privatePathOptions = {}) {
-  const temporary = path3 + "." + process.pid + "." + randomUUID13() + ".tmp";
-  const bytes = Buffer.from(JSON.stringify(descriptor) + "\n");
+  let value;
   try {
-    await writePrivateFile(temporary, bytes, privatePathOptions);
-    await link3(temporary, path3).catch((error61) => {
-      if (error61.code !== "EEXIST") throw error61;
-    });
-  } finally {
-    await rm9(temporary, { force: true }).catch(() => void 0);
+    value = JSON.parse(bytes.toString("utf8"));
+  } catch {
+    throw new SessionUnavailableError("untitled recovery descriptor is invalid", { id: id2 });
   }
-}
-async function ensureRegistryFile(path3, privatePathOptions = privatePathOptionsFor(path3)) {
-  try {
-    await ensurePrivateFile(path3, privatePathOptions);
-  } catch (error61) {
-    throw new SessionUnavailableError("notebook registry path is not private and owner-controlled", {
-      path: path3,
-      cause: error61 instanceof Error ? error61.message : String(error61)
-    });
-  }
-}
-var privatePathOptionsByDirectory = /* @__PURE__ */ new Map();
-function privatePathOptionsFor(path3) {
-  let selected;
-  let selectedLength = -1;
-  for (const [directory, options] of privatePathOptionsByDirectory) {
-    if ((path3 === directory || path3.startsWith(directory + sep3)) && directory.length > selectedLength) {
-      selected = options;
-      selectedLength = directory.length;
-    }
-  }
-  return selected ?? {};
-}
-async function runtimePaths(explicit, processSupervisorExecutable) {
-  const directory = resolve12(explicit ?? process.env.ALDER_RUNTIME_DIRECTORY ?? join19(envPaths("alder").data, "runtime"));
-  const privatePathOptions = { processSupervisorExecutable };
-  await ensurePrivateDirectory(directory, privatePathOptions);
-  privatePathOptionsByDirectory.set(directory, privatePathOptions);
-  return {
-    directory,
-    privatePathOptions,
-    registryPath: (key2) => join19(directory, `${key2}.json`),
-    lockPath: (key2) => join19(directory, `${key2}.json.lock`),
-    lockTarget: (key2) => join19(directory, `${key2}.json`),
-    recoveryPath: (key2) => join19(directory, `${key2}.recovery`),
-    logPath: (key2) => join19(directory, `${key2}.log`)
-  };
+  if (typeof value !== "object" || value === null) throw new SessionUnavailableError("untitled recovery descriptor is invalid", { id: id2 });
+  const candidate = value;
+  if (candidate.schemaVersion !== 1 || candidate.id !== id2 || typeof candidate.projectDirectory !== "string" || typeof candidate.createdAt !== "string" || Number.isNaN(Date.parse(candidate.createdAt))) throw new SessionUnavailableError("untitled recovery descriptor is invalid", { id: id2 });
+  return candidate;
 }
 async function canonicalizePath(path3) {
   if (path3 === null) return null;
-  const absolute = resolve12(path3);
+  const target = resolve12(path3);
   try {
-    return await realpath10(absolute);
-  } catch (error61) {
-    if (error61.code !== "ENOENT") throw error61;
-    return join19(await realpath10(dirname9(absolute)), basename7(absolute));
-  }
-}
-async function sessionKeyFor(path3) {
-  if (path3 === null) return randomUUID13();
-  return createHash8("sha256").update("path:" + path3).digest("hex");
-}
-async function ownershipSessionKey(canonicalPath, supplied) {
-  if (supplied === void 0) return sessionKeyFor(canonicalPath);
-  const expected = canonicalPath === null ? null : await sessionKeyFor(canonicalPath);
-  const valid = canonicalPath === null ? UNTITLED_SESSION_KEY_PATTERN.test(supplied) : SESSION_KEY_PATTERN.test(supplied) && supplied === expected;
-  if (!valid) throw new SessionAuthError("ownership session key does not match the canonical notebook identity");
-  return supplied;
-}
-async function pidAlive(pid) {
-  if (!Number.isSafeInteger(pid) || pid <= 0) return null;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error61) {
-    const code2 = error61.code;
-    if (code2 === "ESRCH") return false;
-    if (code2 === "EPERM") return true;
-    return null;
-  }
-}
-async function processStartIdentity(_pid) {
-  return null;
-}
-async function currentProcessStartIdentity(_pid, _supervisorExecutable) {
-  return null;
-}
-function unavailableLock(registryPath, lockPath, cause) {
-  return new SessionUnavailableError("notebook lock acquisition timed out; manual stale-lock recovery is required", {
-    registryPath,
-    lockPath,
-    cause: cause instanceof Error ? cause.message : String(cause)
-  });
-}
-async function hardenLockDirectory(path3, privatePathOptions) {
-  const info = await lstat9(path3);
-  if (!info.isDirectory() || info.isSymbolicLink()) {
-    await verifyPrivateDirectory(path3, privatePathOptions);
-    return;
-  }
-  await chmod5(path3, RUNTIME_MODE);
-  await verifyPrivateDirectory(path3, privatePathOptions);
-}
-async function reclaimOwnerLock(path3, privatePathOptions) {
-  try {
-    await hardenLockDirectory(path3, privatePathOptions);
-    await rm9(path3, { recursive: true, force: false });
-  } catch (error61) {
-    if (error61.code !== "ENOENT") throw error61;
-  }
-}
-async function acquirePrivateLock(target, options, privatePathOptions = privatePathOptionsFor(target)) {
-  const release = await import_proper_lockfile2.default.lock(target, options);
-  try {
-    await hardenLockDirectory(target + ".lock", privatePathOptions);
-    return release;
-  } catch (error61) {
-    await release().catch(() => void 0);
-    throw error61;
-  }
-}
-async function lockPresent(path3, privatePathOptions = privatePathOptionsFor(path3)) {
-  try {
-    await verifyPrivateDirectory(path3, privatePathOptions);
-    return true;
-  } catch (error61) {
-    if (error61.code === "ENOENT") return false;
-    if (error61 instanceof Error && "code" in error61 && String(error61.code).startsWith("private_path_")) return true;
-    throw error61;
-  }
-}
-async function pathPresent(path3) {
-  try {
-    await lstat9(path3);
-    return true;
-  } catch (error61) {
-    if (error61.code === "ENOENT") return false;
-    throw error61;
-  }
-}
-async function withRecoveryMutex(runtime, sessionKey, callback, onCompromised) {
-  const path3 = runtime.recoveryPath(sessionKey);
-  await ensureRegistryFile(path3, runtime.privatePathOptions);
-  const release = await acquirePrivateLock(path3, lockOptionsFor(path3, lockOptions, onCompromised), runtime.privatePathOptions);
-  try {
-    return await callback();
-  } finally {
-    await release().catch(() => void 0);
-  }
-}
-async function removeExactRegistry(path3, expected) {
-  try {
-    const current = await readRegistry(path3);
-    if (current !== null && current.state === expected.state && sameRegistryOwner(current, expected)) {
-      await unlink5(path3).catch(() => void 0);
-    }
+    return await realpath10(target);
   } catch {
+    return target;
   }
 }
-function delay(ms) {
-  return new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
+async function canonicalizeDestination(path3) {
+  const target = resolve12(path3);
+  try {
+    return await realpath10(target);
+  } catch {
+    return join19(await realpath10(dirname9(target)), basename7(target));
+  }
+}
+function sessionKeyFor(path3) {
+  return createHash8("sha256").update("path:" + path3).digest("hex");
 }
 
 // src/application.ts
@@ -110951,12 +110330,9 @@ var optionsSchema = external_exports.object({
   resources: external_exports.custom(),
   internalHost: external_exports.boolean().default(false),
   session: external_exports.object({
-    runtimeDirectory: external_exports.string().optional(),
     sessionKey: external_exports.string().optional(),
     epoch: external_exports.string().optional(),
-    processNonce: external_exports.string().optional(),
     continuityProof: external_exports.string().optional(),
-    startIdentity: external_exports.string().optional(),
     token: external_exports.string().optional(),
     untitledRecoveryId: external_exports.string().optional(),
     projectDirectory: external_exports.string().optional()
@@ -110971,7 +110347,7 @@ async function startHost(input2) {
   const storagePath = join20(temporary, "Untitled.R");
   try {
     const app = await startNotebookHost(options, storagePath, true, null);
-    const closed = app.closed.finally(() => rm10(temporary, { recursive: true, force: true }));
+    const closed = app.closed.finally(() => rm9(temporary, { recursive: true, force: true }));
     return { ...app, closed, close: async () => {
       try {
         await app.close();
@@ -110980,7 +110356,7 @@ async function startHost(input2) {
       }
     } };
   } catch (error61) {
-    await rm10(temporary, { recursive: true, force: true }).catch(() => {
+    await rm9(temporary, { recursive: true, force: true }).catch(() => {
     });
     throw error61;
   }
@@ -110994,17 +110370,6 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
   const untitledProjectDirectory = declaredProjectDirectory !== void 0 && resolve13(declaredProjectDirectory) === declaredProjectDirectory ? declaredProjectDirectory : null;
   let notebookDirectory = unsaved ? untitledProjectDirectory ?? process.cwd() : dirname10(resolve13(storagePath));
   let selectedRscript = options.rscript;
-  let ownershipCompromise;
-  let compromiseTeardown;
-  let emergencyTeardown;
-  const onOwnershipCompromised = async (error61) => {
-    if (ownershipCompromise !== void 0) return;
-    ownershipCompromise = error61;
-    if (emergencyTeardown !== void 0) {
-      compromiseTeardown ??= emergencyTeardown();
-      await compromiseTeardown;
-    }
-  };
   let configuredToken = options.session?.token;
   if (options.tokenFile !== void 0) {
     try {
@@ -111022,17 +110387,11 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
   }
   const ownership = await acquireNotebookOwnership({
     path: ownershipPath,
-    runtimeDirectory: options.session?.runtimeDirectory ?? process.env.ALDER_RUNTIME_DIRECTORY,
     origin: initialOrigin(options.host, options.port),
-    pid: process.pid,
     epoch: options.session?.epoch,
-    processNonce: options.session?.processNonce,
     continuityProof: options.session?.continuityProof,
-    startIdentity: options.session?.startIdentity,
-    processSupervisorExecutable: options.resources.processSupervisorExecutable,
     token: configuredToken,
-    sessionKey: options.session?.sessionKey,
-    onCompromised: onOwnershipCompromised
+    sessionKey: options.session?.sessionKey
   });
   if (options.session?.sessionKey !== void 0 && options.session.sessionKey !== ownership.sessionKey) {
     await ownership.close().catch(() => {
@@ -111206,21 +110565,10 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
     watcher = void 0;
     await current?.close();
   };
-  emergencyTeardown = async () => {
-    await server?.close().catch(() => void 0);
-    await Promise.allSettled([
-      controller?.close(),
-      engine?.close(),
-      processScope?.close(),
-      closeWatcher()
-    ]);
-  };
   const close = () => closing ??= (async () => {
     publishAbort.abort();
     runtimeAbort?.abort();
     await Promise.allSettled([...activePublishes]);
-    if (ownershipCompromise !== void 0 && compromiseTeardown === void 0 && emergencyTeardown !== void 0) compromiseTeardown = emergencyTeardown();
-    await compromiseTeardown?.catch(() => void 0);
     clearTimeout(idleTimer);
     clearTimeout(lspSyncTimer);
     clearTimeout(sourceWatchTimer);
@@ -111250,12 +110598,12 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
     await attempt(() => controller?.close());
     if (controller === void 0) await attempt(() => engine?.close());
     await attempt(() => packageManager?.close());
-    if (ownershipCompromise === void 0) await attempt(() => recovery?.flush());
+    await attempt(() => recovery?.flush());
     await attempt(() => recovery?.close());
     await attempt(() => processScope?.close());
     await attempt(() => store?.close());
     await attempt(() => ownership.close());
-    await attempt(() => work === "" ? void 0 : rm10(work, { recursive: true, force: true }));
+    await attempt(() => work === "" ? void 0 : rm9(work, { recursive: true, force: true }));
     if (errors.length > 0) throw new AggregateError(errors, "Alder shutdown failed");
   })().finally(resolveClosed);
   const discardAndClose = async () => {
@@ -111267,10 +110615,6 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
     }
     await close();
   };
-  if (ownershipCompromise !== void 0) {
-    await close();
-    throw ownershipCompromise;
-  }
   try {
     let setLsp2 = function(value) {
       lsp = value;
@@ -111982,7 +111326,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
                   revision: null
                 }, { mimeType: "text/html; charset=utf-8", extension: ".html" });
               } finally {
-                await rm10(result.path, { force: true });
+                await rm9(result.path, { force: true });
               }
               if (server === void 0) throw new Error("publish server is unavailable");
               return server.retainArtifact(artifact);
@@ -112170,10 +111514,8 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
           return ownership.canonicalPath;
         },
         epoch: ownership.epoch,
-        processNonce: ownership.processNonce,
         continuityProof: ownership.continuityProof,
         token: ownership.token,
-        pid: ownership.pid,
         get recoveryId() {
           return recovery.recoveryId;
         }
@@ -112414,7 +111756,7 @@ var NotebookBackend = class {
   }
   resources;
   onIdle;
-  hosts = /* @__PURE__ */ new Set();
+  hosts = /* @__PURE__ */ new Map();
   preferences = ApplicationPreferences.open();
   opening = 0;
   openings = /* @__PURE__ */ new Map();
@@ -112422,12 +111764,36 @@ var NotebookBackend = class {
     return this.hosts.size === 0 && this.opening === 0;
   }
   async open(options) {
-    if ([...this.hosts].some((host) => host.ownership.sessionKey === options.sessionKey)) return;
-    const pending = this.openings.get(options.sessionKey);
-    if (pending) return pending;
-    const opening = this.openNotebook(options).finally(() => this.openings.delete(options.sessionKey));
-    this.openings.set(options.sessionKey, opening);
-    return opening;
+    const key2 = options.path === null ? "untitled:" + options.sessionKey : "path:" + options.path;
+    let host = this.hosts.get(key2);
+    if (host && host.ownership.canonicalPath !== options.path) {
+      this.hosts.delete(key2);
+      host = void 0;
+    }
+    host ??= [...this.hosts.values()].find((item) => item.ownership.canonicalPath === options.path && options.path !== null);
+    if (!host) {
+      let pending = this.openings.get(key2);
+      if (!pending) {
+        pending = this.openNotebook(options).finally(() => this.openings.delete(key2));
+        this.openings.set(key2, pending);
+      }
+      host = await pending;
+    }
+    if (host.ownership.canonicalPath !== null) {
+      for (const [stored, value] of this.hosts) if (value === host && stored !== "path:" + host.ownership.canonicalPath) this.hosts.delete(stored);
+      this.hosts.set("path:" + host.ownership.canonicalPath, host);
+    }
+    const token = options.tokenFile ? (await readFile11(options.tokenFile, "utf8")).trim() : host.ownership.token;
+    return {
+      sessionKey: host.ownership.sessionKey,
+      canonicalPath: host.ownership.canonicalPath,
+      origin: host.ownership.origin,
+      browserOrigin: host.ownership.browserOrigin,
+      epoch: host.ownership.epoch,
+      continuityProof: host.ownership.continuityProof,
+      token,
+      capabilities: [...host.controller.snapshot().capabilities ?? []]
+    };
   }
   async openNotebook(options) {
     this.opening++;
@@ -112442,26 +111808,27 @@ var NotebookBackend = class {
         executionMode: options.executionMode,
         runOnStartup: options.runOnStartup,
         deferStartup: options.deferStartup ?? true,
-        idleTimeout: 1,
+        idleTimeout: 15,
         session: {
           sessionKey: options.sessionKey,
-          runtimeDirectory: options.runtimeDirectory,
           projectDirectory: options.projectDirectory,
           ...options.path === null ? { untitledRecoveryId: options.sessionKey } : {}
         }
       });
-      this.hosts.add(host);
+      const key2 = host.ownership.canonicalPath === null ? "untitled:" + host.ownership.sessionKey : "path:" + host.ownership.canonicalPath;
+      this.hosts.set(key2, host);
       void host.closed.finally(() => {
-        this.hosts.delete(host);
+        for (const [stored, value] of this.hosts) if (value === host) this.hosts.delete(stored);
         if (this.idle) this.onIdle();
       });
+      return host;
     } finally {
       this.opening--;
       if (this.idle) this.onIdle();
     }
   }
   async close() {
-    await Promise.allSettled([...this.hosts].map((host) => host.close()));
+    await Promise.allSettled([...new Set(this.hosts.values())].map((host) => host.close()));
     await (await this.preferences).close();
   }
 };
@@ -112474,7 +111841,7 @@ async function serve(socketPath2) {
       if (backend.idle) stop();
     }, 1e3);
   });
-  await mkdir11(dirname11(socketPath2), { recursive: true, mode: 448 });
+  await mkdir10(dirname11(socketPath2), { recursive: true, mode: 448 });
   const server = createServer2((socket) => {
     clearTimeout(idleTimer);
     idleTimer = setTimeout(() => {
@@ -112494,9 +111861,11 @@ async function serve(socketPath2) {
         const request = JSON.parse(input2.trim());
         if (request.type === "open") {
           clearTimeout(idleTimer);
-          await backend.open(request.options);
+          const result = await backend.open(request.options);
+          socket.end(JSON.stringify({ ok: true, result }) + "\n");
+          return;
         } else if (request.type !== "ping") throw new Error("Unknown document service request");
-        socket.end(JSON.stringify({ ok: true }) + "\n");
+        socket.end(JSON.stringify({ ok: true, result: null }) + "\n");
       })().catch((error61) => socket.end(JSON.stringify({ error: error61 instanceof Error ? error61.message : String(error61) }) + "\n"));
     });
   });
@@ -112518,7 +111887,7 @@ async function serve(socketPath2) {
     server.once("error", reject);
     server.listen(socketPath2, ready);
   });
-  await chmod6(socketPath2, 384);
+  await chmod5(socketPath2, 384);
   idleTimer = setTimeout(() => {
     if (backend.idle) stop();
   }, 15e3);

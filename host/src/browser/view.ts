@@ -2137,6 +2137,20 @@ export class NotebookView {
     error.hidden = message.length === 0;
   }
 
+  private openSettings(): void {
+    const dialog = this.dom.getElementById("settings") as HTMLDialogElement | null;
+    const snapshot = this.documentValue?.snapshot;
+    if (!dialog || !snapshot) return;
+    this.fillSettings(snapshot.config);
+    this.settingsBaseline = { ...this.settingsValues(), preferencesVersion: snapshot.preferencesVersion ?? null,
+      projectVersion: snapshot.sidecars.config.version, documentRevision: snapshot.documentRevision };
+    this.settingsError = null;
+    this.renderSettingsError();
+    if (typeof dialog.showModal === "function") {
+      if (!dialog.open) dialog.showModal();
+    } else dialog.setAttribute("open", "");
+  }
+
   private bindSettings(): void {
     const dialog = this.dom.getElementById("settings") as HTMLDialogElement | null;
     const close = (): void => {
@@ -2144,18 +2158,7 @@ export class NotebookView {
       if (typeof dialog.close === "function" && dialog.open) dialog.close();
       else dialog.removeAttribute("open");
     };
-    this.dom.getElementById("settings-open")?.addEventListener("click", () => {
-      const snapshot = this.documentValue?.snapshot;
-      if (!dialog || !snapshot) return;
-      this.fillSettings(snapshot.config);
-      this.settingsBaseline = { ...this.settingsValues(), preferencesVersion: snapshot.preferencesVersion ?? null,
-        projectVersion: snapshot.sidecars.config.version, documentRevision: snapshot.documentRevision };
-      this.settingsError = null;
-      this.renderSettingsError();
-      if (typeof dialog.showModal === "function") {
-        if (!dialog.open) dialog.showModal();
-      } else dialog.setAttribute("open", "");
-    });
+    this.dom.getElementById("settings-open")?.addEventListener("click", () => this.openSettings());
     this.dom.getElementById("settings-close")?.addEventListener("click", close);
     this.dom.getElementById("settings-cancel")?.addEventListener("click", close);
     dialog?.addEventListener("click", (event) => { if (event.target === dialog) close(); });
@@ -2232,6 +2235,30 @@ export class NotebookView {
     return await this.saveNotebook("explicit") === undefined ? "cancelled" : "saved";
   }
 
+  async performDesktopAction(action: import("../protocol.js").WindowAction): Promise<"ok" | "cancelled"> {
+    if (action === "save") return await this.saveForDesktop() === "saved" ? "ok" : "cancelled";
+    if (action === "run-all" || action === "run-stale") {
+      await this.runExplicit(() => this.client.startRunAll(action === "run-stale" ? "stale" : "all"));
+      this.scheduleAutosave();
+    } else if (action === "interrupt") {
+      await this.client.interrupt();
+    } else if (action === "restart") {
+      await this.action(() => this.client.restart());
+    } else if (action === "settings") {
+      this.openSettings();
+    } else if (action === "run-cell") {
+      const element = this.dom.activeElement?.closest?.(".cell");
+      const key = element ? this.keyByElement.get(element) : undefined;
+      if (key) await this.runExplicit(() => this.client.startRunCell(key));
+    } else if (action === "publish") {
+      if (await this.saveNotebook() === undefined) return "cancelled";
+      const include = this.dom.querySelector<HTMLInputElement>(".publish-include-code input");
+      const result = await this.runService("publish", { include_code: include?.checked === true });
+      await this.downloadServiceResult(result);
+    }
+    return "ok";
+  }
+
   private async repaginateTables(limit: number): Promise<void> {
     const requests: Array<Promise<unknown>> = [];
     visitTableOutputs(this.documentValue?.snapshot.cells ?? [], (output) => {
@@ -2263,7 +2290,9 @@ export class NotebookView {
         await this.client.discardAndClose();
         this.transportError = null;
         this.editorHelpError = null;
-        await desktop.hostShutdown();
+        const snapshot = this.documentValue?.snapshot;
+        if (snapshot) await desktop.updateWindowState({ path: snapshot.path, dirty: false, sessionEpoch: snapshot.epoch });
+        window.close();
         return;
       }
       await this.client.shutdown();

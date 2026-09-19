@@ -19,7 +19,7 @@ function resources(root: string): ApplicationResources {
 }
 async function startDocument(path: string, directory: string): Promise<RunningHost> {
   return startHost({ path, resources: resources(directory), rscript: join(directory, "no-Rscript"), recoveryDirectory: join(directory, "recovery"),
-    session: { runtimeDirectory: join(directory, "sessions") }, runOnStartup: false });
+    runOnStartup: false });
 }
 async function dispatch(app: RunningHost, value: Record<string, unknown>): Promise<CommandResult> {
   return app.controller.dispatch(parseHostCommand({ ...value, requestId: randomUUID(), clientId: "document-test",
@@ -95,7 +95,7 @@ if (crashPath) {
     let app: RunningHost | undefined;
     try {
       app = await startHost({ path, resources: resources(directory), rscript: join(directory, "no-Rscript"), recoveryDirectory: unavailable,
-        session: { runtimeDirectory: join(directory, "sessions") }, runOnStartup: false });
+        runOnStartup: false });
       const cell = app.controller.snapshot().cells[0]!;
       const result = await dispatch(app, { type: "transaction", changes: [{ type: "edit", cell: { cellId: cell.id },
         expectedRevision: cell.revision, cellType: "code", body: ["x <- 2"] }] });

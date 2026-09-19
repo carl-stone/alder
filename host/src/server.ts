@@ -90,7 +90,6 @@ export interface AlderServerSession {
   readonly sessionKey: string;
   readonly canonicalPath: string | null;
   readonly epoch: string;
-  readonly processNonce: string;
   readonly continuityProof?: string;
   readonly recoveryId?: string;
   readonly token: string;
@@ -783,10 +782,10 @@ export function createAlderServer(options: AlderServerOptions): AlderServer {
   if (maxJson > HTTP_JSON_LIMIT || maxUpload > HTTP_UPLOAD_LIMIT || maxSource > HTTP_SOURCE_LIMIT || maxSocket > WEBSOCKET_MESSAGE_LIMIT || maxOutbox > 256 * 1024 * 1024) throw new RangeError("server limits exceed their hard bounds");
   if (![leaseExpiryMs, leaseSweepIntervalMs].every(value => Number.isSafeInteger(value) && value > 0)) throw new RangeError("lease timing limits must be positive safe integers");
   const session = options.session ?? {
-    sessionKey: randomUUID(), canonicalPath: null, epoch: randomUUID(), processNonce: randomUUID(), token: randomBytes(32).toString("hex"),
+    sessionKey: randomUUID(), canonicalPath: null, epoch: randomUUID(), token: randomBytes(32).toString("hex"),
   };
   const bearer = validateToken(session.token);
-  const cookieName = `alder_session_${session.processNonce}`;
+  const cookieName = `alder_session_${session.epoch}`;
   const nonce = randomBytes(24).toString("base64url");
   const continuityProof = session.continuityProof ?? randomBytes(32).toString("hex");
   const shutdown = new AbortController();
@@ -1008,7 +1007,7 @@ export function createAlderServer(options: AlderServerOptions): AlderServer {
       deferStartup: false,
     };
     return {
-      protocol: HOST_PROTOCOL, epoch: session.epoch, processNonce: session.processNonce, continuityProof, sessionKey: session.sessionKey,
+      protocol: HOST_PROTOCOL, epoch: session.epoch, continuityProof, sessionKey: session.sessionKey,
       canonicalPath: session.canonicalPath, capabilities: [...(snapshot.capabilities ?? [])], origin: address.origin,
       browserOrigin: address.browserOrigin,
       address: { host: address.host, port: address.port, origin: address.origin, browserOrigin: address.browserOrigin },

@@ -7375,7 +7375,7 @@ var require_polyfills = __commonJS({
       }
       if (platform === "win32") {
         fs.rename = typeof fs.rename !== "function" ? fs.rename : (function(fs$rename) {
-          function rename3(from, to, cb) {
+          function rename2(from, to, cb) {
             var start = Date.now();
             var backoff = 0;
             fs$rename(from, to, function CB(er) {
@@ -7395,8 +7395,8 @@ var require_polyfills = __commonJS({
               if (cb) cb(er);
             });
           }
-          if (Object.setPrototypeOf) Object.setPrototypeOf(rename3, fs$rename);
-          return rename3;
+          if (Object.setPrototypeOf) Object.setPrototypeOf(rename2, fs$rename);
+          return rename2;
         })(fs.rename);
       }
       fs.read = typeof fs.read !== "function" ? fs.read : (function(fs$read) {
@@ -7800,8 +7800,8 @@ var require_graceful_fs = __commonJS({
       fs2.createReadStream = createReadStream;
       fs2.createWriteStream = createWriteStream;
       var fs$readFile = fs2.readFile;
-      fs2.readFile = readFile3;
-      function readFile3(path2, options, cb) {
+      fs2.readFile = readFile2;
+      function readFile2(path2, options, cb) {
         if (typeof options === "function")
           cb = options, options = null;
         return go$readFile(path2, options, cb);
@@ -7817,8 +7817,8 @@ var require_graceful_fs = __commonJS({
         }
       }
       var fs$writeFile = fs2.writeFile;
-      fs2.writeFile = writeFile2;
-      function writeFile2(path2, data, options, cb) {
+      fs2.writeFile = writeFile;
+      function writeFile(path2, data, options, cb) {
         if (typeof options === "function")
           cb = options, options = null;
         return go$writeFile(path2, data, options, cb);
@@ -7977,7 +7977,7 @@ var require_graceful_fs = __commonJS({
       }
       function ReadStream$open() {
         var that = this;
-        open4(that.path, that.flags, that.mode, function(err, fd) {
+        open3(that.path, that.flags, that.mode, function(err, fd) {
           if (err) {
             if (that.autoClose)
               that.destroy();
@@ -7997,7 +7997,7 @@ var require_graceful_fs = __commonJS({
       }
       function WriteStream$open() {
         var that = this;
-        open4(that.path, that.flags, that.mode, function(err, fd) {
+        open3(that.path, that.flags, that.mode, function(err, fd) {
           if (err) {
             that.destroy();
             that.emit("error", err);
@@ -8014,8 +8014,8 @@ var require_graceful_fs = __commonJS({
         return new fs2.WriteStream(path2, options);
       }
       var fs$open = fs2.open;
-      fs2.open = open4;
-      function open4(path2, flags, mode, cb) {
+      fs2.open = open3;
+      function open3(path2, flags, mode, cb) {
         if (typeof mode === "function")
           cb = mode, mode = null;
         return go$open(path2, flags, mode, cb);
@@ -8853,27 +8853,27 @@ var require_adapter = __commonJS({
 var require_proper_lockfile = __commonJS({
   "../../../../../alder/host/node_modules/proper-lockfile/index.js"(exports, module) {
     "use strict";
-    var lockfile3 = require_lockfile();
+    var lockfile2 = require_lockfile();
     var { toPromise, toSync, toSyncOptions } = require_adapter();
     async function lock(file2, options) {
-      const release = await toPromise(lockfile3.lock)(file2, options);
+      const release = await toPromise(lockfile2.lock)(file2, options);
       return toPromise(release);
     }
     function lockSync(file2, options) {
-      const release = toSync(lockfile3.lock)(file2, toSyncOptions(options));
+      const release = toSync(lockfile2.lock)(file2, toSyncOptions(options));
       return toSync(release);
     }
     function unlock(file2, options) {
-      return toPromise(lockfile3.unlock)(file2, options);
+      return toPromise(lockfile2.unlock)(file2, options);
     }
     function unlockSync(file2, options) {
-      return toSync(lockfile3.unlock)(file2, toSyncOptions(options));
+      return toSync(lockfile2.unlock)(file2, toSyncOptions(options));
     }
     function check2(file2, options) {
-      return toPromise(lockfile3.check)(file2, options);
+      return toPromise(lockfile2.check)(file2, options);
     }
     function checkSync(file2, options) {
-      return toSync(lockfile3.check)(file2, toSyncOptions(options));
+      return toSync(lockfile2.check)(file2, toSyncOptions(options));
     }
     module.exports = lock;
     module.exports.lock = lock;
@@ -8888,7 +8888,7 @@ var require_proper_lockfile = __commonJS({
 // src/main.ts
 import { spawn as spawn2 } from "node:child_process";
 import { constants as constants2 } from "node:fs";
-import { chmod as chmod3, mkdtemp, open as open3, rm as rm4 } from "node:fs/promises";
+import { chmod as chmod2, mkdtemp, open as open2, rm as rm3 } from "node:fs/promises";
 import { tmpdir as tmpdir2 } from "node:os";
 import { dirname as dirname4, join as join5, resolve as resolve4 } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -32306,13 +32306,13 @@ var StreamableHTTPClientTransport = class {
       this.onerror?.(new Error(`Maximum reconnection attempts (${maxRetries}) exceeded.`));
       return;
     }
-    const delay2 = this._getNextReconnectionDelay(attemptCount);
+    const delay = this._getNextReconnectionDelay(attemptCount);
     this._reconnectionTimeout = setTimeout(() => {
       this._startOrAuthSse(options).catch((error61) => {
         this.onerror?.(new Error(`Failed to reconnect SSE stream: ${error61 instanceof Error ? error61.message : String(error61)}`));
         this._scheduleReconnection(options, attemptCount + 1);
       });
-    }, delay2);
+    }, delay);
   }
   _handleSseStream(stream, options, isReconnectable) {
     if (!stream) {
@@ -33870,8 +33870,6 @@ var outputRecordShape = external_exports.object({ id: idSchema, sessionEpoch: id
   }
 });
 var outputRecordSchema = protocolJsonSchema.pipe(outputRecordShape);
-var sessionIdentitySchema = external_exports.object({ sessionKey: idSchema, canonicalPath: pathSchema.nullable(), origin: boundedUtf8StringSchema(2048, true), browserOrigin: boundedUtf8StringSchema(2048, true), epoch: idSchema, processNonce: idSchema }).strict();
-var sessionRegistryMetadataSchema = external_exports.object({ state: external_exports.enum(["starting", "ready", "stopping"]), pid: positiveIntegerSchema, processNonce: idSchema, continuityProof: idSchema, startIdentity: idSchema, canonicalPath: pathSchema.nullable(), origin: boundedUtf8StringSchema(2048, true), epoch: idSchema, token: external_exports.string().regex(/^[0-9a-f]{64}$/), protocol: external_exports.literal(HOST_PROTOCOL), address: external_exports.object({ host: boundedUtf8StringSchema(256, true), port: external_exports.number().int().min(0).max(65535).safe(), origin: boundedUtf8StringSchema(2048, true), browserOrigin: boundedUtf8StringSchema(2048, true) }).strict().optional() }).strict();
 var sessionLeaseSchema = external_exports.object({ leaseId: idSchema, clientId: idSchema, epoch: idSchema }).strict();
 var attachLeaseRequestSchema = external_exports.object({ action: external_exports.literal("attach") }).strict();
 var leaseActionRequestSchema = external_exports.object({ action: external_exports.enum(["heartbeat", "release"]), leaseId: idSchema, disposition: external_exports.enum(["normal", "discard"]).optional() }).strict().superRefine((value, context) => {
@@ -33881,11 +33879,11 @@ var ticketMintRequestSchema = external_exports.object({ origin: boundedUtf8Strin
 var ticketMintResponseSchema = external_exports.object({ ticket: idSchema, expiresAt: boundedUtf8StringSchema(256, true) }).strict();
 var ticketExchangeRequestSchema = external_exports.object({ ticket: idSchema }).strict();
 var ticketExchangeResponseSchema = external_exports.object({ leaseId: idSchema, clientId: idSchema, epoch: idSchema, continuityProof: idSchema, csrf: idSchema, recoveryId: idSchema.optional() }).strict();
-var hostIdentitySchema = external_exports.object({ protocol: external_exports.literal(HOST_PROTOCOL), epoch: idSchema, processNonce: idSchema, continuityProof: idSchema, sessionKey: idSchema, canonicalPath: pathSchema.nullable(), capabilities: external_exports.array(boundedUtf8StringSchema(256, true)).max(MAX_PROTOCOL_COLLECTION_ITEMS), origin: boundedUtf8StringSchema(2048, true), browserOrigin: boundedUtf8StringSchema(2048, true), address: external_exports.object({ host: boundedUtf8StringSchema(256, true), port: external_exports.number().int().min(0).max(65535).safe(), origin: boundedUtf8StringSchema(2048, true), browserOrigin: boundedUtf8StringSchema(2048, true) }).strict().optional(), leaseId: idSchema.optional(), clientId: idSchema.optional(), documentReady: external_exports.boolean(), configuration: hostConfigurationSchema }).strict();
-var sessionConnectionSchema = external_exports.object({ sessionKey: idSchema, canonicalPath: pathSchema.nullable(), origin: boundedUtf8StringSchema(2048, true), browserOrigin: boundedUtf8StringSchema(2048, true), epoch: idSchema, processNonce: idSchema, continuityProof: idSchema, leaseId: idSchema, clientId: idSchema, capabilities: external_exports.array(boundedUtf8StringSchema(256, true)).max(MAX_PROTOCOL_COLLECTION_ITEMS) }).strict();
+var hostIdentitySchema = external_exports.object({ protocol: external_exports.literal(HOST_PROTOCOL), epoch: idSchema, continuityProof: idSchema, sessionKey: idSchema, canonicalPath: pathSchema.nullable(), capabilities: external_exports.array(boundedUtf8StringSchema(256, true)).max(MAX_PROTOCOL_COLLECTION_ITEMS), origin: boundedUtf8StringSchema(2048, true), browserOrigin: boundedUtf8StringSchema(2048, true), address: external_exports.object({ host: boundedUtf8StringSchema(256, true), port: external_exports.number().int().min(0).max(65535).safe(), origin: boundedUtf8StringSchema(2048, true), browserOrigin: boundedUtf8StringSchema(2048, true) }).strict().optional(), leaseId: idSchema.optional(), clientId: idSchema.optional(), documentReady: external_exports.boolean(), configuration: hostConfigurationSchema }).strict();
 var windowActionSchema = external_exports.enum(["new", "open", "save", "save-as", "publish", "run-cell", "run-all", "run-stale", "interrupt", "restart", "settings", "select-r", "close", "prepare-unload"]);
-var windowActionMessageSchema = external_exports.object({ action: windowActionSchema }).strict();
-var windowStateSchema = external_exports.object({ path: pathSchema.nullable(), dirty: external_exports.boolean(), platform: boundedUtf8StringSchema(64, true), sessionEpoch: idSchema }).strict();
+var desktopCommandSchema = external_exports.object({ requestId: idSchema, action: windowActionSchema }).strict();
+var desktopCommandResultSchema = external_exports.object({ requestId: idSchema, status: external_exports.enum(["ok", "cancelled", "error"]), message: boundedUtf8StringSchema(8192, true).optional() }).strict();
+var windowStateSchema = external_exports.object({ path: pathSchema.nullable(), dirty: external_exports.boolean(), sessionEpoch: idSchema }).strict();
 var desktopRecoveryRequestSchema = external_exports.object({
   recoveryId: external_exports.string().regex(/^[A-Za-z0-9_-]{1,128}$/),
   action: external_exports.enum(["read", "write", "remove"]),
@@ -34721,8 +34719,8 @@ function invalid(message) {
 
 // src/sessions.ts
 import { createHash, randomBytes, randomUUID as randomUUID2 } from "node:crypto";
-import { realpath as realpath2, lstat as lstat2, chmod as chmod2, rm as rm3, unlink, readdir, link } from "node:fs/promises";
-import { basename, dirname as dirname3, join as join4, resolve as resolve3, sep as sep2 } from "node:path";
+import { readdir, realpath as realpath2, unlink } from "node:fs/promises";
+import { basename, dirname as dirname3, join as join4, resolve as resolve3 } from "node:path";
 
 // ../../../../../alder/host/node_modules/env-paths/index.js
 import path from "node:path";
@@ -34814,9 +34812,6 @@ function envPaths(name, { suffix = "nodejs" } = {}) {
   return linux(name);
 }
 
-// src/sessions.ts
-var import_proper_lockfile2 = __toESM(require_proper_lockfile(), 1);
-
 // src/backend-client.ts
 import { spawn } from "node:child_process";
 import { connect } from "node:net";
@@ -34831,11 +34826,11 @@ var SharedBackend = class {
   resources;
   ready;
   socketPath;
-  async open(options) {
+  async connect(options, timeoutMs = 12e4) {
     await (this.ready ??= this.start().finally(() => {
       this.ready = void 0;
     }));
-    await this.request({ type: "open", options });
+    return this.request({ type: "open", options }, timeoutMs);
   }
   async start() {
     await mkdir(dirname(this.socketPath), { recursive: true, mode: 448 });
@@ -34855,7 +34850,7 @@ var SharedBackend = class {
       return;
     } catch (error61) {
       const code = error61.code;
-      if (code !== "ENOENT" && code !== "ECONNREFUSED") throw error61;
+      if (code !== "ENOENT" && code !== "ECONNREFUSED" && code !== "ECONNRESET" && code !== "EPIPE") throw error61;
     }
     await mkdir(dirname(this.socketPath), { recursive: true, mode: 448 });
     await rm(this.socketPath, { force: true });
@@ -34882,11 +34877,11 @@ var SharedBackend = class {
     }
     throw new Error("Alder's document service did not start. Rebuild the Mac application and try again.");
   }
-  request(value) {
+  request(value, timeoutMs = 15e3) {
     return new Promise((resolve5, reject) => {
       const socket = connect(this.socketPath);
       let input2 = "";
-      socket.setTimeout(15e3, () => socket.destroy(new Error("The document service did not respond.")));
+      socket.setTimeout(timeoutMs, () => socket.destroy(new Error("The document service did not respond.")));
       socket.once("connect", () => socket.write(JSON.stringify(value) + "\n"));
       socket.on("data", (chunk) => {
         input2 += String(chunk);
@@ -34896,7 +34891,7 @@ var SharedBackend = class {
       socket.once("end", () => {
         try {
           const result = JSON.parse(input2);
-          if (result.ok === true) resolve5();
+          if (result.ok === true) resolve5(result.result);
           else reject(new Error(result.error ?? "The document could not be opened."));
         } catch (error61) {
           reject(error61);
@@ -35110,11 +35105,11 @@ async function writePrivateFile(path2, bytes, options = {}) {
 // src/sessions.ts
 var STARTUP_TIMEOUT_MS = 12e4;
 var HEARTBEAT_INTERVAL_MS = 1e4;
-var LOCK_UPDATE_MS = 1e4;
-var POLL_INTERVAL_MS = 100;
 var LOOPBACK_HOSTS = /* @__PURE__ */ new Set(["127.0.0.1"]);
-var IDENTITY_REQUEST_TIMEOUT_MS = 2e3;
+var IDENTITY_REQUEST_TIMEOUT_MS = 4e3;
+var SESSION_KEY_PATTERN = /^[0-9a-f]{64}$/;
 var UNTITLED_SESSION_KEY_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+var TOKEN_PATTERN = /^[0-9a-f]{64}$/;
 var UNTITLED_RECOVERY_SCHEMA_VERSION = 1;
 var UNTITLED_RECOVERY_DIRECTORY = "untitled-recoveries";
 var UNTITLED_RECOVERY_DESCRIPTOR_MAX_BYTES = 64 * 1024;
@@ -35146,13 +35141,9 @@ var SessionConfigurationConflictError = class extends Error {
 function validateExternalAuthOptions(options) {
   const hasOrigin = options.externalOrigin !== void 0;
   const hasTokenFile = options.tokenFile !== void 0;
-  if (hasOrigin !== hasTokenFile) {
-    throw new SessionAuthError("--external-origin and --token-file must be supplied together");
-  }
-  if (options.tokenFile !== void 0 && (options.tokenFile.length === 0 || options.tokenFile.includes("\0"))) {
-    throw new SessionAuthError("--token-file must be a non-empty path");
-  }
-  if (options.externalOrigin === void 0) return false;
+  if (hasOrigin !== hasTokenFile) throw new SessionAuthError("--external-origin and --token-file must be supplied together");
+  if (options.tokenFile !== void 0 && (options.tokenFile.length === 0 || options.tokenFile.includes("\0"))) throw new SessionAuthError("--token-file must be a non-empty path");
+  if (options.externalOrigin === void 0) return;
   let origin;
   try {
     origin = new URL(options.externalOrigin);
@@ -35162,7 +35153,150 @@ function validateExternalAuthOptions(options) {
   if (origin.protocol !== "https:" || origin.username !== "" || origin.password !== "" || origin.pathname !== "/" || origin.search !== "" || origin.hash !== "" || origin.origin !== options.externalOrigin) {
     throw new SessionAuthError("--external-origin must be an exact HTTPS origin");
   }
-  return true;
+}
+async function acquireNotebookSession(options) {
+  validateExternalAuthOptions(options);
+  const timeoutMs = options.startupTimeoutMs ?? STARTUP_TIMEOUT_MS;
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > STARTUP_TIMEOUT_MS) throw new RangeError(`startupTimeoutMs must be between 1 and ${STARTUP_TIMEOUT_MS}`);
+  const canonicalPath = await canonicalizePath(options.path);
+  if (canonicalPath !== null && (options.untitledRecoveryId !== void 0 || options.untitledProjectDirectory !== void 0)) throw new SessionAuthError("untitled options cannot be combined with a notebook path");
+  const selectedRecovery = canonicalPath === null && options.untitledRecoveryId !== void 0 ? await selectUntitledRecoveryDescriptor(options.untitledRecoveryId, void 0, { processSupervisorExecutable: options.resources.processSupervisorExecutable }) : void 0;
+  const sessionKey = canonicalPath === null ? selectedRecovery?.id ?? randomUUID2() : sessionKeyFor(canonicalPath);
+  const projectDirectory = canonicalPath === null ? selectedRecovery?.projectDirectory ?? resolve3(options.untitledProjectDirectory ?? process.cwd()) : void 0;
+  if (projectDirectory !== void 0) await registerUntitledRecoveryDescriptor(sessionKey, projectDirectory, void 0, { processSupervisorExecutable: options.resources.processSupervisorExecutable });
+  const { root, nodeExecutable, hostEntry } = options.resources;
+  if (!root || !nodeExecutable || !hostEntry) throw new SessionUnavailableError("bundled document service is unavailable");
+  const backend = new SharedBackend({ root, nodeExecutable, hostEntry }, options.runtimeDirectory);
+  const descriptor = await backend.connect({
+    path: canonicalPath,
+    sessionKey,
+    projectDirectory,
+    rscript: options.rscript,
+    executionMode: options.executionMode,
+    runOnStartup: options.runOnStartup,
+    deferStartup: options.deferStartup,
+    externalOrigin: options.externalOrigin,
+    tokenFile: options.tokenFile
+  }, timeoutMs);
+  return connectBackendSession(descriptor, options);
+}
+function validateDescriptor(value) {
+  if (typeof value !== "object" || value === null) throw new SessionAuthError("document service returned no session");
+  const candidate = value;
+  if (typeof candidate.sessionKey !== "string" || !SESSION_KEY_PATTERN.test(candidate.sessionKey) && !UNTITLED_SESSION_KEY_PATTERN.test(candidate.sessionKey) || candidate.canonicalPath !== null && typeof candidate.canonicalPath !== "string" || typeof candidate.origin !== "string" || typeof candidate.browserOrigin !== "string" || typeof candidate.epoch !== "string" || typeof candidate.continuityProof !== "string" || typeof candidate.token !== "string" || !TOKEN_PATTERN.test(candidate.token) || !Array.isArray(candidate.capabilities) || candidate.capabilities.length > MAX_PROTOCOL_COLLECTION_ITEMS || candidate.capabilities.some((item) => typeof item !== "string" || item.length > 256)) {
+    throw new SessionAuthError("document service returned an invalid session");
+  }
+  return candidate;
+}
+async function connectBackendSession(raw, requested) {
+  const descriptor = validateDescriptor(raw);
+  const identity = hostIdentitySchema.parse(await requestJson(descriptor.origin, descriptor.token, "/api/identity", { method: "GET", signal: AbortSignal.timeout(IDENTITY_REQUEST_TIMEOUT_MS) }, descriptor.continuityProof));
+  if (identity.sessionKey !== descriptor.sessionKey || identity.canonicalPath !== descriptor.canonicalPath || identity.epoch !== descriptor.epoch || identity.continuityProof !== descriptor.continuityProof || identity.origin !== descriptor.origin || identity.browserOrigin !== descriptor.browserOrigin) throw new SessionAuthError("document service session identity changed");
+  await assertAttachConfiguration(identity, requested, descriptor.sessionKey);
+  const lease = sessionLeaseSchema.parse(await requestJson(descriptor.origin, descriptor.token, "/api/lease", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(attachLeaseRequestSchema.parse({ action: "attach" })),
+    signal: AbortSignal.timeout(IDENTITY_REQUEST_TIMEOUT_MS)
+  }, descriptor.continuityProof));
+  return createConnection(descriptor, lease);
+}
+function createConnection(descriptor, lease) {
+  let released = false;
+  const authenticatedHeaders = (init = {}) => {
+    const headers = new Headers(init.headers);
+    headers.set("Authorization", "Bearer " + descriptor.token);
+    headers.set("X-Alder-Lease-Id", lease.leaseId);
+    headers.set("X-Alder-Client-Id", lease.clientId);
+    return headers;
+  };
+  const request = async (path2, init = {}) => {
+    if (released) throw new SessionUnavailableError("session lease is released");
+    const response = await requestRaw(descriptor.origin, path2, { ...init, headers: authenticatedHeaders(init) });
+    if (response.headers.get("X-Alder-Continuity-Proof") !== descriptor.continuityProof) throw new SessionAuthError("host HTTP continuity proof changed");
+    return response;
+  };
+  const heartbeat = async () => {
+    if (released) return;
+    const response = await request("/api/lease", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "heartbeat", leaseId: lease.leaseId }) });
+    if (!response.ok) throw new SessionUnavailableError("session heartbeat failed (" + response.status + ")");
+    sessionLeaseSchema.parse(await response.json());
+  };
+  let releasePromise;
+  const release = (disposition = "normal") => releasePromise ??= (async () => {
+    await request("/api/lease", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "release", leaseId: lease.leaseId, disposition }) }).catch(() => void 0);
+    released = true;
+  })();
+  const interval = setInterval(() => {
+    void heartbeat().catch(() => void 0);
+  }, HEARTBEAT_INTERVAL_MS);
+  interval.unref();
+  return {
+    sessionKey: descriptor.sessionKey,
+    canonicalPath: descriptor.canonicalPath,
+    origin: descriptor.origin,
+    browserOrigin: descriptor.browserOrigin,
+    epoch: descriptor.epoch,
+    continuityProof: descriptor.continuityProof,
+    leaseId: lease.leaseId,
+    clientId: lease.clientId,
+    capabilities: [...descriptor.capabilities],
+    request,
+    heartbeat,
+    release: async (disposition) => {
+      clearInterval(interval);
+      await release(disposition);
+    }
+  };
+}
+async function canonicalRscriptPath(value) {
+  const requested = resolve3(value);
+  try {
+    return await realpath2(requested);
+  } catch {
+    return requested;
+  }
+}
+async function assertAttachConfiguration(identity, requested, sessionKey) {
+  const active = identity.configuration;
+  const activeRscript = active.rscript === null ? null : await canonicalRscriptPath(active.rscript);
+  const join6 = requested.requestedConfiguration;
+  const selected = {
+    rscript: join6?.rscript ?? requested.rscript,
+    executionMode: join6?.executionMode ?? requested.executionMode,
+    runOnStartup: join6?.runOnStartup ?? requested.runOnStartup,
+    deferStartup: join6?.deferStartup
+  };
+  const comparisons = [
+    ["rscript", selected.rscript === void 0 ? void 0 : await canonicalRscriptPath(selected.rscript), activeRscript],
+    ["executionMode", selected.executionMode, active.executionMode],
+    ["runOnStartup", selected.runOnStartup, active.runOnStartup],
+    ["deferStartup", selected.deferStartup, active.deferStartup]
+  ];
+  const mismatch = comparisons.find(([, value, current]) => value !== void 0 && value !== current);
+  if (mismatch) throw new SessionConfigurationConflictError("existing notebook host uses different runtime settings", { sessionKey, setting: mismatch[0] });
+}
+async function requestRaw(origin, path2, init = {}) {
+  if (!path2.startsWith("/") || path2.startsWith("//")) throw new TypeError("session request path must be origin-relative");
+  let base;
+  try {
+    base = new URL(origin);
+  } catch {
+    throw new SessionAuthError("session origin is invalid");
+  }
+  const hostname3 = base.hostname.replace(/^\[|\]$/g, "");
+  if (base.protocol !== "http:" || !LOOPBACK_HOSTS.has(hostname3) || base.username !== "" || base.password !== "" || base.pathname !== "/" || base.search !== "" || base.hash !== "") throw new SessionAuthError("session origin is not loopback HTTP");
+  const url2 = new URL(path2, base);
+  if (url2.origin !== base.origin) throw new TypeError("session request may not change origin");
+  return fetch(url2, { ...init, redirect: "error" });
+}
+async function requestJson(origin, token, path2, init = {}, expectedProof) {
+  const headers = new Headers(init.headers);
+  headers.set("Authorization", "Bearer " + token);
+  const response = await requestRaw(origin, path2, { ...init, headers });
+  if (expectedProof !== void 0 && response.headers.get("X-Alder-Continuity-Proof") !== expectedProof) throw new SessionAuthError("host HTTP continuity proof changed");
+  if (!response.ok) throw new SessionUnavailableError("notebook host request failed (" + response.status + ")");
+  return await response.json();
 }
 function isUntitledRecoveryId(value) {
   return typeof value === "string" && UNTITLED_SESSION_KEY_PATTERN.test(value);
@@ -35177,610 +35311,82 @@ async function registerUntitledRecoveryDescriptor(id, projectDirectory, dataRoot
   const path2 = untitledRecoveryDescriptorPath(directory, validId);
   const current = await readUntitledRecoveryDescriptor(path2, validId, privatePathOptions);
   if (current !== null) {
-    if (current.projectDirectory !== validProjectDirectory) {
-      throw new SessionUnavailableError("untitled recovery identity belongs to another project", { id: validId });
-    }
+    if (current.projectDirectory !== validProjectDirectory) throw new SessionUnavailableError("untitled recovery identity belongs to another project", { id: validId });
     return current;
   }
-  const descriptor = {
-    schemaVersion: UNTITLED_RECOVERY_SCHEMA_VERSION,
-    id: validId,
-    projectDirectory: validProjectDirectory,
-    createdAt: (/* @__PURE__ */ new Date()).toISOString()
-  };
-  await atomicWriteUntitledRecoveryDescriptor(path2, descriptor, privatePathOptions);
-  const written = await readUntitledRecoveryDescriptor(path2, validId, privatePathOptions);
-  if (written === null) throw new SessionUnavailableError("untitled recovery descriptor disappeared after registration", { id: validId });
-  if (written.projectDirectory !== validProjectDirectory) {
-    throw new SessionUnavailableError("untitled recovery identity changed during registration", { id: validId });
-  }
-  return written;
+  const descriptor = { schemaVersion: UNTITLED_RECOVERY_SCHEMA_VERSION, id: validId, projectDirectory: validProjectDirectory, createdAt: (/* @__PURE__ */ new Date()).toISOString() };
+  await writePrivateFile(path2, Buffer.from(JSON.stringify(descriptor)), privatePathOptions);
+  return descriptor;
 }
 async function listUntitledRecoveryDescriptors(dataRoot, privatePathOptions = {}) {
   const directory = await ensureUntitledRecoveryDirectory(dataRoot, privatePathOptions);
   const entries = await readdir(directory, { withFileTypes: true });
-  const descriptors = [];
+  const values = [];
   for (const entry2 of entries) {
     if (!entry2.isFile() || !entry2.name.endsWith(".json")) continue;
     const id = entry2.name.slice(0, -5);
     if (!isUntitledRecoveryId(id)) continue;
     try {
-      const descriptor = await readUntitledRecoveryDescriptor(join4(directory, entry2.name), id, privatePathOptions);
-      if (descriptor !== null) descriptors.push(descriptor);
-    } catch (error61) {
-      if (!(error61 instanceof SessionUnavailableError)) throw error61;
+      const value = await readUntitledRecoveryDescriptor(join4(directory, entry2.name), id, privatePathOptions);
+      if (value) values.push(value);
+    } catch {
     }
   }
-  descriptors.sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id));
-  return descriptors;
+  return values.sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id));
 }
 async function selectUntitledRecoveryDescriptor(id, dataRoot, privatePathOptions = {}) {
   const validId = requireUntitledRecoveryId(id);
   const directory = await ensureUntitledRecoveryDirectory(dataRoot, privatePathOptions);
-  const descriptor = await readUntitledRecoveryDescriptor(untitledRecoveryDescriptorPath(directory, validId), validId, privatePathOptions);
-  if (descriptor === null) throw new SessionUnavailableError("untitled recovery descriptor was not found", { id: validId });
-  return descriptor;
-}
-var lockOptions = {
-  realpath: false,
-  // proper-lockfile's stale check only knows about mtime. Ownership is
-  // reclaimable only after the registry owner has failed an authenticated
-  // health probe and its recorded PID is proven dead, so never let the
-  // library reclaim one of these locks on mtime alone.
-  stale: Number.MAX_SAFE_INTEGER,
-  update: LOCK_UPDATE_MS,
-  retries: { retries: 0 },
-  // An asynchronous compromise callback cannot safely throw into the caller
-  // that acquired the lock. Per-lock callbacks below record the compromise
-  // and operations turn it into a typed unavailable error instead.
-  onCompromised: () => void 0
-};
-var reservationLockOptions = {
-  ...lockOptions,
-  stale: Number.MAX_SAFE_INTEGER,
-  update: 1e3
-};
-var launches = /* @__PURE__ */ new Map();
-async function acquireNotebookSession(options) {
-  const hasExternalAuth = validateExternalAuthOptions(options);
-  const canonicalPath = await canonicalizePath(options.path);
-  if (canonicalPath !== null && (options.untitledRecoveryId !== void 0 || options.untitledProjectDirectory !== void 0)) {
-    throw new SessionAuthError("untitled options cannot be combined with a notebook path");
-  }
-  const processSupervisorExecutable = options.resources?.processSupervisorExecutable;
-  const selectedRecovery = canonicalPath === null && options.untitledRecoveryId !== void 0 ? await selectUntitledRecoveryDescriptor(options.untitledRecoveryId, void 0, { processSupervisorExecutable }) : void 0;
-  const sessionKey = canonicalPath === null ? selectedRecovery?.id ?? randomUUID2() : await sessionKeyFor(canonicalPath);
-  const projectDirectory = canonicalPath === null ? selectedRecovery?.projectDirectory ?? resolve3(options.untitledProjectDirectory ?? process.cwd()) : void 0;
-  if (projectDirectory !== void 0) await registerUntitledRecoveryDescriptor(sessionKey, projectDirectory, void 0, { processSupervisorExecutable });
-  const timeoutMs = options.startupTimeoutMs ?? STARTUP_TIMEOUT_MS;
-  if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > STARTUP_TIMEOUT_MS) {
-    throw new RangeError(`startupTimeoutMs must be between 1 and ${STARTUP_TIMEOUT_MS}`);
-  }
-  const runtime = await runtimePaths(options.runtimeDirectory, processSupervisorExecutable);
-  const deadline = Date.now() + timeoutMs;
-  let metadata = await readRegistry(runtime.registryPath(sessionKey));
-  while (metadata?.state === "stopping") {
-    const alive = await ownerLiveness(metadata);
-    if (alive === false) break;
-    if (Date.now() >= deadline) {
-      throw new SessionUnavailableError("notebook host did not finish stopping before the startup deadline", {
-        sessionKey,
-        registryPath: runtime.registryPath(sessionKey),
-        lockPath: runtime.lockPath(sessionKey)
-      });
-    }
-    await delay(Math.min(POLL_INTERVAL_MS, Math.max(1, deadline - Date.now())));
-    metadata = await readRegistry(runtime.registryPath(sessionKey));
-  }
-  if (metadata?.state === "ready") {
-    if (hasExternalAuth) {
-      const ownerState = await ownerLiveness(metadata);
-      if (ownerState !== false) {
-        throw new SessionUnavailableError("external authentication settings cannot attach to an existing notebook host", { sessionKey });
-      }
-    } else {
-      const connection2 = await tryAttach(metadata, sessionKey, options);
-      if (connection2) return connection2;
-    }
-    await assertReclaimable(metadata, runtime.lockPath(sessionKey), sessionKey);
-  } else if (metadata?.state === "stopping") {
-    await assertReclaimable(metadata, runtime.lockPath(sessionKey), sessionKey);
-  } else if (metadata?.state === "starting") {
-    const ownerState = await ownerLiveness(metadata);
-    if (ownerState !== false) {
-      if (hasExternalAuth) {
-        throw new SessionUnavailableError("external authentication settings cannot attach to an existing notebook host", { sessionKey });
-      }
-      await waitForReady(runtime, sessionKey, deadline);
-      metadata = await readRegistry(runtime.registryPath(sessionKey));
-      if (metadata?.state === "ready") {
-        const connection2 = await tryAttach(metadata, sessionKey, options);
-        if (connection2) return connection2;
-      }
-      throw new SessionUnavailableError("notebook host did not publish authenticated readiness", {
-        sessionKey,
-        lockPath: runtime.lockPath(sessionKey)
-      });
-    }
-    await assertReclaimable(metadata, runtime.lockPath(sessionKey), sessionKey);
-  }
-  let launch = launches.get(sessionKey);
-  let launchedHere = false;
-  if (launch !== void 0 && hasExternalAuth) {
-    throw new SessionUnavailableError("external authentication settings cannot attach to an existing notebook host", { sessionKey });
-  }
-  if (launch === void 0) {
-    launchedHere = true;
-    launch = options.launchHost ? options.launchHost({ path: canonicalPath, sessionKey, runtimeDirectory: runtime.directory, projectDirectory, rscript: options.rscript, executionMode: options.executionMode, runOnStartup: options.runOnStartup, deferStartup: options.deferStartup }) : launchCandidate({ ...options, path: canonicalPath }, runtime, sessionKey, deadline, projectDirectory);
-    launches.set(sessionKey, launch);
-    void launch.then(
-      () => {
-        if (launches.get(sessionKey) === launch) launches.delete(sessionKey);
-      },
-      () => {
-        if (launches.get(sessionKey) === launch) launches.delete(sessionKey);
-      }
-    );
-  }
-  let startupTimer;
-  try {
-    const remaining = Math.max(1, deadline - Date.now());
-    await Promise.race([
-      launch,
-      new Promise((resolveStartup) => {
-        startupTimer = setTimeout(resolveStartup, remaining);
-      })
-    ]);
-  } finally {
-    if (startupTimer !== void 0) clearTimeout(startupTimer);
-  }
-  await waitForReady(runtime, sessionKey, deadline);
-  metadata = await readRegistry(runtime.registryPath(sessionKey));
-  if (metadata?.state !== "ready") {
-    throw new SessionUnavailableError("notebook host did not become ready before the 120-second startup deadline", {
-      sessionKey,
-      registryPath: runtime.registryPath(sessionKey),
-      lockPath: runtime.lockPath(sessionKey)
-    });
-  }
-  if (hasExternalAuth && !launchedHere) {
-    throw new SessionUnavailableError("external authentication settings cannot attach to an existing notebook host", { sessionKey });
-  }
-  const connection = await tryAttach(metadata, sessionKey, options);
-  if (connection) return connection;
-  throw new SessionUnavailableError("notebook host readiness failed authenticated identity validation", {
-    sessionKey,
-    registryPath: runtime.registryPath(sessionKey)
-  });
-}
-async function canonicalRscriptPath(value) {
-  const requested = resolve3(value);
-  try {
-    return await realpath2(requested);
-  } catch {
-    return requested;
-  }
-}
-async function assertAttachConfiguration(identity, requested, sessionKey) {
-  if (requested === void 0) return;
-  const active = identity.configuration;
-  const activeRscript = active.rscript === null ? null : await canonicalRscriptPath(active.rscript);
-  const join6 = requested.requestedConfiguration;
-  const requestedConfiguration = {};
-  const requestedRscript = join6?.rscript ?? requested.rscript;
-  const requestedExecutionMode = join6?.executionMode ?? requested.executionMode;
-  const requestedRunOnStartup = join6?.runOnStartup ?? requested.runOnStartup;
-  const requestedDeferStartup = join6?.deferStartup;
-  if (requestedRscript !== void 0) requestedConfiguration.rscript = await canonicalRscriptPath(requestedRscript);
-  if (requestedExecutionMode !== void 0) requestedConfiguration.executionMode = requestedExecutionMode;
-  if (requestedRunOnStartup !== void 0) requestedConfiguration.runOnStartup = requestedRunOnStartup;
-  if (requestedDeferStartup !== void 0) requestedConfiguration.deferStartup = requestedDeferStartup;
-  const comparisons = [
-    ["rscript", requestedConfiguration.rscript, activeRscript],
-    ["executionMode", requestedConfiguration.executionMode, active.executionMode],
-    ["runOnStartup", requestedConfiguration.runOnStartup, active.runOnStartup],
-    ["deferStartup", requestedConfiguration.deferStartup, active.deferStartup]
-  ];
-  const mismatch = comparisons.find(([, value, current]) => value !== void 0 && value !== current);
-  if (mismatch !== void 0) {
-    throw new SessionConfigurationConflictError("existing notebook host uses different runtime settings; joining would not change its active configuration", {
-      sessionKey,
-      setting: mismatch[0],
-      requested: requestedConfiguration,
-      active: { ...active, rscript: activeRscript }
-    });
-  }
-}
-async function tryAttach(metadata, sessionKey, requested) {
-  if (metadata.state !== "ready" || metadata.address === void 0 || metadata.address.origin !== metadata.origin || metadata.address.browserOrigin.length === 0) return null;
-  const token = metadata.token;
-  const origin = metadata.address.origin;
-  const browserOrigin = metadata.address.browserOrigin;
-  try {
-    const identity = hostIdentitySchema.parse(await requestJson(origin, token, "/api/identity", { method: "GET", signal: AbortSignal.timeout(IDENTITY_REQUEST_TIMEOUT_MS) }, metadata.continuityProof));
-    const parsedIdentity = sessionIdentitySchema.parse({
-      sessionKey: identity.sessionKey,
-      canonicalPath: identity.canonicalPath,
-      origin: identity.origin,
-      browserOrigin: identity.browserOrigin,
-      epoch: identity.epoch,
-      processNonce: identity.processNonce
-    });
-    const identityAddress = identity.address;
-    const capabilities = parseIdentityCapabilities(identity.capabilities);
-    const sameCanonicalPath = await sameNotebookIdentity(parsedIdentity.canonicalPath, metadata.canonicalPath);
-    if (parsedIdentity.sessionKey !== sessionKey || parsedIdentity.origin !== metadata.origin || parsedIdentity.browserOrigin !== browserOrigin || identityAddress === void 0 || identityAddress.host !== metadata.address.host || identityAddress.port !== metadata.address.port || identityAddress.origin !== metadata.origin || identityAddress.browserOrigin !== browserOrigin || identity.continuityProof !== metadata.continuityProof || parsedIdentity.epoch !== metadata.epoch || parsedIdentity.processNonce !== metadata.processNonce || !sameCanonicalPath) {
-      throw new SessionAuthError("authenticated host identity does not match registry metadata");
-    }
-    await assertAttachConfiguration(identity, requested, sessionKey);
-    const lease = await requestJson(origin, token, "/api/lease", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(attachLeaseRequestSchema.parse({ action: "attach" })),
-      signal: AbortSignal.timeout(IDENTITY_REQUEST_TIMEOUT_MS)
-    }, metadata.continuityProof);
-    return createConnection(
-      { ...metadata, origin },
-      sessionKey,
-      token,
-      sessionLeaseSchema.parse(lease),
-      identity.continuityProof,
-      browserOrigin,
-      capabilities
-    );
-  } catch (error61) {
-    if (error61 instanceof SessionConfigurationConflictError) throw error61;
-    return null;
-  }
-}
-function parseIdentityCapabilities(value) {
-  if (value === void 0) return [];
-  if (!Array.isArray(value) || value.length > MAX_PROTOCOL_COLLECTION_ITEMS || value.some((capability) => typeof capability !== "string" || capability.length > 256)) {
-    throw new SessionAuthError("authenticated host identity has invalid capabilities");
-  }
-  return [...value];
-}
-function createConnection(metadata, sessionKey, token, lease, continuityProof, browserOrigin, capabilities = []) {
-  let released = false;
-  const authenticatedHeaders = (init = {}) => {
-    const headers = new Headers(init.headers);
-    headers.set("Authorization", "Bearer " + token);
-    headers.set("X-Alder-Lease-Id", lease.leaseId);
-    headers.set("X-Alder-Client-Id", lease.clientId);
-    return headers;
-  };
-  const authenticatedJsonHeaders = () => {
-    const headers = authenticatedHeaders({});
-    headers.set("Content-Type", "application/json");
-    return headers;
-  };
-  const request = async (path2, init = {}) => {
-    if (released) throw new SessionUnavailableError("session lease is released");
-    const response = await requestRaw(metadata.origin, token, path2, { ...init, headers: authenticatedHeaders(init) });
-    if (response.headers.get("X-Alder-Continuity-Proof") !== continuityProof) throw new SessionAuthError("host HTTP continuity proof changed");
-    return response;
-  };
-  const heartbeat = async () => {
-    if (released) return;
-    const response = await request("/api/lease", {
-      method: "POST",
-      headers: authenticatedJsonHeaders(),
-      body: JSON.stringify({ action: "heartbeat", leaseId: lease.leaseId })
-    });
-    if (!response.ok) throw new SessionUnavailableError("session heartbeat failed (" + response.status + ")");
-    sessionLeaseSchema.parse(await response.json());
-  };
-  let releasePromise;
-  const release = (disposition = "normal") => {
-    if (releasePromise !== void 0) return releasePromise;
-    releasePromise = (async () => {
-      await request("/api/lease", {
-        method: "POST",
-        headers: authenticatedJsonHeaders(),
-        body: JSON.stringify({ action: "release", leaseId: lease.leaseId, disposition })
-      }).catch(() => void 0);
-      released = true;
-    })();
-    return releasePromise;
-  };
-  const interval = setInterval(() => {
-    void heartbeat().catch(() => void 0);
-  }, HEARTBEAT_INTERVAL_MS);
-  interval.unref();
-  const connection = {
-    sessionKey,
-    canonicalPath: metadata.canonicalPath,
-    origin: metadata.origin,
-    browserOrigin,
-    epoch: metadata.epoch,
-    processNonce: metadata.processNonce,
-    continuityProof,
-    leaseId: lease.leaseId,
-    clientId: lease.clientId,
-    capabilities: [...capabilities],
-    request,
-    heartbeat,
-    release: async (disposition = "normal") => {
-      clearInterval(interval);
-      await release(disposition);
-    }
-  };
-  return connection;
-}
-async function launchCandidate(options, runtime, sessionKey, _deadline, projectDirectory) {
-  const { root, nodeExecutable, hostEntry } = options.resources;
-  if (!root || !nodeExecutable || !hostEntry) throw new SessionUnavailableError("bundled document service is unavailable");
-  await new SharedBackend({ root, nodeExecutable, hostEntry }, runtime.directory).open({
-    path: options.path,
-    sessionKey,
-    runtimeDirectory: runtime.directory,
-    projectDirectory,
-    rscript: options.rscript,
-    executionMode: options.executionMode,
-    runOnStartup: options.runOnStartup,
-    deferStartup: options.deferStartup,
-    externalOrigin: options.externalOrigin,
-    tokenFile: options.tokenFile
-  });
-}
-async function assertReclaimable(metadata, lockPath, sessionKey) {
-  const alive = await ownerLiveness(metadata);
-  if (alive !== false) {
-    throw new SessionUnavailableError("notebook owner liveness is alive or unknown; manual stale-lock recovery is required", {
-      lockPath,
-      pid: metadata.pid,
-      state: metadata.state
-    });
-  }
-  if (await authenticatedHealth(metadata, sessionKey)) {
-    throw new SessionUnavailableError("authenticated notebook owner remains active", { lockPath, pid: metadata.pid });
-  }
-}
-async function authenticatedHealth(metadata, sessionKey) {
-  if (metadata.state !== "ready" || metadata.address === void 0 || metadata.address.origin !== metadata.origin || metadata.address.browserOrigin.length === 0) return false;
-  try {
-    const value = hostIdentitySchema.parse(await requestJson(metadata.address.origin, metadata.token, "/api/identity", { method: "GET", signal: AbortSignal.timeout(IDENTITY_REQUEST_TIMEOUT_MS) }, metadata.continuityProof));
-    return (sessionKey === void 0 || value.sessionKey === sessionKey) && value.processNonce === metadata.processNonce && value.continuityProof === metadata.continuityProof && value.epoch === metadata.epoch && value.canonicalPath === metadata.canonicalPath && value.origin === metadata.origin && value.browserOrigin === metadata.address.browserOrigin && value.address !== void 0 && value.address.host === metadata.address.host && value.address.port === metadata.address.port && value.address.origin === metadata.address.origin && value.address.browserOrigin === metadata.address.browserOrigin;
-  } catch {
-    return false;
-  }
-}
-async function ownerLiveness(metadata) {
-  const pidState = await pidAlive(metadata.pid);
-  if (pidState !== true) return pidState;
-  const observed = await processStartIdentity(metadata.pid);
-  if (observed === null) return null;
-  return observed === metadata.startIdentity ? true : null;
-}
-async function waitForReady(runtime, sessionKey, deadline) {
-  for (; ; ) {
-    const metadata = await readRegistry(runtime.registryPath(sessionKey));
-    if (metadata?.state === "ready") return;
-    if (metadata?.state === "stopping") throw new SessionUnavailableError("notebook host is stopping; retry after it exits", { sessionKey });
-    if (Date.now() >= deadline) {
-      throw new SessionUnavailableError("notebook host did not become ready before the 120-second startup deadline", {
-        sessionKey,
-        registryPath: runtime.registryPath(sessionKey),
-        lockPath: runtime.lockPath(sessionKey)
-      });
-    }
-    await delay(Math.min(POLL_INTERVAL_MS, Math.max(1, deadline - Date.now())));
-  }
-}
-async function requestRaw(origin, token, path2, init = {}) {
-  if (!path2.startsWith("/") || path2.startsWith("//")) throw new TypeError("session request path must be origin-relative");
-  let base;
-  try {
-    base = new URL(origin);
-  } catch {
-    throw new SessionAuthError("session registry origin is invalid");
-  }
-  const hostname3 = base.hostname.replace(/^\[|\]$/g, "");
-  if (base.protocol !== "http:" || !LOOPBACK_HOSTS.has(hostname3) || base.username !== "" || base.password !== "" || base.pathname !== "/" || base.search !== "" || base.hash !== "") {
-    throw new SessionAuthError("session registry origin is not a loopback HTTP origin");
-  }
-  const url2 = new URL(path2, base);
-  if (url2.origin !== base.origin) throw new TypeError("session request may not change origin");
-  const headers = new Headers(init.headers);
-  headers.set("Authorization", "Bearer " + token);
-  if (init.body !== void 0 && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
-  return fetch(url2, { ...init, headers, redirect: "error" });
-}
-async function readBoundedResponse(response, maxBytes) {
-  const declared = response.headers.get("Content-Length");
-  if (declared !== null && (!/^(?:0|[1-9][0-9]*)$/.test(declared) || Number(declared) > maxBytes)) {
-    await response.body?.cancel().catch(() => void 0);
-    throw new SessionAuthError("session response exceeds the byte limit");
-  }
-  if (response.body === null) return new Uint8Array();
-  const reader = response.body.getReader();
-  const chunks = [];
-  let length = 0;
-  try {
-    for (; ; ) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      length += value.byteLength;
-      if (length > maxBytes) {
-        await reader.cancel();
-        throw new SessionAuthError("session response exceeds the byte limit");
-      }
-      chunks.push(value);
-    }
-  } finally {
-    reader.releaseLock();
-  }
-  const bytes = new Uint8Array(length);
-  let offset = 0;
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return bytes;
-}
-async function requestJson(origin, token, path2, init = {}, expectedProof) {
-  const response = await requestRaw(origin, token, path2, init);
-  if (expectedProof !== void 0 && response.headers.get("X-Alder-Continuity-Proof") !== expectedProof) {
-    await response.body?.cancel().catch(() => void 0);
-    throw new SessionAuthError("host HTTP continuity proof changed");
-  }
-  const bytes = await readBoundedResponse(response, 1024 * 1024);
-  let value = null;
-  if (bytes.length > 0) {
-    try {
-      value = decodeJsonFrame(bytes, 1024 * 1024);
-    } catch (error61) {
-      throw new SessionAuthError(error61 instanceof Error ? error61.message : "session response is not valid JSON");
-    }
-  }
-  if (!response.ok) {
-    const detail = value && typeof value === "object" && !Array.isArray(value) ? value : {};
-    throw new SessionAuthError(typeof detail.message === "string" ? detail.message : "session request failed (" + response.status + ")");
-  }
+  const value = await readUntitledRecoveryDescriptor(untitledRecoveryDescriptorPath(directory, validId), validId, privatePathOptions);
+  if (!value) throw new SessionUnavailableError("untitled recovery descriptor was not found", { id: validId });
   return value;
-}
-async function readRegistry(path2, privatePathOptions = privatePathOptionsFor(path2)) {
-  try {
-    const bytes = await readPrivateFile(path2, { ...privatePathOptions, maxBytes: 64 * 1024 });
-    if (bytes.byteLength === 0) return null;
-    return sessionRegistryMetadataSchema.parse(decodeJsonFrame(bytes, 64 * 1024));
-  } catch (error61) {
-    const code = error61.code;
-    if (code === "ENOENT") return null;
-    throw new SessionUnavailableError("notebook registry metadata is corrupt; manual stale-lock recovery is required", { path: path2 });
-  }
 }
 async function ensureUntitledRecoveryDirectory(dataRoot, privatePathOptions = {}) {
   const directory = untitledRecoveryDescriptorDirectory(dataRoot);
-  try {
-    await ensurePrivateDirectory(directory, privatePathOptions);
-  } catch (error61) {
-    throw new SessionUnavailableError("untitled recovery descriptor directory must be private and owner-controlled", {
-      directory,
-      cause: error61 instanceof Error ? error61.message : String(error61)
-    });
-  }
+  await ensurePrivateDirectory(directory, privatePathOptions);
   return directory;
 }
 function requireUntitledRecoveryId(value) {
-  if (!isUntitledRecoveryId(value)) throw new SessionUnavailableError("untitled recovery identity is invalid", { id: value });
+  if (!isUntitledRecoveryId(value)) throw new SessionAuthError("untitled recovery identity is invalid");
   return value;
 }
 function normalizeProjectDirectory(value) {
-  if (typeof value !== "string" || value.length === 0 || value.includes("\0")) {
-    throw new SessionUnavailableError("untitled recovery project directory is invalid");
-  }
+  if (typeof value !== "string" || !value || value.includes("\0")) throw new SessionUnavailableError("untitled project directory is invalid");
   return resolve3(value);
 }
 function untitledRecoveryDescriptorPath(directory, id) {
   return join4(directory, id + ".json");
 }
-async function readUntitledRecoveryDescriptor(path2, id, privatePathOptions = {}) {
+async function readUntitledRecoveryDescriptor(path2, id, options) {
+  let bytes;
   try {
-    const bytes = await readPrivateFile(path2, { ...privatePathOptions, maxBytes: UNTITLED_RECOVERY_DESCRIPTOR_MAX_BYTES });
-    if (bytes.byteLength === 0) throw new SessionUnavailableError("untitled recovery descriptor is empty", { path: path2 });
-    return parseUntitledRecoveryDescriptor(decodeJsonFrame(bytes, UNTITLED_RECOVERY_DESCRIPTOR_MAX_BYTES), id, path2);
+    bytes = await readPrivateFile(path2, { ...options, maxBytes: UNTITLED_RECOVERY_DESCRIPTOR_MAX_BYTES });
   } catch (error61) {
     if (error61.code === "ENOENT") return null;
-    if (error61 instanceof SessionUnavailableError) throw error61;
-    throw new SessionUnavailableError("untitled recovery descriptor is corrupt", { path: path2 });
+    throw error61;
   }
-}
-function parseUntitledRecoveryDescriptor(value, id, path2) {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) throw new SessionUnavailableError("untitled recovery descriptor is not an object", { path: path2 });
-  const record3 = value;
-  const keys = Object.keys(record3).sort();
-  if (keys.join("\0") !== "createdAt\0id\0projectDirectory\0schemaVersion") throw new SessionUnavailableError("untitled recovery descriptor has unexpected fields", { path: path2 });
-  if (record3.schemaVersion !== UNTITLED_RECOVERY_SCHEMA_VERSION || record3.id !== id || !isUntitledRecoveryId(record3.id)) throw new SessionUnavailableError("untitled recovery descriptor identity is invalid", { path: path2 });
-  if (typeof record3.projectDirectory !== "string" || record3.projectDirectory.length === 0 || record3.projectDirectory.includes("\0") || resolve3(record3.projectDirectory) !== record3.projectDirectory) {
-    throw new SessionUnavailableError("untitled recovery descriptor project directory is invalid", { path: path2 });
-  }
-  if (typeof record3.createdAt !== "string" || !isIsoTimestamp(record3.createdAt)) throw new SessionUnavailableError("untitled recovery descriptor timestamp is invalid", { path: path2 });
-  return { schemaVersion: UNTITLED_RECOVERY_SCHEMA_VERSION, id, projectDirectory: record3.projectDirectory, createdAt: record3.createdAt };
-}
-function isIsoTimestamp(value) {
-  const parsed = new Date(value);
-  return Number.isFinite(parsed.getTime()) && parsed.toISOString() === value;
-}
-async function atomicWriteUntitledRecoveryDescriptor(path2, descriptor, privatePathOptions = {}) {
-  const temporary = path2 + "." + process.pid + "." + randomUUID2() + ".tmp";
-  const bytes = Buffer.from(JSON.stringify(descriptor) + "\n");
+  let value;
   try {
-    await writePrivateFile(temporary, bytes, privatePathOptions);
-    await link(temporary, path2).catch((error61) => {
-      if (error61.code !== "EEXIST") throw error61;
-    });
-  } finally {
-    await rm3(temporary, { force: true }).catch(() => void 0);
+    value = JSON.parse(bytes.toString("utf8"));
+  } catch {
+    throw new SessionUnavailableError("untitled recovery descriptor is invalid", { id });
   }
-}
-var privatePathOptionsByDirectory = /* @__PURE__ */ new Map();
-function privatePathOptionsFor(path2) {
-  let selected;
-  let selectedLength = -1;
-  for (const [directory, options] of privatePathOptionsByDirectory) {
-    if ((path2 === directory || path2.startsWith(directory + sep2)) && directory.length > selectedLength) {
-      selected = options;
-      selectedLength = directory.length;
-    }
-  }
-  return selected ?? {};
-}
-async function runtimePaths(explicit, processSupervisorExecutable) {
-  const directory = resolve3(explicit ?? process.env.ALDER_RUNTIME_DIRECTORY ?? join4(envPaths("alder").data, "runtime"));
-  const privatePathOptions = { processSupervisorExecutable };
-  await ensurePrivateDirectory(directory, privatePathOptions);
-  privatePathOptionsByDirectory.set(directory, privatePathOptions);
-  return {
-    directory,
-    privatePathOptions,
-    registryPath: (key) => join4(directory, `${key}.json`),
-    lockPath: (key) => join4(directory, `${key}.json.lock`),
-    lockTarget: (key) => join4(directory, `${key}.json`),
-    recoveryPath: (key) => join4(directory, `${key}.recovery`),
-    logPath: (key) => join4(directory, `${key}.log`)
-  };
+  if (typeof value !== "object" || value === null) throw new SessionUnavailableError("untitled recovery descriptor is invalid", { id });
+  const candidate = value;
+  if (candidate.schemaVersion !== 1 || candidate.id !== id || typeof candidate.projectDirectory !== "string" || typeof candidate.createdAt !== "string" || Number.isNaN(Date.parse(candidate.createdAt))) throw new SessionUnavailableError("untitled recovery descriptor is invalid", { id });
+  return candidate;
 }
 async function canonicalizePath(path2) {
   if (path2 === null) return null;
-  const absolute = resolve3(path2);
+  const target = resolve3(path2);
   try {
-    return await realpath2(absolute);
-  } catch (error61) {
-    if (error61.code !== "ENOENT") throw error61;
-    return join4(await realpath2(dirname3(absolute)), basename(absolute));
-  }
-}
-async function sessionKeyFor(path2) {
-  if (path2 === null) return randomUUID2();
-  return createHash("sha256").update("path:" + path2).digest("hex");
-}
-async function sameNotebookIdentity(left, right) {
-  if (left === right) return true;
-  if (left === null || right === null) return false;
-  try {
-    return await sessionKeyFor(left) === await sessionKeyFor(right);
+    return await realpath2(target);
   } catch {
-    return false;
+    return target;
   }
 }
-async function pidAlive(pid) {
-  if (!Number.isSafeInteger(pid) || pid <= 0) return null;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error61) {
-    const code = error61.code;
-    if (code === "ESRCH") return false;
-    if (code === "EPERM") return true;
-    return null;
-  }
-}
-async function processStartIdentity(_pid) {
-  return null;
-}
-function delay(ms) {
-  return new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
+function sessionKeyFor(path2) {
+  return createHash("sha256").update("path:" + path2).digest("hex");
 }
 
 // src/main.ts
@@ -35972,10 +35578,10 @@ async function openSystemBrowser(url2, options = {}) {
   let handle;
   try {
     directory = await mkdtemp(join5(options.temporaryRoot ?? tmpdir2(), "alder-browser-launch-"));
-    await chmod3(directory, 448);
+    await chmod2(directory, 448);
     const launcherPath = join5(directory, "launch.html");
     const flags = constants2.O_WRONLY | constants2.O_CREAT | constants2.O_EXCL | (constants2.O_NOFOLLOW ?? 0);
-    handle = await open3(launcherPath, flags, 384);
+    handle = await open2(launcherPath, flags, 384);
     await handle.chmod(384);
     await handle.writeFile(browserLauncherHtml(url2), { encoding: "utf8" });
     await handle.sync();
@@ -35995,12 +35601,12 @@ async function openSystemBrowser(url2, options = {}) {
     });
     const cleanupDirectory = directory;
     const cleanup = setTimeout(() => {
-      void rm4(cleanupDirectory, { recursive: true, force: true });
+      void rm3(cleanupDirectory, { recursive: true, force: true });
     }, cleanupDelayMs);
     cleanup.unref();
   } catch {
     await handle?.close().catch(() => void 0);
-    if (directory !== void 0) await rm4(directory, { recursive: true, force: true }).catch(() => void 0);
+    if (directory !== void 0) await rm3(directory, { recursive: true, force: true }).catch(() => void 0);
     throw new Error("could not open system browser");
   }
 }

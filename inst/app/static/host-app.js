@@ -21070,8 +21070,6 @@ var outputRecordShape = external_exports.object({ id: idSchema, sessionEpoch: id
   }
 });
 var outputRecordSchema = protocolJsonSchema.pipe(outputRecordShape);
-var sessionIdentitySchema = external_exports.object({ sessionKey: idSchema, canonicalPath: pathSchema.nullable(), origin: boundedUtf8StringSchema(2048, true), browserOrigin: boundedUtf8StringSchema(2048, true), epoch: idSchema, processNonce: idSchema }).strict();
-var sessionRegistryMetadataSchema = external_exports.object({ state: external_exports.enum(["starting", "ready", "stopping"]), pid: positiveIntegerSchema, processNonce: idSchema, continuityProof: idSchema, startIdentity: idSchema, canonicalPath: pathSchema.nullable(), origin: boundedUtf8StringSchema(2048, true), epoch: idSchema, token: external_exports.string().regex(/^[0-9a-f]{64}$/), protocol: external_exports.literal(HOST_PROTOCOL), address: external_exports.object({ host: boundedUtf8StringSchema(256, true), port: external_exports.number().int().min(0).max(65535).safe(), origin: boundedUtf8StringSchema(2048, true), browserOrigin: boundedUtf8StringSchema(2048, true) }).strict().optional() }).strict();
 var sessionLeaseSchema = external_exports.object({ leaseId: idSchema, clientId: idSchema, epoch: idSchema }).strict();
 var attachLeaseRequestSchema = external_exports.object({ action: external_exports.literal("attach") }).strict();
 var leaseActionRequestSchema = external_exports.object({ action: external_exports.enum(["heartbeat", "release"]), leaseId: idSchema, disposition: external_exports.enum(["normal", "discard"]).optional() }).strict().superRefine((value, context) => {
@@ -21081,11 +21079,11 @@ var ticketMintRequestSchema = external_exports.object({ origin: boundedUtf8Strin
 var ticketMintResponseSchema = external_exports.object({ ticket: idSchema, expiresAt: boundedUtf8StringSchema(256, true) }).strict();
 var ticketExchangeRequestSchema = external_exports.object({ ticket: idSchema }).strict();
 var ticketExchangeResponseSchema = external_exports.object({ leaseId: idSchema, clientId: idSchema, epoch: idSchema, continuityProof: idSchema, csrf: idSchema, recoveryId: idSchema.optional() }).strict();
-var hostIdentitySchema = external_exports.object({ protocol: external_exports.literal(HOST_PROTOCOL), epoch: idSchema, processNonce: idSchema, continuityProof: idSchema, sessionKey: idSchema, canonicalPath: pathSchema.nullable(), capabilities: external_exports.array(boundedUtf8StringSchema(256, true)).max(MAX_PROTOCOL_COLLECTION_ITEMS), origin: boundedUtf8StringSchema(2048, true), browserOrigin: boundedUtf8StringSchema(2048, true), address: external_exports.object({ host: boundedUtf8StringSchema(256, true), port: external_exports.number().int().min(0).max(65535).safe(), origin: boundedUtf8StringSchema(2048, true), browserOrigin: boundedUtf8StringSchema(2048, true) }).strict().optional(), leaseId: idSchema.optional(), clientId: idSchema.optional(), documentReady: external_exports.boolean(), configuration: hostConfigurationSchema }).strict();
-var sessionConnectionSchema = external_exports.object({ sessionKey: idSchema, canonicalPath: pathSchema.nullable(), origin: boundedUtf8StringSchema(2048, true), browserOrigin: boundedUtf8StringSchema(2048, true), epoch: idSchema, processNonce: idSchema, continuityProof: idSchema, leaseId: idSchema, clientId: idSchema, capabilities: external_exports.array(boundedUtf8StringSchema(256, true)).max(MAX_PROTOCOL_COLLECTION_ITEMS) }).strict();
+var hostIdentitySchema = external_exports.object({ protocol: external_exports.literal(HOST_PROTOCOL), epoch: idSchema, continuityProof: idSchema, sessionKey: idSchema, canonicalPath: pathSchema.nullable(), capabilities: external_exports.array(boundedUtf8StringSchema(256, true)).max(MAX_PROTOCOL_COLLECTION_ITEMS), origin: boundedUtf8StringSchema(2048, true), browserOrigin: boundedUtf8StringSchema(2048, true), address: external_exports.object({ host: boundedUtf8StringSchema(256, true), port: external_exports.number().int().min(0).max(65535).safe(), origin: boundedUtf8StringSchema(2048, true), browserOrigin: boundedUtf8StringSchema(2048, true) }).strict().optional(), leaseId: idSchema.optional(), clientId: idSchema.optional(), documentReady: external_exports.boolean(), configuration: hostConfigurationSchema }).strict();
 var windowActionSchema = external_exports.enum(["new", "open", "save", "save-as", "publish", "run-cell", "run-all", "run-stale", "interrupt", "restart", "settings", "select-r", "close", "prepare-unload"]);
-var windowActionMessageSchema = external_exports.object({ action: windowActionSchema }).strict();
-var windowStateSchema = external_exports.object({ path: pathSchema.nullable(), dirty: external_exports.boolean(), platform: boundedUtf8StringSchema(64, true), sessionEpoch: idSchema }).strict();
+var desktopCommandSchema = external_exports.object({ requestId: idSchema, action: windowActionSchema }).strict();
+var desktopCommandResultSchema = external_exports.object({ requestId: idSchema, status: external_exports.enum(["ok", "cancelled", "error"]), message: boundedUtf8StringSchema(8192, true).optional() }).strict();
+var windowStateSchema = external_exports.object({ path: pathSchema.nullable(), dirty: external_exports.boolean(), sessionEpoch: idSchema }).strict();
 var desktopRecoveryRequestSchema = external_exports.object({
   recoveryId: external_exports.string().regex(/^[A-Za-z0-9_-]{1,128}$/),
   action: external_exports.enum(["read", "write", "remove"]),
@@ -25560,6 +25558,23 @@ ${jupyterTrace.map((line, index) => `${index + 1}. ${line}`).join("\n")}` : ""
     error61.textContent = message2;
     error61.hidden = message2.length === 0;
   }
+  openSettings() {
+    const dialog = this.dom.getElementById("settings");
+    const snapshot = this.documentValue?.snapshot;
+    if (!dialog || !snapshot) return;
+    this.fillSettings(snapshot.config);
+    this.settingsBaseline = {
+      ...this.settingsValues(),
+      preferencesVersion: snapshot.preferencesVersion ?? null,
+      projectVersion: snapshot.sidecars.config.version,
+      documentRevision: snapshot.documentRevision
+    };
+    this.settingsError = null;
+    this.renderSettingsError();
+    if (typeof dialog.showModal === "function") {
+      if (!dialog.open) dialog.showModal();
+    } else dialog.setAttribute("open", "");
+  }
   bindSettings() {
     const dialog = this.dom.getElementById("settings");
     const close = () => {
@@ -25567,22 +25582,7 @@ ${jupyterTrace.map((line, index) => `${index + 1}. ${line}`).join("\n")}` : ""
       if (typeof dialog.close === "function" && dialog.open) dialog.close();
       else dialog.removeAttribute("open");
     };
-    this.dom.getElementById("settings-open")?.addEventListener("click", () => {
-      const snapshot = this.documentValue?.snapshot;
-      if (!dialog || !snapshot) return;
-      this.fillSettings(snapshot.config);
-      this.settingsBaseline = {
-        ...this.settingsValues(),
-        preferencesVersion: snapshot.preferencesVersion ?? null,
-        projectVersion: snapshot.sidecars.config.version,
-        documentRevision: snapshot.documentRevision
-      };
-      this.settingsError = null;
-      this.renderSettingsError();
-      if (typeof dialog.showModal === "function") {
-        if (!dialog.open) dialog.showModal();
-      } else dialog.setAttribute("open", "");
-    });
+    this.dom.getElementById("settings-open")?.addEventListener("click", () => this.openSettings());
     this.dom.getElementById("settings-close")?.addEventListener("click", close);
     this.dom.getElementById("settings-cancel")?.addEventListener("click", close);
     dialog?.addEventListener("click", (event) => {
@@ -25658,6 +25658,29 @@ ${jupyterTrace.map((line, index) => `${index + 1}. ${line}`).join("\n")}` : ""
   async saveForDesktop() {
     return await this.saveNotebook("explicit") === void 0 ? "cancelled" : "saved";
   }
+  async performDesktopAction(action) {
+    if (action === "save") return await this.saveForDesktop() === "saved" ? "ok" : "cancelled";
+    if (action === "run-all" || action === "run-stale") {
+      await this.runExplicit(() => this.client.startRunAll(action === "run-stale" ? "stale" : "all"));
+      this.scheduleAutosave();
+    } else if (action === "interrupt") {
+      await this.client.interrupt();
+    } else if (action === "restart") {
+      await this.action(() => this.client.restart());
+    } else if (action === "settings") {
+      this.openSettings();
+    } else if (action === "run-cell") {
+      const element3 = this.dom.activeElement?.closest?.(".cell");
+      const key = element3 ? this.keyByElement.get(element3) : void 0;
+      if (key) await this.runExplicit(() => this.client.startRunCell(key));
+    } else if (action === "publish") {
+      if (await this.saveNotebook() === void 0) return "cancelled";
+      const include = this.dom.querySelector(".publish-include-code input");
+      const result = await this.runService("publish", { include_code: include?.checked === true });
+      await this.downloadServiceResult(result);
+    }
+    return "ok";
+  }
   async repaginateTables(limit) {
     const requests = [];
     visitTableOutputs(this.documentValue?.snapshot.cells ?? [], (output2) => {
@@ -25689,7 +25712,9 @@ ${jupyterTrace.map((line, index) => `${index + 1}. ${line}`).join("\n")}` : ""
         await this.client.discardAndClose();
         this.transportError = null;
         this.editorHelpError = null;
-        await desktop.hostShutdown();
+        const snapshot = this.documentValue?.snapshot;
+        if (snapshot) await desktop.updateWindowState({ path: snapshot.path, dirty: false, sessionEpoch: snapshot.epoch });
+        window.close();
         return;
       }
       await this.client.shutdown();
@@ -26609,29 +26634,37 @@ function bindDesktopActions(next) {
       void desktop.openNotebook().catch((error61) => view?.showError(error61));
     });
   }
-  desktopUnsubscribe = desktop.onWindowAction((action) => {
-    let operation;
-    if (action === "prepare-unload") {
-      operation = next.flushDraftPersistence().then(() => desktop.rendererDraftFlushed());
-    } else if (action === "save") {
-      operation = view?.saveForDesktop().then(async (outcome) => {
-        if (outcome === "cancelled") await desktop.saveCancelled();
-      });
-    } else if (action === "close") {
-      operation = (async () => {
+  desktopUnsubscribe = desktop.onDesktopCommand((command) => {
+    const run = async () => {
+      if (command.action === "prepare-unload") {
+        await next.flushDraftPersistence();
+        return "ok";
+      }
+      if (command.action === "close") {
         await next.discardAndClose();
-        await desktop.hostShutdown();
-      })();
-    } else if (action === "save-as") {
-      operation = desktop.chooseSavePath().then((path) => path === null ? void 0 : next.saveAs(path));
-    } else if (action === "run-all") {
-      operation = view?.runExplicit(() => next.startRunAll("all"));
-    } else if (action === "run-stale") {
-      operation = view?.runExplicit(() => next.startRunAll("stale"));
-    } else if (action === "select-r") {
-      operation = desktop.chooseRscript().then((path) => path === null ? void 0 : next.selectR(path, true));
-    }
-    void operation?.catch((error61) => view?.showError(error61));
+        return "ok";
+      }
+      if (command.action === "save-as") {
+        const path = await desktop.chooseSavePath();
+        if (path === null) return "cancelled";
+        await next.saveAs(path);
+        return "ok";
+      }
+      if (command.action === "select-r") {
+        const path = await desktop.chooseRscript();
+        if (path === null) return "cancelled";
+        await next.selectR(path, true);
+        return "ok";
+      }
+      return await view?.performDesktopAction(command.action) ?? "ok";
+    };
+    void run().then(
+      (status) => desktop.completeDesktopCommand({ requestId: command.requestId, status }),
+      async (error61) => {
+        view?.showError(error61);
+        await desktop.completeDesktopCommand({ requestId: command.requestId, status: "error", message: error61 instanceof Error ? error61.message : String(error61) });
+      }
+    );
   });
 }
 window.addEventListener("pagehide", () => {
@@ -26642,6 +26675,10 @@ window.addEventListener("pagehide", () => {
 function bindClient(next) {
   client = next;
   next.subscribe((document2, event, localCellKeys) => {
+    const desktop = globalThis.alderDesktop;
+    const pending = document2.pendingSource();
+    const state = { path: document2.snapshot.path, dirty: document2.snapshot.dirty || document2.snapshot.changed || pending.changes.length > 0, sessionEpoch: document2.epoch };
+    void desktop?.updateWindowState(state).catch((error61) => view?.showError(error61));
     if (!event) {
       flushRenders();
       view?.render(document2, event, localCellKeys);

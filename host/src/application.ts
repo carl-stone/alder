@@ -72,12 +72,9 @@ const optionsSchema = z.object({
   resources: z.custom<ApplicationResources>(),
   internalHost: z.boolean().default(false),
   session: z.object({
-    runtimeDirectory: z.string().optional(),
     sessionKey: z.string().optional(),
     epoch: z.string().optional(),
-    processNonce: z.string().optional(),
     continuityProof: z.string().optional(),
-    startIdentity: z.string().optional(),
     token: z.string().optional(),
     untitledRecoveryId: z.string().optional(),
     projectDirectory: z.string().optional(),
@@ -142,17 +139,6 @@ async function startNotebookHost(
   const untitledProjectDirectory = declaredProjectDirectory !== undefined && resolve(declaredProjectDirectory) === declaredProjectDirectory ? declaredProjectDirectory : null;
   let notebookDirectory = unsaved ? (untitledProjectDirectory ?? process.cwd()) : dirname(resolve(storagePath));
   let selectedRscript = options.rscript;
-  let ownershipCompromise: Error | undefined;
-  let compromiseTeardown: Promise<void> | undefined;
-  let emergencyTeardown: (() => Promise<void>) | undefined;
-  const onOwnershipCompromised = async (error: Error): Promise<void> => {
-    if (ownershipCompromise !== undefined) return;
-    ownershipCompromise = error;
-    if (emergencyTeardown !== undefined) {
-      compromiseTeardown ??= emergencyTeardown();
-      await compromiseTeardown;
-    }
-  };
   let configuredToken = options.session?.token;
   if (options.tokenFile !== undefined) {
     try {
@@ -170,17 +156,11 @@ async function startNotebookHost(
   }
   const ownership = await acquireNotebookOwnership({
     path: ownershipPath,
-    runtimeDirectory: options.session?.runtimeDirectory ?? process.env.ALDER_RUNTIME_DIRECTORY,
     origin: initialOrigin(options.host, options.port),
-    pid: process.pid,
     epoch: options.session?.epoch,
-    processNonce: options.session?.processNonce,
     continuityProof: options.session?.continuityProof,
-    startIdentity: options.session?.startIdentity,
-    processSupervisorExecutable: options.resources.processSupervisorExecutable,
     token: configuredToken,
     sessionKey: options.session?.sessionKey,
-    onCompromised: onOwnershipCompromised,
   });
   if (options.session?.sessionKey !== undefined && options.session.sessionKey !== ownership.sessionKey) {
     await ownership.close().catch(() => {});
@@ -350,24 +330,10 @@ async function startNotebookHost(
     watcher = undefined;
     await current?.close();
   };
-  // Lock compromise is a hard ownership boundary: stop ingress and all child
-  // processes before waiting on bootstrap or performing ordinary persistence cleanup.
-  emergencyTeardown = async (): Promise<void> => {
-    await server?.close().catch(() => undefined);
-    await Promise.allSettled([
-      controller?.close(),
-      engine?.close(),
-      processScope?.close(),
-      closeWatcher(),
-    ]);
-  };
-
   const close = (): Promise<void> => closing ??= (async () => {
     publishAbort.abort();
     runtimeAbort?.abort();
     await Promise.allSettled([...activePublishes]);
-    if (ownershipCompromise !== undefined && compromiseTeardown === undefined && emergencyTeardown !== undefined) compromiseTeardown = emergencyTeardown();
-    await compromiseTeardown?.catch(() => undefined);
     clearTimeout(idleTimer);
     clearTimeout(lspSyncTimer);
     clearTimeout(sourceWatchTimer);
@@ -387,7 +353,7 @@ async function startNotebookHost(
     await attempt(() => controller?.close());
     if (controller === undefined) await attempt(() => engine?.close());
     await attempt(() => packageManager?.close());
-    if (ownershipCompromise === undefined) await attempt(() => recovery?.flush());
+    await attempt(() => recovery?.flush());
     await attempt(() => recovery?.close());
     await attempt(() => processScope?.close());
     await attempt(() => store?.close());
@@ -404,10 +370,6 @@ async function startNotebookHost(
     }
     await close();
   };
-  if (ownershipCompromise !== undefined) {
-    await close();
-    throw ownershipCompromise;
-  }
   try {
     work = await realpath(await mkdtemp(join(tmpdir(), "alder-host-")));
     uploads = new UploadStore(join(work, "uploads"));
@@ -1282,10 +1244,8 @@ async function startNotebookHost(
         get sessionKey() { return ownership.sessionKey; },
         get canonicalPath() { return ownership.canonicalPath; },
         epoch: ownership.epoch,
-        processNonce: ownership.processNonce,
         continuityProof: ownership.continuityProof,
         token: ownership.token,
-        pid: ownership.pid,
         get recoveryId() { return recovery!.recoveryId; },
       },
       staticDir: options.resources.rendererDirectory,

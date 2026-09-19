@@ -1,31 +1,52 @@
 import { createServer } from "node:net";
-import { chmod, mkdir } from "node:fs/promises";
+import { chmod, mkdir, readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ApplicationPreferences } from "./preferences.js";
 import { startHost, type RunningHost } from "./application.js";
 import { resolveApplicationResources, type ApplicationResources } from "./resources.js";
-import type { HostLaunchOptions } from "./sessions.js";
+import type { BackendSessionDescriptor, HostLaunchOptions } from "./sessions.js";
 
 /** One backend owns desktop documents and outlives any one attached client. */
 export class NotebookBackend {
-  private readonly hosts = new Set<RunningHost>();
+  private readonly hosts = new Map<string, RunningHost>();
   private readonly preferences = ApplicationPreferences.open();
   private opening = 0;
-  private readonly openings = new Map<string, Promise<void>>();
+  private readonly openings = new Map<string, Promise<RunningHost>>();
   get idle(): boolean { return this.hosts.size === 0 && this.opening === 0; }
   constructor(private readonly resources: ApplicationResources, private readonly onIdle = () => {}) {}
 
-  async open(options: HostLaunchOptions): Promise<void> {
-    if ([...this.hosts].some(host => host.ownership.sessionKey === options.sessionKey)) return;
-    const pending = this.openings.get(options.sessionKey);
-    if (pending) return pending;
-    const opening = this.openNotebook(options).finally(() => this.openings.delete(options.sessionKey));
-    this.openings.set(options.sessionKey, opening);
-    return opening;
+  async open(options: HostLaunchOptions): Promise<BackendSessionDescriptor> {
+    const key = options.path === null ? "untitled:" + options.sessionKey : "path:" + options.path;
+    let host = this.hosts.get(key);
+    if (host && host.ownership.canonicalPath !== options.path) { this.hosts.delete(key); host = undefined; }
+    host ??= [...this.hosts.values()].find(item => item.ownership.canonicalPath === options.path && options.path !== null);
+    if (!host) {
+      let pending = this.openings.get(key);
+      if (!pending) {
+        pending = this.openNotebook(options).finally(() => this.openings.delete(key));
+        this.openings.set(key, pending);
+      }
+      host = await pending;
+    }
+    if (host.ownership.canonicalPath !== null) {
+      for (const [stored, value] of this.hosts) if (value === host && stored !== "path:" + host.ownership.canonicalPath) this.hosts.delete(stored);
+      this.hosts.set("path:" + host.ownership.canonicalPath, host);
+    }
+    const token = options.tokenFile ? (await readFile(options.tokenFile, "utf8")).trim() : host.ownership.token;
+    return {
+      sessionKey: host.ownership.sessionKey,
+      canonicalPath: host.ownership.canonicalPath,
+      origin: host.ownership.origin,
+      browserOrigin: host.ownership.browserOrigin,
+      epoch: host.ownership.epoch,
+      continuityProof: host.ownership.continuityProof,
+      token,
+      capabilities: [...(host.controller.snapshot().capabilities ?? [])],
+    };
   }
 
-  private async openNotebook(options: HostLaunchOptions): Promise<void> {
+  private async openNotebook(options: HostLaunchOptions): Promise<RunningHost> {
     this.opening++;
     try {
       const host = await startHost({
@@ -38,16 +59,20 @@ export class NotebookBackend {
         executionMode: options.executionMode,
         runOnStartup: options.runOnStartup,
         deferStartup: options.deferStartup ?? true,
-        idleTimeout: 1,
+        idleTimeout: 15,
         session: {
           sessionKey: options.sessionKey,
-          runtimeDirectory: options.runtimeDirectory,
           projectDirectory: options.projectDirectory,
           ...(options.path === null ? { untitledRecoveryId: options.sessionKey } : {}),
         },
       });
-      this.hosts.add(host);
-      void host.closed.finally(() => { this.hosts.delete(host); if (this.idle) this.onIdle(); });
+      const key = host.ownership.canonicalPath === null ? "untitled:" + host.ownership.sessionKey : "path:" + host.ownership.canonicalPath;
+      this.hosts.set(key, host);
+      void host.closed.finally(() => {
+        for (const [stored, value] of this.hosts) if (value === host) this.hosts.delete(stored);
+        if (this.idle) this.onIdle();
+      });
+      return host;
     } finally {
       this.opening--;
       if (this.idle) this.onIdle();
@@ -55,7 +80,7 @@ export class NotebookBackend {
   }
 
   async close(): Promise<void> {
-    await Promise.allSettled([...this.hosts].map(host => host.close()));
+    await Promise.allSettled([...new Set(this.hosts.values())].map(host => host.close()));
     await (await this.preferences).close();
   }
 }
@@ -84,9 +109,11 @@ async function serve(socketPath: string): Promise<void> {
         const request = JSON.parse(input.trim()) as { type: string; options: HostLaunchOptions };
         if (request.type === "open") {
           clearTimeout(idleTimer);
-          await backend.open(request.options);
+          const result = await backend.open(request.options);
+          socket.end(JSON.stringify({ ok: true, result }) + "\n");
+          return;
         } else if (request.type !== "ping") throw new Error("Unknown document service request");
-        socket.end(JSON.stringify({ ok: true }) + "\n");
+        socket.end(JSON.stringify({ ok: true, result: null }) + "\n");
       })().catch(error => socket.end(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }) + "\n"));
     });
   });

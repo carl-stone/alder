@@ -27,7 +27,6 @@ async function startInstalledHost(path: string, options: {
     executionMode: options.executionMode,
     resources: stagedResources,
     preferencesPath: join(dirname(path), '.test-preferences.yaml'),
-    session: { runtimeDirectory: path + '-runtime' },
   });
 }
 

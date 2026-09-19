@@ -14,6 +14,8 @@ import {
   type ApplicationResources,
 } from "../../host/src/resources.js";
 import {
+  desktopCommandResultSchema,
+  desktopCommandSchema,
   desktopRecoveryRequestSchema,
   decodeHostQueryResultWire,
   decodeJsonFrame,
@@ -23,7 +25,6 @@ import {
   notebookQueryResultSchema,
   ticketMintRequestSchema,
   ticketMintResponseSchema,
-  windowActionMessageSchema,
   windowActionSchema,
   windowStateSchema,
   type HostQuery,
@@ -38,13 +39,11 @@ const IPC_CHANNELS = Object.freeze({
   openNotebook: "alderDesktop:openNotebook",
   chooseSavePath: "alderDesktop:chooseSavePath",
   chooseRscript: "alderDesktop:chooseRscript",
-  getWindowState: "alderDesktop:getWindowState",
   getDraftId: "alderDesktop:getDraftId",
-  hostShutdown: "alderDesktop:hostShutdown",
-  windowAction: "alderDesktop:windowAction",
-  saveCancelled: "alderDesktop:saveCancelled",
   rendererReady: "alderDesktop:rendererReady",
-  rendererDraftFlushed: "alderDesktop:rendererDraftFlushed",
+  windowState: "alderDesktop:windowState",
+  commandResult: "alderDesktop:commandResult",
+  desktopCommand: "alderDesktop:desktopCommand",
 } as const);
 
 const APP_NAME = "Alder";
@@ -65,7 +64,6 @@ export interface ElectronWebContents {
   readonly mainFrame?: { readonly url?: string };
   getURL(): string;
   send(channel: string, value: unknown): void;
-  executeJavaScript(code: string, userGesture?: boolean): Promise<unknown>;
   setWindowOpenHandler(handler: (details: ElectronWindowOpenDetails) => ElectronWindowOpenResult): void;
   on(event: string, listener: (...args: never[]) => unknown): this;
   once(event: string, listener: (...args: never[]) => unknown): this;
@@ -115,8 +113,11 @@ export interface ElectronBrowserWindowConstructor {
 }
 
 export interface ElectronDialog {
+  showOpenDialog(options: Record<string, unknown>): Promise<ElectronFileDialogResult>;
   showOpenDialog(window: ElectronWindow, options: Record<string, unknown>): Promise<ElectronFileDialogResult>;
+  showSaveDialog(options: Record<string, unknown>): Promise<{ canceled: boolean; filePath?: string }>;
   showSaveDialog(window: ElectronWindow, options: Record<string, unknown>): Promise<{ canceled: boolean; filePath?: string }>;
+  showMessageBox(options: Record<string, unknown>): Promise<{ response: number }>;
   showMessageBox(window: ElectronWindow, options: Record<string, unknown>): Promise<{ response: number }>;
 }
 
@@ -206,8 +207,8 @@ interface ElectronWindowRecord {
   loadingOrigin?: string;
   rendererReadyGeneration: number;
   rendererReady?: { promise: Promise<void>; resolve: () => void };
-  rendererDraftFlush?: { generation: number; promise: Promise<void>; resolve: () => void };
-  saveCancelled: boolean;
+  windowState: WindowState | null;
+  readonly pendingCommands: Map<string, { resolve: (result: ReturnType<typeof desktopCommandResultSchema.parse>) => void; reject: (error: Error) => void }>;
   recoveryId?: string;
   readonly draftId: string;
 }
@@ -338,36 +339,11 @@ function selectedPath(value: unknown, label: string): string | null {
   try { return validateNotebookPath(value); } catch { throw new Error(`${label} returned an invalid path`); }
 }
 
-function rendererActionScript(action: WindowAction): string | null {
-  switch (action) {
-    case "save": return null;
-    case "run-all": return null;
-    case "interrupt": return "document.querySelector('#stop')?.click()";
-    case "restart": return "document.querySelector('#restart')?.click()";
-    case "settings": return "document.querySelector('#settings-open')?.click()";
-    case "run-cell": return "document.activeElement?.closest('.cell')?.querySelector('[data-act=run]')?.click()";
-    case "run-stale": return null;
-    case "select-r": return null;
-    case "publish": return "Array.from(document.querySelectorAll('button')).find((button) => button.textContent?.trim() === 'Publish HTML')?.click()";
-    case "close": return null;
-    default: return null;
-  }
-}
-
-const DIRTY_PROJECTION_SCRIPT = `(() => {
-  const host = globalThis.__alderHost;
-  const documentValue = host?.client?.document;
-  const snapshot = documentValue?.snapshot;
-  if (snapshot === undefined) return null;
-  const pending = typeof documentValue?.pendingSource === "function" ? documentValue.pendingSource() : null;
-  return Boolean(snapshot.changed || pending?.changes?.length || pending?.tombstones?.length);
-})()`;
-
 export class ElectronMain implements ElectronMainApplication {
   private readonly runtime: ElectronRuntime;
   private readonly options: ElectronMainOptions;
   private readonly records = new Set<ElectronWindowRecord>();
-  private readonly byKey = new Map<string, ElectronWindowRecord>();
+  private readonly byKey = new Map<string, Set<ElectronWindowRecord>>();
   private readonly pending = new Map<string, Promise<void>>();
   private readonly identityChecks = new WeakMap<ElectronWindowRecord, Promise<void>>();
   private readonly queuedPaths: string[] = [];
@@ -458,10 +434,8 @@ export class ElectronMain implements ElectronMainApplication {
     if (path !== null) path = validateNotebookPath(path);
     const hint = path === null ? null : await canonicalPathHint(path);
     if (hint !== null) {
-      const existing = this.byKey.get(hint);
-      if (existing) { this.focus(existing); return; }
       const pending = this.pending.get(hint);
-      if (pending) { await pending; const current = this.byKey.get(hint); if (current) this.focus(current); return; }
+      if (pending) await pending;
     }
     const key = hint ?? `untitled:${Date.now()}:${Math.random()}`;
     const operation = this.createWindow(path, hint);
@@ -490,13 +464,6 @@ export class ElectronMain implements ElectronMainApplication {
     }
 
     const canonical = connection.canonicalPath;
-    const existing = canonical === null ? undefined : this.byKey.get(canonical);
-    if (existing) {
-      await connection.release();
-      this.focus(existing);
-      return;
-    }
-
     let ticket: string;
     try {
       ticket = await this.mintTicket(connection);
@@ -537,12 +504,13 @@ export class ElectronMain implements ElectronMainApplication {
       hostFailureShown: false,
       loadGeneration: 0,
       rendererReadyGeneration: 0,
-      saveCancelled: false,
+      windowState: null,
+      pendingCommands: new Map(),
     };
     record.keys.add(canonical ?? `session:${connection.sessionKey}`);
     if (hint !== null) record.keys.add(hint);
     this.records.add(record);
-    for (const key of record.keys) this.byKey.set(key, record);
+    for (const key of record.keys) this.addRecordKey(key, record);
     if (canonical !== null) this.rememberRecent(canonical);
     this.installWindowPolicy(record);
     window.once("ready-to-show", () => window.show());
@@ -570,6 +538,7 @@ export class ElectronMain implements ElectronMainApplication {
     if (webRequest === undefined) throw new Error("Electron response interception is unavailable");
     const generation = (record.loadGeneration ?? 0) + 1;
     record.loadGeneration = generation;
+    record.windowState = null;
     record.rendererReadyGeneration = generation;
     let resolveRendererReady!: () => void;
     const rendererReadyPromise = new Promise<void>(resolve => { resolveRendererReady = resolve; });
@@ -698,22 +667,25 @@ export class ElectronMain implements ElectronMainApplication {
       if (result.canceled || result.filePaths.length === 0) return null;
       return selectedPath(result.filePaths[0], "Rscript path");
     });
-    noArguments(IPC_CHANNELS.getWindowState, record => this.readWindowState(record));
     noArguments(IPC_CHANNELS.getDraftId, record => record.draftId);
-    noArguments(IPC_CHANNELS.hostShutdown, async (record) => {
-      record.closing = true;
-      record.hostFailureShown = true;
-      await this.disposeRecord(record, "discard").catch(() => undefined);
-      if (!record.window.isDestroyed()) record.window.destroy();
-      if (this.records.size === 0) this.runtime.app.quit();
-      return undefined;
-    });
-    noArguments(IPC_CHANNELS.saveCancelled, (record) => { record.saveCancelled = true; });
     noArguments(IPC_CHANNELS.rendererReady, (record) => {
       if (record.rendererReadyGeneration === record.loadGeneration) record.rendererReady?.resolve();
     });
-    noArguments(IPC_CHANNELS.rendererDraftFlushed, (record) => {
-      if (record.rendererDraftFlush?.generation === record.loadGeneration) record.rendererDraftFlush.resolve();
+    ipc.removeHandler?.(IPC_CHANNELS.windowState);
+    ipc.handle(IPC_CHANNELS.windowState, (event, ...args) => {
+      if (args.length !== 1) throw new Error("Window state requires one value");
+      const record = this.recordForEvent(event);
+      const state = windowStateSchema.parse(args[0]);
+      if (state.sessionEpoch !== record.connection.epoch) throw new Error("Window state belongs to another session");
+      record.windowState = state;
+      record.dirty = state.dirty;
+    });
+    ipc.removeHandler?.(IPC_CHANNELS.commandResult);
+    ipc.handle(IPC_CHANNELS.commandResult, (event, ...args) => {
+      if (args.length !== 1) throw new Error("Desktop command result requires one value");
+      const record = this.recordForEvent(event);
+      const result = desktopCommandResultSchema.parse(args[0]);
+      record.pendingCommands.get(result.requestId)?.resolve(result);
     });
   }
 
@@ -786,12 +758,24 @@ export class ElectronMain implements ElectronMainApplication {
     }
   }
 
-  private async dispatchAction(record: ElectronWindowRecord, action: WindowAction): Promise<void> {
-    const payload = windowActionMessageSchema.parse({ action: windowActionSchema.parse(action) });
-    if (record.released || record.window.webContents.isDestroyed?.()) return;
-    record.window.webContents.send(IPC_CHANNELS.windowAction, payload);
-    const script = rendererActionScript(action);
-    if (script) await record.window.webContents.executeJavaScript(script, true).catch(() => undefined);
+  private async dispatchAction(record: ElectronWindowRecord, action: WindowAction, timeoutMs = 30_000): Promise<"ok" | "cancelled"> {
+    if (record.released || record.window.webContents.isDestroyed?.()) throw new Error("Desktop window is unavailable");
+    const requestId = randomUUID();
+    const command = desktopCommandSchema.parse({ requestId, action: windowActionSchema.parse(action) });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const result = new Promise<ReturnType<typeof desktopCommandResultSchema.parse>>((resolveResult, rejectResult) => {
+      record.pendingCommands.set(requestId, { resolve: resolveResult, reject: rejectResult });
+      timer = setTimeout(() => rejectResult(new Error("The editor did not complete the native command.")), timeoutMs);
+    });
+    try {
+      record.window.webContents.send(IPC_CHANNELS.desktopCommand, command);
+      const completed = await result;
+      if (completed.status === "error") throw new Error(completed.message ?? "The editor command failed.");
+      return completed.status;
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+      record.pendingCommands.delete(requestId);
+    }
   }
 
   private installMenu(): void {
@@ -803,7 +787,7 @@ export class ElectronMain implements ElectronMainApplication {
   private rebuildMenu(): void {
     const action = (name: WindowAction) => (): void => {
       const record = this.focusedRecord() ?? this.firstRecord();
-      if (record) void this.dispatchAction(record, name);
+      if (record) void this.dispatchAction(record, name).catch(error => this.showApplicationError("Alder", error instanceof Error ? error.message : String(error)));
     };
     const fileSubmenu: Record<string, unknown>[] = [
       { label: "New", accelerator: "CmdOrCtrl+N", click: () => void this.openNotebook(null) },
@@ -843,15 +827,17 @@ export class ElectronMain implements ElectronMainApplication {
   }
 
   private async openNotebookFromDialog(source: ElectronWindowRecord | undefined): Promise<void> {
-    if (!source) return;
-    const result = await this.runtime.dialog.showOpenDialog(source.window, {
+    const options = {
       title: "Open Alder notebook",
       properties: ["openFile"],
       filters: [{ name: "R notebooks", extensions: ["R", "rmd", "r"] }],
-    });
+    };
+    const result = source
+      ? await this.runtime.dialog.showOpenDialog(source.window, options)
+      : await this.runtime.dialog.showOpenDialog(options);
     if (result.canceled || result.filePaths.length === 0) return;
     const path = selectedPath(result.filePaths[0], "Open notebook");
-    if (path) await this.openReplacingPristineUntitled(source, path);
+    if (path) await (source ? this.openReplacingPristineUntitled(source, path) : this.openNotebook(path));
   }
 
   private async requestClose(record: ElectronWindowRecord): Promise<void> {
@@ -878,18 +864,16 @@ export class ElectronMain implements ElectronMainApplication {
       if (answer.response === 2) return;
       if (answer.response === 1) {
         await this.prepareRendererUnload(record);
-        await this.dispatchAction(record, "close").catch(() => undefined);
-        await this.waitForRelease(record, 500);
+        await this.dispatchAction(record, "close");
         if (!record.released) await this.disposeRecord(record, "discard");
         if (!record.window.isDestroyed()) record.window.destroy();
         finished = true;
         return;
       }
-      record.saveCancelled = false;
-      await this.dispatchAction(record, "save");
+      if (await this.dispatchAction(record, "save") === "cancelled") return;
       const settled = await this.waitForClean(record, this.options.closeSettlementTimeoutMs ?? CLOSE_SETTLEMENT_TIMEOUT_MS);
       if (!settled) {
-        if (!record.saveCancelled) await this.showApplicationError("Save", "The save operation did not settle; the window remains open.");
+        await this.showApplicationError("Save", "The save operation did not settle; the window remains open.");
         return;
       }
       await this.prepareRendererUnload(record);
@@ -910,61 +894,21 @@ export class ElectronMain implements ElectronMainApplication {
 
   private async prepareRendererUnload(record: ElectronWindowRecord): Promise<void> {
     if (record.released || record.window.webContents.isDestroyed?.()) return;
-    let resolveFlush!: () => void;
-    const promise = new Promise<void>(resolve => { resolveFlush = resolve; });
-    const pending = { generation: record.loadGeneration, promise, resolve: resolveFlush };
-    record.rendererDraftFlush = pending;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    try {
-      await this.dispatchAction(record, "prepare-unload");
-      await Promise.race([
-        promise,
-        new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("Local edits could not be preserved. The current editor remains open.")), 3_000); }),
-      ]);
-    } finally {
-      if (timer !== undefined) clearTimeout(timer);
-      if (record.rendererDraftFlush === pending) record.rendererDraftFlush = undefined;
-    }
+    await this.dispatchAction(record, "prepare-unload", 3_000);
   }
 
   private async waitForClean(record: ElectronWindowRecord, timeoutMs: number): Promise<boolean> {
     const deadline = Date.now() + timeoutMs;
-    while (!record.released && !record.saveCancelled && Date.now() < deadline) {
+    while (!record.released && Date.now() < deadline) {
       if (!(await this.readWindowState(record)).dirty) return true;
       await new Promise(resolvePromise => setTimeout(resolvePromise, STATE_POLL_MS));
     }
     return false;
   }
-  private async waitForRelease(record: ElectronWindowRecord, timeoutMs: number): Promise<boolean> {
-    const deadline = Date.now() + timeoutMs;
-    while (!record.released && Date.now() < deadline) await new Promise(resolvePromise => setTimeout(resolvePromise, STATE_POLL_MS));
-    return record.released;
-  }
-
   private async readWindowState(record: ElectronWindowRecord): Promise<WindowState> {
-    let localDirty = true;
-    try {
-      const local = await record.window.webContents.executeJavaScript(DIRTY_PROJECTION_SCRIPT, false);
-      if (typeof local === "boolean") localDirty = local;
-    } catch {
-      // The host query below remains authoritative for committed dirty state.
-    }
-    let authoritativeDirty = true;
-    try {
-      const snapshot = await this.querySnapshot(record);
-      authoritativeDirty = snapshot.dirty === true || snapshot.changed === true;
-    } catch {
-      // Keep the state dirty when the authoritative host query is unavailable.
-      // Local renderer state cannot prove that another client has no changes.
-    }
-    const dirty = localDirty || authoritativeDirty;
-    record.dirty = dirty;
-    return windowStateSchema.parse({
-      path: record.connection.canonicalPath,
-      dirty,
-      platform: this.platform(),
-      sessionEpoch: record.connection.epoch,
-    });
+    const state = record.windowState ?? windowStateSchema.parse({ path: record.connection.canonicalPath, dirty: true, sessionEpoch: record.connection.epoch });
+    record.dirty = state.dirty;
+    return state;
   }
 
   private async assertHostContinuity(record: ElectronWindowRecord): Promise<void> {
@@ -978,8 +922,7 @@ export class ElectronMain implements ElectronMainApplication {
       if (bytes.byteLength > MAX_QUERY_RESPONSE_BYTES) throw new Error("desktop host identity response is too large");
       const identity = hostIdentitySchema.parse(decodeJsonFrame(bytes, MAX_QUERY_RESPONSE_BYTES));
       if (identity.continuityProof !== connection.continuityProof || identity.epoch !== connection.epoch ||
-        identity.processNonce !== connection.processNonce || identity.origin !== connection.origin ||
-        identity.browserOrigin !== connection.browserOrigin) {
+        identity.origin !== connection.origin || identity.browserOrigin !== connection.browserOrigin) {
         throw new Error("desktop host process identity changed");
       }
       const pathChanged = identity.canonicalPath !== connection.canonicalPath;
@@ -1000,14 +943,12 @@ export class ElectronMain implements ElectronMainApplication {
 
   private adoptHostIdentity(record: ElectronWindowRecord, sessionKey: string, canonicalPath: string | null): void {
     const nextKey = canonicalPath ?? "session:" + sessionKey;
-    const existing = this.byKey.get(nextKey);
-    if (existing !== undefined && existing !== record) throw new Error("desktop host path is already owned by another window");
-    for (const key of record.keys) if (this.byKey.get(key) === record) this.byKey.delete(key);
+    this.removeRecordKeys(record);
     record.connection.sessionKey = sessionKey;
     record.connection.canonicalPath = canonicalPath;
     record.keys.clear();
     record.keys.add(nextKey);
-    this.byKey.set(nextKey, record);
+    this.addRecordKey(nextKey, record);
     if (canonicalPath !== null) {
       this.rememberRecent(canonicalPath);
       record.window.setTitle?.(basename(canonicalPath) + " — " + APP_NAME);
@@ -1108,14 +1049,12 @@ export class ElectronMain implements ElectronMainApplication {
 
   private replaceConnection(record: ElectronWindowRecord, connection: SessionConnection): void {
     const nextKey = connection.canonicalPath ?? "session:" + connection.sessionKey;
-    const existing = this.byKey.get(nextKey);
-    if (existing !== undefined && existing !== record) throw new Error("desktop host path is already owned by another window");
-    for (const key of record.keys) if (this.byKey.get(key) === record) this.byKey.delete(key);
+    this.removeRecordKeys(record);
     record.connection = connection;
     record.origin = connection.browserOrigin;
     record.keys.clear();
     record.keys.add(nextKey);
-    this.byKey.set(nextKey, record);
+    this.addRecordKey(nextKey, record);
     if (connection.canonicalPath !== null) {
       this.rememberRecent(connection.canonicalPath);
       record.window.setTitle?.(basename(connection.canonicalPath) + " — " + APP_NAME);
@@ -1133,8 +1072,10 @@ export class ElectronMain implements ElectronMainApplication {
     if (record.released) return;
     record.released = true;
     if (record.monitor) clearInterval(record.monitor);
+    for (const pending of record.pendingCommands.values()) pending.reject(new Error("Desktop window closed before the command completed."));
+    record.pendingCommands.clear();
     this.records.delete(record);
-    for (const key of record.keys) if (this.byKey.get(key) === record) this.byKey.delete(key);
+    this.removeRecordKeys(record);
     await Promise.race([record.connection.release(disposition), new Promise<void>(resolve => setTimeout(resolve, 1_000))]);
   }
 
@@ -1162,6 +1103,20 @@ export class ElectronMain implements ElectronMainApplication {
     if (record.window.isMinimized?.()) record.window.restore?.();
     record.window.show();
     record.window.focus();
+  }
+
+  private addRecordKey(key: string, record: ElectronWindowRecord): void {
+    const records = this.byKey.get(key) ?? new Set<ElectronWindowRecord>();
+    records.add(record);
+    this.byKey.set(key, records);
+  }
+
+  private removeRecordKeys(record: ElectronWindowRecord): void {
+    for (const key of record.keys) {
+      const records = this.byKey.get(key);
+      records?.delete(record);
+      if (records?.size === 0) this.byKey.delete(key);
+    }
   }
 
   private focusOrOpenUntitled(): void {
@@ -1208,11 +1163,9 @@ export class ElectronMain implements ElectronMainApplication {
 
   private async showApplicationError(title: string, detail: string): Promise<void> {
     const owner = this.firstRecord()?.window ?? this.runtime.BrowserWindow.getAllWindows?.()[0];
-    if (!owner) {
-      process.stderr.write(`${title}: ${detail}\n`);
-      return;
-    }
-    await this.runtime.dialog.showMessageBox(owner, { type: "error", title, message: detail, buttons: ["OK"] }).catch(() => undefined);
+    const options = { type: "error", title, message: detail, buttons: ["OK"] };
+    if (owner) await this.runtime.dialog.showMessageBox(owner, options).catch(() => undefined);
+    else await this.runtime.dialog.showMessageBox(options).catch(() => { process.stderr.write(`${title}: ${detail}\n`); });
   }
 }
 

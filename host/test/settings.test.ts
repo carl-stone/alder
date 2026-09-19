@@ -25,7 +25,7 @@ async function fixture() {
     async open(path: string, preferences?: ApplicationPreferences, extra = {}) {
       const host = await startHost({ path, resources, rscript: join(root, "missing-Rscript"),
         preferences, preferencesPath: preferencePath, recoveryDirectory: join(root, "recovery"),
-        session: { runtimeDirectory: join(root, "sessions") }, ...extra });
+        ...extra });
       hosts.push(host);
       return host;
     },

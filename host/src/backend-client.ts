@@ -15,9 +15,9 @@ export class SharedBackend {
     this.socketPath = join(runtimeDirectory ?? process.env.ALDER_RUNTIME_DIRECTORY ?? join(envPaths("alder").data, "runtime"), "backend.sock");
   }
 
-  async open(options: HostLaunchOptions): Promise<void> {
+  async connect(options: HostLaunchOptions, timeoutMs = 120_000): Promise<unknown> {
     await (this.ready ??= this.start().finally(() => { this.ready = undefined; }));
-    await this.request({ type: "open", options });
+    return this.request({ type: "open", options }, timeoutMs);
   }
 
   private async start(): Promise<void> {
@@ -32,7 +32,7 @@ export class SharedBackend {
     try { await this.request({ type: "ping" }); return; }
     catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
-      if (code !== "ENOENT" && code !== "ECONNREFUSED") throw error;
+      if (code !== "ENOENT" && code !== "ECONNREFUSED" && code !== "ECONNRESET" && code !== "EPIPE") throw error;
     }
     await mkdir(dirname(this.socketPath), { recursive: true, mode: 0o700 });
     await rm(this.socketPath, { force: true });
@@ -51,11 +51,11 @@ export class SharedBackend {
     throw new Error("Alder's document service did not start. Rebuild the Mac application and try again.");
   }
 
-  private request(value: unknown): Promise<void> {
+  private request(value: unknown, timeoutMs = 15_000): Promise<unknown> {
     return new Promise((resolve, reject) => {
       const socket = connect(this.socketPath);
       let input = "";
-      socket.setTimeout(15_000, () => socket.destroy(new Error("The document service did not respond.")));
+      socket.setTimeout(timeoutMs, () => socket.destroy(new Error("The document service did not respond.")));
       socket.once("connect", () => socket.write(JSON.stringify(value) + "\n"));
       socket.on("data", chunk => {
         input += String(chunk);
@@ -65,7 +65,7 @@ export class SharedBackend {
       socket.once("end", () => {
         try {
           const result = JSON.parse(input);
-          if (result.ok === true) resolve();
+          if (result.ok === true) resolve(result.result);
           else reject(new Error(result.error ?? "The document could not be opened."));
         } catch (error) { reject(error); }
       });

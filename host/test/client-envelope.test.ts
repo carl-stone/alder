@@ -56,7 +56,7 @@ test("browser clients receive a worst-case escaped 32 MiB notebook snapshot", as
     artifactStore,
     session: {
       sessionKey: "large-envelope-session", canonicalPath: null, epoch: state.epoch,
-      processNonce: "large-envelope-process", token: serverToken, documentReady: true,
+      token: serverToken, documentReady: true,
     },
   });
   try {

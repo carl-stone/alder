@@ -28,7 +28,6 @@ async function startInstalledHost(path: string, options: { executionMode?: "auto
     rscript: process.env.ALDER_RSCRIPT ?? execFileSync("which", ["Rscript"], { encoding: "utf8" }).trim(),
     resources: stagedResources,
     preferencesPath: join(dirname(path), ".test-preferences.yaml"),
-    session: { runtimeDirectory: path + "-runtime" },
   });
   const deadline = performance.now() + 45_000;
   while (!app.controller.snapshot().runtime.executionReady && performance.now() < deadline) {
