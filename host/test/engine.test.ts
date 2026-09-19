@@ -13,9 +13,8 @@ import { createProcessScope, type ProcessScope } from "../src/processes.js";
 import type { ApplicationResources } from "../src/resources.js";
 import { analysisResultSchema, type EvaluationPayload, type REnvironment } from "../src/protocol.js";
 
-const applicationRoot = resolve(
-  process.env.ALDER_APPLICATION_ROOT ?? process.env.ALDER_STAGED_ROOT ?? join(process.cwd(), ".application"),
-);
+const configuredApplicationRoot = process.env.ALDER_APPLICATION_ROOT ?? process.env.ALDER_STAGED_ROOT;
+const applicationRoot = configuredApplicationRoot === undefined ? null : resolve(configuredApplicationRoot);
 const inheritedRLibsUser = process.env.R_LIBS_USER;
 const isolatedRLibsUser = await mkdtemp(join(tmpdir(), "alder-engine-r-library-"));
 process.env.R_LIBS_USER = isolatedRLibsUser;
@@ -24,7 +23,7 @@ test.after(async () => {
   else process.env.R_LIBS_USER = inheritedRLibsUser;
   await rm(isolatedRLibsUser, { recursive: true, force: true });
 });
-const resourcesAvailable = existsSync(join(applicationRoot, "runtime", "ark")) &&
+const resourcesAvailable = applicationRoot !== null && existsSync(join(applicationRoot, "runtime", "ark")) &&
   existsSync(join(applicationRoot, "worker", "host-ark.R")) &&
   existsSync(join(applicationRoot, "r-library"));
 const integration = { skip: !resourcesAvailable, timeout: 120_000 };
@@ -80,7 +79,7 @@ async function openEngine(directory: string, overrides: Partial<EngineOptions> =
   processScope: ProcessScope;
   environment: REnvironment;
 }> {
-  const resources = resourcesFor(applicationRoot);
+  const resources = resourcesFor(applicationRoot!);
   const environment = selectedEnvironment(resources);
   const processScope = await createProcessScope(resources);
   const engine = new Engine({
@@ -734,7 +733,7 @@ test("project package versions win before Alder imports load", integration, asyn
   const directory = await mkdtemp(join(tmpdir(), "alder-engine-project-import-"));
   const projectLibrary = join(directory, "project-library");
   await mkdir(projectLibrary);
-  const resources = resourcesFor(applicationRoot);
+  const resources = resourcesFor(applicationRoot!);
   const selected = selectedEnvironment(resources);
   const jsonlitePath = execFileSync(selected.rscript, ["--vanilla", "--slave", "-e",
     'cat(find.package("jsonlite"))'], { encoding: "utf8", env: cleanEnvironment() }).trim();

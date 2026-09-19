@@ -21,6 +21,7 @@ export const ELECTRON_IPC_CHANNELS = Object.freeze({
   hostShutdown: "alderDesktop:hostShutdown",
   saveCancelled: "alderDesktop:saveCancelled",
   rendererReady: "alderDesktop:rendererReady",
+  rendererDraftFlushed: "alderDesktop:rendererDraftFlushed",
   windowAction: "alderDesktop:windowAction",
 } as const);
 
@@ -88,6 +89,9 @@ export function createPreloadApi(ipc: IpcRendererLike): PreloadApi {
     },
     rendererReady: async (): Promise<void> => {
       validateVoid(await ipc.invoke(ELECTRON_IPC_CHANNELS.rendererReady), "rendererReady");
+    },
+    rendererDraftFlushed: async (): Promise<void> => {
+      validateVoid(await ipc.invoke(ELECTRON_IPC_CHANNELS.rendererDraftFlushed), "rendererDraftFlushed");
     },
     onWindowAction: (callback: (action: WindowAction) => void): (() => void) => {
       if (typeof callback !== "function") throw new TypeError("onWindowAction callback must be a function");

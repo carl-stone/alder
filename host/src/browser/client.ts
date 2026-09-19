@@ -103,6 +103,8 @@ export class BrowserNotebookClient {
   private draftPersistence: Promise<void> = Promise.resolve();
   private draftPersistenceQueued = false;
   private draftPersistenceRunning = false;
+  private draftPersistenceTimer: ReturnType<typeof setTimeout> | undefined;
+  private draftPersistenceQueuedAt: number | undefined;
   private draftPersistenceError: Error | null = null;
   private recoveryAttempted = false;
   private browserRecoveryInspected = false;
@@ -179,7 +181,14 @@ export class BrowserNotebookClient {
 
   async flushDraftPersistence(): Promise<void> {
     this.queueDraftPersistence();
-    while (this.draftPersistenceRunning || this.draftPersistenceQueued) await this.draftPersistence;
+    if (this.draftPersistenceTimer !== undefined) {
+      clearTimeout(this.draftPersistenceTimer);
+      this.draftPersistenceTimer = undefined;
+    }
+    while (this.draftPersistenceRunning || this.draftPersistenceQueued) {
+      if (!this.draftPersistenceRunning) this.startDraftPersistence();
+      await this.draftPersistence;
+    }
     if (this.draftPersistenceError) throw this.draftPersistenceError;
   }
 
@@ -525,14 +534,30 @@ export class BrowserNotebookClient {
     if (!store) return;
     this.draftPersistenceQueued = true;
     if (this.draftPersistenceRunning) return;
+    const now = Date.now();
+    this.draftPersistenceQueuedAt ??= now;
+    if (this.draftPersistenceTimer !== undefined) clearTimeout(this.draftPersistenceTimer);
+    const delay = Math.min(150, Math.max(0, this.draftPersistenceQueuedAt + 750 - now));
+    this.draftPersistenceTimer = setTimeout(() => {
+      this.draftPersistenceTimer = undefined;
+      this.startDraftPersistence();
+    }, delay);
+  }
+
+  private startDraftPersistence(): void {
+    const store = this.draftStore();
+    if (!store || this.draftPersistenceRunning || !this.draftPersistenceQueued) return;
+    if (this.draftPersistenceTimer !== undefined) {
+      clearTimeout(this.draftPersistenceTimer);
+      this.draftPersistenceTimer = undefined;
+    }
+    this.draftPersistenceQueuedAt = undefined;
     this.draftPersistenceRunning = true;
     this.draftPersistence = (async () => {
-      while (this.draftPersistenceQueued) {
-        this.draftPersistenceQueued = false;
-        const draft = this.documentValue?.recoveryDraft(this.draftId, this.draftSubmission, this.pendingRun) ?? null;
-        if (draft) await store.saveDraft(draft);
-        else await store.clearDraft(this.draftId);
-      }
+      this.draftPersistenceQueued = false;
+      const draft = this.documentValue?.recoveryDraft(this.draftId, this.draftSubmission, this.pendingRun) ?? null;
+      if (draft) await store.saveDraft(draft);
+      else await store.clearDraft(this.draftId);
       this.draftPersistenceError = null;
       if (this.recoveryStateValue.persistenceError !== null) {
         this.recoveryStateValue = { ...this.recoveryStateValue, persistenceError: null };

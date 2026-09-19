@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, open, readFile, realpath, rename, rm } from "node:fs/promises";
+import { access, mkdir, open, readFile, realpath, rename, rm } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { canonicalBase64ByteLength, MAX_NOTEBOOK_CELLS, MAX_NOTEBOOK_SOURCE_BYTES } from "./protocol.js";
 import { readPrivateFile } from "./private-paths.js";
@@ -118,6 +118,12 @@ export class RecoveryWriter {
     return writer;
   }
 
+  static async hasJournal(options: Pick<RecoveryWriterOptions, "rootDir" | "key">): Promise<boolean> {
+    const directory = join(resolve(options.rootDir), "recovery-" + hash(JSON.stringify(options.key)));
+    try { await access(join(directory, "journal.json")); return true; }
+    catch (error) { if (missing(error)) return false; throw error; }
+  }
+
   private async restore(): Promise<void> {
     try {
       await mkdir(this.directory, { recursive: true, mode: 0o700 });
@@ -159,6 +165,15 @@ export class RecoveryWriter {
     return { baseline: clone(this.baseline), pending: this.pending, fingerprint: this.pending ? this.latestFingerprint : null };
   }
   async materializedBaseline(): Promise<RecoveryBaseline> { return clone(this.baseline); }
+
+  async adoptRecoveryId(recoveryId: string): Promise<void> {
+    if (this.closed) throw new RecoveryError("recovery_closed", "Recovery writer is closed");
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(recoveryId)) throw new RecoveryError("recovery_invalid", "Recovery identity is invalid");
+    await this.writeQueue;
+    if (this.pending || this.corruptJournal) throw Object.assign(new Error("Save As destination has pending recovery data"), { code: "destination_recovery_conflict" });
+    await this.atomicWrite(join(this.directory, "document.id"), Buffer.from(recoveryId));
+    this.recoveryId = recoveryId;
+  }
 
   update(baseline: RecoveryBaseline): void {
     if (this.closed) throw new RecoveryError("recovery_closed", "Recovery writer is closed");

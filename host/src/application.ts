@@ -722,6 +722,8 @@ async function startNotebookHost(
         let savePublication: Awaited<ReturnType<PreparedSaveAs["publish"]>> | undefined;
         let destinationStore: DocumentStore | undefined;
         let destinationRecovery: RecoveryWriter | undefined;
+        let destinationRecoveryPreviousId: string | undefined;
+        let destinationRecoveryAdopted = false;
         let nextManager: PackageManager | undefined;
         try {
           preparedOwner = await ownership.prepareRekey(request.path);
@@ -737,6 +739,10 @@ async function startNotebookHost(
           try { destinationPackages = [...(await readPackageDeclarations(destinationDirectory)).packages]; } catch { destinationPackages = []; }
           const runtimeChanged = destinationDirectory !== notebookDirectory || destinationCache !== cacheDirectory;
           const destinationRuntime = runtimeChanged ? null : runtimeEnvironment;
+          const recoveryRoot = options.recoveryDirectory ?? envPaths("alder", { suffix: "" }).data;
+          if (await RecoveryWriter.hasJournal({ rootDir: recoveryRoot, key: preparedOwner.sessionKey })) {
+            throw Object.assign(new Error("Save As destination has pending recovery data"), { code: "destination_recovery_conflict" });
+          }
           savePublication = await preparedSave.publish();
           destinationStore = savePublication.store;
           nextManager = createPackageManager({ resources: options.resources, environment: destinationRuntime, processScope: processScope!, projectDirectory: destinationDirectory, onProgress: onPackageProgress });
@@ -753,22 +759,16 @@ async function startNotebookHost(
             notebookDiskObservation: recoveryObservation(destinationDisk),
           };
           destinationRecovery = await RecoveryWriter.open({
-            rootDir: options.recoveryDirectory ?? envPaths("alder", { suffix: "" }).data,
+            rootDir: recoveryRoot,
             key: preparedOwner.sessionKey,
             baseline: destinationBaseline,
             recoveryId: oldRecovery.recoveryId,
             processSupervisorExecutable: options.resources.processSupervisorExecutable,
           });
           if ((await destinationRecovery.load()).pending) {
-            await destinationRecovery.retire();
-            destinationRecovery = await RecoveryWriter.open({
-              rootDir: options.recoveryDirectory ?? envPaths("alder", { suffix: "" }).data,
-              key: preparedOwner.sessionKey,
-              baseline: destinationBaseline,
-              recoveryId: oldRecovery.recoveryId,
-              processSupervisorExecutable: options.resources.processSupervisorExecutable,
-            });
+            throw Object.assign(new Error("Save As destination has pending recovery data"), { code: "destination_recovery_conflict" });
           }
+          destinationRecoveryPreviousId = destinationRecovery.recoveryId;
           const publicationBinder = context.preparePublication({
             document: { ...context.document, path: destination },
             path: destination,
@@ -799,6 +799,8 @@ async function startNotebookHost(
             };
             return async () => {
               try {
+                await destinationRecovery!.adoptRecoveryId(oldRecovery.recoveryId);
+                destinationRecoveryAdopted = true;
                 // Apply the controller publication before adopting any destination state.
                 publicationBinder();
                 preparedSave!.adopt();
@@ -835,6 +837,10 @@ async function startNotebookHost(
                 if (runtimeChanged) startRuntime(true);
                 void oldManager?.close().catch(() => {});
               } catch (error) {
+                if (destinationRecoveryAdopted && destinationRecoveryPreviousId !== undefined) {
+                  await destinationRecovery!.adoptRecoveryId(destinationRecoveryPreviousId).catch(() => {});
+                  destinationRecoveryAdopted = false;
+                }
                 try {
                   rollbackControllerPublication();
                 } catch {
@@ -848,7 +854,10 @@ async function startNotebookHost(
           return savePublication.result;
         } catch (error) {
           reservation?.release();
-          if (destinationRecovery !== undefined && destinationRecovery !== recovery) await destinationRecovery.retire().catch(() => {});
+          if (destinationRecovery !== undefined && destinationRecovery !== recovery) {
+            if (destinationRecoveryAdopted && destinationRecoveryPreviousId !== undefined) await destinationRecovery.adoptRecoveryId(destinationRecoveryPreviousId).catch(() => {});
+            await destinationRecovery.close().catch(() => {});
+          }
           await preparedSave?.abort().catch(() => {});
           await preparedOwner?.abort().catch(() => {});
           await nextManager?.close().catch(() => {});
@@ -1277,7 +1286,7 @@ async function startNotebookHost(
         continuityProof: ownership.continuityProof,
         token: ownership.token,
         pid: ownership.pid,
-        recoveryId: recovery!.recoveryId,
+        get recoveryId() { return recovery!.recoveryId; },
       },
       staticDir: options.resources.rendererDirectory,
       indexFile: join(options.resources.rendererDirectory, "index.html"),

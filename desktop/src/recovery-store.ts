@@ -9,6 +9,11 @@ const MAX_BYTES = 256 * 1024 * 1024;
 const fileName = (name: string): string => createHash("sha256").update(name).digest("hex") + ".json";
 const missing = (error: unknown): boolean => (error as NodeJS.ErrnoException)?.code === "ENOENT";
 
+async function syncDirectory(path: string): Promise<void> {
+  const handle = await open(path, "r");
+  try { await handle.sync(); } finally { await handle.close(); }
+}
+
 export class DesktopRecoveryError extends Error {
   constructor(readonly code: "desktop_recovery_invalid" | "desktop_recovery_corrupt", message: string, cause?: unknown) {
     super(message, cause === undefined ? undefined : { cause });
@@ -78,6 +83,7 @@ export class NativeRecoveryStore {
     catch (error) {
       if (!(error instanceof DesktopRecoveryError) || error.code !== "desktop_recovery_corrupt") throw error;
       await rename(path, join(directory, "corrupt-" + randomUUID() + ".json"));
+      await syncDirectory(directory);
     }
   }
 
@@ -98,6 +104,7 @@ export class NativeRecoveryStore {
         await handle.close();
         await this.retainCorrupt(path, directory);
         await rename(temporary, path);
+        await syncDirectory(directory);
       } finally {
         await handle.close().catch(() => {});
         await rm(temporary, { force: true }).catch(() => {});
@@ -114,6 +121,7 @@ export class NativeRecoveryStore {
       await this.directory(recoveryId);
       await this.retainCorrupt(path, directory);
       await rm(path, { force: true });
+      await syncDirectory(directory);
     });
   }
 

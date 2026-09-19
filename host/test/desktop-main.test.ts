@@ -152,6 +152,11 @@ function recordFor(
     hostFailureShown: false,
     loadGeneration: 0,
   };
+  const send = window.webContents.send.bind(window.webContents);
+  window.webContents.send = (channel, value) => {
+    send(channel, value);
+    if ((value as { action?: string })?.action === "prepare-unload") queueMicrotask(() => record.rendererDraftFlush?.resolve());
+  };
   window.once("closed", () => { void (main as any).disposeRecord(record); });
   (main as any).records.add(record);
   for (const key of record.keys) (main as any).byKey.set(key, record);
@@ -233,6 +238,26 @@ test("cancelled close keeps the editor open when the host is unavailable", async
   assert.equal(oldConnection.releaseCount, 0);
 });
 
+test("native close waits for the renderer to persist its latest draft", async () => {
+  const hostConnection = connection("close-flush", "/tmp/alder-close-flush.R", async () => { throw new Error("unexpected host request"); });
+  const window = windowWithLoad();
+  const main = new ElectronMain(runtime(), { resources });
+  const record = recordFor(main, hostConnection, window);
+  (main as any).readWindowState = async () => ({ path: hostConnection.canonicalPath, dirty: false, platform: "darwin", sessionEpoch: "epoch" });
+  let acknowledge!: () => void;
+  const acknowledged = new Promise<void>(resolve => { acknowledge = resolve; });
+  window.webContents.send = (_channel, payload) => {
+    if ((payload as { action?: string }).action === "prepare-unload") void acknowledged.then(() => record.rendererDraftFlush?.resolve());
+  };
+
+  const closing = (main as any).requestClose(record);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(window.destroyed, false);
+  acknowledge();
+  await closing;
+  assert.equal(window.destroyed, true);
+});
+
 test("discard closes within a bounded time when the host is unavailable and lease release stalls", { timeout: 4_000 }, async () => {
   const hostConnection = connection("offline-discard", null, async () => {
     throw new Error("host is unavailable");
@@ -251,7 +276,7 @@ test("discard closes within a bounded time when the host is unavailable and leas
 
   await (main as any).requestClose(record);
 
-  assert.deepEqual(actions, [{ action: "close" }]);
+  assert.deepEqual(actions, [{ action: "prepare-unload" }, { action: "close" }]);
   assert.equal(releaseDisposition, "discard");
   assert.equal(window.destroyed, true);
   assert.equal(main.windows().length, 0);
@@ -305,7 +330,12 @@ for (const decision of ["Cancel", "Save"] as const) {
     });
     const window = windowWithLoad();
     const actions: unknown[] = [];
-    window.webContents.send = (_channel, payload) => { actions.push(payload); };
+    window.webContents.send = (_channel, payload) => {
+      actions.push(payload);
+      if ((payload as { action?: string }).action === "prepare-unload") {
+        queueMicrotask(() => ([...(main as any).records][0] as any)?.rendererDraftFlush?.resolve());
+      }
+    };
     const electronRuntime = runtime();
     electronRuntime.BrowserWindow = Object.assign(function () { return window; }, { fromWebContents: () => window }) as unknown as ElectronRuntime["BrowserWindow"];
     const dialogOpened = Promise.withResolvers<void>();
@@ -337,6 +367,7 @@ for (const decision of ["Cancel", "Save"] as const) {
         assert.equal(window.destroyed, false, "the window must remain open until saving finishes");
         dirty = false;
         while (!window.destroyed) await new Promise(resolve => setTimeout(resolve, 10));
+        assert.deepEqual(actions, [{ action: "save" }, { action: "prepare-unload" }]);
         assert.equal(hostConnection.releaseCount, 1);
       }
     } finally {
@@ -552,6 +583,7 @@ test("host restart preserves the live editor when its current draft cannot be st
   let acquired = false;
   const main = new ElectronMain(runtime(), { resources, acquireSession: async () => { acquired = true; throw new Error("should not replace editor"); } });
   const record = recordFor(main, connection("restart-draft", "/tmp/restart-draft.R", async () => jsonResponse({})), window);
+  window.webContents.send = () => undefined;
   await (main as any).restartHost(record);
   assert.equal(acquired, false);
   assert.equal(window.destroyed, false);

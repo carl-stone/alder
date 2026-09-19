@@ -34,6 +34,24 @@ async function edit(app: RunningHost, body: string): Promise<void> {
   const cell = app.controller.snapshot().cells[0]!;
   await command(app, { type: "transaction", changes: [{ type: "edit", cell: { cellId: cell.id }, expectedRevision: cell.revision, cellType: "code", body: [body] }] });
 }
+async function recoveryIdentity(app: RunningHost): Promise<string> {
+  const ticketResponse = await fetch(app.ready.origin + "/api/ticket", {
+    method: "POST",
+    headers: { Authorization: "Bearer " + app.ownership.token, Origin: app.ready.origin, "Content-Type": "application/json" },
+    body: JSON.stringify({ origin: app.ready.origin }),
+  });
+  if (!ticketResponse.ok) assert.fail(await ticketResponse.text());
+  const ticket = (await ticketResponse.json()) as { ticket: string };
+  const sessionResponse = await fetch(app.ready.origin + "/api/session", {
+    method: "POST",
+    headers: { Origin: app.ready.origin, "Content-Type": "application/json" },
+    body: JSON.stringify({ ticket: ticket.ticket }),
+  });
+  if (!sessionResponse.ok) assert.fail(await sessionResponse.text());
+  const session = (await sessionResponse.json()) as { recoveryId?: string };
+  assert.equal(typeof session.recoveryId, "string");
+  return session.recoveryId!;
+}
 
 const crashPath = process.env.ALDER_DOCUMENT_CRASH_PATH;
 if (crashPath) {
@@ -170,6 +188,73 @@ if (crashPath) {
       assert.equal(await readFile(join(destinationDirectory, ".alder", "packages.yaml"), "utf8"), destinationPackages);
       assert.equal(await readFile(join(destinationDirectory, ".alder", "layout.json"), "utf8"), destinationLayout);
     } finally { await app?.close(); await rm(directory, { recursive: true, force: true }); }
+  });
+
+  test("Save As refuses and preserves a destination with pending recovery", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "alder-save-as-recovery-conflict-")));
+    const source = join(directory, "source.R");
+    const destination = join(directory, "destination.R");
+    await writeFile(source, "# %%\nx <- 1\n");
+    await writeFile(destination, "# %%\ny <- 1\n");
+    let destinationApp: RunningHost | undefined;
+    let sourceApp: RunningHost | undefined;
+    try {
+      destinationApp = await startDocument(destination, directory);
+      const destinationDisk = destinationApp.controller.snapshot().disk;
+      await edit(destinationApp, "y <- 9");
+      await destinationApp.close(); destinationApp = undefined;
+
+      sourceApp = await startDocument(source, directory);
+      await edit(sourceApp, "x <- 2");
+      const result = await dispatch(sourceApp, { type: "save-as", path: destination, expectedDestination: {
+        expectedDiskDigest: destinationDisk.digest,
+        expectedDiskVersion: destinationDisk.version,
+      } });
+      assert.equal(result.error?.code, "destination_recovery_conflict");
+      assert.equal(await readFile(destination, "utf8"), "# %%\ny <- 1\n");
+      await sourceApp.close(); sourceApp = undefined;
+
+      destinationApp = await startDocument(destination, directory);
+      assert.deepEqual(destinationApp.controller.snapshot().cells[0]!.body, ["y <- 9"]);
+      assert.equal((await destinationApp.controller.query({ type: "recovery" })).result.candidate?.state, "restored");
+    } finally {
+      await sourceApp?.close().catch(() => {});
+      await destinationApp?.close().catch(() => {});
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("Save As adopts one recovery identity for a clean previously opened destination", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "alder-save-as-recovery-identity-")));
+    const source = join(directory, "source.R");
+    const destination = join(directory, "destination.R");
+    await writeFile(source, "# %%\nx <- 1\n");
+    await writeFile(destination, "# %%\ny <- 1\n");
+    let destinationApp: RunningHost | undefined;
+    let sourceApp: RunningHost | undefined;
+    try {
+      destinationApp = await startDocument(destination, directory);
+      const oldDestinationId = await recoveryIdentity(destinationApp);
+      const destinationDisk = destinationApp.controller.snapshot().disk;
+      await destinationApp.close(); destinationApp = undefined;
+
+      sourceApp = await startDocument(source, directory);
+      const sourceId = await recoveryIdentity(sourceApp);
+      assert.notEqual(sourceId, oldDestinationId);
+      await command(sourceApp, { type: "save-as", path: destination, expectedDestination: {
+        expectedDiskDigest: destinationDisk.digest,
+        expectedDiskVersion: destinationDisk.version,
+      } });
+      assert.equal(await recoveryIdentity(sourceApp), sourceId);
+      await sourceApp.close(); sourceApp = undefined;
+
+      destinationApp = await startDocument(destination, directory);
+      assert.equal(await recoveryIdentity(destinationApp), sourceId);
+    } finally {
+      await sourceApp?.close().catch(() => {});
+      await destinationApp?.close().catch(() => {});
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   test("corrupt journal falls back to saved source and can be discarded", async () => {

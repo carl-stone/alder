@@ -1311,7 +1311,7 @@ export type SessionReleaseDisposition = "normal" | "discard";
 export interface SessionConnection extends SessionConnectionData { request: SessionRequest; heartbeat(): Promise<void>; release(disposition?: SessionReleaseDisposition): Promise<void>; }
 export const sessionConnectionSchema = z.object({ sessionKey: idSchema, canonicalPath: pathSchema.nullable(), origin: boundedUtf8StringSchema(2_048, true), browserOrigin: boundedUtf8StringSchema(2_048, true), epoch: idSchema, processNonce: idSchema, continuityProof: idSchema, leaseId: idSchema, clientId: idSchema, capabilities: z.array(boundedUtf8StringSchema(256, true)).max(MAX_PROTOCOL_COLLECTION_ITEMS) }).strict();
 
-export const windowActionSchema = z.enum(["new", "open", "save", "save-as", "publish", "run-cell", "run-all", "run-stale", "interrupt", "restart", "settings", "select-r", "close"]);
+export const windowActionSchema = z.enum(["new", "open", "save", "save-as", "publish", "run-cell", "run-all", "run-stale", "interrupt", "restart", "settings", "select-r", "close", "prepare-unload"]);
 export type WindowAction = z.infer<typeof windowActionSchema>;
 export const windowActionMessageSchema = z.object({ action: windowActionSchema }).strict();
 export const windowStateSchema = z.object({ path: pathSchema.nullable(), dirty: z.boolean(), platform: boundedUtf8StringSchema(64, true), sessionEpoch: idSchema }).strict();
@@ -1323,7 +1323,7 @@ export const desktopRecoveryRequestSchema = z.object({
   name: z.string().max(256).optional(), value: z.unknown().optional(),
 }).strict();
 export type DesktopRecoveryRequest = z.infer<typeof desktopRecoveryRequestSchema>;
-export interface PreloadApi { recovery(request: DesktopRecoveryRequest): Promise<unknown>; openNotebook(): Promise<void>; chooseSavePath(): Promise<SaveDestination | null>; chooseRscript(): Promise<string | null>; getWindowState(): Promise<WindowState>; getDraftId(): Promise<string>; hostShutdown(): Promise<void>; saveCancelled(): Promise<void>; rendererReady(): Promise<void>; onWindowAction(callback: (action: WindowAction) => void): () => void; }
+export interface PreloadApi { recovery(request: DesktopRecoveryRequest): Promise<unknown>; openNotebook(): Promise<void>; chooseSavePath(): Promise<SaveDestination | null>; chooseRscript(): Promise<string | null>; getWindowState(): Promise<WindowState>; getDraftId(): Promise<string>; hostShutdown(): Promise<void>; saveCancelled(): Promise<void>; rendererReady(): Promise<void>; rendererDraftFlushed(): Promise<void>; onWindowAction(callback: (action: WindowAction) => void): () => void; }
 
 export class ProtocolError extends Error { readonly code: string; constructor(code: string, message: string) { super(message); this.name = "ProtocolError"; this.code = code; } }
 export function decodeJsonFrame(input: string | Uint8Array, maxBytes = MAX_FRAME_BYTES): unknown {

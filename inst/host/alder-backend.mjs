@@ -63273,7 +63273,7 @@ var ticketExchangeRequestSchema = external_exports.object({ ticket: idSchema }).
 var ticketExchangeResponseSchema = external_exports.object({ leaseId: idSchema, clientId: idSchema, epoch: idSchema, continuityProof: idSchema, csrf: idSchema, recoveryId: idSchema.optional() }).strict();
 var hostIdentitySchema = external_exports.object({ protocol: external_exports.literal(HOST_PROTOCOL), epoch: idSchema, processNonce: idSchema, continuityProof: idSchema, sessionKey: idSchema, canonicalPath: pathSchema.nullable(), capabilities: external_exports.array(boundedUtf8StringSchema(256, true)).max(MAX_PROTOCOL_COLLECTION_ITEMS), origin: boundedUtf8StringSchema(2048, true), browserOrigin: boundedUtf8StringSchema(2048, true), address: external_exports.object({ host: boundedUtf8StringSchema(256, true), port: external_exports.number().int().min(0).max(65535).safe(), origin: boundedUtf8StringSchema(2048, true), browserOrigin: boundedUtf8StringSchema(2048, true) }).strict().optional(), leaseId: idSchema.optional(), clientId: idSchema.optional(), documentReady: external_exports.boolean(), configuration: hostConfigurationSchema }).strict();
 var sessionConnectionSchema = external_exports.object({ sessionKey: idSchema, canonicalPath: pathSchema.nullable(), origin: boundedUtf8StringSchema(2048, true), browserOrigin: boundedUtf8StringSchema(2048, true), epoch: idSchema, processNonce: idSchema, continuityProof: idSchema, leaseId: idSchema, clientId: idSchema, capabilities: external_exports.array(boundedUtf8StringSchema(256, true)).max(MAX_PROTOCOL_COLLECTION_ITEMS) }).strict();
-var windowActionSchema = external_exports.enum(["new", "open", "save", "save-as", "publish", "run-cell", "run-all", "run-stale", "interrupt", "restart", "settings", "select-r", "close"]);
+var windowActionSchema = external_exports.enum(["new", "open", "save", "save-as", "publish", "run-cell", "run-all", "run-stale", "interrupt", "restart", "settings", "select-r", "close", "prepare-unload"]);
 var windowActionMessageSchema = external_exports.object({ action: windowActionSchema }).strict();
 var windowStateSchema = external_exports.object({ path: pathSchema.nullable(), dirty: external_exports.boolean(), platform: boundedUtf8StringSchema(64, true), sessionEpoch: idSchema }).strict();
 var desktopRecoveryRequestSchema = external_exports.object({
@@ -98045,7 +98045,7 @@ function decodeBase644(value) {
 
 // src/recovery.ts
 import { createHash as createHash7, randomUUID as randomUUID10 } from "node:crypto";
-import { mkdir as mkdir8, open as open7, readFile as readFile8, realpath as realpath8, rename as rename5, rm as rm6 } from "node:fs/promises";
+import { access as access3, mkdir as mkdir8, open as open7, readFile as readFile8, realpath as realpath8, rename as rename5, rm as rm6 } from "node:fs/promises";
 import { dirname as dirname7, join as join15, resolve as resolve10 } from "node:path";
 var RecoveryError = class extends Error {
   constructor(code2, message2, originals = [], cause) {
@@ -98129,6 +98129,16 @@ var RecoveryWriter = class _RecoveryWriter {
     await writer.restore();
     return writer;
   }
+  static async hasJournal(options) {
+    const directory = join15(resolve10(options.rootDir), "recovery-" + hash2(JSON.stringify(options.key)));
+    try {
+      await access3(join15(directory, "journal.json"));
+      return true;
+    } catch (error61) {
+      if (missing2(error61)) return false;
+      throw error61;
+    }
+  }
   async restore() {
     try {
       await mkdir8(this.directory, { recursive: true, mode: 448 });
@@ -98174,6 +98184,14 @@ var RecoveryWriter = class _RecoveryWriter {
   }
   async materializedBaseline() {
     return clone4(this.baseline);
+  }
+  async adoptRecoveryId(recoveryId) {
+    if (this.closed) throw new RecoveryError("recovery_closed", "Recovery writer is closed");
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(recoveryId)) throw new RecoveryError("recovery_invalid", "Recovery identity is invalid");
+    await this.writeQueue;
+    if (this.pending || this.corruptJournal) throw Object.assign(new Error("Save As destination has pending recovery data"), { code: "destination_recovery_conflict" });
+    await this.atomicWrite(join15(this.directory, "document.id"), Buffer.from(recoveryId));
+    this.recoveryId = recoveryId;
   }
   update(baseline) {
     if (this.closed) throw new RecoveryError("recovery_closed", "Recovery writer is closed");
@@ -98258,7 +98276,7 @@ var RecoveryWriter = class _RecoveryWriter {
 import { constants as constants5 } from "node:fs";
 import { randomUUID as randomUUID11 } from "node:crypto";
 import {
-  access as access3,
+  access as access4,
   chmod as chmod3,
   link as link2,
   lstat as lstat7,
@@ -108946,7 +108964,7 @@ async function findQuartoExecutable() {
     for (const name of names) {
       const candidate = resolve11(directory, name);
       try {
-        await access3(candidate, constants5.X_OK);
+        await access4(candidate, constants5.X_OK);
         const file2 = await stat14(candidate);
         if (!file2.isFile()) continue;
         return await realpath9(candidate);
@@ -111550,6 +111568,8 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
         let savePublication;
         let destinationStore;
         let destinationRecovery;
+        let destinationRecoveryPreviousId;
+        let destinationRecoveryAdopted = false;
         let nextManager;
         try {
           preparedOwner = await ownership.prepareRekey(request.path);
@@ -111569,6 +111589,10 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
           }
           const runtimeChanged = destinationDirectory !== notebookDirectory || destinationCache !== cacheDirectory;
           const destinationRuntime = runtimeChanged ? null : runtimeEnvironment;
+          const recoveryRoot = options.recoveryDirectory ?? envPaths("alder", { suffix: "" }).data;
+          if (await RecoveryWriter.hasJournal({ rootDir: recoveryRoot, key: preparedOwner.sessionKey })) {
+            throw Object.assign(new Error("Save As destination has pending recovery data"), { code: "destination_recovery_conflict" });
+          }
           savePublication = await preparedSave.publish();
           destinationStore = savePublication.store;
           nextManager = createPackageManager({ resources: options.resources, environment: destinationRuntime, processScope, projectDirectory: destinationDirectory, onProgress: onPackageProgress });
@@ -111585,22 +111609,16 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
             notebookDiskObservation: recoveryObservation(destinationDisk)
           };
           destinationRecovery = await RecoveryWriter.open({
-            rootDir: options.recoveryDirectory ?? envPaths("alder", { suffix: "" }).data,
+            rootDir: recoveryRoot,
             key: preparedOwner.sessionKey,
             baseline: destinationBaseline,
             recoveryId: oldRecovery.recoveryId,
             processSupervisorExecutable: options.resources.processSupervisorExecutable
           });
           if ((await destinationRecovery.load()).pending) {
-            await destinationRecovery.retire();
-            destinationRecovery = await RecoveryWriter.open({
-              rootDir: options.recoveryDirectory ?? envPaths("alder", { suffix: "" }).data,
-              key: preparedOwner.sessionKey,
-              baseline: destinationBaseline,
-              recoveryId: oldRecovery.recoveryId,
-              processSupervisorExecutable: options.resources.processSupervisorExecutable
-            });
+            throw Object.assign(new Error("Save As destination has pending recovery data"), { code: "destination_recovery_conflict" });
           }
+          destinationRecoveryPreviousId = destinationRecovery.recoveryId;
           const publicationBinder = context.preparePublication({
             document: { ...context.document, path: destination },
             path: destination,
@@ -111631,6 +111649,8 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
             };
             return async () => {
               try {
+                await destinationRecovery.adoptRecoveryId(oldRecovery.recoveryId);
+                destinationRecoveryAdopted = true;
                 publicationBinder();
                 preparedSave.adopt();
                 store = destinationStore;
@@ -111669,6 +111689,11 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
                 void oldManager?.close().catch(() => {
                 });
               } catch (error61) {
+                if (destinationRecoveryAdopted && destinationRecoveryPreviousId !== void 0) {
+                  await destinationRecovery.adoptRecoveryId(destinationRecoveryPreviousId).catch(() => {
+                  });
+                  destinationRecoveryAdopted = false;
+                }
                 try {
                   rollbackControllerPublication();
                 } catch {
@@ -111681,8 +111706,12 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
           return savePublication.result;
         } catch (error61) {
           reservation?.release();
-          if (destinationRecovery !== void 0 && destinationRecovery !== recovery) await destinationRecovery.retire().catch(() => {
-          });
+          if (destinationRecovery !== void 0 && destinationRecovery !== recovery) {
+            if (destinationRecoveryAdopted && destinationRecoveryPreviousId !== void 0) await destinationRecovery.adoptRecoveryId(destinationRecoveryPreviousId).catch(() => {
+            });
+            await destinationRecovery.close().catch(() => {
+            });
+          }
           await preparedSave?.abort().catch(() => {
           });
           await preparedOwner?.abort().catch(() => {
@@ -112145,7 +112174,9 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
         continuityProof: ownership.continuityProof,
         token: ownership.token,
         pid: ownership.pid,
-        recoveryId: recovery.recoveryId
+        get recoveryId() {
+          return recovery.recoveryId;
+        }
       },
       staticDir: options.resources.rendererDirectory,
       indexFile: join20(options.resources.rendererDirectory, "index.html"),

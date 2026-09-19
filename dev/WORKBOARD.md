@@ -31,12 +31,22 @@ their implementation-pinning tests once the smaller path works. Deliver focused
 crash/reopen/shared-owner journeys and a runnable signed Mac build without taking
 over Carl's desktop.
 
-**Base checkpoint:** accepted `2c4e020` (`Propagate owned process exit failures`).
+**Checkpoint:** `9ab60b5` (`Simplify document recovery ownership`) on accepted
+`2c4e020`.
 
-**Next action:** implement the reduced document/recovery ownership model as one
-complete slice, deleting superseded production paths and tests. Establish expected
-behavior with real backend, renderer-draft and shared-client journeys rather than
-private recovery internals. Return one reviewable checkpoint with the signed app.
+**Correction target:** retain the simplified backend journal, but make renderer
+draft persistence genuinely coalesced with a bounded debounce and maximum delay.
+Await its serialized flush at submission, reload and native-close boundaries, and
+make the native atomic rename crash-durable. Save As must never delete a pending
+destination journal and must establish one authoritative document identity across
+the backend, server and native draft store, including when the destination was
+previously opened. Add behavior checks for bounded writes during typing, close or
+reload preserving the latest draft, and Save As to clean and pending recovered
+destinations. Stop integration tests from silently selecting a stale ignored
+`.application`; require an explicit current staged root or validate compatibility.
+
+**Next action:** primary implementer corrects `9ab60b5` from the consolidated
+fresh-context review, then returns one commit for focused re-review.
 
 **Testing constraint:** do not take over Carl's visible desktop. Use background
 or isolated Mac GUI checks where native interaction matters. The in-app browser
@@ -60,11 +70,11 @@ order; their implementation details are settled when assigned.
 | Output and cache helpers | Accepted | Primary implementer | `67d92c9`: ordered output, lazy/progress lifecycle, memory/disk reuse and invalidation through helper and NULL dependencies |
 | Ark language assistance | Accepted | Primary implementer | `d4217c8`: stock Ark LSP supplies live completion, hover, diagnostics and navigation across restart/failure; separate `languageserver` path removed |
 | Optional services and R boundary | Accepted | Primary implementer | `2c4e020`: clean R roles, retained optional services, project/user package precedence, isolated service dependencies, cancellable inspection, packaged Air and race-safe child cleanup |
-| Document truth and recovery | Implementing | Primary implementer | Make accepted edits recovery-durable before acknowledgement; keep only accepted backend state, saved baseline, accepted-unsaved journal and unsubmitted renderer draft; coalesce native draft writes and stop Save As from copying project settings |
+| Document truth and recovery | Implementing | Primary implementer | Correct renderer draft batching/flush durability and Save As recovery identity at `9ab60b5`; remove stale staged-root auto-detection, then re-review |
 | Session and desktop boundary | Queued | Unassigned | Replace per-notebook registry/lock/PID choreography with the shared backend's session map and one socket owner; use one typed Electron/renderer command and dirty-state bridge; fix ownerless dialogs and startup errors |
 | Ordinary R and reactive analysis | Queued | Unassigned | Build the graph from statically established definitions and references; require one defining cell per notebook global and an acyclic graph with clear, locally blocking diagnostics; execute other valid dynamic R normally and document that hidden dependencies require explicit reruns, without opaque barriers, runtime tracing or conservative replay |
 | Publishing and optional-service simplification | Queued | Unassigned | Publish an immutable saved source/output snapshot without live R/analyzer/graph gates; remove bespoke shortcode/resource/marker machinery and global UI action locking |
-| Mac runtime and settings cleanup | Queued | Unassigned | Stage and exercise Air, unify R selection with app preferences, remove false Rmd ownership and unused permission declarations, and keep a compact packaged acceptance path |
+| Mac runtime and settings cleanup | Queued | Unassigned | Fix installed-kernel ordinary project-profile/library activation, stage and exercise Air, unify R selection with app preferences, remove false Rmd ownership and unused permission declarations, and keep a compact packaged acceptance path |
 | Residual architecture and test cleanup | Queued | Unassigned | Split oversized state owners where required by the preceding slices; remove remaining source-lineage/provenance gates and obsolete platform/build/CI/performance machinery; freely delete or replace whole implementation-pinning test files, leaving a small behavior-led suite, Mac build/check path and small OS adapters |
 | Complete Mac app and final acceptance | Queued | Unassigned | Deliver a usable Mac app; exercise the packaged native app through launch/open/type/run/interrupt/save/Save As/reopen/recover/close, multiple notebooks, concurrent GUI/agent edits, client detach and backend failure/recovery; check optional-service failures and observable stalls |
 

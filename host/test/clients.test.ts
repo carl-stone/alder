@@ -1171,6 +1171,47 @@ test("unsubmitted typing survives renderer close and reload", async () => {
   } finally { await second.client.close(); }
 });
 
+test("rapid and spaced typing coalesces bounded draft writes with the latest text", async () => {
+  const store = new MemoryRecoveryStore();
+  const saved: BrowserRecoveryDraft[] = [];
+  const saveDraft = store.saveDraft.bind(store);
+  store.saveDraft = async draft => { saved.push(structuredClone(draft)); await saveDraft(draft); };
+  const { client } = await browserClient(store);
+  try {
+    await client.flushDraftPersistence();
+    saved.length = 0;
+    for (let index = 0; index < 6; index += 1) {
+      client.editCell("c1", `x <- ${index + 2}`);
+      await new Promise(resolve => setTimeout(resolve, 60));
+    }
+    await waitUntil(() => saved.length > 0);
+    await client.flushDraftPersistence();
+    assert.ok(saved.length <= 2, `expected at most two coalesced writes, received ${saved.length}`);
+    assert.deepEqual(saved.at(-1)?.changes[0]?.type === "edit" ? saved.at(-1)!.changes[0]!.body : null, ["x <- 7"]);
+  } finally { await client.close(); }
+});
+
+test("authoritative reload waits for the latest renderer draft", async () => {
+  const store = new MemoryRecoveryStore();
+  let release!: () => void;
+  const persisted = new Promise<void>(resolve => { release = resolve; });
+  const saveDraft = store.saveDraft.bind(store);
+  store.saveDraft = async draft => { await persisted; await saveDraft(draft); };
+  const current = snapshot();
+  current.disk = { state: "present", digest: "a".repeat(64), version: "version-1", error: null };
+  const { client, socket } = await browserClient(store, current);
+  try {
+    client.editCell("c1", "x <- 8");
+    const reloading = client.reloadAuthoritativeRecovery();
+    await new Promise(resolve => setTimeout(resolve, 20));
+    assert.equal(socket.commands().length, 0);
+    release();
+    await waitUntil(() => socket.commands().length === 1);
+    socket.reply(socket.commands()[0]!, { reloaded: true });
+    await reloading;
+  } finally { await client.close(); }
+});
+
 test("source submission waits until the latest renderer draft is durable", async () => {
   const store = new MemoryRecoveryStore();
   let release!: () => void;

@@ -21083,7 +21083,7 @@ var ticketExchangeRequestSchema = external_exports.object({ ticket: idSchema }).
 var ticketExchangeResponseSchema = external_exports.object({ leaseId: idSchema, clientId: idSchema, epoch: idSchema, continuityProof: idSchema, csrf: idSchema, recoveryId: idSchema.optional() }).strict();
 var hostIdentitySchema = external_exports.object({ protocol: external_exports.literal(HOST_PROTOCOL), epoch: idSchema, processNonce: idSchema, continuityProof: idSchema, sessionKey: idSchema, canonicalPath: pathSchema.nullable(), capabilities: external_exports.array(boundedUtf8StringSchema(256, true)).max(MAX_PROTOCOL_COLLECTION_ITEMS), origin: boundedUtf8StringSchema(2048, true), browserOrigin: boundedUtf8StringSchema(2048, true), address: external_exports.object({ host: boundedUtf8StringSchema(256, true), port: external_exports.number().int().min(0).max(65535).safe(), origin: boundedUtf8StringSchema(2048, true), browserOrigin: boundedUtf8StringSchema(2048, true) }).strict().optional(), leaseId: idSchema.optional(), clientId: idSchema.optional(), documentReady: external_exports.boolean(), configuration: hostConfigurationSchema }).strict();
 var sessionConnectionSchema = external_exports.object({ sessionKey: idSchema, canonicalPath: pathSchema.nullable(), origin: boundedUtf8StringSchema(2048, true), browserOrigin: boundedUtf8StringSchema(2048, true), epoch: idSchema, processNonce: idSchema, continuityProof: idSchema, leaseId: idSchema, clientId: idSchema, capabilities: external_exports.array(boundedUtf8StringSchema(256, true)).max(MAX_PROTOCOL_COLLECTION_ITEMS) }).strict();
-var windowActionSchema = external_exports.enum(["new", "open", "save", "save-as", "publish", "run-cell", "run-all", "run-stale", "interrupt", "restart", "settings", "select-r", "close"]);
+var windowActionSchema = external_exports.enum(["new", "open", "save", "save-as", "publish", "run-cell", "run-all", "run-stale", "interrupt", "restart", "settings", "select-r", "close", "prepare-unload"]);
 var windowActionMessageSchema = external_exports.object({ action: windowActionSchema }).strict();
 var windowStateSchema = external_exports.object({ path: pathSchema.nullable(), dirty: external_exports.boolean(), platform: boundedUtf8StringSchema(64, true), sessionEpoch: idSchema }).strict();
 var desktopRecoveryRequestSchema = external_exports.object({
@@ -21749,6 +21749,8 @@ var BrowserNotebookClient = class {
   draftPersistence = Promise.resolve();
   draftPersistenceQueued = false;
   draftPersistenceRunning = false;
+  draftPersistenceTimer;
+  draftPersistenceQueuedAt;
   draftPersistenceError = null;
   recoveryAttempted = false;
   browserRecoveryInspected = false;
@@ -21808,7 +21810,14 @@ var BrowserNotebookClient = class {
   }
   async flushDraftPersistence() {
     this.queueDraftPersistence();
-    while (this.draftPersistenceRunning || this.draftPersistenceQueued) await this.draftPersistence;
+    if (this.draftPersistenceTimer !== void 0) {
+      clearTimeout(this.draftPersistenceTimer);
+      this.draftPersistenceTimer = void 0;
+    }
+    while (this.draftPersistenceRunning || this.draftPersistenceQueued) {
+      if (!this.draftPersistenceRunning) this.startDraftPersistence();
+      await this.draftPersistence;
+    }
     if (this.draftPersistenceError) throw this.draftPersistenceError;
   }
   async discardRecovery() {
@@ -22141,14 +22150,29 @@ var BrowserNotebookClient = class {
     if (!store) return;
     this.draftPersistenceQueued = true;
     if (this.draftPersistenceRunning) return;
+    const now = Date.now();
+    this.draftPersistenceQueuedAt ??= now;
+    if (this.draftPersistenceTimer !== void 0) clearTimeout(this.draftPersistenceTimer);
+    const delay = Math.min(150, Math.max(0, this.draftPersistenceQueuedAt + 750 - now));
+    this.draftPersistenceTimer = setTimeout(() => {
+      this.draftPersistenceTimer = void 0;
+      this.startDraftPersistence();
+    }, delay);
+  }
+  startDraftPersistence() {
+    const store = this.draftStore();
+    if (!store || this.draftPersistenceRunning || !this.draftPersistenceQueued) return;
+    if (this.draftPersistenceTimer !== void 0) {
+      clearTimeout(this.draftPersistenceTimer);
+      this.draftPersistenceTimer = void 0;
+    }
+    this.draftPersistenceQueuedAt = void 0;
     this.draftPersistenceRunning = true;
     this.draftPersistence = (async () => {
-      while (this.draftPersistenceQueued) {
-        this.draftPersistenceQueued = false;
-        const draft = this.documentValue?.recoveryDraft(this.draftId, this.draftSubmission, this.pendingRun) ?? null;
-        if (draft) await store.saveDraft(draft);
-        else await store.clearDraft(this.draftId);
-      }
+      this.draftPersistenceQueued = false;
+      const draft = this.documentValue?.recoveryDraft(this.draftId, this.draftSubmission, this.pendingRun) ?? null;
+      if (draft) await store.saveDraft(draft);
+      else await store.clearDraft(this.draftId);
       this.draftPersistenceError = null;
       if (this.recoveryStateValue.persistenceError !== null) {
         this.recoveryStateValue = { ...this.recoveryStateValue, persistenceError: null };
@@ -26587,7 +26611,9 @@ function bindDesktopActions(next) {
   }
   desktopUnsubscribe = desktop.onWindowAction((action) => {
     let operation;
-    if (action === "save") {
+    if (action === "prepare-unload") {
+      operation = next.flushDraftPersistence().then(() => desktop.rendererDraftFlushed());
+    } else if (action === "save") {
       operation = view?.saveForDesktop().then(async (outcome) => {
         if (outcome === "cancelled") await desktop.saveCancelled();
       });
@@ -26648,7 +26674,6 @@ function neutralizeUnsafeNotebookLinks(root) {
   }
 }
 window.addEventListener("beforeunload", (event) => {
-  void client?.flushDraftPersistence();
   if (view?.allowsUnload) return;
   const document2 = client?.document;
   const pending = document2?.pendingSource();

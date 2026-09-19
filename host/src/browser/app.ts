@@ -62,7 +62,9 @@ function bindDesktopActions(next: BrowserNotebookClient): void {
   }
   desktopUnsubscribe = desktop.onWindowAction((action: WindowAction) => {
     let operation: Promise<unknown> | undefined;
-    if (action === "save") {
+    if (action === "prepare-unload") {
+      operation = next.flushDraftPersistence().then(() => desktop.rendererDraftFlushed());
+    } else if (action === "save") {
       operation = view?.saveForDesktop().then(async (outcome) => {
         if (outcome === "cancelled") await desktop.saveCancelled();
       });
@@ -126,7 +128,6 @@ function neutralizeUnsafeNotebookLinks(root: ParentNode): void {
   }
 }
 window.addEventListener("beforeunload", (event) => {
-  void client?.flushDraftPersistence();
   if (view?.allowsUnload) return;
   const document = client?.document;
   const pending = document?.pendingSource();

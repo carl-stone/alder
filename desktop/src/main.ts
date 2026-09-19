@@ -44,6 +44,7 @@ const IPC_CHANNELS = Object.freeze({
   windowAction: "alderDesktop:windowAction",
   saveCancelled: "alderDesktop:saveCancelled",
   rendererReady: "alderDesktop:rendererReady",
+  rendererDraftFlushed: "alderDesktop:rendererDraftFlushed",
 } as const);
 
 const APP_NAME = "Alder";
@@ -205,6 +206,7 @@ interface ElectronWindowRecord {
   loadingOrigin?: string;
   rendererReadyGeneration: number;
   rendererReady?: { promise: Promise<void>; resolve: () => void };
+  rendererDraftFlush?: { generation: number; promise: Promise<void>; resolve: () => void };
   saveCancelled: boolean;
   recoveryId?: string;
   readonly draftId: string;
@@ -710,6 +712,9 @@ export class ElectronMain implements ElectronMainApplication {
     noArguments(IPC_CHANNELS.rendererReady, (record) => {
       if (record.rendererReadyGeneration === record.loadGeneration) record.rendererReady?.resolve();
     });
+    noArguments(IPC_CHANNELS.rendererDraftFlushed, (record) => {
+      if (record.rendererDraftFlush?.generation === record.loadGeneration) record.rendererDraftFlush.resolve();
+    });
   }
 
   private recordForEvent(event: ElectronIpcEvent): ElectronWindowRecord {
@@ -856,6 +861,7 @@ export class ElectronMain implements ElectronMainApplication {
     try {
       const state = await this.readWindowState(record);
       if (!state.dirty) {
+        await this.prepareRendererUnload(record);
         this.finishClose(record);
         finished = true;
         return;
@@ -871,6 +877,7 @@ export class ElectronMain implements ElectronMainApplication {
       });
       if (answer.response === 2) return;
       if (answer.response === 1) {
+        await this.prepareRendererUnload(record);
         await this.dispatchAction(record, "close").catch(() => undefined);
         await this.waitForRelease(record, 500);
         if (!record.released) await this.disposeRecord(record, "discard");
@@ -885,6 +892,7 @@ export class ElectronMain implements ElectronMainApplication {
         if (!record.saveCancelled) await this.showApplicationError("Save", "The save operation did not settle; the window remains open.");
         return;
       }
+      await this.prepareRendererUnload(record);
       this.finishClose(record);
       finished = true;
     } catch (error) {
@@ -898,6 +906,25 @@ export class ElectronMain implements ElectronMainApplication {
     if (record.released) return;
     record.closing = true;
     record.window.destroy();
+  }
+
+  private async prepareRendererUnload(record: ElectronWindowRecord): Promise<void> {
+    if (record.released || record.window.webContents.isDestroyed?.()) return;
+    let resolveFlush!: () => void;
+    const promise = new Promise<void>(resolve => { resolveFlush = resolve; });
+    const pending = { generation: record.loadGeneration, promise, resolve: resolveFlush };
+    record.rendererDraftFlush = pending;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await this.dispatchAction(record, "prepare-unload");
+      await Promise.race([
+        promise,
+        new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("Local edits could not be preserved. The current editor remains open.")), 3_000); }),
+      ]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+      if (record.rendererDraftFlush === pending) record.rendererDraftFlush = undefined;
+    }
   }
 
   private async waitForClean(record: ElectronWindowRecord, timeoutMs: number): Promise<boolean> {
@@ -1034,13 +1061,7 @@ export class ElectronMain implements ElectronMainApplication {
     let navigationStarted = false;
     try {
       // Preserve live edits while the old page still owns its authenticated IPC origin.
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      try {
-        await Promise.race([
-          record.window.webContents.executeJavaScript("globalThis.__alderHost?.client?.flushDraftPersistence()", true),
-          new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("Local edits could not be preserved. The current editor remains open.")), 3_000); }),
-        ]);
-      } finally { if (timer) clearTimeout(timer); }
+      await this.prepareRendererUnload(record);
       const resources = await this.applicationResources();
       const acquire = this.options.acquireSession ?? acquireNotebookSession;
       next = await acquire({
