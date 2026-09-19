@@ -12,7 +12,7 @@ export function notebookSocketUrl(href = location.href): string {
   return target.href;
 }
 
-export function notebookViewUrl(view: "app" | "editor", href = location.href): string {
+export function notebookViewUrl(view: "preview" | "editor", href = location.href): string {
   const current = new URL(href);
   current.hash = "";
   current.searchParams.set("view", view);

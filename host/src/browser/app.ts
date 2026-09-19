@@ -64,12 +64,6 @@ function bindDesktopActions(next: BrowserNotebookClient): void {
     const run = async (): Promise<"ok" | "cancelled"> => {
       if (command.action === "prepare-unload") { await next.flushDraftPersistence(); return "ok"; }
       if (command.action === "close") { await next.discardAndClose(); return "ok"; }
-      if (command.action === "save-as") {
-        const path = await desktop.chooseSavePath();
-        if (path === null) return "cancelled";
-        await next.saveAs(path);
-        return "ok";
-      }
       if (command.action === "select-r") {
         const path = await desktop.chooseRscript();
         if (path === null) return "cancelled";
@@ -96,11 +90,18 @@ window.addEventListener("pagehide", () => {
 
 function bindClient(next: BrowserNotebookClient): void {
   client = next;
-  next.subscribe((document, event, localCellKeys) => {
+  const updateWindowState = (document: import("./document.js").BrowserDocument): void => {
     const desktop = (globalThis as typeof globalThis & { alderDesktop?: PreloadApi }).alderDesktop;
     const pending = document.pendingSource();
-    const state: WindowState = { path: document.snapshot.path, dirty: document.snapshot.dirty || pending.changes.length > 0, sessionEpoch: document.epoch };
+    const dirty = document.snapshot.dirty || pending.changes.length > 0;
+    const current = view?.documentSaveState ?? "saved";
+    const saveState = dirty && current === "saved" ? "edited" : current;
+    const state: WindowState = { path: document.snapshot.path, dirty, saveState, sessionEpoch: document.epoch };
     void desktop?.updateWindowState(state).catch((error) => view?.showError(error));
+  };
+  window.addEventListener("alder:window-state", () => { if (client?.document) updateWindowState(client.document); });
+  next.subscribe((document, event, localCellKeys) => {
+    updateWindowState(document);
     if (!event) {
       flushRenders();
       view?.render(document, event, localCellKeys);

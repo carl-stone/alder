@@ -85,6 +85,8 @@ export interface ElectronWindow {
   destroy(): void;
   loadURL(url: string, options?: { extraHeaders?: string }): Promise<void>;
   setTitle?(title: string): void;
+  setDocumentEdited?(edited: boolean): void;
+  setRepresentedFilename?(path: string): void;
 }
 
 export interface ElectronSession {
@@ -185,7 +187,7 @@ export interface ElectronMainOptions {
 export interface ElectronMainApplication {
   start(): Promise<boolean>;
   stop(): Promise<void>;
-  openNotebook(path: string | null): Promise<void>;
+  openNotebook(path: string | null, options?: { newWindow?: boolean }): Promise<void>;
   windows(): readonly ElectronWindow[];
 }
 
@@ -410,13 +412,20 @@ export class ElectronMain implements ElectronMainApplication {
     await this.releaseAll();
   }
 
-  async openNotebook(path: string | null): Promise<void> {
+  async openNotebook(path: string | null, options: { newWindow?: boolean } = {}): Promise<void> {
     if (this.stopping) throw new Error("desktop application is stopping");
     if (path !== null) path = validateNotebookPath(path);
     const hint = path === null ? null : await canonicalPathHint(path);
     if (hint !== null) {
       const pending = this.pending.get(hint);
       if (pending) await pending;
+      if (!options.newWindow) {
+        const existing = this.byKey.get(hint)?.values().next().value as ElectronWindowRecord | undefined;
+        if (existing && !existing.released) {
+          this.focus(existing);
+          return;
+        }
+      }
     }
     const key = hint ?? `untitled:${Date.now()}:${Math.random()}`;
     const operation = this.createWindow(path, hint);
@@ -640,7 +649,7 @@ export class ElectronMain implements ElectronMainApplication {
     });
     noArguments(IPC_CHANNELS.chooseRscript, async (record) => {
       const result = await this.runtime.dialog.showOpenDialog(record.window, {
-        title: "Select Rscript",
+        title: "Choose R installation",
         properties: ["openFile"],
         filters: [{ name: "Rscript", extensions: ["Rscript", ""] }],
       });
@@ -659,6 +668,9 @@ export class ElectronMain implements ElectronMainApplication {
       if (state.sessionEpoch !== record.connection.epoch) throw new Error("Window state belongs to another session");
       record.windowState = state;
       record.dirty = state.dirty;
+      record.window.setDocumentEdited?.(state.dirty);
+      if (state.path) record.window.setRepresentedFilename?.(state.path);
+      record.window.setTitle?.(`${state.path ? basename(state.path) : "Untitled"}${state.dirty ? " — Edited" : ""} — ${APP_NAME}`);
     });
     ipc.removeHandler?.(IPC_CHANNELS.commandResult);
     ipc.handle(IPC_CHANNELS.commandResult, (event, ...args) => {
@@ -770,42 +782,61 @@ export class ElectronMain implements ElectronMainApplication {
       if (record) void this.dispatchAction(record, name).catch(error => this.showApplicationError("Alder", error instanceof Error ? error.message : String(error)));
     };
     const fileSubmenu: Record<string, unknown>[] = [
-      { label: "New", accelerator: "CmdOrCtrl+N", click: () => void this.openNotebook(null) },
+      { label: "New Notebook", accelerator: "CmdOrCtrl+N", click: () => void this.openNotebook(null) },
       { label: "Open…", accelerator: "CmdOrCtrl+O", click: () => void this.openNotebookFromDialog(this.focusedRecord() ?? this.firstRecord()) },
+      { label: "New Window for Notebook…", accelerator: "CmdOrCtrl+Alt+O", click: () => void this.openNotebookFromDialog(undefined, true) },
       { label: "Recent", submenu: this.recentPaths.length === 0 ? [{ label: "No recent notebooks", enabled: false }] : this.recentPaths.map(path => ({ label: path, click: () => void this.openNotebook(path) })) },
       { type: "separator" },
       { label: "Save", accelerator: "CmdOrCtrl+S", click: action("save") },
       { label: "Save As…", accelerator: "CmdOrCtrl+Shift+S", click: action("save-as") },
-      { label: "Publish HTML", click: action("publish") },
+      { label: "Format Notebook", click: action("format") },
+      { label: "Packages…", click: action("packages") },
+      { label: "Publish HTML…", click: action("publish") },
       { type: "separator" },
       { label: "Close", role: "close", click: () => { const record = this.focusedRecord(); if (record) void this.requestClose(record); } },
     ];
     const runSubmenu: Record<string, unknown>[] = [
-      { label: "Run Cell", click: action("run-cell") },
-      { label: "Run All", click: action("run-all") },
-      { label: "Run Stale", click: action("run-stale") },
-      { label: "Interrupt", click: action("interrupt") },
+      { label: "Run Cell", accelerator: "CmdOrCtrl+Enter", click: action("run-cell") },
+      { label: "Run and Advance", accelerator: "Shift+Enter", click: action("run-and-advance") },
+      { label: "Run All", accelerator: "CmdOrCtrl+Shift+Enter", click: action("run-all") },
+      { label: "Run Outdated Cells", click: action("run-stale") },
+      { label: "Interrupt R", accelerator: "CmdOrCtrl+.", click: action("interrupt") },
       { label: "Restart R", click: action("restart") },
     ];
     const settingsSubmenu: Record<string, unknown>[] = [
-      { label: "Settings", click: action("settings") },
-      { label: "Select R…", click: action("select-r") },
+      { label: "Settings…", accelerator: "CmdOrCtrl+,", click: action("settings") },
+      { label: "Choose R…", click: action("select-r") },
     ];
     const editSubmenu: Record<string, unknown>[] = [
       { role: "undo" }, { role: "redo" }, { type: "separator" },
       { role: "cut" }, { role: "copy" }, { role: "paste" },
       { role: "selectAll" },
     ];
+    const viewSubmenu: Record<string, unknown>[] = [
+      { label: "Toggle Notebook Sidebar", accelerator: "CmdOrCtrl+Alt+S", click: action("toggle-notebook") },
+      { label: "Preview", accelerator: "CmdOrCtrl+Shift+P", click: action("preview") },
+      { type: "separator" }, { role: "reload" }, { role: "toggleDevTools" }, { type: "separator" }, { role: "togglefullscreen" },
+    ];
+    const windowSubmenu: Record<string, unknown>[] = [
+      { role: "minimize" }, { role: "zoom" }, { type: "separator" }, { role: "front" },
+    ];
+    const helpSubmenu: Record<string, unknown>[] = [
+      { label: "Keyboard Shortcuts", click: action("shortcuts") },
+      { label: "R Documentation", accelerator: "F1", click: action("r-documentation") },
+    ];
     const template: Record<string, unknown>[] = [
       { label: APP_NAME, submenu: [...settingsSubmenu, { type: "separator" }, { role: "quit" }] },
       { label: "File", submenu: fileSubmenu },
       { label: "Edit", submenu: editSubmenu },
+      { label: "View", submenu: viewSubmenu },
       { label: "Run", submenu: runSubmenu },
+      { label: "Window", submenu: windowSubmenu },
+      { label: "Help", submenu: helpSubmenu },
     ];
     this.runtime.Menu.setApplicationMenu(this.runtime.Menu.buildFromTemplate(template));
   }
 
-  private async openNotebookFromDialog(source: ElectronWindowRecord | undefined): Promise<void> {
+  private async openNotebookFromDialog(source: ElectronWindowRecord | undefined, newWindow = false): Promise<void> {
     const options = {
       title: "Open Alder notebook",
       properties: ["openFile"],
@@ -816,7 +847,7 @@ export class ElectronMain implements ElectronMainApplication {
       : await this.runtime.dialog.showOpenDialog(options);
     if (result.canceled || result.filePaths.length === 0) return;
     const path = selectedPath(result.filePaths[0], "Open notebook");
-    if (path) await (source ? this.openReplacingPristineUntitled(source, path) : this.openNotebook(path));
+    if (path) await (source && !newWindow ? this.openReplacingPristineUntitled(source, path) : this.openNotebook(path, { newWindow }));
   }
 
   private async requestClose(record: ElectronWindowRecord): Promise<void> {
@@ -885,7 +916,7 @@ export class ElectronMain implements ElectronMainApplication {
     return false;
   }
   private async readWindowState(record: ElectronWindowRecord): Promise<WindowState> {
-    const state = record.windowState ?? windowStateSchema.parse({ path: record.connection.canonicalPath, dirty: true, sessionEpoch: record.connection.epoch });
+    const state = record.windowState ?? windowStateSchema.parse({ path: record.connection.canonicalPath, dirty: true, saveState: "edited", sessionEpoch: record.connection.epoch });
     record.dirty = state.dirty;
     return state;
   }

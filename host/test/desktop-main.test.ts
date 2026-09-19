@@ -65,10 +65,12 @@ function connection(
   return value as SessionConnection & { releaseCount: number; releaseDispositions: string[] };
 }
 
-function windowWithLoad(loadURL: (url: string) => Promise<void> = async () => undefined): ElectronWindow & { destroyed: boolean; focusedCount: number; titles: string[] } {
+function windowWithLoad(loadURL: (url: string) => Promise<void> = async () => undefined): ElectronWindow & { destroyed: boolean; focusedCount: number; titles: string[]; documentEdits: boolean[]; representedFiles: string[] } {
   let destroyed = false;
   let focusedCount = 0;
   const titles: string[] = [];
+  const documentEdits: boolean[] = [];
+  const representedFiles: string[] = [];
   const closedListeners: Array<() => void> = [];
   const closeListeners: Array<(event: { preventDefault: () => void }) => void> = [];
   const webRequest = {
@@ -108,10 +110,12 @@ function windowWithLoad(loadURL: (url: string) => Promise<void> = async () => un
     destroy: () => { if (!destroyed) { destroyed = true; for (const listener of closedListeners) listener(); } },
     loadURL,
     setTitle: (title: string) => { titles.push(title); },
+    setDocumentEdited: (edited: boolean) => { documentEdits.push(edited); },
+    setRepresentedFilename: (path: string) => { representedFiles.push(path); },
   };
   Object.defineProperty(window, "destroyed", { get: () => destroyed });
   Object.defineProperty(window, "focusedCount", { get: () => focusedCount });
-  return Object.assign(window, { titles }) as ElectronWindow & { destroyed: boolean; focusedCount: number; titles: string[] };
+  return Object.assign(window, { titles, documentEdits, representedFiles }) as ElectronWindow & { destroyed: boolean; focusedCount: number; titles: string[]; documentEdits: boolean[]; representedFiles: string[] };
 }
 
 function runtime(messageResponse = 2): ElectronRuntime {
@@ -201,6 +205,24 @@ test("typed desktop commands cover Save, Save As, reload preparation, and close 
   assert.deepEqual(actions, ["save", "save-as", "prepare-unload", "close"]);
 });
 
+test("native menus expose the notebook command hierarchy and keyboard flow", () => {
+  const electronRuntime = runtime();
+  let template: readonly Record<string, any>[] = [];
+  electronRuntime.Menu.buildFromTemplate = value => { template = value; return value; };
+  const main = new ElectronMain(electronRuntime, { resources });
+  (main as any).rebuildMenu();
+  assert.deepEqual(template.map(item => item.label), ["Alder", "File", "Edit", "View", "Run", "Window", "Help"]);
+  const run = template.find(item => item.label === "Run")!.submenu as Record<string, any>[];
+  const shortcuts = Object.fromEntries(run.filter(item => item.label).map(item => [item.label, item.accelerator]));
+  assert.equal(shortcuts["Run Cell"], "CmdOrCtrl+Enter");
+  assert.equal(shortcuts["Run and Advance"], "Shift+Enter");
+  assert.equal(shortcuts["Run All"], "CmdOrCtrl+Shift+Enter");
+  assert.equal(shortcuts["Interrupt R"], "CmdOrCtrl+.");
+  const file = template.find(item => item.label === "File")!.submenu as Record<string, any>[];
+  assert.ok(file.some(item => item.label === "New Window for Notebook…"));
+  assert.ok(file.some(item => item.label === "Publish HTML…"));
+});
+
 test("Open and startup errors use ownerless native dialogs", async () => {
   const electronRuntime = runtime();
   const notebookPath = "/tmp/ownerless-open.R";
@@ -269,7 +291,7 @@ test("native close waits for the renderer to persist its latest draft", async ()
   const window = windowWithLoad();
   const main = new ElectronMain(runtime(), { resources });
   const record = recordFor(main, hostConnection, window);
-  (main as any).readWindowState = async () => ({ path: hostConnection.canonicalPath, dirty: false, sessionEpoch: "epoch" });
+  (main as any).readWindowState = async () => ({ path: hostConnection.canonicalPath, dirty: false, saveState: "saved", sessionEpoch: "epoch" });
   let acknowledge!: () => void;
   const acknowledged = new Promise<void>(resolve => { acknowledge = resolve; });
   window.webContents.send = (_channel, payload) => {
@@ -369,7 +391,7 @@ for (const decision of ["Cancel", "Save"] as const) {
     const main = new ElectronMain(electronRuntime, { resources, acquireSession: async () => hostConnection, closeSettlementTimeoutMs: 1_000 });
     (main as any).loadAuthenticatedNotebook = async () => undefined;
     let dirty = true;
-    (main as any).readWindowState = async () => ({ path, dirty, sessionEpoch: "epoch" });
+    (main as any).readWindowState = async () => ({ path, dirty, saveState: dirty ? "edited" : "saved", sessionEpoch: "epoch" });
     try {
       await main.openNotebook(path);
       window.close();
@@ -429,6 +451,25 @@ test("native recovery IPC accepts the owning main frame and keeps its recovery i
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("typed renderer state drives native edited state and represented filename", async () => {
+  const path = "/tmp/alder-native-document.R";
+  const window = windowWithLoad();
+  const handlers = new Map<string, (event: unknown, ...args: unknown[]) => unknown>();
+  const electronRuntime = runtime();
+  electronRuntime.BrowserWindow.fromWebContents = sender => sender === window.webContents ? window : null;
+  electronRuntime.ipcMain.handle = (channel, handler) => { handlers.set(channel, handler); };
+  const main = new ElectronMain(electronRuntime, { resources });
+  recordFor(main, connection("native-document", path, async () => { throw new Error("unexpected request"); }), window);
+  (main as any).installIpcHandlers();
+  const update = handlers.get("alderDesktop:windowState")!;
+  const event = { sender: window.webContents, senderFrame: window.webContents.mainFrame };
+  await update(event, { path, dirty: true, saveState: "edited", sessionEpoch: "epoch" });
+  await update(event, { path, dirty: false, saveState: "saved", sessionEpoch: "epoch" });
+  assert.deepEqual(window.documentEdits, [true, false]);
+  assert.deepEqual(window.representedFiles, [path, path]);
+  assert.match(window.titles.at(-1) ?? "", /^alder-native-document\.R — Alder$/);
+});
+
 test("Save As returns an absent target or the exact explicitly confirmed destination", async () => {
   const root = await realpath(await mkdtemp(join(tmpdir(), "alder-desktop-save-as-")));
   try {
@@ -477,7 +518,7 @@ test("desktop close returns immediately when untitled Save As is cancelled", asy
   electronRuntime.ipcMain.handle = (channel, handler) => { handlers.set(channel, handler); };
   const main = new ElectronMain(electronRuntime, { resources, closeSettlementTimeoutMs: 30_000 });
   const record = recordFor(main, hostConnection, window);
-  (main as any).readWindowState = async () => ({ path: null, dirty: true, sessionEpoch: "epoch" });
+  (main as any).readWindowState = async () => ({ path: null, dirty: true, saveState: "edited", sessionEpoch: "epoch" });
   let applicationErrors = 0;
   (main as any).showApplicationError = async () => { applicationErrors += 1; };
   window.webContents.send = (_channel, payload) => {
@@ -531,7 +572,7 @@ test("opening a notebook replaces a clean untitled launch window", async () => {
   const record = recordFor(main, untitledConnection, window);
   let opened: string | null = null;
   (main as any).openNotebook = async (path: string) => { opened = path; };
-  (main as any).readWindowState = async () => ({ path: null, dirty: false, sessionEpoch: "epoch" });
+  (main as any).readWindowState = async () => ({ path: null, dirty: false, saveState: "saved", sessionEpoch: "epoch" });
   await (main as any).openReplacingPristineUntitled(record, openedPath);
 
   assert.equal(opened, openedPath);
@@ -542,7 +583,7 @@ test("opening a notebook replaces a clean untitled launch window", async () => {
   assert.equal(main.windows().length, 0);
 });
 
-test("opening the same notebook creates independent GUI clients on one session", async () => {
+test("opening the same notebook focuses its existing window unless a new window is explicit", async () => {
   const path = "/tmp/alder-shared-gui.R";
   const ticket = async (endpoint: string) => {
     assert.equal(endpoint, "/api/ticket");
@@ -560,6 +601,9 @@ test("opening the same notebook creates independent GUI clients on one session",
   (main as any).loadAuthenticatedNotebook = async () => undefined;
   await main.openNotebook(path);
   await main.openNotebook(path);
+  assert.equal(main.windows().length, 1);
+  assert.equal(windows[0]!.focusedCount, 1);
+  await main.openNotebook(path, { newWindow: true });
   assert.equal(main.windows().length, 2);
   windows[0]!.destroy();
   await new Promise(resolve => setImmediate(resolve));
@@ -619,6 +663,6 @@ test("saving recovered source clears the native unsaved prompt despite an older 
   const window = windowWithLoad();
   const main = new ElectronMain(runtime(), { resources });
   const record = recordFor(main, connection("recovered-save", "/tmp/recovered-save.R", async () => jsonResponse({})), window);
-  record.windowState = { path: "/tmp/recovered-save.R", dirty: false, sessionEpoch: "epoch" };
+  record.windowState = { path: "/tmp/recovered-save.R", dirty: false, saveState: "saved", sessionEpoch: "epoch" };
   assert.equal((await (main as any).readWindowState(record)).dirty, false);
 });

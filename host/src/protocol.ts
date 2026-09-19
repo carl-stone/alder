@@ -1303,13 +1303,23 @@ export interface SessionConnectionData { sessionKey: string; canonicalPath: stri
 export type SessionReleaseDisposition = "normal" | "discard";
 export interface SessionConnection extends SessionConnectionData { request: SessionRequest; heartbeat(): Promise<void>; release(disposition?: SessionReleaseDisposition): Promise<void>; }
 
-export const windowActionSchema = z.enum(["new", "open", "save", "save-as", "publish", "run-cell", "run-all", "run-stale", "interrupt", "restart", "settings", "select-r", "close", "prepare-unload"]);
+export const windowActionSchema = z.enum([
+  "new", "open", "save", "save-as", "publish", "format", "packages",
+  "run-cell", "run-and-advance", "run-all", "run-stale", "interrupt", "restart",
+  "toggle-notebook", "preview", "settings", "select-r", "shortcuts", "r-documentation",
+  "close", "prepare-unload",
+]);
 export type WindowAction = z.infer<typeof windowActionSchema>;
 export const desktopCommandSchema = z.object({ requestId: idSchema, action: windowActionSchema }).strict();
 export type DesktopCommand = z.infer<typeof desktopCommandSchema>;
 export const desktopCommandResultSchema = z.object({ requestId: idSchema, status: z.enum(["ok", "cancelled", "error"]), message: boundedUtf8StringSchema(8_192, true).optional() }).strict();
 export type DesktopCommandResult = z.infer<typeof desktopCommandResultSchema>;
-export const windowStateSchema = z.object({ path: pathSchema.nullable(), dirty: z.boolean(), sessionEpoch: idSchema }).strict();
+export const windowStateSchema = z.object({
+  path: pathSchema.nullable(),
+  dirty: z.boolean(),
+  saveState: z.enum(["edited", "saving", "saved", "failed"]),
+  sessionEpoch: idSchema,
+}).strict();
 export type WindowState = z.infer<typeof windowStateSchema>;
 export interface SaveDestination { path: string; expectedDestination: "absent" | { expectedDiskDigest: string; expectedDiskVersion: string }; }
 export const desktopRecoveryRequestSchema = z.object({

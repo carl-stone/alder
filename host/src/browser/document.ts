@@ -178,6 +178,13 @@ export class BrowserDocument {
     return cell;
   }
 
+  keepLocalVersion(key: string): LocalCell {
+    const cell = this.requireCell(key);
+    if (!cell.conflict || cell.tombstone || cell.id === null) throw new Error("cell has no resolvable source conflict");
+    cell.conflict = false;
+    return cell;
+  }
+
   discardLocal(key: string): void {
     const cell = this.requireCell(key);
     if (cell.id !== null && !cell.tombstone) throw new Error("cannot discard an authoritative cell locally");

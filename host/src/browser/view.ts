@@ -85,7 +85,9 @@ export class NotebookView {
   private documentValue: BrowserDocument | null = null;
   private actionError: string | null = null;
   private actionNotice: string | null = null;
+  private saveStateValue: "edited" | "saving" | "saved" | "failed" = "saved";
   private transportError: string | null = null;
+  private transportState: "connecting" | "open" | "recovering" | "closed" = "connecting";
   private editorHelpError: string | null = null;
   private editorHelpRestarting = false;
   private explicitRunCount = 0;
@@ -96,7 +98,7 @@ export class NotebookView {
   private graphZoom = 1;
   private graphExpanded = false;
   private panelOpen = true;
-  private panelTab: DataflowPanelTab = "variables";
+  private panelTab: DataflowPanelTab = "outline";
   private dataflowSignature = "";
   private variablesSignature = "";
   private variablesDirty = false;
@@ -106,7 +108,6 @@ export class NotebookView {
   private dependenciesSignature = "";
   private outlineSignature = "";
   private readonly outlineCells = new Map<string, string>();
-  private minimapSignature = "";
   private configValue: HostSnapshot["config"] | null = null;
   private settingsBaseline: SettingsBaseline | null = null;
   private settingsError: string | null = null;
@@ -124,9 +125,6 @@ export class NotebookView {
   private readonly dataflowStatuses = new Map<string, string>();
   private readonly dataflowCells = new Map<string, string>();
   private readonly graphNodes = new Map<string, SVGGElement>();
-  private minimapButtons = new Map<string, HTMLButtonElement>();
-  private minimapCurrent: string | null = null;
-  private minimapViewportFrame: number | null = null;
   private readonly lspRequests = new Map<string, AbortController>();
   private readonly packageOperations = new Set<PackageOperationTarget>();
   private readonly activeFormatOperationIds = new Set<string>();
@@ -136,12 +134,12 @@ export class NotebookView {
   private publishCancelButton: HTMLButtonElement | null = null;
   private packageCancelButton: HTMLButtonElement | null = null;
   private draggedKey: string | null = null;
+  private deletedCell: { after: string | null; type: "code" | "markdown"; body: readonly string[]; timer: number } | null = null;
   private readonly resizeHandler = (): void => this.updateTopbarInset();
   private readonly preserveRunFocus = (event: MouseEvent): void => {
     if (event.button === 0 && event.target instanceof Element &&
       event.target.closest("#run-all, .cell-head [data-act=run]")) event.preventDefault();
   };
-  private readonly scrollHandler = (): void => this.scheduleMinimapViewport();
 
   constructor(readonly client: BrowserNotebookClient, private readonly dom: Document = document) {
     const notebook = dom.getElementById("notebook");
@@ -149,13 +147,14 @@ export class NotebookView {
     this.notebook = notebook;
     this.status = dom.getElementById("status");
     this.path = dom.getElementById("path");
-    this.appView = new URLSearchParams(location.search).get("view") === "app";
+    const requestedView = new URLSearchParams(location.search).get("view");
+    this.appView = requestedView === "preview" || requestedView === "app";
     const panelPreference = loadPanelPreference(window);
     this.panelOpen = panelPreference.open;
     this.panelTab = panelPreference.tab;
     const appLink = dom.getElementById("app-mode") as HTMLAnchorElement | null;
     const editLink = dom.getElementById("edit-mode") as HTMLAnchorElement | null;
-    if (appLink) appLink.href = notebookViewUrl("app");
+    if (appLink) appLink.href = notebookViewUrl("preview");
     if (editLink) editLink.href = notebookViewUrl("editor");
     dom.body.classList.toggle("app-view", this.appView);
     window.__alderEditors = this.editors;
@@ -194,6 +193,7 @@ export class NotebookView {
     // Pointer Run preserves the editor/caret; keyboard users can still focus it.
     dom.addEventListener("mousedown", this.preserveRunFocus);
     this.bindSettings();
+    this.bindPublishDialog();
     this.bindNavigation();
     this.bindDragAndDrop();
     this.installServiceMenus();
@@ -207,6 +207,14 @@ export class NotebookView {
   get document(): BrowserDocument | null { return this.documentValue; }
   get allowsUnload(): boolean { return this.hostClosed || this.internalNavigation; }
   get runPending(): boolean { return this.explicitRunCount > 0; }
+  get documentSaveState(): "edited" | "saving" | "saved" | "failed" { return this.saveStateValue; }
+
+  private setSaveState(state: "edited" | "saving" | "saved" | "failed"): void {
+    if (this.saveStateValue === state) return;
+    this.saveStateValue = state;
+    window.dispatchEvent(new window.Event("alder:window-state"));
+    if (this.documentValue) this.renderControls(this.documentValue.snapshot);
+  }
 
   async runExplicit<T>(operation: () => Promise<{ completed: Promise<T> }>): Promise<T> {
     this.cancelEditTimers();
@@ -233,7 +241,8 @@ export class NotebookView {
 
   setTransportState(state: "connecting" | "open" | "recovering" | "closed", error?: Error): void {
     if (this.hostClosed) return;
-    this.transportError = state === "closed" && error ? error.message : state === "open" ? null : state === "connecting" ? "Connecting…" : "Recovering session…";
+    this.transportState = state;
+    this.transportError = state === "closed" && error ? error.message : state === "open" ? null : state === "connecting" ? (this.documentValue ? "Reconnecting…" : "Opening notebook…") : "Reconnecting…";
     this.renderStatus();
   }
 
@@ -332,8 +341,6 @@ export class NotebookView {
     this.observer?.disconnect();
     window.removeEventListener("resize", this.resizeHandler);
     this.dom.removeEventListener("mousedown", this.preserveRunFocus);
-    window.removeEventListener("scroll", this.scrollHandler);
-    if (this.minimapViewportFrame !== null) window.cancelAnimationFrame(this.minimapViewportFrame);
     this.cancelVariablesProjection();
   }
 
@@ -438,8 +445,16 @@ export class NotebookView {
     }
     await this.action(async () => {
       if (action === "delete") {
+        const cells = [...this.requireDocument().cells];
+        const index = cells.findIndex(cell => cell.key === key);
+        const cell = this.requireCell(key);
+        const deleted = { after: index > 0 ? cells[index - 1]!.key : null, type: cell.desiredType, body: [...cell.desiredBody] };
         this.cancelEditTimer(key);
         await this.client.deleteCell(key);
+        if (this.deletedCell) window.clearTimeout(this.deletedCell.timer);
+        const timer = window.setTimeout(() => { this.deletedCell = null; this.actionNotice = null; this.renderStatus(); }, 8_000);
+        this.deletedCell = { ...deleted, timer };
+        this.actionNotice = "Cell deleted.";
         this.scheduleAutosave();
       } else if (action === "disable") {
         await this.client.commitEdits();
@@ -574,7 +589,7 @@ export class NotebookView {
         setDisabled(button, !cell.id);
         const label = status === "disabled" ? "Enable" : "Disable";
         if (button.textContent !== label) button.textContent = label;
-      }
+      } else if (button.dataset.act === "delete" || button.dataset.act === "add") setDisabled(button, false);
     });
     if (refreshLabels) {
       const title = element.querySelector<HTMLElement>("[data-role=cell-title]");
@@ -964,6 +979,7 @@ export class NotebookView {
     const actions = element.querySelector<HTMLElement>("[data-role=cell-actions]");
     actions?.querySelectorAll("[data-recovery]").forEach((node) => node.remove());
     element.querySelector("[data-tombstone-message]")?.remove();
+    element.querySelector("[data-conflict-diff]")?.remove();
     actions?.querySelectorAll<HTMLElement>("[data-act]").forEach((node) => { node.hidden = cell.tombstone; });
     if (!actions) return;
     if (cell.tombstone) {
@@ -977,6 +993,7 @@ export class NotebookView {
       const restore = elementNode(this.dom, "button", "btn mini", "Restore as new cell") as HTMLButtonElement;
       restore.type = "button";
       restore.dataset.recovery = "true";
+      restore.dataset.recoveryAction = "restore-new";
       restore.addEventListener("click", () => {
         this.cancelEditTimer(cell.key);
         void this.action(async () => {
@@ -987,6 +1004,7 @@ export class NotebookView {
       const discard = elementNode(this.dom, "button", "btn mini", "Discard local draft") as HTMLButtonElement;
       discard.type = "button";
       discard.dataset.recovery = "true";
+      discard.dataset.recoveryAction = "discard-local";
       discard.addEventListener("click", () => {
         this.cancelEditTimer(cell.key);
         this.client.discardLocalCell(cell.key);
@@ -995,13 +1013,26 @@ export class NotebookView {
       return;
     }
     if (!cell.conflict) return;
-    const button = elementNode(this.dom, "button", "btn mini", "Use server version") as HTMLButtonElement;
-    button.type = "button";
-    button.dataset.recovery = "true";
-    button.addEventListener("click", () => {
-      this.client.useServerVersion(cell.key);
-    });
-    actions.appendChild(button);
+    const diff = this.dom.createElement("details");
+    diff.className = "source-conflict-diff";
+    diff.dataset.conflictDiff = "true";
+    diff.appendChild(elementNode(this.dom, "summary", "", "Compare incoming and my edits"));
+    diff.appendChild(elementNode(this.dom, "pre", "", `Incoming\n${cell.serverBody.join("\n")}\n\nMy edits\n${cell.desiredBody.join("\n")}`));
+    const source = element.querySelector("[data-role=source-area]");
+    element.insertBefore(diff, source);
+    const choice = (label: string, recoveryAction: string, run: () => void | Promise<unknown>): HTMLButtonElement => {
+      const button = elementNode(this.dom, "button", "btn mini", label) as HTMLButtonElement;
+      button.type = "button";
+      button.dataset.recovery = "true";
+      button.dataset.recoveryAction = recoveryAction;
+      button.addEventListener("click", () => { void Promise.resolve(run()).catch(error => this.showError(error)); });
+      return button;
+    };
+    actions.append(
+      choice("Keep my edits", "keep-local", () => this.client.keepLocalVersion(cell.key)),
+      choice("Use incoming", "use-incoming", () => this.client.useServerVersion(cell.key)),
+      choice("Restore mine as new cell", "restore-new", () => this.client.restoreConflictAsNewCell(cell.key)),
+    );
   }
 
   private reconcileOrder(cells: readonly LocalCell[]): void {
@@ -1043,20 +1074,32 @@ export class NotebookView {
       executionMode: snapshot.runtime.executionMode,
       kernelReady: snapshot.runtime.kernelState === "ready",
       dirty,
+      saveState: this.saveStateValue,
     });
     if (signature === this.toolbarSignature) return;
     this.toolbarSignature = signature;
     const runtime = this.dom.getElementById("runtime-select") as HTMLSelectElement | null;
     if (runtime && this.dom.activeElement !== runtime && runtime.value !== snapshot.runtime.executionMode) runtime.value = snapshot.runtime.executionMode;
     if (runtime) setDisabled(runtime, this.hostClosed);
+    const path = this.dom.getElementById("path");
+    const notebookName = snapshot.path?.split(/[\\/]/).at(-1) ?? "Untitled";
+    if (path) path.textContent = notebookName;
+    this.dom.title = this.appView ? `${notebookName} — Preview — Alder` : `${notebookName} — Alder`;
+    const saveState = this.dom.getElementById("save-state");
+    if (saveState) saveState.textContent = dirty && this.saveStateValue === "saved" ? "Edited" : ({ edited: "Edited", saving: "Saving…", saved: "Saved", failed: "Save failed" } as const)[this.saveStateValue];
+    const rState = this.dom.getElementById("r-state");
+    if (rState) rState.textContent = snapshot.runtime.busy ? "R running" : available ? "R ready" : snapshot.runtime.kernelState === "starting" ? "R starting" : "R unavailable";
     const runAll = this.dom.getElementById("run-all") as HTMLButtonElement | null;
     if (runAll) {
-      const label = snapshot.runtime.executionMode === "lazy" ? "Run stale" : "Run all";
+      const label = snapshot.runtime.executionMode === "lazy" ? "Run outdated cells" : "Run All";
       if (runAll.textContent !== label) runAll.textContent = label;
       setDisabled(runAll, this.runPending || busy || !available);
     }
     const stop = this.dom.getElementById("stop") as HTMLButtonElement | null;
-    if (stop) setDisabled(stop, this.hostClosed || !(busy || this.runPending));
+    if (stop) {
+      stop.hidden = !(busy || this.runPending);
+      setDisabled(stop, this.hostClosed || !(busy || this.runPending));
+    }
     const restart = this.dom.getElementById("restart") as HTMLButtonElement | null;
     if (restart) {
       restart.hidden = snapshot.runtime.kernelState === "ready";
@@ -1064,21 +1107,12 @@ export class NotebookView {
     }
     const save = this.dom.getElementById("save") as HTMLButtonElement | null;
     if (save) setDisabled(save, this.hostClosed || !dirty);
-    const shutdown = this.dom.getElementById("shutdown") as HTMLButtonElement | null;
-    if (shutdown) {
-      setDisabled(shutdown, this.hostClosed);
-      shutdown.title = "Shut down this notebook host";
-    }
   }
 
   private renderDataflow(snapshot: HostSnapshot, event?: HostEvent): void {
     if (this.appView) return;
     if (!event || event.cellId) this.patchDataflowStatuses(snapshot, event?.cellId);
-    // Notebook messages carry source/order/config state. Structural changes
-    // update the always-visible minimap immediately; graph layout still waits
-    // for the controller's separate full graph projection.
     if (event?.type === "notebook") {
-      if (notebookRequiresCellReconcile(event.payload, false)) this.renderMinimapProjection(snapshot);
       return;
     }
     if (event?.type === "variables") {
@@ -1100,9 +1134,6 @@ export class NotebookView {
     if (event?.type === "cell" && event.cellId) {
       this.patchDataflowCellLabel(snapshot, event.cellId);
       this.renderOutlineProjection(snapshot, event.cellId);
-      if (snapshot.cells.length !== this.minimapButtons.size || !this.minimapButtons.has(event.cellId)) {
-        this.renderMinimapProjection(snapshot);
-      }
       if (!this.dataflowCellChanged(snapshot, event.cellId)) return;
       this.variablesDirty = true;
       this.scheduleVariablesProjection();
@@ -1119,16 +1150,12 @@ export class NotebookView {
       this.renderDependenciesProjection(snapshot);
       this.renderGraphProjection(snapshot);
       this.renderOutlineProjection(snapshot);
-      this.renderMinimapProjection(snapshot);
       return;
     }
-    // Graph events follow source/structure transactions. Reconcile the always
-    // visible minimap, while expensive panel layouts stay lazy until visible.
     if (event.type === "graph") {
       this.variablesDirty = true;
       this.scheduleVariablesProjection();
     }
-    this.renderMinimapProjection(snapshot);
     if (this.panelActive("dependencies")) this.renderDependenciesProjection(snapshot);
     if (this.panelActive("graph")) this.renderGraphProjection(snapshot);
     if (this.panelActive("outline")) this.renderOutlineProjection(snapshot);
@@ -1179,13 +1206,6 @@ export class NotebookView {
       for (const cell of snapshot.cells) this.outlineCells.set(cell.id, outlineCellSignature(cell));
     }
     this.renderOutline(snapshot);
-  }
-
-  private renderMinimapProjection(snapshot: HostSnapshot): void {
-    const signature = JSON.stringify(snapshot.cells.map((cell) => cell.id));
-    if (signature === this.minimapSignature) return;
-    this.minimapSignature = signature;
-    this.renderMinimap(snapshot);
   }
 
   private renderVariablesProjection(snapshot: HostSnapshot): void {
@@ -1270,12 +1290,6 @@ export class NotebookView {
         const status = graph.querySelector(".dag-node-status");
         if (status) status.textContent = cell.status;
       }
-      const minimap = this.minimapButtons.get(cell.id);
-      if (minimap) {
-        minimap.className = `minimap-cell status-${cell.status}${this.minimapCurrent === cell.id ? " in-viewport" : ""}`;
-        minimap.title = `${minimap.dataset.cellLabel ?? cell.id} — ${cell.status} — stable ID ${cell.id}`;
-        minimap.setAttribute("aria-label", minimap.title);
-      }
     }
   }
 
@@ -1289,12 +1303,6 @@ export class NotebookView {
     if (graphLabel && graphLabel.textContent !== truncate(label, 18)) graphLabel.textContent = truncate(label, 18);
     const graphAria = `Go to ${label}${snapshot.graph.cycles.includes(cellId) ? "; dependency cycle" : ""}`;
     if (graph?.getAttribute("aria-label") !== graphAria) graph?.setAttribute("aria-label", graphAria);
-    const minimap = this.minimapButtons.get(cellId);
-    if (minimap && minimap.dataset.cellLabel !== label) {
-      minimap.dataset.cellLabel = label;
-      minimap.title = `${label} — ${cell.status} — stable ID ${cell.id}`;
-      minimap.setAttribute("aria-label", minimap.title);
-    }
   }
 
   private renderVariables(snapshot: HostSnapshot): void {
@@ -1640,69 +1648,6 @@ export class NotebookView {
     }
   }
 
-  private renderMinimap(snapshot: HostSnapshot): void {
-    const minimap = this.dom.getElementById("minimap");
-    if (!minimap) return;
-    const prior = this.minimapButtons;
-    const next = new Map<string, HTMLButtonElement>();
-    const nodes = snapshot.cells.map((cell, index) => {
-      const button = prior.get(cell.id) ?? this.dom.createElement("button");
-      const label = cellLabelAt(cell, index);
-      button.type = "button";
-      button.className = `minimap-cell status-${cell.status}`;
-      button.dataset.targetCell = cell.id;
-      button.dataset.cellLabel = label;
-      button.dataset.navigationKey = JSON.stringify(["minimap", cell.id]);
-      button.textContent = String(index + 1);
-      button.title = `${label} — ${cell.status} — stable ID ${cell.id}`;
-      button.setAttribute("aria-label", button.title);
-      next.set(cell.id, button);
-      return button;
-    });
-    this.replaceNavigationChildren(minimap, nodes);
-    this.minimapButtons = next;
-    this.minimapCurrent = null;
-    this.scheduleMinimapViewport();
-  }
-
-  private scheduleMinimapViewport(): void {
-    if (this.minimapViewportFrame !== null || this.appView || window.innerWidth <= 900) return;
-    this.minimapViewportFrame = window.requestAnimationFrame(() => {
-      this.minimapViewportFrame = null;
-      this.updateMinimapViewport();
-    });
-  }
-
-  private updateMinimapViewport(): void {
-    const minimap = this.dom.getElementById("minimap");
-    if (!minimap || this.appView || window.innerWidth <= 900 || !this.minimapButtons.size) return;
-    const middle = window.innerHeight / 2;
-    let current: string | null = null;
-    const bounds = this.notebook.getBoundingClientRect();
-    const x = Math.max(0, Math.min(window.innerWidth - 1, bounds.left + Math.min(40, Math.max(1, bounds.width / 2))));
-    if (typeof this.dom.elementFromPoint === "function") {
-      const ys = [middle, Math.max(0, Math.min(window.innerHeight - 1, bounds.top + 1)),
-        Math.max(0, Math.min(window.innerHeight - 1, bounds.bottom - 1))];
-      for (const y of ys) {
-        const hit = this.dom.elementFromPoint(x, y)?.closest<HTMLElement>(".cell[data-cell]");
-        if (hit && !this.notebook.contains(hit)) continue;
-        if (hit?.dataset.cell) { current = hit.dataset.cell; break; }
-      }
-    }
-    if (!current && bounds.top >= middle) current = this.documentValue?.cells[0]?.id ?? null;
-    if (!current && bounds.bottom <= middle) current = this.documentValue?.cells.at(-1)?.id ?? null;
-    if (!current || current === this.minimapCurrent) return;
-    const prior = this.minimapCurrent ? this.minimapButtons.get(this.minimapCurrent) : undefined;
-    prior?.classList.remove("in-viewport");
-    prior?.removeAttribute("aria-current");
-    const selected = this.minimapButtons.get(current);
-    if (selected) {
-      selected.classList.add("in-viewport");
-      selected.setAttribute("aria-current", "location");
-    }
-    this.minimapCurrent = current;
-  }
-
   private replaceNavigationChildren(parent: HTMLElement, children: readonly HTMLElement[]): void {
     const active = this.dom.activeElement;
     const key = active instanceof Element && parent.contains(active)
@@ -1786,11 +1731,12 @@ export class NotebookView {
     }, 0);
   }
 
-  private focusAdjacentCell(key: string, offset: -1 | 1): void {
+  private focusAdjacentCell(key: string, offset: -1 | 1, createAtEnd = true): void {
     const cells = this.documentValue?.cells ?? [];
     const index = cells.findIndex((cell) => cell.key === key);
     const target = index < 0 ? undefined : cells[index + offset];
     if (target) this.navigateToCell(target.key);
+    else if (offset > 0 && createAtEnd) this.addCell(key, "code");
   }
 
   private async moveCellBy(key: string, offset: -1 | 1): Promise<void> {
@@ -1836,7 +1782,7 @@ export class NotebookView {
   }
 
   private bindNavigation(): void {
-    for (const root of [this.dom.getElementById("dataflow-panel"), this.dom.getElementById("minimap")]) {
+    for (const root of [this.dom.getElementById("dataflow-panel")]) {
       root?.addEventListener("click", (event) => {
         const target = (event.target as Element | null)?.closest("[data-target-cell]");
         const id = (target as HTMLElement | null)?.dataset.targetCell;
@@ -1853,7 +1799,6 @@ export class NotebookView {
         if (id) this.navigateToCell(id, line === undefined ? undefined : Number(line));
       });
     }
-    window.addEventListener("scroll", this.scrollHandler, { passive: true });
   }
 
   private bindDragAndDrop(): void {
@@ -1925,7 +1870,7 @@ export class NotebookView {
     menus.dataset.hostServiceMenus = "true";
     menus.style.display = "contents";
 
-    const actionMenu = this.menu("Actions");
+    const actionMenu = this.menu("Actions", "actions");
     const include = this.dom.createElement("input");
     include.type = "checkbox";
     const includeLabel = element(this.dom, "label", "publish-include-code");
@@ -1974,7 +1919,7 @@ export class NotebookView {
       this.actionNotice = "Notebook check passed";
     }));
 
-    const packageMenu = this.menu("Packages");
+    const packageMenu = this.menu("Packages", "packages");
     const names = this.dom.createElement("input");
     names.type = "text";
     names.placeholder = "dplyr, ggplot2";
@@ -2036,10 +1981,12 @@ export class NotebookView {
     else topbar.appendChild(menus);
   }
 
-  private menu(label: string): { wrap: HTMLElement; panel: HTMLElement } {
+  private menu(label: string, key: string): { wrap: HTMLElement; panel: HTMLElement } {
     const wrap = element(this.dom, "div", "service-menu");
     const toggle = element(this.dom, "button", "btn", label) as HTMLButtonElement;
     toggle.type = "button";
+    toggle.dataset.serviceMenu = key;
+    toggle.hidden = true;
     toggle.setAttribute("aria-expanded", "false");
     const panel = element(this.dom, "div", "service-menu-panel");
     panel.hidden = true;
@@ -2160,6 +2107,8 @@ export class NotebookView {
     setChecked(this.dom, "settings-cache-enabled", nested(config, ["cache", "enabled"]) !== false);
     const directory = this.dom.getElementById("settings-cache-directory") as HTMLInputElement | null;
     if (directory) directory.value = configString(config, ["cache", "dir"], "");
+    const selectedR = this.dom.getElementById("settings-selected-r") as HTMLInputElement | null;
+    if (selectedR) selectedR.value = this.documentValue?.snapshot.runtime.rEnvironment?.rscript ?? "No R selected";
   }
 
   private settingsValues(): DialogSettings {
@@ -2221,6 +2170,12 @@ export class NotebookView {
     this.dom.getElementById("settings-open")?.addEventListener("click", () => this.openSettings());
     this.dom.getElementById("settings-close")?.addEventListener("click", close);
     this.dom.getElementById("settings-cancel")?.addEventListener("click", close);
+    this.dom.getElementById("settings-choose-r")?.addEventListener("click", () => {
+      const desktop = (globalThis as typeof globalThis & { alderDesktop?: import("../protocol.js").PreloadApi }).alderDesktop;
+      void desktop?.chooseRscript().then(path => path ? this.client.selectR(path) : undefined).then(() => {
+        if (this.documentValue) this.fillSettings(this.documentValue.snapshot.config);
+      }).catch(error => this.showError(error));
+    });
     dialog?.addEventListener("click", (event) => { if (event.target === dialog) close(); });
     this.dom.getElementById("settings-form")?.addEventListener("submit", (event) => {
       event.preventDefault();
@@ -2279,9 +2234,16 @@ export class NotebookView {
       try { await this.formatCells(); }
       catch (error) { formatFailure = error instanceof Error ? error.message : String(error); }
     }
-    const result = await (destination === undefined ? this.client.save() : this.client.saveAs(destination));
-    if (formatFailure !== null) this.actionNotice = "Saved; formatting failed: " + formatFailure;
-    return result;
+    this.setSaveState("saving");
+    try {
+      const result = await (destination === undefined ? this.client.save() : this.client.saveAs(destination));
+      this.setSaveState("saved");
+      if (formatFailure !== null) this.actionNotice = "Saved; formatting failed: " + formatFailure;
+      return result;
+    } catch (error) {
+      this.setSaveState("failed");
+      throw error;
+    }
   }
 
   private async saveRecoveryCopy(): Promise<void> {
@@ -2297,6 +2259,16 @@ export class NotebookView {
 
   async performDesktopAction(action: import("../protocol.js").WindowAction): Promise<"ok" | "cancelled"> {
     if (action === "save") return await this.saveForDesktop() === "saved" ? "ok" : "cancelled";
+    if (action === "save-as") {
+      const desktop = (globalThis as typeof globalThis & { alderDesktop?: import("../protocol.js").PreloadApi }).alderDesktop;
+      if (!desktop) return "cancelled";
+      const destination = await desktop.chooseSavePath();
+      if (destination === null) return "cancelled";
+      this.setSaveState("saving");
+      try { await this.client.saveAs(destination); this.setSaveState("saved"); }
+      catch (error) { this.setSaveState("failed"); throw error; }
+      return "ok";
+    }
     if (action === "run-all" || action === "run-stale") {
       await this.runExplicit(() => this.client.startRunAll(action === "run-stale" ? "stale" : "all"));
       this.scheduleAutosave();
@@ -2304,23 +2276,78 @@ export class NotebookView {
       await this.client.interrupt();
     } else if (action === "restart") {
       await this.action(() => this.client.restart());
+    } else if (action === "toggle-notebook") {
+      this.togglePanel();
+    } else if (action === "preview") {
+      this.dom.getElementById("app-mode")?.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    } else if (action === "format") {
+      await this.formatCells();
+    } else if (action === "packages") {
+      this.dom.querySelector<HTMLButtonElement>("[data-service-menu=packages]")?.click();
+    } else if (action === "shortcuts") {
+      this.actionNotice = "Run cell ⌘↩ · Run and advance ⇧↩ · Run all ⇧⌘↩ · Interrupt ⌘.";
+      this.renderStatus();
+    } else if (action === "r-documentation") {
+      this.actionNotice = "Place the cursor on an R name and use editor help.";
+      this.renderStatus();
     } else if (action === "settings") {
       this.openSettings();
     } else if (action === "run-cell") {
       const element = this.dom.activeElement?.closest?.(".cell");
       const key = element ? this.keyByElement.get(element) : undefined;
       if (key) await this.runExplicit(() => this.client.startRunCell(key));
+    } else if (action === "run-and-advance") {
+      const element = this.dom.activeElement?.closest?.(".cell");
+      const key = element ? this.keyByElement.get(element) : undefined;
+      if (key) {
+        await this.runExplicit(() => this.client.startRunCell(key));
+        this.focusAdjacentCell(key, 1, true);
+      }
     } else if (action === "publish") {
-      const dirty = this.documentValue?.snapshot.dirty === true || (this.documentValue?.pendingSource().changes.length ?? 0) > 0;
-      const include = this.dom.querySelector<HTMLInputElement>(".publish-include-code input");
-      const result = await this.runService("publish", { include_code: include?.checked === true });
-      await this.downloadServiceResult(result);
-      this.actionNotice = dirty
-        ? "Published the last saved version. Unsaved changes were not included."
-        : "Published HTML downloaded.";
-      this.renderStatus();
+      const dialog = this.dom.getElementById("publish-dialog") as HTMLDialogElement | null;
+      if (dialog && !dialog.open) dialog.showModal();
     }
     return "ok";
+  }
+
+  private bindPublishDialog(): void {
+    const dialog = this.dom.getElementById("publish-dialog") as HTMLDialogElement | null;
+    const form = this.dom.getElementById("publish-form") as HTMLFormElement | null;
+    const cancel = this.dom.getElementById("publish-cancel") as HTMLButtonElement | null;
+    cancel?.addEventListener("click", () => {
+      const operationId = this.activePublishOperationId;
+      if (operationId) {
+        void this.client.cancelOperation(operationId).catch(error => this.showError(error));
+      } else dialog?.close();
+    });
+    form?.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const submit = this.dom.getElementById("publish-submit") as HTMLButtonElement | null;
+      const progress = this.dom.getElementById("publish-progress");
+      const version = form.querySelector<HTMLInputElement>('input[name="publish-version"]:checked')?.value ?? "save";
+      const include = (this.dom.getElementById("publish-include-code") as HTMLInputElement | null)?.checked === true;
+      if (submit) setDisabled(submit, true);
+      if (progress) progress.textContent = version === "save" ? "Saving and publishing…" : "Publishing last saved version…";
+      void this.action(async () => {
+        if (version === "save" && await this.saveNotebook("explicit") === undefined) return;
+        let result: CommandResult | HostQueryResult;
+        try {
+          result = await this.runService("publish", { include_code: include }, operationId => {
+            this.activePublishOperationId = operationId;
+          });
+        } finally {
+          this.activePublishOperationId = null;
+        }
+        await this.downloadServiceResult(result);
+        this.actionNotice = operationPayload(result).unsavedChangesExcluded === true
+          ? "Published the last saved version. Unsaved changes were not included."
+          : "Published HTML downloaded.";
+        dialog?.close();
+      }).catch(error => this.showError(error)).finally(() => {
+        if (submit) setDisabled(submit, false);
+        if (progress) progress.textContent = "";
+      });
+    });
   }
 
   private async repaginateTables(limit: number): Promise<void> {
@@ -2339,38 +2366,7 @@ export class NotebookView {
     await Promise.all(requests);
   }
 
-  private async shutdownHost(): Promise<void> {
-    if (this.hostClosed) return;
-    const pending = this.documentValue?.pendingSource();
-    if ((this.documentValue?.snapshot.dirty || pending?.changes.length)
-      && !window.confirm("This notebook has unsaved changes. Shut down without saving?")) return;
-    await this.action(async () => {
-      const desktop = (globalThis as typeof globalThis & { alderDesktop?: import("../protocol.js").PreloadApi }).alderDesktop;
-      this.hostClosed = true;
-      this.cancelEditTimers();
-      if (this.autosaveTimer !== null) window.clearTimeout(this.autosaveTimer);
-      this.autosaveTimer = null;
-      if (desktop) {
-        await this.client.discardAndClose();
-        this.transportError = null;
-        this.editorHelpError = null;
-        const snapshot = this.documentValue?.snapshot;
-        if (snapshot) await desktop.updateWindowState({ path: snapshot.path, dirty: false, sessionEpoch: snapshot.epoch });
-        window.close();
-        return;
-      }
-      await this.client.shutdown();
-      this.client.close();
-      this.transportError = null;
-      this.editorHelpError = null;
-      this.actionNotice = "Notebook host shut down.";
-    });
-  }
-
   private bindToolbar(): void {
-    this.dom.getElementById("shutdown")?.addEventListener("click", () => {
-      void this.shutdownHost().catch((error) => this.showError(error));
-    });
     this.dom.getElementById("run-all")?.addEventListener("click", (event) => {
       void this.runExplicit(() => this.client.startRunAll(this.runScope(), event)).then(() => {
         this.scheduleAutosave();
@@ -2395,6 +2391,33 @@ export class NotebookView {
     this.status?.addEventListener("click", (event) => {
       const target = (event.target as Element | null)?.closest("[data-status-action]");
       const action = target?.getAttribute("data-status-action");
+      if (action === "undo-delete" && this.deletedCell) {
+        event.preventDefault();
+        const deleted = this.deletedCell;
+        window.clearTimeout(deleted.timer);
+        this.deletedCell = null;
+        this.client.createCell(deleted.after, deleted.type, deleted.body);
+        this.actionNotice = "Cell restored.";
+        this.renderStatus();
+        this.scheduleAutosave();
+        return;
+      }
+      if (action === "retry-connection") {
+        event.preventDefault();
+        this.client.retryConnection();
+        return;
+      }
+      if (action === "close-window") {
+        event.preventDefault();
+        window.close();
+        return;
+      }
+      if (action === "choose-r") {
+        event.preventDefault();
+        const desktop = (globalThis as typeof globalThis & { alderDesktop?: import("../protocol.js").PreloadApi }).alderDesktop;
+        void desktop?.chooseRscript().then(path => path ? this.client.selectR(path) : undefined).catch(error => this.showError(error));
+        return;
+      }
       if (action === "restart-runtime") {
         event.preventDefault();
         void this.action(() => this.client.restart()).catch((error) => this.showError(error));
@@ -2443,7 +2466,7 @@ export class NotebookView {
         await this.client.commitEdits();
         await this.output.flush();
         this.internalNavigation = true;
-        try { location.assign(notebookViewUrl("app")); }
+        try { location.assign(notebookViewUrl("preview")); }
         catch (error) { this.internalNavigation = false; throw error; }
       }).catch((error) => this.showError(error));
     });
@@ -2587,7 +2610,6 @@ export class NotebookView {
       ?? this.documentValue?.snapshot.serviceErrors.lsp?.message
       ?? null;
     const runtimeBlocked = this.documentValue?.snapshot.runtime.executionBlockedReason ?? null;
-    const runtimeMessage = runtimeBlocked === null ? null : "R execution is blocked: " + (runtimeBlocked.message || runtimeBlocked.code);
     const recovery = this.client.recoveryState;
     const recoveryConflict = recovery.status === "conflict" || recovery.candidate?.state === "conflict" || recovery.corruption !== null;
     const recoveryMessage = recovery.uncertainRun ? "The previous run may have been interrupted. Run explicitly when you are ready." : recovery.local !== null
@@ -2595,7 +2617,7 @@ export class NotebookView {
       : recovery.persistenceError ? "Local edit recovery is not durable."
       : recovery.candidate?.state === "restored" ? "Unsaved edits recovered."
       : recovery.corruption ? "Recovery data needs your review." : recoveryConflict ? "Recovered edits need your review." : null;
-    const message = this.hostClosed ? "Notebook host shut down." : this.actionError ?? stateError ?? settingsError ?? editorHelpError ?? runtimeMessage ?? this.transportError ?? this.actionNotice ?? recoveryMessage ?? "";
+    const message = this.hostClosed ? "Notebook closed." : recoveryMessage ?? this.actionError ?? stateError ?? settingsError ?? editorHelpError ?? this.actionNotice ?? "";
     const signature = JSON.stringify({
       runtimeBlocked: runtimeBlocked === null ? null : [runtimeBlocked.code, runtimeBlocked.message],
       message,
@@ -2606,11 +2628,32 @@ export class NotebookView {
       transportError: Boolean(this.transportError),
       editorHelpRestarting: this.editorHelpRestarting,
       recovery: { status: recovery.status, local: recovery.local !== null, candidate: recovery.candidate === null ? null : [recovery.candidate.state, recovery.candidate.documentRevision], uncertainRun: recovery.uncertainRun, corruption: recovery.corruption?.code ?? null, persistenceError: recovery.persistenceError?.code ?? null },
+      canUndoDelete: this.deletedCell !== null,
     });
     if (signature === this.statusSignature) return;
     this.statusSignature = signature;
     this.status.replaceChildren();
     if (message) this.status.appendChild(elementNode(this.dom, "span", "status-message", message));
+    if (this.deletedCell) {
+      const undo = elementNode(this.dom, "button", "btn mini status-action", "Undo") as HTMLButtonElement;
+      undo.type = "button";
+      undo.dataset.statusAction = "undo-delete";
+      this.status.appendChild(undo);
+    }
+    if (this.transportError) {
+      const banner = elementNode(this.dom, "div", "connection-banner", "") as HTMLDivElement;
+      banner.dataset.connectionBanner = this.transportState;
+      banner.setAttribute("role", "alert");
+      banner.appendChild(elementNode(this.dom, "span", "connection-message", this.transportError));
+      const retry = elementNode(this.dom, "button", "btn mini", "Restart connection") as HTMLButtonElement;
+      retry.type = "button";
+      retry.dataset.statusAction = "retry-connection";
+      const close = elementNode(this.dom, "button", "btn mini", "Close") as HTMLButtonElement;
+      close.type = "button";
+      close.dataset.statusAction = "close-window";
+      banner.append(retry, close);
+      this.status.appendChild(banner);
+    }
     if (editorHelpError) {
       const retry = elementNode(this.dom, "button", "btn mini status-action", "Retry editor help") as HTMLButtonElement;
       retry.type = "button";
@@ -2630,15 +2673,19 @@ export class NotebookView {
     const panel = elementNode(this.dom, "div", "runtime-recovery-panel", "") as HTMLDivElement;
     panel.dataset.runtimeRecovery = "true";
     panel.setAttribute("role", "alert");
-    const detail = runtimeBlocked.message || runtimeBlocked.code;
-    panel.appendChild(elementNode(this.dom, "div", "runtime-message", "Execution remains blocked (" + runtimeBlocked.code + "): " + detail));
-    panel.appendChild(elementNode(this.dom, "div", "runtime-guidance", "Your edits and saves are preserved. Restart R to try again."));
+    const detail = runtimeBlocked.message || "Alder could not start R for this notebook.";
+    panel.appendChild(elementNode(this.dom, "div", "runtime-message", "R execution is blocked: " + detail));
+    panel.appendChild(elementNode(this.dom, "div", "runtime-guidance", "Your edits and saves are preserved. Choose an R installation or restart R."));
     const restart = elementNode(this.dom, "button", "btn mini status-action", "Restart R") as HTMLButtonElement;
     restart.type = "button";
     restart.dataset.statusAction = "restart-runtime";
     restart.disabled = this.hostClosed || this.documentValue?.snapshot.runtime.busy === true;
     if (restart.disabled) restart.setAttribute("aria-disabled", "true");
     panel.appendChild(restart);
+    const choose = elementNode(this.dom, "button", "btn mini status-action", "Choose R…") as HTMLButtonElement;
+    choose.type = "button";
+    choose.dataset.statusAction = "choose-r";
+    panel.appendChild(choose);
     this.status.appendChild(panel);
   }
 
@@ -2662,8 +2709,11 @@ export class NotebookView {
       button.addEventListener("click", () => { void this.action(action).catch(error => this.showError(error)); });
       actions.appendChild(button);
     };
-    if (state.candidate?.state === "conflict") add("Save recovered copy", () => this.saveRecoveryCopy());
-    if (state.local || state.candidate || state.corruption) add("Discard recovery", () => this.client.discardRecovery());
+    if (state.local || state.candidate?.state === "restored") add("Continue recovered", async () => this.client.continueRecovered());
+    if (state.status === "conflict" || state.candidate?.state === "conflict") add("Save recovered copy", () => this.saveRecoveryCopy());
+    if (state.local || state.candidate || state.corruption) add("Open saved", async () => {
+      if (window.confirm("Open the saved notebook and remove the recovered edits?")) await this.client.discardRecovery();
+    });
     if (actions.childElementCount) panel.appendChild(actions);
     this.status.appendChild(panel);
   }
@@ -3204,7 +3254,7 @@ function isPanelTab(value: string): value is DataflowPanelTab {
 function loadPanelPreference(browser: Window): { open: boolean; tab: DataflowPanelTab } {
   const fallback = {
     open: browser.matchMedia?.("(max-width: 900px)").matches !== true,
-    tab: "variables" as DataflowPanelTab,
+    tab: "outline" as DataflowPanelTab,
   };
   try {
     const value: unknown = JSON.parse(browser.localStorage.getItem("alder.panel") ?? "null");

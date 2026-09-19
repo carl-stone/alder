@@ -9,39 +9,36 @@ copies in other worktrees are snapshots.
 
 ## Current assignment
 
-**Targeted generative verification — Implementing.**
+**UI/UX review and polish — Implementing.**
 
 **Owner:** primary implementer in the listed implementation worktree.
 
-Apply bounded generated pressure to the stable graph, document/recovery and R
-execution seams, retaining only failures that improve ordinary regression coverage.
+Turn the now-stable Mac notebook into a coherent, attractive and efficient product
+for real scientific work.
 
-**Accept when:** seeded, reproducible generators check dependency graphs against a
-small independent oracle; malformed/truncated/Unicode notebook and recovery inputs
-cannot crash, hang or overwrite saved work; bounded state-machine sequences over
-edit, accept, save, crash, reopen and recovery preserve the document invariants;
-and a constrained ordinary-R expression corpus produces equivalent observable
-results through `Rscript` and packaged Alder. Each check has strict case/time/input
-bounds, prints its seed and shrinks or otherwise minimizes a failure. Useful found
-failures become small readable regression tests. Do not create a fuzzing service,
-large corpus, CI matrix or case-count target. The ordinary fast suite remains fast;
-heavier installed differential checks live in the compact explicit Mac path and
-clean all children. Deliver the signed Mac build without taking over Carl's desktop.
+**Accept when:** the notebook has a consistent visual system and information
+hierarchy across title/status, cells, editor, execution controls, outputs, errors,
+progress, settings and recovery. The editing canvas is calm and primary actions are
+obvious without persistent clutter; execution state, stale results and failures are
+legible at a glance. Keyboard navigation, focus, selection, menus and shortcuts
+support sustained notebook work. Empty, loading, disconnected and optional-service
+states explain the next useful action in product language. Outputs remain readable
+across text, tables, plots, HTML and narrow windows. Native windows/dialogs/titlebar
+fit macOS, and light/dark appearance, contrast, motion and accessible labels are
+coherent. Remove obsolete CSS/DOM state and duplicated presentation mechanisms
+rather than layering a skin over them. Preserve every accepted document, runtime,
+reactive, service and recovery behavior. Validate with representative notebook
+screens/states, behavior-led interaction checks and a signed Mac build without
+taking over Carl's desktop.
 
-**Checkpoint:** `4fffa64` (`Add bounded generative verification`) on accepted
-`8990292`.
+**Base:** accepted `d88ca7d` (`Strengthen generative recovery evidence`).
 
-**Correction target:** prove accepted edits are present in the on-disk recovery
-journal before any graceful close can flush them, then reopen through a replacement
-path. Compare full meaningful valid-recovery baselines, including cells/identities,
-path and disk observation. Minimize corrupt recovery bytes or emit an exact compact
-mutation reproducer. Replace the mostly fixed state-action prefix with bounded
-valid interleavings that still guarantee required operation coverage and vary
-crash/conflict/save/discard/detach ordering. Retain the accepted graph, notebook
-parser and packaged-R differential designs.
-
-**Next action:** primary implementer corrects `4fffa64` from the consolidated
-fresh-context review, then returns one checkpoint for focused re-review.
+**Next action:** audits are complete. The primary implementer first delivers the
+interaction-structure checkpoint: command hierarchy, native dirty state, cell and
+keyboard flow, separated status/recovery surfaces, publish/conflict decisions,
+loading/reconnect behavior, menus and notebook sidebar language. After focused
+review, a second checkpoint applies the cohesive editor/visual/responsive/
+accessibility system and screenshot matrix.
 
 **Testing constraint:** do not take over Carl's visible desktop. Use background
 or isolated Mac GUI checks where native interaction matters. The in-app browser
@@ -71,8 +68,8 @@ order; their implementation details are settled when assigned.
 | Publishing and optional-service simplification | Accepted | Primary implementer | `3680fbf`: immutable saved-snapshot publishing, independent cancellable optional services, safe package restart admission and bounded process cleanup |
 | Mac runtime and settings cleanup | Accepted | Primary implementer | `cc80261`: one R preference path, canonical project recovery, verified/staged Ark/Air/Quarto, accurate Mac claims and real packaged acceptance |
 | Residual architecture and test cleanup | Accepted | Primary implementer | `8990292`: removed trace/strict-JSON/platform/state debris, retained cohesive owners and rebuilt a five-second behavior-led host suite |
-| Targeted generative verification | Implementing | Primary implementer | Prove pre-close recovery durability, compare full baselines, minimize corruption and vary state interleavings at `4fffa64` |
-| UI/UX review and polish | Queued | Unassigned | Review the integrated Mac notebook as a product: visual hierarchy, editing flow, keyboard use, execution and progress feedback, outputs, errors, recovery, menus, settings, empty/loading states and native fit; simplify awkward interactions and deliver a coherent, attractive interface with behavior-led usability checks |
+| Targeted generative verification | Accepted | Primary implementer | `d88ca7d`: bounded independent graph/document/recovery/state/R verification with real crash durability and replayable failures |
+| UI/UX review and polish | Implementing | UX reviewers then primary implementer | Audit and polish visual hierarchy, editing flow, keyboard use, execution/progress, outputs/errors, recovery/settings, empty/loading states, accessibility and native Mac fit |
 | Complete Mac app and final acceptance | Queued | Unassigned | Deliver a usable Mac app; exercise the packaged native app through launch/open/type/run/interrupt/save/Save As/reopen/recover/close, multiple notebooks, concurrent GUI/agent edits, client detach and backend failure/recovery; check optional-service failures and observable stalls |
 
 The following requirements apply to the relevant slices and are checked again
@@ -133,7 +130,17 @@ part of this queue.
 
 ## Latest accepted checkpoint
 
-`8990292` is the residual architecture and test-cleanup checkpoint. Lead accepted
+`d88ca7d` is the targeted generative-verification checkpoint. Lead accepted a
+seeded independent graph oracle, bounded notebook/recovery mutation, varied
+state-machine recovery sequences and packaged Alder-versus-`Rscript` differential
+checks. Recovery durability is inspected on disk after acknowledgement and before
+SIGKILL; replacement restores source without implicit disk writes. Valid journals
+compare full normalized baselines, corrupt cases have compact reproducers and
+generated sequences cover required actions with bounded reduction. The host suite
+passes 397 tests in under five seconds, packaged differential acceptance and strict
+signing pass, and no children leak.
+
+It retains `8990292`, the residual architecture and test-cleanup checkpoint. Lead accepted
 removal of the performance trace subsystem, handwritten strict JSON parser,
 non-Mac desktop branch, duplicate dirty snapshot state and their mechanism-pinning
 tests. Native JSON remains behind fatal UTF-8, byte and schema boundaries. The

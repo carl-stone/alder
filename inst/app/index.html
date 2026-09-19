@@ -10,30 +10,47 @@
 </head>
 <body>
   <header id="topbar">
-    <div class="brand">alder</div>
-    <div id="path" class="path" aria-label="Notebook path"></div>
+    <div class="document-identity">
+      <strong id="path" class="path" aria-label="Notebook name">Untitled</strong>
+      <span id="save-state" class="document-state" aria-live="polite">Saved</span>
+    </div>
     <div class="spacer"></div>
-    <button id="open-notebook" class="btn editor-only" type="button" hidden>Open notebook…</button>
-    <label class="runtime-control editor-only" for="runtime-select">Runtime
-      <select id="runtime-select" aria-label="Runtime execution mode">
-        <option value="automatic">Automatic</option>
-        <option value="lazy">Lazy</option>
-      </select>
-    </label>
+    <span id="r-state" class="runtime-state" aria-live="polite">R starting</span>
     <button id="panel-toggle" class="btn editor-only" type="button"
-      aria-controls="dataflow-panel" aria-expanded="true">Dataflow</button>
-    <button id="run-all" class="btn primary editor-only" type="button">Run all</button>
+      aria-controls="dataflow-panel" aria-expanded="true">Notebook</button>
+    <button id="run-all" class="btn primary editor-only" type="button">Run All</button>
     <button id="stop" class="btn danger" type="button" disabled>Stop</button>
-    <button id="restart" class="btn" type="button" hidden>Restart R</button>
-    <button id="shutdown" class="btn shutdown" type="button">Shut down</button>
-    <button id="save" class="btn editor-only" type="button">Save</button>
-    <button id="settings-open" class="btn editor-only" type="button"
-            aria-haspopup="dialog" aria-controls="settings">Settings</button>
     <span id="vim-mode-indicator" class="vim-mode-indicator editor-only"
           data-role="vim-mode-indicator" aria-live="polite" hidden>Vim</span>
-    <a id="app-mode" class="btn editor-only" href="/?view=app">App mode</a>
-    <a id="edit-mode" class="btn" href="/?view=editor" hidden>Edit mode</a>
+    <a id="app-mode" class="btn editor-only" href="/?view=preview">Preview</a>
+    <a id="edit-mode" class="btn" href="/?view=editor" hidden>Exit Preview</a>
+    <button id="save" type="button" hidden>Save</button>
+    <button id="settings-open" type="button" hidden>Settings</button>
+    <select id="runtime-select" aria-label="Reactive execution" hidden>
+      <option value="automatic">Reactive On</option>
+      <option value="lazy">Reactive Off</option>
+    </select>
   </header>
+
+  <dialog id="publish-dialog" class="settings-dialog editor-only" aria-labelledby="publish-title">
+    <form id="publish-form" method="dialog">
+      <div class="settings-head"><h2 id="publish-title">Publish notebook</h2></div>
+      <fieldset class="settings-section">
+        <legend>Version</legend>
+        <label><input type="radio" name="publish-version" value="save" checked> Save and publish</label>
+        <label><input type="radio" name="publish-version" value="saved"> Publish last saved</label>
+      </fieldset>
+      <label class="settings-check"><input id="publish-include-code" type="checkbox"> Include code</label>
+      <label for="publish-destination">Destination
+        <select id="publish-destination"><option value="download">Download HTML</option></select>
+      </label>
+      <p id="publish-progress" role="status" aria-live="polite"></p>
+      <div class="settings-actions">
+        <button id="publish-cancel" class="btn" type="button">Cancel</button>
+        <button id="publish-submit" class="btn primary" type="submit">Publish</button>
+      </div>
+    </form>
+  </dialog>
 
   <dialog id="settings" class="settings-dialog editor-only"
           aria-labelledby="settings-title">
@@ -105,10 +122,14 @@
         <div class="settings-grid">
           <label for="settings-execution-mode">Execution
             <select id="settings-execution-mode" name="execution_mode">
-              <option value="automatic">Automatic</option>
-              <option value="lazy">Lazy</option>
+              <option value="automatic">Reactive On</option>
+              <option value="lazy">Reactive Off</option>
             </select>
           </label>
+          <label class="settings-wide" for="settings-selected-r">Selected R
+            <input id="settings-selected-r" type="text" readonly value="No R selected">
+          </label>
+          <button id="settings-choose-r" class="btn" type="button">Choose R…</button>
           <label class="settings-check" for="settings-run-on-startup">
             <input id="settings-run-on-startup" name="run_on_startup" type="checkbox">
             Run when opened
@@ -146,15 +167,15 @@
   <div id="editor-workspace">
     <main id="notebook" aria-label="Notebook cells"></main>
 
-    <aside id="dataflow-panel" class="editor-only" aria-label="Notebook dataflow">
+    <aside id="dataflow-panel" class="editor-only" aria-label="Notebook sidebar">
       <div class="panel-head">
-        <strong>Dataflow</strong>
+        <strong>Notebook</strong>
         <button id="panel-close" class="panel-icon-btn" type="button"
           aria-label="Close dataflow panel">×</button>
       </div>
-      <div class="panel-tabs" role="tablist" aria-label="Dataflow views">
+      <div class="panel-tabs" role="tablist" aria-label="Notebook views">
         <button id="panel-tab-variables" type="button" role="tab"
-          aria-controls="panel-variables" aria-selected="true"
+          aria-controls="panel-variables" aria-selected="false"
           data-panel-tab="variables">Variables</button>
         <button id="panel-tab-dependencies" type="button" role="tab"
           aria-controls="panel-dependencies" aria-selected="false"
@@ -163,20 +184,18 @@
           aria-controls="panel-graph" aria-selected="false"
           data-panel-tab="graph">Graph</button>
         <button id="panel-tab-outline" type="button" role="tab"
-          aria-controls="panel-outline" aria-selected="false"
+          aria-controls="panel-outline" aria-selected="true"
           data-panel-tab="outline">Outline</button>
       </div>
       <div id="panel-variables" class="panel-view" role="tabpanel"
-        aria-labelledby="panel-tab-variables"></div>
+        aria-labelledby="panel-tab-variables" hidden></div>
       <div id="panel-dependencies" class="panel-view" role="tabpanel"
         aria-labelledby="panel-tab-dependencies" hidden></div>
       <div id="panel-graph" class="panel-view" role="tabpanel"
         aria-labelledby="panel-tab-graph" hidden></div>
       <div id="panel-outline" class="panel-view" role="tabpanel"
-        aria-labelledby="panel-tab-outline" hidden></div>
+        aria-labelledby="panel-tab-outline"></div>
     </aside>
-
-    <nav id="minimap" class="minimap editor-only" aria-label="Notebook cell navigator"></nav>
   </div>
 
   <template id="cell-tpl">
@@ -188,20 +207,25 @@
           <span class="sr-only" data-role="reorder-help">Use the Move up and
             Move down buttons to reorder this cell with a keyboard.</span>
           <strong class="cell-title" data-role="cell-title">Cell</strong>
-          <label class="type-control" data-editor-only>Type
-            <select data-role="type" aria-label="Cell type">
-              <option value="code">Code</option>
-              <option value="markdown">Markdown</option>
-            </select>
-          </label>
           <span class="cell-badge" data-role="badge">idle</span>
         </div>
         <div class="cell-actions" data-role="cell-actions">
           <button data-act="run" class="btn mini primary" type="button">Run</button>
-          <button data-act="disable" class="btn mini" type="button">Disable</button>
-          <button data-act="move-up" class="btn mini" type="button">Up</button>
-          <button data-act="move-down" class="btn mini" type="button">Down</button>
-          <button data-act="delete" class="btn mini" type="button">Delete</button>
+          <details class="cell-overflow">
+            <summary class="btn mini" aria-label="Cell actions">•••</summary>
+            <div class="cell-overflow-menu">
+              <label class="type-control" data-editor-only>Type
+                <select data-role="type" aria-label="Cell type">
+                  <option value="code">Code</option>
+                  <option value="markdown">Markdown</option>
+                </select>
+              </label>
+              <button data-act="disable" class="btn mini" type="button">Disable cell</button>
+              <button data-act="move-up" class="btn mini" type="button">Move up</button>
+              <button data-act="move-down" class="btn mini" type="button">Move down</button>
+              <button data-act="delete" class="btn mini" type="button">Delete cell</button>
+            </div>
+          </details>
         </div>
       </div>
       <div class="source-area code-area" data-role="source-area" data-editor-only>
@@ -211,8 +235,7 @@
       <div class="output-area" data-role="output"></div>
       <div class="log-area" data-role="log"></div>
       <div class="cell-add editor-only" data-role="cell-add">
-        <button data-act="add" data-type="code" class="btn mini" type="button">+ Add code</button>
-        <button data-act="add" data-type="markdown" class="btn mini" type="button">+ Add Markdown</button>
+        <button data-act="add" data-type="code" class="btn mini insert-cell" type="button" aria-label="Insert code cell below">+ Add cell</button>
       </div>
     </section>
   </template>
@@ -220,8 +243,7 @@
   <template id="empty-bar">
     <div class="empty-bar">
       <span class="empty-message">Empty notebook</span>
-      <button data-act="add" data-type="code" class="btn mini" type="button">+ Add code</button>
-      <button data-act="add" data-type="markdown" class="btn mini" type="button">+ Add Markdown</button>
+      <button data-act="add" data-type="code" class="btn mini" type="button">+ Add cell</button>
     </div>
   </template>
 

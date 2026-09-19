@@ -339,15 +339,14 @@ test('long notebooks virtualize editors while preserving focused source through 
         try { return render(document, event, ...args); }
         finally { window.__renderEvent = null; }
       };
-      window.__longGraph = document.querySelector('#panel-graph .dag-graph');
-      window.__longMinimap = [...document.querySelectorAll('#minimap [data-target-cell]')]
+      window.__longOutline = [...document.querySelectorAll('#panel-outline [data-target-cell]')]
         .find(node => node.dataset.targetCell === 'cell-90');
       window.__unrelatedMutations = 0;
       window.__unrelatedObserver = new MutationObserver(records => {
         window.__unrelatedMutations += records.length;
       });
       window.__unrelatedObserver.observe(unrelated, {childList:true,subtree:true,characterData:true});
-      return Boolean(unrelated && window.__longGraph && window.__longMinimap);
+      return Boolean(unrelated && window.__longOutline);
     })()`), true);
     await browser.click('[data-cell="cell-1"] [data-act=run]');
     await browser.wait(`window.__alderHost.client.document.snapshot.cells[0].status === 'done' &&
@@ -356,9 +355,8 @@ test('long notebooks virtualize editors while preserving focused source through 
       window.__unrelatedObserver.disconnect();
       resolve({
         unrelatedMutations: window.__unrelatedMutations,
-        graphPreserved: document.querySelector('#panel-graph .dag-graph') === window.__longGraph,
-        minimapPreserved: [...document.querySelectorAll('#minimap [data-target-cell]')]
-          .find(node => node.dataset.targetCell === 'cell-90') === window.__longMinimap,
+        outlinePreserved: [...document.querySelectorAll('#panel-outline [data-target-cell]')]
+          .find(node => node.dataset.targetCell === 'cell-90') === window.__longOutline,
         renderedCellIds: [...new Set(window.__renderedCellIds)],
         orderPreserved: [...document.querySelectorAll('#notebook > .cell[data-cell]')]
           .every((node, index) => node.dataset.cell === 'cell-' + (index + 1)),
@@ -369,8 +367,7 @@ test('long notebooks virtualize editors while preserving focused source through 
     })))`);
     assert.deepEqual(selectiveRender, {
       unrelatedMutations: 0,
-      graphPreserved: true,
-      minimapPreserved: true,
+      outlinePreserved: true,
       renderedCellIds: ['cell-1'],
       orderPreserved: true,
       editorPreserved: true,
@@ -384,8 +381,6 @@ test('long notebooks virtualize editors while preserving focused source through 
         type: 'options', cell: { cellId: 'cell-90' }, expectedRevision: renameCell.revision, patch: { name: 'tail' },
       }],
     }))).error, null);
-    await browser.wait(`document.querySelector('#panel-graph [data-target-cell="cell-90"]')?.textContent.includes('tail') &&
-      document.querySelector('#minimap [data-target-cell="cell-90"]')?.getAttribute('aria-label').includes('tail')`);
     await browser.wait(`document.querySelector('#panel-outline [data-target-cell="cell-90"]')?.textContent === 'tail'`);
     const peer90Snapshot = app.controller.snapshot();
     const peer90 = peer90Snapshot.cells.find(cell => cell.id === 'cell-90');
@@ -454,7 +449,7 @@ test('source conflicts and peer deletion retain the exact local draft until expl
     assert.deepEqual(app.controller.snapshot().cells[0]!.body, ['peer <- 9', 'peer']);
     assert.equal(app.controller.snapshot().cells[0]!.revision, 1);
 
-    await browser.click('[data-cell="cell-1"] [data-recovery]');
+    await browser.click('[data-cell="cell-1"] [data-recovery-action="use-incoming"]');
     await browser.wait(`!document.querySelector('[data-cell="cell-1"]')?.classList.contains('source-conflict') &&
       window.__conflictEditor.getDoc() === 'peer <- 9\\npeer'`);
     await browser.click('[data-cell="cell-1"] .cm-content');
@@ -478,7 +473,7 @@ test('source conflicts and peer deletion retain the exact local draft until expl
       window.__alderEditors.get('cell:cell-1') === window.__conflictEditor &&
       document.querySelector('[data-cell="cell-1"] [role=alert]')?.textContent.includes('local draft')`), true);
 
-    await browser.click('[data-cell="cell-1"] [data-recovery]');
+    await browser.click('[data-cell="cell-1"] [data-recovery-action="restore-new"]');
     await browser.wait(`window.__alderHost.client.document.cells.length === 1 &&
       window.__alderHost.client.document.cells[0].id !== null &&
       window.__alderHost.client.document.cells[0].tombstone === false`, 30_000);
@@ -499,7 +494,7 @@ test('source conflicts and peer deletion retain the exact local draft until expl
       }],
     }))).error, null);
     await browser.wait(`document.querySelector('[data-cell="${restoredId}"]')?.classList.contains('tombstone')`);
-    await browser.click(`[data-cell="${restoredId}"] [data-recovery]:last-child`);
+    await browser.click(`[data-cell="${restoredId}"] [data-recovery-action="discard-local"]`);
     await browser.wait("window.__alderHost.client.document.cells.length === 0 && document.querySelectorAll('.cell').length === 0");
     assert.equal(app.controller.snapshot().cells.length, 0);
 

@@ -182,6 +182,12 @@ export class BrowserTransport {
     return this.connectPromise;
   }
 
+  reconnectNow(): void {
+    if (this.stopped || this.socket?.readyState === OPEN || this.attempt !== null) return;
+    this.clearReconnectTimer();
+    this.startAttempt();
+  }
+
   dispatch(command: BrowserCommand): Promise<CommandResult> {
     if (this.stopped || !this.recovered || this.socket?.readyState !== OPEN) return Promise.reject(new BrowserTransportError("transport_closed", "Reconnect before sending this request.", true));
     if (this.pending.size >= (this.options.maxQueuedCommands ?? 100)) return Promise.reject(new BrowserTransportError("client_backpressure", "Too many requests are pending.", true));

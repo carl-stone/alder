@@ -159,6 +159,7 @@ export class BrowserNotebookClient {
     this.transport.close();
     this.finishClose();
   }
+  retryConnection(): void { this.transport.reconnectNow(); }
 
   private finishClose(): void {
     this.runs.clear();
@@ -214,6 +215,16 @@ export class BrowserNotebookClient {
     this.notify();
     this.queueDraftPersistence();
     await this.activateStartupIfSafe();
+  }
+
+  continueRecovered(): void {
+    this.recoveryStateValue = {
+      ...this.recoveryStateValue,
+      candidate: null,
+      corruption: null,
+      status: this.recoveryStateValue.local ? "restored" : "none",
+    };
+    this.notifyRecovery();
   }
 
   async reloadAuthoritativeRecovery(): Promise<void> {
@@ -360,6 +371,29 @@ export class BrowserNotebookClient {
     return this.withSourceLock(() => {
       this.requireDocument().restoreDeleted(key, operationId("create"));
       this.notify(undefined, [key]);
+      this.queueDraftPersistence();
+      return this.commitEditsUnlocked();
+    });
+  }
+
+  async keepLocalVersion(key: string): Promise<CommandResult | null> {
+    return this.withSourceLock(() => {
+      this.requireDocument().keepLocalVersion(key);
+      this.notify(undefined, [key]);
+      this.queueDraftPersistence();
+      return this.commitEditsUnlocked();
+    });
+  }
+
+  async restoreConflictAsNewCell(key: string): Promise<CommandResult | null> {
+    return this.withSourceLock(() => {
+      const document = this.requireDocument();
+      const cell = this.requireCell(key);
+      const body = [...cell.desiredBody];
+      const type = cell.desiredType;
+      document.useServerVersion(key);
+      document.create(operationId("create"), key, type, body);
+      this.notify();
       this.queueDraftPersistence();
       return this.commitEditsUnlocked();
     });
