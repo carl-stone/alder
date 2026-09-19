@@ -9,33 +9,30 @@ copies in other worktrees are snapshots.
 
 ## Current assignment
 
-**Residual architecture and test cleanup — Implementing.**
+**Targeted generative verification — Implementing.**
 
 **Owner:** primary implementer in the listed implementation worktree.
 
-Remove the remaining pre-reset mechanisms and reshape only the state owners whose
-current responsibilities still obscure correctness.
+Apply bounded generated pressure to the stable graph, document/recovery and R
+execution seams, retaining only failures that improve ordinary regression coverage.
 
-**Accept when:** remaining source-lineage/provenance gates, obsolete migration and
-platform branches, performance/latency certification, duplicate protocol/state
-representations and unused build/CI machinery are deleted. Split oversized owners
-only where the final behavior now has a clear durable seam: document/session,
-execution and independently cancellable notebook services; avoid a broad rename or
-abstraction project. The renderer retains one local draft overlay over one server
-snapshot and removes obsolete signature/event reconciliation made unnecessary by
-accepted source state. Rebuild the test suite around current behavior, freely
-deleting whole implementation-pinning files and duplicate matrices. Preserve
-strong journeys for lost edits, atomic save/recovery, shared owners, external
-conflicts, ordinary R/reactive rules, stale results, interruption, outputs/widgets/
-cache, optional-service cancellation and child cleanup. Leave one fast suite, one
-compact installed Mac acceptance command and no hanging children. Deliver a clean
-signed Mac build without taking over Carl's desktop.
+**Accept when:** seeded, reproducible generators check dependency graphs against a
+small independent oracle; malformed/truncated/Unicode notebook and recovery inputs
+cannot crash, hang or overwrite saved work; bounded state-machine sequences over
+edit, accept, save, crash, reopen and recovery preserve the document invariants;
+and a constrained ordinary-R expression corpus produces equivalent observable
+results through `Rscript` and packaged Alder. Each check has strict case/time/input
+bounds, prints its seed and shrinks or otherwise minimizes a failure. Useful found
+failures become small readable regression tests. Do not create a fuzzing service,
+large corpus, CI matrix or case-count target. The ordinary fast suite remains fast;
+heavier installed differential checks live in the compact explicit Mac path and
+clean all children. Deliver the signed Mac build without taking over Carl's desktop.
 
-**Base:** accepted `cc80261` (`Harden Mac runtime acceptance`).
+**Base:** accepted `8990292` (`Remove residual architecture debris`).
 
-**Next action:** primary implementer audits the accepted architecture against the
-remaining production/test/build surface, deletes obsolete mechanisms, makes only
-earned state-owner splits, and returns one checkpoint for fresh review.
+**Next action:** primary implementer adds the four bounded generative checks at
+stable seams, fixes any real failures they expose, minimizes retained regressions
+and returns one checkpoint for fresh review.
 
 **Testing constraint:** do not take over Carl's visible desktop. Use background
 or isolated Mac GUI checks where native interaction matters. The in-app browser
@@ -64,8 +61,8 @@ order; their implementation details are settled when assigned.
 | Ordinary R and reactive analysis | Accepted | Primary implementer | `c7763ff`: rebuilt static graph, ordinary dynamic R, global/cycle restrictions, correct dot globals and invalid-descendant blocking |
 | Publishing and optional-service simplification | Accepted | Primary implementer | `3680fbf`: immutable saved-snapshot publishing, independent cancellable optional services, safe package restart admission and bounded process cleanup |
 | Mac runtime and settings cleanup | Accepted | Primary implementer | `cc80261`: one R preference path, canonical project recovery, verified/staged Ark/Air/Quarto, accurate Mac claims and real packaged acceptance |
-| Residual architecture and test cleanup | Implementing | Primary implementer | Delete remaining provenance/platform/performance/build debris, simplify final state owners and rebuild tests around current product behavior |
-| Targeted generative verification | Queued | Unassigned | Add bounded property, fuzz, state-machine and differential checks at stable product seams; minimize failures into readable regression cases without creating a permanent fuzzing framework |
+| Residual architecture and test cleanup | Accepted | Primary implementer | `8990292`: removed trace/strict-JSON/platform/state debris, retained cohesive owners and rebuilt a five-second behavior-led host suite |
+| Targeted generative verification | Implementing | Primary implementer | Add bounded graph properties, malformed document/recovery fuzzing, stateful recovery sequences and ordinary-R differential checks |
 | UI/UX review and polish | Queued | Unassigned | Review the integrated Mac notebook as a product: visual hierarchy, editing flow, keyboard use, execution and progress feedback, outputs, errors, recovery, menus, settings, empty/loading states and native fit; simplify awkward interactions and deliver a coherent, attractive interface with behavior-led usability checks |
 | Complete Mac app and final acceptance | Queued | Unassigned | Deliver a usable Mac app; exercise the packaged native app through launch/open/type/run/interrupt/save/Save As/reopen/recover/close, multiple notebooks, concurrent GUI/agent edits, client detach and backend failure/recovery; check optional-service failures and observable stalls |
 
@@ -127,7 +124,18 @@ part of this queue.
 
 ## Latest accepted checkpoint
 
-`cc80261` is the Mac runtime and settings checkpoint. Lead accepted one persisted
+`8990292` is the residual architecture and test-cleanup checkpoint. Lead accepted
+removal of the performance trace subsystem, handwritten strict JSON parser,
+non-Mac desktop branch, duplicate dirty snapshot state and their mechanism-pinning
+tests. Native JSON remains behind fatal UTF-8, byte and schema boundaries. The
+renderer has one local pending-source overlay over authoritative server dirty state.
+The remaining Controller is a cohesive notebook execution orchestrator; durable
+document, session, output, package, publishing, formatting, recovery and desktop
+owners are separate. The behavior-led host suite passes 393 tests in under five
+seconds, R helpers pass 164, packaged Engine passes 19/19, Mac acceptance and strict
+signing pass, and no children leak.
+
+It retains `cc80261`, the Mac runtime and settings checkpoint. Lead accepted one persisted
 R selection path, canonical clean and recovery project startup, verified native
 Ark/Air/Quarto staging and accurate format/permission/package claims. Untitled
 recovery through symlinked projects preserves identity and physical project

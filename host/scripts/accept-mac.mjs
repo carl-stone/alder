@@ -14,6 +14,8 @@ const resourcesRoot = join(app, 'Contents/Resources/alder');
 const manifest = JSON.parse(await readFile(join(resourcesRoot, 'manifest.json'), 'utf8'));
 const resources = Object.fromEntries(Object.entries(manifest.resources).map(([key, value]) => [key, value === null ? null : join(resourcesRoot, value)]));
 const timings = {};
+const DIFFERENTIAL_SEED = 0xa1de46;
+const DIFFERENTIAL_TIMEOUT_MS = 60_000;
 
 function run(name, executable, args, options = {}) {
   const started = performance.now();
@@ -43,6 +45,7 @@ if (quartoVersion !== packageMetadata.config.quarto.version) throw new Error(`un
 
 const temporary = await mkdtemp(join(tmpdir(), 'alder-mac-accept-'));
 const runtimeDirectory = join('/tmp', `alder-mac-accept-${process.pid}`);
+let differential;
 try {
   const source = join(temporary, 'format.R');
   await writeFile(source, 'answer<-function(x){x+1}\n');
@@ -55,13 +58,13 @@ try {
   const html = await readFile(join(temporary, 'accept.html'), 'utf8');
   if (!html.includes('Staged Quarto is ready.')) throw new Error('staged Quarto did not render the acceptance document');
 
-  await evaluatePackagedKernel(temporary, runtimeDirectory);
+  differential = await evaluatePackagedKernel(temporary, runtimeDirectory);
 } finally {
   await rm(runtimeDirectory, { recursive: true, force: true });
   await rm(temporary, { recursive: true, force: true });
 }
 
-process.stdout.write(JSON.stringify({ app, arkVersion, airVersion, quartoVersion, timings }) + '\n');
+process.stdout.write(JSON.stringify({ app, arkVersion, airVersion, quartoVersion, differential, timings }) + '\n');
 
 async function evaluatePackagedKernel(directory, runtimePath) {
   const started = performance.now();
@@ -71,7 +74,14 @@ async function evaluatePackagedKernel(directory, runtimePath) {
   await rm(runtimePath, { recursive: true, force: true });
   await mkdir(join(configDirectory, 'alder'), { recursive: true });
   await mkdir(runtimePath, { recursive: true });
-  await writeFile(notebook, '# %%\nanswer <- 6L * 7L\nanswer\n');
+  const corpus = differentialCorpus(DIFFERENTIAL_SEED);
+  const source = corpus.map((entry, index) => `# %%\n${wrappedExpression(index, entry.source)}\n`).join('');
+  if (Buffer.byteLength(source) > 65_536) throw new Error('ordinary R differential corpus exceeds 64 KiB');
+  await writeFile(notebook, source);
+  const referenceScript = join(directory, 'rscript-reference.R');
+  await writeFile(referenceScript, source);
+  const referenceOutput = run('rscript-differential', rscript, ['--vanilla', referenceScript], { cwd: directory, timeout: DIFFERENTIAL_TIMEOUT_MS });
+  const reference = extractDifferential(referenceOutput, corpus.length, 'Rscript');
   await writeFile(join(configDirectory, 'alder/preferences.yaml'), `rscript: ${JSON.stringify(rscript)}\n`);
   const environment = Object.fromEntries(Object.entries(process.env).filter((entry) => entry[1] !== undefined));
   for (const key of Object.keys(environment)) {
@@ -97,27 +107,36 @@ async function evaluatePackagedKernel(directory, runtimePath) {
   const stderrChunks = [];
   transport.stderr?.on('data', chunk => stderrChunks.push(Buffer.from(chunk)));
   try {
-    await client.connect(transport);
-    const state = await client.callTool({ name: 'notebook_state', arguments: {} });
+    await bounded(client.connect(transport), 'packaged client connection');
+    const state = await bounded(client.callTool({ name: 'notebook_state', arguments: {} }), 'initial packaged state');
     if (state.isError) throw new Error('packaged notebook state failed');
     const snapshot = requireRecord(requireRecord(requireRecord(state.structuredContent).result).snapshot);
-    const result = await client.callTool({ name: 'run_all', arguments: {
+    const result = await bounded(client.callTool({ name: 'run_all', arguments: {
       requestId: randomUUID(),
       sessionEpoch: requireString(snapshot.epoch),
       expectedDocumentRevision: requireInteger(snapshot.documentRevision),
-    } });
+    } }), 'packaged differential execution');
     if (result.isError) throw new Error(`packaged Ark evaluation failed: ${JSON.stringify(result.structuredContent)}`);
-    const completed = await client.callTool({ name: 'notebook_state', arguments: {} });
+    const completed = await bounded(client.callTool({ name: 'notebook_state', arguments: {} }), 'completed packaged state');
     if (completed.isError) throw new Error('packaged notebook state failed after evaluation');
     const completedSnapshot = requireRecord(requireRecord(requireRecord(completed.structuredContent).result).snapshot);
-    if (!JSON.stringify(completedSnapshot.cells).includes('42')) throw new Error('packaged Ark evaluation did not return scalar 42');
-    const shutdown = await client.callTool({ name: 'shutdown', arguments: {
+    const actualText = completedSnapshot.cells.map(cell => [
+      ...(Array.isArray(cell.log) ? cell.log : []),
+      ...(Array.isArray(cell.outputs) ? cell.outputs.map(output => output?.data?.text).filter(value => typeof value === 'string') : []),
+    ].join('\n')).join('\n');
+    const actual = extractDifferential(actualText, corpus.length, 'packaged Ark');
+    for (let index = 0; index < corpus.length; index += 1) {
+      if (actual[index] !== reference[index]) {
+        throw new Error(`ordinary R differs at case ${index} (${corpus[index].name}); seed=0x${DIFFERENTIAL_SEED.toString(16)} expected=${reference[index]} actual=${actual[index]}`);
+      }
+    }
+    const shutdown = await bounded(client.callTool({ name: 'shutdown', arguments: {
       requestId: randomUUID(),
       sessionEpoch: requireString(completedSnapshot.epoch),
       expectedDocumentRevision: requireInteger(completedSnapshot.documentRevision),
       expectedClientIds: Array.isArray(completedSnapshot.activeClientIds) ? completedSnapshot.activeClientIds : [],
       confirmed: true,
-    } });
+    } }), 'packaged shutdown');
     if (shutdown.isError) throw new Error(`packaged host shutdown failed: ${JSON.stringify(shutdown.structuredContent)}`);
   } catch (error) {
     const diagnostics = Buffer.concat(stderrChunks).toString('utf8').trim();
@@ -136,6 +155,71 @@ async function evaluatePackagedKernel(directory, runtimePath) {
   const remaining = ownedProcesses([directory, runtimePath]);
   timings['child-cleanup'] = Math.round(performance.now() - cleanupStarted);
   if (remaining.length > 0) throw new Error(`packaged host left owned children running:\n${remaining.join('\n')}`);
+  return { seed: `0x${DIFFERENTIAL_SEED.toString(16)}`, cases: corpus.length, maxSourceBytes: 65_536, timeoutMs: DIFFERENTIAL_TIMEOUT_MS };
+}
+
+function differentialCorpus(seed) {
+  let state = seed >>> 0;
+  const integer = limit => {
+    state ^= state << 13; state ^= state >>> 17; state ^= state << 5; state >>>= 0;
+    return state % limit;
+  };
+  const left = 2 + integer(8), right = 2 + integer(8), unicode = ['café', 'λ', '🧬'][integer(3)];
+  return [
+    { name: 'scalar integer', source: `scalar <- ${left}L; scalar * ${right}L` },
+    { name: 'scalar dependency', source: 'scalar + 1L' },
+    { name: 'numeric vector', source: 'c(1, 2.5, -3, Inf, NA_real_)' },
+    { name: 'named list', source: 'list(alpha=1L, beta=c(TRUE, FALSE), text="ok")' },
+    { name: 'data frame', source: 'data.frame(id=1:3, label=c("a","b","c"), stringsAsFactors=FALSE)' },
+    { name: 'quoting and unicode', source: JSON.stringify(`${unicode} "quoted" \\ slash`) },
+    { name: 'function local', source: 'f <- function(x) { local_value <- x * 2L; local_value + 1L }; f(4L)' },
+    { name: 'dot global definition', source: '.dot_global <- 8L; .dot_global' },
+    { name: 'dot global dependency', source: '.dot_global + 2L' },
+    { name: 'dynamic get', source: 'dynamic_value <- 9L; get("dynamic_value") + 1L' },
+    { name: 'dynamic assign', source: 'assign("assigned_value", 11L, envir=.GlobalEnv); assigned_value' },
+    { name: 'do call', source: 'do.call(sum, list(c(1L, 2L, 3L)))' },
+    { name: 'quoted evaluation', source: 'eval(quote(3L * 5L))' },
+    { name: 'matrix', source: 'matrix(1:6, nrow=2L, dimnames=list(c("r1","r2"), c("a","b","c")))' },
+    { name: 'language object', source: 'quote(mean(c(1, 2, 3)))' },
+    { name: 'subset', source: 'subset(data.frame(x=1:4, y=letters[1:4]), x %% 2L == 0L)' },
+    { name: 'list indexing', source: 'structure(list(a=1L, b=list(2L, 3L)), class="generated")$b[[2L]]' },
+    { name: 'ordinary error', source: `stop(${JSON.stringify(`expected ${unicode}`)})` },
+  ];
+}
+
+function wrappedExpression(index, source) {
+  const value = `.alder_diff_value_${index}`;
+  const text = `.alder_diff_text_${index}`;
+  const hex = `.alder_diff_hex_${index}`;
+  return `${value} <- tryCatch({ ${source} }, error=function(e) structure(conditionMessage(e), class="alder_diff_error"))\n` +
+    `${text} <- if (inherits(${value}, "alder_diff_error")) paste0("error:", unclass(${value})) else paste(capture.output(dput(${value}, control=c("keepNA","keepInteger","niceNames"))), collapse="\\n")\n` +
+    `${hex} <- paste(sprintf("%02x", as.integer(charToRaw(enc2utf8(${text})))), collapse="")\n` +
+    `cat("@@ALDER_DIFF_${index}@@", ${hex}, "\\n", sep="")`;
+}
+
+function extractDifferential(text, count, label) {
+  const values = new Array(count);
+  const pattern = /@@ALDER_DIFF_([0-9]+)@@([0-9a-f]*)/g;
+  for (const match of text.matchAll(pattern)) {
+    const index = Number(match[1]);
+    if (index >= 0 && index < count && match[2].length > 0) values[index] = match[2];
+  }
+  for (let index = 0; index < count; index += 1) if (typeof values[index] !== 'string') {
+    throw new Error(`${label} omitted differential case ${index}; seed=0x${DIFFERENTIAL_SEED.toString(16)}`);
+  }
+  return values;
+}
+
+async function bounded(promise, label) {
+  let timer;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`${label} exceeded ${DIFFERENTIAL_TIMEOUT_MS} ms`)), DIFFERENTIAL_TIMEOUT_MS); }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function ownedProcesses(markers) {
