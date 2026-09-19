@@ -4433,7 +4433,7 @@ test("source query returns the authoritative cell bodies", async () => {
   await controller.close();
 });
 
-test("package installation is asynchronous, leaves edits responsive, blocks runs, and revalidates", async () => {
+test("package installation is asynchronous, leaves edits and runs responsive, and revalidates", async () => {
   const engine = new FakeEngine();
   let finishInstall!: (value: unknown) => void;
   const calls: Array<{ name: string; payload: Record<string, unknown> }> = [];
@@ -4482,7 +4482,7 @@ test("package installation is asynchronous, leaves edits responsive, blocks runs
   const accepted = await startCommand(controller, install);
   assert.ok(controller.operation(accepted.requestId, "controller-tests"));
   await eventually(() => controller.snapshot().operations.find((operation) => operation.id === install.requestId)?.status === "running");
-  assert.equal(controller.snapshot().runtime.packageOperationActive, true);
+  assert.equal(controller.snapshot().operations.find((operation) => operation.id === install.requestId)?.status, "running");
 
   const edit = command(controller, {
     type: "transaction",
@@ -4501,7 +4501,7 @@ test("package installation is asynchronous, leaves edits responsive, blocks runs
   await startCommand(controller, edit);
   await settle(controller, edit.requestId);
   assert.equal(controller.snapshot().cells[0]?.revision, 1);
-  const blockedRun = command(controller, {
+  const overlappingRun = command(controller, {
     type: "run",
     scope: "cell",
     target: {
@@ -4519,18 +4519,17 @@ test("package installation is asynchronous, leaves edits responsive, blocks runs
         }
     ]
   });
-  const blockedStarted = await startCommand(controller, blockedRun);
-  const blockedOperation = await controller.awaitOperation(blockedStarted.requestId, "controller-tests");
-  assert.equal(blockedOperation.status, "error");
-  assert.equal(blockedOperation.error?.code, "package_operation_in_progress");
-  assert.deepEqual(controller.snapshot().cells[0]?.body, ["x <- 2"]);
+  const overlappingStarted = await startCommand(controller, overlappingRun);
+  const overlappingOperation = await controller.awaitOperation(overlappingStarted.requestId, "controller-tests");
+  assert.equal(overlappingOperation.status, "done");
+  assert.deepEqual(controller.snapshot().cells[0]?.body, ["x <- 3"]);
 
   finishInstall({ ok: true, status: "installed", packages: ["dplyr"] });
   const settled = await settle(controller, install.requestId);
   assert.equal(engine.restartCount, 1);
   assert.deepEqual(controller.snapshot().runtime.rEnvironment, refreshedEnvironment);
   assert.equal(controller.snapshot().runtime.analysisEnvironmentId, "analysis-test");
-  assert.equal(controller.snapshot().runtime.packageOperationActive, false);
+  assert.equal(controller.snapshot().operations.find((operation) => operation.id === install.requestId)?.status, "done");
   assert.equal(controller.snapshot().runtime.executionReady, true);
   assert.equal(controller.snapshot().cells[0]?.status, "stale");
   assert.ok(calls.filter((call) => call.name === "packages.status").length >= 1);
@@ -4607,7 +4606,6 @@ test("failed package installation still restarts and reanalyzes before settling 
   assert.equal(operation.error?.code, "install_failed");
   assert.equal(engine.restartCount, 1);
   assert.equal(controller.snapshot().runtime.executionReady, true);
-  assert.equal(controller.snapshot().runtime.packageOperationActive, false);
   await controller.close();
 });
 
@@ -4699,7 +4697,7 @@ test("installer failure remains primary when package restart fails", async () =>
   await controller.close();
 });
 
-test("package installation cannot start while a run is active", async () => {
+test("package installation overlaps an active run and waits to restart R", async () => {
   const engine = new FakeEngine();
   engine.deferred = true;
   let serviceCalls = 0;
@@ -4724,12 +4722,13 @@ test("package installation cannot start while a run is active", async () => {
     kernelEpoch: controller.snapshot().runtime.kernelEpoch,
   });
   const installStarted = await startCommand(controller, install);
-  const installOperation = await controller.awaitOperation(installStarted.requestId, "controller-tests");
-  assert.equal(installOperation.status, "error");
-  assert.equal(installOperation.error?.code, "run_in_progress");
-  assert.equal(serviceCalls, 0);
+  await eventually(() => serviceCalls > 0);
+  assert.equal(controller.operation(installStarted.requestId, "controller-tests")?.status, "running");
   engine.finishEvaluation();
   await settle(controller, run.requestId);
+  const installOperation = await controller.awaitOperation(installStarted.requestId, "controller-tests");
+  assert.equal(installOperation.status, "done");
+  assert.ok(serviceCalls >= 1);
   await controller.close();
 });
 

@@ -16,7 +16,7 @@ import { readLayout } from "./layout.js";
 import { DocumentStore, FileConflict, type PreparedSaveAs } from "./persistence.js";
 import { RecoveryWriter, recoveryObservationMatches, type DiskObservation as RecoveryDiskObservation, type RecoveryBaseline, type RecoveryCellState } from "./recovery.js";
 import { createPackageManager, readPackageDeclarations, type PackageManager } from "./packages.js";
-import { createPublishingService, type PublishingService } from "./publishing.js";
+import { createPublishingService, type PublicationSnapshot, type PublishingService } from "./publishing.js";
 import { createFormattingService, type FormattingService } from "./formatting.js";
 import type { PackageProgress } from "./jobs.js";
 import { renderHelp } from "./markdown.js";
@@ -50,6 +50,31 @@ function semanticValue(value: unknown): unknown {
 
 function sameSemanticValue(left: unknown, right: unknown): boolean {
   return JSON.stringify(semanticValue(left)) === JSON.stringify(semanticValue(right));
+}
+
+function publicationSnapshot(saved: NotebookDocument, current: HostSnapshot): PublicationSnapshot {
+  const currentById = new Map(current.cells.map((cell) => [cell.id, cell]));
+  return {
+    documentRevision: current.documentRevision,
+    path: saved.path ?? current.path,
+    metadata: structuredClone((saved.metadata ?? {}) as HostSnapshot["metadata"]),
+    editorDirty: current.dirty,
+    cells: saved.cells.map((cell) => {
+      const live = currentById.get(cell.id);
+      const revision = cell.revision ?? 0;
+      const compatible = live?.revision === revision;
+      return {
+        id: cell.id,
+        type: cell.type ?? "code",
+        body: [...cell.body],
+        options: structuredClone(cell.options ?? {}),
+        revision,
+        outputs: cell.type === "markdown" ? [] : (live?.outputs.filter((record) => record.revision === revision) ?? []),
+        log: compatible ? [...live.log] : [],
+        progress: compatible ? structuredClone(live.progress) : null,
+      };
+    }),
+  };
 }
 const optionsSchema = z.object({
   path: z.string().min(1).nullable().default(null),
@@ -1034,7 +1059,7 @@ async function startNotebookHost(
             });
             if (selectionGeneration !== runtimeBootstrapGeneration) throw Object.assign(new Error("R environment selection was superseded"), { code: "operation_in_progress" });
             const current = controller!.snapshot();
-            if (current.runtime.busy || current.runtime.activeRunId !== null || current.runtime.packageOperationActive) throw Object.assign(new Error("cannot select R while the notebook is busy"), { code: "busy" });
+            if (current.runtime.busy || current.runtime.activeRunId !== null) throw Object.assign(new Error("cannot select R while the notebook is busy"), { code: "busy" });
             const nextManager = createPackageManager({ resources: options.resources, environment: selected, processScope: processScope!, projectDirectory: notebookDirectory, onProgress: onPackageProgress });
             try {
               await controller!.restartRuntimeContext({ environment: selected, notebookDirectory, cacheDirectory }, stringValue(payload.operationId) ?? randomUUID());
@@ -1064,8 +1089,11 @@ async function startNotebookHost(
             signal: runtimeAbort?.signal,
           });
           if (command === "publish") {
+            if (activePublishes.size > 0) throw Object.assign(new Error("a publication is already in progress"), { code: "operation_in_progress" });
             if (publisher === undefined) publisher = createPublishingService({ outputStore: artifactStore, processScope: processScope! });
-            const snapshot = controller!.snapshot();
+            const liveSnapshot = controller!.snapshot();
+            if (store === undefined) throw Object.assign(new Error("notebook has no saved source"), { code: "notebook_has_no_path" });
+            const snapshot = publicationSnapshot(store.currentDocument, liveSnapshot);
             const requestedPath = typeof payload.outputPath === "string" && payload.outputPath.length > 0 ? payload.outputPath : null;
             const outputPath = requestedPath ?? join(work, "publish-" + randomUUID() + ".html");
             const pendingPublish = publisher.publishSnapshot(snapshot, { outputPath, includeCode: payload.includeCode === true, signal: publishAbort.signal });
@@ -1076,7 +1104,7 @@ async function startNotebookHost(
             try {
               try {
                 artifact = await artifactStore.importArtifact(basename(result.path), {
-                  sessionEpoch: snapshot.epoch,
+                  sessionEpoch: liveSnapshot.epoch,
                   documentRevision: result.documentRevision,
                   kernelEpoch: null,
                   runId: null,

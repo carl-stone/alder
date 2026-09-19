@@ -88,7 +88,6 @@ export class NotebookView {
   private transportError: string | null = null;
   private editorHelpError: string | null = null;
   private editorHelpRestarting = false;
-  private actionCount = 0;
   private explicitRunCount = 0;
   private emptyBar: HTMLElement | null = null;
   private appView = false;
@@ -416,7 +415,6 @@ export class NotebookView {
   }
 
   private async cellAction(key: string, button: HTMLButtonElement, input: MouseEvent): Promise<void> {
-    if (this.actionCount > 0) return;
     const action = button.dataset.act;
     if (action === "add") {
       this.addCell(key, button.dataset.type === "markdown" ? "markdown" : "code");
@@ -562,15 +560,15 @@ export class NotebookView {
     const cells = this.documentValue?.cells ?? [];
     const index = knownIndex ?? cells.findIndex((item) => item.key === cell.key);
     buttons.forEach((button) => {
-      if (button.dataset.act === "run") setDisabled(button, this.actionCount > 0 || this.runPending || !this.executionAvailable() ||
-        this.documentValue?.snapshot.runtime.busy === true || this.documentValue?.snapshot.runtime.packageOperationActive === true);
-      else if (button.dataset.act === "move-up") setDisabled(button, this.actionCount > 0 || !cell.id || index <= 0);
-      else if (button.dataset.act === "move-down") setDisabled(button, this.actionCount > 0 || !cell.id || index < 0 || index >= cells.length - 1);
+      if (button.dataset.act === "run") setDisabled(button, this.runPending || !this.executionAvailable() ||
+        this.documentValue?.snapshot.runtime.busy === true);
+      else if (button.dataset.act === "move-up") setDisabled(button, !cell.id || index <= 0);
+      else if (button.dataset.act === "move-down") setDisabled(button, !cell.id || index < 0 || index >= cells.length - 1);
       else if (button.dataset.act === "disable") {
-        setDisabled(button, this.actionCount > 0 || !cell.id);
+        setDisabled(button, !cell.id);
         const label = status === "disabled" ? "Enable" : "Disable";
         if (button.textContent !== label) button.textContent = label;
-      } else setDisabled(button, this.actionCount > 0);
+      }
     });
     if (refreshLabels) {
       const title = element.querySelector<HTMLElement>("[data-role=cell-title]");
@@ -585,7 +583,7 @@ export class NotebookView {
     }
     const drag = element.querySelector<HTMLElement>("[data-role=drag-handle]");
     if (drag) {
-      const available = this.actionCount === 0 && cell.id !== null && !cell.tombstone;
+      const available = cell.id !== null && !cell.tombstone;
       drag.draggable = available;
       drag.classList.toggle("disabled", !available);
     }
@@ -593,10 +591,8 @@ export class NotebookView {
 
   private renderAllCellActions(): void {
     const runtime = this.documentValue?.snapshot.runtime;
-    const actionPending = this.actionCount > 0;
     const signature = JSON.stringify({
-      actionPending,
-      runBlocked: actionPending || this.runPending || runtime?.busy === true || runtime?.packageOperationActive === true ||
+      runBlocked: this.runPending || runtime?.busy === true ||
         runtime?.executionReady !== true || runtime?.kernelState !== "ready",
     });
     if (signature === this.cellActionsSignature) return;
@@ -1033,12 +1029,10 @@ export class NotebookView {
     const busy = snapshot.runtime.busy;
     const available = !this.hostClosed && snapshot.runtime.executionReady && snapshot.runtime.kernelState === "ready";
     const signature = JSON.stringify({
-      actionCount: this.actionCount,
       runPending: this.runPending,
       hostClosed: this.hostClosed,
       busy,
       available,
-      packageOperationActive: snapshot.runtime.packageOperationActive,
       executionMode: snapshot.runtime.executionMode,
       kernelReady: snapshot.runtime.kernelState === "ready",
       changed: snapshot.changed,
@@ -1047,25 +1041,25 @@ export class NotebookView {
     this.toolbarSignature = signature;
     const runtime = this.dom.getElementById("runtime-select") as HTMLSelectElement | null;
     if (runtime && this.dom.activeElement !== runtime && runtime.value !== snapshot.runtime.executionMode) runtime.value = snapshot.runtime.executionMode;
-    if (runtime) setDisabled(runtime, this.hostClosed || this.actionCount > 0);
+    if (runtime) setDisabled(runtime, this.hostClosed);
     const runAll = this.dom.getElementById("run-all") as HTMLButtonElement | null;
     if (runAll) {
       const label = snapshot.runtime.executionMode === "lazy" ? "Run stale" : "Run all";
       if (runAll.textContent !== label) runAll.textContent = label;
-      setDisabled(runAll, this.actionCount > 0 || this.runPending || busy || snapshot.runtime.packageOperationActive || !available);
+      setDisabled(runAll, this.runPending || busy || !available);
     }
     const stop = this.dom.getElementById("stop") as HTMLButtonElement | null;
     if (stop) setDisabled(stop, this.hostClosed || !(busy || this.runPending));
     const restart = this.dom.getElementById("restart") as HTMLButtonElement | null;
     if (restart) {
       restart.hidden = snapshot.runtime.kernelState === "ready";
-      setDisabled(restart, this.hostClosed || this.actionCount > 0 || busy);
+      setDisabled(restart, this.hostClosed || busy);
     }
     const save = this.dom.getElementById("save") as HTMLButtonElement | null;
-    if (save) setDisabled(save, this.hostClosed || this.actionCount > 0 || !snapshot.changed);
+    if (save) setDisabled(save, this.hostClosed || !snapshot.changed);
     const shutdown = this.dom.getElementById("shutdown") as HTMLButtonElement | null;
     if (shutdown) {
-      setDisabled(shutdown, this.hostClosed || this.actionCount > 0);
+      setDisabled(shutdown, this.hostClosed);
       shutdown.title = "Shut down this notebook host";
     }
   }
@@ -1870,7 +1864,7 @@ export class NotebookView {
       const target = cellElement(handle);
       const key = target?.dataset.key;
       const cell = key ? this.documentValue?.cell(key) : undefined;
-      if (!target || !cell?.id || cell.tombstone || this.actionCount > 0) {
+      if (!target || !cell?.id || cell.tombstone) {
         event.preventDefault();
         return;
       }
@@ -1931,9 +1925,13 @@ export class NotebookView {
     includeLabel.append(include, this.dom.createTextNode(" Include code"));
     actionMenu.panel.appendChild(includeLabel);
     actionMenu.panel.appendChild(this.serviceButton("Publish HTML", async () => {
-      if (await this.saveNotebook() === undefined) return;
+      const dirty = this.documentValue?.snapshot.dirty === true || (this.documentValue?.pendingSource().changes.length ?? 0) > 0;
       const result = await this.runService("publish", { include_code: include.checked });
       await this.downloadServiceResult(result);
+      this.actionNotice = dirty
+        ? "Published the last saved version. Unsaved changes were not included."
+        : "Published HTML downloaded.";
+      this.renderStatus();
     }));
     actionMenu.panel.appendChild(this.serviceButton("Check notebook", async () => {
       const result = await this.runService("check", {});
@@ -2021,7 +2019,13 @@ export class NotebookView {
     Object.assign(button.dataset, dataset);
     button.addEventListener("click", (event) => {
       event.preventDefault();
-      void this.action(run).catch((error) => this.showError(error));
+      if (button.disabled) return;
+      button.disabled = true;
+      button.setAttribute("aria-busy", "true");
+      void this.action(run).catch((error) => this.showError(error)).finally(() => {
+        button.disabled = false;
+        button.removeAttribute("aria-busy");
+      });
     });
     return button;
   }
@@ -2060,8 +2064,6 @@ export class NotebookView {
     } finally {
       globalThis.setTimeout(() => URL.revokeObjectURL(downloadUrl), 0);
     }
-    this.actionNotice = "Published HTML downloaded.";
-    this.renderStatus();
   }
 
   private applyConfig(config: Record<string, unknown>): void {
@@ -2251,10 +2253,14 @@ export class NotebookView {
       const key = element ? this.keyByElement.get(element) : undefined;
       if (key) await this.runExplicit(() => this.client.startRunCell(key));
     } else if (action === "publish") {
-      if (await this.saveNotebook() === undefined) return "cancelled";
+      const dirty = this.documentValue?.snapshot.dirty === true || (this.documentValue?.pendingSource().changes.length ?? 0) > 0;
       const include = this.dom.querySelector<HTMLInputElement>(".publish-include-code input");
       const result = await this.runService("publish", { include_code: include?.checked === true });
       await this.downloadServiceResult(result);
+      this.actionNotice = dirty
+        ? "Published the last saved version. Unsaved changes were not included."
+        : "Published HTML downloaded.";
+      this.renderStatus();
     }
     return "ok";
   }
@@ -2504,24 +2510,12 @@ export class NotebookView {
   }
 
   private async action<T>(operation: () => Promise<T>): Promise<T> {
-    this.actionCount += 1;
     this.actionNotice = null;
-    // Guard input immediately, but avoid repainting every cell's buttons
-    // before the request can leave the browser. Reconcile them when the action finishes.
-    this.cellActionsSignature = "";
-    if (this.documentValue) {
-      this.renderControls(this.documentValue.snapshot);
-    }
     try {
       const result = await operation();
       this.actionError = null;
       return result;
     } finally {
-      this.actionCount -= 1;
-      if (this.documentValue) {
-        this.renderControls(this.documentValue.snapshot);
-        this.renderAllCellActions();
-      }
       this.renderStatus();
     }
   }
@@ -2553,7 +2547,6 @@ export class NotebookView {
       editorHelpError: Boolean(editorHelpError),
       transportError: Boolean(this.transportError),
       editorHelpRestarting: this.editorHelpRestarting,
-      actionCount: this.actionCount,
       recovery: { status: recovery.status, local: recovery.local !== null, candidate: recovery.candidate === null ? null : [recovery.candidate.state, recovery.candidate.documentRevision], uncertainRun: recovery.uncertainRun, corruption: recovery.corruption?.code ?? null, persistenceError: recovery.persistenceError?.code ?? null },
     });
     if (signature === this.statusSignature) return;
@@ -2564,7 +2557,7 @@ export class NotebookView {
       const retry = elementNode(this.dom, "button", "btn mini status-action", "Retry editor help") as HTMLButtonElement;
       retry.type = "button";
       retry.dataset.statusAction = "retry-editor-help";
-      retry.disabled = this.editorHelpRestarting || this.actionCount > 0;
+      retry.disabled = this.editorHelpRestarting;
       if (this.editorHelpRestarting) retry.setAttribute("aria-busy", "true");
       this.status.appendChild(retry);
     }
@@ -2585,7 +2578,7 @@ export class NotebookView {
     const restart = elementNode(this.dom, "button", "btn mini status-action", "Restart R") as HTMLButtonElement;
     restart.type = "button";
     restart.dataset.statusAction = "restart-runtime";
-    restart.disabled = this.hostClosed || this.actionCount > 0 || this.documentValue?.snapshot.runtime.busy === true;
+    restart.disabled = this.hostClosed || this.documentValue?.snapshot.runtime.busy === true;
     if (restart.disabled) restart.setAttribute("aria-disabled", "true");
     panel.appendChild(restart);
     this.status.appendChild(panel);
@@ -2607,7 +2600,7 @@ export class NotebookView {
     const actions = elementNode(this.dom, "div", "recovery-actions", "") as HTMLDivElement;
     const add = (label: string, action: () => Promise<void>): void => {
       const button = elementNode(this.dom, "button", "btn mini", label) as HTMLButtonElement;
-      button.type = "button"; button.dataset.recovery = "true"; button.disabled = this.actionCount > 0;
+      button.type = "button"; button.dataset.recovery = "true";
       button.addEventListener("click", () => { void this.action(action).catch(error => this.showError(error)); });
       actions.appendChild(button);
     };

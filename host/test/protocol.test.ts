@@ -350,7 +350,7 @@ test("shared host response schemas validate complete bounded snapshots and delta
     runtime: {
       documentReady: true, analyzerState: "ready" as const, kernelState: "ready" as const, executionReady: true,
       executionBlockedReason: null, kernelEpoch: "kernel-1", rEnvironment: null, analysisEnvironmentId: "analysis-1",
-      executionMode: "automatic" as const, runOnStartup: false, startupActivated: false, packageOperationActive: false, busy: false, activeRunId: null,
+      executionMode: "automatic" as const, runOnStartup: false, startupActivated: false, busy: false, activeRunId: null,
     },
     cells: [cell],
     graph: { nodes: ["cell-1"], edges: { "cell-1": [] }, reverseEdges: { "cell-1": [] }, duplicates: {}, cycles: [], topologicalOrder: ["cell-1"] },

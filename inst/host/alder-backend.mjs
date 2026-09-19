@@ -62898,7 +62898,7 @@ var runtimeStateSchema = external_exports.object({
   analysisEnvironmentId: analysisEnvironmentIdSchema.nullable()
 }).strict();
 var runtimeModeSchema = external_exports.enum(["automatic", "lazy"]);
-var hostRuntimeSchema = runtimeStateSchema.extend({ executionMode: runtimeModeSchema, runOnStartup: external_exports.boolean(), packageOperationActive: external_exports.boolean(), busy: external_exports.boolean(), activeRunId: idSchema.nullable() }).strict();
+var hostRuntimeSchema = runtimeStateSchema.extend({ executionMode: runtimeModeSchema, runOnStartup: external_exports.boolean(), busy: external_exports.boolean(), activeRunId: idSchema.nullable() }).strict();
 var diskObservationSchema = external_exports.object({ state: external_exports.enum(["untitled", "absent", "present", "unreadable"]), digest: external_exports.string().regex(/^[0-9a-f]{64}$/).nullable(), version: boundedUtf8StringSchema(MAX_ID_BYTES).nullable(), error: hostErrorSchema.nullable() }).strict();
 var sidecarObservationsSchema = external_exports.object({ config: diskObservationSchema, layout: diskObservationSchema, packages: diskObservationSchema }).strict();
 var hostConfigurationSchema = external_exports.object({
@@ -72196,8 +72196,6 @@ var Controller = class {
   activeBatch = null;
   interruptedRuns = /* @__PURE__ */ new Map();
   pumpPromise = null;
-  packageOperationActive = false;
-  packageOperationClientId;
   runPreparationActive = false;
   runPreparationCancellation = null;
   widgetReconciliationScheduled = false;
@@ -72582,8 +72580,7 @@ var Controller = class {
   }
   publishPackageProgress(operationId, progress, clientId) {
     if (this.closed) return;
-    const owner = clientId ?? this.packageOperationClientId ?? INTERNAL_CLIENT_ID;
-    const operation = this.operationFor(operationId, owner);
+    const operation = clientId === void 0 ? [...this.operations.values()].find((candidate) => candidate.id === operationId && candidate.kind === "packages-install" && !isTerminal(candidate.status)) : this.operationFor(operationId, clientId);
     if (operation === void 0 || operation.kind !== "packages-install" || operation.status !== "running") return;
     const parsed = operationProgressSchema.safeParse(progress);
     if (!parsed.success) return;
@@ -72897,7 +72894,6 @@ var Controller = class {
     this.executionReady = false;
     this.kernelAvailable = false;
     this.analyzerAvailable = false;
-    this.packageOperationActive = false;
     this.runPreparationActive = false;
     this.runPreparationCancellation = null;
     this.runtimeContextReservation = void 0;
@@ -73610,7 +73606,6 @@ var Controller = class {
   }
   async prepareRun(command) {
     this.assertNoRuntimeContextReservation();
-    this.assertNoPackageOperation();
     this.assertExecutionPossible();
     if (this.runPreparationActive || this.activeEvaluation !== null && this.activeEvaluation.cancelMode === null || this.queue.length > 0) {
       throw new ControllerError(
@@ -73663,7 +73658,6 @@ var Controller = class {
       await this.ensureCurrentAnalysis();
       this.assertDocumentRevision(runDocumentRevision);
       if (this.cancelRunPreparation(preparation)) return void 0;
-      this.assertNoPackageOperation();
       this.assertExecutionPossible();
       this.assertGraphRunnable();
       let plan;
@@ -73721,7 +73715,6 @@ var Controller = class {
   }
   launchRun(plan, operationId, deferEmptySettlement = false, clientId = "internal") {
     this.assertNoRuntimeContextReservation();
-    this.assertNoPackageOperation();
     this.assertExecutionPossible();
     const operation = this.operationFor(operationId, clientId);
     if (operation === void 0) throw new ControllerError("internal_error", "run operation missing", 500);
@@ -73779,7 +73772,7 @@ var Controller = class {
     });
   }
   reactiveRunReady() {
-    return !this.closed && this.executionMode === "automatic" && this.reactivePending.size > 0 && this.kernelAvailable && this.executionReady && this.analyzerAvailable && !this.engineRestarting && this.analysisNeeded.size === 0 && this.analysisInFlight === null && this.activeEvaluation === null && this.queue.length === 0 && !this.runPreparationActive && this.queuedRunCommands.size === 0 && !this.packageOperationActive && this.runtimeContextReservation === void 0;
+    return !this.closed && this.executionMode === "automatic" && this.reactivePending.size > 0 && this.kernelAvailable && this.executionReady && this.analyzerAvailable && !this.engineRestarting && this.analysisNeeded.size === 0 && this.analysisInFlight === null && this.activeEvaluation === null && this.queue.length === 0 && !this.runPreparationActive && this.queuedRunCommands.size === 0 && !this.packageInstallActive() && this.runtimeContextReservation === void 0;
   }
   scheduleReactiveRun() {
     if (this.reactiveScheduled || !this.reactiveRunReady()) return;
@@ -75446,7 +75439,7 @@ var Controller = class {
     this.scheduleWidgetReconciliation();
   }
   scheduleWidgetReconciliation() {
-    if (this.closed || this.widgetReconciliationRoots.size === 0 || this.widgetReconciliationScheduled || this.widgetReconciliationPreparing || this.activeEvaluation !== null || this.queue.length > 0 || this.runPreparationActive || this.packageOperationActive || this.runtimeContextReservation !== void 0) return;
+    if (this.closed || this.widgetReconciliationRoots.size === 0 || this.widgetReconciliationScheduled || this.widgetReconciliationPreparing || this.activeEvaluation !== null || this.queue.length > 0 || this.runPreparationActive || this.packageInstallActive() || this.runtimeContextReservation !== void 0) return;
     this.widgetReconciliationScheduled = true;
     queueMicrotask(() => {
       this.widgetReconciliationScheduled = false;
@@ -75454,11 +75447,11 @@ var Controller = class {
     });
   }
   async startWidgetReconciliation() {
-    if (this.closed || this.widgetReconciliationPreparing || this.widgetReconciliationRoots.size === 0 || this.activeEvaluation !== null || this.queue.length > 0 || this.runPreparationActive || this.packageOperationActive || this.runtimeContextReservation !== void 0) return;
+    if (this.closed || this.widgetReconciliationPreparing || this.widgetReconciliationRoots.size === 0 || this.activeEvaluation !== null || this.queue.length > 0 || this.runPreparationActive || this.packageInstallActive() || this.runtimeContextReservation !== void 0) return;
     this.widgetReconciliationPreparing = true;
     try {
       await this.ensureCurrentAnalysis();
-      if (this.closed || this.activeEvaluation !== null || this.queue.length > 0 || this.runPreparationActive || this.packageOperationActive || this.runtimeContextReservation !== void 0) return;
+      if (this.closed || this.activeEvaluation !== null || this.queue.length > 0 || this.runPreparationActive || this.packageInstallActive() || this.runtimeContextReservation !== void 0) return;
       const roots = [...this.widgetReconciliationRoots].filter(([id2, revision2]) => {
         const cell = this.cellById(id2);
         return cell?.type === "code" && cell.revision === revision2;
@@ -75936,20 +75929,13 @@ var Controller = class {
     } catch {
     }
   }
-  assertPackageInstallCanStart() {
+  assertPackageInstallCanStart(operationId, clientId) {
     this.assertStarted();
     this.assertNoRuntimeContextReservation();
-    if (this.packageOperationActive) {
+    if (this.packageInstallActive(operationId, clientId)) {
       throw new ControllerError(
         "operation_in_progress",
         "a package installation is already in progress",
-        409
-      );
-    }
-    if (this.runPreparationActive || this.activeEvaluation !== null || this.queue.length > 0) {
-      throw new ControllerError(
-        "run_in_progress",
-        "cannot install packages while a run is active or being prepared",
         409
       );
     }
@@ -75968,15 +75954,9 @@ var Controller = class {
     const operation = this.operationFor(operationId, clientId);
     if (operation !== void 0 && operation.status === "accepted") operation.status = "running";
     if (operation !== void 0) this.rememberOperation(operation);
-    this.packageOperationActive = true;
-    this.packageOperationClientId = clientId;
-    this.bump("runtime", this.runtimeSnapshot(), { operationId });
     try {
       return await this.runPackageInstall(payload, operationId, clientId);
     } finally {
-      this.packageOperationActive = false;
-      this.packageOperationClientId = void 0;
-      this.bump("runtime", this.runtimeSnapshot(), { operationId });
       this.scheduleReactiveRun();
     }
   }
@@ -76002,6 +75982,7 @@ var Controller = class {
     const restartRequired = !isRecord(result) || result.mutatedLibrary !== false;
     if (restartRequired) {
       try {
+        if (this.pumpPromise !== null) await this.pumpPromise;
         await this.restartAfterPackageInstall(operationId, clientId);
       } catch (error61) {
         restartFailure = asControllerError(error61, "worker_unavailable", 503);
@@ -76330,7 +76311,7 @@ var Controller = class {
     this.variableRefreshTimer.unref();
   }
   async refreshVariables() {
-    if (this.closed || !this.kernelAvailable || !this.variableRefreshRequested || this.activeEvaluation !== null || this.queue.length > 0 || this.packageOperationActive || this.variableRefreshInFlight) return;
+    if (this.closed || !this.kernelAvailable || !this.variableRefreshRequested || this.activeEvaluation !== null || this.queue.length > 0 || this.packageInstallActive() || this.variableRefreshInFlight) return;
     this.variableRefreshRequested = false;
     this.variableRefreshInFlight = true;
     const generation = this.variableGeneration;
@@ -76565,6 +76546,7 @@ var Controller = class {
     operation.settledAt = Date.now();
     this.rememberOperation(operation);
     this.notifyOperationWaiters(operation);
+    if (operation.kind === "packages-install") this.scheduleReactiveRun();
   }
   failOperation(id2, error61, clientId = "internal") {
     const operation = this.operationFor(id2, clientId);
@@ -76576,6 +76558,7 @@ var Controller = class {
     operation.settledAt = Date.now();
     this.rememberOperation(operation);
     this.notifyOperationWaiters(operation);
+    if (operation.kind === "packages-install") this.scheduleReactiveRun();
   }
   cancelOperation(id2, error61, clientId = "internal") {
     const operation = this.operationFor(id2, clientId);
@@ -76587,6 +76570,7 @@ var Controller = class {
     operation.settledAt = Date.now();
     this.rememberOperation(operation);
     this.notifyOperationWaiters(operation);
+    if (operation.kind === "packages-install") this.scheduleReactiveRun();
   }
   markOperationCancellationRequested(id2, clientId = "internal") {
     const operation = this.operationFor(id2, clientId);
@@ -76752,17 +76736,12 @@ var Controller = class {
       case "packages-install":
         this.assertDocumentRevision(command.expectedDocumentRevision);
         this.assertKernelEpoch(command.kernelEpoch);
-        this.assertPackageInstallCanStart();
+        this.assertPackageInstallCanStart(command.requestId, command.clientId);
         this.assertExecutionPossible();
         return this.runLongService("packages.install", { packages: command.packages }, command.requestId, command.clientId);
       case "publish": {
         this.assertDocumentRevision(command.expectedDocumentRevision);
-        const reservation = this.reserveRuntimeContext();
-        try {
-          return await this.callService("publish", { includeCode: command.includeCode, outputPath: command.outputPath });
-        } finally {
-          reservation.release();
-        }
+        return this.callService("publish", { includeCode: command.includeCode, outputPath: command.outputPath });
       }
       case "save-as":
         return this.executeSourceService({
@@ -76886,7 +76865,6 @@ var Controller = class {
       analysisEnvironmentId: this.analysisEnvironmentIdValue,
       executionMode: this.executionMode,
       runOnStartup: this.runOnStartup,
-      packageOperationActive: this.packageOperationActive,
       busy: this.activeEvaluation !== null || this.queue.length > 0 || this.runPreparationActive || this.queuedRunCommands.size > 0,
       activeRunId: this.activeEvaluation?.job.runId ?? queuedRunId
     };
@@ -77006,13 +76984,21 @@ var Controller = class {
     }
   }
   assertNoPackageOperation() {
-    if (this.packageOperationActive) {
+    if (this.packageInstallActive()) {
       throw new ControllerError(
         "package_operation_in_progress",
         "cannot start a run while package installation is in progress",
         409
       );
     }
+  }
+  packageInstallActive(exceptOperationId, exceptClientId) {
+    for (const operation of this.operations.values()) {
+      if (operation.kind !== "packages-install" || isTerminal(operation.status)) continue;
+      if (operation.id === exceptOperationId && operation.clientId === exceptClientId) continue;
+      return true;
+    }
+    return false;
   }
   runtimeRequestCurrent(operationId, generation, clientId = "internal") {
     const operation = this.operationFor(operationId, clientId);
@@ -97727,19 +97713,7 @@ var RecoveryWriter = class _RecoveryWriter {
 // src/publishing.ts
 import { constants as constants5 } from "node:fs";
 import { randomUUID as randomUUID11 } from "node:crypto";
-import {
-  access as access4,
-  chmod as chmod3,
-  link as link2,
-  lstat as lstat7,
-  mkdtemp as mkdtemp3,
-  readFile as readFile9,
-  realpath as realpath9,
-  rm as rm7,
-  stat as stat14,
-  unlink as unlink3,
-  writeFile as writeFile5
-} from "node:fs/promises";
+import { access as access4, chmod as chmod3, link as link2, mkdtemp as mkdtemp3, readFile as readFile9, realpath as realpath9, rm as rm7, stat as stat14, unlink as unlink3, writeFile as writeFile5 } from "node:fs/promises";
 import { basename as basename6, delimiter as delimiter2, dirname as dirname8, join as join16, resolve as resolve11 } from "node:path";
 import { tmpdir as tmpdir4 } from "node:os";
 
@@ -108051,25 +108025,6 @@ function number4(value) {
 // src/publishing.ts
 var MAX_QUARTO_STREAM_BYTES = 8 * 1024 * 1024;
 var MAX_PUBLISHED_HTML_BYTES = 128 * 1024 * 1024;
-var QUARTO_COMMAND = "quarto";
-var PUBLISH_TITLE_MARKER = "ALDER_PUBLISH_TITLE_MARKER_" + randomUUID11().replaceAll("-", "");
-var HTML_RESOURCE_ATTRIBUTES = {
-  img: ["src", "srcset"],
-  audio: ["src"],
-  video: ["src", "poster"],
-  source: ["src", "srcset"],
-  script: ["src"],
-  iframe: ["src"],
-  object: ["data"],
-  embed: ["src"],
-  track: ["src"],
-  link: ["href"],
-  image: ["href", "xlink:href"],
-  use: ["href", "xlink:href"],
-  input: ["src"]
-};
-var HTML_CSS_URL = /\burl\(\s*(?:"([^"]*)"|'([^']*)'|([^)]*?))\s*\)/gi;
-var HTML_CSS_IMPORT = /@import\s+(?:url\(\s*(?:"([^"]*)"|'([^']*)'|([^)]*?))\s*\)|"([^"]*)"|'([^']*)'|([^\s;]+))/gi;
 var PublishingError = class extends Error {
   constructor(code2, message2, details) {
     super(message2);
@@ -108081,37 +108036,24 @@ var PublishingError = class extends Error {
   details;
 };
 function createPublishingService(options) {
-  if (!(options?.outputStore instanceof OutputStore)) {
-    throw new TypeError("publishing requires the canonical OutputStore");
-  }
-  if (!options.processScope || typeof options.processScope.spawn !== "function") {
-    throw new TypeError("publishing requires the application ProcessScope");
-  }
+  if (!(options?.outputStore instanceof OutputStore)) throw new TypeError("publishing requires the canonical OutputStore");
+  if (!options.processScope || typeof options.processScope.spawn !== "function") throw new TypeError("publishing requires the application ProcessScope");
   return {
-    publishSnapshot: (snapshot, publishOptions) => publishSnapshot(
-      options.outputStore,
-      options.processScope,
-      snapshot,
-      publishOptions
-    )
+    publishSnapshot: (snapshot, publishOptions) => publishSnapshot(options.outputStore, options.processScope, snapshot, publishOptions)
   };
 }
-async function publishSnapshot(outputStore, processScope, snapshot, options) {
+async function publishSnapshot(outputStore, processScope, source, options) {
   throwIfAborted3(options?.signal);
-  validatePublishOptions(options);
-  assertSettledSnapshot(snapshot);
+  validateOptions(options);
+  const snapshot = captureSnapshot(outputStore, source);
   const outputPath = await validateDestinationPath(options.outputPath);
   let stagingDirectory;
-  let pinned = [];
+  outputStore.pin(snapshot.artifacts);
   try {
-    throwIfAborted3(options.signal);
-    const captured = captureOutputs(outputStore, snapshot);
-    pinned = captured.artifacts;
-    outputStore.pin(pinned);
     stagingDirectory = await mkdtemp3(join16(tmpdir4(), "alder-publish-"));
     const qmdPath = join16(stagingDirectory, "snapshot.qmd");
     const renderedPath = join16(stagingDirectory, "rendered.html");
-    const qmd = await composeQmd(snapshot, captured.records, outputStore, captured.artifacts, options.includeCode, options.signal);
+    const qmd = await composeQmd(snapshot, outputStore, options.includeCode, options.signal);
     await writeFile5(qmdPath, qmd, { encoding: "utf8", mode: 384, flag: "wx" });
     const quarto = await findQuartoExecutable();
     await runQuarto(processScope, quarto, stagingDirectory, qmdPath, renderedPath, options.signal);
@@ -108120,215 +108062,86 @@ async function publishSnapshot(outputStore, processScope, snapshot, options) {
     if (rendered.byteLength === 0 || rendered.byteLength > MAX_PUBLISHED_HTML_BYTES) {
       throw new PublishingError("publish_failed", "Quarto did not produce a bounded HTML document");
     }
-    const html = restorePublishedTitle(restorePublishedLiterals(new TextDecoder("utf-8", { fatal: true }).decode(rendered)), titleOf(snapshot));
-    const finalBytes = Buffer.from(html, "utf8");
-    if (finalBytes.byteLength === 0 || finalBytes.byteLength > MAX_PUBLISHED_HTML_BYTES) {
-      throw new PublishingError("publish_failed", "published HTML exceeded its bounded size");
-    }
-    assertNoExternalAssets(html, "published HTML");
-    captureOutputs(outputStore, snapshot);
-    await publishAbsentDestination(outputPath, finalBytes, options.signal);
-    return { path: outputPath, documentRevision: snapshot.documentRevision };
+    await publishAbsentDestination(outputPath, rendered, options.signal);
+    return {
+      path: outputPath,
+      documentRevision: snapshot.documentRevision,
+      source: "last-saved",
+      unsavedChangesExcluded: snapshot.editorDirty
+    };
   } catch (error61) {
     throw normalizePublishingError(error61);
   } finally {
-    outputStore.unpin(pinned);
-    if (stagingDirectory !== void 0) {
-      await rm7(stagingDirectory, { recursive: true, force: true }).catch(() => {
-      });
-    }
-  }
-}
-function validatePublishOptions(options) {
-  if (!options || typeof options.outputPath !== "string" || options.outputPath.trim().length === 0) {
-    throw new PublishingError("publish_failed", "publish outputPath must be a non-empty path");
-  }
-  if (typeof options.includeCode !== "boolean") {
-    throw new PublishingError("publish_failed", "publish includeCode must be boolean");
-  }
-}
-function assertSettledSnapshot(snapshot) {
-  if (!snapshot || snapshot.protocol !== "alder-host-v2" || !Number.isSafeInteger(snapshot.documentRevision) || snapshot.documentRevision < 0) {
-    throw new PublishingError("publish_not_ready", "publish requires a valid host snapshot");
-  }
-  const runtime = snapshot.runtime;
-  if (snapshot.dirty || !runtime.documentReady || !runtime.executionReady || runtime.analyzerState !== "ready" || runtime.kernelState !== "ready" || runtime.activeRunId !== null || runtime.busy || runtime.packageOperationActive || runtime.executionBlockedReason !== null) {
-    throw new PublishingError("publish_not_ready", snapshot.dirty ? "save the notebook before publishing" : "publish requires an idle, unblocked host");
-  }
-  const cells = snapshot.cells;
-  const disabled = new Set(
-    cells.filter((cell) => cell.status === "disabled" || cell.options.disabled === true).map((cell) => cell.id)
-  );
-  const blocked = new Set(disabled);
-  const queue = [...disabled];
-  let head = 0;
-  while (head < queue.length) {
-    const id2 = queue[head++];
-    for (const dependent of snapshot.graph.reverseEdges[id2] ?? []) {
-      if (blocked.has(dependent)) continue;
-      blocked.add(dependent);
-      queue.push(dependent);
-    }
-  }
-  const enabledCodeCells = cells.filter((cell) => cell.type === "code" && !disabled.has(cell.id));
-  const blockers = [];
-  for (const cell of enabledCodeCells) {
-    if (["stale", "error", "running"].includes(cell.status)) {
-      blockers.push(`${cell.id}:${cell.status}`);
-    }
-    if (cell.outputsStale === true) blockers.push(`${cell.id}:outputs_stale`);
-    if (cell.analysisPending) blockers.push(`${cell.id}:analysis_pending`);
-    if (cell.error !== null) blockers.push(`${cell.id}:analysis_error`);
-    if (cell.diagnostics.some((diagnostic2) => diagnostic2.level === "error")) {
-      blockers.push(`${cell.id}:diagnostic_error`);
-    }
-    if (blocked.has(cell.id)) blockers.push(`${cell.id}:blocked`);
-  }
-  for (const cell of cells) {
-    if (cell.type !== "markdown" || disabled.has(cell.id)) continue;
-    if (["stale", "error", "running"].includes(cell.status)) blockers.push(`${cell.id}:${cell.status}`);
-    if (cell.outputsStale === true) blockers.push(`${cell.id}:outputs_stale`);
-  }
-  const disabledOnly = (ids) => ids.length > 0 && ids.every((id2) => disabled.has(id2));
-  if (snapshot.graph.cycles.length > 0 && !disabledOnly(snapshot.graph.cycles)) {
-    blockers.push("graph:dependency_cycle");
-  }
-  const duplicateCells = Object.values(snapshot.graph.duplicates).flat();
-  if (duplicateCells.length > 0 && !disabledOnly(duplicateCells)) {
-    blockers.push("graph:duplicate_definition");
-  }
-  if (snapshot.graph.topologicalOrder === null && enabledCodeCells.length > 0) {
-    blockers.push("graph:invalid");
-  }
-  if (blockers.length > 0) {
-    throw new PublishingError(
-      "publish_not_ready",
-      `publish requires settled enabled cells: ${blockers.join(", ")}`,
-      { cells: blockers }
-    );
-  }
-}
-async function validateDestinationPath(path3) {
-  const outputPath = resolve11(path3);
-  const parent = dirname8(outputPath);
-  let parentStat;
-  try {
-    parentStat = await stat14(parent);
-  } catch (error61) {
-    if (isErrno(error61, "ENOENT")) {
-      throw new PublishingError("publish_failed", `publish output directory does not exist: ${parent}`);
-    }
-    throw error61;
-  }
-  if (!parentStat.isDirectory()) {
-    throw new PublishingError("publish_failed", `publish output parent is not a directory: ${parent}`);
-  }
-  try {
-    await lstat7(outputPath);
-    throw new PublishingError("destination_exists", `publish destination already exists: ${outputPath}`);
-  } catch (error61) {
-    if (error61 instanceof PublishingError) throw error61;
-    if (!isErrno(error61, "ENOENT")) throw error61;
-  }
-  return outputPath;
-}
-function captureOutputs(outputStore, snapshot) {
-  let storeSnapshot;
-  try {
-    storeSnapshot = outputStore.snapshot({
-      cellIds: snapshot.cells.map((cell) => cell.id),
-      documentRevision: snapshot.documentRevision,
-      kernelEpoch: snapshot.runtime.kernelEpoch
+    outputStore.unpin(snapshot.artifacts);
+    if (stagingDirectory !== void 0) await rm7(stagingDirectory, { recursive: true, force: true }).catch(() => {
     });
+  }
+}
+function captureSnapshot(outputStore, source) {
+  if (!source || !Number.isSafeInteger(source.documentRevision) || source.documentRevision < 0 || !Array.isArray(source.cells)) {
+    throw new PublishingError("publish_failed", "publication snapshot is invalid");
+  }
+  let retained;
+  try {
+    retained = outputStore.snapshot({ cellIds: source.cells.map((cell) => cell.id) });
   } catch (error61) {
     throw normalizeOutputError(error61);
   }
-  const expectedByCell = /* @__PURE__ */ new Map();
-  const expectedById = /* @__PURE__ */ new Map();
-  for (const cell of snapshot.cells) {
-    const records = [...cell.outputs].sort((left, right) => left.sequence - right.sequence);
-    expectedByCell.set(cell.id, records);
-    for (const record4 of records) {
-      if (expectedById.has(record4.id)) {
-        throw new PublishingError("stale_value", `publish snapshot repeats output ${record4.id}`);
-      }
-      expectedById.set(record4.id, record4);
-      const staticMarkdown = cell.type === "markdown" && "kind" in record4.data && record4.data.kind === "markdown" && record4.kernelEpoch === null && record4.runId === null;
-      const liveRuntime = cell.type === "code" && record4.kernelEpoch === snapshot.runtime.kernelEpoch && record4.runId !== null;
-      if (record4.sessionEpoch !== snapshot.epoch || record4.cellId !== cell.id || record4.revision !== cell.revision || !staticMarkdown && !liveRuntime) {
-        throw new PublishingError("stale_value", `publish output ${record4.id} has a stale runtime identity`);
-      }
-    }
-  }
-  const actualByCell = /* @__PURE__ */ new Map();
-  for (const record4 of storeSnapshot.records) {
-    const records = actualByCell.get(record4.cellId) ?? [];
-    records.push(record4);
-    actualByCell.set(record4.cellId, records);
-  }
-  for (const cell of snapshot.cells) {
-    const expected = expectedByCell.get(cell.id) ?? [];
-    const actual = actualByCell.get(cell.id) ?? [];
-    if (expected.length !== actual.length) {
-      throw new PublishingError("stale_value", `publish output set changed for cell ${cell.id}`);
-    }
-    const actualById = new Map(actual.map((record4) => [record4.id, record4]));
-    for (const record4 of expected) {
-      const current = actualById.get(record4.id);
-      if (current === void 0 || stableJson2(current) !== stableJson2(record4)) {
-        throw new PublishingError("stale_value", `publish output ${record4.id} is no longer current`);
-      }
-    }
-  }
-  const referenced = /* @__PURE__ */ new Map();
-  for (const record4 of expectedById.values()) {
-    for (const descriptor of collectArtifactHandles(record4.data)) referenced.set(descriptor.handle, descriptor);
-  }
-  const descriptors = new Map(storeSnapshot.artifacts.map((artifact) => [artifact.handle, artifact]));
-  for (const handle of referenced.keys()) {
-    const descriptor = descriptors.get(handle);
-    if (descriptor === void 0) {
-      throw new PublishingError("output_expired", `publish artifact ${handle} is no longer retained`);
-    }
-    if (descriptor.epoch !== snapshot.epoch || descriptor.documentRevision !== snapshot.documentRevision || descriptor.kernelEpoch !== snapshot.runtime.kernelEpoch) {
-      throw new PublishingError("stale_value", `publish artifact ${handle} has a stale snapshot identity`);
-    }
-  }
-  return {
-    records: Object.freeze([...expectedById.values()]),
-    artifacts: Object.freeze([...storeSnapshot.artifacts])
-  };
-}
-async function composeQmd(snapshot, records, outputStore, artifacts, includeCode, signal) {
-  const recordsByCell = /* @__PURE__ */ new Map();
+  const retainedRecords = new Map(retained.records.map((record4) => [record4.id, record4]));
+  const retainedArtifacts = new Map(retained.artifacts.map((artifact) => [artifact.handle, artifact]));
+  const records = [];
+  const cells = source.cells.map((cell) => {
+    const outputs = cell.outputs.flatMap((record4) => {
+      const current = retainedRecords.get(record4.id);
+      if (current === void 0 || current.cellId !== cell.id || current.revision !== cell.revision) return [];
+      const captured = structuredClone(current);
+      records.push(captured);
+      return [captured];
+    });
+    return {
+      id: cell.id,
+      type: cell.type,
+      body: [...cell.body],
+      options: structuredClone(cell.options),
+      revision: cell.revision,
+      outputs,
+      log: [...cell.log ?? []],
+      progress: structuredClone(cell.progress ?? null)
+    };
+  });
+  const artifacts = /* @__PURE__ */ new Map();
   for (const record4 of records) {
-    const values = recordsByCell.get(record4.cellId) ?? [];
-    values.push(record4);
-    recordsByCell.set(record4.cellId, values);
+    for (const reference2 of collectArtifactHandles(record4.data)) {
+      const descriptor = retainedArtifacts.get(reference2.handle);
+      if (descriptor !== void 0) artifacts.set(descriptor.handle, descriptor);
+    }
   }
-  for (const values of recordsByCell.values()) values.sort((left, right) => left.sequence - right.sequence);
-  const artifactByHandle = new Map(artifacts.map((artifact) => [artifact.handle, artifact]));
+  return Object.freeze({
+    documentRevision: source.documentRevision,
+    path: source.path,
+    metadata: structuredClone(source.metadata),
+    editorDirty: source.editorDirty,
+    cells: Object.freeze(cells),
+    artifacts: Object.freeze([...artifacts.values()])
+  });
+}
+async function composeQmd(snapshot, outputStore, includeCode, signal) {
+  const artifactByHandle = new Map(snapshot.artifacts.map((artifact) => [artifact.handle, artifact]));
   const { document } = parseHTML("<!doctype html><html><head></head><body></body></html>");
   const renderer = new OutputRenderer({
     document,
     mode: "static",
     resolveArtifact: async (descriptor) => {
-      const artifact = await readArtifactReference(descriptor, artifactByHandle, outputStore, signal);
-      throwIfAborted3(signal);
+      const bytes = await readArtifact(descriptor, artifactByHandle, outputStore, signal);
       if (/^(?:text\/html|application\/xhtml\+xml)(?:;|$)/i.test(descriptor.mimeType)) {
-        const html = decodeArtifactText(artifact.bytes, artifact.handle);
-        assertNoExternalAssets(html, `HTML artifact ${artifact.handle}`);
-        return { kind: "html", html: withContentSecurityPolicy(html) };
+        return { kind: "html", html: decodeUtf82(bytes, descriptor.handle) };
       }
-      return {
-        kind: "url",
-        url: `data:${descriptor.mimeType};base64,${artifact.bytes.toString("base64")}`
-      };
+      return { kind: "url", url: `data:${descriptor.mimeType};base64,${bytes.toString("base64")}` };
     }
   });
   const lines = [
     "---",
-    "title: " + yamlString(PUBLISH_TITLE_MARKER),
+    "title: " + JSON.stringify(titleOf(snapshot)),
     "format:",
     "  html:",
     "    embed-resources: true",
@@ -108340,88 +108153,65 @@ async function composeQmd(snapshot, records, outputStore, artifacts, includeCode
     `<style>${PUBLISH_CSS}</style>`,
     ""
   ];
-  const renderCellOutputs = async (cell) => {
-    const container = document.createElement("div");
-    renderer.render(container, recordsByCell.get(cell.id) ?? [], cell.progress);
-    await renderer.flushArtifacts();
-    const rendered = serializeDomChildren(container);
-    if (rendered.length === 0) return;
-    assertNoExternalAssets(rendered, `cell ${cell.id} output`);
-    lines.push(neutralizeQuartoTokens(rendered), "");
-  };
   for (const cell of snapshot.cells) {
     throwIfAborted3(signal);
     if (cell.type === "markdown") {
-      await renderCellOutputs(cell);
-      continue;
-    }
-    if (includeCode && cell.options.hide_code !== true) {
+      lines.push(...cell.body, "");
+    } else if (includeCode && cell.options.hide_code !== true) {
       const fence2 = fenceFor(cell.body);
-      lines.push(fence2 + "r", ...cell.body.map(neutralizeQuartoTokens), fence2, "");
+      lines.push(fence2 + "r", ...cell.body, fence2, "");
     }
-    for (const log of cell.log) {
-      if (log.length > 0) lines.push(neutralizeQuartoTokens('<pre class="output-log">' + escapeHtml2(log) + "</pre>"), "");
-    }
-    await renderCellOutputs(cell);
+    for (const log of cell.log ?? []) if (log.length > 0) lines.push(`<pre class="output-log">${escapeHtml2(log)}</pre>`, "");
+    const container = document.createElement("div");
+    renderer.render(container, cell.outputs, cell.progress ?? null);
+    await renderer.flushArtifacts();
+    const rendered = serializeDomChildren(container);
+    if (rendered.length > 0) lines.push(rendered, "");
   }
-  return neutralizeExecutableFences(`${lines.join("\n")}
-`);
+  return `${lines.join("\n")}
+`;
 }
 function serializeDomChildren(container) {
-  const nodes = Array.from(container.childNodes, htmlNode);
-  return esm_default(nodes, { encodeEntities: "utf8" });
+  return esm_default(Array.from(container.childNodes, htmlNode), { encodeEntities: "utf8" });
 }
 function htmlNode(node2) {
   if (node2.nodeType === 3) return new Text4(node2.nodeValue ?? "");
   if (node2.nodeType === 8) return new Comment4(node2.nodeValue ?? "");
   if (node2.nodeType === 1) {
-    const elementNode = node2;
-    const children = Array.from(elementNode.childNodes, htmlNode);
-    const attributes2 = Object.fromEntries(Array.from(elementNode.attributes, (attribute2) => [attribute2.name, attribute2.value]));
-    const element2 = new Element2(elementNode.localName, attributes2, children);
-    for (const child of children) child.parent = element2;
-    return element2;
+    const element2 = node2;
+    const children = Array.from(element2.childNodes, htmlNode);
+    const converted = new Element2(element2.localName, Object.fromEntries(Array.from(element2.attributes, (attribute2) => [attribute2.name, attribute2.value])), children);
+    for (const child of children) child.parent = converted;
+    return converted;
   }
   throw new Error(`Unsupported DOM node type ${node2.nodeType}`);
 }
-async function readArtifactReference(requested, artifacts, outputStore, signal) {
+async function readArtifact(requested, artifacts, outputStore, signal) {
   const descriptor = artifacts.get(requested.handle);
-  if (descriptor === void 0) throw new PublishingError("output_expired", `published artifact ${requested.handle} is not retained`);
-  const handle = descriptor.handle;
+  if (descriptor === void 0) throw new PublishingError("output_expired", `published artifact ${requested.handle} is no longer retained`);
   const chunks = [];
   let offset = 0;
   while (offset < descriptor.byteLength) {
     throwIfAborted3(signal);
     let chunk;
     try {
-      chunk = await outputStore.readArtifact(handle, offset, Math.min(descriptor.chunkBytes, descriptor.byteLength - offset));
+      chunk = await outputStore.readArtifact(descriptor.handle, offset, Math.min(descriptor.chunkBytes, descriptor.byteLength - offset));
     } catch (error61) {
-      if (isErrno(error61, "ENOENT")) throw new PublishingError("output_expired", `published artifact ${handle} is no longer retained`);
       throw normalizeOutputError(error61);
     }
-    if (chunk.byteLength === 0) throw new PublishingError("output_expired", `published artifact ${handle} ended early`);
+    if (chunk.byteLength === 0) throw new PublishingError("output_expired", `published artifact ${descriptor.handle} ended early`);
     chunks.push(Buffer.from(chunk));
     offset += chunk.byteLength;
   }
-  const bytes = Buffer.concat(chunks, descriptor.byteLength);
-  if (bytes.byteLength !== descriptor.byteLength) {
-    throw new PublishingError("stale_value", `published artifact ${handle} changed while reading`);
-  }
-  return { descriptor, bytes, handle };
+  return Buffer.concat(chunks, descriptor.byteLength);
 }
 async function findQuartoExecutable() {
-  const path3 = process.env.PATH ?? "";
-  const names = [QUARTO_COMMAND];
-  for (const directory of path3.split(delimiter2).filter(Boolean)) {
-    for (const name of names) {
-      const candidate = resolve11(directory, name);
-      try {
-        await access4(candidate, constants5.X_OK);
-        const file2 = await stat14(candidate);
-        if (!file2.isFile()) continue;
-        return await realpath9(candidate);
-      } catch {
-      }
+  for (const directory of (process.env.PATH ?? "").split(delimiter2).filter(Boolean)) {
+    const candidate = resolve11(directory, "quarto");
+    try {
+      await access4(candidate, constants5.X_OK);
+      if ((await stat14(candidate)).isFile()) return await realpath9(candidate);
+    } catch {
     }
   }
   throw new PublishingError("tool_not_found", "Quarto is required for HTML publishing but was not found on PATH");
@@ -108435,7 +108225,7 @@ async function runQuarto(processScope, executable, cwd, qmdPath, outputPath, sig
       args: ["render", basename6(qmdPath), "--to", "html", "--output", basename6(outputPath), "--no-execute"],
       cwd,
       environment: {
-        ...Object.fromEntries(Object.entries(globalThis.process.env).filter((entry) => entry[1] !== void 0)),
+        ...Object.fromEntries(Object.entries(process.env).filter((entry) => entry[1] !== void 0)),
         QUARTO_PROJECT_DIR: cwd,
         QUARTO_PROFILE: ""
       },
@@ -108452,19 +108242,14 @@ async function runQuarto(processScope, executable, cwd, qmdPath, outputPath, sig
     });
   };
   signal?.addEventListener("abort", abort, { once: true });
+  if (aborted2) abort();
   try {
     const stdout = collectStream(owned.stdout);
     const stderr = collectStream(owned.stderr);
     const exit = await owned.exited;
     const [out, err] = await Promise.all([stdout, stderr]);
     if (aborted2) throw new PublishingError("cancelled", "publishing was cancelled");
-    if (exit.code !== 0) {
-      throw new PublishingError(
-        "publish_failed",
-        `Quarto exited with status ${exit.code ?? "unknown"}${err.length > 0 ? `: ${err}` : ""}`,
-        { code: exit.code, signal: exit.signal, stdout: out, stderr: err }
-      );
-    }
+    if (exit.code !== 0) throw new PublishingError("publish_failed", `Quarto exited with status ${exit.code ?? "unknown"}${err ? `: ${err}` : ""}`, { ...exit, stdout: out, stderr: err });
   } finally {
     signal?.removeEventListener("abort", abort);
   }
@@ -108476,29 +108261,42 @@ async function collectStream(stream) {
   try {
     for await (const chunk of stream) {
       if (bytes >= MAX_QUARTO_STREAM_BYTES) continue;
-      const remaining = MAX_QUARTO_STREAM_BYTES - bytes;
-      const bounded = chunk.byteLength > remaining ? chunk.subarray(0, remaining) : chunk;
-      chunks.push(bounded);
+      const bounded = chunk.subarray(0, MAX_QUARTO_STREAM_BYTES - bytes);
+      chunks.push(Buffer.from(bounded));
       bytes += bounded.byteLength;
     }
   } catch (error61) {
     return `[stream read failed: ${error61 instanceof Error ? error61.message : String(error61)}]`;
   }
-  return Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))).toString("utf8");
+  return Buffer.concat(chunks).toString("utf8");
+}
+async function validateDestinationPath(path3) {
+  if (typeof path3 !== "string" || path3.trim().length === 0) throw new PublishingError("publish_failed", "publish outputPath must be a non-empty path");
+  const outputPath = resolve11(path3);
+  let parent;
+  try {
+    parent = await stat14(dirname8(outputPath));
+  } catch (error61) {
+    throw new PublishingError("publish_failed", `publish output directory is unavailable: ${dirname8(outputPath)}`, error61);
+  }
+  if (!parent.isDirectory()) throw new PublishingError("publish_failed", `publish output parent is not a directory: ${dirname8(outputPath)}`);
+  try {
+    await access4(outputPath);
+    throw new PublishingError("destination_exists", `publish destination already exists: ${outputPath}`);
+  } catch (error61) {
+    if (error61 instanceof PublishingError) throw error61;
+    if (!isErrno(error61, "ENOENT")) throw error61;
+  }
+  return outputPath;
 }
 async function publishAbsentDestination(path3, bytes, signal) {
-  throwIfAborted3(signal);
   const temporary = join16(dirname8(path3), `.${basename6(path3)}.alder-${process.pid}-${randomUUID11()}.tmp`);
   try {
+    throwIfAborted3(signal);
     await writeFile5(temporary, bytes, { flag: "wx", mode: 384 });
     await chmod3(temporary, 420);
     throwIfAborted3(signal);
-    try {
-      await link2(temporary, path3);
-    } catch (error61) {
-      if (isErrno(error61, "EEXIST")) throw new PublishingError("destination_exists", `publish destination already exists: ${path3}`);
-      throw error61;
-    }
+    await link2(temporary, path3);
   } catch (error61) {
     throw normalizePublishingError(error61);
   } finally {
@@ -108506,180 +108304,21 @@ async function publishAbsentDestination(path3, bytes, signal) {
     });
   }
 }
-function srcsetCandidates(value) {
-  const candidates = [];
-  let start = 0;
-  for (let index = 0; index < value.length; index += 1) {
-    if (value[index] !== ",") continue;
-    const candidate = value.slice(start, index).trim();
-    const next = value[index + 1] ?? "";
-    if (/^data:/i.test(candidate) && next !== "" && !/\s/.test(next)) continue;
-    if (candidate.length > 0) candidates.push(candidate);
-    start = index + 1;
+function validateOptions(options) {
+  if (!options || typeof options.outputPath !== "string" || typeof options.includeCode !== "boolean") {
+    throw new PublishingError("publish_failed", "publish options are invalid");
   }
-  const final = value.slice(start).trim();
-  if (final.length > 0) candidates.push(final);
-  return candidates;
-}
-function assertNoExternalAssets(html, label) {
-  const reject = (value) => {
-    const resource = value.trim();
-    if (resource.length === 0 || resource.startsWith("#") || /^data:/i.test(resource)) return;
-    throw new PublishingError("publish_external_assets", label + " contains an external or sidecar asset: " + resource);
-  };
-  const pending = [{ html, label }];
-  for (let index = 0; index < pending.length; index += 1) {
-    if (index >= 64) throw new PublishingError("publish_external_assets", label + " contains too many nested srcdoc documents");
-    const current = pending[index];
-    const document = parseHTML(current.html).document;
-    for (const element2 of Array.from(document.querySelectorAll("*"))) {
-      const tag = element2.localName.toLowerCase();
-      assertEmbeddedWidgetIsolation(element2);
-      for (const attribute2 of HTML_RESOURCE_ATTRIBUTES[tag] ?? []) {
-        const value = element2.getAttribute(attribute2);
-        if (value === null) continue;
-        if (attribute2 === "srcset") {
-          for (const candidate of srcsetCandidates(value)) reject(candidate.split(/\s+/)[0] ?? "");
-        } else {
-          reject(value);
-        }
-      }
-      const srcdoc = element2.getAttribute("srcdoc");
-      if (srcdoc !== null) pending.push({ html: srcdoc, label: current.label + " srcdoc" });
-    }
-    const css = [
-      ...Array.from(document.querySelectorAll("style"), (element2) => element2.textContent ?? ""),
-      ...Array.from(document.querySelectorAll("[style]"), (element2) => element2.getAttribute("style") ?? "")
-    ].join("\n");
-    for (const match of css.matchAll(HTML_CSS_URL)) reject(match[1] ?? match[2] ?? match[3] ?? "");
-    for (const match of css.matchAll(HTML_CSS_IMPORT)) reject(match[1] ?? match[2] ?? match[3] ?? match[4] ?? match[5] ?? match[6] ?? "");
-  }
-}
-function assertEmbeddedWidgetIsolation(element2) {
-  if (element2.localName.toLowerCase() !== "iframe" || !element2.hasAttribute("data-alder-artifact-frame")) return;
-  const kind = (element2.getAttribute("data-alder-artifact-frame") ?? "").trim().toLowerCase();
-  const hasSandbox = element2.hasAttribute("sandbox");
-  const sandbox = element2.getAttribute("sandbox") ?? "";
-  const sandboxTokens = new Set(sandbox.split(/\s+/).filter(Boolean));
-  const hasSrcdoc = element2.hasAttribute("srcdoc");
-  const srcdoc = element2.getAttribute("srcdoc") ?? "";
-  const src = element2.getAttribute("src") ?? "";
-  const referrer = (element2.getAttribute("referrerpolicy") ?? "").trim().toLowerCase();
-  const isolated = kind === "html" ? hasSrcdoc && srcdoc.length > 0 && hasSandbox && sandboxTokens.size === 1 && sandboxTokens.has("allow-scripts") : kind === "pdf" ? !hasSrcdoc && !hasSandbox && isCanonicalPdfDataUrl(src) : false;
-  if (!isolated || referrer !== "no-referrer") {
-    throw new PublishingError("publish_failed", "published artifact frame is not isolated");
-  }
-}
-function isCanonicalPdfDataUrl(value) {
-  const prefix = "data:application/pdf;base64,";
-  if (!value.startsWith(prefix)) return false;
-  const encoded = value.slice(prefix.length);
-  return encoded.length % 4 === 0 && /^[A-Za-z0-9+/]*={0,2}$/.test(encoded) && Buffer.from(encoded, "base64").toString("base64") === encoded;
-}
-function withContentSecurityPolicy(html) {
-  const policy = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; connect-src 'none'; img-src data: blob:; media-src data: blob:; style-src 'unsafe-inline' data:; script-src 'unsafe-inline' data:; font-src data:;">`;
-  if (/<head\b/i.test(html)) return html.replace(/<head([^>]*)>/i, "<head$1>" + policy);
-  return "<html><head>" + policy + "</head><body>" + html + "</body></html>";
-}
-var PUBLISH_LITERAL_MARKER_PREFIX = "ALDER_PUBLISH_LITERAL_" + randomUUID11().replaceAll("-", "") + "_";
-var PUBLISH_LITERAL_MARKER_PATTERN = new RegExp(PUBLISH_LITERAL_MARKER_PREFIX + "([A-Za-z0-9_-]+)_", "g");
-function neutralizeQuartoTokens(value) {
-  let result = "";
-  let cursor = 0;
-  while (cursor < value.length) {
-    const opener = nextShortcodeOpener(value, cursor);
-    if (opener === null) {
-      result += value.slice(cursor);
-      break;
-    }
-    let prefixStart = opener.start;
-    while (prefixStart > cursor && value[prefixStart - 1] === "\\") prefixStart -= 1;
-    const contentStart = opener.start + opener.braceCount + (opener.encoded ? 4 : 1);
-    const close = opener.kind === "<" ? findShortcodeClose(value, contentStart, opener.braceCount, opener.encoded) : null;
-    let nested = false;
-    if (close !== null) {
-      const nestedOpener = nextShortcodeOpener(value, contentStart);
-      nested = nestedOpener !== null && nestedOpener.start < close.start;
-    }
-    result += value.slice(cursor, prefixStart);
-    if (prefixStart === opener.start && close !== null && !nested && opener.kind === "<" && opener.braceCount === 2) {
-      result += "{{{<" + value.slice(contentStart, close.start) + ">}}}";
-      cursor = close.end;
-      continue;
-    }
-    const markerPrefix = opener.encoded ? value.slice(prefixStart, contentStart).replace("&lt;", "<") : value.slice(prefixStart, contentStart);
-    result += literalMarker(markerPrefix);
-    cursor = contentStart;
-  }
-  return result;
-}
-function nextShortcodeOpener(value, from) {
-  for (let index = from; index + 2 < value.length; index += 1) {
-    if (value[index] !== "{" || value[index + 1] !== "{" || index > 0 && value[index - 1] === "{") continue;
-    let braceCount = 2;
-    while (value[index + braceCount] === "{") braceCount += 1;
-    const tokenStart = index + braceCount;
-    const kind = value[tokenStart];
-    if (kind === "<" || kind === "%") return { start: index, braceCount, kind, encoded: false };
-    if (value.startsWith("&lt;", tokenStart)) return { start: index, braceCount, kind: "<", encoded: true };
-  }
-  return null;
-}
-function findShortcodeClose(value, from, braceCount, encoded) {
-  for (let index = from; index < value.length; index += 1) {
-    let markerLength = 1;
-    if (encoded) {
-      if (value.startsWith("&gt;", index)) markerLength = 4;
-      else if (value[index] !== ">") continue;
-    } else if (value[index] !== ">") {
-      continue;
-    }
-    const braceStart = index + markerLength;
-    let valid = true;
-    for (let offset = 0; offset < braceCount; offset += 1) {
-      if (value[braceStart + offset] !== "}") {
-        valid = false;
-        break;
-      }
-    }
-    if (valid && value[braceStart + braceCount] !== "}") return { start: index, end: braceStart + braceCount };
-  }
-  return null;
-}
-function literalMarker(value) {
-  return PUBLISH_LITERAL_MARKER_PREFIX + Buffer.from(value, "utf8").toString("base64url") + "_";
-}
-function restorePublishedLiterals(html) {
-  return html.replace(PUBLISH_LITERAL_MARKER_PATTERN, (marker, encoded) => {
-    try {
-      return escapeHtml2(new TextDecoder("utf-8", { fatal: true }).decode(Buffer.from(encoded, "base64url")));
-    } catch {
-      throw new PublishingError("publish_failed", "published literal marker is invalid: " + marker);
-    }
-  });
-}
-function restorePublishedTitle(html, title) {
-  return html.replaceAll(PUBLISH_TITLE_MARKER, escapeHtml2(title));
 }
 function fenceFor(lines) {
   let longest = 2;
-  for (const line of lines) {
-    const runs = line.match(/`+/g) ?? [];
-    for (const run of runs) longest = Math.max(longest, run.length);
-  }
+  for (const line of lines) for (const run of line.match(/`+/g) ?? []) longest = Math.max(longest, run.length);
   return "`".repeat(Math.max(3, longest + 1));
-}
-function neutralizeExecutableFences(qmd) {
-  return qmd.replace(/^(\s*(?:`{3,}|~{3,}))\{r(?=[\s,:}])[^}]*\}\s*$/gim, "$1text");
 }
 function titleOf(snapshot) {
   const title = snapshot.metadata.title;
   return typeof title === "string" && title.trim().length > 0 ? title : "Alder notebook";
 }
-function yamlString(value) {
-  return JSON.stringify(value);
-}
-function decodeArtifactText(bytes, handle) {
+function decodeUtf82(bytes, handle) {
   try {
     return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
   } catch {
@@ -108689,25 +108328,13 @@ function decodeArtifactText(bytes, handle) {
 function escapeHtml2(value) {
   return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
 }
-function stableJson2(value) {
-  if (value === null || typeof value !== "object") return JSON.stringify(value) ?? "null";
-  if (Array.isArray(value)) return "[" + value.map(stableJson2).join(",") + "]";
-  const record4 = value;
-  const entries2 = Object.keys(record4).sort().map((key2) => JSON.stringify(key2) + ":" + stableJson2(record4[key2]));
-  return "{" + entries2.join(",") + "}";
-}
-function isRecord6(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 function throwIfAborted3(signal) {
   if (signal?.aborted) throw new PublishingError("cancelled", "publishing was cancelled");
 }
 function normalizeOutputError(error61) {
   if (error61 instanceof PublishingError) return error61;
   if (error61 instanceof OutputStoreError) {
-    if (error61.code === "not_found") return new PublishingError("output_expired", error61.message);
-    if (error61.code === "stale_value") return new PublishingError("stale_value", error61.message);
-    if (error61.code === "output_expired") return new PublishingError("output_expired", error61.message);
+    if (error61.code === "not_found" || error61.code === "output_expired") return new PublishingError("output_expired", error61.message);
     if (error61.code === "output_quota") return new PublishingError("output_quota", error61.message);
     return new PublishingError("publish_failed", error61.message);
   }
@@ -108716,28 +108343,24 @@ function normalizeOutputError(error61) {
 function normalizePublishingError(error61) {
   if (error61 instanceof PublishingError) return error61;
   if (error61 instanceof OutputStoreError) return normalizeOutputError(error61);
-  if (isErrno(error61, "ENOENT")) return new PublishingError("publish_failed", "publication input or output was not produced");
   if (isErrno(error61, "EEXIST")) return new PublishingError("destination_exists", "publish destination already exists");
+  if (isErrno(error61, "ENOENT")) return new PublishingError("publish_failed", "publication input or output was not produced");
   return new PublishingError("publish_failed", error61 instanceof Error ? error61.message : String(error61));
 }
 function isErrno(error61, code2) {
-  return isRecord6(error61) && error61.code === code2;
+  return typeof error61 === "object" && error61 !== null && "code" in error61 && error61.code === code2;
 }
 var PUBLISH_CSS = `
 :root { color-scheme: light dark; }
 .value-text, .value-json, .output-log, .output-error { white-space: pre-wrap; }
 .html-widget, .media-pdf { width: 100%; min-height: 2rem; border: 0; }
 .media-pdf { min-height: 420px; }
-.plot, .out-media { max-width: 100%; }
-.markdown-output, .html-inline { max-width: 100%; }
+.plot, .out-media, .markdown-output, .html-inline { max-width: 100%; }
 .table-preview { overflow-x: auto; }
 .table-preview table { border-collapse: collapse; }
 .table-preview th, .table-preview td { border: 1px solid currentColor; padding: .25rem .5rem; text-align: left; }
 .widget-container, .widget-group { display: inline-flex; gap: .5rem; align-items: center; }
-.widget-container input:disabled, .widget-group input:disabled { opacity: .85; }
 .out-lazy { opacity: .75; }
-.out-layout { display: flex; flex-direction: column; gap: .5rem; }
-.progress-row { display: flex; gap: .5rem; align-items: center; }
 `;
 
 // src/formatting.ts
@@ -108922,13 +108545,13 @@ function validCoordinate2(value) {
   return Number.isSafeInteger(value) && value >= 0 && value <= 2147483647;
 }
 function translateLocation(location, document, uri) {
-  if (!isRecord7(location)) return null;
+  if (!isRecord6(location)) return null;
   if (location.uri !== void 0 && location.uri !== uri) return null;
   const range = translateRange(location.range, document);
   return range ? { ...location, uri, range } : null;
 }
 function translateLocationLink(location, document, uri) {
-  if (!isRecord7(location) || location.targetUri !== uri) return null;
+  if (!isRecord6(location) || location.targetUri !== uri) return null;
   const targetRange = translateRange(location.targetRange, document);
   const targetSelectionRange = translateRange(location.targetSelectionRange, document);
   const originSelectionRange = location.originSelectionRange === void 0 ? void 0 : translateRange(location.originSelectionRange, document);
@@ -108942,7 +108565,7 @@ function translateLocationLink(location, document, uri) {
   };
 }
 function translateCompletionTextEdit(edit, document) {
-  if (!isRecord7(edit)) return null;
+  if (!isRecord6(edit)) return null;
   if (edit.range !== void 0) {
     const range = translateRange(edit.range, document);
     return range ? { ...edit, range } : null;
@@ -108952,8 +108575,8 @@ function translateCompletionTextEdit(edit, document) {
   return insert2 && replace3 ? { ...edit, insert: insert2, replace: replace3 } : null;
 }
 function translateDocumentSymbol(symbol2, document, uri) {
-  if (!isRecord7(symbol2)) return null;
-  if (isRecord7(symbol2.location)) {
+  if (!isRecord6(symbol2)) return null;
+  if (isRecord6(symbol2.location)) {
     const location = translateLocation(symbol2.location, document, uri);
     return location ? { ...symbol2, location } : null;
   }
@@ -108967,23 +108590,23 @@ function translateDocumentSymbol(symbol2, document, uri) {
 function translateLspResult(result, method2, document, uri) {
   if (result === null || result === void 0) return null;
   if (method2 === "textDocument/definition" || method2 === "textDocument/references") {
-    const translate = (location) => isRecord7(location) && "targetUri" in location ? translateLocationLink(location, document, uri) : translateLocation(location, document, uri);
-    if (isRecord7(result)) return translate(result);
+    const translate = (location) => isRecord6(location) && "targetUri" in location ? translateLocationLink(location, document, uri) : translateLocation(location, document, uri);
+    if (isRecord6(result)) return translate(result);
     if (!Array.isArray(result)) return [];
     return result.map(translate).filter((item) => item !== null);
   }
-  if (method2 === "textDocument/hover" && isRecord7(result) && result.range !== void 0) {
+  if (method2 === "textDocument/hover" && isRecord6(result) && result.range !== void 0) {
     return { ...result, range: translateRange(result.range, document) };
   }
   if (method2 === "textDocument/documentSymbol" && Array.isArray(result)) {
     return result.map((symbol2) => translateDocumentSymbol(symbol2, document, uri)).filter((symbol2) => symbol2 !== null);
   }
   if (method2 === "textDocument/completion") {
-    const container = isRecord7(result) && Array.isArray(result.items) ? result : null;
+    const container = isRecord6(result) && Array.isArray(result.items) ? result : null;
     const items = container ? container.items : Array.isArray(result) ? result : null;
     if (!items) return result;
     const translated = items.flatMap((item) => {
-      if (!isRecord7(item)) return [];
+      if (!isRecord6(item)) return [];
       const textEdit = item.textEdit === void 0 ? void 0 : translateCompletionTextEdit(item.textEdit, document);
       if (item.textEdit !== void 0 && textEdit === null) return [];
       let additionalTextEdits;
@@ -109183,8 +108806,8 @@ var LspClient = class {
   async requestDocument(method2, rawParams, document, timeoutMs = this.options.requestTimeoutMs ?? 3e3) {
     if (!(method2 in REQUEST_TYPES)) throw new LspClientError("invalid_request", "unsupported language-server method");
     await this.syncDocument(document);
-    const params = { ...rawParams, textDocument: { ...isRecord7(rawParams.textDocument) ? rawParams.textDocument : {}, uri: this.documentUri } };
-    if (isRecord7(params.position) && typeof params.position.cell === "string") {
+    const params = { ...rawParams, textDocument: { ...isRecord6(rawParams.textDocument) ? rawParams.textDocument : {}, uri: this.documentUri } };
+    if (isRecord6(params.position) && typeof params.position.cell === "string") {
       const position = toFilePosition(document, {
         cell: params.position.cell,
         line: params.position.line,
@@ -109320,14 +108943,14 @@ function basenameForUri(uri) {
   const pieces = new URL(uri).pathname.split("/").filter(Boolean);
   return decodeURIComponent(pieces.at(-1) ?? "workspace");
 }
-function isRecord7(value) {
+function isRecord6(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function isPosition(value) {
-  return isRecord7(value) && validCoordinate2(value.line) && validCoordinate2(value.character);
+  return isRecord6(value) && validCoordinate2(value.line) && validCoordinate2(value.character);
 }
 function isRange(value) {
-  return isRecord7(value) && isPosition(value.start) && isPosition(value.end);
+  return isRecord6(value) && isPosition(value.start) && isPosition(value.end);
 }
 function cloneRange(range) {
   return {
@@ -109371,7 +108994,7 @@ function boundedUtf8(value, maxBytes) {
 
 // src/uploads.ts
 import { randomUUID as randomUUID12 } from "node:crypto";
-import { chmod as chmod4, lstat as lstat8, mkdir as mkdir9, unlink as unlink4, writeFile as writeFile7 } from "node:fs/promises";
+import { chmod as chmod4, lstat as lstat7, mkdir as mkdir9, unlink as unlink4, writeFile as writeFile7 } from "node:fs/promises";
 import { join as join18 } from "node:path";
 var UPLOAD_MAX_FILES = 1024;
 var UPLOAD_MAX_BASE64_BYTES = 16 * 1024 * 1024;
@@ -109393,7 +109016,7 @@ var UploadStore = class {
   async ensureDirectory() {
     if (this.closed) throw invalid4("session_stopped", "upload store is closed");
     await mkdir9(this.directory, { recursive: true, mode: 448 });
-    const info = await lstat8(this.directory);
+    const info = await lstat7(this.directory);
     if (info.isSymbolicLink() || !info.isDirectory()) throw invalid4("invalid_request", "upload directory is not a directory");
     await chmod4(this.directory, 448);
   }
@@ -109793,11 +109416,35 @@ function recoveryCellStates(document) {
 }
 function semanticValue(value) {
   if (Array.isArray(value)) return value.map(semanticValue);
-  if (isRecord8(value)) return Object.fromEntries(Object.keys(value).sort().map((key2) => [key2, semanticValue(value[key2])]));
+  if (isRecord7(value)) return Object.fromEntries(Object.keys(value).sort().map((key2) => [key2, semanticValue(value[key2])]));
   return value;
 }
 function sameSemanticValue(left, right) {
   return JSON.stringify(semanticValue(left)) === JSON.stringify(semanticValue(right));
+}
+function publicationSnapshot(saved, current) {
+  const currentById = new Map(current.cells.map((cell) => [cell.id, cell]));
+  return {
+    documentRevision: current.documentRevision,
+    path: saved.path ?? current.path,
+    metadata: structuredClone(saved.metadata ?? {}),
+    editorDirty: current.dirty,
+    cells: saved.cells.map((cell) => {
+      const live = currentById.get(cell.id);
+      const revision2 = cell.revision ?? 0;
+      const compatible = live?.revision === revision2;
+      return {
+        id: cell.id,
+        type: cell.type ?? "code",
+        body: [...cell.body],
+        options: structuredClone(cell.options ?? {}),
+        revision: revision2,
+        outputs: cell.type === "markdown" ? [] : live?.outputs.filter((record4) => record4.revision === revision2) ?? [],
+        log: compatible ? [...live.log] : [],
+        progress: compatible ? structuredClone(live.progress) : null
+      };
+    })
+  };
 }
 var optionsSchema = external_exports.object({
   path: external_exports.string().min(1).nullable().default(null),
@@ -110763,7 +110410,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
               });
               if (selectionGeneration !== runtimeBootstrapGeneration) throw Object.assign(new Error("R environment selection was superseded"), { code: "operation_in_progress" });
               const current = controller.snapshot();
-              if (current.runtime.busy || current.runtime.activeRunId !== null || current.runtime.packageOperationActive) throw Object.assign(new Error("cannot select R while the notebook is busy"), { code: "busy" });
+              if (current.runtime.busy || current.runtime.activeRunId !== null) throw Object.assign(new Error("cannot select R while the notebook is busy"), { code: "busy" });
               const nextManager = createPackageManager({ resources: options.resources, environment: selected, processScope, projectDirectory: notebookDirectory, onProgress: onPackageProgress });
               try {
                 await controller.restartRuntimeContext({ environment: selected, notebookDirectory, cacheDirectory }, stringValue(payload.operationId) ?? randomUUID14());
@@ -110794,8 +110441,11 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
             signal: runtimeAbort?.signal
           });
           if (command === "publish") {
+            if (activePublishes.size > 0) throw Object.assign(new Error("a publication is already in progress"), { code: "operation_in_progress" });
             if (publisher === void 0) publisher = createPublishingService({ outputStore: artifactStore, processScope });
-            const snapshot = controller.snapshot();
+            const liveSnapshot = controller.snapshot();
+            if (store === void 0) throw Object.assign(new Error("notebook has no saved source"), { code: "notebook_has_no_path" });
+            const snapshot = publicationSnapshot(store.currentDocument, liveSnapshot);
             const requestedPath = typeof payload.outputPath === "string" && payload.outputPath.length > 0 ? payload.outputPath : null;
             const outputPath = requestedPath ?? join20(work, "publish-" + randomUUID14() + ".html");
             const pendingPublish = publisher.publishSnapshot(snapshot, { outputPath, includeCode: payload.includeCode === true, signal: publishAbort.signal });
@@ -110808,7 +110458,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
             try {
               try {
                 artifact = await artifactStore.importArtifact(basename8(result.path), {
-                  sessionEpoch: snapshot.epoch,
+                  sessionEpoch: liveSnapshot.epoch,
                   documentRevision: result.documentRevision,
                   kernelEpoch: null,
                   runId: null,
@@ -111020,7 +110670,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
         requestDocument: async (method2, params, snapshot) => {
           const client = await getLsp();
           const result = await client.requestDocument(method2, params, await lspDocument(snapshot));
-          return method2 === "textDocument/hover" && isRecord8(result) ? { ...result, rendered: renderHelp(result.contents).html } : result;
+          return method2 === "textDocument/hover" && isRecord7(result) ? { ...result, rendered: renderHelp(result.contents).html } : result;
         },
         restart: async () => {
           if (lspRestarting) return lspRestarting;
@@ -111209,7 +110859,7 @@ function lspDocument(snapshot) {
   return Promise.resolve({ path: snapshot.path, cells: snapshot.cells.map((cell) => ({ id: cell.id, type: cell.type, body: [...cell.body], revision: cell.revision, options: cell.options })) });
 }
 function cellRefId(value) {
-  if (isRecord8(value) && typeof value.cellId === "string") return value.cellId;
+  if (isRecord7(value) && typeof value.cellId === "string") return value.cellId;
   throw new Error("formatter returned an invalid cell reference");
 }
 function stringValue(value) {
@@ -111219,13 +110869,13 @@ function decodePhysicalBytes(value) {
   if (value instanceof Uint8Array) return value;
   if (value instanceof ArrayBuffer) return new Uint8Array(value);
   if (typeof value === "string") return Uint8Array.from(Buffer.from(value, "base64"));
-  if (isRecord8(value) && typeof value.$bytes === "string") return Uint8Array.from(Buffer.from(value.$bytes, "base64"));
+  if (isRecord7(value) && typeof value.$bytes === "string") return Uint8Array.from(Buffer.from(value.$bytes, "base64"));
   return null;
 }
 function errorMessage(error61) {
   return error61 instanceof Error ? error61.message : String(error61);
 }
-function isRecord8(value) {
+function isRecord7(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 function initialOrigin(host, port) {

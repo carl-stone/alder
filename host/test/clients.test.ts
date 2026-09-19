@@ -38,7 +38,7 @@ function snapshot(cells: HostCellState[] = [cell("c1", ["x <- 1"]), cell("c2", [
     runtime: {
       documentReady: true, analyzerState: "ready", kernelState: "ready", executionReady: true,
       executionBlockedReason: null, startupActivated: false, kernelEpoch: "kernel-1", rEnvironment: null, analysisEnvironmentId: "analysis-1",
-      executionMode: "automatic", runOnStartup: false, packageOperationActive: false,
+      executionMode: "automatic", runOnStartup: false,
       busy: false, activeRunId: null,
     },
     cells,
@@ -432,7 +432,7 @@ test("browser view reports typed check issues", async () => {
   });
 });
 
-test("Publish HTML retains the draft and does not publish when Save fails", async () => {
+test("Publish HTML publishes the last saved version without forcing Save", async () => {
   await withViewDom(async (dom, domWindow) => {
     Object.defineProperty(globalThis, "location", { configurable: true, writable: true, value: { search: "?view=editor", href: "http://notebook.test/book.R?view=editor", origin: "http://notebook.test" } });
     const initial = snapshot([cell("c1", ["current <- 42"])]);
@@ -442,6 +442,7 @@ test("Publish HTML retains the draft and does not publish when Save fails", asyn
     let publishes = 0;
     const client = settingsClient({
       save: async () => { throw new Error("source changed on disk"); },
+      commitEdits: async () => initial,
       service: async () => { publishes += 1; return resultFor("publish", null); },
     });
     const view = new NotebookView(client, dom);
@@ -451,10 +452,46 @@ test("Publish HTML retains the draft and does not publish when Save fails", asyn
         .find((candidate) => candidate.textContent === "Publish HTML");
       assert.ok(button);
       button.dispatchEvent(new domWindow.Event("click", { bubbles: true, cancelable: true }));
-      await waitUntil(() => dom.getElementById("status")!.textContent!.includes("source changed"));
-      assert.equal(publishes, 0);
+      await waitUntil(() => publishes === 1);
+      assert.equal(publishes, 1);
       assert.deepEqual(document.cells[0]!.desiredBody, ["current <- 42"]);
     } finally {
+      view.destroy();
+    }
+  });
+});
+
+test("a slow publish disables only its own action", async () => {
+  await withViewDom(async (dom, domWindow) => {
+    Object.defineProperty(globalThis, "location", { configurable: true, writable: true, value: { search: "?view=editor", href: "http://notebook.test/book.R?view=editor", origin: "http://notebook.test" } });
+    const initial = snapshot([cell("c1", ["current <- 42"])]);
+    initial.dirty = true;
+    initial.changed = true;
+    const pending = Promise.withResolvers<CommandResult>();
+    let publishes = 0;
+    const client = settingsClient({
+      commitEdits: async () => initial,
+      service: async () => { publishes += 1; return pending.promise; },
+    });
+    const view = new NotebookView(client, dom);
+    try {
+      view.render(new BrowserDocument(initial));
+      const button = [...dom.querySelectorAll<HTMLButtonElement>("button")]
+        .find((candidate) => candidate.textContent === "Publish HTML");
+      assert.ok(button);
+      button.dispatchEvent(new domWindow.Event("click", { bubbles: true, cancelable: true }));
+      await waitUntil(() => publishes === 1);
+      assert.equal(button.disabled, true);
+      assert.equal(dom.querySelector<HTMLButtonElement>("#save")!.disabled, false);
+      assert.equal(dom.querySelector<HTMLButtonElement>("#run-all")!.disabled, false);
+      assert.equal(dom.querySelector<HTMLTextAreaElement>(".cell textarea")?.disabled ?? false, false);
+      button.dispatchEvent(new domWindow.Event("click", { bubbles: true, cancelable: true }));
+      await Promise.resolve();
+      assert.equal(publishes, 1);
+      pending.resolve(resultFor("publish", null));
+      await waitUntil(() => button.disabled === false);
+    } finally {
+      pending.resolve(resultFor("publish", null));
       view.destroy();
     }
   });
@@ -487,13 +524,13 @@ test("explicit runs flush output and keep stop independent while preparing", asy
       pending = view.runExplicit(() => client.startRunAll("all"));
       assert.deepEqual(order, ["flush"]);
       assert.equal(dom.getElementById("run-all")?.disabled, true);
-      assert.equal(dom.getElementById("save")?.disabled, true);
+      assert.equal(dom.getElementById("save")?.disabled, false);
       assert.equal(dom.getElementById("stop")?.disabled, false);
       dom.getElementById("stop")!.dispatchEvent(new domWindow.Event("click"));
       await Promise.resolve();
       assert.equal(interruptCalls, 1);
       releaseFlush();
-      await waitUntil(() => dom.getElementById("save")?.disabled === false);
+      await waitUntil(() => order.includes("run"));
       assert.deepEqual(order, ["flush", "run"]);
       assert.equal(dom.getElementById("run-all")?.disabled, true);
       assert.equal(dom.getElementById("stop")?.disabled, false);

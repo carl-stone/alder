@@ -446,7 +446,8 @@ test("installed host runs exact edited source, saves bytes and publishes committ
     const publish = await dispatchHost(app, { type: "publish", includeCode: true, outputPath: publishedPath,
       expectedDocumentRevision: publishDocumentRevision });
     assert.equal(publish.error, null);
-    assert.deepEqual(publish.result, { path: publishedPath, documentRevision: publishDocumentRevision });
+    assert.deepEqual(publish.result, { path: publishedPath, documentRevision: publishDocumentRevision,
+      source: "last-saved", unsavedChangesExcluded: false });
     const html = await readFile(publishedPath, "utf8");
     assert.match(html, /42/);
     const publishedText = parseHTML(html).document.querySelector("main")?.textContent ?? "";
@@ -461,10 +462,13 @@ test("installed host runs exact edited source, saves bytes and publishes committ
     await writeFile(path, "# external replacement\n");
     const failedSave = await dispatchHost(app, { type: "save" });
     assert.equal(failedSave.error?.code, "source_conflict");
-    const refusedPath = join(directory, "must-not-publish.html");
-    const refused = await dispatchHost(app, { type: "publish", includeCode: true, outputPath: refusedPath });
-    assert.equal(refused.error?.code, "publish_not_ready");
-    await assert.rejects(access(refusedPath));
+    const savedVersionPath = join(directory, "saved-version.html");
+    const savedVersion = await dispatchHost(app, { type: "publish", includeCode: true, outputPath: savedVersionPath });
+    assert.equal(savedVersion.error, null);
+    assert.equal((savedVersion.result as { unsavedChangesExcluded: boolean }).unsavedChangesExcluded, true);
+    const savedVersionText = parseHTML(await readFile(savedVersionPath, "utf8")).document.querySelector("main")?.textContent ?? "";
+    assert.match(savedVersionText, /a\s*<-\s*40/);
+    assert.doesNotMatch(savedVersionText, /a\s*<-\s*99/);
     assert.equal(controller.snapshot().cells[0]!.body[0], "a <- 99");
   } finally {
     await app?.close();

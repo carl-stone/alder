@@ -883,7 +883,7 @@ export const runtimeStateSchema = z.object({
 }).strict();
 export type RuntimeState = z.infer<typeof runtimeStateSchema>;
 export const runtimeModeSchema = z.enum(["automatic", "lazy"]);
-export const hostRuntimeSchema = runtimeStateSchema.extend({ executionMode: runtimeModeSchema, runOnStartup: z.boolean(), packageOperationActive: z.boolean(), busy: z.boolean(), activeRunId: idSchema.nullable() }).strict();
+export const hostRuntimeSchema = runtimeStateSchema.extend({ executionMode: runtimeModeSchema, runOnStartup: z.boolean(), busy: z.boolean(), activeRunId: idSchema.nullable() }).strict();
 export type HostRuntime = z.infer<typeof hostRuntimeSchema>;
 
 export const diskObservationSchema = z.object({ state: z.enum(["untitled", "absent", "present", "unreadable"]), digest: z.string().regex(/^[0-9a-f]{64}$/).nullable(), version: boundedUtf8StringSchema(MAX_ID_BYTES).nullable(), error: hostErrorSchema.nullable() }).strict();

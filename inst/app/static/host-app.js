@@ -20714,7 +20714,7 @@ var runtimeStateSchema = external_exports.object({
   analysisEnvironmentId: analysisEnvironmentIdSchema.nullable()
 }).strict();
 var runtimeModeSchema = external_exports.enum(["automatic", "lazy"]);
-var hostRuntimeSchema = runtimeStateSchema.extend({ executionMode: runtimeModeSchema, runOnStartup: external_exports.boolean(), packageOperationActive: external_exports.boolean(), busy: external_exports.boolean(), activeRunId: idSchema.nullable() }).strict();
+var hostRuntimeSchema = runtimeStateSchema.extend({ executionMode: runtimeModeSchema, runOnStartup: external_exports.boolean(), busy: external_exports.boolean(), activeRunId: idSchema.nullable() }).strict();
 var diskObservationSchema = external_exports.object({ state: external_exports.enum(["untitled", "absent", "present", "unreadable"]), digest: external_exports.string().regex(/^[0-9a-f]{64}$/).nullable(), version: boundedUtf8StringSchema(MAX_ID_BYTES).nullable(), error: hostErrorSchema.nullable() }).strict();
 var sidecarObservationsSchema = external_exports.object({ config: diskObservationSchema, layout: diskObservationSchema, packages: diskObservationSchema }).strict();
 var hostConfigurationSchema = external_exports.object({
@@ -23671,7 +23671,6 @@ var NotebookView = class {
   transportError = null;
   editorHelpError = null;
   editorHelpRestarting = false;
-  actionCount = 0;
   explicitRunCount = 0;
   emptyBar = null;
   appView = false;
@@ -23915,7 +23914,6 @@ var NotebookView = class {
     return prior === null || prior.desiredBody !== cell.desiredBody || prior.desiredType !== cell.desiredType || prior.server !== cell.server || prior.id !== cell.id || prior.revision !== cell.serverRevision || prior.conflict !== cell.conflict || prior.tombstone !== cell.tombstone || prior.index !== index || prior.cellCount !== this.documentValue?.cells.length || prior.config !== snapshot.config;
   }
   async cellAction(key, button, input2) {
-    if (this.actionCount > 0) return;
     const action = button.dataset.act;
     if (action === "add") {
       this.addCell(key, button.dataset.type === "markdown" ? "markdown" : "code");
@@ -24057,14 +24055,14 @@ var NotebookView = class {
     const cells = this.documentValue?.cells ?? [];
     const index = knownIndex ?? cells.findIndex((item) => item.key === cell.key);
     buttons.forEach((button) => {
-      if (button.dataset.act === "run") setDisabled(button, this.actionCount > 0 || this.runPending || !this.executionAvailable() || this.documentValue?.snapshot.runtime.busy === true || this.documentValue?.snapshot.runtime.packageOperationActive === true);
-      else if (button.dataset.act === "move-up") setDisabled(button, this.actionCount > 0 || !cell.id || index <= 0);
-      else if (button.dataset.act === "move-down") setDisabled(button, this.actionCount > 0 || !cell.id || index < 0 || index >= cells.length - 1);
+      if (button.dataset.act === "run") setDisabled(button, this.runPending || !this.executionAvailable() || this.documentValue?.snapshot.runtime.busy === true);
+      else if (button.dataset.act === "move-up") setDisabled(button, !cell.id || index <= 0);
+      else if (button.dataset.act === "move-down") setDisabled(button, !cell.id || index < 0 || index >= cells.length - 1);
       else if (button.dataset.act === "disable") {
-        setDisabled(button, this.actionCount > 0 || !cell.id);
+        setDisabled(button, !cell.id);
         const label = status === "disabled" ? "Enable" : "Disable";
         if (button.textContent !== label) button.textContent = label;
-      } else setDisabled(button, this.actionCount > 0);
+      }
     });
     if (refreshLabels) {
       const title = element3.querySelector("[data-role=cell-title]");
@@ -24079,17 +24077,15 @@ var NotebookView = class {
     }
     const drag = element3.querySelector("[data-role=drag-handle]");
     if (drag) {
-      const available = this.actionCount === 0 && cell.id !== null && !cell.tombstone;
+      const available = cell.id !== null && !cell.tombstone;
       drag.draggable = available;
       drag.classList.toggle("disabled", !available);
     }
   }
   renderAllCellActions() {
     const runtime = this.documentValue?.snapshot.runtime;
-    const actionPending = this.actionCount > 0;
     const signature = JSON.stringify({
-      actionPending,
-      runBlocked: actionPending || this.runPending || runtime?.busy === true || runtime?.packageOperationActive === true || runtime?.executionReady !== true || runtime?.kernelState !== "ready"
+      runBlocked: this.runPending || runtime?.busy === true || runtime?.executionReady !== true || runtime?.kernelState !== "ready"
     });
     if (signature === this.cellActionsSignature) return;
     this.cellActionsSignature = signature;
@@ -24504,12 +24500,10 @@ ${jupyterTrace.map((line, index) => `${index + 1}. ${line}`).join("\n")}` : ""
     const busy = snapshot.runtime.busy;
     const available = !this.hostClosed && snapshot.runtime.executionReady && snapshot.runtime.kernelState === "ready";
     const signature = JSON.stringify({
-      actionCount: this.actionCount,
       runPending: this.runPending,
       hostClosed: this.hostClosed,
       busy,
       available,
-      packageOperationActive: snapshot.runtime.packageOperationActive,
       executionMode: snapshot.runtime.executionMode,
       kernelReady: snapshot.runtime.kernelState === "ready",
       changed: snapshot.changed
@@ -24518,25 +24512,25 @@ ${jupyterTrace.map((line, index) => `${index + 1}. ${line}`).join("\n")}` : ""
     this.toolbarSignature = signature;
     const runtime = this.dom.getElementById("runtime-select");
     if (runtime && this.dom.activeElement !== runtime && runtime.value !== snapshot.runtime.executionMode) runtime.value = snapshot.runtime.executionMode;
-    if (runtime) setDisabled(runtime, this.hostClosed || this.actionCount > 0);
+    if (runtime) setDisabled(runtime, this.hostClosed);
     const runAll = this.dom.getElementById("run-all");
     if (runAll) {
       const label = snapshot.runtime.executionMode === "lazy" ? "Run stale" : "Run all";
       if (runAll.textContent !== label) runAll.textContent = label;
-      setDisabled(runAll, this.actionCount > 0 || this.runPending || busy || snapshot.runtime.packageOperationActive || !available);
+      setDisabled(runAll, this.runPending || busy || !available);
     }
     const stop = this.dom.getElementById("stop");
     if (stop) setDisabled(stop, this.hostClosed || !(busy || this.runPending));
     const restart = this.dom.getElementById("restart");
     if (restart) {
       restart.hidden = snapshot.runtime.kernelState === "ready";
-      setDisabled(restart, this.hostClosed || this.actionCount > 0 || busy);
+      setDisabled(restart, this.hostClosed || busy);
     }
     const save = this.dom.getElementById("save");
-    if (save) setDisabled(save, this.hostClosed || this.actionCount > 0 || !snapshot.changed);
+    if (save) setDisabled(save, this.hostClosed || !snapshot.changed);
     const shutdown = this.dom.getElementById("shutdown");
     if (shutdown) {
-      setDisabled(shutdown, this.hostClosed || this.actionCount > 0);
+      setDisabled(shutdown, this.hostClosed);
       shutdown.title = "Shut down this notebook host";
     }
   }
@@ -25296,7 +25290,7 @@ ${jupyterTrace.map((line, index) => `${index + 1}. ${line}`).join("\n")}` : ""
       const target = cellElement(handle);
       const key = target?.dataset.key;
       const cell = key ? this.documentValue?.cell(key) : void 0;
-      if (!target || !cell?.id || cell.tombstone || this.actionCount > 0) {
+      if (!target || !cell?.id || cell.tombstone) {
         event.preventDefault();
         return;
       }
@@ -25355,9 +25349,11 @@ ${jupyterTrace.map((line, index) => `${index + 1}. ${line}`).join("\n")}` : ""
     includeLabel.append(include, this.dom.createTextNode(" Include code"));
     actionMenu.panel.appendChild(includeLabel);
     actionMenu.panel.appendChild(this.serviceButton("Publish HTML", async () => {
-      if (await this.saveNotebook() === void 0) return;
+      const dirty = this.documentValue?.snapshot.dirty === true || (this.documentValue?.pendingSource().changes.length ?? 0) > 0;
       const result = await this.runService("publish", { include_code: include.checked });
       await this.downloadServiceResult(result);
+      this.actionNotice = dirty ? "Published the last saved version. Unsaved changes were not included." : "Published HTML downloaded.";
+      this.renderStatus();
     }));
     actionMenu.panel.appendChild(this.serviceButton("Check notebook", async () => {
       const result = await this.runService("check", {});
@@ -25440,7 +25436,13 @@ ${jupyterTrace.map((line, index) => `${index + 1}. ${line}`).join("\n")}` : ""
     Object.assign(button.dataset, dataset);
     button.addEventListener("click", (event) => {
       event.preventDefault();
-      void this.action(run).catch((error61) => this.showError(error61));
+      if (button.disabled) return;
+      button.disabled = true;
+      button.setAttribute("aria-busy", "true");
+      void this.action(run).catch((error61) => this.showError(error61)).finally(() => {
+        button.disabled = false;
+        button.removeAttribute("aria-busy");
+      });
     });
     return button;
   }
@@ -25475,8 +25477,6 @@ ${jupyterTrace.map((line, index) => `${index + 1}. ${line}`).join("\n")}` : ""
     } finally {
       globalThis.setTimeout(() => URL.revokeObjectURL(downloadUrl), 0);
     }
-    this.actionNotice = "Published HTML downloaded.";
-    this.renderStatus();
   }
   applyConfig(config2) {
     const theme = ["light", "dark", "system"].includes(configString(config2, ["theme"], "system")) ? configString(config2, ["theme"], "system") : "system";
@@ -25661,10 +25661,12 @@ ${jupyterTrace.map((line, index) => `${index + 1}. ${line}`).join("\n")}` : ""
       const key = element3 ? this.keyByElement.get(element3) : void 0;
       if (key) await this.runExplicit(() => this.client.startRunCell(key));
     } else if (action === "publish") {
-      if (await this.saveNotebook() === void 0) return "cancelled";
+      const dirty = this.documentValue?.snapshot.dirty === true || (this.documentValue?.pendingSource().changes.length ?? 0) > 0;
       const include = this.dom.querySelector(".publish-include-code input");
       const result = await this.runService("publish", { include_code: include?.checked === true });
       await this.downloadServiceResult(result);
+      this.actionNotice = dirty ? "Published the last saved version. Unsaved changes were not included." : "Published HTML downloaded.";
+      this.renderStatus();
     }
     return "ok";
   }
@@ -25899,22 +25901,12 @@ ${jupyterTrace.map((line, index) => `${index + 1}. ${line}`).join("\n")}` : ""
     return view2?.editor?.getDoc() ?? view2?.fallback?.value ?? this.requireCell(key).desiredBody.join("\n");
   }
   async action(operation) {
-    this.actionCount += 1;
     this.actionNotice = null;
-    this.cellActionsSignature = "";
-    if (this.documentValue) {
-      this.renderControls(this.documentValue.snapshot);
-    }
     try {
       const result = await operation();
       this.actionError = null;
       return result;
     } finally {
-      this.actionCount -= 1;
-      if (this.documentValue) {
-        this.renderControls(this.documentValue.snapshot);
-        this.renderAllCellActions();
-      }
       this.renderStatus();
     }
   }
@@ -25939,7 +25931,6 @@ ${jupyterTrace.map((line, index) => `${index + 1}. ${line}`).join("\n")}` : ""
       editorHelpError: Boolean(editorHelpError),
       transportError: Boolean(this.transportError),
       editorHelpRestarting: this.editorHelpRestarting,
-      actionCount: this.actionCount,
       recovery: { status: recovery.status, local: recovery.local !== null, candidate: recovery.candidate === null ? null : [recovery.candidate.state, recovery.candidate.documentRevision], uncertainRun: recovery.uncertainRun, corruption: recovery.corruption?.code ?? null, persistenceError: recovery.persistenceError?.code ?? null }
     });
     if (signature === this.statusSignature) return;
@@ -25950,7 +25941,7 @@ ${jupyterTrace.map((line, index) => `${index + 1}. ${line}`).join("\n")}` : ""
       const retry = elementNode(this.dom, "button", "btn mini status-action", "Retry editor help");
       retry.type = "button";
       retry.dataset.statusAction = "retry-editor-help";
-      retry.disabled = this.editorHelpRestarting || this.actionCount > 0;
+      retry.disabled = this.editorHelpRestarting;
       if (this.editorHelpRestarting) retry.setAttribute("aria-busy", "true");
       this.status.appendChild(retry);
     }
@@ -25970,7 +25961,7 @@ ${jupyterTrace.map((line, index) => `${index + 1}. ${line}`).join("\n")}` : ""
     const restart = elementNode(this.dom, "button", "btn mini status-action", "Restart R");
     restart.type = "button";
     restart.dataset.statusAction = "restart-runtime";
-    restart.disabled = this.hostClosed || this.actionCount > 0 || this.documentValue?.snapshot.runtime.busy === true;
+    restart.disabled = this.hostClosed || this.documentValue?.snapshot.runtime.busy === true;
     if (restart.disabled) restart.setAttribute("aria-disabled", "true");
     panel.appendChild(restart);
     this.status.appendChild(panel);
@@ -25990,7 +25981,6 @@ ${jupyterTrace.map((line, index) => `${index + 1}. ${line}`).join("\n")}` : ""
       const button = elementNode(this.dom, "button", "btn mini", label);
       button.type = "button";
       button.dataset.recovery = "true";
-      button.disabled = this.actionCount > 0;
       button.addEventListener("click", () => {
         void this.action(action).catch((error61) => this.showError(error61));
       });

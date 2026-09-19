@@ -300,7 +300,6 @@ function snapshot(body: string[]): HostSnapshot {
       analysisEnvironmentId: "large-envelope-analysis",
       executionMode: "automatic",
       runOnStartup: false,
-      packageOperationActive: false,
       busy: false,
       activeRunId: null,
     },

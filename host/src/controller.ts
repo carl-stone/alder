@@ -400,8 +400,6 @@ export class Controller {
   private activeBatch: Map<string, ActiveEvaluation> | null = null;
   private readonly interruptedRuns = new Map<string, NonNullable<EngineResponse["error"]>>();
   private pumpPromise: Promise<void> | null = null;
-  private packageOperationActive = false;
-  private packageOperationClientId: string | undefined;
   private runPreparationActive = false;
   private runPreparationCancellation: {
     operationId: string;
@@ -821,8 +819,9 @@ export class Controller {
 
   publishPackageProgress(operationId: string, progress: unknown, clientId?: string): void {
     if (this.closed) return;
-    const owner = clientId ?? this.packageOperationClientId ?? INTERNAL_CLIENT_ID;
-    const operation = this.operationFor(operationId, owner);
+    const operation = clientId === undefined
+      ? [...this.operations.values()].find((candidate) => candidate.id === operationId && candidate.kind === "packages-install" && !isTerminal(candidate.status))
+      : this.operationFor(operationId, clientId);
     if (operation === undefined || operation.kind !== "packages-install" || operation.status !== "running") return;
     const parsed = operationProgressSchema.safeParse(progress);
     if (!parsed.success) return;
@@ -1131,7 +1130,6 @@ export class Controller {
     this.executionReady = false;
     this.kernelAvailable = false;
     this.analyzerAvailable = false;
-    this.packageOperationActive = false;
     this.runPreparationActive = false;
     this.runPreparationCancellation = null;
     this.runtimeContextReservation = undefined;
@@ -1928,7 +1926,6 @@ export class Controller {
 
   private async prepareRun(command: Extract<HostCommand, { type: "run" }>): Promise<unknown> {
     this.assertNoRuntimeContextReservation();
-    this.assertNoPackageOperation();
     this.assertExecutionPossible();
     if (this.runPreparationActive
       || (this.activeEvaluation !== null && this.activeEvaluation.cancelMode === null)
@@ -1983,7 +1980,6 @@ export class Controller {
       await this.ensureCurrentAnalysis();
       this.assertDocumentRevision(runDocumentRevision);
       if (this.cancelRunPreparation(preparation)) return undefined;
-      this.assertNoPackageOperation();
       this.assertExecutionPossible();
       this.assertGraphRunnable();
 
@@ -2058,7 +2054,6 @@ export class Controller {
     clientId = "internal",
   ): string {
     this.assertNoRuntimeContextReservation();
-    this.assertNoPackageOperation();
     this.assertExecutionPossible();
     const operation = this.operationFor(operationId, clientId);
     if (operation === undefined) throw new ControllerError("internal_error", "run operation missing", 500);
@@ -2131,7 +2126,7 @@ export class Controller {
       && this.queue.length === 0
       && !this.runPreparationActive
       && this.queuedRunCommands.size === 0
-      && !this.packageOperationActive
+      && !this.packageInstallActive()
       && this.runtimeContextReservation === undefined;
   }
 
@@ -4042,7 +4037,7 @@ export class Controller {
       || this.activeEvaluation !== null
       || this.queue.length > 0
       || this.runPreparationActive
-      || this.packageOperationActive
+      || this.packageInstallActive()
       || this.runtimeContextReservation !== undefined
     ) return;
     this.widgetReconciliationScheduled = true;
@@ -4060,7 +4055,7 @@ export class Controller {
       || this.activeEvaluation !== null
       || this.queue.length > 0
       || this.runPreparationActive
-      || this.packageOperationActive
+      || this.packageInstallActive()
       || this.runtimeContextReservation !== undefined
     ) return;
     this.widgetReconciliationPreparing = true;
@@ -4071,7 +4066,7 @@ export class Controller {
         || this.activeEvaluation !== null
         || this.queue.length > 0
         || this.runPreparationActive
-        || this.packageOperationActive
+        || this.packageInstallActive()
         || this.runtimeContextReservation !== undefined
       ) return;
 
@@ -4629,20 +4624,13 @@ export class Controller {
   }
 
 
-  private assertPackageInstallCanStart(): void {
+  private assertPackageInstallCanStart(operationId: string, clientId: string): void {
     this.assertStarted();
     this.assertNoRuntimeContextReservation();
-    if (this.packageOperationActive) {
+    if (this.packageInstallActive(operationId, clientId)) {
       throw new ControllerError(
         "operation_in_progress",
         "a package installation is already in progress",
-        409,
-      );
-    }
-    if (this.runPreparationActive || this.activeEvaluation !== null || this.queue.length > 0) {
-      throw new ControllerError(
-        "run_in_progress",
-        "cannot install packages while a run is active or being prepared",
         409,
       );
     }
@@ -4667,15 +4655,9 @@ export class Controller {
     const operation = this.operationFor(operationId, clientId);
     if (operation !== undefined && operation.status === "accepted") operation.status = "running";
     if (operation !== undefined) this.rememberOperation(operation);
-    this.packageOperationActive = true;
-    this.packageOperationClientId = clientId;
-    this.bump("runtime", this.runtimeSnapshot(), { operationId });
     try {
       return await this.runPackageInstall(payload, operationId, clientId);
     } finally {
-      this.packageOperationActive = false;
-      this.packageOperationClientId = undefined;
-      this.bump("runtime", this.runtimeSnapshot(), { operationId });
       this.scheduleReactiveRun();
     }
   }
@@ -4707,6 +4689,7 @@ export class Controller {
     const restartRequired = !isRecord(result) || result.mutatedLibrary !== false;
     if (restartRequired) {
       try {
+        if (this.pumpPromise !== null) await this.pumpPromise;
         await this.restartAfterPackageInstall(operationId, clientId);
       } catch (error) {
         restartFailure = asControllerError(error, "worker_unavailable", 503);
@@ -5068,7 +5051,7 @@ export class Controller {
   private async refreshVariables(): Promise<void> {
     if (this.closed || !this.kernelAvailable || !this.variableRefreshRequested
       || this.activeEvaluation !== null || this.queue.length > 0
-      || this.packageOperationActive || this.variableRefreshInFlight) return;
+      || this.packageInstallActive() || this.variableRefreshInFlight) return;
     this.variableRefreshRequested = false;
     this.variableRefreshInFlight = true;
     const generation = this.variableGeneration;
@@ -5343,6 +5326,7 @@ export class Controller {
     operation.settledAt = Date.now();
     this.rememberOperation(operation);
     this.notifyOperationWaiters(operation);
+    if (operation.kind === "packages-install") this.scheduleReactiveRun();
   }
 
   private failOperation(id: string, error: HostError, clientId = "internal"): void {
@@ -5355,6 +5339,7 @@ export class Controller {
     operation.settledAt = Date.now();
     this.rememberOperation(operation);
     this.notifyOperationWaiters(operation);
+    if (operation.kind === "packages-install") this.scheduleReactiveRun();
   }
 
   private cancelOperation(id: string, error: HostError, clientId = "internal"): void {
@@ -5367,6 +5352,7 @@ export class Controller {
     operation.settledAt = Date.now();
     this.rememberOperation(operation);
     this.notifyOperationWaiters(operation);
+    if (operation.kind === "packages-install") this.scheduleReactiveRun();
   }
 
   private markOperationCancellationRequested(id: string, clientId = "internal"): void {
@@ -5547,17 +5533,12 @@ export class Controller {
       case "packages-install":
         this.assertDocumentRevision(command.expectedDocumentRevision);
         this.assertKernelEpoch(command.kernelEpoch);
-        this.assertPackageInstallCanStart();
+        this.assertPackageInstallCanStart(command.requestId, command.clientId);
         this.assertExecutionPossible();
         return this.runLongService("packages.install", { packages: command.packages }, command.requestId, command.clientId);
       case "publish": {
         this.assertDocumentRevision(command.expectedDocumentRevision);
-        const reservation = this.reserveRuntimeContext();
-        try {
-          return await this.callService("publish", { includeCode: command.includeCode, outputPath: command.outputPath });
-        } finally {
-          reservation.release();
-        }
+        return this.callService("publish", { includeCode: command.includeCode, outputPath: command.outputPath });
       }
       case "save-as":
         return this.executeSourceService({
@@ -5706,7 +5687,6 @@ export class Controller {
       analysisEnvironmentId: this.analysisEnvironmentIdValue,
       executionMode: this.executionMode,
       runOnStartup: this.runOnStartup,
-      packageOperationActive: this.packageOperationActive,
       busy: this.activeEvaluation !== null || this.queue.length > 0 || this.runPreparationActive || this.queuedRunCommands.size > 0,
       activeRunId: this.activeEvaluation?.job.runId ?? queuedRunId,
     };
@@ -5846,13 +5826,22 @@ export class Controller {
   }
 
   private assertNoPackageOperation(): void {
-    if (this.packageOperationActive) {
+    if (this.packageInstallActive()) {
       throw new ControllerError(
         "package_operation_in_progress",
         "cannot start a run while package installation is in progress",
         409,
       );
     }
+  }
+
+  private packageInstallActive(exceptOperationId?: string, exceptClientId?: string): boolean {
+    for (const operation of this.operations.values()) {
+      if (operation.kind !== "packages-install" || isTerminal(operation.status)) continue;
+      if (operation.id === exceptOperationId && operation.clientId === exceptClientId) continue;
+      return true;
+    }
+    return false;
   }
 
   private runtimeRequestCurrent(operationId: string, generation: number, clientId = "internal"): boolean {

@@ -33525,7 +33525,7 @@ var runtimeStateSchema = external_exports.object({
   analysisEnvironmentId: analysisEnvironmentIdSchema.nullable()
 }).strict();
 var runtimeModeSchema = external_exports.enum(["automatic", "lazy"]);
-var hostRuntimeSchema = runtimeStateSchema.extend({ executionMode: runtimeModeSchema, runOnStartup: external_exports.boolean(), packageOperationActive: external_exports.boolean(), busy: external_exports.boolean(), activeRunId: idSchema.nullable() }).strict();
+var hostRuntimeSchema = runtimeStateSchema.extend({ executionMode: runtimeModeSchema, runOnStartup: external_exports.boolean(), busy: external_exports.boolean(), activeRunId: idSchema.nullable() }).strict();
 var diskObservationSchema = external_exports.object({ state: external_exports.enum(["untitled", "absent", "present", "unreadable"]), digest: external_exports.string().regex(/^[0-9a-f]{64}$/).nullable(), version: boundedUtf8StringSchema(MAX_ID_BYTES).nullable(), error: hostErrorSchema.nullable() }).strict();
 var sidecarObservationsSchema = external_exports.object({ config: diskObservationSchema, layout: diskObservationSchema, packages: diskObservationSchema }).strict();
 var hostConfigurationSchema = external_exports.object({
