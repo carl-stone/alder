@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdir, open, readFile, rename, rm, stat } from "node:fs/promises";
 import { dirname, join, basename } from "node:path";
 import envPaths from "env-paths";
-import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
+import { parseDocument as parseYamlDocument, stringify as stringifyYaml } from "yaml";
 import { z } from "zod";
 import type { NotebookDocument } from "./notebook.js";
 import {
@@ -54,7 +54,11 @@ export function parseYamlMapping(text: string, kind: string): Record<string, unk
   }
   let parsed: unknown;
   try {
-    parsed = text.trim() === "" ? {} : parseYaml(text, { maxAliasCount: 100 });
+    if (text.trim() === "") return {};
+    const document = parseYamlDocument(text, { strict: true });
+    const problem = document.errors[0] ?? document.warnings[0];
+    if (problem !== undefined) throw problem;
+    parsed = document.toJS({ maxAliasCount: 100 });
   } catch (error) {
     throw new ConfigError(kind, `malformed YAML: ${error instanceof Error ? error.message : String(error)}`);
   }

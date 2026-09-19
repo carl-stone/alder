@@ -1,9 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { execFile as execFileCallback } from "node:child_process";
+import { Readable, Writable } from "node:stream";
 import { promisify } from "node:util";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -121,38 +122,53 @@ test("package worker rejects an outside worker before sourcing its bootstrap", a
   }
 });
 
-test("renv restore honors the locked version over a newer repository candidate", async () => {
+test("package status runs in the selected project R environment without changing the host", async () => {
   const fixture = await packageFixture();
   try {
-    const repository = await localSourceRepository(fixture.directory, "alderlockedpkg");
-    const lockfile = {
-      R: { Version: "4.6.1", Repositories: [{ Name: "CRAN", URL: pathToFileURL(repository).href }] },
-      Packages: {
-        alderlockedpkg: { Package: "alderlockedpkg", Version: "1.0.0", Source: "Repository", Repository: "CRAN" },
-      },
+    await mkdir(join(fixture.directory, ".alder"), { recursive: true });
+    await writeFile(join(fixture.directory, ".alder", "packages.yaml"), "packages: [jsonlite]\n");
+    const environment = {
+      rscript: "/selected/R/bin/Rscript",
+      rHome: "/selected/R/lib/R",
+      version: "4.6.1",
+      platform: process.platform,
+      arch: process.arch,
+      libraryPaths: ["/selected/R/library"],
+      identity: "selected-r",
     };
-    const lockfilePath = join(fixture.directory, "renv.lock");
-    await writeFile(lockfilePath, JSON.stringify(lockfile));
-    const response = await runPackageWorker(fixture.directory, {
-      command: "install",
-      payload: {
-        projectDirectory: fixture.directory,
-        packages: ["alderlockedpkg"],
-        mode: "renv",
-        lockfilePath,
-        libraryPath: null,
-        libraryPaths: [],
+    const originalRHome = process.env.R_HOME;
+    let spawnOptions: Parameters<ProcessScope["spawn"]>[0] | undefined;
+    const processScope: ProcessScope = {
+      spawn: async (options) => {
+        spawnOptions = options;
+        const outputPath = String(options.args.at(-1));
+        await writeFile(outputPath, JSON.stringify({ ok: true, result: {
+          ok: true,
+          status: "installed",
+          library: null,
+          records: [{ package: "jsonlite", status: "installed", version: "2.0.0", library: "/selected/R/library" }],
+        }}));
+        return {
+          pid: 1,
+          startIdentity: "selected-r-fixture",
+          stdin: new Writable({ write(_chunk, _encoding, callback) { callback(); } }),
+          stdout: Readable.from([]),
+          stderr: null,
+          exited: Promise.resolve({ code: 0, signal: null }),
+          terminate: async () => undefined,
+        };
       },
-    });
-    assert.equal(response.ok, true);
-    assert.equal(response.result.ok, true, JSON.stringify(response));
-    assert.equal(response.result.status, "installed");
-    assert.deepEqual(response.result.records, [{
-      package: "alderlockedpkg",
-      status: "installed",
-      version: "1.0.0",
-      library: response.result.library,
-    }]);
+      close: async () => undefined,
+    };
+    const manager = new PackageManager({ ...fixture.options, processScope, environment });
+    const status = await manager.status();
+    assert.equal(status.installed[0], "jsonlite");
+    assert.equal(spawnOptions?.executable, environment.rscript);
+    assert.equal(spawnOptions?.cwd, fixture.directory);
+    assert.equal(spawnOptions?.environment.R_HOME, environment.rHome);
+    assert.equal(spawnOptions?.environment.ALDER_R_LIBRARIES, JSON.stringify(environment.libraryPaths));
+    assert.equal(process.env.R_HOME, originalRHome);
+    await manager.close();
   } finally {
     await fixture.remove();
   }
@@ -179,42 +195,6 @@ test("renv lock rejects an undeclared package before starting the worker", async
     await fixture.remove();
   }
 });
-
-async function localSourceRepository(root: string, packageName: string): Promise<string> {
-  const repository = join(root, "repository");
-  const contributionDirectory = join(repository, "src", "contrib");
-  await mkdir(contributionDirectory, { recursive: true });
-  for (const version of ["1.0.0", "2.0.0"]) {
-    const sourceParent = join(root, "source-" + version);
-    const sourceDirectory = join(sourceParent, packageName);
-    await mkdir(join(sourceDirectory, "R"), { recursive: true });
-    await writeFile(join(sourceDirectory, "DESCRIPTION"), [
-      "Package: " + packageName,
-      "Type: Package",
-      "Title: Alder lock regression fixture",
-      "Version: " + version,
-      "Depends: R (>= 4.0.0)",
-      "Authors@R: person(\"Alder\", \"Tester\", email = \"alder@example.invalid\", role = c(\"aut\", \"cre\"))",
-      "Description: Package fixture for lockfile tests.",
-      "License: GPL-3",
-      "Encoding: UTF-8",
-      "LazyData: true",
-      "",
-    ].join("\n"));
-    await writeFile(join(sourceDirectory, "NAMESPACE"), "export(locked_value)\n");
-    await writeFile(join(sourceDirectory, "R", "locked-value.R"), "locked_value <- function() \"" + version + "\"\n");
-    await execFile(process.env.R_BIN ?? "R", ["CMD", "build", "--no-manual", packageName], { cwd: sourceParent });
-    await rename(join(sourceParent, packageName + "_" + version + ".tar.gz"),
-      join(contributionDirectory, packageName + "_" + version + ".tar.gz"));
-  }
-  await execFile(process.env.RSCRIPT ?? "Rscript", [
-    "--vanilla",
-    "-e",
-    "tools::write_PACKAGES(commandArgs(TRUE)[[1L]], type = \"source\", latestOnly = FALSE)",
-    contributionDirectory,
-  ]);
-  return repository;
-}
 
 interface WorkerPackageResponse {
   readonly ok: boolean;

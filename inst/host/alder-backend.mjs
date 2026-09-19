@@ -59959,7 +59959,11 @@ function parseYamlMapping(text2, kind) {
   }
   let parsed;
   try {
-    parsed = text2.trim() === "" ? {} : (0, import_yaml.parse)(text2, { maxAliasCount: 100 });
+    if (text2.trim() === "") return {};
+    const document = (0, import_yaml.parseDocument)(text2, { strict: true });
+    const problem = document.errors[0] ?? document.warnings[0];
+    if (problem !== void 0) throw problem;
+    parsed = document.toJS({ maxAliasCount: 100 });
   } catch (error61) {
     throw new ConfigError(kind, `malformed YAML: ${error61 instanceof Error ? error61.message : String(error61)}`);
   }
@@ -73271,6 +73275,7 @@ var Controller = class {
     this.causalWidgetFailures.clear();
     this.obsoleteWidgetRequests.clear();
     this.widgetReconciliationRoots.clear();
+    this.pendingInspection?.cancellation.abort();
     this.pendingInspection = null;
     this.pendingLazyOutputs.clear();
     this.pendingTablePages.clear();
@@ -74756,6 +74761,17 @@ var Controller = class {
         return { runId: runId2, requested: true };
       }
       if (cancelledQueued) return { runId: null, requested: true };
+      if (targetRunId === void 0 && this.pendingInspection !== null) {
+        const pending = this.pendingInspection;
+        this.pendingInspection = null;
+        pending.cancellation.abort();
+        this.cancelOperation(
+          pending.operationId,
+          hostError("interrupted", "Interrupted", pending.operationId),
+          pending.clientId
+        );
+        return { runId: null, requested: true };
+      }
       throw new ControllerError("no_run_in_progress", "no run in progress", 409);
     }
     if (active.cancelMode !== null) {
@@ -74939,6 +74955,7 @@ var Controller = class {
     }
     this.lastValue = null;
     this.clearVariables();
+    this.pendingInspection?.cancellation.abort();
     this.pendingInspection = null;
     this.pendingLazyOutputs.clear();
     this.pendingTablePages.clear();
@@ -75012,6 +75029,7 @@ var Controller = class {
     this.interruptedRuns.clear();
     this.obsoleteWidgetRequests.clear();
     this.widgetReconciliationRoots.clear();
+    this.pendingInspection?.cancellation.abort();
     this.pendingInspection = null;
     this.pendingLazyOutputs.clear();
     this.pendingTablePages.clear();
@@ -75410,6 +75428,7 @@ var Controller = class {
     }
     if (this.pendingInspection !== null) {
       const pending = this.pendingInspection;
+      pending.cancellation.abort();
       this.pendingInspection = null;
       this.failOperation(
         pending.operationId,
@@ -76000,8 +76019,10 @@ var Controller = class {
       clientId,
       name,
       owner: identity?.id ?? null,
-      revision: identity?.revision ?? null
+      revision: identity?.revision ?? null,
+      cancellation: new AbortController()
     };
+    const inspection = this.pendingInspection;
     const outputScope = {
       sessionEpoch: this.epochValue,
       documentRevision: this.documentRevisionValue,
@@ -76014,7 +76035,7 @@ var Controller = class {
     void this.engine.request("get_value", {
       name,
       token: operationId
-    }, { outputScope }).then((raw) => {
+    }, { outputScope, signal: inspection.cancellation.signal }).then((raw) => {
       if (!this.runtimeRequestCurrent(operationId, generation, clientId)) return;
       const response = engineResponseSchema.parse(raw);
       const responsePayload = response;
@@ -76815,26 +76836,12 @@ var Controller = class {
     try {
       const response = engineResponseSchema.parse(await this.engine.request("env_snapshot", {}));
       if (this.closed || generation !== this.variableGeneration || !this.kernelAvailable) return;
-      if (!response.ok) {
-        this.replaceLastActionError(hostError(
-          "inspection_failed",
-          response.error?.message || "R variable snapshot failed",
-          void 0,
-          response.error
-        ));
-        return;
-      }
+      if (!response.ok) return;
       const variables = parseRuntimeVariables(response.variables, this.graphValue, this.cells);
       if (stableStringify(variables) === stableStringify(this.variables)) return;
       this.variables = variables;
       this.bump("variables", clone3(variables));
-    } catch (error61) {
-      if (!this.closed && generation === this.variableGeneration && this.kernelAvailable) {
-        this.replaceLastActionError(hostError(
-          "inspection_failed",
-          `invalid variable snapshot: ${messageOf2(error61)}`
-        ));
-      }
+    } catch {
     } finally {
       this.variableRefreshInFlight = false;
       if (this.variableRefreshRequested) this.scheduleVariableRefresh();
@@ -76929,6 +76936,7 @@ var Controller = class {
     const currentOwner = this.graphValue.definitionOwner(pending.name);
     const fresh = pending.owner === null ? currentOwner === void 0 && !this.definitionIsInvalidated(pending.name) : currentOwner === pending.owner && this.cellById(pending.owner)?.revision === pending.revision && this.statusOf(pending.owner) === "done";
     if (fresh) return;
+    pending.cancellation.abort();
     this.pendingInspection = null;
     this.failOperation(
       pending.operationId,
@@ -76939,6 +76947,7 @@ var Controller = class {
   cancelRuntimeRequestsOwnedBy(id2, inspectionCode) {
     if (this.pendingInspection?.owner === id2) {
       const pending = this.pendingInspection;
+      pending.cancellation.abort();
       this.pendingInspection = null;
       this.failOperation(
         pending.operationId,
@@ -77061,6 +77070,17 @@ var Controller = class {
     if (operation === void 0 || isTerminal(operation.status)) return;
     operation.status = "error";
     if (operation.kind !== "run") operation.result = null;
+    operation.error = clone3(error61);
+    operation.documentRevision = this.documentRevisionValue;
+    operation.settledAt = Date.now();
+    this.rememberOperation(operation);
+    this.notifyOperationWaiters(operation);
+  }
+  cancelOperation(id2, error61, clientId = "internal") {
+    const operation = this.operationFor(id2, clientId);
+    if (operation === void 0 || isTerminal(operation.status)) return;
+    operation.status = "cancelled";
+    operation.result = null;
     operation.error = clone3(error61);
     operation.documentRevision = this.documentRevisionValue;
     operation.settledAt = Date.now();
@@ -80669,7 +80689,7 @@ var Engine = class extends EventEmitter3 {
       return engineResponseSchema.parse(await this.runArkCommand(command, requestPayload));
     }
     const outputScope = command === "get_value" || command === "lazy_eval" ? requestOutputScope(options?.outputScope) : void 0;
-    const response = await this.runArkCommand(command, payload);
+    const response = await this.runArkCommand(command, payload, true, options?.signal);
     return engineResponseSchema.parse(await this.normalizeRequestResult(command, outputScope, response));
   }
   async interrupt(requestId) {
@@ -81513,7 +81533,7 @@ var Engine = class extends EventEmitter3 {
     const normalized = await store.normalizeAlder(response[field], scope);
     return { ...response, [field]: normalized };
   }
-  async runArkCommand(command, payload, trace = true) {
+  async runArkCommand(command, payload, trace = true, signal) {
     const kernel = this.kernel;
     if (kernel?.ready !== true) throw new EngineTransportError("kernel is unavailable", "kernel");
     if (this.pendingKernelRequests + this.evaluations.size >= MAX_PENDING_REQUESTS2) {
@@ -81530,7 +81550,16 @@ var Engine = class extends EventEmitter3 {
     const eventStream = new ArkEventStreamDecoder(this.arkEventToken, this.maxArkPayloadBytes());
     try {
       const encoded = encodeArkRequest({ request: marker, command, payload }, this.maxArkPayloadBytes());
+      let started = false;
+      const interrupt = () => {
+        if (started) void kernel.interrupt().catch(() => void 0);
+      };
+      signal?.addEventListener("abort", interrupt, { once: true });
       const execution = await kernel.execute(arkCall("request", encoded), {
+        onStarted: () => {
+          started = true;
+          if (signal?.aborted) void kernel.interrupt().catch(() => void 0);
+        },
         onMessage: (message2) => {
           messageTail = messageTail.then(() => {
             if (message2.header.msg_type !== "stream") return;
@@ -81552,7 +81581,7 @@ var Engine = class extends EventEmitter3 {
             messageError ??= asError2(error61);
           });
         }
-      }, { storeHistory: false, auxiliary: command === "env_snapshot" });
+      }, { storeHistory: false, auxiliary: command === "env_snapshot", signal }).finally(() => signal?.removeEventListener("abort", interrupt));
       await messageTail;
       if (messageError !== void 0) throw messageError;
       eventStream.finish();
@@ -109104,8 +109133,8 @@ function assertSettledSnapshot(snapshot) {
     throw new PublishingError("publish_not_ready", "publish requires a valid host snapshot");
   }
   const runtime = snapshot.runtime;
-  if (!runtime.documentReady || !runtime.executionReady || runtime.analyzerState !== "ready" || runtime.kernelState !== "ready" || runtime.activeRunId !== null || runtime.busy || runtime.packageOperationActive || runtime.executionBlockedReason !== null) {
-    throw new PublishingError("publish_not_ready", "publish requires an idle, unblocked host");
+  if (snapshot.dirty || !runtime.documentReady || !runtime.executionReady || runtime.analyzerState !== "ready" || runtime.kernelState !== "ready" || runtime.activeRunId !== null || runtime.busy || runtime.packageOperationActive || runtime.executionBlockedReason !== null) {
+    throw new PublishingError("publish_not_ready", snapshot.dirty ? "save the notebook before publishing" : "publish requires an idle, unblocked host");
   }
   const cells = snapshot.cells;
   const disabled = new Set(

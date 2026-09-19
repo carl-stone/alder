@@ -21,6 +21,7 @@ import type {
   EngineAdapter,
   EngineEvent,
   EngineHandshake,
+  EngineRequestOptions,
   REnvironment,
   EngineResponse,
   EvaluationPayload,
@@ -58,6 +59,7 @@ class FakeEngine implements EngineAdapter {
   readonly evaluations: EvaluationPayload[] = [];
   readonly interrupts: Array<number | undefined> = [];
   readonly requests: Array<{ command: string; payload: Record<string, unknown> }> = [];
+  readonly requestSignals = new Map<string, AbortSignal | undefined>();
   readonly pendingEvaluations: PendingEvaluation[] = [];
   readonly failureListeners = new Set<(role: "kernel" | "analyzer" | "services", error: Error) => void>();
   private outputStore: OutputStore | undefined;
@@ -201,8 +203,9 @@ class FakeEngine implements EngineAdapter {
     return { ...response, outputs: response.outputs.map((output) => this.canonicalRecord(payload, output)) };
   }
 
-  async request(command: string, payload: Record<string, unknown> = {}): Promise<EngineResponse> {
+  async request(command: string, payload: Record<string, unknown> = {}, options?: EngineRequestOptions): Promise<EngineResponse> {
     this.requests.push({ command, payload: structuredClone(payload) });
+    this.requestSignals.set(command, options?.signal);
     return this.requestHandler(command, payload);
   }
   async interrupt(requestId?: number): Promise<{ requested: boolean; requestId?: number }> {
@@ -3740,6 +3743,7 @@ test("owner edits expire pending inspect, lazy, and table requests before late r
   });
   await startCommand(controller, edit);
   assert.equal((await controller.awaitOperation(inspect.requestId, "controller-tests")).error?.code, "stale_value");
+  assert.equal(engine.requestSignals.get("get_value")?.aborted, true);
   assert.equal((await controller.awaitOperation(lazy.requestId, "controller-tests")).error?.code, "lazy_expired");
   assert.equal((await controller.awaitOperation(table.requestId, "controller-tests")).error?.code, "table_unavailable");
   resolvers.get("get_value")?.({ ok: true, value: { kind: "text", text: "obsolete", truncated: false } });
@@ -3818,6 +3822,51 @@ test("output queries read bounded artifact pages without user JSON handle collis
     () => controller.query({ type: "output", handle: descriptor.handle, offset: 0, limit: 262_145 }),
     (error: unknown) => error instanceof ControllerError && error.code === "invalid_request",
   );
+  await controller.close();
+});
+
+test("Stop cancels explicit value inspection without blocking later edits", async () => {
+  const engine = new FakeEngine();
+  let resolveInspection!: (response: EngineResponse) => void;
+  engine.requestHandler = async (name) => name === "get_value"
+    ? new Promise((resolve) => { resolveInspection = resolve; })
+    : { ok: true };
+  const controller = createController({
+    engine,
+    notebook: notebook([["a", "x <- 1"]]),
+    config: resolveSettings({ notebook: { on_startup: false } }),
+  });
+  await controller.start();
+  const run = command(controller, { type: "run", scope: "all", changes: [] });
+  await startCommand(controller, run);
+  await settle(controller, run.requestId);
+
+  const inspect = command(controller, { type: "inspect", name: "x" });
+  await startCommand(controller, inspect);
+  await eventually(() => resolveInspection !== undefined);
+  const stop = command(controller, { type: "interrupt" });
+  await startCommand(controller, stop);
+  assert.equal((await settle(controller, stop.requestId)).error, null);
+  const cancelled = await controller.awaitOperation(inspect.requestId, "controller-tests");
+  assert.equal(cancelled.status, "cancelled");
+  assert.equal(cancelled.error?.code, "interrupted");
+  assert.equal(engine.requestSignals.get("get_value")?.aborted, true);
+
+  const edit = command(controller, {
+    type: "transaction",
+    changes: [{
+      type: "edit",
+      cell: { cellId: "a" },
+      expectedRevision: 0,
+      body: ["x <- 2"],
+      cellType: "code",
+    }],
+  });
+  await startCommand(controller, edit);
+  assert.equal((await settle(controller, edit.requestId)).error, null);
+  resolveInspection({ ok: true, value: { kind: "text", text: "obsolete", truncated: false } });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(controller.snapshot().lastValue, null);
   await controller.close();
 });
 
@@ -4203,7 +4252,7 @@ test("variable snapshots wait for idle input, retain ownership, and reject late 
   await controller.close();
 });
 
-test("variable snapshot failures stay nonfatal and surface inspection errors", async (context) => {
+test("automatic variable snapshot failures stay quiet and nonfatal", async (context) => {
   context.mock.timers.enable({ apis: ["setTimeout"] });
   const engine = new FakeEngine();
   engine.handshake = {
@@ -4224,13 +4273,9 @@ test("variable snapshot failures stay nonfatal and surface inspection errors", a
   const operation = await settle(controller, run.requestId);
   assert.equal(operation.error, null);
   context.mock.timers.tick(100);
-  await eventually(() => controller.snapshot().lastActionError?.code === "inspection_failed");
+  await new Promise((resolve) => setImmediate(resolve));
   assert.equal(controller.snapshot().runtime.executionReady, true);
-  assert.deepEqual(controller.snapshot().lastActionError, {
-    code: "inspection_failed",
-    message: "environment inspection failed",
-    details: { message: "environment inspection failed", code: "r_error", transport: true },
-  });
+  assert.equal(controller.snapshot().lastActionError, null);
 
   engine.requestHandler = async (name) => {
     if (name === "env_snapshot") throw new Error("snapshot transport closed");
@@ -4240,8 +4285,9 @@ test("variable snapshot failures stay nonfatal and surface inspection errors", a
   await startCommand(controller, rerun);
   assert.equal((await settle(controller, rerun.requestId)).error, null);
   context.mock.timers.tick(100);
-  await eventually(() => controller.snapshot().lastActionError?.message === "invalid variable snapshot: snapshot transport closed");
+  await new Promise((resolve) => setImmediate(resolve));
   assert.equal(controller.snapshot().runtime.executionReady, true);
+  assert.equal(controller.snapshot().lastActionError, null);
   await controller.close();
 });
 

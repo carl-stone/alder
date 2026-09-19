@@ -429,6 +429,34 @@ test("browser view reports typed check issues", async () => {
   });
 });
 
+test("Publish HTML saves current source before starting the service", async () => {
+  await withViewDom(async (dom, domWindow) => {
+    Object.defineProperty(globalThis, "location", { configurable: true, writable: true, value: { search: "?view=editor", href: "http://notebook.test/book.R?view=editor", origin: "http://notebook.test" } });
+    const document = new BrowserDocument(snapshot([]));
+    const calls: string[] = [];
+    const client = settingsClient({
+      save: async () => { calls.push("save"); return resultFor("save", null); },
+      commitEdits: async () => { calls.push("commit"); },
+      service: async (command: string) => {
+        calls.push(command);
+        throw new Error("publish fixture complete");
+      },
+    });
+    const view = new NotebookView(client, dom);
+    try {
+      view.render(document);
+      const button = [...dom.querySelectorAll<HTMLButtonElement>("button")]
+        .find((candidate) => candidate.textContent === "Publish HTML");
+      assert.ok(button);
+      button.dispatchEvent(new domWindow.Event("click", { bubbles: true, cancelable: true }));
+      await waitUntil(() => calls.includes("publish"));
+      assert.deepEqual(calls, ["save", "commit", "publish"]);
+    } finally {
+      view.destroy();
+    }
+  });
+});
+
 test("explicit runs flush output and keep stop independent while preparing", async () => {
   await withViewDom(async (dom, domWindow) => {
     const initial = snapshot([]);

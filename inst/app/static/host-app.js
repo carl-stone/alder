@@ -25398,6 +25398,7 @@ ${jupyterTrace.map((line, index) => `${index + 1}. ${line}`).join("\n")}` : ""
     includeLabel.append(include, this.dom.createTextNode(" Include code"));
     actionMenu.panel.appendChild(includeLabel);
     actionMenu.panel.appendChild(this.serviceButton("Publish HTML", async () => {
+      if (await this.saveNotebook() === void 0) return;
       const result = await this.runService("publish", { include_code: include.checked });
       await this.downloadServiceResult(result);
     }));

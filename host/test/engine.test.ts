@@ -672,6 +672,35 @@ test("automatic variable snapshots leave promises and user methods untouched", i
   }
 });
 
+test("explicit value inspection can be interrupted without wedging execution", integration, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "alder-engine-inspect-cancel-"));
+  const { engine, processScope } = await openEngine(directory);
+  try {
+    const epoch = (await engine.start()).kernel!.kernelEpoch;
+    const setup = await engine.evaluate(payload(epoch, "inspect-setup", "inspect-setup", `
+      print.slow_inspect <- function(x, ...) { Sys.sleep(30); invisible(x) }
+      slow_value <- structure(1L, class = "slow_inspect")
+    `));
+    assert.equal(setup.ok, true);
+    const cancellation = new AbortController();
+    const inspection = engine.request("get_value", { name: "slow_value" }, {
+      outputScope: {
+        sessionEpoch: "engine-v2-test-session", documentRevision: 1, kernelEpoch: epoch,
+        runId: null, cellId: null, revision: null,
+      },
+      signal: cancellation.signal,
+    });
+    setTimeout(() => cancellation.abort(), 250).unref();
+    const response = await inspection;
+    assert.equal(response.ok, false);
+    const resumed = await engine.evaluate(payload(epoch, "inspect-resumed", "inspect-resumed", "2L + 2L"));
+    assert.equal(resumed.ok, true);
+    assert.match(JSON.stringify(resumed.outputs), /4/);
+  } finally {
+    await closeEngine(engine, processScope, directory);
+  }
+});
+
 test("nested output conversion preserves malformed child errors", integration, async () => {
   const directory = await mkdtemp(join(tmpdir(), "alder-engine-output-walk-"));
   const { engine, processScope } = await openEngine(directory);

@@ -322,6 +322,7 @@ export class Controller {
     name: string;
     owner: string | null;
     revision: number | null;
+    cancellation: AbortController;
   } | null = null;
   private readonly pendingLazyOutputs = new Map<
     string,
@@ -1152,6 +1153,7 @@ export class Controller {
     this.causalWidgetFailures.clear();
     this.obsoleteWidgetRequests.clear();
     this.widgetReconciliationRoots.clear();
+    this.pendingInspection?.cancellation.abort();
     this.pendingInspection = null;
     this.pendingLazyOutputs.clear();
     this.pendingTablePages.clear();
@@ -2830,6 +2832,17 @@ export class Controller {
         return { runId, requested: true };
       }
       if (cancelledQueued) return { runId: null, requested: true };
+      if (targetRunId === undefined && this.pendingInspection !== null) {
+        const pending = this.pendingInspection;
+        this.pendingInspection = null;
+        pending.cancellation.abort();
+        this.cancelOperation(
+          pending.operationId,
+          hostError("interrupted", "Interrupted", pending.operationId),
+          pending.clientId,
+        );
+        return { runId: null, requested: true };
+      }
       throw new ControllerError("no_run_in_progress", "no run in progress", 409);
     }
     if (active.cancelMode !== null) {
@@ -3034,6 +3047,7 @@ export class Controller {
     }
     this.lastValue = null;
     this.clearVariables();
+    this.pendingInspection?.cancellation.abort();
     this.pendingInspection = null;
     this.pendingLazyOutputs.clear();
     this.pendingTablePages.clear();
@@ -3109,6 +3123,7 @@ export class Controller {
     this.interruptedRuns.clear();
     this.obsoleteWidgetRequests.clear();
     this.widgetReconciliationRoots.clear();
+    this.pendingInspection?.cancellation.abort();
     this.pendingInspection = null;
     this.pendingLazyOutputs.clear();
     this.pendingTablePages.clear();
@@ -3548,6 +3563,7 @@ export class Controller {
     }
     if (this.pendingInspection !== null) {
       const pending = this.pendingInspection;
+      pending.cancellation.abort();
       this.pendingInspection = null;
       this.failOperation(
         pending.operationId,
@@ -4276,7 +4292,9 @@ export class Controller {
       name,
       owner: identity?.id ?? null,
       revision: identity?.revision ?? null,
+      cancellation: new AbortController(),
     };
+    const inspection = this.pendingInspection;
     const outputScope: OutputScope = {
       sessionEpoch: this.epochValue,
       documentRevision: this.documentRevisionValue,
@@ -4289,7 +4307,7 @@ export class Controller {
     void this.engine.request("get_value", {
       name,
       token: operationId,
-    }, { outputScope }).then((raw) => {
+    }, { outputScope, signal: inspection.cancellation.signal }).then((raw) => {
       if (!this.runtimeRequestCurrent(operationId, generation, clientId)) return;
       const response = engineResponseSchema.parse(raw);
       const responsePayload = response as unknown as Record<string, unknown>;
@@ -5202,26 +5220,14 @@ export class Controller {
     try {
       const response = engineResponseSchema.parse(await this.engine.request("env_snapshot", {}));
       if (this.closed || generation !== this.variableGeneration || !this.kernelAvailable) return;
-      if (!response.ok) {
-        this.replaceLastActionError(hostError(
-          "inspection_failed",
-          response.error?.message || "R variable snapshot failed",
-          undefined,
-          response.error,
-        ));
-        return;
-      }
+      if (!response.ok) return;
       const variables = parseRuntimeVariables(response.variables, this.graphValue, this.cells);
       if (stableStringify(variables) === stableStringify(this.variables)) return;
       this.variables = variables;
       this.bump("variables", clone(variables));
-    } catch (error) {
-      if (!this.closed && generation === this.variableGeneration && this.kernelAvailable) {
-        this.replaceLastActionError(hostError(
-          "inspection_failed",
-          `invalid variable snapshot: ${messageOf(error)}`,
-        ));
-      }
+    } catch {
+      // Automatic inspection is advisory. Explicit inspection reports its own
+      // operation error, while a failed refresh leaves editing and execution quiet.
     } finally {
       this.variableRefreshInFlight = false;
       if (this.variableRefreshRequested) this.scheduleVariableRefresh();
@@ -5326,6 +5332,7 @@ export class Controller {
         && this.cellById(pending.owner)?.revision === pending.revision
         && this.statusOf(pending.owner) === "done";
     if (fresh) return;
+    pending.cancellation.abort();
     this.pendingInspection = null;
     this.failOperation(
       pending.operationId,
@@ -5337,6 +5344,7 @@ export class Controller {
   private cancelRuntimeRequestsOwnedBy(id: string, inspectionCode: string): void {
     if (this.pendingInspection?.owner === id) {
       const pending = this.pendingInspection;
+      pending.cancellation.abort();
       this.pendingInspection = null;
       this.failOperation(
         pending.operationId,
@@ -5487,6 +5495,18 @@ export class Controller {
     if (operation === undefined || isTerminal(operation.status)) return;
     operation.status = "error";
     if (operation.kind !== "run") operation.result = null;
+    operation.error = clone(error);
+    operation.documentRevision = this.documentRevisionValue;
+    operation.settledAt = Date.now();
+    this.rememberOperation(operation);
+    this.notifyOperationWaiters(operation);
+  }
+
+  private cancelOperation(id: string, error: HostError, clientId = "internal"): void {
+    const operation = this.operationFor(id, clientId);
+    if (operation === undefined || isTerminal(operation.status)) return;
+    operation.status = "cancelled";
+    operation.result = null;
     operation.error = clone(error);
     operation.documentRevision = this.documentRevisionValue;
     operation.settledAt = Date.now();

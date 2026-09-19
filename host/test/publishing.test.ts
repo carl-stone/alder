@@ -418,6 +418,35 @@ test("rejects stale cells before invoking Quarto", async () => {
   }
 });
 
+test("requires saved source before invoking Quarto", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "alder-publish-dirty-"));
+  const store = new OutputStore({
+    artifactDirectory: directory,
+    sessionEpoch: epoch,
+    documentRevision: 4,
+    kernelEpoch,
+  });
+  let spawned = false;
+  try {
+    const service = createPublishingService({
+      outputStore: store,
+      processScope: { spawn: async () => { spawned = true; throw new Error("must not spawn"); } },
+    });
+    const dirty = snapshot([cell("cell-1")]);
+    dirty.dirty = true;
+    await assert.rejects(
+      service.publishSnapshot(dirty, { outputPath: join(directory, "report.html"), includeCode: false }),
+      (error: unknown) => error instanceof PublishingError
+        && error.code === "publish_not_ready"
+        && error.message === "save the notebook before publishing",
+    );
+    assert.equal(spawned, false);
+  } finally {
+    await store.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("fails closed when Quarto leaves a sidecar asset", async () => {
   const directory = await mkdtemp(join(tmpdir(), "alder-publish-assets-"));
   const { store, record } = await setupStore("cell-1", "captured", directory);

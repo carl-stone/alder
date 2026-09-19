@@ -1931,6 +1931,7 @@ export class NotebookView {
     includeLabel.append(include, this.dom.createTextNode(" Include code"));
     actionMenu.panel.appendChild(includeLabel);
     actionMenu.panel.appendChild(this.serviceButton("Publish HTML", async () => {
+      if (await this.saveNotebook() === undefined) return;
       const result = await this.runService("publish", { include_code: include.checked });
       await this.downloadServiceResult(result);
     }));

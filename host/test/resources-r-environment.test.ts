@@ -71,7 +71,8 @@ test("R selection is explicit and environment serialization is deterministic", a
     ]);
     const environment = rEnvironmentVariables(selected, fixture.resources, "analysis-1");
     assert.deepEqual(JSON.parse(environment.ALDER_R_LIBRARIES!), selected.libraryPaths);
-    assert.equal(environment.R_LIBS_USER, undefined);
+    assert.equal(environment.R_LIBS_USER, "");
+    assert.equal(environment.R_LIBS_SITE, "");
     assert.equal(environment.R_HOME, selected.rHome);
     assert.equal(environment.ALDER_RESOURCES_ROOT, fixture.resources.root);
     assert.equal(environment.ALDER_ANALYSIS_ENVIRONMENT_ID, "analysis-1");

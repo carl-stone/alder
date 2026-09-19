@@ -573,7 +573,8 @@ export type OutputScope = {
 };
 
 export type EngineRequestOptions = {
-  outputScope: OutputScope;
+  outputScope?: OutputScope;
+  signal?: AbortSignal;
 };
 
 export interface EngineRestartOptions {

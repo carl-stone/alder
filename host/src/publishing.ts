@@ -207,6 +207,7 @@ function assertSettledSnapshot(snapshot: HostSnapshot): void {
   }
   const runtime = snapshot.runtime;
   if (
+    snapshot.dirty ||
     !runtime.documentReady ||
     !runtime.executionReady ||
     runtime.analyzerState !== "ready" ||
@@ -216,7 +217,9 @@ function assertSettledSnapshot(snapshot: HostSnapshot): void {
     runtime.packageOperationActive ||
     runtime.executionBlockedReason !== null
   ) {
-    throw new PublishingError("publish_not_ready", "publish requires an idle, unblocked host");
+    throw new PublishingError("publish_not_ready", snapshot.dirty
+      ? "save the notebook before publishing"
+      : "publish requires an idle, unblocked host");
   }
 
   const cells = snapshot.cells;

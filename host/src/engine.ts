@@ -947,7 +947,7 @@ export class Engine extends EventEmitter implements EngineAdapter {
     const outputScope = command === "get_value" || command === "lazy_eval"
       ? requestOutputScope(options?.outputScope)
       : undefined;
-    const response = await this.runArkCommand(command, payload);
+    const response = await this.runArkCommand(command, payload, true, options?.signal);
     return engineResponseSchema.parse(await this.normalizeRequestResult(command, outputScope, response));
   }
 
@@ -1859,6 +1859,7 @@ export class Engine extends EventEmitter implements EngineAdapter {
     command: string,
     payload: Record<string, unknown>,
     trace = true,
+    signal?: AbortSignal,
   ): Promise<Record<string, unknown>> {
     const kernel = this.kernel;
     if (kernel?.ready !== true) throw new EngineTransportError("kernel is unavailable", "kernel");
@@ -1878,7 +1879,16 @@ export class Engine extends EventEmitter implements EngineAdapter {
     const eventStream = new ArkEventStreamDecoder(this.arkEventToken, this.maxArkPayloadBytes());
     try {
       const encoded = encodeArkRequest({ request: marker, command, payload }, this.maxArkPayloadBytes());
+      let started = false;
+      const interrupt = (): void => {
+        if (started) void kernel.interrupt().catch(() => undefined);
+      };
+      signal?.addEventListener("abort", interrupt, { once: true });
       const execution = await kernel.execute(arkCall("request", encoded), {
+        onStarted: () => {
+          started = true;
+          if (signal?.aborted) void kernel.interrupt().catch(() => undefined);
+        },
         onMessage: (message) => {
           messageTail = messageTail.then(() => {
             if (message.header.msg_type !== "stream") return;
@@ -1901,7 +1911,8 @@ export class Engine extends EventEmitter implements EngineAdapter {
             }
           }).catch((error) => { messageError ??= asError(error); });
         },
-      }, { storeHistory: false, auxiliary: command === "env_snapshot" });
+      }, { storeHistory: false, auxiliary: command === "env_snapshot", signal })
+        .finally(() => signal?.removeEventListener("abort", interrupt));
       await messageTail;
       if (messageError !== undefined) throw messageError;
       eventStream.finish();
