@@ -1,6 +1,6 @@
 # Alder workboard
 
-Updated: 2026-09-18. Goal: a dependable Mac notebook for scientific R work.
+Updated: 2026-09-19. Goal: a dependable Mac notebook for scientific R work.
 Current work only. [Lead instructions](LEAD.md) define coordination and state
 transitions; [architecture](ARCHITECTURE.md) holds product and design decisions.
 Carl and the lead own this board; implementation and review tasks have read access.
@@ -9,7 +9,7 @@ copies in other worktrees are snapshots.
 
 ## Current assignment
 
-**Complete Mac app and final acceptance — Implementing.**
+**Complete Mac app and final acceptance — Accepted.**
 
 **Owner:** primary implementer in the listed implementation worktree.
 
@@ -30,27 +30,22 @@ documented final installed-app command all exit within bounds, clean every owned
 child and verify the current signed package. No known P1 product defect, hanging
 process, false passing test or unclassified failure remains.
 
-**Final candidate:** `5e9b5ff` (`Complete Mac app acceptance`) on accepted UI/UX
-checkpoint `dd9d60f`.
+**Accepted candidate:** `8a1381ce` (`Bound LSP transport shutdown`) on rejected
+`3339b677`, itself on
+rejected `6911e1d7` and accepted UI/UX checkpoint `dd9d60f`.
 
-**Correction target:** restore ordinary project/user/bundled package precedence and
-remove all notebook AST rewriting for `library/require/loadNamespace`; isolate the
-app-private Ark adapter without occupying or forcing the public `alder` namespace.
-Make native Save first submit and acknowledge the latest CodeMirror draft, then
-await authoritative disk save; repeated immediate edit/run/Save must never observe
-stale clean state. Eliminate the flaky browser widget input race. Remove the
-acceptance-only driver/private-global/DOM automation from production Electron and
-drive the packaged app externally through normal CDP/user/native seams. Expand the
-installed journey honestly across reopen, interruption/recovery, multiple windows/
-clients, conflicts and optional-service failures where Electron integration adds
-risk; retain layered lower-seam coverage without claiming it is native. Add an
-installed empty-cell regression. Every failure path must clean backend/analyzer/
-Ark/Electron children within bounds. Pass repeated stress cases and one clean
-uninterrupted final command.
+**Review target:** verify ordinary R package precedence and absence of notebook AST
+rewriting/private-namespace collision; immediate CodeMirror Save ordering and stale
+run suppression; widget generation ordering; removal of all production acceptance
+hooks/private-global/DOM automation; external trusted-CDP packaged journey covering
+20 immediate saves, Run-to-Save, interrupt, peer detach, Ark failure/reopen and
+quit/relaunch; installed empty-cell behavior; bounded deliberate-failure cleanup;
+and honest layered coverage of remaining conflict/Save As/optional/UI matrices.
+Independently run one clean uninterrupted final command, classify every skip,
+verify source/bundle freshness, licenses, strict signing and zero children.
 
-**Next action:** primary implementer corrects `5e9b5ff`, returns a clean candidate
-with stress and end-to-end evidence, then both independent release reviewers rerun
-the final acceptance.
+**Next action:** no engineering assignment is active. Carl can use the accepted signed
+Mac build; public distribution and notarization remain deferred until requested.
 
 **Testing constraint:** do not take over Carl's visible desktop. Use background
 or isolated Mac GUI checks where native interaction matters. The in-app browser
@@ -82,7 +77,7 @@ order; their implementation details are settled when assigned.
 | Residual architecture and test cleanup | Accepted | Primary implementer | `8990292`: removed trace/strict-JSON/platform/state debris, retained cohesive owners and rebuilt a five-second behavior-led host suite |
 | Targeted generative verification | Accepted | Primary implementer | `d88ca7d`: bounded independent graph/document/recovery/state/R verification with real crash durability and replayable failures |
 | UI/UX review and polish | Accepted | Primary implementer | `dd9d60f`: coherent Mac interaction and visual system, real responsive/accessibility behavior, truthful production evidence and safe native harness |
-| Complete Mac app and final acceptance | Implementing | Primary implementer | Restore R precedence, fix immediate native Save and widget races, externalize/broaden packaged-app acceptance and guarantee failure cleanup at `5e9b5ff` |
+| Complete Mac app and final acceptance | Accepted | Primary implementer | `8a1381ce`: exact clean candidate passed independent code review and complete signed-app acceptance |
 
 The following requirements apply to the relevant slices and are checked again
 when accepting the complete app:
@@ -141,6 +136,19 @@ public distribution/notarization remain deferred. Local runnable Mac delivery is
 part of this queue.
 
 ## Latest accepted checkpoint
+
+`8a1381ce` is the accepted complete Mac application. Independent review reproduced
+bounded JSON-RPC shutdown with a writer callback that never returns: concurrent Stop
+calls completed in about 2.1 seconds, destroyed the transport, settled pending writes,
+sent no late shutdown and preserved live-operation failures. One exact clean final
+acceptance run completed in 326.69 seconds: R helpers 164; fast host/generative 420
+with 41 classified source-only skips; installed Engine 19, Jupyter 5, Host 11 and MCP
+1; production browser journeys 9; deliberate native failure cleanup and the external
+packaged journey with 20 immediate saves, output 42, interrupt/recovery, peer detach,
+Ark recovery and quit/relaunch. Strict deep signing, staged assets, 62 license entries
+and required runtime notices passed; final required skips were empty and no owned child
+remained. The accepted result includes the prior source/save, output ownership, widget
+generation and external native-harness corrections.
 
 `dd9d60f` is the complete UI/UX checkpoint. Lead accepted the interaction structure
 from `dbfa1df` plus a cohesive light/dark Mac workspace, real CodeMirror theme,
