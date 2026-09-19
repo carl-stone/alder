@@ -26,6 +26,10 @@ Work is coordinated across separate Codex conversations, called tasks. One
   the lead's documentation checkout still contains older source.
 - **Builds, checks and generated files:** [dev/README.md](dev/README.md).
   Consult it before building or changing generated assets.
+- **Tests:** follow the nearest test instructions. Host and browser tests use
+  [host/test/AGENTS.md](host/test/AGENTS.md); R helper tests use
+  [tests/AGENTS.md](tests/AGENTS.md). These files define what evidence a test
+  must provide and which implementation-coupled tests should be removed.
 
 ## Working together
 
@@ -44,14 +48,26 @@ Work is coordinated across separate Codex conversations, called tasks. One
 - This is pre-release software: rewrites and deletion are authorized within the
   assignment. Choose languages for fit and demonstrated performance. Prefer
   platform facilities and libraries; added mechanisms must earn their cost.
+- When complexity comes from the wrong ownership model or boundary, delete the
+  component and replace it with the smallest correct design. Do not spend time
+  preserving its private APIs, tests, migrations or internal compatibility.
+  Salvage only independently useful behavior or code that clearly fits the new
+  boundary.
 - Deliver complete, runnable slices and remove replaced production paths. Use
   concrete notebook examples and independently established expected behavior.
   Existing code and tests are evidence of past behavior, not requirements.
-- Keep checks proportionate and tied to behavior. Run native Mac builds and
-  interaction checks on macOS. Review consequential integrated changes with fresh
-  context; do not recreate obsolete CI or qualification frameworks.
+- Keep checks proportionate and tied to behavior. A test must protect a useful
+  contract or failure mode, and refactoring behind that boundary should not
+  require rewriting its assertion. There is no requirement to preserve test
+  count, test files or suite structure: delete whole obsolete suites and replace
+  them with a smaller behavioral suite when that is clearer. Run native Mac
+  builds and interaction checks on macOS. Review consequential integrated changes
+  with fresh context; do not recreate obsolete CI or qualification frameworks.
 - Retain renderer isolation, authenticated local APIs, external-edit conflict
   handling and ordinary child cleanup. R runs with the user's permissions;
   do not invent hostile-R containment requirements.
 - Keep example notebooks runnable as ordinary R scripts. Never conceal a defect
-  by changing a test's expected result.
+  by changing a test's expected result. When an independently derived behavior
+  test should pass but does not, treat that as evidence of a production defect
+  until investigation shows the expectation is wrong; an old green suite is not
+  evidence that the implementation works.

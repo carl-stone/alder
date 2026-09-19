@@ -180,7 +180,7 @@ test("browser artifact resolution negotiates capabilities and renews expired cac
       assert.equal(requests, 2);
       assert.equal(await client.resolveArtifact(descriptor), path2);
       assert.equal(requests, 2);
-      client.close();
+      await client.close();
       assert.equal(await client.resolveArtifact(descriptor), path3);
       assert.equal(requests, 3);
     });
@@ -308,7 +308,7 @@ test("browser view surfaces a blocked runtime and keeps recovery guidance throug
     const document = new BrowserDocument(initial);
     let restartCalls = 0;
     const client = {
-      recoveryState: { status: "none", local: null, branches: [], drafts: [], pending: false, corruption: null, persistenceError: null },
+      recoveryState: { status: "none", local: null, candidate: null, corruption: null, persistenceError: null },
       subscribeRecovery(listener: () => void) { listener(); return () => {}; },
       restart: async () => { restartCalls += 1; },
     } as unknown as BrowserNotebookClient;
@@ -356,7 +356,7 @@ test('browser view targets nonstructural transaction updates despite repeated co
     const initial = snapshot([cell('c1', ['x <- 1']), cell('c2', ['x + 1'])]);
     const document = new BrowserDocument(initial);
     const client = {
-      recoveryState: { status: 'none', local: null, branches: [], drafts: [], pending: false, corruption: null, persistenceError: null },
+      recoveryState: { status: 'none', local: null, candidate: null, corruption: null, persistenceError: null },
       subscribeRecovery() { return () => {}; },
     } as unknown as BrowserNotebookClient;
     const view = new NotebookView(client, dom);
@@ -400,7 +400,7 @@ test("browser view reports typed check issues", async () => {
     const document = new BrowserDocument(snapshot([]));
     let checkCalls = 0;
     const client = {
-      recoveryState: { status: "none", local: null, branches: [], drafts: [], pending: false, corruption: null, persistenceError: null },
+      recoveryState: { status: "none", local: null, candidate: null, corruption: null, persistenceError: null },
       subscribeRecovery() { return () => {}; },
       commitEdits: async () => {},
       service: async (command: string) => {
@@ -471,7 +471,7 @@ test("explicit runs flush output and keep stop independent while preparing", asy
     let releaseFlush!: () => void;
     const flushPending = new Promise<void>((resolve) => { releaseFlush = resolve; });
     const client = {
-      recoveryState: { status: "none", local: null, branches: [], drafts: [], pending: false, corruption: null, persistenceError: null },
+      recoveryState: { status: "none", local: null, candidate: null, corruption: null, persistenceError: null },
       subscribeRecovery() { return () => {}; },
       startRunAll: async () => { order.push("run"); return { completed: runPending }; },
       interrupt: async () => { interruptCalls += 1; },
@@ -515,7 +515,7 @@ for (const failure of ["preparation", "execution"] as const) {
       const initial = snapshot([]);
       initial.changed = true;
       const client = {
-        recoveryState: { status: "none", local: null, branches: [], drafts: [], pending: false, corruption: null, persistenceError: null },
+        recoveryState: { status: "none", local: null, candidate: null, corruption: null, persistenceError: null },
         subscribeRecovery() { return () => {}; },
         startRunAll: async () => {
           const error = new Error(`${failure} failed`);
@@ -635,7 +635,7 @@ async function installSettingsDom(dom: Document): Promise<void> {
 
 function settingsClient(overrides: Partial<BrowserNotebookClient> = {}): BrowserNotebookClient {
   return {
-    recoveryState: { status: "none", local: null, branches: [], drafts: [], pending: false, corruption: null, persistenceError: null },
+    recoveryState: { status: "none", local: null, candidate: null, corruption: null, persistenceError: null },
     subscribeRecovery() { return () => {}; },
     setPreferences: async () => { throw new Error("unexpected application preference write"); },
     setRuntime: async () => { throw new Error("unexpected notebook settings write"); },
@@ -1050,7 +1050,7 @@ function recoverySnapshot(value: HostSnapshot): unknown {
 async function browserClient(store = new MemoryRecoveryStore(), initial = snapshot(), options: { reconnect?: boolean; draftId?: string } = {}) {
   const sockets: FakeSocket[] = [];
   const client = new BrowserNotebookClient({ url: "ws://127.0.0.1/api/socket", clientId: "browser-test", draftId: options.draftId ?? "window-1", leaseId: "lease-1", csrf: "csrf-1", reconnect: options.reconnect ?? false,
-    restoreSingleDraft: true, reconnectDelayMs: 1, recoveryStore: store, requestAnimationFrame: () => 0,
+    reconnectDelayMs: 1, recoveryStore: store, requestAnimationFrame: () => 0,
     webSocketFactory: () => { const socket = new FakeSocket(); sockets.push(socket); return socket; },
   });
   const connected = client.connect();
@@ -1145,51 +1145,50 @@ test("new backend restores only pending text from an interrupted run draft", asy
   const draft = document.recoveryDraft("old-window", { requestId: "uncertain-run", kind: "run", changes: document.pendingSource().changes })!;
   await store.saveDraft(draft);
   const next = snapshot(); next.epoch = "new-backend";
-  const { client, socket } = await browserClient(store, next);
+  const { client, socket } = await browserClient(store, next, { draftId: "old-window" });
   try {
     assert.deepEqual(client.document!.cell("c1")!.desiredBody, ["x <- 42"]);
     assert.equal(client.document!.hasSourceConflicts, false);
     assert.equal(socket.commands().length, 0);
     await client.flushDraftPersistence();
-    const saved = await store.listDrafts();
-    assert.equal(saved.length, 1); assert.equal(saved[0]!.draftId, "window-1");
-    assert.equal(saved[0]!.submission, null);
+    const saved = await store.readDraft("old-window");
+    assert.equal(saved?.draftId, "old-window");
+    assert.equal(saved?.submission, null);
   } finally { client.close(); }
 });
 
-test("multiple saved drafts remain choices and restoring one retains current work", async () => {
+test("unsubmitted typing survives renderer close and reload", async () => {
   const store = new MemoryRecoveryStore();
-  for (const id of ["one", "two"]) { const doc = new BrowserDocument(snapshot()); doc.edit("c1", [id]); await store.saveDraft(doc.recoveryDraft(id)!); }
-  const { client } = await browserClient(store);
+  const first = await browserClient(store, snapshot(), { draftId: "window-reload" });
+  first.client.editCell("c1", "typed but not submitted");
+  await first.client.close();
+  assert.equal(first.socket.commands().length, 0);
+  const next = snapshot(); next.epoch = "reloaded-renderer";
+  const second = await browserClient(store, next, { draftId: "window-reload" });
   try {
-    assert.equal(client.recoveryState.drafts.length, 2);
-    assert.deepEqual(client.document!.cell("c1")!.desiredBody, ["x <- 1"]);
-    client.editCell("c1", "current-work");
-    await client.restoreSavedDraft("one");
-    assert.deepEqual(client.document!.cell("c1")!.desiredBody, ["one"]);
-    const drafts = await store.listDrafts();
-    assert.ok(drafts.some(draft => draft.draftId === "two"));
-    assert.ok(drafts.some(draft => JSON.stringify(draft.changes).includes("current-work")));
-  } finally { client.close(); }
+    assert.deepEqual(second.client.document!.cell("c1")!.desiredBody, ["typed but not submitted"]);
+    assert.equal(second.client.recoveryState.status, "restored");
+  } finally { await second.client.close(); }
 });
 
-for (const failure of ["rejects", "stalls"]) {
-  test(`source commits remain usable when draft storage ${failure}`, { timeout: 2000 }, async () => {
-    const store = new MemoryRecoveryStore();
-    store.saveDraft = async () => { if (failure === "rejects") throw new Error("storage full"); await new Promise(() => {}); };
-    const { client, socket } = await browserClient(store);
-    try {
-      client.editCell("c1", "x <- 2");
-      const committed = client.commitEdits();
-      await waitUntil(() => socket.commands().length === 1);
-      socket.reply(socket.commands()[0]!, { edited: [{ id: "c1", revision: 1 }], created: {}, deleted: [] });
-      await committed;
-      assert.deepEqual(client.document!.pendingSource().changes, []);
-      client.editCell("c1", "x <- 3");
-      assert.equal(client.document!.pendingSource().changes.length, 1);
-    } finally { client.close(); }
-  });
-}
+test("source submission waits until the latest renderer draft is durable", async () => {
+  const store = new MemoryRecoveryStore();
+  let release!: () => void;
+  const persisted = new Promise<void>(resolve => { release = resolve; });
+  const saveDraft = store.saveDraft.bind(store);
+  store.saveDraft = async draft => { await persisted; await saveDraft(draft); };
+  const { client, socket } = await browserClient(store);
+  try {
+    client.editCell("c1", "x <- 2");
+    const committed = client.commitEdits();
+    await new Promise(resolve => setTimeout(resolve, 10));
+    assert.equal(socket.commands().length, 0);
+    release();
+    await waitUntil(() => socket.commands().length === 1);
+    socket.reply(socket.commands()[0]!, { edited: [{ id: "c1", revision: 1 }], created: {}, deleted: [] });
+    await committed;
+  } finally { await client.close(); }
+});
 
 test("queued Run cannot hold up newer edits and Save behind an active run", async () => {
   const store = new MemoryRecoveryStore();
@@ -1215,7 +1214,7 @@ test("queued Run cannot hold up newer edits and Save behind an active run", asyn
     socket.receive({ type: "commandResult", requestId: queued.requestId, result: { ...resultFor(queued.requestId, null), error: { code: "source_conflict", message: "The document changed before this run began." } } });
     await rejectedRun;
     await client.flushDraftPersistence();
-    assert.ok((await store.listDrafts())[0]!.pendingRun, "rejecting run2 cannot clear the still-running run1 marker");
+    assert.ok((await store.readDraft("window-1"))!.pendingRun, "rejecting run2 cannot clear the still-running run1 marker");
     socket.reply(socket.commands()[0]!, { runId: "first" }); await firstRun;
     assert.deepEqual(client.document!.cell("c1")!.desiredBody, ["x <- 3"]);
     assert.equal(client.document!.hasSourceConflicts, false, "rejecting old work cannot mark newer acknowledged edits conflicting");
@@ -1236,7 +1235,7 @@ test("a current snapshot during a live run does not turn its known completion in
     await running;
     await client.flushDraftPersistence();
     assert.equal(client.recoveryState.uncertainRun, false);
-    assert.equal((await store.listDrafts()).length, 0);
+    assert.equal(await store.readDraft("window-1"), null);
   } finally { client.close(); }
 });
 
@@ -1290,25 +1289,25 @@ function startupSnapshot(): HostSnapshot {
   value.runtime.rEnvironment = { rscript: "/usr/bin/Rscript", rHome: "/usr/lib/R", version: "4.6.1", platform: "darwin", arch: "arm64", libraryPaths: ["/tmp/library"], identity: "a".repeat(64) };
   return value;
 }
-const recoveryResponse = () => new Response(JSON.stringify({ epoch: "epoch-1", documentRevision: 0, cursor: 0, result: { branches: [], pending: false, corruption: null } }), { status: 200 });
+const recoveryResponse = () => new Response(JSON.stringify({ epoch: "epoch-1", documentRevision: 0, cursor: 0, result: { candidate: null, corruption: null } }), { status: 200 });
 
-for (const replayRestart of [false, true]) test(`fresh renderer suppresses startup after uncertain ${replayRestart ? "restart" : "run"} even without edits`, async () => {
+for (const replayRestart of [false, true]) test(`renderer reload suppresses startup after uncertain ${replayRestart ? "restart" : "run"} even without edits`, async () => {
   const store = new MemoryRecoveryStore();
   const first = await browserClient(store);
   try {
     const running = replayRestart ? first.client.restart(true) : first.client.runAll();
     await waitUntil(() => first.socket.commands().length === 1);
     await first.client.flushDraftPersistence();
-    const drafts = await store.listDrafts();
-    assert.equal(drafts[0]!.changes.length, 0);
-    assert.equal(drafts[0]!.pendingRun?.requestId, first.socket.commands()[0]!.requestId);
+    const draft = await store.readDraft("window-1");
+    assert.equal(draft!.changes.length, 0);
+    assert.equal(draft!.pendingRun?.requestId, first.socket.commands()[0]!.requestId);
     const rejected = assert.rejects(running, { code: "request_uncertain" });
     first.socket.disconnect(); await rejected;
     await first.client.flushDraftPersistence();
   } finally { first.client.close(); }
   const next = startupSnapshot(); next.epoch = "replacement-backend";
   await withBrowserFetch(async () => recoveryResponse(), async () => {
-    const { client, socket } = await browserClient(store, next, { draftId: "fresh-window" });
+    const { client, socket } = await browserClient(store, next, { draftId: "window-1" });
     try {
       assert.equal(client.recoveryState.uncertainRun, true);
       assert.equal(socket.commands().length, 0, "startup never repeats a possibly completed run");
@@ -1333,7 +1332,7 @@ test("opening returns while a startup run is still executing", async () => {
   });
 });
 
-test("external browser leaves another window's only draft as a choice", async () => {
+test("a renderer only restores its own draft", async () => {
   const store = new MemoryRecoveryStore();
   const document = new BrowserDocument(snapshot()); document.edit("c1", ["other window"]);
   await store.saveDraft(document.recoveryDraft("other-window")!);
@@ -1343,8 +1342,8 @@ test("external browser leaves another window's only draft as a choice", async ()
   try {
     const connected = client.connect(); socket.open(); socket.receive(recoverySnapshot(snapshot())); await connected;
     assert.deepEqual(client.document!.cell("c1")!.desiredBody, ["x <- 1"]);
-    assert.equal(client.recoveryState.drafts[0]!.draftId, "other-window");
-    assert.equal((await store.listDrafts())[0]!.draftId, "other-window");
+    assert.equal(client.recoveryState.local, null);
+    assert.equal((await store.readDraft("other-window"))!.draftId, "other-window");
   } finally { client.close(); }
 });
 

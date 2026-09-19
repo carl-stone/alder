@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
@@ -12,9 +12,9 @@ import { createMcpHttpHandler } from "./mcp.js";
 import { appConfig, projectConfigPath, readProjectSettings, readNotebookSettings, setNotebookSettings, setAppConfig } from "./configuration.js";
 import { resolveSettings, type Config, type ProjectSettingsPatch, type NotebookSettingsPatch, type PreferencesPatch } from "./settings.js";
 import { ApplicationPreferences } from "./preferences.js";
-import { readLayout, validateLayout } from "./layout.js";
-import { DocumentStore, FileConflict, type PreparedReload, type PreparedSaveAs, type PreparedSidecar } from "./persistence.js";
-import { RecoveryWriter, recoveryObservationMatches, type DiskObservation as RecoveryDiskObservation, type RecoveryBaseline, type RecoveryCellState, type RecoverySidecarObservations } from "./recovery.js";
+import { readLayout } from "./layout.js";
+import { DocumentStore, FileConflict, type PreparedSaveAs } from "./persistence.js";
+import { RecoveryWriter, recoveryObservationMatches, type DiskObservation as RecoveryDiskObservation, type RecoveryBaseline, type RecoveryCellState } from "./recovery.js";
 import { createPackageManager, readPackageDeclarations, type PackageManager } from "./packages.js";
 import { createPublishingService, type PublishingService } from "./publishing.js";
 import { createFormattingService, type FormattingService } from "./formatting.js";
@@ -22,16 +22,13 @@ import type { PackageProgress } from "./jobs.js";
 import { renderHelp } from "./markdown.js";
 import { LspClient } from "./lsp.js";
 import { parseNotebook, restoreNotebookCellIdentity, serializeNotebook, serializeNotebookWithParts, setMetadata, type NotebookDocument } from "./notebook.js";
-import type { ArtifactHandle, EngineHandshake, HostSnapshot, Layout, REnvironment, RecoveryBranch as ProtocolRecoveryBranch, RecoveryState as ProtocolRecoveryState } from "./protocol.js";
-import type { StaticOutputScope } from "./outputs.js";
+import type { ArtifactHandle, EngineHandshake, HostSnapshot, Layout, REnvironment, RecoveryState as ProtocolRecoveryState } from "./protocol.js";
 import { UploadStore } from "./uploads.js";
 import { REnvironmentError, resolveREnvironment } from "./r-environment.js";
 import type { ApplicationResources } from "./resources.js";
 import { createProcessScope, type ProcessScope } from "./processes.js";
 import { acquireNotebookOwnership, isUntitledRecoveryId, registerUntitledRecoveryDescriptor, retireUntitledRecoveryDescriptor, selectUntitledRecoveryDescriptor, SessionAuthError, type NotebookOwnership, type UntitledRecoveryDescriptor } from "./sessions.js";
 import { ensurePrivateDirectory, readPrivateFile, writePrivateFile } from "./private-paths.js";
-
-type CompleteRecoverySidecarObservations = Required<RecoverySidecarObservations>;
 
 type RecoveryObservationSource = Pick<RecoveryDiskObservation, "state" | "digest" | "version">;
 
@@ -41,30 +38,8 @@ function recoveryObservation(source: RecoveryObservationSource): RecoveryDiskObs
     : { state: source.state, digest: source.digest, version: source.version, error: null };
 }
 
-function recoverySidecarObservations(store: DocumentStore): CompleteRecoverySidecarObservations {
-  const observations = {
-    config: recoveryObservation(store.sidecarObservation("config")),
-    layout: recoveryObservation(store.sidecarObservation("layout")),
-    packages: recoveryObservation(store.sidecarObservation("packages")),
-  };
-  return observations;
-}
-
-function recoverySidecarObservationsMatch(expected: RecoverySidecarObservations | undefined, actual: CompleteRecoverySidecarObservations): boolean {
-  if (expected === undefined) return false;
-  for (const key of ["config", "layout", "packages"] as const) {
-    const observation = expected[key];
-    if (observation === undefined || !recoveryObservationMatches(observation, actual[key])) return false;
-  }
-  return true;
-}
-
 function recoveryCellStates(document: { cells: ReadonlyArray<{ id: string; revision?: number }> }): RecoveryCellState[] {
   return document.cells.map(cell => ({ id: cell.id, revision: cell.revision ?? 0 }));
-}
-
-function sourceBytesSha256(bytes: Uint8Array): string {
-  return createHash("sha256").update(bytes).digest("hex");
 }
 
 function semanticValue(value: unknown): unknown {
@@ -264,7 +239,6 @@ async function startNotebookHost(
   let runtimeBootstrap: Promise<void> | undefined;
   let runtimeAbort: AbortController | undefined;
   let startRuntime: (restart?: boolean) => void = () => {};
-  let recoverySidecarError: { kind: "config" | "layout" | "packages"; error: unknown } | null = null;
   let engineIdentity: EngineHandshake | null = null;
   let formatter: FormattingService | undefined;
   let publisher: PublishingService | undefined;
@@ -313,7 +287,6 @@ async function startNotebookHost(
         ...(event.text === undefined ? {} : { text: event.text }),
       });
   };
-  interface PublishedRecoveryProjection { baseline: RecoveryBaseline; fingerprint: string; state: "dirty" | "conflict"; }
   const resolveProjectLibrary = async (base: REnvironment, projectDirectory: string): Promise<string | null> => {
     if (processScope === undefined) throw new Error("R process scope is unavailable while resolving the project library");
     const temporaryManager = createPackageManager({
@@ -328,8 +301,6 @@ async function startNotebookHost(
       await temporaryManager.close().catch(() => {});
     }
   };
-  let publishedRecoveryProjection: PublishedRecoveryProjection | null = null;
-  let pendingRecoveryProjection: PublishedRecoveryProjection | null = null;
   let clientCount = 0;
   let leaseCount = 0;
   let everConnected = false;
@@ -350,20 +321,12 @@ async function startNotebookHost(
   };
   resetRuntimeReady();
 
-  const emptySidecars = (): CompleteRecoverySidecarObservations => ({
-    config: recoveryObservation({ state: "absent", digest: null, version: null }),
-    layout: recoveryObservation({ state: "absent", digest: null, version: null }),
-    packages: recoveryObservation({ state: "absent", digest: null, version: null }),
-  });
   const sourceObservation = (candidate: DocumentStore): RecoveryDiskObservation => isUntitled
     ? recoveryObservation({ state: "untitled", digest: null, version: null })
     : recoveryObservation(candidate.observation());
   const sourceProtocolObservation = (candidate: DocumentStore): HostSnapshot["disk"] => isUntitled
     ? { state: "untitled", digest: null, version: null, error: null }
     : candidate.observation();
-  const sidecarObservations = (candidate: DocumentStore, untitled = isUntitled): CompleteRecoverySidecarObservations => untitled
-    ? emptySidecars()
-    : recoverySidecarObservations(candidate);
   const sidecarProtocolObservations = (candidate: DocumentStore, untitled = isUntitled): HostSnapshot["sidecars"] => untitled
     ? { config: { state: "absent", digest: null, version: null, error: null }, layout: { state: "absent", digest: null, version: null, error: null }, packages: { state: "absent", digest: null, version: null, error: null } }
     : { config: candidate.sidecarObservation("config"), layout: candidate.sidecarObservation("layout"), packages: candidate.sidecarObservation("packages") };
@@ -435,7 +398,7 @@ async function startNotebookHost(
   const discardAndClose = async (): Promise<void> => {
     if (recovery !== undefined) {
       const state = await recovery.load();
-      if (state.fingerprint !== null) await recovery.clearIfMatch({ documentRevision: state.documentRevision, fingerprint: state.fingerprint });
+      if (state.fingerprint !== null) await recovery.clearIfMatch({ documentRevision: state.baseline.documentRevision, fingerprint: state.fingerprint });
       recoveryPending = false;
       recoveryFingerprint = undefined;
     }
@@ -467,7 +430,6 @@ async function startNotebookHost(
       packageDeclarationIntent = [];
     }
 
-    const initialSidecarObservations = sidecarObservations(store);
     const initialSerialized = serializeNotebookWithParts(notebook);
     const baseline: RecoveryBaseline = {
       schemaVersion: 1,
@@ -475,12 +437,7 @@ async function startNotebookHost(
       physicalBytes: initialSerialized.bytes,
       cells: recoveryCellStates(notebook),
       path: notebook.path ?? (isUntitled ? null : store.path),
-      project: notebookDirectory,
-      config: projectSettings as never,
-      layout: projectLayoutIntent as never,
-      packageDeclarationIntent: packageDeclarationIntent as never,
       notebookDiskObservation: sourceObservation(store),
-      sidecarObservations: initialSidecarObservations,
     };
     recovery = await RecoveryWriter.open({ rootDir: options.recoveryDirectory ?? envPaths("alder", { suffix: "" }).data, key: ownership.sessionKey, baseline, processSupervisorExecutable: options.resources.processSupervisorExecutable });
     const loadedRecoveryState = await recovery.load();
@@ -488,20 +445,13 @@ async function startNotebookHost(
     recoveryFingerprint = recoveryPending ? loadedRecoveryState.fingerprint ?? undefined : undefined;
     const materialized = await recovery.materializedBaseline();
     const currentObservation = sourceObservation(store);
-    const currentSidecarObservations = sidecarObservations(store);
     recoveryDocumentRevision = materialized.documentRevision;
-    const observationsMatch = recoveryObservationMatches(materialized.notebookDiskObservation, currentObservation)
-      && recoverySidecarObservationsMatch(materialized.sidecarObservations, currentSidecarObservations);
-    if (observationsMatch && recoveryPending) {
+    const observationsMatch = recoveryObservationMatches(materialized.notebookDiskObservation, currentObservation);
+    if (recoveryPending) {
       const bytes = decodePhysicalBytes(materialized.physicalBytes);
       if (bytes === null) throw new Error("recovery baseline has no physical source bytes");
       notebook = restoreNotebookCellIdentity(parseNotebook(bytes, notebook.path ?? (isUntitled ? null : store.path)), materialized.cells);
-      if (materialized.layout !== undefined) projectLayoutIntent = materialized.layout === null ? null : validateLayout(materialized.layout);
-      if (Array.isArray(materialized.packageDeclarationIntent) && materialized.packageDeclarationIntent.every(value => typeof value === "string")) {
-        packageDeclarationIntent = [...materialized.packageDeclarationIntent] as string[];
-      }
-    } else if (recoveryPending) {
-      recoveryConflict = true;
+      recoveryConflict = !observationsMatch;
     } else {
       // A saved notebook still needs stable cell IDs when a renderer lost the
       // response to a create. Reuse identities only for the exact saved source.
@@ -513,134 +463,40 @@ async function startNotebookHost(
     config = configurationFor(notebook);
     cacheDirectory = config.cache.dir ? resolve(notebookDirectory, config.cache.dir) : cacheDirectory;
     resolvedLayout = projectLayoutIntent;
-    const actualProjectLayout = isUntitled ? null : await readLayout(store.path);
-    let actualProjectPackages: string[] = [];
-    try { actualProjectPackages = [...(await readPackageDeclarations(notebookDirectory)).packages]; } catch { actualProjectPackages = []; }
-    pendingSidecars.layout = recoveryPending && observationsMatch && !sameSemanticValue(projectLayoutIntent, actualProjectLayout);
-    pendingSidecars.packages = recoveryPending && observationsMatch && !sameSemanticValue(packageDeclarationIntent, actualProjectPackages);
-    if (recoveryPending) {
-      const baselineFingerprint = recoveryFingerprint ?? "active-recovery";
-      publishedRecoveryProjection = {
-        baseline: materialized,
-        fingerprint: baselineFingerprint,
-        state: recoveryConflict || !observationsMatch ? "conflict" : "dirty",
-      };
-    }
-    if (recoveryConflict) {
-      await recovery.forkBranch({ baseline: materialized });
-      recovery.update({ ...baseline, documentRevision: recoveryDocumentRevision });
-      await recovery.clearIfMatch({ documentRevision: recoveryDocumentRevision, fingerprint: (await recovery.load()).fingerprint! });
-      recoveryPending = false;
-      recoveryFingerprint = undefined;
-      publishedRecoveryProjection = null;
-    }
+    pendingSidecars.layout = false;
+    pendingSidecars.packages = false;
     engine = new Engine({ resources: options.resources, processScope, environment: runtimeEnvironment ?? undefined, notebookDirectory, artifactDirectory: work, cacheDirectory });
     packageManager = createPackageManager({ resources: options.resources, environment: runtimeEnvironment, processScope, projectDirectory: notebookDirectory, onProgress: onPackageProgress });
-    if (recoveryPending && observationsMatch && packageDeclarationIntent.length > 0) {
-      try {
-        const current = await packageManager.declarations();
-        if (current.packages.join("\\0") !== packageDeclarationIntent.join("\\0")) {
-          const prepared = await store.preparePackages(packageDeclarationIntent, store.sidecarObservation("packages").version);
-          await prepared.publish();
-          pendingSidecars.packages = false;
-          const repairedSidecars = sidecarObservations(store);
-          const repairedState = await recovery.checkpoint({ notebookDiskObservation: sourceObservation(store), sidecarObservations: repairedSidecars });
-          recoveryDocumentRevision = repairedState.documentRevision;
-          recoveryPending = repairedState.pending;
-          recoveryFingerprint = recoveryPending ? repairedState.fingerprint ?? undefined : undefined;
-          if (publishedRecoveryProjection !== null) {
-            publishedRecoveryProjection = {
-              ...publishedRecoveryProjection,
-              fingerprint: repairedState.fingerprint ?? publishedRecoveryProjection.fingerprint,
-              baseline: {
-                ...publishedRecoveryProjection.baseline,
-                documentRevision: repairedState.documentRevision,
-                sidecarObservations: repairedSidecars,
-              },
-            };
-          }
-        }
-      } catch (error) {
-        recoverySidecarError = { kind: "packages", error };
-      }
-    }
     formatter = createFormattingService(options.resources.airExecutable, processScope);
 
-    const checkpointRecovery = async (disk: HostSnapshot["disk"], sidecars: HostSnapshot["sidecars"]): Promise<void> => {
-      if (recovery === undefined) return;
-      const state = await recovery.checkpoint({ notebookDiskObservation: recoveryObservation(disk), sidecarObservations: sidecars });
-      recoveryDocumentRevision = state.documentRevision;
-      recoveryPending = state.pending;
-      recoveryFingerprint = recoveryPending ? state.fingerprint ?? recoveryFingerprint : undefined;
-      const checkpointDisk = recoveryObservation(disk);
-      const checkpointSidecars = {
-        config: recoveryObservation(sidecars.config),
-        layout: recoveryObservation(sidecars.layout),
-        packages: recoveryObservation(sidecars.packages),
-      };
-      const checkpointProjection = (projection: PublishedRecoveryProjection | null): PublishedRecoveryProjection | null => projection === null ? null : {
-        ...projection,
-        fingerprint: state.fingerprint ?? projection.fingerprint,
-        baseline: {
-          ...projection.baseline,
-          documentRevision: state.documentRevision,
-          notebookDiskObservation: checkpointDisk,
-          sidecarObservations: checkpointSidecars,
-        },
-      };
-      pendingRecoveryProjection = checkpointProjection(pendingRecoveryProjection);
-      publishedRecoveryProjection = checkpointProjection(publishedRecoveryProjection);
-    };
     const appendRecovery = async (input: {
       fromRevision: number;
       document: NotebookDocument;
-      config: Record<string, unknown>;
-      layout: unknown;
-      packageDeclarationIntent?: readonly string[];
       disk: HostSnapshot["disk"];
-      sidecars: HostSnapshot["sidecars"];
-      fingerprint: string;
     }): Promise<string | undefined> => {
       if (recovery === undefined) return undefined;
-      const nextPackageDeclarationIntent = input.packageDeclarationIntent ?? packageDeclarationIntent;
       const next = serializeNotebookWithParts(input.document);
-      const fingerprint = createHash("sha256").update(input.fingerprint, "utf8").digest("hex");
       const baseline: RecoveryBaseline = {
         schemaVersion: 1,
         physicalBytes: next.bytes,
         documentRevision: input.fromRevision + 1,
         cells: recoveryCellStates(input.document),
         path: input.document.path ?? (isUntitled ? null : store!.path),
-        project: notebookDirectory,
-        config: input.config as never,
-        layout: input.layout as never,
-        packageDeclarationIntent: nextPackageDeclarationIntent as never,
         notebookDiskObservation: recoveryObservation(input.disk),
-        sidecarObservations: {
-          config: recoveryObservation(input.sidecars.config),
-          layout: recoveryObservation(input.sidecars.layout),
-          packages: recoveryObservation(input.sidecars.packages),
-        },
       };
-      recovery.update(baseline, fingerprint);
+      recovery.update(baseline);
+      await recovery.flush();
+      const state = await recovery.load();
       notebook = input.document;
-      recoveryFingerprint = fingerprint;
+      recoveryFingerprint = state.fingerprint ?? undefined;
       recoveryDocumentRevision = baseline.documentRevision;
       recoveryPending = true;
-      pendingRecoveryProjection = { baseline, fingerprint, state: "dirty" };
-      return fingerprint;
-    };
-    const applyPublishedProjection = (binder: () => void, projection: PublishedRecoveryProjection | null | undefined = undefined): void => {
-      binder();
-      if (projection !== undefined) publishedRecoveryProjection = projection;
-      pendingRecoveryProjection = null;
+      return recoveryFingerprint;
     };
     type SourcePublicationInput = Omit<SourcePublication, "config"> & { config?: Config };
-    const publishSource = (context: SourceCommitContext, publication: SourcePublicationInput, projection: PublishedRecoveryProjection | null | undefined = undefined): void => {
+    const publishSource = (context: SourceCommitContext, publication: SourcePublicationInput): void => {
       const preparedPublication: SourcePublication = { ...publication, config: publication.config ?? context.config };
-      const binder = context.preparePublication(preparedPublication);
-      if (projection === undefined && pendingRecoveryProjection === null) applyPublishedProjection(binder);
-      else applyPublishedProjection(binder, projection === undefined ? pendingRecoveryProjection : projection);
+      context.preparePublication(preparedPublication)();
     };
     const invalidateLsp = async (): Promise<boolean> => {
       const requested = lsp !== undefined || lspStarting !== undefined;
@@ -671,7 +527,7 @@ async function startNotebookHost(
         return { sidecars, error: { kind, error } };
       };
       try {
-        if (recoveryPending || pendingSidecars.layout || pendingSidecars.packages) {
+        if (pendingSidecars.layout || pendingSidecars.packages) {
           activeKind = "layout";
           const actualLayout = await readLayout(store!.path);
           pendingSidecars.layout = !sameSemanticValue(projectLayoutIntent, actualLayout);
@@ -688,7 +544,6 @@ async function startNotebookHost(
           projectLayoutIntent = published.value;
           resolvedLayout = published.value;
           updateObservation("layout", published.observation);
-          await checkpointRecovery(disk, sidecars);
         }
         if (pendingSidecars.packages) {
           activeKind = "packages";
@@ -705,7 +560,6 @@ async function startNotebookHost(
             updateObservation("packages", store!.sidecarObservation("packages"));
           }
           pendingSidecars.packages = false;
-          await checkpointRecovery(disk, sidecars);
         }
       } catch (error) {
         return failure(activeKind, error);
@@ -736,11 +590,7 @@ async function startNotebookHost(
         await appendRecovery({
           fromRevision: context.fromRevision,
           document,
-          config: projectSettings,
-          layout: projectLayoutIntent,
           disk: context.disk,
-          sidecars: context.sidecars,
-          fingerprint: request.fingerprint ?? "transaction",
         });
         publishSource(context, { document,
           path: document.path ?? context.path,
@@ -754,6 +604,7 @@ async function startNotebookHost(
       }
       if (request.kind === "save") {
         if (isUntitled) throw Object.assign(new Error("notebook has no path"), { code: "notebook_has_no_path" });
+        if (recoveryConflict) throw Object.assign(new Error("The saved notebook changed after these recovered edits. Use Save As or discard the recovered edits."), { code: "recovery_conflict" });
         try {
           const result = await store!.save(context.document);
           const disk = sourceProtocolObservation(store!);
@@ -761,29 +612,24 @@ async function startNotebookHost(
           const sidecars = retry.sidecars;
           let clearError: unknown = null;
           let cleared = false;
-          if (retry.error === null && !pendingSidecars.layout && !pendingSidecars.packages && recoveryPending && recoveryFingerprint !== undefined) {
+          if (recoveryPending && recoveryFingerprint !== undefined) {
             try {
               cleared = await recovery!.clearIfMatch({ documentRevision: context.fromRevision, fingerprint: recoveryFingerprint });
               if (cleared) {
                 recoveryPending = false;
                 recoveryFingerprint = undefined;
+                recoveryConflict = false;
               }
             } catch (error) { clearError = error; }
           }
-          let checkpointError: unknown = null;
-          if (!cleared) {
-            try { await checkpointRecovery(disk, sidecars); }
-            catch (error) { checkpointError = error; }
-          }
           const dirty = retry.error !== null
             || clearError !== null
-            || checkpointError !== null
             || recoveryPending
             || pendingSidecars.layout
             || pendingSidecars.packages;
-          publishSource(context, { document: context.document, path: store!.path, layout: resolvedLayout, disk, sidecars, dirty, advanceRevision: false }, cleared ? null : undefined);
+          publishSource(context, { document: context.document, path: store!.path, layout: resolvedLayout, disk, sidecars, dirty, advanceRevision: false });
           if (retry.error !== null) return { ...result, committed: true, diskError: { code: "sidecar_write_failed", sidecar: retry.error.kind, message: errorMessage(retry.error.error) } };
-          if (clearError !== null || checkpointError !== null) return { ...result, committed: true, diskError: { code: "recovery_checkpoint_failed", message: errorMessage(clearError ?? checkpointError) } };
+          if (clearError !== null) return { ...result, committed: true, diskError: { code: "recovery_checkpoint_failed", message: errorMessage(clearError) } };
           return result;
         } catch (error) {
           if (error instanceof FileConflict) throw error;
@@ -797,7 +643,7 @@ async function startNotebookHost(
         const document = setMetadata(context.document, "runtime", updated.metadata?.runtime ?? null);
         const notebook = readNotebookSettings(document.metadata);
         const nextConfig = resolveSettings({ preferences: preferences.snapshot().values, notebook, project: projectSettings });
-        await appendRecovery({ fromRevision: context.fromRevision, document, config: projectSettings, layout: projectLayoutIntent, disk: context.disk, sidecars: context.sidecars, fingerprint: request.fingerprint ?? "runtime" });
+        await appendRecovery({ fromRevision: context.fromRevision, document, disk: context.disk });
         config = nextConfig;
         publishSource(context, { document, path: context.path, config: nextConfig, layout: context.layout, disk: context.disk, sidecars: context.sidecars, dirty: true, advanceRevision: true });
         settingsErrors.delete("notebook");
@@ -815,14 +661,12 @@ async function startNotebookHost(
         publishSettingsError();
         const sidecars = { ...context.sidecars, config: published.observation };
         publishSource(context, { document: context.document, path: context.path, config, layout: context.layout, disk: context.disk, sidecars, dirty: context.dirty, advanceRevision: false });
-        await checkpointRecovery(context.disk, sidecars);
         return { config };
       }
       if (request.kind === "sidecar" && request.sidecar === "layout") {
         if (isUntitled) throw Object.assign(new Error("layout requires a notebook path"), { code: "notebook_has_no_path" });
         const requestedLayout = request.layout ?? null;
         const prepared = await store!.prepareLayout(requestedLayout as never, context.sidecars.layout.version);
-        await appendRecovery({ fromRevision: context.fromRevision, document: context.document, config: projectSettings, layout: prepared.value, disk: context.disk, sidecars: context.sidecars, fingerprint: request.fingerprint ?? "layout" });
         projectLayoutIntent = prepared.value;
         pendingSidecars.layout = true;
         try {
@@ -830,8 +674,7 @@ async function startNotebookHost(
           pendingSidecars.layout = false;
           resolvedLayout = published.value;
           const sidecars = { ...context.sidecars, layout: published.observation };
-          await checkpointRecovery(context.disk, sidecars);
-          publishSource(context, { document: context.document, path: context.path, layout: resolvedLayout, disk: context.disk, sidecars, dirty: true, advanceRevision: true });
+          publishSource(context, { document: context.document, path: context.path, layout: resolvedLayout, disk: context.disk, sidecars, dirty: context.dirty, advanceRevision: false });
           return { layout: resolvedLayout };
         } catch (error) {
           const code = pendingSidecars.layout ? "sidecar_write_failed" : "recovery_checkpoint_failed";
@@ -842,15 +685,13 @@ async function startNotebookHost(
         if (isUntitled) throw Object.assign(new Error("packages require a notebook path"), { code: "notebook_has_no_path" });
         const additions = request.packages ?? [];
         const prepared = await store!.preparePackages(additions, context.sidecars.packages.version);
-        await appendRecovery({ fromRevision: context.fromRevision, document: context.document, config: projectSettings, layout: projectLayoutIntent, disk: context.disk, sidecars: context.sidecars, fingerprint: request.fingerprint ?? "packages" });
         packageDeclarationIntent = [...prepared.value];
         pendingSidecars.packages = true;
         try {
           const published = await prepared.publish();
           pendingSidecars.packages = false;
           const sidecars = { ...context.sidecars, packages: published.observation };
-          await checkpointRecovery(context.disk, sidecars);
-          publishSource(context, { document: context.document, path: context.path, layout: context.layout, disk: context.disk, sidecars, dirty: context.dirty || recoveryPending, advanceRevision: true });
+          publishSource(context, { document: context.document, path: context.path, layout: context.layout, disk: context.disk, sidecars, dirty: context.dirty, advanceRevision: false });
           return { ok: true, path: notebookDirectory, metadata: join(notebookDirectory, ".alder", "packages.yaml"), packages: [...published.value], sidecarVersion: published.observation.version };
         } catch (error) {
           const code = pendingSidecars.packages ? "sidecar_write_failed" : "recovery_checkpoint_failed";
@@ -860,7 +701,7 @@ async function startNotebookHost(
       if (request.kind === "sidecar" && request.sidecar === undefined && request.patch !== undefined) {
         const appDocument = setAppConfig(context.document, request.patch);
         const document = setMetadata(context.document, "app", appDocument.metadata?.app ?? null);
-        await appendRecovery({ fromRevision: context.fromRevision, document, config: projectSettings, layout: projectLayoutIntent, disk: context.disk, sidecars: context.sidecars, fingerprint: request.fingerprint ?? "app" });
+        await appendRecovery({ fromRevision: context.fromRevision, document, disk: context.disk });
         const appResolution = appConfig(document);
         publishSource(context, { document, path: context.path, layout: context.layout, disk: context.disk, sidecars: context.sidecars, dirty: true, advanceRevision: true });
         return appResolution;
@@ -880,7 +721,7 @@ async function startNotebookHost(
         let preparedSave: PreparedSaveAs | undefined;
         let savePublication: Awaited<ReturnType<PreparedSaveAs["publish"]>> | undefined;
         let destinationStore: DocumentStore | undefined;
-        let preparedRecovery: Awaited<ReturnType<RecoveryWriter["prepareRebind"]>> | undefined;
+        let destinationRecovery: RecoveryWriter | undefined;
         let nextManager: PackageManager | undefined;
         try {
           preparedOwner = await ownership.prepareRekey(request.path);
@@ -891,21 +732,13 @@ async function startNotebookHost(
           const destinationProjectConfig = await loadProjectSettings(projectConfigPath(destination));
           const destinationConfig = configurationFor(context.document, destinationProjectConfig);
           const destinationCache = destinationConfig.cache.dir ? resolve(destinationDirectory, destinationConfig.cache.dir) : join(destinationDirectory, ".alder", "cache");
-          let destinationLayout = await readLayout(destination);
+          const destinationLayout = await readLayout(destination);
           let destinationPackages: string[] = [];
           try { destinationPackages = [...(await readPackageDeclarations(destinationDirectory)).packages]; } catch { destinationPackages = []; }
           const runtimeChanged = destinationDirectory !== notebookDirectory || destinationCache !== cacheDirectory;
           const destinationRuntime = runtimeChanged ? null : runtimeEnvironment;
           savePublication = await preparedSave.publish();
           destinationStore = savePublication.store;
-          if (destinationLayout === null && context.layout !== null) {
-            const layoutPrepared = await destinationStore.prepareLayout(context.layout as never, destinationStore.sidecarObservation("layout").version);
-            destinationLayout = (await layoutPrepared.publish()).value;
-          }
-          if (destinationPackages.length === 0 && packageDeclarationIntent.length > 0) {
-            const packagesPrepared = await destinationStore.preparePackages(packageDeclarationIntent, destinationStore.sidecarObservation("packages").version);
-            destinationPackages = [...(await packagesPrepared.publish()).value];
-          }
           nextManager = createPackageManager({ resources: options.resources, environment: destinationRuntime, processScope: processScope!, projectDirectory: destinationDirectory, onProgress: onPackageProgress });
           const destinationDisk = destinationStore.observation();
           const destinationSidecars = sidecarProtocolObservations(destinationStore, false);
@@ -917,26 +750,25 @@ async function startNotebookHost(
             physicalBytes: destinationSerialized.bytes,
             cells: recoveryCellStates(destinationStore.currentDocument),
             path: destination,
-            project: destinationDirectory,
-            config: destinationProjectConfig as never,
-            layout: destinationLayout as never,
-            packageDeclarationIntent: destinationPackages as never,
             notebookDiskObservation: recoveryObservation(destinationDisk),
-            sidecarObservations: {
-              config: recoveryObservation(destinationSidecars.config),
-              layout: recoveryObservation(destinationSidecars.layout),
-              packages: recoveryObservation(destinationSidecars.packages),
-            },
           };
-          preparedRecovery = await oldRecovery.prepareRebind({ rootDir: options.recoveryDirectory ?? envPaths("alder", { suffix: "" }).data, key: preparedOwner.sessionKey, baseline: destinationBaseline });
-          const destinationRecoveryFingerprint = preparedRecovery.state.fingerprint ?? sourceBytesSha256(destinationSerialized.bytes);
-          await preparedRecovery.publish();
-          const recoveryCleared = await preparedRecovery.writer.clearIfMatch({
-            documentRevision: destinationRevision,
-            fingerprint: destinationRecoveryFingerprint,
+          destinationRecovery = await RecoveryWriter.open({
+            rootDir: options.recoveryDirectory ?? envPaths("alder", { suffix: "" }).data,
+            key: preparedOwner.sessionKey,
+            baseline: destinationBaseline,
+            recoveryId: oldRecovery.recoveryId,
+            processSupervisorExecutable: options.resources.processSupervisorExecutable,
           });
-          if (!recoveryCleared) throw new Error("Save As recovery state changed before publication");
-          const destinationRecoveryProjection: PublishedRecoveryProjection | null = null;
+          if ((await destinationRecovery.load()).pending) {
+            await destinationRecovery.retire();
+            destinationRecovery = await RecoveryWriter.open({
+              rootDir: options.recoveryDirectory ?? envPaths("alder", { suffix: "" }).data,
+              key: preparedOwner.sessionKey,
+              baseline: destinationBaseline,
+              recoveryId: oldRecovery.recoveryId,
+              processSupervisorExecutable: options.resources.processSupervisorExecutable,
+            });
+          }
           const publicationBinder = context.preparePublication({
             document: { ...context.document, path: destination },
             path: destination,
@@ -968,11 +800,10 @@ async function startNotebookHost(
             return async () => {
               try {
                 // Apply the controller publication before adopting any destination state.
-                applyPublishedProjection(publicationBinder, destinationRecoveryProjection);
+                publicationBinder();
                 preparedSave!.adopt();
-                preparedRecovery!.adopt();
                 store = destinationStore;
-                recovery = preparedRecovery!.writer;
+                recovery = destinationRecovery;
                 packageManager = nextManager;
                 notebookDirectory = destinationDirectory;
                 cacheDirectory = destinationCache;
@@ -989,6 +820,7 @@ async function startNotebookHost(
                 recoveryDocumentRevision = destinationRevision;
                 recoveryPending = false;
                 recoveryFingerprint = undefined;
+                recoveryConflict = false;
                 reservation?.release();
                 try {
                   bindWatcher(destination);
@@ -999,8 +831,7 @@ async function startNotebookHost(
                 if (runtimeError !== null) controller!.recordRuntimeAvailabilityError(asRuntimeHostError(runtimeError)!);
                 if (untitledRecoveryDescriptor !== undefined) void retireUntitledRecoveryDescriptor(untitledRecoveryDescriptor, undefined, privatePathOptions).catch(error => controller?.recordActionError(errorMessage(error), "recovery_checkpoint_failed"));
                 void oldStore.close().catch(() => {});
-                // Retire the source recovery identity before releasing its ownership.
-                await oldRecovery.load().then(state => oldRecovery.clearIfMatch({ documentRevision: state.documentRevision, fingerprint: state.fingerprint! })).then(() => oldRecovery.close()).catch(() => {});
+                await oldRecovery.retire().catch(() => {});
                 if (runtimeChanged) startRuntime(true);
                 void oldManager?.close().catch(() => {});
               } catch (error) {
@@ -1017,7 +848,7 @@ async function startNotebookHost(
           return savePublication.result;
         } catch (error) {
           reservation?.release();
-          await preparedRecovery?.abort().catch(() => {});
+          if (destinationRecovery !== undefined && destinationRecovery !== recovery) await destinationRecovery.retire().catch(() => {});
           await preparedSave?.abort().catch(() => {});
           await preparedOwner?.abort().catch(() => {});
           await nextManager?.close().catch(() => {});
@@ -1042,7 +873,7 @@ async function startNotebookHost(
             publishSource(context, { document: context.document, path: context.path, layout: context.layout, disk: context.disk, sidecars: context.sidecars, dirty: context.dirty, advanceRevision: false });
             return { changed: false };
           }
-          if (context.dirty && (sourceChanged || sidecarsChanged || request.kind === "reload-source")) {
+          if (context.dirty && (sourceChanged || sidecarsChanged || request.kind === "reload-source") && request.discardRecovery !== true) {
             if (sourceChanged) await store.adoptSourceObservation(observed.store);
             store.adoptSidecarObservations(observed.store);
             await observed.store.close();
@@ -1081,15 +912,17 @@ async function startNotebookHost(
           }
           const nextSidecars = currentSidecars;
           const nextDisk = preparedReload.observation;
-          if (context.dirty && (sourceChanged || sidecarsChanged)) {
-            await appendRecovery({ fromRevision: context.fromRevision, document: nextDocument, config: nextProjectConfig, layout: nextLayout, packageDeclarationIntent: nextPackageDeclarationIntent, disk: nextDisk, sidecars: nextSidecars, fingerprint: request.fingerprint ?? "reload" });
-            await checkpointRecovery(nextDisk, nextSidecars);
-          }
           preparedReload.adopt();
           store.adoptSidecarObservations(observed.store);
           await observed.store.close();
           publishSource(context, { document: nextDocument, path: store.path, layout: nextLayout, disk: nextDisk, sidecars: nextSidecars, dirty: false, advanceRevision: sourceChanged || sidecarsChanged, invalidateRuntime: sourceChanged, config: nextConfig });
           notebook = nextDocument;
+          if (request.discardRecovery === true) {
+            await recovery!.discard();
+            recoveryPending = false;
+            recoveryFingerprint = undefined;
+            recoveryConflict = false;
+          }
           if (sidecarsChanged) {
             projectSettings = { ...nextProjectConfig };
             projectLayoutIntent = nextLayout;
@@ -1127,106 +960,21 @@ async function startNotebookHost(
     };
 
     const artifactStore = engine!.prepareOutputStore({ sessionEpoch: ownership.epoch, documentRevision: recoveryDocumentRevision });
-    const recoveryArtifactCache = new Map<string, { fingerprint: string; handle: ArtifactHandle }>();
-    const activeRecoveryBranchId = "active-" + ownership.sessionKey;
-    const protocolDisk = (observation: RecoveryDiskObservation): HostSnapshot["disk"] => ({
-      state: observation.state,
-      digest: observation.digest ?? null,
-      version: observation.version ?? null,
-      error: null,
-    });
-    const recoverySourceArtifact = async (id: string, fingerprint: string, baseline: RecoveryBaseline): Promise<ArtifactHandle> => {
-      const key = id + "\u0000" + fingerprint;
-      const cached = recoveryArtifactCache.get(key);
-      if (cached !== undefined) {
-        try {
-          await artifactStore.readArtifact(cached.handle, 0, 0);
-          return cached.handle;
-        } catch {
-          artifactStore.release([cached.handle]);
-          recoveryArtifactCache.delete(key);
-        }
-      }
-      const bytes = decodePhysicalBytes(baseline.physicalBytes);
-      if (bytes === null) throw new Error("recovery source bytes are invalid");
-      const outputScope: StaticOutputScope = {
-        sessionEpoch: ownership.epoch,
-        documentRevision: baseline.documentRevision,
-        kernelEpoch: null,
-        runId: null,
-        cellId: null,
-        revision: null,
-      };
-      const handle = await artifactStore.writeStaticArtifact(bytes, "text/plain; charset=utf-8", ".R", outputScope);
-      recoveryArtifactCache.set(key, { fingerprint, handle });
-      if (recoveryArtifactCache.size > 128) {
-        const first = recoveryArtifactCache.entries().next().value as [string, { fingerprint: string; handle: ArtifactHandle }] | undefined;
-        if (first !== undefined) {
-          artifactStore.release([first[1].handle]);
-          recoveryArtifactCache.delete(first[0]);
-        }
-      }
-      return handle;
-    };
     const recoveryState = async (): Promise<ProtocolRecoveryState> => {
-      const currentDisk = protocolDisk(recoveryObservation(controller?.snapshot().disk ?? sourceProtocolObservation(store!)));
-      let loaded: Awaited<ReturnType<RecoveryWriter["listBranches"]>>;
       try {
-        loaded = await recovery!.listBranches();
-      } catch (error) {
+        const state = await recovery!.load();
         return {
-          branches: [],
-          pending: publishedRecoveryProjection !== null,
-          corruption: asHostError(error, "recovery_corrupt"),
+          candidate: state.pending ? {
+            documentRevision: state.baseline.documentRevision,
+            state: recoveryConflict ? "conflict" : "restored",
+          } : null,
+          corruption: recovery!.issue ? asHostError(recovery!.issue, recovery!.issue.code) : null,
         };
+      } catch (error) {
+        return { candidate: null, corruption: asHostError(error, "recovery_corrupt") };
       }
-      const branches: ProtocolRecoveryBranch[] = [];
-      let corruption: ProtocolRecoveryState["corruption"] = recovery?.issue ? asHostError(recovery.issue, recovery.issue.code) : null;
-      for (const branch of loaded) {
-        let baseline: RecoveryBaseline;
-        try {
-          baseline = await recovery!.materializeBranch(branch.id);
-          const sourceHandle = await recoverySourceArtifact(branch.id, branch.fingerprint, baseline);
-          const conflict = !recoveryObservationMatches(baseline.notebookDiskObservation, currentDisk);
-          branches.push({
-            id: branch.id,
-            documentRevision: baseline.documentRevision,
-            baseDisk: protocolDisk(baseline.notebookDiskObservation),
-            sourceHandle,
-            state: conflict ? "conflict" : branch.status === "clean" ? "clean" : "dirty",
-            conflict: conflict ? asHostError(new Error("recovery branch source changed on disk"), "recovery_conflict") : null,
-          });
-        } catch (error) {
-          corruption ??= asHostError(error, "recovery_corrupt");
-        }
-      }
-      if (publishedRecoveryProjection !== null) {
-        const projection = publishedRecoveryProjection;
-        try {
-          const sourceHandle = await recoverySourceArtifact(activeRecoveryBranchId, projection.fingerprint, projection.baseline);
-          const conflict = projection.state === "conflict" || !recoveryObservationMatches(projection.baseline.notebookDiskObservation, currentDisk);
-          branches.push({
-            id: activeRecoveryBranchId,
-            documentRevision: projection.baseline.documentRevision,
-            baseDisk: protocolDisk(projection.baseline.notebookDiskObservation),
-            sourceHandle,
-            state: conflict ? "conflict" : "dirty",
-            conflict: conflict ? asHostError(new Error("active recovery source changed on disk"), "recovery_conflict") : null,
-          });
-        } catch (error) {
-          corruption ??= asHostError(error, "recovery_corrupt");
-        }
-      }
-      return { branches, pending: publishedRecoveryProjection !== null || branches.some(branch => branch.state !== "clean"), corruption };
     };
     const initialProtocolSidecars = sidecarProtocolObservations(store);
-    if (recoverySidecarError !== null) {
-      const kind = recoverySidecarError.kind;
-      initialProtocolSidecars[kind] = {
-        ...initialProtocolSidecars[kind],
-        error: asHostError(recoverySidecarError.error, "sidecar_write_failed"),
-      };
-    }
     const recoveredStartup = recoveryPending;
     controller = new Controller({
       engine,
@@ -1403,7 +1151,6 @@ async function startNotebookHost(
     }
     if (runtimeError !== null) controller.recordRuntimeAvailabilityError(asRuntimeHostError(runtimeError)!);
     if (recoveryConflict) controller.recordActionError("notebook changed on disk; recovery draft retained", "recovery_conflict");
-    if (recoverySidecarError !== null) controller.recordActionError(errorMessage(recoverySidecarError.error), "sidecar_write_failed");
     const getLsp = (): Promise<LspClient> => {
       if (lsp?.alive()) return Promise.resolve(lsp);
       if (lspStarting !== undefined) return lspStarting;

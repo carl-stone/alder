@@ -2221,6 +2221,13 @@ export class NotebookView {
     return result;
   }
 
+  private async saveRecoveryCopy(): Promise<void> {
+    const desktop = (globalThis as typeof globalThis & { alderDesktop?: import("../protocol.js").PreloadApi }).alderDesktop;
+    if (!desktop) throw new Error("Save a copy is available in the desktop app");
+    const destination = await desktop.chooseSavePath();
+    if (destination !== null) await this.client.saveAs(destination);
+  }
+
   async saveForDesktop(): Promise<"saved" | "cancelled"> {
     return await this.saveNotebook("explicit") === undefined ? "cancelled" : "saved";
   }
@@ -2501,12 +2508,12 @@ export class NotebookView {
     const runtimeBlocked = this.documentValue?.snapshot.runtime.executionBlockedReason ?? null;
     const runtimeMessage = runtimeBlocked === null ? null : "R execution is blocked: " + (runtimeBlocked.message || runtimeBlocked.code);
     const recovery = this.client.recoveryState;
-    const recoveryConflict = recovery.status === "conflict" || recovery.branches.some((branch) => branch.state === "conflict") || recovery.corruption !== null;
+    const recoveryConflict = recovery.status === "conflict" || recovery.candidate?.state === "conflict" || recovery.corruption !== null;
     const recoveryMessage = recovery.uncertainRun ? "The previous run may have been interrupted. Run explicitly when you are ready." : recovery.local !== null
       ? recovery.status === "conflict" ? "Recovered edits conflict with newer changes." : "Unsaved edits recovered."
       : recovery.persistenceError ? "Local edit recovery is not durable."
-      : recovery.drafts.length > 0 ? "A saved draft is available."
-      : recovery.pending ? "Recovering an interrupted local edit…" : recovery.corruption ? "Recovery data needs your review." : recoveryConflict ? "Recovered edits need your review." : null;
+      : recovery.candidate?.state === "restored" ? "Unsaved edits recovered."
+      : recovery.corruption ? "Recovery data needs your review." : recoveryConflict ? "Recovered edits need your review." : null;
     const message = this.hostClosed ? "Notebook host shut down." : this.actionError ?? stateError ?? settingsError ?? editorHelpError ?? runtimeMessage ?? this.transportError ?? this.actionNotice ?? recoveryMessage ?? "";
     const signature = JSON.stringify({
       runtimeBlocked: runtimeBlocked === null ? null : [runtimeBlocked.code, runtimeBlocked.message],
@@ -2518,7 +2525,7 @@ export class NotebookView {
       transportError: Boolean(this.transportError),
       editorHelpRestarting: this.editorHelpRestarting,
       actionCount: this.actionCount,
-      recovery: { status: recovery.status, local: recovery.local !== null, branches: recovery.branches.map((branch) => [branch.id, branch.state, branch.documentRevision]), drafts: recovery.drafts.map((draft) => draft.draftId), pending: recovery.pending, uncertainRun: recovery.uncertainRun, corruption: recovery.corruption?.code ?? null, persistenceError: recovery.persistenceError?.code ?? null },
+      recovery: { status: recovery.status, local: recovery.local !== null, candidate: recovery.candidate === null ? null : [recovery.candidate.state, recovery.candidate.documentRevision], uncertainRun: recovery.uncertainRun, corruption: recovery.corruption?.code ?? null, persistenceError: recovery.persistenceError?.code ?? null },
     });
     if (signature === this.statusSignature) return;
     this.statusSignature = signature;
@@ -2558,13 +2565,15 @@ export class NotebookView {
   private renderRecoveryControls(): void {
     if (!this.status) return;
     const state = this.client.recoveryState;
-    if (!state.local && !state.drafts.length && !state.branches.length && !state.pending && !state.uncertainRun && !state.corruption && !state.persistenceError) return;
+    if (!state.local && !state.candidate && !state.uncertainRun && !state.corruption && !state.persistenceError) return;
     const panel = elementNode(this.dom, "div", "recovery-panel", "") as HTMLDivElement;
     panel.dataset.recovery = "true"; panel.dataset.recoveryPanel = "true"; panel.setAttribute("role", "alert");
     const detail = state.uncertainRun ? "The previous run may have been interrupted. It has not been run again." : state.local ? state.status === "conflict"
       ? "Your edits are preserved. Review the conflicting cells before saving."
       : "Your unsaved edits have been recovered."
-      : state.persistenceError?.message ?? state.corruption?.message ?? (state.drafts.length ? "Saved edits are available to restore." : "Unsaved changes were recovered.");
+      : state.persistenceError?.message ?? state.corruption?.message ?? (state.candidate?.state === "conflict"
+        ? "The saved notebook changed after these edits. Use Save As to preserve a copy, or reopen the saved file to discard them."
+        : "Unsaved changes were recovered.");
     panel.appendChild(elementNode(this.dom, "div", "recovery-message", detail));
     const actions = elementNode(this.dom, "div", "recovery-actions", "") as HTMLDivElement;
     const add = (label: string, action: () => Promise<void>): void => {
@@ -2573,12 +2582,8 @@ export class NotebookView {
       button.addEventListener("click", () => { void this.action(action).catch(error => this.showError(error)); });
       actions.appendChild(button);
     };
-    if (state.local) add("Discard recovered edits", () => this.client.discardRecovery());
-    state.drafts.forEach((draft, index) => {
-      const label = state.drafts.length === 1 ? "draft" : "draft " + (index + 1);
-      add("Restore " + label, () => this.client.restoreSavedDraft(draft.draftId));
-      add("Discard " + label, () => this.client.discardSavedDraft(draft.draftId));
-    });
+    if (state.candidate?.state === "conflict") add("Save recovered copy", () => this.saveRecoveryCopy());
+    if (state.local || state.candidate || state.corruption) add("Discard recovery", () => this.client.discardRecovery());
     if (actions.childElementCount) panel.appendChild(actions);
     this.status.appendChild(panel);
   }

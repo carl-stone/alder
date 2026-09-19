@@ -33376,7 +33376,7 @@ var uploadFileSchema = external_exports.object({ name: pathSchema, content_base6
 var uploadCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("upload"), name: idSchema, path: external_exports.array(idSchema).max(256), files: external_exports.array(uploadFileSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS), kernelEpoch: idSchema }).strict();
 var saveCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("save"), expectedDocumentRevision: revisionSchema }).strict();
 var saveAsCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("save-as"), path: pathSchema, expectedDestination: external_exports.union([external_exports.literal("absent"), external_exports.object({ expectedDiskDigest: external_exports.string().min(1), expectedDiskVersion: external_exports.string().min(1) }).strict()]), expectedDocumentRevision: revisionSchema }).strict();
-var reloadSourceCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("reload-source"), expectedDocumentRevision: revisionSchema, expectedDiskDigest: external_exports.string().regex(/^[0-9a-f]{64}$/), expectedDiskVersion: boundedUtf8StringSchema(MAX_ID_BYTES, true) }).strict();
+var reloadSourceCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("reload-source"), expectedDocumentRevision: revisionSchema, expectedDiskDigest: external_exports.string().regex(/^[0-9a-f]{64}$/), expectedDiskVersion: boundedUtf8StringSchema(MAX_ID_BYTES, true), discardRecovery: external_exports.boolean().optional() }).strict();
 var formatCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("format"), cellIds: external_exports.array(idSchema).max(MAX_NOTEBOOK_CELLS).optional(), expectedRevisions: safeStringRecordSchema(revisionSchema), expectedDocumentRevision: revisionSchema }).strict();
 var setPreferencesCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("set-preferences"), patch: preferencesPatchSchema, expectedPreferencesVersion: boundedUtf8StringSchema(MAX_ID_BYTES).nullable() }).strict();
 var setConfigCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("set-config"), patch: projectSettingsPatchSchema, expectedSidecarVersion: boundedUtf8StringSchema(MAX_ID_BYTES).nullable(), expectedDocumentRevision: revisionSchema }).strict();
@@ -33556,8 +33556,8 @@ var hostSnapshotSchema = external_exports.object({ protocol: external_exports.li
 var hostEventTypeSchema = external_exports.enum(["transaction", "notebook", "cell", "cell-started", "cell-output", "cell-completed", "diagnostics", "editor-diagnostics", "service-errors", "graph", "variables", "runtime", "operation", "service-error", "active_clients_changed"]);
 var eventBase = { protocol: external_exports.literal(HOST_PROTOCOL), epoch: idSchema, cursor: protocolIntegerSchema, version: protocolIntegerSchema, documentRevision: revisionSchema, timestamp: external_exports.number().finite().nonnegative(), operationId: idSchema.optional(), clientId: idSchema.optional(), cellId: idSchema.optional(), runId: idSchema.optional(), kernelEpoch: idSchema.nullable().optional(), revision: revisionSchema.optional(), sequence: protocolIntegerSchema.optional() };
 var hostEventSchema = external_exports.object({ ...eventBase, type: hostEventTypeSchema, payload: protocolJsonSchema }).strict();
-var recoveryBranchSchema = external_exports.object({ id: idSchema, documentRevision: revisionSchema, baseDisk: diskObservationSchema, sourceHandle: external_exports.lazy(() => artifactHandleSchema), state: external_exports.enum(["clean", "dirty", "conflict"]), conflict: hostErrorSchema.nullable() }).strict();
-var recoveryStateSchema = external_exports.object({ branches: external_exports.array(recoveryBranchSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS), pending: external_exports.boolean(), corruption: hostErrorSchema.nullable() }).strict();
+var recoveryCandidateSchema = external_exports.object({ documentRevision: revisionSchema, state: external_exports.enum(["restored", "conflict"]) }).strict();
+var recoveryStateSchema = external_exports.object({ candidate: recoveryCandidateSchema.nullable(), corruption: hostErrorSchema.nullable() }).strict();
 var recoverySchema = external_exports.object({ kind: external_exports.literal("snapshot"), epoch: idSchema, cursor: protocolIntegerSchema, snapshot: hostSnapshotSchema }).strict();
 var commandResultSchema = external_exports.object({ requestId: idSchema, epoch: idSchema, documentRevision: revisionSchema, version: protocolIntegerSchema, cursor: protocolIntegerSchema, result: protocolJsonSchema.nullable(), error: hostErrorSchema.nullable() }).strict();
 var queryOffset = protocolIntegerSchema.optional();
@@ -33888,9 +33888,8 @@ var windowActionMessageSchema = external_exports.object({ action: windowActionSc
 var windowStateSchema = external_exports.object({ path: pathSchema.nullable(), dirty: external_exports.boolean(), platform: boundedUtf8StringSchema(64, true), sessionEpoch: idSchema }).strict();
 var desktopRecoveryRequestSchema = external_exports.object({
   recoveryId: external_exports.string().regex(/^[A-Za-z0-9_-]{1,128}$/),
-  action: external_exports.enum(["read", "write", "remove", "list"]),
+  action: external_exports.enum(["read", "write", "remove"]),
   name: external_exports.string().max(256).optional(),
-  prefix: external_exports.string().max(256).optional(),
   value: external_exports.unknown().optional()
 }).strict();
 var ProtocolError = class extends Error {

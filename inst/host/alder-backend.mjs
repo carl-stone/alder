@@ -15197,7 +15197,7 @@ var require_previous_map = __commonJS({
   "../../../../../alder/host/node_modules/postcss/lib/previous-map.js"(exports, module) {
     "use strict";
     var { existsSync, readFileSync, realpathSync } = __require("fs");
-    var { dirname: dirname11, isAbsolute: isAbsolute6, join: join21, relative: relative4, sep: sep4 } = __require("path");
+    var { dirname: dirname12, isAbsolute: isAbsolute6, join: join21, relative: relative4, sep: sep4 } = __require("path");
     var { SourceMapConsumer, SourceMapGenerator } = require_source_map();
     function realPath(path3) {
       try {
@@ -15224,7 +15224,7 @@ var require_previous_map = __commonJS({
         if (!this.mapFile && opts.from) {
           this.mapFile = opts.from;
         }
-        if (this.mapFile) this.root = dirname11(this.mapFile);
+        if (this.mapFile) this.root = dirname12(this.mapFile);
         if (text2) this.text = text2;
       }
       consumer() {
@@ -15270,12 +15270,12 @@ var require_previous_map = __commonJS({
         if (!trusted && !this.unsafeMap) {
           if (!/\.map$/i.test(path3)) return void 0;
           if (!cssFile) return void 0;
-          let rel = relative4(realPath(dirname11(cssFile)), realPath(path3));
+          let rel = relative4(realPath(dirname12(cssFile)), realPath(path3));
           if (rel === ".." || rel.startsWith(".." + sep4) || isAbsolute6(rel)) {
             return void 0;
           }
         }
-        this.root = dirname11(path3);
+        this.root = dirname12(path3);
         if (existsSync(path3)) {
           this.mapFile = path3;
           return readFileSync(path3, "utf-8").toString().trim();
@@ -15312,7 +15312,7 @@ var require_previous_map = __commonJS({
           return this.decodeInline(this.annotation);
         } else if (this.annotation) {
           let map2 = this.annotation;
-          if (file2) map2 = join21(dirname11(file2), map2);
+          if (file2) map2 = join21(dirname12(file2), map2);
           let unknown2 = this.loadFile(map2, file2, false);
           if (unknown2) {
             try {
@@ -15817,12 +15817,12 @@ var require_fromJSON = __commonJS({
 var require_map_generator = __commonJS({
   "../../../../../alder/host/node_modules/postcss/lib/map-generator.js"(exports, module) {
     "use strict";
-    var { dirname: dirname11, relative: relative4, resolve: resolve15, sep: sep4 } = __require("path");
+    var { dirname: dirname12, relative: relative4, resolve: resolve15, sep: sep4 } = __require("path");
     var { SourceMapConsumer, SourceMapGenerator } = require_source_map();
     var { pathToFileURL: pathToFileURL2 } = __require("url");
     var Input = require_input();
     var sourceMapAvailable = Boolean(SourceMapConsumer && SourceMapGenerator);
-    var pathAvailable = Boolean(dirname11 && resolve15 && relative4 && sep4);
+    var pathAvailable = Boolean(dirname12 && resolve15 && relative4 && sep4);
     var MapGenerator = class {
       constructor(stringify, root, opts, cssString) {
         this.stringify = stringify;
@@ -15854,7 +15854,7 @@ var require_map_generator = __commonJS({
       applyPrevMaps() {
         for (let prev of this.previous()) {
           let from = this.toUrl(this.path(prev.file));
-          let root = prev.root || dirname11(prev.file);
+          let root = prev.root || dirname12(prev.file);
           let map2;
           if (this.mapOpts.sourcesContent === false) {
             map2 = new SourceMapConsumer(prev.text);
@@ -16050,9 +16050,9 @@ var require_map_generator = __commonJS({
         if (/^\w+:\/\//.test(file2)) return file2;
         let cached2 = this.memoizedPaths.get(file2);
         if (cached2) return cached2;
-        let from = this.opts.to ? dirname11(this.opts.to) : ".";
+        let from = this.opts.to ? dirname12(this.opts.to) : ".";
         if (typeof this.mapOpts.annotation === "string") {
-          from = dirname11(resolve15(from, this.mapOpts.annotation));
+          from = dirname12(resolve15(from, this.mapOpts.annotation));
         }
         let path3 = relative4(from, file2);
         this.memoizedPaths.set(file2, path3);
@@ -21520,7 +21520,7 @@ var require_websocket = __commonJS({
     var http = __require("http");
     var net = __require("net");
     var tls = __require("tls");
-    var { randomBytes: randomBytes5, createHash: createHash10 } = __require("crypto");
+    var { randomBytes: randomBytes5, createHash: createHash9 } = __require("crypto");
     var { Duplex, Readable: Readable3 } = __require("stream");
     var { URL: URL3 } = __require("url");
     var PerMessageDeflate2 = require_permessage_deflate();
@@ -22188,7 +22188,7 @@ var require_websocket = __commonJS({
           abortHandshake(websocket, socket, "Invalid Upgrade header");
           return;
         }
-        const digest = createHash10("sha1").update(key2 + GUID).digest("base64");
+        const digest = createHash9("sha1").update(key2 + GUID).digest("base64");
         if (res.headers["sec-websocket-accept"] !== digest) {
           abortHandshake(websocket, socket, "Invalid Sec-WebSocket-Accept header");
           return;
@@ -22557,7 +22557,7 @@ var require_websocket_server = __commonJS({
     var EventEmitter4 = __require("events");
     var http = __require("http");
     var { Duplex } = __require("stream");
-    var { createHash: createHash10 } = __require("crypto");
+    var { createHash: createHash9 } = __require("crypto");
     var extension2 = require_extension();
     var PerMessageDeflate2 = require_permessage_deflate();
     var subprotocol2 = require_subprotocol();
@@ -22864,7 +22864,7 @@ var require_websocket_server = __commonJS({
           );
         }
         if (this._state > RUNNING) return abortHandshake(socket, 503);
-        const digest = createHash10("sha1").update(key2 + GUID).digest("base64");
+        const digest = createHash9("sha1").update(key2 + GUID).digest("base64");
         const headers = [
           "HTTP/1.1 101 Switching Protocols",
           "Upgrade: websocket",
@@ -39770,8 +39770,8 @@ var require_graceful_fs = __commonJS({
       fs2.createReadStream = createReadStream2;
       fs2.createWriteStream = createWriteStream;
       var fs$readFile = fs2.readFile;
-      fs2.readFile = readFile11;
-      function readFile11(path3, options, cb) {
+      fs2.readFile = readFile12;
+      function readFile12(path3, options, cb) {
         if (typeof options === "function")
           cb = options, options = null;
         return go$readFile(path3, options, cb);
@@ -39842,9 +39842,9 @@ var require_graceful_fs = __commonJS({
         }
       }
       var fs$readdir = fs2.readdir;
-      fs2.readdir = readdir5;
+      fs2.readdir = readdir4;
       var noReaddirOptionVersions = /^v[0-5]\./;
-      function readdir5(path3, options, cb) {
+      function readdir4(path3, options, cb) {
         if (typeof options === "function")
           cb = options, options = null;
         var go$readdir = noReaddirOptionVersions.test(process.version) ? function go$readdir2(path4, options2, cb2, startTime) {
@@ -40858,7 +40858,7 @@ var require_proper_lockfile = __commonJS({
 // src/backend.ts
 import { createServer as createServer2 } from "node:net";
 import { chmod as chmod6, mkdir as mkdir11 } from "node:fs/promises";
-import { dirname as dirname10, resolve as resolve14 } from "node:path";
+import { dirname as dirname11, resolve as resolve14 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // src/preferences.ts
@@ -60324,9 +60324,9 @@ var ApplicationPreferences = class _ApplicationPreferences {
 };
 
 // src/application.ts
-import { createHash as createHash9, randomUUID as randomUUID14 } from "node:crypto";
+import { randomUUID as randomUUID14 } from "node:crypto";
 import { mkdtemp as mkdtemp5, realpath as realpath11, rm as rm10 } from "node:fs/promises";
-import { basename as basename8, dirname as dirname9, join as join20, resolve as resolve13 } from "node:path";
+import { basename as basename8, dirname as dirname10, join as join20, resolve as resolve13 } from "node:path";
 import { tmpdir as tmpdir6 } from "node:os";
 
 // ../../../../../alder/host/node_modules/chokidar/index.js
@@ -61115,9 +61115,9 @@ var NodeFsHandler = class {
     if (this.fsw.closed) {
       return;
     }
-    const dirname11 = sp.dirname(file2);
+    const dirname12 = sp.dirname(file2);
     const basename9 = sp.basename(file2);
-    const parent = this.fsw._getWatchedDir(dirname11);
+    const parent = this.fsw._getWatchedDir(dirname12);
     let prevStats = stats;
     if (parent.has(basename9))
       return;
@@ -61144,7 +61144,7 @@ var NodeFsHandler = class {
             prevStats = newStats2;
           }
         } catch (error61) {
-          this.fsw._remove(dirname11, basename9);
+          this.fsw._remove(dirname12, basename9);
         }
       } else if (parent.has(basename9)) {
         const at = newStats.atimeMs;
@@ -62749,7 +62749,7 @@ var uploadFileSchema = external_exports.object({ name: pathSchema, content_base6
 var uploadCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("upload"), name: idSchema, path: external_exports.array(idSchema).max(256), files: external_exports.array(uploadFileSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS), kernelEpoch: idSchema }).strict();
 var saveCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("save"), expectedDocumentRevision: revisionSchema }).strict();
 var saveAsCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("save-as"), path: pathSchema, expectedDestination: external_exports.union([external_exports.literal("absent"), external_exports.object({ expectedDiskDigest: external_exports.string().min(1), expectedDiskVersion: external_exports.string().min(1) }).strict()]), expectedDocumentRevision: revisionSchema }).strict();
-var reloadSourceCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("reload-source"), expectedDocumentRevision: revisionSchema, expectedDiskDigest: external_exports.string().regex(/^[0-9a-f]{64}$/), expectedDiskVersion: boundedUtf8StringSchema(MAX_ID_BYTES, true) }).strict();
+var reloadSourceCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("reload-source"), expectedDocumentRevision: revisionSchema, expectedDiskDigest: external_exports.string().regex(/^[0-9a-f]{64}$/), expectedDiskVersion: boundedUtf8StringSchema(MAX_ID_BYTES, true), discardRecovery: external_exports.boolean().optional() }).strict();
 var formatCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("format"), cellIds: external_exports.array(idSchema).max(MAX_NOTEBOOK_CELLS).optional(), expectedRevisions: safeStringRecordSchema(revisionSchema), expectedDocumentRevision: revisionSchema }).strict();
 var setPreferencesCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("set-preferences"), patch: preferencesPatchSchema, expectedPreferencesVersion: boundedUtf8StringSchema(MAX_ID_BYTES).nullable() }).strict();
 var setConfigCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("set-config"), patch: projectSettingsPatchSchema, expectedSidecarVersion: boundedUtf8StringSchema(MAX_ID_BYTES).nullable(), expectedDocumentRevision: revisionSchema }).strict();
@@ -62929,8 +62929,8 @@ var hostSnapshotSchema = external_exports.object({ protocol: external_exports.li
 var hostEventTypeSchema = external_exports.enum(["transaction", "notebook", "cell", "cell-started", "cell-output", "cell-completed", "diagnostics", "editor-diagnostics", "service-errors", "graph", "variables", "runtime", "operation", "service-error", "active_clients_changed"]);
 var eventBase = { protocol: external_exports.literal(HOST_PROTOCOL), epoch: idSchema, cursor: protocolIntegerSchema, version: protocolIntegerSchema, documentRevision: revisionSchema, timestamp: external_exports.number().finite().nonnegative(), operationId: idSchema.optional(), clientId: idSchema.optional(), cellId: idSchema.optional(), runId: idSchema.optional(), kernelEpoch: idSchema.nullable().optional(), revision: revisionSchema.optional(), sequence: protocolIntegerSchema.optional() };
 var hostEventSchema = external_exports.object({ ...eventBase, type: hostEventTypeSchema, payload: protocolJsonSchema }).strict();
-var recoveryBranchSchema = external_exports.object({ id: idSchema, documentRevision: revisionSchema, baseDisk: diskObservationSchema, sourceHandle: external_exports.lazy(() => artifactHandleSchema), state: external_exports.enum(["clean", "dirty", "conflict"]), conflict: hostErrorSchema.nullable() }).strict();
-var recoveryStateSchema = external_exports.object({ branches: external_exports.array(recoveryBranchSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS), pending: external_exports.boolean(), corruption: hostErrorSchema.nullable() }).strict();
+var recoveryCandidateSchema = external_exports.object({ documentRevision: revisionSchema, state: external_exports.enum(["restored", "conflict"]) }).strict();
+var recoveryStateSchema = external_exports.object({ candidate: recoveryCandidateSchema.nullable(), corruption: hostErrorSchema.nullable() }).strict();
 var recoverySchema = external_exports.object({ kind: external_exports.literal("snapshot"), epoch: idSchema, cursor: protocolIntegerSchema, snapshot: hostSnapshotSchema }).strict();
 var commandResultSchema = external_exports.object({ requestId: idSchema, epoch: idSchema, documentRevision: revisionSchema, version: protocolIntegerSchema, cursor: protocolIntegerSchema, result: protocolJsonSchema.nullable(), error: hostErrorSchema.nullable() }).strict();
 var queryOffset = protocolIntegerSchema.optional();
@@ -63278,9 +63278,8 @@ var windowActionMessageSchema = external_exports.object({ action: windowActionSc
 var windowStateSchema = external_exports.object({ path: pathSchema.nullable(), dirty: external_exports.boolean(), platform: boundedUtf8StringSchema(64, true), sessionEpoch: idSchema }).strict();
 var desktopRecoveryRequestSchema = external_exports.object({
   recoveryId: external_exports.string().regex(/^[A-Za-z0-9_-]{1,128}$/),
-  action: external_exports.enum(["read", "write", "remove", "list"]),
+  action: external_exports.enum(["read", "write", "remove"]),
   name: external_exports.string().max(256).optional(),
-  prefix: external_exports.string().max(256).optional(),
   value: external_exports.unknown().optional()
 }).strict();
 var ProtocolError = class extends Error {
@@ -73149,7 +73148,7 @@ var Controller = class {
         result = { layout: clone3(this.layout), sidecar: clone3(this.sidecarsValue.layout) };
         break;
       case "recovery":
-        result = this.getRecoveryState === void 0 ? { branches: [], pending: false, corruption: null } : await this.getRecoveryState();
+        result = this.getRecoveryState === void 0 ? { candidate: null, corruption: null } : await this.getRecoveryState();
         break;
       case "packages-status":
         result = await this.callService("packages.status", {});
@@ -77281,6 +77280,7 @@ var Controller = class {
           expectedDocumentRevision: command.expectedDocumentRevision,
           expectedDisk: { digest: command.expectedDiskDigest, version: command.expectedDiskVersion },
           operationId: command.requestId,
+          discardRecovery: command.discardRecovery,
           fingerprint: stableStringify({ expectedDiskDigest: command.expectedDiskDigest, expectedDiskVersion: command.expectedDiskVersion })
         });
       case "upload":
@@ -98045,26 +98045,31 @@ function decodeBase644(value) {
 
 // src/recovery.ts
 import { createHash as createHash7, randomUUID as randomUUID10 } from "node:crypto";
-import { mkdir as mkdir8, open as open7, readdir as readdir3, realpath as realpath8, rename as rename5, rm as rm6 } from "node:fs/promises";
-import { join as join15, resolve as resolve10 } from "node:path";
+import { mkdir as mkdir8, open as open7, readFile as readFile8, realpath as realpath8, rename as rename5, rm as rm6 } from "node:fs/promises";
+import { dirname as dirname7, join as join15, resolve as resolve10 } from "node:path";
 var RecoveryError = class extends Error {
-  constructor(code2, message2, details = null, originals = [], cause) {
+  constructor(code2, message2, originals = [], cause) {
     super(message2, cause === void 0 ? void 0 : { cause });
     this.code = code2;
-    this.details = details;
     this.originals = originals;
     this.name = "RecoveryError";
   }
   code;
-  details;
   originals;
 };
-var MAX_SNAPSHOT_BYTES = 256 * 1024 * 1024;
-var SNAPSHOT_NAME = /^snapshot-\d+-[0-9a-f-]+\.json$/;
+var MAX_JOURNAL_BYTES = 64 * 1024 * 1024;
 var clone4 = (value) => structuredClone(value);
 var hash2 = (value) => createHash7("sha256").update(value).digest("hex");
 var fingerprint = (value) => hash2(JSON.stringify(value));
 var missing2 = (error61) => error61?.code === "ENOENT";
+async function syncDirectory4(path3) {
+  const directory = await open7(path3, "r");
+  try {
+    await directory.sync();
+  } finally {
+    await directory.close();
+  }
+}
 function recoveryObservationMatches(expected, actual) {
   return expected.state !== "unreadable" && actual.state !== "unreadable" && expected.state === actual.state && expected.digest === actual.digest && expected.version === actual.version && expected.identity === actual.identity && expected.mode === actual.mode;
 }
@@ -98073,47 +98078,45 @@ function normalizeBaseline(input2) {
   const bytes = typeof rawBytes === "string" ? rawBytes : Buffer.from(rawBytes instanceof ArrayBuffer ? new Uint8Array(rawBytes) : rawBytes).toString("base64");
   const length = canonicalBase64ByteLength(bytes);
   if (input2.schemaVersion !== 1 || !Number.isSafeInteger(input2.documentRevision) || input2.documentRevision < 0 || length === null || length > MAX_NOTEBOOK_SOURCE_BYTES || !Array.isArray(input2.cells) || input2.cells.length > MAX_NOTEBOOK_CELLS) {
-    throw new RecoveryError("recovery_invalid", "Recovery snapshot has invalid document data");
+    throw new RecoveryError("recovery_invalid", "Recovery journal has invalid document data");
   }
   const ids = /* @__PURE__ */ new Set();
   for (const cell of input2.cells) {
     if (typeof cell?.id !== "string" || cell.id.length === 0 || ids.has(cell.id) || !Number.isSafeInteger(cell.revision) || cell.revision < 0) {
-      throw new RecoveryError("recovery_invalid", "Recovery snapshot has invalid cell identities");
+      throw new RecoveryError("recovery_invalid", "Recovery journal has invalid cell identities");
     }
     ids.add(cell.id);
   }
-  if (input2.path !== void 0 && input2.path !== null && typeof input2.path !== "string") throw new RecoveryError("recovery_invalid", "Recovery snapshot has an invalid path");
-  const observation = input2.notebookDiskObservation;
-  if (!observation || !["untitled", "absent", "present", "unreadable"].includes(observation.state)) throw new RecoveryError("recovery_invalid", "Recovery snapshot has no disk observation");
-  sidecarObservationsSchema.parse(input2.sidecarObservations);
+  if (input2.path !== void 0 && input2.path !== null && typeof input2.path !== "string") {
+    throw new RecoveryError("recovery_invalid", "Recovery journal has an invalid path");
+  }
+  if (!input2.notebookDiskObservation || !["untitled", "absent", "present", "unreadable"].includes(input2.notebookDiskObservation.state)) {
+    throw new RecoveryError("recovery_invalid", "Recovery journal has no saved baseline");
+  }
   return JSON.parse(JSON.stringify({ ...input2, physicalBytes: bytes }));
 }
 var RecoveryWriter = class _RecoveryWriter {
   rootDir;
   key;
   directory;
-  recoveryId = randomUUID10();
+  journalPath;
+  recoveryId;
   issue = null;
   baseline;
   pending = false;
   latestFingerprint;
-  generation = null;
-  branches = /* @__PURE__ */ new Map();
-  validGenerations = [];
-  timer;
+  dirty = false;
+  corruptJournal = false;
   writeQueue = Promise.resolve();
-  change = 0;
-  persisted = 0;
-  timestamp = 0;
   closed = false;
-  interval;
   constructor(options) {
     this.rootDir = resolve10(options.rootDir);
     this.key = options.key;
     this.directory = join15(this.rootDir, "recovery-" + hash2(JSON.stringify(options.key)));
+    this.journalPath = join15(this.directory, "journal.json");
+    this.recoveryId = options.recoveryId ?? randomUUID10();
     this.baseline = normalizeBaseline(options.baseline);
     this.latestFingerprint = fingerprint(this.baseline);
-    this.interval = options.snapshotIntervalMs ?? 750;
   }
   static async open(options) {
     let rootDir = resolve10(options.rootDir);
@@ -98126,15 +98129,6 @@ var RecoveryWriter = class _RecoveryWriter {
     await writer.restore();
     return writer;
   }
-  get currentBaseline() {
-    return clone4(this.baseline);
-  }
-  get currentGeneration() {
-    return this.generation;
-  }
-  get currentBaselinePath() {
-    return this.generation === null ? null : join15(this.directory, this.generation);
-  }
   async restore() {
     try {
       await mkdir8(this.directory, { recursive: true, mode: 448 });
@@ -98145,167 +98139,66 @@ var RecoveryWriter = class _RecoveryWriter {
         this.recoveryId = id2;
       } catch (error61) {
         if (!missing2(error61)) this.report(error61, "recovery_corrupt", [identityPath]);
-        if (missing2(error61)) {
-          try {
-            const key2 = await readPrivateFile(join15(this.directory, "recovery.key"), { maxBytes: 64 });
-            if (key2.length === 32) this.recoveryId = createHash7("sha256").update(key2).digest("base64url");
-          } catch {
-          }
-          await this.atomicWrite(identityPath, Buffer.from(this.recoveryId));
-        }
+        await this.atomicWrite(identityPath, Buffer.from(this.recoveryId));
       }
-      const names = (await readdir3(this.directory)).filter((name) => SNAPSHOT_NAME.test(name)).sort().reverse();
-      this.timestamp = Number(names[0]?.split("-")[1] ?? 0);
-      let restored = false;
-      for (const name of names) {
-        const path3 = join15(this.directory, name);
-        try {
-          const envelope2 = JSON.parse((await readPrivateFile(path3, { maxBytes: MAX_SNAPSHOT_BYTES })).toString("utf8"));
-          if (hash2(JSON.stringify(envelope2.snapshot)) !== envelope2.sha256 || envelope2.snapshot?.schemaVersion !== 2 || typeof envelope2.snapshot.pending !== "boolean" || typeof envelope2.snapshot.fingerprint !== "string" || !Array.isArray(envelope2.snapshot.branches)) throw new Error("Recovery snapshot is incomplete");
-          const snapshot = envelope2.snapshot;
-          const baseline = normalizeBaseline(snapshot.baseline);
-          const branches = snapshot.branches.map((branch) => {
-            if (typeof branch.id !== "string" || typeof branch.fingerprint !== "string") throw new Error("Recovery branch is invalid");
-            return { ...branch, baseline: normalizeBaseline(branch.baseline) };
-          });
-          this.validGenerations.push(name);
-          if (!restored) {
-            if (snapshot.pending) this.baseline = baseline;
-            else if (baseline.physicalBytes === this.baseline.physicalBytes) {
-              this.baseline = { ...this.baseline, cells: baseline.cells, documentRevision: baseline.documentRevision };
-            }
-            this.pending = snapshot.pending;
-            this.latestFingerprint = snapshot.pending ? snapshot.fingerprint : fingerprint(this.baseline);
-            this.branches = new Map(branches.map((branch) => [branch.id, branch]));
-            this.generation = name;
-            restored = true;
-          }
-        } catch (error61) {
-          this.report(error61, "recovery_corrupt", [path3]);
-        }
+      let bytes;
+      try {
+        bytes = await readFile8(this.journalPath);
+      } catch (error61) {
+        if (missing2(error61)) return;
+        throw error61;
       }
+      if (bytes.length > MAX_JOURNAL_BYTES) throw new Error("Recovery journal is too large");
+      const value = JSON.parse(bytes.toString("utf8"));
+      if (value?.schemaVersion !== 1 || typeof value.fingerprint !== "string") throw new Error("Recovery journal is incomplete");
+      const baseline = normalizeBaseline(value.baseline);
+      if (fingerprint(baseline) !== value.fingerprint) throw new Error("Recovery journal checksum does not match");
+      this.baseline = baseline;
+      this.latestFingerprint = value.fingerprint;
+      this.pending = true;
     } catch (error61) {
-      this.report(error61, "recovery_write_failed", [this.directory]);
+      this.corruptJournal = true;
+      this.report(error61, "recovery_corrupt", [this.journalPath]);
     }
   }
   report(cause, code2, originals) {
-    const paths = [.../* @__PURE__ */ new Set([...this.issue?.originals ?? [], ...originals])];
     this.issue = new RecoveryError(
       code2,
-      code2 === "recovery_corrupt" ? "Some recovery data could not be read and was retained. The latest valid snapshot is available." : "Recovery storage is unavailable. Editing and saving still work.",
-      null,
-      paths,
+      code2 === "recovery_corrupt" ? "The recovery journal is damaged and was retained. The saved notebook is still available." : "The recovery journal could not be written.",
+      [.../* @__PURE__ */ new Set([...this.issue?.originals ?? [], ...originals])],
       cause
     );
   }
-  changed() {
-    this.change += 1;
-    if (!this.closed && this.timer === void 0) {
-      this.timer = setTimeout(() => {
-        this.timer = void 0;
-        void this.flush();
-      }, this.interval);
-      this.timer.unref();
-    }
-  }
-  state() {
-    return {
-      schemaVersion: 1,
-      generation: this.generation,
-      baseline: clone4(this.baseline),
-      documentRevision: this.baseline.documentRevision,
-      status: this.pending ? "recovered" : "empty",
-      pending: this.pending,
-      fingerprint: this.latestFingerprint,
-      branches: [...this.branches.values()].map((branch) => this.describeBranch(branch))
-    };
-  }
-  /** Called only after the controller has checked the source revision. No filesystem work. */
-  update(baseline, sourceFingerprint) {
-    if (this.closed) throw new RecoveryError("recovery_closed", "Recovery writer is closed");
-    this.baseline = normalizeBaseline(baseline);
-    this.latestFingerprint = sourceFingerprint ?? fingerprint(this.baseline);
-    this.pending = true;
-    this.changed();
-  }
   async load() {
-    return this.state();
+    return { baseline: clone4(this.baseline), pending: this.pending, fingerprint: this.pending ? this.latestFingerprint : null };
   }
   async materializedBaseline() {
     return clone4(this.baseline);
   }
-  async checkpoint(input2) {
-    this.baseline = normalizeBaseline({ ...this.baseline, ...input2 });
+  update(baseline) {
+    if (this.closed) throw new RecoveryError("recovery_closed", "Recovery writer is closed");
+    this.baseline = normalizeBaseline(baseline);
     this.latestFingerprint = fingerprint(this.baseline);
-    this.changed();
-    return this.state();
-  }
-  describeBranch(branch) {
-    return { id: branch.id, documentRevision: branch.baseline.documentRevision, status: "recovered", fingerprint: branch.fingerprint };
-  }
-  async forkBranch(input2 = {}) {
-    const baseline = normalizeBaseline(input2.baseline ?? this.baseline);
-    const branch = { id: input2.id ?? randomUUID10(), baseline, fingerprint: fingerprint(baseline) };
-    this.branches.set(branch.id, branch);
-    this.changed();
-    return this.describeBranch(branch);
-  }
-  async listBranches() {
-    return [...this.branches.values()].map((branch) => this.describeBranch(branch));
-  }
-  async materializeBranch(id2) {
-    const branch = this.branches.get(id2);
-    if (!branch) throw new RecoveryError("recovery_invalid", "Recovery branch is no longer available");
-    return clone4(branch.baseline);
-  }
-  async dropBranch(id2, expected) {
-    const branch = this.branches.get(id2);
-    if (!branch || branch.baseline.documentRevision !== expected.documentRevision || branch.fingerprint !== expected.fingerprint) return false;
-    this.branches.delete(id2);
-    this.changed();
-    return true;
+    this.pending = true;
+    this.dirty = true;
   }
   async clearIfMatch(expected) {
-    if (expected.documentRevision !== this.baseline.documentRevision || expected.fingerprint !== this.latestFingerprint) return false;
+    if (!this.pending || expected.documentRevision !== this.baseline.documentRevision || expected.fingerprint !== this.latestFingerprint) return false;
     this.pending = false;
-    this.changed();
-    void this.flush();
+    this.dirty = false;
+    await this.writeQueue;
+    await rm6(this.journalPath, { force: true });
+    await syncDirectory4(this.directory);
     return true;
   }
-  async prepareRebind(target) {
-    const writer = await _RecoveryWriter.open(target);
-    const existing = await writer.load();
-    if (existing.pending) await writer.forkBranch();
-    for (const [id2, branch] of this.branches) writer.branches.set(id2, clone4(branch));
-    const destinationId = writer.recoveryId;
-    writer.recoveryId = this.recoveryId;
-    writer.update(target.baseline);
-    let adopted = false;
-    let aborted2 = false;
-    return {
-      writer,
-      state: writer.state(),
-      publish: async () => {
-        await writer.flush();
-      },
-      adopt: () => {
-        if (adopted) return;
-        if (aborted2) throw new RecoveryError("recovery_invalid", "Recovery rebind was aborted");
-        adopted = true;
-        if (writer.directory !== this.directory) {
-          this.recoveryId = randomUUID10();
-          this.changed();
-          void this.flush();
-        }
-      },
-      abort: async () => {
-        if (adopted || aborted2) return;
-        aborted2 = true;
-        writer.recoveryId = destinationId;
-        writer.changed();
-        await writer.close();
-      }
-    };
+  async discard() {
+    this.pending = false;
+    this.dirty = false;
+    await this.writeQueue;
+    await rm6(this.journalPath, { force: true });
+    await syncDirectory4(this.directory);
+    this.issue = null;
+    this.corruptJournal = false;
   }
   async atomicWrite(path3, bytes) {
     const temporary = path3 + "." + randomUUID10() + ".tmp";
@@ -98315,6 +98208,7 @@ var RecoveryWriter = class _RecoveryWriter {
       await handle.sync();
       await handle.close();
       await rename5(temporary, path3);
+      await syncDirectory4(dirname7(path3));
     } finally {
       await handle.close().catch(() => {
       });
@@ -98322,44 +98216,41 @@ var RecoveryWriter = class _RecoveryWriter {
       });
     }
   }
-  /** Best effort: callers never depend on recovery storage for ordinary document operations. */
   flush() {
-    clearTimeout(this.timer);
-    this.timer = void 0;
     const operation = this.writeQueue.then(async () => {
-      if (this.change === this.persisted) return;
-      const change = this.change;
-      const snapshot = {
-        schemaVersion: 2,
-        baseline: clone4(this.baseline),
-        pending: this.pending,
-        fingerprint: this.latestFingerprint,
-        branches: [...this.branches.values()].map(clone4)
-      };
-      this.timestamp = Math.max(Date.now(), this.timestamp + 1);
-      const generation = `snapshot-${this.timestamp}-${randomUUID10()}.json`;
+      if (!this.dirty) return;
       try {
         await mkdir8(this.directory, { recursive: true, mode: 448 });
         await this.atomicWrite(join15(this.directory, "document.id"), Buffer.from(this.recoveryId));
-        const bytes = Buffer.from(JSON.stringify({ snapshot, sha256: hash2(JSON.stringify(snapshot)) }));
-        if (bytes.length > MAX_SNAPSHOT_BYTES) throw new Error("Recovery snapshot is too large");
-        await this.atomicWrite(join15(this.directory, generation), bytes);
-        this.generation = generation;
-        this.persisted = change;
-        this.validGenerations.unshift(generation);
-        for (const old of this.validGenerations.splice(2)) await rm6(join15(this.directory, old), { force: true });
+        if (this.corruptJournal) {
+          await rename5(this.journalPath, join15(this.directory, "corrupt-" + randomUUID10() + ".json")).catch((error61) => {
+            if (!missing2(error61)) throw error61;
+          });
+          this.corruptJournal = false;
+        }
+        const journal = { schemaVersion: 1, baseline: clone4(this.baseline), fingerprint: this.latestFingerprint };
+        const bytes = Buffer.from(JSON.stringify(journal));
+        if (bytes.length > MAX_JOURNAL_BYTES) throw new Error("Recovery journal is too large");
+        await this.atomicWrite(this.journalPath, bytes);
+        this.dirty = false;
         if (this.issue?.code === "recovery_write_failed") this.issue = null;
       } catch (error61) {
-        this.report(error61, "recovery_write_failed", [this.directory]);
+        this.report(error61, "recovery_write_failed", [this.journalPath]);
+        throw this.issue;
       }
     });
-    this.writeQueue = operation;
+    this.writeQueue = operation.catch(() => void 0);
     return operation;
+  }
+  async retire() {
+    this.closed = true;
+    await this.writeQueue;
+    await rm6(this.directory, { recursive: true, force: true });
   }
   async close() {
     if (this.closed) return this.writeQueue;
-    this.closed = true;
     await this.flush();
+    this.closed = true;
   }
 };
 
@@ -98372,14 +98263,14 @@ import {
   link as link2,
   lstat as lstat7,
   mkdtemp as mkdtemp3,
-  readFile as readFile8,
+  readFile as readFile9,
   realpath as realpath9,
   rm as rm7,
   stat as stat14,
   unlink as unlink3,
   writeFile as writeFile5
 } from "node:fs/promises";
-import { basename as basename6, delimiter as delimiter2, dirname as dirname7, join as join16, resolve as resolve11 } from "node:path";
+import { basename as basename6, delimiter as delimiter2, dirname as dirname8, join as join16, resolve as resolve11 } from "node:path";
 import { tmpdir as tmpdir4 } from "node:os";
 
 // ../../../../../alder/host/node_modules/linkedom/esm/shared/symbols.js
@@ -108755,7 +108646,7 @@ async function publishSnapshot(outputStore, processScope, snapshot, options) {
     const quarto = await findQuartoExecutable();
     await runQuarto(processScope, quarto, stagingDirectory, qmdPath, renderedPath, options.signal);
     throwIfAborted3(options.signal);
-    const rendered = await readFile8(renderedPath);
+    const rendered = await readFile9(renderedPath);
     if (rendered.byteLength === 0 || rendered.byteLength > MAX_PUBLISHED_HTML_BYTES) {
       throw new PublishingError("publish_failed", "Quarto did not produce a bounded HTML document");
     }
@@ -108849,7 +108740,7 @@ function assertSettledSnapshot(snapshot) {
 }
 async function validateDestinationPath(path3) {
   const outputPath = resolve11(path3);
-  const parent = dirname7(outputPath);
+  const parent = dirname8(outputPath);
   let parentStat;
   try {
     parentStat = await stat14(parent);
@@ -109127,7 +109018,7 @@ async function collectStream(stream) {
 }
 async function publishAbsentDestination(path3, bytes, signal) {
   throwIfAborted3(signal);
-  const temporary = join16(dirname7(path3), `.${basename6(path3)}.alder-${process.pid}-${randomUUID11()}.tmp`);
+  const temporary = join16(dirname8(path3), `.${basename6(path3)}.alder-${process.pid}-${randomUUID11()}.tmp`);
   try {
     await writeFile5(temporary, bytes, { flag: "wx", mode: 384 });
     await chmod3(temporary, 420);
@@ -109380,7 +109271,7 @@ var PUBLISH_CSS = `
 `;
 
 // src/formatting.ts
-import { mkdtemp as mkdtemp4, readFile as readFile9, rm as rm8, writeFile as writeFile6 } from "node:fs/promises";
+import { mkdtemp as mkdtemp4, readFile as readFile10, rm as rm8, writeFile as writeFile6 } from "node:fs/promises";
 import { tmpdir as tmpdir5 } from "node:os";
 import { join as join17 } from "node:path";
 import { TextDecoder as TextDecoder3 } from "node:util";
@@ -109445,7 +109336,7 @@ async function formatOne(airExecutable, processScope, body, signal) {
       const detail = result.stderr.trim() || result.stdout.trim() || "exit status " + (result.code ?? "unknown");
       throw new FormattingError("format_failed", "air could not format the cell: " + detail);
     }
-    const bytes = await readFile9(input2);
+    const bytes = await readFile10(input2);
     if (bytes.length > MAX_OUTPUT_BYTES2) throw new FormattingError("format_failed", "air output exceeds formatter limit");
     const output2 = new TextDecoder3("utf-8", { fatal: true }).decode(bytes);
     if (output2.includes("\0")) throw new FormattingError("format_failed", "air returned NUL bytes");
@@ -110228,8 +110119,8 @@ async function createProcessScope(_resources) {
 
 // src/sessions.ts
 import { createHash as createHash8, randomBytes as randomBytes4, randomUUID as randomUUID13 } from "node:crypto";
-import { realpath as realpath10, lstat as lstat9, chmod as chmod5, rm as rm9, unlink as unlink5, readdir as readdir4, link as link3 } from "node:fs/promises";
-import { basename as basename7, dirname as dirname8, join as join19, resolve as resolve12, sep as sep3 } from "node:path";
+import { realpath as realpath10, lstat as lstat9, chmod as chmod5, rm as rm9, unlink as unlink5, readdir as readdir3, link as link3 } from "node:fs/promises";
+import { basename as basename7, dirname as dirname9, join as join19, resolve as resolve12, sep as sep3 } from "node:path";
 var import_proper_lockfile2 = __toESM(require_proper_lockfile(), 1);
 
 // src/backend-client.ts
@@ -110898,7 +110789,7 @@ async function canonicalizePath(path3) {
     return await realpath10(absolute);
   } catch (error61) {
     if (error61.code !== "ENOENT") throw error61;
-    return join19(await realpath10(dirname8(absolute)), basename7(absolute));
+    return join19(await realpath10(dirname9(absolute)), basename7(absolute));
   }
 }
 async function sessionKeyFor(path3) {
@@ -111010,27 +110901,8 @@ function delay(ms) {
 function recoveryObservation(source) {
   return source.state === "unreadable" ? { state: source.state, digest: null, version: null, error: { code: "disk_unreadable", message: "disk observation was unreadable" } } : { state: source.state, digest: source.digest, version: source.version, error: null };
 }
-function recoverySidecarObservations(store) {
-  const observations = {
-    config: recoveryObservation(store.sidecarObservation("config")),
-    layout: recoveryObservation(store.sidecarObservation("layout")),
-    packages: recoveryObservation(store.sidecarObservation("packages"))
-  };
-  return observations;
-}
-function recoverySidecarObservationsMatch(expected, actual) {
-  if (expected === void 0) return false;
-  for (const key2 of ["config", "layout", "packages"]) {
-    const observation = expected[key2];
-    if (observation === void 0 || !recoveryObservationMatches(observation, actual[key2])) return false;
-  }
-  return true;
-}
 function recoveryCellStates(document) {
   return document.cells.map((cell) => ({ id: cell.id, revision: cell.revision ?? 0 }));
-}
-function sourceBytesSha256(bytes) {
-  return createHash9("sha256").update(bytes).digest("hex");
 }
 function semanticValue(value) {
   if (Array.isArray(value)) return value.map(semanticValue);
@@ -111102,7 +110974,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
   let isUntitled = unsaved;
   const declaredProjectDirectory = options.session?.projectDirectory ?? process.env.ALDER_UNTITLED_PROJECT_DIRECTORY;
   const untitledProjectDirectory = declaredProjectDirectory !== void 0 && resolve13(declaredProjectDirectory) === declaredProjectDirectory ? declaredProjectDirectory : null;
-  let notebookDirectory = unsaved ? untitledProjectDirectory ?? process.cwd() : dirname9(resolve13(storagePath));
+  let notebookDirectory = unsaved ? untitledProjectDirectory ?? process.cwd() : dirname10(resolve13(storagePath));
   let selectedRscript = options.rscript;
   let ownershipCompromise;
   let compromiseTeardown;
@@ -111206,7 +111078,6 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
   let runtimeAbort;
   let startRuntime = () => {
   };
-  let recoverySidecarError = null;
   let engineIdentity = null;
   let formatter;
   let publisher;
@@ -111274,8 +111145,6 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
       });
     }
   };
-  let publishedRecoveryProjection = null;
-  let pendingRecoveryProjection = null;
   let clientCount = 0;
   let leaseCount = 0;
   let everConnected = false;
@@ -111296,14 +111165,8 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
     });
   };
   resetRuntimeReady();
-  const emptySidecars = () => ({
-    config: recoveryObservation({ state: "absent", digest: null, version: null }),
-    layout: recoveryObservation({ state: "absent", digest: null, version: null }),
-    packages: recoveryObservation({ state: "absent", digest: null, version: null })
-  });
   const sourceObservation = (candidate) => isUntitled ? recoveryObservation({ state: "untitled", digest: null, version: null }) : recoveryObservation(candidate.observation());
   const sourceProtocolObservation = (candidate) => isUntitled ? { state: "untitled", digest: null, version: null, error: null } : candidate.observation();
-  const sidecarObservations = (candidate, untitled = isUntitled) => untitled ? emptySidecars() : recoverySidecarObservations(candidate);
   const sidecarProtocolObservations = (candidate, untitled = isUntitled) => untitled ? { config: { state: "absent", digest: null, version: null, error: null }, layout: { state: "absent", digest: null, version: null, error: null }, packages: { state: "absent", digest: null, version: null, error: null } } : { config: candidate.sidecarObservation("config"), layout: candidate.sidecarObservation("layout"), packages: candidate.sidecarObservation("packages") };
   const sameObservation = (left, right) => left.state === right.state && left.digest === right.digest && left.version === right.version;
   const asHostError = (error61, code2, operationId) => ({
@@ -111380,7 +111243,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
   const discardAndClose = async () => {
     if (recovery !== void 0) {
       const state = await recovery.load();
-      if (state.fingerprint !== null) await recovery.clearIfMatch({ documentRevision: state.documentRevision, fingerprint: state.fingerprint });
+      if (state.fingerprint !== null) await recovery.clearIfMatch({ documentRevision: state.baseline.documentRevision, fingerprint: state.fingerprint });
       recoveryPending = false;
       recoveryFingerprint = void 0;
     }
@@ -111415,7 +111278,6 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
     } catch {
       packageDeclarationIntent = [];
     }
-    const initialSidecarObservations = sidecarObservations(store);
     const initialSerialized = serializeNotebookWithParts(notebook);
     const baseline = {
       schemaVersion: 1,
@@ -111423,12 +111285,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
       physicalBytes: initialSerialized.bytes,
       cells: recoveryCellStates(notebook),
       path: notebook.path ?? (isUntitled ? null : store.path),
-      project: notebookDirectory,
-      config: projectSettings,
-      layout: projectLayoutIntent,
-      packageDeclarationIntent,
-      notebookDiskObservation: sourceObservation(store),
-      sidecarObservations: initialSidecarObservations
+      notebookDiskObservation: sourceObservation(store)
     };
     recovery = await RecoveryWriter.open({ rootDir: options.recoveryDirectory ?? envPaths("alder", { suffix: "" }).data, key: ownership.sessionKey, baseline, processSupervisorExecutable: options.resources.processSupervisorExecutable });
     const loadedRecoveryState = await recovery.load();
@@ -111436,19 +111293,13 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
     recoveryFingerprint = recoveryPending ? loadedRecoveryState.fingerprint ?? void 0 : void 0;
     const materialized = await recovery.materializedBaseline();
     const currentObservation = sourceObservation(store);
-    const currentSidecarObservations = sidecarObservations(store);
     recoveryDocumentRevision = materialized.documentRevision;
-    const observationsMatch = recoveryObservationMatches(materialized.notebookDiskObservation, currentObservation) && recoverySidecarObservationsMatch(materialized.sidecarObservations, currentSidecarObservations);
-    if (observationsMatch && recoveryPending) {
+    const observationsMatch = recoveryObservationMatches(materialized.notebookDiskObservation, currentObservation);
+    if (recoveryPending) {
       const bytes = decodePhysicalBytes(materialized.physicalBytes);
       if (bytes === null) throw new Error("recovery baseline has no physical source bytes");
       notebook = restoreNotebookCellIdentity(parseNotebook(bytes, notebook.path ?? (isUntitled ? null : store.path)), materialized.cells);
-      if (materialized.layout !== void 0) projectLayoutIntent = materialized.layout === null ? null : validateLayout(materialized.layout);
-      if (Array.isArray(materialized.packageDeclarationIntent) && materialized.packageDeclarationIntent.every((value) => typeof value === "string")) {
-        packageDeclarationIntent = [...materialized.packageDeclarationIntent];
-      }
-    } else if (recoveryPending) {
-      recoveryConflict = true;
+      recoveryConflict = !observationsMatch;
     } else {
       const savedBytes = decodePhysicalBytes(materialized.physicalBytes);
       if (savedBytes !== null && Buffer.from(savedBytes).equals(Buffer.from(serializeNotebookWithParts(notebook).bytes))) {
@@ -111458,127 +111309,34 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
     config3 = configurationFor(notebook);
     cacheDirectory = config3.cache.dir ? resolve13(notebookDirectory, config3.cache.dir) : cacheDirectory;
     resolvedLayout = projectLayoutIntent;
-    const actualProjectLayout = isUntitled ? null : await readLayout(store.path);
-    let actualProjectPackages = [];
-    try {
-      actualProjectPackages = [...(await readPackageDeclarations(notebookDirectory)).packages];
-    } catch {
-      actualProjectPackages = [];
-    }
-    pendingSidecars.layout = recoveryPending && observationsMatch && !sameSemanticValue(projectLayoutIntent, actualProjectLayout);
-    pendingSidecars.packages = recoveryPending && observationsMatch && !sameSemanticValue(packageDeclarationIntent, actualProjectPackages);
-    if (recoveryPending) {
-      const baselineFingerprint = recoveryFingerprint ?? "active-recovery";
-      publishedRecoveryProjection = {
-        baseline: materialized,
-        fingerprint: baselineFingerprint,
-        state: recoveryConflict || !observationsMatch ? "conflict" : "dirty"
-      };
-    }
-    if (recoveryConflict) {
-      await recovery.forkBranch({ baseline: materialized });
-      recovery.update({ ...baseline, documentRevision: recoveryDocumentRevision });
-      await recovery.clearIfMatch({ documentRevision: recoveryDocumentRevision, fingerprint: (await recovery.load()).fingerprint });
-      recoveryPending = false;
-      recoveryFingerprint = void 0;
-      publishedRecoveryProjection = null;
-    }
+    pendingSidecars.layout = false;
+    pendingSidecars.packages = false;
     engine = new Engine({ resources: options.resources, processScope, environment: runtimeEnvironment ?? void 0, notebookDirectory, artifactDirectory: work, cacheDirectory });
     packageManager = createPackageManager({ resources: options.resources, environment: runtimeEnvironment, processScope, projectDirectory: notebookDirectory, onProgress: onPackageProgress });
-    if (recoveryPending && observationsMatch && packageDeclarationIntent.length > 0) {
-      try {
-        const current = await packageManager.declarations();
-        if (current.packages.join("\\0") !== packageDeclarationIntent.join("\\0")) {
-          const prepared = await store.preparePackages(packageDeclarationIntent, store.sidecarObservation("packages").version);
-          await prepared.publish();
-          pendingSidecars.packages = false;
-          const repairedSidecars = sidecarObservations(store);
-          const repairedState = await recovery.checkpoint({ notebookDiskObservation: sourceObservation(store), sidecarObservations: repairedSidecars });
-          recoveryDocumentRevision = repairedState.documentRevision;
-          recoveryPending = repairedState.pending;
-          recoveryFingerprint = recoveryPending ? repairedState.fingerprint ?? void 0 : void 0;
-          if (publishedRecoveryProjection !== null) {
-            publishedRecoveryProjection = {
-              ...publishedRecoveryProjection,
-              fingerprint: repairedState.fingerprint ?? publishedRecoveryProjection.fingerprint,
-              baseline: {
-                ...publishedRecoveryProjection.baseline,
-                documentRevision: repairedState.documentRevision,
-                sidecarObservations: repairedSidecars
-              }
-            };
-          }
-        }
-      } catch (error61) {
-        recoverySidecarError = { kind: "packages", error: error61 };
-      }
-    }
     formatter = createFormattingService(options.resources.airExecutable, processScope);
-    const checkpointRecovery = async (disk, sidecars) => {
-      if (recovery === void 0) return;
-      const state = await recovery.checkpoint({ notebookDiskObservation: recoveryObservation(disk), sidecarObservations: sidecars });
-      recoveryDocumentRevision = state.documentRevision;
-      recoveryPending = state.pending;
-      recoveryFingerprint = recoveryPending ? state.fingerprint ?? recoveryFingerprint : void 0;
-      const checkpointDisk = recoveryObservation(disk);
-      const checkpointSidecars = {
-        config: recoveryObservation(sidecars.config),
-        layout: recoveryObservation(sidecars.layout),
-        packages: recoveryObservation(sidecars.packages)
-      };
-      const checkpointProjection = (projection) => projection === null ? null : {
-        ...projection,
-        fingerprint: state.fingerprint ?? projection.fingerprint,
-        baseline: {
-          ...projection.baseline,
-          documentRevision: state.documentRevision,
-          notebookDiskObservation: checkpointDisk,
-          sidecarObservations: checkpointSidecars
-        }
-      };
-      pendingRecoveryProjection = checkpointProjection(pendingRecoveryProjection);
-      publishedRecoveryProjection = checkpointProjection(publishedRecoveryProjection);
-    };
     const appendRecovery = async (input3) => {
       if (recovery === void 0) return void 0;
-      const nextPackageDeclarationIntent = input3.packageDeclarationIntent ?? packageDeclarationIntent;
       const next = serializeNotebookWithParts(input3.document);
-      const fingerprint2 = createHash9("sha256").update(input3.fingerprint, "utf8").digest("hex");
       const baseline2 = {
         schemaVersion: 1,
         physicalBytes: next.bytes,
         documentRevision: input3.fromRevision + 1,
         cells: recoveryCellStates(input3.document),
         path: input3.document.path ?? (isUntitled ? null : store.path),
-        project: notebookDirectory,
-        config: input3.config,
-        layout: input3.layout,
-        packageDeclarationIntent: nextPackageDeclarationIntent,
-        notebookDiskObservation: recoveryObservation(input3.disk),
-        sidecarObservations: {
-          config: recoveryObservation(input3.sidecars.config),
-          layout: recoveryObservation(input3.sidecars.layout),
-          packages: recoveryObservation(input3.sidecars.packages)
-        }
+        notebookDiskObservation: recoveryObservation(input3.disk)
       };
-      recovery.update(baseline2, fingerprint2);
+      recovery.update(baseline2);
+      await recovery.flush();
+      const state = await recovery.load();
       notebook = input3.document;
-      recoveryFingerprint = fingerprint2;
+      recoveryFingerprint = state.fingerprint ?? void 0;
       recoveryDocumentRevision = baseline2.documentRevision;
       recoveryPending = true;
-      pendingRecoveryProjection = { baseline: baseline2, fingerprint: fingerprint2, state: "dirty" };
-      return fingerprint2;
+      return recoveryFingerprint;
     };
-    const applyPublishedProjection = (binder, projection = void 0) => {
-      binder();
-      if (projection !== void 0) publishedRecoveryProjection = projection;
-      pendingRecoveryProjection = null;
-    };
-    const publishSource = (context, publication, projection = void 0) => {
+    const publishSource = (context, publication) => {
       const preparedPublication = { ...publication, config: publication.config ?? context.config };
-      const binder = context.preparePublication(preparedPublication);
-      if (projection === void 0 && pendingRecoveryProjection === null) applyPublishedProjection(binder);
-      else applyPublishedProjection(binder, projection === void 0 ? pendingRecoveryProjection : projection);
+      context.preparePublication(preparedPublication)();
     };
     const invalidateLsp = async () => {
       const requested = lsp !== void 0 || lspStarting !== void 0;
@@ -111607,7 +111365,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
         return { sidecars, error: { kind, error: error61 } };
       };
       try {
-        if (recoveryPending || pendingSidecars.layout || pendingSidecars.packages) {
+        if (pendingSidecars.layout || pendingSidecars.packages) {
           activeKind = "layout";
           const actualLayout = await readLayout(store.path);
           pendingSidecars.layout = !sameSemanticValue(projectLayoutIntent, actualLayout);
@@ -111624,7 +111382,6 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
           projectLayoutIntent = published.value;
           resolvedLayout = published.value;
           updateObservation("layout", published.observation);
-          await checkpointRecovery(disk, sidecars);
         }
         if (pendingSidecars.packages) {
           activeKind = "packages";
@@ -111641,7 +111398,6 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
             updateObservation("packages", store.sidecarObservation("packages"));
           }
           pendingSidecars.packages = false;
-          await checkpointRecovery(disk, sidecars);
         }
       } catch (error61) {
         return failure2(activeKind, error61);
@@ -111664,11 +111420,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
         await appendRecovery({
           fromRevision: context.fromRevision,
           document,
-          config: projectSettings,
-          layout: projectLayoutIntent,
-          disk: context.disk,
-          sidecars: context.sidecars,
-          fingerprint: request.fingerprint ?? "transaction"
+          disk: context.disk
         });
         publishSource(context, {
           document,
@@ -111683,6 +111435,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
       }
       if (request.kind === "save") {
         if (isUntitled) throw Object.assign(new Error("notebook has no path"), { code: "notebook_has_no_path" });
+        if (recoveryConflict) throw Object.assign(new Error("The saved notebook changed after these recovered edits. Use Save As or discard the recovered edits."), { code: "recovery_conflict" });
         try {
           const result = await store.save(context.document);
           const disk = sourceProtocolObservation(store);
@@ -111690,29 +111443,22 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
           const sidecars = retry.sidecars;
           let clearError = null;
           let cleared = false;
-          if (retry.error === null && !pendingSidecars.layout && !pendingSidecars.packages && recoveryPending && recoveryFingerprint !== void 0) {
+          if (recoveryPending && recoveryFingerprint !== void 0) {
             try {
               cleared = await recovery.clearIfMatch({ documentRevision: context.fromRevision, fingerprint: recoveryFingerprint });
               if (cleared) {
                 recoveryPending = false;
                 recoveryFingerprint = void 0;
+                recoveryConflict = false;
               }
             } catch (error61) {
               clearError = error61;
             }
           }
-          let checkpointError = null;
-          if (!cleared) {
-            try {
-              await checkpointRecovery(disk, sidecars);
-            } catch (error61) {
-              checkpointError = error61;
-            }
-          }
-          const dirty = retry.error !== null || clearError !== null || checkpointError !== null || recoveryPending || pendingSidecars.layout || pendingSidecars.packages;
-          publishSource(context, { document: context.document, path: store.path, layout: resolvedLayout, disk, sidecars, dirty, advanceRevision: false }, cleared ? null : void 0);
+          const dirty = retry.error !== null || clearError !== null || recoveryPending || pendingSidecars.layout || pendingSidecars.packages;
+          publishSource(context, { document: context.document, path: store.path, layout: resolvedLayout, disk, sidecars, dirty, advanceRevision: false });
           if (retry.error !== null) return { ...result, committed: true, diskError: { code: "sidecar_write_failed", sidecar: retry.error.kind, message: errorMessage(retry.error.error) } };
-          if (clearError !== null || checkpointError !== null) return { ...result, committed: true, diskError: { code: "recovery_checkpoint_failed", message: errorMessage(clearError ?? checkpointError) } };
+          if (clearError !== null) return { ...result, committed: true, diskError: { code: "recovery_checkpoint_failed", message: errorMessage(clearError) } };
           return result;
         } catch (error61) {
           if (error61 instanceof FileConflict) throw error61;
@@ -111726,7 +111472,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
         const document = setMetadata(context.document, "runtime", updated.metadata?.runtime ?? null);
         const notebook2 = readNotebookSettings(document.metadata);
         const nextConfig = resolveSettings({ preferences: preferences.snapshot().values, notebook: notebook2, project: projectSettings });
-        await appendRecovery({ fromRevision: context.fromRevision, document, config: projectSettings, layout: projectLayoutIntent, disk: context.disk, sidecars: context.sidecars, fingerprint: request.fingerprint ?? "runtime" });
+        await appendRecovery({ fromRevision: context.fromRevision, document, disk: context.disk });
         config3 = nextConfig;
         publishSource(context, { document, path: context.path, config: nextConfig, layout: context.layout, disk: context.disk, sidecars: context.sidecars, dirty: true, advanceRevision: true });
         settingsErrors.delete("notebook");
@@ -111744,14 +111490,12 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
         publishSettingsError();
         const sidecars = { ...context.sidecars, config: published.observation };
         publishSource(context, { document: context.document, path: context.path, config: config3, layout: context.layout, disk: context.disk, sidecars, dirty: context.dirty, advanceRevision: false });
-        await checkpointRecovery(context.disk, sidecars);
         return { config: config3 };
       }
       if (request.kind === "sidecar" && request.sidecar === "layout") {
         if (isUntitled) throw Object.assign(new Error("layout requires a notebook path"), { code: "notebook_has_no_path" });
         const requestedLayout = request.layout ?? null;
         const prepared = await store.prepareLayout(requestedLayout, context.sidecars.layout.version);
-        await appendRecovery({ fromRevision: context.fromRevision, document: context.document, config: projectSettings, layout: prepared.value, disk: context.disk, sidecars: context.sidecars, fingerprint: request.fingerprint ?? "layout" });
         projectLayoutIntent = prepared.value;
         pendingSidecars.layout = true;
         try {
@@ -111759,8 +111503,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
           pendingSidecars.layout = false;
           resolvedLayout = published.value;
           const sidecars = { ...context.sidecars, layout: published.observation };
-          await checkpointRecovery(context.disk, sidecars);
-          publishSource(context, { document: context.document, path: context.path, layout: resolvedLayout, disk: context.disk, sidecars, dirty: true, advanceRevision: true });
+          publishSource(context, { document: context.document, path: context.path, layout: resolvedLayout, disk: context.disk, sidecars, dirty: context.dirty, advanceRevision: false });
           return { layout: resolvedLayout };
         } catch (error61) {
           const code2 = pendingSidecars.layout ? "sidecar_write_failed" : "recovery_checkpoint_failed";
@@ -111771,15 +111514,13 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
         if (isUntitled) throw Object.assign(new Error("packages require a notebook path"), { code: "notebook_has_no_path" });
         const additions = request.packages ?? [];
         const prepared = await store.preparePackages(additions, context.sidecars.packages.version);
-        await appendRecovery({ fromRevision: context.fromRevision, document: context.document, config: projectSettings, layout: projectLayoutIntent, disk: context.disk, sidecars: context.sidecars, fingerprint: request.fingerprint ?? "packages" });
         packageDeclarationIntent = [...prepared.value];
         pendingSidecars.packages = true;
         try {
           const published = await prepared.publish();
           pendingSidecars.packages = false;
           const sidecars = { ...context.sidecars, packages: published.observation };
-          await checkpointRecovery(context.disk, sidecars);
-          publishSource(context, { document: context.document, path: context.path, layout: context.layout, disk: context.disk, sidecars, dirty: context.dirty || recoveryPending, advanceRevision: true });
+          publishSource(context, { document: context.document, path: context.path, layout: context.layout, disk: context.disk, sidecars, dirty: context.dirty, advanceRevision: false });
           return { ok: true, path: notebookDirectory, metadata: join20(notebookDirectory, ".alder", "packages.yaml"), packages: [...published.value], sidecarVersion: published.observation.version };
         } catch (error61) {
           const code2 = pendingSidecars.packages ? "sidecar_write_failed" : "recovery_checkpoint_failed";
@@ -111789,7 +111530,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
       if (request.kind === "sidecar" && request.sidecar === void 0 && request.patch !== void 0) {
         const appDocument = setAppConfig(context.document, request.patch);
         const document = setMetadata(context.document, "app", appDocument.metadata?.app ?? null);
-        await appendRecovery({ fromRevision: context.fromRevision, document, config: projectSettings, layout: projectLayoutIntent, disk: context.disk, sidecars: context.sidecars, fingerprint: request.fingerprint ?? "app" });
+        await appendRecovery({ fromRevision: context.fromRevision, document, disk: context.disk });
         const appResolution = appConfig(document);
         publishSource(context, { document, path: context.path, layout: context.layout, disk: context.disk, sidecars: context.sidecars, dirty: true, advanceRevision: true });
         return appResolution;
@@ -111802,24 +111543,24 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
         const oldStore = store;
         const oldRecovery = recovery;
         const oldManager = packageManager;
-        const tentativeDirectory = dirname9(resolve13(request.path));
+        const tentativeDirectory = dirname10(resolve13(request.path));
         const reservation = !isUntitled && tentativeDirectory === notebookDirectory && runtimeEnvironment === null ? void 0 : controller.reserveRuntimeContext();
         let preparedOwner;
         let preparedSave;
         let savePublication;
         let destinationStore;
-        let preparedRecovery;
+        let destinationRecovery;
         let nextManager;
         try {
           preparedOwner = await ownership.prepareRekey(request.path);
           preparedSave = await oldStore.prepareSaveAs(request.path, context.document, request.expectedDestination);
           if (preparedSave.destination !== preparedOwner.canonicalPath) throw new Error("Save As destination canonicalization changed during preparation");
           const destination = preparedSave.destination;
-          const destinationDirectory = dirname9(destination);
+          const destinationDirectory = dirname10(destination);
           const destinationProjectConfig = await loadProjectSettings(projectConfigPath(destination));
           const destinationConfig = configurationFor(context.document, destinationProjectConfig);
           const destinationCache = destinationConfig.cache.dir ? resolve13(destinationDirectory, destinationConfig.cache.dir) : join20(destinationDirectory, ".alder", "cache");
-          let destinationLayout = await readLayout(destination);
+          const destinationLayout = await readLayout(destination);
           let destinationPackages = [];
           try {
             destinationPackages = [...(await readPackageDeclarations(destinationDirectory)).packages];
@@ -111830,14 +111571,6 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
           const destinationRuntime = runtimeChanged ? null : runtimeEnvironment;
           savePublication = await preparedSave.publish();
           destinationStore = savePublication.store;
-          if (destinationLayout === null && context.layout !== null) {
-            const layoutPrepared = await destinationStore.prepareLayout(context.layout, destinationStore.sidecarObservation("layout").version);
-            destinationLayout = (await layoutPrepared.publish()).value;
-          }
-          if (destinationPackages.length === 0 && packageDeclarationIntent.length > 0) {
-            const packagesPrepared = await destinationStore.preparePackages(packageDeclarationIntent, destinationStore.sidecarObservation("packages").version);
-            destinationPackages = [...(await packagesPrepared.publish()).value];
-          }
           nextManager = createPackageManager({ resources: options.resources, environment: destinationRuntime, processScope, projectDirectory: destinationDirectory, onProgress: onPackageProgress });
           const destinationDisk = destinationStore.observation();
           const destinationSidecars = sidecarProtocolObservations(destinationStore, false);
@@ -111849,26 +111582,25 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
             physicalBytes: destinationSerialized.bytes,
             cells: recoveryCellStates(destinationStore.currentDocument),
             path: destination,
-            project: destinationDirectory,
-            config: destinationProjectConfig,
-            layout: destinationLayout,
-            packageDeclarationIntent: destinationPackages,
-            notebookDiskObservation: recoveryObservation(destinationDisk),
-            sidecarObservations: {
-              config: recoveryObservation(destinationSidecars.config),
-              layout: recoveryObservation(destinationSidecars.layout),
-              packages: recoveryObservation(destinationSidecars.packages)
-            }
+            notebookDiskObservation: recoveryObservation(destinationDisk)
           };
-          preparedRecovery = await oldRecovery.prepareRebind({ rootDir: options.recoveryDirectory ?? envPaths("alder", { suffix: "" }).data, key: preparedOwner.sessionKey, baseline: destinationBaseline });
-          const destinationRecoveryFingerprint = preparedRecovery.state.fingerprint ?? sourceBytesSha256(destinationSerialized.bytes);
-          await preparedRecovery.publish();
-          const recoveryCleared = await preparedRecovery.writer.clearIfMatch({
-            documentRevision: destinationRevision,
-            fingerprint: destinationRecoveryFingerprint
+          destinationRecovery = await RecoveryWriter.open({
+            rootDir: options.recoveryDirectory ?? envPaths("alder", { suffix: "" }).data,
+            key: preparedOwner.sessionKey,
+            baseline: destinationBaseline,
+            recoveryId: oldRecovery.recoveryId,
+            processSupervisorExecutable: options.resources.processSupervisorExecutable
           });
-          if (!recoveryCleared) throw new Error("Save As recovery state changed before publication");
-          const destinationRecoveryProjection = null;
+          if ((await destinationRecovery.load()).pending) {
+            await destinationRecovery.retire();
+            destinationRecovery = await RecoveryWriter.open({
+              rootDir: options.recoveryDirectory ?? envPaths("alder", { suffix: "" }).data,
+              key: preparedOwner.sessionKey,
+              baseline: destinationBaseline,
+              recoveryId: oldRecovery.recoveryId,
+              processSupervisorExecutable: options.resources.processSupervisorExecutable
+            });
+          }
           const publicationBinder = context.preparePublication({
             document: { ...context.document, path: destination },
             path: destination,
@@ -111899,11 +111631,10 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
             };
             return async () => {
               try {
-                applyPublishedProjection(publicationBinder, destinationRecoveryProjection);
+                publicationBinder();
                 preparedSave.adopt();
-                preparedRecovery.adopt();
                 store = destinationStore;
-                recovery = preparedRecovery.writer;
+                recovery = destinationRecovery;
                 packageManager = nextManager;
                 notebookDirectory = destinationDirectory;
                 cacheDirectory = destinationCache;
@@ -111920,6 +111651,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
                 recoveryDocumentRevision = destinationRevision;
                 recoveryPending = false;
                 recoveryFingerprint = void 0;
+                recoveryConflict = false;
                 reservation?.release();
                 try {
                   bindWatcher(destination);
@@ -111931,7 +111663,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
                 if (untitledRecoveryDescriptor !== void 0) void retireUntitledRecoveryDescriptor(untitledRecoveryDescriptor, void 0, privatePathOptions).catch((error61) => controller?.recordActionError(errorMessage(error61), "recovery_checkpoint_failed"));
                 void oldStore.close().catch(() => {
                 });
-                await oldRecovery.load().then((state) => oldRecovery.clearIfMatch({ documentRevision: state.documentRevision, fingerprint: state.fingerprint })).then(() => oldRecovery.close()).catch(() => {
+                await oldRecovery.retire().catch(() => {
                 });
                 if (runtimeChanged) startRuntime(true);
                 void oldManager?.close().catch(() => {
@@ -111949,7 +111681,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
           return savePublication.result;
         } catch (error61) {
           reservation?.release();
-          await preparedRecovery?.abort().catch(() => {
+          if (destinationRecovery !== void 0 && destinationRecovery !== recovery) await destinationRecovery.retire().catch(() => {
           });
           await preparedSave?.abort().catch(() => {
           });
@@ -111977,7 +111709,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
             publishSource(context, { document: context.document, path: context.path, layout: context.layout, disk: context.disk, sidecars: context.sidecars, dirty: context.dirty, advanceRevision: false });
             return { changed: false };
           }
-          if (context.dirty && (sourceChanged || sidecarsChanged || request.kind === "reload-source")) {
+          if (context.dirty && (sourceChanged || sidecarsChanged || request.kind === "reload-source") && request.discardRecovery !== true) {
             if (sourceChanged) await store.adoptSourceObservation(observed.store);
             store.adoptSidecarObservations(observed.store);
             await observed.store.close();
@@ -112009,7 +111741,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
           const nextConfig = configurationFor(nextDocument, nextProjectConfig);
           if (sidecarsChanged) {
             try {
-              nextPackageDeclarationIntent = [...(await readPackageDeclarations(dirname9(store.path))).packages];
+              nextPackageDeclarationIntent = [...(await readPackageDeclarations(dirname10(store.path))).packages];
             } catch {
               nextPackageDeclarationIntent = [];
             }
@@ -112018,15 +111750,17 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
           }
           const nextSidecars = currentSidecars;
           const nextDisk = preparedReload.observation;
-          if (context.dirty && (sourceChanged || sidecarsChanged)) {
-            await appendRecovery({ fromRevision: context.fromRevision, document: nextDocument, config: nextProjectConfig, layout: nextLayout, packageDeclarationIntent: nextPackageDeclarationIntent, disk: nextDisk, sidecars: nextSidecars, fingerprint: request.fingerprint ?? "reload" });
-            await checkpointRecovery(nextDisk, nextSidecars);
-          }
           preparedReload.adopt();
           store.adoptSidecarObservations(observed.store);
           await observed.store.close();
           publishSource(context, { document: nextDocument, path: store.path, layout: nextLayout, disk: nextDisk, sidecars: nextSidecars, dirty: false, advanceRevision: sourceChanged || sidecarsChanged, invalidateRuntime: sourceChanged, config: nextConfig });
           notebook = nextDocument;
+          if (request.discardRecovery === true) {
+            await recovery.discard();
+            recoveryPending = false;
+            recoveryFingerprint = void 0;
+            recoveryConflict = false;
+          }
           if (sidecarsChanged) {
             projectSettings = { ...nextProjectConfig };
             projectLayoutIntent = nextLayout;
@@ -112064,106 +111798,21 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
       throw Object.assign(new Error("unsupported source commit: " + request.kind), { code: "service_unavailable" });
     };
     const artifactStore = engine.prepareOutputStore({ sessionEpoch: ownership.epoch, documentRevision: recoveryDocumentRevision });
-    const recoveryArtifactCache = /* @__PURE__ */ new Map();
-    const activeRecoveryBranchId = "active-" + ownership.sessionKey;
-    const protocolDisk = (observation) => ({
-      state: observation.state,
-      digest: observation.digest ?? null,
-      version: observation.version ?? null,
-      error: null
-    });
-    const recoverySourceArtifact = async (id2, fingerprint2, baseline2) => {
-      const key2 = id2 + "\0" + fingerprint2;
-      const cached2 = recoveryArtifactCache.get(key2);
-      if (cached2 !== void 0) {
-        try {
-          await artifactStore.readArtifact(cached2.handle, 0, 0);
-          return cached2.handle;
-        } catch {
-          artifactStore.release([cached2.handle]);
-          recoveryArtifactCache.delete(key2);
-        }
-      }
-      const bytes = decodePhysicalBytes(baseline2.physicalBytes);
-      if (bytes === null) throw new Error("recovery source bytes are invalid");
-      const outputScope = {
-        sessionEpoch: ownership.epoch,
-        documentRevision: baseline2.documentRevision,
-        kernelEpoch: null,
-        runId: null,
-        cellId: null,
-        revision: null
-      };
-      const handle = await artifactStore.writeStaticArtifact(bytes, "text/plain; charset=utf-8", ".R", outputScope);
-      recoveryArtifactCache.set(key2, { fingerprint: fingerprint2, handle });
-      if (recoveryArtifactCache.size > 128) {
-        const first = recoveryArtifactCache.entries().next().value;
-        if (first !== void 0) {
-          artifactStore.release([first[1].handle]);
-          recoveryArtifactCache.delete(first[0]);
-        }
-      }
-      return handle;
-    };
     const recoveryState = async () => {
-      const currentDisk = protocolDisk(recoveryObservation(controller?.snapshot().disk ?? sourceProtocolObservation(store)));
-      let loaded;
       try {
-        loaded = await recovery.listBranches();
-      } catch (error61) {
+        const state = await recovery.load();
         return {
-          branches: [],
-          pending: publishedRecoveryProjection !== null,
-          corruption: asHostError(error61, "recovery_corrupt")
+          candidate: state.pending ? {
+            documentRevision: state.baseline.documentRevision,
+            state: recoveryConflict ? "conflict" : "restored"
+          } : null,
+          corruption: recovery.issue ? asHostError(recovery.issue, recovery.issue.code) : null
         };
+      } catch (error61) {
+        return { candidate: null, corruption: asHostError(error61, "recovery_corrupt") };
       }
-      const branches = [];
-      let corruption = recovery?.issue ? asHostError(recovery.issue, recovery.issue.code) : null;
-      for (const branch of loaded) {
-        let baseline2;
-        try {
-          baseline2 = await recovery.materializeBranch(branch.id);
-          const sourceHandle = await recoverySourceArtifact(branch.id, branch.fingerprint, baseline2);
-          const conflict = !recoveryObservationMatches(baseline2.notebookDiskObservation, currentDisk);
-          branches.push({
-            id: branch.id,
-            documentRevision: baseline2.documentRevision,
-            baseDisk: protocolDisk(baseline2.notebookDiskObservation),
-            sourceHandle,
-            state: conflict ? "conflict" : branch.status === "clean" ? "clean" : "dirty",
-            conflict: conflict ? asHostError(new Error("recovery branch source changed on disk"), "recovery_conflict") : null
-          });
-        } catch (error61) {
-          corruption ??= asHostError(error61, "recovery_corrupt");
-        }
-      }
-      if (publishedRecoveryProjection !== null) {
-        const projection = publishedRecoveryProjection;
-        try {
-          const sourceHandle = await recoverySourceArtifact(activeRecoveryBranchId, projection.fingerprint, projection.baseline);
-          const conflict = projection.state === "conflict" || !recoveryObservationMatches(projection.baseline.notebookDiskObservation, currentDisk);
-          branches.push({
-            id: activeRecoveryBranchId,
-            documentRevision: projection.baseline.documentRevision,
-            baseDisk: protocolDisk(projection.baseline.notebookDiskObservation),
-            sourceHandle,
-            state: conflict ? "conflict" : "dirty",
-            conflict: conflict ? asHostError(new Error("active recovery source changed on disk"), "recovery_conflict") : null
-          });
-        } catch (error61) {
-          corruption ??= asHostError(error61, "recovery_corrupt");
-        }
-      }
-      return { branches, pending: publishedRecoveryProjection !== null || branches.some((branch) => branch.state !== "clean"), corruption };
     };
     const initialProtocolSidecars = sidecarProtocolObservations(store);
-    if (recoverySidecarError !== null) {
-      const kind = recoverySidecarError.kind;
-      initialProtocolSidecars[kind] = {
-        ...initialProtocolSidecars[kind],
-        error: asHostError(recoverySidecarError.error, "sidecar_write_failed")
-      };
-    }
     const recoveredStartup = recoveryPending;
     controller = new Controller({
       engine,
@@ -112349,7 +111998,6 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
     }
     if (runtimeError !== null) controller.recordRuntimeAvailabilityError(asRuntimeHostError(runtimeError));
     if (recoveryConflict) controller.recordActionError("notebook changed on disk; recovery draft retained", "recovery_conflict");
-    if (recoverySidecarError !== null) controller.recordActionError(errorMessage(recoverySidecarError.error), "sidecar_write_failed");
     const getLsp = () => {
       if (lsp?.alive()) return Promise.resolve(lsp);
       if (lspStarting !== void 0) return lspStarting;
@@ -112787,7 +112435,7 @@ var NotebookBackend = class {
   }
 };
 async function serve(socketPath2) {
-  const root = resolve14(dirname10(fileURLToPath(import.meta.url)), "..");
+  const root = resolve14(dirname11(fileURLToPath(import.meta.url)), "..");
   let idleTimer;
   const backend = new NotebookBackend(await resolveApplicationResources(root), () => {
     clearTimeout(idleTimer);
@@ -112795,7 +112443,7 @@ async function serve(socketPath2) {
       if (backend.idle) stop();
     }, 1e3);
   });
-  await mkdir11(dirname10(socketPath2), { recursive: true, mode: 448 });
+  await mkdir11(dirname11(socketPath2), { recursive: true, mode: 448 });
   const server = createServer2((socket) => {
     clearTimeout(idleTimer);
     idleTimer = setTimeout(() => {

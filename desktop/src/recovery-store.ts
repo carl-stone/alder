@@ -1,11 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { chmod, lstat, mkdir, open, readdir, rename, rm } from "node:fs/promises";
+import { chmod, lstat, mkdir, open, rename, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
 const RECOVERY_ID = /^[A-Za-z0-9_-]{1,128}$/;
-const RECORD_NAME = /^(?:cursor|(?:draft|branch):[A-Za-z0-9][A-Za-z0-9._:-]{0,255})$/;
-const RECORD_FILE = /^[0-9a-f]{64}\.json$/;
+const RECORD_NAME = /^(?:cursor|draft:[A-Za-z0-9][A-Za-z0-9._:-]{0,255})$/;
 const MAX_BYTES = 256 * 1024 * 1024;
 const fileName = (name: string): string => createHash("sha256").update(name).digest("hex") + ".json";
 const missing = (error: unknown): boolean => (error as NodeJS.ErrnoException)?.code === "ENOENT";
@@ -118,19 +117,4 @@ export class NativeRecoveryStore {
     });
   }
 
-  async list(recoveryId: string, prefix: string): Promise<{ records: Array<{ name: string; value: unknown }>; warning?: string }> {
-    if (!["", "cursor", "draft:", "branch:"].includes(prefix)) throw new DesktopRecoveryError("desktop_recovery_invalid", "Invalid recovery record prefix");
-    const directory = await this.directory(recoveryId);
-    const records: Array<{ name: string; value: unknown }> = [];
-    let warning: string | undefined;
-    for (const file of (await readdir(directory)).filter(name => RECORD_FILE.test(name)).sort()) {
-      try {
-        const record = await this.readRecord(join(directory, file));
-        if (record?.name.startsWith(prefix)) records.push(record);
-      } catch {
-        warning = "Some recovery records could not be read and were retained.";
-      }
-    }
-    return { records, ...(warning === undefined ? {} : { warning }) };
-  }
 }

@@ -1,4 +1,4 @@
-import test, { mock } from "node:test";
+import test from "node:test";
 import assert from "node:assert/strict";
 import { fork } from "node:child_process";
 import { once } from "node:events";
@@ -7,104 +7,87 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
-import { RecoveryWriter, type RecoveryBaseline } from "../src/recovery.js";
 import { startHost, type RunningHost } from "../src/application.js";
-import { encodeHostCommandWire, parseHostCommand } from "../src/protocol.js";
+import { encodeHostCommandWire, parseHostCommand, type CommandResult } from "../src/protocol.js";
 import type { ApplicationResources } from "../src/resources.js";
 
-const absent = { state: "absent" as const, digest: null, version: null, error: null };
-function baseline(text: string, revision = 0): RecoveryBaseline {
-  return { schemaVersion: 1, documentRevision: revision, physicalBytes: Buffer.from(text),
-    cells: [{ id: "cell-1", revision }], notebookDiskObservation: absent,
-    sidecarObservations: { config: absent, layout: absent, packages: absent } };
-}
-const textOf = (value: RecoveryBaseline): string => Buffer.from(value.physicalBytes as string, "base64").toString("utf8");
 function resources(root: string): ApplicationResources {
   return { root, cliLauncher: join(root, "alder"), hostEntry: join(root, "host.mjs"),
     rendererDirectory: join(root, "renderer"), workerDirectory: join(root, "worker"),
     rLibraryDirectory: join(root, "r-library"), arkExecutable: join(root, "ark"), airExecutable: join(root, "air"),
     nodeExecutable: process.execPath, processSupervisorExecutable: join(root, "unused-supervisor"), electronEntry: null };
 }
-async function startDocument(path: string, directory: string, recoveryDirectory = join(directory, "recovery"), idleTimeout = 0): Promise<RunningHost> {
-  return startHost({ path, resources: resources(directory), rscript: join(directory, "no-Rscript"), recoveryDirectory, idleTimeout,
+async function startDocument(path: string, directory: string): Promise<RunningHost> {
+  return startHost({ path, resources: resources(directory), rscript: join(directory, "no-Rscript"), recoveryDirectory: join(directory, "recovery"),
     session: { runtimeDirectory: join(directory, "sessions") }, runOnStartup: false });
 }
-async function command(app: RunningHost, value: Record<string, unknown>): Promise<void> {
-  const result = await app.controller.dispatch(parseHostCommand({ ...value, requestId: randomUUID(), clientId: "document-test",
+async function dispatch(app: RunningHost, value: Record<string, unknown>): Promise<CommandResult> {
+  return app.controller.dispatch(parseHostCommand({ ...value, requestId: randomUUID(), clientId: "document-test",
     sessionEpoch: app.controller.snapshot().epoch, expectedDocumentRevision: app.controller.snapshot().documentRevision }));
+}
+async function command(app: RunningHost, value: Record<string, unknown>): Promise<CommandResult> {
+  const result = await dispatch(app, value);
   if (result.error) throw Object.assign(new Error(result.error.message), result.error);
+  return result;
 }
 async function edit(app: RunningHost, body: string): Promise<void> {
   const cell = app.controller.snapshot().cells[0]!;
   await command(app, { type: "transaction", changes: [{ type: "edit", cell: { cellId: cell.id }, expectedRevision: cell.revision, cellType: "code", body: [body] }] });
 }
 
-async function releaseLastLease(app: RunningHost, discard = false): Promise<void> {
-  const origin = app.server.address()!.origin;
-  const ticketResponse = await fetch(origin + "/api/ticket", { method: "POST", headers: {
-    Authorization: "Bearer " + app.ownership.token, Origin: origin, "Content-Type": "application/json" }, body: JSON.stringify({ origin }) });
-  assert.equal(ticketResponse.ok, true);
-  const ticket = await ticketResponse.json() as { ticket: string };
-  const sessionResponse = await fetch(origin + "/api/session", { method: "POST", headers: {
-    Origin: origin, "Content-Type": "application/json" }, body: JSON.stringify({ ticket: ticket.ticket }) });
-  assert.equal(sessionResponse.ok, true);
-  const session = await sessionResponse.json() as { csrf: string; leaseId: string };
-  const cookie = sessionResponse.headers.getSetCookie()[0]!.split(";", 1)[0]!;
-  const released = await fetch(origin + "/api/lease", { method: "POST", headers: {
-    Origin: origin, Cookie: cookie, "X-CSRF-Token": session.csrf, "Content-Type": "application/json" },
-    body: JSON.stringify({ action: "release", leaseId: session.leaseId, ...(discard ? { disposition: "discard" } : {}) }) });
-  assert.equal(released.ok, true);
-}
-
-if (process.env.ALDER_RECOVERY_CHILD) {
-  const writer = await RecoveryWriter.open({ rootDir: process.env.ALDER_RECOVERY_CHILD, key: "crashed", baseline: baseline("saved\n"), snapshotIntervalMs: 20 });
-  writer.update(baseline("unsaved scientific work\n", 1));
-  const check = setInterval(async () => {
-    if (writer.currentBaselinePath !== null) {
-      clearInterval(check);
-      process.send?.({ saved: true });
-    }
-  }, 10);
+const crashPath = process.env.ALDER_DOCUMENT_CRASH_PATH;
+if (crashPath) {
+  const directory = dirname(crashPath);
+  const app = await startDocument(crashPath, directory);
+  await edit(app, "x <- 42");
+  process.send?.({ acknowledged: true });
   setInterval(() => {}, 60_000);
 } else {
-  test("corrupt newest snapshot retains its bytes and restores the preceding valid document", async () => {
-    const directory = await realpath(await mkdtemp(join(tmpdir(), "alder-recovery-fallback-")));
-    try {
-      const writer = await RecoveryWriter.open({ rootDir: directory, key: "document", baseline: baseline("saved\n") });
-      writer.update(baseline("first unsaved\n", 1));
-      await writer.flush();
-      writer.update(baseline("second unsaved\n", 2));
-      await writer.flush();
-      const damagedPath = writer.currentBaselinePath!;
-      await writer.close();
-      await writeFile(damagedPath, "{damaged snapshot");
-      const recovered = await RecoveryWriter.open({ rootDir: directory, key: "document", baseline: baseline("saved\n") });
-      assert.equal(textOf(await recovered.materializedBaseline()), "first unsaved\n");
-      assert.equal(recovered.issue?.code, "recovery_corrupt");
-      assert.equal((await recovered.load()).pending, true);
-      recovered.update(baseline("continued work\n", 2));
-      await recovered.close();
-      assert.equal(await readFile(damagedPath, "utf8"), "{damaged snapshot");
-    } finally { await rm(directory, { recursive: true, force: true }); }
-  });
-
-  test("periodic snapshot restores unsaved work after its process is killed", { timeout: 10_000 }, async () => {
-    const directory = await realpath(await mkdtemp(join(tmpdir(), "alder-recovery-crash-")));
+  test("an acknowledged edit survives backend death and reopen", { timeout: 15_000 }, async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "alder-acknowledged-crash-")));
+    const path = join(directory, "notebook.R");
+    await writeFile(path, "# %%\nx <- 1\n");
     const child = fork(fileURLToPath(import.meta.url), { execArgv: ["--import", "tsx"], cwd: resolve(dirname(fileURLToPath(import.meta.url)), ".."),
-      env: { ...process.env, ALDER_RECOVERY_CHILD: directory }, stdio: ["ignore", "ignore", "pipe", "ipc"] });
+      env: { ...process.env, ALDER_DOCUMENT_CRASH_PATH: path }, stdio: ["ignore", "ignore", "pipe", "ipc"] });
+    let reopened: RunningHost | undefined;
     try {
-      const ready = await Promise.race([once(child, "message"), once(child, "exit").then(result => { throw new Error("Recovery child exited: " + result); })]);
-      assert.deepEqual(ready[0], { saved: true });
+      const ready = await Promise.race([once(child, "message"), once(child, "exit").then(value => { throw new Error("child exited before acknowledging: " + value); })]);
+      assert.deepEqual(ready[0], { acknowledged: true });
       const exited = once(child, "exit");
       child.kill("SIGKILL");
       await exited;
-      const recovered = await RecoveryWriter.open({ rootDir: directory, key: "crashed", baseline: baseline("saved\n") });
-      assert.equal(textOf(await recovered.materializedBaseline()), "unsaved scientific work\n");
-      await recovered.close();
-    } finally { child.kill(); await rm(directory, { recursive: true, force: true }); }
+      assert.equal(await readFile(path, "utf8"), "# %%\nx <- 1\n");
+      reopened = await startDocument(path, directory);
+      assert.deepEqual(reopened.controller.snapshot().cells[0]!.body, ["x <- 42"]);
+      assert.equal(reopened.controller.snapshot().dirty, true);
+      assert.equal((await reopened.controller.query({ type: "recovery" })).result.candidate?.state, "restored");
+    } finally {
+      child.kill();
+      await reopened?.close();
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
-  test("GUI and agent edits share revision checks and lost replies can be retried across leases", async () => {
+  test("a source edit is not accepted when its recovery journal cannot be written", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "alder-recovery-required-")));
+    const path = join(directory, "notebook.R");
+    const unavailable = join(directory, "not-a-directory");
+    await writeFile(path, "# %%\nx <- 1\n");
+    await writeFile(unavailable, "occupied");
+    let app: RunningHost | undefined;
+    try {
+      app = await startHost({ path, resources: resources(directory), rscript: join(directory, "no-Rscript"), recoveryDirectory: unavailable,
+        session: { runtimeDirectory: join(directory, "sessions") }, runOnStartup: false });
+      const cell = app.controller.snapshot().cells[0]!;
+      const result = await dispatch(app, { type: "transaction", changes: [{ type: "edit", cell: { cellId: cell.id },
+        expectedRevision: cell.revision, cellType: "code", body: ["x <- 2"] }] });
+      assert.equal(result.error?.code, "recovery_write_failed");
+      assert.deepEqual(app.controller.snapshot().cells[0]!.body, ["x <- 1"]);
+      assert.equal(app.controller.snapshot().dirty, false);
+    } finally { await app?.close().catch(() => {}); await rm(directory, { recursive: true, force: true }); }
+  });
+
+  test("GUI and agent edits share one revision and preserve the accepted winner", async () => {
     const directory = await realpath(await mkdtemp(join(tmpdir(), "alder-shared-edits-")));
     const path = join(directory, "notebook.R");
     await writeFile(path, "# %%\nx <- 1\n");
@@ -121,135 +104,28 @@ if (process.env.ALDER_RECOVERY_CHILD) {
       };
       const gui = await attach();
       const agent = await attach();
-      const post = async (lease: typeof gui, command: object) => {
-        const response = await fetch(origin + "/api/command", { method: "POST", headers: { ...headers, "X-Alder-Lease-Id": lease.leaseId },
-          body: JSON.stringify(encodeHostCommandWire(parseHostCommand({ ...command, clientId: lease.clientId, sessionEpoch: lease.epoch }))) });
+      const post = async (lease: typeof gui, value: number) => {
+        const cell = app!.controller.snapshot().cells[0]!;
+        const parsed = parseHostCommand({ requestId: randomUUID(), clientId: lease.clientId, sessionEpoch: lease.epoch, type: "transaction", expectedDocumentRevision: 0,
+          changes: [{ type: "edit", cell: { cellId: cell.id }, cellType: "code", body: ["x <- " + value], expectedRevision: 0 }] });
+        const response = await fetch(origin + "/api/command", { method: "POST", headers: { ...headers, "X-Alder-Lease-Id": lease.leaseId }, body: JSON.stringify(encodeHostCommandWire(parsed)) });
         assert.equal(response.status, 200);
-        return await response.json() as { error: { code: string } | null; documentRevision: number };
+        return await response.json() as CommandResult;
       };
-      const change = (requestId: string, value: number) => ({ requestId, type: "transaction", expectedDocumentRevision: 0,
-        changes: [{ type: "edit", cell: { cellId: "cell-1" }, cellType: "code", body: ["x <- " + value], expectedRevision: 0 }] });
-      const replies = await Promise.all([post(gui, change("gui-edit", 2)), post(agent, change("agent-edit", 3))]);
+      const replies = await Promise.all([post(gui, 2), post(agent, 3)]);
       assert.equal(replies.filter(reply => reply.error === null).length, 1);
       assert.equal(replies.find(reply => reply.error !== null)?.error?.code, "source_conflict");
-      const creation = { requestId: "lost-create-response", type: "transaction", expectedDocumentRevision: 1,
-        changes: [{ type: "create", creationId: "new-cell", after: { cellId: "cell-1" }, cellType: "code", body: ["y <- 4"], options: {} }] };
-      await post(gui, creation); // The renderer can lose this response after commit.
-      const retry = await post(agent, creation);
-      assert.equal(retry.error, null);
-      assert.equal(retry.documentRevision, 2);
-      assert.equal(app.controller.snapshot().documentRevision, 2);
-      assert.deepEqual(app.controller.snapshot().cells.map(cell => cell.id), ["cell-1", "new-cell"]);
-    } finally { await app?.close(); await rm(directory, { recursive: true, force: true }); }
-  });
-
-  test("created cell identity survives saving and reopening after an uncertain response", async () => {
-    const directory = await realpath(await mkdtemp(join(tmpdir(), "alder-stable-cell-")));
-    const path = join(directory, "notebook.R");
-    await writeFile(path, "# %%\nx <- 1\n");
-    let app: RunningHost | undefined;
-    try {
-      app = await startDocument(path, directory);
-      await command(app, { type: "transaction", changes: [{ type: "create", creationId: "gui-created-cell",
-        after: { cellId: "cell-1" }, cellType: "code", body: ["y <- 2"], options: {} }] });
-      await command(app, { type: "save" });
-      await app.close();
-      app = await startDocument(path, directory);
-      assert.deepEqual(app.controller.snapshot().cells.map(cell => cell.id), ["cell-1", "gui-created-cell"]);
-      assert.equal(app.controller.snapshot().dirty, false);
-    } finally { await app?.close(); await rm(directory, { recursive: true, force: true }); }
-  });
-
-  test("saved document opens, edits, saves and reopens while R and recovery storage are unavailable", async () => {
-    const directory = await realpath(await mkdtemp(join(tmpdir(), "alder-document-offline-")));
-    const path = join(directory, "notebook.R");
-    const unavailable = join(directory, "not-a-directory");
-    await writeFile(unavailable, "unavailable");
-    await writeFile(path, "# %%\nx <- 1\n");
-    let app: RunningHost | undefined;
-    try {
-      app = await startDocument(path, directory, unavailable);
-      assert.equal(app.ready.type, "host.ready");
-      assert.equal(app.controller.snapshot().runtime.executionReady, false);
-      await edit(app, "x <- 42");
-      await command(app, { type: "save" });
-      assert.equal(app.controller.snapshot().dirty, false);
-      assert.equal(await readFile(path, "utf8"), "# %%\nx <- 42\n");
-      const recovery = await app.controller.query({ type: "recovery" });
-      assert.equal(recovery.result.corruption?.code, "recovery_write_failed");
-      await app.close(); app = undefined;
-      app = await startDocument(path, directory, unavailable);
-      assert.deepEqual(app.controller.snapshot().cells[0]!.body, ["x <- 42"]);
-      assert.equal(app.controller.snapshot().dirty, false);
-    } finally { await app?.close(); await rm(directory, { recursive: true, force: true }); }
-  });
-
-  test("saved document opens with corrupt recovery and exposes the retained recovery problem", async () => {
-    const directory = await realpath(await mkdtemp(join(tmpdir(), "alder-document-corrupt-")));
-    const path = join(directory, "notebook.R");
-    const recoveryDirectory = join(directory, "recovery");
-    await writeFile(path, "# %%\nx <- 1\n");
-    let app: RunningHost | undefined;
-    try {
-      app = await startDocument(path, directory);
-      await edit(app, "x <- 2");
-      await app.close(); app = undefined;
-      const recoveryPath = join(recoveryDirectory, (await readdir(recoveryDirectory)).find(name => name.startsWith("recovery-"))!);
-      const newest = (await readdir(recoveryPath)).filter(name => name.startsWith("snapshot-")).sort().at(-1)!;
-      await writeFile(join(recoveryPath, newest), "corrupt");
-      app = await startDocument(path, directory);
-      assert.deepEqual(app.controller.snapshot().cells[0]!.body, ["x <- 1"]);
-      const recovery = await app.controller.query({ type: "recovery" });
-      assert.equal(recovery.result.corruption?.code, "recovery_corrupt");
-      await edit(app, "x <- 3");
-      await command(app, { type: "save" });
-      assert.equal(await readFile(path, "utf8"), "# %%\nx <- 3\n");
-      assert.equal(await readFile(join(recoveryPath, newest), "utf8"), "corrupt");
-    } finally { await app?.close(); await rm(directory, { recursive: true, force: true }); }
-  });
-
-  test("last-client idle shutdown keeps the saved file unchanged and recovers its unsaved draft", async () => {
-    const directory = await realpath(await mkdtemp(join(tmpdir(), "alder-document-idle-")));
-    const path = join(directory, "notebook.R");
-    await writeFile(path, "# %%\nx <- 1\n");
-    let app: RunningHost | undefined;
-    try {
-      app = await startDocument(path, directory, join(directory, "recovery"), 0.02);
-      await edit(app, "x <- 2");
-      await releaseLastLease(app);
-      await app.closed; app = undefined;
-      assert.equal(await readFile(path, "utf8"), "# %%\nx <- 1\n");
-      app = await startDocument(path, directory);
-      assert.deepEqual(app.controller.snapshot().cells[0]!.body, ["x <- 2"]);
       assert.equal(app.controller.snapshot().dirty, true);
-      await releaseLastLease(app, true);
-      await app.closed; app = undefined;
+      await app.close(); app = undefined;
       app = await startDocument(path, directory);
-      assert.deepEqual(app.controller.snapshot().cells[0]!.body, ["x <- 1"]);
-      assert.equal(app.controller.snapshot().dirty, false);
+      assert.ok(["x <- 2", "x <- 3"].includes(app.controller.snapshot().cells[0]!.body[0]!));
     } finally { await app?.close(); await rm(directory, { recursive: true, force: true }); }
   });
 
-  test("Don't Save closes an edited document when recovery storage is unavailable", async () => {
-    const directory = await realpath(await mkdtemp(join(tmpdir(), "alder-document-discard-")));
+  test("external change keeps both the saved file and recovered edits available", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "alder-recovery-conflict-")));
     const path = join(directory, "notebook.R");
-    const unavailable = join(directory, "unavailable");
-    await writeFile(path, "# %%\nx <- 1\n");
-    await writeFile(unavailable, "unavailable");
-    let app: RunningHost | undefined;
-    try {
-      app = await startDocument(path, directory, unavailable);
-      await edit(app, "x <- 2");
-      await releaseLastLease(app, true);
-      await app.closed; app = undefined;
-      assert.equal(await readFile(path, "utf8"), "# %%\nx <- 1\n");
-    } finally { await app?.close(); await rm(directory, { recursive: true, force: true }); }
-  });
-
-
-  test("external changes keep the saved notebook authoritative and the unsaved draft recoverable", async () => {
-    const directory = await realpath(await mkdtemp(join(tmpdir(), "alder-document-conflict-")));
-    const path = join(directory, "notebook.R");
+    const copy = join(directory, "recovered-copy.R");
     await writeFile(path, "# %%\nx <- 1\n");
     let app: RunningHost | undefined;
     try {
@@ -258,143 +134,64 @@ if (process.env.ALDER_RECOVERY_CHILD) {
       await app.close(); app = undefined;
       await writeFile(path, "# %%\nx <- 99\n");
       app = await startDocument(path, directory);
-      assert.deepEqual(app.controller.snapshot().cells[0]!.body, ["x <- 99"]);
-      assert.equal(app.controller.snapshot().dirty, false);
-      const recovery = await app.controller.query({ type: "recovery" });
-      assert.equal(recovery.result.branches.length, 1);
-      assert.equal(recovery.result.branches[0]!.state, "conflict");
-      await edit(app, "x <- 100");
+      assert.deepEqual(app.controller.snapshot().cells[0]!.body, ["x <- 2"]);
+      assert.equal((await app.controller.query({ type: "recovery" })).result.candidate?.state, "conflict");
+      assert.equal((await dispatch(app, { type: "save" })).error?.code, "recovery_conflict");
+      await command(app, { type: "save-as", path: copy, expectedDestination: "absent" });
+      assert.equal(await readFile(path, "utf8"), "# %%\nx <- 99\n");
+      assert.equal(await readFile(copy, "utf8"), "# %%\nx <- 2\n");
+      await edit(app, "x <- 3");
       await command(app, { type: "save" });
-      assert.equal(await readFile(path, "utf8"), "# %%\nx <- 100\n");
-      assert.equal((await app.controller.query({ type: "recovery" })).result.branches.length, 1);
+      assert.equal(await readFile(copy, "utf8"), "# %%\nx <- 3\n");
     } finally { await app?.close(); await rm(directory, { recursive: true, force: true }); }
   });
 
-  test("slow R discovery does not block editing and is canceled when the document closes", { timeout: 10_000 }, async () => {
-    const directory = await realpath(await mkdtemp(join(tmpdir(), "alder-document-r-start-")));
-    const path = join(directory, "notebook.R");
-    const rscript = join(directory, "slow-Rscript");
-    const pidPath = join(directory, "probe.pid");
-    await writeFile(path, "# %%\nx <- 1\n");
-    await mkdir(join(directory, "r-library/alder"), { recursive: true });
-    await writeFile(join(directory, "r-library/alder/DESCRIPTION"), "Package: alder\n");
-    await writeFile(rscript, `#!${process.execPath}\nrequire('node:fs').writeFileSync(${JSON.stringify(pidPath)}, String(process.pid)); setInterval(() => {}, 1000);\n`, { mode: 0o755 });
-    const applicationResources = resources(directory);
-    await writeFile(join(directory, "manifest.json"), JSON.stringify({ schemaVersion: 1, kind: "headless", applicationVersion: "0.1.0",
-      resources: { cliLauncher: "alder", hostEntry: "host.mjs", rendererDirectory: "renderer", workerDirectory: "worker", rLibraryDirectory: "r-library",
-        arkExecutable: "ark", airExecutable: "air", nodeExecutable: "node", electronEntry: null } }));
+  test("Save As leaves the destination project policy untouched", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "alder-save-as-project-")));
+    const sourceDirectory = join(directory, "source");
+    const destinationDirectory = join(directory, "destination");
+    await mkdir(join(sourceDirectory, ".alder"), { recursive: true });
+    await mkdir(join(destinationDirectory, ".alder"), { recursive: true });
+    const source = join(sourceDirectory, "notebook.R");
+    const destination = join(destinationDirectory, "copy.R");
+    await writeFile(source, "# %%\nx <- 1\n");
+    await writeFile(join(sourceDirectory, ".alder", "packages.yaml"), "packages:\n  - sourcePkg\n");
+    await writeFile(join(sourceDirectory, ".alder", "layout.json"), "{\"source\":true}\n");
+    const destinationPackages = "packages:\n  - destinationPkg\n";
+    const destinationLayout = "null\n";
+    await writeFile(join(destinationDirectory, ".alder", "packages.yaml"), destinationPackages);
+    await writeFile(join(destinationDirectory, ".alder", "layout.json"), destinationLayout);
     let app: RunningHost | undefined;
-    let probePid: number | undefined;
     try {
-      app = await startHost({ path, resources: applicationResources, rscript, recoveryDirectory: join(directory, "recovery"),
-        session: { runtimeDirectory: join(directory, "sessions") }, runOnStartup: false });
-      const deadline = Date.now() + 3_000;
-      while (probePid === undefined && Date.now() < deadline) {
-        probePid = await readFile(pidPath, "utf8").then(Number).catch(() => undefined);
-        if (probePid === undefined) await new Promise(resolve => setTimeout(resolve, 10));
-      }
-      assert.ok(probePid);
-      await edit(app, "x <- 42");
-      await command(app, { type: "save" });
+      app = await startDocument(source, directory);
+      await edit(app, "x <- 7");
+      await command(app, { type: "save-as", path: destination, expectedDestination: "absent" });
+      assert.equal(await readFile(destination, "utf8"), "# %%\nx <- 7\n");
+      assert.equal(await readFile(join(destinationDirectory, ".alder", "packages.yaml"), "utf8"), destinationPackages);
+      assert.equal(await readFile(join(destinationDirectory, ".alder", "layout.json"), "utf8"), destinationLayout);
+    } finally { await app?.close(); await rm(directory, { recursive: true, force: true }); }
+  });
+
+  test("corrupt journal falls back to saved source and can be discarded", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "alder-corrupt-journal-")));
+    const path = join(directory, "notebook.R");
+    await writeFile(path, "# %%\nx <- 1\n");
+    let app: RunningHost | undefined;
+    try {
+      app = await startDocument(path, directory);
+      await edit(app, "x <- 2");
       await app.close(); app = undefined;
-      const stopped = Date.now() + 1_000;
-      const alive = () => { try { process.kill(probePid!, 0); return true; } catch { return false; } };
-      while (alive() && Date.now() < stopped) await new Promise(resolve => setTimeout(resolve, 10));
-      assert.equal(alive(), false);
-      assert.equal(await readFile(path, "utf8"), "# %%\nx <- 42\n");
-    } finally {
-      await app?.close();
-      if (probePid !== undefined) { try { process.kill(probePid); } catch {} }
-      await rm(directory, { recursive: true, force: true });
-    }
+      const recoveryRoot = join(directory, "recovery");
+      const recoveryDirectory = join(recoveryRoot, (await readdir(recoveryRoot)).find(name => name.startsWith("recovery-"))!);
+      await writeFile(join(recoveryDirectory, "journal.json"), "{damaged");
+      app = await startDocument(path, directory);
+      assert.deepEqual(app.controller.snapshot().cells[0]!.body, ["x <- 1"]);
+      assert.equal((await app.controller.query({ type: "recovery" })).result.corruption?.code, "recovery_corrupt");
+      const disk = app.controller.snapshot().disk;
+      await command(app, { type: "reload-source", expectedDiskDigest: disk.digest, expectedDiskVersion: disk.version, discardRecovery: true });
+      const recovery = await app.controller.query({ type: "recovery" });
+      assert.equal(recovery.result.candidate, null);
+      assert.equal(recovery.result.corruption, null);
+    } finally { await app?.close(); await rm(directory, { recursive: true, force: true }); }
   });
-
-
-  test("Save As transfers the active recovery identity only when adopted and isolates its source", async () => {
-    const directory = await realpath(await mkdtemp(join(tmpdir(), "alder-recovery-rebind-")));
-    try {
-      const source = await RecoveryWriter.open({ rootDir: directory, key: "source", baseline: baseline("source\n") });
-      const destination = await RecoveryWriter.open({ rootDir: directory, key: "destination", baseline: baseline("destination\n") });
-      const activeKey = source.recoveryId;
-      const destinationKey = destination.recoveryId;
-      await destination.close();
-      const target = { rootDir: directory, key: "destination", baseline: baseline("source saved as destination\n", 1) };
-      const canceled = await source.prepareRebind(target);
-      await canceled.publish();
-      assert.equal(source.recoveryId, activeKey);
-      await canceled.abort();
-      const afterAbort = await RecoveryWriter.open(target);
-      assert.equal(afterAbort.recoveryId, destinationKey);
-      assert.equal(source.recoveryId, activeKey);
-      await afterAbort.close();
-      const committed = await source.prepareRebind(target);
-      await committed.publish();
-      assert.equal(source.recoveryId, activeKey);
-      committed.adopt();
-      assert.equal(committed.writer.recoveryId, activeKey);
-      const rotated = source.recoveryId;
-      assert.notEqual(rotated, activeKey);
-      committed.adopt();
-      await committed.abort();
-      assert.equal(source.recoveryId, rotated, "repeated adoption and late abort do not rotate again");
-      await source.close();
-      await committed.writer.close();
-      const reopenedSource = await RecoveryWriter.open({ rootDir: directory, key: "source", baseline: baseline("source\n") });
-      const reopenedDestination = await RecoveryWriter.open(target);
-      assert.equal(reopenedSource.recoveryId, rotated);
-      assert.equal(reopenedDestination.recoveryId, activeKey);
-      await reopenedSource.close();
-      await reopenedDestination.close();
-    } finally { await rm(directory, { recursive: true, force: true }); }
-  });
-
-
-  test("immediately reopening the Save As source gives it a separate recovery identity", { timeout: 10_000 }, async () => {
-    const directory = await realpath(await mkdtemp(join(tmpdir(), "alder-document-save-as-identity-")));
-    const sourcePath = join(directory, "source.R");
-    const destinationPath = join(directory, "destination.R");
-    await writeFile(sourcePath, "# %%\nx <- 1\n");
-    const recoveryIdentity = async (app: RunningHost): Promise<string> => {
-      const origin = app.server.address()!.origin;
-      const ticketResponse = await fetch(origin + "/api/ticket", { method: "POST", headers: {
-        Authorization: "Bearer " + app.ownership.token, Origin: origin, "Content-Type": "application/json" }, body: JSON.stringify({ origin }) });
-      assert.equal(ticketResponse.ok, true);
-      const ticket = await ticketResponse.json() as { ticket: string };
-      const response = await fetch(origin + "/api/session", { method: "POST", headers: {
-        Origin: origin, "Content-Type": "application/json" }, body: JSON.stringify({ ticket: ticket.ticket }) });
-      assert.equal(response.ok, true);
-      const session = await response.json() as { recoveryId?: string };
-      assert.equal(typeof session.recoveryId, "string");
-      return session.recoveryId!;
-    };
-    let active: RunningHost | undefined;
-    let reopenedSource: RunningHost | undefined;
-    let delayedFlush: ReturnType<typeof mock.method> | undefined;
-    try {
-      active = await startDocument(sourcePath, directory);
-      const sourceKey = active.ownership.sessionKey;
-      const flush = RecoveryWriter.prototype.flush;
-      // Slow recovery storage exposes release-before-persistence without delaying the source reopen.
-      delayedFlush = mock.method(RecoveryWriter.prototype, "flush", async function(this: RecoveryWriter) {
-        if (this.key === sourceKey) await new Promise(resolve => setTimeout(resolve, 500));
-        return flush.call(this);
-      });
-      const originalIdentity = await recoveryIdentity(active);
-      await edit(active, "x <- 42");
-      await command(active, { type: "save-as", path: destinationPath, expectedDestination: "absent" });
-      // Reopen in the same runtime as soon as Save As completes; no recovery flush or close is awaited here.
-      reopenedSource = await startDocument(sourcePath, directory);
-      const [destinationIdentity, sourceIdentity] = await Promise.all([recoveryIdentity(active), recoveryIdentity(reopenedSource)]);
-      assert.equal(destinationIdentity, originalIdentity, "the active renderer's drafts follow Save As");
-      assert.notEqual(sourceIdentity, destinationIdentity, "reopened source must not share the destination's renderer drafts");
-      assert.equal(await readFile(sourcePath, "utf8"), "# %%\nx <- 1\n");
-      assert.equal(await readFile(destinationPath, "utf8"), "# %%\nx <- 42\n");
-    } finally {
-      await reopenedSource?.close();
-      await active?.close();
-      delayedFlush?.mock.restore();
-      await rm(directory, { recursive: true, force: true });
-    }
-  });
-
 }

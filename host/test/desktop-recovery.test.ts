@@ -21,7 +21,6 @@ const bridge = (store: NativeRecoveryStore): DesktopRecoveryCall => async reques
     case "read": return store.read(request.recoveryId, request.name!);
     case "write": return store.write(request.recoveryId, request.name!, request.value);
     case "remove": return store.remove(request.recoveryId, request.name!);
-    case "list": return store.list(request.recoveryId, request.prefix!);
   }
 };
 const recordPath = (root: string, name: string): string => join(root, recoveryId, createHash("sha256").update(name).digest("hex") + ".json");
@@ -34,10 +33,10 @@ test("plain desktop drafts survive new renderer origins and native store instanc
     const renderer = new DesktopRecoveryStore(recoveryId, bridge(new NativeRecoveryStore(directory)));
     await renderer.saveDraft(draft);
     const reopened = new DesktopRecoveryStore(recoveryId, bridge(new NativeRecoveryStore(directory)));
-    assert.deepEqual(await reopened.listDrafts(), [draft]);
+    assert.deepEqual(await reopened.readDraft(draft.draftId), draft);
     assert.equal(await new NativeRecoveryStore(directory).read("different-document", "draft:" + draft.draftId), null);
     await reopened.clearDraft(draft.draftId);
-    assert.deepEqual(await reopened.listDrafts(), []);
+    assert.equal(await reopened.readDraft(draft.draftId), null);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
@@ -53,7 +52,6 @@ test("record identities cannot supply filesystem paths", async () => {
       await assert.rejects(store.read(recoveryId, name), /Invalid recovery record name/);
       await assert.rejects(store.remove(recoveryId, name), /Invalid recovery record name/);
     }
-    await assert.rejects(store.list(recoveryId, "../"), /Invalid recovery record prefix/);
     assert.deepEqual(await readdir(directory), []);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
@@ -74,7 +72,7 @@ test("damaged JSON is reported and retained when later work replaces that record
     const retained = (await readdir(join(directory, recoveryId))).filter(name => name.startsWith("corrupt-"));
     assert.equal(retained.length, 1);
     assert.equal(await readFile(join(directory, recoveryId, retained[0]!), "utf8"), corrupt);
-    assert.equal((await renderer.listDrafts())[0]!.updatedAt, 18);
+    assert.equal((await renderer.readDraft(draft.draftId))!.updatedAt, 18);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
@@ -107,32 +105,4 @@ test("the browser adapter reports unavailable storage without modifying its call
   const renderer = new DesktopRecoveryStore(recoveryId, async () => { throw new Error("Disk unavailable"); });
   await assert.rejects(renderer.saveDraft(draft), /Disk unavailable/);
   assert.deepEqual(draft, before);
-});
-
-
-test("legacy drafts normalize to plain snapshots while damaged siblings are retained", async () => {
-  const directory = await temporary();
-  try {
-    const native = new NativeRecoveryStore(directory);
-    const legacy = { schemaVersion: 1, clientId: "old-client", base: { ...draft.base, cursor: 4, version: 2 }, changes: draft.changes,
-      operation: { operationId: "old-run", kind: "run", commandSequence: 1, expectedDocumentRevision: 0 } };
-    await native.write(recoveryId, "draft:old-client", legacy);
-    await native.write(recoveryId, "branch:healthy", legacy);
-    await native.write(recoveryId, "draft:damaged", {});
-    const path = recordPath(directory, "draft:damaged");
-    await writeFile(path, "{broken", { mode: 0o600 });
-    const warnings: string[] = [];
-    const renderer = new DesktopRecoveryStore(recoveryId, bridge(native), message => warnings.push(message));
-    const drafts = await renderer.listDrafts();
-    assert.equal(drafts.length, 2);
-    assert.deepEqual(drafts.map(draft => draft.draftId).sort(), ["old-client", "saved-healthy"]);
-    assert.ok(drafts.every(draft => draft.schemaVersion === 2 && draft.submission?.kind === "run"));
-    assert.ok(warnings.some(message => /retained/.test(message)));
-    assert.equal(await readFile(path, "utf8"), "{broken");
-    const old = drafts.find(draft => draft.draftId === "old-client")!;
-    await renderer.saveDraft(old);
-    assert.deepEqual(await native.read(recoveryId, "draft:old-client"), old);
-    await renderer.clearDraft("saved-healthy");
-    assert.equal(await native.read(recoveryId, "branch:healthy"), null);
-  } finally { await rm(directory, { recursive: true, force: true }); }
 });

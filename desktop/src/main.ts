@@ -658,7 +658,6 @@ export class ElectronMain implements ElectronMainApplication {
         case "read": return store.read(request.recoveryId, request.name ?? "");
         case "write": return store.write(request.recoveryId, request.name ?? "", request.value);
         case "remove": return store.remove(request.recoveryId, request.name ?? "");
-        case "list": return store.list(request.recoveryId, request.prefix ?? "");
       }
     });
     noArguments(IPC_CHANNELS.openNotebook, async (record) => {

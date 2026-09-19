@@ -49,8 +49,7 @@ npm run typecheck --prefix desktop
 their R packages and external tools; report missing prerequisites separately from
 behavior actually checked. A skipped execution test does not qualify R execution.
 Verify actual Mac typing, menus, dialogs, save/reopen and recovery where relevant.
-See [tests/AGENTS.md](../tests/AGENTS.md) for test guidance and
-[responsiveness guidance](reviews/INPUT-LATENCY.md) when performance is involved.
+See [tests/AGENTS.md](../tests/AGENTS.md) for test guidance.
 
 ## Generated files and R helpers
 
@@ -77,7 +76,7 @@ being edited; a private test library avoids picking up an unrelated installation
 
 - [Iris](../inst/examples/iris.R): base-R example.
 - [Demo](../demo.R): small ggplot2 notebook.
-- [Output parity](parity-demo.R): scientific output and interaction fixture.
+- [Outputs and widgets](parity-demo.R): scientific output and interaction fixture.
 - [Ark execution examples](examples/ark-scalar-dependency.R): scalar dependencies,
   errors, plots, Stop and project packages in ordinary R scripts.
 - [Bulk differential expression](examples/bulk-differential-expression.R):

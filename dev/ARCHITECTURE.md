@@ -28,10 +28,11 @@ inspection, language assistance or an agent connection.
   a valid saved notebook remains openable with useful recovery choices.
 - Show the Mac application promptly with actionable progress or errors.
   Users should not need a terminal to understand a failed launch.
-- Keep ordinary editing, running, saving and closing responsive. Measure real
-  interactions on identified hardware; choose performance acceptance against
-  representative workflows rather than treating old universal timing gates as
-  requirements.
+- Get the notebook working first. Do not use the old latency targets or run a
+  performance qualification campaign during the reset. Fix observable stalls or
+  lost input that block ordinary editing, running, saving or closing. Once the
+  functional Mac app is accepted, measure representative workflows and improve
+  performance where users actually feel it.
 
 The app runs trusted R code with the user's permissions. Keep renderer isolation,
 authenticated local APIs and ordinary child-process cleanup. Deliberate escape
@@ -62,6 +63,10 @@ needs; no component must stay in Rust or any other language. Migration complexit
 estimated effort and sunk implementation cost are not reasons to retain a worse
 design. Preserve useful notebook behavior and user work, not internal compatibility
 with discarded implementations.
+If a component is complicated because its ownership or boundary is wrong, replace
+it rather than incrementally refining it. Its private APIs, migrations, test
+layout and internal compatibility have no preservation value. Reuse only pieces
+that are independently simple and belong in the replacement design.
 
 ## Working design
 
@@ -78,13 +83,22 @@ client preserves work for another attached client.
 Use ordinary Node child processes and process groups for lifecycle management.
 Notebook endpoints are routing boundaries; closing a frontend must not end work
 owned by another attached client.
+The backend owns one in-memory canonical-path-to-session map behind one control
+socket and singleton startup lock. Do not layer per-notebook PID registries,
+process-identity certification, recovery mutexes or Save As lock rekey protocols
+over that owner. Authenticate the real local API and recover by reconnecting to
+the backend or starting a new one when its socket owner is gone.
 
 **Documents.** Maintain an in-memory working document, a saved baseline, an
 external-file fingerprint and a recovery snapshot. Stage saves and atomically
 replace the destination. Offer an understandable external-edit conflict choice.
-Snapshot unsaved work periodically; recovery durability is not a prerequisite
-for every edit or execution. Retain revision checks for concurrent edits and
-stale execution results. Provide a bounded close path when the host is unhealthy.
+An accepted source mutation is durable in backend recovery before its command
+reports success. The renderer keeps recovery only for typing not yet accepted by
+the backend, with coalesced writes and an immediate flush before submission,
+reload or close. Retain revision checks for concurrent edits and stale execution
+results. Provide a bounded close path when the host is unhealthy. Save As carries
+the notebook and notebook-owned metadata; it never copies source-project package
+or project settings into the destination project.
 
 **Commands and recovery.** Replace the general command admission/receipt,
 per-client sequence and event-replay framework with simple request IDs, document
@@ -126,8 +140,37 @@ separate launch-time file rewrite or continuing override.
 Keep only the kernel adapter and R helpers required for observable notebook
 behavior, including widgets and necessary cell bookkeeping. Dependency analysis
 runs outside the evaluating kernel. Keep the kernel's dependency footprint small;
-language assistance, formatting and package management use service processes.
+formatting and package management use service processes. Language assistance uses
+stock Ark's built-in LSP through its existing Jupyter comm, with a small Alder
+adapter and no Ark modifications or Positron application code. Do not retain a
+separate R `languageserver` process. Language-assistance failure must not block
+editing, saving or execution.
 Account for already-loaded namespaces when isolating project packages.
+
+Keep four R roles separate:
+
+- **Notebook code** runs only in the notebook's ordinary global environment and
+  owns its project library plus ordinary project `.Renviron` and `.Rprofile`
+  semantics, including renv-style activation. Loading a public helper package is
+  an explicit notebook action; Alder does not attach one before user code. A
+  project/user package version wins over any bundled fallback.
+- **The Ark adapter** is small app-internal code loaded into an environment with
+  a sealed parent such as `baseenv()` or an explicit imports environment. Its
+  unqualified name lookup must never pass through `.GlobalEnv`, and its mutable
+  state must not live in the namespace of a package notebook code can load.
+- **Analysis and other app services** run profile-free in separate processes
+  with explicit app-private dependencies. They do not resolve implementation
+  dependencies from project or user libraries and do not attach packages into
+  the notebook session.
+- **Package installation** uses the selected project R and writes only the
+  project library. App-private packages cannot satisfy project dependencies or
+  become part of notebook package resolution.
+
+The public R helper surface, if retained, contains only notebook-facing value
+semantics such as `ui`, `out` and `cache`. Static analysis, protocol framing,
+performance tracing and private evaluator state do not belong in that package.
+The notebook kernel honors project startup files as notebook configuration;
+service processes never run them.
 
 The execution slice replaces the current patched MIME publisher with an
 integration that works with unmodified Ark, then removes the patch and its
@@ -140,6 +183,26 @@ execution/output facilities. Remove duplicated runtime policy, blanket helper
 compilation and synthetic warm-up execution. Add performance optimizations only
 when measurements of the redesigned app demonstrate a benefit. Preserve useful
 widgets, rich outputs and scientific semantics through a small helper layer.
+
+Dependency analysis is advisory. Syntactically valid R always remains executable.
+The reactive graph records only the definitions and references the analyzer can
+establish; it does not reject dynamic code, label it as an execution barrier,
+trace its runtime effects or broaden reruns merely because some effects are
+unknown. Dynamic operations such as `get`, `assign`, `do.call`, `source`, `load`
+and generated expressions may therefore create dependencies that automatic
+reactivity misses. Running the affected cells or the whole notebook explicitly
+restores current results. Document this limitation instead of defining a
+restricted Alder dialect. R parse errors and actual runtime errors may fail
+execution.
+
+For definitions the analyzer can establish, the reactive notebook has two hard
+graph rules: each notebook-level global name has one defining cell, and the cell
+dependency graph must be acyclic. Multiple-definition and cycle diagnostics name
+the involved cells and prevent those cells from executing until the conflict is
+fixed; unrelated valid cells remain usable. Function-local bindings are not
+notebook globals. Dynamic definitions that static analysis cannot identify are
+not promoted into invented graph edges and retain the best-effort limitation
+above.
 
 **Optional services.** Automatic inspection must not invoke arbitrary user methods
 or force promises. Rich inspection is explicit, cancellable work. Optional service
@@ -155,6 +218,20 @@ failure should have the following effects:
 | Agent disconnects | Desktop work continues |
 | Backend unresponsive | Preserve local unsaved work and provide an explicit close path |
 
+Publishing consumes one immutable saved-source/output snapshot. It does not
+require a live kernel, ready analyzer or valid reactive graph. Use one simple
+static rendering path and Quarto self-contained output; do not maintain a custom
+shortcode parser, recursive resource-certification system or marker-repair layer.
+Slow package, publish, format and inspection work has independent busy/cancel
+state and does not globally disable unrelated editing and document controls.
+
+**Desktop boundary.** Native menus and lifecycle code communicate with the
+renderer through one typed command/state bridge. Do not click DOM selectors,
+search button text or inspect private renderer globals from Electron. Save and
+Save As use the same renderer operation. Ownerless Open and error dialogs work
+after the last window closes, and renderer bootstrap failures show immediately.
+Associate the app only with formats it implements.
+
 **Build and runtime policy.** Delete bespoke dependency certification and source
 lineage/provenance gates. Keep ordinary lockfiles, standard package-manager
 integrity checks and required license notices. Startup resolves necessary
@@ -162,6 +239,9 @@ resources and checks actual compatibility. Separate local development from publi
 distribution and signing. Existing script restrictions describe the current
 implementation; they do not freeze the redesigned runtime contract.
 Stage the Mac app with a compact Forge build and bundled Node/shared resources.
+Stage every advertised runtime tool, including Air, and verify it inside the
+packaged app. Keep the generated application manifest and permission declarations
+limited to facilities Alder actually uses.
 
 Prefer deleting obsolete build and verification machinery to preserving it in
 disabled form. Keep a small local Mac build/check workflow with focused behavior

@@ -210,8 +210,7 @@ test("discarding the last lease removes unsaved recovery", {
     assert.equal(app.controller.snapshot().cells[0]!.body[0], "x <- 1");
     assert.equal(app.controller.snapshot().dirty, false);
     const recovery = await app.controller.query({ type: "recovery" });
-    assert.equal(recovery.result.pending, false);
-    assert.deepEqual(recovery.result.branches, []);
+    assert.equal(recovery.result.candidate, null);
   } finally {
     if (session !== undefined) await closeHttpSession(session);
     await app?.close();
@@ -386,8 +385,7 @@ test("clean external reload does not create recovery startup deferral", {
     assert.equal(clean.runtime.startupActivated, true);
     assert.equal(app.controller.configuration().deferStartup, false);
     const recovery = await app.controller.query({ type: "recovery" });
-    assert.equal(recovery.result.pending, false);
-    assert.deepEqual(recovery.result.branches, []);
+    assert.equal(recovery.result.candidate, null);
 
     await app.close();
     app = undefined;
@@ -397,8 +395,7 @@ test("clean external reload does not create recovery startup deferral", {
     assert.equal(afterRestart.runtime.startupActivated, true);
     assert.equal(restarted.controller.configuration().deferStartup, false);
     const restartedRecovery = await restarted.controller.query({ type: "recovery" });
-    assert.equal(restartedRecovery.result.pending, false);
-    assert.deepEqual(restartedRecovery.result.branches, []);
+    assert.equal(restartedRecovery.result.candidate, null);
   } finally {
     await app?.close();
     await restarted?.close();
@@ -705,8 +702,7 @@ test("runtime and app metadata survive recovery restart, Save, and Save As", {
     assert.match(copied, /vendor_note: keep me/);
     assert.equal(app.controller.snapshot().dirty, false, "a successful Save As must clear the durable recovery draft");
     const saveAsRecovery = await app.controller.query({ type: "recovery" });
-    assert.equal(saveAsRecovery.result.pending, false);
-    assert.deepEqual(saveAsRecovery.result.branches, []);
+    assert.equal(saveAsRecovery.result.candidate, null);
   } finally {
     await app?.close();
     await rm(directory, { recursive: true, force: true });

@@ -131,6 +131,7 @@ export interface SourceCommitRequest {
   readonly patch?: Record<string, unknown>;
   readonly packages?: readonly string[];
   readonly layout?: JsonValue;
+  readonly discardRecovery?: boolean;
   readonly document?: NotebookDocument;
   readonly delta?: DurableCommitInput["delta"];
 }
@@ -1027,7 +1028,7 @@ export class Controller {
       }; break;
       case "layout": result = { layout: clone(this.layout), sidecar: clone(this.sidecarsValue.layout) }; break;
       case "recovery": result = this.getRecoveryState === undefined
-        ? { branches: [], pending: false, corruption: null }
+        ? { candidate: null, corruption: null }
         : await this.getRecoveryState(); break;
       case "packages-status": result = await this.callService("packages.status", {}); break;
       case "check":
@@ -5722,6 +5723,7 @@ export class Controller {
           expectedDocumentRevision: command.expectedDocumentRevision,
           expectedDisk: { digest: command.expectedDiskDigest, version: command.expectedDiskVersion },
           operationId: command.requestId,
+          discardRecovery: command.discardRecovery,
           fingerprint: stableStringify({ expectedDiskDigest: command.expectedDiskDigest, expectedDiskVersion: command.expectedDiskVersion }),
         });
       case "upload":

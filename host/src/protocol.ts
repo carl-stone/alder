@@ -737,7 +737,7 @@ export const uploadFileSchema = z.object({ name: pathSchema, content_base64: bou
 export const uploadCommandSchema = z.object({ ...commandIdentityShape, type: z.literal("upload"), name: idSchema, path: z.array(idSchema).max(256), files: z.array(uploadFileSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS), kernelEpoch: idSchema }).strict();
 export const saveCommandSchema = z.object({ ...commandIdentityShape, type: z.literal("save"), expectedDocumentRevision: revisionSchema }).strict();
 export const saveAsCommandSchema = z.object({ ...commandIdentityShape, type: z.literal("save-as"), path: pathSchema, expectedDestination: z.union([z.literal("absent"), z.object({ expectedDiskDigest: z.string().min(1), expectedDiskVersion: z.string().min(1) }).strict()]), expectedDocumentRevision: revisionSchema }).strict();
-export const reloadSourceCommandSchema = z.object({ ...commandIdentityShape, type: z.literal("reload-source"), expectedDocumentRevision: revisionSchema, expectedDiskDigest: z.string().regex(/^[0-9a-f]{64}$/), expectedDiskVersion: boundedUtf8StringSchema(MAX_ID_BYTES, true) }).strict();
+export const reloadSourceCommandSchema = z.object({ ...commandIdentityShape, type: z.literal("reload-source"), expectedDocumentRevision: revisionSchema, expectedDiskDigest: z.string().regex(/^[0-9a-f]{64}$/), expectedDiskVersion: boundedUtf8StringSchema(MAX_ID_BYTES, true), discardRecovery: z.boolean().optional() }).strict();
 export const formatCommandSchema = z.object({ ...commandIdentityShape, type: z.literal("format"), cellIds: z.array(idSchema).max(MAX_NOTEBOOK_CELLS).optional(), expectedRevisions: safeStringRecordSchema(revisionSchema), expectedDocumentRevision: revisionSchema }).strict();
 export const setPreferencesCommandSchema = z.object({ ...commandIdentityShape, type: z.literal("set-preferences"), patch: preferencesPatchSchema, expectedPreferencesVersion: boundedUtf8StringSchema(MAX_ID_BYTES).nullable() }).strict();
 export const setConfigCommandSchema = z.object({ ...commandIdentityShape, type: z.literal("set-config"), patch: projectSettingsPatchSchema, expectedSidecarVersion: boundedUtf8StringSchema(MAX_ID_BYTES).nullable(), expectedDocumentRevision: revisionSchema }).strict();
@@ -936,10 +936,10 @@ export const hostEventTypeSchema = z.enum(["transaction", "notebook", "cell", "c
 const eventBase = { protocol: z.literal(HOST_PROTOCOL), epoch: idSchema, cursor: protocolIntegerSchema, version: protocolIntegerSchema, documentRevision: revisionSchema, timestamp: z.number().finite().nonnegative(), operationId: idSchema.optional(), clientId: idSchema.optional(), cellId: idSchema.optional(), runId: idSchema.optional(), kernelEpoch: idSchema.nullable().optional(), revision: revisionSchema.optional(), sequence: protocolIntegerSchema.optional() };
 export const hostEventSchema = z.object({ ...eventBase, type: hostEventTypeSchema, payload: protocolJsonSchema }).strict();
 
-export interface RecoveryBranch { id: string; documentRevision: number; baseDisk: DiskObservation; sourceHandle: ArtifactHandle; state: "clean" | "dirty" | "conflict"; conflict: HostError | null; }
-export const recoveryBranchSchema = z.object({ id: idSchema, documentRevision: revisionSchema, baseDisk: diskObservationSchema, sourceHandle: z.lazy(() => artifactHandleSchema), state: z.enum(["clean", "dirty", "conflict"]), conflict: hostErrorSchema.nullable() }).strict();
-export interface RecoveryState { branches: RecoveryBranch[]; pending: boolean; corruption: HostError | null; }
-export const recoveryStateSchema = z.object({ branches: z.array(recoveryBranchSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS), pending: z.boolean(), corruption: hostErrorSchema.nullable() }).strict();
+export interface RecoveryCandidate { documentRevision: number; state: "restored" | "conflict"; }
+export const recoveryCandidateSchema = z.object({ documentRevision: revisionSchema, state: z.enum(["restored", "conflict"]) }).strict();
+export interface RecoveryState { candidate: RecoveryCandidate | null; corruption: HostError | null; }
+export const recoveryStateSchema = z.object({ candidate: recoveryCandidateSchema.nullable(), corruption: hostErrorSchema.nullable() }).strict();
 export type RecoveryDelta = { kind: "source" | "sidecar"; value: JsonValue };
 export type RecoveryBaseline = { documentRevision: number; disk: DiskObservation };
 export type RecoveryDiskObservations = SidecarObservations;
@@ -1319,8 +1319,8 @@ export type WindowState = z.infer<typeof windowStateSchema>;
 export interface SaveDestination { path: string; expectedDestination: "absent" | { expectedDiskDigest: string; expectedDiskVersion: string }; }
 export const desktopRecoveryRequestSchema = z.object({
   recoveryId: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/),
-  action: z.enum(["read", "write", "remove", "list"]),
-  name: z.string().max(256).optional(), prefix: z.string().max(256).optional(), value: z.unknown().optional(),
+  action: z.enum(["read", "write", "remove"]),
+  name: z.string().max(256).optional(), value: z.unknown().optional(),
 }).strict();
 export type DesktopRecoveryRequest = z.infer<typeof desktopRecoveryRequestSchema>;
 export interface PreloadApi { recovery(request: DesktopRecoveryRequest): Promise<unknown>; openNotebook(): Promise<void>; chooseSavePath(): Promise<SaveDestination | null>; chooseRscript(): Promise<string | null>; getWindowState(): Promise<WindowState>; getDraftId(): Promise<string>; hostShutdown(): Promise<void>; saveCancelled(): Promise<void>; rendererReady(): Promise<void>; onWindowAction(callback: (action: WindowAction) => void): () => void; }

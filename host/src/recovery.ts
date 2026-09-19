@@ -1,11 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, open, readdir, realpath, rename, rm } from "node:fs/promises";
-import { join, resolve } from "node:path";
-import { canonicalBase64ByteLength, MAX_NOTEBOOK_CELLS, MAX_NOTEBOOK_SOURCE_BYTES, sidecarObservationsSchema } from "./protocol.js";
+import { mkdir, open, readFile, realpath, rename, rm } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
+import { canonicalBase64ByteLength, MAX_NOTEBOOK_CELLS, MAX_NOTEBOOK_SOURCE_BYTES } from "./protocol.js";
 import { readPrivateFile } from "./private-paths.js";
 
 export type RecoveryJsonValue = null | boolean | number | string | RecoveryJsonValue[] | { [key: string]: RecoveryJsonValue };
-export type RecoveryJsonObject = { [key: string]: RecoveryJsonValue };
 export interface DiskObservation {
   state: "untitled" | "absent" | "present" | "unreadable";
   digest?: string | null;
@@ -14,7 +13,6 @@ export interface DiskObservation {
   identity?: string | null;
   mode?: number;
 }
-export interface RecoverySidecarObservations { config: DiskObservation; layout: DiskObservation; packages: DiskObservation; }
 export interface RecoveryCellState { readonly id: string; readonly revision: number; }
 export interface RecoveryBaseline {
   schemaVersion: 1;
@@ -22,65 +20,35 @@ export interface RecoveryBaseline {
   documentRevision: number;
   cells: readonly RecoveryCellState[];
   path?: string | null;
-  project?: RecoveryJsonValue;
-  config?: RecoveryJsonValue;
-  layout?: RecoveryJsonValue;
-  packageDeclarationIntent?: RecoveryJsonValue;
   notebookDiskObservation: DiskObservation;
-  sidecarObservations: RecoverySidecarObservations;
 }
-export interface RecoveryCheckpoint { readonly notebookDiskObservation: DiskObservation; readonly sidecarObservations: RecoverySidecarObservations; }
-export type RecoveryStatus = "empty" | "clean" | "recovered";
-export interface RecoveryBranch { readonly id: string; readonly documentRevision: number; readonly status: RecoveryStatus; readonly fingerprint: string; }
-export interface RecoveryState {
-  schemaVersion: 1;
-  generation: string | null;
-  baseline: RecoveryBaseline;
-  documentRevision: number;
-  status: RecoveryStatus;
-  pending: boolean;
-  fingerprint: string | null;
-  branches: readonly RecoveryBranch[];
-}
-export interface RecoveryRebindTarget { readonly rootDir: string; readonly key: string; readonly baseline: RecoveryBaseline; }
-export interface PreparedRecoveryRebind {
-  readonly writer: RecoveryWriter;
-  readonly state: RecoveryState;
-  publish(): Promise<void>;
-  adopt(): void;
-  abort(): Promise<void>;
-}
-export interface RecoveryBranchFork { readonly id?: string; readonly baseline?: RecoveryBaseline; }
-export interface RecoveryBranchDropExpected { readonly documentRevision: number; readonly fingerprint: string; }
+export interface RecoveryState { baseline: RecoveryBaseline; pending: boolean; fingerprint: string | null; }
 export interface RecoveryWriterOptions {
   rootDir: string;
   key: string;
   baseline: RecoveryBaseline;
-  snapshotIntervalMs?: number;
+  recoveryId?: string;
   processSupervisorExecutable?: string | null;
 }
 export type RecoveryErrorCode = "recovery_corrupt" | "recovery_write_failed" | "recovery_invalid" | "recovery_closed";
 export class RecoveryError extends Error {
-  constructor(readonly code: RecoveryErrorCode, message: string, readonly details: RecoveryJsonValue | null = null, readonly originals: readonly string[] = [], cause?: unknown) {
+  constructor(readonly code: RecoveryErrorCode, message: string, readonly originals: readonly string[] = [], cause?: unknown) {
     super(message, cause === undefined ? undefined : { cause });
     this.name = "RecoveryError";
   }
 }
 
-interface StoredBranch { id: string; baseline: RecoveryBaseline; fingerprint: string; }
-interface Snapshot {
-  schemaVersion: 2;
-  baseline: RecoveryBaseline;
-  pending: boolean;
-  fingerprint: string;
-  branches: StoredBranch[];
-}
-const MAX_SNAPSHOT_BYTES = 256 * 1024 * 1024;
-const SNAPSHOT_NAME = /^snapshot-\d+-[0-9a-f-]+\.json$/;
+interface StoredJournal { schemaVersion: 1; baseline: RecoveryBaseline; fingerprint: string; }
+const MAX_JOURNAL_BYTES = 64 * 1024 * 1024;
 const clone = <T>(value: T): T => structuredClone(value);
 const hash = (value: string | Uint8Array): string => createHash("sha256").update(value).digest("hex");
 const fingerprint = (value: RecoveryBaseline): string => hash(JSON.stringify(value));
 const missing = (error: unknown): boolean => (error as NodeJS.ErrnoException)?.code === "ENOENT";
+
+async function syncDirectory(path: string): Promise<void> {
+  const directory = await open(path, "r");
+  try { await directory.sync(); } finally { await directory.close(); }
+}
 
 export function recoveryObservationMatches(expected: DiskObservation, actual: DiskObservation): boolean {
   return expected.state !== "unreadable" && actual.state !== "unreadable"
@@ -94,50 +62,49 @@ function normalizeBaseline(input: RecoveryBaseline): RecoveryBaseline {
   const length = canonicalBase64ByteLength(bytes);
   if (input.schemaVersion !== 1 || !Number.isSafeInteger(input.documentRevision) || input.documentRevision < 0
       || length === null || length > MAX_NOTEBOOK_SOURCE_BYTES || !Array.isArray(input.cells) || input.cells.length > MAX_NOTEBOOK_CELLS) {
-    throw new RecoveryError("recovery_invalid", "Recovery snapshot has invalid document data");
+    throw new RecoveryError("recovery_invalid", "Recovery journal has invalid document data");
   }
   const ids = new Set<string>();
   for (const cell of input.cells) {
-    if (typeof cell?.id !== "string" || cell.id.length === 0 || ids.has(cell.id) || !Number.isSafeInteger(cell.revision) || cell.revision < 0) {
-      throw new RecoveryError("recovery_invalid", "Recovery snapshot has invalid cell identities");
+    if (typeof cell?.id !== "string" || cell.id.length === 0 || ids.has(cell.id)
+        || !Number.isSafeInteger(cell.revision) || cell.revision < 0) {
+      throw new RecoveryError("recovery_invalid", "Recovery journal has invalid cell identities");
     }
     ids.add(cell.id);
   }
-  if (input.path !== undefined && input.path !== null && typeof input.path !== "string") throw new RecoveryError("recovery_invalid", "Recovery snapshot has an invalid path");
-  const observation = input.notebookDiskObservation;
-  if (!observation || !["untitled", "absent", "present", "unreadable"].includes(observation.state)) throw new RecoveryError("recovery_invalid", "Recovery snapshot has no disk observation");
-  sidecarObservationsSchema.parse(input.sidecarObservations);
+  if (input.path !== undefined && input.path !== null && typeof input.path !== "string") {
+    throw new RecoveryError("recovery_invalid", "Recovery journal has an invalid path");
+  }
+  if (!input.notebookDiskObservation || !["untitled", "absent", "present", "unreadable"].includes(input.notebookDiskObservation.state)) {
+    throw new RecoveryError("recovery_invalid", "Recovery journal has no saved baseline");
+  }
   return JSON.parse(JSON.stringify({ ...input, physicalBytes: bytes })) as RecoveryBaseline;
 }
 
-/** Working state is in memory. Only periodic snapshots and explicit flushes touch storage. */
+/** One durable snapshot of accepted source that has not yet reached the notebook file. */
 export class RecoveryWriter {
   readonly rootDir: string;
   readonly key: string;
   readonly directory: string;
-  recoveryId = randomUUID() as string;
+  readonly journalPath: string;
+  recoveryId: string;
   issue: RecoveryError | null = null;
   private baseline: RecoveryBaseline;
   private pending = false;
   private latestFingerprint: string;
-  private generation: string | null = null;
-  private branches = new Map<string, StoredBranch>();
-  private validGenerations: string[] = [];
-  private timer: NodeJS.Timeout | undefined;
+  private dirty = false;
+  private corruptJournal = false;
   private writeQueue: Promise<void> = Promise.resolve();
-  private change = 0;
-  private persisted = 0;
-  private timestamp = 0;
   private closed = false;
-  private readonly interval: number;
 
   private constructor(options: RecoveryWriterOptions) {
     this.rootDir = resolve(options.rootDir);
     this.key = options.key;
     this.directory = join(this.rootDir, "recovery-" + hash(JSON.stringify(options.key)));
+    this.journalPath = join(this.directory, "journal.json");
+    this.recoveryId = options.recoveryId ?? randomUUID();
     this.baseline = normalizeBaseline(options.baseline);
     this.latestFingerprint = fingerprint(this.baseline);
-    this.interval = options.snapshotIntervalMs ?? 750;
   }
 
   static async open(options: RecoveryWriterOptions): Promise<RecoveryWriter> {
@@ -145,15 +112,11 @@ export class RecoveryWriter {
     try {
       await mkdir(rootDir, { recursive: true, mode: 0o700 });
       rootDir = await realpath(rootDir);
-    } catch { /* restore reports unavailable storage while preserving in-memory operation */ }
+    } catch { /* the first durable mutation reports the storage failure */ }
     const writer = new RecoveryWriter({ ...options, rootDir });
     await writer.restore();
     return writer;
   }
-
-  get currentBaseline(): RecoveryBaseline { return clone(this.baseline); }
-  get currentGeneration(): string | null { return this.generation; }
-  get currentBaselinePath(): string | null { return this.generation === null ? null : join(this.directory, this.generation); }
 
   private async restore(): Promise<void> {
     try {
@@ -165,161 +128,64 @@ export class RecoveryWriter {
         this.recoveryId = id;
       } catch (error) {
         if (!missing(error)) this.report(error, "recovery_corrupt", [identityPath]);
-        if (missing(error)) {
-          // Preserve the directory containing existing native drafts once; the old
-          // key is no longer used for encryption or sent to a renderer.
-          try {
-            const key = await readPrivateFile(join(this.directory, "recovery.key"), { maxBytes: 64 });
-            if (key.length === 32) this.recoveryId = createHash("sha256").update(key).digest("base64url");
-          } catch { /* new document */ }
-          await this.atomicWrite(identityPath, Buffer.from(this.recoveryId));
-        }
+        await this.atomicWrite(identityPath, Buffer.from(this.recoveryId));
       }
-      const names = (await readdir(this.directory)).filter(name => SNAPSHOT_NAME.test(name)).sort().reverse();
-      this.timestamp = Number(names[0]?.split("-")[1] ?? 0);
-      let restored = false;
-      for (const name of names) {
-        const path = join(this.directory, name);
-        try {
-          const envelope = JSON.parse((await readPrivateFile(path, { maxBytes: MAX_SNAPSHOT_BYTES })).toString("utf8")) as { snapshot: Snapshot; sha256: string };
-          if (hash(JSON.stringify(envelope.snapshot)) !== envelope.sha256 || envelope.snapshot?.schemaVersion !== 2
-              || typeof envelope.snapshot.pending !== "boolean" || typeof envelope.snapshot.fingerprint !== "string"
-              || !Array.isArray(envelope.snapshot.branches)) throw new Error("Recovery snapshot is incomplete");
-          const snapshot = envelope.snapshot;
-          const baseline = normalizeBaseline(snapshot.baseline);
-          const branches = snapshot.branches.map(branch => {
-            if (typeof branch.id !== "string" || typeof branch.fingerprint !== "string") throw new Error("Recovery branch is invalid");
-            return { ...branch, baseline: normalizeBaseline(branch.baseline) };
-          });
-          this.validGenerations.push(name);
-          if (!restored) {
-            // Clean recovery never replaces saved source. Keep cell identities when
-            // that source is identical so a lost creation reply can be reconciled.
-            if (snapshot.pending) this.baseline = baseline;
-            else if (baseline.physicalBytes === this.baseline.physicalBytes) {
-              this.baseline = { ...this.baseline, cells: baseline.cells, documentRevision: baseline.documentRevision };
-            }
-            this.pending = snapshot.pending;
-            this.latestFingerprint = snapshot.pending ? snapshot.fingerprint : fingerprint(this.baseline);
-            this.branches = new Map(branches.map(branch => [branch.id, branch]));
-            this.generation = name;
-            restored = true;
-          }
-        } catch (error) {
-          this.report(error, "recovery_corrupt", [path]);
-        }
-      }
+      let bytes: Buffer;
+      try { bytes = await readFile(this.journalPath); }
+      catch (error) { if (missing(error)) return; throw error; }
+      if (bytes.length > MAX_JOURNAL_BYTES) throw new Error("Recovery journal is too large");
+      const value = JSON.parse(bytes.toString("utf8")) as StoredJournal;
+      if (value?.schemaVersion !== 1 || typeof value.fingerprint !== "string") throw new Error("Recovery journal is incomplete");
+      const baseline = normalizeBaseline(value.baseline);
+      if (fingerprint(baseline) !== value.fingerprint) throw new Error("Recovery journal checksum does not match");
+      this.baseline = baseline;
+      this.latestFingerprint = value.fingerprint;
+      this.pending = true;
     } catch (error) {
-      this.report(error, "recovery_write_failed", [this.directory]);
+      this.corruptJournal = true;
+      this.report(error, "recovery_corrupt", [this.journalPath]);
     }
   }
 
   private report(cause: unknown, code: "recovery_corrupt" | "recovery_write_failed", originals: string[]): void {
-    const paths = [...new Set([...(this.issue?.originals ?? []), ...originals])];
     this.issue = new RecoveryError(code,
       code === "recovery_corrupt"
-        ? "Some recovery data could not be read and was retained. The latest valid snapshot is available."
-        : "Recovery storage is unavailable. Editing and saving still work.", null, paths, cause);
+        ? "The recovery journal is damaged and was retained. The saved notebook is still available."
+        : "The recovery journal could not be written.",
+      [...new Set([...(this.issue?.originals ?? []), ...originals])], cause);
   }
 
-  private changed(): void {
-    this.change += 1;
-    if (!this.closed && this.timer === undefined) {
-      this.timer = setTimeout(() => { this.timer = undefined; void this.flush(); }, this.interval);
-      this.timer.unref();
-    }
+  async load(): Promise<RecoveryState> {
+    return { baseline: clone(this.baseline), pending: this.pending, fingerprint: this.pending ? this.latestFingerprint : null };
   }
-
-  private state(): RecoveryState {
-    return { schemaVersion: 1, generation: this.generation, baseline: clone(this.baseline), documentRevision: this.baseline.documentRevision,
-      status: this.pending ? "recovered" : "empty", pending: this.pending, fingerprint: this.latestFingerprint,
-      branches: [...this.branches.values()].map(branch => this.describeBranch(branch)) };
-  }
-
-  /** Called only after the controller has checked the source revision. No filesystem work. */
-  update(baseline: RecoveryBaseline, sourceFingerprint?: string): void {
-    if (this.closed) throw new RecoveryError("recovery_closed", "Recovery writer is closed");
-    this.baseline = normalizeBaseline(baseline);
-    this.latestFingerprint = sourceFingerprint ?? fingerprint(this.baseline);
-    this.pending = true;
-    this.changed();
-  }
-
-  async load(): Promise<RecoveryState> { return this.state(); }
   async materializedBaseline(): Promise<RecoveryBaseline> { return clone(this.baseline); }
 
-  async checkpoint(input: RecoveryCheckpoint): Promise<RecoveryState> {
-    this.baseline = normalizeBaseline({ ...this.baseline, ...input });
+  update(baseline: RecoveryBaseline): void {
+    if (this.closed) throw new RecoveryError("recovery_closed", "Recovery writer is closed");
+    this.baseline = normalizeBaseline(baseline);
     this.latestFingerprint = fingerprint(this.baseline);
-    this.changed();
-    return this.state();
+    this.pending = true;
+    this.dirty = true;
   }
 
-  private describeBranch(branch: StoredBranch): RecoveryBranch {
-    return { id: branch.id, documentRevision: branch.baseline.documentRevision, status: "recovered", fingerprint: branch.fingerprint };
-  }
-
-  async forkBranch(input: RecoveryBranchFork = {}): Promise<RecoveryBranch> {
-    const baseline = normalizeBaseline(input.baseline ?? this.baseline);
-    const branch = { id: input.id ?? randomUUID(), baseline, fingerprint: fingerprint(baseline) };
-    this.branches.set(branch.id, branch);
-    this.changed();
-    return this.describeBranch(branch);
-  }
-  async listBranches(): Promise<readonly RecoveryBranch[]> { return [...this.branches.values()].map(branch => this.describeBranch(branch)); }
-  async materializeBranch(id: string): Promise<RecoveryBaseline> {
-    const branch = this.branches.get(id);
-    if (!branch) throw new RecoveryError("recovery_invalid", "Recovery branch is no longer available");
-    return clone(branch.baseline);
-  }
-  async dropBranch(id: string, expected: RecoveryBranchDropExpected): Promise<boolean> {
-    const branch = this.branches.get(id);
-    if (!branch || branch.baseline.documentRevision !== expected.documentRevision || branch.fingerprint !== expected.fingerprint) return false;
-    this.branches.delete(id);
-    this.changed();
-    return true;
-  }
-  async clearIfMatch(expected: RecoveryBranchDropExpected): Promise<boolean> {
-    if (expected.documentRevision !== this.baseline.documentRevision || expected.fingerprint !== this.latestFingerprint) return false;
+  async clearIfMatch(expected: { documentRevision: number; fingerprint: string }): Promise<boolean> {
+    if (!this.pending || expected.documentRevision !== this.baseline.documentRevision || expected.fingerprint !== this.latestFingerprint) return false;
     this.pending = false;
-    this.changed();
-    // Saving/discarding writes a clean marker immediately so older drafts are not resurrected.
-    void this.flush();
+    this.dirty = false;
+    await this.writeQueue;
+    await rm(this.journalPath, { force: true });
+    await syncDirectory(this.directory);
     return true;
   }
 
-  async prepareRebind(target: RecoveryRebindTarget): Promise<PreparedRecoveryRebind> {
-    const writer = await RecoveryWriter.open(target);
-    const existing = await writer.load();
-    if (existing.pending) await writer.forkBranch();
-    for (const [id, branch] of this.branches) writer.branches.set(id, clone(branch));
-    const destinationId = writer.recoveryId;
-    writer.recoveryId = this.recoveryId;
-    writer.update(target.baseline);
-    let adopted = false;
-    let aborted = false;
-    return {
-      writer, state: writer.state(),
-      publish: async () => { await writer.flush(); },
-      adopt: () => {
-        if (adopted) return;
-        if (aborted) throw new RecoveryError("recovery_invalid", "Recovery rebind was aborted");
-        adopted = true;
-        // Renderer drafts follow Save As. Reopening the source needs a distinct identity.
-        if (writer.directory !== this.directory) {
-          this.recoveryId = randomUUID() as string;
-          this.changed();
-          void this.flush();
-        }
-      },
-      abort: async () => {
-        if (adopted || aborted) return;
-        aborted = true;
-        writer.recoveryId = destinationId;
-        writer.changed();
-        await writer.close();
-      },
-    };
+  async discard(): Promise<void> {
+    this.pending = false;
+    this.dirty = false;
+    await this.writeQueue;
+    await rm(this.journalPath, { force: true });
+    await syncDirectory(this.directory);
+    this.issue = null;
+    this.corruptJournal = false;
   }
 
   private async atomicWrite(path: string, bytes: Uint8Array): Promise<void> {
@@ -330,46 +196,49 @@ export class RecoveryWriter {
       await handle.sync();
       await handle.close();
       await rename(temporary, path);
+      await syncDirectory(dirname(path));
     } finally {
       await handle.close().catch(() => {});
       await rm(temporary, { force: true }).catch(() => {});
     }
   }
 
-  /** Best effort: callers never depend on recovery storage for ordinary document operations. */
   flush(): Promise<void> {
-    clearTimeout(this.timer);
-    this.timer = undefined;
     const operation = this.writeQueue.then(async () => {
-      if (this.change === this.persisted) return;
-      const change = this.change;
-      const snapshot: Snapshot = { schemaVersion: 2, baseline: clone(this.baseline), pending: this.pending,
-        fingerprint: this.latestFingerprint, branches: [...this.branches.values()].map(clone) };
-      this.timestamp = Math.max(Date.now(), this.timestamp + 1);
-      const generation = `snapshot-${this.timestamp}-${randomUUID()}.json`;
+      if (!this.dirty) return;
       try {
         await mkdir(this.directory, { recursive: true, mode: 0o700 });
         await this.atomicWrite(join(this.directory, "document.id"), Buffer.from(this.recoveryId));
-        const bytes = Buffer.from(JSON.stringify({ snapshot, sha256: hash(JSON.stringify(snapshot)) }));
-        if (bytes.length > MAX_SNAPSHOT_BYTES) throw new Error("Recovery snapshot is too large");
-        await this.atomicWrite(join(this.directory, generation), bytes);
-        this.generation = generation;
-        this.persisted = change;
-        this.validGenerations.unshift(generation);
-        // Only delete snapshots that were successfully validated. Damaged material is retained.
-        for (const old of this.validGenerations.splice(2)) await rm(join(this.directory, old), { force: true });
+        if (this.corruptJournal) {
+          await rename(this.journalPath, join(this.directory, "corrupt-" + randomUUID() + ".json")).catch(error => {
+            if (!missing(error)) throw error;
+          });
+          this.corruptJournal = false;
+        }
+        const journal: StoredJournal = { schemaVersion: 1, baseline: clone(this.baseline), fingerprint: this.latestFingerprint };
+        const bytes = Buffer.from(JSON.stringify(journal));
+        if (bytes.length > MAX_JOURNAL_BYTES) throw new Error("Recovery journal is too large");
+        await this.atomicWrite(this.journalPath, bytes);
+        this.dirty = false;
         if (this.issue?.code === "recovery_write_failed") this.issue = null;
       } catch (error) {
-        this.report(error, "recovery_write_failed", [this.directory]);
+        this.report(error, "recovery_write_failed", [this.journalPath]);
+        throw this.issue;
       }
     });
-    this.writeQueue = operation;
+    this.writeQueue = operation.catch(() => undefined);
     return operation;
+  }
+
+  async retire(): Promise<void> {
+    this.closed = true;
+    await this.writeQueue;
+    await rm(this.directory, { recursive: true, force: true });
   }
 
   async close(): Promise<void> {
     if (this.closed) return this.writeQueue;
-    this.closed = true;
     await this.flush();
+    this.closed = true;
   }
 }

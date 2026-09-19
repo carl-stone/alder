@@ -20565,7 +20565,7 @@ var uploadFileSchema = external_exports.object({ name: pathSchema, content_base6
 var uploadCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("upload"), name: idSchema, path: external_exports.array(idSchema).max(256), files: external_exports.array(uploadFileSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS), kernelEpoch: idSchema }).strict();
 var saveCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("save"), expectedDocumentRevision: revisionSchema }).strict();
 var saveAsCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("save-as"), path: pathSchema, expectedDestination: external_exports.union([external_exports.literal("absent"), external_exports.object({ expectedDiskDigest: external_exports.string().min(1), expectedDiskVersion: external_exports.string().min(1) }).strict()]), expectedDocumentRevision: revisionSchema }).strict();
-var reloadSourceCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("reload-source"), expectedDocumentRevision: revisionSchema, expectedDiskDigest: external_exports.string().regex(/^[0-9a-f]{64}$/), expectedDiskVersion: boundedUtf8StringSchema(MAX_ID_BYTES, true) }).strict();
+var reloadSourceCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("reload-source"), expectedDocumentRevision: revisionSchema, expectedDiskDigest: external_exports.string().regex(/^[0-9a-f]{64}$/), expectedDiskVersion: boundedUtf8StringSchema(MAX_ID_BYTES, true), discardRecovery: external_exports.boolean().optional() }).strict();
 var formatCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("format"), cellIds: external_exports.array(idSchema).max(MAX_NOTEBOOK_CELLS).optional(), expectedRevisions: safeStringRecordSchema(revisionSchema), expectedDocumentRevision: revisionSchema }).strict();
 var setPreferencesCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("set-preferences"), patch: preferencesPatchSchema, expectedPreferencesVersion: boundedUtf8StringSchema(MAX_ID_BYTES).nullable() }).strict();
 var setConfigCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("set-config"), patch: projectSettingsPatchSchema, expectedSidecarVersion: boundedUtf8StringSchema(MAX_ID_BYTES).nullable(), expectedDocumentRevision: revisionSchema }).strict();
@@ -20745,8 +20745,8 @@ var hostSnapshotSchema = external_exports.object({ protocol: external_exports.li
 var hostEventTypeSchema = external_exports.enum(["transaction", "notebook", "cell", "cell-started", "cell-output", "cell-completed", "diagnostics", "editor-diagnostics", "service-errors", "graph", "variables", "runtime", "operation", "service-error", "active_clients_changed"]);
 var eventBase = { protocol: external_exports.literal(HOST_PROTOCOL), epoch: idSchema, cursor: protocolIntegerSchema, version: protocolIntegerSchema, documentRevision: revisionSchema, timestamp: external_exports.number().finite().nonnegative(), operationId: idSchema.optional(), clientId: idSchema.optional(), cellId: idSchema.optional(), runId: idSchema.optional(), kernelEpoch: idSchema.nullable().optional(), revision: revisionSchema.optional(), sequence: protocolIntegerSchema.optional() };
 var hostEventSchema = external_exports.object({ ...eventBase, type: hostEventTypeSchema, payload: protocolJsonSchema }).strict();
-var recoveryBranchSchema = external_exports.object({ id: idSchema, documentRevision: revisionSchema, baseDisk: diskObservationSchema, sourceHandle: external_exports.lazy(() => artifactHandleSchema), state: external_exports.enum(["clean", "dirty", "conflict"]), conflict: hostErrorSchema.nullable() }).strict();
-var recoveryStateSchema = external_exports.object({ branches: external_exports.array(recoveryBranchSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS), pending: external_exports.boolean(), corruption: hostErrorSchema.nullable() }).strict();
+var recoveryCandidateSchema = external_exports.object({ documentRevision: revisionSchema, state: external_exports.enum(["restored", "conflict"]) }).strict();
+var recoveryStateSchema = external_exports.object({ candidate: recoveryCandidateSchema.nullable(), corruption: hostErrorSchema.nullable() }).strict();
 var recoverySchema = external_exports.object({ kind: external_exports.literal("snapshot"), epoch: idSchema, cursor: protocolIntegerSchema, snapshot: hostSnapshotSchema }).strict();
 var commandResultSchema = external_exports.object({ requestId: idSchema, epoch: idSchema, documentRevision: revisionSchema, version: protocolIntegerSchema, cursor: protocolIntegerSchema, result: protocolJsonSchema.nullable(), error: hostErrorSchema.nullable() }).strict();
 var queryOffset = protocolIntegerSchema.optional();
@@ -21088,9 +21088,8 @@ var windowActionMessageSchema = external_exports.object({ action: windowActionSc
 var windowStateSchema = external_exports.object({ path: pathSchema.nullable(), dirty: external_exports.boolean(), platform: boundedUtf8StringSchema(64, true), sessionEpoch: idSchema }).strict();
 var desktopRecoveryRequestSchema = external_exports.object({
   recoveryId: external_exports.string().regex(/^[A-Za-z0-9_-]{1,128}$/),
-  action: external_exports.enum(["read", "write", "remove", "list"]),
+  action: external_exports.enum(["read", "write", "remove"]),
   name: external_exports.string().max(256).optional(),
-  prefix: external_exports.string().max(256).optional(),
   value: external_exports.unknown().optional()
 }).strict();
 var ProtocolError = class extends Error {
@@ -21308,31 +21307,14 @@ var recoveryDraftSchema = external_exports.object({
   pendingRun: external_exports.object({ requestId: external_exports.string(), epoch: external_exports.string() }).nullable().default(null),
   submission: external_exports.object({ requestId: external_exports.string(), kind: external_exports.enum(["transaction", "run"]), changes: external_exports.array(documentChangeSchema) }).nullable()
 });
-function readRecoveryDraft(value, legacyId) {
+function readRecoveryDraft(value) {
   const current = recoveryDraftSchema.safeParse(value);
-  if (current.success) return current.data;
-  const legacy = external_exports.object({
-    schemaVersion: external_exports.literal(1),
-    clientId: external_exports.string(),
-    base: draftBaseSchema,
-    changes: external_exports.array(documentChangeSchema),
-    operation: external_exports.object({ operationId: external_exports.string(), kind: external_exports.enum(["transaction", "run"]), changes: external_exports.array(documentChangeSchema).optional() }).nullable().optional()
-  }).safeParse(value);
-  if (!legacy.success) return null;
-  return {
-    schemaVersion: 2,
-    draftId: legacyId ?? legacy.data.clientId,
-    updatedAt: 0,
-    base: legacy.data.base,
-    changes: legacy.data.changes,
-    pendingRun: legacy.data.operation?.kind === "run" ? { requestId: legacy.data.operation.operationId, epoch: legacy.data.base.epoch } : null,
-    submission: legacy.data.operation ? { requestId: legacy.data.operation.operationId, kind: legacy.data.operation.kind, changes: legacy.data.operation.changes ?? legacy.data.changes } : null
-  };
+  return current.success ? current.data : null;
 }
 var MemoryRecoveryStore = class {
   drafts = /* @__PURE__ */ new Map();
-  async listDrafts() {
-    return [...this.drafts.values()].map((value) => structuredClone(value));
+  async readDraft(draftId) {
+    return structuredClone(this.drafts.get(draftId) ?? null);
   }
   async saveDraft(draft) {
     this.drafts.set(draft.draftId, structuredClone(draft));
@@ -21356,24 +21338,12 @@ var IndexedDBRecoveryStore = class {
       request.onerror = () => reject(request.error);
     });
   }
-  async listDrafts() {
-    if (typeof indexedDB === "undefined") return this.memory.listDrafts();
+  async readDraft(draftId) {
+    if (typeof indexedDB === "undefined") return this.memory.readDraft(draftId);
     const database = await this.open();
     return new Promise((resolve, reject) => {
-      const request = database.transaction("drafts").objectStore("drafts").openCursor();
-      const drafts = [];
-      request.onsuccess = () => {
-        const cursor = request.result;
-        if (!cursor) {
-          resolve(drafts);
-          return;
-        }
-        if (String(cursor.key).startsWith(this.identity + ":")) {
-          const draft = readRecoveryDraft(cursor.value);
-          if (draft) drafts.push(draft);
-        }
-        cursor.continue();
-      };
+      const request = database.transaction("drafts").objectStore("drafts").get(this.identity + ":" + draftId);
+      request.onsuccess = () => resolve(readRecoveryDraft(request.result));
       request.onerror = () => reject(request.error);
     });
   }
@@ -21770,14 +21740,15 @@ var BrowserNotebookClient = class {
   frame;
   now;
   artifactCache = /* @__PURE__ */ new Map();
-  recoveryStateValue = { status: "none", local: null, branches: [], drafts: [], pending: false, uncertainRun: false, corruption: null, persistenceError: null };
+  recoveryStateValue = { status: "none", local: null, candidate: null, uncertainRun: false, corruption: null, persistenceError: null };
   recoveryListeners = /* @__PURE__ */ new Set();
   activeRuns = /* @__PURE__ */ new Map();
   uncertainRun = null;
   pendingRun = null;
   draftSubmission = null;
   draftPersistence = Promise.resolve();
-  draftGeneration = 0;
+  draftPersistenceQueued = false;
+  draftPersistenceRunning = false;
   draftPersistenceError = null;
   recoveryAttempted = false;
   browserRecoveryInspected = false;
@@ -21813,7 +21784,8 @@ var BrowserNotebookClient = class {
     await this.transport.release("discard");
     this.finishClose();
   }
-  close() {
+  async close() {
+    await this.flushDraftPersistence();
     this.transport.close();
     this.finishClose();
   }
@@ -21835,32 +21807,26 @@ var BrowserNotebookClient = class {
     return () => this.recoveryListeners.delete(listener);
   }
   async flushDraftPersistence() {
-    await this.draftPersistence;
     this.queueDraftPersistence();
-    await this.draftPersistence;
+    while (this.draftPersistenceRunning || this.draftPersistenceQueued) await this.draftPersistence;
     if (this.draftPersistenceError) throw this.draftPersistenceError;
-  }
-  async restoreSavedDraft(draftId) {
-    const store = this.draftStore();
-    const draft = this.recoveryStateValue.drafts.find((candidate) => candidate.draftId === draftId);
-    if (!draft) return;
-    await this.beginDraftMutation();
-    const current = this.documentValue?.recoveryDraft(this.draftId, this.draftSubmission, this.pendingRun);
-    if (current) await store.saveDraft({ ...current, draftId: operationId("saved") });
-    this.resetAuthoritativeDocument();
-    this.restoreDraft(draft);
-    await this.flushDraftPersistence();
-    if (draftId !== this.draftId) await store.clearDraft(draftId);
-    await this.refreshSavedDrafts();
-  }
-  async discardSavedDraft(draftId) {
-    await this.draftStore().clearDraft(draftId);
-    await this.refreshSavedDrafts();
   }
   async discardRecovery() {
     await this.beginDraftMutation();
+    if (this.recoveryStateValue.candidate !== null || this.recoveryStateValue.corruption !== null) {
+      const snapshot = this.requireDocument().snapshot;
+      if (snapshot.disk.digest !== null && snapshot.disk.version !== null) {
+        await this.dispatchSettled({
+          type: "reload-source",
+          ...this.base("reload-source"),
+          expectedDiskDigest: snapshot.disk.digest,
+          expectedDiskVersion: snapshot.disk.version,
+          discardRecovery: true
+        });
+        this.recoveryStateValue = { ...this.recoveryStateValue, candidate: null, corruption: null };
+      }
+    }
     await this.draftStore().clearDraft(this.draftId);
-    this.draftGeneration += 1;
     this.resetAuthoritativeDocument();
     this.recoveryStateValue = { ...this.recoveryStateValue, status: "none", local: null };
     this.notifyRecovery();
@@ -21869,6 +21835,7 @@ var BrowserNotebookClient = class {
     await this.activateStartupIfSafe();
   }
   async reloadAuthoritativeRecovery() {
+    await this.flushDraftPersistence();
     const snapshot = this.requireDocument().snapshot;
     if (snapshot.disk.digest === null || snapshot.disk.version === null) throw new Error("authoritative source is not reloadable");
     const result = await this.dispatchSettled({
@@ -22152,7 +22119,7 @@ var BrowserNotebookClient = class {
   async activateStartupIfSafe() {
     if (this.startupActivated || !this.browserRecoveryInspected || !this.hostRecoveryInspected) return;
     const state = this.recoveryStateValue;
-    if (this.pendingRun || state.local || state.drafts.length || state.branches.some((branch) => branch.state !== "clean") || state.pending || state.corruption) return;
+    if (this.pendingRun || state.local || state.candidate || state.corruption) return;
     const snapshot = this.requireDocument().snapshot;
     if (snapshot.runtime.startupActivated) {
       this.startupActivated = true;
@@ -22172,36 +22139,38 @@ var BrowserNotebookClient = class {
   queueDraftPersistence() {
     const store = this.draftStore();
     if (!store) return;
-    const generation = this.draftGeneration;
-    this.draftPersistence = this.draftPersistence.catch(() => void 0).then(async () => {
-      if (generation !== this.draftGeneration) return;
-      const draft = this.documentValue?.recoveryDraft(this.draftId, this.draftSubmission, this.pendingRun) ?? null;
-      if (draft) await store.saveDraft(draft);
-      else await store.clearDraft(this.draftId);
+    this.draftPersistenceQueued = true;
+    if (this.draftPersistenceRunning) return;
+    this.draftPersistenceRunning = true;
+    this.draftPersistence = (async () => {
+      while (this.draftPersistenceQueued) {
+        this.draftPersistenceQueued = false;
+        const draft = this.documentValue?.recoveryDraft(this.draftId, this.draftSubmission, this.pendingRun) ?? null;
+        if (draft) await store.saveDraft(draft);
+        else await store.clearDraft(this.draftId);
+      }
       this.draftPersistenceError = null;
       if (this.recoveryStateValue.persistenceError !== null) {
         this.recoveryStateValue = { ...this.recoveryStateValue, persistenceError: null };
         this.notifyRecovery();
       }
-    }).catch((error61) => {
+    })().catch((error61) => {
       this.draftPersistenceError = error61 instanceof Error ? error61 : new Error(String(error61));
       this.recoveryStateValue = { ...this.recoveryStateValue, persistenceError: { code: "draft_persistence_failed", message: this.draftPersistenceError.message } };
       this.notifyRecovery();
+    }).finally(() => {
+      this.draftPersistenceRunning = false;
+      if (this.draftPersistenceQueued) this.queueDraftPersistence();
     });
   }
   async beginDraftMutation() {
-    this.draftGeneration += 1;
     await this.draftPersistence.catch(() => void 0);
   }
   async restoreBrowserRecovery() {
-    const drafts = await this.draftStore().listDrafts();
-    const own2 = drafts.find((draft) => draft.draftId === this.draftId);
-    const selected = own2 ?? (this.options.restoreSingleDraft && drafts.length === 1 ? drafts[0] : void 0);
-    this.recoveryStateValue = { ...this.recoveryStateValue, drafts: drafts.filter((draft) => draft !== selected) };
+    const selected = await this.draftStore().readDraft(this.draftId);
     if (selected) {
       this.restoreDraft(selected);
       await this.flushDraftPersistence();
-      if (selected.draftId !== this.draftId) await this.draftStore().clearDraft(selected.draftId);
     }
     this.notifyRecovery();
   }
@@ -22234,16 +22203,12 @@ var BrowserNotebookClient = class {
         return false;
       }
       const state = parsed.data;
-      this.recoveryStateValue = { ...this.recoveryStateValue, branches: state.branches, pending: state.pending, corruption: state.corruption };
+      this.recoveryStateValue = { ...this.recoveryStateValue, candidate: state.candidate, corruption: state.corruption };
       this.notifyRecovery();
       return true;
     } catch {
       return false;
     }
-  }
-  async refreshSavedDrafts() {
-    this.recoveryStateValue = { ...this.recoveryStateValue, drafts: (await this.draftStore().listDrafts()).filter((draft) => draft.draftId !== this.draftId) };
-    this.notifyRecovery();
   }
   notifyRecovery() {
     for (const listener of this.recoveryListeners) listener(this.recoveryStateValue);
@@ -22258,6 +22223,7 @@ var BrowserNotebookClient = class {
     this.draftSubmission = { requestId: command.requestId, kind: command.type, changes: changes.map((change) => structuredClone(change)) };
     document2.noteSubmitted(command.requestId, command);
     this.queueDraftPersistence();
+    await this.flushDraftPersistence();
     try {
       const result = await this.dispatch(command);
       document2.acknowledge(result);
@@ -22465,7 +22431,6 @@ function isRecord2(value) {
 }
 
 // src/browser/desktop-recovery.ts
-var recordsSchema = external_exports.object({ records: external_exports.array(external_exports.object({ name: external_exports.string(), value: external_exports.unknown() })), warning: external_exports.string().optional() });
 var DesktopRecoveryStore = class {
   constructor(recoveryId, call, onWarning) {
     this.recoveryId = recoveryId;
@@ -22475,34 +22440,17 @@ var DesktopRecoveryStore = class {
   recoveryId;
   call;
   onWarning;
-  legacyNames = /* @__PURE__ */ new Map();
-  async listDrafts() {
-    const result = recordsSchema.parse(await this.call({ recoveryId: this.recoveryId, action: "list", prefix: "" }));
-    if (result.warning) this.onWarning?.(result.warning);
-    const drafts = /* @__PURE__ */ new Map();
-    for (const record2 of result.records) {
-      if (!record2.name.startsWith("draft:") && !record2.name.startsWith("branch:")) continue;
-      const legacyId = record2.name.startsWith("branch:") ? "saved-" + record2.name.slice(7) : record2.name.slice(6);
-      const draft = readRecoveryDraft(record2.value, legacyId);
-      if (!draft) {
-        this.onWarning?.("A saved draft could not be read and has been retained.");
-        continue;
-      }
-      if (record2.name !== "draft:" + draft.draftId) this.legacyNames.set(draft.draftId, record2.name);
-      drafts.set(draft.draftId, draft);
-    }
-    return [...drafts.values()].sort((a, b) => b.updatedAt - a.updatedAt);
+  async readDraft(draftId) {
+    const value = await this.call({ recoveryId: this.recoveryId, action: "read", name: "draft:" + draftId });
+    const draft = readRecoveryDraft(value);
+    if (value !== null && draft === null) this.onWarning?.("The saved draft could not be read and has been retained.");
+    return draft;
   }
   async saveDraft(draft) {
     await this.call({ recoveryId: this.recoveryId, action: "write", name: "draft:" + draft.draftId, value: draft });
   }
   async clearDraft(draftId) {
     await this.call({ recoveryId: this.recoveryId, action: "remove", name: "draft:" + draftId });
-    const legacy = this.legacyNames.get(draftId);
-    if (legacy) {
-      await this.call({ recoveryId: this.recoveryId, action: "remove", name: legacy });
-      this.legacyNames.delete(draftId);
-    }
   }
 };
 
@@ -25677,6 +25625,12 @@ ${jupyterTrace.map((line, index) => `${index + 1}. ${line}`).join("\n")}` : ""
     if (formatFailure !== null) this.actionNotice = "Saved; formatting failed: " + formatFailure;
     return result;
   }
+  async saveRecoveryCopy() {
+    const desktop = globalThis.alderDesktop;
+    if (!desktop) throw new Error("Save a copy is available in the desktop app");
+    const destination = await desktop.chooseSavePath();
+    if (destination !== null) await this.client.saveAs(destination);
+  }
   async saveForDesktop() {
     return await this.saveNotebook("explicit") === void 0 ? "cancelled" : "saved";
   }
@@ -25937,8 +25891,8 @@ ${jupyterTrace.map((line, index) => `${index + 1}. ${line}`).join("\n")}` : ""
     const runtimeBlocked = this.documentValue?.snapshot.runtime.executionBlockedReason ?? null;
     const runtimeMessage = runtimeBlocked === null ? null : "R execution is blocked: " + (runtimeBlocked.message || runtimeBlocked.code);
     const recovery = this.client.recoveryState;
-    const recoveryConflict = recovery.status === "conflict" || recovery.branches.some((branch) => branch.state === "conflict") || recovery.corruption !== null;
-    const recoveryMessage = recovery.uncertainRun ? "The previous run may have been interrupted. Run explicitly when you are ready." : recovery.local !== null ? recovery.status === "conflict" ? "Recovered edits conflict with newer changes." : "Unsaved edits recovered." : recovery.persistenceError ? "Local edit recovery is not durable." : recovery.drafts.length > 0 ? "A saved draft is available." : recovery.pending ? "Recovering an interrupted local edit\u2026" : recovery.corruption ? "Recovery data needs your review." : recoveryConflict ? "Recovered edits need your review." : null;
+    const recoveryConflict = recovery.status === "conflict" || recovery.candidate?.state === "conflict" || recovery.corruption !== null;
+    const recoveryMessage = recovery.uncertainRun ? "The previous run may have been interrupted. Run explicitly when you are ready." : recovery.local !== null ? recovery.status === "conflict" ? "Recovered edits conflict with newer changes." : "Unsaved edits recovered." : recovery.persistenceError ? "Local edit recovery is not durable." : recovery.candidate?.state === "restored" ? "Unsaved edits recovered." : recovery.corruption ? "Recovery data needs your review." : recoveryConflict ? "Recovered edits need your review." : null;
     const message2 = this.hostClosed ? "Notebook host shut down." : this.actionError ?? stateError ?? settingsError ?? editorHelpError ?? runtimeMessage ?? this.transportError ?? this.actionNotice ?? recoveryMessage ?? "";
     const signature = JSON.stringify({
       runtimeBlocked: runtimeBlocked === null ? null : [runtimeBlocked.code, runtimeBlocked.message],
@@ -25950,7 +25904,7 @@ ${jupyterTrace.map((line, index) => `${index + 1}. ${line}`).join("\n")}` : ""
       transportError: Boolean(this.transportError),
       editorHelpRestarting: this.editorHelpRestarting,
       actionCount: this.actionCount,
-      recovery: { status: recovery.status, local: recovery.local !== null, branches: recovery.branches.map((branch) => [branch.id, branch.state, branch.documentRevision]), drafts: recovery.drafts.map((draft) => draft.draftId), pending: recovery.pending, uncertainRun: recovery.uncertainRun, corruption: recovery.corruption?.code ?? null, persistenceError: recovery.persistenceError?.code ?? null }
+      recovery: { status: recovery.status, local: recovery.local !== null, candidate: recovery.candidate === null ? null : [recovery.candidate.state, recovery.candidate.documentRevision], uncertainRun: recovery.uncertainRun, corruption: recovery.corruption?.code ?? null, persistenceError: recovery.persistenceError?.code ?? null }
     });
     if (signature === this.statusSignature) return;
     this.statusSignature = signature;
@@ -25988,12 +25942,12 @@ ${jupyterTrace.map((line, index) => `${index + 1}. ${line}`).join("\n")}` : ""
   renderRecoveryControls() {
     if (!this.status) return;
     const state = this.client.recoveryState;
-    if (!state.local && !state.drafts.length && !state.branches.length && !state.pending && !state.uncertainRun && !state.corruption && !state.persistenceError) return;
+    if (!state.local && !state.candidate && !state.uncertainRun && !state.corruption && !state.persistenceError) return;
     const panel = elementNode(this.dom, "div", "recovery-panel", "");
     panel.dataset.recovery = "true";
     panel.dataset.recoveryPanel = "true";
     panel.setAttribute("role", "alert");
-    const detail = state.uncertainRun ? "The previous run may have been interrupted. It has not been run again." : state.local ? state.status === "conflict" ? "Your edits are preserved. Review the conflicting cells before saving." : "Your unsaved edits have been recovered." : state.persistenceError?.message ?? state.corruption?.message ?? (state.drafts.length ? "Saved edits are available to restore." : "Unsaved changes were recovered.");
+    const detail = state.uncertainRun ? "The previous run may have been interrupted. It has not been run again." : state.local ? state.status === "conflict" ? "Your edits are preserved. Review the conflicting cells before saving." : "Your unsaved edits have been recovered." : state.persistenceError?.message ?? state.corruption?.message ?? (state.candidate?.state === "conflict" ? "The saved notebook changed after these edits. Use Save As to preserve a copy, or reopen the saved file to discard them." : "Unsaved changes were recovered.");
     panel.appendChild(elementNode(this.dom, "div", "recovery-message", detail));
     const actions = elementNode(this.dom, "div", "recovery-actions", "");
     const add = (label, action) => {
@@ -26006,12 +25960,8 @@ ${jupyterTrace.map((line, index) => `${index + 1}. ${line}`).join("\n")}` : ""
       });
       actions.appendChild(button);
     };
-    if (state.local) add("Discard recovered edits", () => this.client.discardRecovery());
-    state.drafts.forEach((draft, index) => {
-      const label = state.drafts.length === 1 ? "draft" : "draft " + (index + 1);
-      add("Restore " + label, () => this.client.restoreSavedDraft(draft.draftId));
-      add("Discard " + label, () => this.client.discardSavedDraft(draft.draftId));
-    });
+    if (state.candidate?.state === "conflict") add("Save recovered copy", () => this.saveRecoveryCopy());
+    if (state.local || state.candidate || state.corruption) add("Discard recovery", () => this.client.discardRecovery());
     if (actions.childElementCount) panel.appendChild(actions);
     this.status.appendChild(panel);
   }
@@ -26734,7 +26684,6 @@ async function start() {
   };
   const next = new BrowserNotebookClient({
     ...options,
-    restoreSingleDraft: Boolean(desktop),
     draftId: desktop ? await desktop.getDraftId() : browserDraftId(),
     onCommand: (command, result) => window.dispatchEvent(new CustomEvent("alder:host-command", { detail: { command, result } })),
     onVisibleResult: (observation) => window.dispatchEvent(new CustomEvent("alder:visible-result", { detail: observation }))

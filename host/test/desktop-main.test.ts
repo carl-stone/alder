@@ -366,7 +366,6 @@ test("native recovery IPC accepts the owning main frame and keeps its recovery i
     const value = { source: "# %%\nx <- 42\n" };
     await recovery(event, { action: "write", recoveryId, name, value });
     assert.deepEqual(await recovery(event, { action: "read", recoveryId, name }), value);
-    assert.deepEqual(await recovery(event, { action: "list", recoveryId, prefix: "draft:" }), { records: [{ name, value }] });
     await assert.rejects(recovery({ ...event, senderFrame: { url: browserOrigin + "/" } }, { action: "read", recoveryId, name }), /main frame/);
     await assert.rejects(recovery({ sender: windowWithLoad().webContents }, { action: "read", recoveryId, name }), /active application window/);
     await assert.rejects(recovery(event, { action: "read", recoveryId: "b".repeat(43), name }), /identity changed/);

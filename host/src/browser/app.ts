@@ -166,7 +166,6 @@ async function start(): Promise<void> {
   };
   const next = new BrowserNotebookClient({
     ...options,
-    restoreSingleDraft: Boolean(desktop),
     draftId: desktop ? await desktop.getDraftId() : browserDraftId(),
     onCommand: (command, result) => window.dispatchEvent(new CustomEvent("alder:host-command", { detail: { command, result } })),
     onVisibleResult: (observation) => window.dispatchEvent(new CustomEvent("alder:visible-result", { detail: observation })),

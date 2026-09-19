@@ -27,27 +27,18 @@ export const recoveryDraftSchema = z.object({
 });
 export type BrowserRecoveryDraft = z.infer<typeof recoveryDraftSchema>;
 
-/** Old native drafts are read as source only; an interrupted run is never replayed. */
-export function readRecoveryDraft(value: unknown, legacyId?: string): BrowserRecoveryDraft | null {
+export function readRecoveryDraft(value: unknown): BrowserRecoveryDraft | null {
   const current = recoveryDraftSchema.safeParse(value);
-  if (current.success) return current.data;
-  const legacy = z.object({ schemaVersion: z.literal(1), clientId: z.string(), base: draftBaseSchema,
-    changes: z.array(documentChangeSchema), operation: z.object({ operationId: z.string(), kind: z.enum(["transaction", "run"]), changes: z.array(documentChangeSchema).optional() }).nullable().optional(),
-  }).safeParse(value);
-  if (!legacy.success) return null;
-  return { schemaVersion: 2, draftId: legacyId ?? legacy.data.clientId, updatedAt: 0,
-    base: legacy.data.base, changes: legacy.data.changes,
-    pendingRun: legacy.data.operation?.kind === "run" ? { requestId: legacy.data.operation.operationId, epoch: legacy.data.base.epoch } : null,
-    submission: legacy.data.operation ? { requestId: legacy.data.operation.operationId, kind: legacy.data.operation.kind, changes: legacy.data.operation.changes ?? legacy.data.changes } : null };
+  return current.success ? current.data : null;
 }
 export interface BrowserDraftStore {
-  listDrafts(): Promise<BrowserRecoveryDraft[]>;
+  readDraft(draftId: string): Promise<BrowserRecoveryDraft | null>;
   saveDraft(draft: BrowserRecoveryDraft): Promise<void>;
   clearDraft(draftId: string): Promise<void>;
 }
 export class MemoryRecoveryStore implements BrowserDraftStore {
   private readonly drafts = new Map<string, BrowserRecoveryDraft>();
-  async listDrafts(): Promise<BrowserRecoveryDraft[]> { return [...this.drafts.values()].map(value => structuredClone(value)); }
+  async readDraft(draftId: string): Promise<BrowserRecoveryDraft | null> { return structuredClone(this.drafts.get(draftId) ?? null); }
   async saveDraft(draft: BrowserRecoveryDraft): Promise<void> { this.drafts.set(draft.draftId, structuredClone(draft)); }
   async clearDraft(draftId: string): Promise<void> { this.drafts.delete(draftId); }
 }
@@ -65,20 +56,12 @@ export class IndexedDBRecoveryStore implements BrowserDraftStore {
       request.onerror = () => reject(request.error);
     });
   }
-  async listDrafts(): Promise<BrowserRecoveryDraft[]> {
-    if (typeof indexedDB === "undefined") return this.memory.listDrafts();
+  async readDraft(draftId: string): Promise<BrowserRecoveryDraft | null> {
+    if (typeof indexedDB === "undefined") return this.memory.readDraft(draftId);
     const database = await this.open();
     return new Promise((resolve, reject) => {
-      const request = database.transaction("drafts").objectStore("drafts").openCursor();
-      const drafts: BrowserRecoveryDraft[] = [];
-      request.onsuccess = () => {
-        const cursor = request.result;
-        if (!cursor) { resolve(drafts); return; }
-        if (String(cursor.key).startsWith(this.identity + ":")) {
-          const draft = readRecoveryDraft(cursor.value); if (draft) drafts.push(draft);
-        }
-        cursor.continue();
-      };
+      const request = database.transaction("drafts").objectStore("drafts").get(this.identity + ":" + draftId);
+      request.onsuccess = () => resolve(readRecoveryDraft(request.result));
       request.onerror = () => reject(request.error);
     });
   }

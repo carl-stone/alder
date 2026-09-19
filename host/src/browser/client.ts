@@ -15,7 +15,7 @@ import type {
   HostSnapshot,
   ArtifactHandle,
   Recovery,
-  RecoveryBranch,
+  RecoveryCandidate,
   RecoveryState,
   HostError,
 } from "../protocol.js";
@@ -47,7 +47,6 @@ export interface VisibleResultObservation {
 
 export interface NotebookClientOptions extends Omit<BrowserTransportOptions, "onSnapshot" | "onEvent"> {
   draftId?: string;
-  restoreSingleDraft?: boolean;
   onVisibleResult?: (observation: VisibleResultObservation) => void;
   onCommand?: (command: HostCommand, result: CommandResult) => void;
   requestAnimationFrame?: (callback: FrameRequestCallback) => number;
@@ -75,9 +74,7 @@ type DocumentListener = (
 export interface BrowserRecoveryState {
   status: "none" | "restored" | "conflict";
   local: BrowserRecoveryDraft | null;
-  drafts: BrowserRecoveryDraft[];
-  branches: RecoveryBranch[];
-  pending: boolean;
+  candidate: RecoveryCandidate | null;
   uncertainRun: boolean;
   corruption: HostError | null;
   persistenceError: HostError | null;
@@ -97,14 +94,15 @@ export class BrowserNotebookClient {
   private readonly frame: (callback: FrameRequestCallback) => number;
   private readonly now: () => number;
   private artifactCache = new Map<string, ArtifactCacheEntry>();
-  private recoveryStateValue: BrowserRecoveryState = { status: "none", local: null, branches: [], drafts: [], pending: false, uncertainRun: false, corruption: null, persistenceError: null };
+  private recoveryStateValue: BrowserRecoveryState = { status: "none", local: null, candidate: null, uncertainRun: false, corruption: null, persistenceError: null };
   private recoveryListeners = new Set<RecoveryListener>();
   private readonly activeRuns = new Map<string, { requestId: string; epoch: string }>();
   private uncertainRun: BrowserRecoveryDraft["pendingRun"] = null;
   private pendingRun: BrowserRecoveryDraft["pendingRun"] = null;
   private draftSubmission: BrowserRecoveryDraft["submission"] = null;
   private draftPersistence: Promise<void> = Promise.resolve();
-  private draftGeneration = 0;
+  private draftPersistenceQueued = false;
+  private draftPersistenceRunning = false;
   private draftPersistenceError: Error | null = null;
   private recoveryAttempted = false;
   private browserRecoveryInspected = false;
@@ -154,7 +152,8 @@ export class BrowserNotebookClient {
     await this.transport.release("discard");
     this.finishClose();
   }
-  close(): void {
+  async close(): Promise<void> {
+    await this.flushDraftPersistence();
     this.transport.close();
     this.finishClose();
   }
@@ -179,36 +178,27 @@ export class BrowserNotebookClient {
   }
 
   async flushDraftPersistence(): Promise<void> {
-    await this.draftPersistence;
     this.queueDraftPersistence();
-    await this.draftPersistence;
+    while (this.draftPersistenceRunning || this.draftPersistenceQueued) await this.draftPersistence;
     if (this.draftPersistenceError) throw this.draftPersistenceError;
-  }
-
-  async restoreSavedDraft(draftId: string): Promise<void> {
-    const store = this.draftStore();
-    const draft = this.recoveryStateValue.drafts.find(candidate => candidate.draftId === draftId);
-    if (!draft) return;
-    await this.beginDraftMutation();
-    const current = this.documentValue?.recoveryDraft(this.draftId, this.draftSubmission, this.pendingRun);
-    // Choosing another draft must not erase the text currently on screen.
-    if (current) await store.saveDraft({ ...current, draftId: operationId("saved") });
-    this.resetAuthoritativeDocument();
-    this.restoreDraft(draft);
-    await this.flushDraftPersistence();
-    if (draftId !== this.draftId) await store.clearDraft(draftId);
-    await this.refreshSavedDrafts();
-  }
-
-  async discardSavedDraft(draftId: string): Promise<void> {
-    await this.draftStore().clearDraft(draftId);
-    await this.refreshSavedDrafts();
   }
 
   async discardRecovery(): Promise<void> {
     await this.beginDraftMutation();
+    if (this.recoveryStateValue.candidate !== null || this.recoveryStateValue.corruption !== null) {
+      const snapshot = this.requireDocument().snapshot;
+      if (snapshot.disk.digest !== null && snapshot.disk.version !== null) {
+        await this.dispatchSettled({
+          type: "reload-source",
+          ...this.base("reload-source"),
+          expectedDiskDigest: snapshot.disk.digest,
+          expectedDiskVersion: snapshot.disk.version,
+          discardRecovery: true,
+        });
+        this.recoveryStateValue = { ...this.recoveryStateValue, candidate: null, corruption: null };
+      }
+    }
     await this.draftStore().clearDraft(this.draftId);
-    this.draftGeneration += 1;
     this.resetAuthoritativeDocument();
     this.recoveryStateValue = { ...this.recoveryStateValue, status: "none", local: null };
     this.notifyRecovery();
@@ -218,6 +208,7 @@ export class BrowserNotebookClient {
   }
 
   async reloadAuthoritativeRecovery(): Promise<void> {
+    await this.flushDraftPersistence();
     const snapshot = this.requireDocument().snapshot;
     if (snapshot.disk.digest === null || snapshot.disk.version === null) throw new Error("authoritative source is not reloadable");
     const result = await this.dispatchSettled({
@@ -515,7 +506,7 @@ export class BrowserNotebookClient {
   private async activateStartupIfSafe(): Promise<void> {
     if (this.startupActivated || !this.browserRecoveryInspected || !this.hostRecoveryInspected) return;
     const state = this.recoveryStateValue;
-    if (this.pendingRun || state.local || state.drafts.length || state.branches.some(branch => branch.state !== "clean") || state.pending || state.corruption) return;
+    if (this.pendingRun || state.local || state.candidate || state.corruption) return;
     const snapshot = this.requireDocument().snapshot;
     if (snapshot.runtime.startupActivated) { this.startupActivated = true; return; }
     if (!snapshot.runtime.documentReady || snapshot.runtime.rEnvironment === null) return;
@@ -532,38 +523,40 @@ export class BrowserNotebookClient {
   private queueDraftPersistence(): void {
     const store = this.draftStore();
     if (!store) return;
-    const generation = this.draftGeneration;
-    this.draftPersistence = this.draftPersistence.catch(() => undefined).then(async () => {
-      if (generation !== this.draftGeneration) return;
-      const draft = this.documentValue?.recoveryDraft(this.draftId, this.draftSubmission, this.pendingRun) ?? null;
-      if (draft) await store.saveDraft(draft);
-      else await store.clearDraft(this.draftId);
+    this.draftPersistenceQueued = true;
+    if (this.draftPersistenceRunning) return;
+    this.draftPersistenceRunning = true;
+    this.draftPersistence = (async () => {
+      while (this.draftPersistenceQueued) {
+        this.draftPersistenceQueued = false;
+        const draft = this.documentValue?.recoveryDraft(this.draftId, this.draftSubmission, this.pendingRun) ?? null;
+        if (draft) await store.saveDraft(draft);
+        else await store.clearDraft(this.draftId);
+      }
       this.draftPersistenceError = null;
       if (this.recoveryStateValue.persistenceError !== null) {
         this.recoveryStateValue = { ...this.recoveryStateValue, persistenceError: null };
         this.notifyRecovery();
       }
-    }).catch((error) => {
+    })().catch((error) => {
       this.draftPersistenceError = error instanceof Error ? error : new Error(String(error));
       this.recoveryStateValue = { ...this.recoveryStateValue, persistenceError: { code: "draft_persistence_failed", message: this.draftPersistenceError.message } };
       this.notifyRecovery();
+    }).finally(() => {
+      this.draftPersistenceRunning = false;
+      if (this.draftPersistenceQueued) this.queueDraftPersistence();
     });
   }
 
   private async beginDraftMutation(): Promise<void> {
-    this.draftGeneration += 1;
     await this.draftPersistence.catch(() => undefined);
   }
 
   private async restoreBrowserRecovery(): Promise<void> {
-    const drafts = await this.draftStore().listDrafts();
-    const own = drafts.find(draft => draft.draftId === this.draftId);
-    const selected = own ?? (this.options.restoreSingleDraft && drafts.length === 1 ? drafts[0] : undefined);
-    this.recoveryStateValue = { ...this.recoveryStateValue, drafts: drafts.filter(draft => draft !== selected) };
+    const selected = await this.draftStore().readDraft(this.draftId);
     if (selected) {
       this.restoreDraft(selected);
       await this.flushDraftPersistence();
-      if (selected.draftId !== this.draftId) await this.draftStore().clearDraft(selected.draftId);
     }
     this.notifyRecovery();
   }
@@ -599,17 +592,12 @@ export class BrowserNotebookClient {
         return false;
       }
       const state = parsed.data as RecoveryState;
-      this.recoveryStateValue = { ...this.recoveryStateValue, branches: state.branches, pending: state.pending, corruption: state.corruption };
+      this.recoveryStateValue = { ...this.recoveryStateValue, candidate: state.candidate, corruption: state.corruption };
       this.notifyRecovery();
       return true;
     } catch {
       return false;
     }
-  }
-
-  private async refreshSavedDrafts(): Promise<void> {
-    this.recoveryStateValue = { ...this.recoveryStateValue, drafts: (await this.draftStore().listDrafts()).filter(draft => draft.draftId !== this.draftId) };
-    this.notifyRecovery();
   }
 
   private notifyRecovery(): void {
@@ -629,6 +617,7 @@ export class BrowserNotebookClient {
     this.draftSubmission = { requestId: command.requestId, kind: command.type, changes: changes.map(change => structuredClone(change)) };
     document.noteSubmitted(command.requestId, command);
     this.queueDraftPersistence();
+    await this.flushDraftPersistence();
     try {
       const result = await this.dispatch(command);
       document.acknowledge(result);
