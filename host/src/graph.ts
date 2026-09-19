@@ -8,7 +8,7 @@ import {
 
 export interface GraphCellInput extends AnalysisCellResult { type: CellType; disabled?: boolean; }
 export interface GraphValidationIssue {
-  code: "dependency-cycle" | "duplicate-definition" | "graph_blocked";
+  code: "dependency-cycle" | "duplicate-definition" | "invalid-dependency" | "graph_blocked";
   message: string;
   cellId?: string;
   symbol?: string;
@@ -91,6 +91,8 @@ export class ReactiveGraph {
   private cellById = new Map<string, GraphCellInput>();
   private position = new Map<string, number>();
   private owners = new Map<string, Set<string>>();
+  private invalidRootsValue = new Set<string>();
+  private blockedValue = new Set<string>();
   private complexityExceeded = false;
 
   constructor(cells: readonly GraphCellInput[]) { this.replace(cells); }
@@ -118,10 +120,21 @@ export class ReactiveGraph {
     if (!limited) for (const dependent of nodes) for (const dependency of edges[dependent] ?? []) reverseEdges[dependency]?.push(dependent);
     const duplicates = Object.fromEntries([...owners.entries()].filter(([, ids]) => ids.size > 1).sort(([a], [b]) => a.localeCompare(b))
       .map(([symbol, ids]) => [symbol, [...ids].sort((a, b) => (position.get(a) ?? 0) - (position.get(b) ?? 0))]));
-    const cycles = limited ? [] : detectCycleNodes(edges, nodes), blocked = new Set<string>([...cycles, ...Object.values(duplicates).flat()]);
+    const cycles = limited ? [] : detectCycleNodes(edges, nodes);
+    const invalidRoots = new Set<string>([...cycles, ...Object.values(duplicates).flat()]);
+    const blocked = new Set(invalidRoots);
+    const blockedQueue = [...invalidRoots];
+    for (let head = 0; head < blockedQueue.length; head += 1) {
+      for (const descendant of reverseEdges[blockedQueue[head]!] ?? []) {
+        if (blocked.has(descendant)) continue;
+        blocked.add(descendant);
+        blockedQueue.push(descendant);
+      }
+    }
     const runnable = nodes.filter(node => !blocked.has(node));
     const runnableEdges = Object.fromEntries(runnable.map(node => [node, (edges[node] ?? []).filter(dependency => !blocked.has(dependency))]));
     this.cellsValue = normalized; this.cellById = new Map(normalized.map(cell => [cell.id, cell])); this.position = position; this.owners = owners; this.complexityExceeded = limited;
+    this.invalidRootsValue = invalidRoots; this.blockedValue = blocked;
     this.stateValue = { nodes, edges, reverseEdges, duplicates, cycles, topologicalOrder: limited ? null : topologicalOrder(runnableEdges, runnable) };
   }
 
@@ -131,8 +144,19 @@ export class ReactiveGraph {
   descendants(id: string): string[] { return this.closure(this.state.reverseEdges, id); }
   definitionOwners(symbol: string): string[] { return [...(this.owners.get(symbol) ?? [])].sort((a, b) => (this.position.get(a) ?? 0) - (this.position.get(b) ?? 0)); }
   definitionOwner(symbol: string): string | undefined { const owners = this.definitionOwners(symbol); return owners.length === 1 ? owners[0] : undefined; }
-  blockedCellIds(): Set<string> { return new Set([...this.state.cycles, ...Object.values(this.state.duplicates).flat()]); }
-  issuesForCell(id: string): GraphValidationIssue[] { return this.validate().filter(issue => issue.cellId === id || issue.cellId === undefined); }
+  invalidRootIds(): Set<string> { return new Set(this.invalidRootsValue); }
+  blockedCellIds(): Set<string> { return new Set(this.blockedValue); }
+  issuesForCell(id: string): GraphValidationIssue[] {
+    const issues = this.validate().filter(issue => issue.cellId === id || issue.cellId === undefined);
+    if (issues.length > 0 || !this.blockedCellIds().has(id)) return issues;
+    const roots = this.invalidRootIds();
+    const causes = this.ancestors(id).filter(candidate => roots.has(candidate));
+    return [{
+      code: "invalid-dependency",
+      cellId: id,
+      message: `cell ${id} is blocked by invalid dependencies: ${causes.join(", ")}`,
+    }];
+  }
 
   blockedByDisabled(disabled?: ReadonlySet<string>): Set<string> {
     const roots = disabled ?? new Set(this.cells.filter(cell => cell.disabled).map(cell => cell.id)); const blocked = new Set<string>(), queue = [...roots].filter(id => this.has(id));
@@ -173,5 +197,5 @@ export class ReactiveGraph {
 }
 
 function normalizeCell(cell: GraphCellInput): GraphCellInput {
-  return { ...cell, defs: unique(cell.defs), refs: unique(cell.refs), selfRefs: unique(cell.selfRefs), locals: unique(cell.locals), diagnostics: [...cell.diagnostics] };
+  return { ...cell, defs: unique(cell.defs), refs: unique(cell.refs), selfRefs: unique(cell.selfRefs), diagnostics: [...cell.diagnostics] };
 }

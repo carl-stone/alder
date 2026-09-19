@@ -113,7 +113,6 @@ function payload(kernelEpoch: string, operationId: string, cellId: string, sourc
     documentRevision: 1,
     source,
     definitions: [],
-    locals: [],
   };
 }
 
@@ -162,6 +161,13 @@ test("live v2 Engine starts analyzer and kernel independently, analyzes ranges, 
           source: "f <- function(argument) { local_value <- argument; local_value }",
         },
         { id: "notebook-global", revision: 1, type: "code", source: "local_value <- 2L" },
+        { id: "dot-global", revision: 1, type: "code", source: ".x <- 41L" },
+        { id: "dot-reader", revision: 1, type: "code", source: ".answer <- .x + 1L" },
+        {
+          id: "dot-function-locals", revision: 1, type: "code",
+          source: "dot_fn <- function(.argument) { .inside <- .argument; .inside }",
+        },
+        { id: "dot-duplicate", revision: 1, type: "code", source: ".x <- 99L" },
       ], 9));
       assert.equal(ordinaryAnalysis.cells[0]?.error, null);
       assert.deepEqual(ordinaryAnalysis.cells[0]?.diagnostics, []);
@@ -169,6 +175,13 @@ test("live v2 Engine starts analyzer and kernel independently, analyzes ranges, 
       assert.ok(!ordinaryAnalysis.cells[1]?.defs.includes("argument"));
       assert.ok(!ordinaryAnalysis.cells[1]?.defs.includes("local_value"));
       assert.deepEqual(ordinaryAnalysis.cells[2]?.defs, ["local_value"]);
+      assert.deepEqual(ordinaryAnalysis.cells[3]?.defs, [".x"]);
+      assert.deepEqual(ordinaryAnalysis.cells[4]?.defs, [".answer"]);
+      assert.ok(ordinaryAnalysis.cells[4]?.refs.includes(".x"));
+      assert.deepEqual(ordinaryAnalysis.cells[5]?.defs, ["dot_fn"]);
+      assert.ok(!ordinaryAnalysis.cells[5]?.defs.includes(".argument"));
+      assert.ok(!ordinaryAnalysis.cells[5]?.defs.includes(".inside"));
+      assert.deepEqual(ordinaryAnalysis.cells[6]?.defs, [".x"]);
       const firstRange = checked.cells[0]?.ranges?.value?.[0];
       assert.deepEqual(firstRange?.start, { line: 0, character: 0 });
       assert.deepEqual(firstRange?.end, { line: 0, character: 5 });
@@ -230,6 +243,13 @@ test("live v2 Engine starts analyzer and kernel independently, analyzes ranges, 
       assert.equal(batch[0]?.ok, true);
       assert.equal(batch[1]?.ok, true);
       assert.match(JSON.stringify(batch[1]?.outputs), /42/);
+      const dotFirst = payload(kernel.kernelEpoch, "dot-batch", "dot-global", ".x <- 41L");
+      dotFirst.definitions = [".x"];
+      const dotSecond = payload(kernel.kernelEpoch, "dot-batch", "dot-reader", ".x + 1L");
+      const dotBatch = await engine.evaluateBatch([dotFirst, dotSecond]);
+      assert.equal(dotBatch[0]?.ok, true);
+      assert.equal(dotBatch[1]?.ok, true);
+      assert.match(JSON.stringify(dotBatch[1]?.outputs), /42/);
       await engine.restart();
       assert.deepEqual(outputStore.snapshot({ documentRevision: 1 }).records, []);
     } finally {

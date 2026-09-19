@@ -199,7 +199,6 @@ interface EvaluationJob {
   revision: number;
   source: string;
   definitions: string[];
-  locals: string[];
   runId: string;
   operationId: string;
   clientId: string;
@@ -226,7 +225,6 @@ interface AnalysisCacheValue {
   defs: string[];
   refs: string[];
   selfRefs: string[];
-  locals: string[];
   diagnostics: unknown[];
   error: string | null;
 }
@@ -2084,7 +2082,6 @@ export class Controller {
         revision: cell.revision,
         source: joinSource(cell.body),
         definitions: [...analysis.defs],
-        locals: [...analysis.locals],
         runId,
         operationId,
         clientId,
@@ -2177,7 +2174,7 @@ export class Controller {
         this.failKernel("R kernel is unavailable");
         return;
       }
-      // Evaluation clears its own prior definitions and locals, including on
+      // Evaluation clears its own prior definitions, including on
       // interruption. Other invalidated cells must still be cleared before it
       // can observe their bindings.
       const next = this.queue[0];
@@ -2274,7 +2271,7 @@ export class Controller {
     return {
       sessionEpoch: this.epochValue, kernelEpoch, operationId: job.operationId, runId: job.runId,
       cellId: job.id, revision: job.revision, documentRevision: this.documentRevisionValue, source: job.source,
-      definitions: [...job.definitions], locals: [...job.locals],
+      definitions: [...job.definitions],
     };
   }
   private selectBatch(first: EvaluationJob): EvaluationJob[] {
@@ -4886,7 +4883,6 @@ export class Controller {
       defs: [...analysis.defs],
       refs: [...analysis.refs],
       selfRefs: [...analysis.selfRefs],
-      locals: [...analysis.locals],
       diagnostics: this.cellDiagnostics(cell),
       analysisPending: cell.type === "code"
         && (cell.analysis === null || cell.analysis.revision !== cell.revision),
@@ -5875,7 +5871,6 @@ function emptyAnalysis(id: string, revision: number): AnalysisCellResult {
     defs: [],
     refs: [],
     selfRefs: [],
-    locals: [],
     diagnostics: [],
     error: null,
   };
@@ -5886,7 +5881,6 @@ function analysisCacheValue(result: AnalysisCellResult): AnalysisCacheValue {
     defs: [...result.defs],
     refs: [...result.refs],
     selfRefs: [...result.selfRefs],
-    locals: [...result.locals],
     diagnostics: clone(result.diagnostics),
     error: result.error,
   };

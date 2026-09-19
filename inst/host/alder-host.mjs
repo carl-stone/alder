@@ -33013,7 +33013,6 @@ var analysisCellResultSchema = external_exports.object({
   defs: analysisSymbolArraySchema,
   refs: analysisSymbolArraySchema,
   selfRefs: analysisSymbolArraySchema,
-  locals: analysisSymbolArraySchema,
   diagnostics: external_exports.array(analysisDiagnosticSchema).max(MAX_EDITOR_DIAGNOSTICS),
   error: boundedUtf8StringSchema(MAX_FRAME_BYTES).nullable(),
   ranges: safeStringRecordSchema(external_exports.array(sourceRangeSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS)).optional()
@@ -33149,8 +33148,7 @@ var evaluationPayloadSchema = external_exports.object({
   revision: revisionSchema,
   documentRevision: revisionSchema,
   source: sourceTextSchema,
-  definitions: analysisSymbolArraySchema,
-  locals: analysisSymbolArraySchema
+  definitions: analysisSymbolArraySchema
 }).strict();
 var engineEventIdentitySchema = external_exports.object({
   requestId: positiveIntegerSchema,
@@ -33541,7 +33539,7 @@ var cellDisplayPartSchema = external_exports.discriminatedUnion("kind", [
   external_exports.object({ kind: external_exports.literal("output"), id: idSchema }).strict(),
   external_exports.object({ kind: external_exports.literal("log"), text: boundedUtf8StringSchema(MAX_FRAME_BYTES, true) }).strict()
 ]);
-var hostCellStateSchema = external_exports.object({ id: idSchema, type: cellTypeSchema, body: sourceLinesSchema, options: storedCellOptionsSchema, revision: revisionSchema, status: cellStatusSchema, outputs: external_exports.array(external_exports.lazy(() => outputRecordSchema)).max(MAX_PROTOCOL_COLLECTION_ITEMS), outputsStale: external_exports.boolean().optional(), progress: protocolJsonSchema.nullable(), log: external_exports.array(boundedUtf8StringSchema(MAX_FRAME_BYTES)).max(1048578), displayOrder: external_exports.array(cellDisplayPartSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS).optional(), error: engineErrorSchema.nullable(), defs: protocolStringArraySchema, refs: protocolStringArraySchema, selfRefs: protocolStringArraySchema, locals: protocolStringArraySchema, diagnostics: external_exports.array(analysisDiagnosticSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS), analysisPending: external_exports.boolean() }).strict();
+var hostCellStateSchema = external_exports.object({ id: idSchema, type: cellTypeSchema, body: sourceLinesSchema, options: storedCellOptionsSchema, revision: revisionSchema, status: cellStatusSchema, outputs: external_exports.array(external_exports.lazy(() => outputRecordSchema)).max(MAX_PROTOCOL_COLLECTION_ITEMS), outputsStale: external_exports.boolean().optional(), progress: protocolJsonSchema.nullable(), log: external_exports.array(boundedUtf8StringSchema(MAX_FRAME_BYTES)).max(1048578), displayOrder: external_exports.array(cellDisplayPartSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS).optional(), error: engineErrorSchema.nullable(), defs: protocolStringArraySchema, refs: protocolStringArraySchema, selfRefs: protocolStringArraySchema, diagnostics: external_exports.array(analysisDiagnosticSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS), analysisPending: external_exports.boolean() }).strict();
 var graphCellIds = external_exports.array(idSchema).max(MAX_NOTEBOOK_CELLS);
 var graphMap = safeStringRecordSchema(graphCellIds);
 var dependencyGraphStateSchema = external_exports.object({ nodes: graphCellIds, edges: graphMap, reverseEdges: graphMap, duplicates: graphMap, cycles: graphCellIds, topologicalOrder: graphCellIds.nullable() }).strict();

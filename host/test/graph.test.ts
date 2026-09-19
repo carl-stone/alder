@@ -24,7 +24,6 @@ function cell(
     defs: [],
     refs: [],
     selfRefs: [],
-    locals: [],
     diagnostics: [],
     error: null,
     ...values,
@@ -42,7 +41,7 @@ test("static definitions and references produce deterministic dependency edges",
   assert.deepEqual(graph.topologicalOrder, ["a", "b", "c"]);
 });
 
-test("duplicate globals block only their defining cells", () => {
+test("duplicate globals block their defining cells and known descendants", () => {
   const graph = new ReactiveGraph([
     cell("first", { defs: ["shared"] }),
     cell("second", { defs: ["shared"] }),
@@ -50,16 +49,19 @@ test("duplicate globals block only their defining cells", () => {
     cell("unrelated", { defs: ["other"] }),
   ]);
   assert.deepEqual(graph.state.duplicates, { shared: ["first", "second"] });
-  assert.deepEqual(graph.state.topologicalOrder, ["dependent", "unrelated"]);
-  assert.deepEqual([...graph.blockedCellIds()], ["first", "second"]);
+  assert.deepEqual(graph.state.topologicalOrder, ["unrelated"]);
+  assert.deepEqual([...graph.blockedCellIds()], ["first", "second", "dependent"]);
   assert.match(graph.issuesForCell("first")[0]?.message ?? "", /global shared.*first, second/);
+  assert.deepEqual(graph.issuesForCell("dependent").map((issue) => issue.code), ["invalid-dependency"]);
+  assert.match(graph.issuesForCell("dependent")[0]?.message ?? "", /first, second/);
   assert.deepEqual(graph.issuesForCell("unrelated"), []);
 });
 
-test("cycle diagnostics block cycle members while unrelated cells remain runnable", () => {
+test("cycle diagnostics block cycle members and known descendants while unrelated cells remain runnable", () => {
   const graph = new ReactiveGraph([
     cell("a", { defs: ["x"], refs: ["y"] }),
     cell("b", { defs: ["y"], refs: ["x"] }),
+    cell("dependent", { refs: ["x"] }),
     cell("unrelated", { defs: ["z"] }),
   ]);
   assert.deepEqual(graph.state.cycles, ["a", "b"]);
@@ -67,6 +69,7 @@ test("cycle diagnostics block cycle members while unrelated cells remain runnabl
   assert.deepEqual(detectCycleNodes(graph.state.edges, graph.state.nodes), ["a", "b"]);
   assert.equal(topologicalOrder(graph.state.edges, graph.state.nodes), null);
   assert.match(graph.issuesForCell("a")[0]?.message ?? "", /cells: a, b/);
+  assert.deepEqual(graph.issuesForCell("dependent").map((issue) => issue.code), ["invalid-dependency"]);
   assert.deepEqual(graph.issuesForCell("unrelated"), []);
 });
 
@@ -167,4 +170,14 @@ test("prototype-shaped R symbols remain ordinary duplicate-definition keys", () 
   ]);
   assert.equal(Object.hasOwn(graph.duplicates, "__proto__"), true);
   assert.deepEqual(graph.duplicates["__proto__"], ["a", "b"]);
+});
+
+test("dot-prefixed globals are ordinary dependency and duplicate keys", () => {
+  const graph = new ReactiveGraph([
+    cell("first", { defs: [".x"] }),
+    cell("second", { defs: [".x"] }),
+    cell("consumer", { refs: [".x"] }),
+  ]);
+  assert.deepEqual(graph.state.duplicates[".x"], ["first", "second"]);
+  assert.deepEqual([...graph.blockedCellIds()], ["first", "second", "consumer"]);
 });

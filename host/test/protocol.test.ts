@@ -286,7 +286,7 @@ test("raw Ark errors strictly distinguish R conditions from validation failures"
   assert.equal(rawConditionErrorSchema.safeParse({ ...condition, message: `${utf8}é` }).success, false);
 });
 
-test("evaluation definitions and locals retain analyzer symbol bounds", () => {
+test("evaluation definitions retain analyzer symbol bounds", () => {
   const payload = {
     sessionEpoch: "epoch",
     kernelEpoch: "kernel",
@@ -297,17 +297,13 @@ test("evaluation definitions and locals retain analyzer symbol bounds", () => {
     documentRevision: 0,
     source: "x <- 1",
     definitions: ["x"],
-    locals: [],
   };
   assert.equal(evaluationPayloadSchema.safeParse(payload).success, true);
   assert.equal(evaluationPayloadSchema.safeParse({
     ...payload,
     definitions: ["x".repeat(1_025)],
   }).success, false);
-  assert.equal(evaluationPayloadSchema.safeParse({
-    ...payload,
-    locals: Array.from({ length: 10_001 }, () => "x"),
-  }).success, false);
+  assert.equal(evaluationPayloadSchema.safeParse({ ...payload, locals: [] }).success, false);
 });
 
 test("client service commands cannot reach internal codec, filesystem, or validation services", () => {
@@ -344,7 +340,7 @@ test("shared host response schemas validate complete bounded snapshots and delta
   };
   const cell = {
     id: "cell-1", type: "code" as const, body: ["x <- 1"], options: {}, revision: 0, status: "done" as const,
-    outputs: [output, widgetOutput], progress: null, log: [], error: null, defs: ["x"], refs: [], selfRefs: [], locals: [],
+    outputs: [output, widgetOutput], progress: null, log: [], error: null, defs: ["x"], refs: [], selfRefs: [],
     diagnostics: [], analysisPending: false,
   };
   const snapshot = {

@@ -153,7 +153,6 @@ local({
 
 NB_ENV <- globalenv() # notebook globals live in .GlobalEnv
 CELL_DEFS <- new.env(parent = emptyenv()) # cell id -> owned definition names
-CELL_LOCALS <- new.env(parent = emptyenv()) # cell id -> mangled local names
 NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
   SEQ <- new.env(parent = emptyenv())
   SEQ$value <- 0L
@@ -1096,71 +1095,6 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
     if (anyNA(v) || any(!nzchar(v)) || any(duplicated(v))) return(NULL)
     v
   }
-  local_mangled_name <- function(id, name) {
-    cell_key <- gsub("[^A-Za-z0-9_]", "_", id)
-    name_key <- sub("^\\.", "", name)
-    paste0(".alder_local_", cell_key, "_", name_key)
-  }
-
-  mangle_local_expr <- function(node, mapping) {
-    if (!length(mapping)) return(node)
-    if (is.symbol(node)) {
-      nm <- as.character(node)
-      if (nm %in% names(mapping)) return(as.name(mapping[[nm]]))
-      return(node)
-    }
-    if (is.pairlist(node)) {
-      out <- node
-      for (i in seq_along(out)) {
-        out[i] <- list(mangle_local_expr(out[[i]], mapping))
-      }
-      return(out)
-    }
-    if (!is.call(node)) return(node)
-    head <- node[[1L]]
-    head_name <- if (is.symbol(head)) as.character(head) else ""
-    call_name <- head_name
-    if (is.call(head) && length(head) >= 3L && is.symbol(head[[1L]]) &&
-        as.character(head[[1L]]) %in% c("::", ":::") &&
-        is.symbol(head[[2L]]) && identical(as.character(head[[2L]]), "base") &&
-        is.symbol(head[[3L]])) {
-      call_name <- as.character(head[[3L]])
-    }
-    if (head_name %in% c("quote", "substitute", "expression", "alist")) {
-      return(node)
-    }
-    parts <- as.list(node)
-    arg_names <- names(parts)
-    if (is.null(arg_names)) arg_names <- rep("", length(parts))
-    if (identical(call_name, "assign") && length(parts) == 3L) {
-      call_names <- arg_names[-1L]
-      target <- which(call_names == "x")
-      if (!length(target)) target <- which(!nzchar(call_names))[[1L]]
-      target <- target[[1L]] + 1L
-      if (is.character(parts[[target]]) && length(parts[[target]]) == 1L &&
-          parts[[target]] %in% names(mapping)) {
-        parts[[target]] <- unname(mapping[[parts[[target]]]])
-      }
-    } else if (call_name %in% c("rm", "remove") &&
-               !any(nzchar(arg_names[-1L]))) {
-      for (i in seq_along(parts)[-1L]) {
-        if (is.character(parts[[i]]) && length(parts[[i]]) == 1L &&
-            parts[[i]] %in% names(mapping)) {
-          parts[[i]] <- unname(mapping[[parts[[i]]]])
-        }
-      }
-    }
-    for (i in seq_along(parts)) {
-      parts[i] <- list(mangle_local_expr(parts[[i]], mapping))
-    }
-    as.call(parts)
-  }
-
-  mangle_local_exprs <- function(exprs, mapping) {
-    if (!length(mapping)) return(exprs)
-    lapply(exprs, mangle_local_expr, mapping = mapping)
-  }
-
   # eval_cell carries the analyzed unique definition-name array. Entering:
   # drop this cell's previous bindings, evaluate directly in NB_ENV. Success:
   # own only requested definitions that now exist. Error/interrupt: remove
@@ -1309,35 +1243,26 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
     }, error = function(error) cleanup_failure(name, action, error))
   }
 
-  # Remove definitions and private locals a failed/interrupted cell created.
+  # Remove definitions a failed/interrupted cell created.
   # Removal never invokes active-binding getters; locked/active cleanup errors
   # are retained and invalidate this kernel without masking the cell error.
-  cleanup_failed_defs <- function(defs, pre, local_names = character(), id = NULL) {
+  cleanup_failed_defs <- function(defs, pre) {
     failures <- list()
     current <- ls(NB_ENV, all.names = TRUE)
     for (nm in unique(c(setdiff(defs, pre), setdiff(current, pre)))) {
       failure <- remove_binding(nm)
       if (!is.null(failure)) failures <- c(failures, list(failure))
     }
-    for (nm in local_names) {
-      failure <- remove_binding(nm, "remove_local")
-      if (!is.null(failure)) failures <- c(failures, list(failure))
-    }
-    if (!is.null(id)) CELL_LOCALS[[id]] <- NULL
     if (length(failures)) mark_kernel_invalid(failures)
     list(ok = !length(failures), failures = failures)
   }
-  clear_owned_bindings <- function(id, defs, locals) {
+  clear_owned_bindings <- function(id, defs) {
     failures <- list()
     for (nm in defs) {
       if (!identical(NAME_OWNER[[nm]] %||% NULL, id)) next
       failure <- remove_binding(nm, "clear_definition")
       if (!is.null(failure)) failures <- c(failures, list(failure))
       NAME_OWNER[[nm]] <- NULL
-    }
-    for (nm in locals) {
-      failure <- remove_binding(nm, "clear_local")
-      if (!is.null(failure)) failures <- c(failures, list(failure))
     }
     if (length(failures)) mark_kernel_invalid(failures)
     list(ok = !length(failures), failures = failures)
@@ -1376,11 +1301,6 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
         }
       }
       CELL_DEFS[[current_id]] <- NULL
-      for (nm in CELL_LOCALS[[current_id]] %||% character()) {
-        failure <- remove_binding(nm, "clear_local")
-        if (!is.null(failure)) failures <- c(failures, list(failure))
-      }
-      CELL_LOCALS[[current_id]] <- NULL
     }
     if (length(failures)) {
       mark_kernel_invalid(failures)
@@ -1947,7 +1867,7 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
   }
 
   # Ark evaluates this single wrapper expression through its ordinary notebook
-  # REPL. Alder only supplies ownership/local-name semantics around the cell;
+  # REPL. Alder only supplies ownership semantics around the cell;
   # Ark remains responsible for evaluation, streams, conditions, graphics,
   # interruption and terminal Jupyter state.
   flush_ark_render_log <- function() {
@@ -1972,7 +1892,6 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
     id <- if (is.character(id_raw) && length(id_raw) == 1L) id_raw else ""
     code <- if (is.character(code_raw) && length(code_raw) == 1L) code_raw else ""
     defs <- normalize_defs(req[["defs"]])
-    locals <- normalize_defs(req[["locals"]])
     scalar_identity <- function(value) {
       is.character(value) && length(value) == 1L && !is.na(value) && nzchar(value)
     }
@@ -1982,18 +1901,12 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
     if (!scalar_identity(id_raw) || !scalar_identity(code_raw) ||
         !scalar_identity(request_raw) || !scalar_identity(run_id_raw) ||
         !scalar_identity(session_epoch_raw) || !scalar_identity(kernel_epoch_raw) ||
-        !scalar_identity(operation_id_raw) || !valid_revision ||
-        is.null(defs) || is.null(locals)) {
+        !scalar_identity(operation_id_raw) || !valid_revision || is.null(defs)) {
       stop("invalid Alder Ark cell request", call. = FALSE)
     }
     revision <- as.integer(revision_raw)
 
-    local_map <- setNames(
-      vapply(locals, function(nm) local_mangled_name(id, nm), character(1)),
-      locals)
-    local_names <- unname(local_map)
     previous_defs <- CELL_DEFS[[id]] %||% character()
-    previous_locals <- CELL_LOCALS[[id]] %||% character()
     initial_clear_complete <- FALSE
     baseline_captured <- FALSE
     pre <- character()
@@ -2010,12 +1923,10 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
           # An interrupt can land while prior bindings are being invalidated.
           # Finish idempotent removal without forcing active-binding getters.
           if (!initial_clear_complete) {
-            clear_owned_bindings(id, previous_defs, previous_locals)
+            clear_owned_bindings(id, previous_defs)
           }
           if (baseline_captured) {
-            cleanup_failed_defs(defs, pre, local_names, id)
-          } else {
-            CELL_LOCALS[[id]] <- NULL
+            cleanup_failed_defs(defs, pre)
           }
           CELL_DEFS[[id]] <- NULL
         }
@@ -2064,9 +1975,8 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
     old_tables <- ls(TABLE_HANDLES, all.names = TRUE)
     old_tables <- old_tables[startsWith(old_tables, paste0(id, ":"))]
     if (length(old_tables)) rm(list = old_tables, envir = TABLE_HANDLES)
-    initial_clear <- clear_owned_bindings(id, previous_defs, previous_locals)
+    initial_clear <- clear_owned_bindings(id, previous_defs)
     CELL_DEFS[[id]] <- NULL
-    CELL_LOCALS[[id]] <- local_names
     initial_clear_complete <- TRUE
     if (!isTRUE(initial_clear$ok)) stop(kernel_state_condition())
 
@@ -2074,7 +1984,6 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
     baseline_captured <- TRUE
 
     exprs <- parse(text = code, keep.source = TRUE)
-    exprs <- mangle_local_exprs(exprs, local_map)
     value <- NULL
     visible <- FALSE
     vname <- ""
@@ -2097,7 +2006,7 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
     }, alder_stop = identity)
 
     if (inherits(stopped, "alder_stop")) {
-      cleanup <- cleanup_failed_defs(defs, pre, local_names, id)
+      cleanup <- cleanup_failed_defs(defs, pre)
       if (!isTRUE(cleanup$ok)) {
         ark_emit(list(type = "condition", error = condition_payload(
           kernel_state_condition(), "kernel state invalid", sys.calls())))

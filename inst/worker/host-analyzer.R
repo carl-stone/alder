@@ -237,7 +237,6 @@ local({
            defs = I(or_else(analysis$defs, character())),
            refs = I(or_else(analysis$refs, character())),
            selfRefs = I(or_else(analysis$selfRefs, character())),
-           locals = I(or_else(analysis$locals, character())),
            diagnostics = I(normalize_diagnostics(analysis$diagnostics)),
            ranges = I(or_else(analysis$ranges, list())),
            error = or_else(analysis$error, NULL))

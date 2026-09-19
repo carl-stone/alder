@@ -28,7 +28,6 @@ const cell = {
   defs: [],
   refs: [],
   selfRefs: [],
-  locals: [],
   diagnostics: [],
   analysisPending: false,
 } as unknown as HostSnapshot["cells"][number];

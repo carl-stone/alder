@@ -305,7 +305,7 @@ literal_assign_parts <- function(node) {
 cell_defs_refs <- function(code) {
   # Returns the notebook-level definitions and references static analysis can establish.
   empty <- list(defs = character(), refs = character(),
-                selfRefs = character(), locals = character(),
+                selfRefs = character(),
                 diagnostics = list(), error = NULL, ranges = list())
   if (length(code) == 0L) return(empty)
   text <- enc2utf8(paste(code, collapse = "\n"))
@@ -331,14 +331,13 @@ cell_defs_refs <- function(code) {
 
   top <- new_frame(character(), "top")
   for (i in seq_along(exprs)) walk_expr(exprs[[i]], top, new_ctx(), state)
-  locals <- unique(state$defs[grepl("^\\.", state$defs)])
-  defs <- setdiff(state$defs, locals)
-  refs <- setdiff(unique(state$refs), locals)
-  self_refs <- setdiff(unique(state$selfRefs), locals)
+  defs <- unique(state$defs)
+  refs <- unique(state$refs)
+  self_refs <- unique(state$selfRefs)
   ranges <- .analysis_parse_ranges(text, exprs, defs, refs, self_refs)
   diagnostics <- .analysis_diagnostic_ranges(state$diagnostics, ranges)
   list(defs = defs, refs = refs, selfRefs = self_refs,
-       locals = locals, diagnostics = diagnostics,
+       diagnostics = diagnostics,
        error = NULL, ranges = ranges)
 }
 

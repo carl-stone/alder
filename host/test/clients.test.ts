@@ -25,7 +25,7 @@ function cell(id: string, body: string[] = [], revision = 0): HostCellState {
   return {
     id, body, revision, type: "code", options: {}, status: "idle", outputs: [],
     progress: null, log: [], error: null, defs: [], refs: [], selfRefs: [],
-    locals: [], diagnostics: [], analysisPending: false,
+    diagnostics: [], analysisPending: false,
   };
 }
 
@@ -63,6 +63,7 @@ async function withViewDom<T>(callback: (dom: Document, domWindow: Window) => T 
     if (selected) selected.selected = true;
   } });
   Object.defineProperty(domWindow, "requestAnimationFrame", { configurable: true, value: () => 0 });
+  Object.defineProperty(domWindow, "cancelAnimationFrame", { configurable: true, value: () => {} });
   const previous = {
     window: Object.getOwnPropertyDescriptor(globalThis, "window"),
     document: Object.getOwnPropertyDescriptor(globalThis, "document"),
@@ -552,7 +553,7 @@ for (const runControl of ["toolbar", "cell"] as const) {
       const engine: EngineAdapter = {
         start: async () => handshake,
         restart: async () => handshake,
-        analyze: async (cells, revision) => ({ revision, analysisEnvironmentId: "analysis-test", analyzer: { packageVersion: "test", rVersion: "test", policy: "test", analysisEnvironmentId: "analysis-test" }, cells: cells.map(value => ({ id: value.id, revision: value.revision, defs: [], refs: [], selfRefs: [], locals: [], diagnostics: [], error: null })) }),
+        analyze: async (cells, revision) => ({ revision, analysisEnvironmentId: "analysis-test", analyzer: { packageVersion: "test", rVersion: "test", policy: "test", analysisEnvironmentId: "analysis-test" }, cells: cells.map(value => ({ id: value.id, revision: value.revision, defs: [], refs: [], selfRefs: [], diagnostics: [], error: null })) }),
         evaluate: async (payload, onEvent) => {
           executing = true;
           onEvent?.({ type: "started", requestId: 1, sessionEpoch: payload.sessionEpoch, kernelEpoch: payload.kernelEpoch, documentRevision: payload.documentRevision, operationId: payload.operationId, runId: payload.runId, cellId: payload.cellId, revision: payload.revision, sequence: 0 });

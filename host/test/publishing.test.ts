@@ -69,7 +69,6 @@ function cell(id: string, outputs: OutputRecord[] = [], overrides: Partial<HostC
     defs: [],
     refs: [],
     selfRefs: [],
-    locals: [],
     diagnostics: [],
     analysisPending: false,
     ...overrides,

@@ -238,11 +238,11 @@ function createController(options: FixtureControllerOptions): Controller {
   return new Controller({ ...options, epoch: sessionEpoch, outputStore });
 }
 function analyzeCell(cell: CellSnapshot) {
-  const definitions = [...cell.source.matchAll(/\b([A-Za-z][A-Za-z0-9_.]*)\s*<-/g)]
+  const definitions = [...cell.source.matchAll(/([A-Za-z.][A-Za-z0-9_.]*)\s*<-/g)]
     .map((match) => match[1] as string);
   const rightSides = [...cell.source.matchAll(/<-([^\n]*)/g)].map((match) => match[1] ?? "").join(" ");
-  const references = [...rightSides.matchAll(/\b([A-Za-z][A-Za-z0-9_.]*)\b/g)]
-    .map((match) => match[1] as string)
+  const references = [...rightSides.matchAll(/[A-Za-z.][A-Za-z0-9_.]*/g)]
+    .map((match) => match[0] as string)
     .filter((name) => !definitions.includes(name) && !["TRUE", "FALSE", "library"].includes(name));
   return {
     id: cell.id,
@@ -250,7 +250,6 @@ function analyzeCell(cell: CellSnapshot) {
     defs: [...new Set(definitions)],
     refs: [...new Set(references)],
     selfRefs: [],
-    locals: [],
     diagnostics: [],
     error: null,
   };
@@ -1697,13 +1696,14 @@ test("an ordinary automatic cell Run keeps its dependency scope", async () => {
   } finally { await controller.close(); }
 });
 
-test("duplicate globals block their defining cells while an unrelated cell runs", async () => {
+test("duplicate globals and their consumer stay blocked until repair while an independent cell runs", async () => {
   const engine = new FakeEngine();
   const controller = createController({
     engine,
     notebook: notebook([
-      ["first", "shared <- 1"],
-      ["second", "shared <- 2"],
+      ["first", ".x <- 1"],
+      ["second", ".x <- 2"],
+      ["consumer", "answer <- .x + 1"],
       ["unrelated", "other <- 3"],
     ]),
     config: resolveSettings({ notebook: { on_startup: false } }),
@@ -1711,9 +1711,10 @@ test("duplicate globals block their defining cells while an unrelated cell runs"
   try {
     await controller.start();
     const snapshot = controller.snapshot();
-    assert.match(snapshot.cells[0]?.diagnostics[0]?.message ?? "", /global shared.*first, second/);
-    assert.match(snapshot.cells[1]?.diagnostics[0]?.message ?? "", /global shared.*first, second/);
-    assert.deepEqual(snapshot.cells[2]?.diagnostics, []);
+    assert.match(snapshot.cells[0]?.diagnostics[0]?.message ?? "", /global \.x.*first, second/);
+    assert.match(snapshot.cells[1]?.diagnostics[0]?.message ?? "", /global \.x.*first, second/);
+    assert.match(snapshot.cells[2]?.diagnostics[0]?.message ?? "", /blocked by invalid dependencies.*first, second/);
+    assert.deepEqual(snapshot.cells[3]?.diagnostics, []);
 
     const all = command(controller, { type: "run", scope: "all" });
     await startCommand(controller, all);
@@ -1726,16 +1727,38 @@ test("duplicate globals block their defining cells while an unrelated cell runs"
     const failed = await controller.awaitOperation(blocked.requestId, "controller-tests");
     assert.equal(failed.status, "error");
     assert.equal(failed.error?.code, "graph_invalid");
+
+    const dependent = command(controller, { type: "run", scope: "cell", target: { cellId: "consumer" } });
+    await startCommand(controller, dependent);
+    const dependentFailure = await controller.awaitOperation(dependent.requestId, "controller-tests");
+    assert.equal(dependentFailure.status, "error");
+    assert.equal(dependentFailure.error?.code, "graph_invalid");
+
+    const repair = command(controller, { type: "transaction", changes: [{
+      type: "edit", cell: { cellId: "second" }, expectedRevision: 0,
+      body: ["other_shared <- 2"], cellType: "code",
+    }] });
+    await startCommand(controller, repair);
+    await settle(controller, repair.requestId);
+    await eventually(() => controller.snapshot().cells.every((cell) => !cell.analysisPending));
+    const rerun = command(controller, { type: "run", scope: "all" });
+    await startCommand(controller, rerun);
+    const repaired = await settle(controller, rerun.requestId);
+    assert.deepEqual((repaired.result as { plan: string[] }).plan, ["first", "second", "unrelated", "consumer"]);
+    assert.deepEqual(engine.evaluations.map((item) => item.cellId),
+      ["unrelated", "first", "second", "unrelated", "consumer"]);
+    assert.ok(controller.snapshot().cells.every((cell) => cell.status === "done"));
   } finally { await controller.close(); }
 });
 
-test("cycle members stay blocked while an unrelated cell runs", async () => {
+test("cycle members and their consumer stay blocked until repair while an independent cell runs", async () => {
   const engine = new FakeEngine();
   const controller = createController({
     engine,
     notebook: notebook([
       ["a", "x <- y"],
       ["b", "y <- x"],
+      ["consumer", "answer <- x + y"],
       ["unrelated", "other <- 3"],
     ]),
     config: resolveSettings({ notebook: { on_startup: false } }),
@@ -1745,13 +1768,29 @@ test("cycle members stay blocked while an unrelated cell runs", async () => {
     const snapshot = controller.snapshot();
     assert.match(snapshot.cells[0]?.diagnostics[0]?.message ?? "", /cells: a, b/);
     assert.match(snapshot.cells[1]?.diagnostics[0]?.message ?? "", /cells: a, b/);
-    assert.deepEqual(snapshot.cells[2]?.diagnostics, []);
+    assert.match(snapshot.cells[2]?.diagnostics[0]?.message ?? "", /blocked by invalid dependencies.*a, b/);
+    assert.deepEqual(snapshot.cells[3]?.diagnostics, []);
 
     const all = command(controller, { type: "run", scope: "all" });
     await startCommand(controller, all);
     const completed = await settle(controller, all.requestId);
     assert.deepEqual((completed.result as { plan: string[] }).plan, ["unrelated"]);
     assert.deepEqual(engine.evaluations.map((item) => item.cellId), ["unrelated"]);
+
+    const repair = command(controller, { type: "transaction", changes: [{
+      type: "edit", cell: { cellId: "b" }, expectedRevision: 0,
+      body: ["y <- 1"], cellType: "code",
+    }] });
+    await startCommand(controller, repair);
+    await settle(controller, repair.requestId);
+    await eventually(() => controller.snapshot().cells.every((cell) => !cell.analysisPending));
+    const rerun = command(controller, { type: "run", scope: "all" });
+    await startCommand(controller, rerun);
+    const repaired = await settle(controller, rerun.requestId);
+    assert.deepEqual((repaired.result as { plan: string[] }).plan, ["b", "unrelated", "a", "consumer"]);
+    assert.deepEqual(engine.evaluations.map((item) => item.cellId),
+      ["unrelated", "b", "unrelated", "a", "consumer"]);
+    assert.ok(controller.snapshot().cells.every((cell) => cell.status === "done"));
   } finally { await controller.close(); }
 });
 

@@ -62386,7 +62386,6 @@ var analysisCellResultSchema = external_exports.object({
   defs: analysisSymbolArraySchema,
   refs: analysisSymbolArraySchema,
   selfRefs: analysisSymbolArraySchema,
-  locals: analysisSymbolArraySchema,
   diagnostics: external_exports.array(analysisDiagnosticSchema).max(MAX_EDITOR_DIAGNOSTICS),
   error: boundedUtf8StringSchema(MAX_FRAME_BYTES).nullable(),
   ranges: safeStringRecordSchema(external_exports.array(sourceRangeSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS)).optional()
@@ -62522,8 +62521,7 @@ var evaluationPayloadSchema = external_exports.object({
   revision: revisionSchema,
   documentRevision: revisionSchema,
   source: sourceTextSchema,
-  definitions: analysisSymbolArraySchema,
-  locals: analysisSymbolArraySchema
+  definitions: analysisSymbolArraySchema
 }).strict();
 var engineEventIdentitySchema = external_exports.object({
   requestId: positiveIntegerSchema,
@@ -62914,7 +62912,7 @@ var cellDisplayPartSchema = external_exports.discriminatedUnion("kind", [
   external_exports.object({ kind: external_exports.literal("output"), id: idSchema }).strict(),
   external_exports.object({ kind: external_exports.literal("log"), text: boundedUtf8StringSchema(MAX_FRAME_BYTES, true) }).strict()
 ]);
-var hostCellStateSchema = external_exports.object({ id: idSchema, type: cellTypeSchema, body: sourceLinesSchema, options: storedCellOptionsSchema, revision: revisionSchema, status: cellStatusSchema, outputs: external_exports.array(external_exports.lazy(() => outputRecordSchema)).max(MAX_PROTOCOL_COLLECTION_ITEMS), outputsStale: external_exports.boolean().optional(), progress: protocolJsonSchema.nullable(), log: external_exports.array(boundedUtf8StringSchema(MAX_FRAME_BYTES)).max(1048578), displayOrder: external_exports.array(cellDisplayPartSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS).optional(), error: engineErrorSchema.nullable(), defs: protocolStringArraySchema, refs: protocolStringArraySchema, selfRefs: protocolStringArraySchema, locals: protocolStringArraySchema, diagnostics: external_exports.array(analysisDiagnosticSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS), analysisPending: external_exports.boolean() }).strict();
+var hostCellStateSchema = external_exports.object({ id: idSchema, type: cellTypeSchema, body: sourceLinesSchema, options: storedCellOptionsSchema, revision: revisionSchema, status: cellStatusSchema, outputs: external_exports.array(external_exports.lazy(() => outputRecordSchema)).max(MAX_PROTOCOL_COLLECTION_ITEMS), outputsStale: external_exports.boolean().optional(), progress: protocolJsonSchema.nullable(), log: external_exports.array(boundedUtf8StringSchema(MAX_FRAME_BYTES)).max(1048578), displayOrder: external_exports.array(cellDisplayPartSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS).optional(), error: engineErrorSchema.nullable(), defs: protocolStringArraySchema, refs: protocolStringArraySchema, selfRefs: protocolStringArraySchema, diagnostics: external_exports.array(analysisDiagnosticSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS), analysisPending: external_exports.boolean() }).strict();
 var graphCellIds = external_exports.array(idSchema).max(MAX_NOTEBOOK_CELLS);
 var graphMap = safeStringRecordSchema(graphCellIds);
 var dependencyGraphStateSchema = external_exports.object({ nodes: graphCellIds, edges: graphMap, reverseEdges: graphMap, duplicates: graphMap, cycles: graphCellIds, topologicalOrder: graphCellIds.nullable() }).strict();
@@ -65128,6 +65126,8 @@ var ReactiveGraph = class {
   cellById = /* @__PURE__ */ new Map();
   position = /* @__PURE__ */ new Map();
   owners = /* @__PURE__ */ new Map();
+  invalidRootsValue = /* @__PURE__ */ new Set();
+  blockedValue = /* @__PURE__ */ new Set();
   complexityExceeded = false;
   constructor(cells) {
     this.replace(cells);
@@ -65171,7 +65171,17 @@ var ReactiveGraph = class {
     const reverseEdges = nullRecord(nodes);
     if (!limited) for (const dependent of nodes) for (const dependency of edges[dependent] ?? []) reverseEdges[dependency]?.push(dependent);
     const duplicates = Object.fromEntries([...owners.entries()].filter(([, ids]) => ids.size > 1).sort(([a], [b]) => a.localeCompare(b)).map(([symbol2, ids]) => [symbol2, [...ids].sort((a, b) => (position.get(a) ?? 0) - (position.get(b) ?? 0))]));
-    const cycles = limited ? [] : detectCycleNodes(edges, nodes), blocked = /* @__PURE__ */ new Set([...cycles, ...Object.values(duplicates).flat()]);
+    const cycles = limited ? [] : detectCycleNodes(edges, nodes);
+    const invalidRoots = /* @__PURE__ */ new Set([...cycles, ...Object.values(duplicates).flat()]);
+    const blocked = new Set(invalidRoots);
+    const blockedQueue = [...invalidRoots];
+    for (let head = 0; head < blockedQueue.length; head += 1) {
+      for (const descendant of reverseEdges[blockedQueue[head]] ?? []) {
+        if (blocked.has(descendant)) continue;
+        blocked.add(descendant);
+        blockedQueue.push(descendant);
+      }
+    }
     const runnable = nodes.filter((node2) => !blocked.has(node2));
     const runnableEdges = Object.fromEntries(runnable.map((node2) => [node2, (edges[node2] ?? []).filter((dependency) => !blocked.has(dependency))]));
     this.cellsValue = normalized;
@@ -65179,6 +65189,8 @@ var ReactiveGraph = class {
     this.position = position;
     this.owners = owners;
     this.complexityExceeded = limited;
+    this.invalidRootsValue = invalidRoots;
+    this.blockedValue = blocked;
     this.stateValue = { nodes, edges, reverseEdges, duplicates, cycles, topologicalOrder: limited ? null : topologicalOrder(runnableEdges, runnable) };
   }
   has(id2) {
@@ -65200,11 +65212,22 @@ var ReactiveGraph = class {
     const owners = this.definitionOwners(symbol2);
     return owners.length === 1 ? owners[0] : void 0;
   }
+  invalidRootIds() {
+    return new Set(this.invalidRootsValue);
+  }
   blockedCellIds() {
-    return /* @__PURE__ */ new Set([...this.state.cycles, ...Object.values(this.state.duplicates).flat()]);
+    return new Set(this.blockedValue);
   }
   issuesForCell(id2) {
-    return this.validate().filter((issue2) => issue2.cellId === id2 || issue2.cellId === void 0);
+    const issues = this.validate().filter((issue2) => issue2.cellId === id2 || issue2.cellId === void 0);
+    if (issues.length > 0 || !this.blockedCellIds().has(id2)) return issues;
+    const roots = this.invalidRootIds();
+    const causes = this.ancestors(id2).filter((candidate) => roots.has(candidate));
+    return [{
+      code: "invalid-dependency",
+      cellId: id2,
+      message: `cell ${id2} is blocked by invalid dependencies: ${causes.join(", ")}`
+    }];
   }
   blockedByDisabled(disabled) {
     const roots = disabled ?? new Set(this.cells.filter((cell) => cell.disabled).map((cell) => cell.id));
@@ -65266,7 +65289,7 @@ var ReactiveGraph = class {
   }
 };
 function normalizeCell(cell) {
-  return { ...cell, defs: unique(cell.defs), refs: unique(cell.refs), selfRefs: unique(cell.selfRefs), locals: unique(cell.locals), diagnostics: [...cell.diagnostics] };
+  return { ...cell, defs: unique(cell.defs), refs: unique(cell.refs), selfRefs: unique(cell.selfRefs), diagnostics: [...cell.diagnostics] };
 }
 
 // src/output-log.ts
@@ -73722,7 +73745,6 @@ var Controller = class {
         revision: cell.revision,
         source: joinSource(cell.body),
         definitions: [...analysis.defs],
-        locals: [...analysis.locals],
         runId,
         operationId,
         clientId
@@ -73890,8 +73912,7 @@ var Controller = class {
       revision: job.revision,
       documentRevision: this.documentRevisionValue,
       source: job.source,
-      definitions: [...job.definitions],
-      locals: [...job.locals]
+      definitions: [...job.definitions]
     };
   }
   selectBatch(first) {
@@ -76150,7 +76171,6 @@ var Controller = class {
       defs: [...analysis.defs],
       refs: [...analysis.refs],
       selfRefs: [...analysis.selfRefs],
-      locals: [...analysis.locals],
       diagnostics: this.cellDiagnostics(cell),
       analysisPending: cell.type === "code" && (cell.analysis === null || cell.analysis.revision !== cell.revision)
     };
@@ -77006,7 +77026,6 @@ function emptyAnalysis(id2, revision2) {
     defs: [],
     refs: [],
     selfRefs: [],
-    locals: [],
     diagnostics: [],
     error: null
   };
@@ -77016,7 +77035,6 @@ function analysisCacheValue(result) {
     defs: [...result.defs],
     refs: [...result.refs],
     selfRefs: [...result.selfRefs],
-    locals: [...result.locals],
     diagnostics: clone3(result.diagnostics),
     error: result.error
   };
@@ -81241,7 +81259,6 @@ function mapAnalysisResult(raw, sources) {
       defs: cell.defs,
       refs: cell.refs,
       selfRefs: cell.selfRefs,
-      locals: cell.locals,
       diagnostics,
       error: cell.error ?? null,
       ...cell.ranges === void 0 ? {} : { ranges: mapAnalysisRanges(cell.ranges, source) }
@@ -81453,8 +81470,7 @@ function evaluationWire(value, controlDirectory) {
     kernel_epoch: value.kernelEpoch,
     operation_id: value.operationId,
     ...source,
-    defs: value.definitions,
-    locals: value.locals
+    defs: value.definitions
   };
 }
 function makeEvaluation(requestId, payload, onEvent, kernelGeneration, token, maxBytes) {
