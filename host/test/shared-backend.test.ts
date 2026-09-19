@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { NotebookBackend } from "../src/backend.js";
 import { RecoveryWriter } from "../src/recovery.js";
 import { connectBackendSession, type AcquireNotebookSessionOptions, type HostLaunchOptions } from "../src/sessions.js";
-import { decodeHostQueryResultWire, encodeHostCommandWire, encodeHostQueryWire, hostQueryResultSchema, notebookQueryResultSchema, parseHostCommand, type SessionConnection } from "../src/protocol.js";
+import { decodeHostQueryResultWire, encodeHostCommandWire, encodeHostQueryWire, hostIdentitySchema, hostQueryResultSchema, notebookQueryResultSchema, parseHostCommand, type SessionConnection } from "../src/protocol.js";
 import type { ApplicationResources } from "../src/resources.js";
 
 async function fixture(context: test.TestContext) {
@@ -21,7 +21,7 @@ async function fixture(context: test.TestContext) {
   };
   const openRecovery = RecoveryWriter.open.bind(RecoveryWriter);
   context.mock.method(RecoveryWriter, "open", options => openRecovery({ ...options, rootDir: join(root, "recovery") }));
-  const options = (path: string): HostLaunchOptions => ({ path, sessionKey: createHash("sha256").update("path:" + path).digest("hex"), deferStartup: true, runOnStartup: false });
+  const options = (path: string): HostLaunchOptions => ({ path, sessionKey: createHash("sha256").update("path:" + path).digest("hex"), deferStartup: true, suppressStartup: true });
   const clientOptions = (path: string): AcquireNotebookSessionOptions => ({ path, resources });
   const connect = async (backend: NotebookBackend, path: string): Promise<SessionConnection> => connectBackendSession(await backend.open(options(path)), clientOptions(path));
   return { root, resources, options, connect };
@@ -61,6 +61,50 @@ test("same-notebook clients detach independently while different notebooks stay 
     await peer.release();
     assert.equal((await notebook(second)).path, secondPath);
   } finally { await Promise.allSettled(clients.map(client => client.release())); await backend.close(); await rm(value.root, { recursive: true, force: true }); }
+});
+
+test("no-run suppresses a fresh opening and joins an existing session without changing its notebook setting", { timeout: 15_000 }, async context => {
+  const value = await fixture(context);
+  const path = join(value.root, "no-run.R");
+  await writeFile(path, "# %%\nx <- 1\n");
+  const backend = new NotebookBackend(value.resources);
+  const clients: SessionConnection[] = [];
+  const launch = { ...value.options(path), suppressStartup: true };
+  const requested = { path, resources: value.resources, deferStartup: true, suppressStartup: true } satisfies AcquireNotebookSessionOptions;
+  try {
+    const fresh = await connectBackendSession(await backend.open(launch), requested);
+    clients.push(fresh);
+    const freshIdentity = hostIdentitySchema.parse(await (await fresh.request("/api/identity")).json());
+    assert.equal(freshIdentity.configuration.runOnStartup, true);
+    const beforeStartup = await notebook(fresh);
+    const startup = parseHostCommand({
+      requestId: randomUUID(), clientId: fresh.clientId, sessionEpoch: fresh.epoch,
+      expectedDocumentRevision: beforeStartup.documentRevision, type: "run", scope: "all", startup: true,
+    });
+    const startupResponse = await fresh.request("/api/command", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(encodeHostCommandWire(startup)),
+    });
+    assert.equal(startupResponse.status, 200);
+    await startupResponse.json();
+    let suppressed = await notebook(fresh);
+    for (let attempts = 0; !suppressed.runtime.startupActivated && attempts < 20; attempts += 1) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+      suppressed = await notebook(fresh);
+    }
+    assert.equal(suppressed.runtime.startupActivated, true);
+    assert.equal(suppressed.documentRevision, beforeStartup.documentRevision);
+    assert.equal(suppressed.dirty, beforeStartup.dirty);
+
+    const existing = await connectBackendSession(await backend.open(launch), requested);
+    clients.push(existing);
+    const existingIdentity = hostIdentitySchema.parse(await (await existing.request("/api/identity")).json());
+    assert.equal(existing.epoch, fresh.epoch);
+    assert.equal(existingIdentity.configuration.runOnStartup, true);
+  } finally {
+    await Promise.allSettled(clients.map(client => client.release()));
+    await backend.close();
+    await rm(value.root, { recursive: true, force: true });
+  }
 });
 
 test("a replacement backend restores acknowledged work from the document journal", { timeout: 15_000 }, async context => {

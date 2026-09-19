@@ -36,8 +36,7 @@ async function startInstalledHost(path: string, options: {
   process.env.XDG_DATA_HOME = browserDataHome;
   return startHost({
     path,
-    port: 0,
-    runOnStartup: options.runOnStartup ?? false,
+    suppressStartup: options.runOnStartup !== true,
     executionMode: options.executionMode,
     resources: stagedResources,
     preferencesPath: join(dirname(path), '.test-preferences.yaml'),

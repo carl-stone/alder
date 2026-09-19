@@ -41,7 +41,7 @@ export interface HostLaunchOptions {
   sessionKey: string;
   projectDirectory?: string;
   executionMode?: "automatic" | "lazy";
-  runOnStartup?: boolean;
+  suppressStartup?: boolean;
   deferStartup?: boolean;
 }
 
@@ -62,7 +62,7 @@ export interface AcquireNotebookSessionOptions {
   readonly untitledProjectDirectory?: string;
   readonly resources: Pick<ApplicationResources, "root" | "nodeExecutable" | "hostEntry">;
   readonly executionMode?: "automatic" | "lazy";
-  readonly runOnStartup?: boolean;
+  readonly suppressStartup?: boolean;
   readonly deferStartup?: boolean;
   readonly startupTimeoutMs?: number;
   readonly runtimeDirectory?: string;
@@ -141,7 +141,7 @@ export async function acquireNotebookSession(options: AcquireNotebookSessionOpti
   const descriptor = await backend.connect({
     path: canonicalPath, sessionKey, projectDirectory,
     executionMode: options.executionMode,
-    runOnStartup: options.runOnStartup, deferStartup: options.deferStartup,
+    suppressStartup: options.suppressStartup, deferStartup: options.deferStartup,
     externalOrigin: options.externalOrigin, tokenFile: options.tokenFile,
   }, timeoutMs);
   return connectBackendSession(descriptor, options);
@@ -272,11 +272,10 @@ async function assertAttachConfiguration(identity: ReturnType<typeof hostIdentit
   const active = identity.configuration;
   const selected = {
     executionMode: requested.executionMode,
-    runOnStartup: requested.runOnStartup,
     deferStartup: requested.deferStartup,
   };
   const comparisons: Array<[string, unknown, unknown]> = [
-    ["executionMode", selected.executionMode, active.executionMode], ["runOnStartup", selected.runOnStartup, active.runOnStartup], ["deferStartup", selected.deferStartup, active.deferStartup],
+    ["executionMode", selected.executionMode, active.executionMode], ["deferStartup", selected.deferStartup, active.deferStartup],
   ];
   const mismatch = comparisons.find(([, value, current]) => value !== undefined && value !== current);
   if (mismatch) throw new SessionConfigurationConflictError("existing notebook host uses different runtime settings", { sessionKey, setting: mismatch[0] });

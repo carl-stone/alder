@@ -169,7 +169,7 @@ export interface ElectronMainOptions {
   readonly preloadPath?: string;
   readonly initialPath?: string | null;
   readonly executionMode?: "automatic" | "lazy";
-  readonly runOnStartup?: boolean;
+  readonly suppressStartup?: boolean;
   readonly deferStartup?: boolean;
   readonly startupTimeoutMs?: number;
   readonly closeSettlementTimeoutMs?: number;
@@ -450,7 +450,7 @@ export class ElectronMain {
         ...(path === null ? { untitledProjectDirectory: this.runtime.app.getPath?.("home") ?? process.cwd() } : {}),
         resources,
         ...(this.options.executionMode === undefined ? {} : { executionMode: this.options.executionMode }),
-        ...(this.options.runOnStartup === undefined ? {} : { runOnStartup: this.options.runOnStartup }),
+        suppressStartup: this.options.suppressStartup ?? false,
         deferStartup: this.options.deferStartup ?? true,
         ...(this.options.startupTimeoutMs === undefined ? {} : { startupTimeoutMs: this.options.startupTimeoutMs }),
       });
@@ -1044,7 +1044,7 @@ export class ElectronMain {
         ...(old.canonicalPath === null ? { untitledRecoveryId: old.sessionKey } : {}),
         resources,
         ...(this.options.executionMode === undefined ? {} : { executionMode: this.options.executionMode }),
-        ...(this.options.runOnStartup === undefined ? {} : { runOnStartup: this.options.runOnStartup }),
+        suppressStartup: this.options.suppressStartup ?? false,
         deferStartup: this.options.deferStartup ?? true,
         ...(this.options.startupTimeoutMs === undefined ? {} : { startupTimeoutMs: this.options.startupTimeoutMs }),
       });
@@ -1272,6 +1272,6 @@ export async function startPackagedElectronMain(argv: readonly string[] = proces
   return startElectronMain({
     runtime,
     ...(argv.includes("--lazy") ? { executionMode: "lazy" as const } : {}),
-    ...(argv.includes("--no-run") ? { runOnStartup: false } : {}),
+    suppressStartup: argv.includes("--no-run"),
   });
 }

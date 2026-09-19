@@ -336,7 +336,7 @@ async function recoveryJournalFor(recoveryDirectory: string, path: string): Prom
 }
 
 async function open(path: string, resourceRoot: string, recoveryDirectory: string): Promise<RunningHost> {
-  return startHost({ path, resources: resources(resourceRoot), recoveryDirectory, runOnStartup: false });
+  return startHost({ path, resources: resources(resourceRoot), recoveryDirectory, suppressStartup: true });
 }
 
 function resources(root: string): ApplicationResources {

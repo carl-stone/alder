@@ -80,7 +80,7 @@ function publicationSnapshot(saved: NotebookDocument, current: HostSnapshot): Pu
 const optionsSchema = z.object({
   path: z.string().min(1).nullable().default(null),
   executionMode: z.enum(["automatic", "lazy"]).optional(),
-  runOnStartup: z.boolean().optional(),
+  suppressStartup: z.boolean().default(false),
   idleTimeout: z.number().nonnegative().finite().default(0),
   deferStartup: z.boolean().default(false),
   externalOrigin: z.string().optional(),
@@ -995,7 +995,7 @@ async function startNotebookHost(
       layout: resolvedLayout,
       epoch: ownership.epoch,
       deferStartup: options.deferStartup || recoveredStartup,
-      suppressStartup: options.runOnStartup === false,
+      suppressStartup: options.suppressStartup,
       initialDirty: recoveredStartup,
       preferencesVersion: preferences.snapshot().version,
       initialDocumentRevision: recoveryDocumentRevision,

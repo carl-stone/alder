@@ -128,7 +128,7 @@ test("launch execution choices remain editable notebook values", async () => {
   try {
     const path = await f.notebook("launch.R");
     const original = await readFile(path, "utf8");
-    const launched = await f.open(path, undefined, { executionMode: "lazy", runOnStartup: false });
+    const launched = await f.open(path, undefined, { executionMode: "lazy", suppressStartup: true });
     assert.equal(launched.controller.snapshot().runtime.executionMode, "lazy");
     assert.equal(launched.controller.snapshot().runtime.runOnStartup, true, "--no-run does not alter the notebook setting");
     assert.equal(launched.controller.snapshot().dirty, true);

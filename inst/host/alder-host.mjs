@@ -35210,7 +35210,7 @@ async function acquireNotebookSession(options) {
     sessionKey,
     projectDirectory,
     executionMode: options.executionMode,
-    runOnStartup: options.runOnStartup,
+    suppressStartup: options.suppressStartup,
     deferStartup: options.deferStartup,
     externalOrigin: options.externalOrigin,
     tokenFile: options.tokenFile
@@ -35290,12 +35290,10 @@ async function assertAttachConfiguration(identity, requested, sessionKey) {
   const active = identity.configuration;
   const selected = {
     executionMode: requested.executionMode,
-    runOnStartup: requested.runOnStartup,
     deferStartup: requested.deferStartup
   };
   const comparisons = [
     ["executionMode", selected.executionMode, active.executionMode],
-    ["runOnStartup", selected.runOnStartup, active.runOnStartup],
     ["deferStartup", selected.deferStartup, active.deferStartup]
   ];
   const mismatch = comparisons.find(([, value, current]) => value !== void 0 && value !== current);
@@ -35709,7 +35707,7 @@ async function activateHeadlessStartup(connection) {
   await commandOnOwner(connection, { type: "run", scope: "all", startup: true });
 }
 async function runTool(cli, resources) {
-  const connection = await acquireNotebookSession({ path: cli.path, resources, runtimeDirectory: process.env.ALDER_RUNTIME_DIRECTORY, executionMode: cli.lazy ? "lazy" : void 0, runOnStartup: cli.noRun ? false : void 0, deferStartup: true });
+  const connection = await acquireNotebookSession({ path: cli.path, resources, runtimeDirectory: process.env.ALDER_RUNTIME_DIRECTORY, executionMode: cli.lazy ? "lazy" : void 0, suppressStartup: cli.noRun, deferStartup: true });
   try {
     const runtimeSnapshot = await waitForRuntimeReadiness(() => ownerSnapshot(connection), {
       readiness: cli.command === "publish" ? "document" : "analyzer"
@@ -35737,7 +35735,7 @@ async function runMcp(cli, resources) {
     resources,
     runtimeDirectory: process.env.ALDER_RUNTIME_DIRECTORY,
     executionMode: cli.lazy ? "lazy" : void 0,
-    runOnStartup: cli.noRun ? false : void 0,
+    suppressStartup: cli.noRun,
     deferStartup: true
   });
   let stdio;
@@ -35781,7 +35779,7 @@ async function runDesktop(cli, resources) {
       untitledRecoveryId: cli.recover,
       resources,
       executionMode: cli.lazy ? "lazy" : void 0,
-      runOnStartup: cli.noRun ? false : void 0,
+      suppressStartup: cli.noRun,
       deferStartup: true,
       externalOrigin: cli.externalOrigin,
       tokenFile: cli.tokenFile

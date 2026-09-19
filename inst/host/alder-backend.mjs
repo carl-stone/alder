@@ -110334,7 +110334,7 @@ function publicationSnapshot(saved, current) {
 var optionsSchema = external_exports.object({
   path: external_exports.string().min(1).nullable().default(null),
   executionMode: external_exports.enum(["automatic", "lazy"]).optional(),
-  runOnStartup: external_exports.boolean().optional(),
+  suppressStartup: external_exports.boolean().default(false),
   idleTimeout: external_exports.number().nonnegative().finite().default(0),
   deferStartup: external_exports.boolean().default(false),
   externalOrigin: external_exports.string().optional(),
@@ -111249,7 +111249,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
       layout: resolvedLayout,
       epoch: ownership.epoch,
       deferStartup: options.deferStartup || recoveredStartup,
-      suppressStartup: options.runOnStartup === false,
+      suppressStartup: options.suppressStartup,
       initialDirty: recoveredStartup,
       preferencesVersion: preferences.snapshot().version,
       initialDocumentRevision: recoveryDocumentRevision,
@@ -111941,7 +111941,7 @@ var NotebookBackend = class {
         resources: this.resources,
         preferences: await this.preferences,
         executionMode: options.executionMode,
-        runOnStartup: options.runOnStartup,
+        suppressStartup: options.suppressStartup,
         deferStartup: options.deferStartup ?? true,
         idleTimeout: 15,
         session: {

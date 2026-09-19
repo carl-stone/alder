@@ -366,7 +366,7 @@ async function activateHeadlessStartup(connection: SessionConnection): Promise<v
 }
 
 async function runTool(cli: CliOptions, resources: ApplicationResources): Promise<number> {
-  const connection = await acquireNotebookSession({ path: cli.path, resources, runtimeDirectory: process.env.ALDER_RUNTIME_DIRECTORY, executionMode: cli.lazy ? "lazy" : undefined, runOnStartup: cli.noRun ? false : undefined, deferStartup: true });
+  const connection = await acquireNotebookSession({ path: cli.path, resources, runtimeDirectory: process.env.ALDER_RUNTIME_DIRECTORY, executionMode: cli.lazy ? "lazy" : undefined, suppressStartup: cli.noRun, deferStartup: true });
   try {
     const runtimeSnapshot = await waitForRuntimeReadiness(() => ownerSnapshot(connection), {
       readiness: cli.command === "publish" ? "document" : "analyzer",
@@ -393,7 +393,7 @@ async function runMcp(cli: CliOptions, resources: ApplicationResources): Promise
     resources,
     runtimeDirectory: process.env.ALDER_RUNTIME_DIRECTORY,
     executionMode: cli.lazy ? "lazy" : undefined,
-    runOnStartup: cli.noRun ? false : undefined,
+    suppressStartup: cli.noRun,
     deferStartup: true,
   });
   let stdio: Awaited<ReturnType<typeof connectMcpStdio>> | undefined;
@@ -438,7 +438,7 @@ async function runDesktop(cli: CliOptions, resources: ApplicationResources): Pro
       untitledRecoveryId: cli.recover,
       resources,
       executionMode: cli.lazy ? "lazy" : undefined,
-      runOnStartup: cli.noRun ? false : undefined,
+      suppressStartup: cli.noRun,
       deferStartup: true,
       externalOrigin: cli.externalOrigin,
       tokenFile: cli.tokenFile,

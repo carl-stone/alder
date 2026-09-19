@@ -87,7 +87,7 @@ export class NotebookBackend {
         resources: this.resources,
         preferences: await this.preferences,
         executionMode: options.executionMode,
-        runOnStartup: options.runOnStartup,
+        suppressStartup: options.suppressStartup,
         deferStartup: options.deferStartup ?? true,
         idleTimeout: 15,
         session: {

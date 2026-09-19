@@ -24,8 +24,7 @@ async function startInstalledHost(path: string, options: { executionMode?: "auto
   await writeFile(preferencesPath, `rscript: ${JSON.stringify(process.env.ALDER_RSCRIPT ?? execFileSync("which", ["Rscript"], { encoding: "utf8" }).trim())}\n`);
   const app = await startHost({
     path,
-    port: 0,
-    runOnStartup: options.runOnStartup ?? false,
+    suppressStartup: options.runOnStartup !== true,
     executionMode: options.executionMode,
     idleTimeout: options.idleTimeout,
     resources: stagedResources,
@@ -582,7 +581,7 @@ test("untitled recovery reopens a symlinked project with physical R profile and 
     stagedResources ??= await resolveApplicationResources(APPLICATION_ROOT!);
     const open = () => startHost({
       path: null, resources: stagedResources!, preferencesPath, recoveryDirectory,
-      executionMode: "lazy", runOnStartup: false,
+      executionMode: "lazy", suppressStartup: true,
       session: { sessionKey: id, untitledRecoveryId: id, projectDirectory: alias },
     });
     app = await open();
