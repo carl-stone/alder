@@ -1204,6 +1204,57 @@ test("source edit admitted during formatting rejects late candidate before durab
   }
 });
 
+test("optional operations reject only duplicates and cancel their owned work", async () => {
+  let formatAborted = false;
+  let formatStarted!: () => void;
+  const formatting = new Promise<void>((resolve) => { formatStarted = resolve; });
+  const controller = createController({
+    engine: new FakeEngine(),
+    notebook: notebook([["a", "x <- 1"]]),
+    config: resolveSettings({ notebook: { on_startup: false } }),
+    services: {
+      format: async (_cells, context) => {
+        assert.ok(context);
+        formatStarted();
+        return new Promise<Record<string, string[]>>((_resolve, reject) => {
+          context.signal.addEventListener("abort", () => {
+            formatAborted = true;
+            reject(new Error("formatter stopped"));
+          }, { once: true });
+        });
+      },
+      service: async (name) => {
+        if (name === "publish") return { published: true };
+        throw new Error(`unexpected service: ${name}`);
+      },
+    },
+  });
+  await controller.start();
+  const first = command(controller, { type: "format", cellIds: ["a"], expectedRevisions: { a: 0 } });
+  await startCommand(controller, first);
+  await formatting;
+
+  const duplicate = command(controller, { type: "format", cellIds: ["a"], expectedRevisions: { a: 0 } });
+  await startCommand(controller, duplicate);
+  const duplicateOperation = await controller.awaitOperation(duplicate.requestId, "controller-tests");
+  assert.equal(duplicateOperation.status, "error");
+  assert.equal(duplicateOperation.error?.code, "operation_in_progress");
+
+  const publish = command(controller, { type: "publish", includeCode: false });
+  await startCommand(controller, publish);
+  assert.equal((await controller.awaitOperation(publish.requestId, "controller-tests")).status, "done");
+
+  const cancel = command(controller, { type: "cancel-operation", operationId: first.requestId });
+  const cancelResult = await controller.dispatch(cancel);
+  assert.equal(cancelResult.error, null);
+  assert.deepEqual(cancelResult.result, { operationId: first.requestId, cancellationRequested: true });
+  const cancelled = await controller.awaitOperation(first.requestId, "controller-tests");
+  assert.equal(cancelled.status, "cancelled");
+  assert.equal(cancelled.error?.code, "cancelled");
+  assert.equal(formatAborted, true);
+  await controller.close();
+});
+
 test("creating beyond the admitted notebook bound fails before source or engine effects", async () => {
   const engine = new FakeEngine();
   const controller = createController({
@@ -4578,6 +4629,91 @@ test("package progress remains scoped to the running install operation", async (
   assert.equal(events.length, eventCount);
   assert.deepEqual(controller.operation(install.requestId, "controller-tests")?.progress, terminalProgress);
   unsubscribe();
+  await controller.close();
+});
+
+test("package installation cancellation aborts its owned service", async () => {
+  let installStarted!: () => void;
+  const started = new Promise<void>((resolve) => { installStarted = resolve; });
+  let aborted = false;
+  const controller = createController({
+    engine: new FakeEngine(),
+    notebook: notebook([["a", "x <- 1"]]),
+    config: resolveSettings({ notebook: { on_startup: false } }),
+    services: {
+      service: async (name, _payload, context) => {
+        if (name === "packages.status") return { declared: [], installed: [], missing: [] };
+        if (name !== "packages.install") throw new Error(`unexpected service: ${name}`);
+        assert.ok(context);
+        installStarted();
+        return new Promise((_resolve, reject) => {
+          context.signal.addEventListener("abort", () => {
+            aborted = true;
+            reject(new Error("installer stopped"));
+          }, { once: true });
+        });
+      },
+    },
+  });
+  await controller.start();
+  const install = command(controller, {
+    type: "packages-install", packages: ["dplyr"],
+    expectedDocumentRevision: controller.snapshot().documentRevision,
+    kernelEpoch: controller.snapshot().runtime.kernelEpoch,
+  });
+  await startCommand(controller, install);
+  await started;
+  const cancel = command(controller, { type: "cancel-operation", operationId: install.requestId });
+  assert.equal((await controller.dispatch(cancel)).error, null);
+  const operation = await controller.awaitOperation(install.requestId, "controller-tests");
+  assert.equal(operation.status, "cancelled");
+  assert.equal(aborted, true);
+  await controller.close();
+});
+
+test("package restart pending rejects new runs until restart completes", async () => {
+  const engine = new FakeEngine();
+  let restartStarted!: () => void;
+  const restarting = new Promise<void>((resolve) => { restartStarted = resolve; });
+  let finishRestart!: (value: EngineHandshake) => void;
+  engine.restartHandler = async () => {
+    restartStarted();
+    return new Promise<EngineHandshake>((resolve) => { finishRestart = resolve; });
+  };
+  const controller = createController({
+    engine,
+    notebook: notebook([["a", "x <- 1"]]),
+    config: resolveSettings({ notebook: { on_startup: false } }),
+    services: {
+      service: async (name) => name === "packages.install"
+        ? { ok: true, mutatedLibrary: true }
+        : { declared: [], installed: [], missing: [] },
+    },
+  });
+  await controller.start();
+  const install = command(controller, {
+    type: "packages-install", packages: ["dplyr"],
+    expectedDocumentRevision: controller.snapshot().documentRevision,
+    kernelEpoch: controller.snapshot().runtime.kernelEpoch,
+  });
+  await startCommand(controller, install);
+  await restarting;
+
+  const run = command(controller, {
+    type: "run", scope: "cell", target: { cellId: "a" },
+    changes: [{ type: "edit", cell: { cellId: "a" }, expectedRevision: 0, body: ["x <- 2"], cellType: "code" }],
+  });
+  await startCommand(controller, run);
+  const blocked = await controller.awaitOperation(run.requestId, "controller-tests");
+  assert.equal(blocked.status, "error");
+  assert.equal(blocked.error?.code, "operation_in_progress");
+  assert.deepEqual(controller.snapshot().cells[0]?.body, ["x <- 1"]);
+
+  finishRestart(HANDSHAKE);
+  assert.equal((await controller.awaitOperation(install.requestId, "controller-tests")).status, "done");
+  const reopened = command(controller, { type: "run", scope: "all", changes: [] });
+  await startCommand(controller, reopened);
+  assert.equal((await controller.awaitOperation(reopened.requestId, "controller-tests")).status, "done");
   await controller.close();
 });
 

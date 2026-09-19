@@ -38,7 +38,7 @@ export interface PackageServiceOptions {
   readonly projectDirectory: string; readonly onProgress?: (event: PackageProgress) => void | Promise<void>; readonly timeoutMs?: number;
 }
 export interface PackageInstallOptions extends PackageRunOptions { readonly operationId?: string; }
-export interface PackageStatusOptions { readonly operationId?: string; }
+export interface PackageStatusOptions extends PackageRunOptions { readonly operationId?: string; }
 export type PackageErrorCode = "invalid_request" | "package_metadata_error" | "r_not_found" | "environment_unavailable" | "install_failed" | "job_closed" | "job_timeout" | "job_failed" | "cancelled";
 
 export class PackageError extends Error {
@@ -94,7 +94,7 @@ export class PackageManager {
     const declarations = await this.declarations();
     const library = packageLibraryPath(declarations.path);
     const exists = await existingDirectory(library);
-    const response = workerResult(await this.run("status", declarations, declarations.packages, library, options.operationId));
+    const response = workerResult(await this.run("status", declarations, declarations.packages, library, options.operationId, options));
     const records = statusRecords(declarations.packages, response.records);
     return { ...declarations, ok: true, mode: "project", lockfile: null, library: exists ? library : null,
       installed: records.filter(value => value.status === "installed").map(value => value.package),

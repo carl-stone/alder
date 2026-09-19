@@ -247,7 +247,6 @@ async function startNotebookHost(
   let engineIdentity: EngineHandshake | null = null;
   let formatter: FormattingService | undefined;
   let publisher: PublishingService | undefined;
-  const publishAbort = new AbortController();
   const activePublishes = new Set<Promise<unknown>>();
   let recoveryFingerprint: string | undefined;
   let recoveryPending = false;
@@ -356,8 +355,8 @@ async function startNotebookHost(
     await current?.close();
   };
   const close = (): Promise<void> => closing ??= (async () => {
-    publishAbort.abort();
     runtimeAbort?.abort();
+    controller?.cancelOptionalOperations();
     await Promise.allSettled([...activePublishes]);
     clearTimeout(idleTimer);
     clearTimeout(lspSyncTimer);
@@ -991,11 +990,11 @@ async function startNotebookHost(
       sourceCommit,
       getRecoveryState: recoveryState,
       services: {
-        format: async cells => {
+        format: async (cells, operation) => {
           const codeCells = cells.filter(cell => cell.type === "code");
           if (codeCells.length === 0) return {};
           const document: NotebookDocument = { cells: codeCells.map(cell => ({ id: cell.id, type: cell.type, body: [...cell.body], revision: cell.revision })) };
-          const edits = await formatter!.formatCells(document, codeCells.map(cell => cell.id));
+          const edits = await formatter!.formatCells(document, codeCells.map(cell => cell.id), operation?.signal);
           return Object.fromEntries(edits.map(edit => [cellRefId(edit.cell), edit.body]));
         },
         refreshPackageEnvironment: async (): Promise<REnvironment> => {
@@ -1035,7 +1034,7 @@ async function startNotebookHost(
           scheduleLspSync();
           return refreshed;
         },
-        service: async (command, payload) => {
+        service: async (command, payload, operation) => {
           if (command === "preferences.update") {
             await preferences.update(payload.patch as PreferencesPatch, payload.expectedPreferencesVersion as string | null);
             return { config: controller!.snapshot().config, preferencesVersion: preferences.snapshot().version };
@@ -1083,10 +1082,10 @@ async function startNotebookHost(
               throw error;
             }
           }
-          if (command === "packages.status") return packageManager!.status({ operationId: stringValue(payload.operationId) });
+          if (command === "packages.status") return packageManager!.status({ operationId: stringValue(payload.operationId), signal: operation?.signal });
           if (command === "packages.install") return packageManager!.install(z.array(z.string()).parse(payload.packages ?? []), {
             operationId: stringValue(payload.operationId),
-            signal: runtimeAbort?.signal,
+            signal: operation?.signal,
           });
           if (command === "publish") {
             if (activePublishes.size > 0) throw Object.assign(new Error("a publication is already in progress"), { code: "operation_in_progress" });
@@ -1096,7 +1095,7 @@ async function startNotebookHost(
             const snapshot = publicationSnapshot(store.currentDocument, liveSnapshot);
             const requestedPath = typeof payload.outputPath === "string" && payload.outputPath.length > 0 ? payload.outputPath : null;
             const outputPath = requestedPath ?? join(work, "publish-" + randomUUID() + ".html");
-            const pendingPublish = publisher.publishSnapshot(snapshot, { outputPath, includeCode: payload.includeCode === true, signal: publishAbort.signal });
+            const pendingPublish = publisher.publishSnapshot(snapshot, { outputPath, includeCode: payload.includeCode === true, signal: operation?.signal });
             activePublishes.add(pendingPublish);
             const result = await pendingPublish.finally(() => { activePublishes.delete(pendingPublish); });
             if (requestedPath !== null) return result;
@@ -1115,7 +1114,11 @@ async function startNotebookHost(
                 await rm(result.path, { force: true });
               }
               if (server === undefined) throw new Error("publish server is unavailable");
-              return server.retainArtifact(artifact);
+              return {
+                artifact: server.retainArtifact(artifact),
+                source: result.source,
+                unsavedChangesExcluded: result.unsavedChangesExcluded,
+              };
             } catch (error) {
               if (artifact !== undefined) artifactStore.release([artifact]);
               throw error;

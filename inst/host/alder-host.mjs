@@ -33446,6 +33446,7 @@ var inspectCommandSchema = external_exports.object({ ...commandIdentityShape, ty
 var lazyOutputCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("lazy-output"), key: idSchema, kernelEpoch: idSchema }).strict();
 var tablePageCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("table-page"), handle: idSchema, offset: protocolIntegerSchema, limit: external_exports.number().int().min(1).max(200).safe(), sortBy: boundedUtf8StringSchema(256), sortDescending: external_exports.boolean(), filter: boundedUtf8StringSchema(MAX_FRAME_BYTES), kernelEpoch: idSchema }).strict();
 var interruptCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("interrupt"), runId: idSchema.optional() }).strict();
+var cancelOperationCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("cancel-operation"), operationId: idSchema }).strict();
 var activeClientIdsSchema = external_exports.array(idSchema).max(128).refine(
   (clientIds) => new Set(clientIds).size === clientIds.length,
   "expectedClientIds must not contain duplicates"
@@ -33474,11 +33475,12 @@ var hostCommandSchema = external_exports.discriminatedUnion("type", [
   lazyOutputCommandSchema,
   tablePageCommandSchema,
   interruptCommandSchema,
+  cancelOperationCommandSchema,
   shutdownCommandSchema
 ]);
 var cellStatusSchema = external_exports.enum(["idle", "stale", "running", "done", "error", "stopped", "disabled"]);
 var operationStatusSchema = external_exports.enum(["accepted", "running", "done", "error", "interrupted", "cancelled"]);
-var operationKindSchema = external_exports.enum(["transaction", "run", "select-r", "set-app", "packages-declare", "packages-install", "publish", "upload", "save", "save-as", "reload-source", "format", "set-preferences", "set-config", "set-layout", "set-runtime", "restart", "widget", "inspect", "lazy-output", "table-page", "interrupt", "shutdown", "widget-reset", "analysis"]);
+var operationKindSchema = external_exports.enum(["transaction", "run", "select-r", "set-app", "packages-declare", "packages-install", "publish", "upload", "save", "save-as", "reload-source", "format", "set-preferences", "set-config", "set-layout", "set-runtime", "restart", "widget", "inspect", "lazy-output", "table-page", "interrupt", "cancel-operation", "shutdown", "widget-reset", "analysis"]);
 var hostErrorSchema = external_exports.object({ code: boundedUtf8StringSchema(256, true), message: boundedUtf8StringSchema(MAX_FRAME_BYTES), operationId: idSchema.nullable().optional(), details: protocolJsonSchema.optional() }).strict();
 var MAX_OPERATION_PROGRESS_BYTES = 64 * 1024;
 var operationProgressDataSchema = protocolJsonSchema.superRefine((value, context) => {

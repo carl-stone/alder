@@ -481,6 +481,7 @@ test("installed kernel follows ordinary project profile and library activation",
 }, async () => {
   const directory = await mkdtemp(join(tmpdir(), "alder-project-profile-"));
   const path = join(directory, "notebook.R");
+  const projectPath = join(directory, "project-notebook.R");
   const userLibrary = join(directory, "user-library");
   const projectLibrary = join(directory, "renv-library");
   const packageName = "alder";
@@ -520,8 +521,9 @@ test("installed kernel follows ordinary project profile and library activation",
     }).trim();
     assert.match(ordinary,
       /^2\.0\.0\|.*renv-library.*\|project\|project-marker\|999\.0\.0\|incompatible-project-jsonlite$/);
-    await writeFile(path, `# %%\n${setupExpression}${valueExpression}\n`);
-    app = await startInstalledHost(path, { executionMode: "lazy" });
+    // A closed host may retain recovery for its path; keep the project fixture independent.
+    await writeFile(projectPath, `# %%\n${setupExpression}${valueExpression}\n`);
+    app = await startInstalledHost(projectPath, { executionMode: "lazy" });
     for (const dependency of ["codetools", "jsonlite", "mime", "rlang"]) {
       await access(join(stagedResources!.rLibraryDirectory, dependency, "DESCRIPTION"));
     }

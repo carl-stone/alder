@@ -129,6 +129,12 @@ export class NotebookView {
   private minimapViewportFrame: number | null = null;
   private readonly lspRequests = new Map<string, AbortController>();
   private readonly packageOperations = new Set<PackageOperationTarget>();
+  private readonly activeFormatOperationIds = new Set<string>();
+  private activePublishOperationId: string | null = null;
+  private activePackageInstallOperationId: string | null = null;
+  private formatCancelButton: HTMLButtonElement | null = null;
+  private publishCancelButton: HTMLButtonElement | null = null;
+  private packageCancelButton: HTMLButtonElement | null = null;
   private draggedKey: string | null = null;
   private readonly resizeHandler = (): void => this.updateTopbarInset();
   private readonly preserveRunFocus = (event: MouseEvent): void => {
@@ -658,7 +664,7 @@ export class NotebookView {
           }).catch((error) => this.showError(error));
         },
         onSave: () => void this.action(() => this.saveNotebook()).catch((error) => this.showError(error)),
-        onFormat: () => void this.action(() => this.client.formatCells([cell.key])).catch((error) => this.showError(error)),
+        onFormat: () => void this.action(() => this.formatCells([cell.key])).catch((error) => this.showError(error)),
         onJump: (kind, value) => {
           if (kind === "move") {
             void this.action(() => this.moveCellBy(cell.key, value < 0 ? -1 : 1)).catch((error) => this.showError(error));
@@ -1925,14 +1931,36 @@ export class NotebookView {
     includeLabel.append(include, this.dom.createTextNode(" Include code"));
     actionMenu.panel.appendChild(includeLabel);
     actionMenu.panel.appendChild(this.serviceButton("Publish HTML", async () => {
-      const dirty = this.documentValue?.snapshot.dirty === true || (this.documentValue?.pendingSource().changes.length ?? 0) > 0;
-      const result = await this.runService("publish", { include_code: include.checked });
+      let result: CommandResult | HostQueryResult;
+      try {
+        result = await this.runService("publish", { include_code: include.checked }, (operationId) => {
+          this.activePublishOperationId = operationId;
+          if (this.publishCancelButton) this.publishCancelButton.disabled = false;
+        });
+      } finally {
+        this.activePublishOperationId = null;
+        if (this.publishCancelButton) this.publishCancelButton.disabled = true;
+      }
       await this.downloadServiceResult(result);
-      this.actionNotice = dirty
+      this.actionNotice = operationPayload(result).unsavedChangesExcluded === true
         ? "Published the last saved version. Unsaved changes were not included."
         : "Published HTML downloaded.";
       this.renderStatus();
     }));
+    this.publishCancelButton = this.serviceButton("Cancel publishing", async () => {
+      const operationId = this.activePublishOperationId;
+      if (operationId === null) throw new Error("No publication is in progress");
+      await this.client.cancelOperation(operationId);
+    });
+    this.publishCancelButton.disabled = true;
+    actionMenu.panel.appendChild(this.publishCancelButton);
+    this.formatCancelButton = this.serviceButton("Cancel formatting", async () => {
+      const operationId = this.activeFormatOperationIds.values().next().value as string | undefined;
+      if (operationId === undefined) throw new Error("No formatting operation is in progress");
+      await this.client.cancelOperation(operationId);
+    });
+    this.formatCancelButton.disabled = true;
+    actionMenu.panel.appendChild(this.formatCancelButton);
     actionMenu.panel.appendChild(this.serviceButton("Check notebook", async () => {
       const result = await this.runService("check", {});
       const payload = isObject(result.result) ? result.result : {};
@@ -1966,12 +1994,20 @@ export class NotebookView {
       try {
         const result = await this.runService(command, payload, (operationId) => {
           target.operationId = operationId;
+          if (command === "packages.install") {
+            this.activePackageInstallOperationId = operationId;
+            if (this.packageCancelButton) this.packageCancelButton.disabled = false;
+          }
           const current = this.documentValue?.snapshot.operations.find((candidate) => candidate.id === operationId);
           if (current) this.renderPackageProgress(current, target);
         });
         if (command === "packages.declare") updateStatus(await this.client.service("packages.status"), command);
         else updateStatus(result, command);
       } finally {
+        if (command === "packages.install" && this.activePackageInstallOperationId === target.operationId) {
+          this.activePackageInstallOperationId = null;
+          if (this.packageCancelButton) this.packageCancelButton.disabled = true;
+        }
         this.packageOperations.delete(target);
       }
     };
@@ -1984,6 +2020,13 @@ export class NotebookView {
     packageMenu.panel.appendChild(this.serviceButton("Install missing", async () => {
       await runPackage("packages.install", { packages: packages() });
     }));
+    this.packageCancelButton = this.serviceButton("Cancel install", async () => {
+      const operationId = this.activePackageInstallOperationId;
+      if (operationId === null) throw new Error("No package installation is in progress");
+      await this.client.cancelOperation(operationId);
+    });
+    this.packageCancelButton.disabled = true;
+    packageMenu.panel.appendChild(this.packageCancelButton);
     packageMenu.panel.appendChild(status);
 
     menus.append(actionMenu.wrap, packageMenu.wrap);
@@ -2035,6 +2078,20 @@ export class NotebookView {
     await this.client.commitEdits();
     await this.output.flush();
     return this.client.service(command, payload, onAccepted);
+  }
+
+  private async formatCells(keys?: readonly string[]): Promise<CommandResult> {
+    let acceptedOperationId: string | null = null;
+    try {
+      return await this.client.formatCells(keys, (operationId) => {
+        acceptedOperationId = operationId;
+        this.activeFormatOperationIds.add(operationId);
+        if (this.formatCancelButton) this.formatCancelButton.disabled = false;
+      });
+    } finally {
+      if (acceptedOperationId !== null) this.activeFormatOperationIds.delete(acceptedOperationId);
+      if (this.formatCancelButton && this.activeFormatOperationIds.size === 0) this.formatCancelButton.disabled = true;
+    }
   }
 
   private renderPackageProgress(operation: OperationRecord, target?: PackageOperationTarget): void {
@@ -2218,7 +2275,7 @@ export class NotebookView {
     if (destination === null) return undefined;
     let formatFailure: string | null = null;
     if (this.executionAvailable() && nested(this.documentValue?.snapshot.config, ["format", "on_save"]) === true) {
-      try { await this.client.formatCells(); }
+      try { await this.formatCells(); }
       catch (error) { formatFailure = error instanceof Error ? error.message : String(error); }
     }
     const result = await (destination === undefined ? this.client.save() : this.client.saveAs(destination));
@@ -3051,8 +3108,8 @@ function operationPayload(result: CommandResult | HostQueryResult): Record<strin
 }
 
 function artifactHandleFromResult(result: CommandResult | HostQueryResult): ArtifactHandle | null {
-  const candidates: unknown[] = [];
-  candidates.push(result.result);
+  const payload = result.result;
+  const candidates: unknown[] = [payload, isObject(payload) ? payload.artifact : null];
   for (const candidate of candidates) if (isArtifactHandle(candidate)) return candidate;
   return null;
 }

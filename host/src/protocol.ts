@@ -810,6 +810,7 @@ export const inspectCommandSchema = z.object({ ...commandIdentityShape, type: z.
 export const lazyOutputCommandSchema = z.object({ ...commandIdentityShape, type: z.literal("lazy-output"), key: idSchema, kernelEpoch: idSchema }).strict();
 export const tablePageCommandSchema = z.object({ ...commandIdentityShape, type: z.literal("table-page"), handle: idSchema, offset: protocolIntegerSchema, limit: z.number().int().min(1).max(200).safe(), sortBy: boundedUtf8StringSchema(256), sortDescending: z.boolean(), filter: boundedUtf8StringSchema(MAX_FRAME_BYTES), kernelEpoch: idSchema }).strict();
 export const interruptCommandSchema = z.object({ ...commandIdentityShape, type: z.literal("interrupt"), runId: idSchema.optional() }).strict();
+export const cancelOperationCommandSchema = z.object({ ...commandIdentityShape, type: z.literal("cancel-operation"), operationId: idSchema }).strict();
 const activeClientIdsSchema = z.array(idSchema).max(128).refine(
   (clientIds) => new Set(clientIds).size === clientIds.length,
   "expectedClientIds must not contain duplicates",
@@ -819,7 +820,7 @@ export const hostCommandSchema = z.discriminatedUnion("type", [
   transactionCommandSchema, runCommandSchema, selectRCommandSchema, setAppCommandSchema, packagesDeclareCommandSchema, packagesInstallCommandSchema,
   publishCommandSchema, uploadCommandSchema, saveCommandSchema, saveAsCommandSchema, reloadSourceCommandSchema, formatCommandSchema,
   setPreferencesCommandSchema, setConfigCommandSchema, setLayoutCommandSchema, setRuntimeCommandSchema, restartCommandSchema, widgetCommandSchema, inspectCommandSchema,
-  lazyOutputCommandSchema, tablePageCommandSchema, interruptCommandSchema, shutdownCommandSchema,
+  lazyOutputCommandSchema, tablePageCommandSchema, interruptCommandSchema, cancelOperationCommandSchema, shutdownCommandSchema,
 ]);
 export type HostCommand = z.infer<typeof hostCommandSchema>;
 
@@ -827,7 +828,7 @@ export type CellStatus = "idle" | "stale" | "running" | "done" | "error" | "stop
 export const cellStatusSchema = z.enum(["idle", "stale", "running", "done", "error", "stopped", "disabled"]);
 export type OperationStatus = "accepted" | "running" | "done" | "error" | "interrupted" | "cancelled";
 export const operationStatusSchema = z.enum(["accepted", "running", "done", "error", "interrupted", "cancelled"]);
-export const operationKindSchema = z.enum(["transaction", "run", "select-r", "set-app", "packages-declare", "packages-install", "publish", "upload", "save", "save-as", "reload-source", "format", "set-preferences", "set-config", "set-layout", "set-runtime", "restart", "widget", "inspect", "lazy-output", "table-page", "interrupt", "shutdown", "widget-reset", "analysis"]);
+export const operationKindSchema = z.enum(["transaction", "run", "select-r", "set-app", "packages-declare", "packages-install", "publish", "upload", "save", "save-as", "reload-source", "format", "set-preferences", "set-config", "set-layout", "set-runtime", "restart", "widget", "inspect", "lazy-output", "table-page", "interrupt", "cancel-operation", "shutdown", "widget-reset", "analysis"]);
 export type OperationKind = z.infer<typeof operationKindSchema>;
 export const hostErrorSchema = z.object({ code: boundedUtf8StringSchema(256, true), message: boundedUtf8StringSchema(MAX_FRAME_BYTES), operationId: idSchema.nullable().optional(), details: protocolJsonSchema.optional() }).strict();
 export type HostError = z.infer<typeof hostErrorSchema>;
@@ -964,7 +965,8 @@ export const notebookQueryResultSchema = z.object({
 export type NotebookQueryResult = z.infer<typeof notebookQueryResultSchema>;
 export interface HostQueryResult { epoch: string; documentRevision: number; cursor: number; result: JsonValue | ArtifactHandle; }
 export const hostQueryResultSchema = z.object({ epoch: idSchema, documentRevision: revisionSchema, cursor: protocolIntegerSchema, result: z.union([protocolJsonSchema, z.lazy(() => artifactHandleSchema)]) }).strict();
-export interface ControllerServices { save?(snapshot: HostSnapshot): Promise<Record<string, unknown>>; format?(cells: readonly Pick<HostCellState, "id" | "type" | "body" | "revision">[]): Promise<Record<string, string[]>>; service?(command: string, payload: Record<string, unknown>): Promise<unknown>; refreshPackageEnvironment?(): Promise<REnvironment>; }
+export interface ControllerServiceContext { readonly operationId: string; readonly signal: AbortSignal; }
+export interface ControllerServices { save?(snapshot: HostSnapshot): Promise<Record<string, unknown>>; format?(cells: readonly Pick<HostCellState, "id" | "type" | "body" | "revision">[], context?: ControllerServiceContext): Promise<Record<string, string[]>>; service?(command: string, payload: Record<string, unknown>, context?: ControllerServiceContext): Promise<unknown>; refreshPackageEnvironment?(): Promise<REnvironment>; }
 
 export type TableHandle = string;
 export interface TablePage {

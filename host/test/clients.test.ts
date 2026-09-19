@@ -461,6 +461,39 @@ test("Publish HTML publishes the last saved version without forcing Save", async
   });
 });
 
+test("Publish HTML uses the server result for the unsaved-source warning", async () => {
+  await withViewDom(async (dom, domWindow) => {
+    Object.defineProperty(globalThis, "location", { configurable: true, writable: true, value: { search: "?view=editor", href: "http://notebook.test/book.R?view=editor", origin: "http://notebook.test" } });
+    const initial = snapshot([cell("c1", ["saved <- 1"])]);
+    initial.dirty = false;
+    initial.changed = false;
+    const document = new BrowserDocument(initial);
+    const client = settingsClient({
+      commitEdits: async () => initial,
+      service: async () => resultFor("publish", {
+        artifact: artifactDescriptor(),
+        source: "last-saved",
+        unsavedChangesExcluded: true,
+      }),
+    });
+    const view = new NotebookView(client, dom);
+    (view as unknown as { downloadServiceResult: () => Promise<void> }).downloadServiceResult = async () => {};
+    try {
+      view.render(document);
+      const button = [...dom.querySelectorAll<HTMLButtonElement>("button")]
+        .find((candidate) => candidate.textContent === "Publish HTML");
+      assert.ok(button);
+      button.dispatchEvent(new domWindow.Event("click", { bubbles: true, cancelable: true }));
+      const status = dom.getElementById("status");
+      assert.ok(status);
+      await waitUntil(() => status.textContent?.includes("Unsaved changes were not included") === true);
+      assert.match(status.textContent ?? "", /Published the last saved version/);
+    } finally {
+      view.destroy();
+    }
+  });
+});
+
 test("a slow publish disables only its own action", async () => {
   await withViewDom(async (dom, domWindow) => {
     Object.defineProperty(globalThis, "location", { configurable: true, writable: true, value: { search: "?view=editor", href: "http://notebook.test/book.R?view=editor", origin: "http://notebook.test" } });

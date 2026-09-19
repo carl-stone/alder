@@ -290,6 +290,8 @@ export class Controller {
     string,
     Set<(operation: OperationRecord) => void>
   >();
+  private readonly optionalOperationCancellations = new Map<string, AbortController>();
+  private readonly pendingOptionalCancellations = new Set<string>();
   private readonly commandEntries = new Map<string, CommandEntry>();
   private readonly executionRequestIds = new Map<string, string>();
   private runCommandTail: Promise<void> = Promise.resolve();
@@ -417,6 +419,7 @@ export class Controller {
   private analyzerStartupAttempted = false;
   private kernelStartupAttempted = false;
   private engineRestarting = false;
+  private packageRestartPending = false;
   private runtimeContextReservation: string | undefined;
 
   constructor(options: ControllerOptions) {
@@ -817,6 +820,10 @@ export class Controller {
     return false;
   }
 
+  cancelOptionalOperations(): void {
+    for (const cancellation of this.optionalOperationCancellations.values()) cancellation.abort();
+  }
+
   publishPackageProgress(operationId: string, progress: unknown, clientId?: string): void {
     if (this.closed) return;
     const operation = clientId === undefined
@@ -1153,6 +1160,9 @@ export class Controller {
       if (pending.uploadId !== null) void this.removeUpload(pending.uploadId);
     }
     this.pendingUploads.clear();
+    this.cancelOptionalOperations();
+    this.optionalOperationCancellations.clear();
+    this.pendingOptionalCancellations.clear();
     for (const operation of this.operations.values()) {
       if (!isTerminal(operation.status)) {
         this.failOperation(
@@ -1187,6 +1197,13 @@ export class Controller {
           409,
         );
       }
+      if (this.packageRestartPending && ["run", "widget", "inspect", "lazy-output", "table-page"].includes(command.type)) {
+        throw new ControllerError(
+          "operation_in_progress",
+          "package installation restart is pending",
+          409,
+        );
+      }
       if (!this.kernelAvailable && (command.type === 'run' || command.type === 'widget'
         || command.type === 'inspect' || command.type === 'lazy-output' || command.type === 'table-page')) {
         const availability = this.runtimeAvailabilityError;
@@ -1214,6 +1231,9 @@ export class Controller {
           break;
         case "interrupt":
           result = await this.interruptActiveRun(command.runId);
+          break;
+        case "cancel-operation":
+          result = this.cancelOptionalOperation(command.operationId, command.clientId);
           break;
         case "restart":
           if (command.expectedDocumentRevision !== undefined) this.assertDocumentRevision(command.expectedDocumentRevision);
@@ -1258,7 +1278,7 @@ export class Controller {
           break;
         case "format":
           this.assertDocumentRevision(command.expectedDocumentRevision);
-          result = await this.formatSource(command.cellIds, command.expectedRevisions, command.requestId);
+          result = await this.formatSource(command.cellIds, command.expectedRevisions, command.requestId, command.clientId);
           break;
         case "set-runtime":
           result = await this.setRuntime(command.on_cell_change, command.on_startup, command.cache_enabled, command.expectedDocumentRevision, command.requestId);
@@ -4420,6 +4440,7 @@ export class Controller {
     requestedIds: readonly string[] | undefined,
     expectedRevisions: Readonly<Record<string, number>>,
     operationId: string,
+    clientId: string,
   ): Promise<unknown> {
     this.assertStartedForMutation();
     if (this.services.format === undefined) {
@@ -4446,7 +4467,8 @@ export class Controller {
     });
     const codeCells = selected.filter((cell) => cell.type === "code");
     if (codeCells.length === 0) return { changed: 0, edited: [], created: [] };
-    const formatted = await this.services.format(codeCells);
+    this.assertOptionalOperationCanStart("format", operationId, clientId);
+    const formatted = await this.runCancelableOptionalOperation(operationId, clientId, (context) => this.services.format!(codeCells, context));
     this.assertNotClosed();
     for (const selectedCell of selected) {
       const current = this.requireCell(selectedCell.id);
@@ -4555,7 +4577,7 @@ export class Controller {
     return this.commitSource(request);
   }
 
-  private async callService(command: string, payload: Record<string, unknown>): Promise<unknown> {
+  private async callService(command: string, payload: Record<string, unknown>, context?: { operationId: string; signal: AbortSignal }): Promise<unknown> {
     if (command === "check" || command === "packages.install") this.assertStarted();
     else this.assertDocumentReady();
     if (command === "r.select") this.assertNoRuntimeContextReservation();
@@ -4592,7 +4614,7 @@ export class Controller {
       return { text: result.text };
     }
     if (this.services.service !== undefined) {
-      const result = await this.services.service(command, clone(payload));
+      const result = await this.services.service(command, clone(payload), context);
       this.assertNotClosed();
       return result;
     }
@@ -4643,6 +4665,60 @@ export class Controller {
     }
   }
 
+  private assertOptionalOperationCanStart(kind: "format" | "publish", operationId: string, clientId: string): void {
+    for (const operation of this.operations.values()) {
+      if (operation.kind !== kind || isTerminal(operation.status)) continue;
+      if (operation.id === operationId && operation.clientId === clientId) continue;
+      throw new ControllerError("operation_in_progress", `a ${kind} operation is already in progress`, 409);
+    }
+  }
+
+  private async runCancelableOptionalOperation<T>(
+    operationId: string,
+    clientId: string,
+    run: (context: { operationId: string; signal: AbortSignal }) => Promise<T>,
+  ): Promise<T> {
+    const key = this.operationKey(clientId, operationId);
+    const cancellation = new AbortController();
+    this.optionalOperationCancellations.set(key, cancellation);
+    if (this.pendingOptionalCancellations.delete(key)) cancellation.abort();
+    const operation = this.operationFor(operationId, clientId);
+    if (operation !== undefined && operation.status === "accepted") operation.status = "running";
+    if (operation !== undefined) this.rememberOperation(operation);
+    try {
+      if (cancellation.signal.aborted) throw new ControllerError("cancelled", "operation was cancelled", 409);
+      const result = await run({ operationId, signal: cancellation.signal });
+      if (cancellation.signal.aborted) throw new ControllerError("cancelled", "operation was cancelled", 409);
+      return result;
+    } catch (error) {
+      if (cancellation.signal.aborted) {
+        this.cancelOperation(operationId, hostError("cancelled", "operation was cancelled", operationId), clientId);
+        throw new ControllerError("cancelled", "operation was cancelled", 409);
+      }
+      throw error;
+    } finally {
+      if (this.optionalOperationCancellations.get(key) === cancellation) this.optionalOperationCancellations.delete(key);
+    }
+  }
+
+  private cancelOptionalOperation(operationId: string, clientId: string): unknown {
+    const operation = this.operationFor(operationId, clientId);
+    if (operation === undefined || !["format", "publish", "packages-install"].includes(operation.kind)) {
+      throw new ControllerError("not_found", "no cancellable operation: " + operationId, 404);
+    }
+    if (isTerminal(operation.status)) {
+      throw new ControllerError("operation_not_active", "operation is no longer active", 409);
+    }
+    const cancellation = this.optionalOperationCancellations.get(this.operationKey(clientId, operationId));
+    if (cancellation === undefined) {
+      this.pendingOptionalCancellations.add(this.operationKey(clientId, operationId));
+      return { operationId, cancellationRequested: true };
+    }
+    this.markOperationCancellationRequested(operationId, clientId);
+    cancellation.abort();
+    return { operationId, cancellationRequested: true };
+  }
+
   private async runLongService(
     command: string,
     payload: Record<string, unknown>,
@@ -4656,7 +4732,7 @@ export class Controller {
     if (operation !== undefined && operation.status === "accepted") operation.status = "running";
     if (operation !== undefined) this.rememberOperation(operation);
     try {
-      return await this.runPackageInstall(payload, operationId, clientId);
+      return await this.runCancelableOptionalOperation(operationId, clientId, (context) => this.runPackageInstall(payload, operationId, clientId, context));
     } finally {
       this.scheduleReactiveRun();
     }
@@ -4666,10 +4742,11 @@ export class Controller {
     payload: Record<string, unknown>,
     operationId: string,
     clientId: string,
+    context: { operationId: string; signal: AbortSignal },
   ): Promise<unknown> {
     let packages = Array.isArray(payload.packages) ? [...payload.packages] as string[] : [];
     if (packages.length === 0) {
-      const before = await this.callService("packages.status", { operationId });
+      const before = await this.callService("packages.status", { operationId }, context);
       packages = packageMissing(before);
       if (packages.length === 0) {
         return { result: { ok: true, mutatedLibrary: false }, status: clone(before) };
@@ -4678,7 +4755,7 @@ export class Controller {
     let result: unknown;
     let installFailure: unknown;
     try {
-      result = await this.callService("packages.install", { ...payload, packages, operationId });
+      result = await this.callService("packages.install", { ...payload, packages, operationId }, context);
       const failure = serviceResultError(result, operationId);
       if (failure !== null) installFailure = failure;
     } catch (error) {
@@ -4688,11 +4765,14 @@ export class Controller {
     let restartFailure: ControllerError | undefined;
     const restartRequired = !isRecord(result) || result.mutatedLibrary !== false;
     if (restartRequired) {
+      this.packageRestartPending = true;
       try {
         if (this.pumpPromise !== null) await this.pumpPromise;
         await this.restartAfterPackageInstall(operationId, clientId);
       } catch (error) {
         restartFailure = asControllerError(error, "worker_unavailable", 503);
+      } finally {
+        this.packageRestartPending = false;
       }
     }
     if (installFailure !== undefined) {
@@ -4707,7 +4787,7 @@ export class Controller {
       throw installFailure;
     }
     if (restartFailure !== undefined) throw restartFailure;
-    const status = await this.callService("packages.status", { operationId });
+    const status = await this.callService("packages.status", { operationId }, context);
     return { result: clone(result), status: clone(status) };
   }
 
@@ -5324,6 +5404,7 @@ export class Controller {
     operation.error = null;
     operation.documentRevision = this.documentRevisionValue;
     operation.settledAt = Date.now();
+    this.pendingOptionalCancellations.delete(this.operationKey(clientId, id));
     this.rememberOperation(operation);
     this.notifyOperationWaiters(operation);
     if (operation.kind === "packages-install") this.scheduleReactiveRun();
@@ -5337,6 +5418,7 @@ export class Controller {
     operation.error = clone(error);
     operation.documentRevision = this.documentRevisionValue;
     operation.settledAt = Date.now();
+    this.pendingOptionalCancellations.delete(this.operationKey(clientId, id));
     this.rememberOperation(operation);
     this.notifyOperationWaiters(operation);
     if (operation.kind === "packages-install") this.scheduleReactiveRun();
@@ -5350,6 +5432,7 @@ export class Controller {
     operation.error = clone(error);
     operation.documentRevision = this.documentRevisionValue;
     operation.settledAt = Date.now();
+    this.pendingOptionalCancellations.delete(this.operationKey(clientId, id));
     this.rememberOperation(operation);
     this.notifyOperationWaiters(operation);
     if (operation.kind === "packages-install") this.scheduleReactiveRun();
@@ -5538,7 +5621,8 @@ export class Controller {
         return this.runLongService("packages.install", { packages: command.packages }, command.requestId, command.clientId);
       case "publish": {
         this.assertDocumentRevision(command.expectedDocumentRevision);
-        return this.callService("publish", { includeCode: command.includeCode, outputPath: command.outputPath });
+        this.assertOptionalOperationCanStart("publish", command.requestId, command.clientId);
+        return this.runCancelableOptionalOperation(command.requestId, command.clientId, (context) => this.callService("publish", { includeCode: command.includeCode, outputPath: command.outputPath }, context));
       }
       case "save-as":
         return this.executeSourceService({

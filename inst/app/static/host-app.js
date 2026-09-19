@@ -20635,6 +20635,7 @@ var inspectCommandSchema = external_exports.object({ ...commandIdentityShape, ty
 var lazyOutputCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("lazy-output"), key: idSchema, kernelEpoch: idSchema }).strict();
 var tablePageCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("table-page"), handle: idSchema, offset: protocolIntegerSchema, limit: external_exports.number().int().min(1).max(200).safe(), sortBy: boundedUtf8StringSchema(256), sortDescending: external_exports.boolean(), filter: boundedUtf8StringSchema(MAX_FRAME_BYTES), kernelEpoch: idSchema }).strict();
 var interruptCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("interrupt"), runId: idSchema.optional() }).strict();
+var cancelOperationCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("cancel-operation"), operationId: idSchema }).strict();
 var activeClientIdsSchema = external_exports.array(idSchema).max(128).refine(
   (clientIds) => new Set(clientIds).size === clientIds.length,
   "expectedClientIds must not contain duplicates"
@@ -20663,11 +20664,12 @@ var hostCommandSchema = external_exports.discriminatedUnion("type", [
   lazyOutputCommandSchema,
   tablePageCommandSchema,
   interruptCommandSchema,
+  cancelOperationCommandSchema,
   shutdownCommandSchema
 ]);
 var cellStatusSchema = external_exports.enum(["idle", "stale", "running", "done", "error", "stopped", "disabled"]);
 var operationStatusSchema = external_exports.enum(["accepted", "running", "done", "error", "interrupted", "cancelled"]);
-var operationKindSchema = external_exports.enum(["transaction", "run", "select-r", "set-app", "packages-declare", "packages-install", "publish", "upload", "save", "save-as", "reload-source", "format", "set-preferences", "set-config", "set-layout", "set-runtime", "restart", "widget", "inspect", "lazy-output", "table-page", "interrupt", "shutdown", "widget-reset", "analysis"]);
+var operationKindSchema = external_exports.enum(["transaction", "run", "select-r", "set-app", "packages-declare", "packages-install", "publish", "upload", "save", "save-as", "reload-source", "format", "set-preferences", "set-config", "set-layout", "set-runtime", "restart", "widget", "inspect", "lazy-output", "table-page", "interrupt", "cancel-operation", "shutdown", "widget-reset", "analysis"]);
 var hostErrorSchema = external_exports.object({ code: boundedUtf8StringSchema(256, true), message: boundedUtf8StringSchema(MAX_FRAME_BYTES), operationId: idSchema.nullable().optional(), details: protocolJsonSchema.optional() }).strict();
 var MAX_OPERATION_PROGRESS_BYTES = 64 * 1024;
 var operationProgressDataSchema = protocolJsonSchema.superRefine((value, context) => {
@@ -21915,6 +21917,9 @@ var BrowserNotebookClient = class {
   async interrupt(runId) {
     return this.dispatch({ type: "interrupt", ...this.base("interrupt", false), ...runId ? { runId } : {} });
   }
+  async cancelOperation(targetOperationId) {
+    return this.dispatch({ type: "cancel-operation", ...this.base("cancel-operation", false), operationId: targetOperationId });
+  }
   async restart(replay = true) {
     const command = { type: "restart", replay, ...this.base("restart"), ...replay ? { expectedDocumentRevision: this.requireDocument().snapshot.documentRevision } : {} };
     return replay ? this.dispatchSettled(command) : this.dispatch(command);
@@ -22039,11 +22044,11 @@ var BrowserNotebookClient = class {
   async setLayout(layout) {
     return this.dispatch({ type: "set-layout", ...this.base("layout"), layout, expectedSidecarVersion: this.requireDocument().snapshot.sidecars.layout.version });
   }
-  async formatCells(keys) {
+  async formatCells(keys, onAccepted) {
     await this.commitEdits();
     const cells = keys?.map((key) => this.requireCell(key)) ?? [...this.requireDocument().cells];
     const acknowledged = cells.filter((cell) => cell.id !== null);
-    return this.dispatchSettled({ type: "format", ...this.base("format"), ...keys ? { cellIds: acknowledged.map((cell) => cell.id) } : {}, expectedRevisions: Object.fromEntries(acknowledged.map((cell) => [cell.id, cell.serverRevision])) });
+    return this.dispatchSettled({ type: "format", ...this.base("format"), ...keys ? { cellIds: acknowledged.map((cell) => cell.id) } : {}, expectedRevisions: Object.fromEntries(acknowledged.map((cell) => [cell.id, cell.serverRevision])) }, onAccepted);
   }
   async resolveArtifact(descriptor) {
     const parsedDescriptor = artifactHandleSchema.safeParse(descriptor);
@@ -23712,6 +23717,12 @@ var NotebookView = class {
   minimapViewportFrame = null;
   lspRequests = /* @__PURE__ */ new Map();
   packageOperations = /* @__PURE__ */ new Set();
+  activeFormatOperationIds = /* @__PURE__ */ new Set();
+  activePublishOperationId = null;
+  activePackageInstallOperationId = null;
+  formatCancelButton = null;
+  publishCancelButton = null;
+  packageCancelButton = null;
   draggedKey = null;
   resizeHandler = () => this.updateTopbarInset();
   preserveRunFocus = (event) => {
@@ -24147,7 +24158,7 @@ var NotebookView = class {
           }).catch((error61) => this.showError(error61));
         },
         onSave: () => void this.action(() => this.saveNotebook()).catch((error61) => this.showError(error61)),
-        onFormat: () => void this.action(() => this.client.formatCells([cell.key])).catch((error61) => this.showError(error61)),
+        onFormat: () => void this.action(() => this.formatCells([cell.key])).catch((error61) => this.showError(error61)),
         onJump: (kind, value) => {
           if (kind === "move") {
             void this.action(() => this.moveCellBy(cell.key, value < 0 ? -1 : 1)).catch((error61) => this.showError(error61));
@@ -25349,12 +25360,34 @@ ${jupyterTrace.map((line, index) => `${index + 1}. ${line}`).join("\n")}` : ""
     includeLabel.append(include, this.dom.createTextNode(" Include code"));
     actionMenu.panel.appendChild(includeLabel);
     actionMenu.panel.appendChild(this.serviceButton("Publish HTML", async () => {
-      const dirty = this.documentValue?.snapshot.dirty === true || (this.documentValue?.pendingSource().changes.length ?? 0) > 0;
-      const result = await this.runService("publish", { include_code: include.checked });
+      let result;
+      try {
+        result = await this.runService("publish", { include_code: include.checked }, (operationId2) => {
+          this.activePublishOperationId = operationId2;
+          if (this.publishCancelButton) this.publishCancelButton.disabled = false;
+        });
+      } finally {
+        this.activePublishOperationId = null;
+        if (this.publishCancelButton) this.publishCancelButton.disabled = true;
+      }
       await this.downloadServiceResult(result);
-      this.actionNotice = dirty ? "Published the last saved version. Unsaved changes were not included." : "Published HTML downloaded.";
+      this.actionNotice = operationPayload(result).unsavedChangesExcluded === true ? "Published the last saved version. Unsaved changes were not included." : "Published HTML downloaded.";
       this.renderStatus();
     }));
+    this.publishCancelButton = this.serviceButton("Cancel publishing", async () => {
+      const operationId2 = this.activePublishOperationId;
+      if (operationId2 === null) throw new Error("No publication is in progress");
+      await this.client.cancelOperation(operationId2);
+    });
+    this.publishCancelButton.disabled = true;
+    actionMenu.panel.appendChild(this.publishCancelButton);
+    this.formatCancelButton = this.serviceButton("Cancel formatting", async () => {
+      const operationId2 = this.activeFormatOperationIds.values().next().value;
+      if (operationId2 === void 0) throw new Error("No formatting operation is in progress");
+      await this.client.cancelOperation(operationId2);
+    });
+    this.formatCancelButton.disabled = true;
+    actionMenu.panel.appendChild(this.formatCancelButton);
     actionMenu.panel.appendChild(this.serviceButton("Check notebook", async () => {
       const result = await this.runService("check", {});
       const payload = isObject3(result.result) ? result.result : {};
@@ -25386,12 +25419,20 @@ ${jupyterTrace.map((line, index) => `${index + 1}. ${line}`).join("\n")}` : ""
       try {
         const result = await this.runService(command, payload, (operationId2) => {
           target.operationId = operationId2;
+          if (command === "packages.install") {
+            this.activePackageInstallOperationId = operationId2;
+            if (this.packageCancelButton) this.packageCancelButton.disabled = false;
+          }
           const current = this.documentValue?.snapshot.operations.find((candidate) => candidate.id === operationId2);
           if (current) this.renderPackageProgress(current, target);
         });
         if (command === "packages.declare") updateStatus(await this.client.service("packages.status"), command);
         else updateStatus(result, command);
       } finally {
+        if (command === "packages.install" && this.activePackageInstallOperationId === target.operationId) {
+          this.activePackageInstallOperationId = null;
+          if (this.packageCancelButton) this.packageCancelButton.disabled = true;
+        }
         this.packageOperations.delete(target);
       }
     };
@@ -25404,6 +25445,13 @@ ${jupyterTrace.map((line, index) => `${index + 1}. ${line}`).join("\n")}` : ""
     packageMenu.panel.appendChild(this.serviceButton("Install missing", async () => {
       await runPackage("packages.install", { packages: packages() });
     }));
+    this.packageCancelButton = this.serviceButton("Cancel install", async () => {
+      const operationId2 = this.activePackageInstallOperationId;
+      if (operationId2 === null) throw new Error("No package installation is in progress");
+      await this.client.cancelOperation(operationId2);
+    });
+    this.packageCancelButton.disabled = true;
+    packageMenu.panel.appendChild(this.packageCancelButton);
     packageMenu.panel.appendChild(status);
     menus.append(actionMenu.wrap, packageMenu.wrap);
     const anchor2 = this.dom.getElementById("app-mode") ?? this.dom.getElementById("edit-mode");
@@ -25451,6 +25499,19 @@ ${jupyterTrace.map((line, index) => `${index + 1}. ${line}`).join("\n")}` : ""
     await this.client.commitEdits();
     await this.output.flush();
     return this.client.service(command, payload, onAccepted);
+  }
+  async formatCells(keys) {
+    let acceptedOperationId = null;
+    try {
+      return await this.client.formatCells(keys, (operationId2) => {
+        acceptedOperationId = operationId2;
+        this.activeFormatOperationIds.add(operationId2);
+        if (this.formatCancelButton) this.formatCancelButton.disabled = false;
+      });
+    } finally {
+      if (acceptedOperationId !== null) this.activeFormatOperationIds.delete(acceptedOperationId);
+      if (this.formatCancelButton && this.activeFormatOperationIds.size === 0) this.formatCancelButton.disabled = true;
+    }
   }
   renderPackageProgress(operation, target) {
     const candidate = target ?? [...this.packageOperations].find((entry) => entry.operationId === operation.id);
@@ -25627,7 +25688,7 @@ ${jupyterTrace.map((line, index) => `${index + 1}. ${line}`).join("\n")}` : ""
     let formatFailure = null;
     if (this.executionAvailable() && nested(this.documentValue?.snapshot.config, ["format", "on_save"]) === true) {
       try {
-        await this.client.formatCells();
+        await this.formatCells();
       } catch (error61) {
         formatFailure = error61 instanceof Error ? error61.message : String(error61);
       }
@@ -26397,8 +26458,8 @@ function operationPayload(result) {
   return isObject3(result.result) ? result.result : {};
 }
 function artifactHandleFromResult(result) {
-  const candidates = [];
-  candidates.push(result.result);
+  const payload = result.result;
+  const candidates = [payload, isObject3(payload) ? payload.artifact : null];
   for (const candidate of candidates) if (isArtifactHandle2(candidate)) return candidate;
   return null;
 }

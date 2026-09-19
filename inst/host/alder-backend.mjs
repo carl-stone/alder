@@ -62819,6 +62819,7 @@ var inspectCommandSchema = external_exports.object({ ...commandIdentityShape, ty
 var lazyOutputCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("lazy-output"), key: idSchema, kernelEpoch: idSchema }).strict();
 var tablePageCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("table-page"), handle: idSchema, offset: protocolIntegerSchema, limit: external_exports.number().int().min(1).max(200).safe(), sortBy: boundedUtf8StringSchema(256), sortDescending: external_exports.boolean(), filter: boundedUtf8StringSchema(MAX_FRAME_BYTES), kernelEpoch: idSchema }).strict();
 var interruptCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("interrupt"), runId: idSchema.optional() }).strict();
+var cancelOperationCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("cancel-operation"), operationId: idSchema }).strict();
 var activeClientIdsSchema = external_exports.array(idSchema).max(128).refine(
   (clientIds) => new Set(clientIds).size === clientIds.length,
   "expectedClientIds must not contain duplicates"
@@ -62847,11 +62848,12 @@ var hostCommandSchema = external_exports.discriminatedUnion("type", [
   lazyOutputCommandSchema,
   tablePageCommandSchema,
   interruptCommandSchema,
+  cancelOperationCommandSchema,
   shutdownCommandSchema
 ]);
 var cellStatusSchema = external_exports.enum(["idle", "stale", "running", "done", "error", "stopped", "disabled"]);
 var operationStatusSchema = external_exports.enum(["accepted", "running", "done", "error", "interrupted", "cancelled"]);
-var operationKindSchema = external_exports.enum(["transaction", "run", "select-r", "set-app", "packages-declare", "packages-install", "publish", "upload", "save", "save-as", "reload-source", "format", "set-preferences", "set-config", "set-layout", "set-runtime", "restart", "widget", "inspect", "lazy-output", "table-page", "interrupt", "shutdown", "widget-reset", "analysis"]);
+var operationKindSchema = external_exports.enum(["transaction", "run", "select-r", "set-app", "packages-declare", "packages-install", "publish", "upload", "save", "save-as", "reload-source", "format", "set-preferences", "set-config", "set-layout", "set-runtime", "restart", "widget", "inspect", "lazy-output", "table-page", "interrupt", "cancel-operation", "shutdown", "widget-reset", "analysis"]);
 var hostErrorSchema = external_exports.object({ code: boundedUtf8StringSchema(256, true), message: boundedUtf8StringSchema(MAX_FRAME_BYTES), operationId: idSchema.nullable().optional(), details: protocolJsonSchema.optional() }).strict();
 var MAX_OPERATION_PROGRESS_BYTES = 64 * 1024;
 var operationProgressDataSchema = protocolJsonSchema.superRefine((value, context) => {
@@ -72113,6 +72115,8 @@ var Controller = class {
   listeners = /* @__PURE__ */ new Map();
   operations = /* @__PURE__ */ new Map();
   operationWaiters = /* @__PURE__ */ new Map();
+  optionalOperationCancellations = /* @__PURE__ */ new Map();
+  pendingOptionalCancellations = /* @__PURE__ */ new Set();
   commandEntries = /* @__PURE__ */ new Map();
   executionRequestIds = /* @__PURE__ */ new Map();
   runCommandTail = Promise.resolve();
@@ -72209,6 +72213,7 @@ var Controller = class {
   analyzerStartupAttempted = false;
   kernelStartupAttempted = false;
   engineRestarting = false;
+  packageRestartPending = false;
   runtimeContextReservation;
   constructor(options) {
     this.engine = options.engine;
@@ -72578,6 +72583,9 @@ var Controller = class {
     for (const operation of this.operations.values()) if (!isTerminal(operation.status)) return true;
     return false;
   }
+  cancelOptionalOperations() {
+    for (const cancellation of this.optionalOperationCancellations.values()) cancellation.abort();
+  }
   publishPackageProgress(operationId, progress, clientId) {
     if (this.closed) return;
     const operation = clientId === void 0 ? [...this.operations.values()].find((candidate) => candidate.id === operationId && candidate.kind === "packages-install" && !isTerminal(candidate.status)) : this.operationFor(operationId, clientId);
@@ -72917,6 +72925,9 @@ var Controller = class {
       if (pending.uploadId !== null) void this.removeUpload(pending.uploadId);
     }
     this.pendingUploads.clear();
+    this.cancelOptionalOperations();
+    this.optionalOperationCancellations.clear();
+    this.pendingOptionalCancellations.clear();
     for (const operation of this.operations.values()) {
       if (!isTerminal(operation.status)) {
         this.failOperation(
@@ -72950,6 +72961,13 @@ var Controller = class {
           409
         );
       }
+      if (this.packageRestartPending && ["run", "widget", "inspect", "lazy-output", "table-page"].includes(command.type)) {
+        throw new ControllerError(
+          "operation_in_progress",
+          "package installation restart is pending",
+          409
+        );
+      }
       if (!this.kernelAvailable && (command.type === "run" || command.type === "widget" || command.type === "inspect" || command.type === "lazy-output" || command.type === "table-page")) {
         const availability = this.runtimeAvailabilityError;
         if (availability?.code === "kernel_state_invalid") throw new ControllerError(availability.code, availability.message, 409);
@@ -72975,6 +72993,9 @@ var Controller = class {
           break;
         case "interrupt":
           result = await this.interruptActiveRun(command.runId);
+          break;
+        case "cancel-operation":
+          result = this.cancelOptionalOperation(command.operationId, command.clientId);
           break;
         case "restart":
           if (command.expectedDocumentRevision !== void 0) this.assertDocumentRevision(command.expectedDocumentRevision);
@@ -73019,7 +73040,7 @@ var Controller = class {
           break;
         case "format":
           this.assertDocumentRevision(command.expectedDocumentRevision);
-          result = await this.formatSource(command.cellIds, command.expectedRevisions, command.requestId);
+          result = await this.formatSource(command.cellIds, command.expectedRevisions, command.requestId, command.clientId);
           break;
         case "set-runtime":
           result = await this.setRuntime(command.on_cell_change, command.on_startup, command.cache_enabled, command.expectedDocumentRevision, command.requestId);
@@ -75751,7 +75772,7 @@ var Controller = class {
     this.bump("notebook", { saved: true, dirty: this.changed, result: clone3(result) }, { operationId });
     return result;
   }
-  async formatSource(requestedIds, expectedRevisions, operationId) {
+  async formatSource(requestedIds, expectedRevisions, operationId, clientId) {
     this.assertStartedForMutation();
     if (this.services.format === void 0) {
       throw new ControllerError("service_unavailable", "source formatter is unavailable", 503);
@@ -75777,7 +75798,8 @@ var Controller = class {
     });
     const codeCells = selected.filter((cell) => cell.type === "code");
     if (codeCells.length === 0) return { changed: 0, edited: [], created: [] };
-    const formatted = await this.services.format(codeCells);
+    this.assertOptionalOperationCanStart("format", operationId, clientId);
+    const formatted = await this.runCancelableOptionalOperation(operationId, clientId, (context) => this.services.format(codeCells, context));
     this.assertNotClosed();
     for (const selectedCell of selected) {
       const current = this.requireCell(selectedCell.id);
@@ -75865,7 +75887,7 @@ var Controller = class {
     }
     return this.commitSource(request);
   }
-  async callService(command, payload) {
+  async callService(command, payload, context) {
     if (command === "check" || command === "packages.install") this.assertStarted();
     else this.assertDocumentReady();
     if (command === "r.select") this.assertNoRuntimeContextReservation();
@@ -75902,7 +75924,7 @@ var Controller = class {
       return { text: result.text };
     }
     if (this.services.service !== void 0) {
-      const result = await this.services.service(command, clone3(payload));
+      const result = await this.services.service(command, clone3(payload), context);
       this.assertNotClosed();
       return result;
     }
@@ -75947,6 +75969,53 @@ var Controller = class {
       );
     }
   }
+  assertOptionalOperationCanStart(kind, operationId, clientId) {
+    for (const operation of this.operations.values()) {
+      if (operation.kind !== kind || isTerminal(operation.status)) continue;
+      if (operation.id === operationId && operation.clientId === clientId) continue;
+      throw new ControllerError("operation_in_progress", `a ${kind} operation is already in progress`, 409);
+    }
+  }
+  async runCancelableOptionalOperation(operationId, clientId, run) {
+    const key2 = this.operationKey(clientId, operationId);
+    const cancellation = new AbortController();
+    this.optionalOperationCancellations.set(key2, cancellation);
+    if (this.pendingOptionalCancellations.delete(key2)) cancellation.abort();
+    const operation = this.operationFor(operationId, clientId);
+    if (operation !== void 0 && operation.status === "accepted") operation.status = "running";
+    if (operation !== void 0) this.rememberOperation(operation);
+    try {
+      if (cancellation.signal.aborted) throw new ControllerError("cancelled", "operation was cancelled", 409);
+      const result = await run({ operationId, signal: cancellation.signal });
+      if (cancellation.signal.aborted) throw new ControllerError("cancelled", "operation was cancelled", 409);
+      return result;
+    } catch (error61) {
+      if (cancellation.signal.aborted) {
+        this.cancelOperation(operationId, hostError("cancelled", "operation was cancelled", operationId), clientId);
+        throw new ControllerError("cancelled", "operation was cancelled", 409);
+      }
+      throw error61;
+    } finally {
+      if (this.optionalOperationCancellations.get(key2) === cancellation) this.optionalOperationCancellations.delete(key2);
+    }
+  }
+  cancelOptionalOperation(operationId, clientId) {
+    const operation = this.operationFor(operationId, clientId);
+    if (operation === void 0 || !["format", "publish", "packages-install"].includes(operation.kind)) {
+      throw new ControllerError("not_found", "no cancellable operation: " + operationId, 404);
+    }
+    if (isTerminal(operation.status)) {
+      throw new ControllerError("operation_not_active", "operation is no longer active", 409);
+    }
+    const cancellation = this.optionalOperationCancellations.get(this.operationKey(clientId, operationId));
+    if (cancellation === void 0) {
+      this.pendingOptionalCancellations.add(this.operationKey(clientId, operationId));
+      return { operationId, cancellationRequested: true };
+    }
+    this.markOperationCancellationRequested(operationId, clientId);
+    cancellation.abort();
+    return { operationId, cancellationRequested: true };
+  }
   async runLongService(command, payload, operationId, clientId) {
     if (command !== "packages.install") {
       throw new ControllerError("invalid_request", "unsupported long-running service", 400);
@@ -75955,15 +76024,15 @@ var Controller = class {
     if (operation !== void 0 && operation.status === "accepted") operation.status = "running";
     if (operation !== void 0) this.rememberOperation(operation);
     try {
-      return await this.runPackageInstall(payload, operationId, clientId);
+      return await this.runCancelableOptionalOperation(operationId, clientId, (context) => this.runPackageInstall(payload, operationId, clientId, context));
     } finally {
       this.scheduleReactiveRun();
     }
   }
-  async runPackageInstall(payload, operationId, clientId) {
+  async runPackageInstall(payload, operationId, clientId, context) {
     let packages = Array.isArray(payload.packages) ? [...payload.packages] : [];
     if (packages.length === 0) {
-      const before2 = await this.callService("packages.status", { operationId });
+      const before2 = await this.callService("packages.status", { operationId }, context);
       packages = packageMissing(before2);
       if (packages.length === 0) {
         return { result: { ok: true, mutatedLibrary: false }, status: clone3(before2) };
@@ -75972,7 +76041,7 @@ var Controller = class {
     let result;
     let installFailure;
     try {
-      result = await this.callService("packages.install", { ...payload, packages, operationId });
+      result = await this.callService("packages.install", { ...payload, packages, operationId }, context);
       const failure2 = serviceResultError(result, operationId);
       if (failure2 !== null) installFailure = failure2;
     } catch (error61) {
@@ -75981,11 +76050,14 @@ var Controller = class {
     let restartFailure;
     const restartRequired = !isRecord(result) || result.mutatedLibrary !== false;
     if (restartRequired) {
+      this.packageRestartPending = true;
       try {
         if (this.pumpPromise !== null) await this.pumpPromise;
         await this.restartAfterPackageInstall(operationId, clientId);
       } catch (error61) {
         restartFailure = asControllerError(error61, "worker_unavailable", 503);
+      } finally {
+        this.packageRestartPending = false;
       }
     }
     if (installFailure !== void 0) {
@@ -75998,7 +76070,7 @@ var Controller = class {
       throw installFailure;
     }
     if (restartFailure !== void 0) throw restartFailure;
-    const status = await this.callService("packages.status", { operationId });
+    const status = await this.callService("packages.status", { operationId }, context);
     return { result: clone3(result), status: clone3(status) };
   }
   async restartAfterPackageInstall(operationId, clientId) {
@@ -76544,6 +76616,7 @@ var Controller = class {
     operation.error = null;
     operation.documentRevision = this.documentRevisionValue;
     operation.settledAt = Date.now();
+    this.pendingOptionalCancellations.delete(this.operationKey(clientId, id2));
     this.rememberOperation(operation);
     this.notifyOperationWaiters(operation);
     if (operation.kind === "packages-install") this.scheduleReactiveRun();
@@ -76556,6 +76629,7 @@ var Controller = class {
     operation.error = clone3(error61);
     operation.documentRevision = this.documentRevisionValue;
     operation.settledAt = Date.now();
+    this.pendingOptionalCancellations.delete(this.operationKey(clientId, id2));
     this.rememberOperation(operation);
     this.notifyOperationWaiters(operation);
     if (operation.kind === "packages-install") this.scheduleReactiveRun();
@@ -76568,6 +76642,7 @@ var Controller = class {
     operation.error = clone3(error61);
     operation.documentRevision = this.documentRevisionValue;
     operation.settledAt = Date.now();
+    this.pendingOptionalCancellations.delete(this.operationKey(clientId, id2));
     this.rememberOperation(operation);
     this.notifyOperationWaiters(operation);
     if (operation.kind === "packages-install") this.scheduleReactiveRun();
@@ -76741,7 +76816,8 @@ var Controller = class {
         return this.runLongService("packages.install", { packages: command.packages }, command.requestId, command.clientId);
       case "publish": {
         this.assertDocumentRevision(command.expectedDocumentRevision);
-        return this.callService("publish", { includeCode: command.includeCode, outputPath: command.outputPath });
+        this.assertOptionalOperationCanStart("publish", command.requestId, command.clientId);
+        return this.runCancelableOptionalOperation(command.requestId, command.clientId, (context) => this.callService("publish", { includeCode: command.includeCode, outputPath: command.outputPath }, context));
       }
       case "save-as":
         return this.executeSourceService({
@@ -96667,7 +96743,7 @@ var PackageManager = class {
     const declarations = await this.declarations();
     const library = packageLibraryPath(declarations.path);
     const exists = await existingDirectory2(library);
-    const response = workerResult(await this.run("status", declarations, declarations.packages, library, options.operationId));
+    const response = workerResult(await this.run("status", declarations, declarations.packages, library, options.operationId, options));
     const records = statusRecords(declarations.packages, response.records);
     return {
       ...declarations,
@@ -109595,7 +109671,6 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
   let engineIdentity = null;
   let formatter;
   let publisher;
-  const publishAbort = new AbortController();
   const activePublishes = /* @__PURE__ */ new Set();
   let recoveryFingerprint;
   let recoveryPending = false;
@@ -109703,8 +109778,8 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
     await current?.close();
   };
   const close = () => closing ??= (async () => {
-    publishAbort.abort();
     runtimeAbort?.abort();
+    controller?.cancelOptionalOperations();
     await Promise.allSettled([...activePublishes]);
     clearTimeout(idleTimer);
     clearTimeout(lspSyncTimer);
@@ -110343,11 +110418,11 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
       sourceCommit,
       getRecoveryState: recoveryState,
       services: {
-        format: async (cells) => {
+        format: async (cells, operation) => {
           const codeCells = cells.filter((cell) => cell.type === "code");
           if (codeCells.length === 0) return {};
           const document = { cells: codeCells.map((cell) => ({ id: cell.id, type: cell.type, body: [...cell.body], revision: cell.revision })) };
-          const edits = await formatter.formatCells(document, codeCells.map((cell) => cell.id));
+          const edits = await formatter.formatCells(document, codeCells.map((cell) => cell.id), operation?.signal);
           return Object.fromEntries(edits.map((edit) => [cellRefId(edit.cell), edit.body]));
         },
         refreshPackageEnvironment: async () => {
@@ -110386,7 +110461,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
           scheduleLspSync();
           return refreshed;
         },
-        service: async (command, payload) => {
+        service: async (command, payload, operation) => {
           if (command === "preferences.update") {
             await preferences.update(payload.patch, payload.expectedPreferencesVersion);
             return { config: controller.snapshot().config, preferencesVersion: preferences.snapshot().version };
@@ -110435,10 +110510,10 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
               throw error61;
             }
           }
-          if (command === "packages.status") return packageManager.status({ operationId: stringValue(payload.operationId) });
+          if (command === "packages.status") return packageManager.status({ operationId: stringValue(payload.operationId), signal: operation?.signal });
           if (command === "packages.install") return packageManager.install(external_exports.array(external_exports.string()).parse(payload.packages ?? []), {
             operationId: stringValue(payload.operationId),
-            signal: runtimeAbort?.signal
+            signal: operation?.signal
           });
           if (command === "publish") {
             if (activePublishes.size > 0) throw Object.assign(new Error("a publication is already in progress"), { code: "operation_in_progress" });
@@ -110448,7 +110523,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
             const snapshot = publicationSnapshot(store.currentDocument, liveSnapshot);
             const requestedPath = typeof payload.outputPath === "string" && payload.outputPath.length > 0 ? payload.outputPath : null;
             const outputPath = requestedPath ?? join20(work, "publish-" + randomUUID14() + ".html");
-            const pendingPublish = publisher.publishSnapshot(snapshot, { outputPath, includeCode: payload.includeCode === true, signal: publishAbort.signal });
+            const pendingPublish = publisher.publishSnapshot(snapshot, { outputPath, includeCode: payload.includeCode === true, signal: operation?.signal });
             activePublishes.add(pendingPublish);
             const result = await pendingPublish.finally(() => {
               activePublishes.delete(pendingPublish);
@@ -110469,7 +110544,11 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
                 await rm9(result.path, { force: true });
               }
               if (server === void 0) throw new Error("publish server is unavailable");
-              return server.retainArtifact(artifact);
+              return {
+                artifact: server.retainArtifact(artifact),
+                source: result.source,
+                unsavedChangesExcluded: result.unsavedChangesExcluded
+              };
             } catch (error61) {
               if (artifact !== void 0) artifactStore.release([artifact]);
               throw error61;

@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { chmod, mkdtemp, writeFile, rm } from "node:fs/promises";
+import { access, chmod, mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createFormattingService, FormattingError } from "../src/formatting.js";
@@ -94,5 +94,35 @@ test("formatter failure is surfaced instead of falling back", async () => {
   } finally {
     await scope.close();
     await rm(fake.directory, { recursive: true, force: true });
+  }
+});
+
+test("cancelling formatting terminates its Air child", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "alder-format-cancel-"));
+  const started = join(directory, "started");
+  const stopped = join(directory, "stopped");
+  const fake = await fakeAir([
+    "#!/usr/bin/env node",
+    "const fs = require('node:fs');",
+    `fs.writeFileSync(${JSON.stringify(started)}, 'started');`,
+    `process.on('SIGTERM', () => { fs.writeFileSync(${JSON.stringify(stopped)}, 'stopped'); process.exit(0); });`,
+    "setInterval(() => {}, 1000);",
+  ].join("\n"));
+  const scope = directProcessScope();
+  const cancellation = new AbortController();
+  try {
+    const formatting = createFormattingService(fake.executable, scope).formatCells(document, ["code-1"], cancellation.signal);
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      try { await access(started); break; }
+      catch { await new Promise((resolve) => setTimeout(resolve, 5)); }
+    }
+    await access(started);
+    cancellation.abort();
+    await assert.rejects(formatting, (error: unknown) => error instanceof FormattingError && error.code === "cancelled");
+    await access(stopped);
+  } finally {
+    await scope.close();
+    await rm(fake.directory, { recursive: true, force: true });
+    await rm(directory, { recursive: true, force: true });
   }
 });

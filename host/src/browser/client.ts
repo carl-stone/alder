@@ -302,6 +302,10 @@ export class BrowserNotebookClient {
     return this.dispatch({ type: "interrupt", ...this.base("interrupt", false), ...(runId ? { runId } : {}) });
   }
 
+  async cancelOperation(targetOperationId: string): Promise<CommandResult> {
+    return this.dispatch({ type: "cancel-operation", ...this.base("cancel-operation", false), operationId: targetOperationId });
+  }
+
   async restart(replay = true): Promise<CommandResult> {
     const command = { type: "restart", replay, ...this.base("restart"), ...(replay ? { expectedDocumentRevision: this.requireDocument().snapshot.documentRevision } : {}) } as Extract<HostCommand, { type: "restart" }>;
     return replay ? this.dispatchSettled(command) : this.dispatch(command);
@@ -438,11 +442,11 @@ export class BrowserNotebookClient {
     return this.dispatch({ type: "set-layout", ...this.base("layout"), layout: layout as Extract<HostCommand, { type: "set-layout" }>["layout"], expectedSidecarVersion: this.requireDocument().snapshot.sidecars.layout.version });
   }
 
-  async formatCells(keys?: readonly string[]): Promise<CommandResult> {
+  async formatCells(keys?: readonly string[], onAccepted?: (operationId: string) => void): Promise<CommandResult> {
     await this.commitEdits();
     const cells = keys?.map((key) => this.requireCell(key)) ?? [...this.requireDocument().cells];
     const acknowledged = cells.filter((cell): cell is LocalCell & { id: string } => cell.id !== null);
-    return this.dispatchSettled({ type: "format", ...this.base("format"), ...(keys ? { cellIds: acknowledged.map((cell) => cell.id) } : {}), expectedRevisions: Object.fromEntries(acknowledged.map((cell) => [cell.id, cell.serverRevision])) });
+    return this.dispatchSettled({ type: "format", ...this.base("format"), ...(keys ? { cellIds: acknowledged.map((cell) => cell.id) } : {}), expectedRevisions: Object.fromEntries(acknowledged.map((cell) => [cell.id, cell.serverRevision])) }, onAccepted);
   }
 
   async resolveArtifact(descriptor: ArtifactHandle): Promise<string> {
