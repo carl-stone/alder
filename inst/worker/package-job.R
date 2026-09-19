@@ -9,6 +9,9 @@ local({
   library <- request$library
   packages <- unique(as.character(request$packages %||% character()))
   repositories <- unique(as.character(request$repositories %||% character()))
+  if (!length(repositories)) repositories <- as.character(getOption("repos"))
+  repositories[repositories == "@CRAN@"] <- "https://cloud.r-project.org"
+  repositories <- unique(repositories[nzchar(repositories)])
   if (!command %in% c("status", "install")) stop("unknown package command", call. = FALSE)
   if (!is.character(project) || length(project) != 1L || !dir.exists(project)) stop("project directory is unavailable", call. = FALSE)
   if (!is.character(library) || length(library) != 1L || !nzchar(library)) stop("project library is unavailable", call. = FALSE)
@@ -31,7 +34,7 @@ local({
       if (length(missing)) {
         if (!length(repositories)) stop("no package repository is configured", call. = FALSE)
         mutated <- TRUE
-        utils::install.packages(missing, lib = library, repos = repositories, type = "source", quiet = TRUE)
+        utils::install.packages(missing, lib = library, repos = repositories, quiet = TRUE)
       }
     }
     records <- inspect()

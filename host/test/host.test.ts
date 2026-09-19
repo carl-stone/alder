@@ -82,6 +82,11 @@ async function localPackageRepository(root: string, packageName: string): Promis
   execFileSync(process.env.R_BIN ?? "R", ["CMD", "build", "--no-manual", packageName], { cwd: sourceParent });
   await rename(join(sourceParent, `${packageName}_1.0.0.tar.gz`), join(contributionDirectory, `${packageName}_1.0.0.tar.gz`));
   execFileSync(process.env.RSCRIPT ?? "Rscript", ["--vanilla", "-e", "tools::write_PACKAGES(commandArgs(TRUE)[[1L]], type='source')", contributionDirectory]);
+  const repositoryUrl = pathToFileURL(repository).href;
+  const binaryContribution = execFileSync(process.env.RSCRIPT ?? "Rscript", ["--vanilla", "-e",
+    "cat(sub('^file://', '', contrib.url(commandArgs(TRUE)[[1L]], type='binary')))", repositoryUrl], { encoding: "utf8" });
+  await mkdir(binaryContribution, { recursive: true });
+  await writeFile(join(binaryContribution, "PACKAGES"), "");
   return repository;
 }
 
@@ -421,10 +426,9 @@ test("project packages declare, install offline, restart Ark, and leave the user
     await mkdir(userLibrary);
     await writeFile(marker, "unrelated user library\n");
     const repository = await localPackageRepository(directory, "alderfixturepkg");
-    await writeFile(join(directory, "renv.lock"), JSON.stringify({
-      R: { Version: "4.6.1", Repositories: [{ Name: "fixture", URL: pathToFileURL(repository).href }] },
-      Packages: {},
-    }));
+    await mkdir(join(directory, ".alder"));
+    await writeFile(join(directory, ".alder", "repository.yaml"), `repository: ${JSON.stringify(pathToFileURL(repository).href)}\n`);
+    await assert.rejects(access(join(directory, "renv.lock")));
     await writeFile(path, "# %%\nlibrary(alderfixturepkg)\nfixture_value()\n");
     process.env.R_LIBS_USER = userLibrary;
     app = await startInstalledHost(path, { executionMode: "lazy" });

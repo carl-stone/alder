@@ -41,6 +41,8 @@ const MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
 /** One short-lived R process for project package status or installation. */
 export class PackageWorker {
   private readonly children = new Set<OwnedProcess>();
+  private readonly pending = new Set<Promise<OwnedProcess>>();
+  private readonly stopping = new Map<OwnedProcess, Promise<void>>();
   private closed = false;
 
   constructor(private readonly options: PackageWorkerOptions) {
@@ -60,14 +62,21 @@ export class PackageWorker {
       const inputPath = join(directory, "input.json");
       const outputPath = join(directory, "result.json");
       await writeFile(inputPath, JSON.stringify({ command, ...payload }), { mode: 0o600 });
-      child = await this.options.processScope.spawn({
+      if (this.closed) throw failure("job_closed", "package service is closed");
+      const spawning = this.options.processScope.spawn({
         executable: environment.rscript,
         args: ["--vanilla", join(this.options.resources.workerDirectory, "package-job.R"), inputPath, outputPath],
         cwd: this.options.projectDirectory,
         environment: workerEnvironment(environment, this.options.resources),
         stdio: "pipes",
+      }).then(value => {
+        this.children.add(value);
+        return value;
       });
-      this.children.add(child);
+      this.pending.add(spawning);
+      try { child = await spawning; }
+      finally { this.pending.delete(spawning); }
+      if (this.closed) throw failure("job_closed", "package service is closed");
       child.stdin?.end();
       await this.options.onProgress?.({ command, operationId, phase: "started" });
       const outputPromise = collect(child.stdout, child.stderr);
@@ -88,17 +97,28 @@ export class PackageWorker {
       if (runOptions.signal?.aborted) throw failure("cancelled", "R package operation was cancelled");
       throw failure("job_failed", messageOf(error));
     } finally {
-      if (child !== undefined) this.children.delete(child);
+      if (child !== undefined) await this.stopChild(child);
       await rm(directory, { recursive: true, force: true });
     }
   }
 
   async close(): Promise<void> {
     this.closed = true;
+    await Promise.allSettled([...this.pending]);
     const children = [...this.children];
-    await Promise.all(children.map(child => child.terminate().catch(() => undefined)));
-    await Promise.all(children.map(child => child.exited.catch(() => ({ code: null, signal: "SIGKILL" }))));
-    this.children.clear();
+    await Promise.all(children.map(child => this.stopChild(child)));
+  }
+
+  private stopChild(child: OwnedProcess): Promise<void> {
+    const current = this.stopping.get(child);
+    if (current !== undefined) return current;
+    const stopping = (async () => {
+      await child.terminate().catch(() => undefined);
+      await child.exited.catch(() => ({ code: null, signal: "SIGKILL" }));
+      this.children.delete(child);
+    })().finally(() => this.stopping.delete(child));
+    this.stopping.set(child, stopping);
+    return stopping;
   }
 }
 

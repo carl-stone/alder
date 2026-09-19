@@ -2211,10 +2211,14 @@ export class NotebookView {
       ? await desktop.chooseSavePath()
       : undefined;
     if (destination === null) return undefined;
+    let formatFailure: string | null = null;
     if (this.executionAvailable() && nested(this.documentValue?.snapshot.config, ["format", "on_save"]) === true) {
-      await this.client.formatCells().catch(() => undefined);
+      try { await this.client.formatCells(); }
+      catch (error) { formatFailure = error instanceof Error ? error.message : String(error); }
     }
-    return destination === undefined ? this.client.save() : this.client.saveAs(destination);
+    const result = await (destination === undefined ? this.client.save() : this.client.saveAs(destination));
+    if (formatFailure !== null) this.actionNotice = "Saved; formatting failed: " + formatFailure;
+    return result;
   }
 
   async saveForDesktop(): Promise<"saved" | "cancelled"> {

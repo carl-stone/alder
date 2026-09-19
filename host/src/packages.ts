@@ -10,6 +10,7 @@ import type { ProcessScope } from "./processes.js";
 
 export const PACKAGE_NAME_RE = /^[A-Za-z][A-Za-z0-9.]*[A-Za-z0-9]$/;
 export const PACKAGE_METADATA_RELATIVE_PATH = [".alder", "packages.yaml"] as const;
+export const PACKAGE_REPOSITORY_RELATIVE_PATH = [".alder", "repository.yaml"] as const;
 export const PACKAGE_LIBRARY_RELATIVE_PATH = [".alder", "library"] as const;
 export type PackageInstallMode = "project";
 export type PackageState = "installed" | "missing";
@@ -46,6 +47,7 @@ export class PackageError extends Error {
 
 export function packageMetadataPath(projectDirectory: string): string { return join(projectDirectory, ...PACKAGE_METADATA_RELATIVE_PATH); }
 export function packageLibraryPath(projectDirectory: string): string { return join(projectDirectory, ...PACKAGE_LIBRARY_RELATIVE_PATH); }
+export function packageRepositoryPath(projectDirectory: string): string { return join(projectDirectory, ...PACKAGE_REPOSITORY_RELATIVE_PATH); }
 
 export function validatePackageNames(packages: readonly string[], allowEmpty = true): string[] {
   if (!Array.isArray(packages) || packages.some(value => typeof value !== "string")) throw new PackageError("invalid_request", "packages must be an array of package names");
@@ -147,12 +149,18 @@ async function canonicalProjectDirectory(value: string): Promise<string> {
 }
 
 async function projectRepositories(project: string): Promise<string[]> {
+  const path = packageRepositoryPath(project);
   try {
-    const value = JSON.parse(await readFile(join(project, "renv.lock"), "utf8")) as { R?: { Repositories?: Array<{ URL?: unknown }> } };
-    return (value.R?.Repositories ?? []).map(value => value.URL).filter((value): value is string => typeof value === "string" && value.length > 0);
+    const mapping = parseYamlMapping(new TextDecoder("utf-8", { fatal: true }).decode(await readFile(path)), "package repository");
+    if (Object.keys(mapping).length !== 1 || typeof mapping.repository !== "string") {
+      throw new Error("repository settings must contain one repository URL");
+    }
+    const repository = new URL(mapping.repository);
+    if (!["https:", "http:", "file:"].includes(repository.protocol)) throw new Error("repository URL must use HTTPS, HTTP, or file");
+    return [repository.href];
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
-    throw new PackageError("package_metadata_error", "could not read package repositories: " + messageOf(error));
+    throw new PackageError("package_metadata_error", "could not read package repository settings: " + messageOf(error));
   }
 }
 

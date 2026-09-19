@@ -96960,6 +96960,8 @@ var PackageWorker = class {
   }
   options;
   children = /* @__PURE__ */ new Set();
+  pending = /* @__PURE__ */ new Set();
+  stopping = /* @__PURE__ */ new Map();
   closed = false;
   async run(command, payload, runOptions = {}) {
     if (this.closed) throw failure("job_closed", "package service is closed");
@@ -96974,14 +96976,24 @@ var PackageWorker = class {
       const inputPath = join12(directory, "input.json");
       const outputPath = join12(directory, "result.json");
       await writeFile4(inputPath, JSON.stringify({ command, ...payload }), { mode: 384 });
-      child = await this.options.processScope.spawn({
+      if (this.closed) throw failure("job_closed", "package service is closed");
+      const spawning = this.options.processScope.spawn({
         executable: environment.rscript,
         args: ["--vanilla", join12(this.options.resources.workerDirectory, "package-job.R"), inputPath, outputPath],
         cwd: this.options.projectDirectory,
         environment: workerEnvironment(environment, this.options.resources),
         stdio: "pipes"
+      }).then((value) => {
+        this.children.add(value);
+        return value;
       });
-      this.children.add(child);
+      this.pending.add(spawning);
+      try {
+        child = await spawning;
+      } finally {
+        this.pending.delete(spawning);
+      }
+      if (this.closed) throw failure("job_closed", "package service is closed");
       child.stdin?.end();
       await this.options.onProgress?.({ command, operationId, phase: "started" });
       const outputPromise = collect(child.stdout, child.stderr);
@@ -97002,16 +97014,26 @@ var PackageWorker = class {
       if (runOptions.signal?.aborted) throw failure("cancelled", "R package operation was cancelled");
       throw failure("job_failed", messageOf5(error61));
     } finally {
-      if (child !== void 0) this.children.delete(child);
+      if (child !== void 0) await this.stopChild(child);
       await rm5(directory, { recursive: true, force: true });
     }
   }
   async close() {
     this.closed = true;
+    await Promise.allSettled([...this.pending]);
     const children = [...this.children];
-    await Promise.all(children.map((child) => child.terminate().catch(() => void 0)));
-    await Promise.all(children.map((child) => child.exited.catch(() => ({ code: null, signal: "SIGKILL" }))));
-    this.children.clear();
+    await Promise.all(children.map((child) => this.stopChild(child)));
+  }
+  stopChild(child) {
+    const current = this.stopping.get(child);
+    if (current !== void 0) return current;
+    const stopping = (async () => {
+      await child.terminate().catch(() => void 0);
+      await child.exited.catch(() => ({ code: null, signal: "SIGKILL" }));
+      this.children.delete(child);
+    })().finally(() => this.stopping.delete(child));
+    this.stopping.set(child, stopping);
+    return stopping;
   }
 };
 function workerEnvironment(environment, resources2) {
@@ -97073,6 +97095,7 @@ function messageOf5(error61) {
 // src/packages.ts
 var PACKAGE_NAME_RE = /^[A-Za-z][A-Za-z0-9.]*[A-Za-z0-9]$/;
 var PACKAGE_METADATA_RELATIVE_PATH = [".alder", "packages.yaml"];
+var PACKAGE_REPOSITORY_RELATIVE_PATH = [".alder", "repository.yaml"];
 var PACKAGE_LIBRARY_RELATIVE_PATH = [".alder", "library"];
 var PackageError = class extends Error {
   constructor(code2, message2, details) {
@@ -97089,6 +97112,9 @@ function packageMetadataPath(projectDirectory) {
 }
 function packageLibraryPath(projectDirectory) {
   return join13(projectDirectory, ...PACKAGE_LIBRARY_RELATIVE_PATH);
+}
+function packageRepositoryPath(projectDirectory) {
+  return join13(projectDirectory, ...PACKAGE_REPOSITORY_RELATIVE_PATH);
 }
 function validatePackageNames(packages, allowEmpty = true) {
   if (!Array.isArray(packages) || packages.some((value) => typeof value !== "string")) throw new PackageError("invalid_request", "packages must be an array of package names");
@@ -97223,12 +97249,18 @@ async function canonicalProjectDirectory(value) {
   }
 }
 async function projectRepositories(project) {
+  const path3 = packageRepositoryPath(project);
   try {
-    const value = JSON.parse(await readFile6(join13(project, "renv.lock"), "utf8"));
-    return (value.R?.Repositories ?? []).map((value2) => value2.URL).filter((value2) => typeof value2 === "string" && value2.length > 0);
+    const mapping = parseYamlMapping(new TextDecoder("utf-8", { fatal: true }).decode(await readFile6(path3)), "package repository");
+    if (Object.keys(mapping).length !== 1 || typeof mapping.repository !== "string") {
+      throw new Error("repository settings must contain one repository URL");
+    }
+    const repository = new URL(mapping.repository);
+    if (!["https:", "http:", "file:"].includes(repository.protocol)) throw new Error("repository URL must use HTTPS, HTTP, or file");
+    return [repository.href];
   } catch (error61) {
     if (error61.code === "ENOENT") return [];
-    throw new PackageError("package_metadata_error", "could not read package repositories: " + messageOf6(error61));
+    throw new PackageError("package_metadata_error", "could not read package repository settings: " + messageOf6(error61));
   }
 }
 async function existingDirectory2(path3) {

@@ -25665,10 +25665,17 @@ ${jupyterTrace.map((line, index) => `${index + 1}. ${line}`).join("\n")}` : ""
     if (mode === "autosave" && !this.documentValue?.snapshot.path) return void 0;
     const destination = !this.documentValue?.snapshot.path && desktop ? await desktop.chooseSavePath() : void 0;
     if (destination === null) return void 0;
+    let formatFailure = null;
     if (this.executionAvailable() && nested(this.documentValue?.snapshot.config, ["format", "on_save"]) === true) {
-      await this.client.formatCells().catch(() => void 0);
+      try {
+        await this.client.formatCells();
+      } catch (error61) {
+        formatFailure = error61 instanceof Error ? error61.message : String(error61);
+      }
     }
-    return destination === void 0 ? this.client.save() : this.client.saveAs(destination);
+    const result = await (destination === void 0 ? this.client.save() : this.client.saveAs(destination));
+    if (formatFailure !== null) this.actionNotice = "Saved; formatting failed: " + formatFailure;
+    return result;
   }
   async saveForDesktop() {
     return await this.saveNotebook("explicit") === void 0 ? "cancelled" : "saved";

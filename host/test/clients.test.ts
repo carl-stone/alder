@@ -826,17 +826,13 @@ test("format-on-save still saves the current draft when Air fails", async () => 
       initial.config = { format: { on_save: true } };
       const document = new BrowserDocument(initial);
       const formatter = createFormattingService("/usr/bin/false", processScope);
-      const formattingDocument = parseNotebook(Buffer.from("current <- 42\n", "utf8"));
-      let formats = 0;
-      let saves = 0;
+      const formattingDocument = parseNotebook(Buffer.from("# %%\ncurrent <- 42\n", "utf8"));
       const client = settingsClient({
         formatCells: async () => {
-          formats += 1;
           await formatter.formatCells(formattingDocument, [formattingDocument.cells[0]!.id]);
           return resultFor("format", null);
         },
         save: async () => {
-          saves += 1;
           await writeFile(path, document.cells[0]!.desiredBody.join("\n") + "\n", "utf8");
           return resultFor("save", null);
         },
@@ -845,9 +841,9 @@ test("format-on-save still saves the current draft when Air fails", async () => 
       try {
         view.render(document);
         dom.getElementById("save")!.dispatchEvent(new domWindow.Event("click"));
-        await waitUntil(() => saves === 1);
-        assert.equal(formats, 1);
+        await waitUntil(() => dom.getElementById("status")!.textContent!.includes("Saved; formatting failed:"));
         assert.equal(await readFile(path, "utf8"), "current <- 42\n");
+        assert.match(dom.getElementById("status")!.textContent!, /Saved; formatting failed: air could not format the cell/);
         assert.equal(dom.getElementById("status")!.classList.contains("error"), false);
       } finally { view.destroy(); }
     });
