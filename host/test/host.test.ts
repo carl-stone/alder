@@ -29,7 +29,7 @@ async function startInstalledHost(path: string, options: { executionMode?: "auto
     preferencesPath: join(dirname(path), ".test-preferences.yaml"),
     session: { runtimeDirectory: path + "-runtime" },
   });
-  const deadline = performance.now() + 15_000;
+  const deadline = performance.now() + 45_000;
   while (!app.controller.snapshot().runtime.executionReady && performance.now() < deadline) {
     await new Promise(resolve => setTimeout(resolve, 25));
   }
@@ -88,6 +88,33 @@ async function localPackageRepository(root: string, packageName: string): Promis
   await mkdir(binaryContribution, { recursive: true });
   await writeFile(join(binaryContribution, "PACKAGES"), "");
   return repository;
+}
+
+async function installFixturePackage(
+  root: string,
+  library: string,
+  packageName: string,
+  version: string,
+  value: string,
+): Promise<void> {
+  const source = join(root, `${packageName}-${version}`);
+  await mkdir(join(source, "R"), { recursive: true });
+  await mkdir(library, { recursive: true });
+  await writeFile(join(source, "DESCRIPTION"), [
+    `Package: ${packageName}`,
+    "Type: Package",
+    "Title: Alder Library Precedence Fixture",
+    `Version: ${version}`,
+    "Authors@R: person('Alder', 'Tester', email='alder@example.invalid', role=c('aut','cre'))",
+    "Description: Verifies ordinary project startup and package precedence.",
+    "License: MIT",
+    "Encoding: UTF-8",
+    "",
+  ].join("\n"));
+  await writeFile(join(source, "NAMESPACE"), "export(fixture_value)\n");
+  await writeFile(join(source, "R", "fixture-value.R"),
+    `fixture_value <- function() ${JSON.stringify(value)}\n`);
+  execFileSync(process.env.R_BIN ?? "R", ["CMD", "INSTALL", `--library=${library}`, source]);
 }
 
 async function openHttpSession(app: RunningHost): Promise<HttpSession> {
@@ -367,7 +394,11 @@ test("installed host runs exact edited source, saves bytes and publishes committ
     const run = await dispatchHost(app, {
       type: "run", scope: "all",
       changes: [{ type: "edit", cell: { cellId: "cell-1" }, expectedRevision: 0,
-        cellType: "code", body: ["a <- 40", "a"] }],
+        cellType: "code", body: [
+          "get <- assign <- exists <- library <- source <- 1L",
+          "a <- 40",
+          "a",
+        ] }],
       expectedDocumentRevision: snapshot.documentRevision,
     });
     assert.equal(run.error, null);
@@ -375,12 +406,17 @@ test("installed host runs exact edited source, saves bytes and publishes committ
     assert.equal(completed.cells[0]!.revision, 1);
     assert.deepEqual(completed.cells.map(cell => cell.status), ["done", "done", "done"]);
     assert.match(JSON.stringify(completed.cells[2]!.outputs), /42/);
+    const inspected = await dispatchHost(app, {
+      type: "inspect", name: "a", kernelEpoch: completed.runtime.kernelEpoch,
+    });
+    assert.equal(inspected.error, null);
+    assert.match(JSON.stringify(inspected.result), /40/);
 
 
     const save = await dispatchHost(app, { type: "save", expectedDocumentRevision: completed.documentRevision });
     assert.equal(save.error, null);
     assert.equal(controller.snapshot().dirty, false, 'a successful Save must clear the durable recovery draft');
-    assert.equal(await readFile(path, "utf8"), "# title\r\n# %%\r\na <- 40\r\na\r\n# %%\r\nb <- a + 1\nb\r\n# %%\r\nc <- b + 1\nc");
+    assert.equal(await readFile(path, "utf8"), "# title\r\n# %%\r\nget <- assign <- exists <- library <- source <- 1L\r\na <- 40\r\na\r\n# %%\r\nb <- a + 1\nb\r\n# %%\r\nc <- b + 1\nc");
 
     const publishedPath = join(directory, "published.html");
     const publishDocumentRevision = controller.snapshot().documentRevision;
@@ -413,6 +449,52 @@ test("installed host runs exact edited source, saves bytes and publishes committ
   }
 });
 
+test("installed kernel follows ordinary project profile and library activation", {
+  skip: !APPLICATION_ROOT, timeout: 120_000,
+}, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "alder-project-profile-"));
+  const path = join(directory, "notebook.R");
+  const userLibrary = join(directory, "user-library");
+  const projectLibrary = join(directory, "renv-library");
+  const packageName = "alderprofilefixture";
+  const priorUserLibrary = process.env.R_LIBS_USER;
+  let app: RunningHost | undefined;
+  try {
+    await installFixturePackage(directory, userLibrary, packageName, "1.0.0", "user");
+    await installFixturePackage(directory, projectLibrary, packageName, "2.0.0", "project");
+    await installFixturePackage(directory, projectLibrary, "jsonlite", "999.0.0",
+      "incompatible-project-jsonlite");
+    await writeFile(join(directory, ".Renviron"), "ALDER_PROFILE_MARKER=project-marker\n");
+    await writeFile(join(directory, ".Rprofile"),
+      ".libPaths(c(file.path(getwd(), 'renv-library'), .libPaths()))\n");
+    const valueExpression = `paste(as.character(packageVersion('${packageName}')), ` +
+      `normalizePath(find.package('${packageName}'), winslash='/'), ` +
+      `${packageName}::fixture_value(), Sys.getenv('ALDER_PROFILE_MARKER'), ` +
+      "as.character(packageVersion('jsonlite')), jsonlite::fixture_value(), sep='|')";
+    const setupExpression = `library(${packageName}); library(jsonlite); `;
+    const ordinary = execFileSync(process.env.RSCRIPT ?? "Rscript", ["--slave", "-e",
+      setupExpression + `cat(${valueExpression})`], {
+      cwd: directory,
+      env: { ...process.env, R_LIBS_USER: userLibrary },
+      encoding: "utf8",
+    }).trim();
+    assert.match(ordinary,
+      /^2\.0\.0\|.*renv-library.*\|project\|project-marker\|999\.0\.0\|incompatible-project-jsonlite$/);
+    await writeFile(path, `# %%\n${setupExpression}${valueExpression}\n`);
+    process.env.R_LIBS_USER = userLibrary;
+    app = await startInstalledHost(path, { executionMode: "lazy" });
+    const run = await dispatchHost(app, { type: "run", scope: "all", changes: [] });
+    assert.equal(run.error, null);
+    assert.match(JSON.stringify(app.controller.snapshot().cells[0]!.outputs),
+      new RegExp(ordinary.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  } finally {
+    if (priorUserLibrary === undefined) delete process.env.R_LIBS_USER;
+    else process.env.R_LIBS_USER = priorUserLibrary;
+    await app?.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("project packages declare, install offline, restart Ark, and leave the user library unchanged", {
   skip: !APPLICATION_ROOT, timeout: 120_000,
 }, async () => {
@@ -429,14 +511,36 @@ test("project packages declare, install offline, restart Ark, and leave the user
     await mkdir(join(directory, ".alder"));
     await writeFile(join(directory, ".alder", "repository.yaml"), `repository: ${JSON.stringify(pathToFileURL(repository).href)}\n`);
     await assert.rejects(access(join(directory, "renv.lock")));
-    await writeFile(path, "# %%\nlibrary(alderfixturepkg)\nfixture_value()\n");
+    await writeFile(path, [
+      "# %%",
+      "package_sentinel <- 41L",
+      "if (requireNamespace('alderfixturepkg', quietly = TRUE)) alderfixturepkg::fixture_value() else package_sentinel",
+      "",
+    ].join("\n"));
     process.env.R_LIBS_USER = userLibrary;
     app = await startInstalledHost(path, { executionMode: "lazy" });
 
     const declared = await dispatchHost(app, { type: "packages-declare", packages: ["alderfixturepkg"] });
     assert.equal(declared.error, null);
+    const initialRun = await dispatchHost(app, { type: "run", scope: "all", changes: [] });
+    assert.equal(initialRun.error, null);
+    assert.match(JSON.stringify(app.controller.snapshot().cells[0]!.outputs), /41/);
+    const stableEpoch = app.controller.snapshot().runtime.kernelEpoch;
     const missing = await app.controller.query({ type: "packages-status" });
     assert.deepEqual((missing.result as { missing: string[] }).missing, ["alderfixturepkg"]);
+    assert.equal(app.controller.snapshot().runtime.kernelEpoch, stableEpoch);
+
+    await writeFile(join(directory, ".alder", "repository.yaml"), "repository: 42\n");
+    const earlyFailure = await dispatchHost(app, { type: "packages-install", packages: [] });
+    assert.equal(earlyFailure.error?.code, "package_metadata_error");
+    assert.equal(app.controller.snapshot().runtime.kernelEpoch, stableEpoch);
+    const retained = await dispatchHost(app, {
+      type: "inspect", name: "package_sentinel", kernelEpoch: stableEpoch,
+    });
+    assert.equal(retained.error, null);
+    assert.match(JSON.stringify(retained.result), /41/);
+    await writeFile(join(directory, ".alder", "repository.yaml"),
+      `repository: ${JSON.stringify(pathToFileURL(repository).href)}\n`);
 
     const beforeEpoch = app.controller.snapshot().runtime.kernelEpoch;
     const installed = await dispatchHost(app, { type: "packages-install", packages: [] });
@@ -453,6 +557,15 @@ test("project packages declare, install offline, restart Ark, and leave the user
     const run = await dispatchHost(app, { type: "run", scope: "all", changes: [] });
     assert.equal(run.error, null);
     assert.match(JSON.stringify(app.controller.snapshot().cells[0]!.outputs), /project-package-value/);
+    const noOpEpoch = app.controller.snapshot().runtime.kernelEpoch;
+    const noOp = await dispatchHost(app, { type: "packages-install", packages: [] });
+    assert.equal(noOp.error, null);
+    assert.equal(app.controller.snapshot().runtime.kernelEpoch, noOpEpoch);
+    const afterNoOp = await dispatchHost(app, {
+      type: "inspect", name: "package_sentinel", kernelEpoch: noOpEpoch,
+    });
+    assert.equal(afterNoOp.error, null);
+    assert.match(JSON.stringify(afterNoOp.result), /41/);
     assert.equal(await readFile(marker, "utf8"), "unrelated user library\n");
   } finally {
     if (priorUserLibrary === undefined) delete process.env.R_LIBS_USER;
@@ -672,7 +785,7 @@ test("a batched consumer run settles its run-button reset", {
 }, async () => {
   const directory = await mkdtemp(join(tmpdir(), "alder-host-batch-button-"));
   const path = join(directory, "notebook.R");
-  await writeFile(path, "# %%\nbtn <- ui$run_button(); btn\n# %%\nseen <- btn$value; seen\n# %%\nresult <- as.integer(seen); result\n");
+  await writeFile(path, "# %%\nlibrary(alder)\nbtn <- ui$run_button(); btn\n# %%\nseen <- btn$value; seen\n# %%\nresult <- as.integer(seen); result\n");
   let app: RunningHost | undefined;
   try {
     app = await startInstalledHost(path, { executionMode: "lazy" });

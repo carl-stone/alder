@@ -76473,6 +76473,9 @@ var Controller = class {
     if (packages.length === 0) {
       const before2 = await this.callService("packages.status", { operationId });
       packages = packageMissing(before2);
+      if (packages.length === 0) {
+        return { result: { ok: true, mutatedLibrary: false }, status: clone3(before2) };
+      }
     }
     let result;
     let installFailure;
@@ -78538,41 +78541,40 @@ async function resolveREnvironment(options) {
   const platformResult = rEnvironmentSchema.shape.platform.safeParse(process.platform);
   if (!platformResult.success) throw invalid3(`unsupported host platform ${process.platform}`);
   const platform = platformResult.data;
-  const normalLibraries = await normalizeDirectories(probe.libraryPaths, "R library path");
+  const normalLibraries = await normalizeDirectories(
+    await probeProjectLibraries(selected, options.projectDirectory, options.signal),
+    "R project library path"
+  );
   const baseLibrary = await existingDirectory(probe.baseLibrary, "R base library");
   const helperLibrary = await existingDirectory(resources2.rLibraryDirectory, "Alder R library");
   const environmentFields = { rscript: selected, rHome, version: version2, platform, arch: process.arch };
   const helperAbi = `${manifest.applicationVersion}:${R_VERSION_RANGE}`;
-  const baseLibraryPaths = uniquePaths([
-    helperLibrary,
-    ...options.sandbox === true ? [] : normalLibraries,
-    baseLibrary
-  ]);
+  const baseLibraryPaths = uniquePaths([...options.sandbox === true ? [] : normalLibraries, helperLibrary, baseLibrary]);
   const baseEnvironment = makeEnvironment(environmentFields, helperAbi, baseLibraryPaths);
-  await validateHelperLoad(baseEnvironment, manifest, options.signal);
+  await validateHelperLoad(baseEnvironment, manifest, helperLibrary, options.signal);
   const requestedProjectLibrary = options.resolveProjectLibrary === void 0 ? options.sandbox === true ? join7(options.projectDirectory, ".alder", "library") : null : await options.resolveProjectLibrary(baseEnvironment);
   if (requestedProjectLibrary !== null && typeof requestedProjectLibrary !== "string") {
     throw invalid3("project package library resolver must return a path or null");
   }
   const projectLibrary = requestedProjectLibrary === null ? null : await optionalDirectory(requestedProjectLibrary, "project package library");
   const libraryPaths = uniquePaths([
-    helperLibrary,
-    ...projectLibrary === null ? [] : [projectLibrary],
     ...options.sandbox === true ? [] : normalLibraries,
+    ...projectLibrary === null ? [] : [projectLibrary],
+    helperLibrary,
     baseLibrary
   ]);
   options.signal?.throwIfAborted();
   const environment = makeEnvironment(environmentFields, helperAbi, libraryPaths);
   return environment;
 }
-function rEnvironmentVariables(environment, resources2, analysisEnvironmentId) {
+function rServiceEnvironmentVariables(environment, resources2, analysisEnvironmentId) {
   const values = {
     R_HOME: environment.rHome,
     ALDER_R_PRIVATE_LIBRARY: resources2.rLibraryDirectory,
     ALDER_RESOURCES_ROOT: resources2.root,
-    ALDER_R_LIBRARIES: JSON.stringify(environment.libraryPaths),
+    ALDER_R_LIBRARIES: JSON.stringify([resources2.rLibraryDirectory]),
     ALDER_WORKER_DIR: resources2.workerDirectory,
-    R_LIBS: environment.libraryPaths.join(delimiter),
+    R_LIBS: resources2.rLibraryDirectory,
     R_LIBS_SITE: "",
     R_LIBS_USER: ""
   };
@@ -78580,6 +78582,20 @@ function rEnvironmentVariables(environment, resources2, analysisEnvironmentId) {
   values.DYLD_LIBRARY_PATH = prependPath(loaderDirectories, process.env.DYLD_LIBRARY_PATH);
   if (analysisEnvironmentId !== void 0) values.ALDER_ANALYSIS_ENVIRONMENT_ID = analysisEnvironmentId;
   return values;
+}
+function rKernelEnvironmentVariables(environment, resources2, projectDirectory) {
+  const projectLibrary = projectDirectory === void 0 ? void 0 : join7(projectDirectory, ".alder", "library");
+  return {
+    R_HOME: environment.rHome,
+    ALDER_R_PRIVATE_LIBRARY: resources2.rLibraryDirectory,
+    ALDER_RESOURCES_ROOT: resources2.root,
+    ALDER_WORKER_DIR: resources2.workerDirectory,
+    ...projectLibrary !== void 0 && environment.libraryPaths.includes(projectLibrary) ? { ALDER_PROJECT_LIBRARY: projectLibrary } : {},
+    DYLD_LIBRARY_PATH: prependPath(
+      [join7(environment.rHome, "lib"), join7(environment.rHome, "lib", "R")],
+      process.env.DYLD_LIBRARY_PATH
+    )
+  };
 }
 async function selectRscript(requested, desktop, processSupervisorExecutable) {
   if (requested !== void 0) return resolveSelectedPath(requested, "explicit Rscript");
@@ -78682,6 +78698,22 @@ async function probeR(rscript, signal) {
     throw invalid3(`selected Rscript failed identity validation: ${messageOf3(error61)}`);
   }
 }
+async function probeProjectLibraries(rscript, projectDirectory, signal) {
+  try {
+    const result = await execFileAsync(rscript, ["--slave", "-e", "writeLines(.libPaths())"], {
+      signal,
+      cwd: projectDirectory,
+      env: withoutRHome(process.env),
+      timeout: R_PROBE_TIMEOUT_MS,
+      maxBuffer: 512 * 1024
+    });
+    const paths = result.stdout.split("\n").map((value) => value.trim()).filter(Boolean);
+    if (paths.length === 0) throw new Error("selected R returned no project library paths");
+    return paths;
+  } catch (error61) {
+    throw invalid3(`selected R failed project startup: ${messageOf3(error61)}`);
+  }
+}
 async function validateHelperLibrary(resources2) {
   const description = join7(resources2.rLibraryDirectory, "alder", "DESCRIPTION");
   try {
@@ -78691,10 +78723,10 @@ async function validateHelperLibrary(resources2) {
     throw invalid3("The R execution helpers are not installed in this build.");
   }
 }
-async function validateHelperLoad(environment, manifest, signal) {
+async function validateHelperLoad(environment, manifest, helperLibrary, signal) {
   const script = [
-    "suppressPackageStartupMessages(library(alder))",
-    "description <- packageDescription('alder')",
+    `invisible(loadNamespace('alder', lib.loc=${JSON.stringify(helperLibrary)}))`,
+    `description <- packageDescription('alder', lib.loc=${JSON.stringify(helperLibrary)})`,
     "cat(as.character(description$Version), '\\n', description$Built, '\\n', sep = '')"
   ].join("; ");
   try {
@@ -78702,7 +78734,7 @@ async function validateHelperLoad(environment, manifest, signal) {
       signal,
       env: {
         ...withoutRHome(process.env),
-        R_LIBS: environment.libraryPaths.join(delimiter),
+        R_LIBS: helperLibrary,
         R_LIBS_SITE: "",
         R_LIBS_USER: "",
         DYLD_LIBRARY_PATH: prependPath([join7(environment.rHome, "lib"), join7(environment.rHome, "lib", "R")], process.env.DYLD_LIBRARY_PATH)
@@ -79418,9 +79450,6 @@ var ArkKernel = class extends EventEmitter2 {
       "none",
       "--",
       "--interactive",
-      "--no-environ",
-      "--no-site-file",
-      "--no-init-file",
       "--no-save",
       "--no-restore-data",
       "--quiet"
@@ -80416,7 +80445,7 @@ var Engine = class extends EventEmitter3 {
       throw new EngineTransportError("engine request queue is full", "kernel");
     }
     const requestId = this.nextRequestId();
-    const wire = evaluationWire(value);
+    const wire = evaluationWire(value, this.runtime.controlDirectory);
     const state = makeEvaluation(
       requestId,
       value,
@@ -80432,8 +80461,8 @@ var Engine = class extends EventEmitter3 {
       { req: requestId, ...wire }
     ));
     try {
-      const encoded = encodeArkRequest({ request: String(requestId), ...wire }, this.maxArkPayloadBytes());
-      const execution = await this.kernel.execute(arkCall("evaluate", encoded), {
+      const request = encodeArkRequest({ request: String(requestId), ...wire }, this.maxArkPayloadBytes());
+      const execution = await this.kernel.execute(arkCall("evaluate", request), {
         onMessage: (message2) => {
           state.messageTail = state.messageTail.then(
             () => this.processEvaluationMessage(state, message2)
@@ -80554,7 +80583,7 @@ var Engine = class extends EventEmitter3 {
       this.evaluations.set(requestId, batch.states[0]);
       const code2 = values.map((value, offset) => arkCall("evaluate", encodeArkRequest({
         request: String(requestId),
-        ...evaluationWire(value),
+        ...evaluationWire(value, this.runtime.controlDirectory),
         batch: { index: offset + 1, count: values.length, permit: batch.permit }
       }, this.maxArkPayloadBytes()))).join("\n");
       const complete = async (state, execution2) => {
@@ -80896,7 +80925,11 @@ var Engine = class extends EventEmitter3 {
         cwd: paths.notebookDirectory,
         environment: {
           ...paths.arkEnvironment,
-          ...rEnvironmentVariables(environment, this.options.resources, this.analysisEnvironmentId),
+          ...rKernelEnvironmentVariables(
+            environment,
+            this.options.resources,
+            paths.notebookDirectory
+          ),
           ALDER_ARK_KERNEL: "1",
           ALDER_ARK_EVENT_TOKEN: this.arkEventToken,
           ALDER_CAPTURE_DIR: this.runtime.captureDirectory,
@@ -81008,7 +81041,7 @@ var Engine = class extends EventEmitter3 {
   makeRPeer(role, startupTimeoutMs, maxFrameBytes, generation) {
     const paths = this.paths;
     const environment = this.requireEnvironment("analyzer");
-    const peerEnvironment = { ...paths.analyzerEnvironment, ...rEnvironmentVariables(environment, this.options.resources, this.analysisEnvironmentId), ALDER_HOST_ROLE: role };
+    const peerEnvironment = { ...paths.analyzerEnvironment, ...rServiceEnvironmentVariables(environment, this.options.resources, this.analysisEnvironmentId), ALDER_HOST_ROLE: role };
     if (process.platform === "darwin") delete peerEnvironment.R_HOME;
     return new RPeer(
       role,
@@ -81300,7 +81333,7 @@ var Engine = class extends EventEmitter3 {
       throw new FrameProtocolError("Alder Ark event execution identity does not match");
     }
     if (type !== "started" && type !== "batch_end" && type !== "command_result") {
-      if (!state.started) throw new FrameProtocolError("Alder Ark event arrived before evaluation start");
+      if (!state.started) throw new FrameProtocolError(`Alder Ark ${String(type)} event arrived before evaluation start`);
       const sequence = positiveSafeInteger(input2.sequence, "Alder Ark output sequence");
       if (sequence <= state.rSequence) throw new FrameProtocolError("Alder Ark output sequence is not monotonic");
       state.rSequence = sequence;
@@ -81549,13 +81582,13 @@ var Engine = class extends EventEmitter3 {
     let messageTail = Promise.resolve();
     const eventStream = new ArkEventStreamDecoder(this.arkEventToken, this.maxArkPayloadBytes());
     try {
-      const encoded = encodeArkRequest({ request: marker, command, payload }, this.maxArkPayloadBytes());
+      const request = encodeArkRequest({ request: marker, command, payload }, this.maxArkPayloadBytes());
       let started = false;
       const interrupt = () => {
         if (started) void kernel.interrupt().catch(() => void 0);
       };
       signal?.addEventListener("abort", interrupt, { once: true });
-      const execution = await kernel.execute(arkCall("request", encoded), {
+      const execution = await kernel.execute(arkCall("request", request), {
         onStarted: () => {
           started = true;
           if (signal?.aborted) void kernel.interrupt().catch(() => void 0);
@@ -81952,10 +81985,19 @@ function requestError(raw, fallback) {
   const response = engineResponseSchema.parse(raw);
   return new EngineRequestError(response.error?.message ?? fallback, response);
 }
-function arkCall(method2, encoded) {
-  return `get("RUNTIME", envir=asNamespace("alder"), inherits=FALSE)$ark_${method2}("${encoded}")`;
+function arkCall(method2, request) {
+  return `base::get(".__alder_app_bridge_v1", envir=base::globalenv(), inherits=FALSE)$${method2}(${rLiteral(request)})`;
 }
-function evaluationWire(value) {
+function evaluationWire(value, controlDirectory) {
+  const encoded = encodeSource(value.source, "evaluation source");
+  let source;
+  if (encoded.bytes > 1024 * 1024) {
+    const path3 = join10(controlDirectory, ".alder-source-" + randomUUID6());
+    writeFileSync(path3, encoded.text, { encoding: "utf8", flag: "wx", mode: 384 });
+    source = { code_path: path3 };
+  } else {
+    source = { code: encoded.text };
+  }
   return {
     id: value.cellId,
     revision: value.revision,
@@ -81963,7 +82005,7 @@ function evaluationWire(value) {
     session_epoch: value.sessionEpoch,
     kernel_epoch: value.kernelEpoch,
     operation_id: value.operationId,
-    code_base64: encodeSource(value.source, "evaluation source").base64,
+    ...source,
     defs: value.definitions,
     locals: value.locals,
     opaque: value.opaque
@@ -82008,11 +82050,22 @@ function encodeArkRequest(value, maxBytes) {
     throw new TypeError(`Ark request is not JSON serializable: ${asError2(error61).message}`);
   }
   const bytes = Buffer.from(text2, "utf8");
-  const encoded = bytes.toString("base64");
-  if (encoded.length > maxBytes) {
+  if (bytes.length > maxBytes) {
     throw new FrameProtocolError("Alder Ark request exceeds the configured byte limit");
   }
-  return encoded;
+  return value;
+}
+function rLiteral(value) {
+  if (value === null) return "NULL";
+  if (typeof value === "string") return JSON.stringify(value);
+  if (typeof value === "boolean") return value ? "TRUE" : "FALSE";
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  if (Array.isArray(value)) return `base::list(${value.map(rLiteral).join(",")})`;
+  if (typeof value === "object") {
+    const entries2 = Object.entries(value);
+    return `base::structure(base::list(${entries2.map(([, child]) => rLiteral(child)).join(",")}),names=base::c(${entries2.map(([name]) => JSON.stringify(name)).join(",")}))`;
+  }
+  throw new TypeError("Ark request contains an unsupported value");
 }
 function streamText(message2) {
   const text2 = message2.content.text;
@@ -82139,7 +82192,7 @@ function encodeSource(value, label) {
   if (source.length > MAX_NOTEBOOK_SOURCE_BYTES) {
     throw new TypeError(`${label} exceeds the 32 MiB notebook limit`);
   }
-  return { base64: source.toString("base64"), bytes: source.length };
+  return { text: value, base64: source.toString("base64"), bytes: source.length };
 }
 async function prepareRuntime(paths) {
   const captureDirectory = await mkdtemp(join10(paths.artifactDirectory, ".alder-capture-"));
@@ -82187,18 +82240,21 @@ async function resolvePaths(options, environment, signal, pathOptions = options)
   }
   const base = strictEnvironment({
     ...process.env,
-    ...rEnvironmentVariables(environment, resources2),
     ALDER_NOTEBOOK_DIR: notebookDirectory,
     ALDER_ARTIFACT_DIR: artifactDirectory,
     ALDER_CACHE_DIR: cacheDirectory
   });
   const analyzerEnvironment = {
     ...base,
+    ...rServiceEnvironmentVariables(environment, resources2),
     ALDER_HOST_FRAMING: framingScript,
     ALDER_HOST_PROTOCOL: "framed-v2",
     ALDER_HOST_ROLE: "analyzer"
   };
-  const arkEnvironment = { ...base };
+  const arkEnvironment = {
+    ...base,
+    ...rKernelEnvironmentVariables(environment, resources2, notebookDirectory)
+  };
   delete arkEnvironment.ALDER_HOST_FRAMING;
   delete arkEnvironment.ALDER_HOST_PROTOCOL;
   delete arkEnvironment.ALDER_HOST_ROLE;
@@ -97040,7 +97096,7 @@ function workerEnvironment(environment, resources2) {
   const values = {};
   for (const [key2, value] of Object.entries(process.env)) if (value !== void 0) values[key2] = value;
   for (const key2 of ["R_HOME", "R_LIBS", "R_LIBS_USER", "R_LIBS_SITE", "R_PROFILE", "R_PROFILE_USER"]) delete values[key2];
-  Object.assign(values, rEnvironmentVariables(environment, resources2));
+  Object.assign(values, rServiceEnvironmentVariables(environment, resources2));
   return values;
 }
 async function collect(...streams) {
@@ -97185,6 +97241,7 @@ var PackageManager = class {
     const library = packageLibraryPath(declarations.path);
     if (this.options.environment === null) return failedInstall(declarations, requested, library, new PackageError("r_not_found", "selected R environment is unavailable"), false);
     try {
+      await projectRepositories(declarations.path);
       await ensureProjectLibrary(declarations.path, library);
       const response = workerResult(await this.run("install", declarations, requested, library, options.operationId, options));
       const records = statusRecords(requested, response.records);
@@ -97210,7 +97267,8 @@ var PackageManager = class {
       };
     } catch (error61) {
       const failure2 = error61 instanceof PackageWorkerError ? new PackageError(error61.code, error61.message, error61.details) : error61 instanceof PackageError ? error61 : new PackageError("install_failed", messageOf6(error61));
-      return failedInstall(declarations, requested, library, failure2, failure2.code !== "r_not_found" && failure2.code !== "cancelled");
+      const possiblyMutated = error61 instanceof PackageWorkerError && failure2.code !== "r_not_found" && failure2.code !== "cancelled" && failure2.code !== "job_closed";
+      return failedInstall(declarations, requested, library, failure2, possiblyMutated);
     }
   }
   close() {
@@ -97221,18 +97279,13 @@ var PackageManager = class {
     if (this.closed) throw new PackageError("job_closed", "package manager is closed");
   }
   async run(command, declarations, packages, library, operationId, options = {}) {
-    try {
-      return await this.worker.run(command, {
-        projectDirectory: declarations.path,
-        packages,
-        library,
-        repositories: await projectRepositories(declarations.path),
-        ...operationId === void 0 ? {} : { operationId }
-      }, options);
-    } catch (error61) {
-      if (error61 instanceof PackageWorkerError) throw new PackageError(error61.code, error61.message, error61.details);
-      throw error61;
-    }
+    return this.worker.run(command, {
+      projectDirectory: declarations.path,
+      packages,
+      library,
+      repositories: command === "install" ? await projectRepositories(declarations.path) : [],
+      ...operationId === void 0 ? {} : { operationId }
+    }, options);
   }
 };
 function createPackageManager(options) {
@@ -111387,7 +111440,6 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
       recoveryFingerprint = void 0;
       publishedRecoveryProjection = null;
     }
-    const childEnvironment = () => runtimeEnvironment === null ? {} : rEnvironmentVariables(runtimeEnvironment, options.resources);
     engine = new Engine({ resources: options.resources, processScope, environment: runtimeEnvironment ?? void 0, notebookDirectory, artifactDirectory: work, cacheDirectory });
     packageManager = createPackageManager({ resources: options.resources, environment: runtimeEnvironment, processScope, projectDirectory: notebookDirectory, onProgress: onPackageProgress });
     if (recoveryPending && observationsMatch && packageDeclarationIntent.length > 0) {

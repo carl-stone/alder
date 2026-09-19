@@ -70,18 +70,17 @@ export async function resolveREnvironment(options: ResolveREnvironmentOptions): 
   const platformResult = rEnvironmentSchema.shape.platform.safeParse(process.platform);
   if (!platformResult.success) throw invalid(`unsupported host platform ${process.platform}`);
   const platform = platformResult.data;
-  const normalLibraries = await normalizeDirectories(probe.libraryPaths, "R library path");
+  const normalLibraries = await normalizeDirectories(
+    await probeProjectLibraries(selected, options.projectDirectory, options.signal),
+    "R project library path",
+  );
   const baseLibrary = await existingDirectory(probe.baseLibrary, "R base library");
   const helperLibrary = await existingDirectory(resources.rLibraryDirectory, "Alder R library");
   const environmentFields = { rscript: selected, rHome, version, platform, arch: process.arch };
   const helperAbi = `${manifest.applicationVersion}:${R_VERSION_RANGE}`;
-  const baseLibraryPaths = uniquePaths([
-    helperLibrary,
-    ...(options.sandbox === true ? [] : normalLibraries),
-    baseLibrary,
-  ]);
+  const baseLibraryPaths = uniquePaths([...(options.sandbox === true ? [] : normalLibraries), helperLibrary, baseLibrary]);
   const baseEnvironment = makeEnvironment(environmentFields, helperAbi, baseLibraryPaths);
-  await validateHelperLoad(baseEnvironment, manifest, options.signal);
+  await validateHelperLoad(baseEnvironment, manifest, helperLibrary, options.signal);
   const requestedProjectLibrary = options.resolveProjectLibrary === undefined
     ? options.sandbox === true ? join(options.projectDirectory, ".alder", "library") : null
     : await options.resolveProjectLibrary(baseEnvironment);
@@ -92,9 +91,9 @@ export async function resolveREnvironment(options: ResolveREnvironmentOptions): 
     ? null
     : await optionalDirectory(requestedProjectLibrary, "project package library");
   const libraryPaths = uniquePaths([
-    helperLibrary,
-    ...(projectLibrary === null ? [] : [projectLibrary]),
     ...(options.sandbox === true ? [] : normalLibraries),
+    ...(projectLibrary === null ? [] : [projectLibrary]),
+    helperLibrary,
     baseLibrary,
   ]);
   options.signal?.throwIfAborted();
@@ -102,7 +101,7 @@ export async function resolveREnvironment(options: ResolveREnvironmentOptions): 
   return environment;
 }
 
-export function rEnvironmentVariables(
+export function rServiceEnvironmentVariables(
   environment: REnvironment,
   resources: ApplicationResources,
   analysisEnvironmentId?: string,
@@ -111,9 +110,9 @@ export function rEnvironmentVariables(
     R_HOME: environment.rHome,
     ALDER_R_PRIVATE_LIBRARY: resources.rLibraryDirectory,
     ALDER_RESOURCES_ROOT: resources.root,
-    ALDER_R_LIBRARIES: JSON.stringify(environment.libraryPaths),
+    ALDER_R_LIBRARIES: JSON.stringify([resources.rLibraryDirectory]),
     ALDER_WORKER_DIR: resources.workerDirectory,
-    R_LIBS: environment.libraryPaths.join(delimiter),
+    R_LIBS: resources.rLibraryDirectory,
     R_LIBS_SITE: "",
     R_LIBS_USER: "",
   };
@@ -121,6 +120,30 @@ export function rEnvironmentVariables(
   values.DYLD_LIBRARY_PATH = prependPath(loaderDirectories, process.env.DYLD_LIBRARY_PATH);
   if (analysisEnvironmentId !== undefined) values.ALDER_ANALYSIS_ENVIRONMENT_ID = analysisEnvironmentId;
   return values;
+}
+
+/** Kernel processes retain ordinary R startup/profile semantics. */
+export function rKernelEnvironmentVariables(
+  environment: REnvironment,
+  resources: ApplicationResources,
+  projectDirectory?: string,
+): Record<string, string> {
+  const projectLibrary = projectDirectory === undefined
+    ? undefined
+    : join(projectDirectory, ".alder", "library");
+  return {
+    R_HOME: environment.rHome,
+    ALDER_R_PRIVATE_LIBRARY: resources.rLibraryDirectory,
+    ALDER_RESOURCES_ROOT: resources.root,
+    ALDER_WORKER_DIR: resources.workerDirectory,
+    ...(projectLibrary !== undefined && environment.libraryPaths.includes(projectLibrary)
+      ? { ALDER_PROJECT_LIBRARY: projectLibrary }
+      : {}),
+    DYLD_LIBRARY_PATH: prependPath(
+      [join(environment.rHome, "lib"), join(environment.rHome, "lib", "R")],
+      process.env.DYLD_LIBRARY_PATH,
+    ),
+  };
 }
 
 async function selectRscript(
@@ -236,6 +259,23 @@ async function probeR(rscript: string, signal?: AbortSignal): Promise<RProbe> {
   }
 }
 
+async function probeProjectLibraries(rscript: string, projectDirectory: string, signal?: AbortSignal): Promise<string[]> {
+  try {
+    const result = await execFileAsync(rscript, ["--slave", "-e", "writeLines(.libPaths())"], {
+      signal,
+      cwd: projectDirectory,
+      env: withoutRHome(process.env),
+      timeout: R_PROBE_TIMEOUT_MS,
+      maxBuffer: 512 * 1024,
+    });
+    const paths = result.stdout.split("\n").map(value => value.trim()).filter(Boolean);
+    if (paths.length === 0) throw new Error("selected R returned no project library paths");
+    return paths;
+  } catch (error) {
+    throw invalid(`selected R failed project startup: ${messageOf(error)}`);
+  }
+}
+
 async function validateHelperLibrary(resources: ApplicationResources): Promise<void> {
   const description = join(resources.rLibraryDirectory, "alder", "DESCRIPTION");
 
@@ -247,10 +287,10 @@ async function validateHelperLibrary(resources: ApplicationResources): Promise<v
   }
 }
 
-async function validateHelperLoad(environment: REnvironment, manifest: ApplicationManifest, signal?: AbortSignal): Promise<void> {
+async function validateHelperLoad(environment: REnvironment, manifest: ApplicationManifest, helperLibrary: string, signal?: AbortSignal): Promise<void> {
   const script = [
-    "suppressPackageStartupMessages(library(alder))",
-    "description <- packageDescription('alder')",
+    `invisible(loadNamespace('alder', lib.loc=${JSON.stringify(helperLibrary)}))`,
+    `description <- packageDescription('alder', lib.loc=${JSON.stringify(helperLibrary)})`,
     "cat(as.character(description$Version), '\\n', description$Built, '\\n', sep = '')",
   ].join("; ");
   try {
@@ -258,7 +298,7 @@ async function validateHelperLoad(environment: REnvironment, manifest: Applicati
       signal,
       env: {
         ...withoutRHome(process.env),
-        R_LIBS: environment.libraryPaths.join(delimiter),
+        R_LIBS: helperLibrary,
         R_LIBS_SITE: "",
         R_LIBS_USER: "",
         DYLD_LIBRARY_PATH: prependPath([join(environment.rHome, "lib"), join(environment.rHome, "lib", "R")], process.env.DYLD_LIBRARY_PATH),

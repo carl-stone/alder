@@ -7,7 +7,7 @@ import { basename, dirname, extname, join, resolve } from "node:path";
 import { TextDecoder } from "node:util";
 import type { ApplicationResources } from "./resources.js";
 
-import { rEnvironmentVariables } from "./r-environment.js";
+import { rKernelEnvironmentVariables, rServiceEnvironmentVariables } from "./r-environment.js";
 import type { OwnedProcess, ProcessScope } from "./processes.js";
 
 
@@ -673,7 +673,7 @@ export class Engine extends EventEmitter implements EngineAdapter {
       throw new EngineTransportError("engine request queue is full", "kernel");
     }
     const requestId = this.nextRequestId();
-    const wire = evaluationWire(value);
+    const wire = evaluationWire(value, this.runtime!.controlDirectory);
     const state = makeEvaluation(requestId, value, onEvent, kernelGeneration,
       this.arkEventToken, this.maxArkPayloadBytes());
     this.evaluations.set(requestId, state);
@@ -681,8 +681,8 @@ export class Engine extends EventEmitter implements EngineAdapter {
       "kernel", "eval_cell", { req: requestId, ...wire },
     ));
     try {
-      const encoded = encodeArkRequest({ request: String(requestId), ...wire }, this.maxArkPayloadBytes());
-      const execution = await this.kernel!.execute(arkCall("evaluate", encoded), {
+      const request = encodeArkRequest({ request: String(requestId), ...wire }, this.maxArkPayloadBytes());
+      const execution = await this.kernel!.execute(arkCall("evaluate", request), {
         onMessage: (message) => {
           state.messageTail = state.messageTail.then(
             () => this.processEvaluationMessage(state, message),
@@ -802,7 +802,7 @@ export class Engine extends EventEmitter implements EngineAdapter {
       const eventStream = new ArkEventStreamDecoder(this.arkEventToken, this.maxArkPayloadBytes());
       this.evaluations.set(requestId, batch.states[0]!);
       const code = values.map((value, offset) => arkCall("evaluate", encodeArkRequest({
-        request: String(requestId), ...evaluationWire(value),
+        request: String(requestId), ...evaluationWire(value, this.runtime!.controlDirectory),
         batch: { index: offset + 1, count: values.length, permit: batch.permit },
       }, this.maxArkPayloadBytes()))).join("\n");
       const complete = async (state: ActiveEvaluation, execution: ArkExecution): Promise<void> => {
@@ -1159,7 +1159,11 @@ export class Engine extends EventEmitter implements EngineAdapter {
         cwd: paths.notebookDirectory,
         environment: {
           ...paths.arkEnvironment,
-          ...rEnvironmentVariables(environment, this.options.resources, this.analysisEnvironmentId),
+          ...rKernelEnvironmentVariables(
+            environment,
+            this.options.resources,
+            paths.notebookDirectory,
+          ),
           ALDER_ARK_KERNEL: "1",
           ALDER_ARK_EVENT_TOKEN: this.arkEventToken,
           ALDER_CAPTURE_DIR: this.runtime.captureDirectory,
@@ -1277,7 +1281,7 @@ export class Engine extends EventEmitter implements EngineAdapter {
   ): RPeer {
     const paths = this.paths!;
     const environment = this.requireEnvironment("analyzer");
-    const peerEnvironment = { ...paths.analyzerEnvironment, ...rEnvironmentVariables(environment, this.options.resources, this.analysisEnvironmentId), ALDER_HOST_ROLE: role };
+    const peerEnvironment = { ...paths.analyzerEnvironment, ...rServiceEnvironmentVariables(environment, this.options.resources, this.analysisEnvironmentId), ALDER_HOST_ROLE: role };
     if (process.platform === "darwin") delete (peerEnvironment as Record<string, string>).R_HOME;
     return new RPeer(
       role,
@@ -1596,7 +1600,7 @@ export class Engine extends EventEmitter implements EngineAdapter {
       throw new FrameProtocolError("Alder Ark event execution identity does not match");
     }
     if (type !== "started" && type !== "batch_end" && type !== "command_result") {
-      if (!state.started) throw new FrameProtocolError("Alder Ark event arrived before evaluation start");
+      if (!state.started) throw new FrameProtocolError(`Alder Ark ${String(type)} event arrived before evaluation start`);
       const sequence = positiveSafeInteger(input.sequence, "Alder Ark output sequence");
       if (sequence <= state.rSequence) throw new FrameProtocolError("Alder Ark output sequence is not monotonic");
       state.rSequence = sequence;
@@ -1878,13 +1882,13 @@ export class Engine extends EventEmitter implements EngineAdapter {
     let messageTail = Promise.resolve();
     const eventStream = new ArkEventStreamDecoder(this.arkEventToken, this.maxArkPayloadBytes());
     try {
-      const encoded = encodeArkRequest({ request: marker, command, payload }, this.maxArkPayloadBytes());
+      const request = encodeArkRequest({ request: marker, command, payload }, this.maxArkPayloadBytes());
       let started = false;
       const interrupt = (): void => {
         if (started) void kernel.interrupt().catch(() => undefined);
       };
       signal?.addEventListener("abort", interrupt, { once: true });
-      const execution = await kernel.execute(arkCall("request", encoded), {
+      const execution = await kernel.execute(arkCall("request", request), {
         onStarted: () => {
           started = true;
           if (signal?.aborted) void kernel.interrupt().catch(() => undefined);
@@ -2348,16 +2352,25 @@ function requestError(raw: Record<string, unknown>, fallback: string): EngineReq
   return new EngineRequestError(response.error?.message ?? fallback, response);
 }
 
-function arkCall(method: "evaluate" | "request", encoded: string): string {
-  return `get("RUNTIME", envir=asNamespace("alder"), inherits=FALSE)$ark_${method}("${encoded}")`;
+function arkCall(method: "evaluate" | "request", request: unknown): string {
+  return `base::get(".__alder_app_bridge_v1", envir=base::globalenv(), inherits=FALSE)$${method}(${rLiteral(request)})`;
 }
 
-function evaluationWire(value: EvaluationPayload): Record<string, unknown> {
+function evaluationWire(value: EvaluationPayload, controlDirectory: string): Record<string, unknown> {
+  const encoded = encodeSource(value.source, "evaluation source");
+  let source: Record<string, string>;
+  if (encoded.bytes > 1024 * 1024) {
+    const path = join(controlDirectory, ".alder-source-" + randomUUID());
+    writeFileSync(path, encoded.text, { encoding: "utf8", flag: "wx", mode: 0o600 });
+    source = { code_path: path };
+  } else {
+    source = { code: encoded.text };
+  }
   return {
     id: value.cellId, revision: value.revision, run_id: value.runId,
     session_epoch: value.sessionEpoch, kernel_epoch: value.kernelEpoch,
     operation_id: value.operationId,
-    code_base64: encodeSource(value.source, "evaluation source").base64,
+    ...source,
     defs: value.definitions, locals: value.locals, opaque: value.opaque,
   };
 }
@@ -2385,7 +2398,7 @@ function successfulExecution(message: JupyterMessage): ArkExecution {
     reply: { ...message, content: { status: "ok" } }, messages: [] };
 }
 
-function encodeArkRequest(value: unknown, maxBytes: number): string {
+function encodeArkRequest(value: unknown, maxBytes: number): unknown {
   let text: string;
   try {
     text = JSON.stringify(value);
@@ -2393,11 +2406,23 @@ function encodeArkRequest(value: unknown, maxBytes: number): string {
     throw new TypeError(`Ark request is not JSON serializable: ${asError(error).message}`);
   }
   const bytes = Buffer.from(text, "utf8");
-  const encoded = bytes.toString("base64");
-  if (encoded.length > maxBytes) {
+  if (bytes.length > maxBytes) {
     throw new FrameProtocolError("Alder Ark request exceeds the configured byte limit");
   }
-  return encoded;
+  return value;
+}
+
+function rLiteral(value: unknown): string {
+  if (value === null) return "NULL";
+  if (typeof value === "string") return JSON.stringify(value);
+  if (typeof value === "boolean") return value ? "TRUE" : "FALSE";
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  if (Array.isArray(value)) return `base::list(${value.map(rLiteral).join(",")})`;
+  if (typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>);
+    return `base::structure(base::list(${entries.map(([, child]) => rLiteral(child)).join(",")}),names=base::c(${entries.map(([name]) => JSON.stringify(name)).join(",")}))`;
+  }
+  throw new TypeError("Ark request contains an unsupported value");
 }
 
 function streamText(message: JupyterMessage): string {
@@ -2542,7 +2567,7 @@ function jsonByteSize(value: unknown): number {
   return Buffer.byteLength(encoded ?? "null", "utf8");
 }
 
-function encodeSource(value: string, label: string): { base64: string; bytes: number } {
+function encodeSource(value: string, label: string): { text: string; base64: string; bytes: number } {
   if (value.includes("\0")) throw new TypeError(`${label} contains NUL`);
   const source = Buffer.from(value, "utf8");
   if (source.toString("utf8") !== value) {
@@ -2551,7 +2576,7 @@ function encodeSource(value: string, label: string): { base64: string; bytes: nu
   if (source.length > MAX_NOTEBOOK_SOURCE_BYTES) {
     throw new TypeError(`${label} exceeds the 32 MiB notebook limit`);
   }
-  return { base64: source.toString("base64"), bytes: source.length };
+  return { text: value, base64: source.toString("base64"), bytes: source.length };
 }
 
 async function prepareRuntime(paths: ResolvedPaths): Promise<RuntimePaths> {
@@ -2606,18 +2631,21 @@ async function resolvePaths(
   }
   const base = strictEnvironment({
     ...process.env,
-    ...rEnvironmentVariables(environment, resources),
     ALDER_NOTEBOOK_DIR: notebookDirectory,
     ALDER_ARTIFACT_DIR: artifactDirectory,
     ALDER_CACHE_DIR: cacheDirectory,
   });
   const analyzerEnvironment = {
     ...base,
+    ...rServiceEnvironmentVariables(environment, resources),
     ALDER_HOST_FRAMING: framingScript,
     ALDER_HOST_PROTOCOL: "framed-v2",
     ALDER_HOST_ROLE: "analyzer",
   };
-  const arkEnvironment = { ...base };
+  const arkEnvironment = {
+    ...base,
+    ...rKernelEnvironmentVariables(environment, resources, notebookDirectory),
+  };
   delete arkEnvironment.ALDER_HOST_FRAMING;
   delete arkEnvironment.ALDER_HOST_PROTOCOL;
   delete arkEnvironment.ALDER_HOST_ROLE;

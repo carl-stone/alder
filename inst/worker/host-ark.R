@@ -35,27 +35,23 @@ local({
   if (!path_is_under(worker_dir, resources_root)) {
     stop("ALDER_WORKER_DIR must be contained inside application resources", call. = FALSE)
   }
-  bootstrap_path <- normalizePath(file.path(worker_dir, "host-bootstrap.R"),
-                                  mustWork = FALSE, winslash = "/")
   runtime_path <- normalizePath(file.path(worker_dir, "host-ark-runtime.R"),
                                 mustWork = FALSE, winslash = "/")
-  if (!path_is_under(bootstrap_path, resources_root) ||
-      !path_is_under(runtime_path, resources_root) ||
-      !identical(dirname(bootstrap_path), worker_dir) ||
+  if (!path_is_under(runtime_path, resources_root) ||
       !identical(dirname(runtime_path), worker_dir) ||
-      !file.exists(bootstrap_path) || isTRUE(file.info(bootstrap_path)$isdir) ||
-      file.access(bootstrap_path, 4L) != 0L ||
       !file.exists(runtime_path) || isTRUE(file.info(runtime_path)$isdir) ||
       file.access(runtime_path, 4L) != 0L) {
     stop("validated Alder Ark worker modules are missing or outside resources", call. = FALSE)
   }
 
-  runtime <- new.env(parent = globalenv())
+  imports <- new.env(parent = baseenv())
+  imports$setNames <- stats::setNames
+  runtime <- new.env(parent = imports)
   sys.source(runtime_path, envir = runtime, keep.source = FALSE)
   Sys.unsetenv("ALDER_WORKER_DIR")
-  api <- get("RUNTIME", envir = asNamespace("alder"), inherits = FALSE)
-  if (!is.environment(api) || !is.function(api$ark_evaluate) ||
-      !is.function(api$ark_request)) {
+  bridge <- get(".__alder_app_bridge_v1", envir = globalenv(), inherits = FALSE)
+  if (!is.environment(bridge) || !is.function(bridge$evaluate) ||
+      !is.function(bridge$request)) {
     stop("Alder Ark runtime is incomplete", call. = FALSE)
   }
 })

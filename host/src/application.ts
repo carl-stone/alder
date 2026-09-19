@@ -25,7 +25,7 @@ import { parseNotebook, restoreNotebookCellIdentity, serializeNotebook, serializ
 import type { ArtifactHandle, EngineHandshake, HostSnapshot, Layout, REnvironment, RecoveryBranch as ProtocolRecoveryBranch, RecoveryState as ProtocolRecoveryState } from "./protocol.js";
 import type { StaticOutputScope } from "./outputs.js";
 import { UploadStore } from "./uploads.js";
-import { REnvironmentError, resolveREnvironment, rEnvironmentVariables } from "./r-environment.js";
+import { REnvironmentError, resolveREnvironment } from "./r-environment.js";
 import type { ApplicationResources } from "./resources.js";
 import { createProcessScope, type ProcessScope } from "./processes.js";
 import { acquireNotebookOwnership, isUntitledRecoveryId, registerUntitledRecoveryDescriptor, retireUntitledRecoveryDescriptor, selectUntitledRecoveryDescriptor, SessionAuthError, type NotebookOwnership, type UntitledRecoveryDescriptor } from "./sessions.js";
@@ -534,7 +534,6 @@ async function startNotebookHost(
       recoveryFingerprint = undefined;
       publishedRecoveryProjection = null;
     }
-    const childEnvironment = (): Record<string, string> => runtimeEnvironment === null ? {} : rEnvironmentVariables(runtimeEnvironment, options.resources);
     engine = new Engine({ resources: options.resources, processScope, environment: runtimeEnvironment ?? undefined, notebookDirectory, artifactDirectory: work, cacheDirectory });
     packageManager = createPackageManager({ resources: options.resources, environment: runtimeEnvironment, processScope, projectDirectory: notebookDirectory, onProgress: onPackageProgress });
     if (recoveryPending && observationsMatch && packageDeclarationIntent.length > 0) {

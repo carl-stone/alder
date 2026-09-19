@@ -1,6 +1,4 @@
-# Shared bootstrap for every R child launched by the application host.
-# This runs before library(alder) so an installed package outside the
-# application resources cannot win package lookup.
+# Profile-free bootstrap for isolated application services.
 
 .alder_worker_has_control <- function(value) {
   codepoints <- utf8ToInt(value)
@@ -120,9 +118,8 @@
     analysis_environment_id <- NULL
   }
 
-  # Keep Alder's private package first while resolving its imports from the
-  # selected project's library. R_LIBS is seeded by the host before startup.
-  .alder_worker_set_libpaths(unique(c(private_library, .libPaths())))
+  # Service dependencies resolve only from the app-private library and base R.
+  .alder_worker_set_libpaths(private_library)
   Sys.unsetenv(c(
     "ALDER_WORKER_DIR", "ALDER_RESOURCES_ROOT", "ALDER_R_PRIVATE_LIBRARY", "ALDER_R_LIBRARIES",
     "ALDER_HOST_FRAMING", "ALDER_HOST_PROTOCOL", "ALDER_HOST_ROLE",
@@ -149,12 +146,11 @@
   if (anyDuplicated(paths)) {
     stop("ALDER_R_LIBRARIES must contain unique library paths", call. = FALSE)
   }
-  if (!identical(paths[[1L]], private_library)) {
-    stop("ALDER_R_LIBRARIES must begin with the private Alder library",
+  if (!identical(unname(paths), private_library)) {
+    stop("ALDER_R_LIBRARIES must name only the private service library",
          call. = FALSE)
   }
   .alder_worker_set_libpaths(paths)
-  suppressPackageStartupMessages(base::library("alder"))
   list(workerDirectory = worker_dir, privateLibrary = private_library,
        libraryPaths = unname(paths), policy = policy,
        analysisEnvironmentId = analysis_environment_id)

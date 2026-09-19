@@ -26,8 +26,8 @@ local({
     }
   }
   inspect <- function() lapply(packages, record)
+  mutated <- FALSE
   response <- tryCatch({
-    mutated <- FALSE
     if (identical(command, "install")) {
       dir.create(library, recursive = TRUE, showWarnings = FALSE, mode = "0700")
       missing <- packages[vapply(inspect(), function(value) identical(value$status, "missing"), logical(1))]
@@ -41,6 +41,6 @@ local({
     missing <- vapply(records, function(value) identical(value$status, "missing"), logical(1))
     if (identical(command, "install") && any(missing)) stop(paste("packages remain unavailable:", paste(packages[missing], collapse = ", ")), call. = FALSE)
     list(ok = TRUE, records = records, mutatedLibrary = mutated)
-  }, error = function(error) list(ok = FALSE, records = inspect(), mutatedLibrary = identical(command, "install"), error = conditionMessage(error)))
+  }, error = function(error) list(ok = FALSE, records = inspect(), mutatedLibrary = mutated, error = conditionMessage(error)))
   jsonlite::write_json(response, args[[2L]], auto_unbox = TRUE, null = "null")
 })

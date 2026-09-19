@@ -1,31 +1,7 @@
-RUNTIME <- new.env(parent = emptyenv())
-RUNTIME$emit <- NULL
-RUNTIME$render <- NULL
-RUNTIME$cell_id <- function() NULL
-RUNTIME$artifact_dir <- NULL
-RUNTIME$register_artifact <- NULL
-RUNTIME$cache_dir <- NULL
-RUNTIME$lazy <- new.env(parent = emptyenv())
-RUNTIME$lazy_seq <- NULL
-RUNTIME$mem_cache <- new.env(parent = emptyenv())
-RUNTIME$disk_cache_dirs <- new.env(parent = emptyenv())
-
-runtime_seq <- function() {
-  if (is.environment(RUNTIME$seq)) {
-    RUNTIME$seq$value <- as.integer(RUNTIME$seq$value %||% 0L) + 1L
-    return(RUNTIME$seq$value)
-  }
-  RUNTIME$seq <- as.integer(RUNTIME$seq %||% 0L) + 1L
-  RUNTIME$seq
-}
-
-runtime_lazy_seq <- function() {
-  if (is.environment(RUNTIME$lazy_seq)) {
-    RUNTIME$lazy_seq$value <- as.integer(RUNTIME$lazy_seq$value %||% 0L) + 1L
-    return(RUNTIME$lazy_seq$value)
-  }
-  runtime_seq()
-}
+.alder_state <- new.env(parent = emptyenv())
+.alder_state$cache_dir <- NULL
+.alder_state$mem_cache <- new.env(parent = emptyenv())
+.alder_state$disk_cache_dirs <- new.env(parent = emptyenv())
 
 new_output <- function(kind, ...) {
   kinds <- c("text", "table", "image", "html", "markdown", "widget",
@@ -83,7 +59,7 @@ output_widget <- function(x, name = NULL) {
     spec$choices <- I(x$choices)
   }
   new_output("widget", name = as.character(name %||% ""),
-             owner = as.character(RUNTIME$cell_id() %||% ""), path = character(),
+             owner = "", path = character(),
              commit_token = NULL, operation = NULL, spec = spec)
 }
 
@@ -95,7 +71,10 @@ output_value <- function(x, widget_name = NULL) {
   if (is.character(x) && !is.object(x) && length(x) == 1L && !is.na(x)) {
     return(output_text(x))
   }
-  if (is.function(RUNTIME$render)) return(RUNTIME$render(x))
+  handler <- getOption("alder.output_handler")
+  if (is.function(handler)) {
+    return(handler("render", list(value = x, name = widget_name)))
+  }
   output_text(x)
 }
 
@@ -166,8 +145,7 @@ media_output <- function(path_or_raw, media_type, alt = NULL) {
       grepl("^https?://", path_or_raw, ignore.case = TRUE)) {
     return(new_output("error", message = "out$image() needs a local file or raw vector"))
   }
-  dir <- RUNTIME$artifact_dir %||% file.path(tools::R_user_dir("alder", "cache"),
-                                              "artifacts")
+  dir <- file.path(tools::R_user_dir("alder", "cache"), "artifacts")
   dir.create(dir, recursive = TRUE, showWarnings = FALSE)
   if (is.raw(path_or_raw)) {
     mime_type <- media_default_mime(media_type)
@@ -197,20 +175,17 @@ media_output <- function(path_or_raw, media_type, alt = NULL) {
       return(new_output("error", message = "could not copy media artifact"))
     }
   }
-  if (is.function(RUNTIME$register_artifact)) {
-    RUNTIME$register_artifact(basename(dest))
-  }
   new_output("media", media_type = media_type, artifact = basename(dest),
              mime = mime_type, alt = alt %||% "")
 }
 
 progress_emit <- function(record) {
-  emit <- RUNTIME$emit
-  if (is.null(emit)) {
+  handler <- getOption("alder.output_handler")
+  if (is.function(handler)) {
+    handler("progress", record)
+  } else {
     message(sprintf("%s: %s/%s", record$label, record$value,
                     record$total %||% ""))
-  } else {
-    emit("progress", list(progress = record))
   }
   invisible(record)
 }
@@ -340,9 +315,8 @@ out <- list(
               class = c("alder_progress", "list"))
   },
   append = function(x) {
-    output <- output_value(x)
-    emit <- RUNTIME$emit
-    if (is.null(emit)) print(x) else emit("append", list(output = output))
+    handler <- getOption("alder.output_handler")
+    if (is.function(handler)) handler("append", x) else print(x)
     invisible(x)
   },
   lazy = function(f, label = "Show") {
@@ -350,14 +324,12 @@ out <- list(
     if (!is.function(f) || length(formals(f)) != 0L) {
       stop("out$lazy() needs a zero-argument function", call. = FALSE)
     }
-    if (is.null(RUNTIME$emit)) return(f())
-    key <- paste0(RUNTIME$cell_id(), ":", runtime_lazy_seq())
-    if (!is.environment(RUNTIME$lazy)) {
-      stop("lazy output runtime is unavailable", call. = FALSE)
+    handler <- getOption("alder.output_handler")
+    if (is.function(handler)) {
+      handler("lazy", list(resolver = f, label = label))
+    } else {
+      f()
     }
-    assign(key, f, envir = RUNTIME$lazy)
-    new_output("lazy", key = key, label = label,
-               state = "collapsed", child = NULL)
   },
   inspect = function(x) {
     txt <- paste(utils::capture.output(utils::str(x)), collapse = "\n")

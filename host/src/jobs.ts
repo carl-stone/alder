@@ -4,7 +4,7 @@ import { join } from "node:path";
 
 import type { ApplicationResources } from "./resources.js";
 import type { REnvironment } from "./protocol.js";
-import { rEnvironmentVariables } from "./r-environment.js";
+import { rServiceEnvironmentVariables } from "./r-environment.js";
 import type { OwnedProcess, ProcessScope } from "./processes.js";
 
 export interface PackageProgress {
@@ -126,7 +126,7 @@ function workerEnvironment(environment: REnvironment, resources: ApplicationReso
   const values: Record<string, string> = {};
   for (const [key, value] of Object.entries(process.env)) if (value !== undefined) values[key] = value;
   for (const key of ["R_HOME", "R_LIBS", "R_LIBS_USER", "R_LIBS_SITE", "R_PROFILE", "R_PROFILE_USER"]) delete values[key];
-  Object.assign(values, rEnvironmentVariables(environment, resources));
+  Object.assign(values, rServiceEnvironmentVariables(environment, resources));
   return values;
 }
 

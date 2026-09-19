@@ -4822,6 +4822,9 @@ export class Controller {
     if (packages.length === 0) {
       const before = await this.callService("packages.status", { operationId });
       packages = packageMissing(before);
+      if (packages.length === 0) {
+        return { result: { ok: true, mutatedLibrary: false }, status: clone(before) };
+      }
     }
     let result: unknown;
     let installFailure: unknown;

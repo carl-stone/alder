@@ -109,6 +109,7 @@ export class PackageManager {
     const library = packageLibraryPath(declarations.path);
     if (this.options.environment === null) return failedInstall(declarations, requested, library, new PackageError("r_not_found", "selected R environment is unavailable"), false);
     try {
+      await projectRepositories(declarations.path);
       await ensureProjectLibrary(declarations.path, library);
       const response = workerResult(await this.run("install", declarations, requested, library, options.operationId, options));
       const records = statusRecords(requested, response.records);
@@ -123,20 +124,18 @@ export class PackageManager {
       const failure = error instanceof PackageWorkerError
         ? new PackageError(error.code as PackageErrorCode, error.message, error.details)
         : error instanceof PackageError ? error : new PackageError("install_failed", messageOf(error));
-      return failedInstall(declarations, requested, library, failure, failure.code !== "r_not_found" && failure.code !== "cancelled");
+      const possiblyMutated = error instanceof PackageWorkerError
+        && failure.code !== "r_not_found" && failure.code !== "cancelled" && failure.code !== "job_closed";
+      return failedInstall(declarations, requested, library, failure, possiblyMutated);
     }
   }
 
   close(): Promise<void> { this.closed = true; return this.worker.close(); }
   private assertOpen(): void { if (this.closed) throw new PackageError("job_closed", "package manager is closed"); }
   private async run(command: "status" | "install", declarations: PackageDeclarations, packages: string[], library: string, operationId?: string, options: PackageRunOptions = {}): Promise<unknown> {
-    try {
-      return await this.worker.run(command, { projectDirectory: declarations.path, packages, library,
-        repositories: await projectRepositories(declarations.path), ...(operationId === undefined ? {} : { operationId }) }, options);
-    } catch (error) {
-      if (error instanceof PackageWorkerError) throw new PackageError(error.code as PackageErrorCode, error.message, error.details);
-      throw error;
-    }
+    return this.worker.run(command, { projectDirectory: declarations.path, packages, library,
+      repositories: command === "install" ? await projectRepositories(declarations.path) : [],
+      ...(operationId === undefined ? {} : { operationId }) }, options);
   }
 }
 

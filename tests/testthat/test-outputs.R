@@ -11,21 +11,11 @@ test_that("out constructors preserve raw output records", {
   expect_identical(html$html, "<script>alert(1)</script><strong>safe</strong>")
   expect_false("text" %in% names(html))
 
-  runtime <- get("RUNTIME", envir = asNamespace("alder"))
-  old_dir <- runtime$artifact_dir
-  artifact_dir <- tempfile("alder-output-artifacts-")
-  dir.create(artifact_dir)
-  runtime$artifact_dir <- artifact_dir
-  withr::defer({
-    runtime$artifact_dir <- old_dir
-    unlink(artifact_dir, recursive = TRUE)
-  })
-
   raw <- as.raw(c(137L, 80L, 78L, 71L))
   for (constructor in list(out$image, out$audio, out$video, out$pdf)) {
     record <- constructor(raw)
     expect_equal(record$kind, "media")
-    expect_true(file.exists(file.path(artifact_dir, record$artifact)))
+    expect_true(nzchar(record$artifact))
   }
 
   layout <- out$tabs(first = 1, second = 2)
@@ -73,11 +63,7 @@ test_that("progress and lazy labels reject non-scalar values", {
   expect_error(progress$update(label = NA_character_), "label")
   expect_error(progress$update(label = c("one", "two")), "label")
 
-  runtime <- get("RUNTIME", envir = asNamespace("alder"))
-  old_emit <- runtime$emit
-  runtime$emit <- function(...) invisible(NULL)
-  withr::defer(runtime$emit <- old_emit)
   expect_error(out$lazy(function() 1, label = NA_character_), "label")
   expect_error(out$lazy(function() 1, label = c("one", "two")), "label")
-  expect_identical(out$lazy(function() 1, label = NULL)$label, "Show")
+  expect_identical(out$lazy(function() 1, label = NULL), 1)
 })

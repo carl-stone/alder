@@ -5,8 +5,7 @@ Authors@R:
     person("Carl", "Stone", role = c("aut", "cre"), email = "carl@alder.dev")
 Description: R helpers for reactive notebooks and ordinary Rscript programs.
     Alder provides validated user-interface values, rich output records,
-    dependency-aware computation caches, and the static-analysis helpers used
-    by its application host. The public R surface remains usable without an
+    and dependency-aware computation caches. The public R surface remains usable without an
     application process; interactive execution, persistence, and rendering are
     owned by the application host.
 License: Apache License (>= 2)
@@ -17,9 +16,7 @@ Roxygen: list(markdown = TRUE)
 Depends:
     R (>= 4.6.0)
 Imports:
-    base64enc,
     codetools,
-    jsonlite,
     mime,
     rlang
 Suggests:

@@ -78,7 +78,7 @@ cache_key <- function(f, args) {
 }
 
 cache_dir_for <- function(dir = NULL) {
-  target <- dir %||% RUNTIME$cache_dir
+  target <- dir %||% getOption("alder.cache_dir") %||% .alder_state$cache_dir
   if (is.null(target) || !is.character(target) || length(target) != 1L ||
       is.na(target) || !nzchar(target)) {
     target <- file.path(tempdir(), "alder-cache")
@@ -94,10 +94,10 @@ cache_dir_for <- function(dir = NULL) {
 }
 
 register_cache_dir <- function(dir) {
-  dirs <- RUNTIME$disk_cache_dirs
+  dirs <- .alder_state$disk_cache_dirs
   if (!is.environment(dirs)) {
     dirs <- new.env(parent = emptyenv())
-    RUNTIME$disk_cache_dirs <- dirs
+    .alder_state$disk_cache_dirs <- dirs
   }
   dirs[[normalizePath(dir, mustWork = FALSE)]] <- TRUE
   invisible(dir)
@@ -117,10 +117,10 @@ new_cached_wrapper <- function(f, kind, dir = NULL) {
     # of returning a potentially stale value.
     if (is.null(key)) return(do.call(f, args))
     if (identical(kind, "memory")) {
-      store <- RUNTIME$mem_cache
+      store <- .alder_state$mem_cache
       if (!is.environment(store)) {
         store <- new.env(parent = emptyenv())
-        RUNTIME$mem_cache <- store
+        .alder_state$mem_cache <- store
       }
       if (exists(key, envir = store, inherits = FALSE)) {
         return(get(key, envir = store, inherits = FALSE))
@@ -153,7 +153,7 @@ new_cached_wrapper <- function(f, kind, dir = NULL) {
   wrapper_env$kind <- kind
   wrapper_env$cache_dir <- cache_dir
   wrapper_env$cache_key <- cache_key
-  wrapper_env$RUNTIME <- RUNTIME
+  wrapper_env$.alder_state <- .alder_state
   environment(wrapped) <- wrapper_env
   attr(wrapped, "cache") <- kind
   class(wrapped) <- c("alder_cached", "function")
@@ -161,7 +161,7 @@ new_cached_wrapper <- function(f, kind, dir = NULL) {
 }
 
 clear_cache_memory <- function() {
-  store <- RUNTIME$mem_cache
+  store <- .alder_state$mem_cache
   if (is.environment(store)) {
     keys <- ls(store, all.names = TRUE)
     if (length(keys)) rm(list = keys, envir = store)
@@ -170,9 +170,9 @@ clear_cache_memory <- function() {
 }
 
 clear_cache_disk <- function() {
-  dirs <- RUNTIME$disk_cache_dirs
+  dirs <- .alder_state$disk_cache_dirs
   locations <- if (is.environment(dirs)) ls(dirs, all.names = TRUE) else character()
-  default <- RUNTIME$cache_dir
+  default <- getOption("alder.cache_dir") %||% .alder_state$cache_dir
   if (!is.null(default) && length(default) == 1L && nzchar(default)) {
     locations <- unique(c(locations, normalizePath(default, mustWork = FALSE)))
   }

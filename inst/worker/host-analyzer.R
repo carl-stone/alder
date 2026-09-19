@@ -61,9 +61,16 @@ if (!identical(bootstrap_worker_dir, worker_dir) ||
 }
 worker_dir <- bootstrap_worker_dir
 
-# Initialize opt-in tracing before the readiness handshake so creation-only
-# profiles contain analyzer startup rather than beginning at the first request.
-get(".alder_perf_initialize", envir = asNamespace("alder"))()
+service <- new.env(parent = baseenv())
+for (module in c("private-json.R", "private-protocol.R", "private-analysis.R")) {
+  module_path <- normalizePath(file.path(worker_dir, module), mustWork = TRUE,
+                               winslash = "/")
+  if (!path_is_under(module_path, resources_root) ||
+      !identical(dirname(module_path), worker_dir)) {
+    stop("private analyzer module is outside application resources", call. = FALSE)
+  }
+  sys.source(module_path, envir = service, keep.source = FALSE)
+}
 
 local({
   or_else <- function(left, right) if (is.null(left)) right else left
@@ -82,9 +89,11 @@ local({
       diagnostic
     })
   }
-  perf_begin <- get(".alder_perf_begin", asNamespace("alder"))
-  perf_end <- get(".alder_perf_end", asNamespace("alder"))
-  package_version <- as.character(utils::packageVersion("alder"))
+  perf_begin <- function(...) NULL
+  perf_end <- function(...) invisible()
+  package_version <- unname(read.dcf(
+    file.path(worker$privateLibrary, "alder", "DESCRIPTION"),
+    fields = "Version")[[1L]])
   r_version <- as.character(getRversion())
   framing_path <- tryCatch(normalizePath(file.path(worker_dir, "host-framing.R"),
                                           mustWork = TRUE, winslash = "/"),
@@ -103,11 +112,11 @@ local({
   on.exit(tryCatch(close(input), error = function(error) NULL), add = TRUE)
   on.exit(tryCatch(close(output), error = function(error) NULL), add = TRUE)
 
-  safe_identity <- get(".alder_runtime_safe_identity", asNamespace("alder"))
-  has_control <- get(".alder_runtime_has_control", asNamespace("alder"))
-  decode_source <- get("alder_host_decode_source", asNamespace("alder"))
-  max_cells <- get("ALDER_HOST_MAX_CELLS", asNamespace("alder"))
-  max_source_bytes <- get("ALDER_HOST_MAX_SOURCE_BYTES", asNamespace("alder"))
+  safe_identity <- service$.alder_runtime_safe_identity
+  has_control <- service$.alder_runtime_has_control
+  decode_source <- service$alder_host_decode_source
+  max_cells <- service$ALDER_HOST_MAX_CELLS
+  max_source_bytes <- service$ALDER_HOST_MAX_SOURCE_BYTES
   analysis_environment_id <- worker$analysisEnvironmentId
   policy <- worker$policy
 
@@ -217,7 +226,7 @@ local({
           cell = cell_id, cell_revision = cell_revision))
         analysis_result <- list(ok = FALSE)
         on.exit(perf_end(analysis_span, analysis_result), add = TRUE)
-        value <- get("cell_defs_refs", asNamespace("alder"))(source)
+        value <- service$cell_defs_refs(source)
         analysis_result <- list(ok = TRUE,
           defs = length(or_else(value$defs, character())),
           refs = length(or_else(value$refs, character())),

@@ -33,10 +33,10 @@ alder_host_decode_encoded_source <- function(encoded, error_message) {
   if (!is.character(encoded) || length(encoded) != 1L || is.na(encoded) ||
       nchar(encoded, type = "bytes") > ceiling(ALDER_HOST_MAX_SOURCE_BYTES / 3) * 4L ||
       !validUTF8(encoded)) invalid()
-  bytes <- tryCatch(suppressWarnings(base64enc::base64decode(encoded)),
+  bytes <- tryCatch(suppressWarnings(alder_private_base64_decode(encoded)),
                     error = function(error) NULL)
   canonical <- if (is.null(bytes)) NULL else if (!length(bytes)) "" else
-    base64enc::base64encode(bytes)
+    alder_private_base64_encode(bytes)
   if (is.null(bytes) || !identical(canonical, encoded) ||
       length(bytes) > ALDER_HOST_MAX_SOURCE_BYTES || any(bytes == as.raw(0L))) {
     invalid()

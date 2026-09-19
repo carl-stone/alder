@@ -36,25 +36,64 @@ if (!path_is_under(worker_dir, resources_root)) {
   stop("ALDER_WORKER_DIR must be contained inside application resources", call. = FALSE)
 }
 
-bootstrap_path <- normalizePath(file.path(worker_dir, "host-bootstrap.R"),
-                                mustWork = FALSE, winslash = "/")
-if (!path_is_under(bootstrap_path, resources_root) ||
-    !identical(dirname(bootstrap_path), worker_dir) ||
-    !file.exists(bootstrap_path) || isTRUE(file.info(bootstrap_path)$isdir) ||
-    file.access(bootstrap_path, 4L) != 0L) {
-  stop("validated Alder host bootstrap is missing or outside resources", call. = FALSE)
+private_library <- resolve_directory(Sys.getenv("ALDER_R_PRIVATE_LIBRARY", unset = ""),
+                                     "ALDER_R_PRIVATE_LIBRARY")
+if (!path_is_under(private_library, resources_root)) {
+  stop("ALDER_R_PRIVATE_LIBRARY must be inside application resources", call. = FALSE)
 }
-sys.source(bootstrap_path, envir = environment(), keep.source = FALSE)
-.alder_worker_bootstrap()
-Sys.unsetenv("ALDER_WORKER_DIR")
+notebook_root <- resolve_directory(Sys.getenv("ALDER_NOTEBOOK_DIR", unset = ""),
+                                   "ALDER_NOTEBOOK_DIR")
+ordinary_libraries <- .libPaths()
+project_profile_libraries <- ordinary_libraries[vapply(
+  ordinary_libraries,
+  function(path) path_is_under(normalizePath(path, winslash = "/", mustWork = TRUE),
+                               notebook_root),
+  logical(1L)
+)]
+project_library <- Sys.getenv("ALDER_PROJECT_LIBRARY", unset = "")
+if (nzchar(project_library)) {
+  project_library <- resolve_directory(project_library, "ALDER_PROJECT_LIBRARY")
+  expected_project_library <- normalizePath(
+    file.path(notebook_root, ".alder", "library"), mustWork = TRUE,
+    winslash = "/"
+  )
+  if (!identical(project_library, expected_project_library)) {
+    stop("ALDER_PROJECT_LIBRARY must be the notebook project library", call. = FALSE)
+  }
+}
+.libPaths(unique(c(project_profile_libraries,
+                   if (nzchar(project_library)) project_library else character(),
+                   private_library, ordinary_libraries)))
+private_description <- file.path(private_library, "alder", "DESCRIPTION")
+private_version <- tryCatch(
+  unname(read.dcf(private_description, fields = "Version")[[1L]]),
+  error = function(error) NULL
+)
+if (!is.character(private_version) || length(private_version) != 1L ||
+    is.na(private_version) || !nzchar(private_version)) {
+  stop("private Alder package metadata is missing or invalid", call. = FALSE)
+}
+for (module in c("private-json.R", "private-protocol.R", "private-ui.R")) {
+  module_path <- normalizePath(file.path(worker_dir, module), mustWork = TRUE,
+                               winslash = "/")
+  if (!path_is_under(module_path, resources_root) ||
+      !identical(dirname(module_path), worker_dir)) {
+    stop("private Ark module is outside application resources", call. = FALSE)
+  }
+  sys.source(module_path, envir = environment(), keep.source = FALSE)
+}
+PRIVATE_UI_ENV <- environment()
+PRIVATE_VERSION <- private_version
+Sys.unsetenv(c("ALDER_WORKER_DIR", "ALDER_R_PRIVATE_LIBRARY", "ALDER_RESOURCES_ROOT",
+               "ALDER_PROJECT_LIBRARY"))
 
 local({
 
   `%||%` <- function(a, b) if (is.null(a)) b else a
-  perf_begin <- get(".alder_perf_begin", asNamespace("alder"))
-  perf_end <- get(".alder_perf_end", asNamespace("alder"))
-  decode_host_source <- get("alder_host_decode_source", asNamespace("alder"))
-  max_notebook_cells <- get("ALDER_HOST_MAX_CELLS", asNamespace("alder"))
+  perf_begin <- function(...) NULL
+  perf_end <- function(...) invisible()
+  decode_host_source <- alder_host_decode_source
+  max_notebook_cells <- ALDER_HOST_MAX_CELLS
   ark_event_token <- Sys.getenv("ALDER_ARK_EVENT_TOKEN", unset = "")
   Sys.unsetenv(c("ALDER_ARK_KERNEL", "ALDER_ARK_EVENT_TOKEN"))
   if (!nzchar(ark_event_token) ||
@@ -62,10 +101,7 @@ local({
     stop("Alder Ark event token is missing or invalid", call. = FALSE)
   }
 
-  # Widget construction and validation use the installed package namespace.
-  # No mirrored implementation is sourced into the notebook process.
-  Sys.unsetenv("ALDER_UI_WIDGETS")
-  UI_ENV <- asNamespace("alder")
+  UI_ENV <- PRIVATE_UI_ENV
 
   artifact_dir <- Sys.getenv("ALDER_ARTIFACT_DIR", unset = "")
   Sys.unsetenv("ALDER_ARTIFACT_DIR")
@@ -87,6 +123,7 @@ local({
     stop("ALDER_CACHE_DIR is missing or invalid: '", cache_dir,
          "' (must be an existing writable directory)")
   }
+  options(alder.cache_dir = normalizePath(cache_dir, winslash = "/", mustWork = TRUE))
   if (!nzchar(control_dir) || !dir.exists(control_dir) ||
       file.access(control_dir, 2) != 0L) {
     stop("ALDER_CONTROL_DIR is missing or invalid", call. = FALSE)
@@ -178,26 +215,33 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
     ark_emit(list(type = kind, sequence = SEQ$value, payload = payload))
     invisible()
   }
-
-  inject_runtime <- function() {
-    if (!("alder" %in% loadedNamespaces())) return(invisible())
-    rt <- get("RUNTIME", envir = asNamespace("alder"))
-    rt$emit <- notify
-    rt$render <- function(x) {
-      output <- render_kind(x)
+  options(alder.output_handler = function(kind, value) {
+    if (identical(kind, "append")) {
+      output <- render_kind(value)
       if (identical(output$kind, "error")) stop(output$message, call. = FALSE)
-      structure(output, class = c("alder_output", "list"))
+      flush_ark_render_log()
+      notify("append", list(output = output))
+      return(invisible(value))
     }
-    rt$cell_id <- function() CURRENT_CELL
-    rt$artifact_dir <- artifact_dir
-    rt$register_artifact <- register_artifact
-    rt$cache_dir <- cache_dir
-    rt$lazy <- LAZY_ENV
-    rt$lazy_seq <- LAZY_SEQ
-    rt$seq <- SEQ
-  }
-  tryCatch(setHook(packageEvent("alder", "attach"),
-                   function(...) inject_runtime()), error = function(e) NULL)
+    if (identical(kind, "progress")) {
+      flush_ark_render_log()
+      notify("progress", list(progress = value))
+      return(invisible(value))
+    }
+    if (identical(kind, "lazy") && is.list(value) &&
+        is.function(value$resolver)) {
+      LAZY_SEQ$value <- LAZY_SEQ$value + 1L
+      key <- paste0(CURRENT_CELL, ":", LAZY_SEQ$value)
+      assign(key, value$resolver, envir = LAZY_ENV)
+      return(structure(list(kind = "lazy", key = key,
+        label = value$label %||% "Show", state = "collapsed", child = NULL),
+        class = c("alder_output", "list")))
+    }
+    if (identical(kind, "render") && is.list(value)) {
+      return(render_kind(value$value, name = value$name %||% ""))
+    }
+    stop("unknown Alder output operation", call. = FALSE)
+  })
 
   mark_kernel_invalid <- function(failures) {
     KERNEL_STATE$invalid <- TRUE
@@ -295,10 +339,9 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
       revision = CURRENT_REVISION %||% NULL,
       payload = payload
     )
-    data_json <- jsonlite::toJSON(event, auto_unbox = TRUE, null = "null",
-                                  na = "null", force = TRUE)
+    data_json <- alder_private_json_encode(event)
     frame <- paste0("\036ALDER:", ark_event_token, ":",
-                    base64enc::base64encode(charToRaw(enc2utf8(data_json))),
+                    alder_private_base64_encode(charToRaw(enc2utf8(data_json))),
                     ":\036\n")
     write_ark_event(frame)
     invisible()
@@ -947,7 +990,15 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
   render_kind <- function(x, cell_id = CURRENT_CELL, name = "",
                           path = character()) {
     if (inherits(x, "alder_output")) {
-      return(canonicalize_rendered_output(unclass(x), cell_id, name, path))
+      output <- unclass(x)
+      if (identical(output$kind, "lazy") && is.function(output$resolver)) {
+        LAZY_SEQ$value <- LAZY_SEQ$value + 1L
+        key <- paste0(cell_id, ":", LAZY_SEQ$value)
+        assign(key, output$resolver, envir = LAZY_ENV)
+        output$resolver <- NULL
+        output$key <- key
+      }
+      return(canonicalize_rendered_output(output, cell_id, name, path))
     }
     if (inherits(x, "alder_progress")) {
       return(list(kind = "error", message = "a progress handle is not an output"))
@@ -1136,7 +1187,6 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
     CURRENT_OPERATION_ID <<- NULL
     EMITTED_OUTPUTS$value <- list()
     RENDER_LOG$value <- character()
-    inject_runtime()
     on.exit({
       CURRENT_CELL <<- NULL
       CURRENT_REQ <<- NULL
@@ -1477,7 +1527,7 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
       return(list(ok = FALSE, error = list(message = sprintf("no such name: %s",
                                                              name))))
     }
-    v <- render_inspect(get(name, envir = NB_ENV))
+    v <- render_inspect(get(name, envir = NB_ENV, inherits = FALSE))
     if (identical(v$kind, "error")) {
       return(list(ok = FALSE, error = list(message = v$message)))
     }
@@ -1486,7 +1536,7 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
   env_snapshot <- function(req) {
     nms <- ls(NB_ENV, all.names = TRUE)
     nms <- nms[!startsWith(nms, ".alder_local_") &
-                 nms != ".alder_ark_runtime"]
+                 !nms %in% c(".alder_ark_runtime", ".__alder_app_bridge_v1")]
     if (length(nms) > 2000L) nms <- nms[seq_len(2000L)]
     variables <- lapply(nms, function(name) {
       active <- bindingIsActive(name, NB_ENV)
@@ -2060,7 +2110,6 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
     SEQ$value <- 0L
     EMITTED_OUTPUTS$value <- list()
     RENDER_LOG$value <- character()
-    inject_runtime()
 
     # Emit from inside the live helper before inspecting or removing notebook
     # bindings. Active bindings can run arbitrary R code, so Jupyter busy alone
@@ -2189,21 +2238,27 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
     if (isTRUE(visible)) value else invisible(value)
   }
 
-  ark_decode_request <- function(encoded) {
-    if (!is.character(encoded) || length(encoded) != 1L || is.na(encoded) ||
-        !nzchar(encoded) || nchar(encoded, type = "bytes") > 171L * 1024L * 1024L) {
-      stop("invalid Alder Ark request encoding", call. = FALSE)
-    }
-    raw <- jsonlite::base64_dec(encoded)
-    text <- rawToChar(raw)
-    value <- jsonlite::fromJSON(text, simplifyVector = FALSE)
+  ark_decode_request <- function(value) {
     if (!is.list(value) || is.null(names(value)) || anyDuplicated(names(value))) {
       stop("invalid Alder Ark request", call. = FALSE)
     }
-    if (!is.null(value[["code_base64"]])) {
-      value[["code"]] <- decode_host_source(
-        value, "code_base64", "code", "Alder Ark source")
-      value[["code_base64"]] <- NULL
+    code_path <- value[["code_path"]]
+    if (!is.null(code_path)) {
+      if (!is.null(value[["code"]]) || !is.character(code_path) ||
+          length(code_path) != 1L || is.na(code_path) ||
+          !grepl("^\\.alder-source-[a-zA-Z0-9-]+$", basename(code_path)) ||
+          !identical(normalizePath(dirname(code_path), winslash = "/", mustWork = TRUE),
+                     normalizePath(control_dir, winslash = "/", mustWork = TRUE))) {
+        stop("invalid Alder Ark source path", call. = FALSE)
+      }
+      info <- file.info(code_path)
+      if (is.na(info$size) || isTRUE(info$isdir) || info$size > ALDER_HOST_MAX_SOURCE_BYTES) {
+        stop("invalid Alder Ark source file", call. = FALSE)
+      }
+      bytes <- readBin(code_path, what = "raw", n = ALDER_HOST_MAX_SOURCE_BYTES + 1L)
+      unlink(code_path, force = TRUE)
+      value[["code_path"]] <- NULL
+      value[["code"]] <- rawToChar(bytes)
     }
     value
   }
@@ -2320,7 +2375,7 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
     response <- tryCatch(
       switch(command,
         ping = list(ok = TRUE,
-          package_version = as.character(utils::packageVersion("alder")),
+          package_version = PRIVATE_VERSION,
           r_version = as.character(getRversion())),
         clear_cell = clear_cell(payload),
         release_outputs = release_outputs(payload),
@@ -2342,20 +2397,9 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
     invisible(last_value)
   }
 
-  initialize_ark_runtime <- function() {
-    inject_runtime()
-    runtime <- get("RUNTIME", envir = asNamespace("alder"), inherits = FALSE)
-    if (!is.environment(runtime)) {
-      stop("Alder runtime API container is invalid", call. = FALSE)
-    }
-    assign("ark_evaluate", ark_eval_wire, envir = runtime)
-    assign("ark_request", ark_request_wire, envir = runtime)
-    if (!is.function(runtime$ark_evaluate) ||
-        !is.function(runtime$ark_request)) {
-      stop("Alder Ark runtime API exports are unavailable", call. = FALSE)
-    }
-    invisible()
-  }
-
-  initialize_ark_runtime()
+  bridge <- new.env(parent = emptyenv())
+  bridge$evaluate <- ark_eval_wire
+  bridge$request <- ark_request_wire
+  assign(".__alder_app_bridge_v1", bridge, envir = NB_ENV)
+  lockBinding(".__alder_app_bridge_v1", NB_ENV)
 })

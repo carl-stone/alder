@@ -3,7 +3,11 @@ import { mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
-import { resolveREnvironment, rEnvironmentVariables } from "../src/r-environment.js";
+import {
+  resolveREnvironment,
+  rKernelEnvironmentVariables,
+  rServiceEnvironmentVariables,
+} from "../src/r-environment.js";
 import { resolveApplicationResources } from "../src/resources.js";
 
 interface Fixture {
@@ -65,18 +69,23 @@ test("R selection is explicit and environment serialization is deterministic", a
     assert.equal(selected.rscript, fixture.rscript);
     assert.equal(selected.rHome, fixture.rHome);
     assert.deepEqual(selected.libraryPaths, [
-      fixture.resources.rLibraryDirectory,
       projectLibrary,
+      fixture.resources.rLibraryDirectory,
       fixture.baseLibrary,
     ]);
-    const environment = rEnvironmentVariables(selected, fixture.resources, "analysis-1");
-    assert.deepEqual(JSON.parse(environment.ALDER_R_LIBRARIES!), selected.libraryPaths);
-    assert.equal(environment.R_LIBS_USER, "");
-    assert.equal(environment.R_LIBS_SITE, "");
-    assert.equal(environment.R_HOME, selected.rHome);
-    assert.equal(environment.ALDER_RESOURCES_ROOT, fixture.resources.root);
-    assert.equal(environment.ALDER_ANALYSIS_ENVIRONMENT_ID, "analysis-1");
-    assert.match(environment.DYLD_LIBRARY_PATH!, new RegExp(fixture.rHome));
+    const service = rServiceEnvironmentVariables(selected, fixture.resources, "analysis-1");
+    assert.deepEqual(JSON.parse(service.ALDER_R_LIBRARIES!), [fixture.resources.rLibraryDirectory]);
+    assert.equal(service.R_LIBS, fixture.resources.rLibraryDirectory);
+    assert.equal(service.R_LIBS_USER, "");
+    assert.equal(service.R_LIBS_SITE, "");
+    assert.equal(service.ALDER_ANALYSIS_ENVIRONMENT_ID, "analysis-1");
+    const kernel = rKernelEnvironmentVariables(selected, fixture.resources, fixture.root);
+    assert.equal(kernel.R_LIBS, undefined);
+    assert.equal(kernel.R_LIBS_USER, undefined);
+    assert.equal(kernel.ALDER_PROJECT_LIBRARY, projectLibrary);
+    assert.equal(kernel.R_HOME, selected.rHome);
+    assert.equal(kernel.ALDER_RESOURCES_ROOT, fixture.resources.root);
+    assert.match(kernel.DYLD_LIBRARY_PATH!, new RegExp(fixture.rHome));
   } finally {
     await removeFixture(fixture);
   }
@@ -145,7 +154,7 @@ async function makeFixture(helperVersion = "0.1.0"): Promise<Fixture> {
   const rscript = join(root, "fake-Rscript");
   const output = [rHome, "R version 4.6.1 (fake)", "darwin", process.arch, normalLibrary, "--ALDER-LIBS-END--", baseLibrary].join("\n") + "\n";
   const helperOutput = helperVersion + "\nR 4.6.1; fake\n";
-  await writeFile(rscript, `#!${process.execPath}\nconst helper = process.argv.join(' ').includes('library(alder)'); process.stdout.write(helper ? ${JSON.stringify(helperOutput)} : ${JSON.stringify(output)});\n`, { mode: 0o755 });
+  await writeFile(rscript, `#!${process.execPath}\nconst args = process.argv.join(' '); const value = args.includes('loadNamespace') ? ${JSON.stringify(helperOutput)} : args.includes('writeLines(.libPaths())') ? ${JSON.stringify(normalLibrary + "\n" + baseLibrary + "\n")} : ${JSON.stringify(output)}; process.stdout.write(value);\n`, { mode: 0o755 });
   await writeFile(join(root, "manifest.json"), JSON.stringify({
     schemaVersion: 1, kind: "headless", applicationVersion: "0.1.0",
     resources: { cliLauncher: "bin/alder", hostEntry: "host/alder-host.mjs", rendererDirectory: "app", workerDirectory: "worker", rLibraryDirectory: "r-library", arkExecutable: "runtime/ark", airExecutable: "runtime/air", nodeExecutable: "bin/node", electronEntry: null },

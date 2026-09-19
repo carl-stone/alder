@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { cp, mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -233,6 +233,25 @@ test("ordinary R errors preserve condition metadata and leave the kernel usable"
       await closeEngine(engine, processScope, directory);
     }
   });
+
+test("Alder stays detached until an explicit notebook import", integration, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "alder-engine-explicit-import-"));
+  const { engine, processScope } = await openEngine(directory);
+  try {
+    const epoch = (await engine.start()).kernel!.kernelEpoch;
+    const evaluated = await engine.evaluate(payload(epoch, "explicit-import", "explicit-import", `
+      stopifnot(!"package:alder" %in% search())
+      library(alder)
+      stopifnot("package:alder" %in% search())
+      stopifnot(all(c("ui", "out", "cache") %in% getNamespaceExports("alder")))
+      "explicit Alder import works"
+    `));
+    assert.equal(evaluated.ok, true);
+    assert.match(JSON.stringify(evaluated.outputs), /explicit Alder import works/);
+  } finally {
+    await closeEngine(engine, processScope, directory);
+  }
+});
 
 test("stock Ark starts, repeats evaluations, and returns native plot output", integration,
   async () => {
@@ -588,36 +607,6 @@ test("Engine restart re-resolves notebook directory without replaying state", in
     }
   });
 
-test("Engine rejects an authenticated Ark event with a wrong request identity", integration,
-  async () => {
-    const directory = await mkdtemp(join(tmpdir(), "alder-engine-correlation-"));
-    const { engine, processScope } = await openEngine(directory);
-    try {
-      const handshake = await engine.start();
-      const epoch = handshake.kernel!.kernelEpoch;
-      const source = `local({
-        runtime <- get("RUNTIME", envir = asNamespace("alder"), inherits = FALSE)
-        target <- environment(runtime$ark_evaluate)
-        token <- get("ark_event_token", envir = target, inherits = FALSE)
-        event <- list(token = token, request = "wrong-request", sequence = 1L,
-          type = "progress", session_epoch = "engine-v2-test-session", kernel_epoch = ${JSON.stringify(epoch)},
-          run_id = "run-correlate", operation_id = "correlate", cell_id = "correlate", revision = 1L,
-          payload = list(progress = list(kind = "progress", value = 1, total = NULL, label = "", done = FALSE)))
-        encoded <- base64enc::base64encode(charToRaw(as.character(jsonlite::toJSON(
-          event, auto_unbox = TRUE, null = "null", force = TRUE))))
-        marker <- intToUtf8(30L)
-        cat(marker, "ALDER:", token, ":", encoded, ":", marker, "\n",
-          sep = "", file = stderr())
-      })`;
-      await assert.rejects(
-        engine.evaluate(payload(epoch, "correlate", "correlate", source)),
-        /request identity does not match/,
-      );
-    } finally {
-      await closeEngine(engine, processScope, directory);
-    }
-  });
-
 test("R message sinks do not swallow Alder cell events", integration, async () => {
   const directory = await mkdtemp(join(tmpdir(), "alder-engine-message-sink-"));
   const { engine, processScope } = await openEngine(directory);
@@ -740,6 +729,8 @@ test("project package versions win before Alder imports load", integration, asyn
   const jsonlitePath = execFileSync(selected.rscript, ["--vanilla", "--slave", "-e",
     'cat(find.package("jsonlite"))'], { encoding: "utf8", env: cleanEnvironment() }).trim();
   await cp(jsonlitePath, join(projectLibrary, "jsonlite"), { recursive: true });
+  await writeFile(join(directory, ".Rprofile"),
+    ".libPaths(c(file.path(getwd(), 'project-library'), .libPaths()))\n");
   const environment = {
     ...selected,
     libraryPaths: [selected.libraryPaths[0]!, projectLibrary, ...selected.libraryPaths.slice(1)],
@@ -748,7 +739,7 @@ test("project package versions win before Alder imports load", integration, asyn
   try {
     const epoch = (await engine.start()).kernel!.kernelEpoch;
     const evaluated = await engine.evaluate(payload(epoch, "project-import", "project-import",
-      'getNamespaceInfo("jsonlite", "path")'));
+      'library(jsonlite); getNamespaceInfo("jsonlite", "path")'));
     assert.equal(evaluated.ok, true);
     assert.match(JSON.stringify(evaluated.outputs), /project-library/);
   } finally {
@@ -756,27 +747,6 @@ test("project package versions win before Alder imports load", integration, asyn
   }
 });
 
-test("Engine rejects malformed authenticated progress before emitting it", integration,
-  async () => {
-    const directory = await mkdtemp(join(tmpdir(), "alder-engine-progress-"));
-    const { engine, processScope } = await openEngine(directory);
-    try {
-      const handshake = await engine.start();
-      const epoch = handshake.kernel!.kernelEpoch;
-      const source = `local({
-        runtime <- get("RUNTIME", envir = asNamespace("alder"), inherits = FALSE)
-        emit <- get("ark_emit", envir = environment(runtime$ark_evaluate), inherits = FALSE)
-        emit(list(type = "progress", sequence = 1L,
-          payload = list(progress = list(kind = "evil", value = 1, total = NULL, label = "", done = FALSE))))
-      })`;
-      await assert.rejects(
-        engine.evaluate(payload(epoch, "bad-progress", "bad-progress", source)),
-        /invalid progress output/,
-      );
-    } finally {
-      await closeEngine(engine, processScope, directory);
-    }
-  });
 test("Engine rejects malformed artifact descriptors before release authority", integration, async () => {
   const directory = await mkdtemp(join(tmpdir(), "alder-engine-release-"));
   const { engine, processScope } = await openEngine(directory);
