@@ -31,14 +31,22 @@ reactive, service and recovery behavior. Validate with representative notebook
 screens/states, behavior-led interaction checks and a signed Mac build without
 taking over Carl's desktop.
 
-**Base:** accepted `d88ca7d` (`Strengthen generative recovery evidence`).
+**Checkpoint 1:** `d656cd4` (`Restructure notebook interactions`) on accepted
+`d88ca7d`.
 
-**Next action:** audits are complete. The primary implementer first delivers the
-interaction-structure checkpoint: command hierarchy, native dirty state, cell and
-keyboard flow, separated status/recovery surfaces, publish/conflict decisions,
-loading/reconnect behavior, menus and notebook sidebar language. After focused
-review, a second checkpoint applies the cohesive editor/visual/responsive/
-accessibility system and screenshot matrix.
+**Correction target:** make Help/R Documentation either invoke focused-editor help
+or stop intercepting F1; remove production Reload/DevTools and add standard Mac
+About/Services/Hide/Hide Others/Show All roles. Replace hidden legacy service menus
+with visible scoped Format and Packages progress/cancel and the single accepted
+Publish flow, then delete duplicate machinery. Restore deleted cells at their exact
+first/middle/last positions with surfaced async failure. Move Selected R into
+Application settings; make shortcut help a durable dialog/popover; delete stale
+Shutdown/runtime/service CSS and legacy `view=app`. Add behavior coverage for
+Shift-Enter focus/creation, positional Undo, every conflict/recovery and dirty
+publish choice, missing-R/reconnect actions, Preview and F1/shortcut behavior.
+
+**Next action:** primary implementer corrects interaction checkpoint 1 at
+`d656cd4`, then returns it for focused re-review before visual phase 2.
 
 **Testing constraint:** do not take over Carl's visible desktop. Use background
 or isolated Mac GUI checks where native interaction matters. The in-app browser
@@ -69,7 +77,7 @@ order; their implementation details are settled when assigned.
 | Mac runtime and settings cleanup | Accepted | Primary implementer | `cc80261`: one R preference path, canonical project recovery, verified/staged Ark/Air/Quarto, accurate Mac claims and real packaged acceptance |
 | Residual architecture and test cleanup | Accepted | Primary implementer | `8990292`: removed trace/strict-JSON/platform/state debris, retained cohesive owners and rebuilt a five-second behavior-led host suite |
 | Targeted generative verification | Accepted | Primary implementer | `d88ca7d`: bounded independent graph/document/recovery/state/R verification with real crash durability and replayable failures |
-| UI/UX review and polish | Implementing | UX reviewers then primary implementer | Audit and polish visual hierarchy, editing flow, keyboard use, execution/progress, outputs/errors, recovery/settings, empty/loading states, accessibility and native Mac fit |
+| UI/UX review and polish | Implementing | Primary implementer | Correct native help/menus, replace hidden service UI, fix positional Undo and complete phase-1 interaction coverage at `d656cd4` |
 | Complete Mac app and final acceptance | Queued | Unassigned | Deliver a usable Mac app; exercise the packaged native app through launch/open/type/run/interrupt/save/Save As/reopen/recover/close, multiple notebooks, concurrent GUI/agent edits, client detach and backend failure/recovery; check optional-service failures and observable stalls |
 
 The following requirements apply to the relevant slices and are checked again

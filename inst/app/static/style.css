@@ -138,14 +138,6 @@ body {
 }
 .document-state, .runtime-state { color: var(--muted); font-size: 11px; white-space: nowrap; }
 .spacer { flex: 1; }
-.runtime-control {
-  display: inline-flex;
-  flex-shrink: 0;
-  align-items: center;
-  gap: 5px;
-  color: var(--muted);
-  font-size: 12px;
-}
 #runtime-select, .type-control select {
   border: 1px solid var(--border);
   border-radius: 5px;
@@ -175,62 +167,28 @@ body {
   background: var(--button-danger);
   color: #fff;
 }
-.btn.shutdown {
-  border-color: var(--danger);
-  background: var(--panel);
-  color: var(--danger);
-  font-weight: 600;
-}
-.btn.shutdown:hover { background: var(--surface-danger); }
 .btn:disabled, select:disabled, input:disabled { cursor: default; opacity: .45; }
 .btn.mini { font-size: 12px; padding: 3px 8px; }
 #topbar > .btn { flex-shrink: 0; white-space: nowrap; }
-.service-menu {
-  position: relative;
-  flex: 0 0 auto;
-}
-.service-menu-panel {
-  position: absolute;
-  z-index: 40;
-  top: calc(100% + 6px);
-  right: 0;
-  display: flex;
-  width: max-content;
-  min-width: 190px;
-  max-width: min(320px, calc(100vw - 24px));
-  flex-direction: column;
-  gap: 6px;
-  padding: 9px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  background: var(--panel);
-  box-shadow: 0 10px 30px color-mix(in srgb, var(--text) 18%, transparent);
-}
-.service-menu-panel[hidden] { display: none; }
-.service-menu-panel > .btn { width: 100%; text-align: left; }
-.service-menu-panel input[type="text"] {
-  width: 100%;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--surface-input);
-  color: var(--text);
-  padding: 6px 8px;
-}
-.publish-include-code {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  color: var(--muted);
-  font-size: 12px;
-}
 .package-status {
-  max-width: 300px;
-  margin: 3px 0 0;
+  max-height: 240px;
+  margin: var(--space-3) 0;
   overflow: auto;
   color: var(--muted);
   font: 11px/1.45 var(--mono);
   white-space: pre-wrap;
 }
+.service-actions { flex-wrap: wrap; }
+.shortcut-list { margin: var(--space-3) 0 0; }
+.shortcut-list > div {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-6);
+  padding: var(--space-2) 0;
+  border-bottom: 1px solid var(--border);
+}
+.shortcut-list dt { font-weight: 600; }
+.shortcut-list dd { margin: 0; font-family: var(--mono); }
 
 #status {
   min-height: 22px;
@@ -963,12 +921,6 @@ body.panel-closed #editor-workspace {
   outline-offset: 2px;
 }
 
-.shutdown-status {
-  color: var(--done) !important;
-  font-weight: 600;
-}
-body.shutdown-complete #editor-workspace { opacity: .55; }
-
 /* Settings are editor-only and remain out of the published app view. */
 .vim-mode-indicator {
   border: 1px solid var(--accent);
@@ -1098,7 +1050,6 @@ body.app-view #editor-workspace {
 @media (max-width: 720px) {
   #topbar { flex-wrap: wrap; }
   .path { max-width: 58vw; }
-  .runtime-control { order: 4; }
   #editor-workspace { padding: 0 var(--space-2); }
   #editor-workspace > main { margin-top: var(--space-4); }
   #panel-toggle { order: 3; }

@@ -252,6 +252,17 @@ export class BrowserNotebookClient {
     return cell;
   }
 
+  async restoreCellAt(index: number, type: CellType, body: readonly string[]): Promise<CommandResult | null> {
+    return this.withSourceLock(() => {
+      const document = this.requireDocument();
+      const cell = document.createAt(operationId("create"), index, type, body);
+      document.focus(cell.key);
+      this.notify();
+      this.queueDraftPersistence();
+      return this.commitEditsUnlocked();
+    });
+  }
+
   editCell(key: string, source: string | readonly string[], type?: CellType): LocalCell {
     const lines = typeof source === "string" ? splitSource(source) : [...source];
     const cell = this.requireDocument().edit(key, lines, type);

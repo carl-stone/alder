@@ -342,6 +342,7 @@ export function createEditor({
     },
     getDoc() { return view.state.doc.toString(); },
     focus() { view.focus(); },
+    openHelp() { return openKeyboardHelp(view); },
     setDiagnostics(items: readonly EditorDiagnostic[]) {
       diagnostics.current = Array.isArray(items) ? items : [];
       view.dispatch(setDiagnostics(view.state, diagnostics.current));

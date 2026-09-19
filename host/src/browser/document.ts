@@ -125,12 +125,24 @@ export class BrowserDocument {
     type: CellType = "code",
     body: readonly string[] = [],
   ): LocalCell {
+    const after = afterKey === null ? this.ordered.length - 1 : this.ordered.findIndex((cell) => cell.key === afterKey);
+    if (afterKey !== null && after < 0) throw new Error(`no such predecessor: ${afterKey}`);
+    return this.createAt(creationId, after + 1, type, body);
+  }
+
+  createAt(
+    creationId: string,
+    index: number,
+    type: CellType = "code",
+    body: readonly string[] = [],
+  ): LocalCell {
     if (!creationId || this.keyByCreationId.has(creationId)) {
       throw new Error("creationId must be unique and nonempty");
     }
+    if (!Number.isInteger(index) || index < 0 || index > this.ordered.length) {
+      throw new Error(`cell insertion index is out of bounds: ${index}`);
+    }
     const key = `creation:${creationId}`;
-    const after = afterKey === null ? this.ordered.length - 1 : this.ordered.findIndex((cell) => cell.key === afterKey);
-    if (afterKey !== null && after < 0) throw new Error(`no such predecessor: ${afterKey}`);
     this.captureDraftBase();
     const cell: LocalCell = {
       key,
@@ -149,7 +161,7 @@ export class BrowserDocument {
       server: null,
       selection: { anchor: 0, head: 0 },
     };
-    this.ordered.splice(after + 1, 0, cell);
+    this.ordered.splice(index, 0, cell);
     this.byKey.set(key, cell);
     this.keyByCreationId.set(creationId, key);
     return cell;

@@ -221,6 +221,14 @@ test("native menus expose the notebook command hierarchy and keyboard flow", () 
   const file = template.find(item => item.label === "File")!.submenu as Record<string, any>[];
   assert.ok(file.some(item => item.label === "New Window for Notebook…"));
   assert.ok(file.some(item => item.label === "Publish HTML…"));
+  const application = template.find(item => item.label === "Alder")!.submenu as Record<string, any>[];
+  for (const role of ["about", "services", "hide", "hideOthers", "unhide"]) {
+    assert.ok(application.some(item => item.role === role), role);
+  }
+  const view = template.find(item => item.label === "View")!.submenu as Record<string, any>[];
+  assert.equal(view.some(item => item.role === "reload" || item.role === "toggleDevTools"), false);
+  const help = template.find(item => item.label === "Help")!.submenu as Record<string, any>[];
+  assert.equal(help.find(item => item.label === "R Documentation")?.accelerator, "F1");
 });
 
 test("Open and startup errors use ownerless native dialogs", async () => {

@@ -131,10 +131,9 @@ export class NotebookView {
   private activePublishOperationId: string | null = null;
   private activePackageInstallOperationId: string | null = null;
   private formatCancelButton: HTMLButtonElement | null = null;
-  private publishCancelButton: HTMLButtonElement | null = null;
   private packageCancelButton: HTMLButtonElement | null = null;
   private draggedKey: string | null = null;
-  private deletedCell: { after: string | null; type: "code" | "markdown"; body: readonly string[]; timer: number } | null = null;
+  private deletedCell: { index: number; type: "code" | "markdown"; body: readonly string[]; timer: number } | null = null;
   private readonly resizeHandler = (): void => this.updateTopbarInset();
   private readonly preserveRunFocus = (event: MouseEvent): void => {
     if (event.button === 0 && event.target instanceof Element &&
@@ -147,8 +146,7 @@ export class NotebookView {
     this.notebook = notebook;
     this.status = dom.getElementById("status");
     this.path = dom.getElementById("path");
-    const requestedView = new URLSearchParams(location.search).get("view");
-    this.appView = requestedView === "preview" || requestedView === "app";
+    this.appView = new URLSearchParams(location.search).get("view") === "preview";
     const panelPreference = loadPanelPreference(window);
     this.panelOpen = panelPreference.open;
     this.panelTab = panelPreference.tab;
@@ -196,7 +194,7 @@ export class NotebookView {
     this.bindPublishDialog();
     this.bindNavigation();
     this.bindDragAndDrop();
-    this.installServiceMenus();
+    this.bindServiceDialogs();
     this.recoveryUnsubscribe = client.subscribeRecovery(() => this.renderStatus());
     this.applyPanelState();
     this.updateTopbarInset();
@@ -448,7 +446,7 @@ export class NotebookView {
         const cells = [...this.requireDocument().cells];
         const index = cells.findIndex(cell => cell.key === key);
         const cell = this.requireCell(key);
-        const deleted = { after: index > 0 ? cells[index - 1]!.key : null, type: cell.desiredType, body: [...cell.desiredBody] };
+        const deleted = { index, type: cell.desiredType, body: [...cell.desiredBody] };
         this.cancelEditTimer(key);
         await this.client.deleteCell(key);
         if (this.deletedCell) window.clearTimeout(this.deletedCell.timer);
@@ -1862,72 +1860,46 @@ export class NotebookView {
     });
   }
 
-  private installServiceMenus(): void {
+  private bindServiceDialogs(): void {
     if (this.appView) return;
-    const topbar = this.dom.getElementById("topbar");
-    if (!topbar || topbar.querySelector("[data-host-service-menus]")) return;
-    const menus = element(this.dom, "div", "editor-only");
-    menus.dataset.hostServiceMenus = "true";
-    menus.style.display = "contents";
+    const dialog = (id: string): HTMLDialogElement | null => this.dom.getElementById(id) as HTMLDialogElement | null;
+    const close = (buttonId: string, dialogId: string): void => {
+      this.dom.getElementById(buttonId)?.addEventListener("click", () => {
+        const target = dialog(dialogId);
+        if (typeof target?.close === "function") target.close();
+        else target?.removeAttribute("open");
+      });
+    };
+    close("format-close", "format-dialog");
+    close("packages-close", "packages-dialog");
+    close("shortcuts-close", "shortcuts-dialog");
 
-    const actionMenu = this.menu("Actions", "actions");
-    const include = this.dom.createElement("input");
-    include.type = "checkbox";
-    const includeLabel = element(this.dom, "label", "publish-include-code");
-    includeLabel.append(include, this.dom.createTextNode(" Include code"));
-    actionMenu.panel.appendChild(includeLabel);
-    actionMenu.panel.appendChild(this.serviceButton("Publish HTML", async () => {
-      let result: CommandResult | HostQueryResult;
-      try {
-        result = await this.runService("publish", { include_code: include.checked }, (operationId) => {
-          this.activePublishOperationId = operationId;
-          if (this.publishCancelButton) this.publishCancelButton.disabled = false;
-        });
-      } finally {
-        this.activePublishOperationId = null;
-        if (this.publishCancelButton) this.publishCancelButton.disabled = true;
-      }
-      await this.downloadServiceResult(result);
-      this.actionNotice = operationPayload(result).unsavedChangesExcluded === true
-        ? "Published the last saved version. Unsaved changes were not included."
-        : "Published HTML downloaded.";
-      this.renderStatus();
-    }));
-    this.publishCancelButton = this.serviceButton("Cancel publishing", async () => {
-      const operationId = this.activePublishOperationId;
-      if (operationId === null) throw new Error("No publication is in progress");
-      await this.client.cancelOperation(operationId);
+    const formatStart = this.dom.getElementById("format-start") as HTMLButtonElement | null;
+    const formatProgress = this.dom.getElementById("format-progress");
+    this.formatCancelButton = this.dom.getElementById("format-cancel") as HTMLButtonElement | null;
+    formatStart?.addEventListener("click", () => {
+      if (formatStart.disabled) return;
+      setDisabled(formatStart, true);
+      if (formatProgress) formatProgress.textContent = "Formatting…";
+      void this.action(() => this.formatCells()).then(() => {
+        if (formatProgress) formatProgress.textContent = "Formatting complete.";
+      }).catch((error) => {
+        if (formatProgress) formatProgress.textContent = "Formatting failed.";
+        this.showError(error);
+      }).finally(() => setDisabled(formatStart, false));
     });
-    this.publishCancelButton.disabled = true;
-    actionMenu.panel.appendChild(this.publishCancelButton);
-    this.formatCancelButton = this.serviceButton("Cancel formatting", async () => {
+    this.formatCancelButton?.addEventListener("click", () => {
       const operationId = this.activeFormatOperationIds.values().next().value as string | undefined;
-      if (operationId === undefined) throw new Error("No formatting operation is in progress");
-      await this.client.cancelOperation(operationId);
+      if (operationId === undefined) return;
+      void this.client.cancelOperation(operationId).catch((error) => this.showError(error));
     });
-    this.formatCancelButton.disabled = true;
-    actionMenu.panel.appendChild(this.formatCancelButton);
-    actionMenu.panel.appendChild(this.serviceButton("Check notebook", async () => {
-      const result = await this.runService("check", {});
-      const payload = isObject(result.result) ? result.result : {};
-      const issues = Array.isArray(payload.issues) ? payload.issues : [];
-      const blocked = isObject(payload.executionBlockedReason);
-      if (payload.ok === false || issues.length > 0 || blocked) {
-        if (issues.length > 0) throw new Error(issues.length + " notebook validation " + (issues.length === 1 ? "issue" : "issues"));
-        throw new Error("Notebook check failed");
-      }
-      this.actionNotice = "Notebook check passed";
-    }));
 
-    const packageMenu = this.menu("Packages", "packages");
-    const names = this.dom.createElement("input");
-    names.type = "text";
-    names.placeholder = "dplyr, ggplot2";
-    names.setAttribute("aria-label", "Package names");
-    const status = element(this.dom, "pre", "package-status", "Select Refresh to inspect packages.");
-    packageMenu.panel.append(names);
-    const packages = (): string[] => Array.from(new Set(names.value.split(/[\s,]+/).map((name) => name.trim()).filter(Boolean)));
+    const names = this.dom.getElementById("package-names") as HTMLInputElement | null;
+    const status = this.dom.getElementById("package-status") as HTMLElement | null;
+    this.packageCancelButton = this.dom.getElementById("packages-cancel") as HTMLButtonElement | null;
+    const packages = (): string[] => Array.from(new Set((names?.value ?? "").split(/[\s,]+/).map((name) => name.trim()).filter(Boolean)));
     const updateStatus = (result: CommandResult | HostQueryResult, command?: PackageServiceCommand): void => {
+      if (!status) return;
       const payload = operationPayload(result);
       const state = isObject(payload.status) ? payload.status : payload;
       const output = command === "packages.install" && isObject(payload.result) && typeof payload.result.output === "string"
@@ -1935,6 +1907,7 @@ export class NotebookView {
       status.textContent = packageStatusText(state, output);
     };
     const runPackage = async (command: PackageServiceCommand, payload: Record<string, unknown>): Promise<void> => {
+      if (!status) return;
       const target: PackageOperationTarget = { command, operationId: null, status };
       this.packageOperations.add(target);
       try {
@@ -1957,68 +1930,27 @@ export class NotebookView {
         this.packageOperations.delete(target);
       }
     };
-    packageMenu.panel.appendChild(this.serviceButton("Refresh", async () => updateStatus(await this.runService("packages.status", {}))));
-    packageMenu.panel.appendChild(this.serviceButton("Declare", async () => {
+    const bindPackageAction = (id: string, run: () => Promise<void>): void => {
+      const button = this.dom.getElementById(id) as HTMLButtonElement | null;
+      button?.addEventListener("click", () => {
+        if (button.disabled) return;
+        setDisabled(button, true);
+        void this.action(run).catch((error) => this.showError(error)).finally(() => setDisabled(button, false));
+      });
+    };
+    bindPackageAction("packages-refresh", async () => updateStatus(await this.runService("packages.status", {})));
+    bindPackageAction("packages-declare", async () => {
       const selected = packages();
       if (!selected.length) throw new Error("Enter one or more package names");
       await runPackage("packages.declare", { packages: selected });
-    }));
-    packageMenu.panel.appendChild(this.serviceButton("Install missing", async () => {
-      await runPackage("packages.install", { packages: packages() });
-    }));
-    this.packageCancelButton = this.serviceButton("Cancel install", async () => {
+    });
+    bindPackageAction("packages-install", async () => runPackage("packages.install", { packages: packages() }));
+    this.packageCancelButton?.addEventListener("click", () => {
       const operationId = this.activePackageInstallOperationId;
-      if (operationId === null) throw new Error("No package installation is in progress");
-      await this.client.cancelOperation(operationId);
+      if (operationId === null) return;
+      void this.client.cancelOperation(operationId).catch((error) => this.showError(error));
     });
-    this.packageCancelButton.disabled = true;
-    packageMenu.panel.appendChild(this.packageCancelButton);
-    packageMenu.panel.appendChild(status);
 
-    menus.append(actionMenu.wrap, packageMenu.wrap);
-    const anchor = this.dom.getElementById("app-mode") ?? this.dom.getElementById("edit-mode");
-    if (anchor?.parentNode === topbar) topbar.insertBefore(menus, anchor);
-    else topbar.appendChild(menus);
-  }
-
-  private menu(label: string, key: string): { wrap: HTMLElement; panel: HTMLElement } {
-    const wrap = element(this.dom, "div", "service-menu");
-    const toggle = element(this.dom, "button", "btn", label) as HTMLButtonElement;
-    toggle.type = "button";
-    toggle.dataset.serviceMenu = key;
-    toggle.hidden = true;
-    toggle.setAttribute("aria-expanded", "false");
-    const panel = element(this.dom, "div", "service-menu-panel");
-    panel.hidden = true;
-    toggle.addEventListener("click", () => {
-      panel.hidden = !panel.hidden;
-      toggle.setAttribute("aria-expanded", String(!panel.hidden));
-    });
-    panel.addEventListener("click", (event) => {
-      if ((event.target as Element | null)?.closest("button")) {
-        panel.hidden = true;
-        toggle.setAttribute("aria-expanded", "false");
-      }
-    });
-    wrap.append(toggle, panel);
-    return { wrap, panel };
-  }
-
-  private serviceButton(label: string, run: () => Promise<void>, dataset: Record<string, string> = {}): HTMLButtonElement {
-    const button = element(this.dom, "button", "btn mini", label) as HTMLButtonElement;
-    button.type = "button";
-    Object.assign(button.dataset, dataset);
-    button.addEventListener("click", (event) => {
-      event.preventDefault();
-      if (button.disabled) return;
-      button.disabled = true;
-      button.setAttribute("aria-busy", "true");
-      void this.action(run).catch((error) => this.showError(error)).finally(() => {
-        button.disabled = false;
-        button.removeAttribute("aria-busy");
-      });
-    });
-    return button;
   }
 
   private async runService(command: "publish" | "check" | "packages.status" | "packages.declare" | "packages.install", payload: Record<string, unknown>, onAccepted?: (operationId: string) => void): Promise<CommandResult | HostQueryResult> {
@@ -2279,17 +2211,17 @@ export class NotebookView {
     } else if (action === "toggle-notebook") {
       this.togglePanel();
     } else if (action === "preview") {
-      this.dom.getElementById("app-mode")?.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+      (this.dom.getElementById("app-mode") as HTMLAnchorElement | null)?.click();
     } else if (action === "format") {
-      await this.formatCells();
+      this.openDialog("format-dialog");
     } else if (action === "packages") {
-      this.dom.querySelector<HTMLButtonElement>("[data-service-menu=packages]")?.click();
+      this.openDialog("packages-dialog");
     } else if (action === "shortcuts") {
-      this.actionNotice = "Run cell ⌘↩ · Run and advance ⇧↩ · Run all ⇧⌘↩ · Interrupt ⌘.";
-      this.renderStatus();
+      this.openDialog("shortcuts-dialog");
     } else if (action === "r-documentation") {
-      this.actionNotice = "Place the cursor on an R name and use editor help.";
-      this.renderStatus();
+      const key = this.documentValue?.focusedKey;
+      const editor = key ? this.editors.get(key) : undefined;
+      if (!editor?.openHelp?.()) throw new Error("Place the cursor in an R code cell to open R documentation.");
     } else if (action === "settings") {
       this.openSettings();
     } else if (action === "run-cell") {
@@ -2304,10 +2236,16 @@ export class NotebookView {
         this.focusAdjacentCell(key, 1, true);
       }
     } else if (action === "publish") {
-      const dialog = this.dom.getElementById("publish-dialog") as HTMLDialogElement | null;
-      if (dialog && !dialog.open) dialog.showModal();
+      this.openDialog("publish-dialog");
     }
     return "ok";
+  }
+
+  private openDialog(id: string): void {
+    const dialog = this.dom.getElementById(id) as HTMLDialogElement | null;
+    if (!dialog || dialog.hasAttribute("open")) return;
+    if (typeof dialog.showModal === "function") dialog.showModal();
+    else dialog.setAttribute("open", "");
   }
 
   private bindPublishDialog(): void {
@@ -2318,7 +2256,8 @@ export class NotebookView {
       const operationId = this.activePublishOperationId;
       if (operationId) {
         void this.client.cancelOperation(operationId).catch(error => this.showError(error));
-      } else dialog?.close();
+      } else if (typeof dialog?.close === "function") dialog.close();
+      else dialog?.removeAttribute("open");
     });
     form?.addEventListener("submit", (event) => {
       event.preventDefault();
@@ -2342,7 +2281,8 @@ export class NotebookView {
         this.actionNotice = operationPayload(result).unsavedChangesExcluded === true
           ? "Published the last saved version. Unsaved changes were not included."
           : "Published HTML downloaded.";
-        dialog?.close();
+        if (typeof dialog?.close === "function") dialog.close();
+        else dialog?.removeAttribute("open");
       }).catch(error => this.showError(error)).finally(() => {
         if (submit) setDisabled(submit, false);
         if (progress) progress.textContent = "";
@@ -2396,10 +2336,12 @@ export class NotebookView {
         const deleted = this.deletedCell;
         window.clearTimeout(deleted.timer);
         this.deletedCell = null;
-        this.client.createCell(deleted.after, deleted.type, deleted.body);
-        this.actionNotice = "Cell restored.";
-        this.renderStatus();
-        this.scheduleAutosave();
+        void this.action(async () => {
+          await this.client.restoreCellAt(deleted.index, deleted.type, deleted.body);
+          this.actionNotice = "Cell restored.";
+          this.renderStatus();
+          this.scheduleAutosave();
+        }).catch((error) => this.showError(error));
         return;
       }
       if (action === "retry-connection") {

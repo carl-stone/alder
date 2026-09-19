@@ -804,8 +804,14 @@ export class ElectronMain implements ElectronMainApplication {
       { label: "Restart R", click: action("restart") },
     ];
     const settingsSubmenu: Record<string, unknown>[] = [
+      { role: "about" },
+      { type: "separator" },
       { label: "Settings…", accelerator: "CmdOrCtrl+,", click: action("settings") },
       { label: "Choose R…", click: action("select-r") },
+      { type: "separator" },
+      { role: "services" },
+      { type: "separator" },
+      { role: "hide" }, { role: "hideOthers" }, { role: "unhide" },
     ];
     const editSubmenu: Record<string, unknown>[] = [
       { role: "undo" }, { role: "redo" }, { type: "separator" },
@@ -815,7 +821,7 @@ export class ElectronMain implements ElectronMainApplication {
     const viewSubmenu: Record<string, unknown>[] = [
       { label: "Toggle Notebook Sidebar", accelerator: "CmdOrCtrl+Alt+S", click: action("toggle-notebook") },
       { label: "Preview", accelerator: "CmdOrCtrl+Shift+P", click: action("preview") },
-      { type: "separator" }, { role: "reload" }, { role: "toggleDevTools" }, { type: "separator" }, { role: "togglefullscreen" },
+      { type: "separator" }, { role: "togglefullscreen" },
     ];
     const windowSubmenu: Record<string, unknown>[] = [
       { role: "minimize" }, { role: "zoom" }, { type: "separator" }, { role: "front" },

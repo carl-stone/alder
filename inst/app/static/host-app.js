@@ -18986,12 +18986,18 @@ var BrowserDocument = class {
     cell.selection = { ...selection };
   }
   create(creationId, afterKey, type = "code", body = []) {
+    const after = afterKey === null ? this.ordered.length - 1 : this.ordered.findIndex((cell) => cell.key === afterKey);
+    if (afterKey !== null && after < 0) throw new Error(`no such predecessor: ${afterKey}`);
+    return this.createAt(creationId, after + 1, type, body);
+  }
+  createAt(creationId, index, type = "code", body = []) {
     if (!creationId || this.keyByCreationId.has(creationId)) {
       throw new Error("creationId must be unique and nonempty");
     }
+    if (!Number.isInteger(index) || index < 0 || index > this.ordered.length) {
+      throw new Error(`cell insertion index is out of bounds: ${index}`);
+    }
     const key = `creation:${creationId}`;
-    const after = afterKey === null ? this.ordered.length - 1 : this.ordered.findIndex((cell2) => cell2.key === afterKey);
-    if (afterKey !== null && after < 0) throw new Error(`no such predecessor: ${afterKey}`);
     this.captureDraftBase();
     const cell = {
       key,
@@ -19010,7 +19016,7 @@ var BrowserDocument = class {
       server: null,
       selection: { anchor: 0, head: 0 }
     };
-    this.ordered.splice(after + 1, 0, cell);
+    this.ordered.splice(index, 0, cell);
     this.byKey.set(key, cell);
     this.keyByCreationId.set(creationId, key);
     return cell;
@@ -21892,6 +21898,16 @@ var BrowserNotebookClient = class {
     this.queueDraftPersistence();
     return cell;
   }
+  async restoreCellAt(index, type, body) {
+    return this.withSourceLock(() => {
+      const document2 = this.requireDocument();
+      const cell = document2.createAt(operationId("create"), index, type, body);
+      document2.focus(cell.key);
+      this.notify();
+      this.queueDraftPersistence();
+      return this.commitEditsUnlocked();
+    });
+  }
   editCell(key, source, type) {
     const lines = typeof source === "string" ? splitSource(source) : [...source];
     const cell = this.requireDocument().edit(key, lines, type);
@@ -23655,8 +23671,7 @@ var NotebookView = class {
     this.notebook = notebook;
     this.status = dom.getElementById("status");
     this.path = dom.getElementById("path");
-    const requestedView = new URLSearchParams(location.search).get("view");
-    this.appView = requestedView === "preview" || requestedView === "app";
+    this.appView = new URLSearchParams(location.search).get("view") === "preview";
     const panelPreference = loadPanelPreference(window);
     this.panelOpen = panelPreference.open;
     this.panelTab = panelPreference.tab;
@@ -23703,7 +23718,7 @@ var NotebookView = class {
     this.bindPublishDialog();
     this.bindNavigation();
     this.bindDragAndDrop();
-    this.installServiceMenus();
+    this.bindServiceDialogs();
     this.recoveryUnsubscribe = client2.subscribeRecovery(() => this.renderStatus());
     this.applyPanelState();
     this.updateTopbarInset();
@@ -23772,7 +23787,6 @@ var NotebookView = class {
   activePublishOperationId = null;
   activePackageInstallOperationId = null;
   formatCancelButton = null;
-  publishCancelButton = null;
   packageCancelButton = null;
   draggedKey = null;
   deletedCell = null;
@@ -24004,7 +24018,7 @@ var NotebookView = class {
         const cells = [...this.requireDocument().cells];
         const index = cells.findIndex((cell2) => cell2.key === key);
         const cell = this.requireCell(key);
-        const deleted = { after: index > 0 ? cells[index - 1].key : null, type: cell.desiredType, body: [...cell.desiredBody] };
+        const deleted = { index, type: cell.desiredType, body: [...cell.desiredBody] };
         this.cancelEditTimer(key);
         await this.client.deleteCell(key);
         if (this.deletedCell) window.clearTimeout(this.deletedCell.timer);
@@ -25357,74 +25371,51 @@ ${cell.desiredBody.join("\n")}`));
       clear();
     });
   }
-  installServiceMenus() {
+  bindServiceDialogs() {
     if (this.appView) return;
-    const topbar = this.dom.getElementById("topbar");
-    if (!topbar || topbar.querySelector("[data-host-service-menus]")) return;
-    const menus = element2(this.dom, "div", "editor-only");
-    menus.dataset.hostServiceMenus = "true";
-    menus.style.display = "contents";
-    const actionMenu = this.menu("Actions", "actions");
-    const include = this.dom.createElement("input");
-    include.type = "checkbox";
-    const includeLabel = element2(this.dom, "label", "publish-include-code");
-    includeLabel.append(include, this.dom.createTextNode(" Include code"));
-    actionMenu.panel.appendChild(includeLabel);
-    actionMenu.panel.appendChild(this.serviceButton("Publish HTML", async () => {
-      let result;
-      try {
-        result = await this.runService("publish", { include_code: include.checked }, (operationId2) => {
-          this.activePublishOperationId = operationId2;
-          if (this.publishCancelButton) this.publishCancelButton.disabled = false;
-        });
-      } finally {
-        this.activePublishOperationId = null;
-        if (this.publishCancelButton) this.publishCancelButton.disabled = true;
-      }
-      await this.downloadServiceResult(result);
-      this.actionNotice = operationPayload(result).unsavedChangesExcluded === true ? "Published the last saved version. Unsaved changes were not included." : "Published HTML downloaded.";
-      this.renderStatus();
-    }));
-    this.publishCancelButton = this.serviceButton("Cancel publishing", async () => {
-      const operationId2 = this.activePublishOperationId;
-      if (operationId2 === null) throw new Error("No publication is in progress");
-      await this.client.cancelOperation(operationId2);
+    const dialog = (id) => this.dom.getElementById(id);
+    const close = (buttonId, dialogId) => {
+      this.dom.getElementById(buttonId)?.addEventListener("click", () => {
+        const target = dialog(dialogId);
+        if (typeof target?.close === "function") target.close();
+        else target?.removeAttribute("open");
+      });
+    };
+    close("format-close", "format-dialog");
+    close("packages-close", "packages-dialog");
+    close("shortcuts-close", "shortcuts-dialog");
+    const formatStart = this.dom.getElementById("format-start");
+    const formatProgress = this.dom.getElementById("format-progress");
+    this.formatCancelButton = this.dom.getElementById("format-cancel");
+    formatStart?.addEventListener("click", () => {
+      if (formatStart.disabled) return;
+      setDisabled(formatStart, true);
+      if (formatProgress) formatProgress.textContent = "Formatting\u2026";
+      void this.action(() => this.formatCells()).then(() => {
+        if (formatProgress) formatProgress.textContent = "Formatting complete.";
+      }).catch((error61) => {
+        if (formatProgress) formatProgress.textContent = "Formatting failed.";
+        this.showError(error61);
+      }).finally(() => setDisabled(formatStart, false));
     });
-    this.publishCancelButton.disabled = true;
-    actionMenu.panel.appendChild(this.publishCancelButton);
-    this.formatCancelButton = this.serviceButton("Cancel formatting", async () => {
+    this.formatCancelButton?.addEventListener("click", () => {
       const operationId2 = this.activeFormatOperationIds.values().next().value;
-      if (operationId2 === void 0) throw new Error("No formatting operation is in progress");
-      await this.client.cancelOperation(operationId2);
+      if (operationId2 === void 0) return;
+      void this.client.cancelOperation(operationId2).catch((error61) => this.showError(error61));
     });
-    this.formatCancelButton.disabled = true;
-    actionMenu.panel.appendChild(this.formatCancelButton);
-    actionMenu.panel.appendChild(this.serviceButton("Check notebook", async () => {
-      const result = await this.runService("check", {});
-      const payload = isObject3(result.result) ? result.result : {};
-      const issues = Array.isArray(payload.issues) ? payload.issues : [];
-      const blocked = isObject3(payload.executionBlockedReason);
-      if (payload.ok === false || issues.length > 0 || blocked) {
-        if (issues.length > 0) throw new Error(issues.length + " notebook validation " + (issues.length === 1 ? "issue" : "issues"));
-        throw new Error("Notebook check failed");
-      }
-      this.actionNotice = "Notebook check passed";
-    }));
-    const packageMenu = this.menu("Packages", "packages");
-    const names = this.dom.createElement("input");
-    names.type = "text";
-    names.placeholder = "dplyr, ggplot2";
-    names.setAttribute("aria-label", "Package names");
-    const status = element2(this.dom, "pre", "package-status", "Select Refresh to inspect packages.");
-    packageMenu.panel.append(names);
-    const packages = () => Array.from(new Set(names.value.split(/[\s,]+/).map((name) => name.trim()).filter(Boolean)));
+    const names = this.dom.getElementById("package-names");
+    const status = this.dom.getElementById("package-status");
+    this.packageCancelButton = this.dom.getElementById("packages-cancel");
+    const packages = () => Array.from(new Set((names?.value ?? "").split(/[\s,]+/).map((name) => name.trim()).filter(Boolean)));
     const updateStatus = (result, command) => {
+      if (!status) return;
       const payload = operationPayload(result);
       const state = isObject3(payload.status) ? payload.status : payload;
       const output2 = command === "packages.install" && isObject3(payload.result) && typeof payload.result.output === "string" ? payload.result.output : "";
       status.textContent = packageStatusText(state, output2);
     };
     const runPackage = async (command, payload) => {
+      if (!status) return;
       const target = { command, operationId: null, status };
       this.packageOperations.add(target);
       try {
@@ -25447,65 +25438,26 @@ ${cell.desiredBody.join("\n")}`));
         this.packageOperations.delete(target);
       }
     };
-    packageMenu.panel.appendChild(this.serviceButton("Refresh", async () => updateStatus(await this.runService("packages.status", {}))));
-    packageMenu.panel.appendChild(this.serviceButton("Declare", async () => {
+    const bindPackageAction = (id, run) => {
+      const button = this.dom.getElementById(id);
+      button?.addEventListener("click", () => {
+        if (button.disabled) return;
+        setDisabled(button, true);
+        void this.action(run).catch((error61) => this.showError(error61)).finally(() => setDisabled(button, false));
+      });
+    };
+    bindPackageAction("packages-refresh", async () => updateStatus(await this.runService("packages.status", {})));
+    bindPackageAction("packages-declare", async () => {
       const selected = packages();
       if (!selected.length) throw new Error("Enter one or more package names");
       await runPackage("packages.declare", { packages: selected });
-    }));
-    packageMenu.panel.appendChild(this.serviceButton("Install missing", async () => {
-      await runPackage("packages.install", { packages: packages() });
-    }));
-    this.packageCancelButton = this.serviceButton("Cancel install", async () => {
+    });
+    bindPackageAction("packages-install", async () => runPackage("packages.install", { packages: packages() }));
+    this.packageCancelButton?.addEventListener("click", () => {
       const operationId2 = this.activePackageInstallOperationId;
-      if (operationId2 === null) throw new Error("No package installation is in progress");
-      await this.client.cancelOperation(operationId2);
+      if (operationId2 === null) return;
+      void this.client.cancelOperation(operationId2).catch((error61) => this.showError(error61));
     });
-    this.packageCancelButton.disabled = true;
-    packageMenu.panel.appendChild(this.packageCancelButton);
-    packageMenu.panel.appendChild(status);
-    menus.append(actionMenu.wrap, packageMenu.wrap);
-    const anchor2 = this.dom.getElementById("app-mode") ?? this.dom.getElementById("edit-mode");
-    if (anchor2?.parentNode === topbar) topbar.insertBefore(menus, anchor2);
-    else topbar.appendChild(menus);
-  }
-  menu(label, key) {
-    const wrap = element2(this.dom, "div", "service-menu");
-    const toggle = element2(this.dom, "button", "btn", label);
-    toggle.type = "button";
-    toggle.dataset.serviceMenu = key;
-    toggle.hidden = true;
-    toggle.setAttribute("aria-expanded", "false");
-    const panel = element2(this.dom, "div", "service-menu-panel");
-    panel.hidden = true;
-    toggle.addEventListener("click", () => {
-      panel.hidden = !panel.hidden;
-      toggle.setAttribute("aria-expanded", String(!panel.hidden));
-    });
-    panel.addEventListener("click", (event) => {
-      if (event.target?.closest("button")) {
-        panel.hidden = true;
-        toggle.setAttribute("aria-expanded", "false");
-      }
-    });
-    wrap.append(toggle, panel);
-    return { wrap, panel };
-  }
-  serviceButton(label, run, dataset = {}) {
-    const button = element2(this.dom, "button", "btn mini", label);
-    button.type = "button";
-    Object.assign(button.dataset, dataset);
-    button.addEventListener("click", (event) => {
-      event.preventDefault();
-      if (button.disabled) return;
-      button.disabled = true;
-      button.setAttribute("aria-busy", "true");
-      void this.action(run).catch((error61) => this.showError(error61)).finally(() => {
-        button.disabled = false;
-        button.removeAttribute("aria-busy");
-      });
-    });
-    return button;
   }
   async runService(command, payload, onAccepted) {
     this.cancelEditTimers();
@@ -25761,17 +25713,17 @@ ${cell.desiredBody.join("\n")}`));
     } else if (action === "toggle-notebook") {
       this.togglePanel();
     } else if (action === "preview") {
-      this.dom.getElementById("app-mode")?.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+      this.dom.getElementById("app-mode")?.click();
     } else if (action === "format") {
-      await this.formatCells();
+      this.openDialog("format-dialog");
     } else if (action === "packages") {
-      this.dom.querySelector("[data-service-menu=packages]")?.click();
+      this.openDialog("packages-dialog");
     } else if (action === "shortcuts") {
-      this.actionNotice = "Run cell \u2318\u21A9 \xB7 Run and advance \u21E7\u21A9 \xB7 Run all \u21E7\u2318\u21A9 \xB7 Interrupt \u2318.";
-      this.renderStatus();
+      this.openDialog("shortcuts-dialog");
     } else if (action === "r-documentation") {
-      this.actionNotice = "Place the cursor on an R name and use editor help.";
-      this.renderStatus();
+      const key = this.documentValue?.focusedKey;
+      const editor = key ? this.editors.get(key) : void 0;
+      if (!editor?.openHelp?.()) throw new Error("Place the cursor in an R code cell to open R documentation.");
     } else if (action === "settings") {
       this.openSettings();
     } else if (action === "run-cell") {
@@ -25786,10 +25738,15 @@ ${cell.desiredBody.join("\n")}`));
         this.focusAdjacentCell(key, 1, true);
       }
     } else if (action === "publish") {
-      const dialog = this.dom.getElementById("publish-dialog");
-      if (dialog && !dialog.open) dialog.showModal();
+      this.openDialog("publish-dialog");
     }
     return "ok";
+  }
+  openDialog(id) {
+    const dialog = this.dom.getElementById(id);
+    if (!dialog || dialog.hasAttribute("open")) return;
+    if (typeof dialog.showModal === "function") dialog.showModal();
+    else dialog.setAttribute("open", "");
   }
   bindPublishDialog() {
     const dialog = this.dom.getElementById("publish-dialog");
@@ -25799,7 +25756,8 @@ ${cell.desiredBody.join("\n")}`));
       const operationId2 = this.activePublishOperationId;
       if (operationId2) {
         void this.client.cancelOperation(operationId2).catch((error61) => this.showError(error61));
-      } else dialog?.close();
+      } else if (typeof dialog?.close === "function") dialog.close();
+      else dialog?.removeAttribute("open");
     });
     form?.addEventListener("submit", (event) => {
       event.preventDefault();
@@ -25821,7 +25779,8 @@ ${cell.desiredBody.join("\n")}`));
         }
         await this.downloadServiceResult(result);
         this.actionNotice = operationPayload(result).unsavedChangesExcluded === true ? "Published the last saved version. Unsaved changes were not included." : "Published HTML downloaded.";
-        dialog?.close();
+        if (typeof dialog?.close === "function") dialog.close();
+        else dialog?.removeAttribute("open");
       }).catch((error61) => this.showError(error61)).finally(() => {
         if (submit) setDisabled(submit, false);
         if (progress) progress.textContent = "";
@@ -25875,10 +25834,12 @@ ${cell.desiredBody.join("\n")}`));
         const deleted = this.deletedCell;
         window.clearTimeout(deleted.timer);
         this.deletedCell = null;
-        this.client.createCell(deleted.after, deleted.type, deleted.body);
-        this.actionNotice = "Cell restored.";
-        this.renderStatus();
-        this.scheduleAutosave();
+        void this.action(async () => {
+          await this.client.restoreCellAt(deleted.index, deleted.type, deleted.body);
+          this.actionNotice = "Cell restored.";
+          this.renderStatus();
+          this.scheduleAutosave();
+        }).catch((error61) => this.showError(error61));
         return;
       }
       if (action === "retry-connection") {

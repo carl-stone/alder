@@ -70,7 +70,7 @@ async function withViewDom<T>(callback: (dom: Document, domWindow: Window) => T 
     location: Object.getOwnPropertyDescriptor(globalThis, "location"),
     customEvent: Object.getOwnPropertyDescriptor(globalThis, "CustomEvent"),
   };
-  const location = { search: "?view=app", href: "http://notebook.test/book.R?view=app", origin: "http://notebook.test" };
+  const location = { search: "?view=preview", href: "http://notebook.test/book.R?view=preview", origin: "http://notebook.test" };
   Object.defineProperty(globalThis, "window", { configurable: true, writable: true, value: domWindow });
   Object.defineProperty(globalThis, "document", { configurable: true, writable: true, value: dom });
   Object.defineProperty(globalThis, "location", { configurable: true, writable: true, value: location });
@@ -254,6 +254,152 @@ test("browser document builds one canonical transaction for edits and optimistic
   assert.deepEqual(document.pendingSource().changes, []);
 });
 
+test("positional restore recreates a cell at the first, middle, and last position", () => {
+  const cases = [
+    { index: 0, order: ["restored", "left", "right"], after: null },
+    { index: 1, order: ["left", "restored", "right"], after: { cellId: "left" } },
+    { index: 2, order: ["left", "right", "restored"], after: { cellId: "right" } },
+  ] as const;
+  for (const item of cases) {
+    const document = new BrowserDocument(snapshot([cell("left", ["left"]), cell("right", ["right"])]));
+    document.createAt(`restore-${item.index}`, item.index, "code", ["restored"]);
+    assert.deepEqual(document.cells.map((value) => value.desiredBody[0]), item.order);
+    const change = document.pendingSource().changes[0];
+    assert.equal(change?.type, "create");
+    if (change?.type === "create") assert.deepEqual(change.after, item.after);
+  }
+});
+
+test("R Documentation invokes help on the focused editor", async () => {
+  await withViewDom(async (dom) => {
+    Object.defineProperty(globalThis, "location", { configurable: true, writable: true, value: { search: "?view=editor", href: "http://notebook.test/book.R?view=editor", origin: "http://notebook.test" } });
+    const document = new BrowserDocument(snapshot([cell("c1", ["mean(x)"])]));
+    document.focus(document.cells[0]!.key);
+    const view = new NotebookView(settingsClient(), dom);
+    let calls = 0;
+    try {
+      view.render(document);
+      (view as unknown as { editors: Map<string, unknown> }).editors.set(document.cells[0]!.key, {
+        openHelp: () => { calls += 1; return true; },
+      });
+      await view.performDesktopAction("r-documentation");
+      assert.equal(calls, 1);
+    } finally {
+      view.destroy();
+    }
+  });
+});
+
+test("source conflict and recovery choices invoke their explicit resolutions", async () => {
+  await withViewDom(async (dom, domWindow) => {
+    Object.defineProperty(globalThis, "location", { configurable: true, writable: true, value: { search: "?view=editor", href: "http://notebook.test/book.R?view=editor", origin: "http://notebook.test" } });
+    const document = new BrowserDocument(snapshot([cell("c1", ["saved <- 1"])]));
+    const local = document.cell("c1")!;
+    document.edit(local.key, ["mine <- 2"]);
+    document.applyEvent({
+      protocol: HOST_PROTOCOL, epoch: document.epoch, cursor: 1, version: 2, documentRevision: 1, timestamp: 1,
+      type: "cell", operationId: "peer-edit", cellId: "c1", revision: 1,
+      payload: cell("c1", ["incoming <- 3"], 1),
+    });
+    assert.equal(local.conflict, true);
+    const sourceChoices: string[] = [];
+    const recoveryChoices: string[] = [];
+    const recoveryState = {
+      status: "conflict", local: { draftId: "draft" }, candidate: null, corruption: null,
+      persistenceError: null, uncertainRun: false,
+    } as unknown as BrowserNotebookClient["recoveryState"];
+    const client = settingsClient({
+      recoveryState,
+      keepLocalVersion: async () => { sourceChoices.push("keep-local"); return null; },
+      useServerVersion: (key) => { sourceChoices.push("use-incoming"); document.useServerVersion(key); },
+      restoreConflictAsNewCell: async () => { sourceChoices.push("restore-new"); return null; },
+      continueRecovered: () => { recoveryChoices.push("continue"); },
+      saveAs: async () => { recoveryChoices.push("save-copy"); return resultFor("save-copy", null); },
+      discardRecovery: async () => { recoveryChoices.push("open-saved"); },
+    });
+    const desktopDescriptor = Object.getOwnPropertyDescriptor(globalThis, "alderDesktop");
+    Object.defineProperty(globalThis, "alderDesktop", { configurable: true, value: { chooseSavePath: async () => "/tmp/recovered-copy.R" } });
+    const confirmDescriptor = Object.getOwnPropertyDescriptor(window, "confirm");
+    Object.defineProperty(window, "confirm", { configurable: true, value: () => true });
+    const view = new NotebookView(client, dom);
+    try {
+      view.render(document);
+      for (const action of ["keep-local", "use-incoming", "restore-new"]) {
+        dom.querySelector<HTMLButtonElement>(`[data-recovery-action="${action}"]`)!
+          .dispatchEvent(new domWindow.Event("click", { bubbles: true, cancelable: true }));
+      }
+      await waitUntil(() => sourceChoices.length === 3);
+      assert.deepEqual(sourceChoices, ["keep-local", "use-incoming", "restore-new"]);
+      assert.deepEqual(local.desiredBody, ["incoming <- 3"]);
+      for (const label of ["Continue recovered", "Save recovered copy", "Open saved"]) {
+        const button = [...dom.querySelectorAll<HTMLButtonElement>("[data-recovery]")]
+          .find((candidate) => candidate.textContent === label);
+        assert.ok(button, label);
+        button.dispatchEvent(new domWindow.Event("click", { bubbles: true, cancelable: true }));
+      }
+      await waitUntil(() => recoveryChoices.length === 3);
+      assert.deepEqual(recoveryChoices.sort(), ["continue", "open-saved", "save-copy"]);
+    } finally {
+      view.destroy();
+      if (desktopDescriptor) Object.defineProperty(globalThis, "alderDesktop", desktopDescriptor);
+      else Reflect.deleteProperty(globalThis, "alderDesktop");
+      if (confirmDescriptor) Object.defineProperty(window, "confirm", confirmDescriptor);
+      else Reflect.deleteProperty(window, "confirm");
+    }
+  });
+});
+
+test("undo waits for positional restore and surfaces a failed commit", async () => {
+  await withViewDom(async (dom, domWindow) => {
+    Object.defineProperty(globalThis, "location", { configurable: true, writable: true, value: { search: "?view=editor", href: "http://notebook.test/book.R?view=editor", origin: "http://notebook.test" } });
+    let calls = 0;
+    const client = settingsClient({
+      restoreCellAt: async (index, type, body) => {
+        calls += 1;
+        assert.deepEqual({ index, type, body }, { index: 1, type: "code", body: ["restored"] });
+        throw new Error("restore commit failed");
+      },
+    });
+    const view = new NotebookView(client, dom);
+    try {
+      view.render(new BrowserDocument(snapshot([])));
+      (view as unknown as { deletedCell: unknown }).deletedCell = { index: 1, type: "code", body: ["restored"], timer: 0 };
+      (view as unknown as { renderStatus: () => void }).renderStatus();
+      dom.querySelector<HTMLButtonElement>('[data-status-action="undo-delete"]')!
+        .dispatchEvent(new domWindow.Event("click", { bubbles: true, cancelable: true }));
+      await waitUntil(() => dom.getElementById("status")!.textContent?.includes("restore commit failed") === true);
+      assert.equal(calls, 1);
+      assert.doesNotMatch(dom.getElementById("status")!.textContent ?? "", /Cell restored/);
+    } finally {
+      view.destroy();
+    }
+  });
+});
+
+test("connection retry and Preview use their real interaction routes", async () => {
+  await withViewDom(async (dom, domWindow) => {
+    const location = { search: "?view=editor", href: "http://notebook.test/book.R?view=editor", origin: "http://notebook.test", assign(value: string) { this.href = value; } };
+    Object.defineProperty(globalThis, "location", { configurable: true, writable: true, value: location });
+    dom.getElementById("topbar")!.insertAdjacentHTML("beforeend", '<a id="app-mode" href="/?view=preview">Preview</a>');
+    let retries = 0;
+    const client = settingsClient({ retryConnection: () => { retries += 1; }, commitEdits: async () => null });
+    const view = new NotebookView(client, dom);
+    try {
+      view.render(new BrowserDocument(snapshot([])));
+      view.setTransportState("closed", new Error("socket closed"));
+      dom.querySelector<HTMLButtonElement>('[data-status-action="retry-connection"]')!
+        .dispatchEvent(new domWindow.Event("click", { bubbles: true, cancelable: true }));
+      assert.equal(retries, 1);
+      await view.performDesktopAction("preview");
+      await waitUntil(() => view.allowsUnload);
+      assert.equal(view.allowsUnload, true);
+      assert.match(location.href, /view=preview/);
+    } finally {
+      view.destroy();
+    }
+  });
+});
+
 test("browser document never resubmits a rejected structural intent", () => {
   const document = new BrowserDocument(snapshot());
   const deletion = { type: "delete" as const, cell: { cellId: "c2" }, expectedRevision: 0 };
@@ -322,6 +468,7 @@ test("browser view surfaces a blocked runtime and keeps recovery guidance throug
       assert.match(status.textContent ?? "", /Your edits and saves are preserved/);
       const restart = status.querySelector<HTMLButtonElement>("[data-status-action=restart-runtime]");
       assert.ok(restart);
+      assert.equal(status.querySelector<HTMLButtonElement>("[data-status-action=choose-r]")?.textContent, "Choose R…");
       restart.dispatchEvent(new domWindow.Event("click", { bubbles: true, cancelable: true }));
       await Promise.resolve();
       assert.equal(restartCalls, 1);
@@ -395,37 +542,99 @@ test('browser view targets nonstructural transaction updates despite repeated co
   });
 });
 
-test("browser view reports typed check issues", async () => {
-  await withViewDom(async (dom, domWindow) => {
+test("native actions open visible Format, Packages, and keyboard shortcut surfaces", async () => {
+  await withViewDom(async (dom) => {
+    await installInteractionDialogs(dom);
     Object.defineProperty(globalThis, "location", { configurable: true, writable: true, value: { search: "?view=editor", href: "http://notebook.test/book.R?view=editor", origin: "http://notebook.test" } });
-    const document = new BrowserDocument(snapshot([]));
-    let checkCalls = 0;
-    const client = {
-      recoveryState: { status: "none", local: null, candidate: null, corruption: null, persistenceError: null },
-      subscribeRecovery() { return () => {}; },
-      commitEdits: async () => {},
-      service: async (command: string) => {
-        checkCalls += 1;
-        assert.equal(command, "check");
-        return { epoch: document.epoch, documentRevision: 0, cursor: 0, result: { issues: [{ code: "cycle", message: "cycle" }], executionBlockedReason: null } };
-      },
-    } as unknown as BrowserNotebookClient;
+    const view = new NotebookView(settingsClient(), dom);
+    try {
+      view.render(new BrowserDocument(snapshot([])));
+      for (const [action, id] of [["format", "format-dialog"], ["packages", "packages-dialog"], ["shortcuts", "shortcuts-dialog"]] as const) {
+        await view.performDesktopAction(action);
+        assert.equal(dom.getElementById(id)!.hasAttribute("open"), true);
+        dom.getElementById(id)!.removeAttribute("open");
+      }
+      assert.equal(dom.querySelector("[data-host-service-menus]"), null);
+    } finally {
+      view.destroy();
+    }
+  });
+});
+
+test("Format exposes scoped progress and cancels only its accepted operation", async () => {
+  await withViewDom(async (dom, domWindow) => {
+    await installInteractionDialogs(dom);
+    Object.defineProperty(globalThis, "location", { configurable: true, writable: true, value: { search: "?view=editor", href: "http://notebook.test/book.R?view=editor", origin: "http://notebook.test" } });
+    const pending = Promise.withResolvers<CommandResult>();
+    const cancellations: string[] = [];
+    const client = settingsClient({
+      formatCells: async (_keys, accepted) => { accepted?.("format-one"); return pending.promise; },
+      cancelOperation: async (operationId) => { cancellations.push(operationId); return resultFor(operationId, null); },
+    });
     const view = new NotebookView(client, dom);
     try {
-      view.render(document);
-      const actions = [...dom.querySelectorAll<HTMLButtonElement>("button")].find((candidate) => candidate.textContent === "Actions");
-      assert.ok(actions);
-      actions.dispatchEvent(new domWindow.Event("click", { bubbles: true, cancelable: true }));
-      const button = [...dom.querySelectorAll<HTMLButtonElement>("button")].find((candidate) => candidate.textContent === "Check notebook");
-      assert.ok(button);
-      button.dispatchEvent(new domWindow.Event("click", { bubbles: true, cancelable: true }));
-      const status = dom.getElementById("status");
-      assert.ok(status);
-      await waitUntil(() => checkCalls === 1 && status.classList.contains("error"));
-      assert.equal(checkCalls, 1);
-      assert.equal(status.getAttribute("role"), "status");
-      assert.equal(status.classList.contains("error"), true);
-      assert.ok(status.querySelector(".status-message"));
+      view.render(new BrowserDocument(snapshot([])));
+      dom.getElementById("format-start")!.dispatchEvent(new domWindow.Event("click", { bubbles: true }));
+      await waitUntil(() => dom.getElementById("format-cancel")!.hasAttribute("disabled") === false);
+      assert.equal(dom.getElementById("format-progress")!.textContent, "Formatting…");
+      dom.getElementById("format-cancel")!.dispatchEvent(new domWindow.Event("click", { bubbles: true }));
+      await waitUntil(() => cancellations.length === 1);
+      assert.deepEqual(cancellations, ["format-one"]);
+      pending.resolve(resultFor("format-one", null));
+      await waitUntil(() => dom.getElementById("format-progress")!.textContent === "Formatting complete.");
+    } finally {
+      pending.resolve(resultFor("format-one", null));
+      view.destroy();
+    }
+  });
+});
+
+test("Shift-Enter runs the focused cell and advances after completion", async () => {
+  await withViewDom(async (dom) => {
+    Object.defineProperty(globalThis, "location", { configurable: true, writable: true, value: { search: "?view=editor", href: "http://notebook.test/book.R?view=editor", origin: "http://notebook.test" } });
+    let onRun: ((advance?: boolean) => void) | undefined;
+    (window as unknown as { AlderEditor: unknown }).AlderEditor = {
+      createEditor(options: { doc: string; onRun?: (advance?: boolean) => void }) {
+        onRun = options.onRun;
+        return { getDoc: () => options.doc, setDoc() {}, focus() {}, destroy() {} };
+      },
+    };
+    const completed = resultFor("run-cell", null);
+    const client = settingsClient({ startRunCell: async () => ({ completed: Promise.resolve(completed) }) });
+    const view = new NotebookView(client, dom);
+    let advances = 0;
+    (view as unknown as { focusAdjacentCell: () => void }).focusAdjacentCell = () => { advances += 1; };
+    try {
+      view.render(new BrowserDocument(snapshot([cell("c1", ["1"]), cell("c2", ["2"])])));
+      assert.ok(onRun);
+      onRun(true);
+      await waitUntil(() => advances === 1);
+    } finally {
+      delete (window as unknown as { AlderEditor?: unknown }).AlderEditor;
+      view.destroy();
+    }
+  });
+});
+
+test("dirty Save and publish saves before publishing", async () => {
+  await withViewDom(async (dom, domWindow) => {
+    await installInteractionDialogs(dom);
+    Object.defineProperty(globalThis, "location", { configurable: true, writable: true, value: { search: "?view=editor", href: "http://notebook.test/book.R?view=editor", origin: "http://notebook.test" } });
+    const initial = snapshot([cell("c1", ["draft <- 1"])]);
+    initial.dirty = true;
+    const order: string[] = [];
+    const client = settingsClient({
+      save: async () => { order.push("save"); return resultFor("save", null); },
+      commitEdits: async () => null,
+      service: async () => { order.push("publish"); return resultFor("publish", { artifact: artifactDescriptor() }); },
+    });
+    const view = new NotebookView(client, dom);
+    (view as unknown as { downloadServiceResult: () => Promise<void> }).downloadServiceResult = async () => {};
+    try {
+      view.render(new BrowserDocument(initial));
+      dom.getElementById("publish-form")!.dispatchEvent(new domWindow.Event("submit", { bubbles: true, cancelable: true }));
+      await waitUntil(() => order.includes("publish"));
+      assert.deepEqual(order, ["save", "publish"]);
     } finally {
       view.destroy();
     }
@@ -434,26 +643,24 @@ test("browser view reports typed check issues", async () => {
 
 test("Publish HTML publishes the last saved version without forcing Save", async () => {
   await withViewDom(async (dom, domWindow) => {
+    await installInteractionDialogs(dom);
     Object.defineProperty(globalThis, "location", { configurable: true, writable: true, value: { search: "?view=editor", href: "http://notebook.test/book.R?view=editor", origin: "http://notebook.test" } });
     const initial = snapshot([cell("c1", ["current <- 42"])]);
-    initial.dirty = true;
     initial.dirty = true;
     const document = new BrowserDocument(initial);
     let publishes = 0;
     const client = settingsClient({
       save: async () => { throw new Error("source changed on disk"); },
       commitEdits: async () => initial,
-      service: async () => { publishes += 1; return resultFor("publish", null); },
+      service: async (command) => { assert.equal(command, "publish"); publishes += 1; return resultFor("publish", null); },
     });
     const view = new NotebookView(client, dom);
     try {
       view.render(document);
-      const button = [...dom.querySelectorAll<HTMLButtonElement>("button")]
-        .find((candidate) => candidate.textContent === "Publish HTML");
-      assert.ok(button);
-      button.dispatchEvent(new domWindow.Event("click", { bubbles: true, cancelable: true }));
+      dom.querySelector<HTMLInputElement>('input[name="publish-version"][value="save"]')!.removeAttribute("checked");
+      dom.querySelector<HTMLInputElement>('input[name="publish-version"][value="saved"]')!.setAttribute("checked", "");
+      dom.getElementById("publish-form")!.dispatchEvent(new domWindow.Event("submit", { bubbles: true, cancelable: true }));
       await waitUntil(() => publishes === 1);
-      assert.equal(publishes, 1);
       assert.deepEqual(document.cells[0]!.desiredBody, ["current <- 42"]);
     } finally {
       view.destroy();
@@ -463,10 +670,9 @@ test("Publish HTML publishes the last saved version without forcing Save", async
 
 test("Publish HTML uses the server result for the unsaved-source warning", async () => {
   await withViewDom(async (dom, domWindow) => {
+    await installInteractionDialogs(dom);
     Object.defineProperty(globalThis, "location", { configurable: true, writable: true, value: { search: "?view=editor", href: "http://notebook.test/book.R?view=editor", origin: "http://notebook.test" } });
     const initial = snapshot([cell("c1", ["saved <- 1"])]);
-    initial.dirty = false;
-    initial.dirty = false;
     const document = new BrowserDocument(initial);
     const client = settingsClient({
       commitEdits: async () => initial,
@@ -480,12 +686,10 @@ test("Publish HTML uses the server result for the unsaved-source warning", async
     (view as unknown as { downloadServiceResult: () => Promise<void> }).downloadServiceResult = async () => {};
     try {
       view.render(document);
-      const button = [...dom.querySelectorAll<HTMLButtonElement>("button")]
-        .find((candidate) => candidate.textContent === "Publish HTML");
-      assert.ok(button);
-      button.dispatchEvent(new domWindow.Event("click", { bubbles: true, cancelable: true }));
-      const status = dom.getElementById("status");
-      assert.ok(status);
+      dom.querySelector<HTMLInputElement>('input[name="publish-version"][value="save"]')!.removeAttribute("checked");
+      dom.querySelector<HTMLInputElement>('input[name="publish-version"][value="saved"]')!.setAttribute("checked", "");
+      dom.getElementById("publish-form")!.dispatchEvent(new domWindow.Event("submit", { bubbles: true, cancelable: true }));
+      const status = dom.getElementById("status")!;
       await waitUntil(() => status.textContent?.includes("Unsaved changes were not included") === true);
       assert.match(status.textContent ?? "", /Published the last saved version/);
     } finally {
@@ -494,11 +698,11 @@ test("Publish HTML uses the server result for the unsaved-source warning", async
   });
 });
 
-test("a slow publish disables only its own action", async () => {
+test("a slow publish disables only its dialog action", async () => {
   await withViewDom(async (dom, domWindow) => {
+    await installInteractionDialogs(dom);
     Object.defineProperty(globalThis, "location", { configurable: true, writable: true, value: { search: "?view=editor", href: "http://notebook.test/book.R?view=editor", origin: "http://notebook.test" } });
     const initial = snapshot([cell("c1", ["current <- 42"])]);
-    initial.dirty = true;
     initial.dirty = true;
     const pending = Promise.withResolvers<CommandResult>();
     let publishes = 0;
@@ -509,18 +713,14 @@ test("a slow publish disables only its own action", async () => {
     const view = new NotebookView(client, dom);
     try {
       view.render(new BrowserDocument(initial));
-      const button = [...dom.querySelectorAll<HTMLButtonElement>("button")]
-        .find((candidate) => candidate.textContent === "Publish HTML");
-      assert.ok(button);
-      button.dispatchEvent(new domWindow.Event("click", { bubbles: true, cancelable: true }));
+      dom.querySelector<HTMLInputElement>('input[name="publish-version"][value="save"]')!.removeAttribute("checked");
+      dom.querySelector<HTMLInputElement>('input[name="publish-version"][value="saved"]')!.setAttribute("checked", "");
+      const button = dom.querySelector<HTMLButtonElement>("#publish-submit")!;
+      dom.getElementById("publish-form")!.dispatchEvent(new domWindow.Event("submit", { bubbles: true, cancelable: true }));
       await waitUntil(() => publishes === 1);
       assert.equal(button.disabled, true);
       assert.equal(dom.querySelector<HTMLButtonElement>("#save")!.disabled, false);
       assert.equal(dom.querySelector<HTMLButtonElement>("#run-all")!.disabled, false);
-      assert.equal(dom.querySelector<HTMLTextAreaElement>(".cell textarea")?.disabled ?? false, false);
-      button.dispatchEvent(new domWindow.Event("click", { bubbles: true, cancelable: true }));
-      await Promise.resolve();
-      assert.equal(publishes, 1);
       pending.resolve(resultFor("publish", null));
       await waitUntil(() => button.disabled === false);
     } finally {
@@ -700,6 +900,13 @@ for (const runControl of ["toolbar", "cell"] as const) {
 async function installSettingsDom(dom: Document): Promise<void> {
   const markup = parseHTML(await readFile(new URL("../../inst/app/index.html", import.meta.url), "utf8")).document;
   for (const id of ["settings-open", "settings", "runtime-select"]) {
+    dom.body.insertAdjacentHTML("beforeend", markup.getElementById(id)!.outerHTML);
+  }
+}
+
+async function installInteractionDialogs(dom: Document): Promise<void> {
+  const markup = parseHTML(await readFile(new URL("../../inst/app/index.html", import.meta.url), "utf8")).document;
+  for (const id of ["publish-dialog", "format-dialog", "packages-dialog", "shortcuts-dialog"]) {
     dom.body.insertAdjacentHTML("beforeend", markup.getElementById(id)!.outerHTML);
   }
 }

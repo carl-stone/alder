@@ -52,6 +52,50 @@
     </form>
   </dialog>
 
+  <dialog id="format-dialog" class="settings-dialog editor-only" aria-labelledby="format-title">
+    <div class="settings-head">
+      <h2 id="format-title">Format notebook</h2>
+      <button id="format-close" class="btn mini" type="button" aria-label="Close formatting">Close</button>
+    </div>
+    <p>Format every R code cell with Alder's configured formatter.</p>
+    <p id="format-progress" role="status" aria-live="polite">Ready to format.</p>
+    <div class="settings-actions">
+      <button id="format-cancel" class="btn" type="button" disabled>Cancel formatting</button>
+      <button id="format-start" class="btn primary" type="button">Format</button>
+    </div>
+  </dialog>
+
+  <dialog id="packages-dialog" class="settings-dialog editor-only" aria-labelledby="packages-title">
+    <div class="settings-head">
+      <h2 id="packages-title">Packages</h2>
+      <button id="packages-close" class="btn mini" type="button" aria-label="Close packages">Close</button>
+    </div>
+    <label class="settings-wide" for="package-names">Package names
+      <input id="package-names" type="text" placeholder="dplyr, ggplot2">
+    </label>
+    <pre id="package-status" class="package-status" role="status" aria-live="polite">Select Refresh to inspect packages.</pre>
+    <div class="settings-actions service-actions">
+      <button id="packages-refresh" class="btn" type="button">Refresh</button>
+      <button id="packages-declare" class="btn" type="button">Declare</button>
+      <button id="packages-install" class="btn primary" type="button">Install missing</button>
+      <button id="packages-cancel" class="btn" type="button" disabled>Cancel install</button>
+    </div>
+  </dialog>
+
+  <dialog id="shortcuts-dialog" class="settings-dialog editor-only" aria-labelledby="shortcuts-title">
+    <div class="settings-head">
+      <h2 id="shortcuts-title">Keyboard shortcuts</h2>
+      <button id="shortcuts-close" class="btn mini" type="button" aria-label="Close shortcuts">Close</button>
+    </div>
+    <dl class="shortcut-list">
+      <div><dt>Run cell</dt><dd>⌘↩</dd></div>
+      <div><dt>Run and advance</dt><dd>⇧↩</dd></div>
+      <div><dt>Run all</dt><dd>⇧⌘↩</dd></div>
+      <div><dt>Interrupt R</dt><dd>⌘.</dd></div>
+      <div><dt>R documentation</dt><dd>F1</dd></div>
+    </dl>
+  </dialog>
+
   <dialog id="settings" class="settings-dialog editor-only"
           aria-labelledby="settings-title">
     <form id="settings-form" method="dialog">
@@ -114,6 +158,10 @@
           <input id="settings-format-on-save" name="format_on_save" type="checkbox">
           Format before saving
         </label>
+        <label class="settings-wide" for="settings-selected-r">Selected R
+          <input id="settings-selected-r" type="text" readonly value="No R selected">
+        </label>
+        <button id="settings-choose-r" class="btn" type="button">Choose R…</button>
         </div>
       </fieldset>
       <fieldset class="settings-section">
@@ -126,10 +174,6 @@
               <option value="lazy">Reactive Off</option>
             </select>
           </label>
-          <label class="settings-wide" for="settings-selected-r">Selected R
-            <input id="settings-selected-r" type="text" readonly value="No R selected">
-          </label>
-          <button id="settings-choose-r" class="btn" type="button">Choose R…</button>
           <label class="settings-check" for="settings-run-on-startup">
             <input id="settings-run-on-startup" name="run_on_startup" type="checkbox">
             Run when opened

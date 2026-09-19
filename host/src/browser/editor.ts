@@ -10,6 +10,7 @@ export interface EditorHandle {
   closeCompletion?(): void;
   setDoc(text: string, options?: boolean | { silent?: boolean }): void;
   focus(): void;
+  openHelp?(): boolean;
   destroy(): void;
   setDiagnostics?(diagnostics: readonly EditorDiagnostic[]): void;
   setReactiveRefs?(references: readonly EditorReference[]): void;
