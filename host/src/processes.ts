@@ -55,7 +55,7 @@ async function waitForExit(exited: OwnedProcess["exited"], timeoutMs: number): P
   let timer: NodeJS.Timeout | undefined;
   try {
     return await Promise.race([
-      exited.then(() => true, () => true),
+      exited.then(() => true),
       new Promise<false>(resolve => { timer = setTimeout(() => resolve(false), timeoutMs); timer.unref(); }),
     ]);
   } finally {

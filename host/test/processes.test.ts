@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { ChildProcess } from "node:child_process";
 import { once } from "node:events";
 import test from "node:test";
 import { createProcessScope } from "../src/processes.js";
@@ -77,6 +78,38 @@ test("denied process-group signals escalate a TERM-ignoring owned child directly
   } finally {
     process.kill = originalKill;
     await scope.close();
+  }
+});
+
+test("failed direct signaling and exit observation reject termination", async () => {
+  const scope = await createProcessScope();
+  const child = await scope.spawn(options("console.log('ready'); setInterval(() => {}, 1000)"));
+  await once(child.stdout!, "data");
+  const originalProcessKill = process.kill;
+  const originalChildKill = ChildProcess.prototype.kill;
+  process.kill = ((pid: number, signal?: NodeJS.Signals | number) => {
+    if (pid < 0) {
+      const error = new Error("process-group signaling denied") as NodeJS.ErrnoException;
+      error.code = "EPERM";
+      throw error;
+    }
+    return originalProcessKill(pid, signal as NodeJS.Signals | number);
+  }) as typeof process.kill;
+  ChildProcess.prototype.kill = function(): boolean {
+    const error = new Error("direct signaling denied") as NodeJS.ErrnoException;
+    error.code = "EPERM";
+    queueMicrotask(() => this.emit("error", error));
+    return false;
+  };
+  try {
+    await assert.rejects(child.terminate(), { code: "EPERM" });
+    assert.equal(exists(child.pid), true);
+  } finally {
+    process.kill = originalProcessKill;
+    ChildProcess.prototype.kill = originalChildKill;
+    try { originalProcessKill(child.pid, "SIGKILL"); } catch {}
+    await waitGone(child.pid);
+    await scope.close().catch(() => undefined);
   }
 });
 

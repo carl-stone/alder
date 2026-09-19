@@ -110109,7 +110109,7 @@ async function waitForExit2(exited, timeoutMs) {
   let timer;
   try {
     return await Promise.race([
-      exited.then(() => true, () => true),
+      exited.then(() => true),
       new Promise((resolve15) => {
         timer = setTimeout(() => resolve15(false), timeoutMs);
         timer.unref();
