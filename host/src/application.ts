@@ -28,7 +28,7 @@ import { REnvironmentError, resolveREnvironment } from "./r-environment.js";
 import type { ApplicationResources } from "./resources.js";
 import { createProcessScope, type ProcessScope } from "./processes.js";
 import { acquireNotebookOwnership, isUntitledRecoveryId, registerUntitledRecoveryDescriptor, retireUntitledRecoveryDescriptor, selectUntitledRecoveryDescriptor, SessionAuthError, type NotebookOwnership, type UntitledRecoveryDescriptor } from "./sessions.js";
-import { ensurePrivateDirectory, readPrivateFile, writePrivateFile } from "./private-paths.js";
+import { readPrivateFile } from "./private-paths.js";
 
 type RecoveryObservationSource = Pick<RecoveryDiskObservation, "state" | "digest" | "version">;
 
@@ -90,7 +90,6 @@ const optionsSchema = z.object({
   externalOrigin: z.string().optional(),
   tokenFile: z.string().optional(),
   externalBearerValidated: z.boolean().default(false),
-  rscript: z.string().optional(),
   recoveryDirectory: z.string().optional(),
   preferences: z.custom<ApplicationPreferences>().optional(),
   preferencesPath: z.string().optional(),
@@ -158,19 +157,18 @@ async function startNotebookHost(
 ): Promise<RunningHost> {
   const options = optionsSchema.parse({ ...input, path: storagePath });
   const browserOriginHost = createOriginHost();
-  const privatePathOptions = { processSupervisorExecutable: options.resources.processSupervisorExecutable };
   let isUntitled = unsaved;
   const declaredProjectDirectory = options.session?.projectDirectory ?? process.env.ALDER_UNTITLED_PROJECT_DIRECTORY;
-  const untitledProjectDirectory = declaredProjectDirectory !== undefined && resolve(declaredProjectDirectory) === declaredProjectDirectory ? declaredProjectDirectory : null;
-  let notebookDirectory = unsaved ? (untitledProjectDirectory ?? process.cwd()) : dirname(resolve(storagePath));
-  let selectedRscript = options.rscript;
+  const untitledProjectDirectory = declaredProjectDirectory !== undefined && resolve(declaredProjectDirectory) === declaredProjectDirectory
+    ? await realpath(declaredProjectDirectory).catch(() => declaredProjectDirectory)
+    : null;
+  const initialNotebookDirectory = unsaved ? (untitledProjectDirectory ?? process.cwd()) : dirname(resolve(storagePath));
+  let notebookDirectory = await realpath(initialNotebookDirectory).catch(() => initialNotebookDirectory);
+  let selectedRscript: string | undefined;
   let configuredToken = options.session?.token;
   if (options.tokenFile !== undefined) {
     try {
-      const bytes = await readPrivateFile(options.tokenFile, {
-        maxBytes: 65,
-        processSupervisorExecutable: options.resources.processSupervisorExecutable,
-      });
+      const bytes = await readPrivateFile(options.tokenFile, { maxBytes: 65 });
       const text = bytes.toString("utf8").replace(/\r?\n$/, "");
       if (!/^[0-9a-f]{64}$/.test(text)) throw new Error("token file must contain exactly 64 lowercase hexadecimal characters");
       configuredToken = text;
@@ -201,12 +199,12 @@ async function startNotebookHost(
   if (untitledRecoveryId !== null) {
     try {
       if (requestedRecoveryId !== undefined) {
-        const descriptor = await selectUntitledRecoveryDescriptor(untitledRecoveryId, undefined, privatePathOptions);
+        const descriptor = await selectUntitledRecoveryDescriptor(untitledRecoveryId);
         if (untitledProjectDirectory !== null && descriptor.projectDirectory !== untitledProjectDirectory) throw new Error("untitled recovery project directory does not match its descriptor");
         notebookDirectory = descriptor.projectDirectory;
         untitledRecoveryDescriptor = descriptor;
       } else {
-        untitledRecoveryDescriptor = await registerUntitledRecoveryDescriptor(untitledRecoveryId, notebookDirectory, undefined, privatePathOptions);
+        untitledRecoveryDescriptor = await registerUntitledRecoveryDescriptor(untitledRecoveryId, notebookDirectory);
       }
     } catch (error) {
       if (requestedRecoveryId !== undefined) {
@@ -255,6 +253,7 @@ async function startNotebookHost(
   let packageDeclarationIntent: string[] = [];
   let projectSettings: ProjectSettingsPatch = {};
   const preferences = options.preferences ?? await ApplicationPreferences.open(options.preferencesPath);
+  selectedRscript = preferences.snapshot().values.rscript ?? undefined;
   let unsubscribePreferences: (() => void) | undefined;
   const settingsErrors = new Map<string, string>();
   const publishSettingsError = (): void => {
@@ -425,7 +424,7 @@ async function startNotebookHost(
       path: notebook.path ?? (isUntitled ? null : store.path),
       notebookDiskObservation: sourceObservation(store),
     };
-    recovery = await RecoveryWriter.open({ rootDir: options.recoveryDirectory ?? envPaths("alder", { suffix: "" }).data, key: ownership.sessionKey, baseline, processSupervisorExecutable: options.resources.processSupervisorExecutable });
+    recovery = await RecoveryWriter.open({ rootDir: options.recoveryDirectory ?? envPaths("alder", { suffix: "" }).data, key: ownership.sessionKey, baseline });
     const loadedRecoveryState = await recovery.load();
     recoveryPending = loadedRecoveryState.pending;
     recoveryFingerprint = recoveryPending ? loadedRecoveryState.fingerprint ?? undefined : undefined;
@@ -749,7 +748,6 @@ async function startNotebookHost(
             key: preparedOwner.sessionKey,
             baseline: destinationBaseline,
             recoveryId: oldRecovery.recoveryId,
-            processSupervisorExecutable: options.resources.processSupervisorExecutable,
           });
           if ((await destinationRecovery.load()).pending) {
             throw Object.assign(new Error("Save As destination has pending recovery data"), { code: "destination_recovery_conflict" });
@@ -817,7 +815,7 @@ async function startNotebookHost(
                 }
                 invalidateLsp();
                 if (runtimeError !== null) controller!.recordRuntimeAvailabilityError(asRuntimeHostError(runtimeError)!);
-                if (untitledRecoveryDescriptor !== undefined) void retireUntitledRecoveryDescriptor(untitledRecoveryDescriptor, undefined, privatePathOptions).catch(error => controller?.recordActionError(errorMessage(error), "recovery_checkpoint_failed"));
+                if (untitledRecoveryDescriptor !== undefined) void retireUntitledRecoveryDescriptor(untitledRecoveryDescriptor).catch(error => controller?.recordActionError(errorMessage(error), "recovery_checkpoint_failed"));
                 void oldStore.close().catch(() => {});
                 await oldRecovery.retire().catch(() => {});
                 if (runtimeChanged) startRuntime(true);
@@ -984,7 +982,6 @@ async function startNotebookHost(
       preferencesVersion: preferences.snapshot().version,
       initialDocumentRevision: recoveryDocumentRevision,
       rEnvironment: runtimeEnvironment,
-      requestedRscript: selectedRscript,
       disk: sourceProtocolObservation(store),
       sidecars: initialProtocolSidecars,
       sourceCommit,
@@ -1059,6 +1056,8 @@ async function startNotebookHost(
             if (selectionGeneration !== runtimeBootstrapGeneration) throw Object.assign(new Error("R environment selection was superseded"), { code: "operation_in_progress" });
             const current = controller!.snapshot();
             if (current.runtime.busy || current.runtime.activeRunId !== null) throw Object.assign(new Error("cannot select R while the notebook is busy"), { code: "busy" });
+            selectedRscript = selected.rscript;
+            await preferences.update({ rscript: selected.rscript }, preferences.snapshot().version);
             const nextManager = createPackageManager({ resources: options.resources, environment: selected, processScope: processScope!, projectDirectory: notebookDirectory, onProgress: onPackageProgress });
             try {
               await controller!.restartRuntimeContext({ environment: selected, notebookDirectory, cacheDirectory }, stringValue(payload.operationId) ?? randomUUID());
@@ -1069,12 +1068,10 @@ async function startNotebookHost(
             const previousManager = packageManager;
             packageManager = nextManager;
             runtimeEnvironment = selected;
-            selectedRscript = selected.rscript;
             runtimeError = null;
             await previousManager?.close();
             await invalidateLsp();
             scheduleLspSync();
-            if (payload.persistDefault === true) await persistDefaultRscript(selected.rscript, options.resources.processSupervisorExecutable);
             resolveSelectionReady();
             return { rEnvironment: selected, identity: selected.identity };
             } catch (error) {
@@ -1089,7 +1086,7 @@ async function startNotebookHost(
           });
           if (command === "publish") {
             if (activePublishes.size > 0) throw Object.assign(new Error("a publication is already in progress"), { code: "operation_in_progress" });
-            if (publisher === undefined) publisher = createPublishingService({ outputStore: artifactStore, processScope: processScope! });
+            if (publisher === undefined) publisher = createPublishingService({ outputStore: artifactStore, processScope: processScope!, quartoExecutable: options.resources.quartoExecutable });
             const liveSnapshot = controller!.snapshot();
             if (store === undefined) throw Object.assign(new Error("notebook has no saved source"), { code: "notebook_has_no_path" });
             const snapshot = publicationSnapshot(store.currentDocument, liveSnapshot);
@@ -1137,10 +1134,14 @@ async function startNotebookHost(
     });
     const refreshPreferences = (): void => {
       const state = preferences.snapshot();
+      const nextRscript = state.values.rscript ?? undefined;
+      const rSelectionChanged = nextRscript !== selectedRscript;
+      selectedRscript = nextRscript;
       if (state.error) settingsErrors.set("preferences", state.error.message);
       else settingsErrors.delete("preferences");
       controller!.updatePreferences(state.values, state.version);
       publishSettingsError();
+      if (rSelectionChanged) startRuntime(true);
     };
     unsubscribePreferences = preferences.subscribe(refreshPreferences);
     refreshPreferences();
@@ -1269,7 +1270,6 @@ async function startNotebookHost(
       allowedOrigins: options.allowedOrigins,
       externalOrigin: options.externalOrigin,
       tokenFile: options.tokenFile,
-      processSupervisorExecutable: options.resources.processSupervisorExecutable,
       externalBearerValidated: options.externalBearerValidated,
       session: {
         get sessionKey() { return ownership.sessionKey; },
@@ -1448,8 +1448,3 @@ function decodePhysicalBytes(value: unknown): Uint8Array | null {
 function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }
 function isRecord(value: unknown): value is Record<string, any> { return value !== null && typeof value === "object" && !Array.isArray(value); }
 function initialOrigin(host: string, port: number): string { return "http://" + (host === "::1" ? "[::1]" : host) + ":" + port; }
-async function persistDefaultRscript(rscript: string, processSupervisorExecutable: string): Promise<void> {
-  const paths = envPaths("alder", { suffix: "" });
-  await ensurePrivateDirectory(paths.config, { processSupervisorExecutable });
-  await writePrivateFile(join(paths.config, "settings.json"), Buffer.from(JSON.stringify({ schemaVersion: 1, rscript }) + "\n", "utf8"), { processSupervisorExecutable });
-}

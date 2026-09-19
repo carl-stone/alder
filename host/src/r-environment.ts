@@ -4,20 +4,15 @@ import { delimiter, isAbsolute, join, resolve } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
-import envPaths from "env-paths";
-
-import { parseStrictJson } from "./strict-json.js";
 import {
   verifiedApplicationManifest,
   type ApplicationManifest,
   type ApplicationResources,
 } from "./resources.js";
 import { rEnvironmentSchema, type REnvironment } from "./protocol.js";
-import { readPrivateFile } from "./private-paths.js";
 const execFileAsync = promisify(execFile);
 const R_VERSION_RANGE = ">=4.6.0 <4.7.0";
 const R_PROBE_TIMEOUT_MS = 10_000;
-const PRIVATE_SETTINGS_SCHEMA_VERSION = 1;
 
 
 export interface ResolveREnvironmentOptions {
@@ -59,7 +54,7 @@ export async function resolveREnvironment(options: ResolveREnvironmentOptions): 
     throw invalid(`application manifest cannot be read while selecting R: ${messageOf(error)}`);
   });
   await validateHelperLibrary(resources);
-  const selected = await selectRscript(options.rscript, resources.electronEntry !== null, resources.processSupervisorExecutable);
+  const selected = await selectRscript(options.rscript, resources.electronEntry !== null);
   const probe = await probeR(selected, options.signal);
   const version = normalizeVersion(probe.version);
   if (!/^4\.6\./.test(version)) throw unsupported(version);
@@ -149,13 +144,8 @@ export function rKernelEnvironmentVariables(
 async function selectRscript(
   requested: string | undefined,
   desktop: boolean,
-  processSupervisorExecutable: string,
 ): Promise<string> {
-  if (requested !== undefined) return resolveSelectedPath(requested, "explicit Rscript");
-  if (desktop) {
-    const saved = await savedRscript(processSupervisorExecutable);
-    if (saved !== null) return resolveSelectedPath(saved, "saved Rscript");
-  }
+  if (requested !== undefined) return resolveSelectedPath(requested, "selected Rscript");
   const discovered = await findOnPath("Rscript");
   if (discovered !== null) return discovered;
   if (desktop) {
@@ -164,29 +154,6 @@ async function selectRscript(
     throw notFound("Rscript was not found on PATH or at the standard macOS R framework location");
   }
   throw notFound("Rscript was not found on PATH");
-}
-
-async function savedRscript(processSupervisorExecutable: string): Promise<string | null> {
-  const paths = envPaths("alder", { suffix: "" });
-  const settingsPath = join(paths.config, "settings.json");
-  let bytes: Buffer;
-  try {
-    bytes = await readPrivateFile(settingsPath, { maxBytes: 64 * 1024, processSupervisorExecutable });
-  } catch (error) {
-    if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") return null;
-    throw invalid("saved R selection cannot be read: " + messageOf(error));
-  }
-  let value: unknown;
-  try {
-    value = parseStrictJson(bytes, { maxBytes: 64 * 1024, maxDepth: 16 });
-  } catch (error) {
-    throw invalid("saved R selection is invalid: " + messageOf(error));
-  }
-  if (!isRecord(value) || value.schemaVersion !== PRIVATE_SETTINGS_SCHEMA_VERSION ||
-      !(typeof value.rscript === "string" || value.rscript === null) || Object.keys(value).some((key) => !["schemaVersion", "rscript"].includes(key))) {
-    throw invalid("saved R selection has an invalid schema");
-  }
-  return value.rscript;
 }
 
 async function findOnPath(command: string): Promise<string | null> {
@@ -426,10 +393,6 @@ function withoutRHome(environment: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const result = { ...environment };
   delete result.R_HOME;
   return result;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function notFound(message: string): REnvironmentError {

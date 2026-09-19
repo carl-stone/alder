@@ -11,7 +11,7 @@ const editorSchema = z.object({
 const formatSchema = z.object({ on_save: z.boolean() }).strict();
 const tableSchema = z.object({ page_size: z.number().int().min(5).max(200) }).strict();
 
-export const preferencesSchema = z.object({
+const editablePreferencesSchema = z.object({
   theme: z.enum(["light", "dark", "system"]),
   keymap: z.enum(["default", "vim"]),
   autosave: z.boolean(),
@@ -19,11 +19,17 @@ export const preferencesSchema = z.object({
   editor: editorSchema,
   table: tableSchema,
 }).strict();
-export const preferencesPatchSchema = preferencesSchema.extend({
+export const preferencesSchema = editablePreferencesSchema.extend({
+  rscript: z.string().min(1).nullable(),
+});
+export const preferencesPatchSchema = editablePreferencesSchema.extend({
   format: formatSchema.partial(),
   editor: editorSchema.partial(),
   table: tableSchema.partial(),
 }).partial();
+export const storedPreferencesPatchSchema = preferencesPatchSchema.extend({
+  rscript: z.string().min(1).nullable().optional(),
+});
 
 const notebookCacheSchema = z.object({ enabled: z.boolean() }).strict();
 export const notebookSettingsSchema = z.object({
@@ -49,6 +55,7 @@ export const configSchema = preferencesSchema.extend({
 
 export type Preferences = z.infer<typeof preferencesSchema>;
 export type PreferencesPatch = z.infer<typeof preferencesPatchSchema>;
+export type StoredPreferencesPatch = z.infer<typeof storedPreferencesPatchSchema>;
 export type NotebookSettings = z.infer<typeof notebookSettingsSchema>;
 export type NotebookSettingsPatch = z.infer<typeof notebookSettingsPatchSchema>;
 export type ProjectSettings = z.infer<typeof projectSettingsSchema>;
@@ -57,6 +64,7 @@ export type Config = z.infer<typeof configSchema>;
 
 export function preferenceDefaults(): Preferences {
   return {
+    rscript: null,
     theme: "system",
     keymap: "default",
     autosave: false,
@@ -73,8 +81,9 @@ export function preferenceDefaults(): Preferences {
   };
 }
 
-export function mergePreferences(current: Preferences, patch: PreferencesPatch): Preferences {
+export function mergePreferences(current: Preferences, patch: StoredPreferencesPatch): Preferences {
   return {
+    rscript: patch.rscript === undefined ? current.rscript : patch.rscript,
     theme: patch.theme ?? current.theme,
     keymap: patch.keymap ?? current.keymap,
     autosave: patch.autosave ?? current.autosave,
@@ -95,7 +104,7 @@ export function configDefaults(): Config {
 
 /** Each owner supplies only its own fields; defaults fill omitted values. */
 export function resolveSettings(options: {
-  preferences?: PreferencesPatch;
+  preferences?: StoredPreferencesPatch;
   notebook?: NotebookSettingsPatch;
   project?: ProjectSettingsPatch;
 } = {}): Config {

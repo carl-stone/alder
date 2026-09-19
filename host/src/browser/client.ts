@@ -324,13 +324,12 @@ export class BrowserNotebookClient {
     return result;
   }
 
-  async selectR(rscript: string, persistDefault = true): Promise<CommandResult> {
+  async selectR(rscript: string): Promise<CommandResult> {
     await this.commitEdits();
     return this.dispatchSettled({
       type: "select-r",
       ...this.base("select-r"),
       rscript,
-      persistDefault,
       expectedDocumentRevision: this.requireDocument().snapshot.documentRevision,
     });
   }

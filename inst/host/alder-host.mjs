@@ -32701,7 +32701,7 @@ var editorSchema = external_exports.object({
 }).strict();
 var formatSchema = external_exports.object({ on_save: external_exports.boolean() }).strict();
 var tableSchema = external_exports.object({ page_size: external_exports.number().int().min(5).max(200) }).strict();
-var preferencesSchema = external_exports.object({
+var editablePreferencesSchema = external_exports.object({
   theme: external_exports.enum(["light", "dark", "system"]),
   keymap: external_exports.enum(["default", "vim"]),
   autosave: external_exports.boolean(),
@@ -32709,11 +32709,17 @@ var preferencesSchema = external_exports.object({
   editor: editorSchema,
   table: tableSchema
 }).strict();
-var preferencesPatchSchema = preferencesSchema.extend({
+var preferencesSchema = editablePreferencesSchema.extend({
+  rscript: external_exports.string().min(1).nullable()
+});
+var preferencesPatchSchema = editablePreferencesSchema.extend({
   format: formatSchema.partial(),
   editor: editorSchema.partial(),
   table: tableSchema.partial()
 }).partial();
+var storedPreferencesPatchSchema = preferencesPatchSchema.extend({
+  rscript: external_exports.string().min(1).nullable().optional()
+});
 var notebookCacheSchema = external_exports.object({ enabled: external_exports.boolean() }).strict();
 var notebookSettingsSchema = external_exports.object({
   on_cell_change: external_exports.enum(["automatic", "lazy"]),
@@ -33362,7 +33368,7 @@ var runCommandSchema = external_exports.object({
   if (command.scope !== "cell" && command.target !== void 0) context.addIssue({ code: "custom", path: ["target"], message: "target is only valid for cell runs" });
   sourceChangeLimit(command.changes ?? [], context);
 });
-var selectRCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("select-r"), rscript: pathSchema, persistDefault: external_exports.boolean(), expectedDocumentRevision: revisionSchema }).strict();
+var selectRCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("select-r"), rscript: pathSchema, expectedDocumentRevision: revisionSchema }).strict();
 var setAppCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("set-app"), patch: external_exports.object({ layout: external_exports.enum(["vertical", "grid", "slides"]).optional(), width: external_exports.enum(["compact", "medium", "full"]).optional(), include_code: external_exports.boolean().optional() }).strict(), expectedDocumentRevision: revisionSchema }).strict();
 var packagesDeclareCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("packages-declare"), packages: external_exports.array(boundedUtf8StringSchema(256, true)).max(MAX_PROTOCOL_COLLECTION_ITEMS), expectedSidecarVersion: boundedUtf8StringSchema(MAX_ID_BYTES).nullable(), expectedDocumentRevision: revisionSchema }).strict();
 var packagesInstallCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("packages-install"), packages: external_exports.array(boundedUtf8StringSchema(256, true)).max(MAX_PROTOCOL_COLLECTION_ITEMS), expectedDocumentRevision: revisionSchema, kernelEpoch: idSchema.nullable() }).strict();
@@ -34678,7 +34684,7 @@ async function resolveApplicationResources(root) {
     });
     if (directory ? !info.isDirectory() : !info.isFile()) throw invalid(`${key} has the wrong file type: ${path2}`);
   }
-  return { ...paths, root: physicalRoot, manifest, processSupervisorExecutable: "" };
+  return { ...paths, root: physicalRoot, manifest };
 }
 async function readApplicationManifest(root) {
   try {
@@ -34694,7 +34700,7 @@ function validateApplicationManifest(value) {
   }
   const resources = value.resources;
   const paths = {};
-  for (const key of ["cliLauncher", "hostEntry", "rendererDirectory", "workerDirectory", "rLibraryDirectory", "arkExecutable", "airExecutable", "nodeExecutable", "electronEntry"]) {
+  for (const key of ["cliLauncher", "hostEntry", "rendererDirectory", "workerDirectory", "rLibraryDirectory", "arkExecutable", "airExecutable", "quartoExecutable", "nodeExecutable", "electronEntry"]) {
     const path2 = resources[key];
     if (key === "electronEntry" && path2 === null) {
       paths[key] = null;
@@ -34990,7 +34996,7 @@ function validatePrivateStats(info, kind, path2) {
     throw new PrivatePathError("private_path_overshared", `private path is accessible by group or other users: ${path2}`);
   }
 }
-async function inspectExisting(path2, kind, options) {
+async function inspectExisting(path2, kind) {
   const inspection = await inspectPath(path2, kind);
   if (!inspection.exists) throw missing(inspection.path);
   const info = await lstat(inspection.path);
@@ -35008,25 +35014,25 @@ async function syncDirectory(directory) {
     if (handle !== void 0) await handle.close().catch(() => void 0);
   }
 }
-async function verifyPrivateDirectory(path2, options = {}) {
-  const inspection = await inspectExisting(path2, "directory", options);
+async function verifyPrivateDirectory(path2) {
+  const inspection = await inspectExisting(path2, "directory");
   const info = await lstat(inspection.path);
   validatePrivateStats(info, "directory", inspection.path);
 }
-async function securePrivateDirectory(path2, options = {}) {
-  const inspection = await inspectExisting(path2, "directory", options);
+async function securePrivateDirectory(path2) {
+  const inspection = await inspectExisting(path2, "directory");
   await chmod(inspection.path, DIRECTORY_MODE);
-  await verifyPrivateDirectory(inspection.path, options);
+  await verifyPrivateDirectory(inspection.path);
 }
-async function ensurePrivateDirectory(path2, options = {}) {
+async function ensurePrivateDirectory(path2) {
   const inspection = await inspectPath(path2);
   if (inspection.exists) {
-    await verifyPrivateDirectory(inspection.path, options);
+    await verifyPrivateDirectory(inspection.path);
     return;
   }
   await mkdir2(inspection.path, { recursive: true, mode: DIRECTORY_MODE });
   await inspectPath(inspection.path, "directory");
-  await securePrivateDirectory(inspection.path, options);
+  await securePrivateDirectory(inspection.path);
 }
 async function readPrivateFile(path2, options = {}) {
   const maxBytes = options.maxBytes ?? DEFAULT_READ_MAX_BYTES;
@@ -35060,10 +35066,10 @@ async function readPrivateFile(path2, options = {}) {
     if (handle !== void 0) await handle.close().catch(() => void 0);
   }
 }
-async function writePrivateFile(path2, bytes, options = {}) {
+async function writePrivateFile(path2, bytes) {
   const inspection = await inspectPath(path2, null);
   const parent = dirname2(inspection.path);
-  await ensurePrivateDirectory(parent, options);
+  await ensurePrivateDirectory(parent);
   try {
     const target = await lstat(inspection.path);
     if (target.isSymbolicLink()) throw new PrivatePathError("private_path_reparse", "private path is a symlink: " + inspection.path);
@@ -35157,10 +35163,10 @@ async function acquireNotebookSession(options) {
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > STARTUP_TIMEOUT_MS) throw new RangeError(`startupTimeoutMs must be between 1 and ${STARTUP_TIMEOUT_MS}`);
   const canonicalPath = await canonicalizePath(options.path);
   if (canonicalPath !== null && (options.untitledRecoveryId !== void 0 || options.untitledProjectDirectory !== void 0)) throw new SessionAuthError("untitled options cannot be combined with a notebook path");
-  const selectedRecovery = canonicalPath === null && options.untitledRecoveryId !== void 0 ? await selectUntitledRecoveryDescriptor(options.untitledRecoveryId, void 0, { processSupervisorExecutable: options.resources.processSupervisorExecutable }) : void 0;
+  const selectedRecovery = canonicalPath === null && options.untitledRecoveryId !== void 0 ? await selectUntitledRecoveryDescriptor(options.untitledRecoveryId) : void 0;
   const sessionKey = canonicalPath === null ? selectedRecovery?.id ?? randomUUID2() : sessionKeyFor(canonicalPath);
   const projectDirectory = canonicalPath === null ? selectedRecovery?.projectDirectory ?? resolve3(options.untitledProjectDirectory ?? process.cwd()) : void 0;
-  if (projectDirectory !== void 0) await registerUntitledRecoveryDescriptor(sessionKey, projectDirectory, void 0, { processSupervisorExecutable: options.resources.processSupervisorExecutable });
+  if (projectDirectory !== void 0) await registerUntitledRecoveryDescriptor(sessionKey, projectDirectory);
   const { root, nodeExecutable, hostEntry } = options.resources;
   if (!root || !nodeExecutable || !hostEntry) throw new SessionUnavailableError("bundled document service is unavailable");
   const backend = new SharedBackend({ root, nodeExecutable, hostEntry }, options.runtimeDirectory);
@@ -35168,7 +35174,6 @@ async function acquireNotebookSession(options) {
     path: canonicalPath,
     sessionKey,
     projectDirectory,
-    rscript: options.rscript,
     executionMode: options.executionMode,
     runOnStartup: options.runOnStartup,
     deferStartup: options.deferStartup,
@@ -35246,26 +35251,15 @@ function createConnection(descriptor, lease) {
     }
   };
 }
-async function canonicalRscriptPath(value) {
-  const requested = resolve3(value);
-  try {
-    return await realpath2(requested);
-  } catch {
-    return requested;
-  }
-}
 async function assertAttachConfiguration(identity, requested, sessionKey) {
   const active = identity.configuration;
-  const activeRscript = active.rscript === null ? null : await canonicalRscriptPath(active.rscript);
   const join6 = requested.requestedConfiguration;
   const selected = {
-    rscript: join6?.rscript ?? requested.rscript,
     executionMode: join6?.executionMode ?? requested.executionMode,
     runOnStartup: join6?.runOnStartup ?? requested.runOnStartup,
     deferStartup: join6?.deferStartup
   };
   const comparisons = [
-    ["rscript", selected.rscript === void 0 ? void 0 : await canonicalRscriptPath(selected.rscript), activeRscript],
     ["executionMode", selected.executionMode, active.executionMode],
     ["runOnStartup", selected.runOnStartup, active.runOnStartup],
     ["deferStartup", selected.deferStartup, active.deferStartup]
@@ -35301,22 +35295,22 @@ function isUntitledRecoveryId(value) {
 function untitledRecoveryDescriptorDirectory(dataRoot) {
   return join4(resolve3(dataRoot ?? envPaths("alder", { suffix: "" }).data), UNTITLED_RECOVERY_DIRECTORY);
 }
-async function registerUntitledRecoveryDescriptor(id, projectDirectory, dataRoot, privatePathOptions = {}) {
+async function registerUntitledRecoveryDescriptor(id, projectDirectory, dataRoot) {
   const validId = requireUntitledRecoveryId(id);
   const validProjectDirectory = normalizeProjectDirectory(projectDirectory);
-  const directory = await ensureUntitledRecoveryDirectory(dataRoot, privatePathOptions);
+  const directory = await ensureUntitledRecoveryDirectory(dataRoot);
   const path2 = untitledRecoveryDescriptorPath(directory, validId);
-  const current = await readUntitledRecoveryDescriptor(path2, validId, privatePathOptions);
+  const current = await readUntitledRecoveryDescriptor(path2, validId);
   if (current !== null) {
     if (current.projectDirectory !== validProjectDirectory) throw new SessionUnavailableError("untitled recovery identity belongs to another project", { id: validId });
     return current;
   }
   const descriptor = { schemaVersion: UNTITLED_RECOVERY_SCHEMA_VERSION, id: validId, projectDirectory: validProjectDirectory, createdAt: (/* @__PURE__ */ new Date()).toISOString() };
-  await writePrivateFile(path2, Buffer.from(JSON.stringify(descriptor)), privatePathOptions);
+  await writePrivateFile(path2, Buffer.from(JSON.stringify(descriptor)));
   return descriptor;
 }
-async function listUntitledRecoveryDescriptors(dataRoot, privatePathOptions = {}) {
-  const directory = await ensureUntitledRecoveryDirectory(dataRoot, privatePathOptions);
+async function listUntitledRecoveryDescriptors(dataRoot) {
+  const directory = await ensureUntitledRecoveryDirectory(dataRoot);
   const entries = await readdir(directory, { withFileTypes: true });
   const values = [];
   for (const entry2 of entries) {
@@ -35324,23 +35318,23 @@ async function listUntitledRecoveryDescriptors(dataRoot, privatePathOptions = {}
     const id = entry2.name.slice(0, -5);
     if (!isUntitledRecoveryId(id)) continue;
     try {
-      const value = await readUntitledRecoveryDescriptor(join4(directory, entry2.name), id, privatePathOptions);
+      const value = await readUntitledRecoveryDescriptor(join4(directory, entry2.name), id);
       if (value) values.push(value);
     } catch {
     }
   }
   return values.sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id));
 }
-async function selectUntitledRecoveryDescriptor(id, dataRoot, privatePathOptions = {}) {
+async function selectUntitledRecoveryDescriptor(id, dataRoot) {
   const validId = requireUntitledRecoveryId(id);
-  const directory = await ensureUntitledRecoveryDirectory(dataRoot, privatePathOptions);
-  const value = await readUntitledRecoveryDescriptor(untitledRecoveryDescriptorPath(directory, validId), validId, privatePathOptions);
+  const directory = await ensureUntitledRecoveryDirectory(dataRoot);
+  const value = await readUntitledRecoveryDescriptor(untitledRecoveryDescriptorPath(directory, validId), validId);
   if (!value) throw new SessionUnavailableError("untitled recovery descriptor was not found", { id: validId });
   return value;
 }
-async function ensureUntitledRecoveryDirectory(dataRoot, privatePathOptions = {}) {
+async function ensureUntitledRecoveryDirectory(dataRoot) {
   const directory = untitledRecoveryDescriptorDirectory(dataRoot);
-  await ensurePrivateDirectory(directory, privatePathOptions);
+  await ensurePrivateDirectory(directory);
   return directory;
 }
 function requireUntitledRecoveryId(value) {
@@ -35354,10 +35348,10 @@ function normalizeProjectDirectory(value) {
 function untitledRecoveryDescriptorPath(directory, id) {
   return join4(directory, id + ".json");
 }
-async function readUntitledRecoveryDescriptor(path2, id, options) {
+async function readUntitledRecoveryDescriptor(path2, id) {
   let bytes;
   try {
-    bytes = await readPrivateFile(path2, { ...options, maxBytes: UNTITLED_RECOVERY_DESCRIPTOR_MAX_BYTES });
+    bytes = await readPrivateFile(path2, { maxBytes: UNTITLED_RECOVERY_DESCRIPTOR_MAX_BYTES });
   } catch (error61) {
     if (error61.code === "ENOENT") return null;
     throw error61;
@@ -35465,7 +35459,6 @@ function parseCli(argv) {
         lazy: { type: "boolean" },
         "no-run": { type: "boolean" },
         sandbox: { type: "boolean" },
-        rscript: { type: "string" },
         host: { type: "string" },
         port: { type: "string" },
         "allowed-origin": { type: "string", multiple: true },
@@ -35484,7 +35477,7 @@ function parseCli(argv) {
     throw usageError(errorText(error61));
   }
   const values = parsed.values;
-  if (values.help === true) return { command: "desktop", path: null, recover: void 0, listRecoveries: false, browser: false, headless: false, rscript: void 0, sandbox: false, lazy: false, noRun: false, host: "127.0.0.1", port: 0, allowedOrigins: [], externalOrigin: void 0, tokenFile: void 0, output: void 0, includeCode: false };
+  if (values.help === true) return { command: "desktop", path: null, recover: void 0, listRecoveries: false, browser: false, headless: false, sandbox: false, lazy: false, noRun: false, host: "127.0.0.1", port: 0, allowedOrigins: [], externalOrigin: void 0, tokenFile: void 0, output: void 0, includeCode: false };
   const positionals = parsed.positionals;
   const first = positionals[0];
   const command = first === "check" || first === "run" || first === "publish" || first === "mcp" ? first : "desktop";
@@ -35496,7 +35489,7 @@ function parseCli(argv) {
   const recover = values.recover === void 0 ? void 0 : String(values.recover);
   if (browser && headless) throw usageError("--browser and --headless are mutually exclusive");
   if (listRecoveries) {
-    if (positionals.length > 0 || recover !== void 0 || browser || headless || values.lazy === true || values["no-run"] === true || values.sandbox === true || values.rscript !== void 0 || values.host !== void 0 || values.port !== void 0 || values["allowed-origin"] !== void 0 || values["external-origin"] !== void 0 || values["token-file"] !== void 0 || values.output !== void 0 || values["include-code"] === true || values["host-info"] === true) {
+    if (positionals.length > 0 || recover !== void 0 || browser || headless || values.lazy === true || values["no-run"] === true || values.sandbox === true || values.host !== void 0 || values.port !== void 0 || values["allowed-origin"] !== void 0 || values["external-origin"] !== void 0 || values["token-file"] !== void 0 || values.output !== void 0 || values["include-code"] === true || values["host-info"] === true) {
       throw usageError("--list-recoveries cannot be combined with other command or session options");
     }
   }
@@ -35534,7 +35527,7 @@ function parseCli(argv) {
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw usageError("--port must be an integer between 0 and 65535");
   const host = values.host === void 0 ? "127.0.0.1" : String(values.host);
   if (!["127.0.0.1", "::1"].includes(host)) throw usageError("--host must be 127.0.0.1 or ::1");
-  return { command, path: path2, recover, listRecoveries, browser, headless, rscript: typeof values.rscript === "string" ? values.rscript : void 0, sandbox: values.sandbox === true, lazy: values.lazy === true, noRun: values["no-run"] === true, host, port, allowedOrigins: Array.isArray(values["allowed-origin"]) ? values["allowed-origin"].map(String) : [], externalOrigin, tokenFile, output: typeof values.output === "string" ? values.output : void 0, includeCode: values["include-code"] === true, ...retry === void 0 ? {} : { retry } };
+  return { command, path: path2, recover, listRecoveries, browser, headless, sandbox: values.sandbox === true, lazy: values.lazy === true, noRun: values["no-run"] === true, host, port, allowedOrigins: Array.isArray(values["allowed-origin"]) ? values["allowed-origin"].map(String) : [], externalOrigin, tokenFile, output: typeof values.output === "string" ? values.output : void 0, includeCode: values["include-code"] === true, ...retry === void 0 ? {} : { retry } };
 }
 async function applicationResources() {
   const root = process.env.ALDER_APPLICATION_ROOT ?? resolve4(dirname4(fileURLToPath(import.meta.url)), "..");
@@ -35644,7 +35637,7 @@ async function readOwnerArtifact(connection, artifact) {
   return JSON.parse(Buffer.concat(chunks).toString("utf8"));
 }
 async function ownerQuery(connection, query) {
-  const raw = await readSessionJson(await connection.request("/api/query", { method: "POST", body: JSON.stringify(encodeHostQueryWire(query)) }));
+  const raw = await readSessionJson(await connection.request("/api/query", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(encodeHostQueryWire(query)) }));
   const decoded = hostQueryResultSchema.parse(decodeHostQueryResultWire(query, raw));
   const artifact = artifactHandleSchema.safeParse(decoded.result);
   if (!artifact.success) return decoded;
@@ -35666,7 +35659,7 @@ async function commandOnOwner(connection, command, retry) {
     return { requestId: identity.requestId, epoch: identity.sessionEpoch, result: null, error: { code: "session_replaced", message: "The original backend session ended. This uncertain command will not run again automatically." }, request };
   }
   try {
-    const raw = await readSessionJson(await connection.request("/api/command", { method: "POST", body: JSON.stringify(encodeHostCommandWire(request)) }));
+    const raw = await readSessionJson(await connection.request("/api/command", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(encodeHostCommandWire(request)) }));
     const completed = commandResultSchema.parse(raw);
     const artifact = artifactHandleSchema.safeParse(completed.result);
     const result = artifact.success ? await readOwnerArtifact(connection, artifact.data) : completed.result;
@@ -35687,7 +35680,7 @@ async function activateHeadlessStartup(connection) {
   await commandOnOwner(connection, { type: "run", scope: "all", startup: true });
 }
 async function runTool(cli, resources) {
-  const connection = await acquireNotebookSession({ path: cli.path, resources, rscript: cli.rscript, runtimeDirectory: process.env.ALDER_RUNTIME_DIRECTORY, executionMode: cli.lazy ? "lazy" : void 0, runOnStartup: cli.noRun ? false : void 0, deferStartup: true });
+  const connection = await acquireNotebookSession({ path: cli.path, resources, runtimeDirectory: process.env.ALDER_RUNTIME_DIRECTORY, executionMode: cli.lazy ? "lazy" : void 0, runOnStartup: cli.noRun ? false : void 0, deferStartup: true });
   try {
     const runtimeSnapshot = await waitForRuntimeReadiness(() => ownerSnapshot(connection), {
       readiness: cli.command === "publish" ? "document" : "analyzer"
@@ -35713,7 +35706,6 @@ async function runMcp(cli, resources) {
   const connection = await acquireNotebookSession({
     path: cli.path,
     resources,
-    rscript: cli.rscript,
     runtimeDirectory: process.env.ALDER_RUNTIME_DIRECTORY,
     executionMode: cli.lazy ? "lazy" : void 0,
     runOnStartup: cli.noRun ? false : void 0,
@@ -35759,7 +35751,6 @@ async function runDesktop(cli, resources) {
       path: cli.path,
       untitledRecoveryId: cli.recover,
       resources,
-      rscript: cli.rscript,
       executionMode: cli.lazy ? "lazy" : void 0,
       runOnStartup: cli.noRun ? false : void 0,
       deferStartup: true,
@@ -35780,10 +35771,9 @@ async function runDesktop(cli, resources) {
     }
   }
   if (resources.electronEntry === null) throw desktopUnavailableError();
-  if (cli.recover !== void 0) await selectUntitledRecoveryDescriptor(cli.recover, void 0, { processSupervisorExecutable: resources.processSupervisorExecutable });
+  if (cli.recover !== void 0) await selectUntitledRecoveryDescriptor(cli.recover);
   const desktopArgs = [
     ...cli.path === null ? cli.recover === void 0 ? [] : ["--recover", cli.recover] : [cli.path],
-    ...cli.rscript === void 0 ? [] : ["--rscript", cli.rscript],
     ...cli.lazy ? ["--lazy"] : [],
     ...cli.noRun ? ["--no-run"] : []
   ];
@@ -35812,12 +35802,12 @@ async function runCli(argv = process.argv.slice(2)) {
   }
   if (cli.listRecoveries) {
     const resources2 = await applicationResources();
-    writeJson(await listUntitledRecoveryDescriptors(void 0, { processSupervisorExecutable: resources2.processSupervisorExecutable }));
+    writeJson(await listUntitledRecoveryDescriptors());
     return 0;
   }
   const resources = await applicationResources();
   if (argv.includes("--host-info")) {
-    writeJson({ type: "host.info", ...HOST_IDENTITY, resources: { root: resources.root, cliLauncher: resources.cliLauncher, hostEntry: resources.hostEntry, rendererDirectory: resources.rendererDirectory, workerDirectory: resources.workerDirectory, rLibraryDirectory: resources.rLibraryDirectory, arkExecutable: resources.arkExecutable, airExecutable: resources.airExecutable, nodeExecutable: resources.nodeExecutable, processSupervisorExecutable: resources.processSupervisorExecutable, electronEntry: resources.electronEntry } });
+    writeJson({ type: "host.info", ...HOST_IDENTITY, resources: { root: resources.root, cliLauncher: resources.cliLauncher, hostEntry: resources.hostEntry, rendererDirectory: resources.rendererDirectory, workerDirectory: resources.workerDirectory, rLibraryDirectory: resources.rLibraryDirectory, arkExecutable: resources.arkExecutable, airExecutable: resources.airExecutable, nodeExecutable: resources.nodeExecutable, electronEntry: resources.electronEntry } });
     return 0;
   }
   if (cli.command === "check" || cli.command === "run" || cli.command === "publish") return runTool(cli, resources);

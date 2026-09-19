@@ -28,7 +28,6 @@ export interface RecoveryWriterOptions {
   key: string;
   baseline: RecoveryBaseline;
   recoveryId?: string;
-  processSupervisorExecutable?: string | null;
 }
 export type RecoveryErrorCode = "recovery_corrupt" | "recovery_write_failed" | "recovery_invalid" | "recovery_closed";
 export class RecoveryError extends Error {

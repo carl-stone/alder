@@ -6,8 +6,8 @@ import {
   writeAtomicText, type DiskObservation,
 } from "./configuration.js";
 import {
-  mergePreferences, preferenceDefaults, preferencesPatchSchema,
-  type Preferences, type PreferencesPatch,
+  mergePreferences, preferenceDefaults, storedPreferencesPatchSchema,
+  type Preferences, type StoredPreferencesPatch,
 } from "./settings.js";
 
 export interface PreferencesSnapshot {
@@ -47,7 +47,7 @@ async function readPreferences(path: string): Promise<PreferencesFile> {
       identity, mode, inode: info.ino, mtimeMs: info.mtimeMs, size: bytes.byteLength,
     };
     const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-    const patch = preferencesPatchSchema.parse(parseYamlMapping(text, path));
+    const patch = storedPreferencesPatchSchema.parse(parseYamlMapping(text, path));
     return { observation, values: mergePreferences(preferenceDefaults(), patch), error: null };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
@@ -97,7 +97,7 @@ export class ApplicationPreferences {
     return () => this.listeners.delete(listener);
   }
 
-  update(patch: PreferencesPatch, expectedVersion: string | null): Promise<PreferencesSnapshot> {
+  update(patch: StoredPreferencesPatch, expectedVersion: string | null): Promise<PreferencesSnapshot> {
     const changes = structuredClone(patch);
     const operation = this.pending.then(() => this.write(changes, expectedVersion));
     this.pending = operation.then(() => undefined, () => undefined);
@@ -122,7 +122,7 @@ export class ApplicationPreferences {
     }
   }
 
-  private async write(patch: PreferencesPatch, expectedVersion: string | null): Promise<PreferencesSnapshot> {
+  private async write(patch: StoredPreferencesPatch, expectedVersion: string | null): Promise<PreferencesSnapshot> {
     const current = await readPreferences(this.path);
     if (current.error !== null) {
       this.accept(current);

@@ -18,8 +18,8 @@ function resources(directory: string): ApplicationResources {
     rLibraryDirectory: directory,
     arkExecutable: join(directory, "ark"),
     airExecutable: join(directory, "air"),
+    quartoExecutable: join(directory, "quarto"),
     nodeExecutable: process.execPath,
-    processSupervisorExecutable: join(directory, "supervisor"),
     electronEntry: null,
   };
 }

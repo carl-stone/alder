@@ -15,7 +15,7 @@ const config: ForgeConfig = {
         {
           CFBundleTypeName: 'Alder R notebook',
           CFBundleTypeRole: 'Editor',
-          CFBundleTypeExtensions: ['R', 'r', 'Rmd', 'rmd'],
+          CFBundleTypeExtensions: ['R', 'r'],
           LSHandlerRank: 'Alternate',
         },
       ],

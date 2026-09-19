@@ -634,23 +634,6 @@ test("source edits commit before runtime startup and survive startup failure", a
   await controller.close();
 });
 
-test("configuration identifies the requested Rscript before runtime bootstrap", async () => {
-  const controller = createController({
-    engine: new FakeEngine(),
-    notebook: notebook([]),
-    config: resolveSettings({ notebook: { on_startup: false } }),
-    requestedRscript: "/opt/R/bin/Rscript",
-    deferStartup: true,
-  });
-  assert.deepEqual(controller.configuration(), {
-    rscript: "/opt/R/bin/Rscript",
-    executionMode: "automatic",
-    runOnStartup: false,
-    deferStartup: true,
-  });
-  await controller.close();
-});
-
 test("deferred startup reaches readiness without executing source", async () => {
   const engine = new FakeEngine();
   const controller = createController({

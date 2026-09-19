@@ -32,6 +32,7 @@ test("owners compose only their fields with ordinary defaults", () => {
 
 test("setting boundaries reject fields owned elsewhere and invalid values", () => {
   assert.equal(preferencesPatchSchema.safeParse({ on_startup: true }).success, false);
+  assert.equal(preferencesPatchSchema.safeParse({ rscript: "/tmp/Rscript" }).success, false);
   assert.equal(preferencesPatchSchema.safeParse({ editor: { font_size: 2 } }).success, false);
   assert.equal(notebookSettingsPatchSchema.safeParse({ theme: "dark" }).success, false);
   assert.equal(notebookSettingsPatchSchema.safeParse({ cache: { dir: "cache" } }).success, false);

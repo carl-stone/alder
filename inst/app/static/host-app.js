@@ -19889,7 +19889,7 @@ var editorSchema = external_exports.object({
 }).strict();
 var formatSchema = external_exports.object({ on_save: external_exports.boolean() }).strict();
 var tableSchema = external_exports.object({ page_size: external_exports.number().int().min(5).max(200) }).strict();
-var preferencesSchema = external_exports.object({
+var editablePreferencesSchema = external_exports.object({
   theme: external_exports.enum(["light", "dark", "system"]),
   keymap: external_exports.enum(["default", "vim"]),
   autosave: external_exports.boolean(),
@@ -19897,11 +19897,17 @@ var preferencesSchema = external_exports.object({
   editor: editorSchema,
   table: tableSchema
 }).strict();
-var preferencesPatchSchema = preferencesSchema.extend({
+var preferencesSchema = editablePreferencesSchema.extend({
+  rscript: external_exports.string().min(1).nullable()
+});
+var preferencesPatchSchema = editablePreferencesSchema.extend({
   format: formatSchema.partial(),
   editor: editorSchema.partial(),
   table: tableSchema.partial()
 }).partial();
+var storedPreferencesPatchSchema = preferencesPatchSchema.extend({
+  rscript: external_exports.string().min(1).nullable().optional()
+});
 var notebookCacheSchema = external_exports.object({ enabled: external_exports.boolean() }).strict();
 var notebookSettingsSchema = external_exports.object({
   on_cell_change: external_exports.enum(["automatic", "lazy"]),
@@ -20551,7 +20557,7 @@ var runCommandSchema = external_exports.object({
   if (command.scope !== "cell" && command.target !== void 0) context.addIssue({ code: "custom", path: ["target"], message: "target is only valid for cell runs" });
   sourceChangeLimit(command.changes ?? [], context);
 });
-var selectRCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("select-r"), rscript: pathSchema, persistDefault: external_exports.boolean(), expectedDocumentRevision: revisionSchema }).strict();
+var selectRCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("select-r"), rscript: pathSchema, expectedDocumentRevision: revisionSchema }).strict();
 var setAppCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("set-app"), patch: external_exports.object({ layout: external_exports.enum(["vertical", "grid", "slides"]).optional(), width: external_exports.enum(["compact", "medium", "full"]).optional(), include_code: external_exports.boolean().optional() }).strict(), expectedDocumentRevision: revisionSchema }).strict();
 var packagesDeclareCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("packages-declare"), packages: external_exports.array(boundedUtf8StringSchema(256, true)).max(MAX_PROTOCOL_COLLECTION_ITEMS), expectedSidecarVersion: boundedUtf8StringSchema(MAX_ID_BYTES).nullable(), expectedDocumentRevision: revisionSchema }).strict();
 var packagesInstallCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("packages-install"), packages: external_exports.array(boundedUtf8StringSchema(256, true)).max(MAX_PROTOCOL_COLLECTION_ITEMS), expectedDocumentRevision: revisionSchema, kernelEpoch: idSchema.nullable() }).strict();
@@ -21935,13 +21941,12 @@ var BrowserNotebookClient = class {
     await this.refreshRecoveryState();
     return result;
   }
-  async selectR(rscript, persistDefault = true) {
+  async selectR(rscript) {
     await this.commitEdits();
     return this.dispatchSettled({
       type: "select-r",
       ...this.base("select-r"),
       rscript,
-      persistDefault,
       expectedDocumentRevision: this.requireDocument().snapshot.documentRevision
     });
   }
@@ -26691,7 +26696,7 @@ function bindDesktopActions(next) {
       if (command.action === "select-r") {
         const path = await desktop.chooseRscript();
         if (path === null) return "cancelled";
-        await next.selectR(path, true);
+        await next.selectR(path);
         return "ok";
       }
       return await view?.performDesktopAction(command.action) ?? "ok";

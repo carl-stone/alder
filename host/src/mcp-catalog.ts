@@ -116,7 +116,7 @@ const toolSchemas: Record<string, z.ZodType> = {
   apply_transaction: z.object({ ...commonEffect, changes: z.array(mcpDocumentChangeSchema).min(1).max(1_000), expectedDocumentRevision }).strict(),
   edit_cell_ranges: z.object({ ...commonEffect, expectedDocumentRevision, cell: id, edits: z.array(textEditSchema).min(1).max(1_000), expectedRevision: expectedCellRevision }).strict(),
 
-  select_r: z.object({ ...commonEffect, rscript: path, persistDefault: z.boolean().default(false), expectedDocumentRevision }).strict(),
+  select_r: z.object({ ...commonEffect, rscript: path, expectedDocumentRevision }).strict(),
   set_runtime: z.object({ ...commonEffect, on_cell_change: z.enum(["automatic", "lazy"]).optional(), on_startup: z.boolean().optional(), cache_enabled: z.boolean().optional(), expectedDocumentRevision }).strict().refine((v) => v.on_cell_change !== undefined || v.on_startup !== undefined || v.cache_enabled !== undefined, "provide a runtime setting"),
   reload_source: z.object({ ...commonEffect, expectedDocumentRevision, expectedDiskDigest: z.string().regex(/^[0-9a-f]{64}$/), expectedDiskVersion: id }).strict(),
   get_help: z.object({ contents: z.unknown() }).strict(),
@@ -443,7 +443,7 @@ function commandFromTool(options: AlderMcpOptions, name: string, args: Record<st
     case "save": return { ...base, type: "save", expectedDocumentRevision: args.expectedDocumentRevision } as HostCommand;
     case "apply_transaction": return transaction(args.changes as McpDocumentChange[]);
     case "edit_cell_ranges": return transaction([projectRangeEdit(args)]);
-    case "select_r": return { ...base, type: "select-r", rscript: args.rscript, persistDefault: args.persistDefault, expectedDocumentRevision: args.expectedDocumentRevision } as HostCommand;
+    case "select_r": return { ...base, type: "select-r", rscript: args.rscript, expectedDocumentRevision: args.expectedDocumentRevision } as HostCommand;
     case "set_runtime": return { ...base, type: "set-runtime", on_cell_change: args.on_cell_change, on_startup: args.on_startup, cache_enabled: args.cache_enabled, expectedDocumentRevision: args.expectedDocumentRevision } as HostCommand;
     case "reload_source": return { ...base, type: "reload-source", expectedDocumentRevision: args.expectedDocumentRevision, expectedDiskDigest: args.expectedDiskDigest, expectedDiskVersion: args.expectedDiskVersion } as HostCommand;
     case "shutdown": return { ...base, type: "shutdown", expectedDocumentRevision: args.expectedDocumentRevision, expectedClientIds: args.expectedClientIds } as HostCommand;

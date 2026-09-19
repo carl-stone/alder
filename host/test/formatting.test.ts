@@ -57,7 +57,7 @@ function directProcessScope(): ProcessScope {
   };
 }
 const document = {
-  path: "/tmp/example.Rmd",
+  path: "/tmp/example.R",
   text: "x<-1\\n<!-- %% -->\\ntext",
   cells: [
     { id: "markdown-1", type: "markdown" as const, body: ["text"], revision: 2 },

@@ -131,7 +131,6 @@ export interface AlderServerOptions {
   allowedOrigins?: readonly string[];
   externalOrigin?: string;
   tokenFile?: string;
-  processSupervisorExecutable?: string | null;
   externalBearerValidated?: boolean;
   session?: AlderServerSession;
   staticDir: string;
@@ -726,9 +725,9 @@ function tokenFileError(message: string): HttpBoundaryError {
   return new HttpBoundaryError("auth_configuration_invalid", message, 500);
 }
 
-async function readTokenFile(path: string, processSupervisorExecutable?: string | null): Promise<string> {
+async function readTokenFile(path: string): Promise<string> {
   try {
-    const bytes = await readPrivateFile(path, { maxBytes: 65, processSupervisorExecutable });
+    const bytes = await readPrivateFile(path, { maxBytes: 65 });
     let contents = bytes.toString("utf8");
     if (contents.endsWith("\n")) contents = contents.slice(0, -1);
     if (contents.includes("\n") || !AUTH_TOKEN_PATTERN.test(contents)) {
@@ -1751,7 +1750,7 @@ export function createAlderServer(options: AlderServerOptions): AlderServer {
       ? validateToken(options.session.token)
       : options.tokenFile === undefined
         ? bearer
-        : await readTokenFile(options.tokenFile, options.processSupervisorExecutable);
+        : await readTokenFile(options.tokenFile);
     if (externalOrigin !== null && options.tokenFile === undefined && options.externalBearerValidated === true && options.session?.token === undefined) throw tokenFileError("prevalidated external bearer is missing");
   }
 

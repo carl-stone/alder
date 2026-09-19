@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
@@ -73,17 +73,24 @@ test("the staged alder launcher serves MCP over official stdio", installedIntegr
   const directory = await mkdtemp(join(tmpdir(), "alder-mcp-installed-"));
   const notebook = join(directory, "notebook.R");
   await writeFile(notebook, "# %%\nanswer <- 42\nanswer\n");
+  const configDirectory = join(directory, "config");
+  const runtimeDirectory = join("/tmp", `alder-mcp-installed-${process.pid}`);
+  await rm(runtimeDirectory, { recursive: true, force: true });
+  await mkdir(runtimeDirectory, { recursive: true });
+  await mkdir(join(configDirectory, "alder"), { recursive: true });
+  await writeFile(join(configDirectory, "alder/preferences.yaml"), `rscript: ${JSON.stringify(TEST_RSCRIPT)}\n`);
 
   const transport = new StdioClientTransport({
     command: join(resolve(APPLICATION_ROOT!), "bin", "alder"),
-    args: ["mcp", notebook, "--rscript", TEST_RSCRIPT!],
+    args: ["mcp", notebook],
     cwd: directory,
     env: sanitizedEnvironment({
       HOME: directory,
-      XDG_CONFIG_HOME: join(directory, "config"),
+      XDG_CONFIG_HOME: configDirectory,
       XDG_DATA_HOME: join(directory, "data"),
       XDG_CACHE_HOME: join(directory, "cache"),
       XDG_STATE_HOME: join(directory, "state"),
+      ALDER_RUNTIME_DIRECTORY: runtimeDirectory,
     }),
     stderr: "pipe",
     maxBufferSize: 16 * 1024 * 1024,
@@ -132,6 +139,7 @@ test("the staged alder launcher serves MCP over official stdio", installedIntegr
     await client.close().catch(() => undefined);
     await transport.close().catch(() => undefined);
     await rm(directory, { recursive: true, force: true });
+    await rm(runtimeDirectory, { recursive: true, force: true });
   }
 });
 

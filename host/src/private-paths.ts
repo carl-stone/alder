@@ -5,12 +5,7 @@ import { dirname, join, parse, resolve, sep } from "node:path";
 
 export type PrivatePathKind = "file" | "directory";
 
-export interface PrivatePathOptions {
-  // Kept while the execution and session callers migrate off the former supervisor.
-  readonly processSupervisorExecutable?: string | null;
-}
-
-export interface ReadPrivateFileOptions extends PrivatePathOptions {
+export interface ReadPrivateFileOptions {
   readonly maxBytes?: number;
   /** Deterministic test seam for changing the file between fstats. */
   readonly beforeRead?: () => void | Promise<void>;
@@ -137,7 +132,6 @@ function validatePrivateStats(
 async function inspectExisting(
   path: string,
   kind: PrivatePathKind,
-  options: PrivatePathOptions,
 ): Promise<PathInspection> {
   const inspection = await inspectPath(path, kind);
   if (!inspection.exists) throw missing(inspection.path);
@@ -158,39 +152,39 @@ async function syncDirectory(directory: string): Promise<void> {
   }
 }
 
-export async function verifyPrivateDirectory(path: string, options: PrivatePathOptions = {}): Promise<void> {
-  const inspection = await inspectExisting(path, "directory", options);
+export async function verifyPrivateDirectory(path: string): Promise<void> {
+  const inspection = await inspectExisting(path, "directory");
   const info = await lstat(inspection.path);
   validatePrivateStats(info, "directory", inspection.path);
 }
 
-export async function verifyPrivateFile(path: string, options: PrivatePathOptions = {}): Promise<void> {
-  const inspection = await inspectExisting(path, "file", options);
+export async function verifyPrivateFile(path: string): Promise<void> {
+  const inspection = await inspectExisting(path, "file");
   const info = await lstat(inspection.path);
   validatePrivateStats(info, "file", inspection.path);
 }
 
-export async function securePrivateDirectory(path: string, options: PrivatePathOptions = {}): Promise<void> {
-  const inspection = await inspectExisting(path, "directory", options);
+export async function securePrivateDirectory(path: string): Promise<void> {
+  const inspection = await inspectExisting(path, "directory");
   await chmod(inspection.path, DIRECTORY_MODE);
-  await verifyPrivateDirectory(inspection.path, options);
+  await verifyPrivateDirectory(inspection.path);
 }
 
-export async function securePrivateFile(path: string, options: PrivatePathOptions = {}): Promise<void> {
-  const inspection = await inspectExisting(path, "file", options);
+export async function securePrivateFile(path: string): Promise<void> {
+  const inspection = await inspectExisting(path, "file");
   await chmod(inspection.path, FILE_MODE);
-  await verifyPrivateFile(inspection.path, options);
+  await verifyPrivateFile(inspection.path);
 }
 
-export async function ensurePrivateDirectory(path: string, options: PrivatePathOptions = {}): Promise<void> {
+export async function ensurePrivateDirectory(path: string): Promise<void> {
   const inspection = await inspectPath(path);
   if (inspection.exists) {
-    await verifyPrivateDirectory(inspection.path, options);
+    await verifyPrivateDirectory(inspection.path);
     return;
   }
   await mkdir(inspection.path, { recursive: true, mode: DIRECTORY_MODE });
   await inspectPath(inspection.path, "directory");
-  await securePrivateDirectory(inspection.path, options);
+  await securePrivateDirectory(inspection.path);
 }
 
 export async function readPrivateFile(path: string, options: ReadPrivateFileOptions = {}): Promise<Buffer> {
@@ -233,11 +227,10 @@ export async function readPrivateFile(path: string, options: ReadPrivateFileOpti
 export async function writePrivateFile(
   path: string,
   bytes: Uint8Array,
-  options: PrivatePathOptions = {},
 ): Promise<void> {
   const inspection = await inspectPath(path, null);
   const parent = dirname(inspection.path);
-  await ensurePrivateDirectory(parent, options);
+  await ensurePrivateDirectory(parent);
   try {
     const target = await lstat(inspection.path);
     if (target.isSymbolicLink()) throw new PrivatePathError("private_path_reparse", "private path is a symlink: " + inspection.path);
@@ -274,12 +267,12 @@ export async function writePrivateFile(
   }
 }
 
-export async function ensurePrivateFile(path: string, options: PrivatePathOptions = {}): Promise<void> {
+export async function ensurePrivateFile(path: string): Promise<void> {
   const inspection = await inspectPath(path, null);
   const parent = dirname(inspection.path);
-  await ensurePrivateDirectory(parent, options);
+  await ensurePrivateDirectory(parent);
   if (inspection.exists) {
-    await verifyPrivateFile(inspection.path, options);
+    await verifyPrivateFile(inspection.path);
     return;
   }
   const flags = constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0);
@@ -291,12 +284,12 @@ export async function ensurePrivateFile(path: string, options: PrivatePathOption
     await handle.sync();
     await handle.close();
     handle = undefined;
-    await securePrivateFile(inspection.path, options);
+    await securePrivateFile(inspection.path);
     await syncDirectory(parent);
   } catch (error) {
     if (handle !== undefined) await handle.close().catch(() => undefined);
     if (errorCode(error) === "EEXIST") {
-      await verifyPrivateFile(inspection.path, options);
+      await verifyPrivateFile(inspection.path);
       return;
     }
     await rm(inspection.path, { force: true }).catch(() => undefined);

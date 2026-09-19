@@ -93,7 +93,6 @@ export interface ControllerOptions {
   disk?: HostSnapshot["disk"];
   sidecars?: HostSnapshot["sidecars"];
   rEnvironment?: HostSnapshot["runtime"]["rEnvironment"];
-  requestedRscript?: string;
   initialDocumentRevision?: number;
   durableCommit?: (input: DurableCommitInput) => Promise<void>;
   sourceCommit?: SourceCommitHandler;
@@ -382,7 +381,6 @@ export class Controller {
   private analysisEnvironmentIdValue: string | null = null;
   private kernelEpochValue: string | null = null;
   private rEnvironmentValue: HostSnapshot["runtime"]["rEnvironment"] = null;
-  private readonly requestedRscript: string | undefined;
   private diskValue: HostSnapshot["disk"] = { state: "untitled", digest: null, version: null, error: null };
   private sidecarsValue: HostSnapshot["sidecars"] = {
     config: { state: "absent", digest: null, version: null, error: null },
@@ -457,7 +455,6 @@ export class Controller {
     this.sourceCommit = options.sourceCommit;
     this.getRecoveryState = options.getRecoveryState;
     this.rEnvironmentValue = options.rEnvironment ?? null;
-    this.requestedRscript = options.requestedRscript;
     this.diskValue = options.disk ?? {
       state: this.pathValue === null ? "untitled" : "absent", digest: null, version: null, error: null,
     };
@@ -803,7 +800,7 @@ export class Controller {
 
   configuration(): HostConfiguration {
     return {
-      rscript: this.rEnvironmentValue?.rscript ?? this.requestedRscript ?? null,
+      rscript: this.rEnvironmentValue?.rscript ?? null,
       executionMode: this.executionMode,
       runOnStartup: this.runOnStartup,
       deferStartup: this.deferStartup,
@@ -5608,7 +5605,7 @@ export class Controller {
     switch (command.type) {
       case "select-r":
         this.assertDocumentRevision(command.expectedDocumentRevision);
-        return this.callService("r.select", { rscript: command.rscript, persistDefault: command.persistDefault });
+        return this.callService("r.select", { rscript: command.rscript });
       case "set-app":
         return this.setApp(command.patch, command.expectedDocumentRevision, command.requestId);
       case "packages-declare":

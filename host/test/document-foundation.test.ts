@@ -14,11 +14,11 @@ import type { ApplicationResources } from "../src/resources.js";
 function resources(root: string): ApplicationResources {
   return { root, cliLauncher: join(root, "alder"), hostEntry: join(root, "host.mjs"),
     rendererDirectory: join(root, "renderer"), workerDirectory: join(root, "worker"),
-    rLibraryDirectory: join(root, "r-library"), arkExecutable: join(root, "ark"), airExecutable: join(root, "air"),
-    nodeExecutable: process.execPath, processSupervisorExecutable: join(root, "unused-supervisor"), electronEntry: null };
+    rLibraryDirectory: join(root, "r-library"), arkExecutable: join(root, "ark"), airExecutable: join(root, "air"), quartoExecutable: join(root, "quarto"),
+    nodeExecutable: process.execPath, electronEntry: null };
 }
 async function startDocument(path: string, directory: string): Promise<RunningHost> {
-  return startHost({ path, resources: resources(directory), rscript: join(directory, "no-Rscript"), recoveryDirectory: join(directory, "recovery"),
+  return startHost({ path, resources: resources(directory), recoveryDirectory: join(directory, "recovery"),
     runOnStartup: false });
 }
 async function dispatch(app: RunningHost, value: Record<string, unknown>): Promise<CommandResult> {
@@ -94,7 +94,7 @@ if (crashPath) {
     await writeFile(unavailable, "occupied");
     let app: RunningHost | undefined;
     try {
-      app = await startHost({ path, resources: resources(directory), rscript: join(directory, "no-Rscript"), recoveryDirectory: unavailable,
+      app = await startHost({ path, resources: resources(directory), recoveryDirectory: unavailable,
         runOnStartup: false });
       const cell = app.controller.snapshot().cells[0]!;
       const result = await dispatch(app, { type: "transaction", changes: [{ type: "edit", cell: { cellId: cell.id },

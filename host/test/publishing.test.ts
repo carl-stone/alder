@@ -104,12 +104,12 @@ async function setupStore(directory: string): Promise<{ store: OutputStore; reco
   return { store, record };
 }
 
-async function withFakeQuarto<T>(directory: string, mode: "render" | "fail" | "missing", run: () => Promise<T>): Promise<T> {
+async function withFakeQuarto<T>(directory: string, mode: "render" | "fail" | "missing", run: (quarto: string) => Promise<T>): Promise<T> {
   const priorPath = process.env.PATH;
   const quarto = await fakeQuarto(join(directory, "bin"), mode);
   process.env.PATH = dirname(quarto) + delimiter + (priorPath ?? "");
   try {
-    return await run();
+    return await run(quarto);
   } finally {
     process.env.PATH = priorPath;
   }
@@ -120,8 +120,8 @@ test("publishes saved source and compatible retained output through static Quart
   const { store, record } = await setupStore(directory);
   const outputPath = join(directory, "report.html");
   try {
-    const result = await withFakeQuarto(directory, "render", () =>
-      createPublishingService({ outputStore: store, processScope: directProcessScope() })
+    const result = await withFakeQuarto(directory, "render", (quarto) =>
+      createPublishingService({ outputStore: store, processScope: directProcessScope(), quartoExecutable: quarto })
         .publishSnapshot(snapshot([record]), { outputPath, includeCode: true }));
     assert.deepEqual(result, {
       path: outputPath,
@@ -143,8 +143,8 @@ test("dirty publication explicitly reports that unsaved edits were excluded", as
   const { store } = await setupStore(directory);
   const outputPath = join(directory, "report.html");
   try {
-    const result = await withFakeQuarto(directory, "render", () =>
-      createPublishingService({ outputStore: store, processScope: directProcessScope() })
+    const result = await withFakeQuarto(directory, "render", (quarto) =>
+      createPublishingService({ outputStore: store, processScope: directProcessScope(), quartoExecutable: quarto })
         .publishSnapshot(snapshot([], { editorDirty: true }), { outputPath, includeCode: true }));
     assert.equal(result.unsavedChangesExcluded, true);
     assert.match(await readFile(outputPath, "utf8"), /saved_value &lt;- 40/);
@@ -159,8 +159,8 @@ test("publication is independent of runtime, analyzer, graph, and cell status", 
   const { store } = await setupStore(directory);
   const outputPath = join(directory, "report.html");
   try {
-    await withFakeQuarto(directory, "render", () =>
-      createPublishingService({ outputStore: store, processScope: directProcessScope() })
+    await withFakeQuarto(directory, "render", (quarto) =>
+      createPublishingService({ outputStore: store, processScope: directProcessScope(), quartoExecutable: quarto })
         .publishSnapshot(snapshot([], {
           cells: [
             { id: "broken", type: "code", body: ["stop('saved error')"], options: {}, revision: 9, outputs: [] },
@@ -185,7 +185,7 @@ test("captures immutable source and output before concurrent changes", async () 
   try {
     const quarto = await fakeQuarto(join(directory, "bin"), "render");
     process.env.PATH = dirname(quarto) + delimiter + (priorPath ?? "");
-    const promise = createPublishingService({ outputStore: store, processScope: directProcessScope() })
+    const promise = createPublishingService({ outputStore: store, processScope: directProcessScope(), quartoExecutable: quarto })
       .publishSnapshot(source, { outputPath, includeCode: true });
     (source.cells[0]!.body as string[])[0] = "concurrent_edit <- 99";
     store.setIdentity({ documentRevision: 5, kernelEpoch });
@@ -208,8 +208,8 @@ test("Quarto failure and cancellation leave the destination absent", async () =>
     const outputPath = join(directory, "report.html");
     try {
       await assert.rejects(
-        withFakeQuarto(directory, mode, () =>
-          createPublishingService({ outputStore: store, processScope: directProcessScope() })
+        withFakeQuarto(directory, mode, (quarto) =>
+          createPublishingService({ outputStore: store, processScope: directProcessScope(), quartoExecutable: quarto })
             .publishSnapshot(snapshot(), { outputPath, includeCode: false })),
         (error: unknown) => error instanceof PublishingError && error.code === "publish_failed",
       );
@@ -247,7 +247,7 @@ test("cancelling a slow publication terminates Quarto and leaves no destination"
   };
   const abort = new AbortController();
   try {
-    const publishing = createPublishingService({ outputStore: store, processScope: scope })
+    const publishing = createPublishingService({ outputStore: store, processScope: scope, quartoExecutable: quarto })
       .publishSnapshot(snapshot(), { outputPath, includeCode: false, signal: abort.signal });
     await started.promise;
     abort.abort();
@@ -268,7 +268,7 @@ test("refuses to replace an existing destination", async () => {
   await writeFile(outputPath, "existing bytes", "utf8");
   try {
     await assert.rejects(
-      createPublishingService({ outputStore: store, processScope: directProcessScope() })
+      createPublishingService({ outputStore: store, processScope: directProcessScope(), quartoExecutable: join(directory, "missing-quarto") })
         .publishSnapshot(snapshot(), { outputPath, includeCode: false }),
       (error: unknown) => error instanceof PublishingError && error.code === "destination_exists",
     );
@@ -298,7 +298,7 @@ test("installed Quarto creates one self-contained HTML file without executing R"
   const priorPath = process.env.PATH;
   process.env.PATH = dirname(installedQuartoPath) + delimiter + (priorPath ?? "");
   try {
-    await createPublishingService({ outputStore: store, processScope: directProcessScope() }).publishSnapshot(
+    await createPublishingService({ outputStore: store, processScope: directProcessScope(), quartoExecutable: installedQuartoPath }).publishSnapshot(
       snapshot([], { cells: [{ id: "cell-1", type: "code", body: [`writeLines("ran", "${marker}")`], options: {}, revision: 0, outputs: [] }] }),
       { outputPath, includeCode: true },
     );

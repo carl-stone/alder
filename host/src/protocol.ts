@@ -723,7 +723,7 @@ export const runCommandSchema = z.object({
   if (command.scope !== "cell" && command.target !== undefined) context.addIssue({ code: "custom", path: ["target"], message: "target is only valid for cell runs" });
   sourceChangeLimit(command.changes ?? [], context);
 });
-export const selectRCommandSchema = z.object({ ...commandIdentityShape, type: z.literal("select-r"), rscript: pathSchema, persistDefault: z.boolean(), expectedDocumentRevision: revisionSchema }).strict();
+export const selectRCommandSchema = z.object({ ...commandIdentityShape, type: z.literal("select-r"), rscript: pathSchema, expectedDocumentRevision: revisionSchema }).strict();
 export const setAppCommandSchema = z.object({ ...commandIdentityShape, type: z.literal("set-app"), patch: z.object({ layout: z.enum(["vertical", "grid", "slides"]).optional(), width: z.enum(["compact", "medium", "full"]).optional(), include_code: z.boolean().optional() }).strict(), expectedDocumentRevision: revisionSchema }).strict();
 export const packagesDeclareCommandSchema = z.object({ ...commandIdentityShape, type: z.literal("packages-declare"), packages: z.array(boundedUtf8StringSchema(256, true)).max(MAX_PROTOCOL_COLLECTION_ITEMS), expectedSidecarVersion: boundedUtf8StringSchema(MAX_ID_BYTES).nullable(), expectedDocumentRevision: revisionSchema }).strict();
 export const packagesInstallCommandSchema = z.object({ ...commandIdentityShape, type: z.literal("packages-install"), packages: z.array(boundedUtf8StringSchema(256, true)).max(MAX_PROTOCOL_COLLECTION_ITEMS), expectedDocumentRevision: revisionSchema, kernelEpoch: idSchema.nullable() }).strict();

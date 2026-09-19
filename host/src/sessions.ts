@@ -12,7 +12,7 @@ import {
   type SessionRequest,
   type SessionLease,
 } from "./protocol.js";
-import { ensurePrivateDirectory, readPrivateFile, verifyPrivateFile, writePrivateFile, type PrivatePathOptions } from "./private-paths.js";
+import { ensurePrivateDirectory, readPrivateFile, verifyPrivateFile, writePrivateFile } from "./private-paths.js";
 
 export const STARTUP_TIMEOUT_MS = 120_000;
 export const HEARTBEAT_INTERVAL_MS = 10_000;
@@ -29,7 +29,6 @@ export interface SessionResources {
   readonly root?: string;
   readonly nodeExecutable?: string;
   readonly hostEntry?: string;
-  readonly processSupervisorExecutable?: string | null;
 }
 
 export const UNTITLED_RECOVERY_SCHEMA_VERSION = 1 as const;
@@ -49,7 +48,6 @@ export interface HostLaunchOptions {
   path: string | null;
   sessionKey: string;
   projectDirectory?: string;
-  rscript?: string;
   executionMode?: "automatic" | "lazy";
   runOnStartup?: boolean;
   deferStartup?: boolean;
@@ -71,12 +69,10 @@ export interface AcquireNotebookSessionOptions {
   readonly untitledRecoveryId?: string;
   readonly untitledProjectDirectory?: string;
   readonly resources: SessionResources;
-  readonly rscript?: string;
   readonly executionMode?: "automatic" | "lazy";
   readonly runOnStartup?: boolean;
   readonly deferStartup?: boolean;
   readonly requestedConfiguration?: {
-    readonly rscript?: string;
     readonly executionMode?: "automatic" | "lazy";
     readonly runOnStartup?: boolean;
     readonly deferStartup?: boolean;
@@ -149,17 +145,17 @@ export async function acquireNotebookSession(options: AcquireNotebookSessionOpti
   const canonicalPath = await canonicalizePath(options.path);
   if (canonicalPath !== null && (options.untitledRecoveryId !== undefined || options.untitledProjectDirectory !== undefined)) throw new SessionAuthError("untitled options cannot be combined with a notebook path");
   const selectedRecovery = canonicalPath === null && options.untitledRecoveryId !== undefined
-    ? await selectUntitledRecoveryDescriptor(options.untitledRecoveryId, undefined, { processSupervisorExecutable: options.resources.processSupervisorExecutable })
+    ? await selectUntitledRecoveryDescriptor(options.untitledRecoveryId)
     : undefined;
   const sessionKey = canonicalPath === null ? selectedRecovery?.id ?? randomUUID() : sessionKeyFor(canonicalPath);
   const projectDirectory = canonicalPath === null ? selectedRecovery?.projectDirectory ?? resolve(options.untitledProjectDirectory ?? process.cwd()) : undefined;
-  if (projectDirectory !== undefined) await registerUntitledRecoveryDescriptor(sessionKey, projectDirectory, undefined, { processSupervisorExecutable: options.resources.processSupervisorExecutable });
+  if (projectDirectory !== undefined) await registerUntitledRecoveryDescriptor(sessionKey, projectDirectory);
   const { root, nodeExecutable, hostEntry } = options.resources;
   if (!root || !nodeExecutable || !hostEntry) throw new SessionUnavailableError("bundled document service is unavailable");
   const backend = new SharedBackend({ root, nodeExecutable, hostEntry }, options.runtimeDirectory);
   const descriptor = await backend.connect({
     path: canonicalPath, sessionKey, projectDirectory,
-    rscript: options.rscript, executionMode: options.executionMode,
+    executionMode: options.executionMode,
     runOnStartup: options.runOnStartup, deferStartup: options.deferStartup,
     externalOrigin: options.externalOrigin, tokenFile: options.tokenFile,
   }, timeoutMs);
@@ -289,22 +285,15 @@ export async function acquireNotebookOwnership(options: NotebookOwnershipOptions
   return ownership;
 }
 
-async function canonicalRscriptPath(value: string): Promise<string> {
-  const requested = resolve(value);
-  try { return await realpath(requested); } catch { return requested; }
-}
 async function assertAttachConfiguration(identity: ReturnType<typeof hostIdentitySchema.parse>, requested: AcquireNotebookSessionOptions, sessionKey: string): Promise<void> {
   const active = identity.configuration;
-  const activeRscript = active.rscript === null ? null : await canonicalRscriptPath(active.rscript);
   const join = requested.requestedConfiguration;
   const selected = {
-    rscript: join?.rscript ?? requested.rscript,
     executionMode: join?.executionMode ?? requested.executionMode,
     runOnStartup: join?.runOnStartup ?? requested.runOnStartup,
     deferStartup: join?.deferStartup,
   };
   const comparisons: Array<[string, unknown, unknown]> = [
-    ["rscript", selected.rscript === undefined ? undefined : await canonicalRscriptPath(selected.rscript), activeRscript],
     ["executionMode", selected.executionMode, active.executionMode], ["runOnStartup", selected.runOnStartup, active.runOnStartup], ["deferStartup", selected.deferStartup, active.deferStartup],
   ];
   const mismatch = comparisons.find(([, value, current]) => value !== undefined && value !== current);
@@ -331,41 +320,41 @@ async function requestJson<T>(origin: string, token: string, path: string, init:
 
 export function isUntitledRecoveryId(value: unknown): value is string { return typeof value === "string" && UNTITLED_SESSION_KEY_PATTERN.test(value); }
 export function untitledRecoveryDescriptorDirectory(dataRoot?: string): string { return join(resolve(dataRoot ?? envPaths("alder", { suffix: "" }).data), UNTITLED_RECOVERY_DIRECTORY); }
-export async function registerUntitledRecoveryDescriptor(id: string, projectDirectory: string, dataRoot?: string, privatePathOptions: PrivatePathOptions = {}): Promise<UntitledRecoveryDescriptor> {
+export async function registerUntitledRecoveryDescriptor(id: string, projectDirectory: string, dataRoot?: string): Promise<UntitledRecoveryDescriptor> {
   const validId = requireUntitledRecoveryId(id); const validProjectDirectory = normalizeProjectDirectory(projectDirectory);
-  const directory = await ensureUntitledRecoveryDirectory(dataRoot, privatePathOptions); const path = untitledRecoveryDescriptorPath(directory, validId);
-  const current = await readUntitledRecoveryDescriptor(path, validId, privatePathOptions);
+  const directory = await ensureUntitledRecoveryDirectory(dataRoot); const path = untitledRecoveryDescriptorPath(directory, validId);
+  const current = await readUntitledRecoveryDescriptor(path, validId);
   if (current !== null) { if (current.projectDirectory !== validProjectDirectory) throw new SessionUnavailableError("untitled recovery identity belongs to another project", { id: validId }); return current; }
   const descriptor = { schemaVersion: UNTITLED_RECOVERY_SCHEMA_VERSION, id: validId, projectDirectory: validProjectDirectory, createdAt: new Date().toISOString() } as const;
-  await writePrivateFile(path, Buffer.from(JSON.stringify(descriptor)), privatePathOptions);
+  await writePrivateFile(path, Buffer.from(JSON.stringify(descriptor)));
   return descriptor;
 }
-export async function listUntitledRecoveryDescriptors(dataRoot?: string, privatePathOptions: PrivatePathOptions = {}): Promise<UntitledRecoveryDescriptor[]> {
-  const directory = await ensureUntitledRecoveryDirectory(dataRoot, privatePathOptions); const entries = await readdir(directory, { withFileTypes: true }); const values: UntitledRecoveryDescriptor[] = [];
-  for (const entry of entries) { if (!entry.isFile() || !entry.name.endsWith(".json")) continue; const id = entry.name.slice(0, -5); if (!isUntitledRecoveryId(id)) continue; try { const value = await readUntitledRecoveryDescriptor(join(directory, entry.name), id, privatePathOptions); if (value) values.push(value); } catch { /* retain malformed descriptors */ } }
+export async function listUntitledRecoveryDescriptors(dataRoot?: string): Promise<UntitledRecoveryDescriptor[]> {
+  const directory = await ensureUntitledRecoveryDirectory(dataRoot); const entries = await readdir(directory, { withFileTypes: true }); const values: UntitledRecoveryDescriptor[] = [];
+  for (const entry of entries) { if (!entry.isFile() || !entry.name.endsWith(".json")) continue; const id = entry.name.slice(0, -5); if (!isUntitledRecoveryId(id)) continue; try { const value = await readUntitledRecoveryDescriptor(join(directory, entry.name), id); if (value) values.push(value); } catch { /* retain malformed descriptors */ } }
   return values.sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id));
 }
-export async function selectUntitledRecoveryDescriptor(id: string, dataRoot?: string, privatePathOptions: PrivatePathOptions = {}): Promise<UntitledRecoveryDescriptor> {
-  const validId = requireUntitledRecoveryId(id); const directory = await ensureUntitledRecoveryDirectory(dataRoot, privatePathOptions);
-  const value = await readUntitledRecoveryDescriptor(untitledRecoveryDescriptorPath(directory, validId), validId, privatePathOptions);
+export async function selectUntitledRecoveryDescriptor(id: string, dataRoot?: string): Promise<UntitledRecoveryDescriptor> {
+  const validId = requireUntitledRecoveryId(id); const directory = await ensureUntitledRecoveryDirectory(dataRoot);
+  const value = await readUntitledRecoveryDescriptor(untitledRecoveryDescriptorPath(directory, validId), validId);
   if (!value) throw new SessionUnavailableError("untitled recovery descriptor was not found", { id: validId }); return value;
 }
-export async function retireUntitledRecoveryDescriptor(expected: UntitledRecoveryDescriptor, dataRoot?: string, privatePathOptions: PrivatePathOptions = {}): Promise<void> {
-  const id = requireUntitledRecoveryId(expected.id); const directory = await ensureUntitledRecoveryDirectory(dataRoot, privatePathOptions); const path = untitledRecoveryDescriptorPath(directory, id);
-  const current = await readUntitledRecoveryDescriptor(path, id, privatePathOptions); if (!current) return;
+export async function retireUntitledRecoveryDescriptor(expected: UntitledRecoveryDescriptor, dataRoot?: string): Promise<void> {
+  const id = requireUntitledRecoveryId(expected.id); const directory = await ensureUntitledRecoveryDirectory(dataRoot); const path = untitledRecoveryDescriptorPath(directory, id);
+  const current = await readUntitledRecoveryDescriptor(path, id); if (!current) return;
   if (JSON.stringify(current) !== JSON.stringify(expected)) throw new SessionUnavailableError("untitled recovery descriptor changed before retirement", { id });
-  await verifyPrivateFile(path, privatePathOptions); await unlink(path).catch(error => { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; });
+  await verifyPrivateFile(path); await unlink(path).catch(error => { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; });
 }
-async function ensureUntitledRecoveryDirectory(dataRoot?: string, privatePathOptions: PrivatePathOptions = {}): Promise<string> {
+async function ensureUntitledRecoveryDirectory(dataRoot?: string): Promise<string> {
   const directory = untitledRecoveryDescriptorDirectory(dataRoot);
-  await ensurePrivateDirectory(directory, privatePathOptions);
+  await ensurePrivateDirectory(directory);
   return directory;
 }
 function requireUntitledRecoveryId(value: unknown): string { if (!isUntitledRecoveryId(value)) throw new SessionAuthError("untitled recovery identity is invalid"); return value; }
 function normalizeProjectDirectory(value: string): string { if (typeof value !== "string" || !value || value.includes("\0")) throw new SessionUnavailableError("untitled project directory is invalid"); return resolve(value); }
 function untitledRecoveryDescriptorPath(directory: string, id: string): string { return join(directory, id + ".json"); }
-async function readUntitledRecoveryDescriptor(path: string, id: string, options: PrivatePathOptions): Promise<UntitledRecoveryDescriptor | null> {
-  let bytes: Buffer; try { bytes = await readPrivateFile(path, { ...options, maxBytes: UNTITLED_RECOVERY_DESCRIPTOR_MAX_BYTES }); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return null; throw error; }
+async function readUntitledRecoveryDescriptor(path: string, id: string): Promise<UntitledRecoveryDescriptor | null> {
+  let bytes: Buffer; try { bytes = await readPrivateFile(path, { maxBytes: UNTITLED_RECOVERY_DESCRIPTOR_MAX_BYTES }); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return null; throw error; }
   let value: unknown; try { value = JSON.parse(bytes.toString("utf8")); } catch { throw new SessionUnavailableError("untitled recovery descriptor is invalid", { id }); }
   if (typeof value !== "object" || value === null) throw new SessionUnavailableError("untitled recovery descriptor is invalid", { id });
   const candidate = value as Record<string, unknown>;

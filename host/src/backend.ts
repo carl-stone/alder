@@ -55,7 +55,6 @@ export class NotebookBackend {
         tokenFile: options.tokenFile,
         resources: this.resources,
         preferences: await this.preferences,
-        rscript: options.rscript,
         executionMode: options.executionMode,
         runOnStartup: options.runOnStartup,
         deferStartup: options.deferStartup ?? true,

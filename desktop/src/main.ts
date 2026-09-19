@@ -174,7 +174,6 @@ export interface ElectronMainOptions {
   readonly resources?: ApplicationResources;
   readonly preloadPath?: string;
   readonly initialPath?: string | null;
-  readonly rscript?: string;
   readonly executionMode?: "automatic" | "lazy";
   readonly runOnStartup?: boolean;
   readonly deferStartup?: boolean;
@@ -289,28 +288,12 @@ async function canonicalPathHint(path: string): Promise<string> {
 export function parseNotebookArgument(argv: readonly string[]): string | null {
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
-    if (argument === "--rscript") { index += 1; continue; }
     if (typeof argument !== "string" || argument.length === 0 || argument.startsWith("-")) continue;
-    if (/\.(?:r|rmd)$/i.test(argument)) {
+    if (/\.r$/i.test(argument)) {
       try { return validateNotebookPath(resolve(argument)); } catch { return null; }
     }
   }
   return null;
-}
-
-function parseRscriptArgument(argv: readonly string[]): string | undefined {
-  let selected: string | undefined;
-  for (let index = 0; index < argv.length; index += 1) {
-    if (argv[index] !== "--rscript") continue;
-    if (selected !== undefined) throw new Error("--rscript may be supplied only once");
-    const value = argv[index + 1];
-    if (typeof value !== "string" || value.length === 0 || value.includes("\0") || !isAbsolute(value)) {
-      throw new Error("--rscript requires an absolute executable path");
-    }
-    selected = resolve(value);
-    index += 1;
-  }
-  return selected;
 }
 
 function loadElectronRuntime(): ElectronRuntime {
@@ -324,7 +307,6 @@ function sessionResources(resources: ApplicationResources): SessionResources {
     root: resources.root,
     nodeExecutable: resources.nodeExecutable,
     hostEntry: resources.hostEntry,
-    processSupervisorExecutable: resources.processSupervisorExecutable,
   };
 }
 
@@ -452,7 +434,6 @@ export class ElectronMain implements ElectronMainApplication {
         path,
         ...(path === null ? { untitledProjectDirectory: this.runtime.app.getPath?.("home") ?? process.cwd() } : {}),
         resources: sessionResources(resources),
-        ...(this.options.rscript === undefined ? {} : { rscript: this.options.rscript }),
         ...(this.options.executionMode === undefined ? {} : { executionMode: this.options.executionMode }),
         ...(this.options.runOnStartup === undefined ? {} : { runOnStartup: this.options.runOnStartup }),
         deferStartup: this.options.deferStartup ?? true,
@@ -635,7 +616,7 @@ export class ElectronMain implements ElectronMainApplication {
       const result = await this.runtime.dialog.showOpenDialog(record.window, {
         title: "Open Alder notebook",
         properties: ["openFile"],
-        filters: [{ name: "R notebooks", extensions: ["R", "rmd", "r"] }],
+        filters: [{ name: "R source", extensions: ["R", "r"] }],
       });
       if (result.canceled || result.filePaths.length === 0) return undefined;
       const path = selectedPath(result.filePaths[0], "Open notebook");
@@ -647,7 +628,7 @@ export class ElectronMain implements ElectronMainApplication {
         title: "Save notebook",
         message: "Choose where to save this R notebook.",
         properties: ["createDirectory"],
-        filters: [{ name: "R notebook", extensions: ["R", "rmd"] }],
+        filters: [{ name: "R source", extensions: ["R", "r"] }],
       });
       if (result.canceled || !result.filePath) return null;
       const path = selectedPath(result.filePath, "Save path");
@@ -830,7 +811,7 @@ export class ElectronMain implements ElectronMainApplication {
     const options = {
       title: "Open Alder notebook",
       properties: ["openFile"],
-      filters: [{ name: "R notebooks", extensions: ["R", "rmd", "r"] }],
+      filters: [{ name: "R source", extensions: ["R", "r"] }],
     };
     const result = source
       ? await this.runtime.dialog.showOpenDialog(source.window, options)
@@ -1009,7 +990,6 @@ export class ElectronMain implements ElectronMainApplication {
         path: old.canonicalPath,
         ...(old.canonicalPath === null ? { untitledRecoveryId: old.sessionKey } : {}),
         resources: sessionResources(resources),
-        ...(this.options.rscript === undefined ? {} : { rscript: this.options.rscript }),
         ...(this.options.executionMode === undefined ? {} : { executionMode: this.options.executionMode }),
         ...(this.options.runOnStartup === undefined ? {} : { runOnStartup: this.options.runOnStartup }),
         deferStartup: this.options.deferStartup ?? true,
@@ -1177,10 +1157,8 @@ export async function startElectronMain(options: ElectronMainOptions = {}): Prom
 
 export async function startPackagedElectronMain(argv: readonly string[] = process.argv.slice(1)): Promise<ElectronMainApplication> {
   const runtime = loadElectronRuntime();
-  const rscript = parseRscriptArgument(argv);
   return startElectronMain({
     runtime,
-    ...(rscript === undefined ? {} : { rscript }),
     ...(argv.includes("--lazy") ? { executionMode: "lazy" as const } : {}),
     ...(argv.includes("--no-run") ? { runOnStartup: false } : {}),
   });

@@ -9,6 +9,7 @@ export interface ManifestResourcePaths {
   rLibraryDirectory: string;
   arkExecutable: string;
   airExecutable: string;
+  quartoExecutable: string;
   nodeExecutable: string;
   electronEntry: string | null;
 }
@@ -23,8 +24,6 @@ export interface ApplicationManifest {
 export interface ApplicationResources extends ManifestResourcePaths {
   readonly manifest?: ApplicationManifest;
   root: string;
-  /** Transitional callers may still pass this value; no supervisor is used. */
-  processSupervisorExecutable: string;
 }
 
 export class ResourceValidationError extends Error {
@@ -42,7 +41,7 @@ export async function resolveApplicationResources(root: string): Promise<Applica
     const info = await stat(path).catch(() => { throw invalid(`${key} is unavailable: ${path}`); });
     if (directory ? !info.isDirectory() : !info.isFile()) throw invalid(`${key} has the wrong file type: ${path}`);
   }
-  return { ...paths, root: physicalRoot, manifest, processSupervisorExecutable: "" };
+  return { ...paths, root: physicalRoot, manifest };
 }
 
 export async function verifiedApplicationManifest(resources: ApplicationResources): Promise<ApplicationManifest> {
@@ -64,7 +63,7 @@ export function validateApplicationManifest(value: unknown): ApplicationManifest
   }
   const resources = value.resources;
   const paths = {} as ManifestResourcePaths;
-  for (const key of ["cliLauncher", "hostEntry", "rendererDirectory", "workerDirectory", "rLibraryDirectory", "arkExecutable", "airExecutable", "nodeExecutable", "electronEntry"] as const) {
+  for (const key of ["cliLauncher", "hostEntry", "rendererDirectory", "workerDirectory", "rLibraryDirectory", "arkExecutable", "airExecutable", "quartoExecutable", "nodeExecutable", "electronEntry"] as const) {
     const path = resources[key];
     if (key === "electronEntry" && path === null) { paths[key] = null; continue; }
     if (typeof path !== "string" || !path || path.includes("\0") || isAbsolute(path) || path.includes("\\") ||

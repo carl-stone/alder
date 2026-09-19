@@ -73,7 +73,7 @@ function bindDesktopActions(next: BrowserNotebookClient): void {
       if (command.action === "select-r") {
         const path = await desktop.chooseRscript();
         if (path === null) return "cancelled";
-        await next.selectR(path, true);
+        await next.selectR(path);
         return "ok";
       }
       return await view?.performDesktopAction(command.action) ?? "ok";

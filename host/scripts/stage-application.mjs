@@ -1,6 +1,8 @@
 import { execFileSync } from 'node:child_process';
-import { chmod, cp, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
-import { basename, dirname, join, resolve } from 'node:path';
+import { createHash } from 'node:crypto';
+import { createReadStream } from 'node:fs';
+import { chmod, cp, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { basename, dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { createRequire } from 'node:module';
@@ -33,6 +35,10 @@ try {
     const forge = resolve(values['forge-output']);
     const source = basename(forge) === 'Contents' ? dirname(forge) : forge;
     await cp(source, join(temporary, 'Alder.app'), { recursive: true, verbatimSymlinks: true });
+    const infoPlist = join(temporary, 'Alder.app/Contents/Info.plist');
+    for (const key of ['NSAppTransportSecurity', 'NSAudioCaptureUsageDescription', 'NSBluetoothAlwaysUsageDescription', 'NSBluetoothPeripheralUsageDescription', 'NSCameraUsageDescription', 'NSMicrophoneUsageDescription']) {
+      try { execFileSync('/usr/bin/plutil', ['-remove', key, infoPlist]); } catch {}
+    }
     applicationRoot = join(temporary, 'Alder.app/Contents/Resources/alder');
     await rm(applicationRoot, { recursive: true, force: true });
   }
@@ -46,6 +52,26 @@ try {
   await cp(join(root, 'host/licenses/Node.txt'), join(applicationRoot, 'host/licenses/Node.txt'));
   await stageArk({ output: join(applicationRoot, 'runtime') });
   await stageAir({ output: join(applicationRoot, 'runtime') });
+  const packageMetadata = JSON.parse(await readFile(join(root, 'host/package.json'), 'utf8'));
+  const quartoLauncher = await realpath(process.env.ALDER_QUARTO ?? execFileSync('which', ['quarto'], { encoding: 'utf8' }).trim());
+  const quartoRoot = dirname(dirname(quartoLauncher));
+  const quartoVersion = (await readFile(join(quartoRoot, 'share/version'), 'utf8')).trim();
+  if (quartoVersion !== packageMetadata.config.quarto.version) throw new Error(`Quarto ${packageMetadata.config.quarto.version} is required; found ${quartoVersion}`);
+  const quartoArch = process.arch === 'arm64' ? 'aarch64' : 'x86_64';
+  const quartoTarget = `darwin-${process.arch}`;
+  const quartoHash = await hashDistribution(quartoRoot, ['bin/quarto', 'bin/quarto.js', `bin/tools/${quartoArch}`, 'share']);
+  if (quartoHash !== packageMetadata.config.quarto.sha256[quartoTarget]) throw new Error(`Quarto distribution checksum mismatch for ${quartoTarget}`);
+  for (const notice of ['share/COPYING.md', 'share/COPYRIGHT']) {
+    if (!(await stat(join(quartoRoot, notice)).catch(() => null))?.isFile()) throw new Error(`Quarto distribution is missing ${notice}`);
+  }
+  const stagedQuarto = join(applicationRoot, 'runtime/quarto');
+  await mkdir(join(stagedQuarto, 'bin/tools'), { recursive: true });
+  await cp(join(quartoRoot, 'bin/quarto'), join(stagedQuarto, 'bin/quarto'));
+  await cp(join(quartoRoot, 'bin/quarto.js'), join(stagedQuarto, 'bin/quarto.js'));
+  await cp(join(quartoRoot, 'bin/tools', quartoArch), join(stagedQuarto, 'bin/tools', quartoArch), { recursive: true });
+  await symlink(`${quartoArch}/pandoc`, join(stagedQuarto, 'bin/tools/pandoc'));
+  await cp(join(quartoRoot, 'share'), join(stagedQuarto, 'share'), { recursive: true });
+  await chmod(join(stagedQuarto, 'bin/quarto'), 0o755);
   const rPackageBuild = await mkdtemp(join(tmpdir(), 'alder-r-package-'));
   try {
     execFileSync('R', ['--slave', '--vanilla', '-e',
@@ -95,13 +121,13 @@ try {
   const require = createRequire(join(applicationRoot, 'host/package.json'));
   const socket = new (require('zeromq').Dealer)();
   socket.close();
-  const pkg = JSON.parse(await readFile(join(root, 'host/package.json'), 'utf8'));
+  const pkg = packageMetadata;
   const manifest = {
     schemaVersion: 1, kind: values.kind, applicationVersion: pkg.version,
     resources: {
       cliLauncher: 'bin/alder', hostEntry: 'host/alder-host.mjs', rendererDirectory: 'app',
       workerDirectory: 'worker', rLibraryDirectory: 'r-library', arkExecutable: 'runtime/ark',
-      airExecutable: 'runtime/air', nodeExecutable: 'bin/node',
+      airExecutable: 'runtime/air', quartoExecutable: 'runtime/quarto/bin/quarto', nodeExecutable: 'bin/node',
       electronEntry: values.kind === 'desktop' ? 'desktop' : null,
     },
   };
@@ -119,4 +145,29 @@ try {
 } catch (error) {
   await rm(temporary, { recursive: true, force: true });
   throw error;
+}
+
+async function hashDistribution(directory, entries) {
+  const files = [];
+  const walk = async path => {
+    for (const entry of await readdir(path, { withFileTypes: true })) {
+      const child = join(path, entry.name);
+      if (entry.isDirectory()) await walk(child);
+      else if (entry.isFile()) files.push(child);
+    }
+  };
+  for (const entry of entries) {
+    const path = join(directory, entry);
+    if ((await stat(path)).isDirectory()) await walk(path);
+    else files.push(path);
+  }
+  files.sort((left, right) => relative(directory, left).localeCompare(relative(directory, right)));
+  const digest = createHash('sha256');
+  for (const file of files) {
+    digest.update(relative(directory, file));
+    digest.update('\0');
+    for await (const chunk of createReadStream(file)) digest.update(chunk);
+    digest.update('\0');
+  }
+  return digest.digest('hex');
 }

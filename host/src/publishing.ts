@@ -1,7 +1,6 @@
-import { constants } from "node:fs";
 import { randomUUID } from "node:crypto";
-import { access, chmod, link, mkdtemp, readFile, realpath, rm, stat, unlink, writeFile } from "node:fs/promises";
-import { basename, delimiter, dirname, join, resolve } from "node:path";
+import { access, chmod, link, mkdtemp, readFile, rm, stat, unlink, writeFile } from "node:fs/promises";
+import { basename, dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { parseHTML } from "linkedom";
 import renderHtml from "dom-serializer";
@@ -54,6 +53,7 @@ export interface PublicationSnapshot {
 export interface PublishingServiceOptions {
   outputStore: OutputStore;
   processScope: PublishingProcessScope;
+  quartoExecutable: string;
 }
 
 export interface PublishSnapshotOptions {
@@ -92,13 +92,14 @@ export function createPublishingService(options: PublishingServiceOptions): Publ
   if (!(options?.outputStore instanceof OutputStore)) throw new TypeError("publishing requires the canonical OutputStore");
   if (!options.processScope || typeof options.processScope.spawn !== "function") throw new TypeError("publishing requires the application ProcessScope");
   return {
-    publishSnapshot: (snapshot, publishOptions) => publishSnapshot(options.outputStore, options.processScope, snapshot, publishOptions),
+    publishSnapshot: (snapshot, publishOptions) => publishSnapshot(options.outputStore, options.processScope, options.quartoExecutable, snapshot, publishOptions),
   };
 }
 
 async function publishSnapshot(
   outputStore: OutputStore,
   processScope: PublishingProcessScope,
+  quartoExecutable: string,
   source: PublicationSnapshot,
   options: PublishSnapshotOptions,
 ): Promise<PublishSnapshotResult> {
@@ -114,8 +115,7 @@ async function publishSnapshot(
     const renderedPath = join(stagingDirectory, "rendered.html");
     const qmd = await composeQmd(snapshot, outputStore, options.includeCode, options.signal);
     await writeFile(qmdPath, qmd, { encoding: "utf8", mode: 0o600, flag: "wx" });
-    const quarto = await findQuartoExecutable();
-    await runQuarto(processScope, quarto, stagingDirectory, qmdPath, renderedPath, options.signal);
+    await runQuarto(processScope, quartoExecutable, stagingDirectory, qmdPath, renderedPath, options.signal);
     throwIfAborted(options.signal);
     const rendered = await readFile(renderedPath);
     if (rendered.byteLength === 0 || rendered.byteLength > MAX_PUBLISHED_HTML_BYTES) {
@@ -278,17 +278,6 @@ async function readArtifact(
     offset += chunk.byteLength;
   }
   return Buffer.concat(chunks, descriptor.byteLength);
-}
-
-async function findQuartoExecutable(): Promise<string> {
-  for (const directory of (process.env.PATH ?? "").split(delimiter).filter(Boolean)) {
-    const candidate = resolve(directory, "quarto");
-    try {
-      await access(candidate, constants.X_OK);
-      if ((await stat(candidate)).isFile()) return await realpath(candidate);
-    } catch {}
-  }
-  throw new PublishingError("tool_not_found", "Quarto is required for HTML publishing but was not found on PATH");
 }
 
 async function runQuarto(processScope: PublishingProcessScope, executable: string, cwd: string, qmdPath: string, outputPath: string, signal?: AbortSignal): Promise<void> {

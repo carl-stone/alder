@@ -7387,7 +7387,7 @@ var require_punycode = __commonJS({
     var damp = 700;
     var initialBias = 72;
     var initialN = 128;
-    var delimiter3 = "-";
+    var delimiter2 = "-";
     var regexPunycode = /^xn--/;
     var regexNonASCII = /[^\0-\x7F]/;
     var regexSeparators = /[\x2E\u3002\uFF0E\uFF61]/g;
@@ -7473,7 +7473,7 @@ var require_punycode = __commonJS({
       let i = 0;
       let n = initialN;
       let bias = initialBias;
-      let basic = input2.lastIndexOf(delimiter3);
+      let basic = input2.lastIndexOf(delimiter2);
       if (basic < 0) {
         basic = 0;
       }
@@ -7533,7 +7533,7 @@ var require_punycode = __commonJS({
       const basicLength = output2.length;
       let handledCPCount = basicLength;
       if (basicLength) {
-        output2.push(delimiter3);
+        output2.push(delimiter2);
       }
       while (handledCPCount < inputLength) {
         let m = maxInt;
@@ -23432,11 +23432,11 @@ var require_codegen = __commonJS({
         const rhs = this.rhs === void 0 ? "" : ` = ${this.rhs}`;
         return `${varKind} ${this.name}${rhs};` + _n;
       }
-      optimizeNames(names, constants6) {
+      optimizeNames(names, constants5) {
         if (!names[this.name.str])
           return;
         if (this.rhs)
-          this.rhs = optimizeExpr(this.rhs, names, constants6);
+          this.rhs = optimizeExpr(this.rhs, names, constants5);
         return this;
       }
       get names() {
@@ -23453,10 +23453,10 @@ var require_codegen = __commonJS({
       render({ _n }) {
         return `${this.lhs} = ${this.rhs};` + _n;
       }
-      optimizeNames(names, constants6) {
+      optimizeNames(names, constants5) {
         if (this.lhs instanceof code_1.Name && !names[this.lhs.str] && !this.sideEffects)
           return;
-        this.rhs = optimizeExpr(this.rhs, names, constants6);
+        this.rhs = optimizeExpr(this.rhs, names, constants5);
         return this;
       }
       get names() {
@@ -23517,8 +23517,8 @@ var require_codegen = __commonJS({
       optimizeNodes() {
         return `${this.code}` ? this : void 0;
       }
-      optimizeNames(names, constants6) {
-        this.code = optimizeExpr(this.code, names, constants6);
+      optimizeNames(names, constants5) {
+        this.code = optimizeExpr(this.code, names, constants5);
         return this;
       }
       get names() {
@@ -23547,12 +23547,12 @@ var require_codegen = __commonJS({
         }
         return nodes.length > 0 ? this : void 0;
       }
-      optimizeNames(names, constants6) {
+      optimizeNames(names, constants5) {
         const { nodes } = this;
         let i = nodes.length;
         while (i--) {
           const n = nodes[i];
-          if (n.optimizeNames(names, constants6))
+          if (n.optimizeNames(names, constants5))
             continue;
           subtractNames(names, n.names);
           nodes.splice(i, 1);
@@ -23605,12 +23605,12 @@ var require_codegen = __commonJS({
           return void 0;
         return this;
       }
-      optimizeNames(names, constants6) {
+      optimizeNames(names, constants5) {
         var _a5;
-        this.else = (_a5 = this.else) === null || _a5 === void 0 ? void 0 : _a5.optimizeNames(names, constants6);
-        if (!(super.optimizeNames(names, constants6) || this.else))
+        this.else = (_a5 = this.else) === null || _a5 === void 0 ? void 0 : _a5.optimizeNames(names, constants5);
+        if (!(super.optimizeNames(names, constants5) || this.else))
           return;
-        this.condition = optimizeExpr(this.condition, names, constants6);
+        this.condition = optimizeExpr(this.condition, names, constants5);
         return this;
       }
       get names() {
@@ -23633,10 +23633,10 @@ var require_codegen = __commonJS({
       render(opts) {
         return `for(${this.iteration})` + super.render(opts);
       }
-      optimizeNames(names, constants6) {
-        if (!super.optimizeNames(names, constants6))
+      optimizeNames(names, constants5) {
+        if (!super.optimizeNames(names, constants5))
           return;
-        this.iteration = optimizeExpr(this.iteration, names, constants6);
+        this.iteration = optimizeExpr(this.iteration, names, constants5);
         return this;
       }
       get names() {
@@ -23672,10 +23672,10 @@ var require_codegen = __commonJS({
       render(opts) {
         return `for(${this.varKind} ${this.name} ${this.loop} ${this.iterable})` + super.render(opts);
       }
-      optimizeNames(names, constants6) {
-        if (!super.optimizeNames(names, constants6))
+      optimizeNames(names, constants5) {
+        if (!super.optimizeNames(names, constants5))
           return;
-        this.iterable = optimizeExpr(this.iterable, names, constants6);
+        this.iterable = optimizeExpr(this.iterable, names, constants5);
         return this;
       }
       get names() {
@@ -23717,11 +23717,11 @@ var require_codegen = __commonJS({
         (_b = this.finally) === null || _b === void 0 ? void 0 : _b.optimizeNodes();
         return this;
       }
-      optimizeNames(names, constants6) {
+      optimizeNames(names, constants5) {
         var _a5, _b;
-        super.optimizeNames(names, constants6);
-        (_a5 = this.catch) === null || _a5 === void 0 ? void 0 : _a5.optimizeNames(names, constants6);
-        (_b = this.finally) === null || _b === void 0 ? void 0 : _b.optimizeNames(names, constants6);
+        super.optimizeNames(names, constants5);
+        (_a5 = this.catch) === null || _a5 === void 0 ? void 0 : _a5.optimizeNames(names, constants5);
+        (_b = this.finally) === null || _b === void 0 ? void 0 : _b.optimizeNames(names, constants5);
         return this;
       }
       get names() {
@@ -24022,7 +24022,7 @@ var require_codegen = __commonJS({
     function addExprNames(names, from) {
       return from instanceof code_1._CodeOrName ? addNames(names, from.names) : names;
     }
-    function optimizeExpr(expr, names, constants6) {
+    function optimizeExpr(expr, names, constants5) {
       if (expr instanceof code_1.Name)
         return replaceName(expr);
       if (!canOptimize(expr))
@@ -24037,14 +24037,14 @@ var require_codegen = __commonJS({
         return items;
       }, []));
       function replaceName(n) {
-        const c = constants6[n.str];
+        const c = constants5[n.str];
         if (c === void 0 || names[n.str] !== 1)
           return n;
         delete names[n.str];
         return c;
       }
       function canOptimize(e) {
-        return e instanceof code_1._Code && e._items.some((c) => c instanceof code_1.Name && names[c.str] === 1 && constants6[c.str] !== void 0);
+        return e instanceof code_1._Code && e._items.some((c) => c instanceof code_1.Name && names[c.str] === 1 && constants5[c.str] !== void 0);
       }
     }
     function subtractNames(names, from) {
@@ -39281,7 +39281,7 @@ var require_api2 = __commonJS({
 // ../../../../../alder/host/node_modules/graceful-fs/polyfills.js
 var require_polyfills = __commonJS({
   "../../../../../alder/host/node_modules/graceful-fs/polyfills.js"(exports, module) {
-    var constants6 = __require("constants");
+    var constants5 = __require("constants");
     var origCwd = process.cwd;
     var cwd = null;
     var platform = process.env.GRACEFUL_FS_PLATFORM || process.platform;
@@ -39305,7 +39305,7 @@ var require_polyfills = __commonJS({
     var chdir;
     module.exports = patch;
     function patch(fs) {
-      if (constants6.hasOwnProperty("O_SYMLINK") && process.version.match(/^v0\.6\.[0-2]|^v0\.5\./)) {
+      if (constants5.hasOwnProperty("O_SYMLINK") && process.version.match(/^v0\.6\.[0-2]|^v0\.5\./)) {
         patchLchmod(fs);
       }
       if (!fs.lutimes) {
@@ -39407,7 +39407,7 @@ var require_polyfills = __commonJS({
         fs2.lchmod = function(path3, mode, callback) {
           fs2.open(
             path3,
-            constants6.O_WRONLY | constants6.O_SYMLINK,
+            constants5.O_WRONLY | constants5.O_SYMLINK,
             mode,
             function(err, fd) {
               if (err) {
@@ -39423,7 +39423,7 @@ var require_polyfills = __commonJS({
           );
         };
         fs2.lchmodSync = function(path3, mode) {
-          var fd = fs2.openSync(path3, constants6.O_WRONLY | constants6.O_SYMLINK, mode);
+          var fd = fs2.openSync(path3, constants5.O_WRONLY | constants5.O_SYMLINK, mode);
           var threw = true;
           var ret;
           try {
@@ -39443,9 +39443,9 @@ var require_polyfills = __commonJS({
         };
       }
       function patchLutimes(fs2) {
-        if (constants6.hasOwnProperty("O_SYMLINK") && fs2.futimes) {
+        if (constants5.hasOwnProperty("O_SYMLINK") && fs2.futimes) {
           fs2.lutimes = function(path3, at, mt, cb) {
-            fs2.open(path3, constants6.O_SYMLINK, function(er, fd) {
+            fs2.open(path3, constants5.O_SYMLINK, function(er, fd) {
               if (er) {
                 if (cb) cb(er);
                 return;
@@ -39458,7 +39458,7 @@ var require_polyfills = __commonJS({
             });
           };
           fs2.lutimesSync = function(path3, at, mt) {
-            var fd = fs2.openSync(path3, constants6.O_SYMLINK);
+            var fd = fs2.openSync(path3, constants5.O_SYMLINK);
             var ret;
             var threw = true;
             try {
@@ -42924,8 +42924,8 @@ function emoji() {
 }
 var ipv4 = /^(?:(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])$/;
 var ipv6 = /^(([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,7}:|([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,5}(:[0-9a-fA-F]{1,4}){1,2}|([0-9a-fA-F]{1,4}:){1,4}(:[0-9a-fA-F]{1,4}){1,3}|([0-9a-fA-F]{1,4}:){1,3}(:[0-9a-fA-F]{1,4}){1,4}|([0-9a-fA-F]{1,4}:){1,2}(:[0-9a-fA-F]{1,4}){1,5}|[0-9a-fA-F]{1,4}:((:[0-9a-fA-F]{1,4}){1,6})|:((:[0-9a-fA-F]{1,4}){1,7}|:))$/;
-var mac = (delimiter3) => {
-  const escapedDelim = escapeRegex(delimiter3 ?? ":");
+var mac = (delimiter2) => {
+  const escapedDelim = escapeRegex(delimiter2 ?? ":");
   return new RegExp(`^(?:[0-9A-F]{2}${escapedDelim}){5}[0-9A-F]{2}$|^(?:[0-9a-f]{2}${escapedDelim}){5}[0-9a-f]{2}$`);
 };
 var cidrv4 = /^((25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\/([0-9]|[1-2][0-9]|3[0-2])$/;
@@ -59841,7 +59841,7 @@ var editorSchema = external_exports.object({
 }).strict();
 var formatSchema = external_exports.object({ on_save: external_exports.boolean() }).strict();
 var tableSchema = external_exports.object({ page_size: external_exports.number().int().min(5).max(200) }).strict();
-var preferencesSchema = external_exports.object({
+var editablePreferencesSchema = external_exports.object({
   theme: external_exports.enum(["light", "dark", "system"]),
   keymap: external_exports.enum(["default", "vim"]),
   autosave: external_exports.boolean(),
@@ -59849,11 +59849,17 @@ var preferencesSchema = external_exports.object({
   editor: editorSchema,
   table: tableSchema
 }).strict();
-var preferencesPatchSchema = preferencesSchema.extend({
+var preferencesSchema = editablePreferencesSchema.extend({
+  rscript: external_exports.string().min(1).nullable()
+});
+var preferencesPatchSchema = editablePreferencesSchema.extend({
   format: formatSchema.partial(),
   editor: editorSchema.partial(),
   table: tableSchema.partial()
 }).partial();
+var storedPreferencesPatchSchema = preferencesPatchSchema.extend({
+  rscript: external_exports.string().min(1).nullable().optional()
+});
 var notebookCacheSchema = external_exports.object({ enabled: external_exports.boolean() }).strict();
 var notebookSettingsSchema = external_exports.object({
   on_cell_change: external_exports.enum(["automatic", "lazy"]),
@@ -59875,6 +59881,7 @@ var configSchema = preferencesSchema.extend({
 });
 function preferenceDefaults() {
   return {
+    rscript: null,
     theme: "system",
     keymap: "default",
     autosave: false,
@@ -59892,6 +59899,7 @@ function preferenceDefaults() {
 }
 function mergePreferences(current, patch) {
   return {
+    rscript: patch.rscript === void 0 ? current.rscript : patch.rscript,
     theme: patch.theme ?? current.theme,
     keymap: patch.keymap ?? current.keymap,
     autosave: patch.autosave ?? current.autosave,
@@ -60212,7 +60220,7 @@ async function readPreferences(path3) {
       size: bytes.byteLength
     };
     const text2 = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-    const patch = preferencesPatchSchema.parse(parseYamlMapping(text2, path3));
+    const patch = storedPreferencesPatchSchema.parse(parseYamlMapping(text2, path3));
     return { observation, values: mergePreferences(preferenceDefaults(), patch), error: null };
   } catch (error61) {
     if (error61.code === "ENOENT") {
@@ -60325,7 +60333,7 @@ var ApplicationPreferences = class _ApplicationPreferences {
 
 // src/application.ts
 import { randomUUID as randomUUID14 } from "node:crypto";
-import { mkdtemp as mkdtemp5, realpath as realpath11, rm as rm9 } from "node:fs/promises";
+import { mkdtemp as mkdtemp5, realpath as realpath10, rm as rm9 } from "node:fs/promises";
 import { basename as basename8, dirname as dirname10, join as join20, resolve as resolve13 } from "node:path";
 import { tmpdir as tmpdir6 } from "node:os";
 
@@ -61273,7 +61281,7 @@ var NodeFsHandler = class {
    * @param realpath
    * @returns closer for the watcher instance.
    */
-  async _handleDir(dir, stats, initialAdd, depth, target, wh, realpath12) {
+  async _handleDir(dir, stats, initialAdd, depth, target, wh, realpath11) {
     const parentDir = this.fsw._getWatchedDir(sp.dirname(dir));
     const tracked = parentDir.has(sp.basename(dir));
     if (!(initialAdd && this.fsw.options.ignoreInitial) && !target && !tracked) {
@@ -61284,7 +61292,7 @@ var NodeFsHandler = class {
     let throttler;
     let closer;
     const oDepth = this.fsw.options.depth;
-    if ((oDepth == null || depth <= oDepth) && !this.fsw._symlinkPaths.has(realpath12)) {
+    if ((oDepth == null || depth <= oDepth) && !this.fsw._symlinkPaths.has(realpath11)) {
       if (!target) {
         await this._handleRead(dir, initialAdd, wh, target, dir, depth, throttler);
         if (this.fsw.closed)
@@ -62735,7 +62743,7 @@ var runCommandSchema = external_exports.object({
   if (command.scope !== "cell" && command.target !== void 0) context.addIssue({ code: "custom", path: ["target"], message: "target is only valid for cell runs" });
   sourceChangeLimit(command.changes ?? [], context);
 });
-var selectRCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("select-r"), rscript: pathSchema, persistDefault: external_exports.boolean(), expectedDocumentRevision: revisionSchema }).strict();
+var selectRCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("select-r"), rscript: pathSchema, expectedDocumentRevision: revisionSchema }).strict();
 var setAppCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("set-app"), patch: external_exports.object({ layout: external_exports.enum(["vertical", "grid", "slides"]).optional(), width: external_exports.enum(["compact", "medium", "full"]).optional(), include_code: external_exports.boolean().optional() }).strict(), expectedDocumentRevision: revisionSchema }).strict();
 var packagesDeclareCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("packages-declare"), packages: external_exports.array(boundedUtf8StringSchema(256, true)).max(MAX_PROTOCOL_COLLECTION_ITEMS), expectedSidecarVersion: boundedUtf8StringSchema(MAX_ID_BYTES).nullable(), expectedDocumentRevision: revisionSchema }).strict();
 var packagesInstallCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("packages-install"), packages: external_exports.array(boundedUtf8StringSchema(256, true)).max(MAX_PROTOCOL_COLLECTION_ITEMS), expectedDocumentRevision: revisionSchema, kernelEpoch: idSchema.nullable() }).strict();
@@ -72180,7 +72188,6 @@ var Controller = class {
   analysisEnvironmentIdValue = null;
   kernelEpochValue = null;
   rEnvironmentValue = null;
-  requestedRscript;
   diskValue = { state: "untitled", digest: null, version: null, error: null };
   sidecarsValue = {
     config: { state: "absent", digest: null, version: null, error: null },
@@ -72250,7 +72257,6 @@ var Controller = class {
     this.sourceCommit = options.sourceCommit;
     this.getRecoveryState = options.getRecoveryState;
     this.rEnvironmentValue = options.rEnvironment ?? null;
-    this.requestedRscript = options.requestedRscript;
     this.diskValue = options.disk ?? {
       state: this.pathValue === null ? "untitled" : "absent",
       digest: null,
@@ -72569,7 +72575,7 @@ var Controller = class {
   }
   configuration() {
     return {
-      rscript: this.rEnvironmentValue?.rscript ?? this.requestedRscript ?? null,
+      rscript: this.rEnvironmentValue?.rscript ?? null,
       executionMode: this.executionMode,
       runOnStartup: this.runOnStartup,
       deferStartup: this.deferStartup
@@ -76803,7 +76809,7 @@ var Controller = class {
     switch (command.type) {
       case "select-r":
         this.assertDocumentRevision(command.expectedDocumentRevision);
-        return this.callService("r.select", { rscript: command.rscript, persistDefault: command.persistDefault });
+        return this.callService("r.select", { rscript: command.rscript });
       case "set-app":
         return this.setApp(command.patch, command.expectedDocumentRevision, command.requestId);
       case "packages-declare":
@@ -77546,18 +77552,405 @@ function isExecutionCommand(type) {
 
 // src/engine.ts
 import { EventEmitter as EventEmitter3 } from "node:events";
-import { createHash as createHash5, randomBytes as randomBytes2, randomUUID as randomUUID6 } from "node:crypto";
-import { access as access2, mkdir as mkdir5, mkdtemp, rm as rm4, stat as stat9 } from "node:fs/promises";
+import { createHash as createHash5, randomBytes as randomBytes2, randomUUID as randomUUID5 } from "node:crypto";
+import { access as access2, mkdir as mkdir4, mkdtemp, rm as rm3, stat as stat9 } from "node:fs/promises";
 import { rmSync, writeFileSync } from "node:fs";
 import { tmpdir as tmpdir2 } from "node:os";
-import { basename as basename4, extname as extname2, join as join10, resolve as resolve7 } from "node:path";
+import { basename as basename4, extname as extname2, join as join9, resolve as resolve6 } from "node:path";
 
 // src/r-environment.ts
 import { createHash as createHash4 } from "node:crypto";
 import { realpath as realpath4, stat as stat7 } from "node:fs/promises";
-import { delimiter, isAbsolute as isAbsolute4, join as join7, resolve as resolve6 } from "node:path";
+import { delimiter, isAbsolute as isAbsolute4, join as join6, resolve as resolve5 } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+
+// src/resources.ts
+import { readFile as readFile2, realpath as realpath3, stat as stat6 } from "node:fs/promises";
+import { isAbsolute as isAbsolute3, join as join5, resolve as resolve4 } from "node:path";
+var ResourceValidationError = class extends Error {
+  code = "resource_invalid";
+  constructor(message2) {
+    super(message2);
+    this.name = "ResourceValidationError";
+  }
+};
+async function resolveApplicationResources(root) {
+  const physicalRoot = await realpath3(root);
+  const manifest = await readApplicationManifest(physicalRoot);
+  const paths = Object.fromEntries(Object.entries(manifest.resources).map(([key2, path3]) => [key2, path3 === null ? null : resolve4(physicalRoot, path3)]));
+  for (const [key2, directory] of [["hostEntry", false], ["rendererDirectory", true], ["workerDirectory", true]]) {
+    const path3 = paths[key2];
+    const info = await stat6(path3).catch(() => {
+      throw invalid(`${key2} is unavailable: ${path3}`);
+    });
+    if (directory ? !info.isDirectory() : !info.isFile()) throw invalid(`${key2} has the wrong file type: ${path3}`);
+  }
+  return { ...paths, root: physicalRoot, manifest };
+}
+async function verifiedApplicationManifest(resources2) {
+  return resources2.manifest ?? readApplicationManifest(resources2.root);
+}
+async function readApplicationManifest(root) {
+  try {
+    return validateApplicationManifest(JSON.parse(await readFile2(join5(root, "manifest.json"), "utf8")));
+  } catch (error61) {
+    if (error61 instanceof ResourceValidationError) throw error61;
+    throw invalid(`application manifest is unavailable: ${error61 instanceof Error ? error61.message : String(error61)}`);
+  }
+}
+function validateApplicationManifest(value) {
+  if (!record2(value) || value.schemaVersion !== 1 || !["desktop", "headless"].includes(String(value.kind)) || typeof value.applicationVersion !== "string" || !value.applicationVersion || !record2(value.resources)) {
+    throw invalid("invalid application manifest");
+  }
+  const resources2 = value.resources;
+  const paths = {};
+  for (const key2 of ["cliLauncher", "hostEntry", "rendererDirectory", "workerDirectory", "rLibraryDirectory", "arkExecutable", "airExecutable", "quartoExecutable", "nodeExecutable", "electronEntry"]) {
+    const path3 = resources2[key2];
+    if (key2 === "electronEntry" && path3 === null) {
+      paths[key2] = null;
+      continue;
+    }
+    if (typeof path3 !== "string" || !path3 || path3.includes("\0") || isAbsolute3(path3) || path3.includes("\\") || path3.split("/").some((part) => !part || part === "." || part === "..")) {
+      throw invalid(`invalid resource path: ${key2}`);
+    }
+    paths[key2] = path3;
+  }
+  return { schemaVersion: 1, kind: value.kind, applicationVersion: value.applicationVersion, resources: paths };
+}
+function record2(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function invalid(message2) {
+  return new ResourceValidationError(message2);
+}
+
+// src/r-environment.ts
+var execFileAsync = promisify(execFile);
+var R_VERSION_RANGE = ">=4.6.0 <4.7.0";
+var R_PROBE_TIMEOUT_MS = 1e4;
+var REnvironmentError = class extends Error {
+  constructor(code2, message2, details) {
+    super(message2);
+    this.code = code2;
+    this.details = details;
+    this.name = "REnvironmentError";
+  }
+  code;
+  details;
+};
+async function resolveREnvironment(options) {
+  options.signal?.throwIfAborted();
+  const resources2 = options.resources;
+  const manifest = await verifiedApplicationManifest(resources2).catch((error61) => {
+    if (error61 instanceof REnvironmentError) throw error61;
+    throw invalid2(`application manifest cannot be read while selecting R: ${messageOf3(error61)}`);
+  });
+  await validateHelperLibrary(resources2);
+  const selected = await selectRscript(options.rscript, resources2.electronEntry !== null);
+  const probe = await probeR(selected, options.signal);
+  const version2 = normalizeVersion(probe.version);
+  if (!/^4\.6\./.test(version2)) throw unsupported(version2);
+  const rHome = await existingDirectory(probe.rHome, "selected R_HOME");
+  await validateSharedLibrary(rHome);
+  validateRPlatform(probe.platform);
+  validateRArchitecture(probe.arch);
+  const platformResult = rEnvironmentSchema.shape.platform.safeParse(process.platform);
+  if (!platformResult.success) throw invalid2(`unsupported host platform ${process.platform}`);
+  const platform = platformResult.data;
+  const normalLibraries = await normalizeDirectories(
+    await probeProjectLibraries(selected, options.projectDirectory, options.signal),
+    "R project library path"
+  );
+  const baseLibrary = await existingDirectory(probe.baseLibrary, "R base library");
+  const helperLibrary = await existingDirectory(resources2.rLibraryDirectory, "Alder R library");
+  const environmentFields = { rscript: selected, rHome, version: version2, platform, arch: process.arch };
+  const helperAbi = `${manifest.applicationVersion}:${R_VERSION_RANGE}`;
+  const baseLibraryPaths = uniquePaths([...options.sandbox === true ? [] : normalLibraries, helperLibrary, baseLibrary]);
+  const baseEnvironment = makeEnvironment(environmentFields, helperAbi, baseLibraryPaths);
+  await validateHelperLoad(baseEnvironment, manifest, helperLibrary, options.signal);
+  const requestedProjectLibrary = options.resolveProjectLibrary === void 0 ? options.sandbox === true ? join6(options.projectDirectory, ".alder", "library") : null : await options.resolveProjectLibrary(baseEnvironment);
+  if (requestedProjectLibrary !== null && typeof requestedProjectLibrary !== "string") {
+    throw invalid2("project package library resolver must return a path or null");
+  }
+  const projectLibrary = requestedProjectLibrary === null ? null : await optionalDirectory(requestedProjectLibrary, "project package library");
+  const libraryPaths = uniquePaths([
+    ...options.sandbox === true ? [] : normalLibraries,
+    ...projectLibrary === null ? [] : [projectLibrary],
+    helperLibrary,
+    baseLibrary
+  ]);
+  options.signal?.throwIfAborted();
+  const environment = makeEnvironment(environmentFields, helperAbi, libraryPaths);
+  return environment;
+}
+function rServiceEnvironmentVariables(environment, resources2, analysisEnvironmentId) {
+  const values = {
+    R_HOME: environment.rHome,
+    ALDER_R_PRIVATE_LIBRARY: resources2.rLibraryDirectory,
+    ALDER_RESOURCES_ROOT: resources2.root,
+    ALDER_R_LIBRARIES: JSON.stringify([resources2.rLibraryDirectory]),
+    ALDER_WORKER_DIR: resources2.workerDirectory,
+    R_LIBS: resources2.rLibraryDirectory,
+    R_LIBS_SITE: "",
+    R_LIBS_USER: ""
+  };
+  const loaderDirectories = [join6(environment.rHome, "lib"), join6(environment.rHome, "lib", "R")];
+  values.DYLD_LIBRARY_PATH = prependPath(loaderDirectories, process.env.DYLD_LIBRARY_PATH);
+  if (analysisEnvironmentId !== void 0) values.ALDER_ANALYSIS_ENVIRONMENT_ID = analysisEnvironmentId;
+  return values;
+}
+function rKernelEnvironmentVariables(environment, resources2, projectDirectory) {
+  const projectLibrary = projectDirectory === void 0 ? void 0 : join6(projectDirectory, ".alder", "library");
+  return {
+    R_HOME: environment.rHome,
+    ALDER_R_PRIVATE_LIBRARY: resources2.rLibraryDirectory,
+    ALDER_RESOURCES_ROOT: resources2.root,
+    ALDER_WORKER_DIR: resources2.workerDirectory,
+    ...projectLibrary !== void 0 && environment.libraryPaths.includes(projectLibrary) ? { ALDER_PROJECT_LIBRARY: projectLibrary } : {},
+    DYLD_LIBRARY_PATH: prependPath(
+      [join6(environment.rHome, "lib"), join6(environment.rHome, "lib", "R")],
+      process.env.DYLD_LIBRARY_PATH
+    )
+  };
+}
+async function selectRscript(requested, desktop) {
+  if (requested !== void 0) return resolveSelectedPath(requested, "selected Rscript");
+  const discovered = await findOnPath("Rscript");
+  if (discovered !== null) return discovered;
+  if (desktop) {
+    const framework = await resolveExecutableCandidate("/Library/Frameworks/R.framework/Resources/bin/Rscript");
+    if (framework !== null) return framework;
+    throw notFound("Rscript was not found on PATH or at the standard macOS R framework location");
+  }
+  throw notFound("Rscript was not found on PATH");
+}
+async function findOnPath(command) {
+  const pathValue2 = process.env.PATH ?? "";
+  for (const directory of pathValue2.split(delimiter).filter(Boolean)) {
+    const candidates = [join6(directory, command)];
+    for (const candidate of candidates) {
+      const resolved = await resolveExecutableCandidate(candidate);
+      if (resolved !== null) return resolved;
+    }
+  }
+  return null;
+}
+async function resolveExecutableCandidate(candidate) {
+  if (!await isExecutable(candidate)) return null;
+  try {
+    return await realpath4(candidate);
+  } catch {
+    return null;
+  }
+}
+async function resolveSelectedPath(value, label) {
+  if (!value || value.includes("\0")) throw notFound(`${label} is empty or invalid`);
+  const candidate = resolve5(value);
+  if (!await isExecutable(candidate)) throw notFound(`${label} was not found: ${value}`);
+  try {
+    return await realpath4(candidate);
+  } catch (error61) {
+    throw notFound(`${label} cannot be resolved: ${messageOf3(error61)}`);
+  }
+}
+async function probeR(rscript, signal) {
+  const script = [
+    "cat(R.home(), '\\n', sep = '')",
+    "cat(R.version$version.string, intToUtf8(10), sep = '')",
+    "cat(R.version$platform, '\\n', sep = '')",
+    "cat(R.version$arch, '\\n', sep = '')",
+    "cat(paste(.libPaths(), collapse = '\\n'), '\\n--ALDER-LIBS-END--\\n', sep = '')",
+    "cat(R.home('library'), '\\n', sep = '')"
+  ].join("; ");
+  try {
+    const result = await execFileAsync(rscript, ["--vanilla", "--slave", "-e", script], {
+      signal,
+      env: withoutRHome(process.env),
+      timeout: R_PROBE_TIMEOUT_MS,
+      maxBuffer: 512 * 1024
+    });
+    const lines = result.stdout.split("\n");
+    const marker = lines.indexOf("--ALDER-LIBS-END--");
+    if (marker < 5) throw new Error("selected R returned incomplete identity");
+    const rHome = lines[0].trim();
+    const version2 = lines[1].trim();
+    const platform = lines[2].trim();
+    const arch = lines[3].trim();
+    const libraryPaths = lines.slice(4, marker).map((line) => line.trim()).filter(Boolean);
+    const baseLibrary = lines[marker + 1].trim();
+    if (!rHome || !version2 || !platform || !arch || !baseLibrary || libraryPaths.length === 0) {
+      throw new Error("selected R returned incomplete identity");
+    }
+    return { rHome, version: version2, platform, arch, libraryPaths, baseLibrary };
+  } catch (error61) {
+    const code2 = error61.code;
+    if (code2 === "ENOENT") throw notFound(`selected Rscript could not be started: ${rscript}`);
+    if (error61 instanceof REnvironmentError) throw error61;
+    throw invalid2(`selected Rscript failed identity validation: ${messageOf3(error61)}`);
+  }
+}
+async function probeProjectLibraries(rscript, projectDirectory, signal) {
+  try {
+    const result = await execFileAsync(rscript, ["--slave", "-e", "writeLines(.libPaths())"], {
+      signal,
+      cwd: projectDirectory,
+      env: withoutRHome(process.env),
+      timeout: R_PROBE_TIMEOUT_MS,
+      maxBuffer: 512 * 1024
+    });
+    const paths = result.stdout.split("\n").map((value) => value.trim()).filter(Boolean);
+    if (paths.length === 0) throw new Error("selected R returned no project library paths");
+    return paths;
+  } catch (error61) {
+    throw invalid2(`selected R failed project startup: ${messageOf3(error61)}`);
+  }
+}
+async function validateHelperLibrary(resources2) {
+  const description = join6(resources2.rLibraryDirectory, "alder", "DESCRIPTION");
+  try {
+    const info = await stat7(description);
+    if (!info.isFile()) throw new Error("not a file");
+  } catch (error61) {
+    throw invalid2("The R execution helpers are not installed in this build.");
+  }
+}
+async function validateHelperLoad(environment, manifest, helperLibrary, signal) {
+  const script = [
+    `invisible(loadNamespace('alder', lib.loc=${JSON.stringify(helperLibrary)}))`,
+    `description <- packageDescription('alder', lib.loc=${JSON.stringify(helperLibrary)})`,
+    "cat(as.character(description$Version), '\\n', description$Built, '\\n', sep = '')"
+  ].join("; ");
+  try {
+    const result = await execFileAsync(environment.rscript, ["--vanilla", "--slave", "-e", script], {
+      signal,
+      env: {
+        ...withoutRHome(process.env),
+        R_LIBS: helperLibrary,
+        R_LIBS_SITE: "",
+        R_LIBS_USER: "",
+        DYLD_LIBRARY_PATH: prependPath([join6(environment.rHome, "lib"), join6(environment.rHome, "lib", "R")], process.env.DYLD_LIBRARY_PATH)
+      },
+      timeout: R_PROBE_TIMEOUT_MS,
+      maxBuffer: 512 * 1024
+    });
+    const [packageVersion, built] = result.stdout.trim().split("\n");
+    const [major, minor] = environment.version.split(".");
+    if (packageVersion !== manifest.applicationVersion || !built?.startsWith("R " + major + "." + minor + ".")) {
+      throw new Error(`helper package version or Built R ABI does not match the selected runtime (package ${packageVersion ?? "missing"}, Built ${built ?? "missing"}, expected package ${manifest.applicationVersion} built with R ${major}.${minor}.x)`);
+    }
+  } catch (error61) {
+    throw invalid2(`Alder helper package cannot load under selected R: ${messageOf3(error61)}`);
+  }
+}
+async function validateSharedLibrary(rHome) {
+  const candidates = [join6(rHome, "lib", "libR.dylib"), join6(rHome, "lib", "R", "libR.dylib")];
+  for (const candidate of candidates) {
+    if (await isFile(candidate)) return;
+  }
+  throw invalid2(`selected R has no loadable shared library under ${rHome}`);
+}
+function validateRPlatform(platform) {
+  const normalized = platform.toLowerCase();
+  const expected = "darwin";
+  if (!normalized.includes(expected)) {
+    throw invalid2(`selected R platform ${platform} does not match ${process.platform}`);
+  }
+}
+function validateRArchitecture(arch) {
+  const expected = process.arch === "x64" ? ["x86_64", "x64", "amd64"] : process.arch === "arm64" ? ["aarch64", "arm64"] : [process.arch];
+  if (!expected.some((value) => arch.toLowerCase().includes(value.toLowerCase()))) {
+    throw invalid2(`selected R architecture ${arch} does not match ${process.arch}`);
+  }
+}
+async function normalizeDirectories(paths, label) {
+  const result = [];
+  for (const path3 of paths) result.push(await existingDirectory(path3, label));
+  return result;
+}
+function makeEnvironment(fields, helperAbi, paths) {
+  const libraryPaths = uniquePaths(paths);
+  return Object.freeze({
+    ...fields,
+    libraryPaths: Object.freeze(libraryPaths),
+    identity: createIdentity({ ...fields, helperAbi, libraryPaths })
+  });
+}
+async function optionalDirectory(path3, label) {
+  if (!path3 || !isAbsolute4(path3)) throw invalid2(`${label} must be an absolute path`);
+  let physical;
+  try {
+    physical = await realpath4(path3);
+  } catch (error61) {
+    if (error61.code === "ENOENT") return null;
+    throw invalid2(`${label} is unavailable: ${path3}: ${messageOf3(error61)}`);
+  }
+  let info;
+  try {
+    info = await stat7(physical);
+  } catch (error61) {
+    if (error61.code === "ENOENT") return null;
+    throw invalid2(`${label} is unavailable: ${path3}: ${messageOf3(error61)}`);
+  }
+  if (!info.isDirectory()) throw invalid2(`${label} is not a directory: ${path3}`);
+  return physical;
+}
+async function existingDirectory(path3, label) {
+  if (!path3 || !isAbsolute4(path3)) throw invalid2(`${label} must be an absolute path`);
+  const physical = await realpath4(path3).catch((error61) => {
+    throw invalid2(`${label} is unavailable: ${path3}: ${messageOf3(error61)}`);
+  });
+  const info = await stat7(physical);
+  if (!info.isDirectory()) throw invalid2(`${label} is not a directory: ${path3}`);
+  return physical;
+}
+async function isExecutable(path3) {
+  try {
+    const info = await stat7(path3);
+    if (!info.isFile()) return false;
+    return (info.mode & 73) !== 0;
+  } catch {
+    return false;
+  }
+}
+async function isFile(path3) {
+  try {
+    return (await stat7(path3)).isFile();
+  } catch {
+    return false;
+  }
+}
+function normalizeVersion(value) {
+  const match = /^(?:R version\s+)?(\d+\.\d+\.\d+)(?:\s.*|[-+].*)?$/.exec(value.trim());
+  if (!match) throw invalid2(`selected R reported an invalid version: ${value}`);
+  return match[1];
+}
+function uniquePaths(paths) {
+  return [...new Map(paths.map((path3) => [path3, path3])).values()];
+}
+function createIdentity(value) {
+  return createHash4("sha256").update(JSON.stringify(value)).digest("hex");
+}
+function prependPath(prefixes, existing) {
+  return [...prefixes, ...existing ? existing.split(delimiter) : []].join(delimiter);
+}
+function withoutRHome(environment) {
+  const result = { ...environment };
+  delete result.R_HOME;
+  return result;
+}
+function notFound(message2) {
+  return new REnvironmentError("r_not_found", message2);
+}
+function invalid2(message2) {
+  return new REnvironmentError("r_invalid", message2);
+}
+function unsupported(version2) {
+  return new REnvironmentError("r_unsupported", `R ${version2} does not match the helper ABI ${R_VERSION_RANGE}`, { detectedVersion: version2 });
+}
+function messageOf3(error61) {
+  return error61 instanceof Error ? error61.message : String(error61);
+}
 
 // src/strict-json.ts
 var DEFAULT_STRICT_JSON_LIMITS = Object.freeze({
@@ -77762,628 +78155,6 @@ function hasUnpairedSurrogate4(value) {
   return false;
 }
 
-// src/resources.ts
-import { readFile as readFile2, realpath as realpath3, stat as stat6 } from "node:fs/promises";
-import { isAbsolute as isAbsolute3, join as join5, resolve as resolve4 } from "node:path";
-var ResourceValidationError = class extends Error {
-  code = "resource_invalid";
-  constructor(message2) {
-    super(message2);
-    this.name = "ResourceValidationError";
-  }
-};
-async function resolveApplicationResources(root) {
-  const physicalRoot = await realpath3(root);
-  const manifest = await readApplicationManifest(physicalRoot);
-  const paths = Object.fromEntries(Object.entries(manifest.resources).map(([key2, path3]) => [key2, path3 === null ? null : resolve4(physicalRoot, path3)]));
-  for (const [key2, directory] of [["hostEntry", false], ["rendererDirectory", true], ["workerDirectory", true]]) {
-    const path3 = paths[key2];
-    const info = await stat6(path3).catch(() => {
-      throw invalid(`${key2} is unavailable: ${path3}`);
-    });
-    if (directory ? !info.isDirectory() : !info.isFile()) throw invalid(`${key2} has the wrong file type: ${path3}`);
-  }
-  return { ...paths, root: physicalRoot, manifest, processSupervisorExecutable: "" };
-}
-async function verifiedApplicationManifest(resources2) {
-  return resources2.manifest ?? readApplicationManifest(resources2.root);
-}
-async function readApplicationManifest(root) {
-  try {
-    return validateApplicationManifest(JSON.parse(await readFile2(join5(root, "manifest.json"), "utf8")));
-  } catch (error61) {
-    if (error61 instanceof ResourceValidationError) throw error61;
-    throw invalid(`application manifest is unavailable: ${error61 instanceof Error ? error61.message : String(error61)}`);
-  }
-}
-function validateApplicationManifest(value) {
-  if (!record2(value) || value.schemaVersion !== 1 || !["desktop", "headless"].includes(String(value.kind)) || typeof value.applicationVersion !== "string" || !value.applicationVersion || !record2(value.resources)) {
-    throw invalid("invalid application manifest");
-  }
-  const resources2 = value.resources;
-  const paths = {};
-  for (const key2 of ["cliLauncher", "hostEntry", "rendererDirectory", "workerDirectory", "rLibraryDirectory", "arkExecutable", "airExecutable", "nodeExecutable", "electronEntry"]) {
-    const path3 = resources2[key2];
-    if (key2 === "electronEntry" && path3 === null) {
-      paths[key2] = null;
-      continue;
-    }
-    if (typeof path3 !== "string" || !path3 || path3.includes("\0") || isAbsolute3(path3) || path3.includes("\\") || path3.split("/").some((part) => !part || part === "." || part === "..")) {
-      throw invalid(`invalid resource path: ${key2}`);
-    }
-    paths[key2] = path3;
-  }
-  return { schemaVersion: 1, kind: value.kind, applicationVersion: value.applicationVersion, resources: paths };
-}
-function record2(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-function invalid(message2) {
-  return new ResourceValidationError(message2);
-}
-
-// src/private-paths.ts
-import { constants as constants2 } from "node:fs";
-import { randomUUID as randomUUID4 } from "node:crypto";
-import { chmod, lstat as lstat4, mkdir as mkdir3, open as openFile, rename as rename3, rm as rm2 } from "node:fs/promises";
-import { dirname as dirname4, join as join6, parse as parse3, resolve as resolve5, sep } from "node:path";
-var PrivatePathError = class extends Error {
-  constructor(code2, message2, cause) {
-    super(message2);
-    this.code = code2;
-    this.cause = cause;
-    this.name = "PrivatePathError";
-  }
-  code;
-  cause;
-};
-var DEFAULT_READ_MAX_BYTES = 16 * 1024 * 1024;
-var DIRECTORY_MODE = 448;
-var FILE_MODE = 384;
-var PATH_CONTROL = /[\u0000]/;
-function invalid2(message2, cause) {
-  return new PrivatePathError("private_path_invalid", message2, cause);
-}
-function missing(path3) {
-  return Object.assign(new Error(`private path does not exist: ${path3}`), { code: "ENOENT", path: path3 });
-}
-function isMissing(error61) {
-  return errorCode(error61) === "ENOENT";
-}
-function isUnsupportedDirectorySync(error61) {
-  return ["EINVAL", "ENOTSUP", "EBADF", "EPERM"].includes(errorCode(error61) ?? "");
-}
-function errorCode(error61) {
-  if (typeof error61 !== "object" || error61 === null || !("code" in error61)) return void 0;
-  const code2 = error61.code;
-  return typeof code2 === "string" ? code2 : void 0;
-}
-function ensurePathString(path3) {
-  if (typeof path3 !== "string" || path3.length === 0 || PATH_CONTROL.test(path3)) {
-    throw invalid2("private path must be a non-empty path without NUL");
-  }
-  return resolve5(path3);
-}
-async function inspectPath(path3, expectFinal = null) {
-  const absolute = ensurePathString(path3);
-  const root = parse3(absolute).root;
-  const components = absolute.slice(root.length).split(sep).filter(Boolean);
-  let current = root;
-  let exists = true;
-  for (let index = 0; index < components.length; index += 1) {
-    current = join6(current, components[index]);
-    let info;
-    try {
-      info = await lstat4(current);
-    } catch (error61) {
-      if (isMissing(error61)) {
-        exists = false;
-        break;
-      }
-      throw error61;
-    }
-    if (info.isSymbolicLink()) {
-      throw new PrivatePathError("private_path_reparse", `private path component is a symlink: ${current}`);
-    }
-    if (index < components.length - 1 && !info.isDirectory()) {
-      throw new PrivatePathError("private_path_type", `private path component is not a directory: ${current}`);
-    }
-    if (index === components.length - 1 && expectFinal !== null) {
-      if (expectFinal === "directory" && !info.isDirectory()) {
-        throw new PrivatePathError("private_path_type", `private path is not a directory: ${absolute}`);
-      }
-      if (expectFinal === "file" && !info.isFile()) {
-        throw new PrivatePathError("private_path_type", `private path is not a regular file: ${absolute}`);
-      }
-    }
-  }
-  return { path: absolute, exists };
-}
-function validatePrivateStats(info, kind, path3) {
-  if (kind === "directory" ? !info.isDirectory() : !info.isFile()) {
-    throw new PrivatePathError("private_path_type", `private path is not a ${kind}: ${path3}`);
-  }
-  if (info.isSymbolicLink()) {
-    throw new PrivatePathError("private_path_reparse", `private path is a symlink: ${path3}`);
-  }
-  const uid = typeof process.getuid === "function" ? process.getuid() : void 0;
-  if (uid !== void 0 && info.uid !== uid) {
-    throw new PrivatePathError("private_path_overshared", `private path is not owned by the current user: ${path3}`);
-  }
-  if ((Number(info.mode) & 63) !== 0) {
-    throw new PrivatePathError("private_path_overshared", `private path is accessible by group or other users: ${path3}`);
-  }
-}
-async function inspectExisting(path3, kind, options) {
-  const inspection = await inspectPath(path3, kind);
-  if (!inspection.exists) throw missing(inspection.path);
-  const info = await lstat4(inspection.path);
-  validatePrivateStats(info, kind, inspection.path);
-  return inspection;
-}
-async function syncDirectory2(directory) {
-  let handle;
-  try {
-    handle = await openFile(directory, constants2.O_RDONLY);
-    await handle.sync();
-  } catch (error61) {
-    if (!isUnsupportedDirectorySync(error61)) throw error61;
-  } finally {
-    if (handle !== void 0) await handle.close().catch(() => void 0);
-  }
-}
-async function verifyPrivateDirectory(path3, options = {}) {
-  const inspection = await inspectExisting(path3, "directory", options);
-  const info = await lstat4(inspection.path);
-  validatePrivateStats(info, "directory", inspection.path);
-}
-async function verifyPrivateFile(path3, options = {}) {
-  const inspection = await inspectExisting(path3, "file", options);
-  const info = await lstat4(inspection.path);
-  validatePrivateStats(info, "file", inspection.path);
-}
-async function securePrivateDirectory(path3, options = {}) {
-  const inspection = await inspectExisting(path3, "directory", options);
-  await chmod(inspection.path, DIRECTORY_MODE);
-  await verifyPrivateDirectory(inspection.path, options);
-}
-async function ensurePrivateDirectory(path3, options = {}) {
-  const inspection = await inspectPath(path3);
-  if (inspection.exists) {
-    await verifyPrivateDirectory(inspection.path, options);
-    return;
-  }
-  await mkdir3(inspection.path, { recursive: true, mode: DIRECTORY_MODE });
-  await inspectPath(inspection.path, "directory");
-  await securePrivateDirectory(inspection.path, options);
-}
-async function readPrivateFile(path3, options = {}) {
-  const maxBytes = options.maxBytes ?? DEFAULT_READ_MAX_BYTES;
-  if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) throw invalid2("maxBytes must be a non-negative safe integer");
-  const inspection = await inspectPath(path3, "file");
-  if (!inspection.exists) throw missing(inspection.path);
-  const flags = constants2.O_RDONLY | (constants2.O_NOFOLLOW ?? 0);
-  let handle;
-  try {
-    handle = await openFile(inspection.path, flags);
-    const info = await handle.stat();
-    validatePrivateStats(info, "file", inspection.path);
-    if (!Number.isSafeInteger(info.size) || info.size > maxBytes) {
-      throw new PrivatePathError("private_path_too_large", "private file exceeds " + maxBytes + " bytes: " + inspection.path);
-    }
-    await options.beforeRead?.();
-    const bytes = Buffer.alloc(info.size);
-    let offset = 0;
-    while (offset < bytes.length) {
-      const result = await handle.read(bytes, offset, bytes.length - offset, offset);
-      if (result.bytesRead <= 0) throw invalid2("private file was truncated while being read: " + inspection.path);
-      offset += result.bytesRead;
-    }
-    const after2 = await handle.stat();
-    validatePrivateStats(after2, "file", inspection.path);
-    if (after2.dev !== info.dev || after2.ino !== info.ino || after2.mode !== info.mode || after2.nlink !== info.nlink || after2.uid !== info.uid || after2.gid !== info.gid || after2.rdev !== info.rdev || after2.size !== info.size || after2.mtimeMs !== info.mtimeMs || after2.ctimeMs !== info.ctimeMs || after2.birthtimeMs !== info.birthtimeMs) {
-      throw invalid2("private file changed while being read: " + inspection.path);
-    }
-    return bytes;
-  } finally {
-    if (handle !== void 0) await handle.close().catch(() => void 0);
-  }
-}
-async function writePrivateFile(path3, bytes, options = {}) {
-  const inspection = await inspectPath(path3, null);
-  const parent = dirname4(inspection.path);
-  await ensurePrivateDirectory(parent, options);
-  try {
-    const target = await lstat4(inspection.path);
-    if (target.isSymbolicLink()) throw new PrivatePathError("private_path_reparse", "private path is a symlink: " + inspection.path);
-    if (!target.isFile()) throw new PrivatePathError("private_path_type", "private path is not a regular file: " + inspection.path);
-    validatePrivateStats(target, "file", inspection.path);
-  } catch (error61) {
-    if (!isMissing(error61)) throw error61;
-  }
-  const basename9 = inspection.path.slice(inspection.path.lastIndexOf(sep) + 1);
-  const temporary = join6(parent, `.${basename9}.${randomUUID4()}.tmp`);
-  let handle;
-  try {
-    const flags = constants2.O_WRONLY | constants2.O_CREAT | constants2.O_EXCL | (constants2.O_NOFOLLOW ?? 0);
-    handle = await openFile(temporary, flags, FILE_MODE);
-    const info = await handle.stat();
-    validatePrivateStats(info, "file", temporary);
-    let offset = 0;
-    while (offset < bytes.byteLength) {
-      const result = await handle.write(bytes, offset, bytes.byteLength - offset, offset);
-      if (result.bytesWritten <= 0) throw invalid2(`short private file write: ${inspection.path}`);
-      offset += result.bytesWritten;
-    }
-    await handle.sync();
-    await handle.close();
-    handle = void 0;
-    await chmod(temporary, FILE_MODE);
-    await rename3(temporary, inspection.path);
-    await syncDirectory2(parent);
-  } catch (error61) {
-    if (handle !== void 0) await handle.close().catch(() => void 0);
-    await rm2(temporary, { force: true }).catch(() => void 0);
-    throw error61;
-  }
-}
-
-// src/r-environment.ts
-var execFileAsync = promisify(execFile);
-var R_VERSION_RANGE = ">=4.6.0 <4.7.0";
-var R_PROBE_TIMEOUT_MS = 1e4;
-var PRIVATE_SETTINGS_SCHEMA_VERSION = 1;
-var REnvironmentError = class extends Error {
-  constructor(code2, message2, details) {
-    super(message2);
-    this.code = code2;
-    this.details = details;
-    this.name = "REnvironmentError";
-  }
-  code;
-  details;
-};
-async function resolveREnvironment(options) {
-  options.signal?.throwIfAborted();
-  const resources2 = options.resources;
-  const manifest = await verifiedApplicationManifest(resources2).catch((error61) => {
-    if (error61 instanceof REnvironmentError) throw error61;
-    throw invalid3(`application manifest cannot be read while selecting R: ${messageOf3(error61)}`);
-  });
-  await validateHelperLibrary(resources2);
-  const selected = await selectRscript(options.rscript, resources2.electronEntry !== null, resources2.processSupervisorExecutable);
-  const probe = await probeR(selected, options.signal);
-  const version2 = normalizeVersion(probe.version);
-  if (!/^4\.6\./.test(version2)) throw unsupported(version2);
-  const rHome = await existingDirectory(probe.rHome, "selected R_HOME");
-  await validateSharedLibrary(rHome);
-  validateRPlatform(probe.platform);
-  validateRArchitecture(probe.arch);
-  const platformResult = rEnvironmentSchema.shape.platform.safeParse(process.platform);
-  if (!platformResult.success) throw invalid3(`unsupported host platform ${process.platform}`);
-  const platform = platformResult.data;
-  const normalLibraries = await normalizeDirectories(
-    await probeProjectLibraries(selected, options.projectDirectory, options.signal),
-    "R project library path"
-  );
-  const baseLibrary = await existingDirectory(probe.baseLibrary, "R base library");
-  const helperLibrary = await existingDirectory(resources2.rLibraryDirectory, "Alder R library");
-  const environmentFields = { rscript: selected, rHome, version: version2, platform, arch: process.arch };
-  const helperAbi = `${manifest.applicationVersion}:${R_VERSION_RANGE}`;
-  const baseLibraryPaths = uniquePaths([...options.sandbox === true ? [] : normalLibraries, helperLibrary, baseLibrary]);
-  const baseEnvironment = makeEnvironment(environmentFields, helperAbi, baseLibraryPaths);
-  await validateHelperLoad(baseEnvironment, manifest, helperLibrary, options.signal);
-  const requestedProjectLibrary = options.resolveProjectLibrary === void 0 ? options.sandbox === true ? join7(options.projectDirectory, ".alder", "library") : null : await options.resolveProjectLibrary(baseEnvironment);
-  if (requestedProjectLibrary !== null && typeof requestedProjectLibrary !== "string") {
-    throw invalid3("project package library resolver must return a path or null");
-  }
-  const projectLibrary = requestedProjectLibrary === null ? null : await optionalDirectory(requestedProjectLibrary, "project package library");
-  const libraryPaths = uniquePaths([
-    ...options.sandbox === true ? [] : normalLibraries,
-    ...projectLibrary === null ? [] : [projectLibrary],
-    helperLibrary,
-    baseLibrary
-  ]);
-  options.signal?.throwIfAborted();
-  const environment = makeEnvironment(environmentFields, helperAbi, libraryPaths);
-  return environment;
-}
-function rServiceEnvironmentVariables(environment, resources2, analysisEnvironmentId) {
-  const values = {
-    R_HOME: environment.rHome,
-    ALDER_R_PRIVATE_LIBRARY: resources2.rLibraryDirectory,
-    ALDER_RESOURCES_ROOT: resources2.root,
-    ALDER_R_LIBRARIES: JSON.stringify([resources2.rLibraryDirectory]),
-    ALDER_WORKER_DIR: resources2.workerDirectory,
-    R_LIBS: resources2.rLibraryDirectory,
-    R_LIBS_SITE: "",
-    R_LIBS_USER: ""
-  };
-  const loaderDirectories = [join7(environment.rHome, "lib"), join7(environment.rHome, "lib", "R")];
-  values.DYLD_LIBRARY_PATH = prependPath(loaderDirectories, process.env.DYLD_LIBRARY_PATH);
-  if (analysisEnvironmentId !== void 0) values.ALDER_ANALYSIS_ENVIRONMENT_ID = analysisEnvironmentId;
-  return values;
-}
-function rKernelEnvironmentVariables(environment, resources2, projectDirectory) {
-  const projectLibrary = projectDirectory === void 0 ? void 0 : join7(projectDirectory, ".alder", "library");
-  return {
-    R_HOME: environment.rHome,
-    ALDER_R_PRIVATE_LIBRARY: resources2.rLibraryDirectory,
-    ALDER_RESOURCES_ROOT: resources2.root,
-    ALDER_WORKER_DIR: resources2.workerDirectory,
-    ...projectLibrary !== void 0 && environment.libraryPaths.includes(projectLibrary) ? { ALDER_PROJECT_LIBRARY: projectLibrary } : {},
-    DYLD_LIBRARY_PATH: prependPath(
-      [join7(environment.rHome, "lib"), join7(environment.rHome, "lib", "R")],
-      process.env.DYLD_LIBRARY_PATH
-    )
-  };
-}
-async function selectRscript(requested, desktop, processSupervisorExecutable) {
-  if (requested !== void 0) return resolveSelectedPath(requested, "explicit Rscript");
-  if (desktop) {
-    const saved = await savedRscript(processSupervisorExecutable);
-    if (saved !== null) return resolveSelectedPath(saved, "saved Rscript");
-  }
-  const discovered = await findOnPath("Rscript");
-  if (discovered !== null) return discovered;
-  if (desktop) {
-    const framework = await resolveExecutableCandidate("/Library/Frameworks/R.framework/Resources/bin/Rscript");
-    if (framework !== null) return framework;
-    throw notFound("Rscript was not found on PATH or at the standard macOS R framework location");
-  }
-  throw notFound("Rscript was not found on PATH");
-}
-async function savedRscript(processSupervisorExecutable) {
-  const paths = envPaths("alder", { suffix: "" });
-  const settingsPath = join7(paths.config, "settings.json");
-  let bytes;
-  try {
-    bytes = await readPrivateFile(settingsPath, { maxBytes: 64 * 1024, processSupervisorExecutable });
-  } catch (error61) {
-    if (typeof error61 === "object" && error61 !== null && "code" in error61 && error61.code === "ENOENT") return null;
-    throw invalid3("saved R selection cannot be read: " + messageOf3(error61));
-  }
-  let value;
-  try {
-    value = parseStrictJson(bytes, { maxBytes: 64 * 1024, maxDepth: 16 });
-  } catch (error61) {
-    throw invalid3("saved R selection is invalid: " + messageOf3(error61));
-  }
-  if (!isRecord2(value) || value.schemaVersion !== PRIVATE_SETTINGS_SCHEMA_VERSION || !(typeof value.rscript === "string" || value.rscript === null) || Object.keys(value).some((key2) => !["schemaVersion", "rscript"].includes(key2))) {
-    throw invalid3("saved R selection has an invalid schema");
-  }
-  return value.rscript;
-}
-async function findOnPath(command) {
-  const pathValue2 = process.env.PATH ?? "";
-  for (const directory of pathValue2.split(delimiter).filter(Boolean)) {
-    const candidates = [join7(directory, command)];
-    for (const candidate of candidates) {
-      const resolved = await resolveExecutableCandidate(candidate);
-      if (resolved !== null) return resolved;
-    }
-  }
-  return null;
-}
-async function resolveExecutableCandidate(candidate) {
-  if (!await isExecutable(candidate)) return null;
-  try {
-    return await realpath4(candidate);
-  } catch {
-    return null;
-  }
-}
-async function resolveSelectedPath(value, label) {
-  if (!value || value.includes("\0")) throw notFound(`${label} is empty or invalid`);
-  const candidate = resolve6(value);
-  if (!await isExecutable(candidate)) throw notFound(`${label} was not found: ${value}`);
-  try {
-    return await realpath4(candidate);
-  } catch (error61) {
-    throw notFound(`${label} cannot be resolved: ${messageOf3(error61)}`);
-  }
-}
-async function probeR(rscript, signal) {
-  const script = [
-    "cat(R.home(), '\\n', sep = '')",
-    "cat(R.version$version.string, intToUtf8(10), sep = '')",
-    "cat(R.version$platform, '\\n', sep = '')",
-    "cat(R.version$arch, '\\n', sep = '')",
-    "cat(paste(.libPaths(), collapse = '\\n'), '\\n--ALDER-LIBS-END--\\n', sep = '')",
-    "cat(R.home('library'), '\\n', sep = '')"
-  ].join("; ");
-  try {
-    const result = await execFileAsync(rscript, ["--vanilla", "--slave", "-e", script], {
-      signal,
-      env: withoutRHome(process.env),
-      timeout: R_PROBE_TIMEOUT_MS,
-      maxBuffer: 512 * 1024
-    });
-    const lines = result.stdout.split("\n");
-    const marker = lines.indexOf("--ALDER-LIBS-END--");
-    if (marker < 5) throw new Error("selected R returned incomplete identity");
-    const rHome = lines[0].trim();
-    const version2 = lines[1].trim();
-    const platform = lines[2].trim();
-    const arch = lines[3].trim();
-    const libraryPaths = lines.slice(4, marker).map((line) => line.trim()).filter(Boolean);
-    const baseLibrary = lines[marker + 1].trim();
-    if (!rHome || !version2 || !platform || !arch || !baseLibrary || libraryPaths.length === 0) {
-      throw new Error("selected R returned incomplete identity");
-    }
-    return { rHome, version: version2, platform, arch, libraryPaths, baseLibrary };
-  } catch (error61) {
-    const code2 = error61.code;
-    if (code2 === "ENOENT") throw notFound(`selected Rscript could not be started: ${rscript}`);
-    if (error61 instanceof REnvironmentError) throw error61;
-    throw invalid3(`selected Rscript failed identity validation: ${messageOf3(error61)}`);
-  }
-}
-async function probeProjectLibraries(rscript, projectDirectory, signal) {
-  try {
-    const result = await execFileAsync(rscript, ["--slave", "-e", "writeLines(.libPaths())"], {
-      signal,
-      cwd: projectDirectory,
-      env: withoutRHome(process.env),
-      timeout: R_PROBE_TIMEOUT_MS,
-      maxBuffer: 512 * 1024
-    });
-    const paths = result.stdout.split("\n").map((value) => value.trim()).filter(Boolean);
-    if (paths.length === 0) throw new Error("selected R returned no project library paths");
-    return paths;
-  } catch (error61) {
-    throw invalid3(`selected R failed project startup: ${messageOf3(error61)}`);
-  }
-}
-async function validateHelperLibrary(resources2) {
-  const description = join7(resources2.rLibraryDirectory, "alder", "DESCRIPTION");
-  try {
-    const info = await stat7(description);
-    if (!info.isFile()) throw new Error("not a file");
-  } catch (error61) {
-    throw invalid3("The R execution helpers are not installed in this build.");
-  }
-}
-async function validateHelperLoad(environment, manifest, helperLibrary, signal) {
-  const script = [
-    `invisible(loadNamespace('alder', lib.loc=${JSON.stringify(helperLibrary)}))`,
-    `description <- packageDescription('alder', lib.loc=${JSON.stringify(helperLibrary)})`,
-    "cat(as.character(description$Version), '\\n', description$Built, '\\n', sep = '')"
-  ].join("; ");
-  try {
-    const result = await execFileAsync(environment.rscript, ["--vanilla", "--slave", "-e", script], {
-      signal,
-      env: {
-        ...withoutRHome(process.env),
-        R_LIBS: helperLibrary,
-        R_LIBS_SITE: "",
-        R_LIBS_USER: "",
-        DYLD_LIBRARY_PATH: prependPath([join7(environment.rHome, "lib"), join7(environment.rHome, "lib", "R")], process.env.DYLD_LIBRARY_PATH)
-      },
-      timeout: R_PROBE_TIMEOUT_MS,
-      maxBuffer: 512 * 1024
-    });
-    const [packageVersion, built] = result.stdout.trim().split("\n");
-    const [major, minor] = environment.version.split(".");
-    if (packageVersion !== manifest.applicationVersion || !built?.startsWith("R " + major + "." + minor + ".")) {
-      throw new Error(`helper package version or Built R ABI does not match the selected runtime (package ${packageVersion ?? "missing"}, Built ${built ?? "missing"}, expected package ${manifest.applicationVersion} built with R ${major}.${minor}.x)`);
-    }
-  } catch (error61) {
-    throw invalid3(`Alder helper package cannot load under selected R: ${messageOf3(error61)}`);
-  }
-}
-async function validateSharedLibrary(rHome) {
-  const candidates = [join7(rHome, "lib", "libR.dylib"), join7(rHome, "lib", "R", "libR.dylib")];
-  for (const candidate of candidates) {
-    if (await isFile(candidate)) return;
-  }
-  throw invalid3(`selected R has no loadable shared library under ${rHome}`);
-}
-function validateRPlatform(platform) {
-  const normalized = platform.toLowerCase();
-  const expected = "darwin";
-  if (!normalized.includes(expected)) {
-    throw invalid3(`selected R platform ${platform} does not match ${process.platform}`);
-  }
-}
-function validateRArchitecture(arch) {
-  const expected = process.arch === "x64" ? ["x86_64", "x64", "amd64"] : process.arch === "arm64" ? ["aarch64", "arm64"] : [process.arch];
-  if (!expected.some((value) => arch.toLowerCase().includes(value.toLowerCase()))) {
-    throw invalid3(`selected R architecture ${arch} does not match ${process.arch}`);
-  }
-}
-async function normalizeDirectories(paths, label) {
-  const result = [];
-  for (const path3 of paths) result.push(await existingDirectory(path3, label));
-  return result;
-}
-function makeEnvironment(fields, helperAbi, paths) {
-  const libraryPaths = uniquePaths(paths);
-  return Object.freeze({
-    ...fields,
-    libraryPaths: Object.freeze(libraryPaths),
-    identity: createIdentity({ ...fields, helperAbi, libraryPaths })
-  });
-}
-async function optionalDirectory(path3, label) {
-  if (!path3 || !isAbsolute4(path3)) throw invalid3(`${label} must be an absolute path`);
-  let physical;
-  try {
-    physical = await realpath4(path3);
-  } catch (error61) {
-    if (error61.code === "ENOENT") return null;
-    throw invalid3(`${label} is unavailable: ${path3}: ${messageOf3(error61)}`);
-  }
-  let info;
-  try {
-    info = await stat7(physical);
-  } catch (error61) {
-    if (error61.code === "ENOENT") return null;
-    throw invalid3(`${label} is unavailable: ${path3}: ${messageOf3(error61)}`);
-  }
-  if (!info.isDirectory()) throw invalid3(`${label} is not a directory: ${path3}`);
-  return physical;
-}
-async function existingDirectory(path3, label) {
-  if (!path3 || !isAbsolute4(path3)) throw invalid3(`${label} must be an absolute path`);
-  const physical = await realpath4(path3).catch((error61) => {
-    throw invalid3(`${label} is unavailable: ${path3}: ${messageOf3(error61)}`);
-  });
-  const info = await stat7(physical);
-  if (!info.isDirectory()) throw invalid3(`${label} is not a directory: ${path3}`);
-  return physical;
-}
-async function isExecutable(path3) {
-  try {
-    const info = await stat7(path3);
-    if (!info.isFile()) return false;
-    return (info.mode & 73) !== 0;
-  } catch {
-    return false;
-  }
-}
-async function isFile(path3) {
-  try {
-    return (await stat7(path3)).isFile();
-  } catch {
-    return false;
-  }
-}
-function normalizeVersion(value) {
-  const match = /^(?:R version\s+)?(\d+\.\d+\.\d+)(?:\s.*|[-+].*)?$/.exec(value.trim());
-  if (!match) throw invalid3(`selected R reported an invalid version: ${value}`);
-  return match[1];
-}
-function uniquePaths(paths) {
-  return [...new Map(paths.map((path3) => [path3, path3])).values()];
-}
-function createIdentity(value) {
-  return createHash4("sha256").update(JSON.stringify(value)).digest("hex");
-}
-function prependPath(prefixes, existing) {
-  return [...prefixes, ...existing ? existing.split(delimiter) : []].join(delimiter);
-}
-function withoutRHome(environment) {
-  const result = { ...environment };
-  delete result.R_HOME;
-  return result;
-}
-function isRecord2(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-function notFound(message2) {
-  return new REnvironmentError("r_not_found", message2);
-}
-function invalid3(message2) {
-  return new REnvironmentError("r_invalid", message2);
-}
-function unsupported(version2) {
-  return new REnvironmentError("r_unsupported", `R ${version2} does not match the helper ABI ${R_VERSION_RANGE}`, { detectedVersion: version2 });
-}
-function messageOf3(error61) {
-  return error61 instanceof Error ? error61.message : String(error61);
-}
-
 // src/framing.ts
 var DEFAULT_MAX_FRAME_BYTES = 8 * 1024 * 1024;
 var DEFAULT_MAX_ENGINE_FRAME_BYTES2 = 128 * 1024 * 1024;
@@ -78519,8 +78290,8 @@ function validateMaxFrameBytes(value) {
 }
 
 // src/performance.ts
-import { constants as constants3, accessSync, appendFileSync, statSync } from "node:fs";
-import { join as join8 } from "node:path";
+import { constants as constants2, accessSync, appendFileSync, statSync } from "node:fs";
+import { join as join7 } from "node:path";
 var origin = process.hrtime.bigint();
 var spanCounter = 0;
 var PerformanceTrace = class {
@@ -78531,14 +78302,14 @@ var PerformanceTrace = class {
     let valid = false;
     try {
       valid = statSync(directory).isDirectory();
-      accessSync(directory, constants3.W_OK);
+      accessSync(directory, constants2.W_OK);
     } catch {
       valid = false;
     }
     if (!valid) {
       throw new Error("ALDER_PERF_TRACE_DIR must be an existing writable directory");
     }
-    this.path = join8(directory, `host-${process.pid}.jsonl`);
+    this.path = join7(directory, `host-${process.pid}.jsonl`);
   }
   begin(stage, fields = {}) {
     if (this.path === void 0) return void 0;
@@ -78592,10 +78363,10 @@ function nanosecondsToMilliseconds(value) {
 }
 
 // src/jupyter.ts
-import { createHmac, randomBytes, randomUUID as randomUUID5, timingSafeEqual } from "node:crypto";
+import { createHmac, randomBytes, randomUUID as randomUUID4, timingSafeEqual } from "node:crypto";
 import { EventEmitter as EventEmitter2 } from "node:events";
-import { access, chmod as chmod2, mkdir as mkdir4, rm as rm3, stat as stat8, writeFile as writeFile2 } from "node:fs/promises";
-import { join as join9 } from "node:path";
+import { access, chmod, mkdir as mkdir3, rm as rm2, stat as stat8, writeFile as writeFile2 } from "node:fs/promises";
+import { join as join8 } from "node:path";
 import { createConnection, createServer } from "node:net";
 import { TextDecoder as TextDecoder2 } from "node:util";
 var MESSAGE_DELIMITER = Buffer.from("<IDS|MSG>");
@@ -78622,7 +78393,7 @@ var ArkKernel = class extends EventEmitter2 {
   }
   options;
   maxMessageBytes;
-  session = randomUUID5();
+  session = randomUUID4();
   key = randomBytes(32).toString("hex");
   child;
   shell;
@@ -78670,7 +78441,7 @@ var ArkKernel = class extends EventEmitter2 {
         requireExecutable(this.options.executable),
         requireFile(this.options.startupFile, "Ark startup file"),
         requireDirectory(this.options.cwd, "Ark working directory"),
-        mkdir4(this.options.connectionDirectory, { recursive: true })
+        mkdir3(this.options.connectionDirectory, { recursive: true })
       ]);
       this.assertStartAllowed();
       let zmq;
@@ -78685,9 +78456,9 @@ var ArkKernel = class extends EventEmitter2 {
       this.assertStartAllowed();
       const ports = await reserveConnectionPorts();
       this.assertStartAllowed();
-      this.connectionFile = join9(
+      this.connectionFile = join8(
         this.options.connectionDirectory,
-        `ark-${process.pid}-${randomUUID5()}.json`
+        `ark-${process.pid}-${randomUUID4()}.json`
       );
       this.logFile = this.connectionFile + ".log";
       await writeFile2(this.logFile, "", { mode: 384 });
@@ -78699,7 +78470,7 @@ var ArkKernel = class extends EventEmitter2 {
         key: this.key
       })}
 `, { mode: 384 });
-      await chmod2(this.connectionFile, 384).catch(() => {
+      await chmod(this.connectionFile, 384).catch(() => {
       });
       this.assertStartAllowed();
       await this.spawnArk();
@@ -78859,7 +78630,7 @@ var ArkKernel = class extends EventEmitter2 {
   }
   async connectLsp() {
     if (!this.ready || this.shell === void 0) throw new Error("Ark kernel is unavailable");
-    const commId = randomUUID5();
+    const commId = randomUUID4();
     const response = new Promise((resolve15, reject) => {
       this.lspCommPending.set(commId, { resolve: resolve15, reject });
     });
@@ -78947,12 +78718,12 @@ var ArkKernel = class extends EventEmitter2 {
   }
   async removeConnectionFile() {
     if (this.connectionFile !== void 0) {
-      await rm3(this.connectionFile, { force: true }).catch(() => {
+      await rm2(this.connectionFile, { force: true }).catch(() => {
       });
       this.connectionFile = void 0;
     }
     if (this.logFile !== void 0) {
-      await rm3(this.logFile, { force: true }).catch(() => {
+      await rm2(this.logFile, { force: true }).catch(() => {
       });
       this.logFile = void 0;
     }
@@ -79019,7 +78790,7 @@ var ArkKernel = class extends EventEmitter2 {
     }
   }
   async connect(zmq, ports) {
-    const routingId = randomUUID5();
+    const routingId = randomUUID4();
     const bounded = { maxMessageSize: this.maxMessageBytes, receiveHighWaterMark: 256 };
     this.control = new zmq.Dealer({ routingId, ...bounded });
     this.shell = new zmq.Dealer({ routingId, ...bounded });
@@ -79289,9 +79060,9 @@ function decodeMessage(frames, key2, maxMessageBytes = DEFAULT_MAX_FRAME_BYTES) 
       throw new FrameProtocolError("Jupyter message exceeds the configured byte limit");
     }
   }
-  const delimiter3 = frames.findIndex((frame) => frame.equals(MESSAGE_DELIMITER));
-  if (delimiter3 < 0) throw new FrameProtocolError("Jupyter message delimiter is missing");
-  const body = frames.slice(delimiter3 + 1);
+  const delimiter2 = frames.findIndex((frame) => frame.equals(MESSAGE_DELIMITER));
+  if (delimiter2 < 0) throw new FrameProtocolError("Jupyter message delimiter is missing");
+  const body = frames.slice(delimiter2 + 1);
   if (body.length < 5) {
     throw new FrameProtocolError(`Jupyter message has ${body.length} body frames, expected at least 5`);
   }
@@ -79303,7 +79074,7 @@ function decodeMessage(frames, key2, maxMessageBytes = DEFAULT_MAX_FRAME_BYTES) 
   const metadata = asRecord(parseJsonFrame(metadataBytes, "metadata"), "Jupyter metadata");
   const content = asRecord(parseJsonFrame(contentBytes, "content", maxMessageBytes), "Jupyter content");
   return {
-    identities: frames.slice(0, delimiter3),
+    identities: frames.slice(0, delimiter2),
     header,
     parentHeader,
     metadata,
@@ -79455,7 +79226,7 @@ function validateTimeout(value, name) {
   }
 }
 function newMessageId() {
-  return randomUUID5();
+  return randomUUID4();
 }
 function redactText(value, secrets) {
   let result = value;
@@ -79856,7 +79627,7 @@ var Engine = class extends EventEmitter3 {
   async drainRetiredPaths() {
     const directories = [...this.retiredPathDirectories];
     this.retiredPathDirectories.clear();
-    await Promise.all(directories.map((directory) => rm4(directory, { recursive: true, force: true }).catch(() => {
+    await Promise.all(directories.map((directory) => rm3(directory, { recursive: true, force: true }).catch(() => {
     })));
   }
   onFailure(listener) {
@@ -80095,7 +79866,7 @@ var Engine = class extends EventEmitter3 {
         operation_id: values[0].operationId,
         run_id: values[0].runId
       });
-      batch.permit = join10(this.runtime.controlDirectory, ".alder-batch-" + randomUUID6());
+      batch.permit = join9(this.runtime.controlDirectory, ".alder-batch-" + randomUUID5());
       writeFileSync(batch.permit, "", { flag: "wx", mode: 384 });
       batch.states = values.map((value) => ({ ...makeEvaluation(requestId, value, (event) => {
         callbacks = callbacks.then(() => onEvent?.(event));
@@ -80293,7 +80064,7 @@ var Engine = class extends EventEmitter3 {
           this.paths = void 0;
           for (const directory of previousPaths?.ownedDirectories ?? []) {
             if (directory === previousPaths?.artifactDirectory) continue;
-            await rm4(directory, { recursive: true, force: true }).catch(() => {
+            await rm3(directory, { recursive: true, force: true }).catch(() => {
             });
           }
         }
@@ -80356,7 +80127,7 @@ var Engine = class extends EventEmitter3 {
         this.outputDocumentRevision = void 0;
       }
       for (const directory of this.paths?.ownedDirectories ?? []) {
-        await rm4(directory, { recursive: true, force: true }).catch(() => {
+        await rm3(directory, { recursive: true, force: true }).catch(() => {
         });
       }
       await this.drainRetiredPaths();
@@ -80438,7 +80209,7 @@ var Engine = class extends EventEmitter3 {
       this.runtime ??= await prepareRuntime(paths);
       const generation = ++this.peerGeneration;
       this.kernelGeneration = generation;
-      this.kernelEpoch = randomUUID6();
+      this.kernelEpoch = randomUUID5();
       kernel = new ArkKernel({
         executable: paths.arkExecutable,
         startupFile: paths.arkStartupScript,
@@ -80477,7 +80248,7 @@ var Engine = class extends EventEmitter3 {
       const runtime = this.runtime;
       this.runtime = void 0;
       for (const directory of runtime?.ownedDirectories ?? []) {
-        await rm4(directory, { recursive: true, force: true }).catch(() => {
+        await rm3(directory, { recursive: true, force: true }).catch(() => {
         });
       }
       await this.drainRetiredPaths();
@@ -80731,7 +80502,7 @@ var Engine = class extends EventEmitter3 {
     try {
       await Promise.all([kernel?.terminate(), analyzer?.terminate(timeout)]);
     } finally {
-      for (const directory of runtime?.ownedDirectories ?? []) await rm4(directory, { recursive: true, force: true }).catch(() => {
+      for (const directory of runtime?.ownedDirectories ?? []) await rm3(directory, { recursive: true, force: true }).catch(() => {
       });
       if (this.runtime === runtime) this.runtime = void 0;
       if (this.kernel === kernel) this.kernel = void 0;
@@ -81094,7 +80865,7 @@ var Engine = class extends EventEmitter3 {
       throw new EngineTransportError("engine request queue is full", "kernel");
     }
     const requestId = this.nextRequestId();
-    const marker = randomUUID6();
+    const marker = randomUUID5();
     const wire = { req: requestId, command, ...payload };
     const span = trace ? this.trace.begin("host.engine.request", requestTraceFields("kernel", command, wire)) : void 0;
     this.pendingKernelRequests += 1;
@@ -81518,7 +81289,7 @@ function evaluationWire(value, controlDirectory) {
   const encoded = encodeSource(value.source, "evaluation source");
   let source;
   if (encoded.bytes > 1024 * 1024) {
-    const path3 = join10(controlDirectory, ".alder-source-" + randomUUID6());
+    const path3 = join9(controlDirectory, ".alder-source-" + randomUUID5());
     writeFileSync(path3, encoded.text, { encoding: "utf8", flag: "wx", mode: 384 });
     source = { code_path: path3 };
   } else {
@@ -81719,12 +81490,12 @@ function encodeSource(value, label) {
   return { text: value, base64: source.toString("base64"), bytes: source.length };
 }
 async function prepareRuntime(paths) {
-  const captureDirectory = await mkdtemp(join10(paths.artifactDirectory, ".alder-capture-"));
+  const captureDirectory = await mkdtemp(join9(paths.artifactDirectory, ".alder-capture-"));
   try {
-    const controlDirectory = await mkdtemp(join10(paths.artifactDirectory, ".alder-control-"));
+    const controlDirectory = await mkdtemp(join9(paths.artifactDirectory, ".alder-control-"));
     return { captureDirectory, controlDirectory, ownedDirectories: [captureDirectory, controlDirectory] };
   } catch (error61) {
-    await rm4(captureDirectory, { recursive: true, force: true }).catch(() => {
+    await rm3(captureDirectory, { recursive: true, force: true }).catch(() => {
     });
     throw error61;
   }
@@ -81732,18 +81503,18 @@ async function prepareRuntime(paths) {
 async function resolvePaths(options, environment, signal, pathOptions = options) {
   throwIfAborted(signal);
   const resources2 = options.resources;
-  const workerDirectory = resolve7(resources2.workerDirectory);
-  const arkStartupScript = join10(workerDirectory, "host-ark.R");
-  const analyzerScript = join10(workerDirectory, "host-analyzer.R");
-  const framingScript = join10(workerDirectory, "host-framing.R");
-  const arkExecutable = resolve7(resources2.arkExecutable);
+  const workerDirectory = resolve6(resources2.workerDirectory);
+  const arkStartupScript = join9(workerDirectory, "host-ark.R");
+  const analyzerScript = join9(workerDirectory, "host-analyzer.R");
+  const framingScript = join9(workerDirectory, "host-framing.R");
+  const arkExecutable = resolve6(resources2.arkExecutable);
   await Promise.all([
     requireFile2(arkExecutable, "Ark executable"),
     requireFile2(arkStartupScript, "Ark startup script"),
     requireFile2(analyzerScript, "analyzer script"),
     requireFile2(framingScript, "framing script")
   ]);
-  const notebookDirectory = resolve7(pathOptions.notebookDirectory ?? options.notebookDirectory ?? process.cwd());
+  const notebookDirectory = resolve6(pathOptions.notebookDirectory ?? options.notebookDirectory ?? process.cwd());
   const notebookInfo = await stat9(notebookDirectory);
   if (!notebookInfo.isDirectory()) throw new Error("notebookDirectory is not a directory");
   const ownedDirectories = [];
@@ -81751,14 +81522,14 @@ async function resolvePaths(options, environment, signal, pathOptions = options)
   let cacheDirectory;
   try {
     throwIfAborted(signal);
-    artifactDirectory = resolve7(options.artifactDirectory);
-    await mkdir5(artifactDirectory, { recursive: true });
+    artifactDirectory = resolve6(options.artifactDirectory);
+    await mkdir4(artifactDirectory, { recursive: true });
     throwIfAborted(signal);
-    cacheDirectory = pathOptions.cacheDirectory === void 0 ? await mkdtemp(join10(tmpdir2(), "alder-engine-cache-")) : resolve7(pathOptions.cacheDirectory);
+    cacheDirectory = pathOptions.cacheDirectory === void 0 ? await mkdtemp(join9(tmpdir2(), "alder-engine-cache-")) : resolve6(pathOptions.cacheDirectory);
     if (pathOptions.cacheDirectory === void 0) ownedDirectories.push(cacheDirectory);
-    else await mkdir5(cacheDirectory, { recursive: true });
+    else await mkdir4(cacheDirectory, { recursive: true });
   } catch (error61) {
-    await Promise.all(ownedDirectories.map((directory) => rm4(directory, { recursive: true, force: true }).catch(() => {
+    await Promise.all(ownedDirectories.map((directory) => rm3(directory, { recursive: true, force: true }).catch(() => {
     })));
     throw error61;
   }
@@ -81845,6 +81616,212 @@ var import_sender = __toESM(require_sender(), 1);
 var import_subprotocol = __toESM(require_subprotocol(), 1);
 var import_websocket = __toESM(require_websocket(), 1);
 var import_websocket_server = __toESM(require_websocket_server(), 1);
+
+// src/private-paths.ts
+import { constants as constants3 } from "node:fs";
+import { randomUUID as randomUUID6 } from "node:crypto";
+import { chmod as chmod2, lstat as lstat4, mkdir as mkdir5, open as openFile, rename as rename3, rm as rm4 } from "node:fs/promises";
+import { dirname as dirname5, join as join10, parse as parse3, resolve as resolve7, sep } from "node:path";
+var PrivatePathError = class extends Error {
+  constructor(code2, message2, cause) {
+    super(message2);
+    this.code = code2;
+    this.cause = cause;
+    this.name = "PrivatePathError";
+  }
+  code;
+  cause;
+};
+var DEFAULT_READ_MAX_BYTES = 16 * 1024 * 1024;
+var DIRECTORY_MODE = 448;
+var FILE_MODE = 384;
+var PATH_CONTROL = /[\u0000]/;
+function invalid3(message2, cause) {
+  return new PrivatePathError("private_path_invalid", message2, cause);
+}
+function missing(path3) {
+  return Object.assign(new Error(`private path does not exist: ${path3}`), { code: "ENOENT", path: path3 });
+}
+function isMissing(error61) {
+  return errorCode(error61) === "ENOENT";
+}
+function isUnsupportedDirectorySync(error61) {
+  return ["EINVAL", "ENOTSUP", "EBADF", "EPERM"].includes(errorCode(error61) ?? "");
+}
+function errorCode(error61) {
+  if (typeof error61 !== "object" || error61 === null || !("code" in error61)) return void 0;
+  const code2 = error61.code;
+  return typeof code2 === "string" ? code2 : void 0;
+}
+function ensurePathString(path3) {
+  if (typeof path3 !== "string" || path3.length === 0 || PATH_CONTROL.test(path3)) {
+    throw invalid3("private path must be a non-empty path without NUL");
+  }
+  return resolve7(path3);
+}
+async function inspectPath(path3, expectFinal = null) {
+  const absolute = ensurePathString(path3);
+  const root = parse3(absolute).root;
+  const components = absolute.slice(root.length).split(sep).filter(Boolean);
+  let current = root;
+  let exists = true;
+  for (let index = 0; index < components.length; index += 1) {
+    current = join10(current, components[index]);
+    let info;
+    try {
+      info = await lstat4(current);
+    } catch (error61) {
+      if (isMissing(error61)) {
+        exists = false;
+        break;
+      }
+      throw error61;
+    }
+    if (info.isSymbolicLink()) {
+      throw new PrivatePathError("private_path_reparse", `private path component is a symlink: ${current}`);
+    }
+    if (index < components.length - 1 && !info.isDirectory()) {
+      throw new PrivatePathError("private_path_type", `private path component is not a directory: ${current}`);
+    }
+    if (index === components.length - 1 && expectFinal !== null) {
+      if (expectFinal === "directory" && !info.isDirectory()) {
+        throw new PrivatePathError("private_path_type", `private path is not a directory: ${absolute}`);
+      }
+      if (expectFinal === "file" && !info.isFile()) {
+        throw new PrivatePathError("private_path_type", `private path is not a regular file: ${absolute}`);
+      }
+    }
+  }
+  return { path: absolute, exists };
+}
+function validatePrivateStats(info, kind, path3) {
+  if (kind === "directory" ? !info.isDirectory() : !info.isFile()) {
+    throw new PrivatePathError("private_path_type", `private path is not a ${kind}: ${path3}`);
+  }
+  if (info.isSymbolicLink()) {
+    throw new PrivatePathError("private_path_reparse", `private path is a symlink: ${path3}`);
+  }
+  const uid = typeof process.getuid === "function" ? process.getuid() : void 0;
+  if (uid !== void 0 && info.uid !== uid) {
+    throw new PrivatePathError("private_path_overshared", `private path is not owned by the current user: ${path3}`);
+  }
+  if ((Number(info.mode) & 63) !== 0) {
+    throw new PrivatePathError("private_path_overshared", `private path is accessible by group or other users: ${path3}`);
+  }
+}
+async function inspectExisting(path3, kind) {
+  const inspection = await inspectPath(path3, kind);
+  if (!inspection.exists) throw missing(inspection.path);
+  const info = await lstat4(inspection.path);
+  validatePrivateStats(info, kind, inspection.path);
+  return inspection;
+}
+async function syncDirectory2(directory) {
+  let handle;
+  try {
+    handle = await openFile(directory, constants3.O_RDONLY);
+    await handle.sync();
+  } catch (error61) {
+    if (!isUnsupportedDirectorySync(error61)) throw error61;
+  } finally {
+    if (handle !== void 0) await handle.close().catch(() => void 0);
+  }
+}
+async function verifyPrivateDirectory(path3) {
+  const inspection = await inspectExisting(path3, "directory");
+  const info = await lstat4(inspection.path);
+  validatePrivateStats(info, "directory", inspection.path);
+}
+async function verifyPrivateFile(path3) {
+  const inspection = await inspectExisting(path3, "file");
+  const info = await lstat4(inspection.path);
+  validatePrivateStats(info, "file", inspection.path);
+}
+async function securePrivateDirectory(path3) {
+  const inspection = await inspectExisting(path3, "directory");
+  await chmod2(inspection.path, DIRECTORY_MODE);
+  await verifyPrivateDirectory(inspection.path);
+}
+async function ensurePrivateDirectory(path3) {
+  const inspection = await inspectPath(path3);
+  if (inspection.exists) {
+    await verifyPrivateDirectory(inspection.path);
+    return;
+  }
+  await mkdir5(inspection.path, { recursive: true, mode: DIRECTORY_MODE });
+  await inspectPath(inspection.path, "directory");
+  await securePrivateDirectory(inspection.path);
+}
+async function readPrivateFile(path3, options = {}) {
+  const maxBytes = options.maxBytes ?? DEFAULT_READ_MAX_BYTES;
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) throw invalid3("maxBytes must be a non-negative safe integer");
+  const inspection = await inspectPath(path3, "file");
+  if (!inspection.exists) throw missing(inspection.path);
+  const flags = constants3.O_RDONLY | (constants3.O_NOFOLLOW ?? 0);
+  let handle;
+  try {
+    handle = await openFile(inspection.path, flags);
+    const info = await handle.stat();
+    validatePrivateStats(info, "file", inspection.path);
+    if (!Number.isSafeInteger(info.size) || info.size > maxBytes) {
+      throw new PrivatePathError("private_path_too_large", "private file exceeds " + maxBytes + " bytes: " + inspection.path);
+    }
+    await options.beforeRead?.();
+    const bytes = Buffer.alloc(info.size);
+    let offset = 0;
+    while (offset < bytes.length) {
+      const result = await handle.read(bytes, offset, bytes.length - offset, offset);
+      if (result.bytesRead <= 0) throw invalid3("private file was truncated while being read: " + inspection.path);
+      offset += result.bytesRead;
+    }
+    const after2 = await handle.stat();
+    validatePrivateStats(after2, "file", inspection.path);
+    if (after2.dev !== info.dev || after2.ino !== info.ino || after2.mode !== info.mode || after2.nlink !== info.nlink || after2.uid !== info.uid || after2.gid !== info.gid || after2.rdev !== info.rdev || after2.size !== info.size || after2.mtimeMs !== info.mtimeMs || after2.ctimeMs !== info.ctimeMs || after2.birthtimeMs !== info.birthtimeMs) {
+      throw invalid3("private file changed while being read: " + inspection.path);
+    }
+    return bytes;
+  } finally {
+    if (handle !== void 0) await handle.close().catch(() => void 0);
+  }
+}
+async function writePrivateFile(path3, bytes) {
+  const inspection = await inspectPath(path3, null);
+  const parent = dirname5(inspection.path);
+  await ensurePrivateDirectory(parent);
+  try {
+    const target = await lstat4(inspection.path);
+    if (target.isSymbolicLink()) throw new PrivatePathError("private_path_reparse", "private path is a symlink: " + inspection.path);
+    if (!target.isFile()) throw new PrivatePathError("private_path_type", "private path is not a regular file: " + inspection.path);
+    validatePrivateStats(target, "file", inspection.path);
+  } catch (error61) {
+    if (!isMissing(error61)) throw error61;
+  }
+  const basename9 = inspection.path.slice(inspection.path.lastIndexOf(sep) + 1);
+  const temporary = join10(parent, `.${basename9}.${randomUUID6()}.tmp`);
+  let handle;
+  try {
+    const flags = constants3.O_WRONLY | constants3.O_CREAT | constants3.O_EXCL | (constants3.O_NOFOLLOW ?? 0);
+    handle = await openFile(temporary, flags, FILE_MODE);
+    const info = await handle.stat();
+    validatePrivateStats(info, "file", temporary);
+    let offset = 0;
+    while (offset < bytes.byteLength) {
+      const result = await handle.write(bytes, offset, bytes.byteLength - offset, offset);
+      if (result.bytesWritten <= 0) throw invalid3(`short private file write: ${inspection.path}`);
+      offset += result.bytesWritten;
+    }
+    await handle.sync();
+    await handle.close();
+    handle = void 0;
+    await chmod2(temporary, FILE_MODE);
+    await rename3(temporary, inspection.path);
+    await syncDirectory2(parent);
+  } catch (error61) {
+    if (handle !== void 0) await handle.close().catch(() => void 0);
+    await rm4(temporary, { force: true }).catch(() => void 0);
+    throw error61;
+  }
+}
 
 // src/server.ts
 var HTTP_JSON_LIMIT = 1024 * 1024;
@@ -82387,9 +82364,9 @@ async function readPublicArtifactPage(artifactStore, handle, offset, limit) {
 function tokenFileError(message2) {
   return new HttpBoundaryError("auth_configuration_invalid", message2, 500);
 }
-async function readTokenFile(path3, processSupervisorExecutable) {
+async function readTokenFile(path3) {
   try {
-    const bytes = await readPrivateFile(path3, { maxBytes: 65, processSupervisorExecutable });
+    const bytes = await readPrivateFile(path3, { maxBytes: 65 });
     let contents = bytes.toString("utf8");
     if (contents.endsWith("\n")) contents = contents.slice(0, -1);
     if (contents.includes("\n") || !AUTH_TOKEN_PATTERN.test(contents)) {
@@ -83440,7 +83417,7 @@ function createAlderServer(options) {
     void request;
   });
   async function loadAuthToken() {
-    configuredBearer = options.session?.token !== void 0 ? validateToken(options.session.token) : options.tokenFile === void 0 ? bearer : await readTokenFile(options.tokenFile, options.processSupervisorExecutable);
+    configuredBearer = options.session?.token !== void 0 ? validateToken(options.session.token) : options.tokenFile === void 0 ? bearer : await readTokenFile(options.tokenFile);
     if (externalOrigin !== null && options.tokenFile === void 0 && options.externalBearerValidated === true && options.session?.token === void 0) throw tokenFileError("prevalidated external bearer is missing");
   }
   async function compromise(reason) {
@@ -95365,7 +95342,7 @@ var toolSchemas = {
   check: empty,
   apply_transaction: external_exports.object({ ...commonEffect, changes: external_exports.array(mcpDocumentChangeSchema).min(1).max(1e3), expectedDocumentRevision }).strict(),
   edit_cell_ranges: external_exports.object({ ...commonEffect, expectedDocumentRevision, cell: id, edits: external_exports.array(textEditSchema).min(1).max(1e3), expectedRevision: expectedCellRevision }).strict(),
-  select_r: external_exports.object({ ...commonEffect, rscript: path2, persistDefault: external_exports.boolean().default(false), expectedDocumentRevision }).strict(),
+  select_r: external_exports.object({ ...commonEffect, rscript: path2, expectedDocumentRevision }).strict(),
   set_runtime: external_exports.object({ ...commonEffect, on_cell_change: external_exports.enum(["automatic", "lazy"]).optional(), on_startup: external_exports.boolean().optional(), cache_enabled: external_exports.boolean().optional(), expectedDocumentRevision }).strict().refine((v) => v.on_cell_change !== void 0 || v.on_startup !== void 0 || v.cache_enabled !== void 0, "provide a runtime setting"),
   reload_source: external_exports.object({ ...commonEffect, expectedDocumentRevision, expectedDiskDigest: external_exports.string().regex(/^[0-9a-f]{64}$/), expectedDiskVersion: id }).strict(),
   get_help: external_exports.object({ contents: external_exports.unknown() }).strict(),
@@ -95581,7 +95558,7 @@ function createMcpServer(options) {
     }
     await requireInitialized(extra);
     if (options.runtimeReady === void 0 && startupError !== void 0) {
-      if (startupError instanceof Error && isRecord3(startupError) && typeof startupError.code === "string") {
+      if (startupError instanceof Error && isRecord2(startupError) && typeof startupError.code === "string") {
         throw startupError;
       }
       throw codedError("service_unavailable", startupError instanceof Error ? startupError.message : "host startup failed");
@@ -95603,7 +95580,7 @@ function createMcpServer(options) {
           combined.dispose();
         }
       } catch (error61) {
-        const value = isRecord3(error61) && isRecord3(error61.envelope) ? error61.envelope : { error: errorShape(error61) };
+        const value = isRecord2(error61) && isRecord2(error61.envelope) ? error61.envelope : { error: errorShape(error61) };
         return await envelope(options, value, true);
       }
     };
@@ -95682,7 +95659,7 @@ async function executeTool(options, name, args, signal, extra) {
   options.assertActive?.();
   await sendProgress(extra, 1, completed.error === null ? "done" : "failed").catch(() => void 0);
   if (completed.error !== null) throw Object.assign(codedError(completed.error.code, completed.error.message), { envelope: completed });
-  if (name === "shutdown" && isRecord3(completed.result) && completed.result.closing === true) {
+  if (name === "shutdown" && isRecord2(completed.result) && completed.result.closing === true) {
     setImmediate(() => {
       void Promise.resolve().then(() => options.onShutdown?.()).catch(() => void 0);
     });
@@ -95733,7 +95710,7 @@ function commandFromTool(options, name, args) {
     case "edit_cell_ranges":
       return transaction([projectRangeEdit(args)]);
     case "select_r":
-      return { ...base, type: "select-r", rscript: args.rscript, persistDefault: args.persistDefault, expectedDocumentRevision: args.expectedDocumentRevision };
+      return { ...base, type: "select-r", rscript: args.rscript, expectedDocumentRevision: args.expectedDocumentRevision };
     case "set_runtime":
       return { ...base, type: "set-runtime", on_cell_change: args.on_cell_change, on_startup: args.on_startup, cache_enabled: args.cache_enabled, expectedDocumentRevision: args.expectedDocumentRevision };
     case "reload_source":
@@ -95795,7 +95772,7 @@ async function envelope(options, value, isError) {
   const structured = normalizeEnvelope(value, snapshot);
   const bytes = new TextEncoder().encode(JSON.stringify(structured));
   if (bytes.byteLength <= MCP_MAX_RESULT_BYTES) {
-    const summary = isError && isRecord3(structured.error) ? String(structured.error.code ?? "error") + ": " + String(structured.error.message ?? "request failed") : "OK";
+    const summary = isError && isRecord2(structured.error) ? String(structured.error.code ?? "error") + ": " + String(structured.error.message ?? "request failed") : "OK";
     options.assertActive?.();
     return { structuredContent: structured, content: [{ type: "text", text: summary }], isError };
   }
@@ -95806,8 +95783,8 @@ async function envelope(options, value, isError) {
 }
 function normalizeEnvelope(value, snapshot) {
   const base = { epoch: snapshot.epoch, documentRevision: snapshot.documentRevision, cursor: snapshot.cursor };
-  if (isRecord3(value) && "epoch" in value && "documentRevision" in value && "cursor" in value) return value;
-  if (isRecord3(value) && ("error" in value || "result" in value)) return { ...base, ...value };
+  if (isRecord2(value) && "epoch" in value && "documentRevision" in value && "cursor" in value) return value;
+  if (isRecord2(value) && ("error" in value || "result" in value)) return { ...base, ...value };
   return { ...base, result: value };
 }
 async function captureArtifact(options, bytes, mimeType, extension2, snapshot = options.controller.snapshot()) {
@@ -95832,18 +95809,18 @@ async function captureArtifact(options, bytes, mimeType, extension2, snapshot = 
   }
 }
 function errorShape(error61) {
-  const code2 = isRecord3(error61) && typeof error61.code === "string" ? error61.code : "internal_error";
+  const code2 = isRecord2(error61) && typeof error61.code === "string" ? error61.code : "internal_error";
   return { code: code2, message: error61 instanceof Error ? error61.message : String(error61) };
 }
 function codedError(code2, message2) {
   return Object.assign(new Error(message2), { code: code2 });
 }
-function isRecord3(value) {
+function isRecord2(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function abortReason(signal) {
   const reason = signal.reason;
-  if (reason instanceof Error && isRecord3(reason) && typeof reason.code === "string") return reason;
+  if (reason instanceof Error && isRecord2(reason) && typeof reason.code === "string") return reason;
   return codedError("request_cancelled", "MCP request was cancelled");
 }
 function throwIfAborted2(signal) {
@@ -95914,12 +95891,12 @@ async function sendProgress(extra, progress, message2) {
   await extra.sendNotification({ method: "notifications/progress", params: { progressToken, progress, total: 1, message: message2 } });
 }
 function logicalCell(value) {
-  if (!isRecord3(value) || !Array.isArray(value.body) || value.type !== "code" && value.type !== "markdown") return value;
+  if (!isRecord2(value) || !Array.isArray(value.body) || value.type !== "code" && value.type !== "markdown") return value;
   return { ...value, body: toLogicalCellBody(value.type, value.body.filter((line) => typeof line === "string")) };
 }
 function logicalValue(value) {
   if (Array.isArray(value)) return value.map(logicalValue);
-  if (!isRecord3(value)) return value;
+  if (!isRecord2(value)) return value;
   const cell = logicalCell(value);
   if (cell !== value) return cell;
   let changed = false;
@@ -95935,7 +95912,7 @@ function logicalSnapshot(snapshot) {
   return { ...snapshot, cells: snapshot.cells.map((cell) => logicalCell(cell)) };
 }
 function logicalQueryResult(value) {
-  if (isRecord3(value) && "result" in value) return { ...value, result: logicalValue(value.result) };
+  if (isRecord2(value) && "result" in value) return { ...value, result: logicalValue(value.result) };
   return logicalValue(value);
 }
 async function readArtifactPage(store, handle, offset, limit, assertActive) {
@@ -96584,7 +96561,7 @@ var PackageWorker = class {
       const bytes = await readFile5(outputPath);
       if (bytes.byteLength > MAX_OUTPUT_BYTES) throw failure("job_failed", "R package result is too large");
       const result = JSON.parse(bytes.toString("utf8"));
-      if (!isRecord4(result) || typeof result.ok !== "boolean") throw failure("job_failed", "R package service returned an invalid result");
+      if (!isRecord3(result) || typeof result.ok !== "boolean") throw failure("job_failed", "R package service returned an invalid result");
       await this.options.onProgress?.({ command, operationId, phase: "finished" });
       return result;
     } catch (error61) {
@@ -96666,7 +96643,7 @@ function validateTimeout2(value) {
 function failure(code2, message2, details) {
   return new PackageWorkerError(code2, message2, details);
 }
-function isRecord4(value) {
+function isRecord3(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function messageOf5(error61) {
@@ -96856,8 +96833,8 @@ async function ensureProjectLibrary(project, library) {
   if (await realpath6(library) !== join13(await realpath6(project), ".alder", "library")) throw new Error("project library is outside the project");
 }
 function workerResult(value) {
-  if (!isRecord5(value) || typeof value.ok !== "boolean" || !Array.isArray(value.records)) throw new PackageError("job_failed", "package service returned invalid data");
-  const records = value.records.filter(isRecord5).map((record4) => ({
+  if (!isRecord4(value) || typeof value.ok !== "boolean" || !Array.isArray(value.records)) throw new PackageError("job_failed", "package service returned invalid data");
+  const records = value.records.filter(isRecord4).map((record4) => ({
     package: String(record4.package),
     status: record4.status === "installed" ? "installed" : "missing",
     version: typeof record4.version === "string" ? record4.version : null,
@@ -96895,7 +96872,7 @@ function sidecarVersion(observation) {
 function isAbsoluteNonEmptyPath(value) {
   return typeof value === "string" && value.length > 0 && !value.includes("\0") && isAbsolute5(value);
 }
-function isRecord5(value) {
+function isRecord4(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function messageOf6(error61) {
@@ -97787,10 +97764,9 @@ var RecoveryWriter = class _RecoveryWriter {
 };
 
 // src/publishing.ts
-import { constants as constants5 } from "node:fs";
 import { randomUUID as randomUUID11 } from "node:crypto";
-import { access as access4, chmod as chmod3, link as link2, mkdtemp as mkdtemp3, readFile as readFile9, realpath as realpath9, rm as rm7, stat as stat14, unlink as unlink3, writeFile as writeFile5 } from "node:fs/promises";
-import { basename as basename6, delimiter as delimiter2, dirname as dirname8, join as join16, resolve as resolve11 } from "node:path";
+import { access as access4, chmod as chmod3, link as link2, mkdtemp as mkdtemp3, readFile as readFile9, rm as rm7, stat as stat14, unlink as unlink3, writeFile as writeFile5 } from "node:fs/promises";
+import { basename as basename6, dirname as dirname8, join as join16, resolve as resolve11 } from "node:path";
 import { tmpdir as tmpdir4 } from "node:os";
 
 // ../../../../../alder/host/node_modules/linkedom/esm/shared/symbols.js
@@ -108115,10 +108091,10 @@ function createPublishingService(options) {
   if (!(options?.outputStore instanceof OutputStore)) throw new TypeError("publishing requires the canonical OutputStore");
   if (!options.processScope || typeof options.processScope.spawn !== "function") throw new TypeError("publishing requires the application ProcessScope");
   return {
-    publishSnapshot: (snapshot, publishOptions) => publishSnapshot(options.outputStore, options.processScope, snapshot, publishOptions)
+    publishSnapshot: (snapshot, publishOptions) => publishSnapshot(options.outputStore, options.processScope, options.quartoExecutable, snapshot, publishOptions)
   };
 }
-async function publishSnapshot(outputStore, processScope, source, options) {
+async function publishSnapshot(outputStore, processScope, quartoExecutable, source, options) {
   throwIfAborted3(options?.signal);
   validateOptions(options);
   const snapshot = captureSnapshot(outputStore, source);
@@ -108131,8 +108107,7 @@ async function publishSnapshot(outputStore, processScope, source, options) {
     const renderedPath = join16(stagingDirectory, "rendered.html");
     const qmd = await composeQmd(snapshot, outputStore, options.includeCode, options.signal);
     await writeFile5(qmdPath, qmd, { encoding: "utf8", mode: 384, flag: "wx" });
-    const quarto = await findQuartoExecutable();
-    await runQuarto(processScope, quarto, stagingDirectory, qmdPath, renderedPath, options.signal);
+    await runQuarto(processScope, quartoExecutable, stagingDirectory, qmdPath, renderedPath, options.signal);
     throwIfAborted3(options.signal);
     const rendered = await readFile9(renderedPath);
     if (rendered.byteLength === 0 || rendered.byteLength > MAX_PUBLISHED_HTML_BYTES) {
@@ -108280,17 +108255,6 @@ async function readArtifact(requested, artifacts, outputStore, signal) {
     offset += chunk.byteLength;
   }
   return Buffer.concat(chunks, descriptor.byteLength);
-}
-async function findQuartoExecutable() {
-  for (const directory of (process.env.PATH ?? "").split(delimiter2).filter(Boolean)) {
-    const candidate = resolve11(directory, "quarto");
-    try {
-      await access4(candidate, constants5.X_OK);
-      if ((await stat14(candidate)).isFile()) return await realpath9(candidate);
-    } catch {
-    }
-  }
-  throw new PublishingError("tool_not_found", "Quarto is required for HTML publishing but was not found on PATH");
 }
 async function runQuarto(processScope, executable, cwd, qmdPath, outputPath, signal) {
   throwIfAborted3(signal);
@@ -108621,13 +108585,13 @@ function validCoordinate2(value) {
   return Number.isSafeInteger(value) && value >= 0 && value <= 2147483647;
 }
 function translateLocation(location, document, uri) {
-  if (!isRecord6(location)) return null;
+  if (!isRecord5(location)) return null;
   if (location.uri !== void 0 && location.uri !== uri) return null;
   const range = translateRange(location.range, document);
   return range ? { ...location, uri, range } : null;
 }
 function translateLocationLink(location, document, uri) {
-  if (!isRecord6(location) || location.targetUri !== uri) return null;
+  if (!isRecord5(location) || location.targetUri !== uri) return null;
   const targetRange = translateRange(location.targetRange, document);
   const targetSelectionRange = translateRange(location.targetSelectionRange, document);
   const originSelectionRange = location.originSelectionRange === void 0 ? void 0 : translateRange(location.originSelectionRange, document);
@@ -108641,7 +108605,7 @@ function translateLocationLink(location, document, uri) {
   };
 }
 function translateCompletionTextEdit(edit, document) {
-  if (!isRecord6(edit)) return null;
+  if (!isRecord5(edit)) return null;
   if (edit.range !== void 0) {
     const range = translateRange(edit.range, document);
     return range ? { ...edit, range } : null;
@@ -108651,8 +108615,8 @@ function translateCompletionTextEdit(edit, document) {
   return insert2 && replace3 ? { ...edit, insert: insert2, replace: replace3 } : null;
 }
 function translateDocumentSymbol(symbol2, document, uri) {
-  if (!isRecord6(symbol2)) return null;
-  if (isRecord6(symbol2.location)) {
+  if (!isRecord5(symbol2)) return null;
+  if (isRecord5(symbol2.location)) {
     const location = translateLocation(symbol2.location, document, uri);
     return location ? { ...symbol2, location } : null;
   }
@@ -108666,23 +108630,23 @@ function translateDocumentSymbol(symbol2, document, uri) {
 function translateLspResult(result, method2, document, uri) {
   if (result === null || result === void 0) return null;
   if (method2 === "textDocument/definition" || method2 === "textDocument/references") {
-    const translate = (location) => isRecord6(location) && "targetUri" in location ? translateLocationLink(location, document, uri) : translateLocation(location, document, uri);
-    if (isRecord6(result)) return translate(result);
+    const translate = (location) => isRecord5(location) && "targetUri" in location ? translateLocationLink(location, document, uri) : translateLocation(location, document, uri);
+    if (isRecord5(result)) return translate(result);
     if (!Array.isArray(result)) return [];
     return result.map(translate).filter((item) => item !== null);
   }
-  if (method2 === "textDocument/hover" && isRecord6(result) && result.range !== void 0) {
+  if (method2 === "textDocument/hover" && isRecord5(result) && result.range !== void 0) {
     return { ...result, range: translateRange(result.range, document) };
   }
   if (method2 === "textDocument/documentSymbol" && Array.isArray(result)) {
     return result.map((symbol2) => translateDocumentSymbol(symbol2, document, uri)).filter((symbol2) => symbol2 !== null);
   }
   if (method2 === "textDocument/completion") {
-    const container = isRecord6(result) && Array.isArray(result.items) ? result : null;
+    const container = isRecord5(result) && Array.isArray(result.items) ? result : null;
     const items = container ? container.items : Array.isArray(result) ? result : null;
     if (!items) return result;
     const translated = items.flatMap((item) => {
-      if (!isRecord6(item)) return [];
+      if (!isRecord5(item)) return [];
       const textEdit = item.textEdit === void 0 ? void 0 : translateCompletionTextEdit(item.textEdit, document);
       if (item.textEdit !== void 0 && textEdit === null) return [];
       let additionalTextEdits;
@@ -108882,8 +108846,8 @@ var LspClient = class {
   async requestDocument(method2, rawParams, document, timeoutMs = this.options.requestTimeoutMs ?? 3e3) {
     if (!(method2 in REQUEST_TYPES)) throw new LspClientError("invalid_request", "unsupported language-server method");
     await this.syncDocument(document);
-    const params = { ...rawParams, textDocument: { ...isRecord6(rawParams.textDocument) ? rawParams.textDocument : {}, uri: this.documentUri } };
-    if (isRecord6(params.position) && typeof params.position.cell === "string") {
+    const params = { ...rawParams, textDocument: { ...isRecord5(rawParams.textDocument) ? rawParams.textDocument : {}, uri: this.documentUri } };
+    if (isRecord5(params.position) && typeof params.position.cell === "string") {
       const position = toFilePosition(document, {
         cell: params.position.cell,
         line: params.position.line,
@@ -109019,14 +108983,14 @@ function basenameForUri(uri) {
   const pieces = new URL(uri).pathname.split("/").filter(Boolean);
   return decodeURIComponent(pieces.at(-1) ?? "workspace");
 }
-function isRecord6(value) {
+function isRecord5(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function isPosition(value) {
-  return isRecord6(value) && validCoordinate2(value.line) && validCoordinate2(value.character);
+  return isRecord5(value) && validCoordinate2(value.line) && validCoordinate2(value.character);
 }
 function isRange(value) {
-  return isRecord6(value) && isPosition(value.start) && isPosition(value.end);
+  return isRecord5(value) && isPosition(value.start) && isPosition(value.end);
 }
 function cloneRange(range) {
   return {
@@ -109288,7 +109252,7 @@ async function createProcessScope(_resources) {
 
 // src/sessions.ts
 import { createHash as createHash8, randomBytes as randomBytes4, randomUUID as randomUUID13 } from "node:crypto";
-import { readdir as readdir3, realpath as realpath10, unlink as unlink5 } from "node:fs/promises";
+import { readdir as readdir3, realpath as realpath9, unlink as unlink5 } from "node:fs/promises";
 import { basename as basename7, dirname as dirname9, join as join19, resolve as resolve12 } from "node:path";
 
 // src/backend-client.ts
@@ -109394,42 +109358,42 @@ function isUntitledRecoveryId(value) {
 function untitledRecoveryDescriptorDirectory(dataRoot) {
   return join19(resolve12(dataRoot ?? envPaths("alder", { suffix: "" }).data), UNTITLED_RECOVERY_DIRECTORY);
 }
-async function registerUntitledRecoveryDescriptor(id2, projectDirectory, dataRoot, privatePathOptions = {}) {
+async function registerUntitledRecoveryDescriptor(id2, projectDirectory, dataRoot) {
   const validId = requireUntitledRecoveryId(id2);
   const validProjectDirectory = normalizeProjectDirectory(projectDirectory);
-  const directory = await ensureUntitledRecoveryDirectory(dataRoot, privatePathOptions);
+  const directory = await ensureUntitledRecoveryDirectory(dataRoot);
   const path3 = untitledRecoveryDescriptorPath(directory, validId);
-  const current = await readUntitledRecoveryDescriptor(path3, validId, privatePathOptions);
+  const current = await readUntitledRecoveryDescriptor(path3, validId);
   if (current !== null) {
     if (current.projectDirectory !== validProjectDirectory) throw new SessionUnavailableError("untitled recovery identity belongs to another project", { id: validId });
     return current;
   }
   const descriptor = { schemaVersion: UNTITLED_RECOVERY_SCHEMA_VERSION, id: validId, projectDirectory: validProjectDirectory, createdAt: (/* @__PURE__ */ new Date()).toISOString() };
-  await writePrivateFile(path3, Buffer.from(JSON.stringify(descriptor)), privatePathOptions);
+  await writePrivateFile(path3, Buffer.from(JSON.stringify(descriptor)));
   return descriptor;
 }
-async function selectUntitledRecoveryDescriptor(id2, dataRoot, privatePathOptions = {}) {
+async function selectUntitledRecoveryDescriptor(id2, dataRoot) {
   const validId = requireUntitledRecoveryId(id2);
-  const directory = await ensureUntitledRecoveryDirectory(dataRoot, privatePathOptions);
-  const value = await readUntitledRecoveryDescriptor(untitledRecoveryDescriptorPath(directory, validId), validId, privatePathOptions);
+  const directory = await ensureUntitledRecoveryDirectory(dataRoot);
+  const value = await readUntitledRecoveryDescriptor(untitledRecoveryDescriptorPath(directory, validId), validId);
   if (!value) throw new SessionUnavailableError("untitled recovery descriptor was not found", { id: validId });
   return value;
 }
-async function retireUntitledRecoveryDescriptor(expected, dataRoot, privatePathOptions = {}) {
+async function retireUntitledRecoveryDescriptor(expected, dataRoot) {
   const id2 = requireUntitledRecoveryId(expected.id);
-  const directory = await ensureUntitledRecoveryDirectory(dataRoot, privatePathOptions);
+  const directory = await ensureUntitledRecoveryDirectory(dataRoot);
   const path3 = untitledRecoveryDescriptorPath(directory, id2);
-  const current = await readUntitledRecoveryDescriptor(path3, id2, privatePathOptions);
+  const current = await readUntitledRecoveryDescriptor(path3, id2);
   if (!current) return;
   if (JSON.stringify(current) !== JSON.stringify(expected)) throw new SessionUnavailableError("untitled recovery descriptor changed before retirement", { id: id2 });
-  await verifyPrivateFile(path3, privatePathOptions);
+  await verifyPrivateFile(path3);
   await unlink5(path3).catch((error61) => {
     if (error61.code !== "ENOENT") throw error61;
   });
 }
-async function ensureUntitledRecoveryDirectory(dataRoot, privatePathOptions = {}) {
+async function ensureUntitledRecoveryDirectory(dataRoot) {
   const directory = untitledRecoveryDescriptorDirectory(dataRoot);
-  await ensurePrivateDirectory(directory, privatePathOptions);
+  await ensurePrivateDirectory(directory);
   return directory;
 }
 function requireUntitledRecoveryId(value) {
@@ -109443,10 +109407,10 @@ function normalizeProjectDirectory(value) {
 function untitledRecoveryDescriptorPath(directory, id2) {
   return join19(directory, id2 + ".json");
 }
-async function readUntitledRecoveryDescriptor(path3, id2, options) {
+async function readUntitledRecoveryDescriptor(path3, id2) {
   let bytes;
   try {
-    bytes = await readPrivateFile(path3, { ...options, maxBytes: UNTITLED_RECOVERY_DESCRIPTOR_MAX_BYTES });
+    bytes = await readPrivateFile(path3, { maxBytes: UNTITLED_RECOVERY_DESCRIPTOR_MAX_BYTES });
   } catch (error61) {
     if (error61.code === "ENOENT") return null;
     throw error61;
@@ -109466,7 +109430,7 @@ async function canonicalizePath(path3) {
   if (path3 === null) return null;
   const target = resolve12(path3);
   try {
-    return await realpath10(target);
+    return await realpath9(target);
   } catch {
     return target;
   }
@@ -109474,9 +109438,9 @@ async function canonicalizePath(path3) {
 async function canonicalizeDestination(path3) {
   const target = resolve12(path3);
   try {
-    return await realpath10(target);
+    return await realpath9(target);
   } catch {
-    return join19(await realpath10(dirname9(target)), basename7(target));
+    return join19(await realpath9(dirname9(target)), basename7(target));
   }
 }
 function sessionKeyFor(path3) {
@@ -109492,7 +109456,7 @@ function recoveryCellStates(document) {
 }
 function semanticValue(value) {
   if (Array.isArray(value)) return value.map(semanticValue);
-  if (isRecord7(value)) return Object.fromEntries(Object.keys(value).sort().map((key2) => [key2, semanticValue(value[key2])]));
+  if (isRecord6(value)) return Object.fromEntries(Object.keys(value).sort().map((key2) => [key2, semanticValue(value[key2])]));
   return value;
 }
 function sameSemanticValue(left, right) {
@@ -109536,7 +109500,6 @@ var optionsSchema = external_exports.object({
   externalOrigin: external_exports.string().optional(),
   tokenFile: external_exports.string().optional(),
   externalBearerValidated: external_exports.boolean().default(false),
-  rscript: external_exports.string().optional(),
   recoveryDirectory: external_exports.string().optional(),
   preferences: external_exports.custom().optional(),
   preferencesPath: external_exports.string().optional(),
@@ -109556,7 +109519,7 @@ async function startHost(input2) {
   if (options.internalHost && options.path === null && options.session?.sessionKey === void 0) throw new Error("untitled internal hosts require a parent session key");
   if (options.path !== null) return startNotebookHost(options, options.path, false, options.path);
   if (options.sandbox) throw new Error("sandbox mode requires a notebook file path");
-  const temporary = await realpath11(await mkdtemp5(join20(tmpdir6(), "alder-unsaved-")));
+  const temporary = await realpath10(await mkdtemp5(join20(tmpdir6(), "alder-unsaved-")));
   const storagePath = join20(temporary, "Untitled.R");
   try {
     const app = await startNotebookHost(options, storagePath, true, null);
@@ -109577,19 +109540,16 @@ async function startHost(input2) {
 async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
   const options = optionsSchema.parse({ ...input2, path: storagePath });
   const browserOriginHost = createOriginHost();
-  const privatePathOptions = { processSupervisorExecutable: options.resources.processSupervisorExecutable };
   let isUntitled = unsaved;
   const declaredProjectDirectory = options.session?.projectDirectory ?? process.env.ALDER_UNTITLED_PROJECT_DIRECTORY;
-  const untitledProjectDirectory = declaredProjectDirectory !== void 0 && resolve13(declaredProjectDirectory) === declaredProjectDirectory ? declaredProjectDirectory : null;
-  let notebookDirectory = unsaved ? untitledProjectDirectory ?? process.cwd() : dirname10(resolve13(storagePath));
-  let selectedRscript = options.rscript;
+  const untitledProjectDirectory = declaredProjectDirectory !== void 0 && resolve13(declaredProjectDirectory) === declaredProjectDirectory ? await realpath10(declaredProjectDirectory).catch(() => declaredProjectDirectory) : null;
+  const initialNotebookDirectory = unsaved ? untitledProjectDirectory ?? process.cwd() : dirname10(resolve13(storagePath));
+  let notebookDirectory = await realpath10(initialNotebookDirectory).catch(() => initialNotebookDirectory);
+  let selectedRscript;
   let configuredToken = options.session?.token;
   if (options.tokenFile !== void 0) {
     try {
-      const bytes = await readPrivateFile(options.tokenFile, {
-        maxBytes: 65,
-        processSupervisorExecutable: options.resources.processSupervisorExecutable
-      });
+      const bytes = await readPrivateFile(options.tokenFile, { maxBytes: 65 });
       const text2 = bytes.toString("utf8").replace(/\r?\n$/, "");
       if (!/^[0-9a-f]{64}$/.test(text2)) throw new Error("token file must contain exactly 64 lowercase hexadecimal characters");
       configuredToken = text2;
@@ -109622,12 +109582,12 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
   if (untitledRecoveryId !== null) {
     try {
       if (requestedRecoveryId !== void 0) {
-        const descriptor = await selectUntitledRecoveryDescriptor(untitledRecoveryId, void 0, privatePathOptions);
+        const descriptor = await selectUntitledRecoveryDescriptor(untitledRecoveryId);
         if (untitledProjectDirectory !== null && descriptor.projectDirectory !== untitledProjectDirectory) throw new Error("untitled recovery project directory does not match its descriptor");
         notebookDirectory = descriptor.projectDirectory;
         untitledRecoveryDescriptor = descriptor;
       } else {
-        untitledRecoveryDescriptor = await registerUntitledRecoveryDescriptor(untitledRecoveryId, notebookDirectory, void 0, privatePathOptions);
+        untitledRecoveryDescriptor = await registerUntitledRecoveryDescriptor(untitledRecoveryId, notebookDirectory);
       }
     } catch (error61) {
       if (requestedRecoveryId !== void 0) {
@@ -109679,6 +109639,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
   let packageDeclarationIntent = [];
   let projectSettings = {};
   const preferences = options.preferences ?? await ApplicationPreferences.open(options.preferencesPath);
+  selectedRscript = preferences.snapshot().values.rscript ?? void 0;
   let unsubscribePreferences;
   const settingsErrors = /* @__PURE__ */ new Map();
   const publishSettingsError = () => {
@@ -109832,7 +109793,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
       lsp = value;
     };
     var setLsp = setLsp2;
-    work = await realpath11(await mkdtemp5(join20(tmpdir6(), "alder-host-")));
+    work = await realpath10(await mkdtemp5(join20(tmpdir6(), "alder-host-")));
     uploads = new UploadStore(join20(work, "uploads"));
     cacheDirectory = unsaved ? join20(work, "cache") : join20(notebookDirectory, ".alder", "cache");
     const opened = await DocumentStore.open(storagePath);
@@ -109861,7 +109822,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
       path: notebook.path ?? (isUntitled ? null : store.path),
       notebookDiskObservation: sourceObservation(store)
     };
-    recovery = await RecoveryWriter.open({ rootDir: options.recoveryDirectory ?? envPaths("alder", { suffix: "" }).data, key: ownership.sessionKey, baseline, processSupervisorExecutable: options.resources.processSupervisorExecutable });
+    recovery = await RecoveryWriter.open({ rootDir: options.recoveryDirectory ?? envPaths("alder", { suffix: "" }).data, key: ownership.sessionKey, baseline });
     const loadedRecoveryState = await recovery.load();
     recoveryPending = loadedRecoveryState.pending;
     recoveryFingerprint = recoveryPending ? loadedRecoveryState.fingerprint ?? void 0 : void 0;
@@ -110109,7 +110070,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
         publishSource(context, { document, path: context.path, layout: context.layout, disk: context.disk, sidecars: context.sidecars, dirty: true, advanceRevision: true });
         return appResolution;
       }
-      if (request.kind === "save-as" && request.path !== void 0 && !isUntitled && await realpath11(request.path).catch(() => null) === store.path) {
+      if (request.kind === "save-as" && request.path !== void 0 && !isUntitled && await realpath10(request.path).catch(() => null) === store.path) {
         return sourceCommit({ ...request, kind: "save" }, context);
       }
       if (request.kind === "save-as") {
@@ -110168,8 +110129,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
             rootDir: recoveryRoot,
             key: preparedOwner.sessionKey,
             baseline: destinationBaseline,
-            recoveryId: oldRecovery.recoveryId,
-            processSupervisorExecutable: options.resources.processSupervisorExecutable
+            recoveryId: oldRecovery.recoveryId
           });
           if ((await destinationRecovery.load()).pending) {
             throw Object.assign(new Error("Save As destination has pending recovery data"), { code: "destination_recovery_conflict" });
@@ -110236,7 +110196,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
                 }
                 invalidateLsp();
                 if (runtimeError !== null) controller.recordRuntimeAvailabilityError(asRuntimeHostError(runtimeError));
-                if (untitledRecoveryDescriptor !== void 0) void retireUntitledRecoveryDescriptor(untitledRecoveryDescriptor, void 0, privatePathOptions).catch((error61) => controller?.recordActionError(errorMessage(error61), "recovery_checkpoint_failed"));
+                if (untitledRecoveryDescriptor !== void 0) void retireUntitledRecoveryDescriptor(untitledRecoveryDescriptor).catch((error61) => controller?.recordActionError(errorMessage(error61), "recovery_checkpoint_failed"));
                 void oldStore.close().catch(() => {
                 });
                 await oldRecovery.retire().catch(() => {
@@ -110412,7 +110372,6 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
       preferencesVersion: preferences.snapshot().version,
       initialDocumentRevision: recoveryDocumentRevision,
       rEnvironment: runtimeEnvironment,
-      requestedRscript: selectedRscript,
       disk: sourceProtocolObservation(store),
       sidecars: initialProtocolSidecars,
       sourceCommit,
@@ -110486,6 +110445,8 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
               if (selectionGeneration !== runtimeBootstrapGeneration) throw Object.assign(new Error("R environment selection was superseded"), { code: "operation_in_progress" });
               const current = controller.snapshot();
               if (current.runtime.busy || current.runtime.activeRunId !== null) throw Object.assign(new Error("cannot select R while the notebook is busy"), { code: "busy" });
+              selectedRscript = selected.rscript;
+              await preferences.update({ rscript: selected.rscript }, preferences.snapshot().version);
               const nextManager = createPackageManager({ resources: options.resources, environment: selected, processScope, projectDirectory: notebookDirectory, onProgress: onPackageProgress });
               try {
                 await controller.restartRuntimeContext({ environment: selected, notebookDirectory, cacheDirectory }, stringValue(payload.operationId) ?? randomUUID14());
@@ -110497,12 +110458,10 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
               const previousManager = packageManager;
               packageManager = nextManager;
               runtimeEnvironment = selected;
-              selectedRscript = selected.rscript;
               runtimeError = null;
               await previousManager?.close();
               await invalidateLsp();
               scheduleLspSync();
-              if (payload.persistDefault === true) await persistDefaultRscript(selected.rscript, options.resources.processSupervisorExecutable);
               resolveSelectionReady();
               return { rEnvironment: selected, identity: selected.identity };
             } catch (error61) {
@@ -110517,7 +110476,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
           });
           if (command === "publish") {
             if (activePublishes.size > 0) throw Object.assign(new Error("a publication is already in progress"), { code: "operation_in_progress" });
-            if (publisher === void 0) publisher = createPublishingService({ outputStore: artifactStore, processScope });
+            if (publisher === void 0) publisher = createPublishingService({ outputStore: artifactStore, processScope, quartoExecutable: options.resources.quartoExecutable });
             const liveSnapshot = controller.snapshot();
             if (store === void 0) throw Object.assign(new Error("notebook has no saved source"), { code: "notebook_has_no_path" });
             const snapshot = publicationSnapshot(store.currentDocument, liveSnapshot);
@@ -110570,10 +110529,14 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
     });
     const refreshPreferences = () => {
       const state = preferences.snapshot();
+      const nextRscript = state.values.rscript ?? void 0;
+      const rSelectionChanged = nextRscript !== selectedRscript;
+      selectedRscript = nextRscript;
       if (state.error) settingsErrors.set("preferences", state.error.message);
       else settingsErrors.delete("preferences");
       controller.updatePreferences(state.values, state.version);
       publishSettingsError();
+      if (rSelectionChanged) startRuntime(true);
     };
     unsubscribePreferences = preferences.subscribe(refreshPreferences);
     refreshPreferences();
@@ -110723,7 +110686,6 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
       allowedOrigins: options.allowedOrigins,
       externalOrigin: options.externalOrigin,
       tokenFile: options.tokenFile,
-      processSupervisorExecutable: options.resources.processSupervisorExecutable,
       externalBearerValidated: options.externalBearerValidated,
       session: {
         get sessionKey() {
@@ -110749,7 +110711,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
         requestDocument: async (method2, params, snapshot) => {
           const client = await getLsp();
           const result = await client.requestDocument(method2, params, await lspDocument(snapshot));
-          return method2 === "textDocument/hover" && isRecord7(result) ? { ...result, rendered: renderHelp(result.contents).html } : result;
+          return method2 === "textDocument/hover" && isRecord6(result) ? { ...result, rendered: renderHelp(result.contents).html } : result;
         },
         restart: async () => {
           if (lspRestarting) return lspRestarting;
@@ -110938,7 +110900,7 @@ function lspDocument(snapshot) {
   return Promise.resolve({ path: snapshot.path, cells: snapshot.cells.map((cell) => ({ id: cell.id, type: cell.type, body: [...cell.body], revision: cell.revision, options: cell.options })) });
 }
 function cellRefId(value) {
-  if (isRecord7(value) && typeof value.cellId === "string") return value.cellId;
+  if (isRecord6(value) && typeof value.cellId === "string") return value.cellId;
   throw new Error("formatter returned an invalid cell reference");
 }
 function stringValue(value) {
@@ -110948,22 +110910,17 @@ function decodePhysicalBytes(value) {
   if (value instanceof Uint8Array) return value;
   if (value instanceof ArrayBuffer) return new Uint8Array(value);
   if (typeof value === "string") return Uint8Array.from(Buffer.from(value, "base64"));
-  if (isRecord7(value) && typeof value.$bytes === "string") return Uint8Array.from(Buffer.from(value.$bytes, "base64"));
+  if (isRecord6(value) && typeof value.$bytes === "string") return Uint8Array.from(Buffer.from(value.$bytes, "base64"));
   return null;
 }
 function errorMessage(error61) {
   return error61 instanceof Error ? error61.message : String(error61);
 }
-function isRecord7(value) {
+function isRecord6(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 function initialOrigin(host, port) {
   return "http://" + (host === "::1" ? "[::1]" : host) + ":" + port;
-}
-async function persistDefaultRscript(rscript, processSupervisorExecutable) {
-  const paths = envPaths("alder", { suffix: "" });
-  await ensurePrivateDirectory(paths.config, { processSupervisorExecutable });
-  await writePrivateFile(join20(paths.config, "settings.json"), Buffer.from(JSON.stringify({ schemaVersion: 1, rscript }) + "\n", "utf8"), { processSupervisorExecutable });
 }
 
 // src/backend.ts
@@ -111023,7 +110980,6 @@ var NotebookBackend = class {
         tokenFile: options.tokenFile,
         resources: this.resources,
         preferences: await this.preferences,
-        rscript: options.rscript,
         executionMode: options.executionMode,
         runOnStartup: options.runOnStartup,
         deferStartup: options.deferStartup ?? true,

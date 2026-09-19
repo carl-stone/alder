@@ -458,7 +458,6 @@ test("MCP select_r remains callable when initial runtime startup fails", async (
         requestId: "select-r-1",
         sessionEpoch: snapshot.epoch,
         rscript: "/usr/bin/Rscript",
-        persistDefault: false,
         expectedDocumentRevision: snapshot.documentRevision,
       },
     });

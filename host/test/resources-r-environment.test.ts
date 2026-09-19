@@ -157,7 +157,7 @@ async function makeFixture(helperVersion = "0.1.0"): Promise<Fixture> {
   await writeFile(rscript, `#!${process.execPath}\nconst args = process.argv.join(' '); const value = args.includes('loadNamespace') ? ${JSON.stringify(helperOutput)} : args.includes('writeLines(.libPaths())') ? ${JSON.stringify(normalLibrary + "\n" + baseLibrary + "\n")} : ${JSON.stringify(output)}; process.stdout.write(value);\n`, { mode: 0o755 });
   await writeFile(join(root, "manifest.json"), JSON.stringify({
     schemaVersion: 1, kind: "headless", applicationVersion: "0.1.0",
-    resources: { cliLauncher: "bin/alder", hostEntry: "host/alder-host.mjs", rendererDirectory: "app", workerDirectory: "worker", rLibraryDirectory: "r-library", arkExecutable: "runtime/ark", airExecutable: "runtime/air", nodeExecutable: "bin/node", electronEntry: null },
+    resources: { cliLauncher: "bin/alder", hostEntry: "host/alder-host.mjs", rendererDirectory: "app", workerDirectory: "worker", rLibraryDirectory: "r-library", arkExecutable: "runtime/ark", airExecutable: "runtime/air", quartoExecutable: "runtime/quarto/bin/quarto", nodeExecutable: "bin/node", electronEntry: null },
   }));
   return { root, resources: await resolveApplicationResources(root), rscript, rHome, normalLibrary, baseLibrary };
 }

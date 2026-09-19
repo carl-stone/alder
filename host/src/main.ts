@@ -79,7 +79,6 @@ interface CliOptions {
   listRecoveries: boolean;
   browser: boolean;
   headless: boolean;
-  rscript?: string;
   sandbox: boolean;
   lazy: boolean;
   noRun: boolean;
@@ -147,7 +146,7 @@ export function parseCli(argv: readonly string[]): CliOptions {
       options: {
         help: { type: "boolean" }, version: { type: "boolean" }, "host-info": { type: "boolean" },
         browser: { type: "boolean" }, headless: { type: "boolean" }, lazy: { type: "boolean" }, "no-run": { type: "boolean" },
-        sandbox: { type: "boolean" }, rscript: { type: "string" }, host: { type: "string" }, port: { type: "string" },
+        sandbox: { type: "boolean" }, host: { type: "string" }, port: { type: "string" },
         "allowed-origin": { type: "string", multiple: true }, "external-origin": { type: "string" }, "token-file": { type: "string" },
         "request-id": { type: "string" }, "session-epoch": { type: "string" }, "document-revision": { type: "string" },
         output: { type: "string" }, "include-code": { type: "boolean" }, "list-recoveries": { type: "boolean" }, recover: { type: "string" },
@@ -155,7 +154,7 @@ export function parseCli(argv: readonly string[]): CliOptions {
     });
   } catch (error) { throw usageError(errorText(error)); }
   const values = parsed.values as Record<string, unknown>;
-  if (values.help === true) return { command: "desktop", path: null, recover: undefined, listRecoveries: false, browser: false, headless: false, rscript: undefined, sandbox: false, lazy: false, noRun: false, host: "127.0.0.1", port: 0, allowedOrigins: [], externalOrigin: undefined, tokenFile: undefined, output: undefined, includeCode: false };
+  if (values.help === true) return { command: "desktop", path: null, recover: undefined, listRecoveries: false, browser: false, headless: false, sandbox: false, lazy: false, noRun: false, host: "127.0.0.1", port: 0, allowedOrigins: [], externalOrigin: undefined, tokenFile: undefined, output: undefined, includeCode: false };
   const positionals = parsed.positionals;
   const first = positionals[0];
   const command = first === "check" || first === "run" || first === "publish" || first === "mcp" ? first : "desktop";
@@ -167,7 +166,7 @@ export function parseCli(argv: readonly string[]): CliOptions {
   const recover = values.recover === undefined ? undefined : String(values.recover);
   if (browser && headless) throw usageError("--browser and --headless are mutually exclusive");
   if (listRecoveries) {
-    if (positionals.length > 0 || recover !== undefined || browser || headless || values.lazy === true || values["no-run"] === true || values.sandbox === true || values.rscript !== undefined || values.host !== undefined || values.port !== undefined || values["allowed-origin"] !== undefined || values["external-origin"] !== undefined || values["token-file"] !== undefined || values.output !== undefined || values["include-code"] === true || values["host-info"] === true) {
+    if (positionals.length > 0 || recover !== undefined || browser || headless || values.lazy === true || values["no-run"] === true || values.sandbox === true || values.host !== undefined || values.port !== undefined || values["allowed-origin"] !== undefined || values["external-origin"] !== undefined || values["token-file"] !== undefined || values.output !== undefined || values["include-code"] === true || values["host-info"] === true) {
       throw usageError("--list-recoveries cannot be combined with other command or session options");
     }
   }
@@ -205,7 +204,7 @@ export function parseCli(argv: readonly string[]): CliOptions {
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw usageError("--port must be an integer between 0 and 65535");
   const host = values.host === undefined ? "127.0.0.1" : String(values.host);
   if (!["127.0.0.1", "::1"].includes(host)) throw usageError("--host must be 127.0.0.1 or ::1");
-  return { command, path, recover, listRecoveries, browser, headless, rscript: typeof values.rscript === "string" ? values.rscript : undefined, sandbox: values.sandbox === true, lazy: values.lazy === true, noRun: values["no-run"] === true, host, port, allowedOrigins: Array.isArray(values["allowed-origin"]) ? values["allowed-origin"].map(String) : [], externalOrigin, tokenFile, output: typeof values.output === "string" ? values.output : undefined, includeCode: values["include-code"] === true, ...(retry === undefined ? {} : { retry }) };
+  return { command, path, recover, listRecoveries, browser, headless, sandbox: values.sandbox === true, lazy: values.lazy === true, noRun: values["no-run"] === true, host, port, allowedOrigins: Array.isArray(values["allowed-origin"]) ? values["allowed-origin"].map(String) : [], externalOrigin, tokenFile, output: typeof values.output === "string" ? values.output : undefined, includeCode: values["include-code"] === true, ...(retry === undefined ? {} : { retry }) };
 }
 
 async function applicationResources(): Promise<ApplicationResources> {
@@ -332,7 +331,7 @@ async function readOwnerArtifact(connection: SessionConnection, artifact: { hand
 }
 
 async function ownerQuery(connection: SessionConnection, query: HostQuery): Promise<HostQueryResult> {
-  const raw = await readSessionJson(await connection.request("/api/query", { method: "POST", body: JSON.stringify(encodeHostQueryWire(query)) }));
+  const raw = await readSessionJson(await connection.request("/api/query", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(encodeHostQueryWire(query)) }));
   const decoded = hostQueryResultSchema.parse(decodeHostQueryResultWire(query, raw)) as HostQueryResult;
   const artifact = artifactHandleSchema.safeParse(decoded.result);
   if (!artifact.success) return decoded;
@@ -358,7 +357,7 @@ export async function commandOnOwner(connection: SessionConnection, command: Own
     return { requestId: identity.requestId, epoch: identity.sessionEpoch, result: null, error: { code: "session_replaced", message: "The original backend session ended. This uncertain command will not run again automatically." }, request };
   }
   try {
-    const raw = await readSessionJson(await connection.request("/api/command", { method: "POST", body: JSON.stringify(encodeHostCommandWire(request)) }));
+    const raw = await readSessionJson(await connection.request("/api/command", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(encodeHostCommandWire(request)) }));
     const completed = commandResultSchema.parse(raw);
     const artifact = artifactHandleSchema.safeParse(completed.result);
     const result = artifact.success ? await readOwnerArtifact(connection, artifact.data) : completed.result;
@@ -378,7 +377,7 @@ async function activateHeadlessStartup(connection: SessionConnection): Promise<v
 }
 
 async function runTool(cli: CliOptions, resources: ApplicationResources): Promise<number> {
-  const connection = await acquireNotebookSession({ path: cli.path, resources, rscript: cli.rscript, runtimeDirectory: process.env.ALDER_RUNTIME_DIRECTORY, executionMode: cli.lazy ? "lazy" : undefined, runOnStartup: cli.noRun ? false : undefined, deferStartup: true });
+  const connection = await acquireNotebookSession({ path: cli.path, resources, runtimeDirectory: process.env.ALDER_RUNTIME_DIRECTORY, executionMode: cli.lazy ? "lazy" : undefined, runOnStartup: cli.noRun ? false : undefined, deferStartup: true });
   try {
     const runtimeSnapshot = await waitForRuntimeReadiness(() => ownerSnapshot(connection), {
       readiness: cli.command === "publish" ? "document" : "analyzer",
@@ -403,7 +402,6 @@ async function runMcp(cli: CliOptions, resources: ApplicationResources): Promise
   const connection = await acquireNotebookSession({
     path: cli.path,
     resources,
-    rscript: cli.rscript,
     runtimeDirectory: process.env.ALDER_RUNTIME_DIRECTORY,
     executionMode: cli.lazy ? "lazy" : undefined,
     runOnStartup: cli.noRun ? false : undefined,
@@ -450,7 +448,6 @@ async function runDesktop(cli: CliOptions, resources: ApplicationResources): Pro
       path: cli.path,
       untitledRecoveryId: cli.recover,
       resources,
-      rscript: cli.rscript,
       executionMode: cli.lazy ? "lazy" : undefined,
       runOnStartup: cli.noRun ? false : undefined,
       deferStartup: true,
@@ -470,10 +467,9 @@ async function runDesktop(cli: CliOptions, resources: ApplicationResources): Pro
     }
   }
   if (resources.electronEntry === null) throw desktopUnavailableError();
-  if (cli.recover !== undefined) await selectUntitledRecoveryDescriptor(cli.recover, undefined, { processSupervisorExecutable: resources.processSupervisorExecutable });
+  if (cli.recover !== undefined) await selectUntitledRecoveryDescriptor(cli.recover);
   const desktopArgs = [
     ...(cli.path === null ? (cli.recover === undefined ? [] : ["--recover", cli.recover]) : [cli.path]),
-    ...(cli.rscript === undefined ? [] : ["--rscript", cli.rscript]),
     ...(cli.lazy ? ["--lazy"] : []),
     ...(cli.noRun ? ["--no-run"] : []),
   ];
@@ -494,11 +490,11 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
   if (argv.includes("--version")) { process.stdout.write(HOST_IDENTITY.packageVersion + "\n"); return 0; }
   if (cli.listRecoveries) {
     const resources = await applicationResources();
-    writeJson(await listUntitledRecoveryDescriptors(undefined, { processSupervisorExecutable: resources.processSupervisorExecutable }));
+    writeJson(await listUntitledRecoveryDescriptors());
     return 0;
   }
   const resources = await applicationResources();
-  if (argv.includes("--host-info")) { writeJson({ type: "host.info", ...HOST_IDENTITY, resources: { root: resources.root, cliLauncher: resources.cliLauncher, hostEntry: resources.hostEntry, rendererDirectory: resources.rendererDirectory, workerDirectory: resources.workerDirectory, rLibraryDirectory: resources.rLibraryDirectory, arkExecutable: resources.arkExecutable, airExecutable: resources.airExecutable, nodeExecutable: resources.nodeExecutable, processSupervisorExecutable: resources.processSupervisorExecutable, electronEntry: resources.electronEntry } }); return 0; }
+  if (argv.includes("--host-info")) { writeJson({ type: "host.info", ...HOST_IDENTITY, resources: { root: resources.root, cliLauncher: resources.cliLauncher, hostEntry: resources.hostEntry, rendererDirectory: resources.rendererDirectory, workerDirectory: resources.workerDirectory, rLibraryDirectory: resources.rLibraryDirectory, arkExecutable: resources.arkExecutable, airExecutable: resources.airExecutable, nodeExecutable: resources.nodeExecutable, electronEntry: resources.electronEntry } }); return 0; }
   if (cli.command === "check" || cli.command === "run" || cli.command === "publish") return runTool(cli, resources);
   if (cli.command === "mcp") return runMcp(cli, resources);
   return runDesktop(cli, resources);

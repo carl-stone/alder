@@ -17,11 +17,11 @@ async function fixture(context: test.TestContext) {
   await writeFile(join(rendererDirectory, "index.html"), "<!doctype html><title>Alder</title>");
   const resources: ApplicationResources = {
     root, rendererDirectory, workerDirectory, nodeExecutable: process.execPath, hostEntry: join(root, "host.mjs"), cliLauncher: join(root, "alder"),
-    rLibraryDirectory: join(root, "no-r-library"), arkExecutable: join(root, "no-ark"), airExecutable: join(root, "no-air"), electronEntry: null, processSupervisorExecutable: "",
+    rLibraryDirectory: join(root, "no-r-library"), arkExecutable: join(root, "no-ark"), airExecutable: join(root, "no-air"), quartoExecutable: join(root, "no-quarto"), electronEntry: null,
   };
   const openRecovery = RecoveryWriter.open.bind(RecoveryWriter);
   context.mock.method(RecoveryWriter, "open", options => openRecovery({ ...options, rootDir: join(root, "recovery") }));
-  const options = (path: string): HostLaunchOptions => ({ path, sessionKey: createHash("sha256").update("path:" + path).digest("hex"), rscript: join(root, "no-Rscript"), deferStartup: true, runOnStartup: false });
+  const options = (path: string): HostLaunchOptions => ({ path, sessionKey: createHash("sha256").update("path:" + path).digest("hex"), deferStartup: true, runOnStartup: false });
   const clientOptions = (path: string): AcquireNotebookSessionOptions => ({ path, resources });
   const connect = async (backend: NotebookBackend, path: string): Promise<SessionConnection> => connectBackendSession(await backend.open(options(path)), clientOptions(path));
   return { root, resources, options, connect };

@@ -38,8 +38,8 @@ function resourcesFor(root: string): ApplicationResources {
     rLibraryDirectory: join(root, "r-library"),
     arkExecutable: join(root, "runtime", "ark"),
     airExecutable: join(root, "runtime", "air"),
+    quartoExecutable: join(root, "runtime", "quarto"),
     nodeExecutable: join(root, "bin", "node"),
-    processSupervisorExecutable: join(root, "runtime", "alder-process-supervisor"),
     electronEntry: null,
   };
 }

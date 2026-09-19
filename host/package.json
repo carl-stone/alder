@@ -13,6 +13,13 @@
         "darwin-arm64": "aa1186f6e1ad271abaf246fd76e0aa9039cdeeff2cb52147e8887060afd5fb07",
         "darwin-x64": "a8df8b55d951732b73fd05e8857b9c4b185b8dc9d6bc307f2ae5dcb84d4cc913"
       }
+    },
+    "quarto": {
+      "version": "1.8.26",
+      "sha256": {
+        "darwin-arm64": "b08dfb5506e48f4b4e07c23126cf266be9b17eb642bf89891fb2c9de5886270e",
+        "darwin-x64": "dfba8f542f35ccc2278be55af193cabb753f33027ea276e8c9e966dc3a92ed03"
+      }
     }
   },
   "scripts": {
@@ -21,7 +28,8 @@
     "test": "tsx --test test/*.test.ts",
     "start": "tsx src/main.ts",
     "stage": "node scripts/stage-application.mjs --output .application --kind headless",
-    "stage:desktop": "node scripts/stage-application.mjs --output .application-desktop --kind desktop"
+    "stage:desktop": "node scripts/stage-application.mjs --output .application-desktop --kind desktop",
+    "accept:mac": "node scripts/accept-mac.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.30.0",

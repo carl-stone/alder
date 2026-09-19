@@ -17,13 +17,13 @@ async function fixture() {
   const resources: ApplicationResources = {
     root, cliLauncher: join(root, "alder"), hostEntry: join(root, "host.mjs"),
     rendererDirectory: join(root, "renderer"), workerDirectory: join(root, "worker"),
-    rLibraryDirectory: join(root, "r-library"), arkExecutable: join(root, "ark"), airExecutable: join(root, "air"),
-    nodeExecutable: process.execPath, processSupervisorExecutable: join(root, "unused-supervisor"), electronEntry: null,
+    rLibraryDirectory: join(root, "r-library"), arkExecutable: join(root, "ark"), airExecutable: join(root, "air"), quartoExecutable: join(root, "quarto"),
+    nodeExecutable: process.execPath, electronEntry: null,
   };
   return {
     root, preferencePath,
     async open(path: string, preferences?: ApplicationPreferences, extra = {}) {
-      const host = await startHost({ path, resources, rscript: join(root, "missing-Rscript"),
+      const host = await startHost({ path, resources,
         preferences, preferencesPath: preferencePath, recoveryDirectory: join(root, "recovery"),
         ...extra });
       hosts.push(host);
@@ -144,6 +144,35 @@ test("launch execution choices remain editable notebook values", async () => {
     const reopened = await f.open(path);
     assert.equal(reopened.controller.snapshot().runtime.executionMode, "automatic");
     assert.equal(reopened.controller.snapshot().runtime.runOnStartup, true);
+  } finally { await f.close(); }
+});
+
+test("an unavailable selected R leaves preferences, editing, Save, and R selection available", async () => {
+  const f = await fixture();
+  try {
+    const selected = join(f.root, "disappeared-Rscript");
+    await mkdir(join(f.root, "r-library/alder"), { recursive: true });
+    await writeFile(join(f.root, "r-library/alder/DESCRIPTION"), "Package: alder\nVersion: 0.1.0\n");
+    await writeFile(join(f.root, "manifest.json"), JSON.stringify({
+      schemaVersion: 1, kind: "headless", applicationVersion: "0.1.0",
+      resources: { cliLauncher: "alder", hostEntry: "host.mjs", rendererDirectory: "renderer", workerDirectory: "worker", rLibraryDirectory: "r-library", arkExecutable: "ark", airExecutable: "air", quartoExecutable: "quarto", nodeExecutable: "node", electronEntry: null },
+    }));
+    await mkdir(dirname(f.preferencePath), { recursive: true });
+    await writeFile(f.preferencePath, `rscript: ${JSON.stringify(selected)}\n`);
+    const path = await f.notebook("missing-r.R");
+    const host = await f.open(path);
+    const deadline = Date.now() + 2_000;
+    while (host.controller.snapshot().runtime.executionBlockedReason === null && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    assert.match(host.controller.snapshot().runtime.executionBlockedReason?.message ?? "", /selected Rscript was not found/);
+    assert.equal(host.controller.snapshot().config.rscript, selected);
+    await success(host, { type: "set-preferences", patch: { theme: "dark" } });
+    await edit(host, "answer <- 42");
+    await success(host, { type: "save" });
+    assert.match(await readFile(path, "utf8"), /answer <- 42/);
+    const change = await command(host, { type: "select-r", rscript: join(f.root, "another-missing-Rscript") });
+    assert.equal(change.error?.code, "r_not_found");
   } finally { await f.close(); }
 });
 

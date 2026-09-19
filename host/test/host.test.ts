@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
-import { access, mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -19,15 +19,16 @@ let stagedResources: Awaited<ReturnType<typeof resolveApplicationResources>> | u
 async function startInstalledHost(path: string, options: { executionMode?: "automatic" | "lazy"; runOnStartup?: boolean; idleTimeout?: number } = {}): Promise<RunningHost> {
   if (!APPLICATION_ROOT) throw new Error("ALDER_APPLICATION_ROOT is required for installed host tests");
   stagedResources ??= await resolveApplicationResources(APPLICATION_ROOT);
+  const preferencesPath = join(dirname(path), ".test-preferences.yaml");
+  await writeFile(preferencesPath, `rscript: ${JSON.stringify(process.env.ALDER_RSCRIPT ?? execFileSync("which", ["Rscript"], { encoding: "utf8" }).trim())}\n`);
   const app = await startHost({
     path,
     port: 0,
     runOnStartup: options.runOnStartup ?? false,
     executionMode: options.executionMode,
     idleTimeout: options.idleTimeout,
-    rscript: process.env.ALDER_RSCRIPT ?? execFileSync("which", ["Rscript"], { encoding: "utf8" }).trim(),
     resources: stagedResources,
-    preferencesPath: join(dirname(path), ".test-preferences.yaml"),
+    preferencesPath,
   });
   const deadline = performance.now() + 45_000;
   while (!app.controller.snapshot().runtime.executionReady && performance.now() < deadline) {
@@ -602,7 +603,7 @@ test("project packages declare, install offline, restart Ark, and leave the user
       installed: string[]; library: string; status: Array<{ package: string; library: string }>;
     };
     assert.deepEqual(status.installed, ["alderfixturepkg"]);
-    assert.equal(status.library, join(directory, ".alder", "library"));
+    assert.equal(status.library, await realpath(join(directory, ".alder", "library")));
     assert.equal(status.status[0]?.library, status.library);
     const dependencyDescription = await readFile(join(status.library, "jsonlite", "DESCRIPTION"), "utf8");
     assert.match(dependencyDescription, /^Version: 999\.0\.0$/m,
