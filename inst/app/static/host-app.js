@@ -21757,6 +21757,7 @@ var BrowserNotebookClient = class {
   listeners = /* @__PURE__ */ new Set();
   runs = /* @__PURE__ */ new Map();
   sourceQueue = Promise.resolve();
+  sourceAcceptances = /* @__PURE__ */ new Map();
   frame;
   now;
   artifactCache = /* @__PURE__ */ new Map();
@@ -21921,6 +21922,11 @@ var BrowserNotebookClient = class {
   async commitEditsUnlocked() {
     const document2 = this.requireDocument();
     if (document2.hasSourceConflicts) throw new BrowserTransportError("source_conflict", "resolve deleted or conflicting local source before continuing");
+    const pending = document2.pendingSource().changes;
+    const submitted = [...this.sourceAcceptances.values()];
+    if (pending.length > 0 && submitted.length > 0 && pending.every((change) => submitted.some((acceptance) => acceptance.changes.some((candidate) => sameSourceChange(candidate, change))))) {
+      await Promise.all(submitted.map((acceptance) => acceptance.deferred.promise));
+    }
     const command = document2.buildTransactionCommand(operationId("transaction"), this.transport.id);
     if (command === null) return null;
     return this.dispatchSource(command);
@@ -22308,6 +22314,11 @@ var BrowserNotebookClient = class {
   async dispatchSource(command) {
     const document2 = this.requireDocument();
     const changes = command.changes ?? [];
+    const acceptance = changes.length > 0 ? deferredPromise() : null;
+    if (acceptance) this.sourceAcceptances.set(command.requestId, {
+      deferred: acceptance,
+      changes: changes.map((change) => structuredClone(change))
+    });
     document2.stageRecoveryIntent(changes);
     this.draftSubmission = { requestId: command.requestId, kind: command.type, changes: changes.map((change) => structuredClone(change)) };
     document2.noteSubmitted(command.requestId, command);
@@ -22315,6 +22326,7 @@ var BrowserNotebookClient = class {
     await this.flushDraftPersistence();
     try {
       const result = await this.dispatch(command);
+      this.resolveSourceAcceptance(command.requestId);
       document2.acknowledge(result);
       if (this.draftSubmission?.requestId === command.requestId) this.draftSubmission = null;
       this.queueDraftPersistence();
@@ -22323,6 +22335,7 @@ var BrowserNotebookClient = class {
       this.notify(void 0, sourceCellKeys(command, document2));
       return result;
     } catch (error61) {
+      this.resolveSourceAcceptance(command.requestId);
       if (error61 instanceof BrowserTransportError && error61.definitive) {
         document2.reject(command.requestId, error61.code);
         if (this.draftSubmission?.requestId === command.requestId) this.draftSubmission = null;
@@ -22386,6 +22399,7 @@ var BrowserNotebookClient = class {
     if (event.type === "transaction" && event.operationId) {
       const outcome = sourceCommitOutcome(event.payload);
       if (outcome && document2.acknowledgeSourceCommit(event.operationId, outcome)) {
+        this.resolveSourceAcceptance(event.operationId);
         if (this.draftSubmission?.requestId === event.operationId) this.draftSubmission = null;
         this.queueDraftPersistence();
       }
@@ -22448,7 +22462,23 @@ var BrowserNotebookClient = class {
       release();
     }
   }
+  resolveSourceAcceptance(operationId2) {
+    const acceptance = this.sourceAcceptances.get(operationId2);
+    if (!acceptance) return;
+    this.sourceAcceptances.delete(operationId2);
+    acceptance.deferred.resolve();
+  }
 };
+function sameSourceChange(left, right) {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+function deferredPromise() {
+  let resolve;
+  const promise2 = new Promise((settle) => {
+    resolve = settle;
+  });
+  return { promise: promise2, resolve };
+}
 function sourceCellKeys(command, document2) {
   const changes = command.changes ?? [];
   return changes.flatMap((change) => {
@@ -23249,21 +23279,22 @@ var OutputRenderer = class {
         for (const predecessor of predecessors) {
           await predecessor.done;
           if (predecessor.failure !== null) throw predecessor.failure;
-          if (pending.origin.owner === predecessor.origin.owner && pending.origin.revision === predecessor.origin.revision && pending.origin.outputId === predecessor.origin.outputId && pending.origin.kernelEpoch === predecessor.origin.kernelEpoch) {
+          if (pending.origin.owner === predecessor.origin.owner && pending.origin.revision === predecessor.origin.revision && pending.origin.kernelEpoch === predecessor.origin.kernelEpoch && pending.origin.outputGeneration <= predecessor.origin.outputGeneration) {
             pending.origin = predecessor.origin;
           }
         }
         while (pending.update) {
           const next = pending.update;
           pending.update = null;
-          const result = await this.interactiveActions().widget(string4(pending.widget.name), pending.path, next, pending.origin);
+          const submittedOrigin = pending.origin;
+          const result = await this.interactiveActions().widget(string4(pending.widget.name), pending.path, next, submittedOrigin);
           if (isObject2(result) && isObject2(result.result) && typeof result.result.outputRecordId === "string" && typeof result.result.outputGeneration === "number") {
             pending.origin = { ...pending.origin, outputId: result.result.outputRecordId, outputGeneration: result.result.outputGeneration };
             const slot = pending.control.closest(".out-record");
             for (const candidate of Array.from(slot?.querySelectorAll("[data-role=widget]") ?? [])) {
               if (!isWidgetControl(candidate) || candidate.dataset.name !== string4(pending.widget.name)) continue;
               const currentOrigin = this.controlOrigins.get(candidate);
-              if (currentOrigin?.owner === pending.origin.owner && currentOrigin.revision === pending.origin.revision && currentOrigin.outputId === pending.origin.outputId && currentOrigin.kernelEpoch === pending.origin.kernelEpoch && currentOrigin.outputGeneration <= pending.origin.outputGeneration) {
+              if (currentOrigin?.owner === submittedOrigin.owner && currentOrigin.revision === submittedOrigin.revision && currentOrigin.outputId === submittedOrigin.outputId && currentOrigin.kernelEpoch === submittedOrigin.kernelEpoch && currentOrigin.outputGeneration <= submittedOrigin.outputGeneration) {
                 this.controlOrigins.set(candidate, pending.origin);
               }
             }
@@ -23843,6 +23874,7 @@ var NotebookView = class {
   }
   async runExplicit(operation) {
     this.cancelEditTimers();
+    this.captureEditorSources();
     this.explicitRunCount += 1;
     if (this.documentValue) this.renderControls(this.documentValue.snapshot);
     const pending = this.action(async () => {
@@ -25687,6 +25719,7 @@ ${cell.desiredBody.join("\n")}`));
     if (mode === "autosave" && !this.documentValue?.snapshot.path) return void 0;
     const destination = !this.documentValue?.snapshot.path && desktop ? await desktop.chooseSavePath() : void 0;
     if (destination === null) return void 0;
+    await this.flushEditorSources();
     let formatFailure = null;
     if (this.executionAvailable() && nested(this.documentValue?.snapshot.config, ["format", "on_save"]) === true) {
       try {
@@ -25722,6 +25755,7 @@ ${cell.desiredBody.join("\n")}`));
       if (!desktop) return "cancelled";
       const destination = await desktop.chooseSavePath();
       if (destination === null) return "cancelled";
+      await this.flushEditorSources();
       this.setSaveState("saving");
       try {
         await this.client.saveAs(destination);
@@ -26122,6 +26156,20 @@ ${cell.desiredBody.join("\n")}`));
   sourceText(key) {
     const view2 = this.views.get(key);
     return view2?.editor?.getDoc() ?? view2?.fallback?.value ?? this.requireCell(key).desiredBody.join("\n");
+  }
+  captureEditorSources() {
+    if (!this.documentValue) return;
+    for (const cell of this.documentValue.cells) {
+      if (cell.tombstone) continue;
+      const source = this.sourceText(cell.key);
+      if (source !== cell.desiredBody.join("\n")) {
+        this.client.editCell(cell.key, source, cell.desiredType);
+      }
+    }
+  }
+  async flushEditorSources() {
+    this.cancelEditTimers();
+    this.captureEditorSources();
   }
   async action(operation) {
     this.actionNotice = null;

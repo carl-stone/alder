@@ -486,7 +486,7 @@ test("installed kernel follows ordinary project profile and library activation",
   const projectPath = join(directory, "project-notebook.R");
   const userLibrary = join(directory, "user-library");
   const projectLibrary = join(directory, "renv-library");
-  const packageName = "alderfixtureprecedence";
+  const packageName = "alder";
   const priorUserLibrary = process.env.R_LIBS_USER;
   let app: RunningHost | undefined;
   try {
@@ -514,7 +514,9 @@ test("installed kernel follows ordinary project profile and library activation",
       `normalizePath(find.package('${packageName}'), winslash='/'), ` +
       `${packageName}::fixture_value(), Sys.getenv('ALDER_PROFILE_MARKER'), ` +
       "as.character(packageVersion('jsonlite')), jsonlite::fixture_value(), sep='|')";
-    const setupExpression = `library(${packageName}); library(jsonlite); `;
+    const setupExpression = "quoted_loader <- quote(require(alder)); eval(quoted_loader); " +
+      "function_loader <- function() { requireNamespace('alder'); loadNamespace('alder'); library(alder) }; " +
+      "function_loader(); library(jsonlite); ";
     const ordinary = execFileSync(process.env.RSCRIPT ?? "Rscript", ["--slave", "-e",
       setupExpression + `cat(${valueExpression})`], {
       cwd: directory,
@@ -540,38 +542,6 @@ test("installed kernel follows ordinary project profile and library activation",
     assert.equal(run.error, null);
     assert.match(JSON.stringify(app.controller.snapshot().cells[0]!.outputs),
       new RegExp(ordinary.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
-  } finally {
-    if (priorUserLibrary === undefined) delete process.env.R_LIBS_USER;
-    else process.env.R_LIBS_USER = priorUserLibrary;
-    await app?.close();
-    await rm(directory, { recursive: true, force: true });
-  }
-});
-
-test("installed kernel reserves the bundled Alder helper namespace", {
-  skip: !APPLICATION_ROOT, timeout: 120_000,
-}, async () => {
-  const directory = await mkdtemp(join(tmpdir(), "alder-private-helper-"));
-  const path = join(directory, "notebook.R");
-  const userLibrary = join(directory, "user-library");
-  const priorUserLibrary = process.env.R_LIBS_USER;
-  let app: RunningHost | undefined;
-  try {
-    await installFixturePackage(directory, userLibrary, "alder", "999.0.0", "stale-user-helper");
-    process.env.R_LIBS_USER = userLibrary;
-    await writeFile(path, [
-      "# %%",
-      "library(alder)",
-      "paste(as.character(packageVersion('alder')), normalizePath(find.package('alder'), winslash='/'), exists('out', inherits=TRUE), sep='|')",
-      "",
-    ].join("\n"));
-    app = await startInstalledHost(path, { executionMode: "lazy" });
-    const run = await dispatchHost(app, { type: "run", scope: "all", changes: [] });
-    assert.equal(run.error, null);
-    const output = JSON.stringify(app.controller.snapshot().cells[0]!.outputs);
-    assert.match(output, new RegExp(stagedResources!.rLibraryDirectory.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
-    assert.match(output, /\|TRUE/);
-    assert.doesNotMatch(output, /999\.0\.0|user-library|stale-user-helper/);
   } finally {
     if (priorUserLibrary === undefined) delete process.env.R_LIBS_USER;
     else process.env.R_LIBS_USER = priorUserLibrary;

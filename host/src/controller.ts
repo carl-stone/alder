@@ -2496,13 +2496,28 @@ export class Controller {
         );
       }
       active.lastSequence = event.sequence;
+      const current = this.cellById(job.id);
+      const sourceObsolete = current === undefined || current.revision !== job.revision
+        || active.cancelMode === "source" || active.cancelMode === "widget";
       if (event.type === "completed") {
+        if (sourceObsolete) {
+          active.completion = event.result;
+          return;
+        }
         const rawResult = rawEvent.type === "completed" ? rawEvent.result : undefined;
         active.completion = this.canonicalEngineResponse(rawResult, event.result, job);
         return;
       }
       if (event.type !== "output") return;
       const rawPayload = rawEvent.type === "output" ? rawEvent.payload : undefined;
+      if (sourceObsolete || active.cancelMode !== null) {
+        if (event.kind === "append") {
+          this.discardObsoleteEngineRecord(
+            isRecord(rawPayload) && "output" in rawPayload ? rawPayload.output : rawPayload,
+          );
+        }
+        return;
+      }
       const output = event.kind === "append"
         ? this.canonicalEngineRecord(
           isRecord(rawPayload) && "output" in rawPayload ? rawPayload.output : rawPayload,
@@ -2534,6 +2549,12 @@ export class Controller {
       throw new ControllerError("invalid_engine_event", "R kernel returned an output record with stale identity", 503);
     }
     return record;
+  }
+
+  private discardObsoleteEngineRecord(value: unknown): void {
+    if (!isRecord(value) || typeof value.id !== "string") return;
+    const record = this.outputStore.getRecord(value.id);
+    if (record !== undefined && Object.is(record, value)) this.outputStore.discardExact([record]);
   }
 
   private canonicalEngineResponse(

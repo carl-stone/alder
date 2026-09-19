@@ -1643,6 +1643,35 @@ test("source submission waits until the latest renderer draft is durable", async
   } finally { await client.close(); }
 });
 
+test("Save waits for source carried by a pending run to be accepted", async () => {
+  const { client, socket } = await browserClient();
+  try {
+    client.editCell("c1", "x <- 2");
+    const running = client.runAll();
+    await waitUntil(() => socket.commands().length === 1);
+    const run = socket.commands()[0]!;
+    assert.equal(run.type, "run");
+
+    const saving = client.save();
+    await new Promise(resolve => setTimeout(resolve, 20));
+    assert.equal(socket.commands().length, 1, "Save must not pass a run carrying unaccepted source");
+
+    socket.receive({ type: "event", event: encodeHostEventWire({
+      protocol: HOST_PROTOCOL, epoch: "epoch-1", cursor: 1, version: 2,
+      documentRevision: 1, timestamp: 1, type: "transaction", operationId: run.requestId,
+      payload: { updated: [cell("c1", ["x <- 2"], 1)], edited: [{ id: "c1", revision: 1 }], created: {}, deleted: [], documentRevision: 1 } as never,
+    }) });
+    await waitUntil(() => socket.commands().length === 2);
+    const save = socket.commands()[1]!;
+    assert.equal(save.type, "save");
+    assert.equal(save.expectedDocumentRevision, 1);
+    socket.reply(save, { saved: true }, 1);
+    await saving;
+    socket.reply(run, { runId: "run-1" }, 1);
+    await running;
+  } finally { client.close(); }
+});
+
 test("queued Run cannot hold up newer edits and Save behind an active run", async () => {
   const store = new MemoryRecoveryStore();
   const { client, socket } = await browserClient(store);

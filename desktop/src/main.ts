@@ -1,7 +1,7 @@
 import { NativeRecoveryStore } from "./recovery-store.js";
 import { ALDER_APP_NAME, applyNativeWindowState, assertNativeDialogRuntime, installNativeMenu, nativeWindowOptions } from "./native-shell.mjs";
 import { observeSaveAsDestination } from "../../host/src/persistence.js";
-import { realpath, writeFile } from "node:fs/promises";
+import { realpath } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { basename, dirname, extname, isAbsolute, join, resolve } from "node:path";
 
@@ -70,13 +70,6 @@ export interface ElectronWebContents {
   once(event: string, listener: (...args: never[]) => unknown): this;
   isDestroyed?(): boolean;
   reload?(): void;
-  executeJavaScript?(code: string, userGesture?: boolean): Promise<unknown>;
-  readonly debugger?: {
-    attach(protocolVersion?: string): void;
-    detach(): void;
-    isAttached(): boolean;
-    sendCommand(method: string, commandParams?: Record<string, unknown>): Promise<unknown>;
-  };
 }
 
 export interface ElectronWindow {
@@ -189,8 +182,6 @@ export interface ElectronMainOptions {
   readonly deferStartup?: boolean;
   readonly startupTimeoutMs?: number;
   readonly closeSettlementTimeoutMs?: number;
-  /** Final acceptance may exercise the packaged app without activating a GUI. */
-  readonly hiddenAcceptance?: boolean;
   readonly acquireSession?: (options: AcquireNotebookSessionOptions) => Promise<SessionConnection>;
 }
 
@@ -503,9 +494,7 @@ export class ElectronMain implements ElectronMainApplication {
     for (const key of record.keys) this.addRecordKey(key, record);
     if (canonical !== null) this.rememberRecent(canonical);
     this.installWindowPolicy(record);
-    window.once("ready-to-show", () => {
-      if (!this.options.hiddenAcceptance) window.show();
-    });
+    window.once("ready-to-show", () => window.show());
     window.on("close", (event: { preventDefault?: () => void }) => {
       if (this.stopping) return;
       event.preventDefault?.();
@@ -523,53 +512,6 @@ export class ElectronMain implements ElectronMainApplication {
     }
     record.monitor = setInterval(() => { void this.monitorHost(record); }, HOST_MONITOR_MS);
     record.monitor.unref?.();
-    if (this.options.hiddenAcceptance) await this.runHiddenAcceptance(record);
-  }
-
-  private async runHiddenAcceptance(record: ElectronWindowRecord): Promise<void> {
-    const resultPath = process.env.ALDER_ACCEPTANCE_RESULT;
-    const contents = record.window.webContents;
-    if (!resultPath || !isAbsolute(resultPath) || !contents.executeJavaScript || !contents.debugger) {
-      throw new Error("hidden acceptance runtime is incomplete");
-    }
-    const debug = contents.debugger;
-    if (!debug.isAttached()) debug.attach("1.3");
-    const evaluate = (code: string) => contents.executeJavaScript!(code, true);
-    const wait = async (code: string, timeoutMs = 45_000): Promise<void> => {
-      const deadline = Date.now() + timeoutMs;
-      while (Date.now() < deadline) {
-        if (await evaluate(`Boolean(${code})`)) return;
-        await new Promise(resolveWait => setTimeout(resolveWait, 50));
-      }
-      throw new Error(`hidden acceptance timed out: ${code}`);
-    };
-    await wait("window.__alderHost?.client.document?.snapshot.runtime.executionReady && !window.__alderHost.client.document.snapshot.runtime.busy && document.querySelector('.cm-content')");
-    await evaluate("document.querySelector('.cm-content').focus()");
-    await debug.sendCommand("Input.dispatchKeyEvent", { type: "keyDown", key: "a", code: "KeyA", windowsVirtualKeyCode: 65, modifiers: 4 });
-    await debug.sendCommand("Input.dispatchKeyEvent", { type: "keyUp", key: "a", code: "KeyA", windowsVirtualKeyCode: 65, modifiers: 4 });
-    await debug.sendCommand("Input.insertText", { text: "a <- 40\na + 2" });
-    await wait("[...window.__alderEditors.values()][0]?.getDoc() === 'a <- 40\\na + 2'");
-    const runPoint = await evaluate(`(() => {
-      const element = document.querySelector('[data-cell="cell-1"] [data-act=run]');
-      const rect = element.getBoundingClientRect();
-      return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
-    })()`) as { x: number; y: number };
-    await debug.sendCommand("Input.dispatchMouseEvent", { type: "mousePressed", x: runPoint.x, y: runPoint.y, button: "left", clickCount: 1 });
-    await debug.sendCommand("Input.dispatchMouseEvent", { type: "mouseReleased", x: runPoint.x, y: runPoint.y, button: "left", clickCount: 1 });
-    await wait("document.querySelector('[data-cell=\"cell-1\"] [data-role=output]')?.textContent.includes('42')");
-    await debug.sendCommand("Input.dispatchKeyEvent", { type: "keyDown", key: "s", code: "KeyS", windowsVirtualKeyCode: 83, modifiers: 4 });
-    await debug.sendCommand("Input.dispatchKeyEvent", { type: "keyUp", key: "s", code: "KeyS", windowsVirtualKeyCode: 83, modifiers: 4 });
-    await wait("window.__alderHost.client.document.snapshot.dirty === false");
-    const snapshot = await evaluate(`(() => ({
-      title: document.title,
-      output: document.querySelector('[data-cell="cell-1"] [data-role=output]')?.textContent,
-      cells: window.__alderHost.client.document.snapshot.cells.length,
-      dirty: window.__alderHost.client.document.snapshot.dirty,
-      theme: document.documentElement.dataset.theme
-    }))()`);
-    await writeFile(resultPath, JSON.stringify(snapshot));
-    debug.detach();
-    this.runtime.app.quit();
   }
 
   private async loadAuthenticatedNotebook(record: ElectronWindowRecord, ticket: string, connection: SessionConnection = record.connection): Promise<void> {
@@ -1173,14 +1115,6 @@ export class ElectronMain implements ElectronMainApplication {
   }
 
   private async showApplicationError(title: string, detail: string): Promise<void> {
-    if (this.options.hiddenAcceptance) {
-      const resultPath = process.env.ALDER_ACCEPTANCE_RESULT;
-      if (resultPath && isAbsolute(resultPath)) {
-        await writeFile(resultPath, JSON.stringify({ error: `${title}: ${detail}` })).catch(() => undefined);
-      }
-      process.stderr.write(`${title}: ${detail}\n`);
-      return;
-    }
     const owner = this.firstRecord()?.window ?? this.runtime.BrowserWindow.getAllWindows?.()[0];
     const options = { type: "error", title, message: detail, buttons: ["OK"] };
     if (owner) await this.runtime.dialog.showMessageBox(owner, options).catch(() => undefined);
@@ -1196,14 +1130,9 @@ export async function startElectronMain(options: ElectronMainOptions = {}): Prom
 
 export async function startPackagedElectronMain(argv: readonly string[] = process.argv.slice(1)): Promise<ElectronMainApplication> {
   const runtime = loadElectronRuntime();
-  const hiddenAcceptance = process.env.ALDER_ACCEPTANCE_HIDDEN === "1";
   return startElectronMain({
     runtime,
     ...(argv.includes("--lazy") ? { executionMode: "lazy" as const } : {}),
     ...(argv.includes("--no-run") ? { runOnStartup: false } : {}),
-    ...(hiddenAcceptance ? {
-      hiddenAcceptance: true,
-      initialPath: validateNotebookPath(process.env.ALDER_ACCEPTANCE_NOTEBOOK),
-    } : {}),
   });
 }

@@ -756,26 +756,27 @@ export class OutputRenderer {
           if (predecessor.failure !== null) throw predecessor.failure;
           if (pending.origin.owner === predecessor.origin.owner
             && pending.origin.revision === predecessor.origin.revision
-            && pending.origin.outputId === predecessor.origin.outputId
-            && pending.origin.kernelEpoch === predecessor.origin.kernelEpoch) {
+            && pending.origin.kernelEpoch === predecessor.origin.kernelEpoch
+            && pending.origin.outputGeneration <= predecessor.origin.outputGeneration) {
             pending.origin = predecessor.origin;
           }
         }
         while (pending.update) {
           const next = pending.update;
           pending.update = null;
-          const result = await this.interactiveActions().widget(string(pending.widget.name), pending.path, next, pending.origin);
+          const submittedOrigin = pending.origin;
+          const result = await this.interactiveActions().widget(string(pending.widget.name), pending.path, next, submittedOrigin);
           if (isObject(result) && isObject(result.result) && typeof result.result.outputRecordId === "string" && typeof result.result.outputGeneration === "number") {
             pending.origin = { ...pending.origin, outputId: result.result.outputRecordId, outputGeneration: result.result.outputGeneration };
             const slot = pending.control.closest(".out-record");
             for (const candidate of Array.from(slot?.querySelectorAll<HTMLElement>("[data-role=widget]") ?? [])) {
               if (!isWidgetControl(candidate) || candidate.dataset.name !== string(pending.widget.name)) continue;
               const currentOrigin = this.controlOrigins.get(candidate);
-              if (currentOrigin?.owner === pending.origin.owner
-                && currentOrigin.revision === pending.origin.revision
-                && currentOrigin.outputId === pending.origin.outputId
-                && currentOrigin.kernelEpoch === pending.origin.kernelEpoch
-                && currentOrigin.outputGeneration <= pending.origin.outputGeneration) {
+              if (currentOrigin?.owner === submittedOrigin.owner
+                && currentOrigin.revision === submittedOrigin.revision
+                && currentOrigin.outputId === submittedOrigin.outputId
+                && currentOrigin.kernelEpoch === submittedOrigin.kernelEpoch
+                && currentOrigin.outputGeneration <= submittedOrigin.outputGeneration) {
                 this.controlOrigins.set(candidate, pending.origin);
               }
             }

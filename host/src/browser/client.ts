@@ -91,6 +91,10 @@ export class BrowserNotebookClient {
   private listeners = new Set<DocumentListener>();
   private runs = new Map<string, RunIntent>();
   private sourceQueue: Promise<void> = Promise.resolve();
+  private sourceAcceptances = new Map<string, {
+    deferred: { promise: Promise<void>; resolve: () => void };
+    changes: readonly DocumentChange[];
+  }>();
   private readonly frame: (callback: FrameRequestCallback) => number;
   private readonly now: () => number;
   private artifactCache = new Map<string, ArtifactCacheEntry>();
@@ -278,6 +282,12 @@ export class BrowserNotebookClient {
   private async commitEditsUnlocked(): Promise<CommandResult | null> {
     const document = this.requireDocument();
     if (document.hasSourceConflicts) throw new BrowserTransportError("source_conflict", "resolve deleted or conflicting local source before continuing");
+    const pending = document.pendingSource().changes;
+    const submitted = [...this.sourceAcceptances.values()];
+    if (pending.length > 0 && submitted.length > 0 && pending.every((change) =>
+      submitted.some((acceptance) => acceptance.changes.some((candidate) => sameSourceChange(candidate, change))))) {
+      await Promise.all(submitted.map((acceptance) => acceptance.deferred.promise));
+    }
     const command = document.buildTransactionCommand(operationId("transaction"), this.transport.id);
     if (command === null) return null;
     return this.dispatchSource(command);
@@ -686,6 +696,11 @@ export class BrowserNotebookClient {
   private async dispatchSource(command: SourceCommand): Promise<CommandResult> {
     const document = this.requireDocument();
     const changes = command.changes ?? [];
+    const acceptance = changes.length > 0 ? deferredPromise() : null;
+    if (acceptance) this.sourceAcceptances.set(command.requestId, {
+      deferred: acceptance,
+      changes: changes.map((change) => structuredClone(change)),
+    });
     document.stageRecoveryIntent(changes);
     this.draftSubmission = { requestId: command.requestId, kind: command.type, changes: changes.map(change => structuredClone(change)) };
     document.noteSubmitted(command.requestId, command);
@@ -693,6 +708,7 @@ export class BrowserNotebookClient {
     await this.flushDraftPersistence();
     try {
       const result = await this.dispatch(command);
+      this.resolveSourceAcceptance(command.requestId);
       document.acknowledge(result);
       if (this.draftSubmission?.requestId === command.requestId) this.draftSubmission = null;
       this.queueDraftPersistence();
@@ -701,6 +717,7 @@ export class BrowserNotebookClient {
       this.notify(undefined, sourceCellKeys(command, document));
       return result;
     } catch (error) {
+      this.resolveSourceAcceptance(command.requestId);
       if (error instanceof BrowserTransportError && error.definitive) {
         document.reject(command.requestId, error.code);
         if (this.draftSubmission?.requestId === command.requestId) this.draftSubmission = null;
@@ -765,6 +782,7 @@ export class BrowserNotebookClient {
     if (event.type === "transaction" && event.operationId) {
       const outcome = sourceCommitOutcome(event.payload);
       if (outcome && document.acknowledgeSourceCommit(event.operationId, outcome)) {
+        this.resolveSourceAcceptance(event.operationId);
         if (this.draftSubmission?.requestId === event.operationId) this.draftSubmission = null;
         this.queueDraftPersistence();
       }
@@ -831,6 +849,23 @@ export class BrowserNotebookClient {
     try { return await operation(); }
     finally { release(); }
   }
+
+  private resolveSourceAcceptance(operationId: string): void {
+    const acceptance = this.sourceAcceptances.get(operationId);
+    if (!acceptance) return;
+    this.sourceAcceptances.delete(operationId);
+    acceptance.deferred.resolve();
+  }
+}
+
+function sameSourceChange(left: DocumentChange, right: DocumentChange): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function deferredPromise(): { promise: Promise<void>; resolve: () => void } {
+  let resolve!: () => void;
+  const promise = new Promise<void>((settle) => { resolve = settle; });
+  return { promise, resolve };
 }
 
 function sourceCellKeys(command: SourceCommand, document: BrowserDocument): string[] {

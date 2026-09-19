@@ -30,13 +30,27 @@ documented final installed-app command all exit within bounds, clean every owned
 child and verify the current signed package. No known P1 product defect, hanging
 process, false passing test or unclassified failure remains.
 
-**Base:** accepted UI/UX checkpoint `dd9d60f` (`Harden native evidence output
-handling`).
+**Final candidate:** `5e9b5ff` (`Complete Mac app acceptance`) on accepted UI/UX
+checkpoint `dd9d60f`.
 
-**Next action:** primary implementer builds one installed-app acceptance harness
-covering the complete journeys above through production UI/protocol/native seams,
-runs it without foreground takeover, fixes all real failures, and returns a final
-candidate checkpoint for independent release review.
+**Correction target:** restore ordinary project/user/bundled package precedence and
+remove all notebook AST rewriting for `library/require/loadNamespace`; isolate the
+app-private Ark adapter without occupying or forcing the public `alder` namespace.
+Make native Save first submit and acknowledge the latest CodeMirror draft, then
+await authoritative disk save; repeated immediate edit/run/Save must never observe
+stale clean state. Eliminate the flaky browser widget input race. Remove the
+acceptance-only driver/private-global/DOM automation from production Electron and
+drive the packaged app externally through normal CDP/user/native seams. Expand the
+installed journey honestly across reopen, interruption/recovery, multiple windows/
+clients, conflicts and optional-service failures where Electron integration adds
+risk; retain layered lower-seam coverage without claiming it is native. Add an
+installed empty-cell regression. Every failure path must clean backend/analyzer/
+Ark/Electron children within bounds. Pass repeated stress cases and one clean
+uninterrupted final command.
+
+**Next action:** primary implementer corrects `5e9b5ff`, returns a clean candidate
+with stress and end-to-end evidence, then both independent release reviewers rerun
+the final acceptance.
 
 **Testing constraint:** do not take over Carl's visible desktop. Use background
 or isolated Mac GUI checks where native interaction matters. The in-app browser
@@ -68,7 +82,7 @@ order; their implementation details are settled when assigned.
 | Residual architecture and test cleanup | Accepted | Primary implementer | `8990292`: removed trace/strict-JSON/platform/state debris, retained cohesive owners and rebuilt a five-second behavior-led host suite |
 | Targeted generative verification | Accepted | Primary implementer | `d88ca7d`: bounded independent graph/document/recovery/state/R verification with real crash durability and replayable failures |
 | UI/UX review and polish | Accepted | Primary implementer | `dd9d60f`: coherent Mac interaction and visual system, real responsive/accessibility behavior, truthful production evidence and safe native harness |
-| Complete Mac app and final acceptance | Implementing | Primary implementer | Exercise the signed native app end to end through ordinary use, concurrency, failures, recovery, optional services and clean shutdown; fix every release-blocking defect |
+| Complete Mac app and final acceptance | Implementing | Primary implementer | Restore R precedence, fix immediate native Save and widget races, externalize/broaden packaged-app acceptance and guarantee failure cleanup at `5e9b5ff` |
 
 The following requirements apply to the relevant slices and are checked again
 when accepting the complete app:

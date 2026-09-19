@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -13,6 +13,18 @@ type RunningHost = Awaited<ReturnType<typeof startHost>>;
 
 let stagedResources: Awaited<ReturnType<typeof resolveApplicationResources>> | undefined;
 let browserDataHome: string | undefined;
+const inheritedRLibsUser = process.env.R_LIBS_USER;
+const inheritedXdgDataHome = process.env.XDG_DATA_HOME;
+const isolatedRLibsUser = await mkdtemp(join(tmpdir(), 'alder-browser-r-library-'));
+process.env.R_LIBS_USER = isolatedRLibsUser;
+test.after(async () => {
+  if (inheritedRLibsUser === undefined) delete process.env.R_LIBS_USER;
+  else process.env.R_LIBS_USER = inheritedRLibsUser;
+  if (inheritedXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
+  else process.env.XDG_DATA_HOME = inheritedXdgDataHome;
+  await rm(isolatedRLibsUser, { recursive: true, force: true });
+  if (browserDataHome !== undefined) await rm(browserDataHome, { recursive: true, force: true });
+});
 async function startInstalledHost(path: string, options: {
   executionMode?: 'automatic' | 'lazy';
   runOnStartup?: boolean;
@@ -64,6 +76,46 @@ function peerCommand(app: RunningHost, command: Record<string, unknown>): HostCo
     sessionEpoch: app.controller.epoch,
   } as HostCommand;
 }
+
+test('an immediate Save captures the current CodeMirror source', {
+  skip: process.env.ALDER_BROWSER_TEST !== '1', timeout: 120_000,
+}, async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'alder-browser-immediate-save-'));
+  const path = join(directory, 'notebook.R');
+  await writeFile(path, '# %%\nvalue <- 0L\nvalue\n');
+  let app: RunningHost | undefined, browser: Chrome | undefined;
+  try {
+    app = await startInstalledHost(path);
+    browser = await openAuthenticatedBrowser(app);
+    await browser.wait("Boolean(window.__alderHost?.client.document?.snapshot.runtime.executionReady && document.querySelector('.cm-content'))");
+    const shortcut = async (key: string, code: string, virtualKeyCode: number, modifiers = 4) => {
+      await browser!.send('Input.dispatchKeyEvent', { type: 'keyDown', key, code, windowsVirtualKeyCode: virtualKeyCode, modifiers });
+      await browser!.send('Input.dispatchKeyEvent', { type: 'keyUp', key, code, windowsVirtualKeyCode: virtualKeyCode, modifiers });
+    };
+    for (let iteration = 1; iteration <= 20; iteration += 1) {
+      const source = `value <- ${iteration}L\nvalue`;
+      await browser.evaluate("(() => { document.querySelector('.cm-content')?.focus(); return true; })()");
+      await replaceFocusedEditor(browser, source);
+      if (iteration === 10) await shortcut('Enter', 'Enter', 13);
+      await shortcut('s', 'KeyS', 83);
+      await browser.wait(`window.__alderHost.client.document.snapshot.cells[0].body.join('\\n') === ${JSON.stringify(source)} &&
+        window.__alderHost.client.document.snapshot.dirty === false`, 15_000);
+      const expected = `# %%\n${source}\n`;
+      const deadline = Date.now() + 15_000;
+      let saved = await readFile(path, 'utf8');
+      while (saved !== expected && Date.now() < deadline) {
+        await new Promise(resolve => setTimeout(resolve, 20));
+        saved = await readFile(path, 'utf8');
+      }
+      assert.equal(saved, expected);
+    }
+    assert.deepEqual(browser.errors, []);
+  } finally {
+    await browser?.close();
+    await app?.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 
 test('production editor themes render real tokens and the inspector owns narrow focus', {
   skip: process.env.ALDER_BROWSER_TEST !== '1', timeout: 90_000,
@@ -731,6 +783,13 @@ test('scalar, form, and button controls drive the intended reactive cells once',
       await browser.wait(`document.querySelector('[data-cell="cell-5"] [data-role=widget][data-name=settings][data-kind=checkbox]')?.checked === true &&
         window.__alderHost.client.document.snapshot.cells[4].outputs[0]?.data?.spec?.child?.value?.enabled === true &&
         document.querySelector('[data-cell="cell-5"] [data-form-submit=true]')?.disabled === false`, 30_000);
+      for (let iteration = 0; iteration < 20; iteration += 1) {
+        const expected = iteration % 2 === 1;
+        await browser.click('[data-cell="cell-5"] [data-role=widget][data-name=settings][data-kind=checkbox]');
+        await browser.wait(`document.querySelector('[data-cell="cell-5"] [data-role=widget][data-name=settings][data-kind=checkbox]')?.checked === ${expected} &&
+          window.__alderHost.client.document.snapshot.cells[4].outputs[0]?.data?.spec?.child?.value?.enabled === ${expected} &&
+          document.querySelector('[data-cell="cell-5"] [data-role=widget][data-name=settings][data-kind=checkbox]')?.disabled === false`, 8_000);
+      }
       assert.equal(doneRuns.get('cell-6')?.size ?? 0, 0);
       assert.match(String(await browser.evaluate("document.querySelector('[data-cell=\"cell-6\"] [data-role=output]').textContent")), /not submitted/);
       await browser.evaluate(`(() => {

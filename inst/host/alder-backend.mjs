@@ -74152,13 +74152,27 @@ var Controller = class {
         );
       }
       active.lastSequence = event.sequence;
+      const current = this.cellById(job.id);
+      const sourceObsolete = current === void 0 || current.revision !== job.revision || active.cancelMode === "source" || active.cancelMode === "widget";
       if (event.type === "completed") {
+        if (sourceObsolete) {
+          active.completion = event.result;
+          return;
+        }
         const rawResult = rawEvent.type === "completed" ? rawEvent.result : void 0;
         active.completion = this.canonicalEngineResponse(rawResult, event.result, job);
         return;
       }
       if (event.type !== "output") return;
       const rawPayload = rawEvent.type === "output" ? rawEvent.payload : void 0;
+      if (sourceObsolete || active.cancelMode !== null) {
+        if (event.kind === "append") {
+          this.discardObsoleteEngineRecord(
+            isRecord(rawPayload) && "output" in rawPayload ? rawPayload.output : rawPayload
+          );
+        }
+        return;
+      }
       const output2 = event.kind === "append" ? this.canonicalEngineRecord(
         isRecord(rawPayload) && "output" in rawPayload ? rawPayload.output : rawPayload,
         job
@@ -74181,6 +74195,11 @@ var Controller = class {
       throw new ControllerError("invalid_engine_event", "R kernel returned an output record with stale identity", 503);
     }
     return record4;
+  }
+  discardObsoleteEngineRecord(value) {
+    if (!isRecord(value) || typeof value.id !== "string") return;
+    const record4 = this.outputStore.getRecord(value.id);
+    if (record4 !== void 0 && Object.is(record4, value)) this.outputStore.discardExact([record4]);
   }
   canonicalEngineResponse(raw, parsed, job) {
     if (!isRecord(raw) || raw.outputs === void 0) return parsed;
@@ -107315,21 +107334,22 @@ var OutputRenderer = class {
         for (const predecessor of predecessors) {
           await predecessor.done;
           if (predecessor.failure !== null) throw predecessor.failure;
-          if (pending.origin.owner === predecessor.origin.owner && pending.origin.revision === predecessor.origin.revision && pending.origin.outputId === predecessor.origin.outputId && pending.origin.kernelEpoch === predecessor.origin.kernelEpoch) {
+          if (pending.origin.owner === predecessor.origin.owner && pending.origin.revision === predecessor.origin.revision && pending.origin.kernelEpoch === predecessor.origin.kernelEpoch && pending.origin.outputGeneration <= predecessor.origin.outputGeneration) {
             pending.origin = predecessor.origin;
           }
         }
         while (pending.update) {
           const next = pending.update;
           pending.update = null;
-          const result = await this.interactiveActions().widget(string4(pending.widget.name), pending.path, next, pending.origin);
+          const submittedOrigin = pending.origin;
+          const result = await this.interactiveActions().widget(string4(pending.widget.name), pending.path, next, submittedOrigin);
           if (isObject2(result) && isObject2(result.result) && typeof result.result.outputRecordId === "string" && typeof result.result.outputGeneration === "number") {
             pending.origin = { ...pending.origin, outputId: result.result.outputRecordId, outputGeneration: result.result.outputGeneration };
             const slot = pending.control.closest(".out-record");
             for (const candidate of Array.from(slot?.querySelectorAll("[data-role=widget]") ?? [])) {
               if (!isWidgetControl(candidate) || candidate.dataset.name !== string4(pending.widget.name)) continue;
               const currentOrigin = this.controlOrigins.get(candidate);
-              if (currentOrigin?.owner === pending.origin.owner && currentOrigin.revision === pending.origin.revision && currentOrigin.outputId === pending.origin.outputId && currentOrigin.kernelEpoch === pending.origin.kernelEpoch && currentOrigin.outputGeneration <= pending.origin.outputGeneration) {
+              if (currentOrigin?.owner === submittedOrigin.owner && currentOrigin.revision === submittedOrigin.revision && currentOrigin.outputId === submittedOrigin.outputId && currentOrigin.kernelEpoch === submittedOrigin.kernelEpoch && currentOrigin.outputGeneration <= submittedOrigin.outputGeneration) {
                 this.controlOrigins.set(candidate, pending.origin);
               }
             }

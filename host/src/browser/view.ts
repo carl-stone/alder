@@ -240,6 +240,7 @@ export class NotebookView {
 
   async runExplicit<T>(operation: () => Promise<{ completed: Promise<T> }>): Promise<T> {
     this.cancelEditTimers();
+    this.captureEditorSources();
     this.explicitRunCount += 1;
     if (this.documentValue) this.renderControls(this.documentValue.snapshot);
     const pending = this.action(async () => {
@@ -2187,6 +2188,7 @@ export class NotebookView {
       ? await desktop.chooseSavePath()
       : undefined;
     if (destination === null) return undefined;
+    await this.flushEditorSources();
     let formatFailure: string | null = null;
     if (this.executionAvailable() && nested(this.documentValue?.snapshot.config, ["format", "on_save"]) === true) {
       try { await this.formatCells(); }
@@ -2222,6 +2224,7 @@ export class NotebookView {
       if (!desktop) return "cancelled";
       const destination = await desktop.chooseSavePath();
       if (destination === null) return "cancelled";
+      await this.flushEditorSources();
       this.setSaveState("saving");
       try { await this.client.saveAs(destination); this.setSaveState("saved"); }
       catch (error) { this.setSaveState("failed"); throw error; }
@@ -2638,6 +2641,22 @@ export class NotebookView {
   private sourceText(key: string): string {
     const view = this.views.get(key);
     return view?.editor?.getDoc() ?? view?.fallback?.value ?? this.requireCell(key).desiredBody.join("\n");
+  }
+
+  private captureEditorSources(): void {
+    if (!this.documentValue) return;
+    for (const cell of this.documentValue.cells) {
+      if (cell.tombstone) continue;
+      const source = this.sourceText(cell.key);
+      if (source !== cell.desiredBody.join("\n")) {
+        this.client.editCell(cell.key, source, cell.desiredType);
+      }
+    }
+  }
+
+  private async flushEditorSources(): Promise<void> {
+    this.cancelEditTimers();
+    this.captureEditorSources();
   }
 
   private async action<T>(operation: () => Promise<T>): Promise<T> {

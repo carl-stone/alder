@@ -84,7 +84,6 @@ for (module in c("private-json.R", "private-protocol.R", "private-ui.R")) {
 }
 PRIVATE_UI_ENV <- environment()
 PRIVATE_VERSION <- private_version
-PRIVATE_LIBRARY <- private_library
 Sys.unsetenv(c("ALDER_WORKER_DIR", "ALDER_R_PRIVATE_LIBRARY", "ALDER_RESOURCES_ROOT",
                "ALDER_PROJECT_LIBRARY"))
 
@@ -103,27 +102,6 @@ local({
   }
 
   UI_ENV <- PRIVATE_UI_ENV
-
-  pin_private_alder_import <- function(expr) {
-    if (!is.call(expr)) return(expr)
-    parts <- as.list(expr)
-    for (index in seq_along(parts)[-1L]) {
-      parts[index] <- list(pin_private_alder_import(parts[[index]]))
-    }
-    expr <- as.call(parts)
-    function_name <- if (is.symbol(expr[[1L]])) as.character(expr[[1L]]) else ""
-    if (!function_name %in% c("library", "require", "requireNamespace", "loadNamespace")) {
-      return(expr)
-    }
-    arguments <- as.list(expr)[-1L]
-    package <- arguments[["package"]] %||% arguments[[1L]] %||% NULL
-    package_name <- if (is.symbol(package)) as.character(package) else package
-    if (is.character(package_name) && length(package_name) == 1L &&
-        !is.na(package_name) && identical(package_name, "alder")) {
-      expr[["lib.loc"]] <- PRIVATE_LIBRARY
-    }
-    expr
-  }
 
   artifact_dir <- Sys.getenv("ALDER_ARTIFACT_DIR", unset = "")
   Sys.unsetenv("ALDER_ARTIFACT_DIR")
@@ -2009,9 +1987,6 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
     baseline_captured <- TRUE
 
     exprs <- parse(text = code, keep.source = TRUE)
-    if (length(exprs)) {
-      exprs <- as.expression(lapply(exprs, pin_private_alder_import))
-    }
     value <- NULL
     visible <- FALSE
     vname <- ""

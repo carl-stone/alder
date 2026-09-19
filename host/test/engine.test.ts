@@ -217,6 +217,9 @@ test("live v2 Engine starts analyzer and kernel independently, analyzes ranges, 
       const evaluated = await engine.evaluate(payload(kernel.kernelEpoch, "eval", "unicode", "1 + 1"));
       assert.equal(evaluated.ok, true);
       assert.match(JSON.stringify(evaluated.outputs), /2/);
+      const empty = await engine.evaluate(payload(kernel.kernelEpoch, "empty-eval", "empty", ""));
+      assert.equal(empty.ok, true);
+      assert.deepEqual(empty.outputs, []);
       await writeFile(join(directory, "helper.R"), "sourced_value <- 7L\n", "utf8");
       const ordinary = await engine.evaluate(payload(kernel.kernelEpoch, "ordinary-dynamic-r", "ordinary-dynamic-r", `
         name <- "hidden_value"
