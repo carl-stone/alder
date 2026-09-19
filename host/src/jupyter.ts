@@ -554,7 +554,9 @@ export class ArkKernel extends EventEmitter {
 
   private async connect(zmq: ZeroMqModule, ports: ConnectionPorts): Promise<void> {
     const routingId = randomUUID();
-    const bounded = { maxMessageSize: this.maxMessageBytes, receiveHighWaterMark: 256 };
+    // Closed kernels must never hold the shared ZeroMQ context open at process
+    // exit while it tries to deliver messages to an already stopped Ark child.
+    const bounded = { maxMessageSize: this.maxMessageBytes, receiveHighWaterMark: 256, linger: 0 };
     this.control = new zmq.Dealer({ routingId, ...bounded });
     this.shell = new zmq.Dealer({ routingId, ...bounded });
     this.stdin = new zmq.Dealer({ routingId, ...bounded });

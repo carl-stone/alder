@@ -84,6 +84,7 @@ for (module in c("private-json.R", "private-protocol.R", "private-ui.R")) {
 }
 PRIVATE_UI_ENV <- environment()
 PRIVATE_VERSION <- private_version
+PRIVATE_LIBRARY <- private_library
 Sys.unsetenv(c("ALDER_WORKER_DIR", "ALDER_R_PRIVATE_LIBRARY", "ALDER_RESOURCES_ROOT",
                "ALDER_PROJECT_LIBRARY"))
 
@@ -102,6 +103,27 @@ local({
   }
 
   UI_ENV <- PRIVATE_UI_ENV
+
+  pin_private_alder_import <- function(expr) {
+    if (!is.call(expr)) return(expr)
+    parts <- as.list(expr)
+    for (index in seq_along(parts)[-1L]) {
+      parts[index] <- list(pin_private_alder_import(parts[[index]]))
+    }
+    expr <- as.call(parts)
+    function_name <- if (is.symbol(expr[[1L]])) as.character(expr[[1L]]) else ""
+    if (!function_name %in% c("library", "require", "requireNamespace", "loadNamespace")) {
+      return(expr)
+    }
+    arguments <- as.list(expr)[-1L]
+    package <- arguments[["package"]] %||% arguments[[1L]] %||% NULL
+    package_name <- if (is.symbol(package)) as.character(package) else package
+    if (is.character(package_name) && length(package_name) == 1L &&
+        !is.na(package_name) && identical(package_name, "alder")) {
+      expr[["lib.loc"]] <- PRIVATE_LIBRARY
+    }
+    expr
+  }
 
   artifact_dir <- Sys.getenv("ALDER_ARTIFACT_DIR", unset = "")
   Sys.unsetenv("ALDER_ARTIFACT_DIR")
@@ -661,7 +683,8 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
     rows <- lapply(seq_len(nrow(selected)), function(i)
       unname(lapply(selected[i, , drop = FALSE], preview_chr)))
     list(nrow = as.numeric(nr), ncol = as.numeric(nc),
-         columns = I(bounded_chr(columns[seq_len(min(nc, 50L))], 256L)),
+         columns = unname(as.list(bounded_chr(
+           columns[seq_len(min(nc, 50L))], 256L))),
          preview = I(rows), offset = as.numeric(offset),
          limit = as.numeric(limit), sort_by = as.character(sort_by),
          sort_desc = isTRUE(sort_desc), filter = as.character(filter),
@@ -1898,7 +1921,9 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
     valid_revision <- is.numeric(revision_raw) && length(revision_raw) == 1L &&
       !is.na(revision_raw) && is.finite(revision_raw) &&
       revision_raw == floor(revision_raw) && revision_raw >= 0
-    if (!scalar_identity(id_raw) || !scalar_identity(code_raw) ||
+    valid_code <- is.character(code_raw) && length(code_raw) == 1L &&
+      !is.na(code_raw) && validUTF8(code_raw)
+    if (!scalar_identity(id_raw) || !valid_code ||
         !scalar_identity(request_raw) || !scalar_identity(run_id_raw) ||
         !scalar_identity(session_epoch_raw) || !scalar_identity(kernel_epoch_raw) ||
         !scalar_identity(operation_id_raw) || !valid_revision || is.null(defs)) {
@@ -1984,6 +2009,9 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
     baseline_captured <- TRUE
 
     exprs <- parse(text = code, keep.source = TRUE)
+    if (length(exprs)) {
+      exprs <- as.expression(lapply(exprs, pin_private_alder_import))
+    }
     value <- NULL
     visible <- FALSE
     vname <- ""

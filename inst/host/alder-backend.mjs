@@ -78543,7 +78543,7 @@ var ArkKernel = class extends EventEmitter2 {
   }
   async connect(zmq, ports) {
     const routingId = randomUUID4();
-    const bounded = { maxMessageSize: this.maxMessageBytes, receiveHighWaterMark: 256 };
+    const bounded = { maxMessageSize: this.maxMessageBytes, receiveHighWaterMark: 256, linger: 0 };
     this.control = new zmq.Dealer({ routingId, ...bounded });
     this.shell = new zmq.Dealer({ routingId, ...bounded });
     this.stdin = new zmq.Dealer({ routingId, ...bounded });
@@ -108156,9 +108156,9 @@ async function runAir(executable, input2, processScope, cwd, signal) {
     };
     const abort = () => {
       aborting = true;
-      if (child !== void 0) void child.terminate().catch(() => {
-      });
-      finish(() => reject(new FormattingError("cancelled", "formatting was cancelled")));
+      const cancelled = () => finish(() => reject(new FormattingError("cancelled", "formatting was cancelled")));
+      if (child === void 0) cancelled();
+      else void child.terminate().then(cancelled, cancelled);
     };
     if (signal?.aborted) return abort();
     void processScope.spawn({
@@ -108180,7 +108180,8 @@ async function runAir(executable, input2, processScope, cwd, signal) {
         stderr = collect2(stderr, chunk);
       });
       void spawned.exited.then(({ code: code2 }) => {
-        finish(() => resolve15({ code: code2, stdout, stderr }));
+        if (aborting || signal?.aborted) abort();
+        else finish(() => resolve15({ code: code2, stdout, stderr }));
       }, (error61) => {
         finish(() => reject(new FormattingError("format_failed", error61 instanceof Error ? error61.message : String(error61))));
       });

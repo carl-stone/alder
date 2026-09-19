@@ -486,7 +486,7 @@ test("installed kernel follows ordinary project profile and library activation",
   const projectPath = join(directory, "project-notebook.R");
   const userLibrary = join(directory, "user-library");
   const projectLibrary = join(directory, "renv-library");
-  const packageName = "alder";
+  const packageName = "alderfixtureprecedence";
   const priorUserLibrary = process.env.R_LIBS_USER;
   let app: RunningHost | undefined;
   try {
@@ -548,6 +548,38 @@ test("installed kernel follows ordinary project profile and library activation",
   }
 });
 
+test("installed kernel reserves the bundled Alder helper namespace", {
+  skip: !APPLICATION_ROOT, timeout: 120_000,
+}, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "alder-private-helper-"));
+  const path = join(directory, "notebook.R");
+  const userLibrary = join(directory, "user-library");
+  const priorUserLibrary = process.env.R_LIBS_USER;
+  let app: RunningHost | undefined;
+  try {
+    await installFixturePackage(directory, userLibrary, "alder", "999.0.0", "stale-user-helper");
+    process.env.R_LIBS_USER = userLibrary;
+    await writeFile(path, [
+      "# %%",
+      "library(alder)",
+      "paste(as.character(packageVersion('alder')), normalizePath(find.package('alder'), winslash='/'), exists('out', inherits=TRUE), sep='|')",
+      "",
+    ].join("\n"));
+    app = await startInstalledHost(path, { executionMode: "lazy" });
+    const run = await dispatchHost(app, { type: "run", scope: "all", changes: [] });
+    assert.equal(run.error, null);
+    const output = JSON.stringify(app.controller.snapshot().cells[0]!.outputs);
+    assert.match(output, new RegExp(stagedResources!.rLibraryDirectory.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    assert.match(output, /\|TRUE/);
+    assert.doesNotMatch(output, /999\.0\.0|user-library|stale-user-helper/);
+  } finally {
+    if (priorUserLibrary === undefined) delete process.env.R_LIBS_USER;
+    else process.env.R_LIBS_USER = priorUserLibrary;
+    await app?.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("untitled recovery reopens a symlinked project with physical R profile and library ownership", {
   skip: !APPLICATION_ROOT, timeout: 120_000,
 }, async () => {
@@ -563,7 +595,7 @@ test("untitled recovery reopens a symlinked project with physical R profile and 
   try {
     await mkdir(project);
     await symlink(project, alias, "dir");
-    await installFixturePackage(root, library, "alder", "3.0.0", "physical-project");
+    await installFixturePackage(root, library, "alderfixtureproject", "3.0.0", "physical-project");
     await writeFile(join(project, ".Renviron"), "ALDER_UNTITLED_MARKER=physical-profile\n");
     await writeFile(join(project, ".Rprofile"), ".libPaths(c(file.path(getwd(), '.alder', 'library'), .libPaths()))\n");
     await writeFile(preferencesPath, `rscript: ${JSON.stringify(process.env.ALDER_RSCRIPT ?? execFileSync("which", ["Rscript"], { encoding: "utf8" }).trim())}\n`);
@@ -571,7 +603,7 @@ test("untitled recovery reopens a symlinked project with physical R profile and 
     const physicalProject = await realpath(project);
     assert.equal(descriptor.projectDirectory, physicalProject);
     const expression = "paste(normalizePath(getwd(), winslash='/'), Sys.getenv('ALDER_UNTITLED_MARKER'), " +
-      "normalizePath(.libPaths()[1], winslash='/'), alder::fixture_value(), sep='|')";
+      "normalizePath(.libPaths()[1], winslash='/'), alderfixtureproject::fixture_value(), sep='|')";
     const ordinary = execFileSync(process.env.RSCRIPT ?? "Rscript", ["--slave", "-e", `cat(${expression})`], {
       cwd: physicalProject, encoding: "utf8",
     }).trim();

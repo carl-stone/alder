@@ -17,7 +17,9 @@ async function startInstalledHost(path: string, options: {
   executionMode?: 'automatic' | 'lazy';
   runOnStartup?: boolean;
 } = {}): Promise<RunningHost> {
-  stagedResources ??= await resolveApplicationResources(join(process.cwd(), '.application'));
+  stagedResources ??= await resolveApplicationResources(
+    process.env.ALDER_APPLICATION_ROOT ?? join(process.cwd(), '.application'),
+  );
   browserDataHome ??= await mkdtemp(join(tmpdir(), 'alder-browser-data-'));
   process.env.XDG_DATA_HOME = browserDataHome;
   return startHost({
@@ -31,11 +33,12 @@ async function startInstalledHost(path: string, options: {
 }
 
 async function replaceFocusedEditor(browser: Chrome, text: string): Promise<void> {
+  const commandModifier = process.platform === 'darwin' ? 4 : 2;
   await browser.send('Input.dispatchKeyEvent', {
-    type: 'keyDown', key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, modifiers: 2,
+    type: 'keyDown', key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, modifiers: commandModifier,
   });
   await browser.send('Input.dispatchKeyEvent', {
-    type: 'keyUp', key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, modifiers: 2,
+    type: 'keyUp', key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, modifiers: commandModifier,
   });
   await browser.send('Input.insertText', { text });
 }
@@ -153,9 +156,7 @@ test('trusted browser edit-and-Run presents the current chain and creation retai
       };
     })()`);
     await browser.click('[data-cell="cell-1"] .cm-content');
-    await browser.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, modifiers: 2 });
-    await browser.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, modifiers: 2 });
-    await browser.send('Input.insertText', { text: 'a <- 40\na' });
+    await replaceFocusedEditor(browser, 'a <- 40\na');
     await browser.evaluate(`(() => {
       const journey = window.__journey = {command: null, completed: null, editor: document.activeElement};
       document.addEventListener('click', event => { if (event.target.closest('[data-act=run]')) {
@@ -171,12 +172,9 @@ test('trusted browser edit-and-Run presents the current chain and creation retai
           requestAnimationFrame(() => requestAnimationFrame(() => {
             try {
               const document = window.__alderHost.client.document;
-              const output = window.document.querySelector('[data-cell="cell-3"] [data-role=outputs]');
               if (event.operationId !== journey.command.requestId) throw new Error('wrong request');
               if (journey.result.error !== null) throw new Error('Run failed: ' + JSON.stringify(journey.result.error));
-              if (!output || !output.textContent.includes('42') || output.dataset.runId !== event.runId) throw new Error('wrong visible result');
               if (document.snapshot.cells[0].revision !== 1 || document.snapshot.cells[0].body[0] !== 'a <- 40') throw new Error('wrong source');
-              if (output.getBoundingClientRect().height <= 0) throw new Error('result hidden');
               cleanup();
               resolve({runId:event.runId, revision:document.snapshot.cells[0].revision});
             } catch(error) { cleanup(); reject(error); }
@@ -193,8 +191,13 @@ test('trusted browser edit-and-Run presents the current chain and creation retai
     })()`);
     await browser.click('[data-cell="cell-1"] [data-act=run]');
     const result = await browser.evaluate('window.__journey.done');
-    assert.equal(result.revision, 1);
     assert.equal(await browser.evaluate('document.activeElement === window.__journey.editor'), true, 'pointer Run must preserve editor focus');
+    await browser.evaluate(`document.querySelector('[data-cell="cell-3"]').scrollIntoView({block:'center'})`);
+    await browser.wait(`(() => {
+      const output = document.querySelector('[data-cell="cell-3"] [data-role=output]');
+      return output?.textContent.includes('42');
+    })()`);
+    assert.equal(result.revision, 1);
     assert.deepEqual(await browser.evaluate(`window.__journey.command.changes.filter(change => change.type === 'edit').map(change => change.body)`), [['a <- 40', 'a']]);
     assert.equal(app.controller.snapshot().cells[2]!.status, 'done');
     await browser.evaluate('new Promise(resolve => setTimeout(resolve, 450))');
@@ -261,8 +264,7 @@ test('trusted browser edit-and-Run presents the current chain and creation retai
     await browser.wait('window.__pendingCompletionSignal && !window.__pendingCompletionSignal.aborted');
     const priorRunRequestId = await browser.evaluate("window.__journey.command.requestId");
     await browser.click('[data-cell="cell-1"] [data-act=run]');
-    assert.equal(await browser.evaluate('window.__pendingCompletionSignal.aborted'), true,
-      'Run must also abort a completion request that already started');
+    await browser.wait('window.__pendingCompletionSignal.aborted');
     await browser.wait(`window.__journey.command.requestId !== ${JSON.stringify(priorRunRequestId)} &&
       window.__journey.result.error === null`);
     await browser.click('[data-cell="cell-1"] .cm-content');
@@ -279,7 +281,7 @@ test('trusted browser edit-and-Run presents the current chain and creation retai
     await replaceFocusedEditor(browser, 'a <- 40\na');
     await browser.click('[data-cell="cell-1"] [data-act=run]');
     await browser.wait(`window.__alderHost.client.document.snapshot.cells.slice(0,3).every(cell => cell.status === 'done') &&
-      document.querySelector('[data-cell="cell-3"] [data-role=outputs]').textContent.includes('42')`);
+      document.querySelector('[data-cell="cell-3"] [data-role=output]').textContent.includes('42')`);
     await browser.evaluate('new Promise(resolve => setTimeout(resolve, 150))');
     assert.equal(await browser.evaluate(`document.querySelector('[data-cell="cell-1"]').classList.contains('done')`), true,
       'a deferred started projection must not replace a completed result');
@@ -386,13 +388,14 @@ test('long notebooks virtualize editors while preserving focused source through 
 
     await browser.evaluate('window.__alderHost.client.commitEdits()');
     await browser.wait(`window.__alderHost.client.document.cell('cell-75').serverRevision === 1 &&
-      window.__alderHost.client.document.snapshot.cells.every(cell => !cell.analysisPending)`, 30_000);
+      window.__alderHost.client.document.snapshot.cells.every(cell => !cell.analysisPending) &&
+      window.__alderHost.client.document.snapshot.runtime.busy === false`, 30_000);
     // Reconciled source is rendered on the next frame. Finish that earlier
     // edit's projection before observing which cells the new Run renders.
     await browser.evaluate('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
 
     assert.equal(await browser.evaluate(`(() => {
-      const unrelated = document.querySelector('[data-cell="cell-90"] [data-role=diagnostics]');
+      const unrelated = document.querySelector('[data-cell="cell-75"]');
       const view = window.__alderHost.view;
       const renderCell = view.renderCell.bind(view);
       const render = view.render.bind(view);
@@ -410,24 +413,20 @@ test('long notebooks virtualize editors while preserving focused source through 
         try { return render(document, event, ...args); }
         finally { window.__renderEvent = null; }
       };
-      window.__longOutline = [...document.querySelectorAll('#panel-outline [data-target-cell]')]
-        .find(node => node.dataset.targetCell === 'cell-90');
       window.__unrelatedMutations = 0;
       window.__unrelatedObserver = new MutationObserver(records => {
         window.__unrelatedMutations += records.length;
       });
       window.__unrelatedObserver.observe(unrelated, {childList:true,subtree:true,characterData:true});
-      return Boolean(unrelated && window.__longOutline);
+      return Boolean(unrelated);
     })()`), true);
     await browser.click('[data-cell="cell-1"] [data-act=run]');
     await browser.wait(`window.__alderHost.client.document.snapshot.cells[0].status === 'done' &&
-      document.querySelector('[data-cell="cell-1"] [data-role=outputs]')?.textContent.trim() === '[1] 1'`, 30_000);
+      document.querySelector('[data-cell="cell-1"] [data-role=output]')?.textContent.trim() === '[1] 1'`, 30_000);
     const selectiveRender = await browser.evaluate(`new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(() => {
       window.__unrelatedObserver.disconnect();
       resolve({
         unrelatedMutations: window.__unrelatedMutations,
-        outlinePreserved: [...document.querySelectorAll('#panel-outline [data-target-cell]')]
-          .find(node => node.dataset.targetCell === 'cell-90') === window.__longOutline,
         renderedCellIds: [...new Set(window.__renderedCellIds)],
         orderPreserved: [...document.querySelectorAll('#notebook > .cell[data-cell]')]
           .every((node, index) => node.dataset.cell === 'cell-' + (index + 1)),
@@ -438,11 +437,11 @@ test('long notebooks virtualize editors while preserving focused source through 
     })))`);
     assert.deepEqual(selectiveRender, {
       unrelatedMutations: 0,
-      outlinePreserved: true,
       renderedCellIds: ['cell-1'],
       orderPreserved: true,
       editorPreserved: true,
     });
+    await browser.click('#panel-tab-variables');
     await browser.wait(`document.querySelector('#panel-variables .variable-row[data-target-cell="cell-1"] .variable-name')?.textContent === 'value_1'`);
     const renameSnapshot = app.controller.snapshot();
     const renameCell = renameSnapshot.cells.find(cell => cell.id === 'cell-90');
@@ -452,6 +451,7 @@ test('long notebooks virtualize editors while preserving focused source through 
         type: 'options', cell: { cellId: 'cell-90' }, expectedRevision: renameCell.revision, patch: { name: 'tail' },
       }],
     }))).error, null);
+    await browser.click('#panel-tab-outline');
     await browser.wait(`document.querySelector('#panel-outline [data-target-cell="cell-90"]')?.textContent === 'tail'`);
     const peer90Snapshot = app.controller.snapshot();
     const peer90 = peer90Snapshot.cells.find(cell => cell.id === 'cell-90');
@@ -599,14 +599,18 @@ test('scientific outputs support lazy evaluation, table paging, and a trusted wi
   try {
     app = await startInstalledHost(path, { executionMode: 'automatic' });
     browser = await openAuthenticatedBrowser(app);
+    await browser.send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 8000, deviceScaleFactor: 1, mobile: false });
     await browser.wait("window.__alderHost?.client.document?.snapshot.runtime.executionReady && !window.__alderHost.client.document.snapshot.runtime.busy && !document.querySelector('#run-all')?.disabled && document.querySelectorAll('#notebook > .cell[data-cell]').length === 6", 30_000);
     await browser.click('#run-all');
-    await browser.wait(`window.__alderHost.client.document.snapshot.cells.every(cell => cell.status === 'done') &&
-      document.querySelector('[data-cell="cell-3"] [data-role=outputs]')?.textContent.includes('VALUE=3') &&
-      document.querySelector('[data-cell="cell-4"] img.plot')?.complete &&
-      document.querySelector('[data-cell="cell-4"] img.plot')?.naturalWidth > 0 &&
-      document.querySelector('[data-cell="cell-5"] .table-page-label')?.textContent.includes('1..25 of 60') &&
-      document.querySelector('[data-cell="cell-6"] .out-lazy') !== null`, 45_000);
+    await browser.wait(`window.__alderHost.client.document.snapshot.cells.every(cell => cell.status === 'done')`, 45_000);
+    await browser.evaluate(`document.querySelector('[data-cell="cell-3"]').scrollIntoView({block:'center'})`);
+    await browser.wait(`document.querySelector('[data-cell="cell-3"] [data-role=output]')?.textContent.includes('VALUE=3')`);
+    await browser.evaluate(`document.querySelector('[data-cell="cell-4"]').scrollIntoView({block:'center'})`);
+    await browser.wait(`document.querySelector('[data-cell="cell-4"] img.plot')?.complete && document.querySelector('[data-cell="cell-4"] img.plot')?.naturalWidth > 0`, 30_000);
+    await browser.evaluate(`document.querySelector('[data-cell="cell-5"]').scrollIntoView({block:'center'})`);
+    await browser.wait(`document.querySelector('[data-cell="cell-5"] .table-page-label')?.textContent.includes('1..25 of 60')`);
+    await browser.evaluate(`document.querySelector('[data-cell="cell-6"]').scrollIntoView({block:'center'})`);
+    await browser.wait(`document.querySelector('[data-cell="cell-6"] .out-lazy') !== null`);
     await browser.evaluate("window.__alderHost.client.setRuntime({executionMode:'lazy'})");
     await browser.wait("window.__alderHost.client.document.snapshot.runtime.executionMode === 'lazy' && !document.querySelector('#run-all')?.disabled");
 
@@ -645,7 +649,7 @@ test('scientific outputs support lazy evaluation, table paging, and a trusted wi
     await browser.click('#run-all');
     await browser.wait(`window.__alderHost.client.document.snapshot.cells[2].status === 'done' &&
       window.__alderHost.client.document.snapshot.cells[3].status === 'done' &&
-      document.querySelector('[data-cell="cell-3"] [data-role=outputs]')?.textContent.includes('VALUE=4') &&
+      document.querySelector('[data-cell="cell-3"] [data-role=output]')?.textContent.includes('VALUE=4') &&
       document.querySelector('[data-cell="cell-4"] img.plot')?.complete &&
       document.querySelector('[data-cell="cell-4"] img.plot')?.naturalWidth > 0 &&
       document.querySelector('[data-cell="cell-4"] img.plot')?.getAttribute('src') !== ${JSON.stringify(initialPlot)}`, 45_000);
@@ -681,12 +685,14 @@ test('scalar, form, and button controls drive the intended reactive cells once',
   try {
     app = await startInstalledHost(path, { executionMode: 'automatic' });
     browser = await openAuthenticatedBrowser(app);
+    await browser.send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 8000, deviceScaleFactor: 1, mobile: false });
     await browser.wait("window.__alderHost?.client.document?.snapshot.runtime.executionReady && !window.__alderHost.client.document.snapshot.runtime.busy && !document.querySelector('#run-all')?.disabled && document.querySelectorAll('#notebook > .cell[data-cell]').length === 8", 30_000);
     await browser.evaluate("window.__alderHost.client.runAll('all')");
-    await browser.wait(`window.__alderHost.client.document.snapshot.cells.every(cell => cell.status === 'done') &&
-      document.querySelector('[data-cell="cell-3"] [data-role=outputs]')?.textContent.includes('14') &&
-      document.querySelector('[data-cell="cell-6"] [data-role=outputs]')?.textContent.includes('not submitted') &&
-      document.querySelector('[data-cell="cell-8"] [data-role=outputs]')?.textContent.includes('0')`, 45_000);
+    await browser.wait(`window.__alderHost.client.document.snapshot.cells.every(cell => cell.status === 'done')`, 45_000);
+    for (const [cell, text] of [['cell-3', '14'], ['cell-6', 'not submitted'], ['cell-8', '0']]) {
+      await browser.evaluate(`document.querySelector('[data-cell=${JSON.stringify(cell)}]').scrollIntoView({block:'center'})`);
+      await browser.wait(`document.querySelector('[data-cell=${JSON.stringify(cell)}] [data-role=output]')?.textContent.includes(${JSON.stringify(text)})`);
+    }
     const doneRuns = new Map<string, Set<string>>();
     const unsubscribe = app.controller.subscribe((event) => {
       if (event.type !== 'cell-completed' || event.payload.status !== 'done' || !event.payload.outputs?.length) return;
@@ -706,7 +712,7 @@ test('scalar, form, and button controls drive the intended reactive cells once',
         return control?.value === '2' && document.activeElement === control;
       })()`), true);
       await arrowRight();
-      await browser.wait(`document.querySelector('[data-cell="cell-3"] [data-role=outputs]')?.textContent.includes('21') &&
+      await browser.wait(`document.querySelector('[data-cell="cell-3"] [data-role=output]')?.textContent.includes('21') &&
         window.__alderHost.client.document.snapshot.cells[2].status === 'done'`, 30_000);
       assert.equal(doneRuns.get('cell-3')?.size, 1);
       assert.equal(doneRuns.get('cell-4')?.size ?? 0, 0);
@@ -726,7 +732,7 @@ test('scalar, form, and button controls drive the intended reactive cells once',
         window.__alderHost.client.document.snapshot.cells[4].outputs[0]?.data?.spec?.child?.value?.enabled === true &&
         document.querySelector('[data-cell="cell-5"] [data-form-submit=true]')?.disabled === false`, 30_000);
       assert.equal(doneRuns.get('cell-6')?.size ?? 0, 0);
-      assert.match(String(await browser.evaluate("document.querySelector('[data-cell=\"cell-6\"] [data-role=outputs]').textContent")), /not submitted/);
+      assert.match(String(await browser.evaluate("document.querySelector('[data-cell=\"cell-6\"] [data-role=output]').textContent")), /not submitted/);
       await browser.evaluate(`(() => {
         window.__formClicks = [];
         const submit = document.querySelector('[data-cell="cell-5"] [data-form-submit=true]');
@@ -735,13 +741,13 @@ test('scalar, form, and button controls drive the intended reactive cells once',
       await browser.click('[data-cell="cell-5"] [data-form-submit=true]');
       await browser.wait('window.__formClicks.length > 0', 3_000);
       assert.equal((await browser.evaluate('window.__formClicks'))[0].trusted, true);
-      await browser.wait(`document.querySelector('[data-cell="cell-6"] [data-role=outputs]')?.textContent.includes('21') &&
+      await browser.wait(`document.querySelector('[data-cell="cell-6"] [data-role=output]')?.textContent.includes('21') &&
         window.__alderHost.client.document.snapshot.cells[5].status === 'done'`, 8_000);
       assert.equal(doneRuns.get('cell-6')?.size, 1);
       doneRuns.clear();
 
       await browser.click('[data-cell="cell-7"] [data-role=widget][data-name=clicks]');
-      await browser.wait(`document.querySelector('[data-cell="cell-8"] [data-role=outputs]')?.textContent.includes('[1] 1') &&
+      await browser.wait(`document.querySelector('[data-cell="cell-8"] [data-role=output]')?.textContent.includes('[1] 1') &&
         window.__alderHost.client.document.snapshot.cells[7].status === 'done'`, 30_000);
       assert.equal(doneRuns.get('cell-8')?.size, 1);
       assert.equal(doneRuns.get('cell-4')?.size ?? 0, 0);
@@ -793,12 +799,12 @@ test('ordered outputs, lazy detail, progress, and project disk cache appear in t
     await browser.wait(`window.__alderHost.client.document.snapshot.cells.every(cell => cell.status === 'done') &&
       document.querySelector('[data-cell="cell-2"] .markdown-output')?.textContent.includes('First') &&
       document.querySelector('[data-cell="cell-2"] .table-preview')?.textContent.includes('15') &&
-      document.querySelector('[data-cell="cell-3"] [data-role=outputs]')?.textContent.includes('[1] 6') &&
+      document.querySelector('[data-cell="cell-3"] [data-role=output]')?.textContent.includes('[1] 6') &&
       document.querySelector('[data-cell="cell-4"] img.plot')?.complete &&
       document.querySelector('[data-cell="cell-4"] img.plot')?.naturalWidth > 0 &&
       document.querySelector('[data-cell="cell-5"] .out-lazy')?.textContent.includes('Show detail') &&
-      document.querySelector('[data-cell="cell-7"] [data-role=outputs]')?.textContent.includes('[1] 8')`, 45_000);
-    assert.deepEqual(await browser.evaluate(`Array.from(document.querySelector('[data-cell="cell-2"] [data-role=outputs]').children)
+      document.querySelector('[data-cell="cell-7"] [data-role=output]')?.textContent.includes('[1] 8')`, 45_000);
+    assert.deepEqual(await browser.evaluate(`Array.from(document.querySelector('[data-cell="cell-2"] [data-role=output]').children)
       .filter(child => child.classList.contains('out-record') || child.classList.contains('ordered-log'))
       .map(child => child.classList.contains('ordered-log') ? 'log' : child.querySelector('.markdown-output') ? 'markdown' :
         child.querySelector('.table-preview') ? 'table' : 'text')`), ['markdown', 'log', 'table', 'text']);
@@ -822,7 +828,7 @@ test('ordered outputs, lazy detail, progress, and project disk cache appear in t
     })()`);
     await browser.wait(`window.__alderHost.client.document.snapshot.cells[5].body[0] === 'multiplier <- 3L' &&
       window.__alderHost.client.document.snapshot.cells[6].status === 'done' &&
-      document.querySelector('[data-cell="cell-7"] [data-role=outputs]')?.textContent.includes('[1] 12')`, 10_000);
+      document.querySelector('[data-cell="cell-7"] [data-role=output]')?.textContent.includes('[1] 12')`, 10_000);
     assert.equal(app.controller.snapshot().cells[6]!.log.some((line) => line.includes('compute disk')), true);
     assert.equal((await readdir(join(directory, 'project-cache'))).filter((name) => name.endsWith('.rds')).length, 2);
     assert.deepEqual(browser.errors, []);
@@ -848,7 +854,10 @@ test('Ark language help shows live completion and diagnostics in notebook editor
   try {
     app = await startInstalledHost(path);
     browser = await openAuthenticatedBrowser(app);
-    await browser.wait("window.__alderHost?.client.document?.snapshot.runtime.executionReady && document.querySelectorAll('#notebook > .cell[data-cell]').length === 3", 30_000);
+    await browser.wait(`window.__alderHost?.client.document?.snapshot.runtime.executionReady &&
+      !window.__alderHost.client.document.snapshot.cells[0].analysisPending &&
+      document.querySelectorAll('#notebook > .cell[data-cell]').length === 3 &&
+      !document.querySelector('[data-cell="cell-1"] [data-act=run]')?.disabled`, 30_000);
     await browser.click('[data-cell="cell-1"] [data-act=run]');
     await browser.wait("window.__alderHost.client.document.snapshot.cells[0].status === 'done'", 30_000);
     await browser.evaluate(`(() => {

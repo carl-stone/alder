@@ -29,7 +29,8 @@
     "start": "tsx src/main.ts",
     "stage": "node scripts/stage-application.mjs --output .application --kind headless",
     "stage:desktop": "node scripts/stage-application.mjs --output .application-desktop --kind desktop",
-    "accept:mac": "node scripts/accept-mac.mjs"
+    "accept:mac": "node scripts/accept-mac.mjs",
+    "accept:final": "node scripts/final-acceptance.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.30.0",

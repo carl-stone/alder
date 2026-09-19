@@ -9,44 +9,34 @@ copies in other worktrees are snapshots.
 
 ## Current assignment
 
-**UI/UX review and polish — Implementing.**
+**Complete Mac app and final acceptance — Implementing.**
 
 **Owner:** primary implementer in the listed implementation worktree.
 
-Turn the now-stable Mac notebook into a coherent, attractive and efficient product
-for real scientific work.
+Qualify the signed Mac application as one integrated scientific notebook and fix
+any remaining user-visible failure before release readiness.
 
-**Accept when:** the notebook has a consistent visual system and information
-hierarchy across title/status, cells, editor, execution controls, outputs, errors,
-progress, settings and recovery. The editing canvas is calm and primary actions are
-obvious without persistent clutter; execution state, stale results and failures are
-legible at a glance. Keyboard navigation, focus, selection, menus and shortcuts
-support sustained notebook work. Empty, loading, disconnected and optional-service
-states explain the next useful action in product language. Outputs remain readable
-across text, tables, plots, HTML and narrow windows. Native windows/dialogs/titlebar
-fit macOS, and light/dark appearance, contrast, motion and accessible labels are
-coherent. Remove obsolete CSS/DOM state and duplicated presentation mechanisms
-rather than layering a skin over them. Preserve every accepted document, runtime,
-reactive, service and recovery behavior. Validate with representative notebook
-screens/states, behavior-led interaction checks and a signed Mac build without
-taking over Carl's desktop.
+**Accept when:** a clean signed app launches, creates and opens notebooks, edits by
+mouse and keyboard, runs ordinary/reactive R, interrupts and recovers, renders all
+supported outputs/widgets, supplies language help, saves atomically, Save As keeps
+project ownership correct, closes/reopens without false dirty state, and restores
+accepted work after renderer/backend/process failure. Two notebooks remain isolated;
+two clients on one notebook share revisions without lost work and either can detach.
+External edits and source/recovery conflicts preserve inspectable copies. Missing/
+invalid R and failed Ark/Air/Quarto/package/publish/inspection operations leave core
+editing and saving usable. Settings, menus, shortcuts, Preview, narrow/dark UI and
+native document state behave as accepted. The fast suite, generative checks and one
+documented final installed-app command all exit within bounds, clean every owned
+child and verify the current signed package. No known P1 product defect, hanging
+process, false passing test or unclassified failure remains.
 
-**Checkpoint 2:** `16386dd` (`Use production shell for native evidence`) on
-`bc777f7`, `330d091`, accepted interaction checkpoint `dbfa1df` and accepted
-`d88ca7d`.
+**Base:** accepted UI/UX checkpoint `dd9d60f` (`Harden native evidence output
+handling`).
 
-**Correction target:** repair the native evidence harness after real Electron argv
-caused it to treat its own tracked script path as the output directory and delete
-it recursively. Restore the tracked source, remove broad recursive cleanup, parse
-an explicit output argument independent of Electron argv layout and write only
-known evidence files into a safely validated temporary review directory. Refuse
-repository, script, home, root and non-owned targets. Add a regression invoking the
-real Electron argument shape plus unsafe-path refusal. Preserve the validated
-shared production native seam.
-
-**Next action:** primary implementer repairs the dirty worktree and unsafe harness,
-regenerates evidence in a safe temporary directory and returns the tiny delta for
-final re-review.
+**Next action:** primary implementer builds one installed-app acceptance harness
+covering the complete journeys above through production UI/protocol/native seams,
+runs it without foreground takeover, fixes all real failures, and returns a final
+candidate checkpoint for independent release review.
 
 **Testing constraint:** do not take over Carl's visible desktop. Use background
 or isolated Mac GUI checks where native interaction matters. The in-app browser
@@ -77,8 +67,8 @@ order; their implementation details are settled when assigned.
 | Mac runtime and settings cleanup | Accepted | Primary implementer | `cc80261`: one R preference path, canonical project recovery, verified/staged Ark/Air/Quarto, accurate Mac claims and real packaged acceptance |
 | Residual architecture and test cleanup | Accepted | Primary implementer | `8990292`: removed trace/strict-JSON/platform/state debris, retained cohesive owners and rebuilt a five-second behavior-led host suite |
 | Targeted generative verification | Accepted | Primary implementer | `d88ca7d`: bounded independent graph/document/recovery/state/R verification with real crash durability and replayable failures |
-| UI/UX review and polish | Implementing | Primary implementer | Restore and harden the native evidence harness after unsafe recursive self-deletion at `16386dd` |
-| Complete Mac app and final acceptance | Queued | Unassigned | Deliver a usable Mac app; exercise the packaged native app through launch/open/type/run/interrupt/save/Save As/reopen/recover/close, multiple notebooks, concurrent GUI/agent edits, client detach and backend failure/recovery; check optional-service failures and observable stalls |
+| UI/UX review and polish | Accepted | Primary implementer | `dd9d60f`: coherent Mac interaction and visual system, real responsive/accessibility behavior, truthful production evidence and safe native harness |
+| Complete Mac app and final acceptance | Implementing | Primary implementer | Exercise the signed native app end to end through ordinary use, concurrency, failures, recovery, optional services and clean shutdown; fix every release-blocking defect |
 
 The following requirements apply to the relevant slices and are checked again
 when accepting the complete app:
@@ -138,7 +128,17 @@ part of this queue.
 
 ## Latest accepted checkpoint
 
-`dbfa1df` is the UI/UX interaction-structure checkpoint. Lead accepted typed native
+`dd9d60f` is the complete UI/UX checkpoint. Lead accepted the interaction structure
+from `dbfa1df` plus a cohesive light/dark Mac workspace, real CodeMirror theme,
+code-first cells and outputs, truthful production-renderer state matrix, fixed
+responsive inspector with correct focus/inert/scroll behavior, accessible dialogs/
+controls/live regions, actual 200% reflow and reduced-motion behavior. Production
+Electron state/menu evidence shares the real shell and uses a safe unique temporary
+directory with bounded teardown; no sample/fake native menu remains. The full host
+suite passes 414 tests, the signed package contains current assets, strict signing
+passes and no children leak.
+
+It retains `dbfa1df`, the UI/UX interaction-structure checkpoint. Lead accepted typed native
 document/save state, conventional production Mac menus and accelerators, same-file
 focus with explicit shared-session windows, a compact document/cell command
 hierarchy, Shift-Enter creation, exact positional Undo, separated document/R/

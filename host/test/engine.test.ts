@@ -372,7 +372,12 @@ test("stock Ark keeps scalar, form, and button widget values in R", integration,
   });
 test("stock Ark preserves append, log, progress, and deferred output", integration, async () => {
   const directory = await mkdtemp(join(tmpdir(), "alder-engine-output-"));
-  const { engine, processScope } = await openEngine(directory);
+  const resources = resourcesFor(applicationRoot!);
+  const ordinary = selectedEnvironment(resources);
+  const { engine, processScope } = await openEngine(directory, { environment: {
+    ...ordinary,
+    libraryPaths: [...ordinary.libraryPaths.filter((path) => path !== resources.rLibraryDirectory), resources.rLibraryDirectory],
+  } });
   try {
     const epoch = (await engine.start()).kernel!.kernelEpoch;
     assert.equal((await engine.evaluate(payload(epoch, "output-import", "import", "library(alder)"))).ok, true);
@@ -412,7 +417,7 @@ test("stock Ark preserves append, log, progress, and deferred output", integrati
 
     const deferred = await engine.evaluate(payload(epoch, "deferred", "deferred", `
       out$lazy(function() out$vstack(out$md("**Deferred**: six"),
-        data.frame(i = 1:3, doubled = c(2L, 4L, 6L))), label = "Show detail")
+        data.frame(z = 26:55)), label = "Show detail")
     `));
     assert.equal(deferred.ok, true, deferred.error?.message);
     const lazy = deferred.outputs?.[0]?.data as { kind: string; key: string; state: string };
@@ -426,7 +431,7 @@ test("stock Ark preserves append, log, progress, and deferred output", integrati
     });
     assert.equal(expanded.ok, true, expanded.error?.message);
     assert.match(JSON.stringify(expanded.output), /Deferred/);
-    assert.match(JSON.stringify(expanded.output), /doubled/);
+    assert.match(JSON.stringify(expanded.output), /"z"/);
   } finally {
     await closeEngine(engine, processScope, directory);
   }

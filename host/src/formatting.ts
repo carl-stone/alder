@@ -125,8 +125,9 @@ async function runAir(
     };
     const abort = (): void => {
       aborting = true;
-      if (child !== undefined) void child.terminate().catch(() => {});
-      finish(() => reject(new FormattingError("cancelled", "formatting was cancelled")));
+      const cancelled = () => finish(() => reject(new FormattingError("cancelled", "formatting was cancelled")));
+      if (child === undefined) cancelled();
+      else void child.terminate().then(cancelled, cancelled);
     };
     if (signal?.aborted) return abort();
     void processScope.spawn({
@@ -144,7 +145,8 @@ async function runAir(
       spawned.stdout?.on("data", chunk => { stdout = collect(stdout, chunk); });
       spawned.stderr?.on("data", chunk => { stderr = collect(stderr, chunk); });
       void spawned.exited.then(({ code }) => {
-        finish(() => resolve({ code, stdout, stderr }));
+        if (aborting || signal?.aborted) abort();
+        else finish(() => resolve({ code, stdout, stderr }));
       }, error => {
         finish(() => reject(new FormattingError("format_failed", error instanceof Error ? error.message : String(error))));
       });

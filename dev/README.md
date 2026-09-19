@@ -35,6 +35,23 @@ available, it runs cells through the unchanged, pinned Ark kernel and the Alder
 R helper installed in the staged app. Open a notebook with File > Open or
 **Open notebook…**.
 
+## Final Mac acceptance
+
+Run the bounded final acceptance from the repository root:
+
+```sh
+npm run accept:final --prefix host
+```
+
+This removes only Alder's generated staging directories, builds and signs a fresh
+app, verifies its packaged tools and Ark behavior, runs the R, host, generative,
+installed-runtime and production-browser suites serially where required, then
+launches the packaged Electron binary without showing or activating its window.
+The packaged-app journey edits real CodeMirror content, runs it through Ark,
+saves it through the native command path, closes cleanly, and removes its
+temporary profile. Each phase has a timeout and the command fails if a packaged
+child process remains.
+
 ## Focused checks
 
 Choose checks for the behavior being changed. For example:
