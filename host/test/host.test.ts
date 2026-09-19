@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
-import { access, mkdir, mkdtemp, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -10,6 +10,7 @@ import { pathToFileURL } from "node:url";
 import { parseHTML } from "linkedom";
 import { startHost } from "../src/application.js";
 import { resolveApplicationResources } from "../src/resources.js";
+import { registerUntitledRecoveryDescriptor, retireUntitledRecoveryDescriptor, selectUntitledRecoveryDescriptor, type UntitledRecoveryDescriptor } from "../src/sessions.js";
 import { widgetOutputSchema, type CommandResult, type HostCommand } from "../src/protocol.js";
 
 type RunningHost = Awaited<ReturnType<typeof startHost>>;
@@ -544,6 +545,75 @@ test("installed kernel follows ordinary project profile and library activation",
     else process.env.R_LIBS_USER = priorUserLibrary;
     await app?.close();
     await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("untitled recovery reopens a symlinked project with physical R profile and library ownership", {
+  skip: !APPLICATION_ROOT, timeout: 120_000,
+}, async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "alder-untitled-project-alias-")));
+  const project = join(root, "project");
+  const alias = join(root, "project-alias");
+  const library = join(project, ".alder", "library");
+  const preferencesPath = join(root, "preferences.yaml");
+  const recoveryDirectory = join(root, "recovery");
+  const id = randomUUID();
+  let descriptor: UntitledRecoveryDescriptor | undefined;
+  let app: RunningHost | undefined;
+  try {
+    await mkdir(project);
+    await symlink(project, alias, "dir");
+    await installFixturePackage(root, library, "alder", "3.0.0", "physical-project");
+    await writeFile(join(project, ".Renviron"), "ALDER_UNTITLED_MARKER=physical-profile\n");
+    await writeFile(join(project, ".Rprofile"), ".libPaths(c(file.path(getwd(), '.alder', 'library'), .libPaths()))\n");
+    await writeFile(preferencesPath, `rscript: ${JSON.stringify(process.env.ALDER_RSCRIPT ?? execFileSync("which", ["Rscript"], { encoding: "utf8" }).trim())}\n`);
+    descriptor = await registerUntitledRecoveryDescriptor(id, alias);
+    const physicalProject = await realpath(project);
+    assert.equal(descriptor.projectDirectory, physicalProject);
+    const expression = "paste(normalizePath(getwd(), winslash='/'), Sys.getenv('ALDER_UNTITLED_MARKER'), " +
+      "normalizePath(.libPaths()[1], winslash='/'), alder::fixture_value(), sep='|')";
+    const ordinary = execFileSync(process.env.RSCRIPT ?? "Rscript", ["--slave", "-e", `cat(${expression})`], {
+      cwd: physicalProject, encoding: "utf8",
+    }).trim();
+    assert.equal(ordinary, `${physicalProject}|physical-profile|${library}|physical-project`);
+
+    stagedResources ??= await resolveApplicationResources(APPLICATION_ROOT!);
+    const open = () => startHost({
+      path: null, resources: stagedResources!, preferencesPath, recoveryDirectory,
+      executionMode: "lazy", runOnStartup: false,
+      session: { sessionKey: id, untitledRecoveryId: id, projectDirectory: alias },
+    });
+    app = await open();
+    const deadline = Date.now() + 45_000;
+    while (!app.controller.snapshot().runtime.executionReady && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 25));
+    assert.equal(app.controller.snapshot().runtime.executionReady, true);
+    let snapshot = app.controller.snapshot();
+    const change = snapshot.cells.length === 0
+      ? { type: "create" as const, creationId: "project-profile", after: null, cellType: "code" as const, body: [expression], options: {} }
+      : { type: "edit" as const, cell: { cellId: snapshot.cells[0]!.id }, expectedRevision: snapshot.cells[0]!.revision,
+          cellType: "code" as const, body: [expression] };
+    const edited = await dispatchHost(app, {
+      type: "transaction", expectedDocumentRevision: snapshot.documentRevision,
+      changes: [change],
+    });
+    assert.equal(edited.error, null);
+    assert.equal((await dispatchHost(app, { type: "run", scope: "all", changes: [] })).error, null);
+    assert.match(JSON.stringify(app.controller.snapshot().cells[0]!.outputs), new RegExp(ordinary.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    await app.close();
+    app = undefined;
+
+    app = await open();
+    const reopenedDeadline = Date.now() + 45_000;
+    while (!app.controller.snapshot().runtime.executionReady && Date.now() < reopenedDeadline) await new Promise(resolve => setTimeout(resolve, 25));
+    snapshot = app.controller.snapshot();
+    assert.deepEqual(snapshot.cells[0]!.body, [expression]);
+    assert.equal((await dispatchHost(app, { type: "run", scope: "all", changes: [] })).error, null);
+    assert.match(JSON.stringify(app.controller.snapshot().cells[0]!.outputs), new RegExp(ordinary.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    assert.equal((await selectUntitledRecoveryDescriptor(id)).projectDirectory, physicalProject);
+  } finally {
+    await app?.close();
+    if (descriptor !== undefined) await retireUntitledRecoveryDescriptor(await selectUntitledRecoveryDescriptor(id).catch(() => descriptor!)).catch(() => {});
+    await rm(root, { recursive: true, force: true });
   }
 });
 

@@ -109360,7 +109360,7 @@ function untitledRecoveryDescriptorDirectory(dataRoot) {
 }
 async function registerUntitledRecoveryDescriptor(id2, projectDirectory, dataRoot) {
   const validId = requireUntitledRecoveryId(id2);
-  const validProjectDirectory = normalizeProjectDirectory(projectDirectory);
+  const validProjectDirectory = await canonicalizeProjectDirectory(projectDirectory);
   const directory = await ensureUntitledRecoveryDirectory(dataRoot);
   const path3 = untitledRecoveryDescriptorPath(directory, validId);
   const current = await readUntitledRecoveryDescriptor(path3, validId);
@@ -109400,9 +109400,10 @@ function requireUntitledRecoveryId(value) {
   if (!isUntitledRecoveryId(value)) throw new SessionAuthError("untitled recovery identity is invalid");
   return value;
 }
-function normalizeProjectDirectory(value) {
+async function canonicalizeProjectDirectory(value) {
   if (typeof value !== "string" || !value || value.includes("\0")) throw new SessionUnavailableError("untitled project directory is invalid");
-  return resolve12(value);
+  const path3 = resolve12(value);
+  return realpath9(path3).catch(() => path3);
 }
 function untitledRecoveryDescriptorPath(directory, id2) {
   return join19(directory, id2 + ".json");
@@ -109424,7 +109425,11 @@ async function readUntitledRecoveryDescriptor(path3, id2) {
   if (typeof value !== "object" || value === null) throw new SessionUnavailableError("untitled recovery descriptor is invalid", { id: id2 });
   const candidate = value;
   if (candidate.schemaVersion !== 1 || candidate.id !== id2 || typeof candidate.projectDirectory !== "string" || typeof candidate.createdAt !== "string" || Number.isNaN(Date.parse(candidate.createdAt))) throw new SessionUnavailableError("untitled recovery descriptor is invalid", { id: id2 });
-  return candidate;
+  const projectDirectory = await canonicalizeProjectDirectory(candidate.projectDirectory);
+  if (projectDirectory === candidate.projectDirectory) return candidate;
+  const migrated = { ...candidate, projectDirectory };
+  await writePrivateFile(path3, Buffer.from(JSON.stringify(migrated)));
+  return migrated;
 }
 async function canonicalizePath(path3) {
   if (path3 === null) return null;

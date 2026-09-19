@@ -9,44 +9,40 @@ copies in other worktrees are snapshots.
 
 ## Current assignment
 
-**Document truth and recovery — Implementing.**
+**Mac runtime and settings cleanup — Implementing.**
 
 **Owner:** primary implementer in the listed implementation worktree.
 
-Replace the overlapping backend, browser and native recovery state machines with
-one understandable document-truth model.
+Finish the packaged Mac runtime and remove stale format, permission and selection
+claims before broader cleanup.
 
-**Accept when:** an accepted source mutation is durable in backend recovery before
-success is acknowledged; the backend owns accepted source, disk owns the last
-saved baseline, one backend journal owns accepted-unsaved source and the renderer
-stores only typing not yet accepted by the backend. Coalesce native draft writes
-and flush the latest draft before submission, reload and close. Startup offers at
-most one backend recovery candidate and one renderer draft with clear restore,
-discard or save-copy behavior. Save As carries notebook bytes and notebook-owned
-metadata without copying project package or settings policy. Preserve atomic save,
-external-edit conflicts, concurrent GUI/agent revisions, stale-result rejection
-and bounded unhealthy-host close. Delete branch inventories, recovery artifacts,
-rebind transactions, historical-generation protocols, structural-patch replay and
-their implementation-pinning tests once the smaller path works. Deliver focused
-crash/reopen/shared-owner journeys and a runnable signed Mac build without taking
-over Carl's desktop.
+**Accept when:** the packaged app stages and exercises the supported Ark, Air and
+Quarto resources through one compact Mac acceptance path. R selection has one
+authoritative application preference and consistent discovery/validation behavior
+across desktop, backend and notebook startup, with a clear usable failure when the
+selected R disappears. Remove false R Markdown ownership, file associations and
+code paths for formats Alder does not implement. Remove unused entitlement,
+permission and packaging declarations; retain only capabilities exercised by the
+app. Settings remain understandable, persistent and non-blocking when malformed or
+unavailable. Confirm clean-path project `.Renviron`, `.Rprofile` and library
+precedence without recovery-fixture collisions. Delete redundant runtime/settings
+checks and obsolete staging paths. Deliver focused packaged behavior evidence and
+a runnable signed Mac build without taking over Carl's desktop.
 
-**Checkpoint:** `9ab60b5` (`Simplify document recovery ownership`) on accepted
-`2c4e020`.
+**Checkpoint:** `949adab` (`Unify Mac runtime settings and staging`) on accepted
+`3680fbf`.
 
-**Correction target:** retain the simplified backend journal, but make renderer
-draft persistence genuinely coalesced with a bounded debounce and maximum delay.
-Await its serialized flush at submission, reload and native-close boundaries, and
-make the native atomic rename crash-durable. Save As must never delete a pending
-destination journal and must establish one authoritative document identity across
-the backend, server and native draft store, including when the destination was
-previously opened. Add behavior checks for bounded writes during typing, close or
-reload preserving the latest draft, and Save As to clean and pending recovered
-destinations. Stop integration tests from silently selecting a stale ignored
-`.application`; require an explicit current staged root or validate compatibility.
+**Correction target:** canonicalize untitled-recovery project directories when
+registered/selected so symlinked paths reopen against the same physical project
+and retain `.Renviron`, `.Rprofile` and `.alder` ownership, with sensible handling
+for existing descriptors. Add per-architecture Air archive hashes and reject
+corrupt cached or supplied bytes before extraction. Extend the compact Mac
+acceptance command from Ark version inspection to one bounded packaged kernel
+evaluation through the installed host, with normal child cleanup. Retain the
+validated R preference, staging, removed claims and green broad suite.
 
-**Next action:** primary implementer corrects `9ab60b5` from the consolidated
-fresh-context review, then returns one commit for focused re-review.
+**Next action:** primary implementer corrects `949adab` from the consolidated
+fresh-context review, then returns one checkpoint for focused re-review.
 
 **Testing constraint:** do not take over Carl's visible desktop. Use background
 or isolated Mac GUI checks where native interaction matters. The in-app browser
@@ -70,12 +66,14 @@ order; their implementation details are settled when assigned.
 | Output and cache helpers | Accepted | Primary implementer | `67d92c9`: ordered output, lazy/progress lifecycle, memory/disk reuse and invalidation through helper and NULL dependencies |
 | Ark language assistance | Accepted | Primary implementer | `d4217c8`: stock Ark LSP supplies live completion, hover, diagnostics and navigation across restart/failure; separate `languageserver` path removed |
 | Optional services and R boundary | Accepted | Primary implementer | `2c4e020`: clean R roles, retained optional services, project/user package precedence, isolated service dependencies, cancellable inspection, packaged Air and race-safe child cleanup |
-| Document truth and recovery | Implementing | Primary implementer | Correct renderer draft batching/flush durability and Save As recovery identity at `9ab60b5`; remove stale staged-root auto-detection, then re-review |
-| Session and desktop boundary | Queued | Unassigned | Replace per-notebook registry/lock/PID choreography with the shared backend's session map and one socket owner; use one typed Electron/renderer command and dirty-state bridge; fix ownerless dialogs and startup errors |
-| Ordinary R and reactive analysis | Queued | Unassigned | Build the graph from statically established definitions and references; require one defining cell per notebook global and an acyclic graph with clear, locally blocking diagnostics; execute other valid dynamic R normally and document that hidden dependencies require explicit reruns, without opaque barriers, runtime tracing or conservative replay |
-| Publishing and optional-service simplification | Queued | Unassigned | Publish an immutable saved source/output snapshot without live R/analyzer/graph gates; remove bespoke shortcode/resource/marker machinery and global UI action locking |
-| Mac runtime and settings cleanup | Queued | Unassigned | Fix installed-kernel ordinary project-profile/library activation, stage and exercise Air, unify R selection with app preferences, remove false Rmd ownership and unused permission declarations, and keep a compact packaged acceptance path |
+| Document truth and recovery | Accepted | Primary implementer | `09cfaa5`: one durable backend journal, bounded renderer draft persistence, safe Save As recovery identity and explicit staged-root integration checks |
+| Session and desktop boundary | Accepted | Primary implementer | `e0b42f1`: one shared backend session map, independent client leases, typed native bridge and ownerless lifecycle behavior |
+| Ordinary R and reactive analysis | Accepted | Primary implementer | `c7763ff`: rebuilt static graph, ordinary dynamic R, global/cycle restrictions, correct dot globals and invalid-descendant blocking |
+| Publishing and optional-service simplification | Accepted | Primary implementer | `3680fbf`: immutable saved-snapshot publishing, independent cancellable optional services, safe package restart admission and bounded process cleanup |
+| Mac runtime and settings cleanup | Implementing | Primary implementer | Canonicalize untitled recovery projects, verify Air archives and exercise a real packaged Ark kernel in Mac acceptance at `949adab` |
 | Residual architecture and test cleanup | Queued | Unassigned | Split oversized state owners where required by the preceding slices; remove remaining source-lineage/provenance gates and obsolete platform/build/CI/performance machinery; freely delete or replace whole implementation-pinning test files, leaving a small behavior-led suite, Mac build/check path and small OS adapters |
+| Targeted generative verification | Queued | Unassigned | Add bounded property, fuzz, state-machine and differential checks at stable product seams; minimize failures into readable regression cases without creating a permanent fuzzing framework |
+| UI/UX review and polish | Queued | Unassigned | Review the integrated Mac notebook as a product: visual hierarchy, editing flow, keyboard use, execution and progress feedback, outputs, errors, recovery, menus, settings, empty/loading states and native fit; simplify awkward interactions and deliver a coherent, attractive interface with behavior-led usability checks |
 | Complete Mac app and final acceptance | Queued | Unassigned | Deliver a usable Mac app; exercise the packaged native app through launch/open/type/run/interrupt/save/Save As/reopen/recover/close, multiple notebooks, concurrent GUI/agent edits, client detach and backend failure/recovery; check optional-service failures and observable stalls |
 
 The following requirements apply to the relevant slices and are checked again
@@ -109,7 +107,18 @@ when accepting the complete app:
   dirty-document publishing, cancellation and post-failure usability.
 - Provide one documented Mac acceptance command that typechecks, runs R tests,
   builds and verifies the signed app, and runs a focused installed-host/browser
-  smoke set. Keep the ordinary fast unit command separate.
+  smoke set. Keep the ordinary fast unit command separate. Both commands must
+  terminate normally and clean up owned Node, R, Ark, Quarto and Electron children;
+  assertion success followed by a hung process is a failure.
+- After the production seams and behavior suite stabilize, add small targeted
+  generators with strict per-case bounds: property-check random dependency graphs;
+  fuzz malformed notebook and recovery inputs; exercise edit/save/crash/reopen as
+  stateful action sequences; and differentially compare a constrained corpus of
+  ordinary R expressions through `Rscript` and packaged Alder. Assert durable
+  product invariants such as no lost accepted edits, monotonic revisions, notebook
+  isolation, stale-output rejection and dependency-order correctness. Minimize and
+  retain useful failures as ordinary regression cases; do not build a bespoke
+  fuzzing platform or use case counts as a quality metric.
 - Keep the shared core OS-independent with small Mac adapters. No Rust mandate,
   speculative portability framework or retained Linux/Windows implementation,
   installer or container workflow.
@@ -125,7 +134,52 @@ part of this queue.
 
 ## Latest accepted checkpoint
 
-`2c4e020` is the optional-services and R-boundary checkpoint. Lead accepted the
+`3680fbf` is the publishing and optional-service checkpoint. Lead accepted one
+immutable last-saved source/output snapshot rendered through static self-contained
+Quarto without live R, analyzer or graph gates. Dirty edits are authoritatively
+excluded and reported; old shortcode/resource/marker certification is gone.
+Formatting, publishing and package work have scoped duplicate prevention and
+cancellation while editing, Save and unrelated execution remain usable. Package
+restart admission closes atomically after installation mutation. Broad checks
+passed 396 with 38 prerequisite skips in under 25 seconds, focused checks passed
+175/175, packaged journeys passed and no owned child leaked. Independent clean-path
+comparison also proved the earlier project-profile/jsonlite failure was recovery
+fixture contamination, so no runtime defect remains there.
+
+It retains `c7763ff`, the ordinary-R and reactive-analysis checkpoint. Lead accepted a
+fully rebuilt static graph with one defining cell per known notebook global and
+an acyclic known dependency graph. Duplicate/cycle roots and their known
+descendants block while independent branches remain usable; repairs unblock the
+chain. Top-level dot-prefixed names are ordinary globals, function locals remain
+local, and the old name-mangling protocol is gone. Valid dynamic R executes
+normally without barriers, tracing or invented edges; hidden dependencies may
+require explicit reruns. Focused checks passed 167/167, the broad host suite passed
+398 with 38 explicit integration skips, installed Engine behavior and ordinary-R
+examples passed, and the signed app passed strict verification.
+
+It retains `e0b42f1`, the shared session and desktop-boundary checkpoint. Lead accepted one
+desktop-owned control socket and in-memory canonical-path session map with
+independent client leases, notebook isolation and journal recovery after backend
+replacement. Electron uses one typed command/result and renderer-pushed window
+state bridge; the per-notebook registry/lock/PID/nonce discovery system, DOM and
+private-global control, and duplicate lifecycle IPC are gone. Focused lifecycle
+and recovery checks passed 31/31, host typecheck passed and the signed Mac build
+passed strict deep verification. Ownerless Open/startup dialogs and bounded
+unhealthy close are covered. The project-profile/jsonlite regression remains
+visible.
+
+It retains `09cfaa5`, the document-truth and recovery checkpoint. Lead accepted one
+fsynced backend journal for accepted source and one bounded, coalesced renderer
+draft for unsubmitted typing. Submission, reload, native close and host restart
+await the latest draft through a typed handshake. Save As preserves pending or
+corrupt destination recovery and establishes one recovery identity for clean
+destinations. The focused suite passed 99/99, the ordinary host suite passed 414
+with 38 explicit integration skips, current staged Engine startup passed, and the
+signed Mac build passed strict deep verification. Installed integration tests now
+require an explicit current staged root. The separate installed-kernel project
+profile/jsonlite regression remains queued and its expectation remains intact.
+
+It retains `2c4e020`, the optional-services and R-boundary checkpoint. Lead accepted the
 four-role R design after repeated fresh-context review: ordinary notebook startup
 and project/user package precedence, a sealed stock-Ark adapter, profile-free
 app-private services and project-only package installation. The public R package

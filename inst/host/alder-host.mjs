@@ -35165,8 +35165,8 @@ async function acquireNotebookSession(options) {
   if (canonicalPath !== null && (options.untitledRecoveryId !== void 0 || options.untitledProjectDirectory !== void 0)) throw new SessionAuthError("untitled options cannot be combined with a notebook path");
   const selectedRecovery = canonicalPath === null && options.untitledRecoveryId !== void 0 ? await selectUntitledRecoveryDescriptor(options.untitledRecoveryId) : void 0;
   const sessionKey = canonicalPath === null ? selectedRecovery?.id ?? randomUUID2() : sessionKeyFor(canonicalPath);
-  const projectDirectory = canonicalPath === null ? selectedRecovery?.projectDirectory ?? resolve3(options.untitledProjectDirectory ?? process.cwd()) : void 0;
-  if (projectDirectory !== void 0) await registerUntitledRecoveryDescriptor(sessionKey, projectDirectory);
+  let projectDirectory = canonicalPath === null ? selectedRecovery?.projectDirectory ?? resolve3(options.untitledProjectDirectory ?? process.cwd()) : void 0;
+  if (projectDirectory !== void 0) projectDirectory = (await registerUntitledRecoveryDescriptor(sessionKey, projectDirectory)).projectDirectory;
   const { root, nodeExecutable, hostEntry } = options.resources;
   if (!root || !nodeExecutable || !hostEntry) throw new SessionUnavailableError("bundled document service is unavailable");
   const backend = new SharedBackend({ root, nodeExecutable, hostEntry }, options.runtimeDirectory);
@@ -35297,7 +35297,7 @@ function untitledRecoveryDescriptorDirectory(dataRoot) {
 }
 async function registerUntitledRecoveryDescriptor(id, projectDirectory, dataRoot) {
   const validId = requireUntitledRecoveryId(id);
-  const validProjectDirectory = normalizeProjectDirectory(projectDirectory);
+  const validProjectDirectory = await canonicalizeProjectDirectory(projectDirectory);
   const directory = await ensureUntitledRecoveryDirectory(dataRoot);
   const path2 = untitledRecoveryDescriptorPath(directory, validId);
   const current = await readUntitledRecoveryDescriptor(path2, validId);
@@ -35341,9 +35341,10 @@ function requireUntitledRecoveryId(value) {
   if (!isUntitledRecoveryId(value)) throw new SessionAuthError("untitled recovery identity is invalid");
   return value;
 }
-function normalizeProjectDirectory(value) {
+async function canonicalizeProjectDirectory(value) {
   if (typeof value !== "string" || !value || value.includes("\0")) throw new SessionUnavailableError("untitled project directory is invalid");
-  return resolve3(value);
+  const path2 = resolve3(value);
+  return realpath2(path2).catch(() => path2);
 }
 function untitledRecoveryDescriptorPath(directory, id) {
   return join4(directory, id + ".json");
@@ -35365,7 +35366,11 @@ async function readUntitledRecoveryDescriptor(path2, id) {
   if (typeof value !== "object" || value === null) throw new SessionUnavailableError("untitled recovery descriptor is invalid", { id });
   const candidate = value;
   if (candidate.schemaVersion !== 1 || candidate.id !== id || typeof candidate.projectDirectory !== "string" || typeof candidate.createdAt !== "string" || Number.isNaN(Date.parse(candidate.createdAt))) throw new SessionUnavailableError("untitled recovery descriptor is invalid", { id });
-  return candidate;
+  const projectDirectory = await canonicalizeProjectDirectory(candidate.projectDirectory);
+  if (projectDirectory === candidate.projectDirectory) return candidate;
+  const migrated = { ...candidate, projectDirectory };
+  await writePrivateFile(path2, Buffer.from(JSON.stringify(migrated)));
+  return migrated;
 }
 async function canonicalizePath(path2) {
   if (path2 === null) return null;
