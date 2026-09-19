@@ -16,7 +16,6 @@
     "src/**/*.ts",
     "*.config.ts",
     "../host/src/protocol.ts",
-    "../host/src/strict-json.ts",
     "../host/src/resources.ts",
     "../host/src/processes.ts",
     "../host/src/sessions.ts"

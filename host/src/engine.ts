@@ -54,8 +54,7 @@ import {
   encodeFrame,
 } from "./framing.js";
 
-import { parseStrictJson } from "./strict-json.js";
-import { PerformanceTrace, type PerformanceSpan, type TraceFields } from "./performance.js";
+import { parseJson } from "./json.js";
 import { OutputLog } from "./output-log.js";
 import { OutputStore } from "./outputs.js";
 import {
@@ -429,7 +428,6 @@ class RPeer {
   }
 }
 export class Engine extends EventEmitter implements EngineAdapter {
-  private readonly trace: PerformanceTrace;
   private state: EngineState = "new";
   private lifecycleTail: Promise<void> = Promise.resolve();
   private startPromise: Promise<EngineHandshake> | undefined;
@@ -485,7 +483,6 @@ export class Engine extends EventEmitter implements EngineAdapter {
       cacheDirectory: options.cacheDirectory,
     };
 
-    this.trace = new PerformanceTrace();
   }
   get identity(): EngineHandshake | null { return this.handshake ?? null; }
   get outputStore(): OutputStore | undefined { return this.outputStoreValue; }
@@ -677,9 +674,6 @@ export class Engine extends EventEmitter implements EngineAdapter {
     const state = makeEvaluation(requestId, value, onEvent, kernelGeneration,
       this.arkEventToken, this.maxArkPayloadBytes());
     this.evaluations.set(requestId, state);
-    const traceSpan = this.trace.begin("host.engine.request", requestTraceFields(
-      "kernel", "eval_cell", { req: requestId, ...wire },
-    ));
     try {
       const request = encodeArkRequest({ request: String(requestId), ...wire }, this.maxArkPayloadBytes());
       const execution = await this.kernel!.execute(arkCall("evaluate", request), {
@@ -716,7 +710,6 @@ export class Engine extends EventEmitter implements EngineAdapter {
         sequence: state.sequence + 1,
         result: response,
       });
-      this.trace.end(traceSpan, terminalTraceFields(response as Record<string, unknown>));
       return response;
     } catch (error) {
       if (signal?.aborted && error === signal.reason && !state.started) {
@@ -725,7 +718,6 @@ export class Engine extends EventEmitter implements EngineAdapter {
           cancelledBeforeStart: true,
           error: { code: "interrupted", message: "Cancelled before execution", interrupted: true },
         };
-        this.trace.end(traceSpan, { outcome: "cancelled-before-start" });
         return response;
       }
       await state.messageTail;
@@ -741,7 +733,6 @@ export class Engine extends EventEmitter implements EngineAdapter {
         }
       }
       if (state.outputs.length > 0) await this.discardEvaluationOutputs(state.outputs);
-      this.trace.end(traceSpan, { outcome: "failure", error: asError(error).name });
       throw error;
     } finally {
       this.evaluations.delete(requestId);
@@ -771,7 +762,6 @@ export class Engine extends EventEmitter implements EngineAdapter {
     this.batches.add(batch);
     const responses: Array<EngineResponse | undefined> = values.map(() => undefined);
     let requestId: number | undefined;
-    let traceSpan: PerformanceSpan | undefined;
     let tail = Promise.resolve();
     let callbacks = Promise.resolve();
     let messageError: Error | undefined;
@@ -789,11 +779,6 @@ export class Engine extends EventEmitter implements EngineAdapter {
         throw new EngineTransportError("engine request queue is full", "kernel");
       }
       requestId = this.nextRequestId();
-      traceSpan = this.trace.begin("host.engine.request", {
-        role: "kernel", cmd: "eval_batch", req: requestId, cells: values.length,
-        session_epoch: values[0]!.sessionEpoch,
-        operation_id: values[0]!.operationId, run_id: values[0]!.runId,
-      });
       batch.permit = join(this.runtime!.controlDirectory, ".alder-batch-" + randomUUID());
       writeFileSync(batch.permit, "", { flag: "wx", mode: 0o600 });
       batch.states = values.map((value) => ({ ...makeEvaluation(requestId!, value, (event) => {
@@ -874,10 +859,8 @@ export class Engine extends EventEmitter implements EngineAdapter {
         }
         await complete(state, ended && state.finished ? successfulExecution(execution.reply) : execution);
       }
-      this.trace.end(traceSpan, { outcome: "terminal", evaluated: responses.filter(Boolean).length });
       return responses;
     } catch (error) {
-      this.trace.end(traceSpan, { outcome: "failure", error: asError(error).name });
       await tail;
       for (const [offset, state] of batch.states.entries()) {
         if (responses[offset] === undefined && state.outputs.length > 0) {
@@ -947,7 +930,7 @@ export class Engine extends EventEmitter implements EngineAdapter {
     const outputScope = command === "get_value" || command === "lazy_eval"
       ? requestOutputScope(options?.outputScope)
       : undefined;
-    const response = await this.runArkCommand(command, payload, true, options?.signal);
+    const response = await this.runArkCommand(command, payload, options?.signal);
     return engineResponseSchema.parse(await this.normalizeRequestResult(command, outputScope, response));
   }
 
@@ -1212,7 +1195,7 @@ export class Engine extends EventEmitter implements EngineAdapter {
       if (analyzer === undefined || kernel === undefined || this.kernelEpoch === null) {
         throw new EngineTransportError("Engine startup omitted a peer identity");
       }
-      const ping = await this.runArkCommand("ping", {}, false);
+      const ping = await this.runArkCommand("ping", {});
       if (ping.ok !== true || ping.package_version !== analyzer.packageVersion ||
           ping.r_version !== analyzer.rVersion || !kernel.languageVersion.includes(analyzer.rVersion)) {
         throw new EngineTransportError("kernel and analyzer identities do not match");
@@ -1346,42 +1329,15 @@ export class Engine extends EventEmitter implements EngineAdapter {
       cmd: command,
       ...structuredClone(payload),
     };
-    let traceSpan;
-    try {
-      traceSpan = this.trace.begin(
-        "host.engine.request",
-        requestTraceFields(role, command, wire),
-      );
-    } catch (error) {
-      return Promise.reject(asError(error));
-    }
     return new Promise<Record<string, unknown>>((resolveRequest, rejectRequest) => {
-      const settle = (result: TraceFields): Error | undefined => {
-        try {
-          this.trace.end(traceSpan, result);
-          return undefined;
-        } catch (error) {
-          return asError(error);
-        }
-      };
       const pending: PendingRRequest = {
         id: requestId,
         role,
         command,
         wire,
         generation,
-        resolve: (value) => {
-          const traceError = settle(terminalTraceFields(value));
-          if (traceError === undefined) resolveRequest(value);
-          else rejectRequest(traceError);
-        },
-        reject: (error) => {
-          const traceError = settle({
-            outcome: "failure",
-            error: error.name,
-          });
-          rejectRequest(traceError ?? error);
-        },
+        resolve: resolveRequest,
+        reject: rejectRequest,
       };
       this.rPending.set(requestId, pending);
       void peer.send(wire).catch((error) => {
@@ -1862,7 +1818,6 @@ export class Engine extends EventEmitter implements EngineAdapter {
   private async runArkCommand(
     command: string,
     payload: Record<string, unknown>,
-    trace = true,
     signal?: AbortSignal,
   ): Promise<Record<string, unknown>> {
     const kernel = this.kernel;
@@ -1873,9 +1828,6 @@ export class Engine extends EventEmitter implements EngineAdapter {
     const requestId = this.nextRequestId();
     const marker = randomUUID();
     const wire = { req: requestId, command, ...payload };
-    const span = trace
-      ? this.trace.begin("host.engine.request", requestTraceFields("kernel", command, wire))
-      : undefined;
     this.pendingKernelRequests += 1;
     let result: Record<string, unknown> | undefined;
     let messageError: Error | undefined;
@@ -1925,7 +1877,6 @@ export class Engine extends EventEmitter implements EngineAdapter {
           ok: false,
           error: { code: "interrupted", message: "Inspection was interrupted", interrupted: true },
         };
-        if (span !== undefined) this.trace.end(span, terminalTraceFields(interrupted));
         return interrupted;
       }
       if (execution.reply.content.status !== "ok") {
@@ -1934,12 +1885,8 @@ export class Engine extends EventEmitter implements EngineAdapter {
       if (result === undefined) {
         throw new FrameProtocolError("Alder Ark command omitted its result");
       }
-      if (span !== undefined) this.trace.end(span, terminalTraceFields(result));
       return result;
     } catch (error) {
-      if (span !== undefined) {
-        this.trace.end(span, { outcome: "failure", error: asError(error).name });
-      }
       throw error;
     } finally {
       this.pendingKernelRequests -= 1;
@@ -2061,48 +2008,6 @@ function parseHandshake(role: RPeerRole, input: unknown): RawHandshake {
     rVersion: value.r_version,
     capabilities: [...value.capabilities] as string[],
   };
-}
-
-function isTraceValue(value: unknown): value is TraceFields[string] {
-  return value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean";
-}
-function requestTraceFields(
-  role: PeerRole,
-  command: string,
-  wire: Record<string, unknown>,
-): TraceFields {
-  const fields: TraceFields = {
-    req: typeof wire.req === "number" ? wire.req : undefined,
-    role,
-    cmd: command,
-  };
-  const names = [
-    "id",
-    "revision",
-    "run_id",
-    "session_epoch",
-    "operation_id",
-  ] as const;
-  for (const name of names) {
-    const value = wire[name];
-    if (isTraceValue(value)) {
-      fields[name] = value;
-    }
-  }
-  return fields;
-}
-
-function terminalTraceFields(value: Record<string, unknown>): TraceFields {
-  const fields: TraceFields = {
-    outcome: "terminal",
-    ok: value.ok === true,
-  };
-  const error = value.error;
-  if (typeof error === "object" && error !== null &&
-      "code" in error && typeof error.code === "string") {
-    fields.error_code = error.code;
-  }
-  return fields;
 }
 
 function mapAnalysisResult(
@@ -2477,7 +2382,7 @@ class ArkEventStreamDecoder {
       if (!/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)) throw new FrameProtocolError("invalid Alder Ark event base64");
       let event: Record<string, unknown>;
       try {
-        event = asRecord(parseStrictJson(decodeBase64(encoded, this.maxBytes).toString("utf8")), "Alder Ark event");
+        event = asRecord(parseJson(decodeBase64(encoded, this.maxBytes)), "Alder Ark event");
       } catch (error) {
         throw new FrameProtocolError("invalid Alder Ark event: " + asError(error).message);
       }

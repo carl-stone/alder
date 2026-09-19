@@ -180,7 +180,6 @@ export interface ElectronMainOptions {
   readonly startupTimeoutMs?: number;
   readonly closeSettlementTimeoutMs?: number;
   readonly acquireSession?: (options: AcquireNotebookSessionOptions) => Promise<SessionConnection>;
-  readonly platform?: string;
 }
 
 export interface ElectronMainApplication {
@@ -798,11 +797,10 @@ export class ElectronMain implements ElectronMainApplication {
       { role: "selectAll" },
     ];
     const template: Record<string, unknown>[] = [
-      ...(this.platform() === "darwin" ? [{ label: APP_NAME, submenu: [...settingsSubmenu, { type: "separator" }, { role: "quit" }] }] : []),
+      { label: APP_NAME, submenu: [...settingsSubmenu, { type: "separator" }, { role: "quit" }] },
       { label: "File", submenu: fileSubmenu },
       { label: "Edit", submenu: editSubmenu },
       { label: "Run", submenu: runSubmenu },
-      ...(this.platform() === "darwin" ? [] : [{ label: "Alder", submenu: settingsSubmenu }]),
     ];
     this.runtime.Menu.setApplicationMenu(this.runtime.Menu.buildFromTemplate(template));
   }
@@ -1116,7 +1114,6 @@ export class ElectronMain implements ElectronMainApplication {
   private focusedRecord(): ElectronWindowRecord | undefined {
     return [...this.records].find(record => record.window.isFocused?.()) ?? this.firstRecord();
   }
-  private platform(): string { return this.options.platform ?? process.platform; }
 
   private rememberRecent(path: string): void {
     const index = this.recentPaths.indexOf(path);

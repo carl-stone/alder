@@ -9,40 +9,33 @@ copies in other worktrees are snapshots.
 
 ## Current assignment
 
-**Mac runtime and settings cleanup — Implementing.**
+**Residual architecture and test cleanup — Implementing.**
 
 **Owner:** primary implementer in the listed implementation worktree.
 
-Finish the packaged Mac runtime and remove stale format, permission and selection
-claims before broader cleanup.
+Remove the remaining pre-reset mechanisms and reshape only the state owners whose
+current responsibilities still obscure correctness.
 
-**Accept when:** the packaged app stages and exercises the supported Ark, Air and
-Quarto resources through one compact Mac acceptance path. R selection has one
-authoritative application preference and consistent discovery/validation behavior
-across desktop, backend and notebook startup, with a clear usable failure when the
-selected R disappears. Remove false R Markdown ownership, file associations and
-code paths for formats Alder does not implement. Remove unused entitlement,
-permission and packaging declarations; retain only capabilities exercised by the
-app. Settings remain understandable, persistent and non-blocking when malformed or
-unavailable. Confirm clean-path project `.Renviron`, `.Rprofile` and library
-precedence without recovery-fixture collisions. Delete redundant runtime/settings
-checks and obsolete staging paths. Deliver focused packaged behavior evidence and
-a runnable signed Mac build without taking over Carl's desktop.
+**Accept when:** remaining source-lineage/provenance gates, obsolete migration and
+platform branches, performance/latency certification, duplicate protocol/state
+representations and unused build/CI machinery are deleted. Split oversized owners
+only where the final behavior now has a clear durable seam: document/session,
+execution and independently cancellable notebook services; avoid a broad rename or
+abstraction project. The renderer retains one local draft overlay over one server
+snapshot and removes obsolete signature/event reconciliation made unnecessary by
+accepted source state. Rebuild the test suite around current behavior, freely
+deleting whole implementation-pinning files and duplicate matrices. Preserve
+strong journeys for lost edits, atomic save/recovery, shared owners, external
+conflicts, ordinary R/reactive rules, stale results, interruption, outputs/widgets/
+cache, optional-service cancellation and child cleanup. Leave one fast suite, one
+compact installed Mac acceptance command and no hanging children. Deliver a clean
+signed Mac build without taking over Carl's desktop.
 
-**Checkpoint:** `949adab` (`Unify Mac runtime settings and staging`) on accepted
-`3680fbf`.
+**Base:** accepted `cc80261` (`Harden Mac runtime acceptance`).
 
-**Correction target:** canonicalize untitled-recovery project directories when
-registered/selected so symlinked paths reopen against the same physical project
-and retain `.Renviron`, `.Rprofile` and `.alder` ownership, with sensible handling
-for existing descriptors. Add per-architecture Air archive hashes and reject
-corrupt cached or supplied bytes before extraction. Extend the compact Mac
-acceptance command from Ark version inspection to one bounded packaged kernel
-evaluation through the installed host, with normal child cleanup. Retain the
-validated R preference, staging, removed claims and green broad suite.
-
-**Next action:** primary implementer corrects `949adab` from the consolidated
-fresh-context review, then returns one checkpoint for focused re-review.
+**Next action:** primary implementer audits the accepted architecture against the
+remaining production/test/build surface, deletes obsolete mechanisms, makes only
+earned state-owner splits, and returns one checkpoint for fresh review.
 
 **Testing constraint:** do not take over Carl's visible desktop. Use background
 or isolated Mac GUI checks where native interaction matters. The in-app browser
@@ -70,8 +63,8 @@ order; their implementation details are settled when assigned.
 | Session and desktop boundary | Accepted | Primary implementer | `e0b42f1`: one shared backend session map, independent client leases, typed native bridge and ownerless lifecycle behavior |
 | Ordinary R and reactive analysis | Accepted | Primary implementer | `c7763ff`: rebuilt static graph, ordinary dynamic R, global/cycle restrictions, correct dot globals and invalid-descendant blocking |
 | Publishing and optional-service simplification | Accepted | Primary implementer | `3680fbf`: immutable saved-snapshot publishing, independent cancellable optional services, safe package restart admission and bounded process cleanup |
-| Mac runtime and settings cleanup | Implementing | Primary implementer | Canonicalize untitled recovery projects, verify Air archives and exercise a real packaged Ark kernel in Mac acceptance at `949adab` |
-| Residual architecture and test cleanup | Queued | Unassigned | Split oversized state owners where required by the preceding slices; remove remaining source-lineage/provenance gates and obsolete platform/build/CI/performance machinery; freely delete or replace whole implementation-pinning test files, leaving a small behavior-led suite, Mac build/check path and small OS adapters |
+| Mac runtime and settings cleanup | Accepted | Primary implementer | `cc80261`: one R preference path, canonical project recovery, verified/staged Ark/Air/Quarto, accurate Mac claims and real packaged acceptance |
+| Residual architecture and test cleanup | Implementing | Primary implementer | Delete remaining provenance/platform/performance/build debris, simplify final state owners and rebuild tests around current product behavior |
 | Targeted generative verification | Queued | Unassigned | Add bounded property, fuzz, state-machine and differential checks at stable product seams; minimize failures into readable regression cases without creating a permanent fuzzing framework |
 | UI/UX review and polish | Queued | Unassigned | Review the integrated Mac notebook as a product: visual hierarchy, editing flow, keyboard use, execution and progress feedback, outputs, errors, recovery, menus, settings, empty/loading states and native fit; simplify awkward interactions and deliver a coherent, attractive interface with behavior-led usability checks |
 | Complete Mac app and final acceptance | Queued | Unassigned | Deliver a usable Mac app; exercise the packaged native app through launch/open/type/run/interrupt/save/Save As/reopen/recover/close, multiple notebooks, concurrent GUI/agent edits, client detach and backend failure/recovery; check optional-service failures and observable stalls |
@@ -134,7 +127,17 @@ part of this queue.
 
 ## Latest accepted checkpoint
 
-`3680fbf` is the publishing and optional-service checkpoint. Lead accepted one
+`cc80261` is the Mac runtime and settings checkpoint. Lead accepted one persisted
+R selection path, canonical clean and recovery project startup, verified native
+Ark/Air/Quarto staging and accurate format/permission/package claims. Untitled
+recovery through symlinked projects preserves identity and physical project
+profiles/libraries. Air archives for both Mac architectures are hash-verified.
+The compact signed-app acceptance performs real packaged Ark evaluation, Air
+formatting and self-contained Quarto rendering with typed shutdown and no leaked
+children. The broad suite passed 398 with 39 explicit prerequisite skips in 24
+seconds and strict signing passed.
+
+It retains `3680fbf`, the publishing and optional-service checkpoint. Lead accepted one
 immutable last-saved source/output snapshot rendered through static self-contained
 Quarto without live R, analyzer or graph gates. Dirty edits are authoritatively
 excluded and reported; old shortcode/resource/marker certification is gone.

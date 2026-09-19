@@ -99,7 +99,7 @@ function bindClient(next: BrowserNotebookClient): void {
   next.subscribe((document, event, localCellKeys) => {
     const desktop = (globalThis as typeof globalThis & { alderDesktop?: PreloadApi }).alderDesktop;
     const pending = document.pendingSource();
-    const state: WindowState = { path: document.snapshot.path, dirty: document.snapshot.dirty || document.snapshot.changed || pending.changes.length > 0, sessionEpoch: document.epoch };
+    const state: WindowState = { path: document.snapshot.path, dirty: document.snapshot.dirty || pending.changes.length > 0, sessionEpoch: document.epoch };
     void desktop?.updateWindowState(state).catch((error) => view?.showError(error));
     if (!event) {
       flushRenders();
@@ -137,7 +137,7 @@ window.addEventListener("beforeunload", (event) => {
   if (view?.allowsUnload) return;
   const document = client?.document;
   const pending = document?.pendingSource();
-  if (!document?.snapshot.changed && !pending?.changes.length) return;
+  if (!document?.snapshot.dirty && !pending?.changes.length) return;
   event.preventDefault();
 });
 

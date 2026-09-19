@@ -86,29 +86,28 @@ test('trusted browser edit-and-Run presents the current chain and creation retai
     await browser.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, modifiers: 2 });
     await browser.send('Input.insertText', { text: 'a <- 40\na' });
     await browser.evaluate(`(() => {
-      const measurement = window.__measurement = {input: null, handler: null, command: null, completed: null, editor: document.activeElement};
+      const journey = window.__journey = {command: null, completed: null, editor: document.activeElement};
       document.addEventListener('click', event => { if (event.target.closest('[data-act=run]')) {
         if (!event.isTrusted) throw new Error('Run event was not trusted');
-        measurement.input = event.timeStamp; measurement.handler = performance.now();
       } }, {capture:true, once:true});
-      window.addEventListener('alder:host-command', event => { if (event.detail.command.type === 'run') { measurement.command = event.detail.command; measurement.result = event.detail.result; } });
-      measurement.done = new Promise((resolve,reject) => {
+      window.addEventListener('alder:host-command', event => { if (event.detail.command.type === 'run') { journey.command = event.detail.command; journey.result = event.detail.result; } });
+      journey.done = new Promise((resolve,reject) => {
         const cleanup = () => { clearTimeout(timer); unsubscribe(); window.removeEventListener('alder:host-command', onResult); };
         const timer = setTimeout(() => { cleanup(); reject(new Error('no current chain result')); }, 15000);
         const finish = () => {
-          if (!measurement.command || !measurement.completed) return;
-          const event = measurement.completed;
+          if (!journey.command || !journey.completed) return;
+          const event = journey.completed;
           requestAnimationFrame(() => requestAnimationFrame(() => {
             try {
               const document = window.__alderHost.client.document;
               const output = window.document.querySelector('[data-cell="cell-3"] [data-role=outputs]');
-              if (event.operationId !== measurement.command.requestId) throw new Error('wrong request');
-              if (measurement.result.error !== null) throw new Error('Run failed: ' + JSON.stringify(measurement.result.error));
+              if (event.operationId !== journey.command.requestId) throw new Error('wrong request');
+              if (journey.result.error !== null) throw new Error('Run failed: ' + JSON.stringify(journey.result.error));
               if (!output || !output.textContent.includes('42') || output.dataset.runId !== event.runId) throw new Error('wrong visible result');
               if (document.snapshot.cells[0].revision !== 1 || document.snapshot.cells[0].body[0] !== 'a <- 40') throw new Error('wrong source');
               if (output.getBoundingClientRect().height <= 0) throw new Error('result hidden');
               cleanup();
-              resolve({duration:performance.now()-measurement.input, inputDelay:measurement.handler-measurement.input, runId:event.runId, revision:document.snapshot.cells[0].revision});
+              resolve({runId:event.runId, revision:document.snapshot.cells[0].revision});
             } catch(error) { cleanup(); reject(error); }
           }));
         };
@@ -116,17 +115,16 @@ test('trusted browser edit-and-Run presents the current chain and creation retai
         window.addEventListener('alder:host-command', onResult);
         const unsubscribe = window.__alderHost.client.subscribe((_document,event) => {
           if (event?.type !== 'cell-completed' || event.cellId !== 'cell-3') return;
-          measurement.completed = event;
+          journey.completed = event;
           finish();
         });
       });
     })()`);
     await browser.click('[data-cell="cell-1"] [data-act=run]');
-    const result = await browser.evaluate('window.__measurement.done');
+    const result = await browser.evaluate('window.__journey.done');
     assert.equal(result.revision, 1);
-    assert.equal(await browser.evaluate('document.activeElement === window.__measurement.editor'), true, 'pointer Run must preserve editor focus');
-    assert.deepEqual(await browser.evaluate(`window.__measurement.command.changes.filter(change => change.type === 'edit').map(change => change.body)`), [['a <- 40', 'a']]);
-    assert.ok(result.duration >= result.inputDelay && result.inputDelay >= 0);
+    assert.equal(await browser.evaluate('document.activeElement === window.__journey.editor'), true, 'pointer Run must preserve editor focus');
+    assert.deepEqual(await browser.evaluate(`window.__journey.command.changes.filter(change => change.type === 'edit').map(change => change.body)`), [['a <- 40', 'a']]);
     assert.equal(app.controller.snapshot().cells[2]!.status, 'done');
     await browser.evaluate('new Promise(resolve => setTimeout(resolve, 450))');
     assert.deepEqual(await browser.evaluate('window.__typingCompletions'), [], 'Run must cancel completion scheduled by the preceding edit');
@@ -190,12 +188,12 @@ test('trusted browser edit-and-Run presents the current chain and creation retai
     await browser.send('Input.dispatchKeyEvent', { type: 'keyDown', key: ' ', code: 'Space', windowsVirtualKeyCode: 32, modifiers: 2 });
     await browser.send('Input.dispatchKeyEvent', { type: 'keyUp', key: ' ', code: 'Space', windowsVirtualKeyCode: 32, modifiers: 2 });
     await browser.wait('window.__pendingCompletionSignal && !window.__pendingCompletionSignal.aborted');
-    const priorRunRequestId = await browser.evaluate("window.__measurement.command.requestId");
+    const priorRunRequestId = await browser.evaluate("window.__journey.command.requestId");
     await browser.click('[data-cell="cell-1"] [data-act=run]');
     assert.equal(await browser.evaluate('window.__pendingCompletionSignal.aborted'), true,
       'Run must also abort a completion request that already started');
-    await browser.wait(`window.__measurement.command.requestId !== ${JSON.stringify(priorRunRequestId)} &&
-      window.__measurement.result.error === null`);
+    await browser.wait(`window.__journey.command.requestId !== ${JSON.stringify(priorRunRequestId)} &&
+      window.__journey.result.error === null`);
     await browser.click('[data-cell="cell-1"] .cm-content');
     await replaceFocusedEditor(browser, 'Sys.sleep(5)\na <- 40\na');
     await browser.click('[data-cell="cell-1"] [data-act=run]');
@@ -217,7 +215,7 @@ test('trusted browser edit-and-Run presents the current chain and creation retai
     assert.deepEqual(browser.errors, []);
   } catch (error) {
     console.error(JSON.stringify({ host: app?.controller.snapshot(), browser: await browser?.evaluate(
-      "({status:document.querySelector('#status')?.textContent, measurement:window.__measurement && {input:__measurement.input, command:__measurement.command,completed:__measurement.completed},cells:window.__alderHost?.client.document?.snapshot.cells})"
+      "({status:document.querySelector('#status')?.textContent, journey:window.__journey && {command:__journey.command,completed:__journey.completed},cells:window.__alderHost?.client.document?.snapshot.cells})"
     ).catch(() => null), errors: browser?.errors }));
     throw error;
   } finally {

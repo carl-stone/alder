@@ -7,7 +7,7 @@ import {
   FrameProtocolError,
   encodeFrame,
 } from "../src/framing.js";
-import { parseStrictJson } from "../src/strict-json.js";
+import { parseJson } from "../src/json.js";
 
 test("framed JSON survives arbitrary chunk boundaries and coalescing", () => {
   const values = [
@@ -26,27 +26,12 @@ test("framed JSON survives arbitrary chunk boundaries and coalescing", () => {
   assert.deepEqual(decoded, values);
 });
 
-test("strict JSON rejects duplicate keys, excessive depth and invalid scalars", () => {
-  assert.throws(
-    () => parseStrictJson('{"outer":{"same":1,"same":2}}'),
-    /duplicate object key/,
-  );
-  assert.throws(
-    () => parseStrictJson("[".repeat(65) + "]".repeat(65)),
-    /nesting limit/,
-  );
-  assert.throws(() => parseStrictJson("1e400"), /non-finite/);
-  assert.throws(() => parseStrictJson('"\\ud800"'), /unpaired surrogate/);
-  assert.throws(() => parseStrictJson("01"), /trailing content/);
-});
-test("strict JSON accepts whitespace and byte input within explicit limits", () => {
+test("JSON boundaries use the standard parser with byte and UTF-8 limits", () => {
   const json = "{\n  \"ok\": true,\n  \"value\": 1e20\n}";
-  assert.deepEqual(
-    parseStrictJson(new TextEncoder().encode(json), { maxBytes: 128, maxDepth: 64 }),
-    { ok: true, value: 1e20 },
-  );
-  assert.throws(() => parseStrictJson(new Uint8Array(129), { maxBytes: 128, maxDepth: 64 }), /exceeds 128 bytes/);
-  assert.throws(() => parseStrictJson(Uint8Array.from([0xc3, 0x28]), { maxBytes: 128, maxDepth: 64 }), /invalid UTF-8/);
+  assert.deepEqual(parseJson(new TextEncoder().encode(json), 128), { ok: true, value: 1e20 });
+  assert.deepEqual(parseJson('{"same":1,"same":2}'), { same: 2 });
+  assert.throws(() => parseJson(new Uint8Array(129), 128), /exceeds 128 bytes/);
+  assert.throws(() => parseJson(Uint8Array.from([0xc3, 0x28]), 128), /valid UTF-8/);
 });
 test("decoder rejects invalid lengths, UTF-8 and truncated frames permanently", () => {
   const oversized = Buffer.alloc(4);

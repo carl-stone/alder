@@ -25,7 +25,7 @@ function runtimeIdentity(overrides: Record<string, unknown> = {}) {
   return { sessionEpoch: "session-1", documentRevision: 0, kernelEpoch: "kernel-1", ...identity, ...overrides };
 }
 
-test("assigns HTML provenance to normalized output", async () => {
+test("keeps helper HTML inline and native HTML sandboxed", async () => {
   const { directory, store } = await makeStore();
   try {
     const markdown = await store.ingestAlder({ kind: "markdown", text: "# title" }, runtimeIdentity(), { presentation: "sandbox" });

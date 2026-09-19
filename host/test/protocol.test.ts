@@ -345,7 +345,7 @@ test("shared host response schemas validate complete bounded snapshots and delta
   };
   const snapshot = {
     protocol: HOST_PROTOCOL, epoch: "epoch-1", cursor: 7, version: 3, documentRevision: 7,
-    path: "/tmp/notebook.R", metadata: {}, config: {}, preferencesVersion: null, layout: null, dirty: false, changed: false,
+    path: "/tmp/notebook.R", metadata: {}, config: {}, preferencesVersion: null, layout: null, dirty: false,
     disk, sidecars: { config: disk, layout: disk, packages: disk },
     runtime: {
       documentReady: true, analyzerState: "ready" as const, kernelState: "ready" as const, executionReady: true,

@@ -152,7 +152,6 @@ export class BrowserDocument {
     this.ordered.splice(after + 1, 0, cell);
     this.byKey.set(key, cell);
     this.keyByCreationId.set(creationId, key);
-    this.snapshotValue = { ...this.snapshotValue, changed: true };
     return cell;
   }
 
@@ -166,7 +165,6 @@ export class BrowserDocument {
       cell.conflict = false;
       cell.acknowledgedGeneration = cell.generation;
     }
-    this.snapshotValue = { ...this.snapshotValue, changed: true };
     return cell;
   }
 
@@ -204,7 +202,6 @@ export class BrowserDocument {
     cell.tombstone = false;
     cell.server = null;
     this.keyByCreationId.set(creationId, cell.key);
-    this.snapshotValue = { ...this.snapshotValue, changed: true };
     return cell;
   }
 
@@ -298,13 +295,11 @@ export class BrowserDocument {
         cell.generation = Math.max(1, cell.generation + 1);
         cell.acknowledgedGeneration = cell.generation - 1;
         cell.conflict = conflict || cell.tombstone;
-        this.snapshotValue = { ...this.snapshotValue, changed: true };
       } else {
         this.recoveredStructural.push(cloneChange(change));
         this.recoveredStructuralConflict ||= conflict;
       }
     }
-    this.snapshotValue = { ...this.snapshotValue, changed: true };
   }
 
   private recoveryChanges(): DocumentChange[] {
@@ -465,7 +460,6 @@ export class BrowserDocument {
     if (submitted) this.recoveredStructuralConflict = false;
     if (submitted) this.recoveredStructural = [];
     this.submitted.delete(result.requestId);
-    this.reassertLocalDirty();
     this.rebaseDraftToSnapshot();
   }
   acknowledgeSourceCommit(operationId: string, outcome: SourceCommitOutcome): boolean {
@@ -488,7 +482,6 @@ export class BrowserDocument {
     this.recoveredStructuralConflict = false;
     this.recoveredStructural = [];
     this.submitted.delete(operationId);
-    this.reassertLocalDirty();
     this.rebaseDraftToSnapshot();
     return true;
   }
@@ -545,10 +538,6 @@ export class BrowserDocument {
       if (orderChanged) this.reorderFromServerOrderIfPossible();
     }
     this.snapshotValue = patchSnapshot(this.snapshotValue, event, this.serverOrder);
-    if (isRecord(event.payload) && event.type === "notebook" && event.payload.saved === true) {
-      const pending = this.pendingSource();
-      if (pending.changes.length || this.ordered.some((cell) => cell.tombstone)) this.snapshotValue = { ...this.snapshotValue, changed: true };
-    }
   }
 
   applySnapshot(snapshot: HostSnapshot): void {
@@ -585,7 +574,6 @@ export class BrowserDocument {
       }
     }
     this.reorderFromServerOrderIfPossible();
-    this.reassertLocalDirty();
   }
 
   private mergeServerCell(serverCell: HostCellState, forceSource = false, operationId?: string): LocalCell {
@@ -799,11 +787,6 @@ export class BrowserDocument {
     return serverCell.revision === submittedRevision ? sent : undefined;
   }
 
-  private reassertLocalDirty(): void {
-    const pending = this.pendingSource();
-    if (pending.changes.length || this.ordered.some((cell) => cell.tombstone)) this.snapshotValue = { ...this.snapshotValue, changed: true };
-  }
-
   private predecessorReference(key: string): { cellId: string } | { creationId: string } | null {
     const index = this.ordered.findIndex((cell) => cell.key === key);
     for (let before = index - 1; before >= 0; before -= 1) {
@@ -907,13 +890,9 @@ function patchSnapshot(snapshot: HostSnapshot, event: HostEvent, order: readonly
     if (isRecord(payload.app)) next.metadata = { ...next.metadata, app: payload.app };
     if (isRecord(payload.graph)) next.graph = payload.graph as unknown as HostSnapshot["graph"];
     if ("lastValue" in payload) next.lastValue = payload.lastValue;
-    if (payload.saved === true) next.changed = false;
     if (typeof payload.deleted === "string") next.cells = next.cells.filter((cell) => cell.id !== payload.deleted);
     const deletedIds = payload.deleted;
     if (Array.isArray(deletedIds)) next.cells = next.cells.filter((cell) => !deletedIds.includes(cell.id));
-    if (Array.isArray(payload.edited)) next.changed = true;
-    if ("updated" in payload) next.changed = true;
-    if (payload.created !== undefined || payload.deleted !== undefined || typeof payload.moved === "string" || isRecord(payload.metadata) || isRecord(payload.app)) next.changed = true;
     if (Array.isArray(payload.updated)) {
       const updates = new Map<string, HostCellState>();
       for (const value of payload.updated) if (isHostCell(value)) updates.set(value.id, value);
@@ -924,7 +903,7 @@ function patchSnapshot(snapshot: HostSnapshot, event: HostEvent, order: readonly
         addedCell ||= [...updates.keys()].some((id) => !present.has(id));
       }
     }
-    if (typeof payload.dirty === "boolean") next.changed = payload.dirty;
+    if (typeof payload.dirty === "boolean") next.dirty = payload.dirty;
   }
   if (["cell", "cell-started", "cell-completed"].includes(event.type) && event.cellId) {
     if (isRecord(event.payload) && event.payload.deleted === true) next.cells = next.cells.filter((cell) => cell.id !== event.cellId);
@@ -937,7 +916,6 @@ function patchSnapshot(snapshot: HostSnapshot, event: HostEvent, order: readonly
         next.cells.push(payload);
         addedCell = true;
       } else next.cells[index] = payload;
-      if (event.type === "cell" && prior && sourceRecordChanged(prior, payload)) next.changed = true;
     }
   }
   if (event.type === "diagnostics" && event.cellId && Array.isArray(event.payload)) {
@@ -998,10 +976,6 @@ function operationFromEventPayload(value: unknown): OperationRecord | null {
   if (isOperation(value)) return value;
   if (isRecord(value) && isOperation(value.operation)) return value.operation;
   return null;
-}
-
-function sourceRecordChanged(left: HostCellState, right: HostCellState): boolean {
-  return left.type !== right.type || !sameLines(left.body, right.body) || JSON.stringify(left.options) !== JSON.stringify(right.options);
 }
 
 function isSidecarObservations(value: unknown): value is HostSnapshot["sidecars"] {

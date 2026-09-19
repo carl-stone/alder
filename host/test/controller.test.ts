@@ -12,7 +12,6 @@ import { preferenceDefaults, resolveSettings } from "../src/settings.js";
 import { OutputStore } from "../src/outputs.js";
 import {
   MAX_DEPENDENCY_EDGES,
-  MAX_NOTEBOOK_CELLS,
   MAX_NOTEBOOK_SOURCE_BYTES,
 } from "../src/protocol.js";
 import type {
@@ -456,24 +455,6 @@ function serializedNotebookBytes(controller: Controller): Uint8Array {
 
 function serializedNotebook(controller: Controller): string {
   return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(serializedNotebookBytes(controller));
-}
-
-function exactLimitNotebookSource(): string {
-  const encoder = new TextEncoder();
-  const limit = MAX_NOTEBOOK_SOURCE_BYTES;
-  const prefix = "\ufeff# title\r\n# noncanonical header\r\n# %%\r\n#| keep: original\r\nx <- 1\r\n";
-  const filler = "# filler " + "x".repeat(1_023) + "\r\n";
-  const fillerBytes = encoder.encode(filler).byteLength;
-  let source = prefix;
-  let bytes = encoder.encode(source).byteLength;
-  while (bytes + fillerBytes + 1 < limit) {
-    source += filler;
-    bytes += fillerBytes;
-  }
-  source += "x".repeat(limit - bytes);
-  assert.equal(encoder.encode(source).byteLength, limit);
-  assert.equal(source.endsWith("\n"), false);
-  return source;
 }
 
 function mixedPhysicalSource(): string {
@@ -1235,49 +1216,6 @@ test("optional operations reject only duplicates and cancel their owned work", a
   assert.equal(cancelled.status, "cancelled");
   assert.equal(cancelled.error?.code, "cancelled");
   assert.equal(formatAborted, true);
-  await controller.close();
-});
-
-test("creating beyond the admitted notebook bound fails before source or engine effects", async () => {
-  const engine = new FakeEngine();
-  const controller = createController({
-    engine,
-    notebook: {
-      path: "/tmp/bounded.R",
-      metadata: {},
-      cells: Array.from({ length: MAX_NOTEBOOK_CELLS }, (_, index) => ({
-        id: `cell-${index}`,
-        type: "markdown" as const,
-        body: [],
-        options: {},
-        revision: 0,
-      })),
-    },
-    config: resolveSettings({ notebook: { on_startup: false } }),
-  });
-  await controller.start();
-  const beforeIds = controller.snapshot().cells.map((cell) => cell.id);
-  const create = command(controller, {
-    type: "transaction",
-    changes: [
-        {
-            type: "create",
-            creationId: "over-limit-cell",
-            after: null,
-            body: ["x <- 1"],
-            cellType: "code",
-            options: {}
-        }
-    ]
-  });
-  const createStarted = await startCommand(controller, create);
-  const createOperation = await controller.awaitOperation(createStarted.requestId, "controller-tests");
-  assert.equal(createOperation.status, "error");
-  assert.equal(createOperation.error?.code, "too_many_cells");
-  assert.deepEqual(controller.snapshot().cells.map((cell) => cell.id), beforeIds);
-  assert.equal(engine.analysisCalls.length, 0);
-  assert.equal(engine.evaluations.length, 0);
-  assert.equal(engine.requests.length, 0);
   await controller.close();
 });
 
@@ -2294,44 +2232,6 @@ test('notebook option names colliding with Object.prototype remain editable and 
   assert.equal(notebook.cells[0]?.options.__proto__, '2');
   assert.equal(new TextDecoder().decode(serializeNotebook(notebook)), source);
 });
-test("parsed exact-limit physical source supports a reducing edit and small creation", { timeout: 60_000 }, async () => {
-  const source = exactLimitNotebookSource();
-  const engine = new FakeEngine();
-  const controller = createController({ engine, notebook: parsedNotebook(source), config: resolveSettings({ notebook: { on_startup: false } }) });
-  await controller.start();
-  try {
-    const edit = command(controller, {
-    type: "transaction",
-    changes: [
-        {
-            type: "edit",
-            cell: {
-                cellId: "cell-1"
-            },
-            expectedRevision: 0,
-            body: ["x <- 2"],
-            cellType: "code"
-        },
-        {
-            type: "create",
-            creationId: "small",
-            after: {
-                cellId: "cell-1"
-            },
-            body: ["y <- x"],
-            cellType: "code",
-            options: {}
-        }
-    ]
-    });
-    const started = await startCommand(controller, edit);
-    await settle(controller, started.requestId);
-    assert.equal(serializedNotebook(controller), "\ufeff# title\r\n# noncanonical header\r\n# %%\r\n#| keep: original\r\nx <- 2\r\n# %%\r\ny <- x");
-  } finally {
-    await controller.close();
-  }
-});
-
 test("parsed physical records retain BOM, mixed EOL, and duplicate options around an edit", async () => {
   const source = mixedPhysicalSource();
   const engine = new FakeEngine();
@@ -4386,7 +4286,7 @@ test("runtime controls update notebook metadata and current settings together", 
   assert.equal(state.config.on_cell_change, "lazy");
   assert.equal(state.config.on_startup, false);
   assert.equal(state.config.cache.enabled, false);
-  assert.equal(state.changed, true);
+  assert.equal(state.dirty, true);
   const queried = (await controller.query({ type: "config" })).result;
   assert.deepEqual(queried, { config: state.config, preferencesVersion: null, sidecar: state.sidecars.config });
   assert.equal(state.runtime.executionMode, "lazy");
@@ -4445,7 +4345,7 @@ test("persisted layout updates do not mark clean notebook source dirty", async (
   const layoutResult = await controller.dispatch(layoutCommand);
   assert.equal(layoutResult.error, null);
   assert.deepEqual(controller.snapshot().layout, { version: 1, layout: "grid", cells: {} });
-  assert.equal(controller.snapshot().changed, false);
+  assert.equal(controller.snapshot().dirty, false);
   await controller.close();
 });
 

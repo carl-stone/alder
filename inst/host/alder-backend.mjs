@@ -13510,7 +13510,7 @@ var require_util = __commonJS({
       return path3;
     });
     exports.normalize = normalize3;
-    function join21(aRoot, aPath) {
+    function join20(aRoot, aPath) {
       if (aRoot === "") {
         aRoot = ".";
       }
@@ -13542,7 +13542,7 @@ var require_util = __commonJS({
       }
       return joined;
     }
-    exports.join = join21;
+    exports.join = join20;
     exports.isAbsolute = function(aPath) {
       return aPath.charAt(0) === "/" || urlRegexp.test(aPath);
     };
@@ -13756,7 +13756,7 @@ var require_util = __commonJS({
             parsed.path = parsed.path.substring(0, index + 1);
           }
         }
-        sourceURL = join21(urlGenerate(parsed), sourceURL);
+        sourceURL = join20(urlGenerate(parsed), sourceURL);
       }
       return normalize3(sourceURL);
     }
@@ -15197,7 +15197,7 @@ var require_previous_map = __commonJS({
   "../../../../../alder/host/node_modules/postcss/lib/previous-map.js"(exports, module) {
     "use strict";
     var { existsSync, readFileSync, realpathSync } = __require("fs");
-    var { dirname: dirname12, isAbsolute: isAbsolute6, join: join21, relative: relative4, sep: sep3 } = __require("path");
+    var { dirname: dirname12, isAbsolute: isAbsolute6, join: join20, relative: relative4, sep: sep3 } = __require("path");
     var { SourceMapConsumer, SourceMapGenerator } = require_source_map();
     function realPath(path3) {
       try {
@@ -15312,7 +15312,7 @@ var require_previous_map = __commonJS({
           return this.decodeInline(this.annotation);
         } else if (this.annotation) {
           let map2 = this.annotation;
-          if (file2) map2 = join21(dirname12(file2), map2);
+          if (file2) map2 = join20(dirname12(file2), map2);
           let unknown2 = this.loadFile(map2, file2, false);
           if (unknown2) {
             try {
@@ -15433,14 +15433,14 @@ var require_input = __commonJS({
         } else {
           offset = this.fromLineAndColumn(line, column);
         }
-        let origin2 = this.origin(line, column, endLine, endColumn);
-        if (origin2) {
+        let origin = this.origin(line, column, endLine, endColumn);
+        if (origin) {
           result = new CssSyntaxError(
             message2,
-            origin2.endLine === void 0 ? origin2.line : { column: origin2.column, line: origin2.line },
-            origin2.endLine === void 0 ? origin2.column : { column: origin2.endColumn, line: origin2.endLine },
-            origin2.source,
-            origin2.file,
+            origin.endLine === void 0 ? origin.line : { column: origin.column, line: origin.line },
+            origin.endLine === void 0 ? origin.column : { column: origin.endColumn, line: origin.endLine },
+            origin.source,
+            origin.file,
             opts.plugin
           );
         } else {
@@ -23432,11 +23432,11 @@ var require_codegen = __commonJS({
         const rhs = this.rhs === void 0 ? "" : ` = ${this.rhs}`;
         return `${varKind} ${this.name}${rhs};` + _n;
       }
-      optimizeNames(names, constants5) {
+      optimizeNames(names, constants4) {
         if (!names[this.name.str])
           return;
         if (this.rhs)
-          this.rhs = optimizeExpr(this.rhs, names, constants5);
+          this.rhs = optimizeExpr(this.rhs, names, constants4);
         return this;
       }
       get names() {
@@ -23453,10 +23453,10 @@ var require_codegen = __commonJS({
       render({ _n }) {
         return `${this.lhs} = ${this.rhs};` + _n;
       }
-      optimizeNames(names, constants5) {
+      optimizeNames(names, constants4) {
         if (this.lhs instanceof code_1.Name && !names[this.lhs.str] && !this.sideEffects)
           return;
-        this.rhs = optimizeExpr(this.rhs, names, constants5);
+        this.rhs = optimizeExpr(this.rhs, names, constants4);
         return this;
       }
       get names() {
@@ -23517,8 +23517,8 @@ var require_codegen = __commonJS({
       optimizeNodes() {
         return `${this.code}` ? this : void 0;
       }
-      optimizeNames(names, constants5) {
-        this.code = optimizeExpr(this.code, names, constants5);
+      optimizeNames(names, constants4) {
+        this.code = optimizeExpr(this.code, names, constants4);
         return this;
       }
       get names() {
@@ -23547,12 +23547,12 @@ var require_codegen = __commonJS({
         }
         return nodes.length > 0 ? this : void 0;
       }
-      optimizeNames(names, constants5) {
+      optimizeNames(names, constants4) {
         const { nodes } = this;
         let i = nodes.length;
         while (i--) {
           const n = nodes[i];
-          if (n.optimizeNames(names, constants5))
+          if (n.optimizeNames(names, constants4))
             continue;
           subtractNames(names, n.names);
           nodes.splice(i, 1);
@@ -23605,12 +23605,12 @@ var require_codegen = __commonJS({
           return void 0;
         return this;
       }
-      optimizeNames(names, constants5) {
+      optimizeNames(names, constants4) {
         var _a5;
-        this.else = (_a5 = this.else) === null || _a5 === void 0 ? void 0 : _a5.optimizeNames(names, constants5);
-        if (!(super.optimizeNames(names, constants5) || this.else))
+        this.else = (_a5 = this.else) === null || _a5 === void 0 ? void 0 : _a5.optimizeNames(names, constants4);
+        if (!(super.optimizeNames(names, constants4) || this.else))
           return;
-        this.condition = optimizeExpr(this.condition, names, constants5);
+        this.condition = optimizeExpr(this.condition, names, constants4);
         return this;
       }
       get names() {
@@ -23633,10 +23633,10 @@ var require_codegen = __commonJS({
       render(opts) {
         return `for(${this.iteration})` + super.render(opts);
       }
-      optimizeNames(names, constants5) {
-        if (!super.optimizeNames(names, constants5))
+      optimizeNames(names, constants4) {
+        if (!super.optimizeNames(names, constants4))
           return;
-        this.iteration = optimizeExpr(this.iteration, names, constants5);
+        this.iteration = optimizeExpr(this.iteration, names, constants4);
         return this;
       }
       get names() {
@@ -23672,10 +23672,10 @@ var require_codegen = __commonJS({
       render(opts) {
         return `for(${this.varKind} ${this.name} ${this.loop} ${this.iterable})` + super.render(opts);
       }
-      optimizeNames(names, constants5) {
-        if (!super.optimizeNames(names, constants5))
+      optimizeNames(names, constants4) {
+        if (!super.optimizeNames(names, constants4))
           return;
-        this.iterable = optimizeExpr(this.iterable, names, constants5);
+        this.iterable = optimizeExpr(this.iterable, names, constants4);
         return this;
       }
       get names() {
@@ -23717,11 +23717,11 @@ var require_codegen = __commonJS({
         (_b = this.finally) === null || _b === void 0 ? void 0 : _b.optimizeNodes();
         return this;
       }
-      optimizeNames(names, constants5) {
+      optimizeNames(names, constants4) {
         var _a5, _b;
-        super.optimizeNames(names, constants5);
-        (_a5 = this.catch) === null || _a5 === void 0 ? void 0 : _a5.optimizeNames(names, constants5);
-        (_b = this.finally) === null || _b === void 0 ? void 0 : _b.optimizeNames(names, constants5);
+        super.optimizeNames(names, constants4);
+        (_a5 = this.catch) === null || _a5 === void 0 ? void 0 : _a5.optimizeNames(names, constants4);
+        (_b = this.finally) === null || _b === void 0 ? void 0 : _b.optimizeNames(names, constants4);
         return this;
       }
       get names() {
@@ -24022,7 +24022,7 @@ var require_codegen = __commonJS({
     function addExprNames(names, from) {
       return from instanceof code_1._CodeOrName ? addNames(names, from.names) : names;
     }
-    function optimizeExpr(expr, names, constants5) {
+    function optimizeExpr(expr, names, constants4) {
       if (expr instanceof code_1.Name)
         return replaceName(expr);
       if (!canOptimize(expr))
@@ -24037,14 +24037,14 @@ var require_codegen = __commonJS({
         return items;
       }, []));
       function replaceName(n) {
-        const c = constants5[n.str];
+        const c = constants4[n.str];
         if (c === void 0 || names[n.str] !== 1)
           return n;
         delete names[n.str];
         return c;
       }
       function canOptimize(e) {
-        return e instanceof code_1._Code && e._items.some((c) => c instanceof code_1.Name && names[c.str] === 1 && constants5[c.str] !== void 0);
+        return e instanceof code_1._Code && e._items.some((c) => c instanceof code_1.Name && names[c.str] === 1 && constants4[c.str] !== void 0);
       }
     }
     function subtractNames(names, from) {
@@ -39281,7 +39281,7 @@ var require_api2 = __commonJS({
 // ../../../../../alder/host/node_modules/graceful-fs/polyfills.js
 var require_polyfills = __commonJS({
   "../../../../../alder/host/node_modules/graceful-fs/polyfills.js"(exports, module) {
-    var constants5 = __require("constants");
+    var constants4 = __require("constants");
     var origCwd = process.cwd;
     var cwd = null;
     var platform = process.env.GRACEFUL_FS_PLATFORM || process.platform;
@@ -39305,7 +39305,7 @@ var require_polyfills = __commonJS({
     var chdir;
     module.exports = patch;
     function patch(fs) {
-      if (constants5.hasOwnProperty("O_SYMLINK") && process.version.match(/^v0\.6\.[0-2]|^v0\.5\./)) {
+      if (constants4.hasOwnProperty("O_SYMLINK") && process.version.match(/^v0\.6\.[0-2]|^v0\.5\./)) {
         patchLchmod(fs);
       }
       if (!fs.lutimes) {
@@ -39407,7 +39407,7 @@ var require_polyfills = __commonJS({
         fs2.lchmod = function(path3, mode, callback) {
           fs2.open(
             path3,
-            constants5.O_WRONLY | constants5.O_SYMLINK,
+            constants4.O_WRONLY | constants4.O_SYMLINK,
             mode,
             function(err, fd) {
               if (err) {
@@ -39423,7 +39423,7 @@ var require_polyfills = __commonJS({
           );
         };
         fs2.lchmodSync = function(path3, mode) {
-          var fd = fs2.openSync(path3, constants5.O_WRONLY | constants5.O_SYMLINK, mode);
+          var fd = fs2.openSync(path3, constants4.O_WRONLY | constants4.O_SYMLINK, mode);
           var threw = true;
           var ret;
           try {
@@ -39443,9 +39443,9 @@ var require_polyfills = __commonJS({
         };
       }
       function patchLutimes(fs2) {
-        if (constants5.hasOwnProperty("O_SYMLINK") && fs2.futimes) {
+        if (constants4.hasOwnProperty("O_SYMLINK") && fs2.futimes) {
           fs2.lutimes = function(path3, at, mt, cb) {
-            fs2.open(path3, constants5.O_SYMLINK, function(er, fd) {
+            fs2.open(path3, constants4.O_SYMLINK, function(er, fd) {
               if (er) {
                 if (cb) cb(er);
                 return;
@@ -39458,7 +39458,7 @@ var require_polyfills = __commonJS({
             });
           };
           fs2.lutimesSync = function(path3, at, mt) {
-            var fd = fs2.openSync(path3, constants5.O_SYMLINK);
+            var fd = fs2.openSync(path3, constants4.O_SYMLINK);
             var ret;
             var threw = true;
             try {
@@ -43015,7 +43015,7 @@ var numericOriginMap = {
 };
 var $ZodCheckLessThan = /* @__PURE__ */ $constructor("$ZodCheckLessThan", (inst, def) => {
   $ZodCheck.init(inst, def);
-  const origin2 = numericOriginMap[typeof def.value];
+  const origin = numericOriginMap[typeof def.value];
   inst._zod.onattach.push((inst2) => {
     const bag = inst2._zod.bag;
     const curr = (def.inclusive ? bag.maximum : bag.exclusiveMaximum) ?? Number.POSITIVE_INFINITY;
@@ -43031,7 +43031,7 @@ var $ZodCheckLessThan = /* @__PURE__ */ $constructor("$ZodCheckLessThan", (inst,
       return;
     }
     payload.issues.push({
-      origin: numericOriginMap[typeof payload.value] ?? origin2,
+      origin: numericOriginMap[typeof payload.value] ?? origin,
       code: "too_big",
       maximum: typeof def.value === "object" ? def.value.getTime() : def.value,
       input: payload.value,
@@ -43043,7 +43043,7 @@ var $ZodCheckLessThan = /* @__PURE__ */ $constructor("$ZodCheckLessThan", (inst,
 });
 var $ZodCheckGreaterThan = /* @__PURE__ */ $constructor("$ZodCheckGreaterThan", (inst, def) => {
   $ZodCheck.init(inst, def);
-  const origin2 = numericOriginMap[typeof def.value];
+  const origin = numericOriginMap[typeof def.value];
   inst._zod.onattach.push((inst2) => {
     const bag = inst2._zod.bag;
     const curr = (def.inclusive ? bag.minimum : bag.exclusiveMinimum) ?? Number.NEGATIVE_INFINITY;
@@ -43059,7 +43059,7 @@ var $ZodCheckGreaterThan = /* @__PURE__ */ $constructor("$ZodCheckGreaterThan", 
       return;
     }
     payload.issues.push({
-      origin: numericOriginMap[typeof payload.value] ?? origin2,
+      origin: numericOriginMap[typeof payload.value] ?? origin,
       code: "too_small",
       minimum: typeof def.value === "object" ? def.value.getTime() : def.value,
       input: payload.value,
@@ -43098,7 +43098,7 @@ var $ZodCheckNumberFormat = /* @__PURE__ */ $constructor("$ZodCheckNumberFormat"
   $ZodCheck.init(inst, def);
   def.format = def.format || "float64";
   const isInt = def.format?.includes("int");
-  const origin2 = isInt ? "int" : "number";
+  const origin = isInt ? "int" : "number";
   const [minimum, maximum] = NUMBER_FORMAT_RANGES[def.format];
   inst._zod.onattach.push((inst2) => {
     const bag = inst2._zod.bag;
@@ -43113,7 +43113,7 @@ var $ZodCheckNumberFormat = /* @__PURE__ */ $constructor("$ZodCheckNumberFormat"
     if (isInt) {
       if (!Number.isInteger(input2)) {
         payload.issues.push({
-          expected: origin2,
+          expected: origin,
           format: def.format,
           code: "invalid_type",
           continue: false,
@@ -43130,7 +43130,7 @@ var $ZodCheckNumberFormat = /* @__PURE__ */ $constructor("$ZodCheckNumberFormat"
             maximum: Number.MAX_SAFE_INTEGER,
             note: "Integers must be within the safe integer range.",
             inst,
-            origin: origin2,
+            origin,
             inclusive: true,
             continue: !def.abort
           });
@@ -43141,7 +43141,7 @@ var $ZodCheckNumberFormat = /* @__PURE__ */ $constructor("$ZodCheckNumberFormat"
             minimum: Number.MIN_SAFE_INTEGER,
             note: "Integers must be within the safe integer range.",
             inst,
-            origin: origin2,
+            origin,
             inclusive: true,
             continue: !def.abort
           });
@@ -43300,9 +43300,9 @@ var $ZodCheckMaxLength = /* @__PURE__ */ $constructor("$ZodCheckMaxLength", (ins
     const length = typeof input2 === "string" && units > def.maximum ? codePointLength(input2) : units;
     if (length <= def.maximum)
       return;
-    const origin2 = getLengthableOrigin(input2);
+    const origin = getLengthableOrigin(input2);
     payload.issues.push({
-      origin: origin2,
+      origin,
       code: "too_big",
       maximum: def.maximum,
       inclusive: true,
@@ -43327,9 +43327,9 @@ var $ZodCheckMinLength = /* @__PURE__ */ $constructor("$ZodCheckMinLength", (ins
     const length = typeof input2 === "string" && units >= def.minimum && units < def.minimum * 2 ? codePointLength(input2) : units;
     if (length >= def.minimum)
       return;
-    const origin2 = getLengthableOrigin(input2);
+    const origin = getLengthableOrigin(input2);
     payload.issues.push({
-      origin: origin2,
+      origin,
       code: "too_small",
       minimum: def.minimum,
       inclusive: true,
@@ -43355,10 +43355,10 @@ var $ZodCheckLengthEquals = /* @__PURE__ */ $constructor("$ZodCheckLengthEquals"
     const length = typeof input2 === "string" && units >= def.length && units <= def.length * 2 ? codePointLength(input2) : units;
     if (length === def.length)
       return;
-    const origin2 = getLengthableOrigin(input2);
+    const origin = getLengthableOrigin(input2);
     const tooBig = length > def.length;
     payload.issues.push({
-      origin: origin2,
+      origin,
       ...tooBig ? { code: "too_big", maximum: def.length } : { code: "too_small", minimum: def.length },
       inclusive: true,
       exact: true,
@@ -46162,8 +46162,8 @@ var error = () => {
     set: { unit: "\u0639\u0646\u0635\u0631", verb: "\u0623\u0646 \u064A\u062D\u0648\u064A" },
     map: { unit: "\u0639\u0646\u0635\u0631", verb: "\u0623\u0646 \u064A\u062D\u0648\u064A" }
   };
-  function getSizing(origin2) {
-    return Sizable[origin2] ?? null;
+  function getSizing(origin) {
+    return Sizable[origin] ?? null;
   }
   const FormatDictionary = {
     regex: "\u0645\u062F\u062E\u0644",
@@ -46272,8 +46272,8 @@ var error2 = () => {
     set: { unit: "element", verb: "olmal\u0131d\u0131r" },
     map: { unit: "element", verb: "olmal\u0131d\u0131r" }
   };
-  function getSizing(origin2) {
-    return Sizable[origin2] ?? null;
+  function getSizing(origin) {
+    return Sizable[origin] ?? null;
   }
   const FormatDictionary = {
     regex: "input",
@@ -46431,8 +46431,8 @@ var error3 = () => {
       verb: "\u043C\u0435\u0446\u044C"
     }
   };
-  function getSizing(origin2) {
-    return Sizable[origin2] ?? null;
+  function getSizing(origin) {
+    return Sizable[origin] ?? null;
   }
   const FormatDictionary = {
     regex: "\u0443\u0432\u043E\u0434",
@@ -46548,8 +46548,8 @@ var error4 = () => {
     set: { unit: "\u0435\u043B\u0435\u043C\u0435\u043D\u0442\u0430", verb: "\u0434\u0430 \u0441\u044A\u0434\u044A\u0440\u0436\u0430" },
     map: { unit: "\u0435\u043B\u0435\u043C\u0435\u043D\u0442\u0430", verb: "\u0434\u0430 \u0441\u044A\u0434\u044A\u0440\u0436\u0430" }
   };
-  function getSizing(origin2) {
-    return Sizable[origin2] ?? null;
+  function getSizing(origin) {
+    return Sizable[origin] ?? null;
   }
   const FormatDictionary = {
     regex: "\u0432\u0445\u043E\u0434",
@@ -46672,8 +46672,8 @@ var error5 = () => {
     set: { unit: "\u0986\u0987\u099F\u09C7\u09AE", verb: "\u09A5\u09BE\u0995\u09A4\u09C7 \u09B9\u09AC\u09C7" },
     map: { unit: "\u098F\u09A8\u09CD\u099F\u09CD\u09B0\u09BF", verb: "\u09A5\u09BE\u0995\u09A4\u09C7 \u09B9\u09AC\u09C7" }
   };
-  function getSizing(origin2) {
-    return Sizable[origin2] ?? null;
+  function getSizing(origin) {
+    return Sizable[origin] ?? null;
   }
   const FormatDictionary = {
     regex: "\u0987\u09A8\u09AA\u09C1\u099F",
@@ -46784,8 +46784,8 @@ var error6 = () => {
     set: { unit: "elements", verb: "contenir" },
     map: { unit: "elements", verb: "contenir" }
   };
-  function getSizing(origin2) {
-    return Sizable[origin2] ?? null;
+  function getSizing(origin) {
+    return Sizable[origin] ?? null;
   }
   const FormatDictionary = {
     regex: "entrada",
@@ -46896,8 +46896,8 @@ var error7 = () => {
     set: { unit: "\u062F\u0627\u0646\u06D5", verb: "\u0628\u06CE\u062A" },
     map: { unit: "\u062F\u0627\u0646\u06D5", verb: "\u0628\u06CE\u062A" }
   };
-  function getSizing(origin2) {
-    return Sizable[origin2] ?? null;
+  function getSizing(origin) {
+    return Sizable[origin] ?? null;
   }
   const FormatDictionary = {
     regex: "regex",
@@ -47027,8 +47027,8 @@ var error8 = () => {
     set: { unit: "prvk\u016F", verb: "m\xEDt" },
     map: { unit: "prvk\u016F", verb: "m\xEDt" }
   };
-  function getSizing(origin2) {
-    return Sizable[origin2] ?? null;
+  function getSizing(origin) {
+    return Sizable[origin] ?? null;
   }
   const FormatDictionary = {
     regex: "regul\xE1rn\xED v\xFDraz",
@@ -47142,8 +47142,8 @@ var error9 = () => {
     set: { unit: "elementer", verb: "indeholdt" },
     map: { unit: "elementer", verb: "indeholdt" }
   };
-  function getSizing(origin2) {
-    return Sizable[origin2] ?? null;
+  function getSizing(origin) {
+    return Sizable[origin] ?? null;
   }
   const FormatDictionary = {
     regex: "input",
@@ -47205,19 +47205,19 @@ var error9 = () => {
       case "too_big": {
         const adj = issue2.inclusive ? "<=" : "<";
         const sizing = getSizing(issue2.origin);
-        const origin2 = TypeDictionary[issue2.origin] ?? issue2.origin;
+        const origin = TypeDictionary[issue2.origin] ?? issue2.origin;
         if (sizing)
-          return `For stor: forventede ${origin2 ?? "value"} ${sizing.verb} ${adj} ${issue2.maximum.toString()} ${sizing.unit ?? "elementer"}`;
-        return `For stor: forventede ${origin2 ?? "value"} havde ${adj} ${issue2.maximum.toString()}`;
+          return `For stor: forventede ${origin ?? "value"} ${sizing.verb} ${adj} ${issue2.maximum.toString()} ${sizing.unit ?? "elementer"}`;
+        return `For stor: forventede ${origin ?? "value"} havde ${adj} ${issue2.maximum.toString()}`;
       }
       case "too_small": {
         const adj = issue2.inclusive ? ">=" : ">";
         const sizing = getSizing(issue2.origin);
-        const origin2 = TypeDictionary[issue2.origin] ?? issue2.origin;
+        const origin = TypeDictionary[issue2.origin] ?? issue2.origin;
         if (sizing) {
-          return `For lille: forventede ${origin2} ${sizing.verb} ${adj} ${issue2.minimum.toString()} ${sizing.unit}`;
+          return `For lille: forventede ${origin} ${sizing.verb} ${adj} ${issue2.minimum.toString()} ${sizing.unit}`;
         }
-        return `For lille: forventede ${origin2} havde ${adj} ${issue2.minimum.toString()}`;
+        return `For lille: forventede ${origin} havde ${adj} ${issue2.minimum.toString()}`;
       }
       case "invalid_format": {
         const _issue = issue2;
@@ -47261,8 +47261,8 @@ var error10 = () => {
     set: { unit: "Elemente", verb: "zu haben" },
     map: { unit: "Elemente", verb: "zu haben" }
   };
-  function getSizing(origin2) {
-    return Sizable[origin2] ?? null;
+  function getSizing(origin) {
+    return Sizable[origin] ?? null;
   }
   const FormatDictionary = {
     regex: "Eingabe",
@@ -47373,8 +47373,8 @@ var error11 = () => {
     set: { unit: "\u03C3\u03C4\u03BF\u03B9\u03C7\u03B5\u03AF\u03B1", verb: "\u03BD\u03B1 \u03AD\u03C7\u03B5\u03B9" },
     map: { unit: "\u03BA\u03B1\u03C4\u03B1\u03C7\u03C9\u03C1\u03AE\u03C3\u03B5\u03B9\u03C2", verb: "\u03BD\u03B1 \u03AD\u03C7\u03B5\u03B9" }
   };
-  function getSizing(origin2) {
-    return Sizable[origin2] ?? null;
+  function getSizing(origin) {
+    return Sizable[origin] ?? null;
   }
   const FormatDictionary = {
     regex: "\u03B5\u03AF\u03C3\u03BF\u03B4\u03BF\u03C2",
@@ -47484,8 +47484,8 @@ var error12 = () => {
     set: { unit: "items", verb: "to have" },
     map: { unit: "entries", verb: "to have" }
   };
-  function getSizing(origin2) {
-    return Sizable[origin2] ?? null;
+  function getSizing(origin) {
+    return Sizable[origin] ?? null;
   }
   const FormatDictionary = {
     regex: "input",
@@ -47607,8 +47607,8 @@ var error13 = () => {
     set: { unit: "elementojn", verb: "havi" },
     map: { unit: "elementojn", verb: "havi" }
   };
-  function getSizing(origin2) {
-    return Sizable[origin2] ?? null;
+  function getSizing(origin) {
+    return Sizable[origin] ?? null;
   }
   const FormatDictionary = {
     regex: "enigo",
@@ -47719,8 +47719,8 @@ var error14 = () => {
     array: { unit: "elementos", verb: "tener" },
     set: { unit: "elementos", verb: "tener" }
   };
-  function getSizing(origin2) {
-    return Sizable[origin2] ?? null;
+  function getSizing(origin) {
+    return Sizable[origin] ?? null;
   }
   const FormatDictionary = {
     regex: "entrada",
@@ -47799,19 +47799,19 @@ var error14 = () => {
       case "too_big": {
         const adj = issue2.inclusive ? "<=" : "<";
         const sizing = getSizing(issue2.origin);
-        const origin2 = TypeDictionary[issue2.origin] ?? issue2.origin;
+        const origin = TypeDictionary[issue2.origin] ?? issue2.origin;
         if (sizing)
-          return `Demasiado grande: se esperaba que ${origin2 ?? "valor"} tuviera ${adj}${issue2.maximum.toString()} ${sizing.unit ?? "elementos"}`;
-        return `Demasiado grande: se esperaba que ${origin2 ?? "valor"} fuera ${adj}${issue2.maximum.toString()}`;
+          return `Demasiado grande: se esperaba que ${origin ?? "valor"} tuviera ${adj}${issue2.maximum.toString()} ${sizing.unit ?? "elementos"}`;
+        return `Demasiado grande: se esperaba que ${origin ?? "valor"} fuera ${adj}${issue2.maximum.toString()}`;
       }
       case "too_small": {
         const adj = issue2.inclusive ? ">=" : ">";
         const sizing = getSizing(issue2.origin);
-        const origin2 = TypeDictionary[issue2.origin] ?? issue2.origin;
+        const origin = TypeDictionary[issue2.origin] ?? issue2.origin;
         if (sizing) {
-          return `Demasiado peque\xF1o: se esperaba que ${origin2} tuviera ${adj}${issue2.minimum.toString()} ${sizing.unit}`;
+          return `Demasiado peque\xF1o: se esperaba que ${origin} tuviera ${adj}${issue2.minimum.toString()} ${sizing.unit}`;
         }
-        return `Demasiado peque\xF1o: se esperaba que ${origin2} fuera ${adj}${issue2.minimum.toString()}`;
+        return `Demasiado peque\xF1o: se esperaba que ${origin} fuera ${adj}${issue2.minimum.toString()}`;
       }
       case "invalid_format": {
         const _issue = issue2;
@@ -47855,8 +47855,8 @@ var error15 = () => {
     set: { unit: "\u0622\u06CC\u062A\u0645", verb: "\u062F\u0627\u0634\u062A\u0647 \u0628\u0627\u0634\u062F" },
     map: { unit: "\u0622\u06CC\u062A\u0645", verb: "\u062F\u0627\u0634\u062A\u0647 \u0628\u0627\u0634\u062F" }
   };
-  function getSizing(origin2) {
-    return Sizable[origin2] ?? null;
+  function getSizing(origin) {
+    return Sizable[origin] ?? null;
   }
   const FormatDictionary = {
     regex: "\u0648\u0631\u0648\u062F\u06CC",
@@ -47977,8 +47977,8 @@ var error16 = () => {
     int: { unit: "", subject: "kokonaisluvun" },
     date: { unit: "", subject: "p\xE4iv\xE4m\xE4\xE4r\xE4n" }
   };
-  function getSizing(origin2) {
-    return Sizable[origin2] ?? null;
+  function getSizing(origin) {
+    return Sizable[origin] ?? null;
   }
   const FormatDictionary = {
     regex: "s\xE4\xE4nn\xF6llinen lauseke",
@@ -48088,8 +48088,8 @@ var error17 = () => {
     array: { unit: "\xE9l\xE9ments", verb: "avoir" },
     set: { unit: "\xE9l\xE9ments", verb: "avoir" }
   };
-  function getSizing(origin2) {
-    return Sizable[origin2] ?? null;
+  function getSizing(origin) {
+    return Sizable[origin] ?? null;
   }
   const FormatDictionary = {
     regex: "expression r\xE9guli\xE8re",
@@ -48217,8 +48217,8 @@ var error18 = () => {
     set: { unit: "\xE9l\xE9ments", verb: "avoir" },
     map: { unit: "\xE9l\xE9ments", verb: "avoir" }
   };
-  function getSizing(origin2) {
-    return Sizable[origin2] ?? null;
+  function getSizing(origin) {
+    return Sizable[origin] ?? null;
   }
   const FormatDictionary = {
     regex: "entr\xE9e",
@@ -48328,8 +48328,8 @@ var error19 = () => {
     set: { unit: "\u0A86\u0A87\u0A9F\u0AAE", verb: "\u0AB9\u0ACB\u0AB5\u0ABE \u0A9C\u0ACB\u0A88\u0A8F" },
     map: { unit: "\u0A8F\u0AA8\u0ACD\u0A9F\u0ACD\u0AB0\u0AC0", verb: "\u0AB9\u0ACB\u0AB5\u0ABE \u0A9C\u0ACB\u0A88\u0A8F" }
   };
-  function getSizing(origin2) {
-    return Sizable[origin2] ?? null;
+  function getSizing(origin) {
+    return Sizable[origin] ?? null;
   }
   const FormatDictionary = {
     regex: "\u0A87\u0AA8\u0AAA\u0AC1\u0A9F",
@@ -48474,10 +48474,10 @@ var error20 = () => {
     const gender = e?.gender ?? "m";
     return gender === "f" ? "\u05E6\u05E8\u05D9\u05DB\u05D4 \u05DC\u05D4\u05D9\u05D5\u05EA" : "\u05E6\u05E8\u05D9\u05DA \u05DC\u05D4\u05D9\u05D5\u05EA";
   };
-  const getSizing = (origin2) => {
-    if (!origin2)
+  const getSizing = (origin) => {
+    if (!origin)
       return null;
-    return Sizable[origin2] ?? null;
+    return Sizable[origin] ?? null;
   };
   const FormatDictionary = {
     regex: { label: "\u05E7\u05DC\u05D8", gender: "m" },
@@ -48640,8 +48640,8 @@ var error21 = () => {
     set: { unit: "\u0924\u0924\u094D\u0935", verb: "\u0930\u0916\u0928\u0947 \u0915\u0947 \u0932\u093F\u090F" },
     map: { unit: "\u092A\u094D\u0930\u0935\u093F\u0937\u094D\u091F\u093F\u092F\u093E\u0901", verb: "\u0930\u0916\u0928\u0947 \u0915\u0947 \u0932\u093F\u090F" }
   };
-  function getSizing(origin2) {
-    return Sizable[origin2] ?? null;
+  function getSizing(origin) {
+    return Sizable[origin] ?? null;
   }
   const FormatDictionary = {
     regex: "\u0907\u0928\u092A\u0941\u091F",
@@ -48749,8 +48749,8 @@ var error22 = () => {
     array: { unit: "stavki", verb: "imati" },
     set: { unit: "stavki", verb: "imati" }
   };
-  function getSizing(origin2) {
-    return Sizable[origin2] ?? null;
+  function getSizing(origin) {
+    return Sizable[origin] ?? null;
   }
   const FormatDictionary = {
     regex: "unos",
@@ -48819,19 +48819,19 @@ var error22 = () => {
       case "too_big": {
         const adj = issue2.inclusive ? "<=" : "<";
         const sizing = getSizing(issue2.origin);
-        const origin2 = TypeDictionary[issue2.origin] ?? issue2.origin;
+        const origin = TypeDictionary[issue2.origin] ?? issue2.origin;
         if (sizing)
-          return `Preveliko: o\u010Dekivano da ${origin2 ?? "vrijednost"} ima ${adj}${issue2.maximum.toString()} ${sizing.unit ?? "elemenata"}`;
-        return `Preveliko: o\u010Dekivano da ${origin2 ?? "vrijednost"} bude ${adj}${issue2.maximum.toString()}`;
+          return `Preveliko: o\u010Dekivano da ${origin ?? "vrijednost"} ima ${adj}${issue2.maximum.toString()} ${sizing.unit ?? "elemenata"}`;
+        return `Preveliko: o\u010Dekivano da ${origin ?? "vrijednost"} bude ${adj}${issue2.maximum.toString()}`;
       }
       case "too_small": {
         const adj = issue2.inclusive ? ">=" : ">";
         const sizing = getSizing(issue2.origin);
-        const origin2 = TypeDictionary[issue2.origin] ?? issue2.origin;
+        const origin = TypeDictionary[issue2.origin] ?? issue2.origin;
         if (sizing) {
-          return `Premalo: o\u010Dekivano da ${origin2} ima ${adj}${issue2.minimum.toString()} ${sizing.unit}`;
+          return `Premalo: o\u010Dekivano da ${origin} ima ${adj}${issue2.minimum.toString()} ${sizing.unit}`;
         }
-        return `Premalo: o\u010Dekivano da ${origin2} bude ${adj}${issue2.minimum.toString()}`;
+        return `Premalo: o\u010Dekivano da ${origin} bude ${adj}${issue2.minimum.toString()}`;
       }
       case "invalid_format": {
         const _issue = issue2;
@@ -48875,8 +48875,8 @@ var error23 = () => {
     set: { unit: "elem", verb: "legyen" },
     map: { unit: "elem", verb: "legyen" }
   };
-  function getSizing(origin2) {
-    return Sizable[origin2] ?? null;
+  function getSizing(origin) {
+    return Sizable[origin] ?? null;
   }
   const FormatDictionary = {
     regex: "bemenet",
@@ -49027,8 +49027,8 @@ var error24 = () => {
       verb: "\u0578\u0582\u0576\u0565\u0576\u0561\u056C"
     }
   };
-  function getSizing(origin2) {
-    return Sizable[origin2] ?? null;
+  function getSizing(origin) {
+    return Sizable[origin] ?? null;
   }
   const FormatDictionary = {
     regex: "\u0574\u0578\u0582\u057F\u0584",
@@ -49144,8 +49144,8 @@ var error25 = () => {
     set: { unit: "item", verb: "memiliki" },
     map: { unit: "item", verb: "memiliki" }
   };
-  function getSizing(origin2) {
-    return Sizable[origin2] ?? null;
+  function getSizing(origin) {
+    return Sizable[origin] ?? null;
   }
   const FormatDictionary = {
     regex: "input",
@@ -49254,8 +49254,8 @@ var error26 = () => {
     set: { unit: "hluti", verb: "a\xF0 hafa" },
     map: { unit: "hluti", verb: "a\xF0 hafa" }
   };
-  function getSizing(origin2) {
-    return Sizable[origin2] ?? null;
+  function getSizing(origin) {
+    return Sizable[origin] ?? null;
   }
   const FormatDictionary = {
     regex: "gildi",
@@ -49367,8 +49367,8 @@ var error27 = () => {
     set: { unit: "elementi", verb: "avere" },
     map: { unit: "elementi", verb: "avere" }
   };
-  function getSizing(origin2) {
-    return Sizable[origin2] ?? null;
+  function getSizing(origin) {
+    return Sizable[origin] ?? null;
   }
   const FormatDictionary = {
     regex: "input",
@@ -49479,8 +49479,8 @@ var error28 = () => {
     set: { unit: "\u8981\u7D20", verb: "\u3067\u3042\u308B" },
     map: { unit: "\u8981\u7D20", verb: "\u3067\u3042\u308B" }
   };
-  function getSizing(origin2) {
-    return Sizable[origin2] ?? null;
+  function getSizing(origin) {
+    return Sizable[origin] ?? null;
   }
   const FormatDictionary = {
     regex: "\u5165\u529B\u5024",
@@ -49590,8 +49590,8 @@ var error29 = () => {
     set: { unit: "\u10D4\u10DA\u10D4\u10DB\u10D4\u10DC\u10E2\u10D8", verb: "\u10E3\u10DC\u10D3\u10D0 \u10E8\u10D4\u10D8\u10EA\u10D0\u10D5\u10D3\u10D4\u10E1" },
     map: { unit: "\u10D4\u10DA\u10D4\u10DB\u10D4\u10DC\u10E2\u10D8", verb: "\u10E3\u10DC\u10D3\u10D0 \u10E8\u10D4\u10D8\u10EA\u10D0\u10D5\u10D3\u10D4\u10E1" }
   };
-  function getSizing(origin2) {
-    return Sizable[origin2] ?? null;
+  function getSizing(origin) {
+    return Sizable[origin] ?? null;
   }
   const FormatDictionary = {
     regex: "\u10E8\u10D4\u10E7\u10D5\u10D0\u10DC\u10D0",
@@ -49706,8 +49706,8 @@ var error30 = () => {
     set: { unit: "\u1792\u17B6\u178F\u17BB", verb: "\u1782\u17BD\u179A\u1798\u17B6\u1793" },
     map: { unit: "\u1792\u17B6\u178F\u17BB", verb: "\u1782\u17BD\u179A\u1798\u17B6\u1793" }
   };
-  function getSizing(origin2) {
-    return Sizable[origin2] ?? null;
+  function getSizing(origin) {
+    return Sizable[origin] ?? null;
   }
   const FormatDictionary = {
     regex: "\u1791\u17B7\u1793\u17D2\u1793\u1793\u17D0\u1799\u1794\u1789\u17D2\u1785\u17BC\u179B",
@@ -49825,8 +49825,8 @@ var error31 = () => {
     set: { unit: "\u0CB5\u0CB8\u0CCD\u0CA4\u0CC1\u0C97\u0CB3\u0CC1", verb: "\u0CB9\u0CCA\u0C82\u0CA6\u0CB2\u0CC1" },
     map: { unit: "entries", verb: "\u0CB9\u0CCA\u0C82\u0CA6\u0CB2\u0CC1" }
   };
-  function getSizing(origin2) {
-    return Sizable[origin2] ?? null;
+  function getSizing(origin) {
+    return Sizable[origin] ?? null;
   }
   const FormatDictionary = {
     regex: "\u0C87\u0CA8\u0CCD\u0CAA\u0CC1\u0C9F\u0CCD",
@@ -49939,8 +49939,8 @@ var error32 = () => {
     set: { unit: "\uAC1C", verb: "to have" },
     map: { unit: "\uAC1C", verb: "to have" }
   };
-  function getSizing(origin2) {
-    return Sizable[origin2] ?? null;
+  function getSizing(origin) {
+    return Sizable[origin] ?? null;
   }
   const FormatDictionary = {
     regex: "\uC785\uB825",
@@ -50130,8 +50130,8 @@ var error33 = () => {
       }
     }
   };
-  function getSizing(origin2, unitType, inclusive, targetShouldBe) {
-    const result = Sizable[origin2] ?? null;
+  function getSizing(origin, unitType, inclusive, targetShouldBe) {
+    const result = Sizable[origin] ?? null;
     if (result === null)
       return result;
     return {
@@ -50200,20 +50200,20 @@ var error33 = () => {
           return `Privalo b\u016Bti ${stringifyPrimitive(issue2.values[0])}`;
         return `Privalo b\u016Bti vienas i\u0161 ${joinValues(issue2.values, "|")} pasirinkim\u0173`;
       case "too_big": {
-        const origin2 = TypeDictionary[issue2.origin] ?? issue2.origin;
+        const origin = TypeDictionary[issue2.origin] ?? issue2.origin;
         const sizing = getSizing(issue2.origin, getUnitTypeFromNumber(Number(issue2.maximum)), issue2.inclusive ?? false, "smaller");
         if (sizing?.verb)
-          return `${capitalizeFirstCharacter(origin2 ?? issue2.origin ?? "reik\u0161m\u0117")} ${sizing.verb} ${issue2.maximum.toString()} ${sizing.unit ?? "element\u0173"}`;
+          return `${capitalizeFirstCharacter(origin ?? issue2.origin ?? "reik\u0161m\u0117")} ${sizing.verb} ${issue2.maximum.toString()} ${sizing.unit ?? "element\u0173"}`;
         const adj = issue2.inclusive ? "ne didesnis kaip" : "ma\u017Eesnis kaip";
-        return `${capitalizeFirstCharacter(origin2 ?? issue2.origin ?? "reik\u0161m\u0117")} turi b\u016Bti ${adj} ${issue2.maximum.toString()} ${sizing?.unit}`;
+        return `${capitalizeFirstCharacter(origin ?? issue2.origin ?? "reik\u0161m\u0117")} turi b\u016Bti ${adj} ${issue2.maximum.toString()} ${sizing?.unit}`;
       }
       case "too_small": {
-        const origin2 = TypeDictionary[issue2.origin] ?? issue2.origin;
+        const origin = TypeDictionary[issue2.origin] ?? issue2.origin;
         const sizing = getSizing(issue2.origin, getUnitTypeFromNumber(Number(issue2.minimum)), issue2.inclusive ?? false, "bigger");
         if (sizing?.verb)
-          return `${capitalizeFirstCharacter(origin2 ?? issue2.origin ?? "reik\u0161m\u0117")} ${sizing.verb} ${issue2.minimum.toString()} ${sizing.unit ?? "element\u0173"}`;
+          return `${capitalizeFirstCharacter(origin ?? issue2.origin ?? "reik\u0161m\u0117")} ${sizing.verb} ${issue2.minimum.toString()} ${sizing.unit ?? "element\u0173"}`;
         const adj = issue2.inclusive ? "ne ma\u017Eesnis kaip" : "didesnis kaip";
-        return `${capitalizeFirstCharacter(origin2 ?? issue2.origin ?? "reik\u0161m\u0117")} turi b\u016Bti ${adj} ${issue2.minimum.toString()} ${sizing?.unit}`;
+        return `${capitalizeFirstCharacter(origin ?? issue2.origin ?? "reik\u0161m\u0117")} turi b\u016Bti ${adj} ${issue2.minimum.toString()} ${sizing?.unit}`;
       }
       case "invalid_format": {
         const _issue = issue2;
@@ -50237,8 +50237,8 @@ var error33 = () => {
       case "invalid_union":
         return "Klaidinga \u012Fvestis";
       case "invalid_element": {
-        const origin2 = TypeDictionary[issue2.origin] ?? issue2.origin;
-        return `${capitalizeFirstCharacter(origin2 ?? issue2.origin ?? "reik\u0161m\u0117")} turi klaiding\u0105 \u012Fvest\u012F`;
+        const origin = TypeDictionary[issue2.origin] ?? issue2.origin;
+        return `${capitalizeFirstCharacter(origin ?? issue2.origin ?? "reik\u0161m\u0117")} turi klaiding\u0105 \u012Fvest\u012F`;
       }
       default:
         return "Klaidinga \u012Fvestis";
@@ -50260,8 +50260,8 @@ var error34 = () => {
     set: { unit: "\u0441\u0442\u0430\u0432\u043A\u0438", verb: "\u0434\u0430 \u0438\u043C\u0430\u0430\u0442" },
     map: { unit: "\u0441\u0442\u0430\u0432\u043A\u0438", verb: "\u0434\u0430 \u0438\u043C\u0430\u0430\u0442" }
   };
-  function getSizing(origin2) {
-    return Sizable[origin2] ?? null;
+  function getSizing(origin) {
+    return Sizable[origin] ?? null;
   }
   const FormatDictionary = {
     regex: "\u0432\u043D\u0435\u0441",
@@ -50373,8 +50373,8 @@ var error35 = () => {
     set: { unit: "elemen", verb: "mempunyai" },
     map: { unit: "elemen", verb: "mempunyai" }
   };
-  function getSizing(origin2) {
-    return Sizable[origin2] ?? null;
+  function getSizing(origin) {
+    return Sizable[origin] ?? null;
   }
   const FormatDictionary = {
     regex: "input",
@@ -50484,8 +50484,8 @@ var error36 = () => {
     set: { unit: "\u0924\u0924\u094D\u0935", verb: "\u0939\u0941\u0928\u0941\u092A\u0930\u094D\u091B" },
     map: { unit: "\u092A\u094D\u0930\u0935\u093F\u0937\u094D\u091F\u093F", verb: "\u0939\u0941\u0928\u0941\u092A\u0930\u094D\u091B" }
   };
-  function getSizing(origin2) {
-    return Sizable[origin2] ?? null;
+  function getSizing(origin) {
+    return Sizable[origin] ?? null;
   }
   const FormatDictionary = {
     regex: "\u0907\u0928\u092A\u0941\u091F",
@@ -50594,8 +50594,8 @@ var error37 = () => {
     set: { unit: "elementen", verb: "heeft" },
     map: { unit: "elementen", verb: "heeft" }
   };
-  function getSizing(origin2) {
-    return Sizable[origin2] ?? null;
+  function getSizing(origin) {
+    return Sizable[origin] ?? null;
   }
   const FormatDictionary = {
     regex: "invoer",
@@ -50708,8 +50708,8 @@ var error38 = () => {
     set: { unit: "element", verb: "\xE5 innehalde" },
     map: { unit: "element", verb: "\xE5 innehalde" }
   };
-  function getSizing(origin2) {
-    return Sizable[origin2] ?? null;
+  function getSizing(origin) {
+    return Sizable[origin] ?? null;
   }
   const FormatDictionary = {
     regex: "input",
@@ -50820,8 +50820,8 @@ var error39 = () => {
     set: { unit: "elementer", verb: "\xE5 inneholde" },
     map: { unit: "elementer", verb: "\xE5 inneholde" }
   };
-  function getSizing(origin2) {
-    return Sizable[origin2] ?? null;
+  function getSizing(origin) {
+    return Sizable[origin] ?? null;
   }
   const FormatDictionary = {
     regex: "input",
@@ -50932,8 +50932,8 @@ var error40 = () => {
     set: { unit: "unsur", verb: "olmal\u0131d\u0131r" },
     map: { unit: "unsur", verb: "olmal\u0131d\u0131r" }
   };
-  function getSizing(origin2) {
-    return Sizable[origin2] ?? null;
+  function getSizing(origin) {
+    return Sizable[origin] ?? null;
   }
   const FormatDictionary = {
     regex: "giren",
@@ -51045,8 +51045,8 @@ var error41 = () => {
     set: { unit: "\u062A\u0648\u06A9\u064A", verb: "\u0648\u0644\u0631\u064A" },
     map: { unit: "\u062A\u0648\u06A9\u064A", verb: "\u0648\u0644\u0631\u064A" }
   };
-  function getSizing(origin2) {
-    return Sizable[origin2] ?? null;
+  function getSizing(origin) {
+    return Sizable[origin] ?? null;
   }
   const FormatDictionary = {
     regex: "\u0648\u0631\u0648\u062F\u064A",
@@ -51163,8 +51163,8 @@ var error42 = () => {
     set: { unit: "element\xF3w", verb: "mie\u0107" },
     map: { unit: "element\xF3w", verb: "mie\u0107" }
   };
-  function getSizing(origin2) {
-    return Sizable[origin2] ?? null;
+  function getSizing(origin) {
+    return Sizable[origin] ?? null;
   }
   const FormatDictionary = {
     regex: "wyra\u017Cenie",
@@ -51276,8 +51276,8 @@ var error43 = () => {
     set: { unit: "elementos" },
     map: { unit: "entradas" }
   };
-  function getSizing(origin2) {
-    return Sizable[origin2] ?? null;
+  function getSizing(origin) {
+    return Sizable[origin] ?? null;
   }
   const FormatDictionary = {
     regex: "a entrada",
@@ -51418,8 +51418,8 @@ var error44 = () => {
     set: { unit: "elementos" },
     map: { unit: "entradas" }
   };
-  function getSizing(origin2) {
-    return Sizable[origin2] ?? null;
+  function getSizing(origin) {
+    return Sizable[origin] ?? null;
   }
   const FormatDictionary = {
     regex: "a entrada",
@@ -51561,8 +51561,8 @@ var error45 = () => {
     set: { unit: "elemente", verb: "s\u0103 aib\u0103" },
     map: { unit: "intr\u0103ri", verb: "s\u0103 aib\u0103" }
   };
-  function getSizing(origin2) {
-    return Sizable[origin2] ?? null;
+  function getSizing(origin) {
+    return Sizable[origin] ?? null;
   }
   const FormatDictionary = {
     regex: "intrare",
@@ -51732,8 +51732,8 @@ var error46 = () => {
       verb: "\u0438\u043C\u0435\u0442\u044C"
     }
   };
-  function getSizing(origin2) {
-    return Sizable[origin2] ?? null;
+  function getSizing(origin) {
+    return Sizable[origin] ?? null;
   }
   const FormatDictionary = {
     regex: "\u0432\u0432\u043E\u0434",
@@ -51849,8 +51849,8 @@ var error47 = () => {
     set: { unit: "prvkov", verb: "ma\u0165" },
     map: { unit: "polo\u017Eiek", verb: "ma\u0165" }
   };
-  function getSizing(origin2) {
-    return Sizable[origin2] ?? null;
+  function getSizing(origin) {
+    return Sizable[origin] ?? null;
   }
   const FormatDictionary = {
     regex: "regul\xE1rny v\xFDraz",
@@ -51964,8 +51964,8 @@ var error48 = () => {
     set: { unit: "elementov", verb: "imeti" },
     map: { unit: "elementov", verb: "imeti" }
   };
-  function getSizing(origin2) {
-    return Sizable[origin2] ?? null;
+  function getSizing(origin) {
+    return Sizable[origin] ?? null;
   }
   const FormatDictionary = {
     regex: "vnos",
@@ -52077,8 +52077,8 @@ var error49 = () => {
     set: { unit: "objekt", verb: "att inneh\xE5lla" },
     map: { unit: "objekt", verb: "att inneh\xE5lla" }
   };
-  function getSizing(origin2) {
-    return Sizable[origin2] ?? null;
+  function getSizing(origin) {
+    return Sizable[origin] ?? null;
   }
   const FormatDictionary = {
     regex: "regulj\xE4rt uttryck",
@@ -52191,8 +52191,8 @@ var error50 = () => {
     set: { unit: "\u0B89\u0BB1\u0BC1\u0BAA\u0BCD\u0BAA\u0BC1\u0B95\u0BB3\u0BCD", verb: "\u0B95\u0BCA\u0BA3\u0BCD\u0B9F\u0BBF\u0BB0\u0BC1\u0B95\u0BCD\u0B95 \u0BB5\u0BC7\u0BA3\u0BCD\u0B9F\u0BC1\u0BAE\u0BCD" },
     map: { unit: "\u0B89\u0BB1\u0BC1\u0BAA\u0BCD\u0BAA\u0BC1\u0B95\u0BB3\u0BCD", verb: "\u0B95\u0BCA\u0BA3\u0BCD\u0B9F\u0BBF\u0BB0\u0BC1\u0B95\u0BCD\u0B95 \u0BB5\u0BC7\u0BA3\u0BCD\u0B9F\u0BC1\u0BAE\u0BCD" }
   };
-  function getSizing(origin2) {
-    return Sizable[origin2] ?? null;
+  function getSizing(origin) {
+    return Sizable[origin] ?? null;
   }
   const FormatDictionary = {
     regex: "\u0B89\u0BB3\u0BCD\u0BB3\u0BC0\u0B9F\u0BC1",
@@ -52305,8 +52305,8 @@ var error51 = () => {
     set: { unit: "\u0E23\u0E32\u0E22\u0E01\u0E32\u0E23", verb: "\u0E04\u0E27\u0E23\u0E21\u0E35" },
     map: { unit: "\u0E23\u0E32\u0E22\u0E01\u0E32\u0E23", verb: "\u0E04\u0E27\u0E23\u0E21\u0E35" }
   };
-  function getSizing(origin2) {
-    return Sizable[origin2] ?? null;
+  function getSizing(origin) {
+    return Sizable[origin] ?? null;
   }
   const FormatDictionary = {
     regex: "\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25\u0E17\u0E35\u0E48\u0E1B\u0E49\u0E2D\u0E19",
@@ -52419,8 +52419,8 @@ var error52 = () => {
     set: { unit: "elementler", verb: "bolmaly" },
     map: { unit: "elementler", verb: "bolmaly" }
   };
-  function getSizing(origin2) {
-    return Sizable[origin2] ?? null;
+  function getSizing(origin) {
+    return Sizable[origin] ?? null;
   }
   const FormatDictionary = {
     regex: "giri\u015F",
@@ -52525,8 +52525,8 @@ var error53 = () => {
     set: { unit: "\xF6\u011Fe", verb: "olmal\u0131" },
     map: { unit: "\xF6\u011Fe", verb: "olmal\u0131" }
   };
-  function getSizing(origin2) {
-    return Sizable[origin2] ?? null;
+  function getSizing(origin) {
+    return Sizable[origin] ?? null;
   }
   const FormatDictionary = {
     regex: "girdi",
@@ -52634,8 +52634,8 @@ var error54 = () => {
     set: { unit: "\u0435\u043B\u0435\u043C\u0435\u043D\u0442\u0456\u0432", verb: "\u043C\u0430\u0442\u0438\u043C\u0435" },
     map: { unit: "\u0435\u043B\u0435\u043C\u0435\u043D\u0442\u0456\u0432", verb: "\u043C\u0430\u0442\u0438\u043C\u0435" }
   };
-  function getSizing(origin2) {
-    return Sizable[origin2] ?? null;
+  function getSizing(origin) {
+    return Sizable[origin] ?? null;
   }
   const FormatDictionary = {
     regex: "\u0432\u0445\u0456\u0434\u043D\u0456 \u0434\u0430\u043D\u0456",
@@ -52751,8 +52751,8 @@ var error55 = () => {
     set: { unit: "\u0622\u0626\u0679\u0645\u0632", verb: "\u06C1\u0648\u0646\u0627" },
     map: { unit: "\u0622\u0626\u0679\u0645\u0632", verb: "\u06C1\u0648\u0646\u0627" }
   };
-  function getSizing(origin2) {
-    return Sizable[origin2] ?? null;
+  function getSizing(origin) {
+    return Sizable[origin] ?? null;
   }
   const FormatDictionary = {
     regex: "\u0627\u0646 \u067E\u0679",
@@ -52865,8 +52865,8 @@ var error56 = () => {
     set: { unit: "element", verb: "bo\u2018lishi kerak" },
     map: { unit: "yozuv", verb: "bo\u2018lishi kerak" }
   };
-  function getSizing(origin2) {
-    return Sizable[origin2] ?? null;
+  function getSizing(origin) {
+    return Sizable[origin] ?? null;
   }
   const FormatDictionary = {
     regex: "kirish",
@@ -52977,8 +52977,8 @@ var error57 = () => {
     set: { unit: "ph\u1EA7n t\u1EED", verb: "c\xF3" },
     map: { unit: "ph\u1EA7n t\u1EED", verb: "c\xF3" }
   };
-  function getSizing(origin2) {
-    return Sizable[origin2] ?? null;
+  function getSizing(origin) {
+    return Sizable[origin] ?? null;
   }
   const FormatDictionary = {
     regex: "\u0111\u1EA7u v\xE0o",
@@ -53089,8 +53089,8 @@ var error58 = () => {
     set: { unit: "\u9879", verb: "\u5305\u542B" },
     map: { unit: "\u9879", verb: "\u5305\u542B" }
   };
-  function getSizing(origin2) {
-    return Sizable[origin2] ?? null;
+  function getSizing(origin) {
+    return Sizable[origin] ?? null;
   }
   const FormatDictionary = {
     regex: "\u8F93\u5165",
@@ -53202,8 +53202,8 @@ var error59 = () => {
     set: { unit: "\u9805\u76EE", verb: "\u64C1\u6709" },
     map: { unit: "\u9805\u76EE", verb: "\u64C1\u6709" }
   };
-  function getSizing(origin2) {
-    return Sizable[origin2] ?? null;
+  function getSizing(origin) {
+    return Sizable[origin] ?? null;
   }
   const FormatDictionary = {
     regex: "\u8F38\u5165",
@@ -53313,8 +53313,8 @@ var error60 = () => {
     set: { unit: "nkan", verb: "n\xED" },
     map: { unit: "nkan", verb: "n\xED" }
   };
-  function getSizing(origin2) {
-    return Sizable[origin2] ?? null;
+  function getSizing(origin) {
+    return Sizable[origin] ?? null;
   }
   const FormatDictionary = {
     regex: "\u1EB9\u0300r\u1ECD \xECb\xE1w\u1ECDl\xE9",
@@ -60334,7 +60334,7 @@ var ApplicationPreferences = class _ApplicationPreferences {
 // src/application.ts
 import { randomUUID as randomUUID14 } from "node:crypto";
 import { mkdtemp as mkdtemp5, realpath as realpath10, rm as rm9 } from "node:fs/promises";
-import { basename as basename8, dirname as dirname10, join as join20, resolve as resolve13 } from "node:path";
+import { basename as basename8, dirname as dirname10, join as join19, resolve as resolve13 } from "node:path";
 import { tmpdir as tmpdir6 } from "node:os";
 
 // ../../../../../alder/host/node_modules/chokidar/index.js
@@ -62930,7 +62930,7 @@ var runtimeVariableSchema = external_exports.object({ name: boundedUtf8StringSch
 var runtimeVariablesSchema = external_exports.array(runtimeVariableSchema).max(MAX_RUNTIME_VARIABLES);
 var editorDiagnosticsSchema = safeStringRecordSchema(external_exports.array(analysisDiagnosticSchema).max(MAX_EDITOR_DIAGNOSTICS));
 var serviceErrorsSchema = external_exports.object({ lsp: hostErrorSchema.optional(), settings: hostErrorSchema.optional() }).strict();
-var hostSnapshotSchema = external_exports.object({ protocol: external_exports.literal(HOST_PROTOCOL), epoch: idSchema, cursor: protocolIntegerSchema, version: protocolIntegerSchema, documentRevision: revisionSchema, path: pathSchema.nullable(), metadata: protocolJsonRecordSchema, config: protocolJsonRecordSchema, preferencesVersion: boundedUtf8StringSchema(MAX_ID_BYTES).nullable().default(null), layout: protocolJsonSchema, dirty: external_exports.boolean(), changed: external_exports.boolean().optional(), disk: diskObservationSchema, sidecars: sidecarObservationsSchema, runtime: hostRuntimeSchema, cells: external_exports.array(hostCellStateSchema).max(MAX_NOTEBOOK_CELLS), graph: dependencyGraphStateSchema, variables: runtimeVariablesSchema, editorDiagnostics: editorDiagnosticsSchema, serviceErrors: serviceErrorsSchema, operations: external_exports.array(operationRecordSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS), lastValue: protocolJsonSchema.nullable(), lastActionError: hostErrorSchema.nullable(), capabilities: external_exports.array(boundedUtf8StringSchema(256)).max(MAX_PROTOCOL_COLLECTION_ITEMS).optional(), activeClientIds: external_exports.array(idSchema).max(128).optional() }).strict();
+var hostSnapshotSchema = external_exports.object({ protocol: external_exports.literal(HOST_PROTOCOL), epoch: idSchema, cursor: protocolIntegerSchema, version: protocolIntegerSchema, documentRevision: revisionSchema, path: pathSchema.nullable(), metadata: protocolJsonRecordSchema, config: protocolJsonRecordSchema, preferencesVersion: boundedUtf8StringSchema(MAX_ID_BYTES).nullable().default(null), layout: protocolJsonSchema, dirty: external_exports.boolean(), disk: diskObservationSchema, sidecars: sidecarObservationsSchema, runtime: hostRuntimeSchema, cells: external_exports.array(hostCellStateSchema).max(MAX_NOTEBOOK_CELLS), graph: dependencyGraphStateSchema, variables: runtimeVariablesSchema, editorDiagnostics: editorDiagnosticsSchema, serviceErrors: serviceErrorsSchema, operations: external_exports.array(operationRecordSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS), lastValue: protocolJsonSchema.nullable(), lastActionError: hostErrorSchema.nullable(), capabilities: external_exports.array(boundedUtf8StringSchema(256)).max(MAX_PROTOCOL_COLLECTION_ITEMS).optional(), activeClientIds: external_exports.array(idSchema).max(128).optional() }).strict();
 var hostEventTypeSchema = external_exports.enum(["transaction", "notebook", "cell", "cell-started", "cell-output", "cell-completed", "diagnostics", "editor-diagnostics", "service-errors", "graph", "variables", "runtime", "operation", "service-error", "active_clients_changed"]);
 var eventBase = { protocol: external_exports.literal(HOST_PROTOCOL), epoch: idSchema, cursor: protocolIntegerSchema, version: protocolIntegerSchema, documentRevision: revisionSchema, timestamp: external_exports.number().finite().nonnegative(), operationId: idSchema.optional(), clientId: idSchema.optional(), cellId: idSchema.optional(), runId: idSchema.optional(), kernelEpoch: idSchema.nullable().optional(), revision: revisionSchema.optional(), sequence: protocolIntegerSchema.optional() };
 var hostEventSchema = external_exports.object({ ...eventBase, type: hostEventTypeSchema, payload: protocolJsonSchema }).strict();
@@ -62970,7 +62970,6 @@ var notebookQueryResultSchema = external_exports.object({
   metadata: protocolJsonRecordSchema,
   config: protocolJsonRecordSchema,
   dirty: external_exports.boolean(),
-  changed: external_exports.boolean().optional(),
   disk: diskObservationSchema,
   sidecars: sidecarObservationsSchema,
   runtime: hostRuntimeSchema,
@@ -72468,7 +72467,6 @@ var Controller = class {
       preferencesVersion: this.preferencesVersion,
       layout: clone3(this.layout),
       dirty: this.changed,
-      changed: this.changed,
       disk: clone3(this.diskValue),
       sidecars: clone3(this.sidecarsValue),
       runtime: this.runtimeSnapshot(),
@@ -72741,7 +72739,6 @@ var Controller = class {
           metadata: clone3(this.metadata),
           config: clone3(this.config),
           dirty: this.changed,
-          changed: this.changed,
           disk: clone3(this.diskValue),
           sidecars: clone3(this.sidecarsValue),
           runtime: this.runtimeSnapshot(),
@@ -77556,7 +77553,7 @@ import { createHash as createHash5, randomBytes as randomBytes2, randomUUID as r
 import { access as access2, mkdir as mkdir4, mkdtemp, rm as rm3, stat as stat9 } from "node:fs/promises";
 import { rmSync, writeFileSync } from "node:fs";
 import { tmpdir as tmpdir2 } from "node:os";
-import { basename as basename4, extname as extname2, join as join9, resolve as resolve6 } from "node:path";
+import { basename as basename4, extname as extname2, join as join8, resolve as resolve6 } from "node:path";
 
 // src/r-environment.ts
 import { createHash as createHash4 } from "node:crypto";
@@ -77952,207 +77949,17 @@ function messageOf3(error61) {
   return error61 instanceof Error ? error61.message : String(error61);
 }
 
-// src/strict-json.ts
-var DEFAULT_STRICT_JSON_LIMITS = Object.freeze({
-  maxBytes: 8 * 1024 * 1024,
-  maxDepth: 64
-});
-var StrictJsonError = class extends Error {
-  constructor(message2, offset) {
-    super(`${message2} at byte ${offset}`);
-    this.offset = offset;
-    this.name = "StrictJsonError";
-  }
-  offset;
-};
-var StrictJsonParser = class {
-  constructor(text2, maxDepth) {
-    this.text = text2;
-    this.maxDepth = maxDepth;
-  }
-  text;
-  maxDepth;
-  offset = 0;
-  encoder = new TextEncoder();
-  parse() {
-    this.whitespace();
-    const result = this.value(0);
-    this.whitespace();
-    if (this.offset !== this.text.length) this.fail("trailing content");
-    return result;
-  }
-  value(depth) {
-    const next = this.text[this.offset];
-    if (next === "{") return this.object(depth + 1);
-    if (next === "[") return this.array(depth + 1);
-    if (next === '"') return this.string();
-    if (next === "t") return this.literal("true", true);
-    if (next === "f") return this.literal("false", false);
-    if (next === "n") return this.literal("null", null);
-    if (next === "-" || next !== void 0 && next >= "0" && next <= "9") {
-      return this.number();
-    }
-    this.fail("expected a JSON value");
-  }
-  object(depth) {
-    this.checkDepth(depth);
-    this.offset += 1;
-    this.whitespace();
-    const result = {};
-    const keys2 = /* @__PURE__ */ new Set();
-    if (this.consume("}")) return result;
-    while (true) {
-      if (this.text[this.offset] !== '"') this.fail("expected an object key");
-      const key2 = this.string();
-      if (keys2.has(key2)) this.fail(`duplicate object key ${JSON.stringify(key2)}`);
-      keys2.add(key2);
-      this.whitespace();
-      if (!this.consume(":")) this.fail("expected ':' after an object key");
-      this.whitespace();
-      const item = this.value(depth);
-      Object.defineProperty(result, key2, {
-        configurable: true,
-        enumerable: true,
-        value: item,
-        writable: true
-      });
-      this.whitespace();
-      if (this.consume("}")) return result;
-      if (!this.consume(",")) this.fail("expected ',' or '}'");
-      this.whitespace();
-    }
-  }
-  array(depth) {
-    this.checkDepth(depth);
-    this.offset += 1;
-    this.whitespace();
-    const result = [];
-    if (this.consume("]")) return result;
-    while (true) {
-      result.push(this.value(depth));
-      this.whitespace();
-      if (this.consume("]")) return result;
-      if (!this.consume(",")) this.fail("expected ',' or ']'");
-      this.whitespace();
-    }
-  }
-  string() {
-    const start = this.offset;
-    this.offset += 1;
-    while (this.offset < this.text.length) {
-      const code2 = this.text.charCodeAt(this.offset);
-      if (code2 === 34) {
-        this.offset += 1;
-        let result;
-        try {
-          result = JSON.parse(this.text.slice(start, this.offset));
-        } catch {
-          this.fail("invalid JSON string");
-        }
-        this.validateSurrogates(result);
-        return result;
-      }
-      if (code2 < 32) this.fail("unescaped control character in string");
-      if (code2 === 92) {
-        this.offset += 1;
-        if (this.offset >= this.text.length) this.fail("unterminated escape");
-        const escaped2 = this.text[this.offset];
-        if (escaped2 === "u") {
-          const digits = this.text.slice(this.offset + 1, this.offset + 5);
-          if (!/^[0-9a-fA-F]{4}$/.test(digits)) this.fail("invalid Unicode escape");
-          this.offset += 4;
-        } else if (!'"\\/bfnrt'.includes(escaped2)) {
-          this.fail("invalid string escape");
-        }
-      }
-      this.offset += 1;
-    }
-    this.fail("unterminated JSON string");
-  }
-  validateSurrogates(value) {
-    for (let index = 0; index < value.length; index += 1) {
-      const code2 = value.charCodeAt(index);
-      if (code2 >= 55296 && code2 <= 56319) {
-        const low = value.charCodeAt(index + 1);
-        if (!(low >= 56320 && low <= 57343)) this.fail("unpaired surrogate");
-        index += 1;
-      } else if (code2 >= 56320 && code2 <= 57343) {
-        this.fail("unpaired surrogate");
-      }
-    }
-  }
-  number() {
-    const token = this.text.slice(this.offset).match(
-      /^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?/
-    )?.[0];
-    if (token === void 0) this.fail("invalid number");
-    this.offset += token.length;
-    const result = Number(token);
-    if (!Number.isFinite(result)) this.fail("non-finite number");
-    return result;
-  }
-  literal(token, result) {
-    if (!this.text.startsWith(token, this.offset)) this.fail("invalid literal");
-    this.offset += token.length;
-    return result;
-  }
-  whitespace() {
-    while (/\s/.test(this.text[this.offset] ?? "") && " 	\r\n".includes(this.text[this.offset])) {
-      this.offset += 1;
-    }
-  }
-  consume(token) {
-    if (this.text[this.offset] !== token) return false;
-    this.offset += 1;
-    return true;
-  }
-  checkDepth(depth) {
-    if (depth > this.maxDepth) this.fail("JSON nesting limit exceeded");
-  }
-  fail(message2) {
-    throw new StrictJsonError(message2, this.encoder.encode(this.text.slice(0, this.offset)).byteLength);
-  }
-};
-function parseStrictJson(input2, limits = DEFAULT_STRICT_JSON_LIMITS) {
-  validateLimits(limits);
+// src/json.ts
+function parseJson(input2, maxBytes) {
+  const bytes = typeof input2 === "string" ? Buffer.from(input2, "utf8") : Buffer.from(input2);
+  if (maxBytes !== void 0 && bytes.byteLength > maxBytes) throw new SyntaxError(`JSON exceeds ${maxBytes} bytes`);
   let text2;
-  if (typeof input2 === "string") {
-    if (hasUnpairedSurrogate4(input2)) throw new StrictJsonError("unpaired surrogate", 0);
-    if (new TextEncoder().encode(input2).byteLength > limits.maxBytes) {
-      throw new RangeError(`JSON input exceeds ${limits.maxBytes} bytes`);
-    }
-    text2 = input2;
-  } else {
-    if (!(input2 instanceof Uint8Array)) throw new TypeError("JSON input must be text or bytes");
-    if (input2.byteLength > limits.maxBytes) throw new RangeError(`JSON input exceeds ${limits.maxBytes} bytes`);
-    try {
-      text2 = new TextDecoder("utf-8", { fatal: true }).decode(input2);
-    } catch {
-      throw new StrictJsonError("invalid UTF-8", 0);
-    }
+  try {
+    text2 = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    throw new SyntaxError("JSON is not valid UTF-8");
   }
-  return new StrictJsonParser(text2, limits.maxDepth).parse();
-}
-function validateLimits(limits) {
-  if (!limits || !Number.isSafeInteger(limits.maxBytes) || limits.maxBytes < 1) {
-    throw new RangeError("maxBytes must be a positive safe integer");
-  }
-  if (!Number.isSafeInteger(limits.maxDepth) || limits.maxDepth < 1) {
-    throw new RangeError("maxDepth must be a positive safe integer");
-  }
-}
-function hasUnpairedSurrogate4(value) {
-  for (let index = 0; index < value.length; index += 1) {
-    const code2 = value.charCodeAt(index);
-    if (code2 >= 55296 && code2 <= 56319) {
-      const low = value.charCodeAt(index + 1);
-      if (!(low >= 56320 && low <= 57343)) return true;
-      index += 1;
-    } else if (code2 >= 56320 && code2 <= 57343) {
-      return true;
-    }
-  }
-  return false;
+  return JSON.parse(text2);
 }
 
 // src/framing.ts
@@ -78184,16 +77991,11 @@ function encodeFrame(value, maxFrameBytes = DEFAULT_MAX_FRAME_BYTES) {
   return Buffer.concat([header, body], header.length + body.length);
 }
 var FrameDecoder = class {
-  constructor(maxFrameBytes = DEFAULT_MAX_FRAME_BYTES, maxNesting = DEFAULT_STRICT_JSON_LIMITS.maxDepth) {
+  constructor(maxFrameBytes = DEFAULT_MAX_FRAME_BYTES) {
     this.maxFrameBytes = maxFrameBytes;
-    this.maxNesting = maxNesting;
     validateMaxFrameBytes(maxFrameBytes);
-    if (!Number.isSafeInteger(maxNesting) || maxNesting < 1) {
-      throw new RangeError("maxNesting must be a positive safe integer");
-    }
   }
   maxFrameBytes;
-  maxNesting;
   chunks = [];
   chunkIndex = 0;
   bufferedBytes = 0;
@@ -78221,12 +78023,9 @@ var FrameDecoder = class {
         const body = this.readBytes(this.expectedBytes);
         this.expectedBytes = void 0;
         try {
-          values.push(parseStrictJson(body, {
-            maxBytes: this.maxFrameBytes,
-            maxDepth: this.maxNesting
-          }));
+          values.push(parseJson(body, this.maxFrameBytes));
         } catch (error61) {
-          if (error61 instanceof StrictJsonError && error61.message.startsWith("invalid UTF-8")) {
+          if (error61 instanceof SyntaxError && error61.message.includes("valid UTF-8")) {
             throw new FrameProtocolError("frame body is not valid UTF-8");
           }
           throw error61;
@@ -78289,86 +78088,12 @@ function validateMaxFrameBytes(value) {
   }
 }
 
-// src/performance.ts
-import { constants as constants2, accessSync, appendFileSync, statSync } from "node:fs";
-import { join as join7 } from "node:path";
-var origin = process.hrtime.bigint();
-var spanCounter = 0;
-var PerformanceTrace = class {
-  path;
-  constructor(environment = process.env) {
-    const directory = environment.ALDER_PERF_TRACE_DIR ?? "";
-    if (directory.length === 0) return;
-    let valid = false;
-    try {
-      valid = statSync(directory).isDirectory();
-      accessSync(directory, constants2.W_OK);
-    } catch {
-      valid = false;
-    }
-    if (!valid) {
-      throw new Error("ALDER_PERF_TRACE_DIR must be an existing writable directory");
-    }
-    this.path = join7(directory, `host-${process.pid}.jsonl`);
-  }
-  begin(stage, fields = {}) {
-    if (this.path === void 0) return void 0;
-    const start = process.hrtime.bigint();
-    const span = {
-      id: ++spanCounter,
-      stage,
-      start,
-      startMs: nanosecondsToMilliseconds(start - origin),
-      fields,
-      ended: false
-    };
-    this.write({
-      event: "begin",
-      pid: process.pid,
-      span: span.id,
-      stage,
-      clock: "process.hrtime.bigint",
-      start_ms: span.startMs,
-      fields
-    });
-    return span;
-  }
-  end(span, result = {}) {
-    if (span === void 0 || span.ended) return;
-    span.ended = true;
-    const durationMs = nanosecondsToMilliseconds(process.hrtime.bigint() - span.start);
-    this.write({
-      event: "end",
-      duration_ms: durationMs,
-      pid: process.pid,
-      span: span.id,
-      stage: span.stage,
-      clock: "process.hrtime.bigint",
-      start_ms: span.startMs,
-      fields: span.fields,
-      result
-    });
-  }
-  write(record4) {
-    appendFileSync(this.path, `${JSON.stringify(record4)}
-`, {
-      encoding: "utf8",
-      flag: "a",
-      mode: 384
-    });
-  }
-};
-function nanosecondsToMilliseconds(value) {
-  return Number(value) / 1e6;
-}
-
 // src/jupyter.ts
 import { createHmac, randomBytes, randomUUID as randomUUID4, timingSafeEqual } from "node:crypto";
 import { EventEmitter as EventEmitter2 } from "node:events";
 import { access, chmod, mkdir as mkdir3, rm as rm2, stat as stat8, writeFile as writeFile2 } from "node:fs/promises";
-import { join as join8 } from "node:path";
+import { join as join7 } from "node:path";
 import { createConnection, createServer } from "node:net";
-import { TextDecoder as TextDecoder2 } from "node:util";
 var MESSAGE_DELIMITER = Buffer.from("<IDS|MSG>");
 var JUPYTER_VERSION = "5.3";
 var MAX_PENDING_REQUESTS = 1024;
@@ -78456,7 +78181,7 @@ var ArkKernel = class extends EventEmitter2 {
       this.assertStartAllowed();
       const ports = await reserveConnectionPorts();
       this.assertStartAllowed();
-      this.connectionFile = join8(
+      this.connectionFile = join7(
         this.options.connectionDirectory,
         `ark-${process.pid}-${randomUUID4()}.json`
       );
@@ -79114,17 +78839,8 @@ function verifySignature(key2, actual, frames) {
   }
 }
 function parseJsonFrame(frame, label, maxBytes = DEFAULT_MAX_FRAME_BYTES) {
-  let text2;
   try {
-    text2 = new TextDecoder2("utf-8", { fatal: true }).decode(frame);
-  } catch {
-    throw new FrameProtocolError(`Jupyter ${label} is not valid UTF-8`);
-  }
-  try {
-    return parseStrictJson(text2, {
-      maxBytes,
-      maxDepth: DEFAULT_STRICT_JSON_LIMITS.maxDepth
-    });
+    return parseJson(frame, maxBytes);
   } catch (error61) {
     throw new FrameProtocolError(`invalid Jupyter ${label}: ${messageOf4(error61)}`);
   }
@@ -79528,10 +79244,8 @@ var Engine = class extends EventEmitter3 {
       notebookDirectory: options.notebookDirectory,
       cacheDirectory: options.cacheDirectory
     };
-    this.trace = new PerformanceTrace();
   }
   options;
-  trace;
   state = "new";
   lifecycleTail = Promise.resolve();
   startPromise;
@@ -79747,11 +79461,6 @@ var Engine = class extends EventEmitter3 {
       this.maxArkPayloadBytes()
     );
     this.evaluations.set(requestId, state);
-    const traceSpan = this.trace.begin("host.engine.request", requestTraceFields(
-      "kernel",
-      "eval_cell",
-      { req: requestId, ...wire }
-    ));
     try {
       const request = encodeArkRequest({ request: String(requestId), ...wire }, this.maxArkPayloadBytes());
       const execution = await this.kernel.execute(arkCall("evaluate", request), {
@@ -79788,7 +79497,6 @@ var Engine = class extends EventEmitter3 {
         sequence: state.sequence + 1,
         result: response
       });
-      this.trace.end(traceSpan, terminalTraceFields(response));
       return response;
     } catch (error61) {
       if (signal?.aborted && error61 === signal.reason && !state.started) {
@@ -79797,7 +79505,6 @@ var Engine = class extends EventEmitter3 {
           cancelledBeforeStart: true,
           error: { code: "interrupted", message: "Cancelled before execution", interrupted: true }
         };
-        this.trace.end(traceSpan, { outcome: "cancelled-before-start" });
         return response;
       }
       await state.messageTail;
@@ -79814,7 +79521,6 @@ var Engine = class extends EventEmitter3 {
         }
       }
       if (state.outputs.length > 0) await this.discardEvaluationOutputs(state.outputs);
-      this.trace.end(traceSpan, { outcome: "failure", error: asError2(error61).name });
       throw error61;
     } finally {
       this.evaluations.delete(requestId);
@@ -79839,7 +79545,6 @@ var Engine = class extends EventEmitter3 {
     this.batches.add(batch);
     const responses = values.map(() => void 0);
     let requestId;
-    let traceSpan;
     let tail = Promise.resolve();
     let callbacks = Promise.resolve();
     let messageError;
@@ -79857,16 +79562,7 @@ var Engine = class extends EventEmitter3 {
         throw new EngineTransportError("engine request queue is full", "kernel");
       }
       requestId = this.nextRequestId();
-      traceSpan = this.trace.begin("host.engine.request", {
-        role: "kernel",
-        cmd: "eval_batch",
-        req: requestId,
-        cells: values.length,
-        session_epoch: values[0].sessionEpoch,
-        operation_id: values[0].operationId,
-        run_id: values[0].runId
-      });
-      batch.permit = join9(this.runtime.controlDirectory, ".alder-batch-" + randomUUID5());
+      batch.permit = join8(this.runtime.controlDirectory, ".alder-batch-" + randomUUID5());
       writeFileSync(batch.permit, "", { flag: "wx", mode: 384 });
       batch.states = values.map((value) => ({ ...makeEvaluation(requestId, value, (event) => {
         callbacks = callbacks.then(() => onEvent?.(event));
@@ -79944,10 +79640,8 @@ var Engine = class extends EventEmitter3 {
         }
         await complete(state, ended && state.finished ? successfulExecution(execution.reply) : execution);
       }
-      this.trace.end(traceSpan, { outcome: "terminal", evaluated: responses.filter(Boolean).length });
       return responses;
     } catch (error61) {
-      this.trace.end(traceSpan, { outcome: "failure", error: asError2(error61).name });
       await tail;
       for (const [offset, state] of batch.states.entries()) {
         if (responses[offset] === void 0 && state.outputs.length > 0) {
@@ -80010,7 +79704,7 @@ var Engine = class extends EventEmitter3 {
       return engineResponseSchema.parse(await this.runArkCommand(command, requestPayload));
     }
     const outputScope = command === "get_value" || command === "lazy_eval" ? requestOutputScope(options?.outputScope) : void 0;
-    const response = await this.runArkCommand(command, payload, true, options?.signal);
+    const response = await this.runArkCommand(command, payload, options?.signal);
     return engineResponseSchema.parse(await this.normalizeRequestResult(command, outputScope, response));
   }
   async interrupt(requestId) {
@@ -80271,7 +79965,7 @@ var Engine = class extends EventEmitter3 {
       if (analyzer === void 0 || kernel === void 0 || this.kernelEpoch === null) {
         throw new EngineTransportError("Engine startup omitted a peer identity");
       }
-      const ping = await this.runArkCommand("ping", {}, false);
+      const ping = await this.runArkCommand("ping", {});
       if (ping.ok !== true || ping.package_version !== analyzer.packageVersion || ping.r_version !== analyzer.rVersion || !kernel.languageVersion.includes(analyzer.rVersion)) {
         throw new EngineTransportError("kernel and analyzer identities do not match");
       }
@@ -80391,42 +80085,15 @@ var Engine = class extends EventEmitter3 {
       cmd: command,
       ...structuredClone(payload)
     };
-    let traceSpan;
-    try {
-      traceSpan = this.trace.begin(
-        "host.engine.request",
-        requestTraceFields(role, command, wire)
-      );
-    } catch (error61) {
-      return Promise.reject(asError2(error61));
-    }
     return new Promise((resolveRequest, rejectRequest) => {
-      const settle = (result) => {
-        try {
-          this.trace.end(traceSpan, result);
-          return void 0;
-        } catch (error61) {
-          return asError2(error61);
-        }
-      };
       const pending = {
         id: requestId,
         role,
         command,
         wire,
         generation,
-        resolve: (value) => {
-          const traceError = settle(terminalTraceFields(value));
-          if (traceError === void 0) resolveRequest(value);
-          else rejectRequest(traceError);
-        },
-        reject: (error61) => {
-          const traceError = settle({
-            outcome: "failure",
-            error: error61.name
-          });
-          rejectRequest(traceError ?? error61);
-        }
+        resolve: resolveRequest,
+        reject: rejectRequest
       };
       this.rPending.set(requestId, pending);
       void peer.send(wire).catch((error61) => {
@@ -80858,7 +80525,7 @@ var Engine = class extends EventEmitter3 {
     const normalized = await store.normalizeAlder(response[field], scope);
     return { ...response, [field]: normalized };
   }
-  async runArkCommand(command, payload, trace = true, signal) {
+  async runArkCommand(command, payload, signal) {
     const kernel = this.kernel;
     if (kernel?.ready !== true) throw new EngineTransportError("kernel is unavailable", "kernel");
     if (this.pendingKernelRequests + this.evaluations.size >= MAX_PENDING_REQUESTS2) {
@@ -80867,7 +80534,6 @@ var Engine = class extends EventEmitter3 {
     const requestId = this.nextRequestId();
     const marker = randomUUID5();
     const wire = { req: requestId, command, ...payload };
-    const span = trace ? this.trace.begin("host.engine.request", requestTraceFields("kernel", command, wire)) : void 0;
     this.pendingKernelRequests += 1;
     let result;
     let messageError;
@@ -80915,7 +80581,6 @@ var Engine = class extends EventEmitter3 {
           ok: false,
           error: { code: "interrupted", message: "Inspection was interrupted", interrupted: true }
         };
-        if (span !== void 0) this.trace.end(span, terminalTraceFields(interrupted));
         return interrupted;
       }
       if (execution.reply.content.status !== "ok") {
@@ -80924,12 +80589,8 @@ var Engine = class extends EventEmitter3 {
       if (result === void 0) {
         throw new FrameProtocolError("Alder Ark command omitted its result");
       }
-      if (span !== void 0) this.trace.end(span, terminalTraceFields(result));
       return result;
     } catch (error61) {
-      if (span !== void 0) {
-        this.trace.end(span, { outcome: "failure", error: asError2(error61).name });
-      }
       throw error61;
     } finally {
       this.pendingKernelRequests -= 1;
@@ -81039,41 +80700,6 @@ function parseHandshake(role, input2) {
     rVersion: value.r_version,
     capabilities: [...value.capabilities]
   };
-}
-function isTraceValue(value) {
-  return value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean";
-}
-function requestTraceFields(role, command, wire) {
-  const fields = {
-    req: typeof wire.req === "number" ? wire.req : void 0,
-    role,
-    cmd: command
-  };
-  const names = [
-    "id",
-    "revision",
-    "run_id",
-    "session_epoch",
-    "operation_id"
-  ];
-  for (const name of names) {
-    const value = wire[name];
-    if (isTraceValue(value)) {
-      fields[name] = value;
-    }
-  }
-  return fields;
-}
-function terminalTraceFields(value) {
-  const fields = {
-    outcome: "terminal",
-    ok: value.ok === true
-  };
-  const error61 = value.error;
-  if (typeof error61 === "object" && error61 !== null && "code" in error61 && typeof error61.code === "string") {
-    fields.error_code = error61.code;
-  }
-  return fields;
 }
 function mapAnalysisResult(raw, sources) {
   if (!Array.isArray(raw.cells)) throw new FrameProtocolError("analysis cells are missing");
@@ -81289,7 +80915,7 @@ function evaluationWire(value, controlDirectory) {
   const encoded = encodeSource(value.source, "evaluation source");
   let source;
   if (encoded.bytes > 1024 * 1024) {
-    const path3 = join9(controlDirectory, ".alder-source-" + randomUUID5());
+    const path3 = join8(controlDirectory, ".alder-source-" + randomUUID5());
     writeFileSync(path3, encoded.text, { encoding: "utf8", flag: "wx", mode: 384 });
     source = { code_path: path3 };
   } else {
@@ -81411,7 +81037,7 @@ var ArkEventStreamDecoder = class {
       if (!/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)) throw new FrameProtocolError("invalid Alder Ark event base64");
       let event;
       try {
-        event = asRecord2(parseStrictJson(decodeBase643(encoded, this.maxBytes).toString("utf8")), "Alder Ark event");
+        event = asRecord2(parseJson(decodeBase643(encoded, this.maxBytes)), "Alder Ark event");
       } catch (error61) {
         throw new FrameProtocolError("invalid Alder Ark event: " + asError2(error61).message);
       }
@@ -81490,9 +81116,9 @@ function encodeSource(value, label) {
   return { text: value, base64: source.toString("base64"), bytes: source.length };
 }
 async function prepareRuntime(paths) {
-  const captureDirectory = await mkdtemp(join9(paths.artifactDirectory, ".alder-capture-"));
+  const captureDirectory = await mkdtemp(join8(paths.artifactDirectory, ".alder-capture-"));
   try {
-    const controlDirectory = await mkdtemp(join9(paths.artifactDirectory, ".alder-control-"));
+    const controlDirectory = await mkdtemp(join8(paths.artifactDirectory, ".alder-control-"));
     return { captureDirectory, controlDirectory, ownedDirectories: [captureDirectory, controlDirectory] };
   } catch (error61) {
     await rm3(captureDirectory, { recursive: true, force: true }).catch(() => {
@@ -81504,9 +81130,9 @@ async function resolvePaths(options, environment, signal, pathOptions = options)
   throwIfAborted(signal);
   const resources2 = options.resources;
   const workerDirectory = resolve6(resources2.workerDirectory);
-  const arkStartupScript = join9(workerDirectory, "host-ark.R");
-  const analyzerScript = join9(workerDirectory, "host-analyzer.R");
-  const framingScript = join9(workerDirectory, "host-framing.R");
+  const arkStartupScript = join8(workerDirectory, "host-ark.R");
+  const analyzerScript = join8(workerDirectory, "host-analyzer.R");
+  const framingScript = join8(workerDirectory, "host-framing.R");
   const arkExecutable = resolve6(resources2.arkExecutable);
   await Promise.all([
     requireFile2(arkExecutable, "Ark executable"),
@@ -81525,7 +81151,7 @@ async function resolvePaths(options, environment, signal, pathOptions = options)
     artifactDirectory = resolve6(options.artifactDirectory);
     await mkdir4(artifactDirectory, { recursive: true });
     throwIfAborted(signal);
-    cacheDirectory = pathOptions.cacheDirectory === void 0 ? await mkdtemp(join9(tmpdir2(), "alder-engine-cache-")) : resolve6(pathOptions.cacheDirectory);
+    cacheDirectory = pathOptions.cacheDirectory === void 0 ? await mkdtemp(join8(tmpdir2(), "alder-engine-cache-")) : resolve6(pathOptions.cacheDirectory);
     if (pathOptions.cacheDirectory === void 0) ownedDirectories.push(cacheDirectory);
     else await mkdir4(cacheDirectory, { recursive: true });
   } catch (error61) {
@@ -81603,7 +81229,7 @@ import { randomBytes as randomBytes3, randomUUID as randomUUID7, timingSafeEqual
 import { createReadStream } from "node:fs";
 import { createServer as createHttpServer } from "node:http";
 import { lstat as lstat5, readFile as readFile3, realpath as realpath5, stat as stat10 } from "node:fs/promises";
-import { extname as extname3, join as join11, resolve as resolve8, sep as sep2 } from "node:path";
+import { extname as extname3, join as join10, resolve as resolve8, sep as sep2 } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { URL as URL2 } from "node:url";
 
@@ -81618,10 +81244,10 @@ var import_websocket = __toESM(require_websocket(), 1);
 var import_websocket_server = __toESM(require_websocket_server(), 1);
 
 // src/private-paths.ts
-import { constants as constants3 } from "node:fs";
+import { constants as constants2 } from "node:fs";
 import { randomUUID as randomUUID6 } from "node:crypto";
 import { chmod as chmod2, lstat as lstat4, mkdir as mkdir5, open as openFile, rename as rename3, rm as rm4 } from "node:fs/promises";
-import { dirname as dirname5, join as join10, parse as parse3, resolve as resolve7, sep } from "node:path";
+import { dirname as dirname5, join as join9, parse as parse3, resolve as resolve7, sep } from "node:path";
 var PrivatePathError = class extends Error {
   constructor(code2, message2, cause) {
     super(message2);
@@ -81666,7 +81292,7 @@ async function inspectPath(path3, expectFinal = null) {
   let current = root;
   let exists = true;
   for (let index = 0; index < components.length; index += 1) {
-    current = join10(current, components[index]);
+    current = join9(current, components[index]);
     let info;
     try {
       info = await lstat4(current);
@@ -81719,7 +81345,7 @@ async function inspectExisting(path3, kind) {
 async function syncDirectory2(directory) {
   let handle;
   try {
-    handle = await openFile(directory, constants3.O_RDONLY);
+    handle = await openFile(directory, constants2.O_RDONLY);
     await handle.sync();
   } catch (error61) {
     if (!isUnsupportedDirectorySync(error61)) throw error61;
@@ -81757,7 +81383,7 @@ async function readPrivateFile(path3, options = {}) {
   if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) throw invalid3("maxBytes must be a non-negative safe integer");
   const inspection = await inspectPath(path3, "file");
   if (!inspection.exists) throw missing(inspection.path);
-  const flags = constants3.O_RDONLY | (constants3.O_NOFOLLOW ?? 0);
+  const flags = constants2.O_RDONLY | (constants2.O_NOFOLLOW ?? 0);
   let handle;
   try {
     handle = await openFile(inspection.path, flags);
@@ -81797,10 +81423,10 @@ async function writePrivateFile(path3, bytes) {
     if (!isMissing(error61)) throw error61;
   }
   const basename9 = inspection.path.slice(inspection.path.lastIndexOf(sep) + 1);
-  const temporary = join10(parent, `.${basename9}.${randomUUID6()}.tmp`);
+  const temporary = join9(parent, `.${basename9}.${randomUUID6()}.tmp`);
   let handle;
   try {
-    const flags = constants3.O_WRONLY | constants3.O_CREAT | constants3.O_EXCL | (constants3.O_NOFOLLOW ?? 0);
+    const flags = constants2.O_WRONLY | constants2.O_CREAT | constants2.O_EXCL | (constants2.O_NOFOLLOW ?? 0);
     handle = await openFile(temporary, flags, FILE_MODE);
     const info = await handle.stat();
     validatePrivateStats(info, "file", temporary);
@@ -81919,15 +81545,15 @@ function validateLoopbackHost(host) {
 function buildAllowedOrigins(port, origins, originHost) {
   if (!origins && originHost === void 0) return ["http://127.0.0.1:" + port, "http://[::1]:" + port];
   if (origins !== void 0 && (origins.length === 0 || new Set(origins).size !== origins.length)) throw new Error("allowedOrigins must be a nonempty unique array");
-  for (const origin2 of origins ?? []) validateOrigin(origin2);
+  for (const origin of origins ?? []) validateOrigin(origin);
   if (originHost === void 0) return [...origins ?? []];
   const fresh = publicOrigin(validateOriginHost(originHost), port);
-  return origins === void 0 ? [fresh] : [fresh, ...origins.filter((origin2) => origin2 !== fresh)];
+  return origins === void 0 ? [fresh] : [fresh, ...origins.filter((origin) => origin !== fresh)];
 }
 function validateRequestHost(headers, origins) {
   const host = singleHeader(headers.host);
   if (host === null) return false;
-  const authorities = new Set(origins.map((origin2) => new URL2(origin2).host));
+  const authorities = new Set(origins.map((origin) => new URL2(origin).host));
   return authorities.has(host);
 }
 function validateOrigin(value) {
@@ -82268,7 +81894,7 @@ function parseArtifactTarget(target) {
   return { capability, resource };
 }
 function artifactChildContentSecurityPolicy(capability, origins) {
-  const resources2 = origins.map((origin2) => origin2 + "/artifacts/" + capability + "/");
+  const resources2 = origins.map((origin) => origin + "/artifacts/" + capability + "/");
   const scoped = resources2.length === 0 ? "'none'" : resources2.join(" ");
   return [
     "default-src 'none'",
@@ -82597,19 +82223,19 @@ function createAlderServer(options) {
   }
   function assertBrowserAuthority(request, requireOrigin = false) {
     const allowed = origins();
-    const origin2 = singleHeader(request.headers.origin);
+    const origin = singleHeader(request.headers.origin);
     const requestHost = singleHeader(request.headers.host);
     const connectionHost = currentAddress === null ? null : new URL2(connectionOrigin()).host;
-    if (!currentAddress || requestHost === connectionHost || !validateRequestHost(request.headers, allowed) || (origin2 === null ? requireOrigin : !allowed.includes(origin2))) {
+    if (!currentAddress || requestHost === connectionHost || !validateRequestHost(request.headers, allowed) || (origin === null ? requireOrigin : !allowed.includes(origin))) {
       throw new HttpBoundaryError("forbidden_origin", "browser origin not allowed", 403);
     }
   }
   function assertAuthority(request, requireOrigin = false) {
     const allowed = origins();
-    const origin2 = singleHeader(request.headers.origin);
+    const origin = singleHeader(request.headers.origin);
     const requestHost = singleHeader(request.headers.host);
-    const native = currentAddress !== null && requestHost === new URL2(connectionOrigin()).host && origin2 === null;
-    const browser = currentAddress !== null && !native && validateRequestHost(request.headers, allowed) && (origin2 === null ? !requireOrigin : allowed.includes(origin2));
+    const native = currentAddress !== null && requestHost === new URL2(connectionOrigin()).host && origin === null;
+    const browser = currentAddress !== null && !native && validateRequestHost(request.headers, allowed) && (origin === null ? !requireOrigin : allowed.includes(origin));
     if (!browser && !native) throw new HttpBoundaryError("forbidden_origin", "origin not allowed", 403);
   }
   function assertArtifactAuthority(request) {
@@ -82617,8 +82243,8 @@ function createAlderServer(options) {
     const requestHost = singleHeader(request.headers.host);
     const connectionHost = currentAddress === null ? null : new URL2(connectionOrigin()).host;
     if (!currentAddress || requestHost === connectionHost || !validateRequestHost(request.headers, allowed)) throw new HttpBoundaryError("forbidden_origin", "host authority is not allowed", 403);
-    const origin2 = singleHeader(request.headers.origin);
-    if (origin2 !== null && origin2 !== "null" && !allowed.includes(origin2)) throw new HttpBoundaryError("forbidden_origin", "origin not allowed", 403);
+    const origin = singleHeader(request.headers.origin);
+    if (origin !== null && origin !== "null" && !allowed.includes(origin)) throw new HttpBoundaryError("forbidden_origin", "origin not allowed", 403);
   }
   function currentIdentity(lease) {
     const browserOrigin = currentAddress?.origin ?? externalOrigin ?? publicOrigin(originHost, 0);
@@ -82711,11 +82337,11 @@ function createAlderServer(options) {
   function cleanupTicket(ticket) {
     tickets.delete(ticket);
   }
-  function mintTicket(origin2, parentLeaseId) {
+  function mintTicket(origin, parentLeaseId) {
     if (tickets.size >= MAX_LIVE_TICKETS) throw new HttpBoundaryError("ticket_limit", "too many live bootstrap tickets", 429);
     const lease = createLease(true);
     lease.parentLeaseId = parentLeaseId;
-    const ticket = { ticket: randomBytes3(32).toString("hex"), origin: origin2, expiresAt: Date.now() + TICKET_TTL_MS, lease };
+    const ticket = { ticket: randomBytes3(32).toString("hex"), origin, expiresAt: Date.now() + TICKET_TTL_MS, lease };
     tickets.set(ticket.ticket, ticket);
     return ticket;
   }
@@ -82810,9 +82436,9 @@ function createAlderServer(options) {
       reader.close();
       throw new HttpBoundaryError("output_expired", "artifact resource is no longer valid", 404);
     }
-    const origin2 = singleHeader(request.headers.origin);
+    const origin = singleHeader(request.headers.origin);
     const headers = {
-      "Access-Control-Allow-Origin": origin2 === "null" ? "null" : origin2 ?? "*",
+      "Access-Control-Allow-Origin": origin === "null" ? "null" : origin ?? "*",
       "Access-Control-Allow-Credentials": "false",
       "Cache-Control": "no-store"
     };
@@ -82879,7 +82505,7 @@ function createAlderServer(options) {
     if (path3 === "/" || path3 === "/index.html") {
       assertBrowserAuthority(request);
       if (!method(response, request.method ?? "", "GET")) return;
-      const index = options.indexFile ?? join11(options.staticDir, "..", "index.html");
+      const index = options.indexFile ?? join10(options.staticDir, "..", "index.html");
       let html = await readFile3(index, "utf8");
       if (!html.includes("__ALDER_CSP_NONCE__")) throw new HttpBoundaryError("internal_error", "bootstrap shell is missing its CSP nonce marker", 500);
       html = html.replaceAll("__ALDER_CSP_NONCE__", nonce);
@@ -82904,9 +82530,9 @@ function createAlderServer(options) {
       const body = ticketMintRequestSchema.parse(await readJsonBody(request, maxJson));
       const parentLeaseId = body.parentLeaseId;
       if (parentLeaseId !== void 0 && requireLease(request, true).lease.leaseId !== parentLeaseId) throw authFailure("desktop lease does not match request");
-      const origin2 = body.origin;
-      if (!origins().includes(origin2)) throw new HttpBoundaryError("forbidden_origin", "ticket origin is not configured", 403);
-      const ticket = mintTicket(origin2, parentLeaseId);
+      const origin = body.origin;
+      if (!origins().includes(origin)) throw new HttpBoundaryError("forbidden_origin", "ticket origin is not configured", 403);
+      const ticket = mintTicket(origin, parentLeaseId);
       jsonResponse(response, 200, { ticket: ticket.ticket, expiresAt: new Date(ticket.expiresAt).toISOString() });
       return;
     }
@@ -83508,7 +83134,7 @@ import { randomUUID as randomUUID8 } from "node:crypto";
 var X_ALREADY_SENT = "x-hono-already-sent";
 
 // ../../../../../alder/host/node_modules/@hono/node-server/dist/index.mjs
-import { Http2ServerRequest, constants as constants4 } from "node:http2";
+import { Http2ServerRequest, constants as constants3 } from "node:http2";
 import { Readable as Readable2 } from "node:stream";
 
 // ../../../../../alder/host/node_modules/hono/dist/helper/websocket/index.js
@@ -84330,7 +83956,7 @@ var drainIncoming = (incoming) => {
   incomingWithDrainState[incomingDraining] = true;
   if (incoming instanceof Http2ServerRequest) {
     try {
-      incoming.stream?.close?.(constants4.NGHTTP2_NO_ERROR);
+      incoming.stream?.close?.(constants3.NGHTTP2_NO_ERROR);
     } catch {
     }
     return;
@@ -96470,7 +96096,7 @@ async function readLayout(value) {
   if (bytes.byteLength > LAYOUT_MAX_BYTES2) layoutAbort("layout sidecar exceeds the 1 MiB safety limit");
   let parsed;
   try {
-    parsed = parseStrictJson(bytes, { maxBytes: LAYOUT_MAX_BYTES2, maxDepth: 64 });
+    parsed = parseJson(bytes, LAYOUT_MAX_BYTES2);
   } catch (error61) {
     layoutAbort(`invalid layout JSON: ${error61 instanceof Error ? error61.message : String(error61)}`);
   }
@@ -96485,17 +96111,17 @@ async function readLayout(value) {
 // src/persistence.ts
 import { createHash as createHash6, randomUUID as randomUUID9 } from "node:crypto";
 import { mkdir as mkdir7, open as open6, readFile as readFile7, realpath as realpath7, rename as rename4, stat as stat13, unlink as unlink2 } from "node:fs/promises";
-import { basename as basename5, dirname as dirname6, join as join14, resolve as resolve9 } from "node:path";
+import { basename as basename5, dirname as dirname6, join as join13, resolve as resolve9 } from "node:path";
 
 // src/packages.ts
 var import_yaml4 = __toESM(require_dist(), 1);
 import { lstat as lstat6, mkdir as mkdir6, readFile as readFile6, realpath as realpath6, stat as stat12 } from "node:fs/promises";
-import { isAbsolute as isAbsolute5, join as join13 } from "node:path";
+import { isAbsolute as isAbsolute5, join as join12 } from "node:path";
 
 // src/jobs.ts
 import { mkdtemp as mkdtemp2, readFile as readFile5, rm as rm5, writeFile as writeFile4 } from "node:fs/promises";
 import { tmpdir as tmpdir3 } from "node:os";
-import { join as join12 } from "node:path";
+import { join as join11 } from "node:path";
 var PackageWorkerError = class extends Error {
   constructor(code2, message2, details) {
     super(message2);
@@ -96525,16 +96151,16 @@ var PackageWorker = class {
     const environment = this.options.environment;
     if (environment === null) throw failure("r_not_found", "selected R environment is unavailable");
     const operationId = typeof payload.operationId === "string" ? payload.operationId : void 0;
-    const directory = await mkdtemp2(join12(tmpdir3(), "alder-package-"));
+    const directory = await mkdtemp2(join11(tmpdir3(), "alder-package-"));
     let child;
     try {
-      const inputPath = join12(directory, "input.json");
-      const outputPath = join12(directory, "result.json");
+      const inputPath = join11(directory, "input.json");
+      const outputPath = join11(directory, "result.json");
       await writeFile4(inputPath, JSON.stringify({ command, ...payload }), { mode: 384 });
       if (this.closed) throw failure("job_closed", "package service is closed");
       const spawning = this.options.processScope.spawn({
         executable: environment.rscript,
-        args: ["--vanilla", join12(this.options.resources.workerDirectory, "package-job.R"), inputPath, outputPath],
+        args: ["--vanilla", join11(this.options.resources.workerDirectory, "package-job.R"), inputPath, outputPath],
         cwd: this.options.projectDirectory,
         environment: workerEnvironment(environment, this.options.resources),
         stdio: "pipes"
@@ -96666,13 +96292,13 @@ var PackageError = class extends Error {
   details;
 };
 function packageMetadataPath(projectDirectory) {
-  return join13(projectDirectory, ...PACKAGE_METADATA_RELATIVE_PATH);
+  return join12(projectDirectory, ...PACKAGE_METADATA_RELATIVE_PATH);
 }
 function packageLibraryPath(projectDirectory) {
-  return join13(projectDirectory, ...PACKAGE_LIBRARY_RELATIVE_PATH);
+  return join12(projectDirectory, ...PACKAGE_LIBRARY_RELATIVE_PATH);
 }
 function packageRepositoryPath(projectDirectory) {
-  return join13(projectDirectory, ...PACKAGE_REPOSITORY_RELATIVE_PATH);
+  return join12(projectDirectory, ...PACKAGE_REPOSITORY_RELATIVE_PATH);
 }
 function validatePackageNames(packages, allowEmpty = true) {
   if (!Array.isArray(packages) || packages.some((value) => typeof value !== "string")) throw new PackageError("invalid_request", "packages must be an array of package names");
@@ -96826,11 +96452,11 @@ async function existingDirectory2(path3) {
   }
 }
 async function ensureProjectLibrary(project, library) {
-  const alder = join13(project, ".alder");
+  const alder = join12(project, ".alder");
   await mkdir6(alder, { recursive: true, mode: 448 });
   await mkdir6(library, { recursive: true, mode: 448 });
   if (!(await lstat6(alder)).isDirectory() || !(await lstat6(library)).isDirectory()) throw new Error("project library is not a directory");
-  if (await realpath6(library) !== join13(await realpath6(project), ".alder", "library")) throw new Error("project library is outside the project");
+  if (await realpath6(library) !== join12(await realpath6(project), ".alder", "library")) throw new Error("project library is outside the project");
 }
 function workerResult(value) {
   if (!isRecord4(value) || typeof value.ok !== "boolean" || !Array.isArray(value.records)) throw new PackageError("job_failed", "package service returned invalid data");
@@ -96975,7 +96601,7 @@ async function canonicalDestination(path3) {
     if (error61.code !== "ENOENT") throw error61;
     const parent = dirname6(path3);
     if (parent === path3) throw error61;
-    return join14(await canonicalDestination(parent), basename5(path3));
+    return join13(await canonicalDestination(parent), basename5(path3));
   }
 }
 async function resolveNotebookPath(path3) {
@@ -96984,7 +96610,7 @@ async function resolveNotebookPath(path3) {
     return { spelling, canonical: await realpath7(spelling) };
   } catch (error61) {
     if (error61.code !== "ENOENT") throw error61;
-    return { spelling, canonical: join14(await realpath7(dirname6(spelling)), basename5(spelling)) };
+    return { spelling, canonical: join13(await realpath7(dirname6(spelling)), basename5(spelling)) };
   }
 }
 function cloneNotebook(document) {
@@ -97104,7 +96730,7 @@ var DocumentStore = class _DocumentStore {
     return next;
   }
   sidecarPath(kind) {
-    return kind === "config" ? join14(dirname6(this.path), ".alder", "config.yaml") : kind === "layout" ? `${this.path}.alder-layout.json` : packageMetadataPath(dirname6(this.path));
+    return kind === "config" ? join13(dirname6(this.path), ".alder", "config.yaml") : kind === "layout" ? `${this.path}.alder-layout.json` : packageMetadataPath(dirname6(this.path));
   }
   sidecarObservation(kind) {
     const current = this.sidecars.get(this.sidecarPath(kind));
@@ -97187,7 +96813,7 @@ var DocumentStore = class _DocumentStore {
       canonical = await realpath7(this.spelling);
     } catch (error61) {
       if (error61.code !== "ENOENT") throw error61;
-      canonical = join14(await realpath7(dirname6(this.spelling)), basename5(this.spelling));
+      canonical = join13(await realpath7(dirname6(this.spelling)), basename5(this.spelling));
     }
     const current = await diskVersion(this.path);
     if (canonical !== this.path || !sameDisk(this.version, current)) throw new FileConflict();
@@ -97199,7 +96825,7 @@ var DocumentStore = class _DocumentStore {
       this.documentValue = cloneNotebook(candidate);
       return { path: this.path, changed: false, digest: this.version.digest };
     }
-    const stage = join14(dirname6(this.path), `.alder-save-${randomUUID9()}`);
+    const stage = join13(dirname6(this.path), `.alder-save-${randomUUID9()}`);
     try {
       await writeStaged(stage, bytes, this.version.mode);
       await this.assertUnchanged();
@@ -97241,7 +96867,7 @@ var DocumentStore = class _DocumentStore {
       };
       const candidate = { ...this.candidate(fixed), path: destination };
       const bytes = serializeNotebook(candidate);
-      let stage = join14(dirname6(destination), ".alder-save-as-" + randomUUID9());
+      let stage = join13(dirname6(destination), ".alder-save-as-" + randomUUID9());
       const removeStage = async () => {
         if (stage === null) return;
         const current = stage;
@@ -97320,7 +96946,7 @@ var DocumentStore = class _DocumentStore {
         canonical = await realpath7(this.spelling);
       } catch (error61) {
         if (error61.code !== "ENOENT") throw error61;
-        canonical = join14(await realpath7(dirname6(this.spelling)), basename5(this.spelling));
+        canonical = join13(await realpath7(dirname6(this.spelling)), basename5(this.spelling));
       }
       if (canonical !== this.path || current.digest !== precondition.expectedDiskDigest || this.versionToken(current) !== precondition.expectedDiskVersion) throw new FileConflict();
       const parsed = parseNotebook(current.bytes, this.path);
@@ -97425,7 +97051,7 @@ var DocumentStore = class _DocumentStore {
       let stage = null;
       if (!sameBytes2(bytes, expected.bytes)) {
         await mkdir7(parent, { recursive: true, mode: 448 });
-        stage = join14(parent, ".alder-sidecar-" + randomUUID9());
+        stage = join13(parent, ".alder-sidecar-" + randomUUID9());
         try {
           await writeStaged(stage, bytes, expected.mode);
           await assertUnchanged();
@@ -97537,7 +97163,7 @@ function decodeBase644(value) {
 // src/recovery.ts
 import { createHash as createHash7, randomUUID as randomUUID10 } from "node:crypto";
 import { access as access3, mkdir as mkdir8, open as open7, readFile as readFile8, realpath as realpath8, rename as rename5, rm as rm6 } from "node:fs/promises";
-import { dirname as dirname7, join as join15, resolve as resolve10 } from "node:path";
+import { dirname as dirname7, join as join14, resolve as resolve10 } from "node:path";
 var RecoveryError = class extends Error {
   constructor(code2, message2, originals = [], cause) {
     super(message2, cause === void 0 ? void 0 : { cause });
@@ -97603,8 +97229,8 @@ var RecoveryWriter = class _RecoveryWriter {
   constructor(options) {
     this.rootDir = resolve10(options.rootDir);
     this.key = options.key;
-    this.directory = join15(this.rootDir, "recovery-" + hash2(JSON.stringify(options.key)));
-    this.journalPath = join15(this.directory, "journal.json");
+    this.directory = join14(this.rootDir, "recovery-" + hash2(JSON.stringify(options.key)));
+    this.journalPath = join14(this.directory, "journal.json");
     this.recoveryId = options.recoveryId ?? randomUUID10();
     this.baseline = normalizeBaseline(options.baseline);
     this.latestFingerprint = fingerprint(this.baseline);
@@ -97621,9 +97247,9 @@ var RecoveryWriter = class _RecoveryWriter {
     return writer;
   }
   static async hasJournal(options) {
-    const directory = join15(resolve10(options.rootDir), "recovery-" + hash2(JSON.stringify(options.key)));
+    const directory = join14(resolve10(options.rootDir), "recovery-" + hash2(JSON.stringify(options.key)));
     try {
-      await access3(join15(directory, "journal.json"));
+      await access3(join14(directory, "journal.json"));
       return true;
     } catch (error61) {
       if (missing2(error61)) return false;
@@ -97633,7 +97259,7 @@ var RecoveryWriter = class _RecoveryWriter {
   async restore() {
     try {
       await mkdir8(this.directory, { recursive: true, mode: 448 });
-      const identityPath = join15(this.directory, "document.id");
+      const identityPath = join14(this.directory, "document.id");
       try {
         const id2 = (await readPrivateFile(identityPath, { maxBytes: 128 })).toString("utf8");
         if (!/^[A-Za-z0-9_-]{1,128}$/.test(id2)) throw new Error("Recovery identity is invalid");
@@ -97681,7 +97307,7 @@ var RecoveryWriter = class _RecoveryWriter {
     if (!/^[A-Za-z0-9_-]{1,128}$/.test(recoveryId)) throw new RecoveryError("recovery_invalid", "Recovery identity is invalid");
     await this.writeQueue;
     if (this.pending || this.corruptJournal) throw Object.assign(new Error("Save As destination has pending recovery data"), { code: "destination_recovery_conflict" });
-    await this.atomicWrite(join15(this.directory, "document.id"), Buffer.from(recoveryId));
+    await this.atomicWrite(join14(this.directory, "document.id"), Buffer.from(recoveryId));
     this.recoveryId = recoveryId;
   }
   update(baseline) {
@@ -97730,9 +97356,9 @@ var RecoveryWriter = class _RecoveryWriter {
       if (!this.dirty) return;
       try {
         await mkdir8(this.directory, { recursive: true, mode: 448 });
-        await this.atomicWrite(join15(this.directory, "document.id"), Buffer.from(this.recoveryId));
+        await this.atomicWrite(join14(this.directory, "document.id"), Buffer.from(this.recoveryId));
         if (this.corruptJournal) {
-          await rename5(this.journalPath, join15(this.directory, "corrupt-" + randomUUID10() + ".json")).catch((error61) => {
+          await rename5(this.journalPath, join14(this.directory, "corrupt-" + randomUUID10() + ".json")).catch((error61) => {
             if (!missing2(error61)) throw error61;
           });
           this.corruptJournal = false;
@@ -97766,7 +97392,7 @@ var RecoveryWriter = class _RecoveryWriter {
 // src/publishing.ts
 import { randomUUID as randomUUID11 } from "node:crypto";
 import { access as access4, chmod as chmod3, link as link2, mkdtemp as mkdtemp3, readFile as readFile9, rm as rm7, stat as stat14, unlink as unlink3, writeFile as writeFile5 } from "node:fs/promises";
-import { basename as basename6, dirname as dirname8, join as join16, resolve as resolve11 } from "node:path";
+import { basename as basename6, dirname as dirname8, join as join15, resolve as resolve11 } from "node:path";
 import { tmpdir as tmpdir4 } from "node:os";
 
 // ../../../../../alder/host/node_modules/linkedom/esm/shared/symbols.js
@@ -107624,8 +107250,8 @@ var OutputRenderer = class {
     }
   }
   sendWidget(widget, path3, update2, control) {
-    const origin2 = this.controlOrigins.get(control);
-    if (origin2 === void 0) {
+    const origin = this.controlOrigins.get(control);
+    if (origin === void 0) {
       this.interactiveActions().error(new Error("widget output is no longer current"));
       return Promise.resolve();
     }
@@ -107644,7 +107270,7 @@ var OutputRenderer = class {
     });
     const pending = {
       widget,
-      origin: origin2,
+      origin,
       path: [...path3],
       update: update2,
       authoritative: null,
@@ -107779,13 +107405,13 @@ var OutputRenderer = class {
   }
   patchWidget(node2, widget, spec, path3, force = false) {
     const kind = string4(spec.kind);
-    const origin2 = this.widgetOrigins.get(widget);
-    if (origin2 !== void 0) {
+    const origin = this.widgetOrigins.get(widget);
+    if (origin !== void 0) {
       for (const control2 of Array.from(node2.querySelectorAll("[data-role=widget]"))) {
         if (!isWidgetControl(control2)) continue;
         const previous = this.controlOrigins.get(control2);
-        if (previous?.owner === origin2.owner && previous.revision === origin2.revision && previous.outputId === origin2.outputId && previous.kernelEpoch === origin2.kernelEpoch && previous.outputGeneration > origin2.outputGeneration) continue;
-        this.controlOrigins.set(control2, origin2);
+        if (previous?.owner === origin.owner && previous.revision === origin.revision && previous.outputId === origin.outputId && previous.kernelEpoch === origin.kernelEpoch && previous.outputGeneration > origin.outputGeneration) continue;
+        this.controlOrigins.set(control2, origin);
       }
     }
     const key2 = widgetKey2(widget, kind, path3);
@@ -107937,8 +107563,8 @@ var OutputRenderer = class {
     control.dataset.owner = string4(widget.owner);
     control.dataset.path = JSON.stringify(path3);
     control.id = `widget-${safePart(widget.owner)}-${safePart(kind)}${path3.length ? `-${safePart(path3.join("-"))}` : ""}`;
-    const origin2 = this.widgetOrigins.get(widget);
-    if (origin2 && isWidgetControl(control)) this.controlOrigins.set(control, origin2);
+    const origin = this.widgetOrigins.get(widget);
+    if (origin && isWidgetControl(control)) this.controlOrigins.set(control, origin);
     if (this.mode === "static") control.setAttribute("disabled", "");
     return control;
   }
@@ -108102,9 +107728,9 @@ async function publishSnapshot(outputStore, processScope, quartoExecutable, sour
   let stagingDirectory;
   outputStore.pin(snapshot.artifacts);
   try {
-    stagingDirectory = await mkdtemp3(join16(tmpdir4(), "alder-publish-"));
-    const qmdPath = join16(stagingDirectory, "snapshot.qmd");
-    const renderedPath = join16(stagingDirectory, "rendered.html");
+    stagingDirectory = await mkdtemp3(join15(tmpdir4(), "alder-publish-"));
+    const qmdPath = join15(stagingDirectory, "snapshot.qmd");
+    const renderedPath = join15(stagingDirectory, "rendered.html");
     const qmd = await composeQmd(snapshot, outputStore, options.includeCode, options.signal);
     await writeFile5(qmdPath, qmd, { encoding: "utf8", mode: 384, flag: "wx" });
     await runQuarto(processScope, quartoExecutable, stagingDirectory, qmdPath, renderedPath, options.signal);
@@ -108330,7 +107956,7 @@ async function validateDestinationPath(path3) {
   return outputPath;
 }
 async function publishAbsentDestination(path3, bytes, signal) {
-  const temporary = join16(dirname8(path3), `.${basename6(path3)}.alder-${process.pid}-${randomUUID11()}.tmp`);
+  const temporary = join15(dirname8(path3), `.${basename6(path3)}.alder-${process.pid}-${randomUUID11()}.tmp`);
   try {
     throwIfAborted3(signal);
     await writeFile5(temporary, bytes, { flag: "wx", mode: 384 });
@@ -108406,8 +108032,8 @@ var PUBLISH_CSS = `
 // src/formatting.ts
 import { mkdtemp as mkdtemp4, readFile as readFile10, rm as rm8, writeFile as writeFile6 } from "node:fs/promises";
 import { tmpdir as tmpdir5 } from "node:os";
-import { join as join17 } from "node:path";
-import { TextDecoder as TextDecoder3 } from "node:util";
+import { join as join16 } from "node:path";
+import { TextDecoder as TextDecoder2 } from "node:util";
 var FormattingError = class extends Error {
   constructor(code2, message2) {
     super(message2);
@@ -108456,8 +108082,8 @@ function createFormattingService(airExecutable, processScope) {
   return { formatCells };
 }
 async function formatOne(airExecutable, processScope, body, signal) {
-  const directory = await mkdtemp4(join17(tmpdir5(), "alder-format-"));
-  const input2 = join17(directory, "cell.R");
+  const directory = await mkdtemp4(join16(tmpdir5(), "alder-format-"));
+  const input2 = join16(directory, "cell.R");
   try {
     const text2 = body.join("\n");
     if (Buffer.byteLength(text2, "utf8") > MAX_OUTPUT_BYTES2) {
@@ -108471,7 +108097,7 @@ async function formatOne(airExecutable, processScope, body, signal) {
     }
     const bytes = await readFile10(input2);
     if (bytes.length > MAX_OUTPUT_BYTES2) throw new FormattingError("format_failed", "air output exceeds formatter limit");
-    const output2 = new TextDecoder3("utf-8", { fatal: true }).decode(bytes);
+    const output2 = new TextDecoder2("utf-8", { fatal: true }).decode(bytes);
     if (output2.includes("\0")) throw new FormattingError("format_failed", "air returned NUL bytes");
     return sourceLines2(output2);
   } catch (error61) {
@@ -109035,7 +108661,7 @@ function boundedUtf8(value, maxBytes) {
 // src/uploads.ts
 import { randomUUID as randomUUID12 } from "node:crypto";
 import { chmod as chmod4, lstat as lstat7, mkdir as mkdir9, unlink as unlink4, writeFile as writeFile7 } from "node:fs/promises";
-import { join as join18 } from "node:path";
+import { join as join17 } from "node:path";
 var UPLOAD_MAX_FILES = 1024;
 var UPLOAD_MAX_BASE64_BYTES = 16 * 1024 * 1024;
 var UPLOAD_MAX_TOTAL_BYTES = 12 * 1024 * 1024;
@@ -109080,7 +108706,7 @@ var UploadStore = class {
       const value = [];
       for (const file2 of decoded) {
         if (this.closed) throw invalid4("session_stopped", "upload store is closed");
-        const path3 = join18(this.directory, `upload-${randomUUID12()}`);
+        const path3 = join17(this.directory, `upload-${randomUUID12()}`);
         paths.push(path3);
         await writeFile7(path3, file2.bytes, { flag: "wx", mode: 384 });
         await chmod4(path3, 384);
@@ -109253,7 +108879,7 @@ async function createProcessScope(_resources) {
 // src/sessions.ts
 import { createHash as createHash8, randomBytes as randomBytes4, randomUUID as randomUUID13 } from "node:crypto";
 import { readdir as readdir3, realpath as realpath9, unlink as unlink5 } from "node:fs/promises";
-import { basename as basename7, dirname as dirname9, join as join19, resolve as resolve12 } from "node:path";
+import { basename as basename7, dirname as dirname9, join as join18, resolve as resolve12 } from "node:path";
 
 // src/backend-client.ts
 var import_proper_lockfile = __toESM(require_proper_lockfile(), 1);
@@ -109286,8 +108912,8 @@ async function acquireNotebookOwnership(options) {
   let claimKey = canonicalPath === null ? "untitled:" + sessionKey : "path:" + canonicalPath;
   if (claims.has(claimKey)) throw new SessionUnavailableError("notebook is already open", { canonicalPath });
   let closed = false;
-  let origin2 = options.origin ?? "http://127.0.0.1:0";
-  let browserOrigin = origin2;
+  let origin = options.origin ?? "http://127.0.0.1:0";
+  let browserOrigin = origin;
   const epoch = options.epoch ?? randomUUID13();
   const continuityProof = options.continuityProof ?? randomBytes4(32).toString("hex");
   const token = options.token ?? randomBytes4(32).toString("hex");
@@ -109302,13 +108928,13 @@ async function acquireNotebookOwnership(options) {
     continuityProof,
     token,
     get origin() {
-      return origin2;
+      return origin;
     },
     get browserOrigin() {
       return browserOrigin;
     },
     publishReady: async (nextOrigin, address) => {
-      origin2 = nextOrigin;
+      origin = nextOrigin;
       browserOrigin = address?.browserOrigin ?? nextOrigin;
     },
     prepareRekey: async (path3) => {
@@ -109356,7 +108982,7 @@ function isUntitledRecoveryId(value) {
   return typeof value === "string" && UNTITLED_SESSION_KEY_PATTERN.test(value);
 }
 function untitledRecoveryDescriptorDirectory(dataRoot) {
-  return join19(resolve12(dataRoot ?? envPaths("alder", { suffix: "" }).data), UNTITLED_RECOVERY_DIRECTORY);
+  return join18(resolve12(dataRoot ?? envPaths("alder", { suffix: "" }).data), UNTITLED_RECOVERY_DIRECTORY);
 }
 async function registerUntitledRecoveryDescriptor(id2, projectDirectory, dataRoot) {
   const validId = requireUntitledRecoveryId(id2);
@@ -109406,7 +109032,7 @@ async function canonicalizeProjectDirectory(value) {
   return realpath9(path3).catch(() => path3);
 }
 function untitledRecoveryDescriptorPath(directory, id2) {
-  return join19(directory, id2 + ".json");
+  return join18(directory, id2 + ".json");
 }
 async function readUntitledRecoveryDescriptor(path3, id2) {
   let bytes;
@@ -109445,7 +109071,7 @@ async function canonicalizeDestination(path3) {
   try {
     return await realpath9(target);
   } catch {
-    return join19(await realpath9(dirname9(target)), basename7(target));
+    return join18(await realpath9(dirname9(target)), basename7(target));
   }
 }
 function sessionKeyFor(path3) {
@@ -109524,8 +109150,8 @@ async function startHost(input2) {
   if (options.internalHost && options.path === null && options.session?.sessionKey === void 0) throw new Error("untitled internal hosts require a parent session key");
   if (options.path !== null) return startNotebookHost(options, options.path, false, options.path);
   if (options.sandbox) throw new Error("sandbox mode requires a notebook file path");
-  const temporary = await realpath10(await mkdtemp5(join20(tmpdir6(), "alder-unsaved-")));
-  const storagePath = join20(temporary, "Untitled.R");
+  const temporary = await realpath10(await mkdtemp5(join19(tmpdir6(), "alder-unsaved-")));
+  const storagePath = join19(temporary, "Untitled.R");
   try {
     const app = await startNotebookHost(options, storagePath, true, null);
     const closed = app.closed.finally(() => rm9(temporary, { recursive: true, force: true }));
@@ -109798,15 +109424,15 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
       lsp = value;
     };
     var setLsp = setLsp2;
-    work = await realpath10(await mkdtemp5(join20(tmpdir6(), "alder-host-")));
-    uploads = new UploadStore(join20(work, "uploads"));
-    cacheDirectory = unsaved ? join20(work, "cache") : join20(notebookDirectory, ".alder", "cache");
+    work = await realpath10(await mkdtemp5(join19(tmpdir6(), "alder-host-")));
+    uploads = new UploadStore(join19(work, "uploads"));
+    cacheDirectory = unsaved ? join19(work, "cache") : join19(notebookDirectory, ".alder", "cache");
     const opened = await DocumentStore.open(storagePath);
     store = opened.store;
     let notebook = opened.notebook;
     if (isUntitled) notebook = { ...notebook, path: null };
     if (options.expectedSource !== void 0 && !store.matchesSource(options.expectedSource)) throw new FileConflict();
-    const projectPath = isUntitled ? join20(notebookDirectory, ".alder", "config.yaml") : projectConfigPath(store.path);
+    const projectPath = isUntitled ? join19(notebookDirectory, ".alder", "config.yaml") : projectConfigPath(store.path);
     projectSettings = await loadProjectSettings(projectPath);
     config3 = configurationFor(notebook);
     projectLayoutIntent = isUntitled ? null : await readLayout(store.path);
@@ -110025,7 +109651,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
         const published = await prepared.publish();
         projectSettings = published.value;
         config3 = configurationFor(context.document);
-        cacheDirectory = config3.cache.dir ? resolve13(notebookDirectory, config3.cache.dir) : join20(notebookDirectory, ".alder", "cache");
+        cacheDirectory = config3.cache.dir ? resolve13(notebookDirectory, config3.cache.dir) : join19(notebookDirectory, ".alder", "cache");
         settingsErrors.delete("project");
         publishSettingsError();
         const sidecars = { ...context.sidecars, config: published.observation };
@@ -110061,7 +109687,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
           pendingSidecars.packages = false;
           const sidecars = { ...context.sidecars, packages: published.observation };
           publishSource(context, { document: context.document, path: context.path, layout: context.layout, disk: context.disk, sidecars, dirty: context.dirty, advanceRevision: false });
-          return { ok: true, path: notebookDirectory, metadata: join20(notebookDirectory, ".alder", "packages.yaml"), packages: [...published.value], sidecarVersion: published.observation.version };
+          return { ok: true, path: notebookDirectory, metadata: join19(notebookDirectory, ".alder", "packages.yaml"), packages: [...published.value], sidecarVersion: published.observation.version };
         } catch (error61) {
           const code2 = pendingSidecars.packages ? "sidecar_write_failed" : "recovery_checkpoint_failed";
           return publishSidecarFailure(context, context.document, context.config, context.layout, "packages", error61, code2);
@@ -110101,7 +109727,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
           const destinationDirectory = dirname10(destination);
           const destinationProjectConfig = await loadProjectSettings(projectConfigPath(destination));
           const destinationConfig = configurationFor(context.document, destinationProjectConfig);
-          const destinationCache = destinationConfig.cache.dir ? resolve13(destinationDirectory, destinationConfig.cache.dir) : join20(destinationDirectory, ".alder", "cache");
+          const destinationCache = destinationConfig.cache.dir ? resolve13(destinationDirectory, destinationConfig.cache.dir) : join19(destinationDirectory, ".alder", "cache");
           const destinationLayout = await readLayout(destination);
           let destinationPackages = [];
           try {
@@ -110486,7 +110112,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
             if (store === void 0) throw Object.assign(new Error("notebook has no saved source"), { code: "notebook_has_no_path" });
             const snapshot = publicationSnapshot(store.currentDocument, liveSnapshot);
             const requestedPath = typeof payload.outputPath === "string" && payload.outputPath.length > 0 ? payload.outputPath : null;
-            const outputPath = requestedPath ?? join20(work, "publish-" + randomUUID14() + ".html");
+            const outputPath = requestedPath ?? join19(work, "publish-" + randomUUID14() + ".html");
             const pendingPublish = publisher.publishSnapshot(snapshot, { outputPath, includeCode: payload.includeCode === true, signal: operation?.signal });
             activePublishes.add(pendingPublish);
             const result = await pendingPublish.finally(() => {
@@ -110707,7 +110333,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
         }
       },
       staticDir: options.resources.rendererDirectory,
-      indexFile: join20(options.resources.rendererDirectory, "index.html"),
+      indexFile: join19(options.resources.rendererDirectory, "index.html"),
       uploads,
       artifactStore,
       mcpHandler: createMcpHttpHandler({ controller, artifactStore, runtimeReady: () => runtimeReady, onShutdown: close }),

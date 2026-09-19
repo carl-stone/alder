@@ -160,7 +160,6 @@ function makeController(overrides: Partial<McpControllerAdapter> = {}): McpContr
           metadata: {},
           config: {},
           dirty: false,
-          changed: false,
           disk: {},
           sidecars: {},
           runtime: snapshot.runtime,

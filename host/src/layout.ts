@@ -1,6 +1,6 @@
 import { dirname } from "node:path";
 import { readFile, stat } from "node:fs/promises";
-import { parseStrictJson } from "./strict-json.js";
+import { parseJson } from "./json.js";
 import {
   type AtomicWriteOptions,
   writeAtomicText,
@@ -185,7 +185,7 @@ export async function readLayout(value: string | Pick<NotebookDocument, "path"> 
   if (bytes.byteLength > LAYOUT_MAX_BYTES) layoutAbort("layout sidecar exceeds the 1 MiB safety limit");
   let parsed: unknown;
   try {
-    parsed = parseStrictJson(bytes, { maxBytes: LAYOUT_MAX_BYTES, maxDepth: 64 });
+    parsed = parseJson(bytes, LAYOUT_MAX_BYTES);
   } catch (error) {
     layoutAbort(`invalid layout JSON: ${error instanceof Error ? error.message : String(error)}`);
   }

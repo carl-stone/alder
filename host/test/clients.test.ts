@@ -33,7 +33,7 @@ function snapshot(cells: HostCellState[] = [cell("c1", ["x <- 1"]), cell("c2", [
   const disk = { state: "untitled" as const, digest: null, version: null, error: null };
   return {
     protocol: HOST_PROTOCOL, epoch: "epoch-1", cursor: 0, version: 1, documentRevision: 0, path: "/tmp/book.R",
-    metadata: {}, config: {}, layout: null, dirty: false, changed: false, disk,
+    metadata: {}, config: {}, layout: null, dirty: false, disk,
     sidecars: { config: disk, layout: disk, packages: disk },
     runtime: {
       documentReady: true, analyzerState: "ready", kernelState: "ready", executionReady: true,
@@ -437,7 +437,7 @@ test("Publish HTML publishes the last saved version without forcing Save", async
     Object.defineProperty(globalThis, "location", { configurable: true, writable: true, value: { search: "?view=editor", href: "http://notebook.test/book.R?view=editor", origin: "http://notebook.test" } });
     const initial = snapshot([cell("c1", ["current <- 42"])]);
     initial.dirty = true;
-    initial.changed = true;
+    initial.dirty = true;
     const document = new BrowserDocument(initial);
     let publishes = 0;
     const client = settingsClient({
@@ -466,7 +466,7 @@ test("Publish HTML uses the server result for the unsaved-source warning", async
     Object.defineProperty(globalThis, "location", { configurable: true, writable: true, value: { search: "?view=editor", href: "http://notebook.test/book.R?view=editor", origin: "http://notebook.test" } });
     const initial = snapshot([cell("c1", ["saved <- 1"])]);
     initial.dirty = false;
-    initial.changed = false;
+    initial.dirty = false;
     const document = new BrowserDocument(initial);
     const client = settingsClient({
       commitEdits: async () => initial,
@@ -499,7 +499,7 @@ test("a slow publish disables only its own action", async () => {
     Object.defineProperty(globalThis, "location", { configurable: true, writable: true, value: { search: "?view=editor", href: "http://notebook.test/book.R?view=editor", origin: "http://notebook.test" } });
     const initial = snapshot([cell("c1", ["current <- 42"])]);
     initial.dirty = true;
-    initial.changed = true;
+    initial.dirty = true;
     const pending = Promise.withResolvers<CommandResult>();
     let publishes = 0;
     const client = settingsClient({
@@ -533,7 +533,7 @@ test("a slow publish disables only its own action", async () => {
 test("explicit runs flush output and keep stop independent while preparing", async () => {
   await withViewDom(async (dom, domWindow) => {
     const initial = snapshot([]);
-    initial.changed = true;
+    initial.dirty = true;
     const document = new BrowserDocument(initial);
     const order: string[] = [];
     let interruptCalls = 0;
@@ -584,7 +584,7 @@ for (const failure of ["preparation", "execution"] as const) {
   test(`view releases controls and surfaces a run ${failure} failure`, async () => {
     await withViewDom(async (dom, domWindow) => {
       const initial = snapshot([]);
-      initial.changed = true;
+      initial.dirty = true;
       const client = {
         recoveryState: { status: "none", local: null, candidate: null, corruption: null, persistenceError: null },
         subscribeRecovery() { return () => {}; },
@@ -739,7 +739,7 @@ test("Settings sends only changed application preferences and preserves the capt
       assert.equal(dom.documentElement.dataset.theme, "light", "shared preferences apply to the notebook immediately");
       assert.equal(dom.querySelector<HTMLSelectElement>("#settings-theme")!.value, "dark", "open dialog keeps the user's choice");
       assert.equal(notebook.snapshot.preferencesVersion, "preferences-from-peer");
-      assert.equal(notebook.snapshot.changed, false, "application changes do not dirty notebook source");
+      assert.equal(notebook.snapshot.dirty, false, "application changes do not dirty notebook source");
       dom.getElementById("settings-form")!.dispatchEvent(new domWindow.Event("submit", { cancelable: true }));
       await waitUntil(() => Boolean(dom.getElementById("settings-error")!.textContent));
       assert.deepEqual(writes, [{ patch: { theme: "dark", editor: { font_size: 18 } }, version: "preferences-before-open" }]);
@@ -767,7 +767,7 @@ test("Settings saves only notebook execution choices while R is unavailable", as
       writes += 1;
       assert.deepEqual(patch, { executionMode: "lazy", runOnStartup: true, cacheEnabled: false });
       assert.equal(revision, 0);
-      notebook.applySnapshot({ ...initial, documentRevision: 1, changed: true,
+      notebook.applySnapshot({ ...initial, documentRevision: 1, dirty: true,
         config: { cache: { enabled: false } }, runtime: { ...initial.runtime, executionMode: "lazy", runOnStartup: true } });
       view.render(notebook);
       return resultFor("settings-runtime", null);
@@ -794,7 +794,7 @@ test("Settings keeps failed project writes and malformed-file errors visible wit
   await withViewDom(async (dom, domWindow) => {
     await installSettingsDom(dom);
     const initial = snapshot([]);
-    initial.changed = true;
+    initial.dirty = true;
     initial.sidecars.config = { ...initial.sidecars.config, version: "project-version" };
     initial.serviceErrors.settings = { code: "config_invalid", message: "Fix the YAML in /project/.alder/config.yaml, then try again." };
     const notebook = new BrowserDocument(initial);
@@ -867,7 +867,7 @@ test("Settings retries only the owner whose write failed", async () => {
 test("format-on-save still saves the notebook when R is unavailable", async () => {
   await withViewDom(async (dom, domWindow) => {
     const initial = snapshot([]);
-    initial.changed = true;
+    initial.dirty = true;
     initial.config = { format: { on_save: true } };
     initial.runtime.executionReady = false;
     initial.runtime.kernelState = "stopped";
@@ -893,7 +893,7 @@ test("format-on-save still saves the current draft when Air fails", async () => 
   try {
     await withViewDom(async (dom, domWindow) => {
       const initial = snapshot([cell("c1", ["current <- 42"])]);
-      initial.changed = true;
+      initial.dirty = true;
       initial.config = { format: { on_save: true } };
       const document = new BrowserDocument(initial);
       const formatter = createFormattingService("/usr/bin/false", processScope);
@@ -1064,13 +1064,13 @@ test("browser document applies canonical transaction ordering and metadata delta
   assert.deepEqual(document.snapshot.cells.map((value) => value.id), ["c1", "c3", "c2"]);
   document.applyEvent(event(3, "notebook", { moved: "c2", after: null }));
   assert.deepEqual(document.cells.map((value) => value.id), ["c2", "c1", "c3"]);
-  document.applyEvent(event(4, "notebook", { config: { theme: "dark" } }));
+  document.applyEvent(event(4, "notebook", { config: { theme: "dark" }, dirty: true }));
   assert.deepEqual(document.snapshot.config, { theme: "dark" });
-  assert.equal(document.snapshot.changed, true);
+  assert.equal(document.snapshot.dirty, true);
   document.applyEvent(event(5, "operation", operation("peer-operation")));
   assert.equal(document.snapshot.operations.at(-1)?.id, "peer-operation");
-  document.applyEvent(event(6, "notebook", { saved: true }));
-  assert.equal(document.snapshot.changed, false);
+  document.applyEvent(event(6, "notebook", { saved: true, dirty: false }));
+  assert.equal(document.snapshot.dirty, false);
 });
 
 test("browser document consumes authoritative reload cells, order, and clean state", () => {
@@ -1091,7 +1091,7 @@ test("browser document consumes authoritative reload cells, order, and clean sta
     ["c1", 1, ["external <- 1"]],
   ]);
   assert.deepEqual(document.snapshot.cells.map((value) => value.id), ["c3", "c1"]);
-  assert.equal(document.snapshot.changed, false);
+  assert.equal(document.snapshot.dirty, false);
 });
 
 class FakeSocket implements WebSocketLike {

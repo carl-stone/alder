@@ -1033,6 +1033,7 @@ export class NotebookView {
 
   private renderControls(snapshot: HostSnapshot): void {
     const busy = snapshot.runtime.busy;
+    const dirty = snapshot.dirty || (this.documentValue?.pendingSource().changes.length ?? 0) > 0;
     const available = !this.hostClosed && snapshot.runtime.executionReady && snapshot.runtime.kernelState === "ready";
     const signature = JSON.stringify({
       runPending: this.runPending,
@@ -1041,7 +1042,7 @@ export class NotebookView {
       available,
       executionMode: snapshot.runtime.executionMode,
       kernelReady: snapshot.runtime.kernelState === "ready",
-      changed: snapshot.changed,
+      dirty,
     });
     if (signature === this.toolbarSignature) return;
     this.toolbarSignature = signature;
@@ -1062,7 +1063,7 @@ export class NotebookView {
       setDisabled(restart, this.hostClosed || busy);
     }
     const save = this.dom.getElementById("save") as HTMLButtonElement | null;
-    if (save) setDisabled(save, this.hostClosed || !snapshot.changed);
+    if (save) setDisabled(save, this.hostClosed || !dirty);
     const shutdown = this.dom.getElementById("shutdown") as HTMLButtonElement | null;
     if (shutdown) {
       setDisabled(shutdown, this.hostClosed);
@@ -2341,7 +2342,7 @@ export class NotebookView {
   private async shutdownHost(): Promise<void> {
     if (this.hostClosed) return;
     const pending = this.documentValue?.pendingSource();
-    if ((this.documentValue?.snapshot.changed || pending?.changes.length)
+    if ((this.documentValue?.snapshot.dirty || pending?.changes.length)
       && !window.confirm("This notebook has unsaved changes. Shut down without saving?")) return;
     await this.action(async () => {
       const desktop = (globalThis as typeof globalThis & { alderDesktop?: import("../protocol.js").PreloadApi }).alderDesktop;
@@ -2543,7 +2544,7 @@ export class NotebookView {
     if (this.autosaveTimer !== null) window.clearTimeout(this.autosaveTimer);
     this.autosaveTimer = null;
     if (this.appView || this.documentValue?.snapshot.config.autosave !== true
-      || this.documentValue.snapshot.changed !== true) return;
+      || !(this.documentValue.snapshot.dirty || this.documentValue.pendingSource().changes.length > 0)) return;
     this.autosaveTimer = window.setTimeout(() => {
       this.autosaveTimer = null;
       void this.saveNotebook("autosave").catch((error) => this.showError(error));

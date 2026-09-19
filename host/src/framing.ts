@@ -1,4 +1,4 @@
-import { DEFAULT_STRICT_JSON_LIMITS, StrictJsonError, parseStrictJson } from "./strict-json.js";
+import { parseJson } from "./json.js";
 
 export const DEFAULT_MAX_FRAME_BYTES = 8 * 1024 * 1024;
 // A codec request can contain both the immutable 32 MiB disk version and the
@@ -44,14 +44,8 @@ export class FrameDecoder {
   private expectedBytes: number | undefined;
   private failed = false;
 
-  constructor(
-    readonly maxFrameBytes = DEFAULT_MAX_FRAME_BYTES,
-    readonly maxNesting = DEFAULT_STRICT_JSON_LIMITS.maxDepth,
-  ) {
+  constructor(readonly maxFrameBytes = DEFAULT_MAX_FRAME_BYTES) {
     validateMaxFrameBytes(maxFrameBytes);
-    if (!Number.isSafeInteger(maxNesting) || maxNesting < 1) {
-      throw new RangeError("maxNesting must be a positive safe integer");
-    }
   }
 
   push(chunk: Uint8Array): unknown[] {
@@ -76,12 +70,9 @@ export class FrameDecoder {
         const body = this.readBytes(this.expectedBytes);
         this.expectedBytes = undefined;
         try {
-          values.push(parseStrictJson(body, {
-            maxBytes: this.maxFrameBytes,
-            maxDepth: this.maxNesting,
-          }));
+          values.push(parseJson(body, this.maxFrameBytes));
         } catch (error) {
-          if (error instanceof StrictJsonError && error.message.startsWith("invalid UTF-8")) {
+          if (error instanceof SyntaxError && error.message.includes("valid UTF-8")) {
             throw new FrameProtocolError("frame body is not valid UTF-8");
           }
           throw error;

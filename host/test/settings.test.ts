@@ -70,7 +70,7 @@ test("settings have one owner across open notebooks, projects, and relaunch", as
     a.controller.subscribe(event => browserA.applyEvent(event));
     b.controller.subscribe(event => browserB.applyEvent(event));
     assert.equal(a.controller.snapshot().config.theme, "system");
-    assert.equal(a.controller.snapshot().changed, false);
+    assert.equal(a.controller.snapshot().dirty, false);
     await edit(a, "x <- 29");
     const revision = a.controller.snapshot().documentRevision;
     await success(b, { type: "set-preferences", patch: { theme: "dark", editor: { font_size: 18 } } });
@@ -79,9 +79,9 @@ test("settings have one owner across open notebooks, projects, and relaunch", as
       assert.equal((host.controller.snapshot().config.editor as { font_size: number }).font_size, 18);
     }
     assert.equal(a.controller.snapshot().documentRevision, revision);
-    assert.equal(b.controller.snapshot().changed, false, "preferences do not dirty notebook source");
+    assert.equal(b.controller.snapshot().dirty, false, "preferences do not dirty notebook source");
     assert.equal(browserB.snapshot.config.theme, "dark");
-    assert.equal(browserB.snapshot.changed, false);
+    assert.equal(browserB.snapshot.dirty, false);
     assert.equal(await readFile(pathA, "utf8"), original);
     await success(a, { type: "set-runtime", on_cell_change: "lazy", on_startup: false, cache_enabled: false });
     assert.equal(a.controller.snapshot().runtime.executionMode, "lazy");
@@ -99,8 +99,8 @@ test("settings have one owner across open notebooks, projects, and relaunch", as
     assert.equal((a.controller.snapshot().config.cache as { dir: string }).dir, "project-cache");
     assert.equal((b.controller.snapshot().config.cache as { dir: unknown }).dir, null);
     await success(a, { type: "save" });
-    assert.equal(a.controller.snapshot().changed, false);
-    assert.equal(browserA.snapshot.changed, false);
+    assert.equal(a.controller.snapshot().dirty, false);
+    assert.equal(browserA.snapshot.dirty, false);
     const saved = await readFile(pathA, "utf8");
     assert.match(saved, /x <- 29/);
     assert.match(saved, /keep-me/);
@@ -112,7 +112,7 @@ test("settings have one owner across open notebooks, projects, and relaunch", as
     const restoredPreferences = await ApplicationPreferences.open(f.preferencePath);
     const reopenedA = await f.open(pathA, restoredPreferences);
     const reopenedB = await f.open(pathB, restoredPreferences);
-    assert.equal(reopenedA.controller.snapshot().changed, false, "saved settings leave no pending notebook recovery");
+    assert.equal(reopenedA.controller.snapshot().dirty, false, "saved settings leave no pending notebook recovery");
     assert.equal(reopenedA.controller.snapshot().config.theme, "dark");
     assert.equal(reopenedB.controller.snapshot().config.theme, "dark");
     assert.equal(reopenedA.controller.snapshot().runtime.executionMode, "lazy");
@@ -131,7 +131,7 @@ test("launch execution choices remain editable notebook values", async () => {
     const launched = await f.open(path, undefined, { executionMode: "lazy", runOnStartup: false });
     assert.equal(launched.controller.snapshot().runtime.executionMode, "lazy");
     assert.equal(launched.controller.snapshot().runtime.runOnStartup, true, "--no-run does not alter the notebook setting");
-    assert.equal(launched.controller.snapshot().changed, true);
+    assert.equal(launched.controller.snapshot().dirty, true);
     assert.equal(await readFile(path, "utf8"), original, "--lazy uses Save, not a launch-time file rewrite");
     await launched.close();
     const host = await f.open(path);
@@ -184,10 +184,10 @@ test("invalid notebook settings reject ineffective changes while opening and sav
       const host = await f.open(path, undefined, { executionMode: "lazy" });
       assert.ok(host.controller.snapshot().serviceErrors.settings?.message.includes(path));
       assert.equal(host.controller.snapshot().runtime.executionMode, "automatic");
-      assert.equal(host.controller.snapshot().changed, false);
+      assert.equal(host.controller.snapshot().dirty, false);
       const result = await command(host, { type: "set-runtime", on_cell_change: "lazy" });
       assert.ok(result.error, "a remaining invalid setting must not produce a successful ineffective change");
-      assert.equal(host.controller.snapshot().changed, false);
+      assert.equal(host.controller.snapshot().dirty, false);
       await edit(host, "x <- 31");
       await success(host, { type: "save" });
       const saved = await readFile(path, "utf8");

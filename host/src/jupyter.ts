@@ -4,7 +4,6 @@ import { EventEmitter } from "node:events";
 import { access, chmod, mkdir, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createConnection, createServer, type Socket as TcpSocket } from "node:net";
-import { TextDecoder } from "node:util";
 
 import type {
   Dealer,
@@ -16,7 +15,7 @@ import {
   DEFAULT_MAX_FRAME_BYTES,
   FrameProtocolError,
 } from "./framing.js";
-import { DEFAULT_STRICT_JSON_LIMITS, parseStrictJson } from "./strict-json.js";
+import { parseJson } from "./json.js";
 
 const MESSAGE_DELIMITER = Buffer.from("<IDS|MSG>");
 const JUPYTER_VERSION = "5.3";
@@ -962,17 +961,8 @@ function parseJsonFrame(
   label: string,
   maxBytes = DEFAULT_MAX_FRAME_BYTES,
 ): unknown {
-  let text: string;
   try {
-    text = new TextDecoder("utf-8", { fatal: true }).decode(frame);
-  } catch {
-    throw new FrameProtocolError(`Jupyter ${label} is not valid UTF-8`);
-  }
-  try {
-    return parseStrictJson(text, {
-      maxBytes,
-      maxDepth: DEFAULT_STRICT_JSON_LIMITS.maxDepth,
-    });
+    return parseJson(frame, maxBytes);
   } catch (error) {
     throw new FrameProtocolError(`invalid Jupyter ${label}: ${messageOf(error)}`);
   }

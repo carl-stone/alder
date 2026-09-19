@@ -19013,7 +19013,6 @@ var BrowserDocument = class {
     this.ordered.splice(after + 1, 0, cell);
     this.byKey.set(key, cell);
     this.keyByCreationId.set(creationId, key);
-    this.snapshotValue = { ...this.snapshotValue, changed: true };
     return cell;
   }
   edit(key, body, type) {
@@ -19026,7 +19025,6 @@ var BrowserDocument = class {
       cell.conflict = false;
       cell.acknowledgedGeneration = cell.generation;
     }
-    this.snapshotValue = { ...this.snapshotValue, changed: true };
     return cell;
   }
   useServerVersion(key) {
@@ -19061,7 +19059,6 @@ var BrowserDocument = class {
     cell.tombstone = false;
     cell.server = null;
     this.keyByCreationId.set(creationId, cell.key);
-    this.snapshotValue = { ...this.snapshotValue, changed: true };
     return cell;
   }
   pendingSource() {
@@ -19140,13 +19137,11 @@ var BrowserDocument = class {
         cell.generation = Math.max(1, cell.generation + 1);
         cell.acknowledgedGeneration = cell.generation - 1;
         cell.conflict = conflict || cell.tombstone;
-        this.snapshotValue = { ...this.snapshotValue, changed: true };
       } else {
         this.recoveredStructural.push(cloneChange(change));
         this.recoveredStructuralConflict ||= conflict;
       }
     }
-    this.snapshotValue = { ...this.snapshotValue, changed: true };
   }
   recoveryChanges() {
     const changes = [];
@@ -19297,7 +19292,6 @@ var BrowserDocument = class {
     if (submitted) this.recoveredStructuralConflict = false;
     if (submitted) this.recoveredStructural = [];
     this.submitted.delete(result.requestId);
-    this.reassertLocalDirty();
     this.rebaseDraftToSnapshot();
   }
   acknowledgeSourceCommit(operationId2, outcome) {
@@ -19314,7 +19308,6 @@ var BrowserDocument = class {
     this.recoveredStructuralConflict = false;
     this.recoveredStructural = [];
     this.submitted.delete(operationId2);
-    this.reassertLocalDirty();
     this.rebaseDraftToSnapshot();
     return true;
   }
@@ -19369,10 +19362,6 @@ var BrowserDocument = class {
       if (orderChanged) this.reorderFromServerOrderIfPossible();
     }
     this.snapshotValue = patchSnapshot(this.snapshotValue, event, this.serverOrder);
-    if (isRecord(event.payload) && event.type === "notebook" && event.payload.saved === true) {
-      const pending = this.pendingSource();
-      if (pending.changes.length || this.ordered.some((cell) => cell.tombstone)) this.snapshotValue = { ...this.snapshotValue, changed: true };
-    }
   }
   applySnapshot(snapshot) {
     const epochChanged = this.epochValue !== snapshot.epoch;
@@ -19408,7 +19397,6 @@ var BrowserDocument = class {
       }
     }
     this.reorderFromServerOrderIfPossible();
-    this.reassertLocalDirty();
   }
   mergeServerCell(serverCell, forceSource = false, operationId2) {
     const logicalBody = toLogicalCellBody(serverCell.type, serverCell.body);
@@ -19614,10 +19602,6 @@ var BrowserDocument = class {
     const submittedRevision = sent.changesSource ? expectedRevision + 1 : expectedRevision;
     return serverCell.revision === submittedRevision ? sent : void 0;
   }
-  reassertLocalDirty() {
-    const pending = this.pendingSource();
-    if (pending.changes.length || this.ordered.some((cell) => cell.tombstone)) this.snapshotValue = { ...this.snapshotValue, changed: true };
-  }
   predecessorReference(key) {
     const index = this.ordered.findIndex((cell) => cell.key === key);
     for (let before = index - 1; before >= 0; before -= 1) {
@@ -19712,13 +19696,9 @@ function patchSnapshot(snapshot, event, order) {
     if (isRecord(payload.app)) next.metadata = { ...next.metadata, app: payload.app };
     if (isRecord(payload.graph)) next.graph = payload.graph;
     if ("lastValue" in payload) next.lastValue = payload.lastValue;
-    if (payload.saved === true) next.changed = false;
     if (typeof payload.deleted === "string") next.cells = next.cells.filter((cell) => cell.id !== payload.deleted);
     const deletedIds = payload.deleted;
     if (Array.isArray(deletedIds)) next.cells = next.cells.filter((cell) => !deletedIds.includes(cell.id));
-    if (Array.isArray(payload.edited)) next.changed = true;
-    if ("updated" in payload) next.changed = true;
-    if (payload.created !== void 0 || payload.deleted !== void 0 || typeof payload.moved === "string" || isRecord(payload.metadata) || isRecord(payload.app)) next.changed = true;
     if (Array.isArray(payload.updated)) {
       const updates = /* @__PURE__ */ new Map();
       for (const value of payload.updated) if (isHostCell(value)) updates.set(value.id, value);
@@ -19729,7 +19709,7 @@ function patchSnapshot(snapshot, event, order) {
         addedCell ||= [...updates.keys()].some((id) => !present.has(id));
       }
     }
-    if (typeof payload.dirty === "boolean") next.changed = payload.dirty;
+    if (typeof payload.dirty === "boolean") next.dirty = payload.dirty;
   }
   if (["cell", "cell-started", "cell-completed"].includes(event.type) && event.cellId) {
     if (isRecord(event.payload) && event.payload.deleted === true) next.cells = next.cells.filter((cell) => cell.id !== event.cellId);
@@ -19742,7 +19722,6 @@ function patchSnapshot(snapshot, event, order) {
         next.cells.push(payload);
         addedCell = true;
       } else next.cells[index] = payload;
-      if (event.type === "cell" && prior && sourceRecordChanged(prior, payload)) next.changed = true;
     }
   }
   if (event.type === "diagnostics" && event.cellId && Array.isArray(event.payload)) {
@@ -19800,9 +19779,6 @@ function operationFromEventPayload(value) {
   if (isOperation(value)) return value;
   if (isRecord(value) && isOperation(value.operation)) return value.operation;
   return null;
-}
-function sourceRecordChanged(left, right) {
-  return left.type !== right.type || !sameLines(left.body, right.body) || JSON.stringify(left.options) !== JSON.stringify(right.options);
 }
 function isSidecarObservations(value) {
   return isRecord(value) && isDiskObservation(value.config) && isDiskObservation(value.layout) && isDiskObservation(value.packages);
@@ -20744,7 +20720,7 @@ var runtimeVariableSchema = external_exports.object({ name: boundedUtf8StringSch
 var runtimeVariablesSchema = external_exports.array(runtimeVariableSchema).max(MAX_RUNTIME_VARIABLES);
 var editorDiagnosticsSchema = safeStringRecordSchema(external_exports.array(analysisDiagnosticSchema).max(MAX_EDITOR_DIAGNOSTICS));
 var serviceErrorsSchema = external_exports.object({ lsp: hostErrorSchema.optional(), settings: hostErrorSchema.optional() }).strict();
-var hostSnapshotSchema = external_exports.object({ protocol: external_exports.literal(HOST_PROTOCOL), epoch: idSchema, cursor: protocolIntegerSchema, version: protocolIntegerSchema, documentRevision: revisionSchema, path: pathSchema.nullable(), metadata: protocolJsonRecordSchema, config: protocolJsonRecordSchema, preferencesVersion: boundedUtf8StringSchema(MAX_ID_BYTES).nullable().default(null), layout: protocolJsonSchema, dirty: external_exports.boolean(), changed: external_exports.boolean().optional(), disk: diskObservationSchema, sidecars: sidecarObservationsSchema, runtime: hostRuntimeSchema, cells: external_exports.array(hostCellStateSchema).max(MAX_NOTEBOOK_CELLS), graph: dependencyGraphStateSchema, variables: runtimeVariablesSchema, editorDiagnostics: editorDiagnosticsSchema, serviceErrors: serviceErrorsSchema, operations: external_exports.array(operationRecordSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS), lastValue: protocolJsonSchema.nullable(), lastActionError: hostErrorSchema.nullable(), capabilities: external_exports.array(boundedUtf8StringSchema(256)).max(MAX_PROTOCOL_COLLECTION_ITEMS).optional(), activeClientIds: external_exports.array(idSchema).max(128).optional() }).strict();
+var hostSnapshotSchema = external_exports.object({ protocol: external_exports.literal(HOST_PROTOCOL), epoch: idSchema, cursor: protocolIntegerSchema, version: protocolIntegerSchema, documentRevision: revisionSchema, path: pathSchema.nullable(), metadata: protocolJsonRecordSchema, config: protocolJsonRecordSchema, preferencesVersion: boundedUtf8StringSchema(MAX_ID_BYTES).nullable().default(null), layout: protocolJsonSchema, dirty: external_exports.boolean(), disk: diskObservationSchema, sidecars: sidecarObservationsSchema, runtime: hostRuntimeSchema, cells: external_exports.array(hostCellStateSchema).max(MAX_NOTEBOOK_CELLS), graph: dependencyGraphStateSchema, variables: runtimeVariablesSchema, editorDiagnostics: editorDiagnosticsSchema, serviceErrors: serviceErrorsSchema, operations: external_exports.array(operationRecordSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS), lastValue: protocolJsonSchema.nullable(), lastActionError: hostErrorSchema.nullable(), capabilities: external_exports.array(boundedUtf8StringSchema(256)).max(MAX_PROTOCOL_COLLECTION_ITEMS).optional(), activeClientIds: external_exports.array(idSchema).max(128).optional() }).strict();
 var hostEventTypeSchema = external_exports.enum(["transaction", "notebook", "cell", "cell-started", "cell-output", "cell-completed", "diagnostics", "editor-diagnostics", "service-errors", "graph", "variables", "runtime", "operation", "service-error", "active_clients_changed"]);
 var eventBase = { protocol: external_exports.literal(HOST_PROTOCOL), epoch: idSchema, cursor: protocolIntegerSchema, version: protocolIntegerSchema, documentRevision: revisionSchema, timestamp: external_exports.number().finite().nonnegative(), operationId: idSchema.optional(), clientId: idSchema.optional(), cellId: idSchema.optional(), runId: idSchema.optional(), kernelEpoch: idSchema.nullable().optional(), revision: revisionSchema.optional(), sequence: protocolIntegerSchema.optional() };
 var hostEventSchema = external_exports.object({ ...eventBase, type: hostEventTypeSchema, payload: protocolJsonSchema }).strict();
@@ -20784,7 +20760,6 @@ var notebookQueryResultSchema = external_exports.object({
   metadata: protocolJsonRecordSchema,
   config: protocolJsonRecordSchema,
   dirty: external_exports.boolean(),
-  changed: external_exports.boolean().optional(),
   disk: diskObservationSchema,
   sidecars: sidecarObservationsSchema,
   runtime: hostRuntimeSchema,
@@ -24514,6 +24489,7 @@ ${jupyterTrace.map((line, index) => `${index + 1}. ${line}`).join("\n")}` : ""
   }
   renderControls(snapshot) {
     const busy = snapshot.runtime.busy;
+    const dirty = snapshot.dirty || (this.documentValue?.pendingSource().changes.length ?? 0) > 0;
     const available = !this.hostClosed && snapshot.runtime.executionReady && snapshot.runtime.kernelState === "ready";
     const signature = JSON.stringify({
       runPending: this.runPending,
@@ -24522,7 +24498,7 @@ ${jupyterTrace.map((line, index) => `${index + 1}. ${line}`).join("\n")}` : ""
       available,
       executionMode: snapshot.runtime.executionMode,
       kernelReady: snapshot.runtime.kernelState === "ready",
-      changed: snapshot.changed
+      dirty
     });
     if (signature === this.toolbarSignature) return;
     this.toolbarSignature = signature;
@@ -24543,7 +24519,7 @@ ${jupyterTrace.map((line, index) => `${index + 1}. ${line}`).join("\n")}` : ""
       setDisabled(restart, this.hostClosed || busy);
     }
     const save = this.dom.getElementById("save");
-    if (save) setDisabled(save, this.hostClosed || !snapshot.changed);
+    if (save) setDisabled(save, this.hostClosed || !dirty);
     const shutdown = this.dom.getElementById("shutdown");
     if (shutdown) {
       setDisabled(shutdown, this.hostClosed);
@@ -25756,7 +25732,7 @@ ${jupyterTrace.map((line, index) => `${index + 1}. ${line}`).join("\n")}` : ""
   async shutdownHost() {
     if (this.hostClosed) return;
     const pending = this.documentValue?.pendingSource();
-    if ((this.documentValue?.snapshot.changed || pending?.changes.length) && !window.confirm("This notebook has unsaved changes. Shut down without saving?")) return;
+    if ((this.documentValue?.snapshot.dirty || pending?.changes.length) && !window.confirm("This notebook has unsaved changes. Shut down without saving?")) return;
     await this.action(async () => {
       const desktop = globalThis.alderDesktop;
       this.hostClosed = true;
@@ -25946,7 +25922,7 @@ ${jupyterTrace.map((line, index) => `${index + 1}. ${line}`).join("\n")}` : ""
   scheduleAutosave() {
     if (this.autosaveTimer !== null) window.clearTimeout(this.autosaveTimer);
     this.autosaveTimer = null;
-    if (this.appView || this.documentValue?.snapshot.config.autosave !== true || this.documentValue.snapshot.changed !== true) return;
+    if (this.appView || this.documentValue?.snapshot.config.autosave !== true || !(this.documentValue.snapshot.dirty || this.documentValue.pendingSource().changes.length > 0)) return;
     this.autosaveTimer = window.setTimeout(() => {
       this.autosaveTimer = null;
       void this.saveNotebook("autosave").catch((error61) => this.showError(error61));
@@ -26720,7 +26696,7 @@ function bindClient(next) {
   next.subscribe((document2, event, localCellKeys) => {
     const desktop = globalThis.alderDesktop;
     const pending = document2.pendingSource();
-    const state = { path: document2.snapshot.path, dirty: document2.snapshot.dirty || document2.snapshot.changed || pending.changes.length > 0, sessionEpoch: document2.epoch };
+    const state = { path: document2.snapshot.path, dirty: document2.snapshot.dirty || pending.changes.length > 0, sessionEpoch: document2.epoch };
     void desktop?.updateWindowState(state).catch((error61) => view?.showError(error61));
     if (!event) {
       flushRenders();
@@ -26757,7 +26733,7 @@ window.addEventListener("beforeunload", (event) => {
   if (view?.allowsUnload) return;
   const document2 = client?.document;
   const pending = document2?.pendingSource();
-  if (!document2?.snapshot.changed && !pending?.changes.length) return;
+  if (!document2?.snapshot.dirty && !pending?.changes.length) return;
   event.preventDefault();
 });
 async function bootstrapSession() {
