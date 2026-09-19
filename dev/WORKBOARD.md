@@ -9,41 +9,42 @@ copies in other worktrees are snapshots.
 
 ## Current assignment
 
-**Production-path simplification — Implementing.**
+**Simplification verification and acceptance — Implementing.**
 
 **Owner:** primary implementer in the listed implementation worktree.
 
-Simplify the code that remains on real Alder paths after dead-code removal. Review each
-live responsibility—documents/sessions, renderer/native bridge, execution/output,
-optional services, persistence/recovery, diagnostics and packaging—and reduce layers,
-owners and state transitions that do not provide an independent product or boundary
-responsibility.
+Finish the simplification campaign by aligning the supporting tests and tooling with the
+smaller production design, then produce the exact Mac release candidate. Remove tests,
+fixtures, mocks, scripts and dependencies that exist only for deleted mechanisms; replace
+implementation-pinning assertions with concise checks of preserved user-visible behavior
+and important failure boundaries. Fill only material gaps exposed by the simplification
+reviews, including launch-scoped `--no-run` acquisition.
 
-**Accept when:** pass-through wrappers, duplicate state or validation, obsolete options,
-one-implementation interfaces, speculative extension points and unnecessary retry or
-fallback layers are removed or collapsed where doing so produces a clearer owner. The
-same accepted notebook behavior remains available through fewer live mechanisms. New
-abstractions must correspond to a real boundary; no internal compatibility layer is
-retained for deleted pre-release code. The checkpoint ends in one clean runnable commit
-with focused tests, typechecks, regenerated assets and a background staged-app smoke.
+**Accept when:** the remaining verification suite clearly protects documents/sessions,
+execution/reactivity, outputs/widgets/cache, optional services, publishing, recovery,
+diagnostics/privacy, native lifecycle and child cleanup without duplicating internal
+call-count or layer-shape assertions. Fast checks remain proportionate and terminate
+normally. One exact clean candidate then passes independent test-quality review and one
+complete uninterrupted signed-app acceptance, including installed Host/Browser journeys,
+strict signing/notices, hidden packaged diagnostics export/privacy and zero owned children.
 
-**Baseline:** accepted dead-code/dependency checkpoint
-`1080f153a1d900f64f648e53e0b664cf2dab51e2`.
+**Baseline:** accepted production simplification through
+`21f678ca1bda44d27d4debb1101f1eb87c59a767`. Architecture review passed `a334513`; the
+focused correction review passed fresh/existing `--no-run`, Host 11/11, Browser 9/9,
+strict unknown-option validation and cleanup.
 
-**Non-goals:** do not chase line count, formatter churn, naming uniformity, arbitrary
-complexity scores, checksum inventories or theoretical future platforms. Do not rewrite
-a cohesive owner merely because another style is possible. Preserve the approved Mac
-product behavior, Ark boundary, document/recovery guarantees, authenticated APIs,
-renderer isolation, diagnostics privacy and ordinary child cleanup.
+**Non-goals:** do not preserve test count or suite layout; do not delete a behavior test
+merely to shorten the suite; do not add coverage quotas, checksum inventories, benchmark
+gates, qualification frameworks or tests whose only assertion is that the current
+implementation remains arranged the same way.
 
-**Next action:** primary implementer maps the live ownership and state transitions,
-selects simplifications with concrete reductions in indirection or duplicated policy,
-implements them coherently and returns the required exact-commit handoff. Independent
-architecture and preserved-behavior reviews follow before the final verification stage.
+**Next action:** primary implementer performs the final behavior-led test/tooling sweep,
+runs focused checks and returns one exact clean candidate. The lead holds the turn through
+independent review; only after that passes does the final reviewer run `accept:final` on
+the same commit.
 
 **Testing constraint:** do not take over Carl's visible desktop. Use background or
-isolated Mac checks where native behavior matters. Do not run the complete final
-acceptance until the focused reviews pass.
+isolated Mac checks for native behavior.
 
 ## Work queue
 
@@ -55,8 +56,8 @@ order; their implementation details are settled when assigned.
 | Mac architecture reset and complete app | Accepted | Primary implementer | `8a1381ce`: accepted document, execution, reactivity, services, Mac delivery, tests and UI/UX foundation; detailed slice history lives in Git |
 | Local diagnostics and observability | Accepted | Primary implementer | `ea21b96`: bounded private local diagnostics, safe export, durable fatal evidence, truthful timings and full signed-app acceptance |
 | Dead code and dependency removal | Accepted | Primary implementer | `1080f153`: removed confirmed unreachable code, five obsolete files and eight unused dependencies; independent reachability and behavior reviews passed |
-| Production-path simplification | Implementing | Primary implementer | Replace pass-through layers, duplicate ownership and unnecessary policy machinery in the remaining live paths with the smallest cohesive implementation that preserves accepted notebook behavior |
-| Simplification verification and acceptance | Queued | Unassigned | Rebuild affected tests around user-visible behavior, remove obsolete fixtures/tooling, and pass focused workflows plus the complete signed-app acceptance on the simplified tree |
+| Production-path simplification | Accepted | Primary implementer | `a334513` plus `21f678c`: clearer live ownership with launch-scoped no-run restored; architecture and focused behavior reviews passed |
+| Simplification verification and acceptance | Implementing | Primary implementer | Rebuild affected tests around user-visible behavior, remove obsolete fixtures/tooling, and pass focused workflows plus the complete signed-app acceptance on the simplified tree |
 
 The following requirements apply to the relevant slices and are checked again
 when accepting the complete app:
@@ -156,7 +157,7 @@ commit that the next stage can safely simplify.
 
 ## Latest accepted checkpoint
 
-`1080f153` is the accepted Mac application after dead-code and dependency removal; `ea21b96` supplies bounded local diagnostics and `41ccbfd`
+`21f678c` is the accepted Mac application after production-path simplification; `1080f153` removed dead code and dependencies, `ea21b96` supplies bounded local diagnostics and `41ccbfd`
 records the synchronized architecture and workboard state. Independent runtime/privacy
 and performance/storage reviews passed, followed by one uninterrupted signed-app
 acceptance in 347.96 seconds. The run passed R helpers 164, fast host/generative 441
