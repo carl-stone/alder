@@ -305,8 +305,11 @@ test('long notebooks virtualize editors and preserve edited source through recov
       window.scrollTo(0, 0);
       return true;
     })()`), true);
-    await browser.wait(`window.scrollY === 0 &&
-      document.querySelectorAll('.cm-content').length < 25 &&
+    await browser.wait(`(() => {
+      const first = document.querySelector('[data-cell="cell-1"]');
+      const rect = first?.getBoundingClientRect();
+      return rect && rect.bottom > 0 && rect.top < window.innerHeight;
+    })() && document.querySelectorAll('.cm-content').length < 25 &&
       window.__alderHost.client.document.cell('cell-75').desiredBody.join('\\n') === 'value_75 <- 7500\\nvalue_75'`);
 
     await browser.send('Network.enable');
@@ -351,7 +354,7 @@ test('long notebooks virtualize editors and preserve edited source through recov
     if (await browser.evaluate(`document.querySelector('[data-cell="cell-1"] [data-virtual-source]') !== null`)) {
       await browser.click('[data-cell="cell-1"] [data-virtual-source]');
     }
-    await browser.wait(`document.querySelector('[data-cell="cell-1"] [data-act=run]') !== null &&
+    await browser.wait(`!document.querySelector('[data-cell="cell-1"] [data-act=run]')?.disabled &&
       document.querySelector('[data-cell="cell-1"] .cm-content') !== null`);
     await browser.click('[data-cell="cell-1"] [data-act=run]');
     await browser.wait(`window.__alderHost.client.document.snapshot.cells[0].status === 'done' &&

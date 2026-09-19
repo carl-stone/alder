@@ -72175,6 +72175,7 @@ var Controller = class {
   analysisNeeded = /* @__PURE__ */ new Set();
   reactivePending = /* @__PURE__ */ new Set();
   reactiveScheduled = false;
+  explicitRunWaitingForReactive = false;
   clearBeforeEvaluation = /* @__PURE__ */ new Set();
   invalidatedDefinitionsByCell = /* @__PURE__ */ new Map();
   runOperationById = /* @__PURE__ */ new Map();
@@ -73676,6 +73677,12 @@ var Controller = class {
   async prepareRun(command) {
     this.assertNoRuntimeContextReservation();
     this.assertExecutionPossible();
+    this.explicitRunWaitingForReactive = true;
+    try {
+      await this.waitForReactiveExecutionBeforeExplicitRun();
+    } finally {
+      this.explicitRunWaitingForReactive = false;
+    }
     if (this.runPreparationActive || this.activeEvaluation !== null && this.activeEvaluation.cancelMode === null || this.queue.length > 0) {
       throw new ControllerError(
         "run_in_progress",
@@ -73749,6 +73756,17 @@ var Controller = class {
       if (this.runPreparationCancellation === preparation) this.runPreparationCancellation = null;
       this.scheduleWidgetReconciliation();
       this.scheduleReactiveRun();
+    }
+  }
+  async waitForReactiveExecutionBeforeExplicitRun() {
+    while (true) {
+      const jobs = [
+        ...this.activeEvaluation === null ? [] : [this.activeEvaluation.job],
+        ...this.queue
+      ];
+      if (jobs.length === 0 || jobs.some((job) => job.clientId !== INTERNAL_CLIENT_ID)) return;
+      const operations = [...new Set(jobs.map((job) => job.operationId))];
+      await Promise.all(operations.map((operationId) => this.awaitOperation(operationId, INTERNAL_CLIENT_ID)));
     }
   }
   cancelRunPreparation(preparation) {
@@ -73845,7 +73863,7 @@ var Controller = class {
     });
   }
   reactiveRunReady() {
-    return !this.closed && this.executionMode === "automatic" && this.reactivePending.size > 0 && this.kernelAvailable && this.executionReady && this.analyzerAvailable && !this.engineRestarting && this.analysisNeeded.size === 0 && this.analysisInFlight === null && this.activeEvaluation === null && this.queue.length === 0 && !this.runPreparationActive && this.queuedRunCommands.size === 0 && !this.packageInstallActive() && this.runtimeContextReservation === void 0;
+    return !this.closed && this.executionMode === "automatic" && this.reactivePending.size > 0 && this.kernelAvailable && this.executionReady && this.analyzerAvailable && !this.engineRestarting && this.analysisNeeded.size === 0 && this.analysisInFlight === null && this.activeEvaluation === null && this.queue.length === 0 && !this.runPreparationActive && !this.explicitRunWaitingForReactive && this.queuedRunCommands.size === 0 && !this.packageInstallActive() && this.runtimeContextReservation === void 0;
   }
   scheduleReactiveRun() {
     if (this.reactiveScheduled || !this.reactiveRunReady()) return;
@@ -73870,12 +73888,16 @@ var Controller = class {
             "app"
           )) plan.add(candidate);
         }
-        if (plan.size === 0) return;
+        if (plan.size === 0) {
+          this.emit("runtime", this.runtimeSnapshot());
+          return;
+        }
         const operationId = `reactive-${randomUUID3()}`;
         this.createOperation(operationId, "run", INTERNAL_CLIENT_ID);
         this.launchRun(this.graphValue.orderOf(plan), operationId, false, INTERNAL_CLIENT_ID);
       } catch (error61) {
         this.replaceLastActionError(asControllerError(error61).toJSON());
+        if (!this.closed) this.emit("runtime", this.runtimeSnapshot());
       }
     }, 40);
   }
@@ -77026,7 +77048,7 @@ var Controller = class {
       analysisEnvironmentId: this.analysisEnvironmentIdValue,
       executionMode: this.executionMode,
       runOnStartup: this.runOnStartup,
-      busy: this.activeEvaluation !== null || this.queue.length > 0 || this.runPreparationActive || this.queuedRunCommands.size > 0,
+      busy: this.activeEvaluation !== null || this.queue.length > 0 || this.runPreparationActive || this.explicitRunWaitingForReactive || this.queuedRunCommands.size > 0 || this.reactivePending.size > 0,
       activeRunId: this.activeEvaluation?.job.runId ?? queuedRunId
     };
   }

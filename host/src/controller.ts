@@ -300,6 +300,7 @@ export class Controller {
   private readonly analysisNeeded = new Set<string>();
   private readonly reactivePending = new Set<string>();
   private reactiveScheduled = false;
+  private explicitRunWaitingForReactive = false;
   private readonly clearBeforeEvaluation = new Set<string>();
   private readonly invalidatedDefinitionsByCell = new Map<string, Set<string>>();
   private readonly runOperationById = new Map<string, string>();
@@ -1901,6 +1902,12 @@ export class Controller {
   private async prepareRun(command: Extract<HostCommand, { type: "run" }>): Promise<unknown> {
     this.assertNoRuntimeContextReservation();
     this.assertExecutionPossible();
+    this.explicitRunWaitingForReactive = true;
+    try {
+      await this.waitForReactiveExecutionBeforeExplicitRun();
+    } finally {
+      this.explicitRunWaitingForReactive = false;
+    }
     if (this.runPreparationActive
       || (this.activeEvaluation !== null && this.activeEvaluation.cancelMode === null)
       || this.queue.length > 0) {
@@ -1977,6 +1984,18 @@ export class Controller {
       if (this.runPreparationCancellation === preparation) this.runPreparationCancellation = null;
       this.scheduleWidgetReconciliation();
       this.scheduleReactiveRun();
+    }
+  }
+
+  private async waitForReactiveExecutionBeforeExplicitRun(): Promise<void> {
+    while (true) {
+      const jobs = [
+        ...(this.activeEvaluation === null ? [] : [this.activeEvaluation.job]),
+        ...this.queue,
+      ];
+      if (jobs.length === 0 || jobs.some(job => job.clientId !== INTERNAL_CLIENT_ID)) return;
+      const operations = [...new Set(jobs.map(job => job.operationId))];
+      await Promise.all(operations.map(operationId => this.awaitOperation(operationId, INTERNAL_CLIENT_ID)));
     }
   }
 
@@ -2103,6 +2122,7 @@ export class Controller {
       && this.activeEvaluation === null
       && this.queue.length === 0
       && !this.runPreparationActive
+      && !this.explicitRunWaitingForReactive
       && this.queuedRunCommands.size === 0
       && !this.packageInstallActive()
       && this.runtimeContextReservation === undefined;
@@ -2131,12 +2151,16 @@ export class Controller {
             "app",
           )) plan.add(candidate);
         }
-        if (plan.size === 0) return;
+        if (plan.size === 0) {
+          this.emit("runtime", this.runtimeSnapshot());
+          return;
+        }
         const operationId = `reactive-${randomUUID()}`;
         this.createOperation(operationId, "run", INTERNAL_CLIENT_ID);
         this.launchRun(this.graphValue.orderOf(plan), operationId, false, INTERNAL_CLIENT_ID);
       } catch (error) {
         this.replaceLastActionError(asControllerError(error).toJSON());
+        if (!this.closed) this.emit("runtime", this.runtimeSnapshot());
       }
     }, 40);
   }
@@ -5760,7 +5784,8 @@ export class Controller {
       analysisEnvironmentId: this.analysisEnvironmentIdValue,
       executionMode: this.executionMode,
       runOnStartup: this.runOnStartup,
-      busy: this.activeEvaluation !== null || this.queue.length > 0 || this.runPreparationActive || this.queuedRunCommands.size > 0,
+      busy: this.activeEvaluation !== null || this.queue.length > 0 || this.runPreparationActive
+        || this.explicitRunWaitingForReactive || this.queuedRunCommands.size > 0 || this.reactivePending.size > 0,
       activeRunId: this.activeEvaluation?.job.runId ?? queuedRunId,
     };
   }

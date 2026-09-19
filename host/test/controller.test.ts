@@ -1579,6 +1579,45 @@ test("automatic edits run only affected branches in dependency order", async () 
   } finally { await controller.close(); }
 });
 
+test("an explicit Run waits for active automatic work and takes priority over pending reactive work", async () => {
+  const engine = new FakeEngine();
+  engine.deferred = true;
+  const controller = createController({
+    engine,
+    notebook: notebook([["a", "a <- 1"], ["b", "b <- 2"], ["chosen", "chosen <- 3", "chosen"]]),
+    config: resolveSettings({ notebook: { on_startup: false, on_cell_change: "automatic" } }),
+  });
+  try {
+    await controller.start();
+    const edit = (cellId: string, revision: number, body: string) => command(controller, {
+      type: "transaction",
+      changes: [{ type: "edit", cell: { cellId }, expectedRevision: revision, body: [body], cellType: "code" }],
+    });
+    const first = edit("a", 0, "a <- 10");
+    await startCommand(controller, first);
+    await settle(controller, first.requestId);
+    await eventuallyTimed(() => engine.pendingEvaluations.length === 1);
+
+    const second = edit("b", 0, "b <- 20");
+    await startCommand(controller, second);
+    await settle(controller, second.requestId);
+    const explicit = command(controller, { type: "run", scope: "cell", target: { cellId: "chosen" } });
+    const explicitResult = controller.dispatch(explicit);
+    assert.equal(controller.snapshot().runtime.busy, true);
+
+    engine.finishEvaluation();
+    await eventuallyTimed(() => engine.pendingEvaluations.length === 1);
+    assert.equal(engine.pendingEvaluations[0]?.payload.cellId, "chosen");
+    engine.finishEvaluation();
+    assert.equal((await explicitResult).error, null);
+    await eventuallyTimed(() => engine.pendingEvaluations.length === 1);
+    assert.equal(engine.pendingEvaluations[0]?.payload.cellId, "b");
+    engine.finishEvaluation();
+    await eventuallyTimed(() => !controller.snapshot().runtime.busy);
+    assert.deepEqual(engine.evaluations.map(evaluation => evaluation.cellId), ["a", "chosen", "b"]);
+  } finally { await controller.close(); }
+});
+
 test("a newly created code cell joins automatic execution", async () => {
   const engine = new FakeEngine();
   const controller = createController({
