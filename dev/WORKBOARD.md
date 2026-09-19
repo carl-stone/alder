@@ -28,11 +28,20 @@ large corpus, CI matrix or case-count target. The ordinary fast suite remains fa
 heavier installed differential checks live in the compact explicit Mac path and
 clean all children. Deliver the signed Mac build without taking over Carl's desktop.
 
-**Base:** accepted `8990292` (`Remove residual architecture debris`).
+**Checkpoint:** `4fffa64` (`Add bounded generative verification`) on accepted
+`8990292`.
 
-**Next action:** primary implementer adds the four bounded generative checks at
-stable seams, fixes any real failures they expose, minimizes retained regressions
-and returns one checkpoint for fresh review.
+**Correction target:** prove accepted edits are present in the on-disk recovery
+journal before any graceful close can flush them, then reopen through a replacement
+path. Compare full meaningful valid-recovery baselines, including cells/identities,
+path and disk observation. Minimize corrupt recovery bytes or emit an exact compact
+mutation reproducer. Replace the mostly fixed state-action prefix with bounded
+valid interleavings that still guarantee required operation coverage and vary
+crash/conflict/save/discard/detach ordering. Retain the accepted graph, notebook
+parser and packaged-R differential designs.
+
+**Next action:** primary implementer corrects `4fffa64` from the consolidated
+fresh-context review, then returns one checkpoint for focused re-review.
 
 **Testing constraint:** do not take over Carl's visible desktop. Use background
 or isolated Mac GUI checks where native interaction matters. The in-app browser
@@ -62,7 +71,7 @@ order; their implementation details are settled when assigned.
 | Publishing and optional-service simplification | Accepted | Primary implementer | `3680fbf`: immutable saved-snapshot publishing, independent cancellable optional services, safe package restart admission and bounded process cleanup |
 | Mac runtime and settings cleanup | Accepted | Primary implementer | `cc80261`: one R preference path, canonical project recovery, verified/staged Ark/Air/Quarto, accurate Mac claims and real packaged acceptance |
 | Residual architecture and test cleanup | Accepted | Primary implementer | `8990292`: removed trace/strict-JSON/platform/state debris, retained cohesive owners and rebuilt a five-second behavior-led host suite |
-| Targeted generative verification | Implementing | Primary implementer | Add bounded graph properties, malformed document/recovery fuzzing, stateful recovery sequences and ordinary-R differential checks |
+| Targeted generative verification | Implementing | Primary implementer | Prove pre-close recovery durability, compare full baselines, minimize corruption and vary state interleavings at `4fffa64` |
 | UI/UX review and polish | Queued | Unassigned | Review the integrated Mac notebook as a product: visual hierarchy, editing flow, keyboard use, execution and progress feedback, outputs, errors, recovery, menus, settings, empty/loading states and native fit; simplify awkward interactions and deliver a coherent, attractive interface with behavior-led usability checks |
 | Complete Mac app and final acceptance | Queued | Unassigned | Deliver a usable Mac app; exercise the packaged native app through launch/open/type/run/interrupt/save/Save As/reopen/recover/close, multiple notebooks, concurrent GUI/agent edits, client detach and backend failure/recovery; check optional-service failures and observable stalls |
 

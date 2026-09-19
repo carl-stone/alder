@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { createHash } from "node:crypto";
 import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -39,7 +40,7 @@ test("seeded notebook inputs either round-trip exactly or fail within bounded pa
 });
 
 test("seeded corrupt recovery journals preserve saved source and valid journals round-trip", { timeout: 8_000 }, async (context) => {
-  context.diagnostic(`seed=${seedLabel(RECOVERY_SEED)} corruptCases=${RECOVERY_CASES} validCases=12 maxJournalMutationBytes=4096`);
+  context.diagnostic(`seed=${seedLabel(RECOVERY_SEED)} corruptCases=${RECOVERY_CASES} validCases=12 maxReproducerBytes=256`);
   const root = await realpath(await mkdtemp(join(tmpdir(), "alder-generated-recovery-")));
   const savedPath = join(root, "saved.R");
   const savedBytes = Buffer.from('# %%\nsaved <- "café"\n');
@@ -54,19 +55,20 @@ test("seeded corrupt recovery journals preserve saved source and valid journals 
       await writer.flush();
       const valid = await readFile(writer.journalPath);
       await writer.close();
-      const damaged = damageJournal(random, valid, caseIndex);
-      await writeFile(writer.journalPath, damaged);
+      const damage = damageJournal(random, valid, caseIndex);
+      await writeFile(writer.journalPath, damage.bytes);
 
       const reopened = await RecoveryWriter.open({ rootDir: root, key, baseline: baseline(savedPath, savedBytes, 0) });
       const state = await reopened.load();
-      assert.equal(reopened.issue?.code, "recovery_corrupt", `seed=${seedLabel(RECOVERY_SEED)} case=${caseIndex}`);
-      assert.equal(state.pending, false, `seed=${seedLabel(RECOVERY_SEED)} case=${caseIndex}`);
+      const replay = `seed=${seedLabel(RECOVERY_SEED)} case=${caseIndex} reproducer=${JSON.stringify(damage.reproducer)}`;
+      assert.equal(reopened.issue?.code, "recovery_corrupt", replay);
+      assert.equal(state.pending, false, replay);
       assert.deepEqual(decodePhysical(state.baseline.physicalBytes), savedBytes,
-        `fallback changed; seed=${seedLabel(RECOVERY_SEED)} case=${caseIndex}`);
+        `fallback changed; ${replay}`);
       assert.deepEqual(await readFile(savedPath), savedBytes,
-        `saved source overwritten; seed=${seedLabel(RECOVERY_SEED)} case=${caseIndex}`);
-      assert.deepEqual(await readFile(writer.journalPath), damaged,
-        `corrupt journal was not retained; seed=${seedLabel(RECOVERY_SEED)} case=${caseIndex}`);
+        `saved source overwritten; ${replay}`);
+      assert.deepEqual(await readFile(writer.journalPath), damage.bytes,
+        `corrupt journal was not retained; ${replay}`);
       await reopened.close();
     }
 
@@ -81,8 +83,11 @@ test("seeded corrupt recovery journals preserve saved source and valid journals 
       const reopened = await RecoveryWriter.open({ rootDir: root, key, baseline: baseline(savedPath, savedBytes, 0) });
       const state = await reopened.load();
       assert.equal(state.pending, true, `seed=${seedLabel(RECOVERY_SEED)} validCase=${caseIndex}`);
-      assert.equal(state.baseline.documentRevision, expected.documentRevision);
+      // Recovery ID and issue state are writer lifecycle fields; every source-truth
+      // field in the normalized baseline is stable and must match exactly.
+      assert.deepEqual(state.baseline, expected);
       assert.deepEqual(decodePhysical(state.baseline.physicalBytes), source);
+      assert.equal(state.fingerprint, createHash("sha256").update(JSON.stringify(expected)).digest("hex"));
       await reopened.close();
     }
   } finally {
@@ -137,19 +142,29 @@ function baseline(path: string, bytes: Uint8Array, revision: number): RecoveryBa
   };
 }
 
-function damageJournal(random: SeededRandom, valid: Buffer, caseIndex: number): Buffer {
+function damageJournal(random: SeededRandom, valid: Buffer, caseIndex: number): {
+  bytes: Buffer;
+  reproducer: Record<string, string | number>;
+} {
   switch (caseIndex % 6) {
-    case 0: return valid.subarray(0, random.integer(valid.length));
-    case 1: return Buffer.from("{damaged");
-    case 2: return Buffer.from(JSON.stringify({ schemaVersion: 1, baseline: null, fingerprint: "bad" }));
+    case 0: {
+      const length = random.integer(valid.length);
+      return { bytes: valid.subarray(0, length), reproducer: { kind: "truncate", length } };
+    }
+    case 1: return exactReplacement("invalid-json", Buffer.from("{damaged"));
+    case 2: return exactReplacement("missing-baseline", Buffer.from(JSON.stringify({ schemaVersion: 1, baseline: null, fingerprint: "bad" })));
     case 3: {
       const value = JSON.parse(valid.toString("utf8")) as Record<string, unknown>;
       value.fingerprint = "0".repeat(64);
-      return Buffer.from(JSON.stringify(value));
+      return { bytes: Buffer.from(JSON.stringify(value)), reproducer: { kind: "replace-fingerprint", value: "0".repeat(64) } };
     }
-    case 4: return Buffer.from(Array.from({ length: 1 + random.integer(4_096) }, () => random.integer(256)));
-    default: return Buffer.from("[]");
+    case 4: return exactReplacement("random-bytes", Buffer.from(Array.from({ length: 1 + random.integer(64) }, () => random.integer(256))));
+    default: return exactReplacement("wrong-root", Buffer.from("[]"));
   }
+}
+
+function exactReplacement(kind: string, bytes: Buffer): { bytes: Buffer; reproducer: Record<string, string | number> } {
+  return { bytes, reproducer: { kind, payloadHex: bytes.toString("hex") } };
 }
 
 function decodePhysical(value: RecoveryBaseline["physicalBytes"]): Buffer {

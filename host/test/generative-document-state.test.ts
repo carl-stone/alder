@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { fork } from "node:child_process";
+import { createHash, randomUUID } from "node:crypto";
+import { once } from "node:events";
+import { mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { randomUUID } from "node:crypto";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { startHost, type RunningHost } from "../src/application.js";
 import { parseHostCommand, type CommandResult } from "../src/protocol.js";
@@ -11,17 +14,39 @@ import type { ApplicationResources } from "../src/resources.js";
 import { SeededRandom, seedLabel } from "./seeded.js";
 
 const SEED = 0xd0c52026;
-const CASES = 3;
-const ACTIONS = 16;
+const CASES = 4;
+const ACTIONS = 12;
 const ACTION_KINDS = ["edit", "save", "external", "crash-reopen", "save-copy", "discard", "detach"] as const;
 type Action = typeof ACTION_KINDS[number];
 
-test("seeded document and recovery sequences preserve accepted work, disk, revisions, and identity", { timeout: 30_000 }, async (context) => {
+const crashPath = process.env.ALDER_GENERATED_CRASH_PATH;
+if (crashPath !== undefined) {
+  const recoveryDirectory = process.env.ALDER_GENERATED_RECOVERY_DIRECTORY!;
+  const resourceRoot = process.env.ALDER_GENERATED_RESOURCE_ROOT!;
+  const body = process.env.ALDER_GENERATED_CRASH_BODY!;
+  const app = await open(crashPath, resourceRoot, recoveryDirectory);
+  const cell = app.controller.snapshot().cells[0]!;
+  const result = await dispatch(app, { type: "transaction", changes: [{
+    type: "edit", cell: { cellId: cell.id }, expectedRevision: cell.revision, cellType: "code", body: [body],
+  }] });
+  if (result.error !== null) throw new Error(`crash child edit failed: ${JSON.stringify(result.error)}`);
+  const snapshot = app.controller.snapshot();
+  process.send?.({ acknowledged: true, snapshot: {
+    documentRevision: snapshot.documentRevision,
+    path: snapshot.path,
+    cells: snapshot.cells.map((value) => ({ id: value.id, revision: value.revision })),
+    disk: snapshot.disk,
+  } });
+  setInterval(() => {}, 60_000);
+} else test("seeded document and recovery sequences preserve accepted work, disk, revisions, and identity", { timeout: 45_000 }, async (context) => {
   context.diagnostic(`seed=${seedLabel(SEED)} cases=${CASES} actions=${ACTIONS} watcherTimeoutMs=2500`);
   const random = new SeededRandom(SEED);
+  const sequences = Array.from({ length: CASES }, (_, caseIndex) => generateSequence(random, caseIndex));
+  const coverage = new Set(sequences.flat());
+  assert.deepEqual([...ACTION_KINDS].filter((action) => !coverage.has(action)), [], "generated run omitted required action coverage");
+  context.diagnostic(`sequences=${JSON.stringify(sequences)}`);
   for (let caseIndex = 0; caseIndex < CASES; caseIndex += 1) {
-    const required: Action[] = ["edit", "detach", "save", "edit", "external", "crash-reopen", "save-copy", "edit", "external", "discard"];
-    const sequence = [...required, ...Array.from({ length: ACTIONS - required.length }, () => random.pick(ACTION_KINDS))];
+    const sequence = sequences[caseIndex]!;
     const failure = await runSequence(sequence, caseIndex);
     if (failure === null) continue;
     const minimized = await minimize(sequence, caseIndex);
@@ -106,16 +131,19 @@ async function verifySequence(sequence: readonly Action[], caseIndex: number): P
           conflict = false;
         }
       } else if (action === "crash-reopen") {
-        // Replace the process after its acknowledged recovery write, without saving source.
         await primary.close();
-        primary = await open(primaryPath, directory, recoveryDirectory);
+        primary = undefined;
+        const replacement = await crashAndReopen(primaryPath, directory, recoveryDirectory,
+          `value <- ${caseIndex * 1000 + ++editNumber}`, step);
+        primary = replacement.app;
+        working = replacement.body;
+        dirty = true;
+        conflict = replacement.conflict;
         const snapshot = primary.controller.snapshot();
-        assert.equal(snapshot.cells[0]!.body[0], dirty ? working : sourceBody(disk), label(action, step));
+        assert.equal(snapshot.cells[0]!.body[0], working, label(action, step));
         assert.equal(await readFile(primaryPath, "utf8"), disk, label(action, step));
-        if (dirty) {
-          const recovery = await primary.controller.query({ type: "recovery" });
-          assert.ok(recovery.result.candidate !== null, label(action, step));
-        }
+        const recovery = await primary.controller.query({ type: "recovery" });
+        assert.ok(recovery.result.candidate !== null, label(action, step));
       } else if (action === "save-copy") {
         const copy = join(directory, `copy-${copyNumber++}.R`);
         const result = await dispatch(primary, { type: "save-as", path: copy, expectedDestination: "absent" });
@@ -180,11 +208,131 @@ async function verifySequence(sequence: readonly Action[], caseIndex: number): P
 
 async function minimize(sequence: readonly Action[], caseIndex: number): Promise<Action[]> {
   let current = [...sequence];
-  for (let index = current.length - 1; index >= 0; index -= 1) {
+  let attempts = 0;
+  for (let index = current.length - 1; index >= 0 && attempts < 6; index -= 1, attempts += 1) {
     const candidate = current.filter((_, candidateIndex) => candidateIndex !== index);
     if (candidate.length > 0 && await runSequence(candidate, caseIndex) !== null) current = candidate;
   }
   return current;
+}
+
+function generateSequence(random: SeededRandom, caseIndex: number): Action[] {
+  const requiredByCase: readonly (readonly Action[])[] = [
+    ["edit", "crash-reopen", "save"],
+    ["edit", "external", "save-copy"],
+    ["detach", "edit", "external", "discard"],
+    ["edit", "crash-reopen", "save", "detach"],
+  ];
+  for (let attempt = 0; attempt < 64; attempt += 1) {
+    const missing = new Set(requiredByCase[caseIndex] ?? []);
+    const sequence: Action[] = [];
+    let dirty = false, conflict = false, crashed = false;
+    for (let step = 0; step < ACTIONS; step += 1) {
+      const valid = ACTION_KINDS.filter((action) => {
+        if (action === "save") return dirty && !conflict;
+        if (action === "save-copy" || action === "discard") return dirty;
+        if (action === "crash-reopen") return !crashed && missing.has(action);
+        return true;
+      });
+      const required = valid.filter((action) => missing.has(action));
+      const remaining = ACTIONS - step;
+      const pool = required.length > 0 && (random.boolean(0.55) || remaining <= missing.size + 2) ? required : valid;
+      const action = random.pick(pool);
+      sequence.push(action);
+      missing.delete(action);
+      if (action === "edit" || action === "crash-reopen") dirty = true;
+      if (action === "crash-reopen") crashed = true;
+      if (action === "external") conflict = dirty;
+      if (action === "save" || action === "save-copy" || action === "discard") { dirty = false; conflict = false; }
+    }
+    if (missing.size === 0) return sequence;
+  }
+  throw new Error(`could not generate a valid sequence for case ${caseIndex}`);
+}
+
+async function crashAndReopen(path: string, resourceRoot: string, recoveryDirectory: string, body: string, step: number): Promise<{
+  app: RunningHost;
+  body: string;
+  conflict: boolean;
+}> {
+  const child = fork(fileURLToPath(import.meta.url), {
+    execArgv: ["--import", "tsx"],
+    cwd: resolve(dirname(fileURLToPath(import.meta.url)), ".."),
+    env: {
+      ...process.env,
+      ALDER_GENERATED_CRASH_PATH: path,
+      ALDER_GENERATED_RECOVERY_DIRECTORY: recoveryDirectory,
+      ALDER_GENERATED_RESOURCE_ROOT: resourceRoot,
+      ALDER_GENERATED_CRASH_BODY: body,
+    },
+    stdio: ["ignore", "ignore", "pipe", "ipc"],
+  });
+  const diagnostics: Buffer[] = [];
+  child.stderr?.on("data", (chunk) => diagnostics.push(Buffer.from(chunk)));
+  const exit = once(child, "exit");
+  try {
+    const delivered = await Promise.race([
+      once(child, "message").then(([message]) => message),
+      exit.then(([code, signal]) => { throw new Error(`crash child exited before acknowledgement: ${code}/${signal}`); }),
+    ]) as CrashAcknowledgement;
+    assert.equal(delivered.acknowledged, true, label("crash-reopen", step));
+    const journal = await recoveryJournalFor(recoveryDirectory, path);
+    const expected = expectedCrashBaseline(delivered.snapshot, body);
+    const expectedFingerprint = createHash("sha256").update(JSON.stringify(expected)).digest("hex");
+    assert.deepEqual(journal, { schemaVersion: 1, baseline: expected, fingerprint: expectedFingerprint },
+      `acknowledged recovery was not durable before crash; ${label("crash-reopen", step)}`);
+    child.kill("SIGKILL");
+    await exit;
+    const app = await open(path, resourceRoot, recoveryDirectory);
+    const recovery = await app.controller.query({ type: "recovery" });
+    assert.equal(app.controller.snapshot().cells[0]!.body[0], body, label("crash-reopen", step));
+    assert.ok(recovery.result.candidate !== null, label("crash-reopen", step));
+    return { app, body, conflict: recovery.result.candidate?.state === "conflict" };
+  } catch (error) {
+    const stderr = Buffer.concat(diagnostics).toString("utf8").trim();
+    if (stderr) throw new Error(`${error instanceof Error ? error.message : String(error)}\n${stderr}`, { cause: error });
+    throw error;
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill("SIGKILL");
+      await exit.catch(() => undefined);
+    }
+  }
+}
+
+interface CrashAcknowledgement {
+  acknowledged: boolean;
+  snapshot: {
+    documentRevision: number;
+    path: string | null;
+    cells: Array<{ id: string; revision: number }>;
+    disk: { state: "untitled" | "absent" | "present" | "unreadable"; digest: string | null; version: string | null };
+  };
+}
+
+function expectedCrashBaseline(snapshot: CrashAcknowledgement["snapshot"], body: string): Record<string, unknown> {
+  return {
+    schemaVersion: 1,
+    physicalBytes: Buffer.from(notebookSource(body)).toString("base64"),
+    documentRevision: snapshot.documentRevision,
+    cells: snapshot.cells,
+    path: snapshot.path,
+    notebookDiskObservation: snapshot.disk.state === "unreadable"
+      ? { state: "unreadable", digest: null, version: null, error: { code: "disk_unreadable", message: "disk observation was unreadable" } }
+      : { state: snapshot.disk.state, digest: snapshot.disk.digest, version: snapshot.disk.version, error: null },
+  };
+}
+
+async function recoveryJournalFor(recoveryDirectory: string, path: string): Promise<Record<string, unknown>> {
+  for (const entry of await readdir(recoveryDirectory)) {
+    if (!entry.startsWith("recovery-")) continue;
+    try {
+      const journal = JSON.parse(await readFile(join(recoveryDirectory, entry, "journal.json"), "utf8")) as Record<string, unknown>;
+      const baseline = journal.baseline as { path?: unknown } | undefined;
+      if (baseline?.path === path) return journal;
+    } catch { /* another session may not currently have a journal */ }
+  }
+  throw new Error(`no durable recovery journal found for ${path}`);
 }
 
 async function open(path: string, resourceRoot: string, recoveryDirectory: string): Promise<RunningHost> {
