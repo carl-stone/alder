@@ -31,24 +31,21 @@ reactive, service and recovery behavior. Validate with representative notebook
 screens/states, behavior-led interaction checks and a signed Mac build without
 taking over Carl's desktop.
 
-**Checkpoint 2:** `330d091` (`Polish notebook workspace presentation`) on accepted
-interaction checkpoint `dbfa1df` and accepted `d88ca7d`.
+**Checkpoint 2:** `bc777f7` (`Correct notebook presentation evidence`) on
+`330d091`, accepted interaction checkpoint `dbfa1df` and accepted `d88ca7d`.
 
-**Correction target:** install a real CodeMirror `HighlightStyle`/
-`syntaxHighlighting` extension for light/dark editor states. Replace the synthetic
-mock-DOM capture matrix with the production renderer/editor and make every named
-state truthful, including Settings/focus, graph diagnostics, HTML/widgets/errors,
-actual 200% page reflow and observable reduced-motion evidence. Make the narrow
-inspector a fixed viewport drawer with scroll lock/inert background, correct focus
-lifecycle when crossing breakpoints, Tab/Shift-Tab containment and focus return.
-Keep interior dialog clicks open while backdrop clicks dismiss. Give repeated cell
-controls cell-specific names and close action disclosures after selection. Reduce
-connection loss to one intentional live announcement. Add isolated non-activating
-native titlebar/menu/dialog evidence before final UI acceptance.
+**Correction target:** retain the accepted visual and accessibility implementation.
+Replace the standalone sample native-capture window/menu with a non-activating
+harness that instantiates Alder's actual production Electron shell or its exported
+production window/menu construction. Evidence must reflect real document title/
+edited/represented-file state, minimum sizing, menu roles and actual accelerators
+(`Cmd-Enter`, `Cmd-.`), plus production native dialog wiring; do not cite a hand-
+built facsimile. Regenerate the native artifact and clean only owned build/test
+temporaries needed to restore packaging capacity.
 
-**Next action:** primary implementer corrects visual checkpoint 2 at `330d091`,
-then returns a real-renderer screenshot matrix and focused behavior evidence for
-parallel re-review.
+**Next action:** primary implementer corrects the native evidence harness at
+`bc777f7`, rebuilds/signs from a clean bounded environment and returns the tiny
+delta for final workflow re-review.
 
 **Testing constraint:** do not take over Carl's visible desktop. Use background
 or isolated Mac GUI checks where native interaction matters. The in-app browser
@@ -79,7 +76,7 @@ order; their implementation details are settled when assigned.
 | Mac runtime and settings cleanup | Accepted | Primary implementer | `cc80261`: one R preference path, canonical project recovery, verified/staged Ark/Air/Quarto, accurate Mac claims and real packaged acceptance |
 | Residual architecture and test cleanup | Accepted | Primary implementer | `8990292`: removed trace/strict-JSON/platform/state debris, retained cohesive owners and rebuilt a five-second behavior-led host suite |
 | Targeted generative verification | Accepted | Primary implementer | `d88ca7d`: bounded independent graph/document/recovery/state/R verification with real crash durability and replayable failures |
-| UI/UX review and polish | Implementing | Primary implementer | Wire real editor theming, real-renderer evidence, correct modal drawer/dialog behavior and accessibility at `330d091` |
+| UI/UX review and polish | Implementing | Primary implementer | Replace sample native evidence with the production Electron shell and restore clean package capacity at `bc777f7` |
 | Complete Mac app and final acceptance | Queued | Unassigned | Deliver a usable Mac app; exercise the packaged native app through launch/open/type/run/interrupt/save/Save As/reopen/recover/close, multiple notebooks, concurrent GUI/agent edits, client detach and backend failure/recovery; check optional-service failures and observable stalls |
 
 The following requirements apply to the relevant slices and are checked again

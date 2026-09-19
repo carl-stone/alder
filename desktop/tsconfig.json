@@ -3,6 +3,7 @@
     "target": "ES2022",
     "module": "ESNext",
     "moduleResolution": "Bundler",
+    "allowImportingTsExtensions": true,
     "lib": ["ES2022", "DOM"],
     "strict": true,
     "esModuleInterop": true,
@@ -14,6 +15,8 @@
   },
   "include": [
     "src/**/*.ts",
+    "src/**/*.mts",
+    "scripts/**/*.mts",
     "*.config.ts",
     "../host/src/protocol.ts",
     "../host/src/resources.ts",

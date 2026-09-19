@@ -1,4 +1,5 @@
 import { NativeRecoveryStore } from "./recovery-store.js";
+import { ALDER_APP_NAME, applyNativeWindowState, assertNativeDialogRuntime, installNativeMenu, nativeWindowOptions } from "./native-shell.mjs";
 import { observeSaveAsDestination } from "../../host/src/persistence.js";
 import { realpath } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
@@ -46,7 +47,7 @@ const IPC_CHANNELS = Object.freeze({
   desktopCommand: "alderDesktop:desktopCommand",
 } as const);
 
-const APP_NAME = "Alder";
+const APP_NAME = ALDER_APP_NAME;
 const MAX_TICKET_RESPONSE_BYTES = 64 * 1024;
 const MAX_QUERY_RESPONSE_BYTES = 16 * 1024 * 1024;
 const CLOSE_SETTLEMENT_TIMEOUT_MS = 5_000;
@@ -341,6 +342,7 @@ export class ElectronMain implements ElectronMainApplication {
   constructor(runtime: ElectronRuntime = loadElectronRuntime(), options: ElectronMainOptions = {}) {
     this.runtime = runtime;
     this.options = options;
+    assertNativeDialogRuntime(runtime.dialog);
   }
 
   async start(): Promise<boolean> {
@@ -462,23 +464,11 @@ export class ElectronMain implements ElectronMainApplication {
       throw error;
     }
 
-    const window = new this.runtime.BrowserWindow({
-      width: 1440,
-      height: 960,
-      minWidth: 720,
-      minHeight: 600,
-      show: false,
-      title: APP_NAME,
-      webPreferences: {
-        preload: this.options.preloadPath ?? join(__dirname, "preload.cjs"),
-        nodeIntegration: false,
-        contextIsolation: true,
-        // Authentication lasts only for this window; draft files are stored by the native bridge.
-        partition: "alder-" + randomUUID(),
-        sandbox: true,
-        webSecurity: true,
-      },
-    });
+    const window = new this.runtime.BrowserWindow(nativeWindowOptions(
+      this.options.preloadPath ?? join(__dirname, "preload.cjs"),
+      // Authentication lasts only for this window; draft files are stored by the native bridge.
+      "alder-" + randomUUID(),
+    ));
     window.webContents.session?.setPermissionRequestHandler?.((_webContents, _permission, callback) => callback(false));
     window.webContents.session?.setPermissionCheckHandler?.(() => false);
     const record: ElectronWindowRecord = {
@@ -511,7 +501,7 @@ export class ElectronMain implements ElectronMainApplication {
       if (!record.closing) void this.requestClose(record);
     });
     window.on("closed", () => { void this.disposeRecord(record); });
-    window.setTitle?.(canonical ? `${basename(canonical)} — ${APP_NAME}` : APP_NAME);
+    applyNativeWindowState(window, { path: canonical, dirty: false });
     try {
       await this.loadAuthenticatedNotebook(record, ticket);
     } catch (error) {
@@ -670,9 +660,7 @@ export class ElectronMain implements ElectronMainApplication {
       if (state.sessionEpoch !== record.connection.epoch) throw new Error("Window state belongs to another session");
       record.windowState = state;
       record.dirty = state.dirty;
-      record.window.setDocumentEdited?.(state.dirty);
-      if (state.path) record.window.setRepresentedFilename?.(state.path);
-      record.window.setTitle?.(`${state.path ? basename(state.path) : "Untitled"}${state.dirty ? " — Edited" : ""} — ${APP_NAME}`);
+      applyNativeWindowState(record.window, state);
     });
     ipc.removeHandler?.(IPC_CHANNELS.commandResult);
     ipc.handle(IPC_CHANNELS.commandResult, (event, ...args) => {
@@ -779,69 +767,18 @@ export class ElectronMain implements ElectronMainApplication {
   }
 
   private rebuildMenu(): void {
-    const action = (name: WindowAction) => (): void => {
+    const dispatch = (name: WindowAction): void => {
       const record = this.focusedRecord() ?? this.firstRecord();
       if (record) void this.dispatchAction(record, name).catch(error => this.showApplicationError("Alder", error instanceof Error ? error.message : String(error)));
     };
-    const fileSubmenu: Record<string, unknown>[] = [
-      { label: "New Notebook", accelerator: "CmdOrCtrl+N", click: () => void this.openNotebook(null) },
-      { label: "Open…", accelerator: "CmdOrCtrl+O", click: () => void this.openNotebookFromDialog(this.focusedRecord() ?? this.firstRecord()) },
-      { label: "New Window for Notebook…", accelerator: "CmdOrCtrl+Alt+O", click: () => void this.openNotebookFromDialog(undefined, true) },
-      { label: "Recent", submenu: this.recentPaths.length === 0 ? [{ label: "No recent notebooks", enabled: false }] : this.recentPaths.map(path => ({ label: path, click: () => void this.openNotebook(path) })) },
-      { type: "separator" },
-      { label: "Save", accelerator: "CmdOrCtrl+S", click: action("save") },
-      { label: "Save As…", accelerator: "CmdOrCtrl+Shift+S", click: action("save-as") },
-      { label: "Format Notebook", click: action("format") },
-      { label: "Packages…", click: action("packages") },
-      { label: "Publish HTML…", click: action("publish") },
-      { type: "separator" },
-      { label: "Close", role: "close", click: () => { const record = this.focusedRecord(); if (record) void this.requestClose(record); } },
-    ];
-    const runSubmenu: Record<string, unknown>[] = [
-      { label: "Run Cell", accelerator: "CmdOrCtrl+Enter", click: action("run-cell") },
-      { label: "Run and Advance", accelerator: "Shift+Enter", click: action("run-and-advance") },
-      { label: "Run All", accelerator: "CmdOrCtrl+Shift+Enter", click: action("run-all") },
-      { label: "Run Outdated Cells", click: action("run-stale") },
-      { label: "Interrupt R", accelerator: "CmdOrCtrl+.", click: action("interrupt") },
-      { label: "Restart R", click: action("restart") },
-    ];
-    const settingsSubmenu: Record<string, unknown>[] = [
-      { role: "about" },
-      { type: "separator" },
-      { label: "Settings…", accelerator: "CmdOrCtrl+,", click: action("settings") },
-      { label: "Choose R…", click: action("select-r") },
-      { type: "separator" },
-      { role: "services" },
-      { type: "separator" },
-      { role: "hide" }, { role: "hideOthers" }, { role: "unhide" },
-    ];
-    const editSubmenu: Record<string, unknown>[] = [
-      { role: "undo" }, { role: "redo" }, { type: "separator" },
-      { role: "cut" }, { role: "copy" }, { role: "paste" },
-      { role: "selectAll" },
-    ];
-    const viewSubmenu: Record<string, unknown>[] = [
-      { label: "Toggle Notebook Sidebar", accelerator: "CmdOrCtrl+Alt+S", click: action("toggle-notebook") },
-      { label: "Preview", accelerator: "CmdOrCtrl+Shift+P", click: action("preview") },
-      { type: "separator" }, { role: "togglefullscreen" },
-    ];
-    const windowSubmenu: Record<string, unknown>[] = [
-      { role: "minimize" }, { role: "zoom" }, { type: "separator" }, { role: "front" },
-    ];
-    const helpSubmenu: Record<string, unknown>[] = [
-      { label: "Keyboard Shortcuts", click: action("shortcuts") },
-      { label: "R Documentation", accelerator: "F1", click: action("r-documentation") },
-    ];
-    const template: Record<string, unknown>[] = [
-      { label: APP_NAME, submenu: [...settingsSubmenu, { type: "separator" }, { role: "quit" }] },
-      { label: "File", submenu: fileSubmenu },
-      { label: "Edit", submenu: editSubmenu },
-      { label: "View", submenu: viewSubmenu },
-      { label: "Run", submenu: runSubmenu },
-      { label: "Window", submenu: windowSubmenu },
-      { label: "Help", submenu: helpSubmenu },
-    ];
-    this.runtime.Menu.setApplicationMenu(this.runtime.Menu.buildFromTemplate(template));
+    installNativeMenu(this.runtime.Menu, {
+      newNotebook: () => { void this.openNotebook(null); },
+      openNotebook: () => { void this.openNotebookFromDialog(this.focusedRecord() ?? this.firstRecord()); },
+      openNotebookInNewWindow: () => { void this.openNotebookFromDialog(undefined, true); },
+      openRecent: path => { void this.openNotebook(path); },
+      dispatch,
+      closeWindow: () => { const record = this.focusedRecord(); if (record) void this.requestClose(record); },
+    }, this.recentPaths);
   }
 
   private async openNotebookFromDialog(source: ElectronWindowRecord | undefined, newWindow = false): Promise<void> {

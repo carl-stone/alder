@@ -7,6 +7,7 @@ import { join } from "node:path";
 
 import { HOST_PROTOCOL, type SessionConnection } from "../src/protocol.js";
 import { authenticatedNotebookUrl, ElectronMain, isLoopbackHttpOrigin, isTrustedApplicationOrigin, type ElectronRuntime, type ElectronWindow } from "../../desktop/src/main.js";
+import { applyNativeWindowState, nativeMenuTemplate, nativeWindowOptions } from "../../desktop/src/native-shell.mjs";
 
 type RequestHandler = (path: string, init?: RequestInit) => Promise<Response>;
 
@@ -229,6 +230,39 @@ test("native menus expose the notebook command hierarchy and keyboard flow", () 
   assert.equal(view.some(item => item.role === "reload" || item.role === "toggleDevTools"), false);
   const help = template.find(item => item.label === "Help")!.submenu as Record<string, any>[];
   assert.equal(help.find(item => item.label === "R Documentation")?.accelerator, "F1");
+});
+
+test("native evidence and ElectronMain share production window, state, and menu construction", () => {
+  const actions: string[] = [];
+  const template = nativeMenuTemplate({
+    newNotebook: () => undefined,
+    openNotebook: () => undefined,
+    openNotebookInNewWindow: () => undefined,
+    openRecent: () => undefined,
+    dispatch: action => { actions.push(action); },
+    closeWindow: () => undefined,
+  }, []);
+  const run = template.find(item => item.label === "Run")!.submenu as Record<string, any>[];
+  assert.equal(run.find(item => item.label === "Run Cell")?.accelerator, "CmdOrCtrl+Enter");
+  assert.equal(run.find(item => item.label === "Interrupt R")?.accelerator, "CmdOrCtrl+.");
+  run.find(item => item.label === "Run Cell")?.click();
+  run.find(item => item.label === "Interrupt R")?.click();
+  assert.deepEqual(actions, ["run-cell", "interrupt"]);
+  const application = template.find(item => item.label === "Alder")!.submenu as Record<string, any>[];
+  for (const role of ["about", "services", "hide", "hideOthers", "unhide", "quit"]) {
+    assert.ok(application.some(item => item.role === role), role);
+  }
+
+  const options = nativeWindowOptions("/tmp/preload.cjs", "alder-test");
+  assert.equal(options.show, false);
+  assert.equal(options.minWidth, 720);
+  assert.equal(options.minHeight, 600);
+  assert.equal((options.webPreferences as Record<string, unknown>).sandbox, true);
+  const target = windowWithLoad();
+  applyNativeWindowState(target, { path: "/tmp/evidence.R", dirty: true });
+  assert.equal(target.titles.at(-1), "evidence.R — Edited — Alder");
+  assert.equal(target.documentEdits.at(-1), true);
+  assert.equal(target.representedFiles.at(-1), "/tmp/evidence.R");
 });
 
 test("Open and startup errors use ownerless native dialogs", async () => {
