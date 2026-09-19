@@ -1618,6 +1618,49 @@ test("an explicit Run waits for active automatic work and takes priority over pe
   } finally { await controller.close(); }
 });
 
+test("Stop cancels automatic work and an explicit Run waiting behind it", async () => {
+  const engine = new FakeEngine();
+  engine.deferred = true;
+  const controller = createController({
+    engine,
+    notebook: notebook([["active", "active <- 1"], ["pending", "pending <- 2"], ["chosen", "chosen <- 3", "chosen"]]),
+    config: resolveSettings({ notebook: { on_startup: false, on_cell_change: "automatic" } }),
+  });
+  try {
+    await controller.start();
+    const edit = (cellId: string, body: string) => command(controller, {
+      type: "transaction",
+      changes: [{ type: "edit", cell: { cellId }, expectedRevision: 0, body: [body], cellType: "code" }],
+    });
+    const first = edit("active", "active <- 10");
+    await startCommand(controller, first);
+    await settle(controller, first.requestId);
+    await eventuallyTimed(() => engine.pendingEvaluations.length === 1);
+
+    const second = edit("pending", "pending <- 20");
+    await startCommand(controller, second);
+    await settle(controller, second.requestId);
+    const explicit = command(controller, { type: "run", scope: "cell", target: { cellId: "chosen" } });
+    const explicitResult = controller.dispatch(explicit);
+    await new Promise(resolve => setImmediate(resolve));
+
+    const stop = await controller.dispatch(command(controller, { type: "interrupt" }));
+    assert.equal(stop.error, null);
+    assert.equal(engine.interrupts.length, 1);
+    engine.finishEvaluation({ ok: false, error: { message: "Interrupted", interrupted: true } });
+    assert.equal((await explicitResult).error?.code, "interrupted");
+    await eventuallyTimed(() => !controller.snapshot().runtime.busy);
+    assert.deepEqual(engine.evaluations.map(evaluation => evaluation.cellId), ["active"]);
+
+    const later = controller.dispatch(command(controller, { type: "run", scope: "cell", target: { cellId: "chosen" } }));
+    await eventuallyTimed(() => engine.pendingEvaluations.length === 1);
+    assert.equal(engine.pendingEvaluations[0]?.payload.cellId, "chosen");
+    engine.finishEvaluation();
+    assert.equal((await later).error, null);
+    await eventuallyTimed(() => !controller.snapshot().runtime.busy);
+  } finally { await controller.close(); }
+});
+
 test("a newly created code cell joins automatic execution", async () => {
   const engine = new FakeEngine();
   const controller = createController({

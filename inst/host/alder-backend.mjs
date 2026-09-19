@@ -72175,7 +72175,6 @@ var Controller = class {
   analysisNeeded = /* @__PURE__ */ new Set();
   reactivePending = /* @__PURE__ */ new Set();
   reactiveScheduled = false;
-  explicitRunWaitingForReactive = false;
   clearBeforeEvaluation = /* @__PURE__ */ new Set();
   invalidatedDefinitionsByCell = /* @__PURE__ */ new Map();
   runOperationById = /* @__PURE__ */ new Map();
@@ -73677,40 +73676,6 @@ var Controller = class {
   async prepareRun(command) {
     this.assertNoRuntimeContextReservation();
     this.assertExecutionPossible();
-    this.explicitRunWaitingForReactive = true;
-    try {
-      await this.waitForReactiveExecutionBeforeExplicitRun();
-    } finally {
-      this.explicitRunWaitingForReactive = false;
-    }
-    if (this.runPreparationActive || this.activeEvaluation !== null && this.activeEvaluation.cancelMode === null || this.queue.length > 0) {
-      throw new ControllerError(
-        "run_in_progress",
-        "cannot start a run: one is already active or queued",
-        409
-      );
-    }
-    this.assertDocumentRevision(command.expectedDocumentRevision);
-    let preflightTargetId = null;
-    let preflightStaged;
-    if (command.scope === "cell") {
-      const target = command.target;
-      if (target === void 0) throw new ControllerError("invalid_request", "cell runs require a target", 400);
-      if ((command.changes?.length ?? 0) > 0) {
-        const staged = this.stageDocument(command.changes ?? []);
-        preflightStaged = staged;
-        if ("cellId" in target) {
-          if (!staged.document.cells.some((cell) => cell.id === target.cellId)) throw new ControllerError("not_found", "no such cell: " + target.cellId, 404);
-          preflightTargetId = target.cellId;
-        } else {
-          const created = staged.created.get(target.creationId);
-          if (created === void 0 || !staged.document.cells.some((cell) => cell.id === created)) throw new ControllerError("not_found", "no such transaction creation: " + target.creationId, 404);
-          preflightTargetId = created;
-        }
-      } else {
-        preflightTargetId = this.resolveCellRef(target);
-      }
-    }
     this.runPreparationActive = true;
     const preparation = {
       operationId: command.requestId,
@@ -73719,6 +73684,36 @@ var Controller = class {
     };
     this.runPreparationCancellation = preparation;
     try {
+      await this.waitForReactiveExecutionBeforeExplicitRun();
+      if (this.cancelRunPreparation(preparation)) return void 0;
+      if (this.activeEvaluation !== null && this.activeEvaluation.cancelMode === null || this.queue.length > 0) {
+        throw new ControllerError(
+          "run_in_progress",
+          "cannot start a run: one is already active or queued",
+          409
+        );
+      }
+      this.assertDocumentRevision(command.expectedDocumentRevision);
+      let preflightTargetId = null;
+      let preflightStaged;
+      if (command.scope === "cell") {
+        const target = command.target;
+        if (target === void 0) throw new ControllerError("invalid_request", "cell runs require a target", 400);
+        if ((command.changes?.length ?? 0) > 0) {
+          const staged = this.stageDocument(command.changes ?? []);
+          preflightStaged = staged;
+          if ("cellId" in target) {
+            if (!staged.document.cells.some((cell) => cell.id === target.cellId)) throw new ControllerError("not_found", "no such cell: " + target.cellId, 404);
+            preflightTargetId = target.cellId;
+          } else {
+            const created = staged.created.get(target.creationId);
+            if (created === void 0 || !staged.document.cells.some((cell) => cell.id === created)) throw new ControllerError("not_found", "no such transaction creation: " + target.creationId, 404);
+            preflightTargetId = created;
+          }
+        } else {
+          preflightTargetId = this.resolveCellRef(target);
+        }
+      }
       let changes;
       if ((command.changes?.length ?? 0) > 0) {
         changes = await this.applyTransaction(command.changes ?? [], command.expectedDocumentRevision, command.requestId, false, preflightStaged);
@@ -73863,7 +73858,7 @@ var Controller = class {
     });
   }
   reactiveRunReady() {
-    return !this.closed && this.executionMode === "automatic" && this.reactivePending.size > 0 && this.kernelAvailable && this.executionReady && this.analyzerAvailable && !this.engineRestarting && this.analysisNeeded.size === 0 && this.analysisInFlight === null && this.activeEvaluation === null && this.queue.length === 0 && !this.runPreparationActive && !this.explicitRunWaitingForReactive && this.queuedRunCommands.size === 0 && !this.packageInstallActive() && this.runtimeContextReservation === void 0;
+    return !this.closed && this.executionMode === "automatic" && this.reactivePending.size > 0 && this.kernelAvailable && this.executionReady && this.analyzerAvailable && !this.engineRestarting && this.analysisNeeded.size === 0 && this.analysisInFlight === null && this.activeEvaluation === null && this.queue.length === 0 && !this.runPreparationActive && this.queuedRunCommands.size === 0 && !this.packageInstallActive() && this.runtimeContextReservation === void 0;
   }
   scheduleReactiveRun() {
     if (this.reactiveScheduled || !this.reactiveRunReady()) return;
@@ -74420,7 +74415,10 @@ var Controller = class {
   async interruptActiveRun(targetRunId) {
     this.assertStarted();
     let cancelledQueued = false;
+    let cancelledReactive = false;
     if (targetRunId === void 0) {
+      cancelledReactive = this.reactivePending.size > 0;
+      this.reactivePending.clear();
       for (const command of this.queuedRunCommands.values()) {
         this.failOperation(command.requestId, hostError("interrupted", "Interrupted", command.requestId), command.clientId);
         cancelledQueued = true;
@@ -74428,14 +74426,12 @@ var Controller = class {
       this.queuedRunCommands.clear();
     }
     const preparation = this.runPreparationCancellation;
-    if (preparation !== null && this.runPreparationActive) {
-      if (targetRunId !== void 0) {
-        throw new ControllerError("not_found", "no such active run: " + targetRunId, 404);
-      }
+    let cancelledPreparation = false;
+    if (preparation !== null && this.runPreparationActive && targetRunId === void 0) {
       preparation.cancelled = true;
+      cancelledPreparation = true;
       this.markOperationCancellationRequested(preparation.operationId, preparation.clientId);
       this.bump("runtime", this.runtimeSnapshot(), { operationId: preparation.operationId });
-      return { runId: null, requested: true };
     }
     const active = this.activeEvaluation;
     if (active === null) {
@@ -74455,7 +74451,7 @@ var Controller = class {
         });
         return { runId: runId2, requested: true };
       }
-      if (cancelledQueued) return { runId: null, requested: true };
+      if (cancelledQueued || cancelledReactive || cancelledPreparation) return { runId: null, requested: true };
       if (targetRunId === void 0 && this.pendingInspection !== null) {
         const pending = this.pendingInspection;
         this.pendingInspection = null;
@@ -77048,7 +77044,7 @@ var Controller = class {
       analysisEnvironmentId: this.analysisEnvironmentIdValue,
       executionMode: this.executionMode,
       runOnStartup: this.runOnStartup,
-      busy: this.activeEvaluation !== null || this.queue.length > 0 || this.runPreparationActive || this.explicitRunWaitingForReactive || this.queuedRunCommands.size > 0 || this.reactivePending.size > 0,
+      busy: this.activeEvaluation !== null || this.queue.length > 0 || this.runPreparationActive || this.queuedRunCommands.size > 0 || this.reactivePending.size > 0,
       activeRunId: this.activeEvaluation?.job.runId ?? queuedRunId
     };
   }

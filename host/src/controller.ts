@@ -300,7 +300,6 @@ export class Controller {
   private readonly analysisNeeded = new Set<string>();
   private readonly reactivePending = new Set<string>();
   private reactiveScheduled = false;
-  private explicitRunWaitingForReactive = false;
   private readonly clearBeforeEvaluation = new Set<string>();
   private readonly invalidatedDefinitionsByCell = new Map<string, Set<string>>();
   private readonly runOperationById = new Map<string, string>();
@@ -1902,42 +1901,6 @@ export class Controller {
   private async prepareRun(command: Extract<HostCommand, { type: "run" }>): Promise<unknown> {
     this.assertNoRuntimeContextReservation();
     this.assertExecutionPossible();
-    this.explicitRunWaitingForReactive = true;
-    try {
-      await this.waitForReactiveExecutionBeforeExplicitRun();
-    } finally {
-      this.explicitRunWaitingForReactive = false;
-    }
-    if (this.runPreparationActive
-      || (this.activeEvaluation !== null && this.activeEvaluation.cancelMode === null)
-      || this.queue.length > 0) {
-      throw new ControllerError(
-        "run_in_progress",
-        "cannot start a run: one is already active or queued",
-        409,
-      );
-    }
-    this.assertDocumentRevision(command.expectedDocumentRevision);
-    let preflightTargetId: string | null = null;
-    let preflightStaged: ReturnType<typeof stageDocumentChanges> | undefined;
-    if (command.scope === "cell") {
-      const target = command.target;
-      if (target === undefined) throw new ControllerError("invalid_request", "cell runs require a target", 400);
-      if ((command.changes?.length ?? 0) > 0) {
-        const staged = this.stageDocument(command.changes ?? []);
-        preflightStaged = staged;
-        if ("cellId" in target) {
-          if (!staged.document.cells.some((cell) => cell.id === target.cellId)) throw new ControllerError("not_found", "no such cell: " + target.cellId, 404);
-          preflightTargetId = target.cellId;
-        } else {
-          const created = staged.created.get(target.creationId);
-          if (created === undefined || !staged.document.cells.some((cell) => cell.id === created)) throw new ControllerError("not_found", "no such transaction creation: " + target.creationId, 404);
-          preflightTargetId = created;
-        }
-      } else {
-        preflightTargetId = this.resolveCellRef(target);
-      }
-    }
     this.runPreparationActive = true;
     const preparation = {
       operationId: command.requestId,
@@ -1946,6 +1909,37 @@ export class Controller {
     };
     this.runPreparationCancellation = preparation;
     try {
+      await this.waitForReactiveExecutionBeforeExplicitRun();
+      if (this.cancelRunPreparation(preparation)) return undefined;
+      if ((this.activeEvaluation !== null && this.activeEvaluation.cancelMode === null)
+        || this.queue.length > 0) {
+        throw new ControllerError(
+          "run_in_progress",
+          "cannot start a run: one is already active or queued",
+          409,
+        );
+      }
+      this.assertDocumentRevision(command.expectedDocumentRevision);
+      let preflightTargetId: string | null = null;
+      let preflightStaged: ReturnType<typeof stageDocumentChanges> | undefined;
+      if (command.scope === "cell") {
+        const target = command.target;
+        if (target === undefined) throw new ControllerError("invalid_request", "cell runs require a target", 400);
+        if ((command.changes?.length ?? 0) > 0) {
+          const staged = this.stageDocument(command.changes ?? []);
+          preflightStaged = staged;
+          if ("cellId" in target) {
+            if (!staged.document.cells.some((cell) => cell.id === target.cellId)) throw new ControllerError("not_found", "no such cell: " + target.cellId, 404);
+            preflightTargetId = target.cellId;
+          } else {
+            const created = staged.created.get(target.creationId);
+            if (created === undefined || !staged.document.cells.some((cell) => cell.id === created)) throw new ControllerError("not_found", "no such transaction creation: " + target.creationId, 404);
+            preflightTargetId = created;
+          }
+        } else {
+          preflightTargetId = this.resolveCellRef(target);
+        }
+      }
       let changes: Record<string, unknown> | undefined;
       if ((command.changes?.length ?? 0) > 0) {
         changes = await this.applyTransaction(command.changes ?? [], command.expectedDocumentRevision, command.requestId, false, preflightStaged) as Record<string, unknown>;
@@ -2122,7 +2116,6 @@ export class Controller {
       && this.activeEvaluation === null
       && this.queue.length === 0
       && !this.runPreparationActive
-      && !this.explicitRunWaitingForReactive
       && this.queuedRunCommands.size === 0
       && !this.packageInstallActive()
       && this.runtimeContextReservation === undefined;
@@ -2759,7 +2752,10 @@ export class Controller {
   private async interruptActiveRun(targetRunId?: string): Promise<unknown> {
     this.assertStarted();
     let cancelledQueued = false;
+    let cancelledReactive = false;
     if (targetRunId === undefined) {
+      cancelledReactive = this.reactivePending.size > 0;
+      this.reactivePending.clear();
       for (const command of this.queuedRunCommands.values()) {
         this.failOperation(command.requestId, hostError("interrupted", "Interrupted", command.requestId), command.clientId);
         cancelledQueued = true;
@@ -2767,14 +2763,12 @@ export class Controller {
       this.queuedRunCommands.clear();
     }
     const preparation = this.runPreparationCancellation;
-    if (preparation !== null && this.runPreparationActive) {
-      if (targetRunId !== undefined) {
-        throw new ControllerError("not_found", "no such active run: " + targetRunId, 404);
-      }
+    let cancelledPreparation = false;
+    if (preparation !== null && this.runPreparationActive && targetRunId === undefined) {
       preparation.cancelled = true;
+      cancelledPreparation = true;
       this.markOperationCancellationRequested(preparation.operationId, preparation.clientId);
       this.bump("runtime", this.runtimeSnapshot(), { operationId: preparation.operationId });
-      return { runId: null, requested: true };
     }
     const active = this.activeEvaluation;
     if (active === null) {
@@ -2794,7 +2788,7 @@ export class Controller {
         });
         return { runId, requested: true };
       }
-      if (cancelledQueued) return { runId: null, requested: true };
+      if (cancelledQueued || cancelledReactive || cancelledPreparation) return { runId: null, requested: true };
       if (targetRunId === undefined && this.pendingInspection !== null) {
         const pending = this.pendingInspection;
         this.pendingInspection = null;
@@ -5785,7 +5779,7 @@ export class Controller {
       executionMode: this.executionMode,
       runOnStartup: this.runOnStartup,
       busy: this.activeEvaluation !== null || this.queue.length > 0 || this.runPreparationActive
-        || this.explicitRunWaitingForReactive || this.queuedRunCommands.size > 0 || this.reactivePending.size > 0,
+        || this.queuedRunCommands.size > 0 || this.reactivePending.size > 0,
       activeRunId: this.activeEvaluation?.job.runId ?? queuedRunId,
     };
   }

@@ -826,6 +826,64 @@ test("editing a queued batch cell prevents its old effects and retains unaffecte
   }
 });
 
+test("Stop cancels an explicit Run waiting behind automatic Ark execution", {
+  skip: !APPLICATION_ROOT, timeout: 60_000,
+}, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "alder-host-reactive-stop-"));
+  const path = join(directory, "notebook.R");
+  await writeFile(path, "# %%\nactive <- 1; active\n# %%\npending <- 2; pending\n# %%\nchosen <- 3; chosen\n");
+  let app: RunningHost | undefined;
+  try {
+    app = await startInstalledHost(path, { executionMode: "automatic" });
+    const controller = app.controller;
+    const firstEdit = await dispatchHost(app, {
+      type: "transaction",
+      changes: [{ type: "edit", cell: { cellId: "cell-1" }, expectedRevision: 0,
+        cellType: "code", body: ["Sys.sleep(2); active <- 10; active"] }],
+    });
+    assert.equal(firstEdit.error, null);
+    const runningDeadline = performance.now() + 5_000;
+    while (controller.snapshot().cells[0]!.status !== "running" && performance.now() < runningDeadline) {
+      await new Promise(resolve => setTimeout(resolve, 5));
+    }
+    assert.equal(controller.snapshot().cells[0]!.status, "running");
+
+    const secondEdit = await dispatchHost(app, {
+      type: "transaction",
+      changes: [{ type: "edit", cell: { cellId: "cell-2" }, expectedRevision: 0,
+        cellType: "code", body: ["pending <- 20; pending"] }],
+    });
+    assert.equal(secondEdit.error, null);
+    const waitingRun = dispatchHost(app, {
+      type: "run", scope: "cell", target: { cellId: "cell-3" },
+      expectedDocumentRevision: controller.snapshot().documentRevision,
+    });
+    await new Promise(resolve => setImmediate(resolve));
+
+    const stop = await dispatchHost(app, { type: "interrupt" });
+    assert.equal(stop.error, null);
+    assert.equal((await waitingRun).error?.code, "interrupted");
+    const idleDeadline = performance.now() + 5_000;
+    while (controller.snapshot().runtime.busy && performance.now() < idleDeadline) {
+      await new Promise(resolve => setTimeout(resolve, 5));
+    }
+    assert.equal(controller.snapshot().runtime.busy, false);
+    assert.equal(controller.snapshot().cells[1]!.status, "idle");
+    assert.deepEqual(controller.snapshot().cells[1]!.outputs, []);
+    assert.equal(controller.snapshot().cells[2]!.status, "idle");
+
+    const later = await dispatchHost(app, {
+      type: "run", scope: "cell", target: { cellId: "cell-3" },
+      expectedDocumentRevision: controller.snapshot().documentRevision,
+    });
+    assert.equal(later.error, null);
+    assert.match(JSON.stringify(controller.snapshot().cells[2]!.outputs), /\[1\] 3/);
+  } finally {
+    await app?.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 
 test("a batched consumer run settles its run-button reset", {
   skip: !APPLICATION_ROOT, timeout: 60_000,
