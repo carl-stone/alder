@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdtemp, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -155,6 +155,7 @@ function recordFor(
     rendererReadyGeneration: 0,
     windowState: null,
     pendingCommands: new Map(),
+    draftId: randomUUID(),
   };
   const send = window.webContents.send.bind(window.webContents);
   window.webContents.send = (channel, value) => {
@@ -210,6 +211,102 @@ test("native menus expose the notebook command hierarchy and keyboard flow", () 
   const help = template.find(item => item.label === "Help")!.submenu as Record<string, any>[];
   assert.equal(help.find(item => item.label === "R Documentation")?.accelerator, "F1");
   assert.ok(help.some(item => item.label === "Alder Diagnostics…"));
+});
+
+test("created notebook windows keep the native renderer sandbox boundary", async () => {
+  const window = windowWithLoad();
+  const electronRuntime = runtime();
+  let creationOptions: Record<string, unknown> | undefined;
+  electronRuntime.BrowserWindow = Object.assign(function (options: Record<string, unknown>) {
+    creationOptions = options;
+    return window;
+  }, { fromWebContents: () => null }) as unknown as ElectronRuntime["BrowserWindow"];
+  const hostConnection = connection("sandbox-window", "/tmp/sandbox-window.R", async endpoint => {
+    assert.equal(endpoint, "/api/ticket");
+    return jsonResponse({ ticket: "a".repeat(64), expiresAt: "2026-12-01T00:00:00.000Z" });
+  });
+  const main = new ElectronMain(electronRuntime, { resources, acquireSession: async () => hostConnection });
+  (main as any).loadAuthenticatedNotebook = async () => undefined;
+  try {
+    await main.openNotebook("/tmp/sandbox-window.R");
+    const webPreferences = creationOptions?.webPreferences as Record<string, unknown> | undefined;
+    assert.deepEqual({
+      nodeIntegration: webPreferences?.nodeIntegration,
+      contextIsolation: webPreferences?.contextIsolation,
+      sandbox: webPreferences?.sandbox,
+    }, { nodeIntegration: false, contextIsolation: true, sandbox: true });
+  } finally {
+    window.destroy();
+    await new Promise(resolve => setImmediate(resolve));
+    await main.stop();
+  }
+});
+
+test("privileged IPC accepts only the owning main frame at the authenticated nonce origin", async () => {
+  const window = windowWithLoad();
+  const handlers = new Map<string, (event: unknown, ...args: unknown[]) => unknown>();
+  const electronRuntime = runtime();
+  electronRuntime.BrowserWindow.fromWebContents = sender => sender === window.webContents ? window : null;
+  electronRuntime.ipcMain.handle = (channel, handler) => { handlers.set(channel, handler); };
+  const main = new ElectronMain(electronRuntime, { resources });
+  recordFor(main, connection("origin-policy", "/tmp/origin-policy.R", async () => jsonResponse({})), window);
+  (main as any).installIpcHandlers();
+  const getDraftId = handlers.get("alderDesktop:getDraftId")!;
+  const mainFrame = window.webContents.mainFrame as { url?: string };
+  const event = { sender: window.webContents, senderFrame: mainFrame };
+
+  mainFrame.url = browserOrigin + "/index.html";
+  assert.match(String(await getDraftId(event)), /^[0-9a-f-]{36}$/);
+
+  for (const invalid of [
+    "http://127.0.0.1:43123/index.html",
+    "http://localhost:43123/index.html",
+    "http://" + "b".repeat(32) + ".localhost:43123/index.html",
+    "http://" + "a".repeat(31) + ".localhost:43123/index.html",
+    "http://" + "a".repeat(32) + ".localhost.evil:43123/index.html",
+    "https://" + "a".repeat(32) + ".localhost:43123/index.html",
+  ]) {
+    mainFrame.url = invalid;
+    await assert.rejects(Promise.resolve().then(() => getDraftId(event)), /origin is not trusted/, invalid);
+  }
+});
+
+test("native navigation and opener hooks keep the window on its authenticated origin", async () => {
+  const window = windowWithLoad();
+  const listeners = new Map<string, (...args: any[]) => unknown>();
+  let openHandler: ((details: { url: string; disposition?: string; referrer?: { url?: string } }) => { action: "allow" | "deny" }) | undefined;
+  window.webContents.on = (event, handler) => { listeners.set(event, handler); return window.webContents; };
+  window.webContents.setWindowOpenHandler = handler => { openHandler = handler; };
+  const opened: string[] = [];
+  const electronRuntime = runtime();
+  electronRuntime.shell.openExternal = async url => { opened.push(url); };
+  const main = new ElectronMain(electronRuntime, { resources });
+  const record = recordFor(main, connection("navigation-policy", "/tmp/navigation-policy.R", async () => jsonResponse({})), window);
+  (main as any).installWindowPolicy(record);
+
+  for (const eventName of ["will-navigate", "will-frame-navigate"]) {
+    let prevented = false;
+    listeners.get(eventName)!({ preventDefault: () => { prevented = true; } }, browserOrigin + "/notebook");
+    assert.equal(prevented, false, `${eventName} should allow the owned application origin`);
+    listeners.get(eventName)!({ preventDefault: () => { prevented = true; } }, "https://example.com/unowned");
+    assert.equal(prevented, true, `${eventName} should block an unowned origin`);
+  }
+
+  assert.deepEqual(openHandler!({
+    url: "https://example.com/reference",
+    disposition: "foreground-tab",
+    referrer: { url: browserOrigin + "/index.html" },
+  }), { action: "deny" });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(opened, ["https://example.com/reference"]);
+
+  assert.deepEqual(openHandler!({
+    url: "https://example.com/rejected",
+    disposition: "foreground-tab",
+    referrer: { url: "http://127.0.0.1:43123/index.html" },
+  }), { action: "deny" });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(opened, ["https://example.com/reference"]);
 });
 
 test("diagnostic menu cancellation is quiet and export failures use a bounded native error", async () => {
