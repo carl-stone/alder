@@ -63,7 +63,7 @@ if (nzchar(project_library)) {
 }
 .libPaths(unique(c(project_profile_libraries,
                    if (nzchar(project_library)) project_library else character(),
-                   private_library, ordinary_libraries)))
+                   ordinary_libraries, private_library)))
 private_description <- file.path(private_library, "alder", "DESCRIPTION")
 private_version <- tryCatch(
   unname(read.dcf(private_description, fields = "Version")[[1L]]),

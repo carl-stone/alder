@@ -81618,6 +81618,14 @@ var Engine = class extends EventEmitter3 {
       await messageTail;
       if (messageError !== void 0) throw messageError;
       eventStream.finish();
+      if (signal?.aborted) {
+        const interrupted = {
+          ok: false,
+          error: { code: "interrupted", message: "Inspection was interrupted", interrupted: true }
+        };
+        if (span !== void 0) this.trace.end(span, terminalTraceFields(interrupted));
+        return interrupted;
+      }
       if (execution.reply.content.status !== "ok") {
         throw new EngineTransportError(jupyterError(execution.reply.content).message, "kernel");
       }
@@ -97097,6 +97105,9 @@ function workerEnvironment(environment, resources2) {
   for (const [key2, value] of Object.entries(process.env)) if (value !== void 0) values[key2] = value;
   for (const key2 of ["R_HOME", "R_LIBS", "R_LIBS_USER", "R_LIBS_SITE", "R_PROFILE", "R_PROFILE_USER"]) delete values[key2];
   Object.assign(values, rServiceEnvironmentVariables(environment, resources2));
+  values.ALDER_SELECTED_R_LIBRARIES = JSON.stringify(
+    environment.libraryPaths.filter((path3) => path3 !== resources2.rLibraryDirectory)
+  );
   return values;
 }
 async function collect(...streams) {

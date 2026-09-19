@@ -1920,6 +1920,14 @@ export class Engine extends EventEmitter implements EngineAdapter {
       await messageTail;
       if (messageError !== undefined) throw messageError;
       eventStream.finish();
+      if (signal?.aborted) {
+        const interrupted = {
+          ok: false,
+          error: { code: "interrupted", message: "Inspection was interrupted", interrupted: true },
+        };
+        if (span !== undefined) this.trace.end(span, terminalTraceFields(interrupted));
+        return interrupted;
+      }
       if (execution.reply.content.status !== "ok") {
         throw new EngineTransportError(jupyterError(execution.reply.content).message, "kernel");
       }

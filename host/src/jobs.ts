@@ -127,6 +127,9 @@ function workerEnvironment(environment: REnvironment, resources: ApplicationReso
   for (const [key, value] of Object.entries(process.env)) if (value !== undefined) values[key] = value;
   for (const key of ["R_HOME", "R_LIBS", "R_LIBS_USER", "R_LIBS_SITE", "R_PROFILE", "R_PROFILE_USER"]) delete values[key];
   Object.assign(values, rServiceEnvironmentVariables(environment, resources));
+  values.ALDER_SELECTED_R_LIBRARIES = JSON.stringify(
+    environment.libraryPaths.filter(path => path !== resources.rLibraryDirectory),
+  );
   return values;
 }
 

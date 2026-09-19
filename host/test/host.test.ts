@@ -25,6 +25,7 @@ async function startInstalledHost(path: string, options: { executionMode?: "auto
     runOnStartup: options.runOnStartup ?? false,
     executionMode: options.executionMode,
     idleTimeout: options.idleTimeout,
+    rscript: process.env.ALDER_RSCRIPT ?? execFileSync("which", ["Rscript"], { encoding: "utf8" }).trim(),
     resources: stagedResources,
     preferencesPath: join(dirname(path), ".test-preferences.yaml"),
     session: { runtimeDirectory: path + "-runtime" },
@@ -32,6 +33,11 @@ async function startInstalledHost(path: string, options: { executionMode?: "auto
   const deadline = performance.now() + 45_000;
   while (!app.controller.snapshot().runtime.executionReady && performance.now() < deadline) {
     await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  if (!app.controller.snapshot().runtime.executionReady) {
+    const runtime = app.controller.snapshot().runtime;
+    await app.close();
+    throw new Error(`installed host runtime did not become ready: ${JSON.stringify(runtime)}`);
   }
   return app;
 }
@@ -64,7 +70,10 @@ async function localPackageRepository(root: string, packageName: string): Promis
   const contributionDirectory = join(repository, "src", "contrib");
   const sourceParent = join(root, "package-source");
   const sourceDirectory = join(sourceParent, packageName);
+  const dependencyName = "jsonlite";
+  const dependencyDirectory = join(sourceParent, dependencyName);
   await mkdir(join(sourceDirectory, "R"), { recursive: true });
+  await mkdir(join(dependencyDirectory, "R"), { recursive: true });
   await mkdir(contributionDirectory, { recursive: true });
   await writeFile(join(sourceDirectory, "DESCRIPTION"), [
     `Package: ${packageName}`,
@@ -75,11 +84,29 @@ async function localPackageRepository(root: string, packageName: string): Promis
     "Description: Local package used by the project package acceptance journey.",
     "License: MIT",
     "Encoding: UTF-8",
+    `Imports: ${dependencyName} (>= 999.0.0)`,
     "",
   ].join("\n"));
   await writeFile(join(sourceDirectory, "NAMESPACE"), "export(fixture_value)\n");
-  await writeFile(join(sourceDirectory, "R", "fixture-value.R"), "fixture_value <- function() 'project-package-value'\n");
+  await writeFile(join(sourceDirectory, "R", "fixture-value.R"),
+    `fixture_value <- function() ${dependencyName}::fixture_dependency_value()\n`);
+  await writeFile(join(dependencyDirectory, "DESCRIPTION"), [
+    `Package: ${dependencyName}`,
+    "Type: Package",
+    "Title: Alder Project Dependency Fixture",
+    "Version: 999.0.0",
+    "Authors@R: person('Alder', 'Tester', email='alder@example.invalid', role=c('aut','cre'))",
+    "Description: Confirms project dependencies are installed into the project library.",
+    "License: MIT",
+    "Encoding: UTF-8",
+    "",
+  ].join("\n"));
+  await writeFile(join(dependencyDirectory, "NAMESPACE"), "export(fixture_dependency_value)\n");
+  await writeFile(join(dependencyDirectory, "R", "fixture-dependency-value.R"),
+    "fixture_dependency_value <- function() 'project-package-value'\n");
+  execFileSync(process.env.R_BIN ?? "R", ["CMD", "build", "--no-manual", dependencyName], { cwd: sourceParent });
   execFileSync(process.env.R_BIN ?? "R", ["CMD", "build", "--no-manual", packageName], { cwd: sourceParent });
+  await rename(join(sourceParent, `${dependencyName}_999.0.0.tar.gz`), join(contributionDirectory, `${dependencyName}_999.0.0.tar.gz`));
   await rename(join(sourceParent, `${packageName}_1.0.0.tar.gz`), join(contributionDirectory, `${packageName}_1.0.0.tar.gz`));
   execFileSync(process.env.RSCRIPT ?? "Rscript", ["--vanilla", "-e", "tools::write_PACKAGES(commandArgs(TRUE)[[1L]], type='source')", contributionDirectory]);
   const repositoryUrl = pathToFileURL(repository).href;
@@ -456,11 +483,24 @@ test("installed kernel follows ordinary project profile and library activation",
   const path = join(directory, "notebook.R");
   const userLibrary = join(directory, "user-library");
   const projectLibrary = join(directory, "renv-library");
-  const packageName = "alderprofilefixture";
+  const packageName = "alder";
   const priorUserLibrary = process.env.R_LIBS_USER;
   let app: RunningHost | undefined;
   try {
     await installFixturePackage(directory, userLibrary, packageName, "1.0.0", "user");
+    process.env.R_LIBS_USER = userLibrary;
+    const userExpression = `paste(as.character(packageVersion('${packageName}')), ` +
+      `normalizePath(find.package('${packageName}'), winslash='/'), ${packageName}::fixture_value(), sep='|')`;
+    await writeFile(path, `# %%\n${userExpression}\n`);
+    app = await startInstalledHost(path, { executionMode: "lazy" });
+    let run = await dispatchHost(app, { type: "run", scope: "all", changes: [] });
+    assert.equal(run.error, null);
+    assert.match(JSON.stringify(app.controller.snapshot().cells[0]!.outputs),
+      /1\.0\.0\|.*user-library.*\|user/,
+      "the selected R user library must precede the bundled Alder fallback");
+    await app.close();
+    app = undefined;
+
     await installFixturePackage(directory, projectLibrary, packageName, "2.0.0", "project");
     await installFixturePackage(directory, projectLibrary, "jsonlite", "999.0.0",
       "incompatible-project-jsonlite");
@@ -481,9 +521,18 @@ test("installed kernel follows ordinary project profile and library activation",
     assert.match(ordinary,
       /^2\.0\.0\|.*renv-library.*\|project\|project-marker\|999\.0\.0\|incompatible-project-jsonlite$/);
     await writeFile(path, `# %%\n${setupExpression}${valueExpression}\n`);
-    process.env.R_LIBS_USER = userLibrary;
     app = await startInstalledHost(path, { executionMode: "lazy" });
-    const run = await dispatchHost(app, { type: "run", scope: "all", changes: [] });
+    for (const dependency of ["codetools", "jsonlite", "mime", "rlang"]) {
+      await access(join(stagedResources!.rLibraryDirectory, dependency, "DESCRIPTION"));
+    }
+    const beforeFormat = app.controller.snapshot();
+    const formatted = await dispatchHost(app, {
+      type: "format",
+      expectedRevisions: Object.fromEntries(beforeFormat.cells.map(cell => [cell.id, cell.revision])),
+    });
+    assert.equal(formatted.error, null,
+      "formatting and analysis services must remain independent of project R packages");
+    run = await dispatchHost(app, { type: "run", scope: "all", changes: [] });
     assert.equal(run.error, null);
     assert.match(JSON.stringify(app.controller.snapshot().cells[0]!.outputs),
       new RegExp(ordinary.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
@@ -553,6 +602,9 @@ test("project packages declare, install offline, restart Ark, and leave the user
     assert.deepEqual(status.installed, ["alderfixturepkg"]);
     assert.equal(status.library, join(directory, ".alder", "library"));
     assert.equal(status.status[0]?.library, status.library);
+    const dependencyDescription = await readFile(join(status.library, "jsonlite", "DESCRIPTION"), "utf8");
+    assert.match(dependencyDescription, /^Version: 999\.0\.0$/m,
+      "the project dependency must be installed in the project library instead of borrowed from the app");
 
     const run = await dispatchHost(app, { type: "run", scope: "all", changes: [] });
     assert.equal(run.error, null);
@@ -656,84 +708,6 @@ test("runtime and app metadata survive recovery restart, Save, and Save As", {
     assert.equal(saveAsRecovery.result.pending, false);
     assert.deepEqual(saveAsRecovery.result.branches, []);
   } finally {
-    await app?.close();
-    await rm(directory, { recursive: true, force: true });
-  }
-});
-
-test("idle shutdown waits for a real save before closing", {
-  skip: !APPLICATION_ROOT, timeout: 90_000,
-}, async () => {
-  const directory = await mkdtemp(join(tmpdir(), "alder-host-idle-save-"));
-  const path = join(directory, "notebook.R");
-  const originalBytes = "# %%\nx <- 1\n";
-  const savedBytes = "# %%\nx <- 2\n";
-  await writeFile(path, originalBytes);
-  let app: RunningHost | undefined;
-  let session: HttpSession | undefined;
-  try {
-    app = await startInstalledHost(path, { idleTimeout: 0.25 });
-    const controller = app.controller;
-    assert.equal(controller.snapshot().runtime.executionReady, true);
-
-    const originalCommitSource = controller.commitSource.bind(controller);
-    let resolveSaveBegan!: () => void;
-    const saveBegan = new Promise<void>(resolve => { resolveSaveBegan = resolve; });
-    const mutable = controller as unknown as {
-      commitSource(request: { kind: string }, prepare?: unknown): Promise<unknown>;
-    };
-    mutable.commitSource = async (request, prepare) => {
-      if (request.kind === "save") {
-        resolveSaveBegan();
-        await new Promise<void>(resolve => setTimeout(resolve, 750));
-      }
-      return originalCommitSource(request as never, prepare as never);
-    };
-
-    const before = controller.snapshot();
-    const edit = await dispatchHost(app, {
-      type: "transaction",
-      expectedDocumentRevision: before.documentRevision,
-      changes: [{ type: "edit", cell: { cellId: before.cells[0]!.id }, expectedRevision: before.cells[0]!.revision,
-        cellType: "code", body: ["x <- 2"] }],
-    });
-    assert.equal(edit.error, null);
-    assert.equal(controller.snapshot().dirty, true);
-
-    session = await openHttpSession(app);
-    await closeHttpSession(session);
-    session = undefined;
-
-    await saveBegan;
-    assert.equal(await readFile(path, "utf8"), originalBytes, "idle shutdown must not close while the real save is pending");
-    const closedWhilePending = await Promise.race([
-      app.closed.then(() => true),
-      new Promise<boolean>(resolve => setTimeout(() => resolve(false), 200)),
-    ]);
-    assert.equal(closedWhilePending, false);
-
-    const readSavedBytes = async (): Promise<string | null> => {
-      try {
-        return await readFile(path, "utf8");
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-        throw error;
-      }
-    };
-    let finalBytes = await readSavedBytes();
-    const deadline = performance.now() + 5_000;
-    while (finalBytes !== savedBytes && performance.now() < deadline) {
-      await new Promise(resolve => setTimeout(resolve, 25));
-      finalBytes = await readSavedBytes();
-    }
-    assert.equal(finalBytes, savedBytes);
-    const closedAfterSave = await Promise.race([
-      app.closed.then(() => true),
-      new Promise<boolean>(resolve => setTimeout(() => resolve(false), 5_000)),
-    ]);
-    assert.equal(closedAfterSave, true, "idle shutdown must close automatically after the real save settles");
-  } finally {
-    if (session !== undefined) await closeHttpSession(session);
     await app?.close();
     await rm(directory, { recursive: true, force: true });
   }

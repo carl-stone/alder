@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { createRequire } from 'node:module';
 import { stageArk } from './fetch-ark.mjs';
+import { stageAir } from './fetch-air.mjs';
 import { tmpdir } from 'node:os';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
@@ -44,6 +45,7 @@ try {
   await chmod(join(applicationRoot, 'bin/node'), 0o755);
   await cp(join(root, 'host/licenses/Node.txt'), join(applicationRoot, 'host/licenses/Node.txt'));
   await stageArk({ output: join(applicationRoot, 'runtime') });
+  await stageAir({ output: join(applicationRoot, 'runtime') });
   const rPackageBuild = await mkdtemp(join(tmpdir(), 'alder-r-package-'));
   try {
     execFileSync('R', ['--slave', '--vanilla', '-e',
@@ -56,6 +58,13 @@ try {
     if (archives.length !== 1) throw new Error('R package build did not produce one Alder archive');
     const library = join(applicationRoot, 'r-library');
     await mkdir(library);
+    execFileSync('Rscript', ['--vanilla', '-e', [
+      'library <- commandArgs(TRUE)[[1L]]',
+      'packages <- c("codetools", "jsonlite", "mime", "rlang")',
+      'install.packages(packages, lib=library, repos="https://cloud.r-project.org", dependencies=c("Depends", "Imports", "LinkingTo"))',
+      'missing <- packages[!vapply(packages, requireNamespace, logical(1), quietly=TRUE, lib.loc=library)]',
+      'if (length(missing)) stop("private R dependencies are missing: ", paste(missing, collapse=", "))',
+    ].join('; '), library], { stdio: 'inherit' });
     execFileSync('R', ['CMD', 'INSTALL', `--library=${library}`, join(rPackageBuild, archives[0])], {
       stdio: 'inherit',
     });

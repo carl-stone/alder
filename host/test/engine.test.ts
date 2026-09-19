@@ -16,6 +16,14 @@ import { analysisResultSchema, type EvaluationPayload, type REnvironment } from 
 const applicationRoot = resolve(
   process.env.ALDER_APPLICATION_ROOT ?? process.env.ALDER_STAGED_ROOT ?? join(process.cwd(), ".application"),
 );
+const inheritedRLibsUser = process.env.R_LIBS_USER;
+const isolatedRLibsUser = await mkdtemp(join(tmpdir(), "alder-engine-r-library-"));
+process.env.R_LIBS_USER = isolatedRLibsUser;
+test.after(async () => {
+  if (inheritedRLibsUser === undefined) delete process.env.R_LIBS_USER;
+  else process.env.R_LIBS_USER = inheritedRLibsUser;
+  await rm(isolatedRLibsUser, { recursive: true, force: true });
+});
 const resourcesAvailable = existsSync(join(applicationRoot, "runtime", "ark")) &&
   existsSync(join(applicationRoot, "worker", "host-ark.R")) &&
   existsSync(join(applicationRoot, "r-library"));
@@ -529,12 +537,15 @@ test("Alder log notifications preserve exact OutputLog lines", integration,
           epoch,
           "alder-event-log",
           "alder-event-log",
-          String.raw`renderer <- structure(1L, class = "alder_log_renderer")
+          String.raw`library(alder)
+renderer <- structure(1L, class = "alder_log_renderer")
 print.alder_log_renderer <- function(x, ...) {
   message("renderer message")
   warning("renderer warning")
   cat("renderer output\n")
 }
+registerS3method("print", "alder_log_renderer", print.alder_log_renderer,
+                 envir = asNamespace("base"))
 message("message line")
 warning("warning line")
 out$append(renderer)`,
@@ -543,7 +554,7 @@ out$append(renderer)`,
           if (event.type === "output" && event.kind === "log") logEvents.push(event.payload);
         },
       );
-      assert.equal(alder.ok, true);
+      assert.equal(alder.ok, true, JSON.stringify(alder));
       const eventLines = logEvents.flatMap((payload) => {
         assert.ok(typeof payload === "object" && payload !== null);
         const lines = (payload as { lines?: unknown }).lines;
@@ -667,8 +678,7 @@ test("explicit value inspection can be interrupted without wedging execution", i
   try {
     const epoch = (await engine.start()).kernel!.kernelEpoch;
     const setup = await engine.evaluate(payload(epoch, "inspect-setup", "inspect-setup", `
-      print.slow_inspect <- function(x, ...) { Sys.sleep(30); invisible(x) }
-      slow_value <- structure(1L, class = "slow_inspect")
+      delayedAssign("slow_value", { Sys.sleep(30); 1L }, assign.env = environment())
     `));
     assert.equal(setup.ok, true);
     const cancellation = new AbortController();
