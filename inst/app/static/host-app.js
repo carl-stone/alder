@@ -25666,7 +25666,7 @@ ${jupyterTrace.map((line, index) => `${index + 1}. ${line}`).join("\n")}` : ""
     const destination = !this.documentValue?.snapshot.path && desktop ? await desktop.chooseSavePath() : void 0;
     if (destination === null) return void 0;
     if (this.executionAvailable() && nested(this.documentValue?.snapshot.config, ["format", "on_save"]) === true) {
-      await this.client.formatCells();
+      await this.client.formatCells().catch(() => void 0);
     }
     return destination === void 0 ? this.client.save() : this.client.saveAs(destination);
   }

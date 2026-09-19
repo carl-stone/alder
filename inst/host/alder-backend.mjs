@@ -11483,9 +11483,9 @@ var require_picocolors = __commonJS({
     var argv = p.argv || [];
     var env2 = p.env || {};
     var isColorSupported = !(!!env2.NO_COLOR || argv.includes("--no-color")) && (!!env2.FORCE_COLOR || argv.includes("--color") || p.platform === "win32" || (p.stdout || {}).isTTY && env2.TERM !== "dumb" || !!env2.CI);
-    var formatter = (open10, close, replace3 = open10) => (input2) => {
-      let string5 = "" + input2, index = string5.indexOf(close, open10.length);
-      return ~index ? open10 + replaceClose(string5, close, replace3, index) + close : open10 + string5 + close;
+    var formatter = (open9, close, replace3 = open9) => (input2) => {
+      let string5 = "" + input2, index = string5.indexOf(close, open9.length);
+      return ~index ? open9 + replaceClose(string5, close, replace3, index) + close : open9 + string5 + close;
     };
     var replaceClose = (string5, close, replace3, index) => {
       let result = "", cursor = 0;
@@ -13466,7 +13466,7 @@ var require_util = __commonJS({
         }
         path3 = url2.path;
       }
-      var isAbsolute7 = exports.isAbsolute(path3);
+      var isAbsolute6 = exports.isAbsolute(path3);
       var parts = [];
       var start = 0;
       var i = 0;
@@ -13501,7 +13501,7 @@ var require_util = __commonJS({
       }
       path3 = parts.join("/");
       if (path3 === "") {
-        path3 = isAbsolute7 ? "/" : ".";
+        path3 = isAbsolute6 ? "/" : ".";
       }
       if (url2) {
         url2.path = path3;
@@ -15197,7 +15197,7 @@ var require_previous_map = __commonJS({
   "../../../../../alder/host/node_modules/postcss/lib/previous-map.js"(exports, module) {
     "use strict";
     var { existsSync, readFileSync, realpathSync } = __require("fs");
-    var { dirname: dirname11, isAbsolute: isAbsolute7, join: join21, relative: relative4, sep: sep4 } = __require("path");
+    var { dirname: dirname11, isAbsolute: isAbsolute6, join: join21, relative: relative4, sep: sep4 } = __require("path");
     var { SourceMapConsumer, SourceMapGenerator } = require_source_map();
     function realPath(path3) {
       try {
@@ -15271,7 +15271,7 @@ var require_previous_map = __commonJS({
           if (!/\.map$/i.test(path3)) return void 0;
           if (!cssFile) return void 0;
           let rel = relative4(realPath(dirname11(cssFile)), realPath(path3));
-          if (rel === ".." || rel.startsWith(".." + sep4) || isAbsolute7(rel)) {
+          if (rel === ".." || rel.startsWith(".." + sep4) || isAbsolute6(rel)) {
             return void 0;
           }
         }
@@ -15342,7 +15342,7 @@ var require_input = __commonJS({
   "../../../../../alder/host/node_modules/postcss/lib/input.js"(exports, module) {
     "use strict";
     var { nanoid: nanoid3 } = require_non_secure();
-    var { isAbsolute: isAbsolute7, resolve: resolve15 } = __require("path");
+    var { isAbsolute: isAbsolute6, resolve: resolve15 } = __require("path");
     var { SourceMapConsumer, SourceMapGenerator } = require_source_map();
     var { fileURLToPath: fileURLToPath2, pathToFileURL: pathToFileURL2 } = __require("url");
     var CssSyntaxError = require_css_syntax_error();
@@ -15350,7 +15350,7 @@ var require_input = __commonJS({
     var terminalHighlight = require_terminal_highlight();
     var lineToIndexCache = /* @__PURE__ */ Symbol("lineToIndexCache");
     var sourceMapAvailable = Boolean(SourceMapConsumer && SourceMapGenerator);
-    var pathAvailable = Boolean(resolve15 && isAbsolute7);
+    var pathAvailable = Boolean(resolve15 && isAbsolute6);
     function getLineToIndex(input2) {
       if (input2[lineToIndexCache]) return input2[lineToIndexCache];
       let lines = input2.css.split("\n");
@@ -15381,7 +15381,7 @@ var require_input = __commonJS({
         this.document = this.css;
         if (opts.document) this.document = opts.document.toString();
         if (opts.from) {
-          if (!pathAvailable || /^\w+:\/\//.test(opts.from) || isAbsolute7(opts.from)) {
+          if (!pathAvailable || /^\w+:\/\//.test(opts.from) || isAbsolute6(opts.from)) {
             this.file = opts.from;
           } else {
             this.file = resolve15(opts.from);
@@ -15521,7 +15521,7 @@ var require_input = __commonJS({
           if (toPosition.source) to = toPosition;
         }
         let fromUrl;
-        if (isAbsolute7(from.source)) {
+        if (isAbsolute6(from.source)) {
           fromUrl = pathToFileURL2(from.source);
         } else {
           fromUrl = new URL(
@@ -16186,7 +16186,7 @@ var require_parser2 = __commonJS({
         let prev;
         let shift;
         let last = false;
-        let open10 = false;
+        let open9 = false;
         let params = [];
         let brackets = [];
         while (!this.tokenizer.endOfFile()) {
@@ -16206,7 +16206,7 @@ var require_parser2 = __commonJS({
               this.semicolon = true;
               break;
             } else if (type === "{") {
-              open10 = true;
+              open9 = true;
               break;
             } else if (type === "}") {
               if (params.length > 0) {
@@ -16248,7 +16248,7 @@ var require_parser2 = __commonJS({
           node2.raws.afterName = "";
           node2.params = "";
         }
-        if (open10) {
+        if (open9) {
           node2.nodes = [];
           this.current = node2;
         }
@@ -22469,7 +22469,7 @@ var require_stream = __commonJS({
       };
       duplex._final = function(callback) {
         if (ws.readyState === ws.CONNECTING) {
-          ws.once("open", function open10() {
+          ws.once("open", function open9() {
             duplex._final(callback);
           });
           return;
@@ -22490,7 +22490,7 @@ var require_stream = __commonJS({
       };
       duplex._write = function(chunk, encoding, callback) {
         if (ws.readyState === ws.CONNECTING) {
-          ws.once("open", function open10() {
+          ws.once("open", function open9() {
             duplex._write(chunk, encoding, callback);
           });
           return;
@@ -39770,8 +39770,8 @@ var require_graceful_fs = __commonJS({
       fs2.createReadStream = createReadStream2;
       fs2.createWriteStream = createWriteStream;
       var fs$readFile = fs2.readFile;
-      fs2.readFile = readFile10;
-      function readFile10(path3, options, cb) {
+      fs2.readFile = readFile11;
+      function readFile11(path3, options, cb) {
         if (typeof options === "function")
           cb = options, options = null;
         return go$readFile(path3, options, cb);
@@ -39947,7 +39947,7 @@ var require_graceful_fs = __commonJS({
       }
       function ReadStream$open() {
         var that = this;
-        open10(that.path, that.flags, that.mode, function(err, fd) {
+        open9(that.path, that.flags, that.mode, function(err, fd) {
           if (err) {
             if (that.autoClose)
               that.destroy();
@@ -39967,7 +39967,7 @@ var require_graceful_fs = __commonJS({
       }
       function WriteStream$open() {
         var that = this;
-        open10(that.path, that.flags, that.mode, function(err, fd) {
+        open9(that.path, that.flags, that.mode, function(err, fd) {
           if (err) {
             that.destroy();
             that.emit("error", err);
@@ -39984,8 +39984,8 @@ var require_graceful_fs = __commonJS({
         return new fs2.WriteStream(path3, options);
       }
       var fs$open = fs2.open;
-      fs2.open = open10;
-      function open10(path3, flags, mode, cb) {
+      fs2.open = open9;
+      function open9(path3, flags, mode, cb) {
         if (typeof mode === "function")
           cb = mode, mode = null;
         return go$open(path3, flags, mode, cb);
@@ -44890,7 +44890,7 @@ function handleIntersectionResults(result, left, right) {
   const unrecKeys = /* @__PURE__ */ new Map();
   let unrecIssue;
   const keyIssues = /* @__PURE__ */ new Map();
-  const collect = (iss, side) => {
+  const collect2 = (iss, side) => {
     let keys2;
     if (iss.code === "unrecognized_keys" && !iss.path?.length) {
       unrecIssue ?? (unrecIssue = iss);
@@ -44911,11 +44911,11 @@ function handleIntersectionResults(result, left, right) {
     return true;
   };
   for (const iss of left.issues) {
-    if (!collect(iss, "l"))
+    if (!collect2(iss, "l"))
       result.issues.push(iss);
   }
   for (const iss of right.issues) {
-    if (!collect(iss, "r"))
+    if (!collect2(iss, "r"))
       result.issues.push(iss);
   }
   const bothKeys = [...unrecKeys].filter(([, f]) => f.l && f.r).map(([k]) => k);
@@ -66590,8 +66590,8 @@ var REBuilder = class {
   escapeRE(str) {
     return str.replace(/[.?*+^$[\]\\(){}|-]/g, "\\$&");
   }
-  nestedPairRE(open10, close, depth = 4) {
-    const openRE = this.escapeRE(open10);
+  nestedPairRE(open9, close, depth = 4) {
+    const openRE = this.escapeRE(open9);
     const closeRE = this.escapeRE(close);
     const atom = `(?:(?!${this.src_ZCc}|${openRE}|${closeRE}).)`;
     let pair = `${openRE}${atom}{0,1000}${closeRE}`;
@@ -72705,10 +72705,10 @@ var Controller = class {
       if (this.engine.environment !== void 0) this.rEnvironmentValue = clone3(this.engine.environment);
     } catch (error61) {
       this.starting = false;
-      const failure = hostError("analysis_unavailable", messageOf2(error61));
-      this.recordRuntimeAvailabilityError(failure);
-      this.replaceLastActionError(failure);
-      throw new ControllerError(failure.code, failure.message, 503);
+      const failure2 = hostError("analysis_unavailable", messageOf2(error61));
+      this.recordRuntimeAvailabilityError(failure2);
+      this.replaceLastActionError(failure2);
+      throw new ControllerError(failure2.code, failure2.message, 503);
     }
     this.assertStartCurrent(generation);
     this.starting = false;
@@ -72720,8 +72720,8 @@ var Controller = class {
       await this.ensureCurrentAnalysis();
       if (!this.graphValue.resourceLimited) this.replaceLastActionError(null);
     } catch (error61) {
-      const failure = asControllerError(error61, "analysis_unavailable", 503);
-      this.replaceLastActionError(failure.toJSON());
+      const failure2 = asControllerError(error61, "analysis_unavailable", 503);
+      this.replaceLastActionError(failure2.toJSON());
     }
     this.bump("notebook", { ready: false });
     this.emit("runtime", this.runtimeSnapshot());
@@ -72748,9 +72748,9 @@ var Controller = class {
       }
       this.kernelAvailable = false;
       this.analyzerAvailable = false;
-      const failure = hostError("engine_start_failed", messageOf2(error61));
-      this.recordRuntimeAvailabilityError(failure);
-      this.replaceLastActionError(failure);
+      const failure2 = hostError("engine_start_failed", messageOf2(error61));
+      this.recordRuntimeAvailabilityError(failure2);
+      this.replaceLastActionError(failure2);
       throw new ControllerError("engine_start_failed", messageOf2(error61), 503);
     }
     if (this.closed || generation !== this.runtimeGeneration) {
@@ -72764,12 +72764,12 @@ var Controller = class {
     this.kernelAvailable = handshake.kernelReady && handshake.captureReady;
     this.analyzerAvailable = handshake.analyzerReady;
     if (!this.kernelAvailable || !this.analyzerAvailable) {
-      const failure = hostError(
+      const failure2 = hostError(
         "engine_not_ready",
         "R kernel, analyzer, and capture services must be ready before execution"
       );
-      this.recordRuntimeAvailabilityError(failure);
-      this.replaceLastActionError(failure);
+      this.recordRuntimeAvailabilityError(failure2);
+      this.replaceLastActionError(failure2);
       this.emit("runtime", this.runtimeSnapshot());
       return this.snapshot();
     }
@@ -72782,8 +72782,8 @@ var Controller = class {
       if (!this.graphValue.resourceLimited) this.replaceLastActionError(null);
     } catch (error61) {
       this.assertStartCurrent(generation);
-      const failure = asControllerError(error61, "analysis_unavailable", 503);
-      this.replaceLastActionError(failure.toJSON());
+      const failure2 = asControllerError(error61, "analysis_unavailable", 503);
+      this.replaceLastActionError(failure2.toJSON());
     }
     this.bump("notebook", { ready: this.executionReady });
     this.emit("runtime", this.runtimeSnapshot());
@@ -72802,9 +72802,9 @@ var Controller = class {
       this.assertGraphRunnable();
       this.launchRun(this.allCodePlan(), operationId);
     } catch (error61) {
-      const failure = asControllerError(error61).toJSON(operationId);
-      this.replaceLastActionError(failure, { operationId });
-      this.failOperation(operationId, failure);
+      const failure2 = asControllerError(error61).toJSON(operationId);
+      this.replaceLastActionError(failure2, { operationId });
+      this.failOperation(operationId, failure2);
     }
     return clone3(this.operationFor(operationId, INTERNAL_CLIENT_ID) ?? null);
   }
@@ -73423,8 +73423,8 @@ var Controller = class {
       if (settled.result === null && result !== void 0) settled.result = clone3(result);
       return this.commandResult(command.requestId, settled);
     } catch (error61) {
-      const failure = asControllerError(error61);
-      const hostFailure = failure.toJSON(command.requestId);
+      const failure2 = asControllerError(error61);
+      const hostFailure = failure2.toJSON(command.requestId);
       if (!this.closed) {
         this.replaceLastActionError(hostFailure, { operationId: command.requestId });
         this.failOperation(command.requestId, hostFailure, command.clientId);
@@ -74875,9 +74875,9 @@ var Controller = class {
       } catch (error61) {
         if (this.closed) throw new ControllerError("session_stopped", "session is stopped", 409);
         this.kernelAvailable = false;
-        const failure = hostError("worker_unavailable", messageOf2(error61));
-        this.recordRuntimeAvailabilityError(failure);
-        throw new ControllerError("worker_unavailable", failure.message, 503);
+        const failure2 = hostError("worker_unavailable", messageOf2(error61));
+        this.recordRuntimeAvailabilityError(failure2);
+        throw new ControllerError("worker_unavailable", failure2.message, 503);
       }
       await priorAnalysis?.catch(() => {
       });
@@ -74891,9 +74891,9 @@ var Controller = class {
       this.kernelAvailable = handshake.kernelReady && handshake.captureReady;
       this.analyzerAvailable = handshake.analyzerReady;
       if (!this.kernelAvailable || !this.analyzerAvailable) {
-        const failure = hostError("engine_not_ready", "R engine did not become ready");
-        this.recordRuntimeAvailabilityError(failure);
-        throw new ControllerError("engine_not_ready", failure.message, 503);
+        const failure2 = hostError("engine_not_ready", "R engine did not become ready");
+        this.recordRuntimeAvailabilityError(failure2);
+        throw new ControllerError("engine_not_ready", failure2.message, 503);
       }
       this.barrierRestartRequired = false;
       this.clearBeforeEvaluation.clear();
@@ -74968,11 +74968,11 @@ var Controller = class {
     this.widgetReconciliationRoots.clear();
     this.pendingButtonResets.clear();
     this.activeButtonResets.clear();
-    const failure = hostError(
+    const failure2 = hostError(
       failureCode,
       `${message2}; outputs are stale. Restart R to replay the notebook`
     );
-    this.setRuntimeAvailabilityError(failure);
+    this.setRuntimeAvailabilityError(failure2);
     this.bump("runtime", this.runtimeSnapshot(), {
       operationId: active?.job.operationId,
       runId: active?.job.runId
@@ -74981,7 +74981,7 @@ var Controller = class {
       operationId: active?.job.operationId,
       runId: active?.job.runId
     });
-    this.replaceLastActionError(failure, {
+    this.replaceLastActionError(failure2, {
       operationId: active?.job.operationId,
       runId: active?.job.runId
     });
@@ -74998,10 +74998,10 @@ var Controller = class {
     }
     this.analyzerAvailable = false;
     this.executionReady = false;
-    const failure = hostError("analysis_unavailable", error61.message);
-    this.setRuntimeAvailabilityError(failure);
+    const failure2 = hostError("analysis_unavailable", error61.message);
+    this.setRuntimeAvailabilityError(failure2);
     this.bump("runtime", this.runtimeSnapshot());
-    this.replaceLastActionError(failure);
+    this.replaceLastActionError(failure2);
   }
   invalidateRuntimeView() {
     const changed = /* @__PURE__ */ new Set();
@@ -75157,8 +75157,8 @@ var Controller = class {
       return;
     }
     void this.ensureCurrentAnalysis().catch((error61) => {
-      const failure = asControllerError(error61, "analysis_unavailable", 503);
-      this.replaceLastActionError(failure.toJSON());
+      const failure2 = asControllerError(error61, "analysis_unavailable", 503);
+      this.replaceLastActionError(failure2.toJSON());
     });
   }
   async ensureCurrentAnalysis() {
@@ -75510,8 +75510,8 @@ var Controller = class {
         ...update2
       });
     }).then((response) => this.finishWidgetOperation(command, identity, response, update2)).catch((error61) => {
-      const failure = asControllerError(error61, "widget_update_failed");
-      void this.failWidgetOperation(command, identity, failure.code, failure.message);
+      const failure2 = asControllerError(error61, "widget_update_failed");
+      void this.failWidgetOperation(command, identity, failure2.code, failure2.message);
     });
     return { token: identity.token, owner: owner.id };
   }
@@ -75622,9 +75622,9 @@ var Controller = class {
         }
       }
     }
-    const failure = hostError(code2, message2, command.requestId);
-    this.replaceLastActionError(failure, { operationId: command.requestId, cellId: identity.owner });
-    this.failOperation(command.requestId, failure, command.clientId);
+    const failure2 = hostError(code2, message2, command.requestId);
+    this.replaceLastActionError(failure2, { operationId: command.requestId, cellId: identity.owner });
+    this.failOperation(command.requestId, failure2, command.clientId);
   }
   scheduleWidgetConsumers(name, owner, source, operationId, clientId) {
     const references = this.cellsReferencing(name, owner);
@@ -75856,7 +75856,7 @@ var Controller = class {
       this.bump("cell", this.publicCell(currentOwner), { operationId: resetOperationId, cellId: currentOwner.id, revision: currentOwner.revision });
     }).catch(async (error61) => {
       if (!this.runtimeRequestCurrent(resetOperationId, generation, reset.triggerClientId)) return;
-      const failure = asControllerError(error61, "widget_update_failed", 400);
+      const failure2 = asControllerError(error61, "widget_update_failed", 400);
       const ownsPending = this.pendingWidgets.get(reset.key) === this.operationKey(reset.triggerClientId, resetOperationId);
       if (ownsPending) this.pendingWidgets.delete(reset.key);
       this.activeButtonResets.delete(resetOperationId);
@@ -75866,14 +75866,14 @@ var Controller = class {
         try {
           reset.record = await this.updateOutputRecord(currentOwner, current.record, (data) => {
             const widget = findRichOutputRecord(data, (output2) => output2.kind === "widget" && output2.name === reset.name);
-            if (widget !== null) setWidgetOperation(widget, reset.key, { token, operationId: resetOperationId, status: "error", error: { code: failure.code, message: failure.message } });
+            if (widget !== null) setWidgetOperation(widget, reset.key, { token, operationId: resetOperationId, status: "error", error: { code: failure2.code, message: failure2.message } });
           });
           this.bump("cell", this.publicCell(currentOwner), { operationId: resetOperationId, cellId: currentOwner.id, revision: currentOwner.revision });
         } catch {
         }
       }
-      this.failOperation(resetOperationId, hostError(failure.code, failure.message, resetOperationId), reset.triggerClientId);
-      this.failButtonResetParents(reset, failure.code, failure.message);
+      this.failOperation(resetOperationId, hostError(failure2.code, failure2.message, resetOperationId), reset.triggerClientId);
+      this.failButtonResetParents(reset, failure2.code, failure2.message);
       if (reset.runId !== null) this.completeRunIfIdle(reset.runId);
     });
   }
@@ -75964,8 +75964,8 @@ var Controller = class {
       }
       if (!this.runHasPendingJobs(runId)) this.completeRunIfIdle(runId);
     } catch (error61) {
-      const failure = asControllerError(error61);
-      this.replaceLastActionError(failure.toJSON());
+      const failure2 = asControllerError(error61);
+      this.replaceLastActionError(failure2.toJSON());
       this.widgetReconciliationRoots.clear();
     } finally {
       this.widgetReconciliationPreparing = false;
@@ -76062,8 +76062,8 @@ var Controller = class {
     }).catch((error61) => {
       if (!this.runtimeRequestCurrent(operationId, generation, clientId)) return;
       this.pendingInspection = null;
-      const failure = asControllerError(error61, "value_request_failed");
-      this.failOperation(operationId, failure.toJSON(operationId), clientId);
+      const failure2 = asControllerError(error61, "value_request_failed");
+      this.failOperation(operationId, failure2.toJSON(operationId), clientId);
     });
     return { name, owner: owner?.id ?? null, revision: owner?.revision ?? null };
   }
@@ -76478,8 +76478,8 @@ var Controller = class {
     let installFailure;
     try {
       result = await this.callService("packages.install", { ...payload, packages, operationId });
-      const failure = serviceResultError(result, operationId);
-      if (failure !== null) installFailure = failure;
+      const failure2 = serviceResultError(result, operationId);
+      if (failure2 !== null) installFailure = failure2;
     } catch (error61) {
       installFailure = error61;
     }
@@ -76494,10 +76494,10 @@ var Controller = class {
     }
     if (installFailure !== void 0) {
       if (restartFailure !== void 0) {
-        const installError2 = asControllerError(installFailure, "install_failed", 500);
+        const installError = asControllerError(installFailure, "install_failed", 500);
         const restartDetails = restartFailure.toJSON(operationId);
-        const details = isRecord(installError2.details) ? { ...installError2.details, restartFailure: restartDetails } : { installFailure: installError2.details ?? null, restartFailure: restartDetails };
-        throw new ControllerError(installError2.code, installError2.message, installError2.status, details);
+        const details = isRecord(installError.details) ? { ...installError.details, restartFailure: restartDetails } : { installFailure: installError.details ?? null, restartFailure: restartDetails };
+        throw new ControllerError(installError.code, installError.message, installError.status, details);
       }
       throw installFailure;
     }
@@ -76547,13 +76547,13 @@ var Controller = class {
         ));
       } catch (error61) {
         const restartFailure = asControllerError(error61, "worker_unavailable", 503);
-        const failure = hostError(
+        const failure2 = hostError(
           "worker_unavailable",
           `R engine restart after package installation failed: ${restartFailure.message}`
         );
-        this.setRuntimeAvailabilityError(failure);
+        this.setRuntimeAvailabilityError(failure2);
         this.bump("runtime", this.runtimeSnapshot(), { operationId });
-        throw new ControllerError("worker_unavailable", failure.message, 503, restartFailure.toJSON(operationId));
+        throw new ControllerError("worker_unavailable", failure2.message, 503, restartFailure.toJSON(operationId));
       }
       this.assertNotClosed();
       this.handshake = handshake;
@@ -76563,10 +76563,10 @@ var Controller = class {
       this.kernelAvailable = handshake.kernelReady && handshake.captureReady;
       this.analyzerAvailable = handshake.analyzerReady;
       if (!this.kernelAvailable || !this.analyzerAvailable) {
-        const failure = hostError("engine_not_ready", "R engine did not become ready after package installation");
-        this.setRuntimeAvailabilityError(failure);
+        const failure2 = hostError("engine_not_ready", "R engine did not become ready after package installation");
+        this.setRuntimeAvailabilityError(failure2);
         this.bump("runtime", this.runtimeSnapshot(), { operationId });
-        throw new ControllerError("engine_not_ready", failure.message, 503);
+        throw new ControllerError("engine_not_ready", failure2.message, 503);
       }
       if (refreshedEnvironment !== null) this.rEnvironmentValue = clone3(refreshedEnvironment);
       this.clearRuntimeAvailabilityError();
@@ -77182,8 +77182,8 @@ var Controller = class {
     });
     void this.storeAndApplyUpload(command).catch((error61) => {
       if (this.closed) return;
-      const failure = asControllerError(error61, "upload_failed");
-      const hostFailure = failure.toJSON(command.requestId);
+      const failure2 = asControllerError(error61, "upload_failed");
+      const hostFailure = failure2.toJSON(command.requestId);
       this.replaceLastActionError(hostFailure, { operationId: command.requestId });
       this.discardUpload(this.operationKey(command.clientId, command.requestId));
       this.failOperation(command.requestId, hostFailure, command.clientId);
@@ -80027,11 +80027,11 @@ var RPeer = class {
         stdio: "pipes"
       });
     } catch (error61) {
-      const failure = new EngineTransportError(
+      const failure2 = new EngineTransportError(
         "could not start " + this.role + ": " + asError2(error61).message,
         this.role
       );
-      this.fail(failure);
+      this.fail(failure2);
       return await startup;
     }
     this.child = child;
@@ -96098,8 +96098,8 @@ async function executeTool(options, name, args, signal, extra) {
       [signal]
     );
   } catch (error61) {
-    const failure = codedError("command_uncertain", `${errorShape(error61).message} Retry the identical request only with requestId ${command.requestId} and sessionEpoch ${command.sessionEpoch}.`);
-    throw Object.assign(failure, { envelope: { requestId: command.requestId, epoch: command.sessionEpoch, result: null, error: errorShape(failure) } });
+    const failure2 = codedError("command_uncertain", `${errorShape(error61).message} Retry the identical request only with requestId ${command.requestId} and sessionEpoch ${command.sessionEpoch}.`);
+    throw Object.assign(failure2, { envelope: { requestId: command.requestId, epoch: command.sessionEpoch, result: null, error: errorShape(failure2) } });
   }
   options.assertActive?.();
   await sendProgress(extra, 1, completed.error === null ? "done" : "failed").catch(() => void 0);
@@ -96929,213 +96929,127 @@ async function readLayout(value) {
 
 // src/persistence.ts
 import { createHash as createHash6, randomUUID as randomUUID9 } from "node:crypto";
-import { mkdir as mkdir7, open as open7, readFile as readFile6, realpath as realpath7, rename as rename4, stat as stat13, unlink as unlink2 } from "node:fs/promises";
+import { mkdir as mkdir7, open as open6, readFile as readFile7, realpath as realpath7, rename as rename4, stat as stat13, unlink as unlink2 } from "node:fs/promises";
 import { basename as basename5, dirname as dirname6, join as join14, resolve as resolve9 } from "node:path";
 
 // src/packages.ts
 var import_yaml4 = __toESM(require_dist(), 1);
-import { lstat as lstat6, mkdir as mkdir6, readFile as readFile5, realpath as realpath6, stat as stat12 } from "node:fs/promises";
-import { isAbsolute as isAbsolute6, join as join13 } from "node:path";
+import { lstat as lstat6, mkdir as mkdir6, readFile as readFile6, realpath as realpath6, stat as stat12 } from "node:fs/promises";
+import { isAbsolute as isAbsolute5, join as join13 } from "node:path";
 
 // src/jobs.ts
-import { mkdtemp as mkdtemp2, open as open6, rm as rm5, writeFile as writeFile4 } from "node:fs/promises";
+import { mkdtemp as mkdtemp2, readFile as readFile5, rm as rm5, writeFile as writeFile4 } from "node:fs/promises";
 import { tmpdir as tmpdir3 } from "node:os";
-import { isAbsolute as isAbsolute5, join as join12 } from "node:path";
-import { TextDecoder as TextDecoder3 } from "node:util";
-var MAX_JOB_INPUT_BYTES = 16 * 1024 * 1024;
-var MAX_JOB_OUTPUT_BYTES = 8 * 1024 * 1024;
-var MAX_DIAGNOSTIC_BYTES = 64 * 1024;
-var DEFAULT_TIMEOUT_MS = 3e5;
-var WORKER_NAME = "package-job.R";
-var PROGRESS_PREFIX = "ALDER_PACKAGE_PROGRESS	";
-var PackageJobError = class extends Error {
+import { join as join12 } from "node:path";
+var PackageWorkerError = class extends Error {
   constructor(code2, message2, details) {
     super(message2);
     this.code = code2;
     this.details = details;
-    this.name = "PackageJobError";
+    this.name = "PackageWorkerError";
   }
   code;
   details;
 };
-var PackageJobs = class {
+var DEFAULT_TIMEOUT_MS = 3e5;
+var MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
+var PackageWorker = class {
   constructor(options) {
     this.options = options;
-    if (!options.resources || !options.environment && options.environment !== null) {
-      throw new Error("R job resources and environment are required");
-    }
-    if (!isAbsoluteNonEmptyPath(options.projectDirectory)) {
-      throw new Error("R job project directory must be an absolute path");
-    }
-    if (!isAbsoluteNonEmptyPath(options.resources.workerDirectory) || !isAbsoluteNonEmptyPath(options.resources.rLibraryDirectory)) {
-      throw new Error("R job resource paths must be absolute");
-    }
-    validateTimeout2(options.timeoutMs);
+    if (options.timeoutMs !== void 0) validateTimeout2(options.timeoutMs);
   }
   options;
   children = /* @__PURE__ */ new Set();
   closed = false;
-  closing;
   async run(command, payload, runOptions = {}) {
-    if (this.closed) throw jobError("job_closed", "R job manager is closed");
-    if (command !== "status" && command !== "install") {
-      throw jobError("invalid_request", "unknown package worker command: " + command);
-    }
+    if (this.closed) throw failure("job_closed", "package service is closed");
     if (runOptions.timeoutMs !== void 0) validateTimeout2(runOptions.timeoutMs);
-    if (runOptions.signal?.aborted) throw jobError("cancelled", "R package job was cancelled");
+    runOptions.signal?.throwIfAborted();
+    const environment = this.options.environment;
+    if (environment === null) throw failure("r_not_found", "selected R environment is unavailable");
     const operationId = typeof payload.operationId === "string" ? payload.operationId : void 0;
-    if (this.options.environment === null) {
-      throw jobError("r_not_found", "selected R environment is unavailable");
-    }
-    const directory = await mkdtemp2(join12(tmpdir3(), "alder-package-job-"));
-    let process4;
-    let failure;
+    const directory = await mkdtemp2(join12(tmpdir3(), "alder-package-"));
+    let child;
     try {
       const inputPath = join12(directory, "input.json");
       const outputPath = join12(directory, "result.json");
-      const encoded = JSON.stringify({ command, payload });
-      if (Buffer.byteLength(encoded, "utf8") > MAX_JOB_INPUT_BYTES) {
-        throw jobError("invalid_request", "R package job input exceeds 16 MiB");
-      }
-      await writeFile4(inputPath, encoded, { encoding: "utf8", mode: 384 });
-      if (this.closed) throw jobError("job_closed", "R job manager is closed");
-      const childEnvironment = workerEnvironment(this.options);
-      const workerPath = join12(this.options.resources.workerDirectory, WORKER_NAME);
-      process4 = await this.options.processScope.spawn({
-        executable: this.options.environment.rscript,
-        args: ["--vanilla", workerPath, inputPath, outputPath],
+      await writeFile4(inputPath, JSON.stringify({ command, ...payload }), { mode: 384 });
+      child = await this.options.processScope.spawn({
+        executable: environment.rscript,
+        args: ["--vanilla", join12(this.options.resources.workerDirectory, "package-job.R"), inputPath, outputPath],
         cwd: this.options.projectDirectory,
-        environment: childEnvironment,
+        environment: workerEnvironment(environment, this.options.resources),
         stdio: "pipes"
       });
-      this.children.add(process4);
-      if (this.closed) {
-        await process4.terminate().catch(() => void 0);
-        throw jobError("job_closed", "R job manager is closed");
-      }
-      const diagnostics = new DiagnosticCapture(command, operationId, this.options.callbacks?.onProgress);
-      const streams = [
-        consumeStream(process4.stdout, "stdout", diagnostics),
-        consumeStream(process4.stderr, "stderr", diagnostics)
-      ];
-      process4.stdin?.end();
-      await notify(this.options.callbacks?.onProgress, { command, operationId, phase: "started" });
-      const exit = await waitForProcess(process4, runOptions.signal, runOptions.timeoutMs ?? this.options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
-      await Promise.all(streams);
-      if (exit.kind !== "exit") {
-        const code2 = exit.kind === "timeout" ? "job_timeout" : "cancelled";
-        const message2 = exit.kind === "timeout" ? "R package job timed out" : "R package job was cancelled";
-        throw jobError(code2, message2, { output: diagnostics.text });
-      }
-      if (exit.code !== 0) {
-        throw jobError("job_failed", "R package job exited " + (exit.code ?? "without a status") + ": " + diagnostics.text, {
-          status: exit.code,
-          signal: exit.signal,
-          output: diagnostics.text
-        });
-      }
-      let response;
-      try {
-        const bytes = await readBounded(outputPath, MAX_JOB_OUTPUT_BYTES);
-        response = parseStrictJson(bytes, { maxBytes: MAX_JOB_OUTPUT_BYTES, maxDepth: 64 });
-      } catch (error61) {
-        throw jobError("job_protocol_error", "R package worker returned an invalid response: " + messageOf5(error61), {
-          output: diagnostics.text
-        });
-      }
-      if (!isRecord4(response) || typeof response.ok !== "boolean") {
-        throw jobError("job_protocol_error", "R package worker returned an invalid response", { output: diagnostics.text });
-      }
-      if (!response.ok) {
-        const detail = isRecord4(response.error) ? response.error : {};
-        throw jobError(
-          typeof detail.code === "string" ? detail.code : "job_failed",
-          typeof detail.message === "string" ? detail.message : "R package worker failed",
-          { ...isRecord4(detail.details) ? { details: detail.details } : {}, output: diagnostics.text }
-        );
-      }
-      const result = command === "install" ? withDiagnostics(response.result, diagnostics.text) : response.result;
-      const operationFailure = command === "install" ? nestedFailure(result) : void 0;
-      await notify(this.options.callbacks?.onProgress, { command, operationId, phase: "finished" });
-      await notify(this.options.callbacks?.onTerminal, operationFailure === void 0 ? { command, operationId, ok: true, result } : { command, operationId, ok: false, error: operationFailure, result });
+      this.children.add(child);
+      child.stdin?.end();
+      await this.options.onProgress?.({ command, operationId, phase: "started" });
+      const outputPromise = collect(child.stdout, child.stderr);
+      const exit = await waitForExit(child, runOptions.signal, runOptions.timeoutMs ?? this.options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+      const output2 = await outputPromise;
+      if (exit === "cancelled") throw failure("cancelled", "R package operation was cancelled");
+      if (exit === "timeout") throw failure("job_timeout", "R package operation timed out");
+      if (output2.length > 0) await this.options.onProgress?.({ command, operationId, phase: "output", text: output2 });
+      if (exit.code !== 0) throw failure("install_failed", output2 || `R package operation exited ${exit.code ?? "without status"}`);
+      const bytes = await readFile5(outputPath);
+      if (bytes.byteLength > MAX_OUTPUT_BYTES) throw failure("job_failed", "R package result is too large");
+      const result = JSON.parse(bytes.toString("utf8"));
+      if (!isRecord4(result) || typeof result.ok !== "boolean") throw failure("job_failed", "R package service returned an invalid result");
+      await this.options.onProgress?.({ command, operationId, phase: "finished" });
       return result;
     } catch (error61) {
-      failure = error61 instanceof PackageJobError ? error61 : jobError("job_failed", messageOf5(error61));
-      await notify(this.options.callbacks?.onFailure, failure);
-      await notify(this.options.callbacks?.onTerminal, {
-        command,
-        operationId,
-        ok: false,
-        error: { code: failure.code, message: failure.message, details: failure.details }
-      });
-      throw failure;
+      if (error61 instanceof PackageWorkerError) throw error61;
+      if (runOptions.signal?.aborted) throw failure("cancelled", "R package operation was cancelled");
+      throw failure("job_failed", messageOf5(error61));
     } finally {
-      if (process4 !== void 0) this.children.delete(process4);
+      if (child !== void 0) this.children.delete(child);
       await rm5(directory, { recursive: true, force: true });
     }
   }
-  close() {
+  async close() {
     this.closed = true;
-    if (this.closing !== void 0) return this.closing;
-    this.closing = (async () => {
-      const children = [...this.children];
-      await Promise.all(children.map(async (child) => {
-        await child.terminate().catch(() => void 0);
-      }));
-      await Promise.all(children.map((child) => child.exited.catch(() => ({ code: null, signal: "SIGKILL" }))));
-    })();
-    return this.closing;
+    const children = [...this.children];
+    await Promise.all(children.map((child) => child.terminate().catch(() => void 0)));
+    await Promise.all(children.map((child) => child.exited.catch(() => ({ code: null, signal: "SIGKILL" }))));
+    this.children.clear();
   }
 };
-function workerEnvironment(options) {
-  const environment = options.environment;
-  if (environment === null) throw jobError("r_not_found", "selected R environment is unavailable");
+function workerEnvironment(environment, resources2) {
   const values = {};
-  for (const [key2, value] of Object.entries(process.env)) {
-    if (value !== void 0) values[key2] = value;
-  }
-  for (const key2 of [
-    "R_HOME",
-    "R_LIBS",
-    "R_LIBS_USER",
-    "R_LIBS_SITE",
-    "R_PROFILE",
-    "R_PROFILE_USER",
-    "ALDER_R_PACKAGE",
-    "ALDER_R_PRIVATE_LIBRARY",
-    "ALDER_R_LIBRARIES",
-    "ALDER_RESOURCES_ROOT",
-    "ALDER_WORKER_DIR",
-    "ALDER_PROJECT_LIB",
-    "ALDER_SANDBOX_LIB",
-    "ALDER_PACKAGE_LIB",
-    "ALDER_PACKAGE_MODE"
-  ]) delete values[key2];
-  for (const key2 of Object.keys(values)) {
-    if (key2.startsWith("RENV_")) delete values[key2];
-  }
-  Object.assign(values, rEnvironmentVariables(environment, options.resources));
+  for (const [key2, value] of Object.entries(process.env)) if (value !== void 0) values[key2] = value;
+  for (const key2 of ["R_HOME", "R_LIBS", "R_LIBS_USER", "R_LIBS_SITE", "R_PROFILE", "R_PROFILE_USER"]) delete values[key2];
+  Object.assign(values, rEnvironmentVariables(environment, resources2));
   return values;
 }
-async function waitForProcess(child, signal, timeoutMs) {
+async function collect(...streams) {
+  let output2 = "";
+  await Promise.all(streams.map((stream) => stream === null ? void 0 : new Promise((resolve15, reject) => {
+    stream.on("data", (chunk) => {
+      output2 += typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
+      if (Buffer.byteLength(output2, "utf8") > MAX_OUTPUT_BYTES) output2 = output2.slice(-MAX_OUTPUT_BYTES / 2);
+    });
+    stream.once("end", resolve15);
+    stream.once("error", reject);
+  })));
+  return output2.trim();
+}
+async function waitForExit(child, signal, timeoutMs) {
   let timer;
   let abort;
-  const exit = child.exited.then((value) => ({ kind: "exit", ...value }));
   const timeout = new Promise((resolve15) => {
-    timer = setTimeout(() => resolve15({ kind: "timeout" }), timeoutMs);
+    timer = setTimeout(() => resolve15("timeout"), timeoutMs);
     timer.unref();
   });
-  const cancellation = signal === void 0 ? new Promise(() => void 0) : new Promise((resolve15) => {
-    abort = () => resolve15({ kind: "cancelled" });
-    if (signal.aborted) resolve15({ kind: "cancelled" });
+  const cancelled = signal === void 0 ? new Promise(() => void 0) : new Promise((resolve15) => {
+    abort = () => resolve15("cancelled");
+    if (signal.aborted) abort();
     else signal.addEventListener("abort", abort, { once: true });
   });
   try {
-    const result = await Promise.race([exit, timeout, cancellation]);
-    if (result.kind !== "exit") {
+    const result = await Promise.race([child.exited, timeout, cancelled]);
+    if (result === "cancelled" || result === "timeout") {
       await child.terminate().catch(() => void 0);
       await child.exited.catch(() => void 0);
-      return result;
     }
     return result;
   } finally {
@@ -97143,127 +97057,11 @@ async function waitForProcess(child, signal, timeoutMs) {
     if (abort !== void 0) signal?.removeEventListener("abort", abort);
   }
 }
-var DiagnosticCapture = class {
-  constructor(command, operationId, progress) {
-    this.command = command;
-    this.operationId = operationId;
-    this.progress = progress;
-  }
-  command;
-  operationId;
-  progress;
-  value = "";
-  progressBuffer = "";
-  decoders = {
-    stdout: new TextDecoder3("utf-8"),
-    stderr: new TextDecoder3("utf-8")
-  };
-  get text() {
-    return this.value;
-  }
-  async append(stream, bytes) {
-    await this.appendText(stream, this.decoders[stream].decode(bytes, { stream: true }));
-  }
-  async flush(stream) {
-    await this.appendText(stream, this.decoders[stream].decode());
-  }
-  async appendText(stream, decoded) {
-    if (!decoded) return;
-    const text2 = boundedUtf8Tail(decoded, MAX_DIAGNOSTIC_BYTES);
-    this.value = boundedUtf8Tail(this.value + text2, MAX_DIAGNOSTIC_BYTES);
-    await notify(this.progress, { command: this.command, operationId: this.operationId, phase: "output", stream, text: text2 });
-    this.progressBuffer = boundedUtf8Tail(this.progressBuffer + text2, MAX_DIAGNOSTIC_BYTES);
-    const lines = this.progressBuffer.split(/\r?\n/);
-    this.progressBuffer = lines.pop() ?? "";
-    for (const line of lines) {
-      if (!line.startsWith(PROGRESS_PREFIX)) continue;
-      const json3 = line.slice(PROGRESS_PREFIX.length);
-      try {
-        await notify(this.progress, { command: this.command, operationId: this.operationId, phase: "output", stream, text: line, data: parseProgressJson(json3) });
-      } catch {
-      }
-    }
-  }
-};
-async function consumeStream(stream, name, capture) {
-  if (stream === null) return;
-  let pending = Promise.resolve();
-  stream.on("data", (chunk) => {
-    pending = pending.then(() => capture.append(name, typeof chunk === "string" ? Buffer.from(chunk) : chunk));
-  });
-  await new Promise((resolve15, reject) => {
-    stream.once("end", resolve15);
-    stream.once("error", reject);
-  });
-  await pending;
-  await capture.flush(name);
+function validateTimeout2(value) {
+  if (!Number.isSafeInteger(value) || value < 1) throw new RangeError("package timeout must be a positive integer");
 }
-function boundedUtf8Tail(value, maxBytes) {
-  if (Buffer.byteLength(value, "utf8") <= maxBytes) return value;
-  const bytes = Buffer.from(value, "utf8");
-  let start = bytes.length - maxBytes;
-  while (start < bytes.length && (bytes[start] & 192) === 128) start += 1;
-  return bytes.subarray(start).toString("utf8");
-}
-function parseProgressJson(value) {
-  try {
-    return parseStrictJson(value, { maxBytes: 64 * 1024, maxDepth: 16 });
-  } catch {
-    return void 0;
-  }
-}
-function withDiagnostics(value, diagnostics) {
-  if (!diagnostics || !isRecord4(value) || typeof value.output !== "string" || value.output.length > 0) {
-    return value;
-  }
-  const error61 = isRecord4(value.error) && typeof value.error.output === "string" && value.error.output.length === 0 ? { ...value.error, output: diagnostics } : value.error;
-  return { ...value, output: diagnostics, ...error61 === void 0 ? {} : { error: error61 } };
-}
-function nestedFailure(value) {
-  if (!isRecord4(value) || value.ok !== false) return void 0;
-  const error61 = isRecord4(value.error) ? value.error : {};
-  return {
-    code: typeof error61.code === "string" ? error61.code : "job_failed",
-    message: typeof error61.message === "string" ? error61.message : "package operation failed",
-    details: error61
-  };
-}
-async function notify(callback, value) {
-  if (callback === void 0) return;
-  try {
-    await callback(value);
-  } catch {
-  }
-}
-async function readBounded(path3, maximum) {
-  let handle;
-  try {
-    handle = await open6(path3, "r");
-    const info = await handle.stat();
-    if (!info.isFile()) throw new Error("worker result is not a regular file");
-    if (info.size > maximum) throw new Error("worker result exceeds 8 MiB");
-    const bytes = Buffer.allocUnsafe(info.size);
-    let offset = 0;
-    while (offset < bytes.length) {
-      const read = await handle.read(bytes, offset, bytes.length - offset, null);
-      if (read.bytesRead === 0) throw new Error("worker result ended unexpectedly");
-      offset += read.bytesRead;
-    }
-    return bytes;
-  } finally {
-    await handle?.close().catch(() => void 0);
-  }
-}
-function validateTimeout2(timeout) {
-  if (timeout !== void 0 && (!Number.isSafeInteger(timeout) || timeout <= 0 || timeout > 36e5)) {
-    throw new Error("R job timeout must be an integer between 1 and 3600000 milliseconds");
-  }
-}
-function isAbsoluteNonEmptyPath(value) {
-  return typeof value === "string" && value.length > 0 && !value.includes("\0") && isAbsolute5(value);
-}
-function jobError(code2, message2, details) {
-  return new PackageJobError(code2, message2, details);
+function failure(code2, message2, details) {
+  return new PackageWorkerError(code2, message2, details);
 }
 function isRecord4(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -97293,82 +97091,41 @@ function packageLibraryPath(projectDirectory) {
   return join13(projectDirectory, ...PACKAGE_LIBRARY_RELATIVE_PATH);
 }
 function validatePackageNames(packages, allowEmpty = true) {
-  if (!Array.isArray(packages) || packages.some((packageName) => typeof packageName !== "string")) {
-    throw new PackageError("invalid_request", "packages must be an array of package names");
-  }
-  const unique2 = [...new Set(packages)];
-  const invalid5 = unique2.filter((packageName) => !PACKAGE_NAME_RE.test(packageName));
-  if (invalid5.length > 0) {
-    throw new PackageError("invalid_request", "invalid package name: " + invalid5.join(", "));
-  }
-  if (!allowEmpty && unique2.length === 0) {
-    throw new PackageError("invalid_request", "at least one package is required");
-  }
-  return unique2.sort();
+  if (!Array.isArray(packages) || packages.some((value) => typeof value !== "string")) throw new PackageError("invalid_request", "packages must be an array of package names");
+  const values = [...new Set(packages)];
+  const invalid5 = values.filter((value) => !PACKAGE_NAME_RE.test(value));
+  if (invalid5.length > 0) throw new PackageError("invalid_request", "invalid package name: " + invalid5.join(", "));
+  if (!allowEmpty && values.length === 0) throw new PackageError("invalid_request", "at least one package is required");
+  return values.sort();
 }
 async function readPackageDeclarations(projectDirectory) {
   const project = await canonicalProjectDirectory(projectDirectory);
   const metadata = packageMetadataPath(project);
   const observation = await observeFile(metadata);
-  if (observation.state === "absent") {
-    return { path: project, metadata, packages: [], sidecarVersion: null };
-  }
-  if (observation.state !== "present") {
-    throw new PackageError("package_metadata_error", "package metadata is not readable: " + metadata);
-  }
-  let text2;
+  if (observation.state === "absent") return { path: project, metadata, packages: [], sidecarVersion: null };
+  if (observation.state !== "present") throw new PackageError("package_metadata_error", "package metadata is not readable: " + metadata);
   try {
-    const bytes = await readFile5(metadata);
-    if (bytes.includes(0)) throw new Error("package metadata contains an embedded NUL");
-    text2 = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    const mapping = parseYamlMapping(new TextDecoder("utf-8", { fatal: true }).decode(await readFile6(metadata)), "packages");
+    if (Object.keys(mapping).length !== 1 || !Array.isArray(mapping.packages) || mapping.packages.some((value) => typeof value !== "string")) {
+      throw new Error("package metadata must contain only a packages sequence");
+    }
+    return { path: project, metadata, packages: validatePackageNames(mapping.packages), sidecarVersion: sidecarVersion(observation) };
   } catch (error61) {
-    throw new PackageError("package_metadata_error", "could not read package metadata: " + messageOf6(error61));
+    throw new PackageError("package_metadata_error", messageOf6(error61));
   }
-  let mapping;
-  try {
-    mapping = parseYamlMapping(text2, "packages");
-  } catch (error61) {
-    throw new PackageError("package_metadata_error", messageOf6(error61), error61);
-  }
-  const keys2 = Object.keys(mapping);
-  if (keys2.length !== 1 || keys2[0] !== "packages") {
-    throw new PackageError("package_metadata_error", "package metadata must contain only a packages sequence");
-  }
-  if (!Array.isArray(mapping.packages) || mapping.packages.some((value) => typeof value !== "string")) {
-    throw new PackageError("package_metadata_error", "packages must be a character sequence");
-  }
-  let packages;
-  try {
-    packages = validatePackageNames(mapping.packages);
-  } catch (error61) {
-    throw new PackageError("package_metadata_error", messageOf6(error61), error61);
-  }
-  return {
-    path: project,
-    metadata,
-    packages,
-    sidecarVersion: sidecarVersion(observation)
-  };
 }
 function serializePackageDeclarations(packages) {
-  const value = { packages: validatePackageNames(packages) };
-  const text2 = (0, import_yaml4.stringify)(value, {
-    version: "1.2",
-    schema: "core",
-    sortMapEntries: true
-  });
+  const text2 = (0, import_yaml4.stringify)({ packages: validatePackageNames(packages) }, { sortMapEntries: true });
   return text2.endsWith("\n") ? text2 : text2 + "\n";
 }
 var PackageManager = class {
   constructor(options) {
     this.options = options;
-    if (!isAbsoluteNonEmptyPath2(options.projectDirectory)) {
-      throw new Error("package project directory must be an absolute path");
-    }
-    this.jobs = new PackageJobs(options);
+    if (!isAbsoluteNonEmptyPath(options.projectDirectory)) throw new Error("package project directory must be an absolute path");
+    this.worker = new PackageWorker(options);
   }
   options;
-  jobs;
+  worker;
   closed = false;
   async declarations() {
     this.assertOpen();
@@ -97376,214 +97133,103 @@ var PackageManager = class {
   }
   async status(options = {}) {
     this.assertOpen();
-    const declarations = await readPackageDeclarations(this.options.projectDirectory);
-    const lockfile3 = await projectLockfile(declarations.path);
-    const locked = lockfile3 === null ? null : await readRenvLockSnapshot(lockfile3);
-    if (locked !== null) requireLockedPackages(declarations.packages, locked);
-    const mode = lockfile3 === null ? "pak" : "renv";
-    const ordinaryLibrary = packageLibraryPath(declarations.path);
-    const ordinaryPresent = await existingDirectory2(ordinaryLibrary);
-    const libraryPaths = mode === "pak" ? uniquePaths2([...ordinaryPresent ? [ordinaryLibrary] : [], ...this.options.environment?.libraryPaths ?? []]) : [...this.options.environment?.libraryPaths ?? []];
-    let result;
-    try {
-      result = await this.jobs.run("status", {
-        projectDirectory: declarations.path,
-        packages: declarations.packages,
-        mode,
-        lockfilePath: lockfile3,
-        libraryPath: mode === "pak" && ordinaryPresent ? ordinaryLibrary : null,
-        libraryPaths,
-        ...options.operationId === void 0 ? {} : { operationId: options.operationId }
-      });
-    } catch (error61) {
-      if (error61 instanceof PackageJobError) {
-        throw new PackageError(error61.code, error61.message, error61.details);
-      }
-      throw error61;
-    }
-    const worker = checkedWorkerStatus(result);
-    const records = statusRecords(declarations.packages, worker.records);
+    const declarations = await this.declarations();
+    const library = packageLibraryPath(declarations.path);
+    const exists = await existingDirectory2(library);
+    const response = workerResult(await this.run("status", declarations, declarations.packages, library, options.operationId));
+    const records = statusRecords(declarations.packages, response.records);
     return {
+      ...declarations,
       ok: true,
-      path: declarations.path,
-      metadata: declarations.metadata,
-      packages: declarations.packages,
-      sidecarVersion: declarations.sidecarVersion,
-      mode,
-      lockfile: lockfile3,
-      library: mode === "pak" ? ordinaryPresent ? ordinaryLibrary : null : worker.library,
-      installed: records.filter((record4) => record4.status === "installed").map((record4) => record4.package),
-      missing: records.filter((record4) => record4.status === "missing").map((record4) => record4.package),
+      mode: "project",
+      lockfile: null,
+      library: exists ? library : null,
+      installed: records.filter((value) => value.status === "installed").map((value) => value.package),
+      missing: records.filter((value) => value.status === "missing").map((value) => value.package),
       installing: [],
       status: records,
       error: null
     };
   }
-  async install(packages, runOptions = {}) {
+  async install(packages, options = {}) {
     this.assertOpen();
-    const requested = validatePackageNames(packages, false);
-    const declarations = await readPackageDeclarations(this.options.projectDirectory);
-    const lockfile3 = await projectLockfile(declarations.path);
-    const locked = lockfile3 === null ? null : await readRenvLockSnapshot(lockfile3);
-    if (locked !== null) requireLockedPackages(requested, locked);
-    const mode = lockfile3 === null ? "pak" : "renv";
-    const ordinaryLibrary = packageLibraryPath(declarations.path);
-    if (this.options.environment === null) {
-      return failedInstall(
-        declarations,
-        mode,
-        lockfile3,
-        mode === "pak" ? ordinaryLibrary : null,
-        requested,
-        new PackageError("r_not_found", "selected R environment is unavailable"),
-        false
-      );
-    }
-    if (mode === "pak") {
-      try {
-        await ensureProjectLibrary(declarations.path, ordinaryLibrary);
-      } catch (error61) {
-        return failedInstall(
-          declarations,
-          mode,
-          lockfile3,
-          ordinaryLibrary,
-          requested,
-          new PackageError("install_failed", "could not create safe package library: " + messageOf6(error61)),
-          false
-        );
-      }
-    }
-    const libraryPaths = mode === "pak" ? uniquePaths2([ordinaryLibrary, ...this.options.environment?.libraryPaths ?? []]) : [...this.options.environment?.libraryPaths ?? []];
+    const declarations = await this.declarations();
+    const requested = validatePackageNames(packages).length > 0 ? validatePackageNames(packages) : declarations.packages;
+    if (requested.length === 0) throw new PackageError("invalid_request", "declare at least one package before installing");
+    const library = packageLibraryPath(declarations.path);
+    if (this.options.environment === null) return failedInstall(declarations, requested, library, new PackageError("r_not_found", "selected R environment is unavailable"), false);
     try {
-      const result = await this.jobs.run("install", {
-        projectDirectory: declarations.path,
+      await ensureProjectLibrary(declarations.path, library);
+      const response = workerResult(await this.run("install", declarations, requested, library, options.operationId, options));
+      const records = statusRecords(requested, response.records);
+      const ok = response.ok && records.every((value) => value.status === "installed");
+      if (!ok) return failedInstall(declarations, requested, library, new PackageError("install_failed", response.error ?? "package installation failed"), response.mutatedLibrary);
+      const installed = records.map((value) => value.package);
+      return {
+        ...declarations,
+        ok: true,
+        status: "installed",
+        mode: "project",
+        lockfile: null,
+        library,
         packages: requested,
-        mode,
-        lockfilePath: lockfile3,
-        libraryPath: mode === "pak" ? ordinaryLibrary : null,
-        libraryPaths,
-        ...runOptions.operationId === void 0 ? {} : { operationId: runOptions.operationId }
-      }, runOptions);
-      return normalizeInstallResult(
-        result,
-        declarations,
-        mode,
-        lockfile3,
-        requested,
-        mode === "pak" ? ordinaryLibrary : null
-      );
+        installed,
+        missing: [],
+        installing: [],
+        mutatedLibrary: response.mutatedLibrary,
+        result: { status: "installed", library, packages: requested, installed, missing: [], output: "", packageStatus: records },
+        output: "",
+        packageStatus: records,
+        error: null
+      };
     } catch (error61) {
-      const failure = error61 instanceof PackageJobError ? new PackageError(error61.code, error61.message, error61.details) : error61 instanceof PackageError ? error61 : new PackageError("install_failed", messageOf6(error61));
-      const mutatedLibrary = failure.code !== "r_not_found" && failure.code !== "cancelled";
-      return failedInstall(declarations, mode, lockfile3, mode === "pak" ? ordinaryLibrary : null, requested, failure, mutatedLibrary);
+      const failure2 = error61 instanceof PackageWorkerError ? new PackageError(error61.code, error61.message, error61.details) : error61 instanceof PackageError ? error61 : new PackageError("install_failed", messageOf6(error61));
+      return failedInstall(declarations, requested, library, failure2, failure2.code !== "r_not_found" && failure2.code !== "cancelled");
     }
   }
   close() {
-    if (this.closed) return this.jobs.close();
     this.closed = true;
-    return this.jobs.close();
+    return this.worker.close();
   }
   assertOpen() {
     if (this.closed) throw new PackageError("job_closed", "package manager is closed");
+  }
+  async run(command, declarations, packages, library, operationId, options = {}) {
+    try {
+      return await this.worker.run(command, {
+        projectDirectory: declarations.path,
+        packages,
+        library,
+        repositories: await projectRepositories(declarations.path),
+        ...operationId === void 0 ? {} : { operationId }
+      }, options);
+    } catch (error61) {
+      if (error61 instanceof PackageWorkerError) throw new PackageError(error61.code, error61.message, error61.details);
+      throw error61;
+    }
   }
 };
 function createPackageManager(options) {
   return new PackageManager(options);
 }
 async function canonicalProjectDirectory(value) {
-  if (!isAbsoluteNonEmptyPath2(value)) {
-    throw new PackageError("invalid_request", "project directory must be an absolute path");
-  }
+  if (!isAbsoluteNonEmptyPath(value)) throw new PackageError("invalid_request", "project directory must be an absolute path");
   try {
     const path3 = await realpath6(value);
-    const info = await stat12(path3);
-    if (!info.isDirectory()) throw new Error("project directory is not a directory");
+    if (!(await stat12(path3)).isDirectory()) throw new Error("not a directory");
     return path3;
   } catch (error61) {
-    if (error61.code === "ENOENT") {
-      throw new PackageError("invalid_request", "project directory does not exist: " + value);
-    }
-    if (error61 instanceof PackageError) throw error61;
     throw new PackageError("invalid_request", "project directory is unavailable: " + messageOf6(error61));
   }
 }
-async function projectLockfile(project) {
-  const path3 = join13(project, "renv.lock");
+async function projectRepositories(project) {
   try {
-    const info = await lstat6(path3);
-    if (!info.isFile() || info.isSymbolicLink()) {
-      throw new PackageError("package_metadata_error", "renv.lock must be a regular file");
-    }
-    return path3;
+    const value = JSON.parse(await readFile6(join13(project, "renv.lock"), "utf8"));
+    return (value.R?.Repositories ?? []).map((value2) => value2.URL).filter((value2) => typeof value2 === "string" && value2.length > 0);
   } catch (error61) {
-    if (error61.code === "ENOENT") return null;
-    if (error61 instanceof PackageError) throw error61;
-    throw new PackageError("package_metadata_error", "could not inspect renv.lock: " + messageOf6(error61));
+    if (error61.code === "ENOENT") return [];
+    throw new PackageError("package_metadata_error", "could not read package repositories: " + messageOf6(error61));
   }
-}
-var MAX_RENV_LOCKFILE_BYTES = 16 * 1024 * 1024;
-async function readRenvLockSnapshot(path3) {
-  let bytes;
-  try {
-    bytes = await readFile5(path3);
-  } catch (error61) {
-    throw new PackageError("package_metadata_error", "could not read renv.lock: " + messageOf6(error61));
-  }
-  let value;
-  try {
-    value = parseStrictJson(bytes, { maxBytes: MAX_RENV_LOCKFILE_BYTES, maxDepth: 64 });
-  } catch (error61) {
-    throw new PackageError("package_metadata_error", "renv.lock is not strict JSON: " + messageOf6(error61), error61);
-  }
-  if (!isRecord5(value) || !isRecord5(value.R) || !isRecord5(value.Packages)) {
-    throw new PackageError("package_metadata_error", "renv.lock must contain R and Packages objects");
-  }
-  const r = value.R;
-  if (!strictLockString(r.Version, "R.Version") || !Array.isArray(r.Repositories)) {
-    throw new PackageError("package_metadata_error", "renv.lock has an invalid R record");
-  }
-  const repositoryNames = /* @__PURE__ */ new Set();
-  for (const repository of r.Repositories) {
-    if (!isRecord5(repository) || !strictLockString(repository.Name, "repository Name") || !strictLockString(repository.URL, "repository URL") || repositoryNames.has(repository.Name)) {
-      throw new PackageError("package_metadata_error", "renv.lock has an invalid repository record");
-    }
-    repositoryNames.add(repository.Name);
-  }
-  const records = /* @__PURE__ */ new Map();
-  for (const [name, record4] of Object.entries(value.Packages)) {
-    if (!PACKAGE_NAME_RE.test(name) || !isRecord5(record4) || record4.Package !== name || !strictLockString(record4.Package, "package Package") || !strictLockString(record4.Version, "package Version") || !strictLockString(record4.Source, "package Source")) {
-      throw new PackageError("package_metadata_error", "renv.lock has an invalid package record: " + name);
-    }
-    const source = record4.Source;
-    const repository = record4.Repository === void 0 ? null : record4.Repository;
-    if (repository !== null && !strictLockString(repository, "package Repository")) {
-      throw new PackageError("package_metadata_error", "renv.lock has an invalid package repository: " + name);
-    }
-    if (["repository", "cran", "p3m", "ppm", "rspm", "bioconductor"].includes(source.toLowerCase()) && repository === null) {
-      throw new PackageError("package_metadata_error", "renv.lock package lacks repository identity: " + name);
-    }
-    for (const [field, fieldValue] of Object.entries(record4)) {
-      if (field.startsWith("Remote") && !strictLockString(fieldValue, "package " + field)) {
-        throw new PackageError("package_metadata_error", "renv.lock has an invalid remote identity: " + name);
-      }
-    }
-    records.set(name, { package: name, version: record4.Version, source, repository });
-  }
-  return records;
-}
-function requireLockedPackages(packages, records) {
-  const missing3 = packages.filter((packageName) => !records.has(packageName));
-  if (missing3.length > 0) {
-    throw new PackageError(
-      "package_metadata_error",
-      "renv.lock does not declare requested package(s): " + missing3.join(", "),
-      { missing: missing3 }
-    );
-  }
-}
-function strictLockString(value, label) {
-  return typeof value === "string" && value.length > 0 && value.length <= 64 * 1024 && !/[\u0000-\u001f\u007f]/u.test(value) && label.length > 0;
 }
 async function existingDirectory2(path3) {
   try {
@@ -97594,113 +97240,33 @@ async function existingDirectory2(path3) {
 }
 async function ensureProjectLibrary(project, library) {
   const alder = join13(project, ".alder");
-  await mkdir6(alder, { mode: 448 }).catch((error61) => {
-    if (error61.code !== "EEXIST") throw error61;
-  });
-  const alderInfo = await lstat6(alder);
-  if (!alderInfo.isDirectory() || alderInfo.isSymbolicLink()) throw new Error("project .alder path must be a real directory");
-  await mkdir6(library, { mode: 448 }).catch((error61) => {
-    if (error61.code !== "EEXIST") throw error61;
-  });
-  const libraryInfo = await lstat6(library);
-  if (!libraryInfo.isDirectory() || libraryInfo.isSymbolicLink()) throw new Error("project package library must be a real directory");
-  const [physicalProject, physicalLibrary] = await Promise.all([realpath6(project), realpath6(library)]);
-  if (physicalLibrary !== join13(physicalProject, ".alder", "library")) throw new Error("project package library escapes the project directory");
+  await mkdir6(alder, { recursive: true, mode: 448 });
+  await mkdir6(library, { recursive: true, mode: 448 });
+  if (!(await lstat6(alder)).isDirectory() || !(await lstat6(library)).isDirectory()) throw new Error("project library is not a directory");
+  if (await realpath6(library) !== join13(await realpath6(project), ".alder", "library")) throw new Error("project library is outside the project");
 }
-function checkedWorkerStatus(value) {
-  if (!isRecord5(value)) {
-    throw new PackageError("job_protocol_error", "package worker returned invalid status data");
-  }
-  if (value.ok === false) {
-    const detail = isRecord5(value.error) ? value.error : {};
-    const code2 = typeof detail.code === "string" ? detail.code : "job_failed";
-    const message2 = typeof detail.message === "string" ? detail.message : "package status failed";
-    throw new PackageError(code2, message2, detail);
-  }
-  if (value.ok !== true || value.status !== "installed" || !Array.isArray(value.records) || value.records.some((record4) => !isRecord5(record4) || typeof record4.package !== "string" || record4.status !== "installed" && record4.status !== "missing" || record4.version !== null && typeof record4.version !== "string" || record4.library !== null && typeof record4.library !== "string")) {
-    throw new PackageError("job_protocol_error", "package worker returned invalid status data");
-  }
-  if (value.library !== null && typeof value.library !== "string") {
-    throw new PackageError("job_protocol_error", "package worker returned an invalid library path");
-  }
-  return { records: value.records, library: value.library };
+function workerResult(value) {
+  if (!isRecord5(value) || typeof value.ok !== "boolean" || !Array.isArray(value.records)) throw new PackageError("job_failed", "package service returned invalid data");
+  const records = value.records.filter(isRecord5).map((record4) => ({
+    package: String(record4.package),
+    status: record4.status === "installed" ? "installed" : "missing",
+    version: typeof record4.version === "string" ? record4.version : null,
+    library: typeof record4.library === "string" ? record4.library : null
+  }));
+  return { ok: value.ok, records, mutatedLibrary: value.mutatedLibrary === true, ...typeof value.error === "string" ? { error: value.error } : {} };
 }
-function statusRecords(packages, worker) {
-  const byName = new Map(worker.map((record4) => [record4.package, record4]));
-  return packages.map((packageName) => {
-    const record4 = byName.get(packageName);
-    if (record4 === void 0) return { package: packageName, status: "missing", version: null, library: null };
-    return { package: packageName, status: record4.status, version: record4.version, library: record4.library };
-  });
+function statusRecords(packages, records) {
+  const byName = new Map(records.map((value) => [value.package, value]));
+  return packages.map((packageName) => byName.get(packageName) ?? { package: packageName, status: "missing", version: null, library: null });
 }
-function normalizeInstallResult(value, declarations, mode, lockfile3, requested, library) {
-  if (!isRecord5(value) || typeof value.ok !== "boolean" || value.status !== "installed" && value.status !== "error" || !Array.isArray(value.records) || value.records.some((record4) => !isRecord5(record4) || typeof record4.package !== "string" || record4.status !== "installed" && record4.status !== "missing" || record4.version !== null && typeof record4.version !== "string" || record4.library !== null && typeof record4.library !== "string") || value.library !== null && typeof value.library !== "string" || typeof value.mutatedLibrary !== "boolean" || typeof value.output !== "string") {
-    throw new PackageError("job_protocol_error", "package worker returned invalid install data");
-  }
-  const records = statusRecords(requested, value.records);
-  const error61 = value.error === null || value.error === void 0 ? null : installError(value.error);
-  const ok = value.ok && value.status === "installed" && error61 === null && records.every((record4) => record4.status === "installed");
-  const resultLibrary = mode === "renv" ? value.library : library;
+function failedInstall(declarations, requested, library, error61, mutatedLibrary) {
+  const records = requested.map((packageName) => ({ package: packageName, status: "missing", version: null, library: null }));
   return {
-    ok,
-    status: ok ? "installed" : "error",
-    path: declarations.path,
-    metadata: declarations.metadata,
-    sidecarVersion: declarations.sidecarVersion,
-    mode,
-    lockfile: lockfile3,
-    library: resultLibrary,
-    packages: requested,
-    installed: records.filter((record4) => record4.status === "installed").map((record4) => record4.package),
-    missing: records.filter((record4) => record4.status === "missing").map((record4) => record4.package),
-    installing: [],
-    mutatedLibrary: value.mutatedLibrary,
-    result: ok ? {
-      status: "installed",
-      library: resultLibrary,
-      packages: requested,
-      installed: records.filter((record4) => record4.status === "installed").map((record4) => record4.package),
-      missing: records.filter((record4) => record4.status === "missing").map((record4) => record4.package),
-      output: value.output,
-      packageStatus: records
-    } : null,
-    output: value.output,
-    packageStatus: records,
-    error: ok ? null : error61 ?? {
-      code: "install_failed",
-      message: "requested packages remain unavailable",
-      output: value.output
-    }
-  };
-}
-function installError(value) {
-  if (!isRecord5(value) || typeof value.code !== "string" || typeof value.message !== "string") {
-    throw new PackageError("job_protocol_error", "package worker returned invalid install error data");
-  }
-  const status = typeof value.status === "number" || value.status === null ? value.status : void 0;
-  const output2 = typeof value.output === "string" ? value.output : void 0;
-  return {
-    code: value.code,
-    message: value.message,
-    ...status === void 0 ? {} : { status },
-    ...output2 === void 0 ? {} : { output: output2 },
-    ...value.details === void 0 ? {} : { details: value.details }
-  };
-}
-function failedInstall(declarations, mode, lockfile3, library, requested, error61, mutatedLibrary) {
-  const errorValue = {
-    code: error61.code,
-    message: error61.message,
-    ...error61.details === void 0 ? {} : { details: error61.details }
-  };
-  return {
+    ...declarations,
     ok: false,
     status: "error",
-    path: declarations.path,
-    metadata: declarations.metadata,
-    sidecarVersion: declarations.sidecarVersion,
-    mode,
-    lockfile: lockfile3,
+    mode: "project",
+    lockfile: null,
     library,
     packages: requested,
     installed: [],
@@ -97708,20 +97274,16 @@ function failedInstall(declarations, mode, lockfile3, library, requested, error6
     installing: [],
     mutatedLibrary,
     result: null,
-    output: typeof error61.details === "object" && error61.details !== null && "output" in error61.details && typeof error61.details.output === "string" ? error61.details.output : "",
-    packageStatus: requested.map((packageName) => ({ package: packageName, status: "missing", version: null, library: null })),
-    error: errorValue
+    output: "",
+    packageStatus: records,
+    error: { code: error61.code, message: error61.message, ...error61.details === void 0 ? {} : { details: error61.details } }
   };
 }
 function sidecarVersion(observation) {
-  if (observation.state !== "present") return null;
-  return observation.version ?? observation.digest;
+  return observation.state === "present" ? observation.version ?? observation.digest : null;
 }
-function uniquePaths2(paths) {
-  return [...new Set(paths.filter((path3) => typeof path3 === "string" && path3.length > 0))];
-}
-function isAbsoluteNonEmptyPath2(value) {
-  return typeof value === "string" && value.length > 0 && !value.includes("\0") && isAbsolute6(value);
+function isAbsoluteNonEmptyPath(value) {
+  return typeof value === "string" && value.length > 0 && !value.includes("\0") && isAbsolute5(value);
 }
 function isRecord5(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -97755,7 +97317,7 @@ var PersistenceError = class extends Error {
 async function diskVersion(path3, previous) {
   let file2;
   try {
-    file2 = await open7(path3, "r");
+    file2 = await open6(path3, "r");
   } catch (error61) {
     if (error61.code === "ENOENT") {
       const bytes = new Uint8Array();
@@ -98356,7 +97918,7 @@ function validateDiskPrecondition(precondition) {
 async function syncDirectory3(path3) {
   let directory;
   try {
-    directory = await open7(path3, "r");
+    directory = await open6(path3, "r");
     await directory.sync();
   } catch (error61) {
     const code2 = error61.code;
@@ -98366,7 +97928,7 @@ async function syncDirectory3(path3) {
   }
 }
 async function writeStaged(path3, bytes, mode) {
-  const file2 = await open7(path3, "wx", mode);
+  const file2 = await open6(path3, "wx", mode);
   try {
     await file2.chmod(mode);
     await file2.writeFile(bytes);
@@ -98387,7 +97949,7 @@ function decodeBase644(value) {
 
 // src/recovery.ts
 import { createHash as createHash7, randomUUID as randomUUID10 } from "node:crypto";
-import { mkdir as mkdir8, open as open8, readdir as readdir3, realpath as realpath8, rename as rename5, rm as rm6 } from "node:fs/promises";
+import { mkdir as mkdir8, open as open7, readdir as readdir3, realpath as realpath8, rename as rename5, rm as rm6 } from "node:fs/promises";
 import { join as join15, resolve as resolve10 } from "node:path";
 var RecoveryError = class extends Error {
   constructor(code2, message2, details = null, originals = [], cause) {
@@ -98651,7 +98213,7 @@ var RecoveryWriter = class _RecoveryWriter {
   }
   async atomicWrite(path3, bytes) {
     const temporary = path3 + "." + randomUUID10() + ".tmp";
-    const handle = await open8(temporary, "wx", 384);
+    const handle = await open7(temporary, "wx", 384);
     try {
       await handle.writeFile(bytes);
       await handle.sync();
@@ -98714,7 +98276,7 @@ import {
   link as link2,
   lstat as lstat7,
   mkdtemp as mkdtemp3,
-  readFile as readFile7,
+  readFile as readFile8,
   realpath as realpath9,
   rm as rm7,
   stat as stat14,
@@ -107995,9 +107557,9 @@ var OutputRenderer = class {
   }
   async flushArtifacts() {
     while (this.pendingArtifacts.size) await Promise.all([...this.pendingArtifacts]);
-    const failure = this.artifactFailure;
+    const failure2 = this.artifactFailure;
     this.artifactFailure = null;
-    if (this.mode === "static" && failure !== null) throw failure;
+    if (this.mode === "static" && failure2 !== null) throw failure2;
   }
   render(container, outputs, progress) {
     container.classList.add("out-stack");
@@ -109097,7 +108659,7 @@ async function publishSnapshot(outputStore, processScope, snapshot, options) {
     const quarto = await findQuartoExecutable();
     await runQuarto(processScope, quarto, stagingDirectory, qmdPath, renderedPath, options.signal);
     throwIfAborted3(options.signal);
-    const rendered = await readFile7(renderedPath);
+    const rendered = await readFile8(renderedPath);
     if (rendered.byteLength === 0 || rendered.byteLength > MAX_PUBLISHED_HTML_BYTES) {
       throw new PublishingError("publish_failed", "Quarto did not produce a bounded HTML document");
     }
@@ -109722,10 +109284,10 @@ var PUBLISH_CSS = `
 `;
 
 // src/formatting.ts
-import { mkdtemp as mkdtemp4, readFile as readFile8, rm as rm8, writeFile as writeFile6 } from "node:fs/promises";
+import { mkdtemp as mkdtemp4, readFile as readFile9, rm as rm8, writeFile as writeFile6 } from "node:fs/promises";
 import { tmpdir as tmpdir5 } from "node:os";
 import { join as join17 } from "node:path";
-import { TextDecoder as TextDecoder4 } from "node:util";
+import { TextDecoder as TextDecoder3 } from "node:util";
 var FormattingError = class extends Error {
   constructor(code2, message2) {
     super(message2);
@@ -109733,10 +109295,10 @@ var FormattingError = class extends Error {
   }
   code;
 };
-var MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
+var MAX_OUTPUT_BYTES2 = 8 * 1024 * 1024;
 var MAX_LINE_BYTES = 1024 * 1024;
 function createFormattingService(airExecutable, processScope) {
-  if (!isAbsoluteNonEmptyPath3(airExecutable)) {
+  if (!isAbsoluteNonEmptyPath2(airExecutable)) {
     throw new Error("Air executable must be an absolute path");
   }
   if (!processScope || typeof processScope.spawn !== "function") {
@@ -109778,7 +109340,7 @@ async function formatOne(airExecutable, processScope, body, signal) {
   const input2 = join17(directory, "cell.R");
   try {
     const text2 = body.join("\n");
-    if (Buffer.byteLength(text2, "utf8") > MAX_OUTPUT_BYTES) {
+    if (Buffer.byteLength(text2, "utf8") > MAX_OUTPUT_BYTES2) {
       throw new FormattingError("format_failed", "cell source exceeds formatter limit");
     }
     await writeFile6(input2, text2, { encoding: "utf8", mode: 384 });
@@ -109787,9 +109349,9 @@ async function formatOne(airExecutable, processScope, body, signal) {
       const detail = result.stderr.trim() || result.stdout.trim() || "exit status " + (result.code ?? "unknown");
       throw new FormattingError("format_failed", "air could not format the cell: " + detail);
     }
-    const bytes = await readFile8(input2);
-    if (bytes.length > MAX_OUTPUT_BYTES) throw new FormattingError("format_failed", "air output exceeds formatter limit");
-    const output2 = new TextDecoder4("utf-8", { fatal: true }).decode(bytes);
+    const bytes = await readFile9(input2);
+    if (bytes.length > MAX_OUTPUT_BYTES2) throw new FormattingError("format_failed", "air output exceeds formatter limit");
+    const output2 = new TextDecoder3("utf-8", { fatal: true }).decode(bytes);
     if (output2.includes("\0")) throw new FormattingError("format_failed", "air returned NUL bytes");
     return sourceLines2(output2);
   } catch (error61) {
@@ -109806,7 +109368,7 @@ async function runAir(executable, input2, processScope, cwd, signal) {
   let stderr = "";
   let settled = false;
   let aborting = false;
-  const collect = (current, chunk) => (current + Buffer.from(chunk).toString("utf8")).slice(-65536);
+  const collect2 = (current, chunk) => (current + Buffer.from(chunk).toString("utf8")).slice(-65536);
   const environment = Object.fromEntries(
     Object.entries(process.env).filter((entry) => typeof entry[1] === "string")
   );
@@ -109837,10 +109399,10 @@ async function runAir(executable, input2, processScope, cwd, signal) {
         return;
       }
       spawned.stdout?.on("data", (chunk) => {
-        stdout = collect(stdout, chunk);
+        stdout = collect2(stdout, chunk);
       });
       spawned.stderr?.on("data", (chunk) => {
-        stderr = collect(stderr, chunk);
+        stderr = collect2(stderr, chunk);
       });
       void spawned.exited.then(({ code: code2 }) => {
         finish(() => resolve15({ code: code2, stdout, stderr }));
@@ -109865,7 +109427,7 @@ function sourceLines2(text2) {
   }
   return lines;
 }
-function isAbsoluteNonEmptyPath3(value) {
+function isAbsoluteNonEmptyPath2(value) {
   return typeof value === "string" && value.length > 0 && !value.includes("\0") && (value.startsWith("/") || /^[A-Za-z]:[\\/]/.test(value));
 }
 
@@ -111562,16 +111124,12 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
   const pendingSidecars = { layout: false, packages: false };
   let config3 = null;
   let resolvedLayout = null;
-  const packageCallbacks = {
-    onProgress: (event) => {
-      if (controller === void 0 || event.operationId === void 0) return;
-      controller.publishPackageProgress(event.operationId, {
-        phase: event.phase,
-        ...event.stream === void 0 ? {} : { stream: event.stream },
-        ...event.text === void 0 ? {} : { text: event.text },
-        ...event.data === void 0 ? {} : { data: event.data }
-      });
-    }
+  const onPackageProgress = (event) => {
+    if (controller === void 0 || event.operationId === void 0) return;
+    controller.publishPackageProgress(event.operationId, {
+      phase: event.phase,
+      ...event.text === void 0 ? {} : { text: event.text }
+    });
   };
   const resolveProjectLibrary = async (base, projectDirectory) => {
     if (processScope === void 0) throw new Error("R process scope is unavailable while resolving the project library");
@@ -111799,7 +111357,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
     }
     const childEnvironment = () => runtimeEnvironment === null ? {} : rEnvironmentVariables(runtimeEnvironment, options.resources);
     engine = new Engine({ resources: options.resources, processScope, environment: runtimeEnvironment ?? void 0, notebookDirectory, artifactDirectory: work, cacheDirectory });
-    packageManager = createPackageManager({ resources: options.resources, environment: runtimeEnvironment, processScope, projectDirectory: notebookDirectory, callbacks: packageCallbacks });
+    packageManager = createPackageManager({ resources: options.resources, environment: runtimeEnvironment, processScope, projectDirectory: notebookDirectory, onProgress: onPackageProgress });
     if (recoveryPending && observationsMatch && packageDeclarationIntent.length > 0) {
       try {
         const current = await packageManager.declarations();
@@ -111916,7 +111474,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
       const updateObservation = (kind, observation) => {
         sidecars = { ...sidecars, [kind]: observation };
       };
-      const failure = (kind, error61) => {
+      const failure2 = (kind, error61) => {
         const observation = sidecars[kind];
         updateObservation(kind, { ...observation, error: asHostError(error61, "sidecar_write_failed", operationId) });
         return { sidecars, error: { kind, error: error61 } };
@@ -111959,7 +111517,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
           await checkpointRecovery(disk, sidecars);
         }
       } catch (error61) {
-        return failure(activeKind, error61);
+        return failure2(activeKind, error61);
       }
       return { sidecars, error: null };
     };
@@ -112153,7 +111711,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
             const packagesPrepared = await destinationStore.preparePackages(packageDeclarationIntent, destinationStore.sidecarObservation("packages").version);
             destinationPackages = [...(await packagesPrepared.publish()).value];
           }
-          nextManager = createPackageManager({ resources: options.resources, environment: destinationRuntime, processScope, projectDirectory: destinationDirectory, callbacks: packageCallbacks });
+          nextManager = createPackageManager({ resources: options.resources, environment: destinationRuntime, processScope, projectDirectory: destinationDirectory, onProgress: onPackageProgress });
           const destinationDisk = destinationStore.observation();
           const destinationSidecars = sidecarProtocolObservations(destinationStore, false);
           const destinationSerialized = serializeNotebookWithParts(destinationStore.currentDocument);
@@ -112524,7 +112082,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
             environment: refreshed,
             processScope,
             projectDirectory: notebookDirectory,
-            callbacks: packageCallbacks
+            onProgress: onPackageProgress
           });
           if (!isCurrent()) {
             await nextManager.close().catch(() => {
@@ -112567,7 +112125,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
               if (selectionGeneration !== runtimeBootstrapGeneration) throw Object.assign(new Error("R environment selection was superseded"), { code: "operation_in_progress" });
               const current = controller.snapshot();
               if (current.runtime.busy || current.runtime.activeRunId !== null || current.runtime.packageOperationActive) throw Object.assign(new Error("cannot select R while the notebook is busy"), { code: "busy" });
-              const nextManager = createPackageManager({ resources: options.resources, environment: selected, processScope, projectDirectory: notebookDirectory, callbacks: packageCallbacks });
+              const nextManager = createPackageManager({ resources: options.resources, environment: selected, processScope, projectDirectory: notebookDirectory, onProgress: onPackageProgress });
               try {
                 await controller.restartRuntimeContext({ environment: selected, notebookDirectory, cacheDirectory }, stringValue(payload.operationId) ?? randomUUID14());
               } catch (error61) {
@@ -112592,7 +112150,10 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
             }
           }
           if (command === "packages.status") return packageManager.status({ operationId: stringValue(payload.operationId) });
-          if (command === "packages.install") return packageManager.install(external_exports.array(external_exports.string()).parse(payload.packages ?? []), { operationId: stringValue(payload.operationId) });
+          if (command === "packages.install") return packageManager.install(external_exports.array(external_exports.string()).parse(payload.packages ?? []), {
+            operationId: stringValue(payload.operationId),
+            signal: runtimeAbort?.signal
+          });
           if (command === "publish") {
             if (publisher === void 0) publisher = createPublishingService({ outputStore: artifactStore, processScope });
             const snapshot = controller.snapshot();
@@ -112913,7 +112474,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
             rejectBootstrapReady(new Error("runtime bootstrap superseded"));
             return;
           }
-          nextManager = createPackageManager({ resources: options.resources, environment: selected, processScope, projectDirectory: bootstrapDirectory, callbacks: packageCallbacks });
+          nextManager = createPackageManager({ resources: options.resources, environment: selected, processScope, projectDirectory: bootstrapDirectory, onProgress: onPackageProgress });
           if (!restart) engine.setEnvironment(selected);
         } catch (error61) {
           if (closing || bootstrapGeneration !== runtimeBootstrapGeneration || bootstrapUntitled !== isUntitled || bootstrapDirectory !== notebookDirectory) {

@@ -18,7 +18,7 @@ import { RecoveryWriter, recoveryObservationMatches, type DiskObservation as Rec
 import { createPackageManager, readPackageDeclarations, type PackageManager } from "./packages.js";
 import { createPublishingService, type PublishingService } from "./publishing.js";
 import { createFormattingService, type FormattingService } from "./formatting.js";
-import type { JobCallbacks } from "./jobs.js";
+import type { PackageProgress } from "./jobs.js";
 import { renderHelp } from "./markdown.js";
 import { LspClient } from "./lsp.js";
 import { parseNotebook, restoreNotebookCellIdentity, serializeNotebook, serializeNotebookWithParts, setMetadata, type NotebookDocument } from "./notebook.js";
@@ -306,16 +306,12 @@ async function startNotebookHost(
   const pendingSidecars = { layout: false, packages: false };
   let config: Config | null = null;
   let resolvedLayout: Layout | null = null;
-  const packageCallbacks: JobCallbacks = {
-    onProgress: event => {
+  const onPackageProgress = (event: PackageProgress): void => {
       if (controller === undefined || event.operationId === undefined) return;
       controller.publishPackageProgress(event.operationId, {
         phase: event.phase,
-        ...(event.stream === undefined ? {} : { stream: event.stream }),
         ...(event.text === undefined ? {} : { text: event.text }),
-        ...(event.data === undefined ? {} : { data: event.data }),
       });
-    },
   };
   interface PublishedRecoveryProjection { baseline: RecoveryBaseline; fingerprint: string; state: "dirty" | "conflict"; }
   const resolveProjectLibrary = async (base: REnvironment, projectDirectory: string): Promise<string | null> => {
@@ -540,7 +536,7 @@ async function startNotebookHost(
     }
     const childEnvironment = (): Record<string, string> => runtimeEnvironment === null ? {} : rEnvironmentVariables(runtimeEnvironment, options.resources);
     engine = new Engine({ resources: options.resources, processScope, environment: runtimeEnvironment ?? undefined, notebookDirectory, artifactDirectory: work, cacheDirectory });
-    packageManager = createPackageManager({ resources: options.resources, environment: runtimeEnvironment, processScope, projectDirectory: notebookDirectory, callbacks: packageCallbacks });
+    packageManager = createPackageManager({ resources: options.resources, environment: runtimeEnvironment, processScope, projectDirectory: notebookDirectory, onProgress: onPackageProgress });
     if (recoveryPending && observationsMatch && packageDeclarationIntent.length > 0) {
       try {
         const current = await packageManager.declarations();
@@ -911,7 +907,7 @@ async function startNotebookHost(
             const packagesPrepared = await destinationStore.preparePackages(packageDeclarationIntent, destinationStore.sidecarObservation("packages").version);
             destinationPackages = [...(await packagesPrepared.publish()).value];
           }
-          nextManager = createPackageManager({ resources: options.resources, environment: destinationRuntime, processScope: processScope!, projectDirectory: destinationDirectory, callbacks: packageCallbacks });
+          nextManager = createPackageManager({ resources: options.resources, environment: destinationRuntime, processScope: processScope!, projectDirectory: destinationDirectory, onProgress: onPackageProgress });
           const destinationDisk = destinationStore.observation();
           const destinationSidecars = sidecarProtocolObservations(destinationStore, false);
           const destinationSerialized = serializeNotebookWithParts(destinationStore.currentDocument);
@@ -1280,7 +1276,7 @@ async function startNotebookHost(
             environment: refreshed,
             processScope: processScope!,
             projectDirectory: notebookDirectory,
-            callbacks: packageCallbacks,
+            onProgress: onPackageProgress,
           });
           if (!isCurrent()) {
             await nextManager.close().catch(() => {});
@@ -1321,7 +1317,7 @@ async function startNotebookHost(
             if (selectionGeneration !== runtimeBootstrapGeneration) throw Object.assign(new Error("R environment selection was superseded"), { code: "operation_in_progress" });
             const current = controller!.snapshot();
             if (current.runtime.busy || current.runtime.activeRunId !== null || current.runtime.packageOperationActive) throw Object.assign(new Error("cannot select R while the notebook is busy"), { code: "busy" });
-            const nextManager = createPackageManager({ resources: options.resources, environment: selected, processScope: processScope!, projectDirectory: notebookDirectory, callbacks: packageCallbacks });
+            const nextManager = createPackageManager({ resources: options.resources, environment: selected, processScope: processScope!, projectDirectory: notebookDirectory, onProgress: onPackageProgress });
             try {
               await controller!.restartRuntimeContext({ environment: selected, notebookDirectory, cacheDirectory }, stringValue(payload.operationId) ?? randomUUID());
             } catch (error) {
@@ -1345,7 +1341,10 @@ async function startNotebookHost(
             }
           }
           if (command === "packages.status") return packageManager!.status({ operationId: stringValue(payload.operationId) });
-          if (command === "packages.install") return packageManager!.install(z.array(z.string()).parse(payload.packages ?? []), { operationId: stringValue(payload.operationId) });
+          if (command === "packages.install") return packageManager!.install(z.array(z.string()).parse(payload.packages ?? []), {
+            operationId: stringValue(payload.operationId),
+            signal: runtimeAbort?.signal,
+          });
           if (command === "publish") {
             if (publisher === undefined) publisher = createPublishingService({ outputStore: artifactStore, processScope: processScope! });
             const snapshot = controller!.snapshot();
@@ -1609,7 +1608,7 @@ async function startNotebookHost(
             rejectBootstrapReady(new Error("runtime bootstrap superseded"));
             return;
           }
-          nextManager = createPackageManager({ resources: options.resources, environment: selected, processScope: processScope!, projectDirectory: bootstrapDirectory, callbacks: packageCallbacks });
+          nextManager = createPackageManager({ resources: options.resources, environment: selected, processScope: processScope!, projectDirectory: bootstrapDirectory, onProgress: onPackageProgress });
           if (!restart) engine!.setEnvironment(selected);
         } catch (error) {
           if (closing || bootstrapGeneration !== runtimeBootstrapGeneration || bootstrapUntitled !== isUntitled || bootstrapDirectory !== notebookDirectory) {

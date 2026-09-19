@@ -2212,7 +2212,7 @@ export class NotebookView {
       : undefined;
     if (destination === null) return undefined;
     if (this.executionAvailable() && nested(this.documentValue?.snapshot.config, ["format", "on_save"]) === true) {
-      await this.client.formatCells();
+      await this.client.formatCells().catch(() => undefined);
     }
     return destination === undefined ? this.client.save() : this.client.saveAs(destination);
   }

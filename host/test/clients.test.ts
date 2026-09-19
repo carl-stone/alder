@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BrowserNotebookClient } from "../src/browser/client.js";
@@ -18,6 +18,8 @@ import type { EngineAdapter, EngineHandshake, EngineResponse } from "../src/prot
 import { decodeHostCommandWire, encodeHostEventWire, encodeRecoveryWire, HOST_PROTOCOL, HOST_CLIENT_PROTOCOL_VERSION, type CommandResult, type HostCellState, type HostCommand, type HostEvent, type HostSnapshot, type OperationRecord, type Recovery } from "../src/protocol.js";
 import { ARTIFACT_DESCRIPTOR_HEADER, ARTIFACT_RESOLUTION_MEDIA_TYPE, encodeArtifactDescriptor, type ArtifactHandle } from "../src/protocol.js";
 import { blocksNotebookNavigation } from "../src/browser/url.js";
+import { createFormattingService } from "../src/formatting.js";
+import { createProcessScope } from "../src/processes.js";
 
 function cell(id: string, body: string[] = [], revision = 0): HostCellState {
   return {
@@ -429,18 +431,17 @@ test("browser view reports typed check issues", async () => {
   });
 });
 
-test("Publish HTML saves current source before starting the service", async () => {
+test("Publish HTML retains the draft and does not publish when Save fails", async () => {
   await withViewDom(async (dom, domWindow) => {
     Object.defineProperty(globalThis, "location", { configurable: true, writable: true, value: { search: "?view=editor", href: "http://notebook.test/book.R?view=editor", origin: "http://notebook.test" } });
-    const document = new BrowserDocument(snapshot([]));
-    const calls: string[] = [];
+    const initial = snapshot([cell("c1", ["current <- 42"])]);
+    initial.dirty = true;
+    initial.changed = true;
+    const document = new BrowserDocument(initial);
+    let publishes = 0;
     const client = settingsClient({
-      save: async () => { calls.push("save"); return resultFor("save", null); },
-      commitEdits: async () => { calls.push("commit"); },
-      service: async (command: string) => {
-        calls.push(command);
-        throw new Error("publish fixture complete");
-      },
+      save: async () => { throw new Error("source changed on disk"); },
+      service: async () => { publishes += 1; return resultFor("publish", null); },
     });
     const view = new NotebookView(client, dom);
     try {
@@ -449,8 +450,9 @@ test("Publish HTML saves current source before starting the service", async () =
         .find((candidate) => candidate.textContent === "Publish HTML");
       assert.ok(button);
       button.dispatchEvent(new domWindow.Event("click", { bubbles: true, cancelable: true }));
-      await waitUntil(() => calls.includes("publish"));
-      assert.deepEqual(calls, ["save", "commit", "publish"]);
+      await waitUntil(() => dom.getElementById("status")!.textContent!.includes("source changed"));
+      assert.equal(publishes, 0);
+      assert.deepEqual(document.cells[0]!.desiredBody, ["current <- 42"]);
     } finally {
       view.destroy();
     }
@@ -811,6 +813,48 @@ test("format-on-save still saves the notebook when R is unavailable", async () =
       assert.equal(dom.getElementById("status")!.classList.contains("error"), false);
     } finally { view.destroy(); }
   });
+});
+
+test("format-on-save still saves the current draft when Air fails", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "alder-save-format-failure-"));
+  const path = join(directory, "notebook.R");
+  const processScope = await createProcessScope();
+  try {
+    await withViewDom(async (dom, domWindow) => {
+      const initial = snapshot([cell("c1", ["current <- 42"])]);
+      initial.changed = true;
+      initial.config = { format: { on_save: true } };
+      const document = new BrowserDocument(initial);
+      const formatter = createFormattingService("/usr/bin/false", processScope);
+      const formattingDocument = parseNotebook(Buffer.from("current <- 42\n", "utf8"));
+      let formats = 0;
+      let saves = 0;
+      const client = settingsClient({
+        formatCells: async () => {
+          formats += 1;
+          await formatter.formatCells(formattingDocument, [formattingDocument.cells[0]!.id]);
+          return resultFor("format", null);
+        },
+        save: async () => {
+          saves += 1;
+          await writeFile(path, document.cells[0]!.desiredBody.join("\n") + "\n", "utf8");
+          return resultFor("save", null);
+        },
+      });
+      const view = new NotebookView(client, dom);
+      try {
+        view.render(document);
+        dom.getElementById("save")!.dispatchEvent(new domWindow.Event("click"));
+        await waitUntil(() => saves === 1);
+        assert.equal(formats, 1);
+        assert.equal(await readFile(path, "utf8"), "current <- 42\n");
+        assert.equal(dom.getElementById("status")!.classList.contains("error"), false);
+      } finally { view.destroy(); }
+    });
+  } finally {
+    await processScope.close();
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("notebook execution control restores the stored value after a failed write", async () => {

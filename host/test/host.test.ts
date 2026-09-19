@@ -1,10 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
-import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
+import { pathToFileURL } from "node:url";
+import { parseHTML } from "linkedom";
 import { startHost } from "../src/application.js";
 import { resolveApplicationResources } from "../src/resources.js";
 import { widgetOutputSchema, type CommandResult, type HostCommand } from "../src/protocol.js";
@@ -36,7 +39,7 @@ async function startInstalledHost(path: string, options: { executionMode?: "auto
 function hostCommand(app: RunningHost, value: Record<string, unknown>): HostCommand {
   const snapshot = app.controller.snapshot();
   const type = String(value.type);
-  const needsRevision = ["transaction", "run", "publish", "save", "save-as", "reload-source", "format", "set-app", "set-config", "set-layout", "set-runtime"].includes(type);
+  const needsRevision = ["transaction", "run", "publish", "save", "save-as", "reload-source", "format", "set-app", "set-config", "set-layout", "set-runtime", "packages-declare", "packages-install"].includes(type);
   return {
     ...value,
     requestId: typeof value.requestId === "string" ? value.requestId : randomUUID(),
@@ -45,6 +48,8 @@ function hostCommand(app: RunningHost, value: Record<string, unknown>): HostComm
     ...(needsRevision && value.expectedDocumentRevision === undefined ? { expectedDocumentRevision: snapshot.documentRevision } : {}),
     ...(type === "set-config" && value.expectedSidecarVersion === undefined ? { expectedSidecarVersion: snapshot.sidecars.config.version } : {}),
     ...(type === "set-layout" && value.expectedSidecarVersion === undefined ? { expectedSidecarVersion: snapshot.sidecars.layout.version } : {}),
+    ...(type === "packages-declare" && value.expectedSidecarVersion === undefined ? { expectedSidecarVersion: snapshot.sidecars.packages.version } : {}),
+    ...(type === "packages-install" && value.kernelEpoch === undefined ? { kernelEpoch: snapshot.runtime.kernelEpoch } : {}),
   } as HostCommand;
 }
 
@@ -53,6 +58,32 @@ async function dispatchHost(app: RunningHost, value: Record<string, unknown>) {
 }
 
 type HttpSession = { origin: string; cookie: string; csrf: string; leaseId: string };
+
+async function localPackageRepository(root: string, packageName: string): Promise<string> {
+  const repository = join(root, "repository");
+  const contributionDirectory = join(repository, "src", "contrib");
+  const sourceParent = join(root, "package-source");
+  const sourceDirectory = join(sourceParent, packageName);
+  await mkdir(join(sourceDirectory, "R"), { recursive: true });
+  await mkdir(contributionDirectory, { recursive: true });
+  await writeFile(join(sourceDirectory, "DESCRIPTION"), [
+    `Package: ${packageName}`,
+    "Type: Package",
+    "Title: Alder Offline Package Fixture",
+    "Version: 1.0.0",
+    "Authors@R: person('Alder', 'Tester', email='alder@example.invalid', role=c('aut','cre'))",
+    "Description: Local package used by the project package acceptance journey.",
+    "License: MIT",
+    "Encoding: UTF-8",
+    "",
+  ].join("\n"));
+  await writeFile(join(sourceDirectory, "NAMESPACE"), "export(fixture_value)\n");
+  await writeFile(join(sourceDirectory, "R", "fixture-value.R"), "fixture_value <- function() 'project-package-value'\n");
+  execFileSync(process.env.R_BIN ?? "R", ["CMD", "build", "--no-manual", packageName], { cwd: sourceParent });
+  await rename(join(sourceParent, `${packageName}_1.0.0.tar.gz`), join(contributionDirectory, `${packageName}_1.0.0.tar.gz`));
+  execFileSync(process.env.RSCRIPT ?? "Rscript", ["--vanilla", "-e", "tools::write_PACKAGES(commandArgs(TRUE)[[1L]], type='source')", contributionDirectory]);
+  return repository;
+}
 
 async function openHttpSession(app: RunningHost): Promise<HttpSession> {
   const origin = app.server.address()!.origin;
@@ -352,21 +383,81 @@ test("installed host runs exact edited source, saves bytes and publishes committ
       expectedDocumentRevision: publishDocumentRevision });
     assert.equal(publish.error, null);
     assert.deepEqual(publish.result, { path: publishedPath, documentRevision: publishDocumentRevision });
-    assert.match(await readFile(publishedPath, "utf8"), /42/);
+    const html = await readFile(publishedPath, "utf8");
+    assert.match(html, /42/);
+    const publishedText = parseHTML(html).document.querySelector("main")?.textContent ?? "";
+    assert.match(publishedText, /a\s*<-\s*40/);
 
-    const stale = await dispatchHost(app, {
-      type: "run", scope: "cell", target: { cellId: "cell-1" },
-      changes: [{ type: "edit", cell: { cellId: "cell-1" }, expectedRevision: 0,
-        cellType: "code", body: ["a <- -1"] }],
-      expectedDocumentRevision: controller.snapshot().documentRevision,
+    const edit = await dispatchHost(app, {
+      type: "transaction",
+      changes: [{ type: "edit", cell: { cellId: "cell-1" }, expectedRevision: 1,
+        cellType: "code", body: ["a <- 99", "a"] }],
     });
-    assert.equal(stale.error?.code, 'source_conflict', JSON.stringify(stale.error));
-    assert.equal(controller.snapshot().cells[0]!.body[0], 'a <- 40');
+    assert.equal(edit.error, null);
+    await writeFile(path, "# external replacement\n");
+    const failedSave = await dispatchHost(app, { type: "save" });
+    assert.equal(failedSave.error?.code, "source_conflict");
+    const refusedPath = join(directory, "must-not-publish.html");
+    const refused = await dispatchHost(app, { type: "publish", includeCode: true, outputPath: refusedPath });
+    assert.equal(refused.error?.code, "publish_not_ready");
+    await assert.rejects(access(refusedPath));
+    assert.equal(controller.snapshot().cells[0]!.body[0], "a <- 99");
   } finally {
     await app?.close();
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("project packages declare, install offline, restart Ark, and leave the user library unchanged", {
+  skip: !APPLICATION_ROOT, timeout: 120_000,
+}, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "alder-project-package-"));
+  const path = join(directory, "notebook.R");
+  const userLibrary = join(directory, "user-library");
+  const marker = join(userLibrary, "marker.txt");
+  const priorUserLibrary = process.env.R_LIBS_USER;
+  let app: RunningHost | undefined;
+  try {
+    await mkdir(userLibrary);
+    await writeFile(marker, "unrelated user library\n");
+    const repository = await localPackageRepository(directory, "alderfixturepkg");
+    await writeFile(join(directory, "renv.lock"), JSON.stringify({
+      R: { Version: "4.6.1", Repositories: [{ Name: "fixture", URL: pathToFileURL(repository).href }] },
+      Packages: {},
+    }));
+    await writeFile(path, "# %%\nlibrary(alderfixturepkg)\nfixture_value()\n");
+    process.env.R_LIBS_USER = userLibrary;
+    app = await startInstalledHost(path, { executionMode: "lazy" });
+
+    const declared = await dispatchHost(app, { type: "packages-declare", packages: ["alderfixturepkg"] });
+    assert.equal(declared.error, null);
+    const missing = await app.controller.query({ type: "packages-status" });
+    assert.deepEqual((missing.result as { missing: string[] }).missing, ["alderfixturepkg"]);
+
+    const beforeEpoch = app.controller.snapshot().runtime.kernelEpoch;
+    const installed = await dispatchHost(app, { type: "packages-install", packages: [] });
+    assert.equal(installed.error, null, JSON.stringify(installed.error));
+    const afterInstall = app.controller.snapshot();
+    assert.notEqual(afterInstall.runtime.kernelEpoch, beforeEpoch);
+    const status = (await app.controller.query({ type: "packages-status" })).result as {
+      installed: string[]; library: string; status: Array<{ package: string; library: string }>;
+    };
+    assert.deepEqual(status.installed, ["alderfixturepkg"]);
+    assert.equal(status.library, join(directory, ".alder", "library"));
+    assert.equal(status.status[0]?.library, status.library);
+
+    const run = await dispatchHost(app, { type: "run", scope: "all", changes: [] });
+    assert.equal(run.error, null);
+    assert.match(JSON.stringify(app.controller.snapshot().cells[0]!.outputs), /project-package-value/);
+    assert.equal(await readFile(marker, "utf8"), "unrelated user library\n");
+  } finally {
+    if (priorUserLibrary === undefined) delete process.env.R_LIBS_USER;
+    else process.env.R_LIBS_USER = priorUserLibrary;
+    await app?.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("runtime and app metadata survive recovery restart, Save, and Save As", {
   skip: !APPLICATION_ROOT, timeout: 120_000,
 }, async () => {
