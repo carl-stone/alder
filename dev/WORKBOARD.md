@@ -31,14 +31,24 @@ reactive, service and recovery behavior. Validate with representative notebook
 screens/states, behavior-led interaction checks and a signed Mac build without
 taking over Carl's desktop.
 
-**Base for checkpoint 2:** accepted interaction checkpoint `dbfa1df` (`Correct
-notebook interaction structure`) on accepted `d88ca7d`.
+**Checkpoint 2:** `330d091` (`Polish notebook workspace presentation`) on accepted
+interaction checkpoint `dbfa1df` and accepted `d88ca7d`.
 
-**Next action:** primary implementer applies one cohesive quiet-Mac visual system:
-editor theme, hierarchy, cell/output chrome, responsive inspector/disclosures,
-light/dark and accessibility states. Delete obsolete presentation paths, produce
-the representative non-visible screenshot matrix, and return checkpoint 2 for
-fresh visual and behavior review.
+**Correction target:** install a real CodeMirror `HighlightStyle`/
+`syntaxHighlighting` extension for light/dark editor states. Replace the synthetic
+mock-DOM capture matrix with the production renderer/editor and make every named
+state truthful, including Settings/focus, graph diagnostics, HTML/widgets/errors,
+actual 200% page reflow and observable reduced-motion evidence. Make the narrow
+inspector a fixed viewport drawer with scroll lock/inert background, correct focus
+lifecycle when crossing breakpoints, Tab/Shift-Tab containment and focus return.
+Keep interior dialog clicks open while backdrop clicks dismiss. Give repeated cell
+controls cell-specific names and close action disclosures after selection. Reduce
+connection loss to one intentional live announcement. Add isolated non-activating
+native titlebar/menu/dialog evidence before final UI acceptance.
+
+**Next action:** primary implementer corrects visual checkpoint 2 at `330d091`,
+then returns a real-renderer screenshot matrix and focused behavior evidence for
+parallel re-review.
 
 **Testing constraint:** do not take over Carl's visible desktop. Use background
 or isolated Mac GUI checks where native interaction matters. The in-app browser
@@ -69,7 +79,7 @@ order; their implementation details are settled when assigned.
 | Mac runtime and settings cleanup | Accepted | Primary implementer | `cc80261`: one R preference path, canonical project recovery, verified/staged Ark/Air/Quarto, accurate Mac claims and real packaged acceptance |
 | Residual architecture and test cleanup | Accepted | Primary implementer | `8990292`: removed trace/strict-JSON/platform/state debris, retained cohesive owners and rebuilt a five-second behavior-led host suite |
 | Targeted generative verification | Accepted | Primary implementer | `d88ca7d`: bounded independent graph/document/recovery/state/R verification with real crash durability and replayable failures |
-| UI/UX review and polish | Implementing | Primary implementer | Apply cohesive editor/visual/responsive/accessibility system and screenshot matrix on accepted interaction checkpoint `dbfa1df` |
+| UI/UX review and polish | Implementing | Primary implementer | Wire real editor theming, real-renderer evidence, correct modal drawer/dialog behavior and accessibility at `330d091` |
 | Complete Mac app and final acceptance | Queued | Unassigned | Deliver a usable Mac app; exercise the packaged native app through launch/open/type/run/interrupt/save/Save As/reopen/recover/close, multiple notebooks, concurrent GUI/agent edits, client detach and backend failure/recovery; check optional-service failures and observable stalls |
 
 The following requirements apply to the relevant slices and are checked again

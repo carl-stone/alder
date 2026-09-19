@@ -400,6 +400,11 @@ test("connection retry and Preview use their real interaction routes", async () 
     try {
       view.render(new BrowserDocument(snapshot([])));
       view.setTransportState("closed", new Error("socket closed"));
+      const connection = dom.querySelector<HTMLElement>("[data-connection-banner]")!;
+      assert.equal(connection.getAttribute("role"), "region");
+      assert.equal(connection.getAttribute("aria-label"), "Connection status");
+      assert.equal(dom.getElementById("announcer")!.textContent, "");
+      assert.equal((dom.getElementById("status")!.textContent?.match(/socket closed/g) ?? []).length, 1);
       dom.querySelector<HTMLButtonElement>('[data-status-action="retry-connection"]')!
         .dispatchEvent(new domWindow.Event("click", { bubbles: true, cancelable: true }));
       assert.equal(retries, 1);
@@ -590,26 +595,43 @@ test("narrow inspector traps focus, closes with Escape, and returns focus", asyn
     const markup = parseHTML(await readFile(new URL("../../inst/app/index.html", import.meta.url), "utf8")).document;
     dom.getElementById("topbar")!.insertAdjacentHTML("beforeend", markup.getElementById("panel-toggle")!.outerHTML);
     dom.body.insertAdjacentHTML("beforeend", `<div id="editor-workspace">${markup.getElementById("dataflow-panel")!.outerHTML}${markup.getElementById("panel-scrim")!.outerHTML}</div>`);
-    Object.defineProperty(domWindow, "matchMedia", { configurable: true, value: () => ({ matches: true }) });
+    let narrow = false;
+    Object.defineProperty(domWindow, "matchMedia", { configurable: true, value: () => ({ get matches() { return narrow; } }) });
+    Object.defineProperty(domWindow, "requestAnimationFrame", { configurable: true, value: (callback: FrameRequestCallback) => { callback(0); return 1; } });
     Object.defineProperty(globalThis, "location", { configurable: true, writable: true, value: { search: "?view=editor", href: "http://notebook.test/book.R?view=editor", origin: "http://notebook.test" } });
+    const opener = dom.getElementById("panel-toggle") as HTMLButtonElement;
+    let active: Element | null = opener;
+    Object.defineProperty(dom, "activeElement", { configurable: true, get: () => active });
+    opener.focus = () => { active = opener; };
     const view = new NotebookView(settingsClient(), dom);
     try {
-      const opener = dom.getElementById("panel-toggle") as HTMLButtonElement;
-      let active: Element | null = null;
-      Object.defineProperty(dom, "activeElement", { configurable: true, get: () => active });
-      opener.focus = () => { active = opener; };
-      opener.focus();
-      opener.dispatchEvent(new domWindow.Event("click", { bubbles: true }));
       const panel = dom.getElementById("dataflow-panel")!;
+      assert.equal(panel.getAttribute("role"), "complementary");
+      narrow = true;
+      domWindow.dispatchEvent(new domWindow.Event("resize"));
       assert.equal(panel.hidden, false);
       assert.equal(panel.getAttribute("role"), "dialog");
       assert.equal(panel.getAttribute("aria-modal"), "true");
       assert.equal(dom.getElementById("panel-scrim")!.hidden, false);
-      const focusable = [...panel.querySelectorAll<HTMLElement>('button:not([disabled]), [tabindex]:not([tabindex="-1"])')];
+      assert.equal(dom.getElementById("topbar")!.hasAttribute("inert"), true);
+      assert.equal(dom.getElementById("notebook")!.hasAttribute("inert"), true);
+      assert.equal(dom.body.classList.contains("inspector-modal-open"), true);
+      const focusable = [...panel.querySelectorAll<HTMLElement>('button:not([disabled]):not([tabindex="-1"]), [tabindex]:not([tabindex="-1"])')];
       for (const element of focusable) element.focus = () => { active = element; };
       focusable.at(-1)!.focus();
       focusable.at(-1)!.dispatchEvent(keyboardEvent(domWindow, "Tab"));
       assert.ok(active === focusable[0]);
+      focusable[0]!.dispatchEvent(keyboardEvent(domWindow, "Tab", true));
+      assert.ok(active === focusable.at(-1));
+      narrow = false;
+      domWindow.dispatchEvent(new domWindow.Event("resize"));
+      assert.equal(panel.getAttribute("role"), "complementary");
+      assert.equal(panel.hasAttribute("aria-modal"), false);
+      assert.equal(dom.getElementById("topbar")!.hasAttribute("inert"), false);
+      assert.equal(dom.body.classList.contains("inspector-modal-open"), false);
+      assert.ok(active === opener);
+      narrow = true;
+      domWindow.dispatchEvent(new domWindow.Event("resize"));
       panel.dispatchEvent(keyboardEvent(domWindow, "Escape"));
       assert.equal(panel.hidden, true);
       assert.ok(active === opener);
@@ -636,7 +658,14 @@ test("dialogs and cell overflow light-dismiss and restore focus", async () => {
       focusable.at(-1)!.focus();
       focusable.at(-1)!.dispatchEvent(keyboardEvent(domWindow, "Tab"));
       assert.ok(active === focusable[0]);
-      dialog.dispatchEvent(new domWindow.Event("click", { bubbles: true }));
+      Object.defineProperty(dialog, "getBoundingClientRect", { configurable: true, value: () => ({ left: 100, right: 500, top: 100, bottom: 500 }) });
+      const interior = new domWindow.Event("click", { bubbles: true });
+      Object.defineProperties(interior, { clientX: { value: 200 }, clientY: { value: 200 } });
+      dialog.dispatchEvent(interior);
+      assert.equal(dialog.hasAttribute("open"), true);
+      const backdrop = new domWindow.Event("click", { bubbles: true });
+      Object.defineProperties(backdrop, { clientX: { value: 20 }, clientY: { value: 20 } });
+      dialog.dispatchEvent(backdrop);
       assert.equal(dialog.hasAttribute("open"), false);
       assert.ok(active === opener);
 
@@ -647,6 +676,9 @@ test("dialogs and cell overflow light-dismiss and restore focus", async () => {
       assert.ok(active === opener);
 
       const disclosure = dom.querySelector<HTMLDetailsElement>("details.cell-overflow")!;
+      assert.match(dom.querySelector<HTMLButtonElement>("[data-act=run]")!.getAttribute("aria-label") ?? "", /Run Cell 1.*position 1 of 1/);
+      assert.match(disclosure.querySelector("summary")!.getAttribute("aria-label") ?? "", /Actions for Cell 1.*position 1 of 1/);
+      assert.match(disclosure.querySelector<HTMLButtonElement>("[data-act=delete]")!.getAttribute("aria-label") ?? "", /Delete Cell 1.*position 1 of 1/);
       disclosure.setAttribute("open", "");
       const menuButton = disclosure.querySelector<HTMLButtonElement>("button")!;
       const summary = disclosure.querySelector<HTMLElement>("summary")!;
@@ -656,6 +688,9 @@ test("dialogs and cell overflow light-dismiss and restore focus", async () => {
       menuButton.dispatchEvent(keyboardEvent(domWindow, "Escape"));
       assert.equal(disclosure.hasAttribute("open"), false);
       assert.ok(active === summary);
+      disclosure.setAttribute("open", "");
+      menuButton.dispatchEvent(new domWindow.Event("click", { bubbles: true, cancelable: true }));
+      assert.equal(disclosure.hasAttribute("open"), false);
     } finally { view.destroy(); }
   });
 });

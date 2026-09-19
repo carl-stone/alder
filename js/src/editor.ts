@@ -30,7 +30,7 @@ import {
   indentWithTab,
   toggleComment
 } from "@codemirror/commands";
-import {indentOnInput, bracketMatching, foldGutter, foldKeymap, StreamLanguage} from "@codemirror/language";
+import {indentOnInput, bracketMatching, foldGutter, foldKeymap, HighlightStyle, StreamLanguage, syntaxHighlighting} from "@codemirror/language";
 import {markdown} from "@codemirror/lang-markdown";
 import {
   acceptCompletion,
@@ -46,10 +46,12 @@ import {searchKeymap, highlightSelectionMatches, openSearchPanel} from "@codemir
 import {linter, setDiagnostics} from "@codemirror/lint";
 import {r} from "@codemirror/legacy-modes/mode/r";
 import {vim} from "@replit/codemirror-vim";
+import {tags} from "@lezer/highlight";
 
 const languageCompartment = new Compartment();
 const readOnlyCompartment = new Compartment();
 const completionCompartment = new Compartment();
+const themeCompartment = new Compartment();
 const reactiveEffect = StateEffect.define<DecorationSet>();
 const reactiveField = StateField.define<DecorationSet>({
   create: () => Decoration.none,
@@ -65,6 +67,69 @@ const reactiveField = StateField.define<DecorationSet>({
 
 export function languageFor(name: string) {
   return name === "markdown" ? markdown() : StreamLanguage.define(r);
+}
+
+const lightHighlightStyle = HighlightStyle.define([
+  {tag: [tags.keyword, tags.controlKeyword], color: "#7656b8"},
+  {tag: [tags.string, tags.regexp], color: "#9a4a2d"},
+  {tag: [tags.number, tags.bool, tags.null], color: "#176982"},
+  {tag: tags.comment, color: "#6b737d", fontStyle: "italic"},
+  {tag: [tags.function(tags.variableName), tags.definition(tags.variableName)], color: "#255fa8"},
+  {tag: [tags.typeName, tags.className], color: "#7b4b18"},
+  {tag: tags.operator, color: "#6b4f85"},
+  {tag: tags.heading, color: "#244f91", fontWeight: "700"},
+  {tag: tags.link, color: "#1557c0", textDecoration: "underline"},
+  {tag: tags.invalid, color: "#b4232f", textDecoration: "underline wavy"},
+]);
+
+const darkHighlightStyle = HighlightStyle.define([
+  {tag: [tags.keyword, tags.controlKeyword], color: "#c5a7ff"},
+  {tag: [tags.string, tags.regexp], color: "#e7a17f"},
+  {tag: [tags.number, tags.bool, tags.null], color: "#83cbe5"},
+  {tag: tags.comment, color: "#9aa3ae", fontStyle: "italic"},
+  {tag: [tags.function(tags.variableName), tags.definition(tags.variableName)], color: "#8ab7ff"},
+  {tag: [tags.typeName, tags.className], color: "#e4bc82"},
+  {tag: tags.operator, color: "#ccb2df"},
+  {tag: tags.heading, color: "#a9c5ff", fontWeight: "700"},
+  {tag: tags.link, color: "#9dbbff", textDecoration: "underline"},
+  {tag: tags.invalid, color: "#ff8b95", textDecoration: "underline wavy"},
+]);
+
+const editorChrome = {
+  "&": {backgroundColor: "transparent", color: "var(--text)"},
+  "&.cm-focused": {outline: "none"},
+  ".cm-content": {caretColor: "var(--accent)"},
+  ".cm-cursor, .cm-dropCursor": {borderLeftColor: "var(--accent)", borderLeftWidth: "2px"},
+  "&.cm-focused .cm-selectionBackground, .cm-selectionBackground, .cm-content ::selection": {
+    backgroundColor: "color-mix(in srgb, var(--accent) 24%, transparent)",
+  },
+  ".cm-activeLine": {backgroundColor: "color-mix(in srgb, var(--accent) 5%, transparent)"},
+  ".cm-gutters": {backgroundColor: "transparent", color: "var(--muted)", borderRight: "0"},
+  ".cm-activeLineGutter": {backgroundColor: "color-mix(in srgb, var(--accent) 7%, transparent)", color: "var(--text-secondary)"},
+  ".cm-matchingBracket": {backgroundColor: "var(--accent-soft)", outline: "1px solid color-mix(in srgb, var(--accent) 40%, transparent)"},
+  ".cm-searchMatch": {backgroundColor: "color-mix(in srgb, #e7b43a 36%, transparent)", outline: "1px solid color-mix(in srgb, #b47a00 55%, transparent)"},
+  ".cm-searchMatch.cm-searchMatch-selected": {backgroundColor: "color-mix(in srgb, var(--accent) 28%, transparent)"},
+  ".cm-tooltip": {border: "1px solid var(--border-strong)", borderRadius: "var(--radius-md)", backgroundColor: "var(--surface-raised)", color: "var(--text)", boxShadow: "var(--shadow-menu)", overflow: "hidden"},
+  ".cm-tooltip-autocomplete > ul > li[aria-selected]": {backgroundColor: "var(--accent-soft)", color: "var(--text)"},
+  ".cm-panels": {borderColor: "var(--border)", backgroundColor: "var(--surface-raised)", color: "var(--text)"},
+  ".cm-diagnostic": {borderLeftColor: "var(--border-strong)", color: "var(--text)"},
+  ".cm-diagnostic-error": {borderLeftColor: "var(--danger)"},
+  ".cm-diagnostic-warning": {borderLeftColor: "var(--warning)"},
+  ".cm-lintRange-error": {backgroundImage: "none", textDecoration: "underline wavy var(--danger)"},
+  ".cm-lintRange-warning": {backgroundImage: "none", textDecoration: "underline wavy var(--warning)"},
+  ".cm-alder-hover, .cm-alder-signature": {backgroundColor: "var(--surface-raised)", color: "var(--text)"},
+};
+
+export function editorThemeExtensions(dark: boolean): Extension {
+  return [
+    EditorView.theme(editorChrome, {dark}),
+    syntaxHighlighting(dark ? darkHighlightStyle : lightHighlightStyle),
+  ];
+}
+
+function darkThemeActive(): boolean {
+  const theme = document.documentElement.dataset.theme;
+  return theme === "dark" || (theme === "system" && window.matchMedia?.("(prefers-color-scheme: dark)").matches === true);
 }
 
 function makeSignatureTooltip(value: EditorSignature | null) {
@@ -176,6 +241,7 @@ export function createEditor({
   let suppressChanges = false;
   let keyboardHoverIntent: {doc: Text; selection: EditorSelection; pos: number} | null = null;
   let preparedKeyboardHover: {pos: number; value: NonNullable<EditorHover>} | null = null;
+  let darkTheme = darkThemeActive();
   const cancelKeyboardHover = () => { keyboardHoverIntent = null; };
   const helpTooltip = (value: EditorHover, pos: number, focusContent: boolean): Tooltip | null => {
     if (!value) return null;
@@ -250,6 +316,7 @@ export function createEditor({
     // edits so automatic help cannot split an immediate edit-and-Run command.
     // Explicit Tab completion still starts immediately.
     completionCompartment.of(autocompletion({override: [stableCompletionSource], activateOnTypingDelay: 400})),
+    themeCompartment.of(editorThemeExtensions(darkTheme)),
     linter(() => diagnostics.current, {delay: 1000}),
     keymap.of([
       {key: "F1", run: openKeyboardHelp},
@@ -327,6 +394,16 @@ export function createEditor({
     state: EditorState.create({doc, extensions}),
     parent
   });
+  const colorScheme = window.matchMedia?.("(prefers-color-scheme: dark)") ?? null;
+  const refreshTheme = () => {
+    const next = darkThemeActive();
+    if (next === darkTheme) return;
+    darkTheme = next;
+    view.dispatch({effects: themeCompartment.reconfigure(editorThemeExtensions(darkTheme))});
+  };
+  const themeObserver = new MutationObserver(refreshTheme);
+  themeObserver.observe(document.documentElement, {attributes: true, attributeFilter: ["data-theme"]});
+  colorScheme?.addEventListener?.("change", refreshTheme);
 
   return {
     view,
@@ -374,6 +451,8 @@ export function createEditor({
     closeCompletion() { closeCompletion(view); },
     destroy() {
       cancelKeyboardHover();
+      themeObserver.disconnect();
+      colorScheme?.removeEventListener?.("change", refreshTheme);
       signatureNode?.remove();
       view.destroy();
     }

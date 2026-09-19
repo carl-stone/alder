@@ -61,6 +61,77 @@ function peerCommand(app: RunningHost, command: Record<string, unknown>): HostCo
     sessionEpoch: app.controller.epoch,
   } as HostCommand;
 }
+
+test('production editor themes render real tokens and the inspector owns narrow focus', {
+  skip: process.env.ALDER_BROWSER_TEST !== '1', timeout: 90_000,
+}, async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'alder-browser-theme-'));
+  const path = join(directory, 'theme.R');
+  await writeFile(path, Array.from({ length: 18 }, (_, index) =>
+    `# %% Cell ${index + 1}\nvalue_${index + 1} <- if (TRUE) "sample" else ${index}\nvalue_${index + 1}\n`,
+  ).join(''));
+  let app: RunningHost | undefined, browser: Chrome | undefined;
+  try {
+    app = await startInstalledHost(path);
+    browser = await openAuthenticatedBrowser(app);
+    await browser.wait("Boolean(window.__alderHost?.client.document && document.querySelector('.cm-line span'))");
+    const tokenColors = async (theme: 'light' | 'dark') => {
+      await browser!.evaluate(`(async () => {
+        const client = window.__alderHost.client;
+        await client.setPreferences({theme:${JSON.stringify(theme)}}, client.document.snapshot.preferencesVersion);
+      })()`);
+      await browser!.wait(`document.documentElement.dataset.theme === ${JSON.stringify(theme)}`);
+      return await browser!.evaluate(`Array.from(document.querySelectorAll('.cm-line span')).slice(0,12).map(node => getComputedStyle(node).color)`);
+    };
+    const light = await tokenColors('light');
+    const dark = await tokenColors('dark');
+    assert.ok(new Set(light).size >= 3, JSON.stringify(light));
+    assert.ok(new Set(dark).size >= 3, JSON.stringify(dark));
+    assert.notDeepEqual(light, dark);
+
+    await browser.send('Emulation.setDeviceMetricsOverride', { width: 1200, height: 900, deviceScaleFactor: 1, mobile: false });
+    await browser.wait("matchMedia('(max-width: 900px)').matches === false");
+    await browser.evaluate(`document.getElementById('panel-toggle').focus()`);
+    await browser.send('Emulation.setDeviceMetricsOverride', { width: 760, height: 900, deviceScaleFactor: 1, mobile: false });
+    await browser.wait("document.getElementById('dataflow-panel').getAttribute('role') === 'dialog' && document.getElementById('notebook').inert");
+    const geometry = await browser.evaluate(`(() => {
+      const panel = document.getElementById('dataflow-panel');
+      const rect = panel.getBoundingClientRect();
+      const topbar = document.getElementById('topbar').getBoundingClientRect();
+      return {position:getComputedStyle(panel).position, top:rect.top, bottom:rect.bottom, width:rect.width,
+        innerHeight, topbarBottom:topbar.bottom, overflow:getComputedStyle(document.body).overflow,
+        focused:panel.contains(document.activeElement), modal:panel.getAttribute('aria-modal')};
+    })()`);
+    assert.equal(geometry.position, 'fixed');
+    assert.equal(geometry.modal, 'true');
+    assert.equal(geometry.focused, true);
+    assert.equal(geometry.overflow, 'hidden');
+    assert.ok(geometry.top >= geometry.topbarBottom - 1, JSON.stringify(geometry));
+    assert.ok(geometry.bottom <= 901, JSON.stringify(geometry));
+    assert.ok(geometry.width <= 716, JSON.stringify(geometry));
+
+    await browser.evaluate(`(() => {
+      const panel = document.getElementById('dataflow-panel');
+      const items = Array.from(panel.querySelectorAll('button:not([disabled]):not([tabindex="-1"]), [href]:not([tabindex="-1"]), input:not([disabled]):not([tabindex="-1"]), select:not([disabled]):not([tabindex="-1"]), textarea:not([disabled]):not([tabindex="-1"]), [tabindex]:not([tabindex="-1"])')).filter(node => !node.closest('[hidden], [aria-hidden=true]'));
+      window.__drawerFocus = {first:items[0], last:items.at(-1)};
+      items[0].focus();
+    })()`);
+    await browser.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9, modifiers: 8 });
+    await browser.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9, modifiers: 8 });
+    assert.equal(await browser.evaluate(`document.activeElement === window.__drawerFocus.last`), true);
+    await browser.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9 });
+    await browser.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9 });
+    assert.equal(await browser.evaluate(`document.activeElement === window.__drawerFocus.first`), true);
+
+    await browser.send('Emulation.setDeviceMetricsOverride', { width: 1200, height: 900, deviceScaleFactor: 1, mobile: false });
+    await browser.wait("document.getElementById('dataflow-panel').getAttribute('role') === 'complementary' && !document.getElementById('notebook').inert");
+    assert.equal(await browser.evaluate(`document.activeElement === document.getElementById('panel-toggle')`), true);
+  } finally {
+    await browser?.close();
+    await app?.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 test('trusted browser edit-and-Run presents the current chain and creation retains focus', {
   skip: process.env.ALDER_BROWSER_TEST !== '1', timeout: 90_000,
 }, async () => {

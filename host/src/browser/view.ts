@@ -134,9 +134,29 @@ export class NotebookView {
   private packageCancelButton: HTMLButtonElement | null = null;
   private draggedKey: string | null = null;
   private panelReturnFocus: HTMLElement | null = null;
+  private panelDrawerMode = false;
   private readonly dialogReturnFocus = new WeakMap<HTMLDialogElement, HTMLElement>();
   private deletedCell: { index: number; type: "code" | "markdown"; body: readonly string[]; timer: number } | null = null;
-  private readonly resizeHandler = (): void => { this.updateTopbarInset(); this.applyPanelState(); };
+  private readonly resizeHandler = (): void => {
+    this.updateTopbarInset();
+    const next = this.isInspectorDrawer();
+    const previous = this.panelDrawerMode;
+    if (next === previous) { this.applyPanelState(); return; }
+    const panel = this.dom.getElementById("dataflow-panel");
+    const active = this.dom.activeElement as HTMLElement | null;
+    if (this.panelOpen && next && (!panel || !active || !panel.contains(active))) {
+      this.panelReturnFocus = active ?? this.dom.getElementById("panel-toggle");
+    }
+    this.panelDrawerMode = next;
+    this.applyPanelState();
+    if (!this.panelOpen) return;
+    if (next) window.requestAnimationFrame(() => this.focusInspector());
+    else {
+      const target = this.panelReturnFocus ?? this.dom.getElementById("panel-toggle");
+      this.panelReturnFocus = null;
+      (target as HTMLElement | null)?.focus({ preventScroll: true });
+    }
+  };
   private readonly preserveRunFocus = (event: MouseEvent): void => {
     if (event.button === 0 && event.target instanceof Element &&
       event.target.closest("#run-all, .cell-head [data-act=run]")) event.preventDefault();
@@ -150,7 +170,8 @@ export class NotebookView {
     this.path = dom.getElementById("path");
     this.appView = new URLSearchParams(location.search).get("view") === "preview";
     const panelPreference = loadPanelPreference(window);
-    this.panelOpen = window.matchMedia?.("(max-width: 900px)").matches === true ? false : panelPreference.open;
+    this.panelDrawerMode = this.isInspectorDrawer();
+    this.panelOpen = this.panelDrawerMode ? false : panelPreference.open;
     this.panelTab = panelPreference.tab;
     const appLink = dom.getElementById("app-mode") as HTMLAnchorElement | null;
     const editLink = dom.getElementById("edit-mode") as HTMLAnchorElement | null;
@@ -242,12 +263,9 @@ export class NotebookView {
 
   setTransportState(state: "connecting" | "open" | "recovering" | "closed", error?: Error): void {
     if (this.hostClosed) return;
-    const previous = this.transportState;
     this.transportState = state;
     this.transportError = state === "closed" && error ? error.message : state === "open" ? null : state === "connecting" ? (this.documentValue ? "Reconnecting…" : "Opening notebook…") : "Reconnecting…";
     this.renderStatus();
-    if (state === "closed") this.announce("Connection lost. Reconnect is available.");
-    else if (state === "open" && previous !== "open") this.announce("Notebook connected.");
   }
 
   render(
@@ -349,6 +367,7 @@ export class NotebookView {
     this.observer?.disconnect();
     window.removeEventListener("resize", this.resizeHandler);
     this.dom.removeEventListener("mousedown", this.preserveRunFocus);
+    this.setInspectorModal(false);
     this.cancelVariablesProjection();
   }
 
@@ -423,6 +442,7 @@ export class NotebookView {
     for (const button of Array.from(view.element.querySelectorAll<HTMLButtonElement>("button[data-act]"))) {
       button.addEventListener("click", (event: MouseEvent) => {
         event.preventDefault();
+        button.closest<HTMLDetailsElement>("details.cell-overflow")?.removeAttribute("open");
         void this.cellAction(key, button, event).catch((error) => this.showError(error));
       });
     }
@@ -602,8 +622,16 @@ export class NotebookView {
     });
     if (refreshLabels) {
       const title = element.querySelector<HTMLElement>("[data-role=cell-title]");
+      const name = title?.textContent || `Cell ${index + 1}`;
+      const position = index >= 0 ? `${name}, position ${index + 1} of ${cells.length}` : name;
       const reorderHelp = element.querySelector<HTMLElement>("[data-role=reorder-help]");
       if (reorderHelp) reorderHelp.id = `${element.id}-reorder-help`;
+      element.querySelector<HTMLButtonElement>("[data-act=run]")?.setAttribute("aria-label", `Run ${position}`);
+      element.querySelector<HTMLElement>("details.cell-overflow summary")?.setAttribute("aria-label", `Actions for ${position}`);
+      element.querySelector<HTMLSelectElement>("[data-role=type]")?.setAttribute("aria-label", `Cell type for ${position}`);
+      element.querySelector<HTMLButtonElement>("[data-act=disable]")?.setAttribute("aria-label", `${status === "disabled" ? "Enable" : "Disable"} ${position}`);
+      element.querySelector<HTMLButtonElement>("[data-act=delete]")?.setAttribute("aria-label", `Delete ${position}`);
+      element.querySelector<HTMLButtonElement>("[data-act=add]")?.setAttribute("aria-label", `Insert code cell after ${position}`);
       for (const direction of ["up", "down"] as const) {
         const button = element.querySelector<HTMLButtonElement>(`[data-act=move-${direction}]`);
         if (!button) continue;
@@ -2261,7 +2289,7 @@ export class NotebookView {
   private bindDisclosureBehavior(): void {
     for (const dialog of Array.from(this.dom.querySelectorAll<HTMLDialogElement>("dialog"))) {
       dialog.addEventListener("click", (event) => {
-        if (event.target === dialog) this.closeDialog(dialog);
+        if (event.target === dialog && clickOutsideBounds(event, dialog)) this.closeDialog(dialog);
       });
       dialog.addEventListener("keydown", (event) => {
         if (event.key === "Escape") {
@@ -2442,10 +2470,10 @@ export class NotebookView {
           this.graphExpanded = false;
           this.applyPanelState();
           if (this.documentValue) this.renderGraph(this.documentValue.snapshot);
-        } else if (this.isInspectorDrawer()) this.togglePanel(false);
+        } else if (this.panelDrawerMode) this.togglePanel(false);
         return;
       }
-      if (event.key !== "Tab" || !this.isInspectorDrawer()) return;
+      if (event.key !== "Tab" || !this.panelDrawerMode) return;
       trapTabKey(event, this.dom.getElementById("dataflow-panel") as HTMLElement);
     });
     this.dom.getElementById("app-mode")?.addEventListener("click", (event) => {
@@ -2462,8 +2490,9 @@ export class NotebookView {
   }
 
   private togglePanel(force?: boolean): void {
+    this.panelDrawerMode = this.isInspectorDrawer();
     const opening = force ?? !this.panelOpen;
-    if (opening && this.isInspectorDrawer()) this.panelReturnFocus = this.dom.activeElement as HTMLElement | null;
+    if (opening && this.panelDrawerMode) this.panelReturnFocus = this.dom.activeElement as HTMLElement | null;
     this.panelOpen = opening;
     if (!this.panelOpen) {
       this.graphExpanded = false;
@@ -2472,9 +2501,7 @@ export class NotebookView {
     savePanelPreference(window, { open: this.panelOpen, tab: this.panelTab });
     this.applyPanelState();
     if (this.panelOpen && this.documentValue) this.renderSelectedPanel(this.documentValue.snapshot);
-    if (this.panelOpen && this.isInspectorDrawer()) window.requestAnimationFrame(() => {
-      (this.dom.querySelector("#dataflow-panel [aria-selected=true]") as HTMLElement | null)?.focus();
-    });
+    if (this.panelOpen && this.panelDrawerMode) window.requestAnimationFrame(() => this.focusInspector());
     if (!this.panelOpen && this.panelReturnFocus) {
       const target = this.panelReturnFocus;
       this.panelReturnFocus = null;
@@ -2515,12 +2542,13 @@ export class NotebookView {
     if (!panel || this.appView) return;
     panel.hidden = !this.panelOpen;
     this.dom.body.classList.toggle("panel-closed", !this.panelOpen);
-    const drawer = this.isInspectorDrawer();
+    const drawer = this.panelDrawerMode;
     panel.setAttribute("role", drawer ? "dialog" : "complementary");
     if (drawer) panel.setAttribute("aria-modal", "true");
     else panel.removeAttribute("aria-modal");
     const scrim = this.dom.getElementById("panel-scrim") as HTMLButtonElement | null;
     if (scrim) scrim.hidden = !(drawer && this.panelOpen);
+    this.setInspectorModal(drawer && this.panelOpen);
     this.dom.getElementById("panel-toggle")?.setAttribute("aria-expanded", String(this.panelOpen));
     for (const tab of Array.from(this.dom.querySelectorAll<HTMLButtonElement>("[data-panel-tab]"))) {
       const selected = tab.dataset.panelTab === this.panelTab;
@@ -2539,6 +2567,20 @@ export class NotebookView {
 
   private isInspectorDrawer(): boolean {
     return window.matchMedia?.("(max-width: 900px)").matches === true;
+  }
+
+  private focusInspector(): void {
+    (this.dom.querySelector("#dataflow-panel [aria-selected=true]") as HTMLElement | null)?.focus({ preventScroll: true });
+  }
+
+  private setInspectorModal(active: boolean): void {
+    this.dom.body.classList.toggle("inspector-modal-open", active);
+    for (const selector of ["#topbar", "#status", "#editor-diagnostics", "#notebook"]) {
+      const target = this.dom.querySelector<HTMLElement>(selector);
+      if (!target) continue;
+      if (active) target.setAttribute("inert", "");
+      else target.removeAttribute("inert");
+    }
   }
 
   private updateTopbarInset(): void {
@@ -2651,7 +2693,8 @@ export class NotebookView {
     if (this.transportError) {
       const banner = elementNode(this.dom, "div", "connection-banner", "") as HTMLDivElement;
       banner.dataset.connectionBanner = this.transportState;
-      banner.setAttribute("role", "alert");
+      banner.setAttribute("role", "region");
+      banner.setAttribute("aria-label", "Connection status");
       banner.appendChild(elementNode(this.dom, "span", "connection-message", this.transportError));
       const retry = elementNode(this.dom, "button", "btn mini", "Restart connection") as HTMLButtonElement;
       retry.type = "button";
@@ -2953,6 +2996,12 @@ function focusableElements(root: HTMLElement): HTMLElement[] {
   return Array.from(root.querySelectorAll<HTMLElement>(
     'button:not([disabled]):not([tabindex="-1"]), [href]:not([tabindex="-1"]), input:not([disabled]):not([tabindex="-1"]), select:not([disabled]):not([tabindex="-1"]), textarea:not([disabled]):not([tabindex="-1"]), [tabindex]:not([tabindex="-1"])',
   )).filter((element) => !element.closest("[hidden], [aria-hidden=true]"));
+}
+
+function clickOutsideBounds(event: MouseEvent, element: HTMLElement): boolean {
+  const bounds = element.getBoundingClientRect();
+  return event.clientX < bounds.left || event.clientX > bounds.right ||
+    event.clientY < bounds.top || event.clientY > bounds.bottom;
 }
 
 function firstFocusable(root: HTMLElement): HTMLElement | undefined {

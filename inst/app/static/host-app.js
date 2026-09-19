@@ -23675,7 +23675,8 @@ var NotebookView = class {
     this.path = dom.getElementById("path");
     this.appView = new URLSearchParams(location.search).get("view") === "preview";
     const panelPreference = loadPanelPreference(window);
-    this.panelOpen = window.matchMedia?.("(max-width: 900px)").matches === true ? false : panelPreference.open;
+    this.panelDrawerMode = this.isInspectorDrawer();
+    this.panelOpen = this.panelDrawerMode ? false : panelPreference.open;
     this.panelTab = panelPreference.tab;
     const appLink = dom.getElementById("app-mode");
     const editLink = dom.getElementById("edit-mode");
@@ -23793,11 +23794,31 @@ var NotebookView = class {
   packageCancelButton = null;
   draggedKey = null;
   panelReturnFocus = null;
+  panelDrawerMode = false;
   dialogReturnFocus = /* @__PURE__ */ new WeakMap();
   deletedCell = null;
   resizeHandler = () => {
     this.updateTopbarInset();
+    const next = this.isInspectorDrawer();
+    const previous = this.panelDrawerMode;
+    if (next === previous) {
+      this.applyPanelState();
+      return;
+    }
+    const panel = this.dom.getElementById("dataflow-panel");
+    const active = this.dom.activeElement;
+    if (this.panelOpen && next && (!panel || !active || !panel.contains(active))) {
+      this.panelReturnFocus = active ?? this.dom.getElementById("panel-toggle");
+    }
+    this.panelDrawerMode = next;
     this.applyPanelState();
+    if (!this.panelOpen) return;
+    if (next) window.requestAnimationFrame(() => this.focusInspector());
+    else {
+      const target = this.panelReturnFocus ?? this.dom.getElementById("panel-toggle");
+      this.panelReturnFocus = null;
+      target?.focus({ preventScroll: true });
+    }
   };
   preserveRunFocus = (event) => {
     if (event.button === 0 && event.target instanceof Element && event.target.closest("#run-all, .cell-head [data-act=run]")) event.preventDefault();
@@ -23842,12 +23863,9 @@ var NotebookView = class {
   }
   setTransportState(state, error61) {
     if (this.hostClosed) return;
-    const previous = this.transportState;
     this.transportState = state;
     this.transportError = state === "closed" && error61 ? error61.message : state === "open" ? null : state === "connecting" ? this.documentValue ? "Reconnecting\u2026" : "Opening notebook\u2026" : "Reconnecting\u2026";
     this.renderStatus();
-    if (state === "closed") this.announce("Connection lost. Reconnect is available.");
-    else if (state === "open" && previous !== "open") this.announce("Notebook connected.");
   }
   render(notebook, event, localCellKeys) {
     this.documentValue = notebook;
@@ -23930,6 +23948,7 @@ var NotebookView = class {
     this.observer?.disconnect();
     window.removeEventListener("resize", this.resizeHandler);
     this.dom.removeEventListener("mousedown", this.preserveRunFocus);
+    this.setInspectorModal(false);
     this.cancelVariablesProjection();
   }
   showError(error61) {
@@ -24005,6 +24024,7 @@ var NotebookView = class {
     for (const button of Array.from(view2.element.querySelectorAll("button[data-act]"))) {
       button.addEventListener("click", (event) => {
         event.preventDefault();
+        button.closest("details.cell-overflow")?.removeAttribute("open");
         void this.cellAction(key, button, event).catch((error61) => this.showError(error61));
       });
     }
@@ -24178,8 +24198,16 @@ var NotebookView = class {
     });
     if (refreshLabels) {
       const title = element3.querySelector("[data-role=cell-title]");
+      const name = title?.textContent || `Cell ${index + 1}`;
+      const position = index >= 0 ? `${name}, position ${index + 1} of ${cells.length}` : name;
       const reorderHelp = element3.querySelector("[data-role=reorder-help]");
       if (reorderHelp) reorderHelp.id = `${element3.id}-reorder-help`;
+      element3.querySelector("[data-act=run]")?.setAttribute("aria-label", `Run ${position}`);
+      element3.querySelector("details.cell-overflow summary")?.setAttribute("aria-label", `Actions for ${position}`);
+      element3.querySelector("[data-role=type]")?.setAttribute("aria-label", `Cell type for ${position}`);
+      element3.querySelector("[data-act=disable]")?.setAttribute("aria-label", `${status === "disabled" ? "Enable" : "Disable"} ${position}`);
+      element3.querySelector("[data-act=delete]")?.setAttribute("aria-label", `Delete ${position}`);
+      element3.querySelector("[data-act=add]")?.setAttribute("aria-label", `Insert code cell after ${position}`);
       for (const direction of ["up", "down"]) {
         const button = element3.querySelector(`[data-act=move-${direction}]`);
         if (!button) continue;
@@ -25763,7 +25791,7 @@ ${cell.desiredBody.join("\n")}`));
   bindDisclosureBehavior() {
     for (const dialog of Array.from(this.dom.querySelectorAll("dialog"))) {
       dialog.addEventListener("click", (event) => {
-        if (event.target === dialog) this.closeDialog(dialog);
+        if (event.target === dialog && clickOutsideBounds(event, dialog)) this.closeDialog(dialog);
       });
       dialog.addEventListener("keydown", (event) => {
         if (event.key === "Escape") {
@@ -25939,10 +25967,10 @@ ${cell.desiredBody.join("\n")}`));
           this.graphExpanded = false;
           this.applyPanelState();
           if (this.documentValue) this.renderGraph(this.documentValue.snapshot);
-        } else if (this.isInspectorDrawer()) this.togglePanel(false);
+        } else if (this.panelDrawerMode) this.togglePanel(false);
         return;
       }
-      if (event.key !== "Tab" || !this.isInspectorDrawer()) return;
+      if (event.key !== "Tab" || !this.panelDrawerMode) return;
       trapTabKey(event, this.dom.getElementById("dataflow-panel"));
     });
     this.dom.getElementById("app-mode")?.addEventListener("click", (event) => {
@@ -25962,8 +25990,9 @@ ${cell.desiredBody.join("\n")}`));
     });
   }
   togglePanel(force) {
+    this.panelDrawerMode = this.isInspectorDrawer();
     const opening = force ?? !this.panelOpen;
-    if (opening && this.isInspectorDrawer()) this.panelReturnFocus = this.dom.activeElement;
+    if (opening && this.panelDrawerMode) this.panelReturnFocus = this.dom.activeElement;
     this.panelOpen = opening;
     if (!this.panelOpen) {
       this.graphExpanded = false;
@@ -25972,9 +26001,7 @@ ${cell.desiredBody.join("\n")}`));
     savePanelPreference(window, { open: this.panelOpen, tab: this.panelTab });
     this.applyPanelState();
     if (this.panelOpen && this.documentValue) this.renderSelectedPanel(this.documentValue.snapshot);
-    if (this.panelOpen && this.isInspectorDrawer()) window.requestAnimationFrame(() => {
-      this.dom.querySelector("#dataflow-panel [aria-selected=true]")?.focus();
-    });
+    if (this.panelOpen && this.panelDrawerMode) window.requestAnimationFrame(() => this.focusInspector());
     if (!this.panelOpen && this.panelReturnFocus) {
       const target = this.panelReturnFocus;
       this.panelReturnFocus = null;
@@ -26012,12 +26039,13 @@ ${cell.desiredBody.join("\n")}`));
     if (!panel || this.appView) return;
     panel.hidden = !this.panelOpen;
     this.dom.body.classList.toggle("panel-closed", !this.panelOpen);
-    const drawer = this.isInspectorDrawer();
+    const drawer = this.panelDrawerMode;
     panel.setAttribute("role", drawer ? "dialog" : "complementary");
     if (drawer) panel.setAttribute("aria-modal", "true");
     else panel.removeAttribute("aria-modal");
     const scrim = this.dom.getElementById("panel-scrim");
     if (scrim) scrim.hidden = !(drawer && this.panelOpen);
+    this.setInspectorModal(drawer && this.panelOpen);
     this.dom.getElementById("panel-toggle")?.setAttribute("aria-expanded", String(this.panelOpen));
     for (const tab of Array.from(this.dom.querySelectorAll("[data-panel-tab]"))) {
       const selected = tab.dataset.panelTab === this.panelTab;
@@ -26035,6 +26063,18 @@ ${cell.desiredBody.join("\n")}`));
   }
   isInspectorDrawer() {
     return window.matchMedia?.("(max-width: 900px)").matches === true;
+  }
+  focusInspector() {
+    this.dom.querySelector("#dataflow-panel [aria-selected=true]")?.focus({ preventScroll: true });
+  }
+  setInspectorModal(active) {
+    this.dom.body.classList.toggle("inspector-modal-open", active);
+    for (const selector of ["#topbar", "#status", "#editor-diagnostics", "#notebook"]) {
+      const target = this.dom.querySelector(selector);
+      if (!target) continue;
+      if (active) target.setAttribute("inert", "");
+      else target.removeAttribute("inert");
+    }
   }
   updateTopbarInset() {
     const bottom = Math.max(0, this.dom.getElementById("topbar")?.getBoundingClientRect().bottom ?? 48);
@@ -26129,7 +26169,8 @@ ${cell.desiredBody.join("\n")}`));
     if (this.transportError) {
       const banner = elementNode(this.dom, "div", "connection-banner", "");
       banner.dataset.connectionBanner = this.transportState;
-      banner.setAttribute("role", "alert");
+      banner.setAttribute("role", "region");
+      banner.setAttribute("aria-label", "Connection status");
       banner.appendChild(elementNode(this.dom, "span", "connection-message", this.transportError));
       const retry = elementNode(this.dom, "button", "btn mini", "Restart connection");
       retry.type = "button";
@@ -26400,6 +26441,10 @@ function focusableElements(root) {
   return Array.from(root.querySelectorAll(
     'button:not([disabled]):not([tabindex="-1"]), [href]:not([tabindex="-1"]), input:not([disabled]):not([tabindex="-1"]), select:not([disabled]):not([tabindex="-1"]), textarea:not([disabled]):not([tabindex="-1"]), [tabindex]:not([tabindex="-1"])'
   )).filter((element3) => !element3.closest("[hidden], [aria-hidden=true]"));
+}
+function clickOutsideBounds(event, element3) {
+  const bounds = element3.getBoundingClientRect();
+  return event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom;
 }
 function firstFocusable(root) {
   return focusableElements(root)[0];

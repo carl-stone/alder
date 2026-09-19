@@ -1130,42 +1130,21 @@ body.panel-closed #editor-workspace { grid-template-columns: minmax(0, 1040px); 
 .cell-overflow-menu .btn { width: 100%; border-color: transparent; background: transparent; }
 .cell-overflow-menu .btn:hover { background: var(--surface-subtle); }
 .source-area { overflow: hidden; border-radius: 0 0 var(--radius-lg) var(--radius-lg); }
-.source-area .cm-editor { background: var(--surface-code); caret-color: var(--text); }
+.source-area .cm-editor { background: var(--surface-code); }
 .source-area .cm-content { padding-top: 8px; padding-bottom: 14px; }
-.source-area .cm-activeLine { background: color-mix(in srgb, var(--accent) 5%, transparent); }
-.source-area .cm-activeLineGutter { background: color-mix(in srgb, var(--accent) 7%, transparent); color: var(--text-secondary); }
-.source-area .cm-selectionBackground, .source-area .cm-content ::selection { background: color-mix(in srgb, var(--accent) 24%, transparent) !important; }
-.source-area .cm-cursor { border-left-color: var(--accent); border-left-width: 2px; }
-.source-area .cm-matchingBracket { background: var(--accent-soft); outline: 1px solid color-mix(in srgb, var(--accent) 40%, transparent); }
-.cm-tooltip, .cm-tooltip-autocomplete {
-  border: 1px solid var(--border-strong) !important;
-  border-radius: var(--radius-md) !important;
-  background: var(--surface-raised) !important;
-  color: var(--text) !important;
-  box-shadow: var(--shadow-menu) !important;
-  overflow: hidden;
-}
-.cm-tooltip-autocomplete > ul > li[aria-selected] { background: var(--accent-soft) !important; color: var(--text) !important; }
-.cm-panels { border-color: var(--border) !important; background: var(--surface-raised) !important; color: var(--text) !important; }
-.cm-searchMatch { background: color-mix(in srgb, #e7b43a 36%, transparent); outline: 1px solid color-mix(in srgb, #b47a00 55%, transparent); }
-.cm-searchMatch.cm-searchMatch-selected { background: color-mix(in srgb, var(--accent) 28%, transparent); }
-.tok-keyword, .tok-controlKeyword { color: #7656b8; }
-.tok-string, .tok-regexp { color: #a14f30; }
-.tok-number, .tok-bool, .tok-null { color: #1f6f8a; }
-.tok-comment { color: var(--muted); font-style: italic; }
-.tok-variableName, .tok-propertyName { color: var(--text); }
-.tok-function, .tok-functionName { color: #255fa8; }
-.tok-operator { color: #6b4f85; }
-[data-theme="dark"] :is(.tok-keyword, .tok-controlKeyword) { color: #c5a7ff; }
-[data-theme="dark"] :is(.tok-string, .tok-regexp) { color: #e7a17f; }
-[data-theme="dark"] :is(.tok-number, .tok-bool, .tok-null) { color: #83cbe5; }
-[data-theme="dark"] :is(.tok-function, .tok-functionName) { color: #8ab7ff; }
-[data-theme="dark"] .tok-operator { color: #ccb2df; }
 
 .output-area { padding: var(--space-3) var(--space-4) var(--space-4); background: var(--panel); }
 .value-text, .error-trace { line-height: 1.55; border: 1px solid var(--border); }
 .output-error { padding: var(--space-2) 0; font-weight: 600; }
 .plot, .out-media:not(audio):not(video) { padding: var(--space-2); background: #fff; border-color: var(--border-strong); }
+.html-inline {
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-subtle);
+}
+.html-inline > :first-child { margin-top: 0; }
+.html-inline > :last-child { margin-bottom: 0; }
 .table-preview { border: 1px solid var(--border); border-radius: var(--radius-md); }
 .table-preview th, .table-preview td { border: 0; border-bottom: 1px solid var(--border); padding: 6px 9px; }
 .table-preview tbody tr:nth-child(even) { background: color-mix(in srgb, var(--surface-subtle) 62%, transparent); }
@@ -1213,16 +1192,23 @@ body.panel-closed #editor-workspace { grid-template-columns: minmax(0, 1040px); 
   #editor-workspace { grid-template-columns: minmax(0, 1fr) 284px; }
 }
 @media (max-width: 900px) {
+  body.inspector-modal-open { overflow: hidden; }
   #editor-workspace, body.panel-closed #editor-workspace { display: block; max-width: 100%; }
   #dataflow-panel {
+    position: fixed;
     z-index: 80;
-    top: 0;
+    top: var(--alder-topbar-bottom, 48px);
+    right: 0;
+    bottom: 0;
+    left: auto;
     width: min(380px, calc(100% - 44px));
-    height: 100dvh;
-    max-height: 100dvh;
+    height: auto;
+    max-height: none;
     margin: 0;
+    overscroll-behavior: contain;
     border: 0;
     border-left: 1px solid var(--border);
+    border-radius: 0;
     box-shadow: -18px 0 50px rgb(10 14 20 / 24%);
   }
   .panel-scrim:not([hidden]) {
