@@ -26,6 +26,7 @@ import type {
   EvaluationPayload,
   HostCommand,
   OutputRecord,
+  RichOutputPayload,
   HostEvent,
 } from "../src/protocol.js";
 
@@ -163,6 +164,18 @@ class FakeEngine implements EngineAdapter {
     pending.resolve(result);
   }
 
+  finishEvaluationWithCanonicalResponse(result: EngineResponse): void {
+    const pending = this.pendingEvaluations.shift();
+    assert.ok(pending, "an evaluation must be pending");
+    pending.onEvent?.({
+      type: "completed", requestId: pending.requestId, sessionEpoch: pending.payload.sessionEpoch,
+      kernelEpoch: pending.payload.kernelEpoch, documentRevision: pending.payload.documentRevision,
+      operationId: pending.payload.operationId, runId: pending.payload.runId, cellId: pending.payload.cellId,
+      revision: pending.payload.revision, sequence: ++pending.sequence, result,
+    });
+    pending.resolve(result);
+  }
+
   emitEvaluationLog(payload: unknown): void {
     this.emitEvaluationOutput("log", payload);
   }
@@ -170,7 +183,7 @@ class FakeEngine implements EngineAdapter {
   emitEvaluationOutput(
     kind: Extract<EngineEvent, { type: "output" }>["kind"],
     payload: unknown,
-  ): void {
+  ): OutputRecord | undefined {
     const pending = this.pendingEvaluations[0];
     assert.ok(pending, "an evaluation must be pending");
     const eventPayload = kind === "append"
@@ -190,6 +203,8 @@ class FakeEngine implements EngineAdapter {
       kind,
       payload: eventPayload,
     });
+    return kind === "append" && isRecord(eventPayload) && "output" in eventPayload
+      ? eventPayload.output as OutputRecord : undefined;
   }
   private canonicalRecord(payload: EvaluationPayload, value: unknown): OutputRecord {
     const store = this.outputStore;
@@ -200,6 +215,11 @@ class FakeEngine implements EngineAdapter {
   private canonicalizeResponse(payload: EvaluationPayload, response: EngineResponse): EngineResponse {
     if (response.outputs === undefined) return response;
     return { ...response, outputs: response.outputs.map((output) => this.canonicalRecord(payload, output)) };
+  }
+
+  async replaceCanonicalRecord(expected: OutputRecord, payload: RichOutputPayload): Promise<OutputRecord> {
+    assert.ok(this.outputStore, "FakeEngine must share the Controller OutputStore");
+    return this.outputStore.updateRecord(expected, payload);
   }
 
   async request(command: string, payload: Record<string, unknown> = {}, options?: EngineRequestOptions): Promise<EngineResponse> {
@@ -1607,6 +1627,47 @@ test("an obsolete slow result cannot replace a newer reactive result", async () 
     await eventuallyTimed(() => controller.snapshot().cells[1]?.status === "done");
     assert.ok(!JSON.stringify(controller.snapshot()).includes("obsolete slow result"));
     assert.equal(controller.snapshot().cells[2]?.outputs[0]?.id, unrelatedOutput);
+  } finally { await controller.close(); }
+});
+
+test("source edits retire obsolete output and accept the replacement generation", async () => {
+  const engine = new FakeEngine();
+  const controller = createController({
+    engine, notebook: reactiveExample("reactive-slow.R"),
+    config: resolveSettings({ notebook: { on_startup: false, on_cell_change: "automatic" } }),
+  });
+  try {
+    await controller.start();
+    const ids = controller.snapshot().cells.map(cell => cell.id);
+    const initial = command(controller, { type: "run", scope: "all" });
+    await startCommand(controller, initial); await settle(controller, initial.requestId);
+    engine.deferred = true;
+    const edit = (value: number, revision: number) => command(controller, {
+      type: "transaction", changes: [{ type: "edit", cell: { cellId: ids[0]! }, expectedRevision: revision,
+        body: [`x <- ${value}L`, "x"], cellType: "code" }],
+    });
+    const first = edit(2, 0); await startCommand(controller, first); await settle(controller, first.requestId);
+    await eventuallyTimed(() => engine.pendingEvaluations.length === 1);
+    engine.finishEvaluation();
+    await eventuallyTimed(() => engine.pendingEvaluations.length === 1);
+    const second = edit(3, 1); await startCommand(controller, second); await settle(controller, second.requestId);
+    await eventuallyTimed(() => engine.interrupts.length > 0);
+    engine.finishEvaluation({ ok: true, outputs: [{ kind: "text", text: "obsolete", truncated: false }] });
+
+    await eventuallyTimed(() => engine.pendingEvaluations.length === 1);
+    const retired = engine.emitEvaluationOutput("append", { kind: "text", text: "replaced", truncated: false })!;
+    const replacement = await engine.replaceCanonicalRecord(retired, { kind: "text", text: "accepted replacement", truncated: false });
+    engine.finishEvaluationWithCanonicalResponse({ ok: true, outputs: [retired, replacement] });
+    const deadline = Date.now() + 1_000;
+    while (controller.snapshot().runtime.busy && Date.now() < deadline) {
+      if (engine.pendingEvaluations.length) engine.finishEvaluation();
+      await new Promise(resolve => setTimeout(resolve, 1));
+    }
+    await eventuallyTimed(() => controller.snapshot().runtime.kernelState === "ready" && !controller.snapshot().runtime.busy);
+    const rendered = JSON.stringify(controller.snapshot());
+    assert.ok(!rendered.includes('"text":"replaced"'));
+    assert.ok(!rendered.includes("obsolete"));
+    assert.ok(rendered.includes("accepted replacement"));
   } finally { await controller.close(); }
 });
 

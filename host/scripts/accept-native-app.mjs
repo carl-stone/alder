@@ -12,6 +12,7 @@ const saveIterations = Number(process.env.ALDER_NATIVE_SAVE_ITERATIONS ?? 20);
 const temporary = await mkdtemp('/tmp/alder-native-accept-');
 const notebook = join(temporary, 'native-accept.R');
 const children = new Set();
+const ownedPids = new Set();
 const sessions = new Set();
 const started = performance.now();
 await writeFile(notebook, '# ---\n# runtime:\n#   on_cell_change: lazy\n# ---\n# %%\nvalue <- 0L\nvalue\n');
@@ -33,6 +34,7 @@ async function launch(name) {
     '--headless=new', '--remote-debugging-port=0', `--user-data-dir=${join(temporary, name)}`, notebook,
   ], { cwd: temporary, env: environment(), stdio: ['ignore', 'ignore', 'pipe'] });
   children.add(child);
+  ownedPids.add(child.pid);
   child.stderr.on('data', chunk => stderr.push(Buffer.from(chunk)));
   const endpoint = await new Promise((resolveEndpoint, reject) => {
     const timer = setTimeout(() => reject(new Error(`packaged app startup timed out: ${Buffer.concat(stderr)}`)), 30_000);
@@ -89,6 +91,7 @@ async function waitDiskSource(source, timeout = 20_000) {
 async function stop(instance) {
   if (!instance) return;
   const owned = processTree(instance.child.pid);
+  for (const pid of owned) ownedPids.add(pid);
   try { await shortcut(instance.cdp, 'q', 'KeyQ', 81, 4); } catch {}
   const exited = await Promise.race([
     new Promise(resolveExit => instance.child.once('exit', () => resolveExit(true))),
@@ -126,6 +129,22 @@ function processTree(rootPid) {
     for (const child of children) { parents.add(child.pid); found.push(child.pid); }
   }
   return found;
+}
+
+async function auditOwnedProcesses() {
+  const rows = execFileSync('/bin/ps', ['-axo', 'pid=,ppid=,command='], { encoding: 'utf8' }).split('\n').map(line => {
+    const match = /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line);
+    return match ? { pid: Number(match[1]), ppid: Number(match[2]), command: match[3] } : null;
+  }).filter(Boolean);
+  let expanded = true;
+  while (expanded) {
+    expanded = false;
+    for (const row of rows) if (ownedPids.has(row.ppid) && !ownedPids.has(row.pid)) {
+      ownedPids.add(row.pid); expanded = true;
+    }
+  }
+  const survivors = rows.filter(row => ownedPids.has(row.pid) || row.command.includes(temporary));
+  if (survivors.length) throw new Error(`owned packaged processes survived native cleanup:\n${survivors.map(row => `${row.pid} ${row.command}`).join('\n')}`);
 }
 
 class Cdp {
@@ -284,5 +303,7 @@ try {
   }
   await new Promise(resolveWait => setTimeout(resolveWait, 500));
   for (const child of children) if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+  await new Promise(resolveWait => setTimeout(resolveWait, 250));
+  await auditOwnedProcesses();
   await rm(temporary, { recursive: true, force: true });
 }

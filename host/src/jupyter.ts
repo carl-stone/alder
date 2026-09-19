@@ -525,9 +525,10 @@ export class ArkKernel extends EventEmitter {
       this.childExited = false;
       child.stdout?.on("data", (chunk: Buffer) => this.recordDiagnostic(chunk));
       child.stderr?.on("data", (chunk: Buffer) => this.recordDiagnostic(chunk));
-      child.stdin?.on("error", (error) => this.fail(
-        new Error("could not write to Ark: " + error.message + this.diagnosticText()),
-      ));
+      child.stdin?.on("error", (error) => {
+        if (this.intentionalExit || this.stopRequested || this.stopped) return;
+        this.fail(new Error("could not write to Ark: " + error.message + this.diagnosticText()));
+      });
       void child.exited.then(({ code, signal }) => {
         this.childExited = true;
         this.exitResolve?.();
@@ -820,7 +821,10 @@ export class ArkKernel extends EventEmitter {
     this.closeSockets();
 
     if (!this.intentionalExit) this.emit("failed", error);
-    this.terminationPromise ??= this.finishProcessCleanup();
+    if (this.terminationPromise === undefined) {
+      this.terminationPromise = this.finishProcessCleanup();
+      void this.terminationPromise.catch(() => {});
+    }
   }
 
   private rejectAll(error: Error): void {

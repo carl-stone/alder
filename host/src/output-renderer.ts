@@ -12,6 +12,7 @@ export interface WidgetOrigin {
 
 interface PendingWidget {
   widget: JsonObject;
+  readonly instance: number;
   origin: WidgetOrigin;
   path: readonly string[];
   update: JsonObject | null;
@@ -65,6 +66,8 @@ export class OutputRenderer {
   private readonly structures = new WeakMap<Element, string>();
   private readonly widgetOrigins = new WeakMap<JsonObject, WidgetOrigin>();
   private readonly controlOrigins = new WeakMap<WidgetControl, WidgetOrigin>();
+  private readonly outputInstances = new WeakMap<Element, number>();
+  private nextOutputInstance = 0;
   private readonly pendingWidgets = new Map<string, PendingWidget>();
   private readonly pendingForms = new Map<string, Promise<void>>();
   private readonly pendingUploads = new Set<Promise<void>>();
@@ -732,7 +735,8 @@ export class OutputRenderer {
       this.interactiveActions().error(new Error("widget output is no longer current"));
       return Promise.resolve();
     }
-    const key = widgetKey(widget, string(control.dataset.kind), path);
+    const instance = this.widgetInstance(control);
+    const key = widgetOperationKey(widget, string(control.dataset.kind), path, instance);
     const oneShot = ["run_button", "button", "refresh", "form"].includes(string(control.dataset.kind));
     const current = this.pendingWidgets.get(key);
     if (current) {
@@ -741,12 +745,13 @@ export class OutputRenderer {
       if (!current.oneShot) current.update = update;
       return current.done;
     }
-    const predecessors = Array.from(this.pendingWidgets.values()).filter((operation) => string(operation.widget.name) === string(widget.name));
+    const predecessors = Array.from(this.pendingWidgets.values()).filter((operation) =>
+      string(operation.widget.name) === string(widget.name) && operation.instance === instance);
     if (oneShot) control.setAttribute("disabled", "");
     let resolveDone!: () => void;
     const done = new Promise<void>((resolve) => { resolveDone = resolve; });
     const pending: PendingWidget = {
-      widget, origin, path: [...path], update, authoritative: null, oneShot, control, failure: null, done, resolveDone,
+      widget, instance, origin, path: [...path], update, authoritative: null, oneShot, control, failure: null, done, resolveDone,
     };
     this.pendingWidgets.set(key, pending);
     void (async () => {
@@ -800,7 +805,13 @@ export class OutputRenderer {
   }
 
   private submitForm(node: HTMLElement, widget: JsonObject, spec: JsonObject, path: readonly string[], control: HTMLButtonElement): void {
-    const key = widgetKey(widget, "form", path);
+    const origin = this.controlOrigins.get(control);
+    if (origin === undefined) {
+      this.interactiveActions().error(new Error("widget output is no longer current"));
+      return;
+    }
+    const instance = this.widgetInstance(control);
+    const key = widgetOperationKey(widget, "form", path, instance);
     if (this.pendingForms.has(key)) return;
     control.disabled = true;
     for (const child of Array.from(node.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement | HTMLButtonElement>("[data-role=widget]"))) {
@@ -808,7 +819,7 @@ export class OutputRenderer {
     }
     let request!: Promise<void>;
     request = (async () => {
-      await this.flushWidgetSubtree(string(widget.name), path);
+      await this.flushWidgetSubtree(string(widget.name), path, instance);
       await this.sendWidget(widget, path, { submit: true }, control);
     })().catch(() => {
       // The originating widget operation reports its failure to any action
@@ -820,15 +831,26 @@ export class OutputRenderer {
     this.pendingForms.set(key, request);
   }
 
-  private async flushWidgetSubtree(name: string, path: readonly string[]): Promise<void> {
+  private async flushWidgetSubtree(name: string, path: readonly string[], instance: number): Promise<void> {
     for (;;) {
       const pending = Array.from(this.pendingWidgets.values()).filter((operation) =>
-        string(operation.widget.name) === name && path.every((part, index) => operation.path[index] === part));
+        string(operation.widget.name) === name && operation.instance === instance
+          && path.every((part, index) => operation.path[index] === part));
       if (!pending.length) return;
       await Promise.all(pending.map((operation) => operation.done));
       const failed = pending.find((operation) => operation.failure !== null);
       if (failed) throw failed.failure;
     }
+  }
+
+  private widgetInstance(control: WidgetControl): number {
+    const output = control.closest(".out-record");
+    if (output === null) throw new Error("widget output is no longer current");
+    const existing = this.outputInstances.get(output);
+    if (existing !== undefined) return existing;
+    const created = ++this.nextOutputInstance;
+    this.outputInstances.set(output, created);
+    return created;
   }
 
   private buildWidgetTable(node: HTMLElement, widget: JsonObject, spec: JsonObject, kind: string, path: readonly string[]): void {
@@ -1139,6 +1161,10 @@ function visitWidgets(value: unknown, visit: (widget: JsonObject) => void): void
 
 function widgetKey(widget: JsonObject, kind: string, path: readonly string[]): string {
   return `${string(widget.name)}\0${kind}\0${path.join("\u0001")}`;
+}
+
+function widgetOperationKey(widget: JsonObject, kind: string, path: readonly string[], instance: number): string {
+  return `${string(widget.name)}\0${kind}\0${path.join("\u0001")}\0${instance}`;
 }
 
 

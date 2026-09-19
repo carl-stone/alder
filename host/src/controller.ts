@@ -2524,29 +2524,35 @@ export class Controller {
           job,
         )
         : undefined;
-      this.applyOutputEvent(event, active, output);
+      if (event.kind === "append" && output === null) return;
+      this.applyOutputEvent(event, active, output ?? undefined);
     } catch (error) {
       active.protocolFailure = asControllerError(error, "invalid_engine_event", 503);
     }
   }
 
-  private canonicalEngineRecord(value: unknown, job: EvaluationJob): OutputRecord {
+  private canonicalEngineRecord(value: unknown, job: EvaluationJob): OutputRecord | null {
     const checked = outputRecordSchema.safeParse(value);
     if (!checked.success) {
       throw new ControllerError("invalid_engine_event", "R kernel returned a non-canonical output record", 503);
     }
-    const record = this.outputStore.getRecord(checked.data.id);
-    if (record === undefined || !Object.is(record, value)) {
-      throw new ControllerError("invalid_engine_event", "R kernel returned an output record not owned by the store", 503);
-    }
     if (
-      record.sessionEpoch !== this.epochValue
-      || record.kernelEpoch !== this.kernelEpochValue
-      || record.runId !== job.runId
-      || record.cellId !== job.id
-      || record.revision !== job.revision
+      checked.data.sessionEpoch !== this.epochValue
+      || checked.data.kernelEpoch !== this.kernelEpochValue
+      || checked.data.runId !== job.runId
+      || checked.data.cellId !== job.id
+      || checked.data.revision !== job.revision
     ) {
       throw new ControllerError("invalid_engine_event", "R kernel returned an output record with stale identity", 503);
+    }
+    const record = this.outputStore.getRecord(checked.data.id);
+    if (record === undefined) {
+      if (this.outputStore.ownsRecordReference(value)) return null;
+      throw new ControllerError("invalid_engine_event", "R kernel returned an output record not owned by the store", 503);
+    }
+    if (!Object.is(record, value)) {
+      if (this.outputStore.ownsRecordReference(value)) return null;
+      throw new ControllerError("invalid_engine_event", "R kernel returned an output record not owned by the store", 503);
     }
     return record;
   }
@@ -2568,7 +2574,10 @@ export class Controller {
     }
     return {
       ...parsed,
-      outputs: raw.outputs.map((value) => this.canonicalEngineRecord(value, job)),
+      outputs: raw.outputs.flatMap((value) => {
+        const record = this.canonicalEngineRecord(value, job);
+        return record === null ? [] : [record];
+      }),
     };
   }
 

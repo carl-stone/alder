@@ -169,6 +169,7 @@ export class OutputStore {
   private readonly recordsByCell = new Map<string, StoredRecord[]>();
   private readonly recordsById = new Map<string, StoredRecord>();
   private readonly recordMetadata = new WeakMap<StoredRecord, StoredRecordMetadata>();
+  private readonly ownedRecords = new WeakSet<object>();
   private readonly artifactsByHandle = new Map<string, StoredArtifact>();
   private readonly nextSequenceByOwner = new Map<string, number>();
   private readonly requestArtifactsByOwner = new Map<string, {
@@ -226,6 +227,11 @@ export class OutputStore {
     }
     this.documentRevision = nextDocumentRevision;
     this.kernelEpoch = identity.kernelEpoch;
+  }
+
+  /** True for the exact canonical object created by this store, including after retirement. */
+  ownsRecordReference(value: unknown): value is OutputRecord {
+    return typeof value === "object" && value !== null && this.ownedRecords.has(value);
   }
   /** Normalize one public Jupyter display-data map. */
 
@@ -1377,6 +1383,7 @@ export class OutputStore {
     current.push(stored);
     this.recordsByCell.set(stored.cellId, current);
     this.recordsById.set(stored.id, stored);
+    this.ownedRecords.add(stored);
     this.nextSequenceByOwner.set(prepared.ownerKey, stored.sequence + 1);
     this.recordMetadata.set(stored, Object.freeze({
       handles: Object.freeze(prepared.handles.map((descriptor) => descriptor.handle)),
@@ -1419,6 +1426,7 @@ export class OutputStore {
     }
     records[index] = stored;
     this.recordsById.set(stored.id, stored);
+    this.ownedRecords.add(stored);
     this.nextSequenceByOwner.set(prepared.ownerKey, stored.sequence + 1);
     this.recordMetadata.set(stored, Object.freeze({
       handles: Object.freeze([...nextHandles]),

@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { BrowserNotebookClient } from "../src/browser/client.js";
 import { BrowserDocument, reconcileDraft } from "../src/browser/document.js";
 import { NotebookView } from "../src/browser/view.js";
+import { OutputRenderer } from "../src/output-renderer.js";
 import { parseHTML } from "linkedom";
 import { BrowserTransport, BrowserTransportError, IndexedDBRecoveryStore, MemoryRecoveryStore, type BrowserRecoveryDraft, type WebSocketLike } from "../src/browser/transport.js";
 
@@ -52,6 +53,41 @@ function snapshot(cells: HostCellState[] = [cell("c1", ["x <- 1"]), cell("c2", [
     operations: [], lastValue: null, lastActionError: null,
   };
 }
+
+test("same-named widgets in distinct output records dispatch against their own causal instance", async () => {
+  const { document, window } = parseHTML("<!doctype html><html><body><div id=outputs></div></body></html>");
+  const calls: Array<{ origin: { outputId: string; outputGeneration: number }; resolve: (value: unknown) => void }> = [];
+  const renderer = new OutputRenderer({
+    mode: "interactive", document,
+    resolveArtifact: async () => ({ kind: "html", html: "" }),
+    actions: {
+      widget: async (_name, _path, _update, origin) => new Promise(resolve => calls.push({ origin, resolve })),
+      upload: async () => undefined, lazy: async () => undefined, table: async () => undefined,
+      error: error => { throw error; }, pageSize: () => 25, widgetAvailable: () => true,
+    },
+  });
+  const output = (id: string, sequence: number): import("../src/protocol.js").OutputRecord => ({
+    id, sessionEpoch: "epoch-1", kernelEpoch: "kernel-1", runId: "run-1", cellId: "c1", revision: 0, sequence,
+    data: { kind: "widget", name: "shared", owner: "c1", path: [], commit_token: null, operation: null,
+      spec: { kind: "slider", value: 1, min: 0, max: 10, step: 1 } },
+    metadata: { presentation: "inline" }, truncated: false,
+  });
+  const container = document.getElementById("outputs")!;
+  renderer.render(container, [output("output-one", 1), output("output-two", 2)], null);
+  const controls = [...container.querySelectorAll<HTMLInputElement>("input")];
+  assert.equal(controls.length, 2);
+  controls[0]!.value = "2"; controls[0]!.dispatchEvent(new window.Event("input", { bubbles: true }));
+  controls[1]!.value = "3"; controls[1]!.dispatchEvent(new window.Event("input", { bubbles: true }));
+  await waitUntil(() => calls.length === 2);
+  assert.deepEqual(calls.map(call => call.origin.outputId), ["output-one", "output-two"]);
+  calls.forEach(call => call.resolve({ result: { outputRecordId: call.origin.outputId, outputGeneration: 1 } }));
+  await renderer.flush();
+  controls[0]!.value = "4"; controls[0]!.dispatchEvent(new window.Event("input", { bubbles: true }));
+  await waitUntil(() => calls.length === 3);
+  assert.deepEqual(calls[2]!.origin, { owner: "c1", revision: 0, outputId: "output-one", outputGeneration: 1, kernelEpoch: "kernel-1" });
+  calls[2]!.resolve({ result: { outputRecordId: "output-one", outputGeneration: 2 } });
+  await renderer.flush();
+});
 
 async function withViewDom<T>(callback: (dom: Document, domWindow: Window) => T | PromiseLike<T>): Promise<T> {
   const canonical = parseHTML(await readFile(new URL("../../inst/app/index.html", import.meta.url), "utf8")).document;
@@ -1640,6 +1676,38 @@ test("source submission waits until the latest renderer draft is durable", async
     await waitUntil(() => socket.commands().length === 1);
     socket.reply(socket.commands()[0]!, { edited: [{ id: "c1", revision: 1 }], created: {}, deleted: [] });
     await committed;
+  } finally { await client.close(); }
+});
+
+test("a failed Run draft flush settles source acceptance so immediate Save cannot hang", async () => {
+  const store = new MemoryRecoveryStore();
+  const { client, socket } = await browserClient(store);
+  try {
+    await client.flushDraftPersistence();
+    const saveDraft = store.saveDraft.bind(store);
+    let fail = true;
+    store.saveDraft = async draft => {
+      if (fail) { fail = false; throw new Error("draft disk unavailable"); }
+      await saveDraft(draft);
+    };
+    client.editCell("c1", "x <- 2");
+    await assert.rejects(client.runAll(), /draft disk unavailable/);
+    assert.equal(socket.commands().length, 0);
+    assert.deepEqual(client.document!.cell("c1")!.desiredBody, ["x <- 2"]);
+
+    const saving = client.save();
+    await waitUntil(() => socket.commands().length === 1);
+    const edit = socket.commands()[0]!;
+    assert.equal(edit.type, "transaction");
+    socket.reply(edit, { edited: [{ id: "c1", revision: 1 }], created: {}, deleted: [] }, 1);
+    await waitUntil(() => socket.commands().length === 2);
+    const save = socket.commands()[1]!;
+    assert.equal(save.type, "save");
+    socket.reply(save, { saved: true }, 1);
+    await Promise.race([
+      saving,
+      new Promise((_, reject) => setTimeout(() => reject(new Error("Save hung after failed Run draft flush")), 1_000)),
+    ]);
   } finally { await client.close(); }
 });
 

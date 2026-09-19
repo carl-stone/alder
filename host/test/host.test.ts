@@ -297,6 +297,9 @@ test("installed Ark editor help follows live R values, source edits and kernel r
   await writeFile(path, "# %%\nmy_table <- data.frame(long_column = 1L)\n# %%\nmy_table$lo\n# %%\nmissing_symbol\n");
   let app: RunningHost | undefined;
   let session: HttpSession | undefined;
+  const unhandled: unknown[] = [];
+  const onUnhandled = (error: unknown): void => { unhandled.push(error); };
+  process.on("unhandledRejection", onUnhandled);
   try {
     app = await startInstalledHost(path);
     const first = await dispatchHost(app, { type: "run", scope: "cell", target: { cellId: "cell-1" } });
@@ -347,7 +350,10 @@ test("installed Ark editor help follows live R values, source edits and kernel r
   } finally {
     if (session) await closeHttpSession(session);
     await app?.close();
+    await new Promise(resolve => setTimeout(resolve, 100));
+    process.off("unhandledRejection", onUnhandled);
     await rm(directory, { recursive: true, force: true });
+    assert.deepEqual(unhandled, [], `Ark teardown leaked an unhandled rejection: ${unhandled.map(String).join("; ")}`);
   }
 });
 

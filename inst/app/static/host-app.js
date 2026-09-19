@@ -22323,10 +22323,11 @@ var BrowserNotebookClient = class {
     this.draftSubmission = { requestId: command.requestId, kind: command.type, changes: changes.map((change) => structuredClone(change)) };
     document2.noteSubmitted(command.requestId, command);
     this.queueDraftPersistence();
-    await this.flushDraftPersistence();
+    let dispatched = false;
     try {
+      await this.flushDraftPersistence();
+      dispatched = true;
       const result = await this.dispatch(command);
-      this.resolveSourceAcceptance(command.requestId);
       document2.acknowledge(result);
       if (this.draftSubmission?.requestId === command.requestId) this.draftSubmission = null;
       this.queueDraftPersistence();
@@ -22335,9 +22336,9 @@ var BrowserNotebookClient = class {
       this.notify(void 0, sourceCellKeys(command, document2));
       return result;
     } catch (error61) {
-      this.resolveSourceAcceptance(command.requestId);
-      if (error61 instanceof BrowserTransportError && error61.definitive) {
-        document2.reject(command.requestId, error61.code);
+      if (!dispatched || error61 instanceof BrowserTransportError && error61.definitive) {
+        const reason = !dispatched ? "draft_persistence_failed" : error61 instanceof BrowserTransportError ? error61.code : "source_rejected";
+        document2.reject(command.requestId, reason);
         if (this.draftSubmission?.requestId === command.requestId) this.draftSubmission = null;
       }
       this.queueDraftPersistence();
@@ -22346,6 +22347,8 @@ var BrowserNotebookClient = class {
       this.notifyRecovery();
       this.notify();
       throw error61;
+    } finally {
+      this.resolveSourceAcceptance(command.requestId);
     }
   }
   async dispatch(command) {
@@ -22623,6 +22626,8 @@ var OutputRenderer = class {
   structures = /* @__PURE__ */ new WeakMap();
   widgetOrigins = /* @__PURE__ */ new WeakMap();
   controlOrigins = /* @__PURE__ */ new WeakMap();
+  outputInstances = /* @__PURE__ */ new WeakMap();
+  nextOutputInstance = 0;
   pendingWidgets = /* @__PURE__ */ new Map();
   pendingForms = /* @__PURE__ */ new Map();
   pendingUploads = /* @__PURE__ */ new Set();
@@ -23248,14 +23253,15 @@ var OutputRenderer = class {
       this.interactiveActions().error(new Error("widget output is no longer current"));
       return Promise.resolve();
     }
-    const key = widgetKey(widget, string4(control.dataset.kind), path);
+    const instance = this.widgetInstance(control);
+    const key = widgetOperationKey(widget, string4(control.dataset.kind), path, instance);
     const oneShot = ["run_button", "button", "refresh", "form"].includes(string4(control.dataset.kind));
     const current = this.pendingWidgets.get(key);
     if (current) {
       if (!current.oneShot) current.update = update;
       return current.done;
     }
-    const predecessors = Array.from(this.pendingWidgets.values()).filter((operation) => string4(operation.widget.name) === string4(widget.name));
+    const predecessors = Array.from(this.pendingWidgets.values()).filter((operation) => string4(operation.widget.name) === string4(widget.name) && operation.instance === instance);
     if (oneShot) control.setAttribute("disabled", "");
     let resolveDone;
     const done = new Promise((resolve) => {
@@ -23263,6 +23269,7 @@ var OutputRenderer = class {
     });
     const pending = {
       widget,
+      instance,
       origin,
       path: [...path],
       update,
@@ -23317,7 +23324,13 @@ var OutputRenderer = class {
     return done;
   }
   submitForm(node2, widget, spec, path, control) {
-    const key = widgetKey(widget, "form", path);
+    const origin = this.controlOrigins.get(control);
+    if (origin === void 0) {
+      this.interactiveActions().error(new Error("widget output is no longer current"));
+      return;
+    }
+    const instance = this.widgetInstance(control);
+    const key = widgetOperationKey(widget, "form", path, instance);
     if (this.pendingForms.has(key)) return;
     control.disabled = true;
     for (const child of Array.from(node2.querySelectorAll("[data-role=widget]"))) {
@@ -23325,7 +23338,7 @@ var OutputRenderer = class {
     }
     let request;
     request = (async () => {
-      await this.flushWidgetSubtree(string4(widget.name), path);
+      await this.flushWidgetSubtree(string4(widget.name), path, instance);
       await this.sendWidget(widget, path, { submit: true }, control);
     })().catch(() => {
     }).finally(() => {
@@ -23334,14 +23347,23 @@ var OutputRenderer = class {
     });
     this.pendingForms.set(key, request);
   }
-  async flushWidgetSubtree(name, path) {
+  async flushWidgetSubtree(name, path, instance) {
     for (; ; ) {
-      const pending = Array.from(this.pendingWidgets.values()).filter((operation) => string4(operation.widget.name) === name && path.every((part, index) => operation.path[index] === part));
+      const pending = Array.from(this.pendingWidgets.values()).filter((operation) => string4(operation.widget.name) === name && operation.instance === instance && path.every((part, index) => operation.path[index] === part));
       if (!pending.length) return;
       await Promise.all(pending.map((operation) => operation.done));
       const failed = pending.find((operation) => operation.failure !== null);
       if (failed) throw failed.failure;
     }
+  }
+  widgetInstance(control) {
+    const output2 = control.closest(".out-record");
+    if (output2 === null) throw new Error("widget output is no longer current");
+    const existing = this.outputInstances.get(output2);
+    if (existing !== void 0) return existing;
+    const created = ++this.nextOutputInstance;
+    this.outputInstances.set(output2, created);
+    return created;
   }
   buildWidgetTable(node2, widget, spec, kind, path) {
     const page = object2(spec.page);
@@ -23618,6 +23640,9 @@ function visitWidgets(value, visit2) {
 }
 function widgetKey(widget, kind, path) {
   return `${string4(widget.name)}\0${kind}\0${path.join("")}`;
+}
+function widgetOperationKey(widget, kind, path, instance) {
+  return `${string4(widget.name)}\0${kind}\0${path.join("")}\0${instance}`;
 }
 function safePart(value) {
   return encodeURIComponent(string4(value)).replaceAll("%", "_");

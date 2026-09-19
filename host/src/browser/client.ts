@@ -705,10 +705,11 @@ export class BrowserNotebookClient {
     this.draftSubmission = { requestId: command.requestId, kind: command.type, changes: changes.map(change => structuredClone(change)) };
     document.noteSubmitted(command.requestId, command);
     this.queueDraftPersistence();
-    await this.flushDraftPersistence();
+    let dispatched = false;
     try {
+      await this.flushDraftPersistence();
+      dispatched = true;
       const result = await this.dispatch(command);
-      this.resolveSourceAcceptance(command.requestId);
       document.acknowledge(result);
       if (this.draftSubmission?.requestId === command.requestId) this.draftSubmission = null;
       this.queueDraftPersistence();
@@ -717,9 +718,10 @@ export class BrowserNotebookClient {
       this.notify(undefined, sourceCellKeys(command, document));
       return result;
     } catch (error) {
-      this.resolveSourceAcceptance(command.requestId);
-      if (error instanceof BrowserTransportError && error.definitive) {
-        document.reject(command.requestId, error.code);
+      if (!dispatched || error instanceof BrowserTransportError && error.definitive) {
+        const reason = !dispatched ? "draft_persistence_failed"
+          : error instanceof BrowserTransportError ? error.code : "source_rejected";
+        document.reject(command.requestId, reason);
         if (this.draftSubmission?.requestId === command.requestId) this.draftSubmission = null;
       }
       this.queueDraftPersistence();
@@ -727,6 +729,8 @@ export class BrowserNotebookClient {
       this.recoveryStateValue = { ...this.recoveryStateValue, status: local ? "conflict" : "none", local };
       this.notifyRecovery(); this.notify();
       throw error;
+    } finally {
+      this.resolveSourceAcceptance(command.requestId);
     }
   }
 

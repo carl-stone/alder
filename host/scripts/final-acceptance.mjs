@@ -1,6 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
-import { readFile, readdir, rm, stat } from 'node:fs/promises';
+import { readFile, rm, stat } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -50,47 +49,28 @@ run('production browser journeys', node, ['--import', 'tsx', '--test', '--test-c
   cwd: join(root, 'host'), env: { ...installedEnvironment, ALDER_BROWSER_TEST: '1' }, timeout: 20 * 60_000,
 });
 run('native cleanup failure probe', node, ['host/scripts/accept-native-app.mjs', app, '--cleanup-probe'], { timeout: 2 * 60_000 });
+await auditPackagedProcesses('native cleanup failure probe');
 run('external packaged app journeys', node, ['host/scripts/accept-native-app.mjs', app], { timeout: 8 * 60_000 });
+await auditPackagedProcesses('external packaged app journeys');
 
-let survivors = [];
-const auditDeadline = Date.now() + 10_000;
-do {
-  survivors = execFileSync('/bin/ps', ['-axo', 'pid=,command='], { encoding: 'utf8' })
-    .split('\n').map(line => line.trim())
-    .filter(line => line && line.includes(applicationRoot) && !line.includes('final-acceptance.mjs'));
-  if (survivors.length === 0) break;
-  await new Promise(resolveWait => setTimeout(resolveWait, 100));
-} while (Date.now() < auditDeadline);
-if (survivors.length > 0) throw new Error(`packaged child processes survived acceptance:\n${survivors.join('\n')}`);
-
-const sourceHash = await hashFiles(root, execFileSync('git', ['ls-files', '-z'], { cwd: root }).toString('utf8').split('\0').filter(Boolean));
-const bundleFiles = await walkFiles(applicationRoot);
-const bundleHash = await hashFiles(applicationRoot, bundleFiles);
-const licenseIndex = JSON.parse(await readFile(join(applicationRoot, 'host/licenses/index.json'), 'utf8'));
-for (const notice of ['runtime/ARK_LICENSE', 'runtime/ARK_NOTICE', 'runtime/AIR_LICENSE', 'runtime/quarto/share/COPYING.md', 'runtime/quarto/share/COPYRIGHT']) {
+for (const notice of ['host/licenses/index.json', 'runtime/ARK_LICENSE', 'runtime/ARK_NOTICE', 'runtime/AIR_LICENSE', 'runtime/quarto/share/COPYING.md', 'runtime/quarto/share/COPYRIGHT']) {
   if (!(await stat(join(applicationRoot, notice))).isFile()) throw new Error(`staged license notice is missing: ${notice}`);
 }
 
 process.stdout.write(`\n${JSON.stringify({ app, signing: 'codesign --deep --strict verified', processAudit: 'clean',
-  sourceHash, bundleHash, licenses: { nodePackages: Object.keys(licenseIndex).length, runtimeNotices: 5 }, skipped: [], timings })}\n`);
+  licenses: 'staged notices verified', skipped: [], timings })}\n`);
 
-async function walkFiles(directory) {
-  const files = [];
-  const walk = async current => {
-    for (const entry of await readdir(current, { withFileTypes: true })) {
-      const path = join(current, entry.name);
-      if (entry.isDirectory()) await walk(path);
-      else if (entry.isFile()) files.push(path.slice(directory.length + 1));
-    }
-  };
-  await walk(directory);
-  return files.sort();
-}
-
-async function hashFiles(directory, files) {
-  const hash = createHash('sha256');
-  for (const file of files) {
-    hash.update(file); hash.update('\0'); hash.update(await readFile(join(directory, file))); hash.update('\0');
+async function auditPackagedProcesses(name) {
+  const auditDeadline = Date.now() + 10_000;
+  let survivors = [];
+  do {
+    survivors = execFileSync('/bin/ps', ['-axo', 'pid=,command='], { encoding: 'utf8' })
+      .split('\n').map(line => line.trim())
+      .filter(line => line && (line.includes(applicationRoot) || line.includes(app)) && !line.includes('final-acceptance.mjs'));
+    if (!survivors.length) return;
+    await new Promise(resolveWait => setTimeout(resolveWait, 100));
+  } while (Date.now() < auditDeadline);
+  if (survivors.length) {
+    throw new Error(`packaged child processes survived ${name}:\n${survivors.join('\n')}`);
   }
-  return hash.digest('hex');
 }

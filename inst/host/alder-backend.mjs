@@ -70568,6 +70568,7 @@ var OutputStore = class {
   recordsByCell = /* @__PURE__ */ new Map();
   recordsById = /* @__PURE__ */ new Map();
   recordMetadata = /* @__PURE__ */ new WeakMap();
+  ownedRecords = /* @__PURE__ */ new WeakSet();
   artifactsByHandle = /* @__PURE__ */ new Map();
   nextSequenceByOwner = /* @__PURE__ */ new Map();
   requestArtifactsByOwner = /* @__PURE__ */ new Map();
@@ -70619,6 +70620,10 @@ var OutputStore = class {
     }
     this.documentRevision = nextDocumentRevision;
     this.kernelEpoch = identity.kernelEpoch;
+  }
+  /** True for the exact canonical object created by this store, including after retirement. */
+  ownsRecordReference(value) {
+    return typeof value === "object" && value !== null && this.ownedRecords.has(value);
   }
   /** Normalize one public Jupyter display-data map. */
   async ingestDisplay(data, metadata, identity) {
@@ -71641,6 +71646,7 @@ var OutputStore = class {
     current.push(stored);
     this.recordsByCell.set(stored.cellId, current);
     this.recordsById.set(stored.id, stored);
+    this.ownedRecords.add(stored);
     this.nextSequenceByOwner.set(prepared.ownerKey, stored.sequence + 1);
     this.recordMetadata.set(stored, Object.freeze({
       handles: Object.freeze(prepared.handles.map((descriptor) => descriptor.handle)),
@@ -71678,6 +71684,7 @@ var OutputStore = class {
     }
     records[index] = stored;
     this.recordsById.set(stored.id, stored);
+    this.ownedRecords.add(stored);
     this.nextSequenceByOwner.set(prepared.ownerKey, stored.sequence + 1);
     this.recordMetadata.set(stored, Object.freeze({
       handles: Object.freeze([...nextHandles]),
@@ -74177,7 +74184,8 @@ var Controller = class {
         isRecord(rawPayload) && "output" in rawPayload ? rawPayload.output : rawPayload,
         job
       ) : void 0;
-      this.applyOutputEvent(event, active, output2);
+      if (event.kind === "append" && output2 === null) return;
+      this.applyOutputEvent(event, active, output2 ?? void 0);
     } catch (error61) {
       active.protocolFailure = asControllerError(error61, "invalid_engine_event", 503);
     }
@@ -74187,12 +74195,17 @@ var Controller = class {
     if (!checked.success) {
       throw new ControllerError("invalid_engine_event", "R kernel returned a non-canonical output record", 503);
     }
+    if (checked.data.sessionEpoch !== this.epochValue || checked.data.kernelEpoch !== this.kernelEpochValue || checked.data.runId !== job.runId || checked.data.cellId !== job.id || checked.data.revision !== job.revision) {
+      throw new ControllerError("invalid_engine_event", "R kernel returned an output record with stale identity", 503);
+    }
     const record4 = this.outputStore.getRecord(checked.data.id);
-    if (record4 === void 0 || !Object.is(record4, value)) {
+    if (record4 === void 0) {
+      if (this.outputStore.ownsRecordReference(value)) return null;
       throw new ControllerError("invalid_engine_event", "R kernel returned an output record not owned by the store", 503);
     }
-    if (record4.sessionEpoch !== this.epochValue || record4.kernelEpoch !== this.kernelEpochValue || record4.runId !== job.runId || record4.cellId !== job.id || record4.revision !== job.revision) {
-      throw new ControllerError("invalid_engine_event", "R kernel returned an output record with stale identity", 503);
+    if (!Object.is(record4, value)) {
+      if (this.outputStore.ownsRecordReference(value)) return null;
+      throw new ControllerError("invalid_engine_event", "R kernel returned an output record not owned by the store", 503);
     }
     return record4;
   }
@@ -74208,7 +74221,10 @@ var Controller = class {
     }
     return {
       ...parsed,
-      outputs: raw.outputs.map((value) => this.canonicalEngineRecord(value, job))
+      outputs: raw.outputs.flatMap((value) => {
+        const record4 = this.canonicalEngineRecord(value, job);
+        return record4 === null ? [] : [record4];
+      })
     };
   }
   applyOutputEvent(event, active, canonicalOutput) {
@@ -78534,9 +78550,10 @@ var ArkKernel = class extends EventEmitter2 {
       this.childExited = false;
       child.stdout?.on("data", (chunk) => this.recordDiagnostic(chunk));
       child.stderr?.on("data", (chunk) => this.recordDiagnostic(chunk));
-      child.stdin?.on("error", (error61) => this.fail(
-        new Error("could not write to Ark: " + error61.message + this.diagnosticText())
-      ));
+      child.stdin?.on("error", (error61) => {
+        if (this.intentionalExit || this.stopRequested || this.stopped) return;
+        this.fail(new Error("could not write to Ark: " + error61.message + this.diagnosticText()));
+      });
       void child.exited.then(({ code: code2, signal }) => {
         this.childExited = true;
         this.exitResolve?.();
@@ -78776,7 +78793,11 @@ var ArkKernel = class extends EventEmitter2 {
     this.rejectAll(error61);
     this.closeSockets();
     if (!this.intentionalExit) this.emit("failed", error61);
-    this.terminationPromise ??= this.finishProcessCleanup();
+    if (this.terminationPromise === void 0) {
+      this.terminationPromise = this.finishProcessCleanup();
+      void this.terminationPromise.catch(() => {
+      });
+    }
   }
   rejectAll(error61) {
     const seen = /* @__PURE__ */ new Set();
@@ -106678,6 +106699,8 @@ var OutputRenderer = class {
   structures = /* @__PURE__ */ new WeakMap();
   widgetOrigins = /* @__PURE__ */ new WeakMap();
   controlOrigins = /* @__PURE__ */ new WeakMap();
+  outputInstances = /* @__PURE__ */ new WeakMap();
+  nextOutputInstance = 0;
   pendingWidgets = /* @__PURE__ */ new Map();
   pendingForms = /* @__PURE__ */ new Map();
   pendingUploads = /* @__PURE__ */ new Set();
@@ -107303,14 +107326,15 @@ var OutputRenderer = class {
       this.interactiveActions().error(new Error("widget output is no longer current"));
       return Promise.resolve();
     }
-    const key2 = widgetKey2(widget, string4(control.dataset.kind), path3);
+    const instance = this.widgetInstance(control);
+    const key2 = widgetOperationKey(widget, string4(control.dataset.kind), path3, instance);
     const oneShot = ["run_button", "button", "refresh", "form"].includes(string4(control.dataset.kind));
     const current = this.pendingWidgets.get(key2);
     if (current) {
       if (!current.oneShot) current.update = update2;
       return current.done;
     }
-    const predecessors = Array.from(this.pendingWidgets.values()).filter((operation) => string4(operation.widget.name) === string4(widget.name));
+    const predecessors = Array.from(this.pendingWidgets.values()).filter((operation) => string4(operation.widget.name) === string4(widget.name) && operation.instance === instance);
     if (oneShot) control.setAttribute("disabled", "");
     let resolveDone;
     const done = new Promise((resolve15) => {
@@ -107318,6 +107342,7 @@ var OutputRenderer = class {
     });
     const pending = {
       widget,
+      instance,
       origin,
       path: [...path3],
       update: update2,
@@ -107372,7 +107397,13 @@ var OutputRenderer = class {
     return done;
   }
   submitForm(node2, widget, spec, path3, control) {
-    const key2 = widgetKey2(widget, "form", path3);
+    const origin = this.controlOrigins.get(control);
+    if (origin === void 0) {
+      this.interactiveActions().error(new Error("widget output is no longer current"));
+      return;
+    }
+    const instance = this.widgetInstance(control);
+    const key2 = widgetOperationKey(widget, "form", path3, instance);
     if (this.pendingForms.has(key2)) return;
     control.disabled = true;
     for (const child of Array.from(node2.querySelectorAll("[data-role=widget]"))) {
@@ -107380,7 +107411,7 @@ var OutputRenderer = class {
     }
     let request;
     request = (async () => {
-      await this.flushWidgetSubtree(string4(widget.name), path3);
+      await this.flushWidgetSubtree(string4(widget.name), path3, instance);
       await this.sendWidget(widget, path3, { submit: true }, control);
     })().catch(() => {
     }).finally(() => {
@@ -107389,14 +107420,23 @@ var OutputRenderer = class {
     });
     this.pendingForms.set(key2, request);
   }
-  async flushWidgetSubtree(name, path3) {
+  async flushWidgetSubtree(name, path3, instance) {
     for (; ; ) {
-      const pending = Array.from(this.pendingWidgets.values()).filter((operation) => string4(operation.widget.name) === name && path3.every((part, index) => operation.path[index] === part));
+      const pending = Array.from(this.pendingWidgets.values()).filter((operation) => string4(operation.widget.name) === name && operation.instance === instance && path3.every((part, index) => operation.path[index] === part));
       if (!pending.length) return;
       await Promise.all(pending.map((operation) => operation.done));
       const failed = pending.find((operation) => operation.failure !== null);
       if (failed) throw failed.failure;
     }
+  }
+  widgetInstance(control) {
+    const output2 = control.closest(".out-record");
+    if (output2 === null) throw new Error("widget output is no longer current");
+    const existing = this.outputInstances.get(output2);
+    if (existing !== void 0) return existing;
+    const created = ++this.nextOutputInstance;
+    this.outputInstances.set(output2, created);
+    return created;
   }
   buildWidgetTable(node2, widget, spec, kind, path3) {
     const page = object3(spec.page);
@@ -107673,6 +107713,9 @@ function visitWidgets(value, visit2) {
 }
 function widgetKey2(widget, kind, path3) {
   return `${string4(widget.name)}\0${kind}\0${path3.join("")}`;
+}
+function widgetOperationKey(widget, kind, path3, instance) {
+  return `${string4(widget.name)}\0${kind}\0${path3.join("")}\0${instance}`;
 }
 function safePart(value) {
   return encodeURIComponent(string4(value)).replaceAll("%", "_");
