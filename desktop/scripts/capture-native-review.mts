@@ -1,6 +1,6 @@
 import { app, BrowserWindow, dialog, Menu, nativeTheme } from "electron";
-import { mkdir, rm, writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { writeFile } from "node:fs/promises";
+import { join } from "node:path";
 
 import type { WindowState } from "../../host/src/protocol.js";
 import {
@@ -10,12 +10,23 @@ import {
   installNativeMenu,
   nativeWindowOptions,
 } from "../src/native-shell.mts";
+import { createNativeReviewOutputDirectory } from "../src/native-review-output.mts";
 
-const outputDirectory = resolve(process.argv[2] || "/tmp/alder-ui-review-checkpoint2-corrected/native");
+let reviewWindow: BrowserWindow | undefined;
 
-void app.whenReady().then(async () => {
-  await rm(outputDirectory, { recursive: true, force: true });
-  await mkdir(outputDirectory, { recursive: true });
+function closeNativeReview(): void {
+  if (reviewWindow && !reviewWindow.isDestroyed()) {
+    reviewWindow.webContents.removeAllListeners();
+    reviewWindow.removeAllListeners();
+    reviewWindow.destroy();
+  }
+  reviewWindow = undefined;
+  if (app.isReady()) app.quit();
+}
+
+async function captureNativeReview(): Promise<Record<string, unknown>> {
+  const outputDirectory = await createNativeReviewOutputDirectory(process.argv);
+  await app.whenReady();
   assertNativeDialogRuntime(dialog);
   app.setName(ALDER_APP_NAME);
 
@@ -27,8 +38,10 @@ void app.whenReady().then(async () => {
     dispatch: () => undefined,
     closeWindow: () => undefined,
   }, []);
-  const preloadPath = resolve("desktop/.vite/build/preload.cjs");
+  const preloadPath = join(outputDirectory, "native-review-preload.cjs");
+  await writeFile(preloadPath, "// Intentionally empty hidden-review preload.\n");
   const window = new BrowserWindow(nativeWindowOptions(preloadPath, "alder-native-review"));
+  reviewWindow = window;
   const representedFilename = join(outputDirectory, "methylation-analysis.R");
   await writeFile(representedFilename, "# Native shell evidence fixture\n");
   const rendererState: WindowState = {
@@ -50,6 +63,7 @@ void app.whenReady().then(async () => {
   const [minimumWidth, minimumHeight] = window.getMinimumSize();
   const evidence = {
     source: "production native-shell.mts construction used by ElectronMain",
+    outputDirectory,
     runtime: process.versions.electron,
     platform: process.platform,
     rendererState,
@@ -79,7 +93,13 @@ void app.whenReady().then(async () => {
     throw new Error("production native evidence failed: " + JSON.stringify(evidence));
   }
   await writeFile(join(outputDirectory, "native-window-state.json"), JSON.stringify(evidence, null, 2));
-  console.log(JSON.stringify(evidence, null, 2));
-  window.destroy();
-  app.quit();
-}).catch(error => { console.error(error); app.exit(1); });
+  return evidence;
+}
+
+void captureNativeReview().then(() => {
+  closeNativeReview();
+}).catch(error => {
+  console.error(error);
+  closeNativeReview();
+  app.exit(1);
+});

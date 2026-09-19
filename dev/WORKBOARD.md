@@ -31,21 +31,22 @@ reactive, service and recovery behavior. Validate with representative notebook
 screens/states, behavior-led interaction checks and a signed Mac build without
 taking over Carl's desktop.
 
-**Checkpoint 2:** `bc777f7` (`Correct notebook presentation evidence`) on
-`330d091`, accepted interaction checkpoint `dbfa1df` and accepted `d88ca7d`.
+**Checkpoint 2:** `16386dd` (`Use production shell for native evidence`) on
+`bc777f7`, `330d091`, accepted interaction checkpoint `dbfa1df` and accepted
+`d88ca7d`.
 
-**Correction target:** retain the accepted visual and accessibility implementation.
-Replace the standalone sample native-capture window/menu with a non-activating
-harness that instantiates Alder's actual production Electron shell or its exported
-production window/menu construction. Evidence must reflect real document title/
-edited/represented-file state, minimum sizing, menu roles and actual accelerators
-(`Cmd-Enter`, `Cmd-.`), plus production native dialog wiring; do not cite a hand-
-built facsimile. Regenerate the native artifact and clean only owned build/test
-temporaries needed to restore packaging capacity.
+**Correction target:** repair the native evidence harness after real Electron argv
+caused it to treat its own tracked script path as the output directory and delete
+it recursively. Restore the tracked source, remove broad recursive cleanup, parse
+an explicit output argument independent of Electron argv layout and write only
+known evidence files into a safely validated temporary review directory. Refuse
+repository, script, home, root and non-owned targets. Add a regression invoking the
+real Electron argument shape plus unsafe-path refusal. Preserve the validated
+shared production native seam.
 
-**Next action:** primary implementer corrects the native evidence harness at
-`bc777f7`, rebuilds/signs from a clean bounded environment and returns the tiny
-delta for final workflow re-review.
+**Next action:** primary implementer repairs the dirty worktree and unsafe harness,
+regenerates evidence in a safe temporary directory and returns the tiny delta for
+final re-review.
 
 **Testing constraint:** do not take over Carl's visible desktop. Use background
 or isolated Mac GUI checks where native interaction matters. The in-app browser
@@ -76,7 +77,7 @@ order; their implementation details are settled when assigned.
 | Mac runtime and settings cleanup | Accepted | Primary implementer | `cc80261`: one R preference path, canonical project recovery, verified/staged Ark/Air/Quarto, accurate Mac claims and real packaged acceptance |
 | Residual architecture and test cleanup | Accepted | Primary implementer | `8990292`: removed trace/strict-JSON/platform/state debris, retained cohesive owners and rebuilt a five-second behavior-led host suite |
 | Targeted generative verification | Accepted | Primary implementer | `d88ca7d`: bounded independent graph/document/recovery/state/R verification with real crash durability and replayable failures |
-| UI/UX review and polish | Implementing | Primary implementer | Replace sample native evidence with the production Electron shell and restore clean package capacity at `bc777f7` |
+| UI/UX review and polish | Implementing | Primary implementer | Restore and harden the native evidence harness after unsafe recursive self-deletion at `16386dd` |
 | Complete Mac app and final acceptance | Queued | Unassigned | Deliver a usable Mac app; exercise the packaged native app through launch/open/type/run/interrupt/save/Save As/reopen/recover/close, multiple notebooks, concurrent GUI/agent edits, client detach and backend failure/recovery; check optional-service failures and observable stalls |
 
 The following requirements apply to the relevant slices and are checked again
