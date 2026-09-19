@@ -261,6 +261,38 @@ test("cancelling a slow publication terminates Quarto and leaves no destination"
   }
 });
 
+test("a hung Quarto process is terminated at the publishing deadline", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "alder-publish-timeout-"));
+  const { store } = await setupStore(directory);
+  const outputPath = join(directory, "report.html");
+  const quarto = await fakeQuarto(join(directory, "bin"), "render");
+  const exited = Promise.withResolvers<{ code: number | null; signal: string | null }>();
+  let terminated = false;
+  const scope: PublishingProcessScope = {
+    spawn: async () => ({
+      stdout: null,
+      stderr: null,
+      exited: exited.promise,
+      terminate: async () => { terminated = true; exited.resolve({ code: null, signal: "SIGTERM" }); },
+    }),
+  };
+  const keepAlive = setInterval(() => undefined, 1_000);
+  try {
+    await assert.rejects(
+      createPublishingService({ outputStore: store, processScope: scope, quartoExecutable: quarto, quartoTimeoutMs: 10 })
+        .publishSnapshot(snapshot(), { outputPath, includeCode: false }),
+      (error: unknown) => error instanceof PublishingError && error.code === "publish_failed"
+        && (error.details as { code?: string } | undefined)?.code === "publish_timeout",
+    );
+    assert.equal(terminated, true);
+    await assert.rejects(access(outputPath), { code: "ENOENT" });
+  } finally {
+    clearInterval(keepAlive);
+    await store.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("refuses to replace an existing destination", async () => {
   const directory = await mkdtemp(join(tmpdir(), "alder-publish-existing-"));
   const { store } = await setupStore(directory);

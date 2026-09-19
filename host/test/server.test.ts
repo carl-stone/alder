@@ -24,9 +24,16 @@ import {
   type HostSnapshot,
 } from "../src/protocol.js";
 import { OutputStore } from "../src/outputs.js";
+import type { DiagnosticFields, DiagnosticSeverity, DiagnosticSink } from "../src/diagnostics.js";
 
 const TOKEN = "a".repeat(64);
 const BODY = new TextEncoder().encode("<html><script>document.body.textContent='ok'</script></html>");
+
+class CollectingDiagnostics implements DiagnosticSink {
+  readonly events: Array<{ severity: DiagnosticSeverity; event: string; fields: DiagnosticFields }> = [];
+  record(severity: DiagnosticSeverity, event: string, fields: DiagnosticFields = {}): void { this.events.push({ severity, event, fields }); }
+  child(_fields: DiagnosticFields): DiagnosticSink { return this; }
+}
 
 
 function commandResult(requestId: string) {
@@ -53,7 +60,7 @@ async function startFixture(
   mcpHandler?: McpHttpHandler,
   auth: Pick<AlderServerOptions, "externalOrigin" | "externalBearerValidated"> = {},
   controller: ControllerAdapter = makeController(),
-  timing: Pick<AlderServerOptions, "leaseExpiryMs" | "leaseSweepIntervalMs" | "onShutdown" | "onLastLeaseDiscard"> = {},
+  timing: Pick<AlderServerOptions, "leaseExpiryMs" | "leaseSweepIntervalMs" | "onShutdown" | "onLastLeaseDiscard" | "diagnostics" | "flushDiagnostics"> = {},
   recoveryIdentity: { recoveryId: string } | undefined = undefined,
   port = 0,
 ) {
@@ -147,6 +154,34 @@ async function requestWithHost(target: string, host: string, extraHeaders: Recor
     request.end();
   });
 }
+
+test("authenticated diagnostic endpoints flush and accept only bounded visible-result records", async () => {
+  const diagnostics = new CollectingDiagnostics();
+  let flushes = 0;
+  const { server, origin, root } = await startFixture(undefined, {}, makeController(), {
+    diagnostics, flushDiagnostics: async () => { flushes++; },
+  });
+  try {
+    const leaseId = await attachBearerLease(origin);
+    const headers = bearerHeaders(origin, leaseId);
+    const flushed = await fetch(origin + "/api/diagnostics/flush", { method: "POST", headers });
+    assert.equal(flushed.status, 200);
+    assert.equal(flushes, 1);
+    const visible = await fetch(origin + "/api/diagnostics/phase", {
+      method: "POST", headers,
+      body: JSON.stringify({ operationId: "operation", runId: "run", cellId: "cell", revision: 2, phase: "visible-result", durationMs: 12.5 }),
+    });
+    assert.equal(visible.status, 200);
+    assert.ok(diagnostics.events.some(item => item.event === "operation.phase" && item.fields.phase === "visible-result" && item.fields.operationId === "operation"));
+    const extra = await fetch(origin + "/api/diagnostics/phase", {
+      method: "POST", headers,
+      body: JSON.stringify({ operationId: "operation", runId: "run", cellId: "cell", revision: 2, phase: "visible-result", durationMs: 12.5, source: "secret" }),
+    });
+    assert.equal(extra.status, 400);
+    const unauthenticated = await fetch(origin + "/api/diagnostics/flush", { method: "POST", headers: { Origin: origin } });
+    assert.equal(unauthenticated.status, 403);
+  } finally { await server.close(); await rm(root, { recursive: true, force: true }); }
+});
 async function fetch(input: string | URL, init: RequestInit = {}): Promise<Response> {
   const logical = new URL(input.toString());
   if (!logical.hostname.endsWith(".localhost")) return globalThis.fetch(input, init);
@@ -1135,7 +1170,8 @@ test("capability resolution cannot renew a published result's read lease", { tim
 
 
 test("output queries reject malformed identifiers before artifact storage access", async () => {
-  const { server, origin, root } = await startFixture();
+  const diagnostics = new CollectingDiagnostics();
+  const { server, origin, root } = await startFixture(undefined, {}, makeController(), { diagnostics });
   try {
     const leaseId = await attachBearerLease(origin);
     for (const handle of ["../manifest.json", "é".repeat(65)]) {
@@ -1152,6 +1188,10 @@ test("output queries reject malformed identifiers before artifact storage access
       body: JSON.stringify({ type: "output", handle: "é".repeat(64), offset: 0, limit: 1 }),
     });
     assert.equal(unknown.status, 404);
+    assert.ok(diagnostics.events.some(item => item.event === "boundary.rejected" && item.fields.kind === "query"
+      && item.fields.errorCode === "invalid_request" && item.fields.status === 400));
+    assert.ok(diagnostics.events.some(item => item.event === "boundary.rejected" && item.fields.kind === "query"
+      && item.fields.status === 404 && typeof item.fields.bytes === "number"));
   } finally {
     await server.close();
     await rm(root, { recursive: true, force: true });

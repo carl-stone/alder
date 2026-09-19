@@ -61,6 +61,7 @@ import { toLogicalCellBody } from "./cell-body.js";
 import { ReactiveGraph, type GraphCellInput } from "./graph.js";
 import { tailLog } from "./output-log.js";
 import { OutputStore, OutputStoreError, OUTPUT_ARTIFACT_CHUNK_BYTES } from "./outputs.js";
+import type { DiagnosticSink } from "./diagnostics.js";
 const INTERNAL_CLIENT_ID = "internal";
 
 const OPERATION_JOURNAL_LIMIT = 256;
@@ -97,6 +98,7 @@ export interface ControllerOptions {
   durableCommit?: (input: DurableCommitInput) => Promise<void>;
   sourceCommit?: SourceCommitHandler;
   getRecoveryState?: () => Promise<RecoveryState>;
+  diagnostics?: DiagnosticSink;
 }
 
 export interface DurableCommitInput {
@@ -419,11 +421,15 @@ export class Controller {
   private engineRestarting = false;
   private packageRestartPending = false;
   private runtimeContextReservation: string | undefined;
+  private readonly diagnostics?: DiagnosticSink;
+  private readonly diagnosticProgressSeen = new Set<string>();
+  private readonly diagnosticRunPhases = new Map<string, { dispatched: boolean; output: boolean; kernelCompleted: boolean }>();
 
   constructor(options: ControllerOptions) {
     this.engine = options.engine;
     this.outputStore = options.outputStore;
     this.services = options.services ?? {};
+    this.diagnostics = options.diagnostics;
     this.epochValue = options.epoch ?? randomUUID();
     let notebook: ReturnType<typeof notebookInputSchema.parse>;
     let sourceDocument: NotebookDocument;
@@ -835,11 +841,19 @@ export class Controller {
       ...(value.text === undefined ? {} : { text: value.text }),
       ...(value.data === undefined ? {} : { data: value.data }),
     };
+    const diagnosticKey = this.operationKey(operation.clientId, operationId);
+    if (!this.diagnosticProgressSeen.has(diagnosticKey)) {
+      this.diagnosticProgressSeen.add(diagnosticKey);
+      this.diagnostics?.record("info", "operation.progress", {
+        operationId, clientId: operation.clientId, kind: "packages-install", phase: value.phase, documentRevision: this.documentRevisionValue,
+      });
+    }
     this.rememberOperation(operation);
   }
 
   recordActionError(message: string, code = "internal_error"): void {
     this.assertNotClosed();
+    this.diagnostics?.record("warn", "host.action_failure", { errorCode: code, outcome: "error" });
     this.replaceLastActionError(hostError(code, message));
   }
 
@@ -918,9 +932,23 @@ export class Controller {
     }
     this.registerClient(command.clientId);
     this.createOperation(command.requestId, command.type, command.clientId);
+    if (command.type === "run") this.diagnosticRunPhases.set(this.operationKey(command.clientId, command.requestId), {
+      dispatched: false, output: false, kernelCompleted: false,
+    });
+    const acceptedAt = performance.now();
+    this.diagnostics?.record("info", "operation.accepted", {
+      operationId: command.requestId, kind: command.type, clientId: command.clientId,
+      documentRevision: this.documentRevisionValue,
+    });
     if (isExecutionCommand(command.type)) this.executionRequestIds.set(command.requestId, fingerprint);
     const operationCompletion = this.awaitOperation(command.requestId, command.clientId);
-    const execute = (): Promise<CommandResult> => this.executeCommand(command, operationCompletion);
+    const execute = (): Promise<CommandResult> => {
+      this.diagnostics?.record("info", "operation.started", {
+        operationId: command.requestId, clientId: command.clientId, kind: command.type,
+        queueMs: Math.round(performance.now() - acceptedAt), documentRevision: this.documentRevisionValue,
+      });
+      return this.executeCommand(command, operationCompletion);
+    };
     let completion: Promise<CommandResult>;
     if (command.type === "run") {
       this.queuedRunCommands.set(command.requestId, command);
@@ -937,11 +965,48 @@ export class Controller {
       fingerprint, completion, settled: false,
     };
     this.commandEntries.set(command.requestId, entry);
+    void completion.then(result => {
+      this.diagnosticProgressSeen.delete(this.operationKey(command.clientId, command.requestId));
+      const runId = isRecord(result.result) && typeof result.result.runId === "string" ? result.result.runId : null;
+      const cancelled = result.error?.code === "cancelled";
+      this.diagnostics?.record(result.error ? "warn" : "info", cancelled ? "operation.cancelled" : result.error ? "operation.failed" : "operation.settled", {
+        operationId: command.requestId, clientId: command.clientId, kind: command.type, runId,
+        outcome: cancelled ? "cancelled" : result.error ? "error" : "success", errorCode: result.error?.code ?? null,
+        notApplicablePhases: command.type === "run" ? this.runNotApplicablePhases(command.clientId, command.requestId) : [],
+        durationMs: Math.round(performance.now() - acceptedAt), documentRevision: result.documentRevision,
+      });
+    }, error => {
+      this.diagnosticProgressSeen.delete(this.operationKey(command.clientId, command.requestId));
+      this.diagnostics?.record("error", "operation.failed", {
+        operationId: command.requestId, clientId: command.clientId, kind: command.type, outcome: "error",
+        errorCode: error instanceof ControllerError ? error.code : "internal_error",
+        errorType: error instanceof Error ? error.name : "unknown",
+        notApplicablePhases: command.type === "run" ? this.runNotApplicablePhases(command.clientId, command.requestId) : [],
+        durationMs: Math.round(performance.now() - acceptedAt), documentRevision: this.documentRevisionValue,
+      });
+    });
     void completion.finally(() => {
       entry.settled = true;
       this.trimCommandEntries();
     }).catch(() => undefined);
     return completion.then(clone);
+  }
+
+  private diagnosticOperationPhase(clientId: string, operationId: string, phase: string, kind = "run"): void {
+    this.diagnostics?.record("info", "operation.phase", {
+      clientId, operationId, kind, phase, documentRevision: this.documentRevisionValue,
+    });
+  }
+
+  private runNotApplicablePhases(clientId: string, operationId: string): string[] {
+    const key = this.operationKey(clientId, operationId);
+    const state = this.diagnosticRunPhases.get(key);
+    this.diagnosticRunPhases.delete(key);
+    if (!state) return [];
+    return [
+      ...(state.output ? [] : ["first-output"]),
+      ...(state.dispatched ? [] : ["kernel-dispatch", "kernel-completion"]),
+    ];
   }
   /** Register an authenticated client lease exactly once. */
   registerClient(clientId: string): void {
@@ -1214,6 +1279,8 @@ export class Controller {
       switch (command.type) {
         case "transaction":
           result = await this.applyTransaction(command.changes, command.expectedDocumentRevision, command.requestId, false);
+          this.diagnosticOperationPhase(command.clientId, command.requestId, "recovery-flush", "transaction");
+          this.diagnosticOperationPhase(command.clientId, command.requestId, "authoritative-ack", "transaction");
           this.scheduleReactiveRun();
           break;
         case "run":
@@ -1257,6 +1324,8 @@ export class Controller {
           break;
         case "save":
           result = await this.saveNotebook(command.expectedDocumentRevision, command.requestId);
+          this.diagnosticOperationPhase(command.clientId, command.requestId, "publication", "save");
+          this.diagnosticOperationPhase(command.clientId, command.requestId, "clean", "save");
           break;
         case "save-as":
         case "reload-source":
@@ -1995,6 +2064,7 @@ export class Controller {
       await this.ensureCurrentAnalysis();
       this.assertDocumentRevision(runDocumentRevision);
       if (this.cancelRunPreparation(preparation)) return undefined;
+      this.diagnosticOperationPhase(command.clientId, command.requestId, "analysis-ready");
       this.assertExecutionPossible();
       this.assertGraphRunnable();
 
@@ -2102,7 +2172,10 @@ export class Controller {
     operation.cellIds = jobs.map((job) => job.id);
     operation.executionDone = jobs.length === 0;
     operation.resetOperationIds ??= [];
-    if (jobs.length === 0 && !deferEmptySettlement) operation.settledAt = Date.now();
+    if (jobs.length === 0 && !deferEmptySettlement) {
+      operation.settledAt = Date.now();
+      this.diagnosticOperationPhase(clientId, operationId, "authoritative-completion");
+    }
     this.rememberOperation(operation);
     this.runOperationById.set(runId, this.operationKey(clientId, operationId));
     for (const job of jobs) this.reactivePending.delete(job.id);
@@ -2264,6 +2337,11 @@ export class Controller {
       };
       let response: EngineResponse;
       try {
+        const diagnosticState = this.diagnosticRunPhases.get(this.operationKey(job.clientId, job.operationId));
+        if (diagnosticState && !diagnosticState.dispatched) {
+          diagnosticState.dispatched = true;
+          this.diagnosticOperationPhase(job.clientId, job.operationId, "kernel-dispatch");
+        }
         const result = await this.engine.evaluate(this.evaluationPayload(job),
           (event) => this.handleEngineEvent(event), this.activeEvaluation.queuedCancellation!.signal);
         response = this.canonicalEngineResponse(result, engineResponseSchema.parse(result), job);
@@ -2309,6 +2387,12 @@ export class Controller {
     for (const job of jobs) this.cancelOwnedOperations(job.id);
     this.clearVariables();
     try {
+      const firstJob = jobs[0]!;
+      const diagnosticState = this.diagnosticRunPhases.get(this.operationKey(firstJob.clientId, firstJob.operationId));
+      if (diagnosticState && !diagnosticState.dispatched) {
+        diagnosticState.dispatched = true;
+        this.diagnosticOperationPhase(firstJob.clientId, firstJob.operationId, "kernel-dispatch");
+      }
       await this.engine.evaluateBatch!(jobs.map((job) => this.evaluationPayload(job)), async (event) => {
         const active = states.get(event.cellId);
         if (active === undefined) throw new Error("batch event identifies an unknown cell");
@@ -2525,6 +2609,11 @@ export class Controller {
         )
         : undefined;
       if (event.kind === "append" && output === null) return;
+      const diagnosticState = this.diagnosticRunPhases.get(this.operationKey(job.clientId, job.operationId));
+      if (diagnosticState && !diagnosticState.output) {
+        diagnosticState.output = true;
+        this.diagnosticOperationPhase(job.clientId, job.operationId, "first-output");
+      }
       this.applyOutputEvent(event, active, output ?? undefined);
     } catch (error) {
       active.protocolFailure = asControllerError(error, "invalid_engine_event", 503);
@@ -3138,6 +3227,12 @@ export class Controller {
     operation.executionDone = true;
     const operationId = operation.id;
     const operationClientId = operation.clientId;
+    const diagnosticState = this.diagnosticRunPhases.get(this.operationKey(operationClientId, operationId));
+    if (diagnosticState?.dispatched && !diagnosticState.kernelCompleted) {
+      diagnosticState.kernelCompleted = true;
+      this.diagnosticOperationPhase(operationClientId, operationId, "kernel-completion");
+    }
+    this.diagnosticOperationPhase(operationClientId, operationId, "authoritative-completion");
     const resets = operation.resetOperationIds ?? [];
     const interruption = this.interruptedRuns.get(runId);
     if (interruption !== undefined) {

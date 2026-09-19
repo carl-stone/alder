@@ -3,6 +3,7 @@ import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import envPaths from "env-paths";
+import type { DiagnosticSink } from "./diagnostics.js";
 import { watch, type FSWatcher } from "chokidar";
 import { z } from "zod";
 import { Controller, type DurableCommitInput, type SourceCommitContext, type SourceCommitHandler, type SourcePublication } from "./controller.js";
@@ -94,6 +95,7 @@ const optionsSchema = z.object({
   preferences: z.custom<ApplicationPreferences>().optional(),
   preferencesPath: z.string().optional(),
   resources: z.custom<ApplicationResources>(),
+  diagnostics: z.custom<DiagnosticSink>().optional(),
   internalHost: z.boolean().default(false),
   session: z.object({
     sessionKey: z.string().optional(),
@@ -156,6 +158,9 @@ async function startNotebookHost(
   ownershipPath: string | null,
 ): Promise<RunningHost> {
   const options = optionsSchema.parse({ ...input, path: storagePath });
+  const diagnostics = options.diagnostics;
+  const hostStartedAt = performance.now();
+  diagnostics?.record("info", "host.launch", { cold: true });
   const browserOriginHost = createOriginHost();
   let isUntitled = unsaved;
   const declaredProjectDirectory = options.session?.projectDirectory ?? process.env.ALDER_UNTITLED_PROJECT_DIRECTORY;
@@ -354,6 +359,7 @@ async function startNotebookHost(
     await current?.close();
   };
   const close = (): Promise<void> => closing ??= (async () => {
+    diagnostics?.record("info", "host.stop.started", {});
     runtimeAbort?.abort();
     controller?.cancelOptionalOperations();
     await Promise.allSettled([...activePublishes]);
@@ -382,6 +388,10 @@ async function startNotebookHost(
     await attempt(() => store?.close());
     await attempt(() => ownership.close());
     await attempt(() => work === "" ? undefined : rm(work, { recursive: true, force: true }));
+    diagnostics?.record(errors.length ? "error" : "info", "host.stop.settled", {
+      outcome: errors.length ? "error" : "success", count: errors.length,
+      durationMs: Math.round(performance.now() - hostStartedAt),
+    });
     if (errors.length > 0) throw new AggregateError(errors, "Alder shutdown failed");
   })().finally(resolveClosed);
   const discardAndClose = async (): Promise<void> => {
@@ -407,7 +417,7 @@ async function startNotebookHost(
     config = configurationFor(notebook);
     projectLayoutIntent = isUntitled ? null : await readLayout(store.path);
     resolvedLayout = projectLayoutIntent;
-    processScope = await createProcessScope(options.resources);
+    processScope = await createProcessScope(options.resources, diagnostics);
     try {
       const declarations = await readPackageDeclarations(notebookDirectory);
       packageDeclarationIntent = [...declarations.packages];
@@ -485,6 +495,8 @@ async function startNotebookHost(
     };
     const invalidateLsp = async (): Promise<boolean> => {
       const requested = lsp !== undefined || lspStarting !== undefined;
+      const startedAt = performance.now();
+      if (requested) diagnostics?.record("info", "lsp.stop", { phase: "started" });
       ++lspGeneration;
       const previous = lsp;
       const pending = lspStarting;
@@ -493,6 +505,7 @@ async function startNotebookHost(
       await pending?.catch(() => {});
       if (lspStarting === pending) lspStarting = undefined;
       await lspSyncRunning?.catch(() => {});
+      if (requested) diagnostics?.record("info", "lsp.stop", { phase: "settled", durationMs: Math.round(performance.now() - startedAt), outcome: "success" });
       return requested;
     };
 
@@ -569,6 +582,10 @@ async function startNotebookHost(
       return { committed: true, diskError: { code, sidecar: kind, message: errorMessage(error) } };
     };
     const sourceCommit: SourceCommitHandler = async (request, context) => {
+      diagnostics?.record("info", "operation.phase", {
+        operationId: request.operationId ?? null, kind: request.kind, phase: "persistence",
+        documentRevision: context.fromRevision,
+      });
       if (request.kind === "transaction") {
         const document = request.document ?? context.document;
         const delta = request.delta;
@@ -576,6 +593,10 @@ async function startNotebookHost(
           fromRevision: context.fromRevision,
           document,
           disk: context.disk,
+        });
+        diagnostics?.record("info", "persistence.recovery_flushed", {
+          operationId: request.operationId ?? null, kind: request.kind, phase: "recovery-flush",
+          documentRevision: context.fromRevision + 1,
         });
         publishSource(context, { document,
           path: document.path ?? context.path,
@@ -585,6 +606,10 @@ async function startNotebookHost(
           dirty: true,
           advanceRevision: true,
         });
+        diagnostics?.record("info", "operation.phase", {
+          operationId: request.operationId ?? null, kind: request.kind, phase: "authoritative-ack",
+          documentRevision: context.fromRevision + 1,
+        });
         return { created: delta?.created ?? {}, edited: delta?.edited ?? [], deleted: delta?.deleted ?? [], documentRevision: context.fromRevision + 1 };
       }
       if (request.kind === "save") {
@@ -592,6 +617,9 @@ async function startNotebookHost(
         if (recoveryConflict) throw Object.assign(new Error("The saved notebook changed after these recovered edits. Use Save As or discard the recovered edits."), { code: "recovery_conflict" });
         try {
           const result = await store!.save(context.document);
+          diagnostics?.record("info", "save.source_published", {
+            operationId: request.operationId ?? null, phase: "publication", documentRevision: context.fromRevision,
+          });
           const disk = sourceProtocolObservation(store!);
           const retry = await retryPendingSidecars(context.document, disk, request.operationId);
           const sidecars = retry.sidecars;
@@ -613,10 +641,17 @@ async function startNotebookHost(
             || pendingSidecars.layout
             || pendingSidecars.packages;
           publishSource(context, { document: context.document, path: store!.path, layout: resolvedLayout, disk, sidecars, dirty, advanceRevision: false });
+          diagnostics?.record(dirty ? "warn" : "info", "save.clean_state", {
+            operationId: request.operationId ?? null, phase: "clean", dirty, documentRevision: context.fromRevision,
+          });
           if (retry.error !== null) return { ...result, committed: true, diskError: { code: "sidecar_write_failed", sidecar: retry.error.kind, message: errorMessage(retry.error.error) } };
           if (clearError !== null) return { ...result, committed: true, diskError: { code: "recovery_checkpoint_failed", message: errorMessage(clearError) } };
           return result;
         } catch (error) {
+          diagnostics?.record(error instanceof FileConflict ? "warn" : "error", error instanceof FileConflict ? "persistence.conflict" : "persistence.failure", {
+            operationId: request.operationId ?? null, kind: request.kind, outcome: "error",
+            errorCode: error instanceof FileConflict ? "source_conflict" : (error as NodeJS.ErrnoException)?.code ?? "source_write_failed",
+          });
           if (error instanceof FileConflict) throw error;
           const diskError = asHostError(error, "source_write_failed", request.operationId);
           publishSource(context, { document: context.document, path: context.path, layout: context.layout, disk: unreadableObservation(error, "source_write_failed", request.operationId), sidecars: context.sidecars, dirty: true, advanceRevision: false });
@@ -986,6 +1021,7 @@ async function startNotebookHost(
       sidecars: initialProtocolSidecars,
       sourceCommit,
       getRecoveryState: recoveryState,
+      diagnostics,
       services: {
         format: async (cells, operation) => {
           const codeCells = cells.filter(cell => cell.type === "code");
@@ -1158,7 +1194,7 @@ async function startNotebookHost(
       if (lsp?.alive()) return Promise.resolve(lsp);
       if (lspStarting !== undefined) return lspStarting;
       const generation = ++lspGeneration;
-      const starting = createLsp(generation, () => lspGeneration, controller!, engine!, () => runtimeReady, notebookDirectory, setLsp);
+      const starting = createLsp(generation, () => lspGeneration, controller!, engine!, () => runtimeReady, notebookDirectory, setLsp, diagnostics);
       lspStarting = starting;
       void starting.then(
         () => { if (lspStarting === starting) lspStarting = undefined; },
@@ -1283,7 +1319,9 @@ async function startNotebookHost(
       indexFile: join(options.resources.rendererDirectory, "index.html"),
       uploads,
       artifactStore,
-      mcpHandler: createMcpHttpHandler({ controller, artifactStore, runtimeReady: () => runtimeReady, onShutdown: close }),
+      diagnostics,
+      flushDiagnostics: () => diagnostics?.flush?.() ?? Promise.resolve(),
+      mcpHandler: createMcpHttpHandler({ controller, artifactStore, runtimeReady: () => runtimeReady, onShutdown: close, diagnostics }),
       documentReady: true,
       lsp: {
         requestDocument: async (method: string, params: Record<string, unknown>, snapshot: unknown) => {
@@ -1338,6 +1376,8 @@ async function startNotebookHost(
       const rejectBootstrapReady = rejectRuntimeReady;
       const bootstrapDirectory = notebookDirectory;
       const bootstrapUntitled = isUntitled;
+      const runtimeStartedAt = performance.now();
+      diagnostics?.record("info", restart ? "r.runtime.restart" : "r.runtime.start", { phase: "environment" });
       runtimeBootstrap = (async () => {
         let selected: REnvironment;
         let nextManager: PackageManager;
@@ -1349,6 +1389,9 @@ async function startNotebookHost(
             resources: options.resources,
             sandbox: options.sandbox,
             resolveProjectLibrary: base => resolveProjectLibrary(base, bootstrapDirectory),
+          });
+          diagnostics?.record("info", "r.environment.ready", {
+            durationMs: Math.round(performance.now() - runtimeStartedAt), runtimeVersion: selected.version,
           });
           if (closing || bootstrapGeneration !== runtimeBootstrapGeneration || bootstrapUntitled !== isUntitled || bootstrapDirectory !== notebookDirectory) {
             rejectBootstrapReady(new Error("runtime bootstrap superseded"));
@@ -1362,6 +1405,9 @@ async function startNotebookHost(
             return;
           }
           runtimeError = error;
+          diagnostics?.record("error", "r.runtime.failure", {
+            phase: "environment", outcome: "error", errorCode: (error as NodeJS.ErrnoException)?.code ?? "r_environment_failed",
+          });
           controller!.recordRuntimeAvailabilityError(asRuntimeHostError(error)!);
           rejectBootstrapReady(error);
           return;
@@ -1371,7 +1417,15 @@ async function startNotebookHost(
           else if (options.deferStartup) await controller!.startAnalyzer();
           else await controller!.start();
           engineIdentity = engine!.identity;
+          const runtime = controller!.snapshot().runtime;
+          diagnostics?.record("info", "r.runtime.ready", {
+            durationMs: Math.round(performance.now() - runtimeStartedAt), analyzerState: runtime.analyzerState,
+            kernelState: runtime.kernelState, executionReady: runtime.executionReady,
+          });
         } catch (error) {
+          diagnostics?.record("error", "r.runtime.failure", {
+            phase: "startup", outcome: "error", errorCode: (error as NodeJS.ErrnoException)?.code ?? "r_start_failed",
+          });
           rejectBootstrapReady(error);
           await nextManager.close().catch(() => {});
           return;
@@ -1396,6 +1450,9 @@ async function startNotebookHost(
     };
     startRuntime();
     const ready = { type: "host.ready" as const, origin: address.origin, epoch: ownership.epoch, capabilities: [...(controller.snapshot().capabilities ?? [])] };
+    diagnostics?.record("info", "host.ready", {
+      sessionEpoch: ownership.epoch, durationMs: Math.round(performance.now() - hostStartedAt), ready: true,
+    });
     scheduleLspSync();
     return {
       controller,
@@ -1410,12 +1467,21 @@ async function startNotebookHost(
       closed,
       close,
     };
-  } catch (error) { try { await close(); } catch (cleanup) { throw new AggregateError([error, cleanup], "Alder startup and cleanup failed"); } throw error; }
+  } catch (error) {
+    diagnostics?.record("error", "host.fatal", {
+      outcome: "error", errorCode: (error as { code?: string })?.code ?? "host_start_failed",
+      errorType: error instanceof Error ? error.name : "unknown",
+      durationMs: Math.round(performance.now() - hostStartedAt),
+    });
+    try { await close(); } catch (cleanup) { throw new AggregateError([error, cleanup], "Alder startup and cleanup failed"); } throw error;
+  }
 }
 
 
 
-async function createLsp(generation: number, currentGeneration: () => number, controller: Controller, engine: Engine, runtimeReady: () => Promise<void>, notebookDirectory: string, setLsp: (value: LspClient | undefined) => void): Promise<LspClient> {
+async function createLsp(generation: number, currentGeneration: () => number, controller: Controller, engine: Engine, runtimeReady: () => Promise<void>, notebookDirectory: string, setLsp: (value: LspClient | undefined) => void, diagnostics?: DiagnosticSink): Promise<LspClient> {
+  const startedAt = performance.now();
+  diagnostics?.record("info", "lsp.start", {});
   await runtimeReady();
   const document = await lspDocument(controller.snapshot());
   const client = new LspClient({ document, cwd: notebookDirectory, connect: () => engine.connectArkLsp(), onFailure: message => controller.publishServiceError("lsp", { code: "lsp_unavailable", message }), onDiagnostics: (changed, diagnostics) => controller.publishEditorDiagnostics(changed.cells.map(cell => ({ id: cell.id, revision: cell.revision ?? 0, type: cell.type ?? "code", source: cell.body.join("\n") })), diagnostics) });
@@ -1427,8 +1493,13 @@ async function createLsp(generation: number, currentGeneration: () => number, co
     }
     setLsp(client);
     controller.publishServiceError("lsp", null);
+    diagnostics?.record("info", "lsp.ready", { durationMs: Math.round(performance.now() - startedAt), ready: true });
     return client;
   } catch (error) {
+    diagnostics?.record("error", "lsp.failure", {
+      outcome: "error", errorCode: (error as NodeJS.ErrnoException)?.code ?? "lsp_unavailable",
+      durationMs: Math.round(performance.now() - startedAt),
+    });
     await client.stop().catch(() => {});
     throw error;
   }

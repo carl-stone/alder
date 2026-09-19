@@ -176,7 +176,17 @@ async function start(): Promise<void> {
     ...options,
     draftId: desktop ? await desktop.getDraftId() : browserDraftId(),
     onCommand: (command, result) => window.dispatchEvent(new CustomEvent("alder:host-command", { detail: { command, result } })),
-    onVisibleResult: (observation) => window.dispatchEvent(new CustomEvent("alder:visible-result", { detail: observation })),
+    onVisibleResult: (observation) => {
+      window.dispatchEvent(new CustomEvent("alder:visible-result", { detail: observation }));
+      void desktop?.reportDiagnostic({
+        event: "run.visible", operationId: observation.operationId, runId: observation.runId,
+        cellId: observation.cellId, revision: observation.revision,
+        inputToHandlerMs: Math.max(0, observation.handlerTimestamp - observation.inputTimestamp),
+        handlerToVisibleMs: Math.max(0, observation.presentedTimestamp - observation.handlerTimestamp),
+        inputToVisibleMs: Math.max(0, observation.presentedTimestamp - observation.inputTimestamp),
+        proxy: observation.proxy,
+      }).catch(() => {});
+    },
   });
   bindClient(next);
   view = new NotebookView(next);
@@ -186,7 +196,17 @@ async function start(): Promise<void> {
   await (globalThis as typeof globalThis & { alderDesktop?: PreloadApi }).alderDesktop?.rendererReady();
 }
 
-void start().catch((error) => view?.showError(error));
+function reportRendererFailure(event: "renderer.error" | "renderer.unhandled_rejection" | "renderer.bootstrap_failed", category: "script-error" | "unhandled-rejection" | "bootstrap-failed"): void {
+  const desktop = (globalThis as typeof globalThis & { alderDesktop?: PreloadApi }).alderDesktop;
+  void desktop?.reportDiagnostic({ event, category }).catch(() => undefined);
+}
+
+window.addEventListener("error", () => reportRendererFailure("renderer.error", "script-error"));
+window.addEventListener("unhandledrejection", () => reportRendererFailure("renderer.unhandled_rejection", "unhandled-rejection"));
+void start().catch((error) => {
+  reportRendererFailure("renderer.bootstrap_failed", "bootstrap-failed");
+  view?.showError(error);
+});
 
 
 function recoveryIdentity(): string {

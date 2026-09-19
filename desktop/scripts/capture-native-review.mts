@@ -37,6 +37,7 @@ async function captureNativeReview(): Promise<Record<string, unknown>> {
     openRecent: () => undefined,
     dispatch: () => undefined,
     closeWindow: () => undefined,
+    diagnostics: () => undefined,
   }, []);
   const preloadPath = join(outputDirectory, "native-review-preload.cjs");
   await writeFile(preloadPath, "// Intentionally empty hidden-review preload.\n");

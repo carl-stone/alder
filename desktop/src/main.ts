@@ -1,6 +1,7 @@
 import { NativeRecoveryStore } from "./recovery-store.js";
 import { ALDER_APP_NAME, applyNativeWindowState, assertNativeDialogRuntime, installNativeMenu, nativeWindowOptions } from "./native-shell.mjs";
 import { observeSaveAsDestination } from "../../host/src/persistence.js";
+import { StructuredDiagnostics, exportDiagnosticBundle } from "../../host/src/diagnostics.js";
 import { realpath } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { basename, dirname, extname, isAbsolute, join, resolve } from "node:path";
@@ -18,6 +19,7 @@ import {
   desktopCommandResultSchema,
   desktopCommandSchema,
   desktopRecoveryRequestSchema,
+  desktopDiagnosticSchema,
   decodeHostQueryResultWire,
   decodeJsonFrame,
   encodeHostQueryWire,
@@ -42,6 +44,7 @@ const IPC_CHANNELS = Object.freeze({
   chooseRscript: "alderDesktop:chooseRscript",
   getDraftId: "alderDesktop:getDraftId",
   rendererReady: "alderDesktop:rendererReady",
+  diagnostic: "alderDesktop:diagnostic",
   windowState: "alderDesktop:windowState",
   commandResult: "alderDesktop:commandResult",
   desktopCommand: "alderDesktop:desktopCommand",
@@ -105,6 +108,7 @@ export interface ElectronApp {
   on(event: string, listener: (...args: never[]) => unknown): this;
   quit(): void;
   getPath?(name: string): string;
+  getVersion?(): string;
   addRecentDocument?(path: string): void;
   clearRecentDocuments?(): void;
 }
@@ -183,6 +187,8 @@ export interface ElectronMainOptions {
   readonly startupTimeoutMs?: number;
   readonly closeSettlementTimeoutMs?: number;
   readonly acquireSession?: (options: AcquireNotebookSessionOptions) => Promise<SessionConnection>;
+  /** Injected by diagnostics tests; production creates the bounded local logger after app readiness. */
+  readonly diagnostics?: StructuredDiagnostics;
 }
 
 export interface ElectronMainApplication {
@@ -193,6 +199,8 @@ export interface ElectronMainApplication {
 }
 
 interface ElectronWindowRecord {
+  readonly windowId: string;
+  readonly openedAt: number;
   readonly window: ElectronWindow;
   readonly keys: Set<string>;
   connection: SessionConnection;
@@ -338,10 +346,13 @@ export class ElectronMain implements ElectronMainApplication {
   private quitHandled = false;
   private resourcesPromise?: Promise<ApplicationResources>;
   private recoveryStore?: NativeRecoveryStore;
+  private diagnostics?: StructuredDiagnostics;
+  private readonly appLaunchId = randomUUID();
 
   constructor(runtime: ElectronRuntime = loadElectronRuntime(), options: ElectronMainOptions = {}) {
     this.runtime = runtime;
     this.options = options;
+    this.diagnostics = options.diagnostics;
     assertNativeDialogRuntime(runtime.dialog);
   }
 
@@ -376,6 +387,8 @@ export class ElectronMain implements ElectronMainApplication {
         }
         this.stopping = true;
         await this.releaseAll();
+        this.diagnostics?.record("info", "desktop.quit", { outcome: "success" });
+        await this.diagnostics?.close();
         this.runtime.app.quit();
       })().catch(() => { this.quitHandled = false; });
     });
@@ -384,9 +397,27 @@ export class ElectronMain implements ElectronMainApplication {
       this.quitHandled = true;
       this.stopping = true;
       void this.releaseAll();
+      this.diagnostics?.record("info", "desktop.quit", { outcome: "success" });
+      void this.diagnostics?.close();
     });
 
     await this.runtime.app.whenReady();
+    const userData = this.runtime.app.getPath?.("userData");
+    if (userData && !this.diagnostics) {
+      const appVersion = this.runtime.app.getVersion?.() ?? "unknown";
+      const buildId = process.env.ALDER_BUILD_ID ?? appVersion;
+      this.diagnostics = new StructuredDiagnostics({
+        rootDir: join(userData, "diagnostics"), role: "desktop", component: "desktop",
+        appLaunchId: this.appLaunchId, appVersion, buildId,
+      });
+      process.env.ALDER_DIAGNOSTICS_DIR = join(userData, "diagnostics");
+      process.env.ALDER_APP_LAUNCH_ID = this.appLaunchId;
+      process.env.ALDER_APP_VERSION = appVersion;
+      process.env.ALDER_BUILD_ID = buildId;
+      this.diagnostics.record("info", "desktop.launch", { cold: true });
+    } else if (this.diagnostics) {
+      this.diagnostics.record("info", "desktop.launch", { cold: true });
+    }
     this.started = true;
     this.installPermissionDenials();
     this.installIpcHandlers();
@@ -412,6 +443,8 @@ export class ElectronMain implements ElectronMainApplication {
   async stop(): Promise<void> {
     this.stopping = true;
     await this.releaseAll();
+    this.diagnostics?.record("info", "desktop.quit", { outcome: "success" });
+    await this.diagnostics?.close();
   }
 
   async openNotebook(path: string | null, options: { newWindow?: boolean } = {}): Promise<void> {
@@ -472,6 +505,8 @@ export class ElectronMain implements ElectronMainApplication {
     window.webContents.session?.setPermissionRequestHandler?.((_webContents, _permission, callback) => callback(false));
     window.webContents.session?.setPermissionCheckHandler?.(() => false);
     const record: ElectronWindowRecord = {
+      windowId: randomUUID(),
+      openedAt: performance.now(),
       window,
       keys: new Set<string>(),
       draftId: randomUUID(),
@@ -488,6 +523,10 @@ export class ElectronMain implements ElectronMainApplication {
       windowState: null,
       pendingCommands: new Map(),
     };
+    this.diagnostics?.record("info", "window.open", {
+      windowId: record.windowId, sessionId: connection.sessionKey, sessionEpoch: connection.epoch,
+      cold: ![...this.records].some(item => item.connection.sessionKey === connection.sessionKey),
+    });
     record.keys.add(canonical ?? `session:${connection.sessionKey}`);
     if (hint !== null) record.keys.add(hint);
     this.records.add(record);
@@ -562,6 +601,10 @@ export class ElectronMain implements ElectronMainApplication {
       await new Promise<void>((resolveReady, rejectReady) => {
         const timeout = setTimeout(() => rejectReady(new Error("Electron notebook renderer did not become ready")), RENDERER_READY_TIMEOUT_MS);
         rendererReadyPromise.then(() => { clearTimeout(timeout); resolveReady(); }, rejectReady);
+      });
+      this.diagnostics?.record("info", "renderer.ready", {
+        windowId: record.windowId, sessionId: connection.sessionKey, sessionEpoch: connection.epoch,
+        rendererGeneration: generation, durationMs: Math.round(performance.now() - record.openedAt), ready: true,
       });
     } finally {
       bootstrapTicket = null;
@@ -652,6 +695,33 @@ export class ElectronMain implements ElectronMainApplication {
     noArguments(IPC_CHANNELS.rendererReady, (record) => {
       if (record.rendererReadyGeneration === record.loadGeneration) record.rendererReady?.resolve();
     });
+    ipc.removeHandler?.(IPC_CHANNELS.diagnostic);
+    ipc.handle(IPC_CHANNELS.diagnostic, async (event, ...args) => {
+      if (args.length !== 1) throw new Error("Desktop diagnostic requires one value");
+      const record = this.recordForEvent(event);
+      const diagnostic = desktopDiagnosticSchema.parse(args[0]);
+      if (diagnostic.event !== "run.visible") {
+        this.diagnostics?.record("error", diagnostic.event, {
+          windowId: record.windowId, sessionId: record.connection.sessionKey, sessionEpoch: record.connection.epoch,
+          reason: diagnostic.category, outcome: "error",
+        });
+        return;
+      }
+      this.diagnostics?.record("info", diagnostic.event, {
+        windowId: record.windowId, sessionId: record.connection.sessionKey, sessionEpoch: record.connection.epoch,
+        operationId: diagnostic.operationId, runId: diagnostic.runId, cellId: diagnostic.cellId,
+        cellRevision: diagnostic.revision, durationMs: Math.round(diagnostic.inputToVisibleMs),
+        dispatchMs: Math.round(diagnostic.inputToHandlerMs), visibleMs: Math.round(diagnostic.handlerToVisibleMs),
+        phase: "visible-result", mode: diagnostic.proxy,
+      });
+      const response = await record.connection.request("/api/diagnostics/phase", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({
+          operationId: diagnostic.operationId, runId: diagnostic.runId, cellId: diagnostic.cellId,
+          revision: diagnostic.revision, phase: "visible-result", durationMs: diagnostic.inputToVisibleMs,
+        }),
+      });
+      if (!response.ok) throw new Error("The host rejected renderer timing metadata.");
+    });
     ipc.removeHandler?.(IPC_CHANNELS.windowState);
     ipc.handle(IPC_CHANNELS.windowState, (event, ...args) => {
       if (args.length !== 1) throw new Error("Window state requires one value");
@@ -685,6 +755,23 @@ export class ElectronMain implements ElectronMainApplication {
 
   private installWindowPolicy(record: ElectronWindowRecord): void {
     const contents = record.window.webContents;
+    contents.on("unresponsive", () => {
+      this.diagnostics?.record("warn", "renderer.unresponsive", {
+        windowId: record.windowId, sessionEpoch: record.connection.epoch, reason: "unresponsive", outcome: "error",
+      });
+    });
+    contents.on("responsive", () => {
+      this.diagnostics?.record("info", "renderer.responsive", {
+        windowId: record.windowId, sessionEpoch: record.connection.epoch, reason: "responsive", outcome: "success",
+      });
+    });
+    contents.on("did-fail-load", (_event: unknown, errorCode: number, _description: string, _url: string, isMainFrame: boolean) => {
+      if (!isMainFrame) return;
+      this.diagnostics?.record("error", "renderer.load_failed", {
+        windowId: record.windowId, sessionEpoch: record.connection.epoch, reason: "load-failed",
+        status: errorCode, outcome: "error",
+      });
+    });
     contents.setWindowOpenHandler(details => {
       const expectedOrigin = record.loadingOrigin ?? record.origin;
       const external = safeExternalUrl(details.url, expectedOrigin);
@@ -712,6 +799,10 @@ export class ElectronMain implements ElectronMainApplication {
     });
     contents.on("render-process-gone", (_event: unknown, details: { reason?: string }) => {
       if (record.released || record.reloadInProgress) return;
+      this.diagnostics?.record("error", "renderer.gone", {
+        windowId: record.windowId, sessionEpoch: record.connection.epoch,
+        reason: details?.reason ?? "unknown", outcome: "error",
+      });
       record.reloadInProgress = true;
       void this.recoverRenderer(record, details?.reason ?? "unknown").finally(() => { record.reloadInProgress = false; });
     });
@@ -735,7 +826,16 @@ export class ElectronMain implements ElectronMainApplication {
     try {
       const ticket = await this.mintTicket(record.connection);
       await this.loadAuthenticatedNotebook(record, ticket);
+      this.diagnostics?.record("info", "renderer.recovered", {
+        windowId: record.windowId, sessionEpoch: record.connection.epoch,
+        rendererGeneration: record.loadGeneration, outcome: "success",
+      });
     } catch (error) {
+      this.diagnostics?.record("error", "renderer.recovery_failed", {
+        windowId: record.windowId, sessionEpoch: record.connection.epoch,
+        rendererGeneration: record.loadGeneration, outcome: "error",
+        errorCode: (error as NodeJS.ErrnoException)?.code ?? "renderer_recovery_failed",
+      });
       await this.showApplicationError("Renderer recovery", error instanceof Error ? error.message : "The renderer could not be recovered.");
     }
   }
@@ -747,7 +847,13 @@ export class ElectronMain implements ElectronMainApplication {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const result = new Promise<ReturnType<typeof desktopCommandResultSchema.parse>>((resolveResult, rejectResult) => {
       record.pendingCommands.set(requestId, { resolve: resolveResult, reject: rejectResult });
-      timer = setTimeout(() => rejectResult(new Error("The editor did not complete the native command.")), timeoutMs);
+      timer = setTimeout(() => {
+        this.diagnostics?.record("warn", "native_command.timeout", {
+          windowId: record.windowId, sessionEpoch: record.connection.epoch, kind: action,
+          requestId, durationMs: timeoutMs, outcome: "error", errorCode: "command_timeout",
+        });
+        rejectResult(new Error("The editor did not complete the native command."));
+      }, timeoutMs);
     });
     try {
       record.window.webContents.send(IPC_CHANNELS.desktopCommand, command);
@@ -778,6 +884,7 @@ export class ElectronMain implements ElectronMainApplication {
       openRecent: path => { void this.openNotebook(path); },
       dispatch,
       closeWindow: () => { const record = this.focusedRecord(); if (record) void this.requestClose(record); },
+      diagnostics: () => { void this.showDiagnostics().catch(() => this.showDiagnosticsError()); },
     }, this.recentPaths);
   }
 
@@ -1030,7 +1137,75 @@ export class ElectronMain implements ElectronMainApplication {
     record.pendingCommands.clear();
     this.records.delete(record);
     this.removeRecordKeys(record);
-    await Promise.race([record.connection.release(disposition), new Promise<void>(resolve => setTimeout(resolve, 1_000))]);
+    let timedOut = false;
+    try {
+      await Promise.race([
+        record.connection.release(disposition),
+        new Promise<void>(resolve => setTimeout(() => { timedOut = true; resolve(); }, 1_000)),
+      ]);
+      this.diagnostics?.record(timedOut ? "warn" : "info", "window.close", {
+        windowId: record.windowId, sessionId: record.connection.sessionKey, sessionEpoch: record.connection.epoch,
+        outcome: timedOut ? "error" : "success", errorCode: timedOut ? "lease_release_timeout" : null,
+        durationMs: Math.round(performance.now() - record.openedAt),
+      });
+    } catch (error) {
+      this.diagnostics?.record("error", "window.close", {
+        windowId: record.windowId, sessionEpoch: record.connection.epoch, outcome: "error",
+        errorCode: (error as NodeJS.ErrnoException)?.code ?? "lease_release_failed",
+      });
+    }
+  }
+
+  private async showDiagnostics(): Promise<void> {
+    const diagnostics = this.diagnostics;
+    if (!diagnostics) throw new Error("diagnostics unavailable");
+    const status = diagnostics.status();
+    const record = this.focusedRecord() ?? this.firstRecord();
+    const state = record?.windowState;
+    const snapshot = record ? await this.querySnapshot(record).catch(() => null) : null;
+    const answer = await (record
+      ? this.runtime.dialog.showMessageBox(record.window, {
+          type: "info", title: "Alder Diagnostics", message: status.available ? "Local diagnostics are available." : "Local diagnostics are unavailable.",
+          detail: `Dropped events: ${status.droppedEvents + status.unavailableEvents}\nRuntime: ${snapshot?.runtime.kernelState ?? "unknown"}; active operation: ${snapshot?.runtime.activeRunId ?? "none"}\n\nA saved bundle includes bounded structured lifecycle logs, build/runtime metadata, coarse service state and one resource snapshot. It excludes notebook source, R output and values, widget/upload content, credentials, environment values, absolute paths and raw child output.`,
+          buttons: ["Save Diagnostic Bundle…", "Close"], defaultId: 0, cancelId: 1,
+        })
+      : this.runtime.dialog.showMessageBox({
+          type: "info", title: "Alder Diagnostics", message: status.available ? "Local diagnostics are available." : "Local diagnostics are unavailable.",
+          detail: `Dropped events: ${status.droppedEvents + status.unavailableEvents}`, buttons: ["Save Diagnostic Bundle…", "Close"], defaultId: 0, cancelId: 1,
+        }));
+    if (answer.response !== 0) return;
+    const selected = record
+      ? await this.runtime.dialog.showSaveDialog(record.window, { title: "Save Diagnostic Bundle", message: "Choose a new folder for the diagnostic bundle.", properties: ["createDirectory"] })
+      : await this.runtime.dialog.showSaveDialog({ title: "Save Diagnostic Bundle", message: "Choose a new folder for the diagnostic bundle.", properties: ["createDirectory"] });
+    if (selected.canceled || !selected.filePath) return;
+    const cacheRoot = record?.connection.canonicalPath ? join(dirname(record.connection.canonicalPath), ".alder", "cache") : undefined;
+    await exportDiagnosticBundle(diagnostics, selected.filePath, {
+      appVersion: this.runtime.app.getVersion?.() ?? "unknown", buildId: process.env.ALDER_BUILD_ID,
+      recoveryRoot: this.runtime.app.getPath?.("userData") ? join(this.runtime.app.getPath!("userData"), "document-recovery") : undefined,
+      cacheRoot,
+      flushPeers: async () => {
+        if (!record) return;
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const timeout = new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new Error("diagnostic flush timeout")), 2_000); timer.unref?.(); });
+        const response = await Promise.race([record.connection.request("/api/diagnostics/flush", { method: "POST" }), timeout])
+          .finally(() => { if (timer) clearTimeout(timer); });
+        if (!response.ok) throw new Error("diagnostic flush failed");
+      },
+      runtime: snapshot?.runtime ? {
+        kernelState: snapshot.runtime.kernelState, analyzerState: snapshot.runtime.analyzerState,
+        executionReady: snapshot.runtime.executionReady, activeRunId: snapshot.runtime.activeRunId,
+      } : {},
+      state: { dirty: state?.dirty ?? false, sessionEpoch: state?.sessionEpoch ?? null },
+    });
+  }
+
+  private async showDiagnosticsError(): Promise<void> {
+    const record = this.focusedRecord() ?? this.firstRecord();
+    const options = {
+      type: "error", title: "Alder Diagnostics", message: "The diagnostic bundle could not be saved.",
+      detail: "Alder remains usable. Choose a new destination and try again.", buttons: ["OK"],
+    };
+    await (record ? this.runtime.dialog.showMessageBox(record.window, options) : this.runtime.dialog.showMessageBox(options)).catch(() => undefined);
   }
 
   private async releaseAll(): Promise<void> {

@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { HOST_PROTOCOL, type SessionConnection } from "../src/protocol.js";
+import { StructuredDiagnostics } from "../src/diagnostics.js";
 import { authenticatedNotebookUrl, ElectronMain, isLoopbackHttpOrigin, isTrustedApplicationOrigin, type ElectronRuntime, type ElectronWindow } from "../../desktop/src/main.js";
 import { applyNativeWindowState, nativeMenuTemplate, nativeWindowOptions } from "../../desktop/src/native-shell.mjs";
 
@@ -230,6 +231,56 @@ test("native menus expose the notebook command hierarchy and keyboard flow", () 
   assert.equal(view.some(item => item.role === "reload" || item.role === "toggleDevTools"), false);
   const help = template.find(item => item.label === "Help")!.submenu as Record<string, any>[];
   assert.equal(help.find(item => item.label === "R Documentation")?.accelerator, "F1");
+  assert.ok(help.some(item => item.label === "Alder Diagnostics…"));
+});
+
+test("diagnostic menu cancellation is quiet and export failures use a bounded native error", async () => {
+  const root = await mkdtemp(join(tmpdir(), "alder-desktop-diagnostic-menu-"));
+  const diagnostics = new StructuredDiagnostics({ rootDir: join(root, "logs"), role: "desktop", flushDelayMs: 60_000, stderr: null });
+  const electronRuntime = runtime(0);
+  const dialogs: string[] = [];
+  let saveCancelled = true;
+  electronRuntime.dialog.showMessageBox = async (...args: any[]) => {
+    const options = args.at(-1) as { title?: string; type?: string };
+    dialogs.push(`${options.title}:${options.type}`);
+    return { response: 0 };
+  };
+  electronRuntime.dialog.showSaveDialog = async () => saveCancelled
+    ? ({ canceled: true, filePath: undefined })
+    : ({ canceled: false, filePath: join(root, "bundle") });
+  const main = new ElectronMain(electronRuntime, { resources, diagnostics });
+  await (main as any).showDiagnostics();
+  assert.deepEqual(dialogs, ["Alder Diagnostics:info"]);
+
+  const window = windowWithLoad();
+  recordFor(main, connection("diagnostic-export", "/tmp/diagnostic-export.R", async path => {
+    if (path === "/api/snapshot") return jsonResponse({ runtime: {} });
+    if (path === "/api/diagnostics/flush") return jsonResponse({ error: "failed" }, 500);
+    return jsonResponse({});
+  }), window);
+  saveCancelled = false;
+  await assert.rejects((main as any).showDiagnostics(), /diagnostic flush failed/);
+  await (main as any).showDiagnosticsError();
+  assert.equal(dialogs.at(-1), "Alder Diagnostics:error");
+  await diagnostics.close();
+  await rm(root, { recursive: true, force: true });
+});
+
+test("diagnostic menu reports unavailable logging without throwing from its click handler", async () => {
+  const electronRuntime = runtime(0);
+  let template: readonly Record<string, any>[] = [];
+  const dialogs: string[] = [];
+  electronRuntime.Menu.buildFromTemplate = value => { template = value; return value; };
+  electronRuntime.dialog.showMessageBox = async (...args: any[]) => {
+    dialogs.push((args.at(-1) as { type?: string }).type ?? "unknown");
+    return { response: 0 };
+  };
+  const main = new ElectronMain(electronRuntime, { resources });
+  (main as any).rebuildMenu();
+  const help = template.find(item => item.label === "Help")!.submenu as Record<string, any>[];
+  help.find(item => item.label === "Alder Diagnostics…")!.click();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(dialogs, ["error"]);
 });
 
 test("native evidence and ElectronMain share production window, state, and menu construction", () => {
@@ -241,6 +292,7 @@ test("native evidence and ElectronMain share production window, state, and menu 
     openRecent: () => undefined,
     dispatch: action => { actions.push(action); },
     closeWindow: () => undefined,
+    diagnostics: () => undefined,
   }, []);
   const run = template.find(item => item.label === "Run")!.submenu as Record<string, any>[];
   assert.equal(run.find(item => item.label === "Run Cell")?.accelerator, "CmdOrCtrl+Enter");
@@ -626,6 +678,8 @@ test("opening a notebook replaces a clean untitled launch window", async () => {
 });
 
 test("opening the same notebook focuses its existing window unless a new window is explicit", async () => {
+  const diagnosticRoot = await mkdtemp(join(tmpdir(), "alder-window-diagnostics-"));
+  const diagnostics = new StructuredDiagnostics({ rootDir: diagnosticRoot, role: "desktop", flushDelayMs: 0, stderr: null });
   const path = "/tmp/alder-shared-gui.R";
   const ticket = async (endpoint: string) => {
     assert.equal(endpoint, "/api/ticket");
@@ -639,7 +693,7 @@ test("opening the same notebook focuses its existing window unless a new window 
   const electronRuntime = runtime();
   electronRuntime.BrowserWindow = Object.assign(function () { return windows[windowIndex++]!; }, { fromWebContents: () => null }) as unknown as ElectronRuntime["BrowserWindow"];
   const connections = [first, second];
-  const main = new ElectronMain(electronRuntime, { resources, acquireSession: async () => connections.shift()! });
+  const main = new ElectronMain(electronRuntime, { resources, diagnostics, acquireSession: async () => connections.shift()! });
   (main as any).loadAuthenticatedNotebook = async () => undefined;
   await main.openNotebook(path);
   await main.openNotebook(path);
@@ -653,6 +707,11 @@ test("opening the same notebook focuses its existing window unless a new window 
   assert.equal(second.releaseCount, 0);
   assert.equal(main.windows().length, 1);
   await main.stop();
+  const diagnosticFiles = (await readdir(diagnosticRoot)).filter(name => name.endsWith(".jsonl"));
+  const diagnosticText = (await Promise.all(diagnosticFiles.map(name => readFile(join(diagnosticRoot, name), "utf8")))).join("");
+  const opens = diagnosticText.trim().split("\n").map(line => JSON.parse(line) as { event: string; cold?: boolean }).filter(item => item.event === "window.open");
+  assert.deepEqual(opens.map(item => item.cold), [true, false]);
+  await rm(diagnosticRoot, { recursive: true, force: true });
 });
 
 test("opening a notebook retains an untitled window with uncertain state", async () => {

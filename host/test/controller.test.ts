@@ -10,6 +10,7 @@ import { Controller, ControllerError, type ControllerOptions, type SourcePublica
 import { parseNotebook, serializeNotebook } from "../src/notebook.js";
 import { preferenceDefaults, resolveSettings } from "../src/settings.js";
 import { OutputStore } from "../src/outputs.js";
+import type { DiagnosticFields, DiagnosticSeverity, DiagnosticSink } from "../src/diagnostics.js";
 import {
   MAX_DEPENDENCY_EDGES,
   MAX_NOTEBOOK_SOURCE_BYTES,
@@ -241,6 +242,12 @@ class FakeEngine implements EngineAdapter {
 }
 
 type FixtureControllerOptions = Omit<ControllerOptions, "outputStore"> & { outputStore?: OutputStore };
+
+class CollectingDiagnostics implements DiagnosticSink {
+  readonly events: Array<{ severity: DiagnosticSeverity; event: string; fields: DiagnosticFields }> = [];
+  record(severity: DiagnosticSeverity, event: string, fields: DiagnosticFields = {}): void { this.events.push({ severity, event, fields }); }
+  child(_fields: DiagnosticFields): DiagnosticSink { return this; }
+}
 
 function createController(options: FixtureControllerOptions): Controller {
   const sessionEpoch = options.epoch ?? randomUUID();
@@ -1189,6 +1196,7 @@ test("source edit admitted during formatting rejects late candidate before durab
 });
 
 test("optional operations reject only duplicates and cancel their owned work", async () => {
+  const diagnostics = new CollectingDiagnostics();
   let formatAborted = false;
   let formatStarted!: () => void;
   const formatting = new Promise<void>((resolve) => { formatStarted = resolve; });
@@ -1196,6 +1204,7 @@ test("optional operations reject only duplicates and cancel their owned work", a
     engine: new FakeEngine(),
     notebook: notebook([["a", "x <- 1"]]),
     config: resolveSettings({ notebook: { on_startup: false } }),
+    diagnostics,
     services: {
       format: async (_cells, context) => {
         assert.ok(context);
@@ -1236,6 +1245,10 @@ test("optional operations reject only duplicates and cancel their owned work", a
   assert.equal(cancelled.status, "cancelled");
   assert.equal(cancelled.error?.code, "cancelled");
   assert.equal(formatAborted, true);
+  await eventually(() => diagnostics.events.some(item => item.event === "operation.cancelled" && item.fields.operationId === first.requestId));
+  assert.ok(diagnostics.events.some(item => item.event === "operation.cancelled" && item.fields.operationId === first.requestId));
+  assert.ok(diagnostics.events.some(item => item.event === "operation.failed" && item.fields.operationId === duplicate.requestId));
+  assert.ok(diagnostics.events.some(item => item.event === "operation.settled" && item.fields.operationId === publish.requestId));
   await controller.close();
 });
 
@@ -1320,6 +1333,40 @@ test("one command creates, reconciles, analyzes, and runs an optimistic cell", a
   assert.equal(engine.analysisCalls.at(-1)?.[0]?.id, "focused-editor-1");
   assert.equal(engine.evaluations[0]?.cellId, "focused-editor-1");
   await controller.close();
+});
+
+test("run diagnostics report causal host phases and mark empty execution phases not applicable", async () => {
+  const diagnostics = new CollectingDiagnostics();
+  const controller = createController({
+    engine: new FakeEngine(), notebook: notebook([["a", "x <- 1"]]),
+    config: resolveSettings({ notebook: { on_startup: false } }), diagnostics,
+  });
+  await controller.start();
+  const run = command(controller, { type: "run", scope: "all" });
+  await controller.dispatch(run);
+  await settle(controller, run.requestId);
+  await eventually(() => diagnostics.events.some(item => item.event === "operation.settled" && item.fields.operationId === run.requestId));
+  const events = diagnostics.events.filter(item => item.fields.operationId === run.requestId);
+  const phases = events.filter(item => item.event === "operation.phase").map(item => item.fields.phase);
+  assert.deepEqual(phases, ["analysis-ready", "kernel-dispatch", "kernel-completion", "authoritative-completion"]);
+  assert.ok(events.every(item => item.fields.clientId === "controller-tests"));
+  assert.ok(events.find(item => item.event === "operation.settled"));
+  await controller.close();
+
+  const emptyDiagnostics = new CollectingDiagnostics();
+  const empty = createController({
+    engine: new FakeEngine(), notebook: notebook([]),
+    config: resolveSettings({ notebook: { on_startup: false } }), diagnostics: emptyDiagnostics,
+  });
+  await empty.start();
+  const emptyRun = command(empty, { type: "run", scope: "all" });
+  await empty.dispatch(emptyRun);
+  await settle(empty, emptyRun.requestId);
+  await eventually(() => emptyDiagnostics.events.some(item => item.event === "operation.settled" && item.fields.operationId === emptyRun.requestId));
+  const terminal = emptyDiagnostics.events.find(item => item.event === "operation.settled" && item.fields.operationId === emptyRun.requestId);
+  assert.deepEqual(terminal?.fields.notApplicablePhases, ["first-output", "kernel-dispatch", "kernel-completion"]);
+  assert.ok(emptyDiagnostics.events.some(item => item.event === "operation.phase" && item.fields.operationId === emptyRun.requestId && item.fields.phase === "authoritative-completion"));
+  await empty.close();
 });
 
 test("body edits rebuild current static facts while execution waits for replacement analysis", async () => {

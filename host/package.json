@@ -26,6 +26,7 @@
     "build": "tsc -p tsconfig.json --noEmit && node scripts/build.mjs",
     "check": "tsc -p tsconfig.json --noEmit",
     "test": "tsx --test test/*.test.ts",
+    "benchmark:diagnostics": "tsx scripts/benchmark-diagnostics.ts",
     "start": "tsx src/main.ts",
     "stage": "node scripts/stage-application.mjs --output .application --kind headless",
     "stage:desktop": "node scripts/stage-application.mjs --output .application-desktop --kind desktop",

@@ -3,6 +3,13 @@ import { ChildProcess } from "node:child_process";
 import { once } from "node:events";
 import test from "node:test";
 import { createProcessScope } from "../src/processes.js";
+import type { DiagnosticFields, DiagnosticSeverity, DiagnosticSink } from "../src/diagnostics.js";
+
+class CollectingDiagnostics implements DiagnosticSink {
+  readonly events: Array<{ severity: DiagnosticSeverity; event: string; fields: DiagnosticFields }> = [];
+  record(severity: DiagnosticSeverity, event: string, fields: DiagnosticFields = {}): void { this.events.push({ severity, event, fields }); }
+  child(): DiagnosticSink { return this; }
+}
 
 const environment = Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => typeof entry[1] === "string"));
 const options = (source: string) => ({ executable: process.execPath, args: ["-e", source], cwd: process.cwd(), environment, stdio: "pipes" as const });
@@ -114,13 +121,18 @@ test("failed direct signaling and exit observation reject termination", async ()
 });
 
 test("a child that ignores SIGTERM is stopped with bounded escalation", async () => {
-  const scope = await createProcessScope();
+  const diagnostics = new CollectingDiagnostics();
+  const scope = await createProcessScope(undefined, diagnostics);
   try {
     const child = await scope.spawn(options("process.on('SIGTERM', () => {}); console.log('ready'); setInterval(() => {}, 1000)"));
     await once(child.stdout!, "data");
     await child.terminate();
     assert.equal((await child.exited).signal, "SIGKILL");
     await waitGone(child.pid);
+    assert.ok(diagnostics.events.some(item => item.event === "child.spawn" && item.fields.childPid === child.pid));
+    assert.ok(diagnostics.events.some(item => item.event === "child.term"));
+    assert.ok(diagnostics.events.some(item => item.event === "child.kill"));
+    assert.ok(diagnostics.events.some(item => item.event === "child.exit" && item.fields.signal === "SIGKILL"));
   } finally { await scope.close(); }
 });
 

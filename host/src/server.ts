@@ -7,6 +7,7 @@ import { extname, join, resolve, sep } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { URL } from "node:url";
 import { WebSocket, WebSocketServer, type RawData } from "ws";
+import type { DiagnosticSink } from "./diagnostics.js";
 import {
   ARTIFACT_DESCRIPTOR_HEADER,
   ARTIFACT_RESOLUTION_MEDIA_TYPE,
@@ -141,6 +142,8 @@ export interface AlderServerOptions {
   lsp?: LspAdapter;
   mcpHandler?: McpHttpHandler;
   logger?: (level: "info" | "warn" | "error", message: string) => void;
+  diagnostics?: DiagnosticSink;
+  flushDiagnostics?: () => Promise<void>;
   onClientCount?: (count: number) => void;
   onLeaseCount?: (count: number) => void;
   onLastLeaseDiscard?: () => void | Promise<void>;
@@ -1369,6 +1372,28 @@ export function createAlderServer(options: AlderServerOptions): AlderServer {
       } finally { release(); }
       return;
     }
+    if (path === "/api/diagnostics/flush") {
+      if (!method(response, request.method ?? "", "POST")) return;
+      requireLease(request, true);
+      await options.flushDiagnostics?.();
+      jsonResponse(response, 200, { flushed: true });
+      return;
+    }
+    if (path === "/api/diagnostics/phase") {
+      if (!method(response, request.method ?? "", "POST")) return;
+      const resolved = requireLease(request, true);
+      const body = z.object({
+        operationId: z.string().min(1).max(256), runId: z.string().min(1).max(256).nullable(),
+        cellId: z.string().min(1).max(256), revision: z.number().int().nonnegative(),
+        phase: z.literal("visible-result"), durationMs: z.number().finite().nonnegative().max(24 * 60 * 60 * 1000),
+      }).strict().parse(await readJsonBody(request, maxJson));
+      options.diagnostics?.record("info", "operation.phase", {
+        clientId: resolved.lease.clientId, operationId: body.operationId, runId: body.runId,
+        cellId: body.cellId, cellRevision: body.revision, phase: body.phase, durationMs: Math.round(body.durationMs), kind: "run",
+      });
+      jsonResponse(response, 200, { recorded: true });
+      return;
+    }
     if (path === "/api/query") {
       if (!method(response, request.method ?? "", "POST")) return;
       const resolved = requireLease(request, true);
@@ -1501,6 +1526,20 @@ export function createAlderServer(options: AlderServerOptions): AlderServer {
 
   const server = createHttpServer((request, response) => {
     void handleHttp(request, response).catch(error => {
+      const detail = errorPayload(error);
+      const pathname = (() => { try { return new URL(request.url ?? "/", "http://localhost").pathname; } catch { return "/"; } })();
+      const kind = pathname.startsWith("/artifacts/") ? "artifact"
+        : pathname.startsWith("/api/upload") ? "upload"
+          : pathname === "/api/query" ? "query"
+            : pathname === "/mcp" ? "mcp" : "request";
+      const contentType = String(request.headers["content-type"] ?? "").split(";", 1)[0]!.toLowerCase();
+      const family = /^(text|image|audio|video|application)\//.exec(contentType)?.[1] ?? (contentType ? "other" : "none");
+      const declaredBytes = Number(request.headers["content-length"]);
+      options.diagnostics?.record(detail.status < 500 ? "warn" : "error", "boundary.rejected", {
+        kind, mimeFamily: family, bytes: Number.isSafeInteger(declaredBytes) && declaredBytes >= 0 ? declaredBytes : null,
+        status: detail.status, errorCode: detail.code,
+        outcome: "error",
+      });
       if (response.writableEnded || response.destroyed) return;
       if (!response.headersSent) failResponse(response, error);
       else response.destroy();

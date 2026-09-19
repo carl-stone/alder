@@ -21101,6 +21101,22 @@ var windowStateSchema = external_exports.object({
   saveState: external_exports.enum(["edited", "saving", "saved", "failed"]),
   sessionEpoch: idSchema
 }).strict();
+var visibleResultDiagnosticSchema = external_exports.object({
+  event: external_exports.literal("run.visible"),
+  operationId: idSchema,
+  runId: idSchema.nullable(),
+  cellId: idSchema,
+  revision: revisionSchema,
+  inputToHandlerMs: external_exports.number().finite().nonnegative().max(24 * 60 * 60 * 1e3),
+  handlerToVisibleMs: external_exports.number().finite().nonnegative().max(24 * 60 * 60 * 1e3),
+  inputToVisibleMs: external_exports.number().finite().nonnegative().max(24 * 60 * 60 * 1e3),
+  proxy: external_exports.literal("two-animation-frames")
+}).strict();
+var rendererFailureDiagnosticSchema = external_exports.object({
+  event: external_exports.enum(["renderer.error", "renderer.unhandled_rejection", "renderer.bootstrap_failed"]),
+  category: external_exports.enum(["script-error", "unhandled-rejection", "bootstrap-failed"])
+}).strict();
+var desktopDiagnosticSchema = external_exports.discriminatedUnion("event", [visibleResultDiagnosticSchema, rendererFailureDiagnosticSchema]);
 var desktopRecoveryRequestSchema = external_exports.object({
   recoveryId: external_exports.string().regex(/^[A-Za-z0-9_-]{1,128}$/),
   action: external_exports.enum(["read", "write", "remove"]),
@@ -27085,7 +27101,21 @@ async function start() {
     ...options,
     draftId: desktop ? await desktop.getDraftId() : browserDraftId(),
     onCommand: (command, result) => window.dispatchEvent(new CustomEvent("alder:host-command", { detail: { command, result } })),
-    onVisibleResult: (observation) => window.dispatchEvent(new CustomEvent("alder:visible-result", { detail: observation }))
+    onVisibleResult: (observation) => {
+      window.dispatchEvent(new CustomEvent("alder:visible-result", { detail: observation }));
+      void desktop?.reportDiagnostic({
+        event: "run.visible",
+        operationId: observation.operationId,
+        runId: observation.runId,
+        cellId: observation.cellId,
+        revision: observation.revision,
+        inputToHandlerMs: Math.max(0, observation.handlerTimestamp - observation.inputTimestamp),
+        handlerToVisibleMs: Math.max(0, observation.presentedTimestamp - observation.handlerTimestamp),
+        inputToVisibleMs: Math.max(0, observation.presentedTimestamp - observation.inputTimestamp),
+        proxy: observation.proxy
+      }).catch(() => {
+      });
+    }
   });
   bindClient(next);
   view = new NotebookView(next);
@@ -27094,7 +27124,16 @@ async function start() {
   await next.connect();
   await globalThis.alderDesktop?.rendererReady();
 }
-void start().catch((error61) => view?.showError(error61));
+function reportRendererFailure(event, category) {
+  const desktop = globalThis.alderDesktop;
+  void desktop?.reportDiagnostic({ event, category }).catch(() => void 0);
+}
+window.addEventListener("error", () => reportRendererFailure("renderer.error", "script-error"));
+window.addEventListener("unhandledrejection", () => reportRendererFailure("renderer.unhandled_rejection", "unhandled-rejection"));
+void start().catch((error61) => {
+  reportRendererFailure("renderer.bootstrap_failed", "bootstrap-failed");
+  view?.showError(error61);
+});
 function recoveryIdentity() {
   const current = new URL(location.href);
   current.hash = "";

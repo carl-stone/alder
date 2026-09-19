@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, realpath, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import { parseNotebook, serializeNotebook } from "../src/notebook.js";
 import { MAX_SOURCE_LINE_LENGTH } from "../src/protocol.js";
@@ -93,6 +93,33 @@ test("seeded corrupt recovery journals preserve saved source and valid journals 
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("opening and closing a valid idle recovery writer prunes accumulated corrupt copies", async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "alder-recovery-lifecycle-prune-")));
+  const savedPath = join(root, "saved.R");
+  const savedBytes = Buffer.from("# %%\nvalue <- 1\n");
+  await writeFile(savedPath, savedBytes);
+  const initial = await RecoveryWriter.open({ rootDir: root, key: "lifecycle-prune", baseline: baseline(savedPath, savedBytes, 0) });
+  const directory = dirname(initial.journalPath);
+  await initial.close();
+  for (let index = 0; index < 9; index++) {
+    const path = join(directory, `corrupt-planted-${index}.json`);
+    await writeFile(path, String(index));
+    const time = new Date(Date.now() - index * 40 * 24 * 60 * 60 * 1000);
+    await utimes(path, time, time);
+  }
+  const reopened = await RecoveryWriter.open({ rootDir: root, key: "lifecycle-prune", baseline: baseline(savedPath, savedBytes, 0) });
+  assert.ok((await readdir(directory)).filter(name => name.startsWith("corrupt-")).length <= 3);
+  for (let index = 0; index < 7; index++) {
+    const path = join(directory, `corrupt-close-${index}.json`);
+    await writeFile(path, String(index));
+    const time = new Date(Date.now() - (index + 1) * 40 * 24 * 60 * 60 * 1000);
+    await utimes(path, time, time);
+  }
+  await reopened.close();
+  assert.ok((await readdir(directory)).filter(name => name.startsWith("corrupt-")).length <= 3);
+  await rm(root, { recursive: true, force: true });
 });
 
 function notebookInput(random: SeededRandom, caseIndex: number): Uint8Array {

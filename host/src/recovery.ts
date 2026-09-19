@@ -3,6 +3,7 @@ import { access, mkdir, open, readFile, realpath, rename, rm } from "node:fs/pro
 import { dirname, join, resolve } from "node:path";
 import { canonicalBase64ByteLength, MAX_NOTEBOOK_CELLS, MAX_NOTEBOOK_SOURCE_BYTES } from "./protocol.js";
 import { readPrivateFile } from "./private-paths.js";
+import { pruneCorruptRecoveryCopies } from "./diagnostics.js";
 
 export type RecoveryJsonValue = null | boolean | number | string | RecoveryJsonValue[] | { [key: string]: RecoveryJsonValue };
 export interface DiskObservation {
@@ -126,6 +127,7 @@ export class RecoveryWriter {
   private async restore(): Promise<void> {
     try {
       await mkdir(this.directory, { recursive: true, mode: 0o700 });
+      await pruneCorruptRecoveryCopies(this.directory);
       const identityPath = join(this.directory, "document.id");
       try {
         const id = (await readPrivateFile(identityPath, { maxBytes: 128 })).toString("utf8");
@@ -227,6 +229,7 @@ export class RecoveryWriter {
           await rename(this.journalPath, join(this.directory, "corrupt-" + randomUUID() + ".json")).catch(error => {
             if (!missing(error)) throw error;
           });
+          await pruneCorruptRecoveryCopies(this.directory);
           this.corruptJournal = false;
         }
         const journal: StoredJournal = { schemaVersion: 1, baseline: clone(this.baseline), fingerprint: this.latestFingerprint };
@@ -253,6 +256,7 @@ export class RecoveryWriter {
   async close(): Promise<void> {
     if (this.closed) return this.writeQueue;
     await this.flush();
+    await pruneCorruptRecoveryCopies(this.directory);
     this.closed = true;
   }
 }

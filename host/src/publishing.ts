@@ -12,6 +12,7 @@ import type { ArtifactHandle, JsonValue, OutputRecord } from "./protocol.js";
 
 const MAX_QUARTO_STREAM_BYTES = 8 * 1024 * 1024;
 const MAX_PUBLISHED_HTML_BYTES = 128 * 1024 * 1024;
+const QUARTO_TIMEOUT_MS = 5 * 60 * 1000;
 
 export interface PublishingProcessScope {
   spawn(options: {
@@ -54,6 +55,7 @@ export interface PublishingServiceOptions {
   outputStore: OutputStore;
   processScope: PublishingProcessScope;
   quartoExecutable: string;
+  quartoTimeoutMs?: number;
 }
 
 export interface PublishSnapshotOptions {
@@ -92,7 +94,7 @@ export function createPublishingService(options: PublishingServiceOptions): Publ
   if (!(options?.outputStore instanceof OutputStore)) throw new TypeError("publishing requires the canonical OutputStore");
   if (!options.processScope || typeof options.processScope.spawn !== "function") throw new TypeError("publishing requires the application ProcessScope");
   return {
-    publishSnapshot: (snapshot, publishOptions) => publishSnapshot(options.outputStore, options.processScope, options.quartoExecutable, snapshot, publishOptions),
+    publishSnapshot: (snapshot, publishOptions) => publishSnapshot(options.outputStore, options.processScope, options.quartoExecutable, snapshot, publishOptions, options.quartoTimeoutMs),
   };
 }
 
@@ -102,6 +104,7 @@ async function publishSnapshot(
   quartoExecutable: string,
   source: PublicationSnapshot,
   options: PublishSnapshotOptions,
+  quartoTimeoutMs = QUARTO_TIMEOUT_MS,
 ): Promise<PublishSnapshotResult> {
   throwIfAborted(options?.signal);
   validateOptions(options);
@@ -115,7 +118,7 @@ async function publishSnapshot(
     const renderedPath = join(stagingDirectory, "rendered.html");
     const qmd = await composeQmd(snapshot, outputStore, options.includeCode, options.signal);
     await writeFile(qmdPath, qmd, { encoding: "utf8", mode: 0o600, flag: "wx" });
-    await runQuarto(processScope, quartoExecutable, stagingDirectory, qmdPath, renderedPath, options.signal);
+    await runQuarto(processScope, quartoExecutable, stagingDirectory, qmdPath, renderedPath, options.signal, quartoTimeoutMs);
     throwIfAborted(options.signal);
     const rendered = await readFile(renderedPath);
     if (rendered.byteLength === 0 || rendered.byteLength > MAX_PUBLISHED_HTML_BYTES) {
@@ -280,7 +283,7 @@ async function readArtifact(
   return Buffer.concat(chunks, descriptor.byteLength);
 }
 
-async function runQuarto(processScope: PublishingProcessScope, executable: string, cwd: string, qmdPath: string, outputPath: string, signal?: AbortSignal): Promise<void> {
+async function runQuarto(processScope: PublishingProcessScope, executable: string, cwd: string, qmdPath: string, outputPath: string, signal?: AbortSignal, timeoutMs = QUARTO_TIMEOUT_MS): Promise<void> {
   throwIfAborted(signal);
   let owned: PublishingOwnedProcess;
   try {
@@ -300,7 +303,10 @@ async function runQuarto(processScope: PublishingProcessScope, executable: strin
     throw error;
   }
   let aborted = signal?.aborted === true;
+  let timedOut = false;
   const abort = () => { aborted = true; void owned.terminate().catch(() => {}); };
+  const timeout = setTimeout(() => { timedOut = true; void owned.terminate().catch(() => {}); }, timeoutMs);
+  timeout.unref?.();
   signal?.addEventListener("abort", abort, { once: true });
   if (aborted) abort();
   try {
@@ -308,9 +314,11 @@ async function runQuarto(processScope: PublishingProcessScope, executable: strin
     const stderr = collectStream(owned.stderr);
     const exit = await owned.exited;
     const [out, err] = await Promise.all([stdout, stderr]);
+    if (timedOut) throw new PublishingError("publish_failed", "Quarto publishing exceeded the local five-minute limit", { code: "publish_timeout" });
     if (aborted) throw new PublishingError("cancelled", "publishing was cancelled");
     if (exit.code !== 0) throw new PublishingError("publish_failed", `Quarto exited with status ${exit.code ?? "unknown"}${err ? `: ${err}` : ""}`, { ...exit, stdout: out, stderr: err });
   } finally {
+    clearTimeout(timeout);
     signal?.removeEventListener("abort", abort);
   }
 }

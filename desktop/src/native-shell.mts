@@ -28,6 +28,7 @@ export interface NativeMenuCallbacks {
   openRecent(path: string): void;
   dispatch(action: WindowAction): void;
   closeWindow(): void;
+  diagnostics(): void;
 }
 
 export function nativeWindowOptions(preloadPath: string, partition: string): Record<string, unknown> {
@@ -110,6 +111,8 @@ export function nativeMenuTemplate(callbacks: NativeMenuCallbacks, recentPaths: 
     { label: "Run", submenu: runSubmenu },
     { label: "Window", submenu: [{ role: "minimize" }, { role: "zoom" }, { type: "separator" }, { role: "front" }] },
     { label: "Help", submenu: [
+      { label: "Alder Diagnostics…", click: callbacks.diagnostics },
+      { type: "separator" },
       { label: "Keyboard Shortcuts", click: action("shortcuts") },
       { label: "R Documentation", accelerator: "F1", click: action("r-documentation") },
     ] },

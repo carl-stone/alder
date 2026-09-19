@@ -11483,9 +11483,9 @@ var require_picocolors = __commonJS({
     var argv = p.argv || [];
     var env2 = p.env || {};
     var isColorSupported = !(!!env2.NO_COLOR || argv.includes("--no-color")) && (!!env2.FORCE_COLOR || argv.includes("--color") || p.platform === "win32" || (p.stdout || {}).isTTY && env2.TERM !== "dumb" || !!env2.CI);
-    var formatter = (open8, close, replace3 = open8) => (input2) => {
-      let string5 = "" + input2, index = string5.indexOf(close, open8.length);
-      return ~index ? open8 + replaceClose(string5, close, replace3, index) + close : open8 + string5 + close;
+    var formatter = (open9, close, replace3 = open9) => (input2) => {
+      let string5 = "" + input2, index = string5.indexOf(close, open9.length);
+      return ~index ? open9 + replaceClose(string5, close, replace3, index) + close : open9 + string5 + close;
     };
     var replaceClose = (string5, close, replace3, index) => {
       let result = "", cursor = 0;
@@ -13510,7 +13510,7 @@ var require_util = __commonJS({
       return path3;
     });
     exports.normalize = normalize3;
-    function join20(aRoot, aPath) {
+    function join22(aRoot, aPath) {
       if (aRoot === "") {
         aRoot = ".";
       }
@@ -13542,7 +13542,7 @@ var require_util = __commonJS({
       }
       return joined;
     }
-    exports.join = join20;
+    exports.join = join22;
     exports.isAbsolute = function(aPath) {
       return aPath.charAt(0) === "/" || urlRegexp.test(aPath);
     };
@@ -13756,7 +13756,7 @@ var require_util = __commonJS({
             parsed.path = parsed.path.substring(0, index + 1);
           }
         }
-        sourceURL = join20(urlGenerate(parsed), sourceURL);
+        sourceURL = join22(urlGenerate(parsed), sourceURL);
       }
       return normalize3(sourceURL);
     }
@@ -15197,7 +15197,7 @@ var require_previous_map = __commonJS({
   "../../../../../alder/host/node_modules/postcss/lib/previous-map.js"(exports, module) {
     "use strict";
     var { existsSync, readFileSync, realpathSync } = __require("fs");
-    var { dirname: dirname12, isAbsolute: isAbsolute6, join: join20, relative: relative4, sep: sep3 } = __require("path");
+    var { dirname: dirname12, isAbsolute: isAbsolute6, join: join22, relative: relative4, sep: sep3 } = __require("path");
     var { SourceMapConsumer, SourceMapGenerator } = require_source_map();
     function realPath(path3) {
       try {
@@ -15312,7 +15312,7 @@ var require_previous_map = __commonJS({
           return this.decodeInline(this.annotation);
         } else if (this.annotation) {
           let map2 = this.annotation;
-          if (file2) map2 = join20(dirname12(file2), map2);
+          if (file2) map2 = join22(dirname12(file2), map2);
           let unknown2 = this.loadFile(map2, file2, false);
           if (unknown2) {
             try {
@@ -15342,7 +15342,7 @@ var require_input = __commonJS({
   "../../../../../alder/host/node_modules/postcss/lib/input.js"(exports, module) {
     "use strict";
     var { nanoid: nanoid3 } = require_non_secure();
-    var { isAbsolute: isAbsolute6, resolve: resolve15 } = __require("path");
+    var { isAbsolute: isAbsolute6, resolve: resolve16 } = __require("path");
     var { SourceMapConsumer, SourceMapGenerator } = require_source_map();
     var { fileURLToPath: fileURLToPath2, pathToFileURL: pathToFileURL2 } = __require("url");
     var CssSyntaxError = require_css_syntax_error();
@@ -15350,7 +15350,7 @@ var require_input = __commonJS({
     var terminalHighlight = require_terminal_highlight();
     var lineToIndexCache = /* @__PURE__ */ Symbol("lineToIndexCache");
     var sourceMapAvailable = Boolean(SourceMapConsumer && SourceMapGenerator);
-    var pathAvailable = Boolean(resolve15 && isAbsolute6);
+    var pathAvailable = Boolean(resolve16 && isAbsolute6);
     function getLineToIndex(input2) {
       if (input2[lineToIndexCache]) return input2[lineToIndexCache];
       let lines = input2.css.split("\n");
@@ -15384,7 +15384,7 @@ var require_input = __commonJS({
           if (!pathAvailable || /^\w+:\/\//.test(opts.from) || isAbsolute6(opts.from)) {
             this.file = opts.from;
           } else {
-            this.file = resolve15(opts.from);
+            this.file = resolve16(opts.from);
           }
         }
         if (pathAvailable && sourceMapAvailable) {
@@ -15505,7 +15505,7 @@ var require_input = __commonJS({
         if (/^\w+:\/\//.test(file2)) {
           return file2;
         }
-        return resolve15(this.map.consumer().sourceRoot || this.map.root || ".", file2);
+        return resolve16(this.map.consumer().sourceRoot || this.map.root || ".", file2);
       }
       origin(line, column, endLine, endColumn) {
         if (!this.map) return false;
@@ -15817,12 +15817,12 @@ var require_fromJSON = __commonJS({
 var require_map_generator = __commonJS({
   "../../../../../alder/host/node_modules/postcss/lib/map-generator.js"(exports, module) {
     "use strict";
-    var { dirname: dirname12, relative: relative4, resolve: resolve15, sep: sep3 } = __require("path");
+    var { dirname: dirname12, relative: relative4, resolve: resolve16, sep: sep3 } = __require("path");
     var { SourceMapConsumer, SourceMapGenerator } = require_source_map();
     var { pathToFileURL: pathToFileURL2 } = __require("url");
     var Input = require_input();
     var sourceMapAvailable = Boolean(SourceMapConsumer && SourceMapGenerator);
-    var pathAvailable = Boolean(dirname12 && resolve15 && relative4 && sep3);
+    var pathAvailable = Boolean(dirname12 && resolve16 && relative4 && sep3);
     var MapGenerator = class {
       constructor(stringify, root, opts, cssString) {
         this.stringify = stringify;
@@ -16052,7 +16052,7 @@ var require_map_generator = __commonJS({
         if (cached2) return cached2;
         let from = this.opts.to ? dirname12(this.opts.to) : ".";
         if (typeof this.mapOpts.annotation === "string") {
-          from = dirname12(resolve15(from, this.mapOpts.annotation));
+          from = dirname12(resolve16(from, this.mapOpts.annotation));
         }
         let path3 = relative4(from, file2);
         this.memoizedPaths.set(file2, path3);
@@ -16186,7 +16186,7 @@ var require_parser2 = __commonJS({
         let prev;
         let shift;
         let last = false;
-        let open8 = false;
+        let open9 = false;
         let params = [];
         let brackets = [];
         while (!this.tokenizer.endOfFile()) {
@@ -16206,7 +16206,7 @@ var require_parser2 = __commonJS({
               this.semicolon = true;
               break;
             } else if (type === "{") {
-              open8 = true;
+              open9 = true;
               break;
             } else if (type === "}") {
               if (params.length > 0) {
@@ -16248,7 +16248,7 @@ var require_parser2 = __commonJS({
           node2.raws.afterName = "";
           node2.params = "";
         }
-        if (open8) {
+        if (open9) {
           node2.nodes = [];
           this.current = node2;
         }
@@ -21520,7 +21520,7 @@ var require_websocket = __commonJS({
     var http = __require("http");
     var net = __require("net");
     var tls = __require("tls");
-    var { randomBytes: randomBytes5, createHash: createHash9 } = __require("crypto");
+    var { randomBytes: randomBytes6, createHash: createHash9 } = __require("crypto");
     var { Duplex, Readable: Readable3 } = __require("stream");
     var { URL: URL3 } = __require("url");
     var PerMessageDeflate2 = require_permessage_deflate();
@@ -22058,7 +22058,7 @@ var require_websocket = __commonJS({
         }
       }
       const defaultPort = isSecure ? 443 : 80;
-      const key2 = randomBytes5(16).toString("base64");
+      const key2 = randomBytes6(16).toString("base64");
       const request = isSecure ? https.request : http.request;
       const protocolSet = /* @__PURE__ */ new Set();
       let perMessageDeflate;
@@ -22469,7 +22469,7 @@ var require_stream = __commonJS({
       };
       duplex._final = function(callback) {
         if (ws.readyState === ws.CONNECTING) {
-          ws.once("open", function open8() {
+          ws.once("open", function open9() {
             duplex._final(callback);
           });
           return;
@@ -22490,7 +22490,7 @@ var require_stream = __commonJS({
       };
       duplex._write = function(chunk, encoding, callback) {
         if (ws.readyState === ws.CONNECTING) {
-          ws.once("open", function open8() {
+          ws.once("open", function open9() {
             duplex._write(chunk, encoding, callback);
           });
           return;
@@ -26006,7 +26006,7 @@ var require_compile = __commonJS({
       const schOrFunc = root.refs[ref];
       if (schOrFunc)
         return schOrFunc;
-      let _sch = resolve15.call(this, root, ref);
+      let _sch = resolve16.call(this, root, ref);
       if (_sch === void 0) {
         const schema = (_a5 = root.localRefs) === null || _a5 === void 0 ? void 0 : _a5[ref];
         const { schemaId } = this.opts;
@@ -26033,7 +26033,7 @@ var require_compile = __commonJS({
     function sameSchemaEnv(s1, s2) {
       return s1.schema === s2.schema && s1.root === s2.root && s1.baseId === s2.baseId;
     }
-    function resolve15(root, ref) {
+    function resolve16(root, ref) {
       let sch;
       while (typeof (sch = this.refs[ref]) == "string")
         ref = sch;
@@ -26863,7 +26863,7 @@ var require_fast_uri = __commonJS({
       }
       return uri;
     }
-    function resolve15(baseURI, relativeURI, options) {
+    function resolve16(baseURI, relativeURI, options) {
       const schemelessOptions = options ? Object.assign({ scheme: "null" }, options) : { scheme: "null" };
       const {
         parsed: baseParsed,
@@ -27231,7 +27231,7 @@ var require_fast_uri = __commonJS({
     var fastUri = {
       SCHEMES,
       normalize: normalize3,
-      resolve: resolve15,
+      resolve: resolve16,
       resolveComponent,
       equal,
       serialize,
@@ -33534,8 +33534,8 @@ var require_semaphore = __commonJS({
         this._waiting = [];
       }
       lock(thunk) {
-        return new Promise((resolve15, reject) => {
-          this._waiting.push({ thunk, resolve: resolve15, reject });
+        return new Promise((resolve16, reject) => {
+          this._waiting.push({ thunk, resolve: resolve16, reject });
           this.runNext();
         });
       }
@@ -35160,9 +35160,9 @@ ${JSON.stringify(message2, null, 4)}`);
           if (typeof cancellationStrategy.sender.enableCancellation === "function") {
             cancellationStrategy.sender.enableCancellation(requestMessage);
           }
-          return new Promise(async (resolve15, reject) => {
+          return new Promise(async (resolve16, reject) => {
             const resolveWithCleanup = (r) => {
-              resolve15(r);
+              resolve16(r);
               cancellationStrategy.sender.cleanup(id2);
               disposable?.dispose();
             };
@@ -35592,10 +35592,10 @@ var require_ril = __commonJS({
         return api_1.Disposable.create(() => this.stream.off("end", listener));
       }
       write(data, encoding) {
-        return new Promise((resolve15, reject) => {
+        return new Promise((resolve16, reject) => {
           const callback = (error61) => {
             if (error61 === void 0 || error61 === null) {
-              resolve15();
+              resolve16();
             } else {
               reject(error61);
             }
@@ -35887,10 +35887,10 @@ var require_main = __commonJS({
     }
     function createClientPipeTransport(pipeName, encoding = "utf-8") {
       let connectResolve;
-      const connected = new Promise((resolve15, _reject) => {
-        connectResolve = resolve15;
+      const connected = new Promise((resolve16, _reject) => {
+        connectResolve = resolve16;
       });
-      return new Promise((resolve15, reject) => {
+      return new Promise((resolve16, reject) => {
         const server = (0, net_1.createServer)((socket) => {
           server.close();
           connectResolve([
@@ -35901,7 +35901,7 @@ var require_main = __commonJS({
         server.on("error", reject);
         server.listen(pipeName, () => {
           server.removeListener("error", reject);
-          resolve15({
+          resolve16({
             onConnected: () => {
               return connected;
             }
@@ -35918,10 +35918,10 @@ var require_main = __commonJS({
     }
     function createClientSocketTransport(port, encoding = "utf-8") {
       let connectResolve;
-      const connected = new Promise((resolve15, _reject) => {
-        connectResolve = resolve15;
+      const connected = new Promise((resolve16, _reject) => {
+        connectResolve = resolve16;
       });
-      return new Promise((resolve15, reject) => {
+      return new Promise((resolve16, reject) => {
         const server = (0, net_1.createServer)((socket) => {
           server.close();
           connectResolve([
@@ -35932,7 +35932,7 @@ var require_main = __commonJS({
         server.on("error", reject);
         server.listen(port, "127.0.0.1", () => {
           server.removeListener("error", reject);
-          resolve15({
+          resolve16({
             onConnected: () => {
               return connected;
             }
@@ -39345,7 +39345,7 @@ var require_polyfills = __commonJS({
       }
       if (platform === "win32") {
         fs.rename = typeof fs.rename !== "function" ? fs.rename : (function(fs$rename) {
-          function rename6(from, to, cb) {
+          function rename7(from, to, cb) {
             var start = Date.now();
             var backoff = 0;
             fs$rename(from, to, function CB(er) {
@@ -39365,8 +39365,8 @@ var require_polyfills = __commonJS({
               if (cb) cb(er);
             });
           }
-          if (Object.setPrototypeOf) Object.setPrototypeOf(rename6, fs$rename);
-          return rename6;
+          if (Object.setPrototypeOf) Object.setPrototypeOf(rename7, fs$rename);
+          return rename7;
         })(fs.rename);
       }
       fs.read = typeof fs.read !== "function" ? fs.read : (function(fs$read) {
@@ -39770,8 +39770,8 @@ var require_graceful_fs = __commonJS({
       fs2.createReadStream = createReadStream2;
       fs2.createWriteStream = createWriteStream;
       var fs$readFile = fs2.readFile;
-      fs2.readFile = readFile12;
-      function readFile12(path3, options, cb) {
+      fs2.readFile = readFile13;
+      function readFile13(path3, options, cb) {
         if (typeof options === "function")
           cb = options, options = null;
         return go$readFile(path3, options, cb);
@@ -39787,8 +39787,8 @@ var require_graceful_fs = __commonJS({
         }
       }
       var fs$writeFile = fs2.writeFile;
-      fs2.writeFile = writeFile8;
-      function writeFile8(path3, data, options, cb) {
+      fs2.writeFile = writeFile9;
+      function writeFile9(path3, data, options, cb) {
         if (typeof options === "function")
           cb = options, options = null;
         return go$writeFile(path3, data, options, cb);
@@ -39805,8 +39805,8 @@ var require_graceful_fs = __commonJS({
       }
       var fs$appendFile = fs2.appendFile;
       if (fs$appendFile)
-        fs2.appendFile = appendFile;
-      function appendFile(path3, data, options, cb) {
+        fs2.appendFile = appendFile2;
+      function appendFile2(path3, data, options, cb) {
         if (typeof options === "function")
           cb = options, options = null;
         return go$appendFile(path3, data, options, cb);
@@ -39823,8 +39823,8 @@ var require_graceful_fs = __commonJS({
       }
       var fs$copyFile = fs2.copyFile;
       if (fs$copyFile)
-        fs2.copyFile = copyFile;
-      function copyFile(src, dest, flags, cb) {
+        fs2.copyFile = copyFile2;
+      function copyFile2(src, dest, flags, cb) {
         if (typeof flags === "function") {
           cb = flags;
           flags = 0;
@@ -39842,9 +39842,9 @@ var require_graceful_fs = __commonJS({
         }
       }
       var fs$readdir = fs2.readdir;
-      fs2.readdir = readdir4;
+      fs2.readdir = readdir5;
       var noReaddirOptionVersions = /^v[0-5]\./;
-      function readdir4(path3, options, cb) {
+      function readdir5(path3, options, cb) {
         if (typeof options === "function")
           cb = options, options = null;
         var go$readdir = noReaddirOptionVersions.test(process.version) ? function go$readdir2(path4, options2, cb2, startTime) {
@@ -39947,7 +39947,7 @@ var require_graceful_fs = __commonJS({
       }
       function ReadStream$open() {
         var that = this;
-        open8(that.path, that.flags, that.mode, function(err, fd) {
+        open9(that.path, that.flags, that.mode, function(err, fd) {
           if (err) {
             if (that.autoClose)
               that.destroy();
@@ -39967,7 +39967,7 @@ var require_graceful_fs = __commonJS({
       }
       function WriteStream$open() {
         var that = this;
-        open8(that.path, that.flags, that.mode, function(err, fd) {
+        open9(that.path, that.flags, that.mode, function(err, fd) {
           if (err) {
             that.destroy();
             that.emit("error", err);
@@ -39984,8 +39984,8 @@ var require_graceful_fs = __commonJS({
         return new fs2.WriteStream(path3, options);
       }
       var fs$open = fs2.open;
-      fs2.open = open8;
-      function open8(path3, flags, mode, cb) {
+      fs2.open = open9;
+      function open9(path3, flags, mode, cb) {
         if (typeof mode === "function")
           cb = mode, mode = null;
         return go$open(path3, flags, mode, cb);
@@ -40483,11 +40483,11 @@ var require_mtime_precision = __commonJS({
     function probe(file2, fs, callback) {
       const cachedPrecision = fs[cacheSymbol];
       if (cachedPrecision) {
-        return fs.stat(file2, (err, stat15) => {
+        return fs.stat(file2, (err, stat16) => {
           if (err) {
             return callback(err);
           }
-          callback(null, stat15.mtime, cachedPrecision);
+          callback(null, stat16.mtime, cachedPrecision);
         });
       }
       const mtime = new Date(Math.ceil(Date.now() / 1e3) * 1e3 + 5);
@@ -40495,13 +40495,13 @@ var require_mtime_precision = __commonJS({
         if (err) {
           return callback(err);
         }
-        fs.stat(file2, (err2, stat15) => {
+        fs.stat(file2, (err2, stat16) => {
           if (err2) {
             return callback(err2);
           }
-          const precision = stat15.mtime.getTime() % 1e3 === 0 ? "s" : "ms";
+          const precision = stat16.mtime.getTime() % 1e3 === 0 ? "s" : "ms";
           Object.defineProperty(fs, cacheSymbol, { value: precision });
-          callback(null, stat15.mtime, precision);
+          callback(null, stat16.mtime, precision);
         });
       });
     }
@@ -40555,14 +40555,14 @@ var require_lockfile = __commonJS({
         if (options.stale <= 0) {
           return callback(Object.assign(new Error("Lock file is already being held"), { code: "ELOCKED", file: file2 }));
         }
-        options.fs.stat(lockfilePath, (err2, stat15) => {
+        options.fs.stat(lockfilePath, (err2, stat16) => {
           if (err2) {
             if (err2.code === "ENOENT") {
               return acquireLock(file2, { ...options, stale: 0 }, callback);
             }
             return callback(err2);
           }
-          if (!isLockStale(stat15, options)) {
+          if (!isLockStale(stat16, options)) {
             return callback(Object.assign(new Error("Lock file is already being held"), { code: "ELOCKED", file: file2 }));
           }
           removeLock(file2, options, (err3) => {
@@ -40574,8 +40574,8 @@ var require_lockfile = __commonJS({
         });
       });
     }
-    function isLockStale(stat15, options) {
-      return stat15.mtime.getTime() < Date.now() - options.stale;
+    function isLockStale(stat16, options) {
+      return stat16.mtime.getTime() < Date.now() - options.stale;
     }
     function removeLock(file2, options, callback) {
       options.fs.rmdir(getLockFile(file2, options), (err) => {
@@ -40593,7 +40593,7 @@ var require_lockfile = __commonJS({
       lock2.updateDelay = lock2.updateDelay || options.update;
       lock2.updateTimeout = setTimeout(() => {
         lock2.updateTimeout = null;
-        options.fs.stat(lock2.lockfilePath, (err, stat15) => {
+        options.fs.stat(lock2.lockfilePath, (err, stat16) => {
           const isOverThreshold = lock2.lastUpdate + options.stale < Date.now();
           if (err) {
             if (err.code === "ENOENT" || isOverThreshold) {
@@ -40602,7 +40602,7 @@ var require_lockfile = __commonJS({
             lock2.updateDelay = 1e3;
             return updateLock(file2, options);
           }
-          const isMtimeOurs = lock2.mtime.getTime() === stat15.mtime.getTime();
+          const isMtimeOurs = lock2.mtime.getTime() === stat16.mtime.getTime();
           if (!isMtimeOurs) {
             return setLockAsCompromised(
               file2,
@@ -40727,11 +40727,11 @@ var require_lockfile = __commonJS({
         if (err) {
           return callback(err);
         }
-        options.fs.stat(getLockFile(file3, options), (err2, stat15) => {
+        options.fs.stat(getLockFile(file3, options), (err2, stat16) => {
           if (err2) {
             return err2.code === "ENOENT" ? callback(null, false) : callback(err2);
           }
-          return callback(null, !isLockStale(stat15, options));
+          return callback(null, !isLockStale(stat16, options));
         });
       });
     }
@@ -40777,12 +40777,12 @@ var require_adapter = __commonJS({
       return newFs;
     }
     function toPromise(method2) {
-      return (...args) => new Promise((resolve15, reject) => {
+      return (...args) => new Promise((resolve16, reject) => {
         args.push((err, result) => {
           if (err) {
             reject(err);
           } else {
-            resolve15(result);
+            resolve16(result);
           }
         });
         method2(...args);
@@ -40857,19 +40857,10 @@ var require_proper_lockfile = __commonJS({
 
 // src/backend.ts
 import { createServer as createServer2 } from "node:net";
-import { chmod as chmod5, mkdir as mkdir10, readFile as readFile11 } from "node:fs/promises";
-import { dirname as dirname11, resolve as resolve14 } from "node:path";
+import { randomUUID as randomUUID17 } from "node:crypto";
+import { chmod as chmod6, mkdir as mkdir11, readFile as readFile12 } from "node:fs/promises";
+import { dirname as dirname11, join as join21, resolve as resolve15 } from "node:path";
 import { fileURLToPath } from "node:url";
-
-// src/preferences.ts
-var import_yaml2 = __toESM(require_dist(), 1);
-import { createHash as createHash2 } from "node:crypto";
-import { open as open3 } from "node:fs/promises";
-
-// src/configuration.ts
-import { createHash, randomUUID } from "node:crypto";
-import { mkdir, open as open2, readFile, rename, rm, stat } from "node:fs/promises";
-import { dirname, join, basename } from "node:path";
 
 // ../../../../../alder/host/node_modules/env-paths/index.js
 import path from "node:path";
@@ -40961,7 +40952,15 @@ function envPaths(name, { suffix = "nodejs" } = {}) {
   return linux(name);
 }
 
+// src/preferences.ts
+var import_yaml2 = __toESM(require_dist(), 1);
+import { createHash as createHash2 } from "node:crypto";
+import { open as open3 } from "node:fs/promises";
+
 // src/configuration.ts
+import { createHash, randomUUID } from "node:crypto";
+import { mkdir, open as open2, readFile, rename, rm, stat } from "node:fs/promises";
+import { dirname, join, basename } from "node:path";
 var import_yaml = __toESM(require_dist(), 1);
 
 // ../../../../../alder/host/node_modules/zod/v4/classic/external.js
@@ -60332,9 +60331,9 @@ var ApplicationPreferences = class _ApplicationPreferences {
 };
 
 // src/application.ts
-import { randomUUID as randomUUID14 } from "node:crypto";
-import { mkdtemp as mkdtemp5, realpath as realpath10, rm as rm9 } from "node:fs/promises";
-import { basename as basename8, dirname as dirname10, join as join19, resolve as resolve13 } from "node:path";
+import { randomUUID as randomUUID16 } from "node:crypto";
+import { mkdtemp as mkdtemp5, realpath as realpath10, rm as rm10 } from "node:fs/promises";
+import { basename as basename10, dirname as dirname10, join as join20, resolve as resolve14 } from "node:path";
 import { tmpdir as tmpdir6 } from "node:os";
 
 // ../../../../../alder/host/node_modules/chokidar/index.js
@@ -60535,9 +60534,9 @@ var ReaddirpStream = class extends Readable {
   }
   // Synchronous in dirent mode; returns a promise only when stats are needed.
   _formatEntry(dirent, path3) {
-    const basename9 = this._isDirent ? dirent.name : dirent;
-    const fullPath = pjoin(path3, basename9);
-    const entry = { path: fullPath.slice(this._relStart), fullPath, basename: basename9 };
+    const basename11 = this._isDirent ? dirent.name : dirent;
+    const fullPath = pjoin(path3, basename11);
+    const entry = { path: fullPath.slice(this._relStart), fullPath, basename: basename11 };
     if (this._isDirent) {
       entry.dirent = dirent;
       return entry;
@@ -61089,9 +61088,9 @@ var NodeFsHandler = class {
   _watchWithNodeFs(path3, listener) {
     const opts = this.fsw.options;
     const directory = sp.dirname(path3);
-    const basename9 = sp.basename(path3);
+    const basename11 = sp.basename(path3);
     const parent = this.fsw._getWatchedDir(directory);
-    parent.add(basename9);
+    parent.add(basename11);
     const absolutePath = sp.resolve(path3);
     const options = {
       persistent: opts.persistent
@@ -61101,7 +61100,7 @@ var NodeFsHandler = class {
     let closer;
     if (opts.usePolling) {
       const enableBin = opts.interval !== opts.binaryInterval;
-      options.interval = enableBin && isBinaryPath(basename9) ? opts.binaryInterval : opts.interval;
+      options.interval = enableBin && isBinaryPath(basename11) ? opts.binaryInterval : opts.interval;
       closer = setFsWatchFileListener(path3, absolutePath, options, {
         listener,
         rawEmitter: this.fsw._emitRaw
@@ -61124,10 +61123,10 @@ var NodeFsHandler = class {
       return;
     }
     const dirname12 = sp.dirname(file2);
-    const basename9 = sp.basename(file2);
+    const basename11 = sp.basename(file2);
     const parent = this.fsw._getWatchedDir(dirname12);
     let prevStats = stats;
-    if (parent.has(basename9))
+    if (parent.has(basename11))
       return;
     const listener = async (path3, newStats) => {
       if (!this.fsw._throttle(THROTTLE_MODE_WATCH, file2, 5))
@@ -61152,9 +61151,9 @@ var NodeFsHandler = class {
             prevStats = newStats2;
           }
         } catch (error61) {
-          this.fsw._remove(dirname12, basename9);
+          this.fsw._remove(dirname12, basename11);
         }
-      } else if (parent.has(basename9)) {
+      } else if (parent.has(basename11)) {
         const at = newStats.atimeMs;
         const mt = newStats.mtimeMs;
         if (!at || at <= mt || mt !== prevStats.mtimeMs) {
@@ -61249,7 +61248,7 @@ var NodeFsHandler = class {
         this._addToNodeFs(path3, initialAdd, wh, depth + 1);
       }
     }).on(EV.ERROR, this._boundHandleError);
-    return new Promise((resolve15, reject) => {
+    return new Promise((resolve16, reject) => {
       if (!stream)
         return reject();
       stream.once(STR_END, () => {
@@ -61258,7 +61257,7 @@ var NodeFsHandler = class {
           return;
         }
         const wasThrottled = throttler ? throttler.clear() : false;
-        resolve15(void 0);
+        resolve16(void 0);
         previous.getChildren().filter((item) => {
           return item !== directory && !current.has(item);
         }).forEach((item) => {
@@ -61985,8 +61984,8 @@ var FSWatcher = class extends EventEmitter {
     }
     return this._userIgnored(path3, stats);
   }
-  _isntIgnored(path3, stat15) {
-    return !this._isIgnored(path3, stat15);
+  _isntIgnored(path3, stat16) {
+    return !this._isIgnored(path3, stat16);
   }
   /**
    * Provides a set of common helpers and properties relating to symlink handling.
@@ -63305,6 +63304,22 @@ var windowStateSchema = external_exports.object({
   saveState: external_exports.enum(["edited", "saving", "saved", "failed"]),
   sessionEpoch: idSchema
 }).strict();
+var visibleResultDiagnosticSchema = external_exports.object({
+  event: external_exports.literal("run.visible"),
+  operationId: idSchema,
+  runId: idSchema.nullable(),
+  cellId: idSchema,
+  revision: revisionSchema,
+  inputToHandlerMs: external_exports.number().finite().nonnegative().max(24 * 60 * 60 * 1e3),
+  handlerToVisibleMs: external_exports.number().finite().nonnegative().max(24 * 60 * 60 * 1e3),
+  inputToVisibleMs: external_exports.number().finite().nonnegative().max(24 * 60 * 60 * 1e3),
+  proxy: external_exports.literal("two-animation-frames")
+}).strict();
+var rendererFailureDiagnosticSchema = external_exports.object({
+  event: external_exports.enum(["renderer.error", "renderer.unhandled_rejection", "renderer.bootstrap_failed"]),
+  category: external_exports.enum(["script-error", "unhandled-rejection", "bootstrap-failed"])
+}).strict();
+var desktopDiagnosticSchema = external_exports.discriminatedUnion("event", [visibleResultDiagnosticSchema, rendererFailureDiagnosticSchema]);
 var desktopRecoveryRequestSchema = external_exports.object({
   recoveryId: external_exports.string().regex(/^[A-Za-z0-9_-]{1,128}$/),
   action: external_exports.enum(["read", "write", "remove"]),
@@ -66266,8 +66281,8 @@ var REBuilder = class {
   escapeRE(str) {
     return str.replace(/[.?*+^$[\]\\(){}|-]/g, "\\$&");
   }
-  nestedPairRE(open8, close, depth = 4) {
-    const openRE = this.escapeRE(open8);
+  nestedPairRE(open9, close, depth = 4) {
+    const openRE = this.escapeRE(open9);
     const closeRE = this.escapeRE(close);
     const atom = `(?:(?!${this.src_ZCc}|${openRE}|${closeRE}).)`;
     let pair = `${openRE}${atom}{0,1000}${closeRE}`;
@@ -69212,9 +69227,9 @@ function linkify(state, silent) {
   while (protoStart > protoMin && isSchemeChar(state.src.charCodeAt(protoStart - 1))) protoStart--;
   if (protoStart === pos || !isAsciiAlpha(state.src.charCodeAt(protoStart))) return false;
   const protoLength = pos - protoStart;
-  const link3 = state.md.linkify.matchAtStart(state.src.slice(protoStart));
-  if (!link3) return false;
-  let url2 = link3.url;
+  const link4 = state.md.linkify.matchAtStart(state.src.slice(protoStart));
+  if (!link4) return false;
+  let url2 = link4.url;
   if (url2.length <= protoLength) return false;
   let urlEnd = url2.length;
   while (urlEnd > 0 && url2.charCodeAt(urlEnd - 1) === 42) urlEnd--;
@@ -71796,8 +71811,8 @@ var OutputStore = class {
   async withArtifactWriteLock(operation) {
     const previous = this.writeTail;
     let release;
-    this.writeTail = new Promise((resolve15) => {
-      release = resolve15;
+    this.writeTail = new Promise((resolve16) => {
+      release = resolve16;
     });
     await previous;
     try {
@@ -72255,10 +72270,14 @@ var Controller = class {
   engineRestarting = false;
   packageRestartPending = false;
   runtimeContextReservation;
+  diagnostics;
+  diagnosticProgressSeen = /* @__PURE__ */ new Set();
+  diagnosticRunPhases = /* @__PURE__ */ new Map();
   constructor(options) {
     this.engine = options.engine;
     this.outputStore = options.outputStore;
     this.services = options.services ?? {};
+    this.diagnostics = options.diagnostics;
     this.epochValue = options.epoch ?? randomUUID3();
     let notebook;
     let sourceDocument;
@@ -72637,10 +72656,22 @@ var Controller = class {
       ...value.text === void 0 ? {} : { text: value.text },
       ...value.data === void 0 ? {} : { data: value.data }
     };
+    const diagnosticKey = this.operationKey(operation.clientId, operationId);
+    if (!this.diagnosticProgressSeen.has(diagnosticKey)) {
+      this.diagnosticProgressSeen.add(diagnosticKey);
+      this.diagnostics?.record("info", "operation.progress", {
+        operationId,
+        clientId: operation.clientId,
+        kind: "packages-install",
+        phase: value.phase,
+        documentRevision: this.documentRevisionValue
+      });
+    }
     this.rememberOperation(operation);
   }
   recordActionError(message2, code2 = "internal_error") {
     this.assertNotClosed();
+    this.diagnostics?.record("warn", "host.action_failure", { errorCode: code2, outcome: "error" });
     this.replaceLastActionError(hostError(code2, message2));
   }
   recordRuntimeAvailabilityError(error61) {
@@ -72664,7 +72695,7 @@ var Controller = class {
       return Promise.reject(new ControllerError("not_found", `no such operation: ${id2}`, 404));
     }
     if (isTerminal(current.status)) return Promise.resolve(clone3(current));
-    return new Promise((resolve15, reject) => {
+    return new Promise((resolve16, reject) => {
       if (signal?.aborted) {
         reject(abortError());
         return;
@@ -72672,7 +72703,7 @@ var Controller = class {
       const waiters = this.operationWaiters.get(key2) ?? /* @__PURE__ */ new Set();
       const finish = (operation) => {
         signal?.removeEventListener("abort", abort);
-        resolve15(clone3(operation));
+        resolve16(clone3(operation));
       };
       const abort = () => {
         waiters.delete(finish);
@@ -72716,9 +72747,30 @@ var Controller = class {
     }
     this.registerClient(command.clientId);
     this.createOperation(command.requestId, command.type, command.clientId);
+    if (command.type === "run") this.diagnosticRunPhases.set(this.operationKey(command.clientId, command.requestId), {
+      dispatched: false,
+      output: false,
+      kernelCompleted: false
+    });
+    const acceptedAt = performance.now();
+    this.diagnostics?.record("info", "operation.accepted", {
+      operationId: command.requestId,
+      kind: command.type,
+      clientId: command.clientId,
+      documentRevision: this.documentRevisionValue
+    });
     if (isExecutionCommand(command.type)) this.executionRequestIds.set(command.requestId, fingerprint2);
     const operationCompletion = this.awaitOperation(command.requestId, command.clientId);
-    const execute = () => this.executeCommand(command, operationCompletion);
+    const execute = () => {
+      this.diagnostics?.record("info", "operation.started", {
+        operationId: command.requestId,
+        clientId: command.clientId,
+        kind: command.type,
+        queueMs: Math.round(performance.now() - acceptedAt),
+        documentRevision: this.documentRevisionValue
+      });
+      return this.executeCommand(command, operationCompletion);
+    };
     let completion;
     if (command.type === "run") {
       this.queuedRunCommands.set(command.requestId, command);
@@ -72736,11 +72788,59 @@ var Controller = class {
       settled: false
     };
     this.commandEntries.set(command.requestId, entry);
+    void completion.then((result) => {
+      this.diagnosticProgressSeen.delete(this.operationKey(command.clientId, command.requestId));
+      const runId = isRecord(result.result) && typeof result.result.runId === "string" ? result.result.runId : null;
+      const cancelled = result.error?.code === "cancelled";
+      this.diagnostics?.record(result.error ? "warn" : "info", cancelled ? "operation.cancelled" : result.error ? "operation.failed" : "operation.settled", {
+        operationId: command.requestId,
+        clientId: command.clientId,
+        kind: command.type,
+        runId,
+        outcome: cancelled ? "cancelled" : result.error ? "error" : "success",
+        errorCode: result.error?.code ?? null,
+        notApplicablePhases: command.type === "run" ? this.runNotApplicablePhases(command.clientId, command.requestId) : [],
+        durationMs: Math.round(performance.now() - acceptedAt),
+        documentRevision: result.documentRevision
+      });
+    }, (error61) => {
+      this.diagnosticProgressSeen.delete(this.operationKey(command.clientId, command.requestId));
+      this.diagnostics?.record("error", "operation.failed", {
+        operationId: command.requestId,
+        clientId: command.clientId,
+        kind: command.type,
+        outcome: "error",
+        errorCode: error61 instanceof ControllerError ? error61.code : "internal_error",
+        errorType: error61 instanceof Error ? error61.name : "unknown",
+        notApplicablePhases: command.type === "run" ? this.runNotApplicablePhases(command.clientId, command.requestId) : [],
+        durationMs: Math.round(performance.now() - acceptedAt),
+        documentRevision: this.documentRevisionValue
+      });
+    });
     void completion.finally(() => {
       entry.settled = true;
       this.trimCommandEntries();
     }).catch(() => void 0);
     return completion.then(clone3);
+  }
+  diagnosticOperationPhase(clientId, operationId, phase, kind = "run") {
+    this.diagnostics?.record("info", "operation.phase", {
+      clientId,
+      operationId,
+      kind,
+      phase,
+      documentRevision: this.documentRevisionValue
+    });
+  }
+  runNotApplicablePhases(clientId, operationId) {
+    const key2 = this.operationKey(clientId, operationId);
+    const state = this.diagnosticRunPhases.get(key2);
+    this.diagnosticRunPhases.delete(key2);
+    if (!state) return [];
+    return [
+      ...state.output ? [] : ["first-output"],
+      ...state.dispatched ? [] : ["kernel-dispatch", "kernel-completion"]
+    ];
   }
   /** Register an authenticated client lease exactly once. */
   registerClient(clientId) {
@@ -73018,6 +73118,8 @@ var Controller = class {
       switch (command.type) {
         case "transaction":
           result = await this.applyTransaction(command.changes, command.expectedDocumentRevision, command.requestId, false);
+          this.diagnosticOperationPhase(command.clientId, command.requestId, "recovery-flush", "transaction");
+          this.diagnosticOperationPhase(command.clientId, command.requestId, "authoritative-ack", "transaction");
           this.scheduleReactiveRun();
           break;
         case "run":
@@ -73061,6 +73163,8 @@ var Controller = class {
           break;
         case "save":
           result = await this.saveNotebook(command.expectedDocumentRevision, command.requestId);
+          this.diagnosticOperationPhase(command.clientId, command.requestId, "publication", "save");
+          this.diagnosticOperationPhase(command.clientId, command.requestId, "clean", "save");
           break;
         case "save-as":
         case "reload-source":
@@ -73716,6 +73820,7 @@ var Controller = class {
       await this.ensureCurrentAnalysis();
       this.assertDocumentRevision(runDocumentRevision);
       if (this.cancelRunPreparation(preparation)) return void 0;
+      this.diagnosticOperationPhase(command.clientId, command.requestId, "analysis-ready");
       this.assertExecutionPossible();
       this.assertGraphRunnable();
       let plan;
@@ -73806,7 +73911,10 @@ var Controller = class {
     operation.cellIds = jobs.map((job) => job.id);
     operation.executionDone = jobs.length === 0;
     operation.resetOperationIds ??= [];
-    if (jobs.length === 0 && !deferEmptySettlement) operation.settledAt = Date.now();
+    if (jobs.length === 0 && !deferEmptySettlement) {
+      operation.settledAt = Date.now();
+      this.diagnosticOperationPhase(clientId, operationId, "authoritative-completion");
+    }
     this.rememberOperation(operation);
     this.runOperationById.set(runId, this.operationKey(clientId, operationId));
     for (const job of jobs) this.reactivePending.delete(job.id);
@@ -73938,6 +74046,11 @@ var Controller = class {
       };
       let response;
       try {
+        const diagnosticState = this.diagnosticRunPhases.get(this.operationKey(job.clientId, job.operationId));
+        if (diagnosticState && !diagnosticState.dispatched) {
+          diagnosticState.dispatched = true;
+          this.diagnosticOperationPhase(job.clientId, job.operationId, "kernel-dispatch");
+        }
         const result = await this.engine.evaluate(
           this.evaluationPayload(job),
           (event) => this.handleEngineEvent(event),
@@ -73990,6 +74103,12 @@ var Controller = class {
     for (const job of jobs) this.cancelOwnedOperations(job.id);
     this.clearVariables();
     try {
+      const firstJob = jobs[0];
+      const diagnosticState = this.diagnosticRunPhases.get(this.operationKey(firstJob.clientId, firstJob.operationId));
+      if (diagnosticState && !diagnosticState.dispatched) {
+        diagnosticState.dispatched = true;
+        this.diagnosticOperationPhase(firstJob.clientId, firstJob.operationId, "kernel-dispatch");
+      }
       await this.engine.evaluateBatch(jobs.map((job) => this.evaluationPayload(job)), async (event) => {
         const active = states.get(event.cellId);
         if (active === void 0) throw new Error("batch event identifies an unknown cell");
@@ -74185,6 +74304,11 @@ var Controller = class {
         job
       ) : void 0;
       if (event.kind === "append" && output2 === null) return;
+      const diagnosticState = this.diagnosticRunPhases.get(this.operationKey(job.clientId, job.operationId));
+      if (diagnosticState && !diagnosticState.output) {
+        diagnosticState.output = true;
+        this.diagnosticOperationPhase(job.clientId, job.operationId, "first-output");
+      }
       this.applyOutputEvent(event, active, output2 ?? void 0);
     } catch (error61) {
       active.protocolFailure = asControllerError(error61, "invalid_engine_event", 503);
@@ -74720,6 +74844,12 @@ var Controller = class {
     operation.executionDone = true;
     const operationId = operation.id;
     const operationClientId = operation.clientId;
+    const diagnosticState = this.diagnosticRunPhases.get(this.operationKey(operationClientId, operationId));
+    if (diagnosticState?.dispatched && !diagnosticState.kernelCompleted) {
+      diagnosticState.kernelCompleted = true;
+      this.diagnosticOperationPhase(operationClientId, operationId, "kernel-completion");
+    }
+    this.diagnosticOperationPhase(operationClientId, operationId, "authoritative-completion");
     const resets = operation.resetOperationIds ?? [];
     const interruption = this.interruptedRuns.get(runId);
     if (interruption !== void 0) {
@@ -78343,7 +78473,7 @@ var ArkKernel = class extends EventEmitter2 {
   async executeOnce(code2, callbacks, options) {
     if (!this.ready || this.shell === void 0) throw new Error("Ark kernel is unavailable");
     const id2 = newMessageId();
-    const result = new Promise((resolve15, reject) => {
+    const result = new Promise((resolve16, reject) => {
       const pending = {
         expectedType: "execute_reply",
         messages: [],
@@ -78351,7 +78481,7 @@ var ArkKernel = class extends EventEmitter2 {
         callbacks,
         idle: false,
         started: false,
-        executionResolve: resolve15,
+        executionResolve: resolve16,
         resolve: (reply) => {
           pending.reply = reply;
           this.finishExecution(id2);
@@ -78418,8 +78548,8 @@ var ArkKernel = class extends EventEmitter2 {
   async connectLsp() {
     if (!this.ready || this.shell === void 0) throw new Error("Ark kernel is unavailable");
     const commId = randomUUID4();
-    const response = new Promise((resolve15, reject) => {
-      this.lspCommPending.set(commId, { resolve: resolve15, reject });
+    const response = new Promise((resolve16, reject) => {
+      this.lspCommPending.set(commId, { resolve: resolve16, reject });
     });
     try {
       await sendMessage(this.shell, this.key, this.session, "comm_open", {
@@ -78435,8 +78565,8 @@ var ArkKernel = class extends EventEmitter2 {
       }
       const socket = createConnection({ host: "127.0.0.1", port });
       try {
-        await withTimeout(new Promise((resolve15, reject) => {
-          socket.once("connect", resolve15);
+        await withTimeout(new Promise((resolve16, reject) => {
+          socket.once("connect", resolve16);
           socket.once("error", reject);
         }), this.options.startupTimeoutMs, "Ark LSP socket");
       } catch (error61) {
@@ -78606,10 +78736,10 @@ var ArkKernel = class extends EventEmitter2 {
   async waitForWelcome() {
     if (this.welcomed) return;
     if (this.failure !== void 0) throw this.failure;
-    await withTimeout(new Promise((resolve15, reject) => {
+    await withTimeout(new Promise((resolve16, reject) => {
       const onWelcome = () => {
         cleanup();
-        resolve15();
+        resolve16();
       };
       const onFailure = (error61) => {
         cleanup();
@@ -78767,8 +78897,8 @@ var ArkKernel = class extends EventEmitter2 {
     if (socket === void 0) throw new Error("Ark channel is unavailable");
     if (pendingMap.size >= MAX_PENDING_REQUESTS) throw new Error("Ark request queue is full");
     const id2 = newMessageId();
-    const response = new Promise((resolve15, reject) => {
-      pendingMap.set(id2, { expectedType, resolve: resolve15, reject });
+    const response = new Promise((resolve16, reject) => {
+      pendingMap.set(id2, { expectedType, resolve: resolve16, reject });
     });
     try {
       await sendMessage(
@@ -81489,8 +81619,8 @@ async function writePrivateFile(path3, bytes) {
   } catch (error61) {
     if (!isMissing(error61)) throw error61;
   }
-  const basename9 = inspection.path.slice(inspection.path.lastIndexOf(sep) + 1);
-  const temporary = join9(parent, `.${basename9}.${randomUUID6()}.tmp`);
+  const basename11 = inspection.path.slice(inspection.path.lastIndexOf(sep) + 1);
+  const temporary = join9(parent, `.${basename11}.${randomUUID6()}.tmp`);
   let handle;
   try {
     const flags = constants2.O_WRONLY | constants2.O_CREAT | constants2.O_EXCL | (constants2.O_NOFOLLOW ?? 0);
@@ -81987,7 +82117,7 @@ function artifactNeedsChildSandbox(mimeType) {
   return essence === "text/html" || essence === "application/xhtml+xml" || essence === "text/xml" || essence === "application/xml" || essence.endsWith("+xml");
 }
 function waitForResponseDrain(response) {
-  return new Promise((resolve15, reject) => {
+  return new Promise((resolve16, reject) => {
     const cleanup = () => {
       response.off("drain", onDrain);
       response.off("error", onError);
@@ -81995,7 +82125,7 @@ function waitForResponseDrain(response) {
     };
     const onDrain = () => {
       cleanup();
-      resolve15();
+      resolve16();
     };
     const onError = (error61) => {
       cleanup();
@@ -82685,6 +82815,37 @@ function createAlderServer(options) {
       }
       return;
     }
+    if (path3 === "/api/diagnostics/flush") {
+      if (!method(response, request.method ?? "", "POST")) return;
+      requireLease(request, true);
+      await options.flushDiagnostics?.();
+      jsonResponse(response, 200, { flushed: true });
+      return;
+    }
+    if (path3 === "/api/diagnostics/phase") {
+      if (!method(response, request.method ?? "", "POST")) return;
+      const resolved = requireLease(request, true);
+      const body = external_exports.object({
+        operationId: external_exports.string().min(1).max(256),
+        runId: external_exports.string().min(1).max(256).nullable(),
+        cellId: external_exports.string().min(1).max(256),
+        revision: external_exports.number().int().nonnegative(),
+        phase: external_exports.literal("visible-result"),
+        durationMs: external_exports.number().finite().nonnegative().max(24 * 60 * 60 * 1e3)
+      }).strict().parse(await readJsonBody(request, maxJson));
+      options.diagnostics?.record("info", "operation.phase", {
+        clientId: resolved.lease.clientId,
+        operationId: body.operationId,
+        runId: body.runId,
+        cellId: body.cellId,
+        cellRevision: body.revision,
+        phase: body.phase,
+        durationMs: Math.round(body.durationMs),
+        kind: "run"
+      });
+      jsonResponse(response, 200, { recorded: true });
+      return;
+    }
     if (path3 === "/api/query") {
       if (!method(response, request.method ?? "", "POST")) return;
       const resolved = requireLease(request, true);
@@ -82812,6 +82973,26 @@ function createAlderServer(options) {
   }
   const server = createHttpServer((request, response) => {
     void handleHttp(request, response).catch((error61) => {
+      const detail = errorPayload(error61);
+      const pathname = (() => {
+        try {
+          return new URL2(request.url ?? "/", "http://localhost").pathname;
+        } catch {
+          return "/";
+        }
+      })();
+      const kind = pathname.startsWith("/artifacts/") ? "artifact" : pathname.startsWith("/api/upload") ? "upload" : pathname === "/api/query" ? "query" : pathname === "/mcp" ? "mcp" : "request";
+      const contentType3 = String(request.headers["content-type"] ?? "").split(";", 1)[0].toLowerCase();
+      const family = /^(text|image|audio|video|application)\//.exec(contentType3)?.[1] ?? (contentType3 ? "other" : "none");
+      const declaredBytes = Number(request.headers["content-length"]);
+      options.diagnostics?.record(detail.status < 500 ? "warn" : "error", "boundary.rejected", {
+        kind,
+        mimeFamily: family,
+        bytes: Number.isSafeInteger(declaredBytes) && declaredBytes >= 0 ? declaredBytes : null,
+        status: detail.status,
+        errorCode: detail.code,
+        outcome: "error"
+      });
       if (response.writableEnded || response.destroyed) return;
       if (!response.headersSent) failResponse(response, error61);
       else response.destroy();
@@ -83619,7 +83800,7 @@ var readBodyDirect = (request) => {
     request[bodyBufferKey] = buffered;
     return Promise.resolve(buffered);
   }
-  const promise2 = new Promise((resolve15, reject) => {
+  const promise2 = new Promise((resolve16, reject) => {
     const chunks = [];
     let settled = false;
     const finish = (callback) => {
@@ -83637,7 +83818,7 @@ var readBodyDirect = (request) => {
         else if (recovered === void 0) reject(error61 ?? normalizeAbortError(request, incoming));
         else {
           request[bodyBufferKey] = recovered;
-          resolve15(recovered);
+          resolve16(recovered);
         }
       });
       return true;
@@ -83649,7 +83830,7 @@ var readBodyDirect = (request) => {
       finish(() => {
         const buffer = chunks.length === 1 ? chunks[0] : Buffer.concat(chunks);
         request[bodyBufferKey] = buffer;
-        resolve15(buffer);
+        resolve16(buffer);
       });
     };
     const onError = (error61) => {
@@ -84174,7 +84355,7 @@ var responseViaResponseObject = async (res, outgoing, options = {}) => {
         });
         if (!chunk) {
           if (i === 1) {
-            await new Promise((resolve15) => setTimeout(resolve15));
+            await new Promise((resolve16) => setTimeout(resolve16));
             maxReadCount = 3;
             continue;
           }
@@ -86387,9 +86568,9 @@ data:
       const initRequest = messages.find((m) => isInitializeRequest(m));
       const clientProtocolVersion = initRequest ? initRequest.params.protocolVersion : req.headers.get("mcp-protocol-version") ?? DEFAULT_NEGOTIATED_PROTOCOL_VERSION;
       if (this._enableJsonResponse) {
-        return new Promise((resolve15) => {
+        return new Promise((resolve16) => {
           this._streamMapping.set(streamId, {
-            resolveJson: resolve15,
+            resolveJson: resolve16,
             cleanup: () => {
               this._streamMapping.delete(streamId);
             }
@@ -92729,7 +92910,7 @@ var Protocol = class {
           return;
         }
         const pollInterval = task2.pollInterval ?? this._options?.defaultTaskPollInterval ?? 1e3;
-        await new Promise((resolve15) => setTimeout(resolve15, pollInterval));
+        await new Promise((resolve16) => setTimeout(resolve16, pollInterval));
         options?.signal?.throwIfAborted();
       }
     } catch (error61) {
@@ -92746,7 +92927,7 @@ var Protocol = class {
    */
   request(request, resultSchema, options) {
     const { relatedRequestId, resumptionToken, onresumptiontoken, task, relatedTask } = options ?? {};
-    return new Promise((resolve15, reject) => {
+    return new Promise((resolve16, reject) => {
       const earlyReject = (error61) => {
         reject(error61);
       };
@@ -92824,7 +93005,7 @@ var Protocol = class {
           if (!parseResult.success) {
             reject(parseResult.error);
           } else {
-            resolve15(parseResult.data);
+            resolve16(parseResult.data);
           }
         } catch (error61) {
           reject(error61);
@@ -93085,12 +93266,12 @@ var Protocol = class {
       }
     } catch {
     }
-    return new Promise((resolve15, reject) => {
+    return new Promise((resolve16, reject) => {
       if (signal.aborted) {
         reject(new McpError(ErrorCode.InvalidRequest, "Request cancelled"));
         return;
       }
-      const timeoutId = setTimeout(resolve15, interval);
+      const timeoutId = setTimeout(resolve16, interval);
       signal.addEventListener("abort", () => {
         clearTimeout(timeoutId);
         reject(new McpError(ErrorCode.InvalidRequest, "Request cancelled"));
@@ -94403,7 +94584,7 @@ var McpServer = class {
     let task = createTaskResult.task;
     const pollInterval = task.pollInterval ?? 5e3;
     while (task.status !== "completed" && task.status !== "failed" && task.status !== "cancelled") {
-      await new Promise((resolve15) => setTimeout(resolve15, pollInterval));
+      await new Promise((resolve16) => setTimeout(resolve16, pollInterval));
       const updatedTask = await extra.taskStore.getTask(taskId);
       if (!updatedTask) {
         throw new McpError(ErrorCode.InternalError, `Task ${taskId} not found during polling`);
@@ -95140,8 +95321,8 @@ function createMcpServer(options) {
   const subscribedResources = /* @__PURE__ */ new Set();
   let resolveReady;
   let readinessGeneration = 0;
-  let ready = new Promise((resolve15) => {
-    resolveReady = resolve15;
+  let ready = new Promise((resolve16) => {
+    resolveReady = resolve16;
   });
   void ready.catch(() => void 0);
   readyByServer.set(server, ready);
@@ -95162,7 +95343,7 @@ function createMcpServer(options) {
     return track(promise2);
   };
   drainByServer.set(server, async () => {
-    await new Promise((resolve15) => setImmediate(resolve15));
+    await new Promise((resolve16) => setImmediate(resolve16));
     if (initialized) await ready;
     while (pending.size > 0) await Promise.allSettled([...pending]);
   });
@@ -95523,7 +95704,7 @@ async function awaitWithAbort(promise2, signals) {
   const watched = signals.filter((signal) => signal !== void 0);
   for (const signal of watched) throwIfAborted2(signal);
   if (watched.length === 0) return promise2;
-  return await new Promise((resolve15, reject) => {
+  return await new Promise((resolve16, reject) => {
     let settled = false;
     const cleanups = [];
     const settle = (callback) => {
@@ -95537,7 +95718,7 @@ async function awaitWithAbort(promise2, signals) {
       signal.addEventListener("abort", onAbort, { once: true });
       cleanups.push(() => signal.removeEventListener("abort", onAbort));
     }
-    void promise2.then((value) => settle(() => resolve15(value)), (error61) => settle(() => reject(error61)));
+    void promise2.then((value) => settle(() => resolve16(value)), (error61) => settle(() => reject(error61)));
   });
 }
 async function awaitWithTimeout(promise2, timeoutMs, timeoutError, signals) {
@@ -95720,6 +95901,7 @@ var RequestBodyError = class extends Error {
   rpcCode;
 };
 function createMcpHttpHandler(options) {
+  options.diagnostics?.record("info", "mcp.endpoint.ready", {});
   const sessions = /* @__PURE__ */ new Map();
   const allSessions = /* @__PURE__ */ new Set();
   const initializingLeases = /* @__PURE__ */ new Set();
@@ -95763,6 +95945,7 @@ function createMcpHttpHandler(options) {
       await session.connectPromise?.catch(() => void 0);
       await session.server.close().catch(() => void 0);
     } finally {
+      options.diagnostics?.record("info", "mcp.session.closed", { clientId: session.clientId, outcome: "success" });
       session.resolveClosed();
     }
     return session.closed;
@@ -95827,7 +96010,12 @@ function createMcpHttpHandler(options) {
       initializingLease = true;
       try {
         session = await makeSession(options, { ...auth, leaseId: auth.leaseId, clientId: auth.clientId }, sessions, allSessions, dispose);
-      } catch {
+      } catch (error61) {
+        options.diagnostics?.record("error", "mcp.session.error", {
+          clientId: auth.clientId,
+          outcome: "error",
+          errorCode: error61?.code ?? "mcp_initialize_failed"
+        });
         initializingLeases.delete(auth.leaseId);
         jsonRpcError(response, 500, -32603, "Internal MCP error");
         return;
@@ -95867,7 +96055,12 @@ function createMcpHttpHandler(options) {
     }
     try {
       await session.transport.handleRequest(authenticated, response, parsedBody);
-    } catch {
+    } catch (error61) {
+      options.diagnostics?.record("error", "mcp.request.error", {
+        clientId: auth.clientId,
+        outcome: "error",
+        errorCode: error61?.code ?? "mcp_internal_error"
+      });
       if (session.transport.sessionId === void 0) await dispose(session).catch(() => void 0);
       if (!response.headersSent && !response.writableEnded) {
         jsonRpcError(response, 500, -32603, "Internal MCP error");
@@ -95890,14 +96083,15 @@ function createMcpHttpHandler(options) {
     initializingLeases.clear();
     abortBodies();
     await Promise.allSettled([...allSessions].map(dispose));
+    options.diagnostics?.record("info", "mcp.endpoint.closed", { outcome: "success" });
   };
   return handler4;
 }
 async function makeSession(options, auth, sessions, allSessions, dispose) {
   let session;
   let resolveClosed;
-  const closed = new Promise((resolve15) => {
-    resolveClosed = resolve15;
+  const closed = new Promise((resolve16) => {
+    resolveClosed = resolve16;
   });
   const transport = new StreamableHTTPServerTransport({
     sessionIdGenerator: randomUUID8,
@@ -95945,8 +96139,8 @@ async function makeSession(options, auth, sessions, allSessions, dispose) {
   };
   let resolveConnect;
   let rejectConnect;
-  const connectPromise = new Promise((resolve15, reject) => {
-    resolveConnect = resolve15;
+  const connectPromise = new Promise((resolve16, reject) => {
+    resolveConnect = resolve16;
     rejectConnect = reject;
   });
   session.connectPromise = connectPromise;
@@ -95954,6 +96148,7 @@ async function makeSession(options, auth, sessions, allSessions, dispose) {
     const established = server.connect(transport);
     established.then(resolveConnect, rejectConnect);
     await connectPromise;
+    options.diagnostics?.record("info", "mcp.session.opened", { clientId: auth.clientId, sessionEpoch: options.controller.snapshot().epoch });
   } catch (error61) {
     rejectConnect(error61);
     await dispose(session);
@@ -96296,12 +96491,12 @@ function workerEnvironment(environment, resources2) {
 }
 async function collect(...streams) {
   let output2 = "";
-  await Promise.all(streams.map((stream) => stream === null ? void 0 : new Promise((resolve15, reject) => {
+  await Promise.all(streams.map((stream) => stream === null ? void 0 : new Promise((resolve16, reject) => {
     stream.on("data", (chunk) => {
       output2 += typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
       if (Buffer.byteLength(output2, "utf8") > MAX_OUTPUT_BYTES) output2 = output2.slice(-MAX_OUTPUT_BYTES / 2);
     });
-    stream.once("end", resolve15);
+    stream.once("end", resolve16);
     stream.once("error", reject);
   })));
   return output2.trim();
@@ -96309,12 +96504,12 @@ async function collect(...streams) {
 async function waitForExit(child, signal, timeoutMs) {
   let timer;
   let abort;
-  const timeout = new Promise((resolve15) => {
-    timer = setTimeout(() => resolve15("timeout"), timeoutMs);
+  const timeout = new Promise((resolve16) => {
+    timer = setTimeout(() => resolve16("timeout"), timeoutMs);
     timer.unref();
   });
-  const cancelled = signal === void 0 ? new Promise(() => void 0) : new Promise((resolve15) => {
-    abort = () => resolve15("cancelled");
+  const cancelled = signal === void 0 ? new Promise(() => void 0) : new Promise((resolve16) => {
+    abort = () => resolve16("cancelled");
     if (signal.aborted) abort();
     else signal.addEventListener("abort", abort, { once: true });
   });
@@ -97228,9 +97423,1006 @@ function decodeBase644(value) {
 }
 
 // src/recovery.ts
-import { createHash as createHash7, randomUUID as randomUUID10 } from "node:crypto";
-import { access as access3, mkdir as mkdir8, open as open7, readFile as readFile8, realpath as realpath8, rename as rename5, rm as rm6 } from "node:fs/promises";
-import { dirname as dirname7, join as join14, resolve as resolve10 } from "node:path";
+import { createHash as createHash7, randomUUID as randomUUID11 } from "node:crypto";
+import { access as access3, mkdir as mkdir9, open as open8, readFile as readFile9, realpath as realpath8, rename as rename6, rm as rm7 } from "node:fs/promises";
+import { dirname as dirname7, join as join15, resolve as resolve11 } from "node:path";
+
+// src/diagnostics.ts
+import { createHmac as createHmac2, randomBytes as randomBytes4, randomUUID as randomUUID10 } from "node:crypto";
+import { appendFile, chmod as chmod3, copyFile, link as link2, mkdir as mkdir8, open as open7, readdir as readdir3, readFile as readFile8, rename as rename5, rm as rm6, stat as stat14, writeFile as writeFile5 } from "node:fs/promises";
+import { basename as basename6, join as join14, resolve as resolve10 } from "node:path";
+var DIAGNOSTIC_SCHEMA_VERSION = 1;
+var DIAGNOSTIC_SEGMENT_BYTES = 5 * 1024 * 1024;
+var DIAGNOSTIC_TOTAL_BYTES = 25 * 1024 * 1024;
+var DIAGNOSTIC_MAX_SEGMENTS = 5;
+var DIAGNOSTIC_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1e3;
+var DIAGNOSTIC_QUEUE_LIMIT = 2048;
+var DIAGNOSTIC_BATCH_SIZE = 128;
+var LOCK_WAIT_MS = 2e3;
+var LOCK_STALE_MS = 3e4;
+var DIAGNOSTIC_EVENTS = [
+  "backend.close.summary",
+  "backend.fatal",
+  "backend.forced_exit",
+  "backend.launch",
+  "backend.session.open",
+  "backend.stop",
+  "backend.uncaught_exception",
+  "backend.unhandled_rejection",
+  "boundary.rejected",
+  "child.cancel",
+  "child.cleanup_failed",
+  "child.exit",
+  "child.kill",
+  "child.spawn",
+  "child.term",
+  "desktop.fatal",
+  "desktop.launch",
+  "desktop.quit",
+  "desktop.uncaught_exception",
+  "desktop.unhandled_rejection",
+  "diagnostic.unknown_event",
+  "host.action_failure",
+  "host.fatal",
+  "host.launch",
+  "host.ready",
+  "host.stop.settled",
+  "host.stop.started",
+  "lsp.failure",
+  "lsp.ready",
+  "lsp.start",
+  "lsp.stop",
+  "mcp.endpoint.closed",
+  "mcp.endpoint.ready",
+  "mcp.request.error",
+  "mcp.session.closed",
+  "mcp.session.error",
+  "mcp.session.opened",
+  "native_command.timeout",
+  "operation.accepted",
+  "operation.cancelled",
+  "operation.failed",
+  "operation.phase",
+  "operation.progress",
+  "operation.settled",
+  "operation.slow",
+  "operation.started",
+  "operation.timing",
+  "persistence.conflict",
+  "persistence.failure",
+  "persistence.recovery_flushed",
+  "process_scope.cleanup_failed",
+  "r.environment.ready",
+  "r.runtime.failure",
+  "r.runtime.ready",
+  "r.runtime.restart",
+  "r.runtime.start",
+  "renderer.bootstrap_failed",
+  "renderer.error",
+  "renderer.gone",
+  "renderer.load_failed",
+  "renderer.ready",
+  "renderer.recovered",
+  "renderer.recovery_failed",
+  "renderer.responsive",
+  "renderer.unhandled_rejection",
+  "renderer.unresponsive",
+  "run.visible",
+  "save.clean_state",
+  "save.source_published",
+  "window.close",
+  "window.open"
+];
+var FIELD_NAMES = /* @__PURE__ */ new Set([
+  "appLaunchId",
+  "backendInstanceId",
+  "sessionId",
+  "sessionEpoch",
+  "documentId",
+  "clientId",
+  "operationId",
+  "runId",
+  "cellId",
+  "childInstanceId",
+  "childRole",
+  "childPid",
+  "windowId",
+  "requestId",
+  "eventSequence",
+  "documentRevision",
+  "cellRevision",
+  "outputGeneration",
+  "phase",
+  "kind",
+  "mimeFamily",
+  "outcome",
+  "status",
+  "reason",
+  "errorCode",
+  "errorType",
+  "durationMs",
+  "queueMs",
+  "analysisMs",
+  "dispatchMs",
+  "firstOutputMs",
+  "completionMs",
+  "visibleMs",
+  "bytes",
+  "count",
+  "dropped",
+  "forced",
+  "cold",
+  "ready",
+  "dirty",
+  "conflict",
+  "truncated",
+  "unknown",
+  "missingPhases",
+  "notApplicablePhases",
+  "observedPhases",
+  "version",
+  "runtimeVersion",
+  "os",
+  "arch",
+  "signal",
+  "exitCode",
+  "lastProgressMs",
+  "activeOperationCount",
+  "activeRunId",
+  "kernelState",
+  "analyzerState",
+  "executionReady",
+  "processCount",
+  "rssBytes",
+  "cpuUserMicros",
+  "cpuSystemMicros",
+  "diagnosticBytes",
+  "recoveryBytes",
+  "artifactBytes",
+  "cacheBytes",
+  "elapsedMs",
+  "thresholdMs",
+  "rendererGeneration",
+  "mode"
+]);
+var ID_FIELDS = /* @__PURE__ */ new Set([
+  "appLaunchId",
+  "backendInstanceId",
+  "sessionId",
+  "sessionEpoch",
+  "documentId",
+  "clientId",
+  "operationId",
+  "runId",
+  "cellId",
+  "childInstanceId",
+  "windowId",
+  "requestId",
+  "activeRunId"
+]);
+var NUMERIC_FIELDS = /* @__PURE__ */ new Set([
+  "eventSequence",
+  "documentRevision",
+  "cellRevision",
+  "outputGeneration",
+  "durationMs",
+  "queueMs",
+  "analysisMs",
+  "dispatchMs",
+  "firstOutputMs",
+  "completionMs",
+  "visibleMs",
+  "bytes",
+  "count",
+  "dropped",
+  "exitCode",
+  "lastProgressMs",
+  "activeOperationCount",
+  "processCount",
+  "rssBytes",
+  "cpuUserMicros",
+  "cpuSystemMicros",
+  "diagnosticBytes",
+  "recoveryBytes",
+  "artifactBytes",
+  "cacheBytes",
+  "elapsedMs",
+  "thresholdMs",
+  "rendererGeneration",
+  "childPid"
+]);
+var BOOLEAN_FIELDS = /* @__PURE__ */ new Set(["forced", "cold", "ready", "dirty", "conflict", "truncated", "unknown", "executionReady"]);
+var SAFE_CATEGORIES = /* @__PURE__ */ new Set([
+  "success",
+  "error",
+  "cancelled",
+  "started",
+  "settled",
+  "running",
+  "queued",
+  "done",
+  "failed",
+  "other",
+  "unknown",
+  "none",
+  "transaction",
+  "save",
+  "save-as",
+  "run",
+  "restart",
+  "format",
+  "publish",
+  "packages-install",
+  "inspect",
+  "widget",
+  "output",
+  "artifact",
+  "upload",
+  "query",
+  "mcp",
+  "request",
+  "shutdown",
+  "stop",
+  "set-config",
+  "set-layout",
+  "set-runtime",
+  "set-app",
+  "reload-source",
+  "cancel-operation",
+  "interrupt",
+  "lazy-output",
+  "table-page",
+  "analysis",
+  "analysis-ready",
+  "analysis-not-applicable",
+  "kernel-dispatch",
+  "first-output",
+  "first-output-not-applicable",
+  "kernel-completion",
+  "authoritative-completion",
+  "visible-result",
+  "terminal",
+  "recovery-flush",
+  "authoritative-ack",
+  "publication",
+  "clean",
+  "environment",
+  "startup",
+  "first-progress",
+  "persistence",
+  "text",
+  "image",
+  "audio",
+  "video",
+  "application",
+  "multipart",
+  "binary",
+  "html",
+  "json",
+  "pdf",
+  "idle",
+  "ready",
+  "starting",
+  "stopping",
+  "unavailable",
+  "blocked",
+  "active",
+  "available",
+  "sigterm",
+  "sigkill",
+  "sigint",
+  "clean-exit",
+  "abnormal-exit",
+  "killed",
+  "crashed",
+  "oom",
+  "launch-failed",
+  "integrity-failure",
+  "script-error",
+  "unhandled-rejection",
+  "bootstrap-failed",
+  "load-failed",
+  "unresponsive",
+  "responsive",
+  "two-animation-frames",
+  "emergency",
+  "desktop",
+  "backend",
+  "host",
+  "renderer",
+  "cli",
+  "node",
+  "r",
+  "rscript",
+  "ark",
+  "air",
+  "quarto",
+  "child",
+  "darwin",
+  "linux",
+  "win32",
+  "arm64",
+  "x64"
+]);
+var SAFE_ERROR_CODES = /* @__PURE__ */ new Set([
+  "cancelled",
+  "internal_error",
+  "unknown",
+  "other",
+  "backend_fatal",
+  "desktop_start_failed",
+  "uncaught_exception",
+  "unhandled_rejection",
+  "close_timeout",
+  "command_timeout",
+  "lease_release_timeout",
+  "lease_release_failed",
+  "renderer_recovery_failed",
+  "renderer_bootstrap_failed",
+  "child_exit_failed",
+  "child_cleanup_failed",
+  "ordinary_exit_cleanup_failed",
+  "process_cleanup_failed",
+  "host_start_failed",
+  "r_environment_failed",
+  "r_start_failed",
+  "lsp_unavailable",
+  "source_conflict",
+  "source_write_failed",
+  "recovery_checkpoint_failed",
+  "sidecar_write_failed",
+  "operation_in_progress",
+  "publish_timeout",
+  "publish_failed",
+  "invalid_request",
+  "not_found",
+  "payload_too_large",
+  "unsupported_media_type",
+  "stale_value",
+  "output_expired",
+  "output_invalid",
+  "output_quota",
+  "service_unavailable",
+  "mcp_initialize_failed",
+  "mcp_internal_error",
+  "session_compromised",
+  "watcher_failed",
+  "recovery_conflict",
+  "ENOENT",
+  "EACCES",
+  "EPERM",
+  "ENOSPC",
+  "EIO"
+]);
+var SAFE_ERROR_TYPES = /* @__PURE__ */ new Set(["Error", "TypeError", "RangeError", "AggregateError", "ControllerError", "PublishingError", "ZodError"]);
+var TERMINAL_EVENTS = /* @__PURE__ */ new Set(["operation.settled", "operation.cancelled", "operation.failed"]);
+var SAFE_EVENTS = new Set(DIAGNOSTIC_EVENTS);
+var SLOW_THRESHOLDS = {
+  transaction: 5e3,
+  save: 1e4,
+  "save-as": 15e3,
+  run: 3e4,
+  restart: 45e3,
+  format: 3e4,
+  publish: 12e4,
+  "packages-install": 12e4,
+  inspect: 15e3
+};
+var EXPECTED_PHASES = {
+  transaction: ["recovery-flush", "authoritative-ack"],
+  save: ["publication", "clean"],
+  "save-as": ["publication", "clean"],
+  run: ["analysis-ready", "kernel-dispatch", "kernel-completion", "authoritative-completion"],
+  restart: ["terminal"],
+  format: ["terminal"],
+  publish: ["terminal"],
+  "packages-install": ["terminal"],
+  inspect: ["terminal"]
+};
+var DiagnosticsCore = class {
+  rootDir;
+  role;
+  component;
+  appLaunchId;
+  backendInstanceId;
+  processInstanceId;
+  appVersion;
+  buildId;
+  queueLimit;
+  segmentBytes;
+  totalBytes;
+  maxSegments;
+  maxAgeMs;
+  flushDelayMs;
+  stderr;
+  now;
+  monotonicNow;
+  slowThresholdMs;
+  queue = [];
+  activeOperations = /* @__PURE__ */ new Map();
+  flushTimer;
+  drainTail = Promise.resolve();
+  initialized = false;
+  disabled = false;
+  closed = false;
+  fallbackReported = false;
+  activePath = "";
+  activeSize = 0;
+  hmacKey;
+  eventSequence = 0;
+  generatedEvents = 0;
+  acceptedEvents = 0;
+  persistedEvents = 0;
+  droppedEvents = 0;
+  unavailableEvents = 0;
+  constructor(options) {
+    this.rootDir = resolve10(options.rootDir);
+    this.role = options.role;
+    this.component = SAFE_CATEGORIES.has(options.component ?? "") ? options.component : options.role;
+    this.appLaunchId = options.appLaunchId ?? randomUUID10();
+    this.backendInstanceId = options.backendInstanceId;
+    this.processInstanceId = options.processInstanceId ?? randomUUID10();
+    this.appVersion = safeVersion(options.appVersion);
+    this.buildId = safeVersion(options.buildId);
+    this.queueLimit = options.queueLimit ?? DIAGNOSTIC_QUEUE_LIMIT;
+    this.segmentBytes = options.segmentBytes ?? DIAGNOSTIC_SEGMENT_BYTES;
+    this.totalBytes = options.totalBytes ?? DIAGNOSTIC_TOTAL_BYTES;
+    this.maxSegments = options.maxSegments ?? DIAGNOSTIC_MAX_SEGMENTS;
+    this.maxAgeMs = options.maxAgeMs ?? DIAGNOSTIC_MAX_AGE_MS;
+    this.flushDelayMs = options.flushDelayMs ?? 25;
+    this.stderr = options.stderr === void 0 ? process.stderr : options.stderr;
+    this.now = options.now ?? (() => /* @__PURE__ */ new Date());
+    this.monotonicNow = options.monotonicNow ?? (() => performance.now());
+    this.slowThresholdMs = options.slowThresholdMs;
+  }
+  enqueue(severity, event, context, fields) {
+    this.generatedEvents++;
+    if (this.disabled || this.closed) {
+      this.unavailableEvents++;
+      return;
+    }
+    if (!/^[a-z][a-z0-9_.-]{1,79}$/.test(event)) {
+      this.droppedEvents++;
+      return;
+    }
+    const admitted = this.queue.length < this.queueLimit;
+    if (admitted) {
+      const sequence = ++this.eventSequence;
+      this.queue.push({
+        sequence,
+        timestamp: this.now().toISOString(),
+        monotonicMs: Math.round(this.monotonicNow() * 1e3) / 1e3,
+        severity,
+        event,
+        context,
+        fields
+      });
+      this.acceptedEvents++;
+    } else this.droppedEvents++;
+    this.observeOperation(event, { ...context, ...fields });
+    if (admitted) this.scheduleFlush(this.queue.length >= 64 ? 0 : this.flushDelayMs);
+  }
+  operationKey(fields) {
+    const operationId = typeof fields.operationId === "string" ? fields.operationId : null;
+    if (!operationId) return null;
+    const clientId = typeof fields.clientId === "string" ? fields.clientId : "internal";
+    return clientId + "\0" + operationId;
+  }
+  observeOperation(event, fields) {
+    const key2 = this.operationKey(fields);
+    if (!key2) return;
+    if (event === "operation.accepted") {
+      const operationId = String(fields.operationId);
+      const clientId = typeof fields.clientId === "string" ? fields.clientId : "internal";
+      const kind = typeof fields.kind === "string" ? fields.kind : "other";
+      const startedAt = this.monotonicNow();
+      const threshold = this.slowThresholdMs ?? SLOW_THRESHOLDS[kind] ?? 3e4;
+      const prior = this.activeOperations.get(key2);
+      if (prior) clearTimeout(prior.timer);
+      const timer = setTimeout(() => {
+        const active2 = this.activeOperations.get(key2);
+        if (!active2) return;
+        this.enqueue("warn", "operation.slow", {}, {
+          operationId,
+          clientId,
+          kind: active2.kind,
+          thresholdMs: threshold,
+          durationMs: Math.round(this.monotonicNow() - active2.startedAt),
+          lastProgressMs: Math.round(this.monotonicNow() - active2.lastProgressAt)
+        });
+      }, threshold);
+      timer.unref?.();
+      this.activeOperations.set(key2, { operationId, clientId, kind, startedAt, lastProgressAt: startedAt, phases: /* @__PURE__ */ new Set(), timer });
+      return;
+    }
+    const active = this.activeOperations.get(key2);
+    if (!active) return;
+    if (!TERMINAL_EVENTS.has(event)) {
+      const phase = typeof fields.phase === "string" ? fields.phase : event === "operation.progress" ? "first-progress" : void 0;
+      if (phase) {
+        active.phases.add(phase);
+        active.lastProgressAt = this.monotonicNow();
+      }
+      return;
+    }
+    clearTimeout(active.timer);
+    active.phases.add("terminal");
+    const expected = EXPECTED_PHASES[active.kind] ?? ["terminal"];
+    const notApplicable = Array.isArray(fields.notApplicablePhases) ? fields.notApplicablePhases.filter((value) => typeof value === "string") : [];
+    this.activeOperations.delete(key2);
+    this.enqueue("info", "operation.timing", {}, {
+      operationId: active.operationId,
+      clientId: active.clientId,
+      kind: active.kind,
+      outcome: event === "operation.settled" ? "success" : event === "operation.cancelled" ? "cancelled" : "error",
+      durationMs: Math.round(this.monotonicNow() - active.startedAt),
+      observedPhases: [...active.phases],
+      notApplicablePhases: notApplicable,
+      missingPhases: expected.filter((phase) => !active.phases.has(phase) && !notApplicable.includes(phase))
+    });
+  }
+  scheduleFlush(delay) {
+    if (this.flushTimer !== void 0 || this.closed || this.disabled) return;
+    this.flushTimer = setTimeout(() => {
+      this.flushTimer = void 0;
+      void this.flush().catch(() => void 0);
+    }, delay);
+    this.flushTimer.unref?.();
+  }
+  async initialize() {
+    if (this.initialized) return;
+    await mkdir8(this.rootDir, { recursive: true, mode: 448 });
+    await chmod3(this.rootDir, 448);
+    this.hmacKey = await loadOrCreateKey(this.rootDir);
+    this.activePath = join14(this.rootDir, `diagnostics-active-${this.role}-${process.pid}-${this.processInstanceId}.jsonl`);
+    this.activeSize = await stat14(this.activePath).then((info) => info.size, (error61) => {
+      if (error61.code === "ENOENT") return 0;
+      throw error61;
+    });
+    await chmod3(this.activePath, 384).catch((error61) => {
+      if (error61.code !== "ENOENT") throw error61;
+    });
+    this.initialized = true;
+  }
+  async hashIdentity(value) {
+    try {
+      await this.initialize();
+      return pseudonym(this.hmacKey, value);
+    } catch (error61) {
+      this.disable(error61);
+      return "id-unavailable";
+    }
+  }
+  serialize(record4) {
+    const key2 = this.hmacKey;
+    const value = {
+      schemaVersion: DIAGNOSTIC_SCHEMA_VERSION,
+      timestamp: record4.timestamp,
+      monotonicMs: record4.monotonicMs,
+      severity: record4.severity,
+      component: this.component,
+      event: SAFE_EVENTS.has(record4.event) ? record4.event : "diagnostic.unknown_event",
+      appVersion: this.appVersion,
+      buildId: this.buildId,
+      process: { role: this.role, instanceId: pseudonym(key2, this.processInstanceId), pid: process.pid },
+      appLaunchId: pseudonym(key2, this.appLaunchId),
+      eventSequence: record4.sequence,
+      ...this.backendInstanceId ? { backendInstanceId: pseudonym(key2, this.backendInstanceId) } : {},
+      ...sanitizeFields(record4.context, key2),
+      ...sanitizeFields(record4.fields, key2)
+    };
+    const line = JSON.stringify(value) + "\n";
+    return { line, bytes: Buffer.byteLength(line) };
+  }
+  async drainThrough(targetSequence) {
+    if (this.disabled) return;
+    try {
+      await this.initialize();
+    } catch (error61) {
+      this.disable(error61);
+      return;
+    }
+    while (this.queue.length > 0 && this.queue[0].sequence <= targetSequence) {
+      const raw = this.queue.slice(0, DIAGNOSTIC_BATCH_SIZE).filter((record4) => record4.sequence <= targetSequence);
+      if (raw.length === 0) break;
+      const serialized = raw.map((record4) => this.serialize(record4));
+      let persisted = 0;
+      try {
+        persisted = await this.appendRecords(serialized);
+      } catch (error61) {
+        this.disable(error61);
+        return;
+      }
+      this.queue.splice(0, raw.length);
+      this.persistedEvents += persisted;
+      this.droppedEvents += raw.length - persisted;
+    }
+  }
+  async appendRecords(records) {
+    return withDirectoryLock(this.rootDir, async () => {
+      await normalizeDeadActiveSegments(this.rootDir);
+      let persisted = 0;
+      let index = 0;
+      while (index < records.length) {
+        const first = records[index];
+        if (first.bytes > this.segmentBytes || first.bytes > this.totalBytes) {
+          index++;
+          continue;
+        }
+        if (this.activeSize > 0 && this.activeSize + first.bytes > this.segmentBytes) await this.rotateLocked();
+        const remaining = this.segmentBytes - this.activeSize;
+        const chunk = [];
+        let chunkBytes = 0;
+        while (index < records.length && chunkBytes + records[index].bytes <= remaining) {
+          chunk.push(records[index]);
+          chunkBytes += records[index].bytes;
+          index++;
+        }
+        if (chunk.length === 0) {
+          index++;
+          continue;
+        }
+        const allowed = await pruneSegmentsLocked(this.rootDir, {
+          maxAgeMs: this.maxAgeMs,
+          maxSegments: this.maxSegments,
+          totalBytes: this.totalBytes,
+          reserveBytes: chunkBytes,
+          prospectivePath: this.activePath
+        });
+        if (!allowed) continue;
+        await appendFile(this.activePath, chunk.map((record4) => record4.line).join(""), { mode: 384 });
+        this.activeSize += chunkBytes;
+        persisted += chunk.length;
+      }
+      await pruneSegmentsLocked(this.rootDir, {
+        maxAgeMs: this.maxAgeMs,
+        maxSegments: this.maxSegments,
+        totalBytes: this.totalBytes,
+        reserveBytes: 0,
+        prospectivePath: this.activePath
+      });
+      return persisted;
+    });
+  }
+  async rotateLocked() {
+    if (this.activeSize === 0) return;
+    const stamp = this.now().toISOString().replace(/[^0-9]/g, "").slice(0, 17);
+    const target = join14(this.rootDir, `diagnostics-${stamp}-${this.role}-${process.pid}-${randomUUID10()}.jsonl`);
+    await rename5(this.activePath, target);
+    await chmod3(target, 384);
+    this.activeSize = 0;
+  }
+  disable(error61) {
+    if (this.disabled) return;
+    this.disabled = true;
+    this.unavailableEvents += this.queue.length;
+    this.queue.length = 0;
+    for (const active of this.activeOperations.values()) clearTimeout(active.timer);
+    this.activeOperations.clear();
+    if (!this.fallbackReported && this.stderr) {
+      this.fallbackReported = true;
+      try {
+        this.stderr.write(`Alder diagnostics unavailable (${fixedErrorCode(error61)}).
+`);
+      } catch {
+      }
+    }
+  }
+  async flush() {
+    if (this.flushTimer !== void 0) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = void 0;
+    }
+    if (this.disabled || this.queue.length === 0) return;
+    const target = this.queue[this.queue.length - 1].sequence;
+    const operation = this.drainTail.then(() => this.drainThrough(target));
+    this.drainTail = operation.catch(() => void 0);
+    await operation;
+  }
+  async close() {
+    if (this.closed) {
+      await this.drainTail;
+      return;
+    }
+    this.closed = true;
+    for (const active of this.activeOperations.values()) clearTimeout(active.timer);
+    this.activeOperations.clear();
+    await this.flush();
+    if (this.initialized && !this.disabled && this.activeSize > 0) {
+      await withDirectoryLock(this.rootDir, async () => {
+        await this.rotateLocked();
+        await pruneSegmentsLocked(this.rootDir, {
+          maxAgeMs: this.maxAgeMs,
+          maxSegments: this.maxSegments,
+          totalBytes: this.totalBytes,
+          reserveBytes: 0
+        });
+      }).catch((error61) => this.disable(error61));
+    }
+  }
+  abandonQueued() {
+    const count = this.queue.length;
+    this.queue.length = 0;
+    this.unavailableEvents += count;
+    return count;
+  }
+  safeFields(fields) {
+    return this.initialize().then(() => sanitizeFields(fields, this.hmacKey));
+  }
+  status() {
+    return {
+      available: !this.disabled,
+      generatedEvents: this.generatedEvents,
+      acceptedEvents: this.acceptedEvents,
+      persistedEvents: this.persistedEvents,
+      droppedEvents: this.droppedEvents,
+      unavailableEvents: this.unavailableEvents,
+      queuedEvents: this.queue.length,
+      currentSegmentBytes: this.activeSize,
+      rootDir: this.rootDir
+    };
+  }
+};
+var StructuredDiagnostics = class _StructuredDiagnostics {
+  core;
+  context;
+  constructor(options, core, context = {}) {
+    this.core = core ?? new DiagnosticsCore(options);
+    this.context = context;
+  }
+  record(severity, event, fields = {}) {
+    this.core.enqueue(severity, event, this.context, fields);
+  }
+  child(fields) {
+    return new _StructuredDiagnostics({ rootDir: this.core.rootDir, role: this.core.role }, this.core, { ...this.context, ...fields });
+  }
+  hashIdentity(value) {
+    return this.core.hashIdentity(value);
+  }
+  flush() {
+    return this.core.flush();
+  }
+  close() {
+    return this.core.close();
+  }
+  abandonQueued() {
+    return this.core.abandonQueued();
+  }
+  safeFields(fields) {
+    return this.core.safeFields(fields);
+  }
+  status() {
+    return this.core.status();
+  }
+};
+function safeVersion(value) {
+  return value !== void 0 && /^(?:[A-Za-z]+[ -])?\d+(?:\.\d+){0,3}(?:[-+][A-Za-z0-9.]+)?$/.test(value) ? value : "unknown";
+}
+function pseudonym(key2, value) {
+  return "id-" + createHmac2("sha256", key2).update(value).digest("hex").slice(0, 24);
+}
+function safeCategory(value) {
+  return SAFE_CATEGORIES.has(value.toLowerCase()) ? value.toLowerCase() : "other";
+}
+function safeErrorCode(value) {
+  return SAFE_ERROR_CODES.has(value) ? value : "other";
+}
+function safeErrorType(value) {
+  return SAFE_ERROR_TYPES.has(value) ? value : "other";
+}
+function sanitizeFields(fields, key2) {
+  const output2 = {};
+  for (const [name, raw] of Object.entries(fields)) {
+    if (!FIELD_NAMES.has(name)) continue;
+    if (Array.isArray(raw)) {
+      output2[name] = raw.slice(0, 32).map((value) => typeof value === "string" ? safeCategory(value) : sanitizePrimitive(name, value, key2));
+    } else output2[name] = sanitizePrimitive(name, raw, key2);
+  }
+  return output2;
+}
+function sanitizePrimitive(name, value, key2) {
+  if (value === null) return null;
+  if (ID_FIELDS.has(name)) return pseudonym(key2, String(value));
+  if (NUMERIC_FIELDS.has(name)) return typeof value === "number" && Number.isFinite(value) ? value : null;
+  if (BOOLEAN_FIELDS.has(name)) return typeof value === "boolean" ? value : null;
+  if (name === "errorCode") return typeof value === "string" ? safeErrorCode(value) : "other";
+  if (name === "errorType") return typeof value === "string" ? safeErrorType(value) : "other";
+  if (name === "version" || name === "runtimeVersion") return typeof value === "string" ? safeVersion(value) : "unknown";
+  if (typeof value === "string") return safeCategory(value);
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  return value;
+}
+function fixedErrorCode(error61) {
+  const code2 = error61?.code;
+  return typeof code2 === "string" ? safeErrorCode(code2) : "other";
+}
+async function loadOrCreateKey(rootDir) {
+  const path3 = join14(rootDir, "identity.key");
+  try {
+    const existing = await readFile8(path3);
+    if (existing.length === 32) return existing;
+  } catch (error61) {
+    if (error61.code !== "ENOENT") throw error61;
+  }
+  const key2 = randomBytes4(32);
+  const temporary = join14(rootDir, `.identity-${process.pid}-${randomUUID10()}.tmp`);
+  const handle = await open7(temporary, "wx", 384);
+  try {
+    await handle.writeFile(key2);
+    await handle.sync();
+    await handle.close();
+    try {
+      await link2(temporary, path3);
+    } catch (error61) {
+      if (error61.code !== "EEXIST") throw error61;
+    }
+    const published = await readFile8(path3);
+    if (published.length !== 32) throw new Error("diagnostic identity key is invalid");
+    await chmod3(path3, 384);
+    return published;
+  } catch (error61) {
+    throw error61;
+  } finally {
+    await handle.close().catch(() => void 0);
+    await rm6(temporary, { force: true }).catch(() => void 0);
+  }
+}
+async function persistEmergencyDiagnostic(options) {
+  const rootDir = resolve10(options.rootDir);
+  await mkdir8(rootDir, { recursive: true, mode: 448 });
+  await chmod3(rootDir, 448);
+  const timestamp = (options.now ?? (() => /* @__PURE__ */ new Date()))().toISOString();
+  const fields = options.fields ?? {};
+  const value = {
+    schemaVersion: DIAGNOSTIC_SCHEMA_VERSION,
+    timestamp,
+    severity: "error",
+    component: SAFE_CATEGORIES.has(options.component ?? "") ? options.component : options.role,
+    event: SAFE_EVENTS.has(options.event) ? options.event : "diagnostic.unknown_event",
+    process: { role: options.role, pid: process.pid },
+    ...typeof fields.outcome === "string" ? { outcome: safeCategory(fields.outcome) } : {},
+    ...typeof fields.errorCode === "string" ? { errorCode: safeErrorCode(fields.errorCode) } : {},
+    ...typeof fields.errorType === "string" ? { errorType: safeErrorType(fields.errorType) } : {},
+    ...typeof fields.forced === "boolean" ? { forced: fields.forced } : {},
+    ...typeof fields.durationMs === "number" && Number.isFinite(fields.durationMs) ? { durationMs: fields.durationMs } : {},
+    mode: "emergency"
+  };
+  const path3 = join14(rootDir, `diagnostics-emergency-${options.role}-${process.pid}-${randomUUID10()}.jsonl`);
+  const handle = await open7(path3, "wx", 384);
+  try {
+    await handle.writeFile(JSON.stringify(value) + "\n");
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+  const directory = await open7(rootDir, "r");
+  try {
+    await directory.sync();
+  } finally {
+    await directory.close();
+  }
+  return path3;
+}
+async function withDirectoryLock(rootDir, action) {
+  await mkdir8(rootDir, { recursive: true, mode: 448 });
+  const lock = join14(rootDir, ".retention-lock");
+  const deadline = Date.now() + LOCK_WAIT_MS;
+  while (true) {
+    try {
+      await mkdir8(lock, { mode: 448 });
+      break;
+    } catch (error61) {
+      if (error61.code !== "EEXIST") throw error61;
+      const info = await stat14(lock).catch(() => null);
+      if (info && Date.now() - info.mtimeMs > LOCK_STALE_MS) {
+        await rm6(lock, { recursive: true, force: true });
+        continue;
+      }
+      if (Date.now() >= deadline) throw Object.assign(new Error("diagnostic retention lock timed out"), { code: "EIO" });
+      await new Promise((resolveWait) => setTimeout(resolveWait, 10));
+    }
+  }
+  try {
+    return await action();
+  } finally {
+    await rm6(lock, { recursive: true, force: true });
+  }
+}
+function segmentInfo(name) {
+  if (!/^diagnostics-.*\.jsonl$/.test(name)) return null;
+  const match = /^diagnostics-active-[a-z]+-(\d+)-.*\.jsonl$/.exec(name);
+  return { active: match !== null, pid: match ? Number(match[1]) : null };
+}
+function pidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+async function listSegments(rootDir) {
+  let names;
+  try {
+    names = await readdir3(rootDir);
+  } catch (error61) {
+    if (error61.code === "ENOENT") return [];
+    throw error61;
+  }
+  const entries2 = [];
+  for (const name of names) {
+    const parsed = segmentInfo(name);
+    if (!parsed) continue;
+    const path3 = join14(rootDir, name);
+    try {
+      const info = await stat14(path3);
+      entries2.push({ path: path3, name, size: info.size, mtimeMs: info.mtimeMs, ...parsed });
+    } catch (error61) {
+      if (error61.code !== "ENOENT") throw error61;
+    }
+  }
+  return entries2;
+}
+async function normalizeDeadActiveSegments(rootDir) {
+  for (const entry of await listSegments(rootDir)) {
+    if (!entry.active || entry.pid === null || entry.pid === process.pid || pidAlive(entry.pid)) continue;
+    const target = join14(rootDir, `diagnostics-recovered-${Date.now()}-${randomUUID10()}.jsonl`);
+    await rename5(entry.path, target).catch((error61) => {
+      if (error61.code !== "ENOENT") throw error61;
+    });
+  }
+}
+async function pruneSegmentsLocked(rootDir, options) {
+  const now = Date.now();
+  let entries2 = await listSegments(rootDir);
+  for (const entry of entries2.filter((item) => !item.active && now - item.mtimeMs > options.maxAgeMs)) await rm6(entry.path, { force: true });
+  entries2 = await listSegments(rootDir);
+  const prospectiveExists = options.prospectivePath ? entries2.some((entry) => resolve10(entry.path) === resolve10(options.prospectivePath)) : true;
+  const addedCount = options.reserveBytes > 0 && !prospectiveExists ? 1 : 0;
+  const removable = entries2.filter((entry) => !entry.active).sort((a, b) => a.mtimeMs - b.mtimeMs);
+  let total = entries2.reduce((sum, entry) => sum + entry.size, 0);
+  let count = entries2.length;
+  while ((total + options.reserveBytes > options.totalBytes || count + addedCount > options.maxSegments) && removable.length > 0) {
+    const entry = removable.shift();
+    await rm6(entry.path, { force: true });
+    total -= entry.size;
+    count--;
+  }
+  return total + options.reserveBytes <= options.totalBytes && count + addedCount <= options.maxSegments;
+}
+async function pruneCorruptRecoveryCopies(directory, options = {}) {
+  const retain = options.retain ?? 5, maxAgeMs = options.maxAgeMs ?? 30 * 24 * 60 * 60 * 1e3;
+  let names;
+  try {
+    names = (await readdir3(directory)).filter((name) => /^corrupt-.*\.json$/.test(name));
+  } catch (error61) {
+    if (error61.code === "ENOENT") return 0;
+    throw error61;
+  }
+  const now = Date.now();
+  const entries2 = (await Promise.all(names.map(async (name) => ({ name, info: await stat14(join14(directory, name)) })))).sort((a, b) => b.info.mtimeMs - a.info.mtimeMs);
+  let removed = 0;
+  for (let index = 0; index < entries2.length; index++) {
+    if (index < Math.min(3, retain)) continue;
+    if (index < retain && now - entries2[index].info.mtimeMs <= maxAgeMs) continue;
+    await rm6(join14(directory, entries2[index].name), { force: true });
+    removed++;
+  }
+  return removed;
+}
+async function drainDiagnosticsBounded(diagnostics, timeoutMs) {
+  let timer;
+  const timeout = new Promise((resolveTimeout) => {
+    timer = setTimeout(() => resolveTimeout(false), timeoutMs);
+  });
+  const drained = diagnostics.flush().then(() => true, () => false);
+  const result = await Promise.race([drained, timeout]);
+  if (timer) clearTimeout(timer);
+  if (!result) diagnostics.abandonQueued();
+  return result;
+}
+
+// src/recovery.ts
 var RecoveryError = class extends Error {
   constructor(code2, message2, originals = [], cause) {
     super(message2, cause === void 0 ? void 0 : { cause });
@@ -97247,7 +98439,7 @@ var hash2 = (value) => createHash7("sha256").update(value).digest("hex");
 var fingerprint = (value) => hash2(JSON.stringify(value));
 var missing2 = (error61) => error61?.code === "ENOENT";
 async function syncDirectory4(path3) {
-  const directory = await open7(path3, "r");
+  const directory = await open8(path3, "r");
   try {
     await directory.sync();
   } finally {
@@ -97294,18 +98486,18 @@ var RecoveryWriter = class _RecoveryWriter {
   writeQueue = Promise.resolve();
   closed = false;
   constructor(options) {
-    this.rootDir = resolve10(options.rootDir);
+    this.rootDir = resolve11(options.rootDir);
     this.key = options.key;
-    this.directory = join14(this.rootDir, "recovery-" + hash2(JSON.stringify(options.key)));
-    this.journalPath = join14(this.directory, "journal.json");
-    this.recoveryId = options.recoveryId ?? randomUUID10();
+    this.directory = join15(this.rootDir, "recovery-" + hash2(JSON.stringify(options.key)));
+    this.journalPath = join15(this.directory, "journal.json");
+    this.recoveryId = options.recoveryId ?? randomUUID11();
     this.baseline = normalizeBaseline(options.baseline);
     this.latestFingerprint = fingerprint(this.baseline);
   }
   static async open(options) {
-    let rootDir = resolve10(options.rootDir);
+    let rootDir = resolve11(options.rootDir);
     try {
-      await mkdir8(rootDir, { recursive: true, mode: 448 });
+      await mkdir9(rootDir, { recursive: true, mode: 448 });
       rootDir = await realpath8(rootDir);
     } catch {
     }
@@ -97314,9 +98506,9 @@ var RecoveryWriter = class _RecoveryWriter {
     return writer;
   }
   static async hasJournal(options) {
-    const directory = join14(resolve10(options.rootDir), "recovery-" + hash2(JSON.stringify(options.key)));
+    const directory = join15(resolve11(options.rootDir), "recovery-" + hash2(JSON.stringify(options.key)));
     try {
-      await access3(join14(directory, "journal.json"));
+      await access3(join15(directory, "journal.json"));
       return true;
     } catch (error61) {
       if (missing2(error61)) return false;
@@ -97325,8 +98517,9 @@ var RecoveryWriter = class _RecoveryWriter {
   }
   async restore() {
     try {
-      await mkdir8(this.directory, { recursive: true, mode: 448 });
-      const identityPath = join14(this.directory, "document.id");
+      await mkdir9(this.directory, { recursive: true, mode: 448 });
+      await pruneCorruptRecoveryCopies(this.directory);
+      const identityPath = join15(this.directory, "document.id");
       try {
         const id2 = (await readPrivateFile(identityPath, { maxBytes: 128 })).toString("utf8");
         if (!/^[A-Za-z0-9_-]{1,128}$/.test(id2)) throw new Error("Recovery identity is invalid");
@@ -97337,7 +98530,7 @@ var RecoveryWriter = class _RecoveryWriter {
       }
       let bytes;
       try {
-        bytes = await readFile8(this.journalPath);
+        bytes = await readFile9(this.journalPath);
       } catch (error61) {
         if (missing2(error61)) return;
         throw error61;
@@ -97374,7 +98567,7 @@ var RecoveryWriter = class _RecoveryWriter {
     if (!/^[A-Za-z0-9_-]{1,128}$/.test(recoveryId)) throw new RecoveryError("recovery_invalid", "Recovery identity is invalid");
     await this.writeQueue;
     if (this.pending || this.corruptJournal) throw Object.assign(new Error("Save As destination has pending recovery data"), { code: "destination_recovery_conflict" });
-    await this.atomicWrite(join14(this.directory, "document.id"), Buffer.from(recoveryId));
+    await this.atomicWrite(join15(this.directory, "document.id"), Buffer.from(recoveryId));
     this.recoveryId = recoveryId;
   }
   update(baseline) {
@@ -97389,7 +98582,7 @@ var RecoveryWriter = class _RecoveryWriter {
     this.pending = false;
     this.dirty = false;
     await this.writeQueue;
-    await rm6(this.journalPath, { force: true });
+    await rm7(this.journalPath, { force: true });
     await syncDirectory4(this.directory);
     return true;
   }
@@ -97397,24 +98590,24 @@ var RecoveryWriter = class _RecoveryWriter {
     this.pending = false;
     this.dirty = false;
     await this.writeQueue;
-    await rm6(this.journalPath, { force: true });
+    await rm7(this.journalPath, { force: true });
     await syncDirectory4(this.directory);
     this.issue = null;
     this.corruptJournal = false;
   }
   async atomicWrite(path3, bytes) {
-    const temporary = path3 + "." + randomUUID10() + ".tmp";
-    const handle = await open7(temporary, "wx", 384);
+    const temporary = path3 + "." + randomUUID11() + ".tmp";
+    const handle = await open8(temporary, "wx", 384);
     try {
       await handle.writeFile(bytes);
       await handle.sync();
       await handle.close();
-      await rename5(temporary, path3);
+      await rename6(temporary, path3);
       await syncDirectory4(dirname7(path3));
     } finally {
       await handle.close().catch(() => {
       });
-      await rm6(temporary, { force: true }).catch(() => {
+      await rm7(temporary, { force: true }).catch(() => {
       });
     }
   }
@@ -97422,12 +98615,13 @@ var RecoveryWriter = class _RecoveryWriter {
     const operation = this.writeQueue.then(async () => {
       if (!this.dirty) return;
       try {
-        await mkdir8(this.directory, { recursive: true, mode: 448 });
-        await this.atomicWrite(join14(this.directory, "document.id"), Buffer.from(this.recoveryId));
+        await mkdir9(this.directory, { recursive: true, mode: 448 });
+        await this.atomicWrite(join15(this.directory, "document.id"), Buffer.from(this.recoveryId));
         if (this.corruptJournal) {
-          await rename5(this.journalPath, join14(this.directory, "corrupt-" + randomUUID10() + ".json")).catch((error61) => {
+          await rename6(this.journalPath, join15(this.directory, "corrupt-" + randomUUID11() + ".json")).catch((error61) => {
             if (!missing2(error61)) throw error61;
           });
+          await pruneCorruptRecoveryCopies(this.directory);
           this.corruptJournal = false;
         }
         const journal = { schemaVersion: 1, baseline: clone4(this.baseline), fingerprint: this.latestFingerprint };
@@ -97447,19 +98641,20 @@ var RecoveryWriter = class _RecoveryWriter {
   async retire() {
     this.closed = true;
     await this.writeQueue;
-    await rm6(this.directory, { recursive: true, force: true });
+    await rm7(this.directory, { recursive: true, force: true });
   }
   async close() {
     if (this.closed) return this.writeQueue;
     await this.flush();
+    await pruneCorruptRecoveryCopies(this.directory);
     this.closed = true;
   }
 };
 
 // src/publishing.ts
-import { randomUUID as randomUUID11 } from "node:crypto";
-import { access as access4, chmod as chmod3, link as link2, mkdtemp as mkdtemp3, readFile as readFile9, rm as rm7, stat as stat14, unlink as unlink3, writeFile as writeFile5 } from "node:fs/promises";
-import { basename as basename6, dirname as dirname8, join as join15, resolve as resolve11 } from "node:path";
+import { randomUUID as randomUUID12 } from "node:crypto";
+import { access as access4, chmod as chmod4, link as link3, mkdtemp as mkdtemp3, readFile as readFile10, rm as rm8, stat as stat15, unlink as unlink3, writeFile as writeFile6 } from "node:fs/promises";
+import { basename as basename7, dirname as dirname8, join as join16, resolve as resolve12 } from "node:path";
 import { tmpdir as tmpdir4 } from "node:os";
 
 // ../../../../../alder/host/node_modules/linkedom/esm/shared/symbols.js
@@ -101068,8 +102263,8 @@ var CustomElementRegistry = class {
     } : (element2) => element2.localName === localName;
     registry2.set(localName, { Class: Class2, check: check2 });
     if (waiting.has(localName)) {
-      for (const resolve15 of waiting.get(localName))
-        resolve15(Class2);
+      for (const resolve16 of waiting.get(localName))
+        resolve16(Class2);
       waiting.delete(localName);
     }
     ownerDocument.querySelectorAll(
@@ -101109,13 +102304,13 @@ var CustomElementRegistry = class {
    */
   whenDefined(localName) {
     const { registry: registry2, waiting } = this;
-    return new Promise((resolve15) => {
+    return new Promise((resolve16) => {
       if (registry2.has(localName))
-        resolve15(registry2.get(localName).Class);
+        resolve16(registry2.get(localName).Class);
       else {
         if (!waiting.has(localName))
           waiting.set(localName, []);
-        waiting.get(localName).push(resolve15);
+        waiting.get(localName).push(resolve16);
       }
     });
   }
@@ -107337,8 +108532,8 @@ var OutputRenderer = class {
     const predecessors = Array.from(this.pendingWidgets.values()).filter((operation) => string4(operation.widget.name) === string4(widget.name) && operation.instance === instance);
     if (oneShot) control.setAttribute("disabled", "");
     let resolveDone;
-    const done = new Promise((resolve15) => {
-      resolveDone = resolve15;
+    const done = new Promise((resolve16) => {
+      resolveDone = resolve16;
     });
     const pending = {
       widget,
@@ -107799,6 +108994,7 @@ function number4(value) {
 // src/publishing.ts
 var MAX_QUARTO_STREAM_BYTES = 8 * 1024 * 1024;
 var MAX_PUBLISHED_HTML_BYTES = 128 * 1024 * 1024;
+var QUARTO_TIMEOUT_MS = 5 * 60 * 1e3;
 var PublishingError = class extends Error {
   constructor(code2, message2, details) {
     super(message2);
@@ -107813,10 +109009,10 @@ function createPublishingService(options) {
   if (!(options?.outputStore instanceof OutputStore)) throw new TypeError("publishing requires the canonical OutputStore");
   if (!options.processScope || typeof options.processScope.spawn !== "function") throw new TypeError("publishing requires the application ProcessScope");
   return {
-    publishSnapshot: (snapshot, publishOptions) => publishSnapshot(options.outputStore, options.processScope, options.quartoExecutable, snapshot, publishOptions)
+    publishSnapshot: (snapshot, publishOptions) => publishSnapshot(options.outputStore, options.processScope, options.quartoExecutable, snapshot, publishOptions, options.quartoTimeoutMs)
   };
 }
-async function publishSnapshot(outputStore, processScope, quartoExecutable, source, options) {
+async function publishSnapshot(outputStore, processScope, quartoExecutable, source, options, quartoTimeoutMs = QUARTO_TIMEOUT_MS) {
   throwIfAborted3(options?.signal);
   validateOptions(options);
   const snapshot = captureSnapshot(outputStore, source);
@@ -107824,14 +109020,14 @@ async function publishSnapshot(outputStore, processScope, quartoExecutable, sour
   let stagingDirectory;
   outputStore.pin(snapshot.artifacts);
   try {
-    stagingDirectory = await mkdtemp3(join15(tmpdir4(), "alder-publish-"));
-    const qmdPath = join15(stagingDirectory, "snapshot.qmd");
-    const renderedPath = join15(stagingDirectory, "rendered.html");
+    stagingDirectory = await mkdtemp3(join16(tmpdir4(), "alder-publish-"));
+    const qmdPath = join16(stagingDirectory, "snapshot.qmd");
+    const renderedPath = join16(stagingDirectory, "rendered.html");
     const qmd = await composeQmd(snapshot, outputStore, options.includeCode, options.signal);
-    await writeFile5(qmdPath, qmd, { encoding: "utf8", mode: 384, flag: "wx" });
-    await runQuarto(processScope, quartoExecutable, stagingDirectory, qmdPath, renderedPath, options.signal);
+    await writeFile6(qmdPath, qmd, { encoding: "utf8", mode: 384, flag: "wx" });
+    await runQuarto(processScope, quartoExecutable, stagingDirectory, qmdPath, renderedPath, options.signal, quartoTimeoutMs);
     throwIfAborted3(options.signal);
-    const rendered = await readFile9(renderedPath);
+    const rendered = await readFile10(renderedPath);
     if (rendered.byteLength === 0 || rendered.byteLength > MAX_PUBLISHED_HTML_BYTES) {
       throw new PublishingError("publish_failed", "Quarto did not produce a bounded HTML document");
     }
@@ -107846,7 +109042,7 @@ async function publishSnapshot(outputStore, processScope, quartoExecutable, sour
     throw normalizePublishingError(error61);
   } finally {
     outputStore.unpin(snapshot.artifacts);
-    if (stagingDirectory !== void 0) await rm7(stagingDirectory, { recursive: true, force: true }).catch(() => {
+    if (stagingDirectory !== void 0) await rm8(stagingDirectory, { recursive: true, force: true }).catch(() => {
     });
   }
 }
@@ -107978,13 +109174,13 @@ async function readArtifact(requested, artifacts, outputStore, signal) {
   }
   return Buffer.concat(chunks, descriptor.byteLength);
 }
-async function runQuarto(processScope, executable, cwd, qmdPath, outputPath, signal) {
+async function runQuarto(processScope, executable, cwd, qmdPath, outputPath, signal, timeoutMs = QUARTO_TIMEOUT_MS) {
   throwIfAborted3(signal);
   let owned;
   try {
     owned = await processScope.spawn({
       executable,
-      args: ["render", basename6(qmdPath), "--to", "html", "--output", basename6(outputPath), "--no-execute"],
+      args: ["render", basename7(qmdPath), "--to", "html", "--output", basename7(outputPath), "--no-execute"],
       cwd,
       environment: {
         ...Object.fromEntries(Object.entries(process.env).filter((entry) => entry[1] !== void 0)),
@@ -107998,11 +109194,18 @@ async function runQuarto(processScope, executable, cwd, qmdPath, outputPath, sig
     throw error61;
   }
   let aborted2 = signal?.aborted === true;
+  let timedOut = false;
   const abort = () => {
     aborted2 = true;
     void owned.terminate().catch(() => {
     });
   };
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    void owned.terminate().catch(() => {
+    });
+  }, timeoutMs);
+  timeout.unref?.();
   signal?.addEventListener("abort", abort, { once: true });
   if (aborted2) abort();
   try {
@@ -108010,9 +109213,11 @@ async function runQuarto(processScope, executable, cwd, qmdPath, outputPath, sig
     const stderr = collectStream(owned.stderr);
     const exit = await owned.exited;
     const [out, err] = await Promise.all([stdout, stderr]);
+    if (timedOut) throw new PublishingError("publish_failed", "Quarto publishing exceeded the local five-minute limit", { code: "publish_timeout" });
     if (aborted2) throw new PublishingError("cancelled", "publishing was cancelled");
     if (exit.code !== 0) throw new PublishingError("publish_failed", `Quarto exited with status ${exit.code ?? "unknown"}${err ? `: ${err}` : ""}`, { ...exit, stdout: out, stderr: err });
   } finally {
+    clearTimeout(timeout);
     signal?.removeEventListener("abort", abort);
   }
 }
@@ -108034,10 +109239,10 @@ async function collectStream(stream) {
 }
 async function validateDestinationPath(path3) {
   if (typeof path3 !== "string" || path3.trim().length === 0) throw new PublishingError("publish_failed", "publish outputPath must be a non-empty path");
-  const outputPath = resolve11(path3);
+  const outputPath = resolve12(path3);
   let parent;
   try {
-    parent = await stat14(dirname8(outputPath));
+    parent = await stat15(dirname8(outputPath));
   } catch (error61) {
     throw new PublishingError("publish_failed", `publish output directory is unavailable: ${dirname8(outputPath)}`, error61);
   }
@@ -108052,13 +109257,13 @@ async function validateDestinationPath(path3) {
   return outputPath;
 }
 async function publishAbsentDestination(path3, bytes, signal) {
-  const temporary = join15(dirname8(path3), `.${basename6(path3)}.alder-${process.pid}-${randomUUID11()}.tmp`);
+  const temporary = join16(dirname8(path3), `.${basename7(path3)}.alder-${process.pid}-${randomUUID12()}.tmp`);
   try {
     throwIfAborted3(signal);
-    await writeFile5(temporary, bytes, { flag: "wx", mode: 384 });
-    await chmod3(temporary, 420);
+    await writeFile6(temporary, bytes, { flag: "wx", mode: 384 });
+    await chmod4(temporary, 420);
     throwIfAborted3(signal);
-    await link2(temporary, path3);
+    await link3(temporary, path3);
   } catch (error61) {
     throw normalizePublishingError(error61);
   } finally {
@@ -108126,9 +109331,9 @@ var PUBLISH_CSS = `
 `;
 
 // src/formatting.ts
-import { mkdtemp as mkdtemp4, readFile as readFile10, rm as rm8, writeFile as writeFile6 } from "node:fs/promises";
+import { mkdtemp as mkdtemp4, readFile as readFile11, rm as rm9, writeFile as writeFile7 } from "node:fs/promises";
 import { tmpdir as tmpdir5 } from "node:os";
-import { join as join16 } from "node:path";
+import { join as join17 } from "node:path";
 import { TextDecoder as TextDecoder2 } from "node:util";
 var FormattingError = class extends Error {
   constructor(code2, message2) {
@@ -108178,20 +109383,20 @@ function createFormattingService(airExecutable, processScope) {
   return { formatCells };
 }
 async function formatOne(airExecutable, processScope, body, signal) {
-  const directory = await mkdtemp4(join16(tmpdir5(), "alder-format-"));
-  const input2 = join16(directory, "cell.R");
+  const directory = await mkdtemp4(join17(tmpdir5(), "alder-format-"));
+  const input2 = join17(directory, "cell.R");
   try {
     const text2 = body.join("\n");
     if (Buffer.byteLength(text2, "utf8") > MAX_OUTPUT_BYTES2) {
       throw new FormattingError("format_failed", "cell source exceeds formatter limit");
     }
-    await writeFile6(input2, text2, { encoding: "utf8", mode: 384 });
+    await writeFile7(input2, text2, { encoding: "utf8", mode: 384 });
     const result = await runAir(airExecutable, input2, processScope, directory, signal);
     if (result.code !== 0) {
       const detail = result.stderr.trim() || result.stdout.trim() || "exit status " + (result.code ?? "unknown");
       throw new FormattingError("format_failed", "air could not format the cell: " + detail);
     }
-    const bytes = await readFile10(input2);
+    const bytes = await readFile11(input2);
     if (bytes.length > MAX_OUTPUT_BYTES2) throw new FormattingError("format_failed", "air output exceeds formatter limit");
     const output2 = new TextDecoder2("utf-8", { fatal: true }).decode(bytes);
     if (output2.includes("\0")) throw new FormattingError("format_failed", "air returned NUL bytes");
@@ -108200,7 +109405,7 @@ async function formatOne(airExecutable, processScope, body, signal) {
     if (error61 instanceof FormattingError) throw error61;
     throw new FormattingError("format_failed", error61 instanceof Error ? error61.message : String(error61));
   } finally {
-    await rm8(directory, { recursive: true, force: true });
+    await rm9(directory, { recursive: true, force: true });
   }
 }
 async function runAir(executable, input2, processScope, cwd, signal) {
@@ -108214,7 +109419,7 @@ async function runAir(executable, input2, processScope, cwd, signal) {
   const environment = Object.fromEntries(
     Object.entries(process.env).filter((entry) => typeof entry[1] === "string")
   );
-  const result = await new Promise((resolve15, reject) => {
+  const result = await new Promise((resolve16, reject) => {
     const finish = (callback) => {
       if (settled) return;
       settled = true;
@@ -108248,7 +109453,7 @@ async function runAir(executable, input2, processScope, cwd, signal) {
       });
       void spawned.exited.then(({ code: code2 }) => {
         if (aborting || signal?.aborted) abort();
-        else finish(() => resolve15({ code: code2, stdout, stderr }));
+        else finish(() => resolve16({ code: code2, stdout, stderr }));
       }, (error61) => {
         finish(() => reject(new FormattingError("format_failed", error61 instanceof Error ? error61.message : String(error61))));
       });
@@ -108774,9 +109979,9 @@ function boundedUtf8(value, maxBytes) {
 }
 
 // src/uploads.ts
-import { randomUUID as randomUUID12 } from "node:crypto";
-import { chmod as chmod4, lstat as lstat7, mkdir as mkdir9, unlink as unlink4, writeFile as writeFile7 } from "node:fs/promises";
-import { join as join17 } from "node:path";
+import { randomUUID as randomUUID13 } from "node:crypto";
+import { chmod as chmod5, lstat as lstat7, mkdir as mkdir10, unlink as unlink4, writeFile as writeFile8 } from "node:fs/promises";
+import { join as join18 } from "node:path";
 var UPLOAD_MAX_FILES = 1024;
 var UPLOAD_MAX_BASE64_BYTES = 16 * 1024 * 1024;
 var UPLOAD_MAX_TOTAL_BYTES = 12 * 1024 * 1024;
@@ -108796,10 +110001,10 @@ var UploadStore = class {
   closed = false;
   async ensureDirectory() {
     if (this.closed) throw invalid4("session_stopped", "upload store is closed");
-    await mkdir9(this.directory, { recursive: true, mode: 448 });
+    await mkdir10(this.directory, { recursive: true, mode: 448 });
     const info = await lstat7(this.directory);
     if (info.isSymbolicLink() || !info.isDirectory()) throw invalid4("invalid_request", "upload directory is not a directory");
-    await chmod4(this.directory, 448);
+    await chmod5(this.directory, 448);
   }
   async store(input2) {
     if (this.closed) throw invalid4("session_stopped", "upload store is closed");
@@ -108814,17 +110019,17 @@ var UploadStore = class {
       return { name: file2.name, bytes };
     });
     await this.ensureDirectory();
-    const uploadId = randomUUID12();
+    const uploadId = randomUUID13();
     const paths = [];
     this.batches.set(uploadId, paths);
     try {
       const value = [];
       for (const file2 of decoded) {
         if (this.closed) throw invalid4("session_stopped", "upload store is closed");
-        const path3 = join17(this.directory, `upload-${randomUUID12()}`);
+        const path3 = join18(this.directory, `upload-${randomUUID13()}`);
         paths.push(path3);
-        await writeFile7(path3, file2.bytes, { flag: "wx", mode: 384 });
-        await chmod4(path3, 384);
+        await writeFile8(path3, file2.bytes, { flag: "wx", mode: 384 });
+        await chmod5(path3, 384);
         value.push({ name: file2.name, size: file2.bytes.length, path: path3 });
       }
       return { uploadId, value };
@@ -108850,7 +110055,9 @@ var UploadStore = class {
 
 // src/processes.ts
 import { spawn } from "node:child_process";
+import { randomUUID as randomUUID14 } from "node:crypto";
 import { once } from "node:events";
+import { basename as basename8 } from "node:path";
 function signalGroup(pid, signal) {
   try {
     process.kill(-pid, signal);
@@ -108875,8 +110082,8 @@ async function waitForExit2(exited, timeoutMs) {
   try {
     return await Promise.race([
       exited.then(() => true),
-      new Promise((resolve15) => {
-        timer = setTimeout(() => resolve15(false), timeoutMs);
+      new Promise((resolve16) => {
+        timer = setTimeout(() => resolve16(false), timeoutMs);
         timer.unref();
       })
     ]);
@@ -108884,48 +110091,87 @@ async function waitForExit2(exited, timeoutMs) {
     if (timer !== void 0) clearTimeout(timer);
   }
 }
-async function stopChild(child, exited, termFirst) {
+async function stopChild(child, exited, termFirst, onSignal) {
   if (termFirst) {
+    onSignal("SIGTERM");
     signalChild(child, "SIGTERM");
     if (await waitForExit2(exited, 1e3)) return;
   }
+  onSignal("SIGKILL");
   signalChild(child, "SIGKILL");
   if (!await waitForExit2(exited, 1e3)) {
     throw new Error(`owned process ${child.pid ?? "unknown"} did not exit after SIGKILL`);
   }
 }
-async function stopGroup(pid, child, exited) {
+async function stopGroup(pid, child, exited, onSignal) {
+  onSignal("SIGTERM");
   const term = signalGroup(pid, "SIGTERM");
   if (term === "gone") return;
-  if (term === "denied") return stopChild(child, exited, true);
+  if (term === "denied") return stopChild(child, exited, true, onSignal);
   const deadline = Date.now() + 1e3;
   while (Date.now() < deadline) {
     const state = signalGroup(pid, 0);
     if (state === "gone") return;
-    if (state === "denied") return stopChild(child, exited, true);
-    await new Promise((resolve15) => setTimeout(resolve15, 20));
+    if (state === "denied") return stopChild(child, exited, true, onSignal);
+    await new Promise((resolve16) => setTimeout(resolve16, 20));
   }
-  if (signalGroup(pid, "SIGKILL") === "denied") return stopChild(child, exited, false);
+  onSignal("SIGKILL");
+  if (signalGroup(pid, "SIGKILL") === "denied") return stopChild(child, exited, false, onSignal);
 }
-async function spawnChild(options) {
+async function spawnChild(options, diagnostics) {
   const child = spawn(options.executable, [...options.args], {
     cwd: options.cwd,
     env: options.environment,
     detached: true,
     stdio: options.stdio === "pipes" ? ["pipe", "pipe", "pipe"] : "ignore"
   });
-  const exited = new Promise((resolve15, reject) => {
+  const exited = new Promise((resolve16, reject) => {
     child.once("error", reject);
-    child.once("exit", (code2, signal) => resolve15({ code: code2, signal }));
+    child.once("exit", (code2, signal) => resolve16({ code: code2, signal }));
   });
   void exited.catch(() => {
   });
   await once(child, "spawn");
   const pid = child.pid;
+  const childInstanceId = randomUUID14();
+  const childRole = basename8(options.executable).replace(/[^A-Za-z0-9_.-]/g, "_").slice(0, 64) || "child";
+  diagnostics?.record("info", "child.spawn", { childInstanceId, childRole, childPid: pid });
+  void exited.then((result) => diagnostics?.record(result.code === 0 ? "info" : "warn", "child.exit", {
+    childInstanceId,
+    childRole,
+    childPid: pid,
+    exitCode: result.code,
+    signal: result.signal,
+    outcome: result.code === 0 ? "success" : "error"
+  }), (error61) => diagnostics?.record("error", "child.exit", {
+    childInstanceId,
+    childRole,
+    childPid: pid,
+    outcome: "error",
+    errorCode: error61?.code ?? "child_exit_failed"
+  }));
   let stopping;
-  const stop = () => stopping ??= stopGroup(pid, child, exited);
+  const onSignal = (signal) => diagnostics?.record(signal === "SIGKILL" ? "warn" : "info", signal === "SIGKILL" ? "child.kill" : "child.term", {
+    childInstanceId,
+    childRole,
+    childPid: pid,
+    signal
+  });
+  const stop = () => stopping ??= stopGroup(pid, child, exited, onSignal);
   const terminate = async () => {
-    await stop();
+    diagnostics?.record("info", "child.cancel", { childInstanceId, childRole, childPid: pid });
+    try {
+      await stop();
+    } catch (error61) {
+      diagnostics?.record("error", "child.cleanup_failed", {
+        childInstanceId,
+        childRole,
+        childPid: pid,
+        outcome: "error",
+        errorCode: error61?.code ?? "child_cleanup_failed"
+      });
+      throw error61;
+    }
     if (!await waitForExit2(exited, 1e3)) {
       throw new Error(`owned process ${pid} remained alive after termination`);
     }
@@ -108934,6 +110180,8 @@ async function spawnChild(options) {
   return {
     child,
     pid,
+    diagnosticId: childInstanceId,
+    diagnosticRole: childRole,
     stdin: child.stdin,
     stdout: child.stdout,
     stderr: child.stderr,
@@ -108942,7 +110190,7 @@ async function spawnChild(options) {
     stop
   };
 }
-async function createProcessScope(_resources) {
+async function createProcessScope(_resources, diagnostics) {
   const children = /* @__PURE__ */ new Set();
   const pending = /* @__PURE__ */ new Set();
   let closing;
@@ -108959,7 +110207,7 @@ async function createProcessScope(_resources) {
     spawn(options) {
       if (closing) return Promise.reject(new Error("process scope is closed"));
       const operation = (async () => {
-        const child = await spawnChild(options);
+        const child = await spawnChild(options, diagnostics);
         children.add(child);
         if (closing) {
           await child.terminate();
@@ -108967,8 +110215,19 @@ async function createProcessScope(_resources) {
           throw new Error("process scope is closed");
         }
         void child.exited.finally(async () => {
-          await child.stop();
-          children.delete(child);
+          try {
+            await child.stop();
+          } catch (error61) {
+            diagnostics?.record("error", "child.cleanup_failed", {
+              childInstanceId: child.diagnosticId,
+              childRole: child.diagnosticRole,
+              childPid: child.pid,
+              outcome: "error",
+              errorCode: error61?.code ?? "ordinary_exit_cleanup_failed"
+            });
+          } finally {
+            children.delete(child);
+          }
         }).catch(() => {
         });
         return child;
@@ -108985,6 +110244,11 @@ async function createProcessScope(_resources) {
         children.clear();
         process.off("exit", onExit);
         const errors = stopped.filter((result) => result.status === "rejected").map((result) => result.reason);
+        if (errors.length) diagnostics?.record("error", "process_scope.cleanup_failed", {
+          count: errors.length,
+          outcome: "error",
+          errorCode: "process_cleanup_failed"
+        });
         if (errors.length) throw new AggregateError(errors, "could not stop owned processes");
       })();
     }
@@ -108992,9 +110256,9 @@ async function createProcessScope(_resources) {
 }
 
 // src/sessions.ts
-import { createHash as createHash8, randomBytes as randomBytes4, randomUUID as randomUUID13 } from "node:crypto";
-import { readdir as readdir3, realpath as realpath9, unlink as unlink5 } from "node:fs/promises";
-import { basename as basename7, dirname as dirname9, join as join18, resolve as resolve12 } from "node:path";
+import { createHash as createHash8, randomBytes as randomBytes5, randomUUID as randomUUID15 } from "node:crypto";
+import { readdir as readdir4, realpath as realpath9, unlink as unlink5 } from "node:fs/promises";
+import { basename as basename9, dirname as dirname9, join as join19, resolve as resolve13 } from "node:path";
 
 // src/backend-client.ts
 var import_proper_lockfile = __toESM(require_proper_lockfile(), 1);
@@ -109029,9 +110293,9 @@ async function acquireNotebookOwnership(options) {
   let closed = false;
   let origin = options.origin ?? "http://127.0.0.1:0";
   let browserOrigin = origin;
-  const epoch = options.epoch ?? randomUUID13();
-  const continuityProof = options.continuityProof ?? randomBytes4(32).toString("hex");
-  const token = options.token ?? randomBytes4(32).toString("hex");
+  const epoch = options.epoch ?? randomUUID15();
+  const continuityProof = options.continuityProof ?? randomBytes5(32).toString("hex");
+  const token = options.token ?? randomBytes5(32).toString("hex");
   const ownership = {
     get sessionKey() {
       return sessionKey;
@@ -109097,7 +110361,7 @@ function isUntitledRecoveryId(value) {
   return typeof value === "string" && UNTITLED_SESSION_KEY_PATTERN.test(value);
 }
 function untitledRecoveryDescriptorDirectory(dataRoot) {
-  return join18(resolve12(dataRoot ?? envPaths("alder", { suffix: "" }).data), UNTITLED_RECOVERY_DIRECTORY);
+  return join19(resolve13(dataRoot ?? envPaths("alder", { suffix: "" }).data), UNTITLED_RECOVERY_DIRECTORY);
 }
 async function registerUntitledRecoveryDescriptor(id2, projectDirectory, dataRoot) {
   const validId = requireUntitledRecoveryId(id2);
@@ -109143,11 +110407,11 @@ function requireUntitledRecoveryId(value) {
 }
 async function canonicalizeProjectDirectory(value) {
   if (typeof value !== "string" || !value || value.includes("\0")) throw new SessionUnavailableError("untitled project directory is invalid");
-  const path3 = resolve12(value);
+  const path3 = resolve13(value);
   return realpath9(path3).catch(() => path3);
 }
 function untitledRecoveryDescriptorPath(directory, id2) {
-  return join18(directory, id2 + ".json");
+  return join19(directory, id2 + ".json");
 }
 async function readUntitledRecoveryDescriptor(path3, id2) {
   let bytes;
@@ -109174,7 +110438,7 @@ async function readUntitledRecoveryDescriptor(path3, id2) {
 }
 async function canonicalizePath(path3) {
   if (path3 === null) return null;
-  const target = resolve12(path3);
+  const target = resolve13(path3);
   try {
     return await realpath9(target);
   } catch {
@@ -109182,11 +110446,11 @@ async function canonicalizePath(path3) {
   }
 }
 async function canonicalizeDestination(path3) {
-  const target = resolve12(path3);
+  const target = resolve13(path3);
   try {
     return await realpath9(target);
   } catch {
-    return join18(await realpath9(dirname9(target)), basename7(target));
+    return join19(await realpath9(dirname9(target)), basename9(target));
   }
 }
 function sessionKeyFor(path3) {
@@ -109250,6 +110514,7 @@ var optionsSchema = external_exports.object({
   preferences: external_exports.custom().optional(),
   preferencesPath: external_exports.string().optional(),
   resources: external_exports.custom(),
+  diagnostics: external_exports.custom().optional(),
   internalHost: external_exports.boolean().default(false),
   session: external_exports.object({
     sessionKey: external_exports.string().optional(),
@@ -109265,11 +110530,11 @@ async function startHost(input2) {
   if (options.internalHost && options.path === null && options.session?.sessionKey === void 0) throw new Error("untitled internal hosts require a parent session key");
   if (options.path !== null) return startNotebookHost(options, options.path, false, options.path);
   if (options.sandbox) throw new Error("sandbox mode requires a notebook file path");
-  const temporary = await realpath10(await mkdtemp5(join19(tmpdir6(), "alder-unsaved-")));
-  const storagePath = join19(temporary, "Untitled.R");
+  const temporary = await realpath10(await mkdtemp5(join20(tmpdir6(), "alder-unsaved-")));
+  const storagePath = join20(temporary, "Untitled.R");
   try {
     const app = await startNotebookHost(options, storagePath, true, null);
-    const closed = app.closed.finally(() => rm9(temporary, { recursive: true, force: true }));
+    const closed = app.closed.finally(() => rm10(temporary, { recursive: true, force: true }));
     return { ...app, closed, close: async () => {
       try {
         await app.close();
@@ -109278,18 +110543,21 @@ async function startHost(input2) {
       }
     } };
   } catch (error61) {
-    await rm9(temporary, { recursive: true, force: true }).catch(() => {
+    await rm10(temporary, { recursive: true, force: true }).catch(() => {
     });
     throw error61;
   }
 }
 async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
   const options = optionsSchema.parse({ ...input2, path: storagePath });
+  const diagnostics = options.diagnostics;
+  const hostStartedAt = performance.now();
+  diagnostics?.record("info", "host.launch", { cold: true });
   const browserOriginHost = createOriginHost();
   let isUntitled = unsaved;
   const declaredProjectDirectory = options.session?.projectDirectory ?? process.env.ALDER_UNTITLED_PROJECT_DIRECTORY;
-  const untitledProjectDirectory = declaredProjectDirectory !== void 0 && resolve13(declaredProjectDirectory) === declaredProjectDirectory ? await realpath10(declaredProjectDirectory).catch(() => declaredProjectDirectory) : null;
-  const initialNotebookDirectory = unsaved ? untitledProjectDirectory ?? process.cwd() : dirname10(resolve13(storagePath));
+  const untitledProjectDirectory = declaredProjectDirectory !== void 0 && resolve14(declaredProjectDirectory) === declaredProjectDirectory ? await realpath10(declaredProjectDirectory).catch(() => declaredProjectDirectory) : null;
+  const initialNotebookDirectory = unsaved ? untitledProjectDirectory ?? process.cwd() : dirname10(resolve14(storagePath));
   let notebookDirectory = await realpath10(initialNotebookDirectory).catch(() => initialNotebookDirectory);
   let selectedRscript;
   let configuredToken = options.session?.token;
@@ -109453,8 +110721,8 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
   let rejectRuntimeReady;
   let runtimeReady;
   const resetRuntimeReady = () => {
-    runtimeReady = new Promise((resolve15, reject) => {
-      resolveRuntimeReady = resolve15;
+    runtimeReady = new Promise((resolve16, reject) => {
+      resolveRuntimeReady = resolve16;
       rejectRuntimeReady = reject;
     });
     void runtimeReady.catch(() => {
@@ -109485,6 +110753,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
     await current?.close();
   };
   const close = () => closing ??= (async () => {
+    diagnostics?.record("info", "host.stop.started", {});
     runtimeAbort?.abort();
     controller?.cancelOptionalOperations();
     await Promise.allSettled([...activePublishes]);
@@ -109522,7 +110791,12 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
     await attempt(() => processScope?.close());
     await attempt(() => store?.close());
     await attempt(() => ownership.close());
-    await attempt(() => work === "" ? void 0 : rm9(work, { recursive: true, force: true }));
+    await attempt(() => work === "" ? void 0 : rm10(work, { recursive: true, force: true }));
+    diagnostics?.record(errors.length ? "error" : "info", "host.stop.settled", {
+      outcome: errors.length ? "error" : "success",
+      count: errors.length,
+      durationMs: Math.round(performance.now() - hostStartedAt)
+    });
     if (errors.length > 0) throw new AggregateError(errors, "Alder shutdown failed");
   })().finally(resolveClosed);
   const discardAndClose = async () => {
@@ -109539,20 +110813,20 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
       lsp = value;
     };
     var setLsp = setLsp2;
-    work = await realpath10(await mkdtemp5(join19(tmpdir6(), "alder-host-")));
-    uploads = new UploadStore(join19(work, "uploads"));
-    cacheDirectory = unsaved ? join19(work, "cache") : join19(notebookDirectory, ".alder", "cache");
+    work = await realpath10(await mkdtemp5(join20(tmpdir6(), "alder-host-")));
+    uploads = new UploadStore(join20(work, "uploads"));
+    cacheDirectory = unsaved ? join20(work, "cache") : join20(notebookDirectory, ".alder", "cache");
     const opened = await DocumentStore.open(storagePath);
     store = opened.store;
     let notebook = opened.notebook;
     if (isUntitled) notebook = { ...notebook, path: null };
     if (options.expectedSource !== void 0 && !store.matchesSource(options.expectedSource)) throw new FileConflict();
-    const projectPath = isUntitled ? join19(notebookDirectory, ".alder", "config.yaml") : projectConfigPath(store.path);
+    const projectPath = isUntitled ? join20(notebookDirectory, ".alder", "config.yaml") : projectConfigPath(store.path);
     projectSettings = await loadProjectSettings(projectPath);
     config3 = configurationFor(notebook);
     projectLayoutIntent = isUntitled ? null : await readLayout(store.path);
     resolvedLayout = projectLayoutIntent;
-    processScope = await createProcessScope(options.resources);
+    processScope = await createProcessScope(options.resources, diagnostics);
     try {
       const declarations = await readPackageDeclarations(notebookDirectory);
       packageDeclarationIntent = [...declarations.packages];
@@ -109588,7 +110862,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
       }
     }
     config3 = configurationFor(notebook);
-    cacheDirectory = config3.cache.dir ? resolve13(notebookDirectory, config3.cache.dir) : cacheDirectory;
+    cacheDirectory = config3.cache.dir ? resolve14(notebookDirectory, config3.cache.dir) : cacheDirectory;
     resolvedLayout = projectLayoutIntent;
     pendingSidecars.layout = false;
     pendingSidecars.packages = false;
@@ -109621,6 +110895,8 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
     };
     const invalidateLsp = async () => {
       const requested = lsp !== void 0 || lspStarting !== void 0;
+      const startedAt = performance.now();
+      if (requested) diagnostics?.record("info", "lsp.stop", { phase: "started" });
       ++lspGeneration;
       const previous = lsp;
       const pending = lspStarting;
@@ -109632,6 +110908,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
       if (lspStarting === pending) lspStarting = void 0;
       await lspSyncRunning?.catch(() => {
       });
+      if (requested) diagnostics?.record("info", "lsp.stop", { phase: "settled", durationMs: Math.round(performance.now() - startedAt), outcome: "success" });
       return requested;
     };
     const retryPendingSidecars = async (document, disk, operationId) => {
@@ -109695,6 +110972,12 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
       return { committed: true, diskError: { code: code2, sidecar: kind, message: errorMessage(error61) } };
     };
     const sourceCommit = async (request, context) => {
+      diagnostics?.record("info", "operation.phase", {
+        operationId: request.operationId ?? null,
+        kind: request.kind,
+        phase: "persistence",
+        documentRevision: context.fromRevision
+      });
       if (request.kind === "transaction") {
         const document = request.document ?? context.document;
         const delta = request.delta;
@@ -109702,6 +110985,12 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
           fromRevision: context.fromRevision,
           document,
           disk: context.disk
+        });
+        diagnostics?.record("info", "persistence.recovery_flushed", {
+          operationId: request.operationId ?? null,
+          kind: request.kind,
+          phase: "recovery-flush",
+          documentRevision: context.fromRevision + 1
         });
         publishSource(context, {
           document,
@@ -109712,6 +111001,12 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
           dirty: true,
           advanceRevision: true
         });
+        diagnostics?.record("info", "operation.phase", {
+          operationId: request.operationId ?? null,
+          kind: request.kind,
+          phase: "authoritative-ack",
+          documentRevision: context.fromRevision + 1
+        });
         return { created: delta?.created ?? {}, edited: delta?.edited ?? [], deleted: delta?.deleted ?? [], documentRevision: context.fromRevision + 1 };
       }
       if (request.kind === "save") {
@@ -109719,6 +111014,11 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
         if (recoveryConflict) throw Object.assign(new Error("The saved notebook changed after these recovered edits. Use Save As or discard the recovered edits."), { code: "recovery_conflict" });
         try {
           const result = await store.save(context.document);
+          diagnostics?.record("info", "save.source_published", {
+            operationId: request.operationId ?? null,
+            phase: "publication",
+            documentRevision: context.fromRevision
+          });
           const disk = sourceProtocolObservation(store);
           const retry = await retryPendingSidecars(context.document, disk, request.operationId);
           const sidecars = retry.sidecars;
@@ -109738,10 +111038,22 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
           }
           const dirty = retry.error !== null || clearError !== null || recoveryPending || pendingSidecars.layout || pendingSidecars.packages;
           publishSource(context, { document: context.document, path: store.path, layout: resolvedLayout, disk, sidecars, dirty, advanceRevision: false });
+          diagnostics?.record(dirty ? "warn" : "info", "save.clean_state", {
+            operationId: request.operationId ?? null,
+            phase: "clean",
+            dirty,
+            documentRevision: context.fromRevision
+          });
           if (retry.error !== null) return { ...result, committed: true, diskError: { code: "sidecar_write_failed", sidecar: retry.error.kind, message: errorMessage(retry.error.error) } };
           if (clearError !== null) return { ...result, committed: true, diskError: { code: "recovery_checkpoint_failed", message: errorMessage(clearError) } };
           return result;
         } catch (error61) {
+          diagnostics?.record(error61 instanceof FileConflict ? "warn" : "error", error61 instanceof FileConflict ? "persistence.conflict" : "persistence.failure", {
+            operationId: request.operationId ?? null,
+            kind: request.kind,
+            outcome: "error",
+            errorCode: error61 instanceof FileConflict ? "source_conflict" : error61?.code ?? "source_write_failed"
+          });
           if (error61 instanceof FileConflict) throw error61;
           const diskError = asHostError(error61, "source_write_failed", request.operationId);
           publishSource(context, { document: context.document, path: context.path, layout: context.layout, disk: unreadableObservation(error61, "source_write_failed", request.operationId), sidecars: context.sidecars, dirty: true, advanceRevision: false });
@@ -109766,7 +111078,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
         const published = await prepared.publish();
         projectSettings = published.value;
         config3 = configurationFor(context.document);
-        cacheDirectory = config3.cache.dir ? resolve13(notebookDirectory, config3.cache.dir) : join19(notebookDirectory, ".alder", "cache");
+        cacheDirectory = config3.cache.dir ? resolve14(notebookDirectory, config3.cache.dir) : join20(notebookDirectory, ".alder", "cache");
         settingsErrors.delete("project");
         publishSettingsError();
         const sidecars = { ...context.sidecars, config: published.observation };
@@ -109802,7 +111114,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
           pendingSidecars.packages = false;
           const sidecars = { ...context.sidecars, packages: published.observation };
           publishSource(context, { document: context.document, path: context.path, layout: context.layout, disk: context.disk, sidecars, dirty: context.dirty, advanceRevision: false });
-          return { ok: true, path: notebookDirectory, metadata: join19(notebookDirectory, ".alder", "packages.yaml"), packages: [...published.value], sidecarVersion: published.observation.version };
+          return { ok: true, path: notebookDirectory, metadata: join20(notebookDirectory, ".alder", "packages.yaml"), packages: [...published.value], sidecarVersion: published.observation.version };
         } catch (error61) {
           const code2 = pendingSidecars.packages ? "sidecar_write_failed" : "recovery_checkpoint_failed";
           return publishSidecarFailure(context, context.document, context.config, context.layout, "packages", error61, code2);
@@ -109824,7 +111136,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
         const oldStore = store;
         const oldRecovery = recovery;
         const oldManager = packageManager;
-        const tentativeDirectory = dirname10(resolve13(request.path));
+        const tentativeDirectory = dirname10(resolve14(request.path));
         const reservation = !isUntitled && tentativeDirectory === notebookDirectory && runtimeEnvironment === null ? void 0 : controller.reserveRuntimeContext();
         let preparedOwner;
         let preparedSave;
@@ -109842,7 +111154,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
           const destinationDirectory = dirname10(destination);
           const destinationProjectConfig = await loadProjectSettings(projectConfigPath(destination));
           const destinationConfig = configurationFor(context.document, destinationProjectConfig);
-          const destinationCache = destinationConfig.cache.dir ? resolve13(destinationDirectory, destinationConfig.cache.dir) : join19(destinationDirectory, ".alder", "cache");
+          const destinationCache = destinationConfig.cache.dir ? resolve14(destinationDirectory, destinationConfig.cache.dir) : join20(destinationDirectory, ".alder", "cache");
           const destinationLayout = await readLayout(destination);
           let destinationPackages = [];
           try {
@@ -110122,6 +111434,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
       sidecars: initialProtocolSidecars,
       sourceCommit,
       getRecoveryState: recoveryState,
+      diagnostics,
       services: {
         format: async (cells, operation) => {
           const codeCells = cells.filter((cell) => cell.type === "code");
@@ -110195,7 +111508,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
               await preferences.update({ rscript: selected.rscript }, preferences.snapshot().version);
               const nextManager = createPackageManager({ resources: options.resources, environment: selected, processScope, projectDirectory: notebookDirectory, onProgress: onPackageProgress });
               try {
-                await controller.restartRuntimeContext({ environment: selected, notebookDirectory, cacheDirectory }, stringValue(payload.operationId) ?? randomUUID14());
+                await controller.restartRuntimeContext({ environment: selected, notebookDirectory, cacheDirectory }, stringValue(payload.operationId) ?? randomUUID16());
               } catch (error61) {
                 await nextManager.close().catch(() => {
                 });
@@ -110227,7 +111540,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
             if (store === void 0) throw Object.assign(new Error("notebook has no saved source"), { code: "notebook_has_no_path" });
             const snapshot = publicationSnapshot(store.currentDocument, liveSnapshot);
             const requestedPath = typeof payload.outputPath === "string" && payload.outputPath.length > 0 ? payload.outputPath : null;
-            const outputPath = requestedPath ?? join19(work, "publish-" + randomUUID14() + ".html");
+            const outputPath = requestedPath ?? join20(work, "publish-" + randomUUID16() + ".html");
             const pendingPublish = publisher.publishSnapshot(snapshot, { outputPath, includeCode: payload.includeCode === true, signal: operation?.signal });
             activePublishes.add(pendingPublish);
             const result = await pendingPublish.finally(() => {
@@ -110237,7 +111550,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
             let artifact;
             try {
               try {
-                artifact = await artifactStore.importArtifact(basename8(result.path), {
+                artifact = await artifactStore.importArtifact(basename10(result.path), {
                   sessionEpoch: liveSnapshot.epoch,
                   documentRevision: result.documentRevision,
                   kernelEpoch: null,
@@ -110246,7 +111559,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
                   revision: null
                 }, { mimeType: "text/html; charset=utf-8", extension: ".html" });
               } finally {
-                await rm9(result.path, { force: true });
+                await rm10(result.path, { force: true });
               }
               if (server === void 0) throw new Error("publish server is unavailable");
               return {
@@ -110289,7 +111602,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
     if (options.executionMode !== void 0 && options.executionMode !== controller.snapshot().runtime.executionMode) {
       const result = await controller.dispatch({
         type: "set-runtime",
-        requestId: randomUUID14(),
+        requestId: randomUUID16(),
         clientId: "launch",
         sessionEpoch: controller.epoch,
         expectedDocumentRevision: controller.snapshot().documentRevision,
@@ -110303,7 +111616,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
       if (lsp?.alive()) return Promise.resolve(lsp);
       if (lspStarting !== void 0) return lspStarting;
       const generation = ++lspGeneration;
-      const starting = createLsp(generation, () => lspGeneration, controller, engine, () => runtimeReady, notebookDirectory, setLsp2);
+      const starting = createLsp(generation, () => lspGeneration, controller, engine, () => runtimeReady, notebookDirectory, setLsp2, diagnostics);
       lspStarting = starting;
       void starting.then(
         () => {
@@ -110359,7 +111672,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
         watcherReady = Promise.resolve();
         return;
       }
-      const canonical = resolve13(path3);
+      const canonical = resolve14(path3);
       const sidecarPaths = ["config", "layout", "packages"].map((kind) => store.sidecarPath(kind));
       const observedPaths = /* @__PURE__ */ new Set([canonical, ...sidecarPaths]);
       const next = watch([...observedPaths], { ignoreInitial: true, persistent: true, followSymlinks: false });
@@ -110375,7 +111688,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
         next.once("error", settle);
       });
       next.on("all", (_event, changedPath) => {
-        const resolvedChangedPath = resolve13(changedPath);
+        const resolvedChangedPath = resolve14(changedPath);
         if (generation !== watcherGeneration || !observedPaths.has(resolvedChangedPath)) return;
         clearTimeout(sourceWatchTimer);
         sourceWatchTimer = setTimeout(() => {
@@ -110389,7 +111702,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
             const sidecars = sidecarProtocolObservations(store, false);
             const unchanged = sameObservation(snapshot.disk, disk) && sameObservation(snapshot.sidecars.config, sidecars.config) && sameObservation(snapshot.sidecars.layout, sidecars.layout) && sameObservation(snapshot.sidecars.packages, sidecars.packages);
             if (unchanged) return;
-            const request = { kind: "watcher", expectedDocumentRevision: snapshot.documentRevision, operationId: randomUUID14() };
+            const request = { kind: "watcher", expectedDocumentRevision: snapshot.documentRevision, operationId: randomUUID16() };
             await controller.commitSource(request, async (context) => sourceCommit(request, context));
           }).catch((error61) => {
             if (!closing) controller?.recordActionError(errorMessage(error61), "watcher_failed");
@@ -110448,10 +111761,12 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
         }
       },
       staticDir: options.resources.rendererDirectory,
-      indexFile: join19(options.resources.rendererDirectory, "index.html"),
+      indexFile: join20(options.resources.rendererDirectory, "index.html"),
       uploads,
       artifactStore,
-      mcpHandler: createMcpHttpHandler({ controller, artifactStore, runtimeReady: () => runtimeReady, onShutdown: close }),
+      diagnostics,
+      flushDiagnostics: () => diagnostics?.flush?.() ?? Promise.resolve(),
+      mcpHandler: createMcpHttpHandler({ controller, artifactStore, runtimeReady: () => runtimeReady, onShutdown: close, diagnostics }),
       documentReady: true,
       lsp: {
         requestDocument: async (method2, params, snapshot) => {
@@ -110533,6 +111848,8 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
       const rejectBootstrapReady = rejectRuntimeReady;
       const bootstrapDirectory = notebookDirectory;
       const bootstrapUntitled = isUntitled;
+      const runtimeStartedAt = performance.now();
+      diagnostics?.record("info", restart ? "r.runtime.restart" : "r.runtime.start", { phase: "environment" });
       runtimeBootstrap = (async () => {
         let selected;
         let nextManager;
@@ -110544,6 +111861,10 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
             resources: options.resources,
             sandbox: options.sandbox,
             resolveProjectLibrary: (base) => resolveProjectLibrary(base, bootstrapDirectory)
+          });
+          diagnostics?.record("info", "r.environment.ready", {
+            durationMs: Math.round(performance.now() - runtimeStartedAt),
+            runtimeVersion: selected.version
           });
           if (closing || bootstrapGeneration !== runtimeBootstrapGeneration || bootstrapUntitled !== isUntitled || bootstrapDirectory !== notebookDirectory) {
             rejectBootstrapReady(new Error("runtime bootstrap superseded"));
@@ -110557,6 +111878,11 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
             return;
           }
           runtimeError = error61;
+          diagnostics?.record("error", "r.runtime.failure", {
+            phase: "environment",
+            outcome: "error",
+            errorCode: error61?.code ?? "r_environment_failed"
+          });
           controller.recordRuntimeAvailabilityError(asRuntimeHostError(error61));
           rejectBootstrapReady(error61);
           return;
@@ -110566,7 +111892,19 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
           else if (options.deferStartup) await controller.startAnalyzer();
           else await controller.start();
           engineIdentity = engine.identity;
+          const runtime = controller.snapshot().runtime;
+          diagnostics?.record("info", "r.runtime.ready", {
+            durationMs: Math.round(performance.now() - runtimeStartedAt),
+            analyzerState: runtime.analyzerState,
+            kernelState: runtime.kernelState,
+            executionReady: runtime.executionReady
+          });
         } catch (error61) {
+          diagnostics?.record("error", "r.runtime.failure", {
+            phase: "startup",
+            outcome: "error",
+            errorCode: error61?.code ?? "r_start_failed"
+          });
           rejectBootstrapReady(error61);
           await nextManager.close().catch(() => {
           });
@@ -110593,6 +111931,11 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
     };
     startRuntime();
     const ready = { type: "host.ready", origin: address.origin, epoch: ownership.epoch, capabilities: [...controller.snapshot().capabilities ?? []] };
+    diagnostics?.record("info", "host.ready", {
+      sessionEpoch: ownership.epoch,
+      durationMs: Math.round(performance.now() - hostStartedAt),
+      ready: true
+    });
     scheduleLspSync();
     return {
       controller,
@@ -110612,6 +111955,12 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
       close
     };
   } catch (error61) {
+    diagnostics?.record("error", "host.fatal", {
+      outcome: "error",
+      errorCode: error61?.code ?? "host_start_failed",
+      errorType: error61 instanceof Error ? error61.name : "unknown",
+      durationMs: Math.round(performance.now() - hostStartedAt)
+    });
     try {
       await close();
     } catch (cleanup) {
@@ -110620,10 +111969,12 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
     throw error61;
   }
 }
-async function createLsp(generation, currentGeneration, controller, engine, runtimeReady, notebookDirectory, setLsp) {
+async function createLsp(generation, currentGeneration, controller, engine, runtimeReady, notebookDirectory, setLsp, diagnostics) {
+  const startedAt = performance.now();
+  diagnostics?.record("info", "lsp.start", {});
   await runtimeReady();
   const document = await lspDocument(controller.snapshot());
-  const client = new LspClient({ document, cwd: notebookDirectory, connect: () => engine.connectArkLsp(), onFailure: (message2) => controller.publishServiceError("lsp", { code: "lsp_unavailable", message: message2 }), onDiagnostics: (changed, diagnostics) => controller.publishEditorDiagnostics(changed.cells.map((cell) => ({ id: cell.id, revision: cell.revision ?? 0, type: cell.type ?? "code", source: cell.body.join("\n") })), diagnostics) });
+  const client = new LspClient({ document, cwd: notebookDirectory, connect: () => engine.connectArkLsp(), onFailure: (message2) => controller.publishServiceError("lsp", { code: "lsp_unavailable", message: message2 }), onDiagnostics: (changed, diagnostics2) => controller.publishEditorDiagnostics(changed.cells.map((cell) => ({ id: cell.id, revision: cell.revision ?? 0, type: cell.type ?? "code", source: cell.body.join("\n") })), diagnostics2) });
   try {
     await client.start();
     if (generation !== currentGeneration()) {
@@ -110632,8 +111983,14 @@ async function createLsp(generation, currentGeneration, controller, engine, runt
     }
     setLsp(client);
     controller.publishServiceError("lsp", null);
+    diagnostics?.record("info", "lsp.ready", { durationMs: Math.round(performance.now() - startedAt), ready: true });
     return client;
   } catch (error61) {
+    diagnostics?.record("error", "lsp.failure", {
+      outcome: "error",
+      errorCode: error61?.code ?? "lsp_unavailable",
+      durationMs: Math.round(performance.now() - startedAt)
+    });
     await client.stop().catch(() => {
     });
     throw error61;
@@ -110670,13 +112027,44 @@ function initialOrigin(host, port) {
 }
 
 // src/backend.ts
+var activeBackendDiagnostics;
+var handlingBackendFatal = false;
+async function exitAfterBackendFatal(event, error61) {
+  if (handlingBackendFatal) process.exit(1);
+  handlingBackendFatal = true;
+  const diagnostics = activeBackendDiagnostics;
+  if (diagnostics) {
+    const fields = {
+      outcome: "error",
+      errorCode: error61?.code ?? (event === "backend.fatal" ? "backend_fatal" : event === "backend.unhandled_rejection" ? "unhandled_rejection" : "uncaught_exception"),
+      errorType: error61 instanceof Error ? error61.name : "other"
+    };
+    const emergency = await persistEmergencyDiagnostic({
+      rootDir: diagnostics.status().rootDir,
+      role: "backend",
+      component: "backend",
+      event,
+      fields
+    }).then(() => true, () => false);
+    if (!emergency) diagnostics.record("error", event, fields);
+    await drainDiagnosticsBounded(diagnostics, 250).catch(() => false);
+  } else {
+    try {
+      process.stderr.write("Alder backend failed before diagnostics initialized.\n");
+    } catch {
+    }
+  }
+  process.exit(1);
+}
 var NotebookBackend = class {
-  constructor(resources2, onIdle = () => {
+  constructor(resources2, diagnostics, onIdle = () => {
   }) {
     this.resources = resources2;
+    this.diagnostics = diagnostics;
     this.onIdle = onIdle;
   }
   resources;
+  diagnostics;
   onIdle;
   hosts = /* @__PURE__ */ new Map();
   preferences = ApplicationPreferences.open();
@@ -110693,6 +112081,7 @@ var NotebookBackend = class {
       host = void 0;
     }
     host ??= [...this.hosts.values()].find((item) => item.ownership.canonicalPath === options.path && options.path !== null);
+    const cold = !host;
     if (!host) {
       let pending = this.openings.get(key2);
       if (!pending) {
@@ -110701,11 +112090,17 @@ var NotebookBackend = class {
       }
       host = await pending;
     }
+    this.diagnostics?.record("info", "backend.session.open", {
+      sessionId: options.sessionKey,
+      sessionEpoch: host.ownership.epoch,
+      cold,
+      documentId: options.path === null ? options.sessionKey : await this.diagnostics.hashIdentity(options.path)
+    });
     if (host.ownership.canonicalPath !== null) {
       for (const [stored, value] of this.hosts) if (value === host && stored !== "path:" + host.ownership.canonicalPath) this.hosts.delete(stored);
       this.hosts.set("path:" + host.ownership.canonicalPath, host);
     }
-    const token = options.tokenFile ? (await readFile11(options.tokenFile, "utf8")).trim() : host.ownership.token;
+    const token = options.tokenFile ? (await readFile12(options.tokenFile, "utf8")).trim() : host.ownership.token;
     return {
       sessionKey: host.ownership.sessionKey,
       canonicalPath: host.ownership.canonicalPath,
@@ -110734,7 +112129,11 @@ var NotebookBackend = class {
           sessionKey: options.sessionKey,
           projectDirectory: options.projectDirectory,
           ...options.path === null ? { untitledRecoveryId: options.sessionKey } : {}
-        }
+        },
+        diagnostics: this.diagnostics?.child({
+          sessionId: options.sessionKey,
+          documentId: options.path === null ? options.sessionKey : await this.diagnostics.hashIdentity(options.path)
+        })
       });
       const key2 = host.ownership.canonicalPath === null ? "untitled:" + host.ownership.sessionKey : "path:" + host.ownership.canonicalPath;
       this.hosts.set(key2, host);
@@ -110749,20 +112148,44 @@ var NotebookBackend = class {
     }
   }
   async close() {
-    await Promise.allSettled([...new Set(this.hosts.values())].map((host) => host.close()));
+    const results = await Promise.allSettled([...new Set(this.hosts.values())].map((host) => host.close()));
+    const rejected = results.filter((result) => result.status === "rejected").length;
+    this.diagnostics?.record(rejected ? "error" : "info", "backend.close.summary", {
+      count: results.length,
+      outcome: rejected ? "error" : "success",
+      dropped: rejected
+    });
     await (await this.preferences).close();
   }
 };
 async function serve(socketPath2) {
-  const root = resolve14(dirname11(fileURLToPath(import.meta.url)), "..");
+  const root = resolve15(dirname11(fileURLToPath(import.meta.url)), "..");
+  const diagnosticsRoot = process.env.ALDER_DIAGNOSTICS_DIR ?? join21(envPaths("alder", { suffix: "" }).data, "diagnostics");
+  const diagnostics = new StructuredDiagnostics({
+    rootDir: diagnosticsRoot,
+    role: "backend",
+    component: "backend",
+    appLaunchId: process.env.ALDER_APP_LAUNCH_ID,
+    backendInstanceId: randomUUID17(),
+    appVersion: process.env.ALDER_APP_VERSION,
+    buildId: process.env.ALDER_BUILD_ID
+  });
+  activeBackendDiagnostics = diagnostics;
+  process.once("uncaughtException", (error61) => {
+    void exitAfterBackendFatal("backend.uncaught_exception", error61);
+  });
+  process.once("unhandledRejection", (reason) => {
+    void exitAfterBackendFatal("backend.unhandled_rejection", reason);
+  });
+  diagnostics.record("info", "backend.launch", {});
   let idleTimer;
-  const backend = new NotebookBackend(await resolveApplicationResources(root), () => {
+  const backend = new NotebookBackend(await resolveApplicationResources(root), diagnostics, () => {
     clearTimeout(idleTimer);
     idleTimer = setTimeout(() => {
       if (backend.idle) stop();
     }, 1e3);
   });
-  await mkdir10(dirname11(socketPath2), { recursive: true, mode: 448 });
+  await mkdir11(dirname11(socketPath2), { recursive: true, mode: 448 });
   const server = createServer2((socket) => {
     clearTimeout(idleTimer);
     idleTimer = setTimeout(() => {
@@ -110796,9 +112219,14 @@ async function serve(socketPath2) {
     stopping = true;
     clearTimeout(idleTimer);
     server.close();
-    const deadline = setTimeout(() => process.exit(0), 5e3);
+    const deadline = setTimeout(() => {
+      diagnostics.record("error", "backend.forced_exit", { forced: true, durationMs: 5e3, errorCode: "close_timeout" });
+      void drainDiagnosticsBounded(diagnostics, 100).finally(() => process.exit(0));
+    }, 5e3);
     void backend.close().finally(async () => {
       clearTimeout(deadline);
+      diagnostics.record("info", "backend.stop", { forced: false });
+      await diagnostics.close();
       process.exit(0);
     });
   };
@@ -110808,16 +112236,13 @@ async function serve(socketPath2) {
     server.once("error", reject);
     server.listen(socketPath2, ready);
   });
-  await chmod5(socketPath2, 384);
+  await chmod6(socketPath2, 384);
   idleTimer = setTimeout(() => {
     if (backend.idle) stop();
   }, 15e3);
 }
 var socketPath = process.argv[2];
-if (socketPath && process.argv[1]?.endsWith("alder-backend.mjs")) void serve(socketPath).catch((error61) => {
-  process.stderr.write(String(error61) + "\n");
-  process.exit(1);
-});
+if (socketPath && process.argv[1]?.endsWith("alder-backend.mjs")) void serve(socketPath).catch((error61) => exitAfterBackendFatal("backend.fatal", error61));
 export {
   NotebookBackend
 };

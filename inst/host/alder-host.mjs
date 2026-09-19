@@ -33913,6 +33913,22 @@ var windowStateSchema = external_exports.object({
   saveState: external_exports.enum(["edited", "saving", "saved", "failed"]),
   sessionEpoch: idSchema
 }).strict();
+var visibleResultDiagnosticSchema = external_exports.object({
+  event: external_exports.literal("run.visible"),
+  operationId: idSchema,
+  runId: idSchema.nullable(),
+  cellId: idSchema,
+  revision: revisionSchema,
+  inputToHandlerMs: external_exports.number().finite().nonnegative().max(24 * 60 * 60 * 1e3),
+  handlerToVisibleMs: external_exports.number().finite().nonnegative().max(24 * 60 * 60 * 1e3),
+  inputToVisibleMs: external_exports.number().finite().nonnegative().max(24 * 60 * 60 * 1e3),
+  proxy: external_exports.literal("two-animation-frames")
+}).strict();
+var rendererFailureDiagnosticSchema = external_exports.object({
+  event: external_exports.enum(["renderer.error", "renderer.unhandled_rejection", "renderer.bootstrap_failed"]),
+  category: external_exports.enum(["script-error", "unhandled-rejection", "bootstrap-failed"])
+}).strict();
+var desktopDiagnosticSchema = external_exports.discriminatedUnion("event", [visibleResultDiagnosticSchema, rendererFailureDiagnosticSchema]);
 var desktopRecoveryRequestSchema = external_exports.object({
   recoveryId: external_exports.string().regex(/^[A-Za-z0-9_-]{1,128}$/),
   action: external_exports.enum(["read", "write", "remove"]),

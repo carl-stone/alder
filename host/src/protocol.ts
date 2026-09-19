@@ -1321,6 +1321,23 @@ export const windowStateSchema = z.object({
   sessionEpoch: idSchema,
 }).strict();
 export type WindowState = z.infer<typeof windowStateSchema>;
+const visibleResultDiagnosticSchema = z.object({
+  event: z.literal("run.visible"),
+  operationId: idSchema,
+  runId: idSchema.nullable(),
+  cellId: idSchema,
+  revision: revisionSchema,
+  inputToHandlerMs: z.number().finite().nonnegative().max(24 * 60 * 60 * 1000),
+  handlerToVisibleMs: z.number().finite().nonnegative().max(24 * 60 * 60 * 1000),
+  inputToVisibleMs: z.number().finite().nonnegative().max(24 * 60 * 60 * 1000),
+  proxy: z.literal("two-animation-frames"),
+}).strict();
+const rendererFailureDiagnosticSchema = z.object({
+  event: z.enum(["renderer.error", "renderer.unhandled_rejection", "renderer.bootstrap_failed"]),
+  category: z.enum(["script-error", "unhandled-rejection", "bootstrap-failed"]),
+}).strict();
+export const desktopDiagnosticSchema = z.discriminatedUnion("event", [visibleResultDiagnosticSchema, rendererFailureDiagnosticSchema]);
+export type DesktopDiagnostic = z.infer<typeof desktopDiagnosticSchema>;
 export interface SaveDestination { path: string; expectedDestination: "absent" | { expectedDiskDigest: string; expectedDiskVersion: string }; }
 export const desktopRecoveryRequestSchema = z.object({
   recoveryId: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/),
@@ -1328,7 +1345,7 @@ export const desktopRecoveryRequestSchema = z.object({
   name: z.string().max(256).optional(), value: z.unknown().optional(),
 }).strict();
 export type DesktopRecoveryRequest = z.infer<typeof desktopRecoveryRequestSchema>;
-export interface PreloadApi { recovery(request: DesktopRecoveryRequest): Promise<unknown>; openNotebook(): Promise<void>; chooseSavePath(): Promise<SaveDestination | null>; chooseRscript(): Promise<string | null>; getDraftId(): Promise<string>; rendererReady(): Promise<void>; updateWindowState(state: WindowState): Promise<void>; completeDesktopCommand(result: DesktopCommandResult): Promise<void>; onDesktopCommand(callback: (command: DesktopCommand) => void): () => void; }
+export interface PreloadApi { recovery(request: DesktopRecoveryRequest): Promise<unknown>; openNotebook(): Promise<void>; chooseSavePath(): Promise<SaveDestination | null>; chooseRscript(): Promise<string | null>; getDraftId(): Promise<string>; rendererReady(): Promise<void>; reportDiagnostic(event: DesktopDiagnostic): Promise<void>; updateWindowState(state: WindowState): Promise<void>; completeDesktopCommand(result: DesktopCommandResult): Promise<void>; onDesktopCommand(callback: (command: DesktopCommand) => void): () => void; }
 
 export class ProtocolError extends Error { readonly code: string; constructor(code: string, message: string) { super(message); this.name = "ProtocolError"; this.code = code; } }
 export function decodeJsonFrame(input: string | Uint8Array, maxBytes = MAX_FRAME_BYTES): unknown {

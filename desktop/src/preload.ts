@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer } from "electron";
 import {
   desktopRecoveryRequestSchema,
+  desktopDiagnosticSchema,
   desktopCommandResultSchema,
   desktopCommandSchema,
   windowStateSchema,
@@ -19,6 +20,7 @@ export const ELECTRON_IPC_CHANNELS = Object.freeze({
   chooseRscript: "alderDesktop:chooseRscript",
   getDraftId: "alderDesktop:getDraftId",
   rendererReady: "alderDesktop:rendererReady",
+  diagnostic: "alderDesktop:diagnostic",
   windowState: "alderDesktop:windowState",
   commandResult: "alderDesktop:commandResult",
   desktopCommand: "alderDesktop:desktopCommand",
@@ -80,6 +82,9 @@ export function createPreloadApi(ipc: IpcRendererLike): PreloadApi {
     },
     rendererReady: async (): Promise<void> => {
       validateVoid(await ipc.invoke(ELECTRON_IPC_CHANNELS.rendererReady), "rendererReady");
+    },
+    reportDiagnostic: async (event): Promise<void> => {
+      validateVoid(await ipc.invoke(ELECTRON_IPC_CHANNELS.diagnostic, desktopDiagnosticSchema.parse(event)), "reportDiagnostic");
     },
     updateWindowState: async (state): Promise<void> => {
       validateVoid(await ipc.invoke(ELECTRON_IPC_CHANNELS.windowState, windowStateSchema.parse(state)), "updateWindowState");

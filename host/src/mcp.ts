@@ -9,6 +9,7 @@ import { isInitializeRequest, type ServerCapabilities } from "@modelcontextproto
 import { createMcpServer, type AlderMcpOptions, type McpControllerAdapter } from "./mcp-catalog.js";
 import { MAX_MCP_REQUEST_BYTES, ProtocolError, decodeJsonFrame } from "./protocol.js";
 import type { ArtifactStoreBinding, AuthContext, McpHttpHandler } from "./server.js";
+import type { DiagnosticSink } from "./diagnostics.js";
 
 export { createMcpServer } from "./mcp-catalog.js";
 export type { AlderMcpOptions, McpControllerAdapter } from "./mcp-catalog.js";
@@ -24,6 +25,7 @@ export interface McpHttpOptions {
   readonly startup?: AlderMcpOptions["startup"];
   readonly runtimeReady?: AlderMcpOptions["runtimeReady"];
   readonly onShutdown?: AlderMcpOptions["onShutdown"];
+  readonly diagnostics?: DiagnosticSink;
 }
 
 interface HttpSession {
@@ -56,6 +58,7 @@ class RequestBodyError extends Error {
  * authoritative Controller and output store.
  */
 export function createMcpHttpHandler(options: McpHttpOptions): McpHttpHandler {
+  options.diagnostics?.record("info", "mcp.endpoint.ready", {});
   const sessions = new Map<string, HttpSession>();
   const allSessions = new Set<HttpSession>();
   const initializingLeases = new Set<string>();
@@ -100,6 +103,7 @@ export function createMcpHttpHandler(options: McpHttpOptions): McpHttpHandler {
       await session.connectPromise?.catch(() => undefined);
       await session.server.close().catch(() => undefined);
     } finally {
+      options.diagnostics?.record("info", "mcp.session.closed", { clientId: session.clientId, outcome: "success" });
       session.resolveClosed();
     }
     return session.closed;
@@ -170,7 +174,10 @@ export function createMcpHttpHandler(options: McpHttpOptions): McpHttpHandler {
       initializingLease = true;
       try {
         session = await makeSession(options, { ...auth, leaseId: auth.leaseId, clientId: auth.clientId }, sessions, allSessions, dispose);
-      } catch {
+      } catch (error) {
+        options.diagnostics?.record("error", "mcp.session.error", {
+          clientId: auth.clientId, outcome: "error", errorCode: (error as NodeJS.ErrnoException)?.code ?? "mcp_initialize_failed",
+        });
         initializingLeases.delete(auth.leaseId);
         jsonRpcError(response, 500, -32603, "Internal MCP error");
         return;
@@ -213,7 +220,10 @@ export function createMcpHttpHandler(options: McpHttpOptions): McpHttpHandler {
 
     try {
       await session.transport.handleRequest(authenticated, response, parsedBody);
-    } catch {
+    } catch (error) {
+      options.diagnostics?.record("error", "mcp.request.error", {
+        clientId: auth.clientId, outcome: "error", errorCode: (error as NodeJS.ErrnoException)?.code ?? "mcp_internal_error",
+      });
       if (session.transport.sessionId === undefined) await dispose(session).catch(() => undefined);
       if (!response.headersSent && !response.writableEnded) {
         jsonRpcError(response, 500, -32603, "Internal MCP error");
@@ -237,6 +247,7 @@ export function createMcpHttpHandler(options: McpHttpOptions): McpHttpHandler {
     initializingLeases.clear();
     abortBodies();
     await Promise.allSettled([...allSessions].map(dispose));
+    options.diagnostics?.record("info", "mcp.endpoint.closed", { outcome: "success" });
   };
   return handler;
 }
@@ -299,6 +310,7 @@ async function makeSession(
     const established = server.connect(transport);
     established.then(resolveConnect, rejectConnect);
     await connectPromise;
+    options.diagnostics?.record("info", "mcp.session.opened", { clientId: auth.clientId, sessionEpoch: options.controller.snapshot().epoch });
   } catch (error) {
     rejectConnect(error);
     await dispose(session);

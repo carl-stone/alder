@@ -1,11 +1,37 @@
 import { createServer } from "node:net";
+import { randomUUID } from "node:crypto";
 import { chmod, mkdir, readFile } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import envPaths from "env-paths";
 import { ApplicationPreferences } from "./preferences.js";
 import { startHost, type RunningHost } from "./application.js";
 import { resolveApplicationResources, type ApplicationResources } from "./resources.js";
 import type { BackendSessionDescriptor, HostLaunchOptions } from "./sessions.js";
+import { StructuredDiagnostics, drainDiagnosticsBounded, persistEmergencyDiagnostic } from "./diagnostics.js";
+
+let activeBackendDiagnostics: StructuredDiagnostics | undefined;
+let handlingBackendFatal = false;
+
+async function exitAfterBackendFatal(event: "backend.fatal" | "backend.uncaught_exception" | "backend.unhandled_rejection", error: unknown): Promise<never> {
+  if (handlingBackendFatal) process.exit(1);
+  handlingBackendFatal = true;
+  const diagnostics = activeBackendDiagnostics;
+  if (diagnostics) {
+    const fields = {
+      outcome: "error", errorCode: (error as NodeJS.ErrnoException)?.code ?? (event === "backend.fatal" ? "backend_fatal" : event === "backend.unhandled_rejection" ? "unhandled_rejection" : "uncaught_exception"),
+      errorType: error instanceof Error ? error.name : "other",
+    } as const;
+    const emergency = await persistEmergencyDiagnostic({
+      rootDir: diagnostics.status().rootDir, role: "backend", component: "backend", event, fields,
+    }).then(() => true, () => false);
+    if (!emergency) diagnostics.record("error", event, fields);
+    await drainDiagnosticsBounded(diagnostics, 250).catch(() => false);
+  } else {
+    try { process.stderr.write("Alder backend failed before diagnostics initialized.\n"); } catch {}
+  }
+  process.exit(1);
+}
 
 /** One backend owns desktop documents and outlives any one attached client. */
 export class NotebookBackend {
@@ -14,13 +40,14 @@ export class NotebookBackend {
   private opening = 0;
   private readonly openings = new Map<string, Promise<RunningHost>>();
   get idle(): boolean { return this.hosts.size === 0 && this.opening === 0; }
-  constructor(private readonly resources: ApplicationResources, private readonly onIdle = () => {}) {}
+  constructor(private readonly resources: ApplicationResources, private readonly diagnostics?: StructuredDiagnostics, private readonly onIdle = () => {}) {}
 
   async open(options: HostLaunchOptions): Promise<BackendSessionDescriptor> {
     const key = options.path === null ? "untitled:" + options.sessionKey : "path:" + options.path;
     let host = this.hosts.get(key);
     if (host && host.ownership.canonicalPath !== options.path) { this.hosts.delete(key); host = undefined; }
     host ??= [...this.hosts.values()].find(item => item.ownership.canonicalPath === options.path && options.path !== null);
+    const cold = !host;
     if (!host) {
       let pending = this.openings.get(key);
       if (!pending) {
@@ -29,6 +56,10 @@ export class NotebookBackend {
       }
       host = await pending;
     }
+    this.diagnostics?.record("info", "backend.session.open", {
+      sessionId: options.sessionKey, sessionEpoch: host.ownership.epoch, cold,
+      documentId: options.path === null ? options.sessionKey : await this.diagnostics!.hashIdentity(options.path),
+    });
     if (host.ownership.canonicalPath !== null) {
       for (const [stored, value] of this.hosts) if (value === host && stored !== "path:" + host.ownership.canonicalPath) this.hosts.delete(stored);
       this.hosts.set("path:" + host.ownership.canonicalPath, host);
@@ -64,6 +95,10 @@ export class NotebookBackend {
           projectDirectory: options.projectDirectory,
           ...(options.path === null ? { untitledRecoveryId: options.sessionKey } : {}),
         },
+        diagnostics: this.diagnostics?.child({
+          sessionId: options.sessionKey,
+          documentId: options.path === null ? options.sessionKey : await this.diagnostics!.hashIdentity(options.path),
+        }),
       });
       const key = host.ownership.canonicalPath === null ? "untitled:" + host.ownership.sessionKey : "path:" + host.ownership.canonicalPath;
       this.hosts.set(key, host);
@@ -79,15 +114,30 @@ export class NotebookBackend {
   }
 
   async close(): Promise<void> {
-    await Promise.allSettled([...new Set(this.hosts.values())].map(host => host.close()));
+    const results = await Promise.allSettled([...new Set(this.hosts.values())].map(host => host.close()));
+    const rejected = results.filter(result => result.status === "rejected").length;
+    this.diagnostics?.record(rejected ? "error" : "info", "backend.close.summary", {
+      count: results.length, outcome: rejected ? "error" : "success", dropped: rejected,
+    });
     await (await this.preferences).close();
   }
 }
 
 async function serve(socketPath: string): Promise<void> {
   const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+  const diagnosticsRoot = process.env.ALDER_DIAGNOSTICS_DIR ?? join(envPaths("alder", { suffix: "" }).data, "diagnostics");
+  const diagnostics = new StructuredDiagnostics({
+    rootDir: diagnosticsRoot,
+    role: "backend", component: "backend", appLaunchId: process.env.ALDER_APP_LAUNCH_ID,
+    backendInstanceId: randomUUID(), appVersion: process.env.ALDER_APP_VERSION,
+    buildId: process.env.ALDER_BUILD_ID,
+  });
+  activeBackendDiagnostics = diagnostics;
+  process.once("uncaughtException", error => { void exitAfterBackendFatal("backend.uncaught_exception", error); });
+  process.once("unhandledRejection", reason => { void exitAfterBackendFatal("backend.unhandled_rejection", reason); });
+  diagnostics.record("info", "backend.launch", {});
   let idleTimer: NodeJS.Timeout;
-  const backend = new NotebookBackend(await resolveApplicationResources(root), () => {
+  const backend = new NotebookBackend(await resolveApplicationResources(root), diagnostics, () => {
     clearTimeout(idleTimer);
     idleTimer = setTimeout(() => { if (backend.idle) stop(); }, 1_000);
   });
@@ -122,9 +172,14 @@ async function serve(socketPath: string): Promise<void> {
     stopping = true;
     clearTimeout(idleTimer);
     server.close();
-    const deadline = setTimeout(() => process.exit(0), 5_000);
+    const deadline = setTimeout(() => {
+      diagnostics.record("error", "backend.forced_exit", { forced: true, durationMs: 5_000, errorCode: "close_timeout" });
+      void drainDiagnosticsBounded(diagnostics, 100).finally(() => process.exit(0));
+    }, 5_000);
     void backend.close().finally(async () => {
       clearTimeout(deadline);
+      diagnostics.record("info", "backend.stop", { forced: false });
+      await diagnostics.close();
       process.exit(0);
     });
   };
@@ -136,7 +191,4 @@ async function serve(socketPath: string): Promise<void> {
 }
 
 const socketPath = process.argv[2];
-if (socketPath && process.argv[1]?.endsWith("alder-backend.mjs")) void serve(socketPath).catch(error => {
-  process.stderr.write(String(error) + "\n");
-  process.exit(1);
-});
+if (socketPath && process.argv[1]?.endsWith("alder-backend.mjs")) void serve(socketPath).catch(error => exitAfterBackendFatal("backend.fatal", error));
