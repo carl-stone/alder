@@ -512,7 +512,7 @@ export class ElectronMain {
       event.preventDefault?.();
       if (!record.closing) void this.requestClose(record);
     });
-    window.on("closed", () => { void this.disposeRecord(record); });
+    window.on("closed", () => { void this.disposeRecord(record, this.quitHandled || this.stopping ? "discard" : "normal"); });
     applyNativeWindowState(window, { path: canonical, dirty: false });
     try {
       await this.loadAuthenticatedNotebook(record, ticket);
@@ -899,7 +899,7 @@ export class ElectronMain {
       const state = await this.readWindowState(record);
       if (!state.dirty) {
         await this.prepareRendererUnload(record);
-        this.finishClose(record);
+        await this.finishClose(record);
         finished = true;
         return;
       }
@@ -928,7 +928,7 @@ export class ElectronMain {
         return;
       }
       await this.prepareRendererUnload(record);
-      this.finishClose(record);
+      await this.finishClose(record);
       finished = true;
     } catch (error) {
       await this.showApplicationError("Close notebook", error instanceof Error ? error.message : "The notebook remains open because its state could not be read.");
@@ -937,10 +937,11 @@ export class ElectronMain {
     }
   }
 
-  private finishClose(record: ElectronWindowRecord): void {
+  private async finishClose(record: ElectronWindowRecord): Promise<void> {
     if (record.released) return;
     record.closing = true;
-    record.window.destroy();
+    await this.disposeRecord(record, this.quitHandled || this.stopping ? "discard" : "normal");
+    if (!record.window.isDestroyed()) record.window.destroy();
   }
 
   private async prepareRendererUnload(record: ElectronWindowRecord): Promise<void> {
@@ -1208,7 +1209,7 @@ export class ElectronMain {
     if (source.released || source.closing || source.connection.canonicalPath !== null) return;
     const state = await this.readWindowState(source).catch(() => null);
     if (state === null || state.path !== null || state.dirty || source.released || source.closing) return;
-    this.finishClose(source);
+    await this.finishClose(source);
   }
 
   private focus(record: ElectronWindowRecord): void {

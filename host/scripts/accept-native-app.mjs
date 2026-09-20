@@ -49,7 +49,7 @@ async function launch(name) {
   });
   const cdp = await Cdp.connect(endpoint);
   sessions.add(cdp);
-  await cdp.wait("document.querySelector('.cm-content') && document.getElementById('r-state')?.textContent === 'R ready' && !document.getElementById('run-all')?.disabled", 45_000);
+  await cdp.wait("document.querySelector('.cm-content') && document.getElementById('r-state')?.textContent === 'R ready' && !document.querySelector('[data-act=run]')?.disabled", 45_000);
   return { child, cdp, stderr };
 }
 
@@ -133,20 +133,26 @@ function processTree(rootPid) {
   return found;
 }
 
-async function auditOwnedProcesses() {
-  const rows = execFileSync('/bin/ps', ['-axo', 'pid=,ppid=,command='], { encoding: 'utf8' }).split('\n').map(line => {
-    const match = /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line);
-    return match ? { pid: Number(match[1]), ppid: Number(match[2]), command: match[3] } : null;
-  }).filter(Boolean);
-  let expanded = true;
-  while (expanded) {
-    expanded = false;
-    for (const row of rows) if (ownedPids.has(row.ppid) && !ownedPids.has(row.pid)) {
-      ownedPids.add(row.pid); expanded = true;
+async function auditOwnedProcesses(timeout = 10_000) {
+  const deadline = Date.now() + timeout;
+  let survivors = [];
+  do {
+    const rows = execFileSync('/bin/ps', ['-axo', 'pid=,ppid=,command='], { encoding: 'utf8' }).split('\n').map(line => {
+      const match = /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line);
+      return match ? { pid: Number(match[1]), ppid: Number(match[2]), command: match[3] } : null;
+    }).filter(Boolean);
+    let expanded = true;
+    while (expanded) {
+      expanded = false;
+      for (const row of rows) if (ownedPids.has(row.ppid) && !ownedPids.has(row.pid)) {
+        ownedPids.add(row.pid); expanded = true;
+      }
     }
-  }
-  const survivors = rows.filter(row => ownedPids.has(row.pid) || row.command.includes(temporary));
-  if (survivors.length) throw new Error(`owned packaged processes survived native cleanup:\n${survivors.map(row => `${row.pid} ${row.command}`).join('\n')}`);
+    survivors = rows.filter(row => ownedPids.has(row.pid) || row.command.includes(temporary));
+    if (!survivors.length) return;
+    await new Promise(resolveWait => setTimeout(resolveWait, 25));
+  } while (Date.now() < deadline);
+  throw new Error(`owned packaged processes survived native cleanup:\n${survivors.map(row => `${row.pid} ${row.command}`).join('\n')}`);
 }
 
 class Cdp {

@@ -442,6 +442,51 @@ test("native close waits for the renderer to persist its latest draft", async ()
   assert.equal(window.destroyed, true);
 });
 
+test("clean application quit awaits final native lease discard before destroying the window", async () => {
+  const hostConnection = connection("clean-quit", "/tmp/alder-clean-quit.R", async endpoint => {
+    assert.equal(endpoint, "/api/ticket");
+    return jsonResponse({ ticket: "a".repeat(64), expiresAt: "2026-12-01T00:00:00.000Z" });
+  });
+  let releaseStarted!: () => void;
+  let finishRelease!: () => void;
+  const started = new Promise<void>(resolve => { releaseStarted = resolve; });
+  const finish = new Promise<void>(resolve => { finishRelease = resolve; });
+  hostConnection.release = async disposition => {
+    hostConnection.releaseCount += 1;
+    hostConnection.releaseDispositions.push(disposition ?? "normal");
+    releaseStarted();
+    await finish;
+  };
+  const window = windowWithLoad();
+  const electronRuntime = runtime();
+  const events = new Map<string, (...args: any[]) => unknown>();
+  electronRuntime.app.requestSingleInstanceLock = () => true;
+  electronRuntime.app.whenReady = async () => undefined;
+  electronRuntime.app.on = (event, handler) => { events.set(event, handler); return electronRuntime.app; };
+  let quits = 0;
+  electronRuntime.app.quit = () => { quits += 1; };
+  electronRuntime.BrowserWindow = Object.assign(function () { return window; }, { fromWebContents: () => null }) as unknown as ElectronRuntime["BrowserWindow"];
+  const main = new ElectronMain(electronRuntime, { resources, initialPath: "/tmp/alder-clean-quit.R", acquireSession: async () => hostConnection });
+  (main as any).loadAuthenticatedNotebook = async () => undefined;
+  await main.start();
+  const record = [...(main as any).records][0];
+  record.windowState = { path: hostConnection.canonicalPath, dirty: false, saveState: "saved", sessionEpoch: "epoch" };
+  window.webContents.send = (_channel, payload) => {
+    const command = payload as { requestId?: string };
+    if (command.requestId) queueMicrotask(() => record.pendingCommands.get(command.requestId)?.resolve({ requestId: command.requestId, status: "ok" }));
+  };
+
+  events.get("before-quit")!({ preventDefault: () => undefined });
+  await started;
+  assert.equal(quits, 0);
+  assert.equal(window.destroyed, false);
+  assert.deepEqual(hostConnection.releaseDispositions, ["discard"]);
+  finishRelease();
+  while (quits === 0) await new Promise(resolve => setImmediate(resolve));
+  assert.equal(window.destroyed, true);
+  assert.equal(hostConnection.releaseCount, 1);
+});
+
 test("discard closes within a bounded time when the host is unavailable and lease release stalls", { timeout: 4_000 }, async () => {
   const hostConnection = connection("offline-discard", null, async () => {
     throw new Error("host is unavailable");
