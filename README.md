@@ -13,12 +13,12 @@ tables, and controls in one focused window.
 Alder currently requires:
 
 - macOS 13 or later
-- R 4.6 or later, including `Rscript`
+- R 4.6.x, including `Rscript`
 
 Copy the provided `Alder.app` bundle to your Applications folder, then open it.
 Alder normally finds the system R installation automatically. If the status bar
-shows **R unavailable**, choose **R…** and select the `Rscript` executable from
-the R installation you want to use.
+shows **R unavailable**, select **Choose R…** and choose the `Rscript` executable
+from the R installation you want to use.
 
 Choose **File → Open…** or **Open notebook…** to open an existing `.R` file. A
 new notebook can be saved anywhere a normal R script can be saved.
@@ -99,12 +99,9 @@ recovery and detects changes made by another editor, offering an explicit choice
 instead of silently replacing either version. Editing and saving remain available
 even when R is unavailable.
 
-The notebook can also be opened through Alder's bundled MCP command when a local
-agent needs structured access to the same document and execution session.
-
 ## Examples and development
 
-[Iris](inst/examples/iris.R) is a package-free reactive example, and
+[Iris](inst/examples/iris.R) uses base R and Alder's bundled helpers, while
 [demo.R](demo.R) adds a `ggplot2` workflow. Both remain ordinary R scripts.
 
 To build Alder or contribute to the project, start with the
