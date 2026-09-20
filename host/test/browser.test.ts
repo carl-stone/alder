@@ -252,10 +252,18 @@ test('trusted browser edit-and-Run presents the current chain and creation retai
     await browser.wait(`document.querySelector('[data-cell="cell-1"]').classList.contains('running') &&
       document.querySelector('#stop').disabled === false`);
     await browser.click('#stop');
-    await browser.wait(`window.__alderHost.client.document.snapshot.runtime.busy === false &&
-      !document.querySelector('[data-cell="cell-1"]').classList.contains('running')`);
-    assert.equal(app.controller.snapshot().cells[0]?.error?.interrupted, true,
+    await browser.wait(`(() => {
+      const snapshot = window.__alderHost.client.document.snapshot;
+      const cell = document.querySelector('[data-cell="cell-1"]');
+      const run = cell?.querySelector('[data-act=run]');
+      return snapshot.runtime.busy === false && snapshot.cells[0].status === 'stopped' &&
+        snapshot.cells[0].error === null && cell?.classList.contains('stopped') &&
+        !cell.classList.contains('error') && cell.querySelector('[data-role=badge]')?.textContent === 'stopped' &&
+        run?.disabled === false && !document.querySelector('#status')?.classList.contains('error');
+    })()`);
+    assert.equal(app.controller.snapshot().cells[0]?.status, 'stopped',
       'long evaluations must show running feedback and remain stoppable');
+    assert.equal(app.controller.snapshot().cells[0]?.error, null);
     await browser.click('[data-cell="cell-1"] .cm-content');
     await replaceFocusedEditor(browser, 'a <- 40\na');
     await browser.click('[data-cell="cell-1"] [data-act=run]');
@@ -264,6 +272,8 @@ test('trusted browser edit-and-Run presents the current chain and creation retai
     await browser.evaluate('new Promise(resolve => setTimeout(resolve, 150))');
     assert.equal(await browser.evaluate(`document.querySelector('[data-cell="cell-1"]').classList.contains('done')`), true,
       'a deferred started projection must not replace a completed result');
+    assert.equal(app.controller.snapshot().cells[0]?.status, 'done');
+    assert.equal(app.controller.snapshot().cells[0]?.error, null);
     assert.deepEqual(browser.errors, []);
   } catch (error) {
     console.error(JSON.stringify({ host: app?.controller.snapshot(), browser: await browser?.evaluate(

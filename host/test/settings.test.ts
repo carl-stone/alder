@@ -123,7 +123,7 @@ test("settings have one owner across open notebooks, projects, and relaunch", as
   } finally { await preferences.close(); await f.close(); }
 });
 
-test("launch execution choices remain editable notebook values", async () => {
+test("launch execution choice stays transient until a user saves notebook settings", async () => {
   const f = await fixture();
   try {
     const path = await f.notebook("launch.R");
@@ -131,19 +131,25 @@ test("launch execution choices remain editable notebook values", async () => {
     const launched = await f.open(path, undefined, { executionMode: "lazy", suppressStartup: true });
     assert.equal(launched.controller.snapshot().runtime.executionMode, "lazy");
     assert.equal(launched.controller.snapshot().runtime.runOnStartup, true, "--no-run does not alter the notebook setting");
-    assert.equal(launched.controller.snapshot().dirty, true);
-    assert.equal(await readFile(path, "utf8"), original, "--lazy uses Save, not a launch-time file rewrite");
+    assert.equal(launched.controller.snapshot().dirty, false);
+    assert.equal((await launched.controller.query({ type: "recovery" })).result.candidate, null);
+    assert.equal(await readFile(path, "utf8"), original);
     await launched.close();
     const host = await f.open(path);
-    assert.equal(host.controller.snapshot().runtime.executionMode, "lazy", "the unsaved notebook choice is recoverable");
-    await success(host, { type: "set-runtime", on_cell_change: "automatic", on_startup: true });
-    assert.equal(host.controller.snapshot().runtime.executionMode, "automatic");
-    assert.equal(host.controller.snapshot().runtime.runOnStartup, true);
+    assert.equal(host.controller.snapshot().runtime.executionMode, "automatic", "a launch-only choice is not persisted");
+    assert.equal(host.controller.snapshot().dirty, false);
+    assert.equal((await host.controller.query({ type: "recovery" })).result.candidate, null);
+
+    await success(host, { type: "set-runtime", on_cell_change: "lazy", on_startup: false });
+    assert.equal(host.controller.snapshot().runtime.executionMode, "lazy");
+    assert.equal(host.controller.snapshot().runtime.runOnStartup, false);
+    assert.equal(host.controller.snapshot().dirty, true);
     await success(host, { type: "save" });
     await host.close();
     const reopened = await f.open(path);
-    assert.equal(reopened.controller.snapshot().runtime.executionMode, "automatic");
-    assert.equal(reopened.controller.snapshot().runtime.runOnStartup, true);
+    assert.equal(reopened.controller.snapshot().runtime.executionMode, "lazy");
+    assert.equal(reopened.controller.snapshot().runtime.runOnStartup, false);
+    assert.equal(reopened.controller.snapshot().dirty, false);
   } finally { await f.close(); }
 });
 
@@ -183,7 +189,7 @@ test("invalid notebook settings reject ineffective changes while opening and sav
       const path = await f.notebook(`${runtime.includes("false") ? "mapping" : "field"}.R`, `# ---\n${runtime}\n# ---\n# %%\nx <- 1\n`);
       const host = await f.open(path, undefined, { executionMode: "lazy" });
       assert.ok(host.controller.snapshot().serviceErrors.settings?.message.includes(path));
-      assert.equal(host.controller.snapshot().runtime.executionMode, "automatic");
+      assert.equal(host.controller.snapshot().runtime.executionMode, "lazy", "the transient launch mode remains usable while authored settings need repair");
       assert.equal(host.controller.snapshot().dirty, false);
       const result = await command(host, { type: "set-runtime", on_cell_change: "lazy" });
       assert.ok(result.error, "a remaining invalid setting must not produce a successful ineffective change");
