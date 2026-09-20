@@ -23,6 +23,17 @@ test("explicit no-run disables configured startup", () => {
   assert.equal(parseCli([]).noRun, false);
 });
 
+test("diagnostics CLI exposes the stable read-only query surface", () => {
+  const options = parseCli(["diagnostics", "incident", "--id", "operation-1", "--since", "2026-09-19T00:00:00Z", "--limit", "25"]);
+  assert.equal(options.command, "diagnostics");
+  assert.equal(options.diagnosticQuery, "incident");
+  assert.equal(options.diagnosticId, "operation-1");
+  assert.equal(options.diagnosticLimit, 25);
+  assert.throws(() => parseCli(["diagnostics", "unknown"]), /requires status/);
+  assert.throws(() => parseCli(["diagnostics", "status", "--limit", "0"]), /1 to 10000/);
+  assert.throws(() => parseCli(["run", "notebook.R", "--since", "2026-09-19"]), /diagnostics command/);
+});
+
 test("CLI waits for cold runtime startup before the first operation", async () => {
   const snapshots = [
     { runtime: { executionReady: false, executionBlockedReason: null } },

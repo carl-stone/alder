@@ -1,5 +1,5 @@
 import { execFileSync, spawn } from 'node:child_process';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import WebSocket from 'ws';
@@ -10,11 +10,13 @@ const executable = join(app, 'Contents/MacOS/Alder');
 const cleanupProbe = process.argv.includes('--cleanup-probe');
 const saveIterations = Number(process.env.ALDER_NATIVE_SAVE_ITERATIONS ?? 20);
 const temporary = await mkdtemp('/tmp/alder-native-accept-');
-const notebook = join(temporary, 'native-accept.R');
+const workspace = join(temporary, 'workspace');
+const notebook = join(workspace, 'native-accept.R');
 const children = new Set();
 const ownedPids = new Set();
 const sessions = new Set();
 const started = performance.now();
+await mkdir(workspace);
 await writeFile(notebook, '# ---\n# runtime:\n#   on_cell_change: lazy\n# ---\n# %%\nvalue <- 0L\nvalue\n');
 function environment() {
   const result = { ...process.env,
@@ -231,6 +233,9 @@ try {
   primary = await launch('electron-primary');
   if (cleanupProbe) throw new Error('intentional cleanup probe');
 
+  await primary.cdp.evaluate(`(() => { const cause = new Error('PACKAGED_RENDERER_CAUSE'); const error = new Error('PACKAGED_RENDERER_FAILURE', { cause }); error.stack = 'PACKAGED_RENDERER_STACK'; window.dispatchEvent(new ErrorEvent('error', { error, message: error.message, filename: '/packaged/native-accept-renderer.js', lineno: 14, colno: 9 })) })()`);
+  await new Promise(resolveWait => setTimeout(resolveWait, 250));
+
   for (let iteration = 1; iteration <= saveIterations; iteration += 1) {
     const source = `value <- ${iteration}L\nvalue`;
     await replaceEditor(primary.cdp, source);
@@ -239,6 +244,27 @@ try {
     await waitDiskSource(source);
     await primary.cdp.wait("!document.title.includes('Edited')", 20_000);
   }
+
+  await replaceEditor(primary.cdp, 'Sys.sleep(0.25)\nslow_value <- 42L\nslow_value');
+  await primary.cdp.wait("!document.querySelector('[data-act=run]')?.disabled", 30_000);
+  await click(primary.cdp, '[data-act=run]');
+  await primary.cdp.wait("document.querySelector('[data-role=output]')?.textContent.includes('42')", 30_000);
+
+  await replaceEditor(primary.cdp, `stop('PACKAGED_ARK_FAILURE')`);
+  await primary.cdp.wait("!document.querySelector('[data-act=run]')?.disabled", 30_000);
+  await click(primary.cdp, '[data-act=run]');
+  await primary.cdp.wait("document.getElementById('status')?.textContent.includes('PACKAGED_ARK_FAILURE')", 30_000);
+
+  await replaceEditor(primary.cdp, 'persistence_value <- 99L\npersistence_value');
+  await chmod(workspace, 0o500);
+  try {
+    await shortcut(primary.cdp, 's', 'KeyS', 83, 4);
+    await new Promise(resolveWait => setTimeout(resolveWait, 1_500));
+  } finally {
+    await chmod(workspace, 0o700);
+  }
+  await shortcut(primary.cdp, 's', 'KeyS', 83, 4);
+  await waitDiskSource('persistence_value <- 99L\npersistence_value');
 
   await replaceEditor(primary.cdp, 'a <- 40\na + 2');
   await shortcut(primary.cdp, 's', 'KeyS', 83, 4);
@@ -278,7 +304,7 @@ try {
   process.kill(ark.pid, 'SIGKILL');
   await primary.cdp.wait("document.getElementById('r-state')?.textContent !== 'R ready' && !document.getElementById('restart')?.hidden", 20_000);
   await stop(primary); primary = undefined;
-  primary = await launch('electron-recovery');
+  primary = await launch('electron-primary');
   const recoveredSource = await primary.cdp.evaluate("[...document.querySelectorAll('.cm-content .cm-line')].map(node => node.textContent).join('\\n')");
   if (recoveredSource !== '6 * 7') throw new Error(`Ark recovery replaced current source: ${JSON.stringify(recoveredSource)}`);
   await replaceEditor(primary.cdp, 'recovered <- 42L\nrecovered');
@@ -287,14 +313,37 @@ try {
   await primary.cdp.wait("!document.title.includes('Edited')", 20_000);
   await stop(primary); primary = undefined;
 
-  primary = await launch('electron-relaunch');
+  primary = await launch('electron-primary');
   await primary.cdp.wait("[...document.querySelectorAll('.cm-content .cm-line')].map(node => node.textContent).join('\\n') === 'recovered <- 42L\\nrecovered'", 30_000);
   if (savedSource(await readFile(notebook, 'utf8')) !== 'recovered <- 42L\nrecovered') throw new Error('quit and relaunch did not preserve exact source');
+  await stop(primary); primary = undefined;
+
+  const diagnosticRoot = join(temporary, 'electron-primary', 'diagnostics');
+  const cli = join(app, 'Contents/Resources/alder/bin/alder');
+  const query = (name, args = []) => JSON.parse(execFileSync(cli, ['diagnostics', name, ...args], {
+    cwd: temporary, env: { ...environment(), ALDER_DIAGNOSTICS_DIR: diagnosticRoot }, encoding: 'utf8',
+  }));
+  const status = query('status');
+  const launches = query('launches', ['--limit', '100']);
+  const errors = query('errors', ['--limit', '500']);
+  const operations = query('operations', ['--slow-ms', '100', '--limit', '500']);
+  const performanceSummary = query('performance', ['--limit', '100']);
+  const errorText = JSON.stringify(errors);
+  if (!status.available || status.retainedBytes <= 0 || status.droppedRecords !== 0) throw new Error(`packaged diagnostic status is unhealthy: ${JSON.stringify(status)}`);
+  if (launches.records.length < 4) throw new Error(`packaged launches are incomplete: ${JSON.stringify(launches)}`);
+  for (const expected of ['PACKAGED_RENDERER_FAILURE', 'PACKAGED_RENDERER_STACK', 'PACKAGED_ARK_FAILURE', 'persistence.failure', 'child.exit']) {
+    if (!errorText.includes(expected)) throw new Error(`packaged diagnostic errors omit ${expected}: ${errorText}`);
+  }
+  if (!JSON.stringify(operations).includes('slow_value') || !operations.operations.length) throw new Error(`packaged slow operation is absent: ${JSON.stringify(operations)}`);
+  if (!performanceSummary.summaries.length) throw new Error(`packaged performance summary is empty: ${JSON.stringify(performanceSummary)}`);
   process.stdout.write(JSON.stringify({ app, elapsedMs: Math.round(performance.now() - started), immediateSaveIterations: saveIterations,
-    journeys: ['open-reopen', 'editor-run', 'immediate-save', 'interrupt-recovery', 'same-file-peer-detach', 'ark-recovery', 'quit-relaunch'] }) + '\n');
+    journeys: ['open-reopen', 'editor-run', 'immediate-save', 'renderer-error', 'slow-run', 'ark-error', 'persistence-failure', 'interrupt-recovery', 'same-file-peer-detach', 'ark-recovery', 'quit-relaunch', 'stopped-diagnostic-queries'],
+    diagnostics: { retainedBytes: status.retainedBytes, launches: launches.records.length, errors: errors.records.length, operations: operations.operations.length, performance: performanceSummary.summaries.length },
+  }) + '\n');
 } catch (error) {
   if (!(cleanupProbe && String(error?.message).includes('intentional cleanup probe'))) throw error;
 } finally {
+  await chmod(workspace, 0o700).catch(() => undefined);
   await stop(peer);
   await stop(primary);
   for (const cdp of sessions) cdp.close();

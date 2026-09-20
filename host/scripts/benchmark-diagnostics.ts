@@ -29,11 +29,18 @@ async function ordinary(label: string, sink: DiagnosticSink): Promise<Record<str
   for (let index = 0; index < iterations; index++) {
     const operationId = `operation-${index}`;
     const before = performance.now();
-    sink.record("info", "operation.accepted", { clientId: "benchmark-client", operationId, kind: "run", documentRevision: index });
+    const source = [`sample_${index} <- rnorm(1000)`, `summary_${index} <- summary(sample_${index})`, `summary_${index}`];
+    sink.record("info", "operation.accepted", {
+      clientId: "benchmark-client", operationId, kind: "run", documentRevision: index,
+      command: { type: "run", scope: "cell", target: { cellId: `cell-${index % 80}` }, source },
+    });
     for (const phase of ["analysis-ready", "kernel-dispatch", "kernel-completion", "authoritative-completion"]) {
       sink.record("info", "operation.phase", { clientId: "benchmark-client", operationId, phase });
     }
-    sink.record("info", "operation.settled", { clientId: "benchmark-client", operationId, kind: "run", outcome: "success", durationMs: 1 });
+    sink.record("info", "operation.settled", {
+      clientId: "benchmark-client", operationId, kind: "run", outcome: "success", durationMs: 1,
+      notebookContext: { path: `/Users/research/project/notebook-${index % 5}.R`, cells: [{ id: `cell-${index % 80}`, source, output: { text: "Min. 1st Qu. Median Mean 3rd Qu. Max." } }] },
+    });
     samples.push((performance.now() - before) * 1_000);
     if (sink instanceof StructuredDiagnostics && index % 250 === 249) await sink.flush();
   }
@@ -77,7 +84,9 @@ const rotating = new StructuredDiagnostics({
 try {
   await ordinary("warmup", disabled);
   const off = await ordinary("disabled", disabled);
-  const on = { ...(await ordinary("ordinary-enabled", enabled)), retainedDirectoryBytes: await retainedBytes(ordinaryRoot) };
+  const enabledResult = await ordinary("ordinary-enabled", enabled);
+  const enabledBytes = await retainedBytes(ordinaryRoot);
+  const on = { ...enabledResult, retainedDirectoryBytes: enabledBytes };
 
   const saturationCpu = process.cpuUsage(), saturationStarted = performance.now();
   for (let index = 0; index < iterations; index++) saturated.record("info", "host.ready", { count: index });
@@ -110,7 +119,22 @@ try {
     throw new Error("rotation benchmark exceeded retention caps");
   }
 
-  process.stdout.write(JSON.stringify({ benchmark: "alder-diagnostics", off, on, saturation, rotation }, null, 2) + "\n");
+  const bytesPerOperation = enabledBytes / iterations;
+  const estimatedOperationsPerDay = 2_000;
+  process.stdout.write(JSON.stringify({
+    benchmark: "alder-diagnostics", workload: "six lifecycle records plus raw command, three-line R source, cell output and notebook path per operation",
+    off, on, saturation, rotation,
+    interpretation: {
+      bytesPerOperation,
+      estimatedOperationsPerDay,
+      estimatedBytesPerDay: Math.round(bytesPerOperation * estimatedOperationsPerDay),
+      defaultRetentionBytes: 256 * 1024 * 1024,
+      estimatedDaysAtDefaultCap: Math.floor((256 * 1024 * 1024) / (bytesPerOperation * estimatedOperationsPerDay)),
+      wallOverheadMs: Number(on.wallMs) - Number(off.wallMs),
+      cpuOverheadMicros: Number((on.cpuMicros as { user: number; system: number }).user) + Number((on.cpuMicros as { user: number; system: number }).system)
+        - Number((off.cpuMicros as { user: number; system: number }).user) - Number((off.cpuMicros as { user: number; system: number }).system),
+    },
+  }, null, 2) + "\n");
 } finally {
   await Promise.all([enabled.close(), saturated.close(), rotating.close()]);
   await rm(root, { recursive: true, force: true });

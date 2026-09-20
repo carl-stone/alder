@@ -69,6 +69,32 @@ Verify actual Mac typing, menus, dialogs, save/reopen and recovery where relevan
 See [host/test/AGENTS.md](../host/test/AGENTS.md) for host, browser and desktop
 tests, and [tests/AGENTS.md](../tests/AGENTS.md) for R helper tests.
 
+## Inspect local diagnostics
+
+The installed `alder` command locates Alder's automatic local diagnostic store;
+callers do not need to find or name JSONL segments. Every query is read-only and
+prints one machine-readable JSON object. It works while Alder is running or after
+the app and backend have stopped.
+
+```sh
+alder diagnostics status
+alder diagnostics launches --limit 20
+alder diagnostics errors --since 2026-09-19T00:00:00Z --limit 100
+alder diagnostics operations --slow-ms 5000 --limit 100
+alder diagnostics performance --since 2026-09-19T00:00:00Z
+alder diagnostics incident --id OPERATION_OR_SESSION_ID --limit 500
+alder diagnostics incident --since 2026-09-19T14:00:00Z --until 2026-09-19T14:05:00Z --limit 1000
+```
+
+`status` reports retained bytes, segment and active-writer counts, malformed
+records, dropped records and writer health. `launches` returns app, backend, host,
+session and window starts. `errors` returns raw error and fatal records.
+`operations` reconstructs slow and incomplete work. `performance` summarizes
+recorded durations and resource snapshots. `incident` returns the chronological
+raw records in a time range or records containing an exact correlation identifier.
+Local records contain full paths, source, output, environment, commands and raw
+errors; a Help-menu raw copy is optional and contains the same uncensored data.
+
 ## Generated files and R helpers
 
 - After changing editor sources in `js/`, run `npm run build --prefix js`.

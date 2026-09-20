@@ -34,6 +34,27 @@ test("owned processes deliver output and exit status without a native supervisor
   } finally { await scope.close(); }
 });
 
+test("owned child diagnostics retain argv, cwd, environment and bounded stdout and stderr tails", async () => {
+  const diagnostics = new CollectingDiagnostics();
+  const scope = await createProcessScope(undefined, diagnostics);
+  const childOptions = options("setTimeout(() => { console.log('RAW_CHILD_STDOUT'); console.error('RAW_CHILD_STDERR') }, 20)");
+  childOptions.environment.ALDER_CHILD_CONTEXT = "raw-child-environment";
+  try {
+    const child = await scope.spawn(childOptions);
+    child.stdout!.resume(); child.stderr!.resume();
+    assert.deepEqual(await child.exited, { code: 0, signal: null });
+    await new Promise(resolve => setImmediate(resolve));
+    const spawn = diagnostics.events.find(item => item.event === "child.spawn")!;
+    assert.equal(spawn.fields.executable, process.execPath);
+    assert.deepEqual(spawn.fields.argv, childOptions.args);
+    assert.equal(spawn.fields.cwd, process.cwd());
+    assert.equal((spawn.fields.environment as Record<string, string>).ALDER_CHILD_CONTEXT, "raw-child-environment");
+    const exit = diagnostics.events.find(item => item.event === "child.exit")!;
+    assert.match(String(exit.fields.stdoutTail), /RAW_CHILD_STDOUT/);
+    assert.match(String(exit.fields.stderrTail), /RAW_CHILD_STDERR/);
+  } finally { await scope.close(); }
+});
+
 test("scope close stops a running child and its descendant", async () => {
   const scope = await createProcessScope();
   const child = await scope.spawn(options("const c = require('node:child_process').spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {stdio:'ignore'}); console.log(c.pid); setInterval(() => {}, 1000)"));

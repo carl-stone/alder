@@ -1,7 +1,7 @@
 import { NativeRecoveryStore } from "./recovery-store.js";
 import { ALDER_APP_NAME, applyNativeWindowState, assertNativeDialogRuntime, installNativeMenu, nativeWindowOptions } from "./native-shell.mjs";
 import { observeSaveAsDestination } from "../../host/src/persistence.js";
-import { StructuredDiagnostics, exportDiagnosticBundle } from "../../host/src/diagnostics.js";
+import { StructuredDiagnostics, diagnosticError, exportDiagnosticBundle } from "../../host/src/diagnostics.js";
 import { realpath } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
@@ -498,6 +498,7 @@ export class ElectronMain {
     this.diagnostics?.record("info", "window.open", {
       windowId: record.windowId, sessionId: connection.sessionKey, sessionEpoch: connection.epoch,
       cold: ![...this.records].some(item => item.connection.sessionKey === connection.sessionKey),
+      path: canonical, origin: connection.origin, browserOrigin: connection.browserOrigin,
     });
     record.keys.add(canonical ?? `session:${connection.sessionKey}`);
     if (hint !== null) record.keys.add(hint);
@@ -675,7 +676,8 @@ export class ElectronMain {
       if (diagnostic.event !== "run.visible") {
         this.diagnostics?.record("error", diagnostic.event, {
           windowId: record.windowId, sessionId: record.connection.sessionKey, sessionEpoch: record.connection.epoch,
-          reason: diagnostic.category, outcome: "error",
+          reason: diagnostic.category, outcome: "error", error: diagnostic.error,
+          filename: diagnostic.filename, line: diagnostic.line, column: diagnostic.column,
         });
         return;
       }
@@ -737,11 +739,11 @@ export class ElectronMain {
         windowId: record.windowId, sessionEpoch: record.connection.epoch, reason: "responsive", outcome: "success",
       });
     });
-    contents.on("did-fail-load", (_event: unknown, errorCode: number, _description: string, _url: string, isMainFrame: boolean) => {
+    contents.on("did-fail-load", (_event: unknown, errorCode: number, description: string, url: string, isMainFrame: boolean) => {
       if (!isMainFrame) return;
       this.diagnostics?.record("error", "renderer.load_failed", {
         windowId: record.windowId, sessionEpoch: record.connection.epoch, reason: "load-failed",
-        status: errorCode, outcome: "error",
+        status: errorCode, description, url, outcome: "error",
       });
     });
     contents.setWindowOpenHandler(details => {
@@ -769,11 +771,11 @@ export class ElectronMain {
     contents.on("will-frame-navigate", (event: { preventDefault?: () => void }, url: string) => {
       if (!isTrustedApplicationOrigin(url, record.loadingOrigin ?? record.origin)) event.preventDefault?.();
     });
-    contents.on("render-process-gone", (_event: unknown, details: { reason?: string }) => {
+    contents.on("render-process-gone", (_event: unknown, details: { reason?: string; exitCode?: number }) => {
       if (record.released || record.reloadInProgress) return;
       this.diagnostics?.record("error", "renderer.gone", {
         windowId: record.windowId, sessionEpoch: record.connection.epoch,
-        reason: details?.reason ?? "unknown", outcome: "error",
+        reason: details?.reason ?? "unknown", exitCode: details?.exitCode ?? null, details, outcome: "error",
       });
       record.reloadInProgress = true;
       void this.recoverRenderer(record, details?.reason ?? "unknown").finally(() => { record.reloadInProgress = false; });
@@ -807,6 +809,7 @@ export class ElectronMain {
         windowId: record.windowId, sessionEpoch: record.connection.epoch,
         rendererGeneration: record.loadGeneration, outcome: "error",
         errorCode: (error as NodeJS.ErrnoException)?.code ?? "renderer_recovery_failed",
+        error: diagnosticError(error),
       });
       await this.showApplicationError("Renderer recovery", error instanceof Error ? error.message : "The renderer could not be recovered.");
     }
@@ -828,10 +831,24 @@ export class ElectronMain {
       }, timeoutMs);
     });
     try {
+      this.diagnostics?.record("info", "native_command.started", {
+        windowId: record.windowId, sessionId: record.connection.sessionKey, sessionEpoch: record.connection.epoch,
+        requestId, action, command,
+      });
       record.window.webContents.send(IPC_CHANNELS.desktopCommand, command);
       const completed = await result;
+      this.diagnostics?.record(completed.status === "error" ? "error" : "info", "native_command.settled", {
+        windowId: record.windowId, sessionId: record.connection.sessionKey, sessionEpoch: record.connection.epoch,
+        requestId, action, result: completed,
+      });
       if (completed.status === "error") throw new Error(completed.message ?? "The editor command failed.");
       return completed.status;
+    } catch (error) {
+      this.diagnostics?.record("error", "native_command.failed", {
+        windowId: record.windowId, sessionId: record.connection.sessionKey, sessionEpoch: record.connection.epoch,
+        requestId, action, command, error: diagnosticError(error),
+      });
+      throw error;
     } finally {
       if (timer !== undefined) clearTimeout(timer);
       record.pendingCommands.delete(requestId);
@@ -1117,6 +1134,7 @@ export class ElectronMain {
       this.diagnostics?.record("error", "window.close", {
         windowId: record.windowId, sessionEpoch: record.connection.epoch, outcome: "error",
         errorCode: (error as NodeJS.ErrnoException)?.code ?? "lease_release_failed",
+        error: diagnosticError(error),
       });
     }
   }
@@ -1131,17 +1149,17 @@ export class ElectronMain {
     const answer = await (record
       ? this.runtime.dialog.showMessageBox(record.window, {
           type: "info", title: "Alder Diagnostics", message: status.available ? "Local diagnostics are available." : "Local diagnostics are unavailable.",
-          detail: `Dropped events: ${status.droppedEvents + status.unavailableEvents}\nRuntime: ${snapshot?.runtime.kernelState ?? "unknown"}; active operation: ${snapshot?.runtime.activeRunId ?? "none"}\n\nA saved bundle includes bounded structured lifecycle logs, build/runtime metadata, coarse service state and one resource snapshot. It excludes notebook source, R output and values, widget/upload content, credentials, environment values, absolute paths and raw child output.`,
-          buttons: ["Save Diagnostic Bundle…", "Close"], defaultId: 0, cancelId: 1,
+          detail: `Retained bytes: ${status.retainedBytes}; dropped records: ${status.droppedEvents + status.unavailableEvents}\nRuntime: ${snapshot?.runtime.kernelState ?? "unknown"}; active operation: ${snapshot?.runtime.activeRunId ?? "none"}\n\nAlder automatically retains full local diagnostic records. Agents can inspect them with \`alder diagnostics\`; saving a raw copy is optional.`,
+          buttons: ["Save Raw Copy…", "Close"], defaultId: 0, cancelId: 1,
         })
       : this.runtime.dialog.showMessageBox({
           type: "info", title: "Alder Diagnostics", message: status.available ? "Local diagnostics are available." : "Local diagnostics are unavailable.",
-          detail: `Dropped events: ${status.droppedEvents + status.unavailableEvents}`, buttons: ["Save Diagnostic Bundle…", "Close"], defaultId: 0, cancelId: 1,
+          detail: `Retained bytes: ${status.retainedBytes}; dropped records: ${status.droppedEvents + status.unavailableEvents}`, buttons: ["Save Raw Copy…", "Close"], defaultId: 0, cancelId: 1,
         }));
     if (answer.response !== 0) return;
     const selected = record
-      ? await this.runtime.dialog.showSaveDialog(record.window, { title: "Save Diagnostic Bundle", message: "Choose a new folder for the diagnostic bundle.", properties: ["createDirectory"] })
-      : await this.runtime.dialog.showSaveDialog({ title: "Save Diagnostic Bundle", message: "Choose a new folder for the diagnostic bundle.", properties: ["createDirectory"] });
+      ? await this.runtime.dialog.showSaveDialog(record.window, { title: "Save Raw Diagnostic Copy", message: "Choose a new folder for the raw diagnostic copy.", properties: ["createDirectory"] })
+      : await this.runtime.dialog.showSaveDialog({ title: "Save Raw Diagnostic Copy", message: "Choose a new folder for the raw diagnostic copy.", properties: ["createDirectory"] });
     if (selected.canceled || !selected.filePath) return;
     const cacheRoot = record?.connection.canonicalPath ? join(dirname(record.connection.canonicalPath), ".alder", "cache") : undefined;
     await exportDiagnosticBundle(diagnostics, selected.filePath, {
@@ -1167,7 +1185,7 @@ export class ElectronMain {
   private async showDiagnosticsError(): Promise<void> {
     const record = this.focusedRecord() ?? this.firstRecord();
     const options = {
-      type: "error", title: "Alder Diagnostics", message: "The diagnostic bundle could not be saved.",
+      type: "error", title: "Alder Diagnostics", message: "The raw diagnostic copy could not be saved.",
       detail: "Alder remains usable. Choose a new destination and try again.", buttons: ["OK"],
     };
     await (record ? this.runtime.dialog.showMessageBox(record.window, options) : this.runtime.dialog.showMessageBox(options)).catch(() => undefined);

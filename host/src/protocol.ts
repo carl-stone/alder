@@ -1301,6 +1301,15 @@ const visibleResultDiagnosticSchema = z.object({
 const rendererFailureDiagnosticSchema = z.object({
   event: z.enum(["renderer.error", "renderer.unhandled_rejection", "renderer.bootstrap_failed"]),
   category: z.enum(["script-error", "unhandled-rejection", "bootstrap-failed"]),
+  error: z.object({
+    name: boundedUtf8StringSchema(1_024, true),
+    message: boundedUtf8StringSchema(MAX_FRAME_BYTES, true),
+    stack: boundedUtf8StringSchema(MAX_FRAME_BYTES, true).nullable(),
+    cause: protocolJsonSchema,
+  }).strict(),
+  filename: boundedUtf8StringSchema(MAX_FRAME_BYTES, true).nullable(),
+  line: protocolIntegerSchema.nullable(),
+  column: protocolIntegerSchema.nullable(),
 }).strict();
 export const desktopDiagnosticSchema = z.discriminatedUnion("event", [visibleResultDiagnosticSchema, rendererFailureDiagnosticSchema]);
 export type DesktopDiagnostic = z.infer<typeof desktopDiagnosticSchema>;

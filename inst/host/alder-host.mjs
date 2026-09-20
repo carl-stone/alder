@@ -2990,7 +2990,7 @@ var require_compile = __commonJS({
       const schOrFunc = root.refs[ref];
       if (schOrFunc)
         return schOrFunc;
-      let _sch = resolve5.call(this, root, ref);
+      let _sch = resolve6.call(this, root, ref);
       if (_sch === void 0) {
         const schema = (_a3 = root.localRefs) === null || _a3 === void 0 ? void 0 : _a3[ref];
         const { schemaId } = this.opts;
@@ -3017,7 +3017,7 @@ var require_compile = __commonJS({
     function sameSchemaEnv(s1, s2) {
       return s1.schema === s2.schema && s1.root === s2.root && s1.baseId === s2.baseId;
     }
-    function resolve5(root, ref) {
+    function resolve6(root, ref) {
       let sch;
       while (typeof (sch = this.refs[ref]) == "string")
         ref = sch;
@@ -3847,7 +3847,7 @@ var require_fast_uri = __commonJS({
       }
       return uri;
     }
-    function resolve5(baseURI, relativeURI, options) {
+    function resolve6(baseURI, relativeURI, options) {
       const schemelessOptions = options ? Object.assign({ scheme: "null" }, options) : { scheme: "null" };
       const {
         parsed: baseParsed,
@@ -4215,7 +4215,7 @@ var require_fast_uri = __commonJS({
     var fastUri = {
       SCHEMES,
       normalize,
-      resolve: resolve5,
+      resolve: resolve6,
       resolveComponent,
       equal,
       serialize,
@@ -7375,7 +7375,7 @@ var require_polyfills = __commonJS({
       }
       if (platform === "win32") {
         fs.rename = typeof fs.rename !== "function" ? fs.rename : (function(fs$rename) {
-          function rename2(from, to, cb) {
+          function rename3(from, to, cb) {
             var start = Date.now();
             var backoff = 0;
             fs$rename(from, to, function CB(er) {
@@ -7395,8 +7395,8 @@ var require_polyfills = __commonJS({
               if (cb) cb(er);
             });
           }
-          if (Object.setPrototypeOf) Object.setPrototypeOf(rename2, fs$rename);
-          return rename2;
+          if (Object.setPrototypeOf) Object.setPrototypeOf(rename3, fs$rename);
+          return rename3;
         })(fs.rename);
       }
       fs.read = typeof fs.read !== "function" ? fs.read : (function(fs$read) {
@@ -7797,11 +7797,11 @@ var require_graceful_fs = __commonJS({
     function patch(fs2) {
       polyfills(fs2);
       fs2.gracefulify = patch;
-      fs2.createReadStream = createReadStream;
+      fs2.createReadStream = createReadStream2;
       fs2.createWriteStream = createWriteStream;
       var fs$readFile = fs2.readFile;
-      fs2.readFile = readFile2;
-      function readFile2(path2, options, cb) {
+      fs2.readFile = readFile3;
+      function readFile3(path2, options, cb) {
         if (typeof options === "function")
           cb = options, options = null;
         return go$readFile(path2, options, cb);
@@ -7817,8 +7817,8 @@ var require_graceful_fs = __commonJS({
         }
       }
       var fs$writeFile = fs2.writeFile;
-      fs2.writeFile = writeFile;
-      function writeFile(path2, data, options, cb) {
+      fs2.writeFile = writeFile2;
+      function writeFile2(path2, data, options, cb) {
         if (typeof options === "function")
           cb = options, options = null;
         return go$writeFile(path2, data, options, cb);
@@ -7835,8 +7835,8 @@ var require_graceful_fs = __commonJS({
       }
       var fs$appendFile = fs2.appendFile;
       if (fs$appendFile)
-        fs2.appendFile = appendFile;
-      function appendFile(path2, data, options, cb) {
+        fs2.appendFile = appendFile2;
+      function appendFile2(path2, data, options, cb) {
         if (typeof options === "function")
           cb = options, options = null;
         return go$appendFile(path2, data, options, cb);
@@ -7853,8 +7853,8 @@ var require_graceful_fs = __commonJS({
       }
       var fs$copyFile = fs2.copyFile;
       if (fs$copyFile)
-        fs2.copyFile = copyFile;
-      function copyFile(src, dest, flags, cb) {
+        fs2.copyFile = copyFile2;
+      function copyFile2(src, dest, flags, cb) {
         if (typeof flags === "function") {
           cb = flags;
           flags = 0;
@@ -7872,9 +7872,9 @@ var require_graceful_fs = __commonJS({
         }
       }
       var fs$readdir = fs2.readdir;
-      fs2.readdir = readdir2;
+      fs2.readdir = readdir3;
       var noReaddirOptionVersions = /^v[0-5]\./;
-      function readdir2(path2, options, cb) {
+      function readdir3(path2, options, cb) {
         if (typeof options === "function")
           cb = options, options = null;
         var go$readdir = noReaddirOptionVersions.test(process.version) ? function go$readdir2(path3, options2, cb2, startTime) {
@@ -7977,7 +7977,7 @@ var require_graceful_fs = __commonJS({
       }
       function ReadStream$open() {
         var that = this;
-        open3(that.path, that.flags, that.mode, function(err, fd) {
+        open4(that.path, that.flags, that.mode, function(err, fd) {
           if (err) {
             if (that.autoClose)
               that.destroy();
@@ -7997,7 +7997,7 @@ var require_graceful_fs = __commonJS({
       }
       function WriteStream$open() {
         var that = this;
-        open3(that.path, that.flags, that.mode, function(err, fd) {
+        open4(that.path, that.flags, that.mode, function(err, fd) {
           if (err) {
             that.destroy();
             that.emit("error", err);
@@ -8007,15 +8007,15 @@ var require_graceful_fs = __commonJS({
           }
         });
       }
-      function createReadStream(path2, options) {
+      function createReadStream2(path2, options) {
         return new fs2.ReadStream(path2, options);
       }
       function createWriteStream(path2, options) {
         return new fs2.WriteStream(path2, options);
       }
       var fs$open = fs2.open;
-      fs2.open = open3;
-      function open3(path2, flags, mode, cb) {
+      fs2.open = open4;
+      function open4(path2, flags, mode, cb) {
         if (typeof mode === "function")
           cb = mode, mode = null;
         return go$open(path2, flags, mode, cb);
@@ -8513,11 +8513,11 @@ var require_mtime_precision = __commonJS({
     function probe(file2, fs, callback) {
       const cachedPrecision = fs[cacheSymbol];
       if (cachedPrecision) {
-        return fs.stat(file2, (err, stat2) => {
+        return fs.stat(file2, (err, stat3) => {
           if (err) {
             return callback(err);
           }
-          callback(null, stat2.mtime, cachedPrecision);
+          callback(null, stat3.mtime, cachedPrecision);
         });
       }
       const mtime = new Date(Math.ceil(Date.now() / 1e3) * 1e3 + 5);
@@ -8525,13 +8525,13 @@ var require_mtime_precision = __commonJS({
         if (err) {
           return callback(err);
         }
-        fs.stat(file2, (err2, stat2) => {
+        fs.stat(file2, (err2, stat3) => {
           if (err2) {
             return callback(err2);
           }
-          const precision = stat2.mtime.getTime() % 1e3 === 0 ? "s" : "ms";
+          const precision = stat3.mtime.getTime() % 1e3 === 0 ? "s" : "ms";
           Object.defineProperty(fs, cacheSymbol, { value: precision });
-          callback(null, stat2.mtime, precision);
+          callback(null, stat3.mtime, precision);
         });
       });
     }
@@ -8585,14 +8585,14 @@ var require_lockfile = __commonJS({
         if (options.stale <= 0) {
           return callback(Object.assign(new Error("Lock file is already being held"), { code: "ELOCKED", file: file2 }));
         }
-        options.fs.stat(lockfilePath, (err2, stat2) => {
+        options.fs.stat(lockfilePath, (err2, stat3) => {
           if (err2) {
             if (err2.code === "ENOENT") {
               return acquireLock(file2, { ...options, stale: 0 }, callback);
             }
             return callback(err2);
           }
-          if (!isLockStale(stat2, options)) {
+          if (!isLockStale(stat3, options)) {
             return callback(Object.assign(new Error("Lock file is already being held"), { code: "ELOCKED", file: file2 }));
           }
           removeLock(file2, options, (err3) => {
@@ -8604,8 +8604,8 @@ var require_lockfile = __commonJS({
         });
       });
     }
-    function isLockStale(stat2, options) {
-      return stat2.mtime.getTime() < Date.now() - options.stale;
+    function isLockStale(stat3, options) {
+      return stat3.mtime.getTime() < Date.now() - options.stale;
     }
     function removeLock(file2, options, callback) {
       options.fs.rmdir(getLockFile(file2, options), (err) => {
@@ -8623,7 +8623,7 @@ var require_lockfile = __commonJS({
       lock2.updateDelay = lock2.updateDelay || options.update;
       lock2.updateTimeout = setTimeout(() => {
         lock2.updateTimeout = null;
-        options.fs.stat(lock2.lockfilePath, (err, stat2) => {
+        options.fs.stat(lock2.lockfilePath, (err, stat3) => {
           const isOverThreshold = lock2.lastUpdate + options.stale < Date.now();
           if (err) {
             if (err.code === "ENOENT" || isOverThreshold) {
@@ -8632,7 +8632,7 @@ var require_lockfile = __commonJS({
             lock2.updateDelay = 1e3;
             return updateLock(file2, options);
           }
-          const isMtimeOurs = lock2.mtime.getTime() === stat2.mtime.getTime();
+          const isMtimeOurs = lock2.mtime.getTime() === stat3.mtime.getTime();
           if (!isMtimeOurs) {
             return setLockAsCompromised(
               file2,
@@ -8757,11 +8757,11 @@ var require_lockfile = __commonJS({
         if (err) {
           return callback(err);
         }
-        options.fs.stat(getLockFile(file3, options), (err2, stat2) => {
+        options.fs.stat(getLockFile(file3, options), (err2, stat3) => {
           if (err2) {
             return err2.code === "ENOENT" ? callback(null, false) : callback(err2);
           }
-          return callback(null, !isLockStale(stat2, options));
+          return callback(null, !isLockStale(stat3, options));
         });
       });
     }
@@ -8807,12 +8807,12 @@ var require_adapter = __commonJS({
       return newFs;
     }
     function toPromise(method) {
-      return (...args) => new Promise((resolve5, reject) => {
+      return (...args) => new Promise((resolve6, reject) => {
         args.push((err, result) => {
           if (err) {
             reject(err);
           } else {
-            resolve5(result);
+            resolve6(result);
           }
         });
         method(...args);
@@ -8888,9 +8888,9 @@ var require_proper_lockfile = __commonJS({
 // src/main.ts
 import { spawn as spawn2 } from "node:child_process";
 import { constants as constants2 } from "node:fs";
-import { chmod as chmod2, mkdtemp, open as open2, rm as rm3 } from "node:fs/promises";
+import { chmod as chmod3, mkdtemp, open as open3, rm as rm4 } from "node:fs/promises";
 import { tmpdir as tmpdir2 } from "node:os";
-import { dirname as dirname4, join as join5, resolve as resolve4 } from "node:path";
+import { dirname as dirname4, join as join6, resolve as resolve5 } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import { randomUUID as randomUUID3 } from "node:crypto";
@@ -29873,7 +29873,7 @@ var Protocol = class {
           return;
         }
         const pollInterval = task2.pollInterval ?? this._options?.defaultTaskPollInterval ?? 1e3;
-        await new Promise((resolve5) => setTimeout(resolve5, pollInterval));
+        await new Promise((resolve6) => setTimeout(resolve6, pollInterval));
         options?.signal?.throwIfAborted();
       }
     } catch (error61) {
@@ -29890,7 +29890,7 @@ var Protocol = class {
    */
   request(request, resultSchema, options) {
     const { relatedRequestId, resumptionToken, onresumptiontoken, task, relatedTask } = options ?? {};
-    return new Promise((resolve5, reject) => {
+    return new Promise((resolve6, reject) => {
       const earlyReject = (error61) => {
         reject(error61);
       };
@@ -29968,7 +29968,7 @@ var Protocol = class {
           if (!parseResult.success) {
             reject(parseResult.error);
           } else {
-            resolve5(parseResult.data);
+            resolve6(parseResult.data);
           }
         } catch (error61) {
           reject(error61);
@@ -30229,12 +30229,12 @@ var Protocol = class {
       }
     } catch {
     }
-    return new Promise((resolve5, reject) => {
+    return new Promise((resolve6, reject) => {
       if (signal.aborted) {
         reject(new McpError(ErrorCode.InvalidRequest, "Request cancelled"));
         return;
       }
-      const timeoutId = setTimeout(resolve5, interval);
+      const timeoutId = setTimeout(resolve6, interval);
       signal.addEventListener("abort", () => {
         clearTimeout(timeoutId);
         reject(new McpError(ErrorCode.InvalidRequest, "Request cancelled"));
@@ -32679,12 +32679,12 @@ var StdioServerTransport = class {
     this.onclose?.();
   }
   send(message) {
-    return new Promise((resolve5) => {
+    return new Promise((resolve6) => {
       const json2 = serializeMessage(message);
       if (this._stdout.write(json2)) {
-        resolve5();
+        resolve6();
       } else {
-        this._stdout.once("drain", resolve5);
+        this._stdout.once("drain", resolve6);
       }
     });
   }
@@ -33921,7 +33921,16 @@ var visibleResultDiagnosticSchema = external_exports.object({
 }).strict();
 var rendererFailureDiagnosticSchema = external_exports.object({
   event: external_exports.enum(["renderer.error", "renderer.unhandled_rejection", "renderer.bootstrap_failed"]),
-  category: external_exports.enum(["script-error", "unhandled-rejection", "bootstrap-failed"])
+  category: external_exports.enum(["script-error", "unhandled-rejection", "bootstrap-failed"]),
+  error: external_exports.object({
+    name: boundedUtf8StringSchema(1024, true),
+    message: boundedUtf8StringSchema(MAX_FRAME_BYTES, true),
+    stack: boundedUtf8StringSchema(MAX_FRAME_BYTES, true).nullable(),
+    cause: protocolJsonSchema
+  }).strict(),
+  filename: boundedUtf8StringSchema(MAX_FRAME_BYTES, true).nullable(),
+  line: protocolIntegerSchema.nullable(),
+  column: protocolIntegerSchema.nullable()
 }).strict();
 var desktopDiagnosticSchema = external_exports.discriminatedUnion("event", [visibleResultDiagnosticSchema, rendererFailureDiagnosticSchema]);
 var desktopRecoveryRequestSchema = external_exports.object({
@@ -34661,7 +34670,7 @@ function disposeUpstream(upstream) {
   void Promise.resolve().then(() => upstream.transport.close()).catch(() => void 0);
 }
 async function awaitWithTimeoutAndAbort(promise2, timeoutMs, timeoutError, signal) {
-  return await new Promise((resolve5, reject) => {
+  return await new Promise((resolve6, reject) => {
     let settled = false;
     let timer;
     const settle = (callback) => {
@@ -34682,7 +34691,7 @@ async function awaitWithTimeoutAndAbort(promise2, timeoutMs, timeoutError, signa
     signal.addEventListener("abort", onAbort, { once: true });
     timer = setTimeout(() => settle(() => reject(timeoutError)), timeoutMs);
     timer.unref?.();
-    void promise2.then((value) => settle(() => resolve5(value)), (error61) => settle(() => reject(error61)));
+    void promise2.then((value) => settle(() => resolve6(value)), (error61) => settle(() => reject(error61)));
   });
 }
 function errorResponse(error61) {
@@ -34700,67 +34709,11 @@ function recoverRequestId(input2) {
   }
 }
 
-// src/resources.ts
-import { readFile, realpath, stat } from "node:fs/promises";
-import { isAbsolute, join, resolve } from "node:path";
-var ResourceValidationError = class extends Error {
-  code = "resource_invalid";
-  constructor(message) {
-    super(message);
-    this.name = "ResourceValidationError";
-  }
-};
-async function resolveApplicationResources(root) {
-  const physicalRoot = await realpath(root);
-  const manifest = await readApplicationManifest(physicalRoot);
-  const paths = Object.fromEntries(Object.entries(manifest.resources).map(([key, path2]) => [key, path2 === null ? null : resolve(physicalRoot, path2)]));
-  for (const [key, directory] of [["hostEntry", false], ["rendererDirectory", true], ["workerDirectory", true]]) {
-    const path2 = paths[key];
-    const info = await stat(path2).catch(() => {
-      throw invalid(`${key} is unavailable: ${path2}`);
-    });
-    if (directory ? !info.isDirectory() : !info.isFile()) throw invalid(`${key} has the wrong file type: ${path2}`);
-  }
-  return { ...paths, root: physicalRoot, manifest };
-}
-async function readApplicationManifest(root) {
-  try {
-    return validateApplicationManifest(JSON.parse(await readFile(join(root, "manifest.json"), "utf8")));
-  } catch (error61) {
-    if (error61 instanceof ResourceValidationError) throw error61;
-    throw invalid(`application manifest is unavailable: ${error61 instanceof Error ? error61.message : String(error61)}`);
-  }
-}
-function validateApplicationManifest(value) {
-  if (!record2(value) || value.schemaVersion !== 1 || !["desktop", "headless"].includes(String(value.kind)) || typeof value.applicationVersion !== "string" || !value.applicationVersion || !record2(value.resources)) {
-    throw invalid("invalid application manifest");
-  }
-  const resources = value.resources;
-  const paths = {};
-  for (const key of ["cliLauncher", "hostEntry", "rendererDirectory", "workerDirectory", "rLibraryDirectory", "arkExecutable", "airExecutable", "quartoExecutable", "nodeExecutable", "electronEntry"]) {
-    const path2 = resources[key];
-    if (key === "electronEntry" && path2 === null) {
-      paths[key] = null;
-      continue;
-    }
-    if (typeof path2 !== "string" || !path2 || path2.includes("\0") || isAbsolute(path2) || path2.includes("\\") || path2.split("/").some((part) => !part || part === "." || part === "..")) {
-      throw invalid(`invalid resource path: ${key}`);
-    }
-    paths[key] = path2;
-  }
-  return { schemaVersion: 1, kind: value.kind, applicationVersion: value.applicationVersion, resources: paths };
-}
-function record2(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-function invalid(message) {
-  return new ResourceValidationError(message);
-}
-
-// src/sessions.ts
-import { createHash, randomBytes, randomUUID as randomUUID2 } from "node:crypto";
-import { readdir, realpath as realpath2, unlink } from "node:fs/promises";
-import { basename, dirname as dirname3, join as join4, resolve as resolve3 } from "node:path";
+// src/diagnostics.ts
+import { createReadStream } from "node:fs";
+import { appendFile, chmod, copyFile, mkdir, open as open2, readdir, readFile, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
+import { basename, join, resolve } from "node:path";
+import { createInterface } from "node:readline";
 
 // node_modules/env-paths/index.js
 import path from "node:path";
@@ -34852,16 +34805,301 @@ function envPaths(name, { suffix = "nodejs" } = {}) {
   return linux(name);
 }
 
+// src/diagnostics.ts
+var DIAGNOSTIC_SCHEMA_VERSION = 2;
+var DIAGNOSTIC_SEGMENT_BYTES = 10 * 1024 * 1024;
+var DIAGNOSTIC_TOTAL_BYTES = 256 * 1024 * 1024;
+var DIAGNOSTIC_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1e3;
+var DIAGNOSTIC_CHILD_TAIL_BYTES = 64 * 1024;
+var QUERY_RECORD_LIMIT = 2e5;
+var TERMINAL_EVENTS = /* @__PURE__ */ new Set(["operation.settled", "operation.cancelled", "operation.failed"]);
+function diagnosticsRoot() {
+  return resolve(process.env.ALDER_DIAGNOSTICS_DIR ?? join(envPaths("Alder", { suffix: "" }).data, "diagnostics"));
+}
+function diagnosticError(value, seen = /* @__PURE__ */ new Set()) {
+  if (value instanceof Error) {
+    if (seen.has(value)) return { name: value.name, message: value.message, stack: value.stack ?? null, cause: "[Circular error cause]", code: value.code ?? null };
+    seen.add(value);
+    return {
+      name: value.name,
+      message: value.message,
+      stack: value.stack ?? null,
+      cause: value.cause === void 0 ? null : value.cause instanceof Error ? diagnosticError(value.cause, seen) : diagnosticValue(value.cause),
+      code: value.code ?? null
+    };
+  }
+  return { name: typeof value, message: String(value), stack: null, cause: null, code: null };
+}
+function diagnosticValue(value, seen = /* @__PURE__ */ new Set()) {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return value;
+  if (typeof value === "number") return Number.isFinite(value) ? value : String(value);
+  if (typeof value === "bigint") return value.toString();
+  if (typeof value === "undefined") return null;
+  if (value instanceof Error) return diagnosticError(value);
+  if (Buffer.isBuffer(value)) return { type: "Buffer", byteLength: value.byteLength, base64: value.toString("base64") };
+  if (value instanceof Uint8Array) return { type: value.constructor.name, byteLength: value.byteLength, base64: Buffer.from(value).toString("base64") };
+  if (value instanceof Date) return value.toISOString();
+  if (typeof value !== "object") return String(value);
+  if (seen.has(value)) return "[Circular]";
+  seen.add(value);
+  if (Array.isArray(value)) {
+    const output3 = value.map((item) => diagnosticValue(item, seen));
+    seen.delete(value);
+    return output3;
+  }
+  const output2 = {};
+  for (const [key, item] of Object.entries(value)) output2[key] = diagnosticValue(item, seen);
+  seen.delete(value);
+  return output2;
+}
+function segmentInfo(name) {
+  if (!/^diagnostics-.*\.jsonl$/.test(name)) return null;
+  const match = /^diagnostics-active-[a-z]+-(\d+)-.*\.jsonl$/.exec(name);
+  return { active: match !== null, pid: match ? Number(match[1]) : null };
+}
+function pidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+async function listSegments(rootDir) {
+  let names;
+  try {
+    names = await readdir(rootDir);
+  } catch (error61) {
+    if (error61.code === "ENOENT") return [];
+    throw error61;
+  }
+  const entries = [];
+  for (const name of names) {
+    const parsed = segmentInfo(name);
+    if (!parsed) continue;
+    const path2 = join(rootDir, name);
+    try {
+      const info = await stat(path2);
+      entries.push({ path: path2, name, size: info.size, mtimeMs: info.mtimeMs, ...parsed });
+    } catch (error61) {
+      if (error61.code !== "ENOENT") throw error61;
+    }
+  }
+  return entries;
+}
+async function readStore(rootDir, options) {
+  const since = options.since ? Date.parse(options.since) : Number.NEGATIVE_INFINITY;
+  const until = options.until ? Date.parse(options.until) : Number.POSITIVE_INFINITY;
+  if (Number.isNaN(since) || Number.isNaN(until) || since > until) throw new Error("invalid diagnostic query time range");
+  const records = [];
+  let malformedRecords = 0, scannedRecords = 0, truncated = false;
+  const entries = (await listSegments(rootDir)).sort((a, b) => a.mtimeMs - b.mtimeMs);
+  outer: for (const entry2 of entries) {
+    const lines = createInterface({ input: createReadStream(entry2.path), crlfDelay: Infinity });
+    for await (const line of lines) {
+      if (!line.trim()) continue;
+      scannedRecords++;
+      if (scannedRecords > QUERY_RECORD_LIMIT) {
+        truncated = true;
+        lines.close();
+        break outer;
+      }
+      let record3;
+      try {
+        record3 = JSON.parse(line);
+      } catch {
+        malformedRecords++;
+        continue;
+      }
+      if (!isRecord2(record3) || typeof record3.timestamp !== "string") {
+        malformedRecords++;
+        continue;
+      }
+      const timestamp = Date.parse(record3.timestamp);
+      if (!Number.isFinite(timestamp) || timestamp < since || timestamp > until) continue;
+      records.push(record3);
+    }
+  }
+  records.sort(compareRecords);
+  return { records, malformedRecords, scannedRecords: Math.min(scannedRecords, QUERY_RECORD_LIMIT), truncated };
+}
+function compareRecords(a, b) {
+  return String(a.timestamp).localeCompare(String(b.timestamp)) || String(a.process?.instanceId ?? "").localeCompare(String(b.process?.instanceId ?? "")) || Number(a.eventSequence ?? 0) - Number(b.eventSequence ?? 0);
+}
+function containsExact(value, target, seen = /* @__PURE__ */ new Set()) {
+  if (value === target) return true;
+  if (value === null || typeof value !== "object" || seen.has(value)) return false;
+  seen.add(value);
+  if (Array.isArray(value)) return value.some((item) => containsExact(item, target, seen));
+  return Object.values(value).some((item) => containsExact(item, target, seen));
+}
+function limited(values, limit) {
+  return values.slice(Math.max(0, values.length - limit));
+}
+async function queryDiagnostics(query, options = {}) {
+  const rootDir = resolve(options.rootDir ?? diagnosticsRoot());
+  const limit = Math.max(1, Math.min(1e4, options.limit ?? 100));
+  const rootInfo = await stat(rootDir).catch(() => null);
+  const storeAvailable = rootInfo?.isDirectory() === true;
+  const entries = await listSegments(rootDir).catch(() => []);
+  const retainedBytes = entries.reduce((sum, entry2) => sum + entry2.size, 0);
+  const statusFiles = await readStatuses(rootDir);
+  const base = {
+    schemaVersion: DIAGNOSTIC_SCHEMA_VERSION,
+    query,
+    rootDir,
+    retainedBytes,
+    segmentCount: entries.length,
+    activeWriters: entries.filter((entry2) => entry2.active && entry2.pid !== null && pidAlive(entry2.pid)).length,
+    statuses: statusFiles
+  };
+  const store = await readStore(rootDir, options).catch((error61) => ({ records: [], malformedRecords: 0, scannedRecords: 0, truncated: false, readError: diagnosticError(error61) }));
+  const metadata = {
+    ...base,
+    scannedRecords: store.scannedRecords,
+    malformedRecords: store.malformedRecords,
+    truncated: store.truncated,
+    ..."readError" in store ? { readError: store.readError } : {}
+  };
+  if (query === "status") {
+    const droppedRecords = statusFiles.reduce((sum, status) => sum + Number(status.droppedEvents ?? 0) + Number(status.unavailableEvents ?? 0), 0);
+    return { ...metadata, available: storeAvailable && !("readError" in store), degraded: !storeAvailable || droppedRecords > 0 || store.malformedRecords > 0 || statusFiles.some((status) => status.available === false), droppedRecords };
+  }
+  const records = store.records;
+  if (query === "launches") {
+    return { ...metadata, records: limited(records.filter((record3) => ["desktop.launch", "backend.launch", "host.launch", "backend.session.open", "window.open"].includes(String(record3.event))), limit) };
+  }
+  if (query === "errors") {
+    return { ...metadata, records: limited(records.filter((record3) => record3.severity === "error" || record3.outcome === "error" || /(?:fatal|failure|failed|uncaught|unhandled)/.test(String(record3.event))), limit) };
+  }
+  if (query === "incident") {
+    const incident = options.id ? records.filter((record3) => containsExact(record3, options.id)) : records;
+    return { ...metadata, records: limited(incident, limit) };
+  }
+  if (query === "operations") {
+    const byId = /* @__PURE__ */ new Map();
+    for (const record3 of records) {
+      if (typeof record3.operationId !== "string") continue;
+      const key = String(record3.clientId ?? "internal") + "\0" + record3.operationId;
+      const item = byId.get(key) ?? {};
+      if (record3.event === "operation.accepted") item.accepted = record3;
+      else if (TERMINAL_EVENTS.has(String(record3.event))) item.terminal = record3;
+      else if (record3.event === "operation.timing") item.timing = record3;
+      else if (record3.event === "operation.slow") item.slow = record3;
+      byId.set(key, item);
+    }
+    const slowMs = options.slowMs ?? 5e3;
+    const operations = [...byId.values()].filter((item) => item.accepted && (!item.terminal || item.slow || Number(item.timing?.durationMs ?? item.terminal?.durationMs ?? 0) >= slowMs));
+    return { ...metadata, slowMs, operations: limited(operations, limit) };
+  }
+  const durations = /* @__PURE__ */ new Map();
+  for (const record3 of records) {
+    if (typeof record3.durationMs !== "number") continue;
+    const key = String(record3.kind ?? record3.event ?? "unknown");
+    const values = durations.get(key) ?? [];
+    values.push(record3.durationMs);
+    durations.set(key, values);
+  }
+  const summaries = [...durations].map(([kind, values]) => {
+    values.sort((a, b) => a - b);
+    return { kind, count: values.length, minMs: values[0], medianMs: values[Math.floor(values.length / 2)], p95Ms: values[Math.min(values.length - 1, Math.floor(values.length * 0.95))], maxMs: values.at(-1) };
+  });
+  const resources = records.filter((record3) => record3.event === "diagnostic.resource" || record3.processContext !== void 0);
+  return { ...metadata, summaries, recentResources: limited(resources, Math.min(limit, 20)) };
+}
+async function readStatuses(rootDir) {
+  let names;
+  try {
+    names = (await readdir(rootDir)).filter((name) => /^diagnostics-status-.*\.json$/.test(name));
+  } catch {
+    return [];
+  }
+  const statuses = [];
+  for (const name of names) {
+    try {
+      const value = JSON.parse(await readFile(join(rootDir, name), "utf8"));
+      if (isRecord2(value)) statuses.push(value);
+    } catch {
+    }
+  }
+  return statuses.sort((a, b) => String(a.timestamp ?? "").localeCompare(String(b.timestamp ?? "")));
+}
+function isRecord2(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+// src/resources.ts
+import { readFile as readFile2, realpath, stat as stat2 } from "node:fs/promises";
+import { isAbsolute, join as join2, resolve as resolve2 } from "node:path";
+var ResourceValidationError = class extends Error {
+  code = "resource_invalid";
+  constructor(message) {
+    super(message);
+    this.name = "ResourceValidationError";
+  }
+};
+async function resolveApplicationResources(root) {
+  const physicalRoot = await realpath(root);
+  const manifest = await readApplicationManifest(physicalRoot);
+  const paths = Object.fromEntries(Object.entries(manifest.resources).map(([key, path2]) => [key, path2 === null ? null : resolve2(physicalRoot, path2)]));
+  for (const [key, directory] of [["hostEntry", false], ["rendererDirectory", true], ["workerDirectory", true]]) {
+    const path2 = paths[key];
+    const info = await stat2(path2).catch(() => {
+      throw invalid(`${key} is unavailable: ${path2}`);
+    });
+    if (directory ? !info.isDirectory() : !info.isFile()) throw invalid(`${key} has the wrong file type: ${path2}`);
+  }
+  return { ...paths, root: physicalRoot, manifest };
+}
+async function readApplicationManifest(root) {
+  try {
+    return validateApplicationManifest(JSON.parse(await readFile2(join2(root, "manifest.json"), "utf8")));
+  } catch (error61) {
+    if (error61 instanceof ResourceValidationError) throw error61;
+    throw invalid(`application manifest is unavailable: ${error61 instanceof Error ? error61.message : String(error61)}`);
+  }
+}
+function validateApplicationManifest(value) {
+  if (!record2(value) || value.schemaVersion !== 1 || !["desktop", "headless"].includes(String(value.kind)) || typeof value.applicationVersion !== "string" || !value.applicationVersion || !record2(value.resources)) {
+    throw invalid("invalid application manifest");
+  }
+  const resources = value.resources;
+  const paths = {};
+  for (const key of ["cliLauncher", "hostEntry", "rendererDirectory", "workerDirectory", "rLibraryDirectory", "arkExecutable", "airExecutable", "quartoExecutable", "nodeExecutable", "electronEntry"]) {
+    const path2 = resources[key];
+    if (key === "electronEntry" && path2 === null) {
+      paths[key] = null;
+      continue;
+    }
+    if (typeof path2 !== "string" || !path2 || path2.includes("\0") || isAbsolute(path2) || path2.includes("\\") || path2.split("/").some((part) => !part || part === "." || part === "..")) {
+      throw invalid(`invalid resource path: ${key}`);
+    }
+    paths[key] = path2;
+  }
+  return { schemaVersion: 1, kind: value.kind, applicationVersion: value.applicationVersion, resources: paths };
+}
+function record2(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function invalid(message) {
+  return new ResourceValidationError(message);
+}
+
+// src/sessions.ts
+import { createHash, randomBytes, randomUUID as randomUUID2 } from "node:crypto";
+import { readdir as readdir2, realpath as realpath2, unlink as unlink2 } from "node:fs/promises";
+import { basename as basename2, dirname as dirname3, join as join5, resolve as resolve4 } from "node:path";
+
 // src/backend-client.ts
 import { spawn } from "node:child_process";
 import { connect } from "node:net";
-import { mkdir, rm } from "node:fs/promises";
-import { dirname, join as join2 } from "node:path";
+import { mkdir as mkdir2, rm as rm2 } from "node:fs/promises";
+import { dirname, join as join3 } from "node:path";
 var import_proper_lockfile = __toESM(require_proper_lockfile(), 1);
 var SharedBackend = class {
   constructor(resources, runtimeDirectory) {
     this.resources = resources;
-    this.socketPath = join2(runtimeDirectory ?? process.env.ALDER_RUNTIME_DIRECTORY ?? join2(envPaths("alder").data, "runtime"), "backend.sock");
+    this.socketPath = join3(runtimeDirectory ?? process.env.ALDER_RUNTIME_DIRECTORY ?? join3(envPaths("alder").data, "runtime"), "backend.sock");
   }
   resources;
   ready;
@@ -34873,7 +35111,7 @@ var SharedBackend = class {
     return this.request({ type: "open", options }, timeoutMs);
   }
   async start() {
-    await mkdir(dirname(this.socketPath), { recursive: true, mode: 448 });
+    await mkdir2(dirname(this.socketPath), { recursive: true, mode: 448 });
     const release = await import_proper_lockfile.default.lock(this.socketPath, {
       realpath: false,
       retries: { retries: 150, minTimeout: 50, maxTimeout: 100 }
@@ -34892,9 +35130,9 @@ var SharedBackend = class {
       const code = error61.code;
       if (code !== "ENOENT" && code !== "ECONNREFUSED" && code !== "ECONNRESET" && code !== "EPIPE") throw error61;
     }
-    await mkdir(dirname(this.socketPath), { recursive: true, mode: 448 });
-    await rm(this.socketPath, { force: true });
-    const child = spawn(this.resources.nodeExecutable, [join2(dirname(this.resources.hostEntry), "alder-backend.mjs"), this.socketPath], {
+    await mkdir2(dirname(this.socketPath), { recursive: true, mode: 448 });
+    await rm2(this.socketPath, { force: true });
+    const child = spawn(this.resources.nodeExecutable, [join3(dirname(this.resources.hostEntry), "alder-backend.mjs"), this.socketPath], {
       cwd: this.resources.root,
       detached: true,
       stdio: "ignore",
@@ -34913,12 +35151,12 @@ var SharedBackend = class {
         return;
       } catch {
       }
-      await new Promise((resolve5) => setTimeout(resolve5, 50));
+      await new Promise((resolve6) => setTimeout(resolve6, 50));
     }
     throw new Error("Alder's document service did not start. Rebuild the Mac application and try again.");
   }
   request(value, timeoutMs = 15e3) {
-    return new Promise((resolve5, reject) => {
+    return new Promise((resolve6, reject) => {
       const socket = connect(this.socketPath);
       let input2 = "";
       socket.setTimeout(timeoutMs, () => socket.destroy(new Error("The document service did not respond.")));
@@ -34931,7 +35169,7 @@ var SharedBackend = class {
       socket.once("end", () => {
         try {
           const result = JSON.parse(input2);
-          if (result.ok === true) resolve5(result.result);
+          if (result.ok === true) resolve6(result.result);
           else reject(new Error(result.error ?? "The document could not be opened."));
         } catch (error61) {
           reject(error61);
@@ -34944,8 +35182,8 @@ var SharedBackend = class {
 // src/private-paths.ts
 import { constants } from "node:fs";
 import { randomUUID } from "node:crypto";
-import { chmod, lstat, mkdir as mkdir2, open as openFile, rename, rm as rm2 } from "node:fs/promises";
-import { dirname as dirname2, join as join3, parse as parse3, resolve as resolve2, sep } from "node:path";
+import { chmod as chmod2, lstat, mkdir as mkdir3, open as openFile, rename as rename2, rm as rm3 } from "node:fs/promises";
+import { dirname as dirname2, join as join4, parse as parse3, resolve as resolve3, sep } from "node:path";
 var PrivatePathError = class extends Error {
   constructor(code, message, cause) {
     super(message);
@@ -34981,7 +35219,7 @@ function ensurePathString(path2) {
   if (typeof path2 !== "string" || path2.length === 0 || PATH_CONTROL.test(path2)) {
     throw invalid2("private path must be a non-empty path without NUL");
   }
-  return resolve2(path2);
+  return resolve3(path2);
 }
 async function inspectPath(path2, expectFinal = null) {
   const absolute = ensurePathString(path2);
@@ -34990,7 +35228,7 @@ async function inspectPath(path2, expectFinal = null) {
   let current = root;
   let exists = true;
   for (let index = 0; index < components.length; index += 1) {
-    current = join3(current, components[index]);
+    current = join4(current, components[index]);
     let info;
     try {
       info = await lstat(current);
@@ -35058,7 +35296,7 @@ async function verifyPrivateDirectory(path2) {
 }
 async function securePrivateDirectory(path2) {
   const inspection = await inspectExisting(path2, "directory");
-  await chmod(inspection.path, DIRECTORY_MODE);
+  await chmod2(inspection.path, DIRECTORY_MODE);
   await verifyPrivateDirectory(inspection.path);
 }
 async function ensurePrivateDirectory(path2) {
@@ -35067,7 +35305,7 @@ async function ensurePrivateDirectory(path2) {
     await verifyPrivateDirectory(inspection.path);
     return;
   }
-  await mkdir2(inspection.path, { recursive: true, mode: DIRECTORY_MODE });
+  await mkdir3(inspection.path, { recursive: true, mode: DIRECTORY_MODE });
   await inspectPath(inspection.path, "directory");
   await securePrivateDirectory(inspection.path);
 }
@@ -35115,8 +35353,8 @@ async function writePrivateFile(path2, bytes) {
   } catch (error61) {
     if (!isMissing(error61)) throw error61;
   }
-  const basename2 = inspection.path.slice(inspection.path.lastIndexOf(sep) + 1);
-  const temporary = join3(parent, `.${basename2}.${randomUUID()}.tmp`);
+  const basename3 = inspection.path.slice(inspection.path.lastIndexOf(sep) + 1);
+  const temporary = join4(parent, `.${basename3}.${randomUUID()}.tmp`);
   let handle;
   try {
     const flags = constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0);
@@ -35132,12 +35370,12 @@ async function writePrivateFile(path2, bytes) {
     await handle.sync();
     await handle.close();
     handle = void 0;
-    await chmod(temporary, FILE_MODE);
-    await rename(temporary, inspection.path);
+    await chmod2(temporary, FILE_MODE);
+    await rename2(temporary, inspection.path);
     await syncDirectory(parent);
   } catch (error61) {
     if (handle !== void 0) await handle.close().catch(() => void 0);
-    await rm2(temporary, { force: true }).catch(() => void 0);
+    await rm3(temporary, { force: true }).catch(() => void 0);
     throw error61;
   }
 }
@@ -35202,7 +35440,7 @@ async function acquireNotebookSession(options) {
   if (canonicalPath !== null && (options.untitledRecoveryId !== void 0 || options.untitledProjectDirectory !== void 0)) throw new SessionAuthError("untitled options cannot be combined with a notebook path");
   const selectedRecovery = canonicalPath === null && options.untitledRecoveryId !== void 0 ? await selectUntitledRecoveryDescriptor(options.untitledRecoveryId) : void 0;
   const sessionKey = canonicalPath === null ? selectedRecovery?.id ?? randomUUID2() : sessionKeyFor(canonicalPath);
-  let projectDirectory = canonicalPath === null ? selectedRecovery?.projectDirectory ?? resolve3(options.untitledProjectDirectory ?? process.cwd()) : void 0;
+  let projectDirectory = canonicalPath === null ? selectedRecovery?.projectDirectory ?? resolve4(options.untitledProjectDirectory ?? process.cwd()) : void 0;
   if (projectDirectory !== void 0) projectDirectory = (await registerUntitledRecoveryDescriptor(sessionKey, projectDirectory)).projectDirectory;
   const backend = new SharedBackend(options.resources, options.runtimeDirectory);
   const descriptor = await backend.connect({
@@ -35325,7 +35563,7 @@ function isUntitledRecoveryId(value) {
   return typeof value === "string" && UNTITLED_SESSION_KEY_PATTERN.test(value);
 }
 function untitledRecoveryDescriptorDirectory(dataRoot) {
-  return join4(resolve3(dataRoot ?? envPaths("alder", { suffix: "" }).data), UNTITLED_RECOVERY_DIRECTORY);
+  return join5(resolve4(dataRoot ?? envPaths("alder", { suffix: "" }).data), UNTITLED_RECOVERY_DIRECTORY);
 }
 async function registerUntitledRecoveryDescriptor(id, projectDirectory, dataRoot) {
   const validId = requireUntitledRecoveryId(id);
@@ -35343,14 +35581,14 @@ async function registerUntitledRecoveryDescriptor(id, projectDirectory, dataRoot
 }
 async function listUntitledRecoveryDescriptors(dataRoot) {
   const directory = await ensureUntitledRecoveryDirectory(dataRoot);
-  const entries = await readdir(directory, { withFileTypes: true });
+  const entries = await readdir2(directory, { withFileTypes: true });
   const values = [];
   for (const entry2 of entries) {
     if (!entry2.isFile() || !entry2.name.endsWith(".json")) continue;
     const id = entry2.name.slice(0, -5);
     if (!isUntitledRecoveryId(id)) continue;
     try {
-      const value = await readUntitledRecoveryDescriptor(join4(directory, entry2.name), id);
+      const value = await readUntitledRecoveryDescriptor(join5(directory, entry2.name), id);
       if (value) values.push(value);
     } catch {
     }
@@ -35375,11 +35613,11 @@ function requireUntitledRecoveryId(value) {
 }
 async function canonicalizeProjectDirectory(value) {
   if (typeof value !== "string" || !value || value.includes("\0")) throw new SessionUnavailableError("untitled project directory is invalid");
-  const path2 = resolve3(value);
+  const path2 = resolve4(value);
   return realpath2(path2).catch(() => path2);
 }
 function untitledRecoveryDescriptorPath(directory, id) {
-  return join4(directory, id + ".json");
+  return join5(directory, id + ".json");
 }
 async function readUntitledRecoveryDescriptor(path2, id) {
   let bytes;
@@ -35406,7 +35644,7 @@ async function readUntitledRecoveryDescriptor(path2, id) {
 }
 async function canonicalizePath(path2) {
   if (path2 === null) return null;
-  const target = resolve3(path2);
+  const target = resolve4(path2);
   try {
     return await realpath2(target);
   } catch {
@@ -35455,7 +35693,7 @@ async function readSessionJson(response) {
   let value = null;
   if (bytes.byteLength > 0) value = decodeJsonFrame(bytes, SNAPSHOT_ENVELOPE_LIMIT);
   if (!response.ok) {
-    const detail = isRecord2(value) ? value : {};
+    const detail = isRecord3(value) ? value : {};
     throw new Error(typeof detail.message === "string" ? detail.message : "session request failed (" + response.status + ")");
   }
   return value;
@@ -35503,7 +35741,12 @@ function parseCli(argv) {
         output: { type: "string" },
         "include-code": { type: "boolean" },
         "list-recoveries": { type: "boolean" },
-        recover: { type: "string" }
+        recover: { type: "string" },
+        limit: { type: "string" },
+        since: { type: "string" },
+        until: { type: "string" },
+        id: { type: "string" },
+        "slow-ms": { type: "string" }
       }
     });
   } catch (error61) {
@@ -35513,9 +35756,13 @@ function parseCli(argv) {
   if (values.help === true) return { command: "desktop", path: null, recover: void 0, listRecoveries: false, browser: false, headless: false, lazy: false, noRun: false, externalOrigin: void 0, tokenFile: void 0, output: void 0, includeCode: false };
   const positionals = parsed.positionals;
   const first = positionals[0];
-  const command = first === "check" || first === "run" || first === "publish" || first === "mcp" ? first : "desktop";
-  const path2 = command === "desktop" ? first ?? null : positionals[1] ?? null;
+  const command = first === "check" || first === "run" || first === "publish" || first === "mcp" || first === "diagnostics" ? first : "desktop";
+  const path2 = command === "desktop" ? first ?? null : command === "diagnostics" ? null : positionals[1] ?? null;
   if (positionals.length > (command === "desktop" ? 1 : 2)) throw usageError("too many positional arguments");
+  const diagnosticQuery = command === "diagnostics" ? positionals[1] : void 0;
+  if (command === "diagnostics" && !["status", "launches", "errors", "operations", "performance", "incident"].includes(diagnosticQuery ?? "")) {
+    throw usageError("diagnostics requires status, launches, errors, operations, performance or incident");
+  }
   const browser = values.browser === true;
   const headless = values.headless === true;
   const listRecoveries = values["list-recoveries"] === true;
@@ -35543,6 +35790,12 @@ function parseCli(argv) {
   if (command === "publish" && typeof values.output !== "string") throw usageError("publish requires --output FILE.html");
   if ((command === "check" || command === "run" || command === "publish" || command === "mcp") && path2 === null) throw usageError(command + " requires NOTEBOOK.R");
   if (command === "mcp" && (browser || headless)) throw usageError("mcp does not accept --browser or --headless");
+  const diagnosticFlags = [values.limit, values.since, values.until, values.id, values["slow-ms"]];
+  if (command !== "diagnostics" && diagnosticFlags.some((value) => value !== void 0)) throw usageError("diagnostic query flags require the diagnostics command");
+  const diagnosticLimit = values.limit === void 0 ? void 0 : Number(values.limit);
+  const diagnosticSlowMs = values["slow-ms"] === void 0 ? void 0 : Number(values["slow-ms"]);
+  if (diagnosticLimit !== void 0 && (!Number.isSafeInteger(diagnosticLimit) || diagnosticLimit <= 0 || diagnosticLimit > 1e4)) throw usageError("--limit must be an integer from 1 to 10000");
+  if (diagnosticSlowMs !== void 0 && (!Number.isSafeInteger(diagnosticSlowMs) || diagnosticSlowMs < 0)) throw usageError("--slow-ms must be a non-negative integer");
   const retryFlags = [values["request-id"], values["session-epoch"], values["document-revision"]];
   let retry;
   if (retryFlags.some((value) => value !== void 0)) {
@@ -35554,10 +35807,30 @@ function parseCli(argv) {
     if (!requestId || !sessionEpoch || requestId.length > 256 || sessionEpoch.length > 256 || !Number.isSafeInteger(expectedDocumentRevision) || expectedDocumentRevision < 0) throw usageError("invalid command retry identity or document revision");
     retry = { requestId, sessionEpoch, expectedDocumentRevision };
   }
-  return { command, path: path2, recover, listRecoveries, browser, headless, lazy: values.lazy === true, noRun: values["no-run"] === true, externalOrigin, tokenFile, output: typeof values.output === "string" ? values.output : void 0, includeCode: values["include-code"] === true, ...retry === void 0 ? {} : { retry } };
+  return {
+    command,
+    path: path2,
+    recover,
+    listRecoveries,
+    browser,
+    headless,
+    lazy: values.lazy === true,
+    noRun: values["no-run"] === true,
+    externalOrigin,
+    tokenFile,
+    output: typeof values.output === "string" ? values.output : void 0,
+    includeCode: values["include-code"] === true,
+    ...retry === void 0 ? {} : { retry },
+    ...diagnosticQuery === void 0 ? {} : { diagnosticQuery },
+    ...diagnosticLimit === void 0 ? {} : { diagnosticLimit },
+    ...diagnosticSlowMs === void 0 ? {} : { diagnosticSlowMs },
+    ...typeof values.since === "string" ? { diagnosticSince: values.since } : {},
+    ...typeof values.until === "string" ? { diagnosticUntil: values.until } : {},
+    ...typeof values.id === "string" ? { diagnosticId: values.id } : {}
+  };
 }
 async function applicationResources() {
-  const root = process.env.ALDER_APPLICATION_ROOT ?? resolve4(dirname4(fileURLToPath(import.meta.url)), "..");
+  const root = process.env.ALDER_APPLICATION_ROOT ?? resolve5(dirname4(fileURLToPath(import.meta.url)), "..");
   return resolveApplicationResources(root);
 }
 function publicReady(origin, epoch, capabilities) {
@@ -35570,7 +35843,7 @@ async function browserUrl(connection) {
     body: JSON.stringify({ origin: connection.browserOrigin })
   });
   const value = await readSessionJson(response);
-  if (!isRecord2(value) || typeof value.ticket !== "string" || !AUTH_TOKEN_PATTERN.test(value.ticket)) {
+  if (!isRecord3(value) || typeof value.ticket !== "string" || !AUTH_TOKEN_PATTERN.test(value.ticket)) {
     throw new Error("host returned an invalid browser bootstrap ticket");
   }
   const url2 = new URL("/index.html", connection.browserOrigin);
@@ -35594,11 +35867,11 @@ async function openSystemBrowser(url2, options = {}) {
   let directory;
   let handle;
   try {
-    directory = await mkdtemp(join5(options.temporaryRoot ?? tmpdir2(), "alder-browser-launch-"));
-    await chmod2(directory, 448);
-    const launcherPath = join5(directory, "launch.html");
+    directory = await mkdtemp(join6(options.temporaryRoot ?? tmpdir2(), "alder-browser-launch-"));
+    await chmod3(directory, 448);
+    const launcherPath = join6(directory, "launch.html");
     const flags = constants2.O_WRONLY | constants2.O_CREAT | constants2.O_EXCL | (constants2.O_NOFOLLOW ?? 0);
-    handle = await open2(launcherPath, flags, 384);
+    handle = await open3(launcherPath, flags, 384);
     await handle.chmod(384);
     await handle.writeFile(browserLauncherHtml(url2), { encoding: "utf8" });
     await handle.sync();
@@ -35618,12 +35891,12 @@ async function openSystemBrowser(url2, options = {}) {
     });
     const cleanupDirectory = directory;
     const cleanup = setTimeout(() => {
-      void rm3(cleanupDirectory, { recursive: true, force: true });
+      void rm4(cleanupDirectory, { recursive: true, force: true });
     }, cleanupDelayMs);
     cleanup.unref();
   } catch {
     await handle?.close().catch(() => void 0);
-    if (directory !== void 0) await rm3(directory, { recursive: true, force: true }).catch(() => void 0);
+    if (directory !== void 0) await rm4(directory, { recursive: true, force: true }).catch(() => void 0);
     throw new Error("could not open system browser");
   }
 }
@@ -35632,9 +35905,9 @@ async function holdSession(connection) {
   writeJson(ready);
   const keepAlive = setInterval(() => void 0, 6e4);
   try {
-    await new Promise((resolve5) => {
+    await new Promise((resolve6) => {
       const stop = () => {
-        void connection.release().finally(resolve5);
+        void connection.release().finally(resolve6);
       };
       process.once("SIGINT", stop);
       process.once("SIGTERM", stop);
@@ -35650,7 +35923,7 @@ async function readOwnerArtifact(connection, artifact) {
   for (; ; ) {
     const pageQuery = { type: "output", handle: artifact.handle, offset, limit: artifact.chunkBytes };
     const pageEnvelope = await ownerQuery(connection, pageQuery);
-    if (!isRecord2(pageEnvelope.result)) throw new Error("owner artifact page is not an object");
+    if (!isRecord3(pageEnvelope.result)) throw new Error("owner artifact page is not an object");
     const page = pageEnvelope.result;
     if (page.encoding !== "base64" || typeof page.data !== "string" || !Number.isSafeInteger(page.offset) || !Number.isSafeInteger(page.nextOffset) || typeof page.eof !== "boolean") throw new Error("owner artifact page has an invalid shape");
     const bytes = Buffer.from(page.data, "base64");
@@ -35674,7 +35947,7 @@ async function ownerQuery(connection, query) {
 async function ownerSnapshot(connection) {
   const query = { type: "state" };
   const result = (await ownerQuery(connection, query)).result;
-  if (!isRecord2(result)) throw new Error("owner recovery query did not return an object");
+  if (!isRecord3(result)) throw new Error("owner recovery query did not return an object");
   const recovery = result;
   if (recovery.kind !== "snapshot") throw new Error("owner recovery query did not return a snapshot");
   return hostSnapshotSchema.parse(recovery.snapshot);
@@ -35715,7 +35988,7 @@ async function runTool(cli, resources) {
     if (cli.command === "check") {
       const query = { type: "check" };
       const result = (await ownerQuery(connection, query)).result;
-      if (!isRecord2(result)) throw new Error("owner check query did not return an object");
+      if (!isRecord3(result)) throw new Error("owner check query did not return an object");
       const check2 = result;
       writeJson({ epoch: connection.epoch, documentRevision: runtimeSnapshot.documentRevision, dirty: runtimeSnapshot.dirty, disk: runtimeSnapshot.disk, result: check2, error: null });
       return Array.isArray(check2.issues) && check2.issues.length > 0 || runtimeSnapshot.runtime.executionBlockedReason !== null ? 1 : 0;
@@ -35762,7 +36035,7 @@ async function runMcp(cli, resources) {
       upstreamClient = client;
       return { client, transport };
     }, { input: process.stdin, output: process.stdout, alder });
-    await new Promise((resolve5) => process.stdin.once("end", resolve5));
+    await new Promise((resolve6) => process.stdin.once("end", resolve6));
     await stdio.close();
     await drainMcpStdio(stdio);
     return 0;
@@ -35820,6 +36093,7 @@ async function runCli(argv = process.argv.slice(2)) {
     process.stdout.write("       alder --recover UUID [--browser|--headless]\n");
     process.stdout.write("       alder --list-recoveries\n");
     process.stdout.write("       alder check|run|publish|mcp NOTEBOOK.R\n");
+    process.stdout.write("       alder diagnostics status|launches|errors|operations|performance|incident [--limit N] [--since ISO] [--until ISO] [--id VALUE]\n");
     process.stdout.write("       alder run|publish NOTEBOOK.R --request-id ID --session-epoch EPOCH --document-revision N\n");
     return 0;
   }
@@ -35829,6 +36103,16 @@ async function runCli(argv = process.argv.slice(2)) {
   }
   if (cli.listRecoveries) {
     writeJson(await listUntitledRecoveryDescriptors());
+    return 0;
+  }
+  if (cli.command === "diagnostics") {
+    writeJson(await queryDiagnostics(cli.diagnosticQuery, {
+      limit: cli.diagnosticLimit,
+      since: cli.diagnosticSince,
+      until: cli.diagnosticUntil,
+      id: cli.diagnosticId,
+      slowMs: cli.diagnosticSlowMs
+    }));
     return 0;
   }
   const resources = await applicationResources();
@@ -35852,7 +36136,7 @@ if (entry) {
     }
   );
 }
-function isRecord2(value) {
+function isRecord3(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 export {

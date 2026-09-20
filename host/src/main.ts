@@ -10,6 +10,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
 import { connectMcpStdio, drainMcpStdio, type McpInitializationMetadata } from "./mcp-stdio.js";
+import { queryDiagnostics, type DiagnosticQuery } from "./diagnostics.js";
 import { type HostReady } from "./application.js";
 import { resolveApplicationResources, type ApplicationResources } from "./resources.js";
 import { acquireNotebookSession, isUntitledRecoveryId, listUntitledRecoveryDescriptors, selectUntitledRecoveryDescriptor } from "./sessions.js";
@@ -73,7 +74,7 @@ export async function waitForRuntimeReadiness(
 }
 
 interface CliOptions {
-  command: "desktop" | "check" | "run" | "publish" | "mcp";
+  command: "desktop" | "check" | "run" | "publish" | "mcp" | "diagnostics";
   path: string | null;
   recover?: string;
   listRecoveries: boolean;
@@ -85,6 +86,12 @@ interface CliOptions {
   tokenFile?: string;
   output?: string;
   includeCode: boolean;
+  diagnosticQuery?: DiagnosticQuery;
+  diagnosticLimit?: number;
+  diagnosticSince?: string;
+  diagnosticUntil?: string;
+  diagnosticId?: string;
+  diagnosticSlowMs?: number;
   retry?: { requestId: string; sessionEpoch: string; expectedDocumentRevision: number };
 }
 
@@ -145,6 +152,7 @@ export function parseCli(argv: readonly string[]): CliOptions {
         "external-origin": { type: "string" }, "token-file": { type: "string" },
         "request-id": { type: "string" }, "session-epoch": { type: "string" }, "document-revision": { type: "string" },
         output: { type: "string" }, "include-code": { type: "boolean" }, "list-recoveries": { type: "boolean" }, recover: { type: "string" },
+        limit: { type: "string" }, since: { type: "string" }, until: { type: "string" }, id: { type: "string" }, "slow-ms": { type: "string" },
       },
     });
   } catch (error) { throw usageError(errorText(error)); }
@@ -152,9 +160,13 @@ export function parseCli(argv: readonly string[]): CliOptions {
   if (values.help === true) return { command: "desktop", path: null, recover: undefined, listRecoveries: false, browser: false, headless: false, lazy: false, noRun: false, externalOrigin: undefined, tokenFile: undefined, output: undefined, includeCode: false };
   const positionals = parsed.positionals;
   const first = positionals[0];
-  const command = first === "check" || first === "run" || first === "publish" || first === "mcp" ? first : "desktop";
-  const path = command === "desktop" ? (first ?? null) : (positionals[1] ?? null);
+  const command = first === "check" || first === "run" || first === "publish" || first === "mcp" || first === "diagnostics" ? first : "desktop";
+  const path = command === "desktop" ? (first ?? null) : command === "diagnostics" ? null : (positionals[1] ?? null);
   if (positionals.length > (command === "desktop" ? 1 : 2)) throw usageError("too many positional arguments");
+  const diagnosticQuery = command === "diagnostics" ? positionals[1] : undefined;
+  if (command === "diagnostics" && !["status", "launches", "errors", "operations", "performance", "incident"].includes(diagnosticQuery ?? "")) {
+    throw usageError("diagnostics requires status, launches, errors, operations, performance or incident");
+  }
   const browser = values.browser === true;
   const headless = values.headless === true;
   const listRecoveries = values["list-recoveries"] === true;
@@ -182,6 +194,12 @@ export function parseCli(argv: readonly string[]): CliOptions {
   if (command === "publish" && typeof values.output !== "string") throw usageError("publish requires --output FILE.html");
   if ((command === "check" || command === "run" || command === "publish" || command === "mcp") && path === null) throw usageError(command + " requires NOTEBOOK.R");
   if (command === "mcp" && (browser || headless)) throw usageError("mcp does not accept --browser or --headless");
+  const diagnosticFlags = [values.limit, values.since, values.until, values.id, values["slow-ms"]];
+  if (command !== "diagnostics" && diagnosticFlags.some(value => value !== undefined)) throw usageError("diagnostic query flags require the diagnostics command");
+  const diagnosticLimit = values.limit === undefined ? undefined : Number(values.limit);
+  const diagnosticSlowMs = values["slow-ms"] === undefined ? undefined : Number(values["slow-ms"]);
+  if (diagnosticLimit !== undefined && (!Number.isSafeInteger(diagnosticLimit) || diagnosticLimit <= 0 || diagnosticLimit > 10_000)) throw usageError("--limit must be an integer from 1 to 10000");
+  if (diagnosticSlowMs !== undefined && (!Number.isSafeInteger(diagnosticSlowMs) || diagnosticSlowMs < 0)) throw usageError("--slow-ms must be a non-negative integer");
   const retryFlags = [values["request-id"], values["session-epoch"], values["document-revision"]];
   let retry: CliOptions["retry"];
   if (retryFlags.some(value => value !== undefined)) {
@@ -193,7 +211,17 @@ export function parseCli(argv: readonly string[]): CliOptions {
     if (!requestId || !sessionEpoch || requestId.length > 256 || sessionEpoch.length > 256 || !Number.isSafeInteger(expectedDocumentRevision) || expectedDocumentRevision < 0) throw usageError("invalid command retry identity or document revision");
     retry = { requestId, sessionEpoch, expectedDocumentRevision };
   }
-  return { command, path, recover, listRecoveries, browser, headless, lazy: values.lazy === true, noRun: values["no-run"] === true, externalOrigin, tokenFile, output: typeof values.output === "string" ? values.output : undefined, includeCode: values["include-code"] === true, ...(retry === undefined ? {} : { retry }) };
+  return {
+    command, path, recover, listRecoveries, browser, headless, lazy: values.lazy === true, noRun: values["no-run"] === true,
+    externalOrigin, tokenFile, output: typeof values.output === "string" ? values.output : undefined,
+    includeCode: values["include-code"] === true, ...(retry === undefined ? {} : { retry }),
+    ...(diagnosticQuery === undefined ? {} : { diagnosticQuery: diagnosticQuery as DiagnosticQuery }),
+    ...(diagnosticLimit === undefined ? {} : { diagnosticLimit }),
+    ...(diagnosticSlowMs === undefined ? {} : { diagnosticSlowMs }),
+    ...(typeof values.since === "string" ? { diagnosticSince: values.since } : {}),
+    ...(typeof values.until === "string" ? { diagnosticUntil: values.until } : {}),
+    ...(typeof values.id === "string" ? { diagnosticId: values.id } : {}),
+  };
 }
 
 async function applicationResources(): Promise<ApplicationResources> {
@@ -473,12 +501,23 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
     process.stdout.write("       alder --recover UUID [--browser|--headless]\n");
     process.stdout.write("       alder --list-recoveries\n");
     process.stdout.write("       alder check|run|publish|mcp NOTEBOOK.R\n");
+    process.stdout.write("       alder diagnostics status|launches|errors|operations|performance|incident [--limit N] [--since ISO] [--until ISO] [--id VALUE]\n");
     process.stdout.write("       alder run|publish NOTEBOOK.R --request-id ID --session-epoch EPOCH --document-revision N\n");
     return 0;
   }
   if (argv.includes("--version")) { process.stdout.write(HOST_IDENTITY.packageVersion + "\n"); return 0; }
   if (cli.listRecoveries) {
     writeJson(await listUntitledRecoveryDescriptors());
+    return 0;
+  }
+  if (cli.command === "diagnostics") {
+    writeJson(await queryDiagnostics(cli.diagnosticQuery!, {
+      limit: cli.diagnosticLimit,
+      since: cli.diagnosticSince,
+      until: cli.diagnosticUntil,
+      id: cli.diagnosticId,
+      slowMs: cli.diagnosticSlowMs,
+    }));
     return 0;
   }
   const resources = await applicationResources();

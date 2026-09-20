@@ -9,7 +9,7 @@ import { isInitializeRequest, type ServerCapabilities } from "@modelcontextproto
 import { createMcpServer, type AlderMcpOptions, type McpControllerAdapter } from "./mcp-catalog.js";
 import { MAX_MCP_REQUEST_BYTES, ProtocolError, decodeJsonFrame } from "./protocol.js";
 import type { ArtifactStoreBinding, AuthContext, McpHttpHandler } from "./server.js";
-import type { DiagnosticSink } from "./diagnostics.js";
+import { diagnosticError, type DiagnosticSink } from "./diagnostics.js";
 
 export { createMcpServer } from "./mcp-catalog.js";
 export type { AlderMcpOptions, McpControllerAdapter } from "./mcp-catalog.js";
@@ -177,6 +177,7 @@ export function createMcpHttpHandler(options: McpHttpOptions): McpHttpHandler {
       } catch (error) {
         options.diagnostics?.record("error", "mcp.session.error", {
           clientId: auth.clientId, outcome: "error", errorCode: (error as NodeJS.ErrnoException)?.code ?? "mcp_initialize_failed",
+          error: diagnosticError(error), request: parsedBody, leaseId: auth.leaseId,
         });
         initializingLeases.delete(auth.leaseId);
         jsonRpcError(response, 500, -32603, "Internal MCP error");
@@ -223,6 +224,7 @@ export function createMcpHttpHandler(options: McpHttpOptions): McpHttpHandler {
     } catch (error) {
       options.diagnostics?.record("error", "mcp.request.error", {
         clientId: auth.clientId, outcome: "error", errorCode: (error as NodeJS.ErrnoException)?.code ?? "mcp_internal_error",
+        error: diagnosticError(error), request: parsedBody, leaseId: auth.leaseId,
       });
       if (session.transport.sessionId === undefined) await dispose(session).catch(() => undefined);
       if (!response.headersSent && !response.writableEnded) {

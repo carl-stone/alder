@@ -58,7 +58,7 @@ import { toLogicalCellBody } from "./cell-body.js";
 import { ReactiveGraph, type GraphCellInput } from "./graph.js";
 import { tailLog } from "./output-log.js";
 import { OutputStore, OutputStoreError, OUTPUT_ARTIFACT_CHUNK_BYTES } from "./outputs.js";
-import type { DiagnosticSink } from "./diagnostics.js";
+import { diagnosticError, type DiagnosticSink } from "./diagnostics.js";
 const INTERNAL_CLIENT_ID = "internal";
 
 const OPERATION_JOURNAL_LIMIT = 256;
@@ -935,7 +935,7 @@ export class Controller {
     const acceptedAt = performance.now();
     this.diagnostics?.record("info", "operation.accepted", {
       operationId: command.requestId, kind: command.type, clientId: command.clientId,
-      documentRevision: this.documentRevisionValue,
+      documentRevision: this.documentRevisionValue, command,
     });
     if (isExecutionCommand(command.type)) this.executionRequestIds.set(command.requestId, fingerprint);
     const operationCompletion = this.awaitOperation(command.requestId, command.clientId);
@@ -971,6 +971,7 @@ export class Controller {
         outcome: cancelled ? "cancelled" : result.error ? "error" : "success", errorCode: result.error?.code ?? null,
         notApplicablePhases: command.type === "run" ? this.runNotApplicablePhases(command.clientId, command.requestId) : [],
         durationMs: Math.round(performance.now() - acceptedAt), documentRevision: result.documentRevision,
+        result, notebookContext: this.diagnosticOperationContext(command, result.error !== null),
       });
     }, error => {
       this.diagnosticProgressSeen.delete(this.operationKey(command.clientId, command.requestId));
@@ -980,6 +981,7 @@ export class Controller {
         errorType: error instanceof Error ? error.name : "unknown",
         notApplicablePhases: command.type === "run" ? this.runNotApplicablePhases(command.clientId, command.requestId) : [],
         durationMs: Math.round(performance.now() - acceptedAt), documentRevision: this.documentRevisionValue,
+        error: diagnosticError(error), command, notebookContext: this.diagnosticOperationContext(command, true),
       });
     });
     void completion.finally(() => {
@@ -993,6 +995,26 @@ export class Controller {
     this.diagnostics?.record("info", "operation.phase", {
       clientId, operationId, kind, phase, documentRevision: this.documentRevisionValue,
     });
+  }
+
+  private diagnosticOperationContext(command: HostCommand, includeAll: boolean): Record<string, unknown> {
+    const ids = new Set<string>();
+    if ("target" in command && command.target && "cellId" in command.target) ids.add(command.target.cellId);
+    if ("changes" in command && Array.isArray(command.changes)) {
+      for (const change of command.changes) {
+        if ("cell" in change && change.cell && "cellId" in change.cell) ids.add(change.cell.cellId);
+      }
+    }
+    const operation = this.operationFor(command.requestId, command.clientId);
+    for (const id of operation?.cellIds ?? []) ids.add(id);
+    const cells = this.cells.filter(cell => includeAll || ids.has(cell.id)).map(cell => this.publicCell(cell));
+    return {
+      path: this.pathValue,
+      documentRevision: this.documentRevisionValue,
+      dirty: this.changed,
+      runtime: this.runtimeSnapshot(),
+      cells,
+    };
   }
 
   private runNotApplicablePhases(clientId: string, operationId: string): string[] {

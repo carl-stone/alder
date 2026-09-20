@@ -4,7 +4,7 @@ import { DesktopRecoveryStore } from "./desktop-recovery.js";
 import { IndexedDBRecoveryStore } from "./transport.js";
 import type { BrowserTransportOptions } from "./transport.js";
 import { NotebookView } from "./view.js";
-import type { DesktopCommand, HostEvent, PreloadApi, WindowState } from "../protocol.js";
+import type { DesktopCommand, HostEvent, JsonValue, PreloadApi, WindowState } from "../protocol.js";
 import { blocksNotebookNavigation, notebookUrl } from "./url.js";
 
 let view: NotebookView | null = null;
@@ -196,15 +196,52 @@ async function start(): Promise<void> {
   await (globalThis as typeof globalThis & { alderDesktop?: PreloadApi }).alderDesktop?.rendererReady();
 }
 
-function reportRendererFailure(event: "renderer.error" | "renderer.unhandled_rejection" | "renderer.bootstrap_failed", category: "script-error" | "unhandled-rejection" | "bootstrap-failed"): void {
-  const desktop = (globalThis as typeof globalThis & { alderDesktop?: PreloadApi }).alderDesktop;
-  void desktop?.reportDiagnostic({ event, category }).catch(() => undefined);
+function rendererJson(value: unknown, seen = new Set<unknown>()): JsonValue {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return value;
+  if (typeof value === "number") return Number.isFinite(value) ? value : String(value);
+  if (typeof value === "undefined") return null;
+  if (value instanceof Error) return rendererError(value, seen);
+  if (typeof value !== "object") return String(value);
+  if (seen.has(value)) return "[Circular]";
+  seen.add(value);
+  const output: JsonValue = Array.isArray(value)
+    ? value.map(item => rendererJson(item, seen))
+    : Object.fromEntries(Object.entries(value).map(([key, item]) => [key, rendererJson(item, seen)]));
+  seen.delete(value);
+  return output;
 }
 
-window.addEventListener("error", () => reportRendererFailure("renderer.error", "script-error"));
-window.addEventListener("unhandledrejection", () => reportRendererFailure("renderer.unhandled_rejection", "unhandled-rejection"));
+function rendererError(value: unknown, seen = new Set<unknown>()): { name: string; message: string; stack: string | null; cause: JsonValue } {
+  if (value instanceof Error) {
+    if (seen.has(value)) return { name: value.name, message: value.message, stack: value.stack ?? null, cause: "[Circular error cause]" };
+    seen.add(value);
+    return {
+      name: value.name, message: value.message, stack: value.stack ?? null,
+      cause: value.cause === undefined ? null : rendererJson(value.cause, seen),
+    };
+  }
+  return { name: typeof value, message: String(value), stack: null, cause: null };
+}
+
+function reportRendererFailure(
+  event: "renderer.error" | "renderer.unhandled_rejection" | "renderer.bootstrap_failed",
+  category: "script-error" | "unhandled-rejection" | "bootstrap-failed",
+  value: unknown,
+  location: { filename?: string; line?: number; column?: number } = {},
+): void {
+  const desktop = (globalThis as typeof globalThis & { alderDesktop?: PreloadApi }).alderDesktop;
+  void desktop?.reportDiagnostic({
+    event, category, error: rendererError(value), filename: location.filename ?? null,
+    line: location.line ?? null, column: location.column ?? null,
+  }).catch(() => undefined);
+}
+
+window.addEventListener("error", event => reportRendererFailure("renderer.error", "script-error", event.error ?? event.message, {
+  filename: event.filename, line: event.lineno, column: event.colno,
+}));
+window.addEventListener("unhandledrejection", event => reportRendererFailure("renderer.unhandled_rejection", "unhandled-rejection", event.reason));
 void start().catch((error) => {
-  reportRendererFailure("renderer.bootstrap_failed", "bootstrap-failed");
+  reportRendererFailure("renderer.bootstrap_failed", "bootstrap-failed", error);
   view?.showError(error);
 });
 

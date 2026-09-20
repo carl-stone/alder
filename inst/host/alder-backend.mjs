@@ -21520,7 +21520,7 @@ var require_websocket = __commonJS({
     var http = __require("http");
     var net = __require("net");
     var tls = __require("tls");
-    var { randomBytes: randomBytes6, createHash: createHash9 } = __require("crypto");
+    var { randomBytes: randomBytes5, createHash: createHash9 } = __require("crypto");
     var { Duplex, Readable: Readable3 } = __require("stream");
     var { URL: URL3 } = __require("url");
     var PerMessageDeflate2 = require_permessage_deflate();
@@ -22058,7 +22058,7 @@ var require_websocket = __commonJS({
         }
       }
       const defaultPort = isSecure ? 443 : 80;
-      const key2 = randomBytes6(16).toString("base64");
+      const key2 = randomBytes5(16).toString("base64");
       const request = isSecure ? https.request : http.request;
       const protocolSet = /* @__PURE__ */ new Set();
       let perMessageDeflate;
@@ -40859,8 +40859,18 @@ var require_proper_lockfile = __commonJS({
 import { createServer as createServer2 } from "node:net";
 import { randomUUID as randomUUID17 } from "node:crypto";
 import { chmod as chmod6, mkdir as mkdir11, readFile as readFile11 } from "node:fs/promises";
-import { dirname as dirname10, join as join21, resolve as resolve15 } from "node:path";
+import { dirname as dirname10, resolve as resolve15 } from "node:path";
 import { fileURLToPath } from "node:url";
+
+// src/preferences.ts
+var import_yaml2 = __toESM(require_dist(), 1);
+import { createHash as createHash2 } from "node:crypto";
+import { open as open3 } from "node:fs/promises";
+
+// src/configuration.ts
+import { createHash, randomUUID } from "node:crypto";
+import { mkdir, open as open2, readFile, rename, rm, stat } from "node:fs/promises";
+import { dirname, join } from "node:path";
 
 // node_modules/env-paths/index.js
 import path from "node:path";
@@ -40952,15 +40962,7 @@ function envPaths(name, { suffix = "nodejs" } = {}) {
   return linux(name);
 }
 
-// src/preferences.ts
-var import_yaml2 = __toESM(require_dist(), 1);
-import { createHash as createHash2 } from "node:crypto";
-import { open as open3 } from "node:fs/promises";
-
 // src/configuration.ts
-import { createHash, randomUUID } from "node:crypto";
-import { mkdir, open as open2, readFile, rename, rm, stat } from "node:fs/promises";
-import { dirname, join } from "node:path";
 var import_yaml = __toESM(require_dist(), 1);
 
 // node_modules/zod/v4/classic/external.js
@@ -60336,14 +60338,680 @@ import { mkdtemp as mkdtemp5, realpath as realpath10, rm as rm10 } from "node:fs
 import { basename as basename9, dirname as dirname9, join as join20, resolve as resolve14 } from "node:path";
 import { tmpdir as tmpdir6 } from "node:os";
 
+// src/diagnostics.ts
+import { randomUUID as randomUUID2 } from "node:crypto";
+import { appendFile, chmod, copyFile, mkdir as mkdir2, open as open4, readdir, readFile as readFile2, rename as rename2, rm as rm2, stat as stat2, unlink, writeFile } from "node:fs/promises";
+import { basename, join as join2, resolve } from "node:path";
+var DIAGNOSTIC_SCHEMA_VERSION = 2;
+var DIAGNOSTIC_SEGMENT_BYTES = 10 * 1024 * 1024;
+var DIAGNOSTIC_TOTAL_BYTES = 256 * 1024 * 1024;
+var DIAGNOSTIC_MAX_SEGMENTS = 32;
+var DIAGNOSTIC_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1e3;
+var DIAGNOSTIC_QUEUE_LIMIT = 4096;
+var DIAGNOSTIC_CHILD_TAIL_BYTES = 64 * 1024;
+var DIAGNOSTIC_BATCH_SIZE = 128;
+var LOCK_WAIT_MS = 2e3;
+var LOCK_STALE_MS = 3e4;
+var TERMINAL_EVENTS = /* @__PURE__ */ new Set(["operation.settled", "operation.cancelled", "operation.failed"]);
+var SLOW_THRESHOLDS = {
+  transaction: 5e3,
+  save: 1e4,
+  "save-as": 15e3,
+  run: 3e4,
+  restart: 45e3,
+  format: 3e4,
+  publish: 12e4,
+  "packages-install": 12e4,
+  inspect: 15e3
+};
+var EXPECTED_PHASES = {
+  transaction: ["recovery-flush", "authoritative-ack"],
+  save: ["publication", "clean"],
+  "save-as": ["publication", "clean"],
+  run: ["analysis-ready", "kernel-dispatch", "kernel-completion", "authoritative-completion"],
+  restart: ["terminal"],
+  format: ["terminal"],
+  publish: ["terminal"],
+  "packages-install": ["terminal"],
+  inspect: ["terminal"]
+};
+function diagnosticsRoot() {
+  return resolve(process.env.ALDER_DIAGNOSTICS_DIR ?? join2(envPaths("Alder", { suffix: "" }).data, "diagnostics"));
+}
+function diagnosticError(value, seen = /* @__PURE__ */ new Set()) {
+  if (value instanceof Error) {
+    if (seen.has(value)) return { name: value.name, message: value.message, stack: value.stack ?? null, cause: "[Circular error cause]", code: value.code ?? null };
+    seen.add(value);
+    return {
+      name: value.name,
+      message: value.message,
+      stack: value.stack ?? null,
+      cause: value.cause === void 0 ? null : value.cause instanceof Error ? diagnosticError(value.cause, seen) : diagnosticValue(value.cause),
+      code: value.code ?? null
+    };
+  }
+  return { name: typeof value, message: String(value), stack: null, cause: null, code: null };
+}
+function diagnosticProcessContext() {
+  const usage = process.resourceUsage?.();
+  return {
+    pid: process.pid,
+    ppid: process.ppid,
+    cwd: process.cwd(),
+    argv: [...process.argv],
+    execPath: process.execPath,
+    versions: { ...process.versions },
+    platform: process.platform,
+    arch: process.arch,
+    environment: { ...process.env },
+    memory: process.memoryUsage(),
+    resourceUsage: usage ? { ...usage } : null
+  };
+}
+function diagnosticValue(value, seen = /* @__PURE__ */ new Set()) {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return value;
+  if (typeof value === "number") return Number.isFinite(value) ? value : String(value);
+  if (typeof value === "bigint") return value.toString();
+  if (typeof value === "undefined") return null;
+  if (value instanceof Error) return diagnosticError(value);
+  if (Buffer.isBuffer(value)) return { type: "Buffer", byteLength: value.byteLength, base64: value.toString("base64") };
+  if (value instanceof Uint8Array) return { type: value.constructor.name, byteLength: value.byteLength, base64: Buffer.from(value).toString("base64") };
+  if (value instanceof Date) return value.toISOString();
+  if (typeof value !== "object") return String(value);
+  if (seen.has(value)) return "[Circular]";
+  seen.add(value);
+  if (Array.isArray(value)) {
+    const output3 = value.map((item) => diagnosticValue(item, seen));
+    seen.delete(value);
+    return output3;
+  }
+  const output2 = {};
+  for (const [key2, item] of Object.entries(value)) output2[key2] = diagnosticValue(item, seen);
+  seen.delete(value);
+  return output2;
+}
+var DiagnosticsCore = class {
+  rootDir;
+  role;
+  component;
+  appLaunchId;
+  backendInstanceId;
+  processInstanceId;
+  appVersion;
+  buildId;
+  queueLimit;
+  segmentBytes;
+  totalBytes;
+  maxSegments;
+  maxAgeMs;
+  flushDelayMs;
+  stderr;
+  now;
+  monotonicNow;
+  slowThresholdMs;
+  queue = [];
+  activeOperations = /* @__PURE__ */ new Map();
+  flushTimer;
+  drainTail = Promise.resolve();
+  initialized = false;
+  disabled = false;
+  closed = false;
+  fallbackReported = false;
+  activePath = "";
+  statusPath = "";
+  activeSize = 0;
+  retainedBytes = 0;
+  segmentCount = 0;
+  lastError = null;
+  eventSequence = 0;
+  generatedEvents = 0;
+  acceptedEvents = 0;
+  persistedEvents = 0;
+  droppedEvents = 0;
+  unavailableEvents = 0;
+  constructor(options) {
+    this.rootDir = resolve(options.rootDir);
+    this.role = options.role;
+    this.component = options.component ?? options.role;
+    this.appLaunchId = options.appLaunchId ?? randomUUID2();
+    this.backendInstanceId = options.backendInstanceId;
+    this.processInstanceId = options.processInstanceId ?? randomUUID2();
+    this.appVersion = options.appVersion ?? "unknown";
+    this.buildId = options.buildId ?? "unknown";
+    this.queueLimit = options.queueLimit ?? DIAGNOSTIC_QUEUE_LIMIT;
+    this.segmentBytes = options.segmentBytes ?? DIAGNOSTIC_SEGMENT_BYTES;
+    this.totalBytes = options.totalBytes ?? DIAGNOSTIC_TOTAL_BYTES;
+    this.maxSegments = options.maxSegments ?? DIAGNOSTIC_MAX_SEGMENTS;
+    this.maxAgeMs = options.maxAgeMs ?? DIAGNOSTIC_MAX_AGE_MS;
+    this.flushDelayMs = options.flushDelayMs ?? 25;
+    this.stderr = options.stderr === void 0 ? process.stderr : options.stderr;
+    this.now = options.now ?? (() => /* @__PURE__ */ new Date());
+    this.monotonicNow = options.monotonicNow ?? (() => performance.now());
+    this.slowThresholdMs = options.slowThresholdMs;
+  }
+  enqueue(severity, event, context, fields) {
+    this.generatedEvents++;
+    if (this.disabled || this.closed) {
+      this.unavailableEvents++;
+      return;
+    }
+    if (!/^[a-z][a-z0-9_.-]{1,127}$/.test(event)) {
+      this.droppedEvents++;
+      void this.persistStatus().catch(() => void 0);
+      return;
+    }
+    const admitted = this.queue.length < this.queueLimit;
+    if (admitted) {
+      const sequence = ++this.eventSequence;
+      const launchContext = event.endsWith(".launch") ? { processContext: diagnosticProcessContext() } : {};
+      this.queue.push({
+        sequence,
+        timestamp: this.now().toISOString(),
+        monotonicMs: Math.round(this.monotonicNow() * 1e3) / 1e3,
+        severity,
+        event,
+        context,
+        fields: { ...launchContext, ...fields }
+      });
+      this.acceptedEvents++;
+    } else {
+      this.droppedEvents++;
+      void this.persistStatus().catch(() => void 0);
+    }
+    this.observeOperation(event, { ...context, ...fields });
+    if (admitted) this.scheduleFlush(severity === "error" || TERMINAL_EVENTS.has(event) || event.includes("fatal") ? 0 : this.queue.length >= 64 ? 0 : this.flushDelayMs);
+  }
+  operationKey(fields) {
+    const operationId = typeof fields.operationId === "string" ? fields.operationId : null;
+    if (!operationId) return null;
+    return (typeof fields.clientId === "string" ? fields.clientId : "internal") + "\0" + operationId;
+  }
+  observeOperation(event, fields) {
+    const key2 = this.operationKey(fields);
+    if (!key2) return;
+    if (event === "operation.accepted") {
+      const operationId = String(fields.operationId);
+      const clientId = typeof fields.clientId === "string" ? fields.clientId : "internal";
+      const kind = typeof fields.kind === "string" ? fields.kind : "other";
+      const startedAt = this.monotonicNow();
+      const threshold = this.slowThresholdMs ?? SLOW_THRESHOLDS[kind] ?? 3e4;
+      const prior = this.activeOperations.get(key2);
+      if (prior) clearTimeout(prior.timer);
+      const timer = setTimeout(() => {
+        const active2 = this.activeOperations.get(key2);
+        if (!active2) return;
+        this.enqueue("warn", "operation.slow", {}, {
+          operationId,
+          clientId,
+          kind: active2.kind,
+          thresholdMs: threshold,
+          durationMs: Math.round(this.monotonicNow() - active2.startedAt),
+          lastProgressMs: Math.round(this.monotonicNow() - active2.lastProgressAt)
+        });
+      }, threshold);
+      timer.unref?.();
+      this.activeOperations.set(key2, { operationId, clientId, kind, startedAt, lastProgressAt: startedAt, phases: /* @__PURE__ */ new Set(), timer });
+      return;
+    }
+    const active = this.activeOperations.get(key2);
+    if (!active) return;
+    if (!TERMINAL_EVENTS.has(event)) {
+      const phase = typeof fields.phase === "string" ? fields.phase : event === "operation.progress" ? "first-progress" : void 0;
+      if (phase) {
+        active.phases.add(phase);
+        active.lastProgressAt = this.monotonicNow();
+      }
+      return;
+    }
+    clearTimeout(active.timer);
+    active.phases.add("terminal");
+    const expected = EXPECTED_PHASES[active.kind] ?? ["terminal"];
+    const notApplicable = Array.isArray(fields.notApplicablePhases) ? fields.notApplicablePhases.filter((value) => typeof value === "string") : [];
+    this.activeOperations.delete(key2);
+    this.enqueue("info", "operation.timing", {}, {
+      operationId: active.operationId,
+      clientId: active.clientId,
+      kind: active.kind,
+      outcome: event === "operation.settled" ? "success" : event === "operation.cancelled" ? "cancelled" : "error",
+      durationMs: Math.round(this.monotonicNow() - active.startedAt),
+      observedPhases: [...active.phases],
+      notApplicablePhases: notApplicable,
+      missingPhases: expected.filter((phase) => !active.phases.has(phase) && !notApplicable.includes(phase))
+    });
+  }
+  scheduleFlush(delay) {
+    if (this.flushTimer !== void 0 || this.closed || this.disabled) return;
+    this.flushTimer = setTimeout(() => {
+      this.flushTimer = void 0;
+      void this.flush().catch(() => void 0);
+    }, delay);
+    this.flushTimer.unref?.();
+  }
+  async initialize() {
+    if (this.initialized) return;
+    await mkdir2(this.rootDir, { recursive: true, mode: 448 });
+    await chmod(this.rootDir, 448);
+    const suffix = `${this.role}-${process.pid}-${this.processInstanceId}`;
+    this.activePath = join2(this.rootDir, `diagnostics-active-${suffix}.jsonl`);
+    this.statusPath = join2(this.rootDir, `diagnostics-status-${suffix}.json`);
+    this.activeSize = await stat2(this.activePath).then((info) => info.size, (error61) => {
+      if (error61.code === "ENOENT") return 0;
+      throw error61;
+    });
+    await chmod(this.activePath, 384).catch((error61) => {
+      if (error61.code !== "ENOENT") throw error61;
+    });
+    this.initialized = true;
+    await this.refreshRetainedSize();
+    await this.persistStatus();
+  }
+  serialize(record4) {
+    const value = {
+      schemaVersion: DIAGNOSTIC_SCHEMA_VERSION,
+      timestamp: record4.timestamp,
+      monotonicMs: record4.monotonicMs,
+      severity: record4.severity,
+      component: this.component,
+      event: record4.event,
+      appVersion: this.appVersion,
+      buildId: this.buildId,
+      process: { role: this.role, instanceId: this.processInstanceId, pid: process.pid },
+      appLaunchId: this.appLaunchId,
+      eventSequence: record4.sequence,
+      ...this.backendInstanceId ? { backendInstanceId: this.backendInstanceId } : {},
+      ...diagnosticValue(record4.context),
+      ...diagnosticValue(record4.fields)
+    };
+    const line = JSON.stringify(value) + "\n";
+    return { line, bytes: Buffer.byteLength(line) };
+  }
+  async drainThrough(targetSequence) {
+    if (this.disabled) return;
+    try {
+      await this.initialize();
+    } catch (error61) {
+      await this.disable(error61);
+      return;
+    }
+    while (this.queue.length > 0 && this.queue[0].sequence <= targetSequence) {
+      const raw = this.queue.slice(0, DIAGNOSTIC_BATCH_SIZE).filter((record4) => record4.sequence <= targetSequence);
+      if (raw.length === 0) break;
+      const serialized = raw.map((record4) => this.serialize(record4));
+      let persisted = 0;
+      try {
+        persisted = await this.appendRecords(serialized);
+      } catch (error61) {
+        await this.disable(error61);
+        return;
+      }
+      this.queue.splice(0, raw.length);
+      this.persistedEvents += persisted;
+      this.droppedEvents += raw.length - persisted;
+    }
+    await this.refreshRetainedSize();
+    await this.persistStatus();
+  }
+  async appendRecords(records) {
+    return withDirectoryLock(this.rootDir, async () => {
+      await normalizeDeadActiveSegments(this.rootDir);
+      let persisted = 0;
+      let index = 0;
+      while (index < records.length) {
+        const first = records[index];
+        if (first.bytes > this.segmentBytes || first.bytes > this.totalBytes) {
+          index++;
+          continue;
+        }
+        if (this.activeSize > 0 && this.activeSize + first.bytes > this.segmentBytes) await this.rotateLocked();
+        const remaining = this.segmentBytes - this.activeSize;
+        const chunk = [];
+        let chunkBytes = 0;
+        while (index < records.length && chunkBytes + records[index].bytes <= remaining) {
+          chunk.push(records[index]);
+          chunkBytes += records[index].bytes;
+          index++;
+        }
+        if (chunk.length === 0) {
+          index++;
+          continue;
+        }
+        const allowed = await pruneSegmentsLocked(this.rootDir, {
+          maxAgeMs: this.maxAgeMs,
+          maxSegments: this.maxSegments,
+          totalBytes: this.totalBytes,
+          reserveBytes: chunkBytes,
+          prospectivePath: this.activePath
+        });
+        if (!allowed) continue;
+        await appendFile(this.activePath, chunk.map((record4) => record4.line).join(""), { mode: 384 });
+        this.activeSize += chunkBytes;
+        persisted += chunk.length;
+      }
+      await pruneSegmentsLocked(this.rootDir, {
+        maxAgeMs: this.maxAgeMs,
+        maxSegments: this.maxSegments,
+        totalBytes: this.totalBytes,
+        reserveBytes: 0,
+        prospectivePath: this.activePath
+      });
+      return persisted;
+    });
+  }
+  async rotateLocked() {
+    if (this.activeSize === 0) return;
+    const stamp = this.now().toISOString().replace(/[^0-9]/g, "").slice(0, 17);
+    const target = join2(this.rootDir, `diagnostics-${stamp}-${this.role}-${process.pid}-${randomUUID2()}.jsonl`);
+    await rename2(this.activePath, target);
+    await chmod(target, 384);
+    this.activeSize = 0;
+  }
+  async refreshRetainedSize() {
+    const entries2 = await listSegments(this.rootDir);
+    this.retainedBytes = entries2.reduce((sum, entry) => sum + entry.size, 0);
+    this.segmentCount = entries2.length;
+  }
+  statusValue() {
+    return {
+      ...this.status(),
+      timestamp: this.now().toISOString(),
+      role: this.role,
+      processInstanceId: this.processInstanceId,
+      pid: process.pid
+    };
+  }
+  async persistStatus() {
+    if (!this.initialized || !this.statusPath) return;
+    const temporary = this.statusPath + `.${randomUUID2()}.tmp`;
+    await writeFile(temporary, JSON.stringify(this.statusValue()) + "\n", { mode: 384, flag: "wx" });
+    await rename2(temporary, this.statusPath);
+    await chmod(this.statusPath, 384);
+  }
+  async disable(error61) {
+    if (this.disabled) return;
+    this.disabled = true;
+    this.lastError = diagnosticError(error61);
+    this.unavailableEvents += this.queue.length;
+    this.queue.length = 0;
+    for (const active of this.activeOperations.values()) clearTimeout(active.timer);
+    this.activeOperations.clear();
+    await this.persistStatus().catch(() => void 0);
+    if (!this.fallbackReported && this.stderr) {
+      this.fallbackReported = true;
+      try {
+        this.stderr.write(`Alder diagnostics unavailable: ${this.lastError.message}
+`);
+      } catch {
+      }
+    }
+  }
+  async flush() {
+    if (this.flushTimer !== void 0) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = void 0;
+    }
+    if (this.disabled || this.queue.length === 0) return;
+    const target = this.queue[this.queue.length - 1].sequence;
+    const operation = this.drainTail.then(() => this.drainThrough(target));
+    this.drainTail = operation.catch(() => void 0);
+    await operation;
+  }
+  async close() {
+    if (this.closed) {
+      await this.drainTail;
+      return;
+    }
+    this.closed = true;
+    for (const active of this.activeOperations.values()) clearTimeout(active.timer);
+    this.activeOperations.clear();
+    await this.flush();
+    if (this.initialized && !this.disabled && this.activeSize > 0) {
+      await withDirectoryLock(this.rootDir, async () => {
+        await this.rotateLocked();
+        await pruneSegmentsLocked(this.rootDir, {
+          maxAgeMs: this.maxAgeMs,
+          maxSegments: this.maxSegments,
+          totalBytes: this.totalBytes,
+          reserveBytes: 0
+        });
+      }).catch((error61) => this.disable(error61));
+      await this.refreshRetainedSize().catch(() => void 0);
+      await this.persistStatus().catch(() => void 0);
+    }
+  }
+  abandonQueued() {
+    const count = this.queue.length;
+    this.queue.length = 0;
+    this.unavailableEvents += count;
+    void this.persistStatus().catch(() => void 0);
+    return count;
+  }
+  status() {
+    return {
+      available: !this.disabled,
+      degraded: this.disabled || this.droppedEvents > 0 || this.unavailableEvents > 0,
+      generatedEvents: this.generatedEvents,
+      acceptedEvents: this.acceptedEvents,
+      persistedEvents: this.persistedEvents,
+      droppedEvents: this.droppedEvents,
+      unavailableEvents: this.unavailableEvents,
+      queuedEvents: this.queue.length,
+      currentSegmentBytes: this.activeSize,
+      retainedBytes: this.retainedBytes,
+      segmentCount: this.segmentCount,
+      lastError: this.lastError,
+      rootDir: this.rootDir
+    };
+  }
+};
+var StructuredDiagnostics = class _StructuredDiagnostics {
+  core;
+  context;
+  constructor(options, core, context = {}) {
+    this.core = core ?? new DiagnosticsCore(options);
+    this.context = context;
+  }
+  record(severity, event, fields = {}) {
+    this.core.enqueue(severity, event, this.context, fields);
+  }
+  child(fields) {
+    return new _StructuredDiagnostics({ rootDir: this.core.rootDir, role: this.core.role }, this.core, { ...this.context, ...fields });
+  }
+  flush() {
+    return this.core.flush();
+  }
+  close() {
+    return this.core.close();
+  }
+  abandonQueued() {
+    return this.core.abandonQueued();
+  }
+  status() {
+    return this.core.status();
+  }
+};
+async function persistEmergencyDiagnostic(options) {
+  const rootDir = resolve(options.rootDir);
+  await mkdir2(rootDir, { recursive: true, mode: 448 });
+  await chmod(rootDir, 448);
+  const timestamp = (options.now ?? (() => /* @__PURE__ */ new Date()))().toISOString();
+  const value = {
+    schemaVersion: DIAGNOSTIC_SCHEMA_VERSION,
+    timestamp,
+    severity: "error",
+    component: options.component ?? options.role,
+    event: options.event,
+    process: { role: options.role, instanceId: randomUUID2(), pid: process.pid },
+    appLaunchId: options.appLaunchId ?? process.env.ALDER_APP_LAUNCH_ID ?? null,
+    processContext: diagnosticProcessContext(),
+    ...diagnosticValue(options.fields ?? {}),
+    durable: true
+  };
+  const path3 = join2(rootDir, `diagnostics-emergency-${options.role}-${process.pid}-${randomUUID2()}.jsonl`);
+  const handle = await open4(path3, "wx", 384);
+  try {
+    await handle.writeFile(JSON.stringify(value) + "\n");
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+  const directory = await open4(rootDir, "r");
+  try {
+    await directory.sync();
+  } finally {
+    await directory.close();
+  }
+  return path3;
+}
+async function withDirectoryLock(rootDir, action) {
+  await mkdir2(rootDir, { recursive: true, mode: 448 });
+  const lock = join2(rootDir, ".retention-lock");
+  const deadline = Date.now() + LOCK_WAIT_MS;
+  while (true) {
+    try {
+      const handle = await open4(lock, "wx", 384);
+      try {
+        await handle.writeFile(String(process.pid));
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+      break;
+    } catch (error61) {
+      if (error61.code !== "EEXIST") throw error61;
+      const info = await stat2(lock).catch(() => null);
+      const ownerPid = await readFile2(lock, "utf8").then((value) => Number(value.trim()), () => Number.NaN);
+      const deadOwner = Number.isSafeInteger(ownerPid) && ownerPid > 0 && !pidAlive(ownerPid);
+      const invalidOwner = (!Number.isSafeInteger(ownerPid) || ownerPid <= 0) && info !== null && Date.now() - info.mtimeMs > 250;
+      if (deadOwner || invalidOwner || info && Date.now() - info.mtimeMs > LOCK_STALE_MS) {
+        await unlink(lock).catch((unlinkError) => {
+          if (unlinkError.code !== "ENOENT") throw unlinkError;
+        });
+        continue;
+      }
+      if (Date.now() >= deadline) throw Object.assign(new Error("diagnostic retention lock timed out"), { code: "EIO" });
+      await new Promise((resolveWait) => setTimeout(resolveWait, 10));
+    }
+  }
+  try {
+    return await action();
+  } finally {
+    await unlink(lock).catch((error61) => {
+      if (error61.code !== "ENOENT") throw error61;
+    });
+  }
+}
+function segmentInfo(name) {
+  if (!/^diagnostics-.*\.jsonl$/.test(name)) return null;
+  const match = /^diagnostics-active-[a-z]+-(\d+)-.*\.jsonl$/.exec(name);
+  return { active: match !== null, pid: match ? Number(match[1]) : null };
+}
+function pidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+async function listSegments(rootDir) {
+  let names;
+  try {
+    names = await readdir(rootDir);
+  } catch (error61) {
+    if (error61.code === "ENOENT") return [];
+    throw error61;
+  }
+  const entries2 = [];
+  for (const name of names) {
+    const parsed = segmentInfo(name);
+    if (!parsed) continue;
+    const path3 = join2(rootDir, name);
+    try {
+      const info = await stat2(path3);
+      entries2.push({ path: path3, name, size: info.size, mtimeMs: info.mtimeMs, ...parsed });
+    } catch (error61) {
+      if (error61.code !== "ENOENT") throw error61;
+    }
+  }
+  return entries2;
+}
+async function normalizeDeadActiveSegments(rootDir) {
+  for (const entry of await listSegments(rootDir)) {
+    if (!entry.active || entry.pid === null || entry.pid === process.pid || pidAlive(entry.pid)) continue;
+    const target = join2(rootDir, `diagnostics-recovered-${Date.now()}-${randomUUID2()}.jsonl`);
+    await rename2(entry.path, target).catch((error61) => {
+      if (error61.code !== "ENOENT") throw error61;
+    });
+  }
+}
+async function pruneSegmentsLocked(rootDir, options) {
+  const now = Date.now();
+  let entries2 = await listSegments(rootDir);
+  for (const entry of entries2.filter((item) => !item.active && now - item.mtimeMs > options.maxAgeMs)) await rm2(entry.path, { force: true });
+  entries2 = await listSegments(rootDir);
+  const prospectiveExists = options.prospectivePath ? entries2.some((entry) => resolve(entry.path) === resolve(options.prospectivePath)) : true;
+  const addedCount = options.reserveBytes > 0 && !prospectiveExists ? 1 : 0;
+  const removable = entries2.filter((entry) => !entry.active).sort((a, b) => a.mtimeMs - b.mtimeMs);
+  let total = entries2.reduce((sum, entry) => sum + entry.size, 0);
+  let count = entries2.length;
+  while ((total + options.reserveBytes > options.totalBytes || count + addedCount > options.maxSegments) && removable.length > 0) {
+    const entry = removable.shift();
+    await rm2(entry.path, { force: true });
+    total -= entry.size;
+    count--;
+  }
+  await pruneStatusFiles(rootDir, options.maxAgeMs);
+  return total + options.reserveBytes <= options.totalBytes && count + addedCount <= options.maxSegments;
+}
+async function pruneStatusFiles(rootDir, maxAgeMs) {
+  const names = (await readdir(rootDir)).filter((name) => /^diagnostics-status-.*\.json$/.test(name));
+  const entries2 = (await Promise.all(names.map(async (name) => ({ name, info: await stat2(join2(rootDir, name)) })))).sort((a, b) => b.info.mtimeMs - a.info.mtimeMs);
+  const now = Date.now();
+  for (let index = 0; index < entries2.length; index++) {
+    if (index < 64 && now - entries2[index].info.mtimeMs <= maxAgeMs) continue;
+    await rm2(join2(rootDir, entries2[index].name), { force: true });
+  }
+}
+async function pruneCorruptRecoveryCopies(directory, options = {}) {
+  const retain = options.retain ?? 5, maxAgeMs = options.maxAgeMs ?? 30 * 24 * 60 * 60 * 1e3;
+  let names;
+  try {
+    names = (await readdir(directory)).filter((name) => /^corrupt-.*\.json$/.test(name));
+  } catch (error61) {
+    if (error61.code === "ENOENT") return 0;
+    throw error61;
+  }
+  const now = Date.now();
+  const entries2 = (await Promise.all(names.map(async (name) => ({ name, info: await stat2(join2(directory, name)) })))).sort((a, b) => b.info.mtimeMs - a.info.mtimeMs);
+  let removed = 0;
+  for (let index = 0; index < entries2.length; index++) {
+    if (index < Math.min(3, retain)) continue;
+    if (index < retain && now - entries2[index].info.mtimeMs <= maxAgeMs) continue;
+    await rm2(join2(directory, entries2[index].name), { force: true });
+    removed++;
+  }
+  return removed;
+}
+async function drainDiagnosticsBounded(diagnostics, timeoutMs) {
+  let timer;
+  const timeout = new Promise((resolveTimeout) => {
+    timer = setTimeout(() => resolveTimeout(false), timeoutMs);
+  });
+  const drained = diagnostics.flush().then(() => true, () => false);
+  const result = await Promise.race([drained, timeout]);
+  if (timer) clearTimeout(timer);
+  if (!result) diagnostics.abandonQueued();
+  return result;
+}
+
 // node_modules/chokidar/index.js
 import { EventEmitter } from "node:events";
 import { stat as statcb, Stats } from "node:fs";
-import { readdir as readdir2, stat as stat4 } from "node:fs/promises";
+import { readdir as readdir3, stat as stat5 } from "node:fs/promises";
 import * as sp2 from "node:path";
 
 // node_modules/readdirp/index.js
-import { lstat, readdir, realpath, stat as stat2 } from "node:fs/promises";
+import { lstat, readdir as readdir2, realpath, stat as stat3 } from "node:fs/promises";
 import { join as pjoin, resolve as presolve, sep as psep } from "node:path";
 import { Readable } from "node:stream";
 var EntryTypes = {
@@ -60433,7 +61101,7 @@ var ReaddirpStream = class extends Readable {
     const type = opts.type ?? defaultOptions.type;
     this._fileFilter = normalizeFilter(opts.fileFilter);
     this._directoryFilter = normalizeFilter(opts.directoryFilter);
-    const statMethod = opts.lstat ? lstat : stat2;
+    const statMethod = opts.lstat ? lstat : stat3;
     if (wantBigintFsStats) {
       this._stat = (path3) => statMethod(path3, { bigint: true });
     } else {
@@ -60526,7 +61194,7 @@ var ReaddirpStream = class extends Readable {
   async _exploreDir(path3, depth) {
     let files;
     try {
-      files = await readdir(path3, this._rdOptions);
+      files = await readdir2(path3, this._rdOptions);
     } catch (error61) {
       this._onError(error61);
     }
@@ -60618,7 +61286,7 @@ function readdirp(root, options = {}) {
 
 // node_modules/chokidar/handler.js
 import { watch as fs_watch, unwatchFile, watchFile } from "node:fs";
-import { realpath as fsrealpath, lstat as lstat2, open as open4, stat as stat3 } from "node:fs/promises";
+import { realpath as fsrealpath, lstat as lstat2, open as open5, stat as stat4 } from "node:fs/promises";
 import { type as osType } from "node:os";
 import * as sp from "node:path";
 var STR_DATA = "data";
@@ -60645,7 +61313,7 @@ var EVENTS = {
 };
 var EV = EVENTS;
 var THROTTLE_MODE_WATCH = "watch";
-var statMethods = { lstat: lstat2, stat: stat3 };
+var statMethods = { lstat: lstat2, stat: stat4 };
 var KEY_LISTENERS = "listeners";
 var KEY_ERR = "errHandlers";
 var KEY_RAW = "rawEmitters";
@@ -61002,7 +61670,7 @@ var setFsWatchListener = (path3, fullPath, options, handlers) => {
         cont.watcherUnusable = true;
       if (isWindows && error61.code === "EPERM") {
         try {
-          const fd = await open4(path3, "r");
+          const fd = await open5(path3, "r");
           await fd.close();
           broadcastErr(error61);
         } catch (err) {
@@ -61133,7 +61801,7 @@ var NodeFsHandler = class {
         return;
       if (!newStats || newStats.mtimeMs === 0) {
         try {
-          const newStats2 = await stat3(file2);
+          const newStats2 = await stat4(file2);
           if (this.fsw.closed)
             return;
           const at = newStats2.atimeMs;
@@ -61507,7 +62175,7 @@ var DirEntry = class {
       return;
     const dir = this.path;
     try {
-      await readdir2(dir);
+      await readdir3(dir);
     } catch (err) {
       if (this._removeWatcher) {
         this._removeWatcher(sp2.dirname(dir), sp2.basename(dir));
@@ -61857,7 +62525,7 @@ var FSWatcher = class extends EventEmitter {
       const fullPath = opts.cwd ? sp2.join(opts.cwd, path3) : path3;
       let stats2;
       try {
-        stats2 = await stat4(fullPath);
+        stats2 = await stat5(fullPath);
       } catch (err) {
       }
       if (!stats2 || this.closed)
@@ -62109,7 +62777,7 @@ function watch(paths, options = {}) {
 }
 
 // src/controller.ts
-import { createHash as createHash3, randomUUID as randomUUID3 } from "node:crypto";
+import { createHash as createHash3, randomUUID as randomUUID4 } from "node:crypto";
 
 // src/protocol.ts
 var HOST_PROTOCOL = "alder-host-v2";
@@ -63312,7 +63980,16 @@ var visibleResultDiagnosticSchema = external_exports.object({
 }).strict();
 var rendererFailureDiagnosticSchema = external_exports.object({
   event: external_exports.enum(["renderer.error", "renderer.unhandled_rejection", "renderer.bootstrap_failed"]),
-  category: external_exports.enum(["script-error", "unhandled-rejection", "bootstrap-failed"])
+  category: external_exports.enum(["script-error", "unhandled-rejection", "bootstrap-failed"]),
+  error: external_exports.object({
+    name: boundedUtf8StringSchema(1024, true),
+    message: boundedUtf8StringSchema(MAX_FRAME_BYTES, true),
+    stack: boundedUtf8StringSchema(MAX_FRAME_BYTES, true).nullable(),
+    cause: protocolJsonSchema
+  }).strict(),
+  filename: boundedUtf8StringSchema(MAX_FRAME_BYTES, true).nullable(),
+  line: protocolIntegerSchema.nullable(),
+  column: protocolIntegerSchema.nullable()
 }).strict();
 var desktopDiagnosticSchema = external_exports.discriminatedUnion("event", [visibleResultDiagnosticSchema, rendererFailureDiagnosticSchema]);
 var desktopRecoveryRequestSchema = external_exports.object({
@@ -65393,19 +66070,19 @@ var OutputLog = class {
 };
 
 // src/outputs.ts
-import { randomUUID as randomUUID2 } from "node:crypto";
+import { randomUUID as randomUUID3 } from "node:crypto";
 import { constants, unlinkSync } from "node:fs";
 import {
   lstat as lstat3,
-  mkdir as mkdir2,
-  open as open5,
+  mkdir as mkdir3,
+  open as open6,
   realpath as realpath2,
-  rename as rename2,
-  stat as stat5,
-  unlink,
-  writeFile
+  rename as rename3,
+  stat as stat6,
+  unlink as unlink2,
+  writeFile as writeFile2
 } from "node:fs/promises";
-import { isAbsolute as isAbsolute2, join as join4, relative as relative3, resolve as resolve3 } from "node:path";
+import { isAbsolute as isAbsolute2, join as join5, relative as relative3, resolve as resolve4 } from "node:path";
 
 // node_modules/mdurl/index.mjs
 var mdurl_exports = {};
@@ -69219,9 +69896,9 @@ function linkify(state, silent) {
   while (protoStart > protoMin && isSchemeChar(state.src.charCodeAt(protoStart - 1))) protoStart--;
   if (protoStart === pos || !isAsciiAlpha(state.src.charCodeAt(protoStart))) return false;
   const protoLength = pos - protoStart;
-  const link4 = state.md.linkify.matchAtStart(state.src.slice(protoStart));
-  if (!link4) return false;
-  let url2 = link4.url;
+  const link3 = state.md.linkify.matchAtStart(state.src.slice(protoStart));
+  if (!link3) return false;
+  let url2 = link3.url;
   if (url2.length <= protoLength) return false;
   let urlEnd = url2.length;
   while (urlEnd > 0 && url2.charCodeAt(urlEnd - 1) === 42) urlEnd--;
@@ -70604,8 +71281,8 @@ var OutputStore = class {
     if (options.kernelEpoch !== void 0 && options.kernelEpoch !== null && !safeId(options.kernelEpoch)) {
       throw new TypeError("kernelEpoch must be null or a bounded identifier");
     }
-    this.artifactDirectory = resolve3(options.artifactDirectory);
-    this.artifactSourceDirectory = resolve3(options.artifactSourceDirectory ?? options.artifactDirectory);
+    this.artifactDirectory = resolve4(options.artifactDirectory);
+    this.artifactSourceDirectory = resolve4(options.artifactSourceDirectory ?? options.artifactDirectory);
     this.sessionEpoch = options.sessionEpoch;
     this.documentRevision = documentRevision;
     this.kernelEpoch = options.kernelEpoch ?? null;
@@ -71013,7 +71690,7 @@ var OutputStore = class {
     try {
       before2 = await lstat3(artifact.path);
       if (!before2.isFile()) throw new OutputStoreError("output_expired", "artifact is no longer a retained regular file");
-      file2 = await open5(artifact.path, constants.O_RDONLY | constants.O_NOFOLLOW);
+      file2 = await open6(artifact.path, constants.O_RDONLY | constants.O_NOFOLLOW);
     } catch (error61) {
       throw error61 instanceof OutputStoreError ? error61 : new OutputStoreError("output_expired", "artifact bytes are no longer retained");
     }
@@ -71107,7 +71784,7 @@ var OutputStore = class {
     const root = await realpath2(this.artifactSourceDirectory).catch(() => {
       throw new OutputStoreError("not_found", "artifact source directory is unavailable");
     });
-    const candidate = resolve3(root, name);
+    const candidate = resolve4(root, name);
     if (!isInside(root, candidate) || isAbsolute2(name)) {
       throw new OutputStoreError("output_invalid", "artifact path escapes the source directory");
     }
@@ -71115,7 +71792,7 @@ var OutputStore = class {
       throw new OutputStoreError("not_found", "registered artifact was not found");
     });
     if (!isInside(root, source)) throw new OutputStoreError("output_invalid", "artifact path escapes the source directory");
-    const sourceStat = await stat5(source).catch(() => {
+    const sourceStat = await stat6(source).catch(() => {
       throw new OutputStoreError("not_found", "registered artifact was not found");
     });
     if (!sourceStat.isFile()) throw new OutputStoreError("output_invalid", "registered artifact is not a regular file");
@@ -71126,7 +71803,7 @@ var OutputStore = class {
     const extension2 = options.extension ?? extensionForMime(mimeType, name);
     let sourceHandle;
     try {
-      sourceHandle = await open5(source, constants.O_RDONLY | constants.O_NOFOLLOW);
+      sourceHandle = await open6(source, constants.O_RDONLY | constants.O_NOFOLLOW);
     } catch {
       throw new OutputStoreError("stale_value", "registered artifact changed during import");
     }
@@ -71151,16 +71828,16 @@ var OutputStore = class {
     if (!safeMime(mimeType)) throw new OutputStoreError("output_invalid", "artifact MIME type is invalid");
     const safeExtension = normalizeExtension(extension2);
     return this.withArtifactWriteLock(async () => {
-      await mkdir2(this.artifactDirectory, { recursive: true, mode: 448 });
+      await mkdir3(this.artifactDirectory, { recursive: true, mode: 448 });
       this.makeRoom(byteLength2);
       this.reservedArtifactBytes += byteLength2;
-      const handle = randomUUID2();
-      const path3 = join4(this.artifactDirectory, handle + safeExtension);
-      const temporary = join4(this.artifactDirectory, handle + ".tmp-" + randomUUID2());
+      const handle = randomUUID3();
+      const path3 = join5(this.artifactDirectory, handle + safeExtension);
+      const temporary = join5(this.artifactDirectory, handle + ".tmp-" + randomUUID3());
       let promoted = false;
       let destination;
       try {
-        destination = await open5(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 384);
+        destination = await open6(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 384);
         const chunk = Buffer.allocUnsafe(Math.max(1, Math.min(OUTPUT_ARTIFACT_CHUNK_BYTES, byteLength2)));
         let offset = 0;
         while (offset < byteLength2) {
@@ -71186,7 +71863,7 @@ var OutputStore = class {
         }
         await destination.close();
         destination = void 0;
-        await rename2(temporary, path3);
+        await rename3(temporary, path3);
         promoted = true;
         const descriptor = Object.freeze({
           handle,
@@ -71219,9 +71896,9 @@ var OutputStore = class {
       } catch (error61) {
         await destination?.close().catch(() => {
         });
-        if (!promoted) await unlink(temporary).catch(() => {
+        if (!promoted) await unlink2(temporary).catch(() => {
         });
-        else await unlink(path3).catch(() => {
+        else await unlink2(path3).catch(() => {
         });
         throw error61;
       } finally {
@@ -71258,16 +71935,16 @@ var OutputStore = class {
     const capturedIdentity = Object.freeze({ ...identity });
     const byteLength2 = bytes.byteLength;
     return this.withArtifactWriteLock(async () => {
-      await mkdir2(this.artifactDirectory, { recursive: true, mode: 448 });
+      await mkdir3(this.artifactDirectory, { recursive: true, mode: 448 });
       this.makeRoom(byteLength2);
       this.reservedArtifactBytes += byteLength2;
-      const handle = randomUUID2();
-      const path3 = join4(this.artifactDirectory, `${handle}${safeExtension}`);
-      const temporary = join4(this.artifactDirectory, `${handle}.tmp-${randomUUID2()}`);
+      const handle = randomUUID3();
+      const path3 = join5(this.artifactDirectory, `${handle}${safeExtension}`);
+      const temporary = join5(this.artifactDirectory, `${handle}.tmp-${randomUUID3()}`);
       let promoted = false;
       try {
-        await writeFile(temporary, bytes, { flag: "wx", mode: 384 });
-        await rename2(temporary, path3);
+        await writeFile2(temporary, bytes, { flag: "wx", mode: 384 });
+        await rename3(temporary, path3);
         promoted = true;
         const descriptor = Object.freeze({
           handle,
@@ -71298,9 +71975,9 @@ var OutputStore = class {
         this.retainedArtifactBytes += byteLength2;
         return descriptor;
       } catch (error61) {
-        if (!promoted) await unlink(temporary).catch(() => {
+        if (!promoted) await unlink2(temporary).catch(() => {
         });
-        else await unlink(path3).catch(() => {
+        else await unlink2(path3).catch(() => {
         });
         throw error61;
       } finally {
@@ -71321,7 +71998,7 @@ var OutputStore = class {
   }
   record(identity, data, metadata, truncated = hasTruncation(data)) {
     const candidate = {
-      id: randomUUID2(),
+      id: randomUUID3(),
       sessionEpoch: identity.sessionEpoch,
       kernelEpoch: identity.kernelEpoch,
       runId: identity.runId,
@@ -72270,7 +72947,7 @@ var Controller = class {
     this.outputStore = options.outputStore;
     this.services = options.services ?? {};
     this.diagnostics = options.diagnostics;
-    this.epochValue = options.epoch ?? randomUUID3();
+    this.epochValue = options.epoch ?? randomUUID4();
     let notebook;
     let sourceDocument;
     try {
@@ -72449,7 +73126,7 @@ var Controller = class {
     }
     this.starting = false;
     this.handshake = handshake;
-    this.kernelEpochValue = handshake.kernel?.kernelEpoch ?? (handshake.kernelReady ? randomUUID3() : null);
+    this.kernelEpochValue = handshake.kernel?.kernelEpoch ?? (handshake.kernelReady ? randomUUID4() : null);
     this.outputStore.setIdentity({ documentRevision: this.documentRevisionValue, kernelEpoch: this.kernelEpochValue });
     this.started = true;
     this.kernelAvailable = handshake.kernelReady && handshake.captureReady;
@@ -72487,7 +73164,7 @@ var Controller = class {
     if (this.startupActivated) return null;
     this.startupActivated = true;
     if (!this.executionReady || !this.runOnStartup || this.suppressStartup) return null;
-    const operationId = `startup-${randomUUID3()}`;
+    const operationId = `startup-${randomUUID4()}`;
     this.createOperation(operationId, "run");
     try {
       this.assertGraphRunnable();
@@ -72749,7 +73426,8 @@ var Controller = class {
       operationId: command.requestId,
       kind: command.type,
       clientId: command.clientId,
-      documentRevision: this.documentRevisionValue
+      documentRevision: this.documentRevisionValue,
+      command
     });
     if (isExecutionCommand(command.type)) this.executionRequestIds.set(command.requestId, fingerprint2);
     const operationCompletion = this.awaitOperation(command.requestId, command.clientId);
@@ -72793,7 +73471,9 @@ var Controller = class {
         errorCode: result.error?.code ?? null,
         notApplicablePhases: command.type === "run" ? this.runNotApplicablePhases(command.clientId, command.requestId) : [],
         durationMs: Math.round(performance.now() - acceptedAt),
-        documentRevision: result.documentRevision
+        documentRevision: result.documentRevision,
+        result,
+        notebookContext: this.diagnosticOperationContext(command, result.error !== null)
       });
     }, (error61) => {
       this.diagnosticProgressSeen.delete(this.operationKey(command.clientId, command.requestId));
@@ -72806,7 +73486,10 @@ var Controller = class {
         errorType: error61 instanceof Error ? error61.name : "unknown",
         notApplicablePhases: command.type === "run" ? this.runNotApplicablePhases(command.clientId, command.requestId) : [],
         durationMs: Math.round(performance.now() - acceptedAt),
-        documentRevision: this.documentRevisionValue
+        documentRevision: this.documentRevisionValue,
+        error: diagnosticError(error61),
+        command,
+        notebookContext: this.diagnosticOperationContext(command, true)
       });
     });
     void completion.finally(() => {
@@ -72823,6 +73506,25 @@ var Controller = class {
       phase,
       documentRevision: this.documentRevisionValue
     });
+  }
+  diagnosticOperationContext(command, includeAll) {
+    const ids = /* @__PURE__ */ new Set();
+    if ("target" in command && command.target && "cellId" in command.target) ids.add(command.target.cellId);
+    if ("changes" in command && Array.isArray(command.changes)) {
+      for (const change of command.changes) {
+        if ("cell" in change && change.cell && "cellId" in change.cell) ids.add(change.cell.cellId);
+      }
+    }
+    const operation = this.operationFor(command.requestId, command.clientId);
+    for (const id2 of operation?.cellIds ?? []) ids.add(id2);
+    const cells = this.cells.filter((cell) => includeAll || ids.has(cell.id)).map((cell) => this.publicCell(cell));
+    return {
+      path: this.pathValue,
+      documentRevision: this.documentRevisionValue,
+      dirty: this.changed,
+      runtime: this.runtimeSnapshot(),
+      cells
+    };
   }
   runNotApplicablePhases(clientId, operationId) {
     const key2 = this.operationKey(clientId, operationId);
@@ -73336,7 +74038,7 @@ var Controller = class {
   }
   applySourcePublication(preparedPublication, request) {
     const { publication, staged } = preparedPublication;
-    const operationId = request.operationId ?? randomUUID3();
+    const operationId = request.operationId ?? randomUUID4();
     const currentOrder = this.cells.map((cell) => cell.id);
     const currentGraph = this.graphValue.state;
     const publishedOrder = publication.document.cells.map((cell) => cell.id);
@@ -73667,7 +74369,7 @@ var Controller = class {
     return affected;
   }
   async applySourceChanges(changes, waitForAnalysis, operationId) {
-    const result = await this.applyTransaction(changes, this.documentRevisionValue, operationId ?? randomUUID3(), waitForAnalysis);
+    const result = await this.applyTransaction(changes, this.documentRevisionValue, operationId ?? randomUUID4(), waitForAnalysis);
     return {
       edited: result.edited,
       created: Object.entries(result.created).map(([creationId, id2]) => ({ creationId, id: id2, revision: 0 }))
@@ -73887,7 +74589,7 @@ var Controller = class {
           this.emit("runtime", this.runtimeSnapshot());
           return;
         }
-        const operationId = `reactive-${randomUUID3()}`;
+        const operationId = `reactive-${randomUUID4()}`;
         this.createOperation(operationId, "run", INTERNAL_CLIENT_ID);
         this.launchRun(this.graphValue.orderOf(plan), operationId, false, INTERNAL_CLIENT_ID);
       } catch (error61) {
@@ -74508,7 +75210,7 @@ var Controller = class {
     if (this.runtimeContextReservation !== void 0) {
       throw new ControllerError("operation_in_progress", "runtime context transition is already reserved", 409);
     }
-    const token = randomUUID3();
+    const token = randomUUID4();
     this.runtimeContextReservation = token;
     let released = false;
     return {
@@ -74528,7 +75230,7 @@ var Controller = class {
       throw new ControllerError("operation_in_progress", "runtime context transition is pending", 409);
     }
   }
-  async restartRuntimeContext(options, operationId = randomUUID3()) {
+  async restartRuntimeContext(options, operationId = randomUUID4()) {
     this.assertRuntimeContextTransitionReady();
     return this.restartEngine(options, false, operationId);
   }
@@ -74576,7 +75278,7 @@ var Controller = class {
       this.handshake = handshake;
       this.started = true;
       if (options?.environment !== void 0) this.rEnvironmentValue = clone3(options.environment);
-      this.kernelEpochValue = handshake.kernel?.kernelEpoch ?? (handshake.kernelReady ? randomUUID3() : null);
+      this.kernelEpochValue = handshake.kernel?.kernelEpoch ?? (handshake.kernelReady ? randomUUID4() : null);
       this.outputStore.setIdentity({ documentRevision: this.documentRevisionValue, kernelEpoch: this.kernelEpochValue });
       this.analysisEnvironmentIdValue = null;
       this.kernelAvailable = handshake.kernelReady && handshake.captureReady;
@@ -75432,7 +76134,7 @@ var Controller = class {
       return;
     }
     reset.record = location.record;
-    const resetOperationId = reset.triggerOperationId + ":reset:" + randomUUID3();
+    const resetOperationId = reset.triggerOperationId + ":reset:" + randomUUID4();
     const resetOperation = this.createOperation(resetOperationId, "widget-reset", reset.triggerClientId);
     resetOperation.status = "running";
     resetOperation.cellIds = [reset.owner];
@@ -75606,7 +76308,7 @@ var Controller = class {
       for (const [id2] of roots) {
         for (const candidate of this.planCellRun(id2, "app")) plan.add(candidate);
       }
-      const operationId = `widget-reconcile-${randomUUID3()}`;
+      const operationId = `widget-reconcile-${randomUUID4()}`;
       this.createOperation(operationId, "run");
       const runId = this.launchRun(this.graphValue.orderOf(plan), operationId);
       const scheduled = new Set(this.operationFor(operationId, INTERNAL_CLIENT_ID)?.cellIds ?? []);
@@ -76024,7 +76726,7 @@ var Controller = class {
         }))
       };
     }
-    if (command === "set-app") return this.setApp(payload, this.documentRevisionValue, randomUUID3());
+    if (command === "set-app") return this.setApp(payload, this.documentRevisionValue, randomUUID4());
     if (command === "source") {
       if (Object.keys(payload).length > 0) {
         throw new ControllerError("invalid_request", "source does not accept arguments", 400);
@@ -76244,7 +76946,7 @@ var Controller = class {
       }
       this.assertNotClosed();
       this.handshake = handshake;
-      this.kernelEpochValue = handshake.kernel?.kernelEpoch ?? (handshake.kernelReady ? randomUUID3() : null);
+      this.kernelEpochValue = handshake.kernel?.kernelEpoch ?? (handshake.kernelReady ? randomUUID4() : null);
       this.outputStore.setIdentity({ documentRevision: this.documentRevisionValue, kernelEpoch: this.kernelEpochValue });
       this.analysisEnvironmentIdValue = null;
       this.kernelAvailable = handshake.kernelReady && handshake.captureReady;
@@ -77649,22 +78351,22 @@ function isExecutionCommand(type) {
 
 // src/engine.ts
 import { EventEmitter as EventEmitter3 } from "node:events";
-import { createHash as createHash5, randomBytes as randomBytes2, randomUUID as randomUUID5 } from "node:crypto";
-import { access as access2, mkdir as mkdir4, mkdtemp, rm as rm3, stat as stat9 } from "node:fs/promises";
+import { createHash as createHash5, randomBytes as randomBytes2, randomUUID as randomUUID6 } from "node:crypto";
+import { access as access2, mkdir as mkdir5, mkdtemp, rm as rm4, stat as stat10 } from "node:fs/promises";
 import { rmSync, writeFileSync } from "node:fs";
 import { tmpdir as tmpdir2 } from "node:os";
-import { basename as basename3, extname as extname2, join as join8, resolve as resolve6 } from "node:path";
+import { basename as basename4, extname as extname2, join as join9, resolve as resolve7 } from "node:path";
 
 // src/r-environment.ts
 import { createHash as createHash4 } from "node:crypto";
-import { realpath as realpath4, stat as stat7 } from "node:fs/promises";
-import { delimiter, isAbsolute as isAbsolute4, join as join6, resolve as resolve5 } from "node:path";
+import { realpath as realpath4, stat as stat8 } from "node:fs/promises";
+import { delimiter, isAbsolute as isAbsolute4, join as join7, resolve as resolve6 } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
 // src/resources.ts
-import { readFile as readFile2, realpath as realpath3, stat as stat6 } from "node:fs/promises";
-import { isAbsolute as isAbsolute3, join as join5, resolve as resolve4 } from "node:path";
+import { readFile as readFile3, realpath as realpath3, stat as stat7 } from "node:fs/promises";
+import { isAbsolute as isAbsolute3, join as join6, resolve as resolve5 } from "node:path";
 var ResourceValidationError = class extends Error {
   code = "resource_invalid";
   constructor(message2) {
@@ -77675,10 +78377,10 @@ var ResourceValidationError = class extends Error {
 async function resolveApplicationResources(root) {
   const physicalRoot = await realpath3(root);
   const manifest = await readApplicationManifest(physicalRoot);
-  const paths = Object.fromEntries(Object.entries(manifest.resources).map(([key2, path3]) => [key2, path3 === null ? null : resolve4(physicalRoot, path3)]));
+  const paths = Object.fromEntries(Object.entries(manifest.resources).map(([key2, path3]) => [key2, path3 === null ? null : resolve5(physicalRoot, path3)]));
   for (const [key2, directory] of [["hostEntry", false], ["rendererDirectory", true], ["workerDirectory", true]]) {
     const path3 = paths[key2];
-    const info = await stat6(path3).catch(() => {
+    const info = await stat7(path3).catch(() => {
       throw invalid(`${key2} is unavailable: ${path3}`);
     });
     if (directory ? !info.isDirectory() : !info.isFile()) throw invalid(`${key2} has the wrong file type: ${path3}`);
@@ -77690,7 +78392,7 @@ async function verifiedApplicationManifest(resources2) {
 }
 async function readApplicationManifest(root) {
   try {
-    return validateApplicationManifest(JSON.parse(await readFile2(join5(root, "manifest.json"), "utf8")));
+    return validateApplicationManifest(JSON.parse(await readFile3(join6(root, "manifest.json"), "utf8")));
   } catch (error61) {
     if (error61 instanceof ResourceValidationError) throw error61;
     throw invalid(`application manifest is unavailable: ${error61 instanceof Error ? error61.message : String(error61)}`);
@@ -77792,13 +78494,13 @@ function rServiceEnvironmentVariables(environment, resources2, analysisEnvironme
     R_LIBS_SITE: "",
     R_LIBS_USER: ""
   };
-  const loaderDirectories = [join6(environment.rHome, "lib"), join6(environment.rHome, "lib", "R")];
+  const loaderDirectories = [join7(environment.rHome, "lib"), join7(environment.rHome, "lib", "R")];
   values.DYLD_LIBRARY_PATH = prependPath(loaderDirectories, process.env.DYLD_LIBRARY_PATH);
   if (analysisEnvironmentId !== void 0) values.ALDER_ANALYSIS_ENVIRONMENT_ID = analysisEnvironmentId;
   return values;
 }
 function rKernelEnvironmentVariables(environment, resources2, projectDirectory) {
-  const projectLibrary = projectDirectory === void 0 ? void 0 : join6(projectDirectory, ".alder", "library");
+  const projectLibrary = projectDirectory === void 0 ? void 0 : join7(projectDirectory, ".alder", "library");
   return {
     R_HOME: environment.rHome,
     ALDER_R_PRIVATE_LIBRARY: resources2.rLibraryDirectory,
@@ -77806,7 +78508,7 @@ function rKernelEnvironmentVariables(environment, resources2, projectDirectory) 
     ALDER_WORKER_DIR: resources2.workerDirectory,
     ...projectLibrary !== void 0 && environment.libraryPaths.includes(projectLibrary) ? { ALDER_PROJECT_LIBRARY: projectLibrary } : {},
     DYLD_LIBRARY_PATH: prependPath(
-      [join6(environment.rHome, "lib"), join6(environment.rHome, "lib", "R")],
+      [join7(environment.rHome, "lib"), join7(environment.rHome, "lib", "R")],
       process.env.DYLD_LIBRARY_PATH
     )
   };
@@ -77825,7 +78527,7 @@ async function selectRscript(requested, desktop) {
 async function findOnPath(command) {
   const pathValue2 = process.env.PATH ?? "";
   for (const directory of pathValue2.split(delimiter).filter(Boolean)) {
-    const candidates = [join6(directory, command)];
+    const candidates = [join7(directory, command)];
     for (const candidate of candidates) {
       const resolved = await resolveExecutableCandidate(candidate);
       if (resolved !== null) return resolved;
@@ -77843,7 +78545,7 @@ async function resolveExecutableCandidate(candidate) {
 }
 async function resolveSelectedPath(value, label) {
   if (!value || value.includes("\0")) throw notFound(`${label} is empty or invalid`);
-  const candidate = resolve5(value);
+  const candidate = resolve6(value);
   if (!await isExecutable(candidate)) throw notFound(`${label} was not found: ${value}`);
   try {
     return await realpath4(candidate);
@@ -77904,9 +78606,9 @@ async function probeProjectLibraries(rscript, projectDirectory, signal) {
   }
 }
 async function validateHelperLibrary(resources2) {
-  const description = join6(resources2.rLibraryDirectory, "alder", "DESCRIPTION");
+  const description = join7(resources2.rLibraryDirectory, "alder", "DESCRIPTION");
   try {
-    const info = await stat7(description);
+    const info = await stat8(description);
     if (!info.isFile()) throw new Error("not a file");
   } catch (error61) {
     throw invalid2("The R execution helpers are not installed in this build.");
@@ -77926,7 +78628,7 @@ async function validateHelperLoad(environment, manifest, helperLibrary, signal) 
         R_LIBS: helperLibrary,
         R_LIBS_SITE: "",
         R_LIBS_USER: "",
-        DYLD_LIBRARY_PATH: prependPath([join6(environment.rHome, "lib"), join6(environment.rHome, "lib", "R")], process.env.DYLD_LIBRARY_PATH)
+        DYLD_LIBRARY_PATH: prependPath([join7(environment.rHome, "lib"), join7(environment.rHome, "lib", "R")], process.env.DYLD_LIBRARY_PATH)
       },
       timeout: R_PROBE_TIMEOUT_MS,
       maxBuffer: 512 * 1024
@@ -77941,7 +78643,7 @@ async function validateHelperLoad(environment, manifest, helperLibrary, signal) 
   }
 }
 async function validateSharedLibrary(rHome) {
-  const candidates = [join6(rHome, "lib", "libR.dylib"), join6(rHome, "lib", "R", "libR.dylib")];
+  const candidates = [join7(rHome, "lib", "libR.dylib"), join7(rHome, "lib", "R", "libR.dylib")];
   for (const candidate of candidates) {
     if (await isFile(candidate)) return;
   }
@@ -77984,7 +78686,7 @@ async function optionalDirectory(path3, label) {
   }
   let info;
   try {
-    info = await stat7(physical);
+    info = await stat8(physical);
   } catch (error61) {
     if (error61.code === "ENOENT") return null;
     throw invalid2(`${label} is unavailable: ${path3}: ${messageOf3(error61)}`);
@@ -77997,13 +78699,13 @@ async function existingDirectory(path3, label) {
   const physical = await realpath4(path3).catch((error61) => {
     throw invalid2(`${label} is unavailable: ${path3}: ${messageOf3(error61)}`);
   });
-  const info = await stat7(physical);
+  const info = await stat8(physical);
   if (!info.isDirectory()) throw invalid2(`${label} is not a directory: ${path3}`);
   return physical;
 }
 async function isExecutable(path3) {
   try {
-    const info = await stat7(path3);
+    const info = await stat8(path3);
     if (!info.isFile()) return false;
     return (info.mode & 73) !== 0;
   } catch {
@@ -78012,7 +78714,7 @@ async function isExecutable(path3) {
 }
 async function isFile(path3) {
   try {
-    return (await stat7(path3)).isFile();
+    return (await stat8(path3)).isFile();
   } catch {
     return false;
   }
@@ -78188,10 +78890,10 @@ function validateMaxFrameBytes(value) {
 }
 
 // src/jupyter.ts
-import { createHmac, randomBytes, randomUUID as randomUUID4, timingSafeEqual } from "node:crypto";
+import { createHmac, randomBytes, randomUUID as randomUUID5, timingSafeEqual } from "node:crypto";
 import { EventEmitter as EventEmitter2 } from "node:events";
-import { access, chmod, mkdir as mkdir3, rm as rm2, stat as stat8, writeFile as writeFile2 } from "node:fs/promises";
-import { join as join7 } from "node:path";
+import { access, chmod as chmod2, mkdir as mkdir4, rm as rm3, stat as stat9, writeFile as writeFile3 } from "node:fs/promises";
+import { join as join8 } from "node:path";
 import { createConnection, createServer } from "node:net";
 var MESSAGE_DELIMITER = Buffer.from("<IDS|MSG>");
 var JUPYTER_VERSION = "5.3";
@@ -78217,7 +78919,7 @@ var ArkKernel = class extends EventEmitter2 {
   }
   options;
   maxMessageBytes;
-  session = randomUUID4();
+  session = randomUUID5();
   key = randomBytes(32).toString("hex");
   child;
   shell;
@@ -78265,7 +78967,7 @@ var ArkKernel = class extends EventEmitter2 {
         requireExecutable(this.options.executable),
         requireFile(this.options.startupFile, "Ark startup file"),
         requireDirectory(this.options.cwd, "Ark working directory"),
-        mkdir3(this.options.connectionDirectory, { recursive: true })
+        mkdir4(this.options.connectionDirectory, { recursive: true })
       ]);
       this.assertStartAllowed();
       let zmq;
@@ -78280,13 +78982,13 @@ var ArkKernel = class extends EventEmitter2 {
       this.assertStartAllowed();
       const ports = await reserveConnectionPorts();
       this.assertStartAllowed();
-      this.connectionFile = join7(
+      this.connectionFile = join8(
         this.options.connectionDirectory,
-        `ark-${process.pid}-${randomUUID4()}.json`
+        `ark-${process.pid}-${randomUUID5()}.json`
       );
       this.logFile = this.connectionFile + ".log";
-      await writeFile2(this.logFile, "", { mode: 384 });
-      await writeFile2(this.connectionFile, `${JSON.stringify({
+      await writeFile3(this.logFile, "", { mode: 384 });
+      await writeFile3(this.connectionFile, `${JSON.stringify({
         ...ports,
         transport: "tcp",
         signature_scheme: "hmac-sha256",
@@ -78294,7 +78996,7 @@ var ArkKernel = class extends EventEmitter2 {
         key: this.key
       })}
 `, { mode: 384 });
-      await chmod(this.connectionFile, 384).catch(() => {
+      await chmod2(this.connectionFile, 384).catch(() => {
       });
       this.assertStartAllowed();
       await this.spawnArk();
@@ -78454,7 +79156,7 @@ var ArkKernel = class extends EventEmitter2 {
   }
   async connectLsp() {
     if (!this.ready || this.shell === void 0) throw new Error("Ark kernel is unavailable");
-    const commId = randomUUID4();
+    const commId = randomUUID5();
     const response = new Promise((resolve16, reject) => {
       this.lspCommPending.set(commId, { resolve: resolve16, reject });
     });
@@ -78542,12 +79244,12 @@ var ArkKernel = class extends EventEmitter2 {
   }
   async removeConnectionFile() {
     if (this.connectionFile !== void 0) {
-      await rm2(this.connectionFile, { force: true }).catch(() => {
+      await rm3(this.connectionFile, { force: true }).catch(() => {
       });
       this.connectionFile = void 0;
     }
     if (this.logFile !== void 0) {
-      await rm2(this.logFile, { force: true }).catch(() => {
+      await rm3(this.logFile, { force: true }).catch(() => {
       });
       this.logFile = void 0;
     }
@@ -78615,7 +79317,7 @@ var ArkKernel = class extends EventEmitter2 {
     }
   }
   async connect(zmq, ports) {
-    const routingId = randomUUID4();
+    const routingId = randomUUID5();
     const bounded = { maxMessageSize: this.maxMessageBytes, receiveHighWaterMark: 256, linger: 0 };
     this.control = new zmq.Dealer({ routingId, ...bounded });
     this.shell = new zmq.Dealer({ routingId, ...bounded });
@@ -79020,7 +79722,7 @@ async function reserveConnectionPorts() {
 async function requireExecutable(path3) {
   try {
     await access(path3, process.platform === "win32" ? void 0 : 1);
-    if (!(await stat8(path3)).isFile()) throw new Error("not a file");
+    if (!(await stat9(path3)).isFile()) throw new Error("not a file");
   } catch {
     throw new Error(`Ark executable not found or not executable: ${path3}`);
   }
@@ -79028,14 +79730,14 @@ async function requireExecutable(path3) {
 async function requireFile(path3, label) {
   try {
     await access(path3);
-    if (!(await stat8(path3)).isFile()) throw new Error("not a file");
+    if (!(await stat9(path3)).isFile()) throw new Error("not a file");
   } catch {
     throw new Error(`${label} not found: ${path3}`);
   }
 }
 async function requireDirectory(path3, label) {
   try {
-    if (!(await stat8(path3)).isDirectory()) throw new Error("not a directory");
+    if (!(await stat9(path3)).isDirectory()) throw new Error("not a directory");
   } catch {
     throw new Error(`${label} not found: ${path3}`);
   }
@@ -79046,7 +79748,7 @@ function validateTimeout(value, name) {
   }
 }
 function newMessageId() {
-  return randomUUID4();
+  return randomUUID5();
 }
 function redactText(value, secrets) {
   let result = value;
@@ -79442,7 +80144,7 @@ var Engine = class extends EventEmitter3 {
   async drainRetiredPaths() {
     const directories = [...this.retiredPathDirectories];
     this.retiredPathDirectories.clear();
-    await Promise.all(directories.map((directory) => rm3(directory, { recursive: true, force: true }).catch(() => {
+    await Promise.all(directories.map((directory) => rm4(directory, { recursive: true, force: true }).catch(() => {
     })));
   }
   onFailure(listener) {
@@ -79663,7 +80365,7 @@ var Engine = class extends EventEmitter3 {
         throw new EngineTransportError("engine request queue is full", "kernel");
       }
       requestId = this.nextRequestId();
-      batch.permit = join8(this.runtime.controlDirectory, ".alder-batch-" + randomUUID5());
+      batch.permit = join9(this.runtime.controlDirectory, ".alder-batch-" + randomUUID6());
       writeFileSync(batch.permit, "", { flag: "wx", mode: 384 });
       batch.states = values.map((value) => ({ ...makeEvaluation(requestId, value, (event) => {
         callbacks = callbacks.then(() => onEvent?.(event));
@@ -79859,7 +80561,7 @@ var Engine = class extends EventEmitter3 {
           this.paths = void 0;
           for (const directory of previousPaths?.ownedDirectories ?? []) {
             if (directory === previousPaths?.artifactDirectory) continue;
-            await rm3(directory, { recursive: true, force: true }).catch(() => {
+            await rm4(directory, { recursive: true, force: true }).catch(() => {
             });
           }
         }
@@ -79921,7 +80623,7 @@ var Engine = class extends EventEmitter3 {
         this.outputSessionEpoch = void 0;
       }
       for (const directory of this.paths?.ownedDirectories ?? []) {
-        await rm3(directory, { recursive: true, force: true }).catch(() => {
+        await rm4(directory, { recursive: true, force: true }).catch(() => {
         });
       }
       await this.drainRetiredPaths();
@@ -80003,7 +80705,7 @@ var Engine = class extends EventEmitter3 {
       this.runtime ??= await prepareRuntime(paths);
       const generation = ++this.peerGeneration;
       this.kernelGeneration = generation;
-      this.kernelEpoch = randomUUID5();
+      this.kernelEpoch = randomUUID6();
       kernel = new ArkKernel({
         executable: paths.arkExecutable,
         startupFile: paths.arkStartupScript,
@@ -80042,7 +80744,7 @@ var Engine = class extends EventEmitter3 {
       const runtime = this.runtime;
       this.runtime = void 0;
       for (const directory of runtime?.ownedDirectories ?? []) {
-        await rm3(directory, { recursive: true, force: true }).catch(() => {
+        await rm4(directory, { recursive: true, force: true }).catch(() => {
         });
       }
       await this.drainRetiredPaths();
@@ -80265,7 +80967,7 @@ var Engine = class extends EventEmitter3 {
     try {
       await Promise.all([kernel?.terminate(), analyzer?.terminate(timeout)]);
     } finally {
-      for (const directory of runtime?.ownedDirectories ?? []) await rm3(directory, { recursive: true, force: true }).catch(() => {
+      for (const directory of runtime?.ownedDirectories ?? []) await rm4(directory, { recursive: true, force: true }).catch(() => {
       });
       if (this.runtime === runtime) this.runtime = void 0;
       if (this.kernel === kernel) this.kernel = void 0;
@@ -80627,7 +81329,7 @@ var Engine = class extends EventEmitter3 {
     if (this.pendingKernelRequests + this.evaluations.size >= MAX_PENDING_REQUESTS2) {
       throw new EngineTransportError("engine request queue is full", "kernel");
     }
-    const marker = randomUUID5();
+    const marker = randomUUID6();
     this.pendingKernelRequests += 1;
     let result;
     let messageError;
@@ -81009,7 +81711,7 @@ function evaluationWire(value, controlDirectory) {
   const encoded = encodeSource(value.source, "evaluation source");
   let source;
   if (encoded.bytes > 1024 * 1024) {
-    const path3 = join8(controlDirectory, ".alder-source-" + randomUUID5());
+    const path3 = join9(controlDirectory, ".alder-source-" + randomUUID6());
     writeFileSync(path3, encoded.text, { encoding: "utf8", flag: "wx", mode: 384 });
     source = { code_path: path3 };
   } else {
@@ -81192,7 +81894,7 @@ function optionalRecord(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value : void 0;
 }
 function artifactHandle(value) {
-  return typeof value === "string" && value.length > 0 && value.length <= 1024 && basename3(value) === value && !value.startsWith(".") && !/[\\/]/.test(value) && extname2(value).length > 1;
+  return typeof value === "string" && value.length > 0 && value.length <= 1024 && basename4(value) === value && !value.startsWith(".") && !/[\\/]/.test(value) && extname2(value).length > 1;
 }
 function jsonByteSize(value) {
   const encoded = JSON.stringify(value);
@@ -81210,12 +81912,12 @@ function encodeSource(value, label) {
   return { text: value, base64: source.toString("base64"), bytes: source.length };
 }
 async function prepareRuntime(paths) {
-  const captureDirectory = await mkdtemp(join8(paths.artifactDirectory, ".alder-capture-"));
+  const captureDirectory = await mkdtemp(join9(paths.artifactDirectory, ".alder-capture-"));
   try {
-    const controlDirectory = await mkdtemp(join8(paths.artifactDirectory, ".alder-control-"));
+    const controlDirectory = await mkdtemp(join9(paths.artifactDirectory, ".alder-control-"));
     return { captureDirectory, controlDirectory, ownedDirectories: [captureDirectory, controlDirectory] };
   } catch (error61) {
-    await rm3(captureDirectory, { recursive: true, force: true }).catch(() => {
+    await rm4(captureDirectory, { recursive: true, force: true }).catch(() => {
     });
     throw error61;
   }
@@ -81223,33 +81925,33 @@ async function prepareRuntime(paths) {
 async function resolvePaths(options, environment, signal, pathOptions = options) {
   throwIfAborted(signal);
   const resources2 = options.resources;
-  const workerDirectory = resolve6(resources2.workerDirectory);
-  const arkStartupScript = join8(workerDirectory, "host-ark.R");
-  const analyzerScript = join8(workerDirectory, "host-analyzer.R");
-  const framingScript = join8(workerDirectory, "host-framing.R");
-  const arkExecutable = resolve6(resources2.arkExecutable);
+  const workerDirectory = resolve7(resources2.workerDirectory);
+  const arkStartupScript = join9(workerDirectory, "host-ark.R");
+  const analyzerScript = join9(workerDirectory, "host-analyzer.R");
+  const framingScript = join9(workerDirectory, "host-framing.R");
+  const arkExecutable = resolve7(resources2.arkExecutable);
   await Promise.all([
     requireFile2(arkExecutable, "Ark executable"),
     requireFile2(arkStartupScript, "Ark startup script"),
     requireFile2(analyzerScript, "analyzer script"),
     requireFile2(framingScript, "framing script")
   ]);
-  const notebookDirectory = resolve6(pathOptions.notebookDirectory ?? options.notebookDirectory ?? process.cwd());
-  const notebookInfo = await stat9(notebookDirectory);
+  const notebookDirectory = resolve7(pathOptions.notebookDirectory ?? options.notebookDirectory ?? process.cwd());
+  const notebookInfo = await stat10(notebookDirectory);
   if (!notebookInfo.isDirectory()) throw new Error("notebookDirectory is not a directory");
   const ownedDirectories = [];
   let artifactDirectory;
   let cacheDirectory;
   try {
     throwIfAborted(signal);
-    artifactDirectory = resolve6(options.artifactDirectory);
-    await mkdir4(artifactDirectory, { recursive: true });
+    artifactDirectory = resolve7(options.artifactDirectory);
+    await mkdir5(artifactDirectory, { recursive: true });
     throwIfAborted(signal);
-    cacheDirectory = pathOptions.cacheDirectory === void 0 ? await mkdtemp(join8(tmpdir2(), "alder-engine-cache-")) : resolve6(pathOptions.cacheDirectory);
+    cacheDirectory = pathOptions.cacheDirectory === void 0 ? await mkdtemp(join9(tmpdir2(), "alder-engine-cache-")) : resolve7(pathOptions.cacheDirectory);
     if (pathOptions.cacheDirectory === void 0) ownedDirectories.push(cacheDirectory);
-    else await mkdir4(cacheDirectory, { recursive: true });
+    else await mkdir5(cacheDirectory, { recursive: true });
   } catch (error61) {
-    await Promise.all(ownedDirectories.map((directory) => rm3(directory, { recursive: true, force: true }).catch(() => {
+    await Promise.all(ownedDirectories.map((directory) => rm4(directory, { recursive: true, force: true }).catch(() => {
     })));
     throw error61;
   }
@@ -81292,7 +81994,7 @@ function throwIfAborted(signal) {
 async function requireFile2(path3, label) {
   try {
     await access2(path3);
-    if (!(await stat9(path3)).isFile()) throw new Error();
+    if (!(await stat10(path3)).isFile()) throw new Error();
   } catch {
     throw new Error(label + " not found: " + path3);
   }
@@ -81319,11 +82021,11 @@ function asError2(error61) {
 }
 
 // src/server.ts
-import { randomBytes as randomBytes3, randomUUID as randomUUID7, timingSafeEqual as timingSafeEqual2 } from "node:crypto";
+import { randomBytes as randomBytes3, randomUUID as randomUUID8, timingSafeEqual as timingSafeEqual2 } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { createServer as createHttpServer } from "node:http";
-import { lstat as lstat5, readFile as readFile3, realpath as realpath5, stat as stat10 } from "node:fs/promises";
-import { extname as extname3, join as join10, resolve as resolve8, sep as sep2 } from "node:path";
+import { lstat as lstat5, readFile as readFile4, realpath as realpath5, stat as stat11 } from "node:fs/promises";
+import { extname as extname3, join as join11, resolve as resolve9, sep as sep2 } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { URL as URL2 } from "node:url";
 
@@ -81339,9 +82041,9 @@ var import_websocket_server = __toESM(require_websocket_server(), 1);
 
 // src/private-paths.ts
 import { constants as constants2 } from "node:fs";
-import { randomUUID as randomUUID6 } from "node:crypto";
-import { chmod as chmod2, lstat as lstat4, mkdir as mkdir5, open as openFile, rename as rename3, rm as rm4 } from "node:fs/promises";
-import { dirname as dirname4, join as join9, parse as parse3, resolve as resolve7, sep } from "node:path";
+import { randomUUID as randomUUID7 } from "node:crypto";
+import { chmod as chmod3, lstat as lstat4, mkdir as mkdir6, open as openFile, rename as rename4, rm as rm5 } from "node:fs/promises";
+import { dirname as dirname4, join as join10, parse as parse3, resolve as resolve8, sep } from "node:path";
 var PrivatePathError = class extends Error {
   constructor(code2, message2, cause) {
     super(message2);
@@ -81377,7 +82079,7 @@ function ensurePathString(path3) {
   if (typeof path3 !== "string" || path3.length === 0 || PATH_CONTROL.test(path3)) {
     throw invalid3("private path must be a non-empty path without NUL");
   }
-  return resolve7(path3);
+  return resolve8(path3);
 }
 async function inspectPath(path3, expectFinal = null) {
   const absolute = ensurePathString(path3);
@@ -81386,7 +82088,7 @@ async function inspectPath(path3, expectFinal = null) {
   let current = root;
   let exists = true;
   for (let index = 0; index < components.length; index += 1) {
-    current = join9(current, components[index]);
+    current = join10(current, components[index]);
     let info;
     try {
       info = await lstat4(current);
@@ -81459,7 +82161,7 @@ async function verifyPrivateFile(path3) {
 }
 async function securePrivateDirectory(path3) {
   const inspection = await inspectExisting(path3, "directory");
-  await chmod2(inspection.path, DIRECTORY_MODE);
+  await chmod3(inspection.path, DIRECTORY_MODE);
   await verifyPrivateDirectory(inspection.path);
 }
 async function ensurePrivateDirectory(path3) {
@@ -81468,7 +82170,7 @@ async function ensurePrivateDirectory(path3) {
     await verifyPrivateDirectory(inspection.path);
     return;
   }
-  await mkdir5(inspection.path, { recursive: true, mode: DIRECTORY_MODE });
+  await mkdir6(inspection.path, { recursive: true, mode: DIRECTORY_MODE });
   await inspectPath(inspection.path, "directory");
   await securePrivateDirectory(inspection.path);
 }
@@ -81517,7 +82219,7 @@ async function writePrivateFile(path3, bytes) {
     if (!isMissing(error61)) throw error61;
   }
   const basename10 = inspection.path.slice(inspection.path.lastIndexOf(sep) + 1);
-  const temporary = join9(parent, `.${basename10}.${randomUUID6()}.tmp`);
+  const temporary = join10(parent, `.${basename10}.${randomUUID7()}.tmp`);
   let handle;
   try {
     const flags = constants2.O_WRONLY | constants2.O_CREAT | constants2.O_EXCL | (constants2.O_NOFOLLOW ?? 0);
@@ -81533,12 +82235,12 @@ async function writePrivateFile(path3, bytes) {
     await handle.sync();
     await handle.close();
     handle = void 0;
-    await chmod2(temporary, FILE_MODE);
-    await rename3(temporary, inspection.path);
+    await chmod3(temporary, FILE_MODE);
+    await rename4(temporary, inspection.path);
     await syncDirectory2(parent);
   } catch (error61) {
     if (handle !== void 0) await handle.close().catch(() => void 0);
-    await rm4(temporary, { force: true }).catch(() => void 0);
+    await rm5(temporary, { force: true }).catch(() => void 0);
     throw error61;
   }
 }
@@ -81702,7 +82404,7 @@ async function safeChildPath(root, encodedRelative, allowedExtensions, allowNest
   if (!extensions.has("*") && !extensions.has(extension2)) return null;
   try {
     const rootPath = await realpath5(root);
-    const candidatePath = await realpath5(resolve8(root, relative4));
+    const candidatePath = await realpath5(resolve9(root, relative4));
     if (candidatePath !== rootPath && !candidatePath.startsWith(`${rootPath}${sep2}`)) return null;
     const info = await lstat5(candidatePath);
     return info.isFile() ? candidatePath : null;
@@ -81752,7 +82454,7 @@ var MIME_TYPES = {
 };
 var STATIC_EXTENSIONS = Object.keys(MIME_TYPES);
 async function serveFile(response, path3, contentType3, headers = {}) {
-  const info = await stat10(path3);
+  const info = await stat11(path3);
   if (response.destroyed) return;
   response.writeHead(200, {
     "Content-Type": contentType3,
@@ -82138,9 +82840,9 @@ function createAlderServer(options) {
   if (maxJson > HTTP_JSON_LIMIT || maxUpload > HTTP_UPLOAD_LIMIT || maxSource > HTTP_SOURCE_LIMIT || maxSocket > WEBSOCKET_MESSAGE_LIMIT || maxOutbox > 256 * 1024 * 1024) throw new RangeError("server limits exceed their hard bounds");
   if (![leaseExpiryMs, leaseSweepIntervalMs].every((value) => Number.isSafeInteger(value) && value > 0)) throw new RangeError("lease timing limits must be positive safe integers");
   const session = options.session ?? {
-    sessionKey: randomUUID7(),
+    sessionKey: randomUUID8(),
     canonicalPath: null,
-    epoch: randomUUID7(),
+    epoch: randomUUID8(),
     token: randomBytes3(32).toString("hex")
   };
   const bearer = validateToken(session.token);
@@ -82417,7 +83119,7 @@ function createAlderServer(options) {
     return { auth: resolved.auth, lease: resolved.lease };
   }
   function createLease(reserved = false) {
-    return { leaseId: randomUUID7(), clientId: randomUUID7(), csrf: randomBytes3(32).toString("hex"), lastSeen: Date.now(), reserved };
+    return { leaseId: randomUUID8(), clientId: randomUUID8(), csrf: randomBytes3(32).toString("hex"), lastSeen: Date.now(), reserved };
   }
   function activateLease(lease) {
     if (leases.size >= MAX_ACTIVE_LEASES) throw new HttpBoundaryError("client_limit", "too many active client leases", 429);
@@ -82599,8 +83301,8 @@ function createAlderServer(options) {
     if (path3 === "/" || path3 === "/index.html") {
       assertBrowserAuthority(request);
       if (!method(response, request.method ?? "", "GET")) return;
-      const index = options.indexFile ?? join10(options.staticDir, "..", "index.html");
-      let html = await readFile3(index, "utf8");
+      const index = options.indexFile ?? join11(options.staticDir, "..", "index.html");
+      let html = await readFile4(index, "utf8");
       if (!html.includes("__ALDER_CSP_NONCE__")) throw new HttpBoundaryError("internal_error", "bootstrap shell is missing its CSP nonce marker", 500);
       html = html.replaceAll("__ALDER_CSP_NONCE__", nonce);
       const body = Buffer.from(html);
@@ -82888,7 +83590,11 @@ function createAlderServer(options) {
         bytes: Number.isSafeInteger(declaredBytes) && declaredBytes >= 0 ? declaredBytes : null,
         status: detail.status,
         errorCode: detail.code,
-        outcome: "error"
+        outcome: "error",
+        error: diagnosticError(error61),
+        method: request.method,
+        url: request.url,
+        headers: request.headers
       });
       if (response.writableEnded || response.destroyed) return;
       if (!response.headersSent) failResponse(response, error61);
@@ -83273,7 +83979,7 @@ function createAlderServer(options) {
 }
 
 // src/mcp.ts
-import { randomUUID as randomUUID8 } from "node:crypto";
+import { randomUUID as randomUUID9 } from "node:crypto";
 
 // node_modules/@hono/node-server/dist/constants-BLSFu_RU.mjs
 var X_ALREADY_SENT = "x-hono-already-sent";
@@ -95911,7 +96617,10 @@ function createMcpHttpHandler(options) {
         options.diagnostics?.record("error", "mcp.session.error", {
           clientId: auth.clientId,
           outcome: "error",
-          errorCode: error61?.code ?? "mcp_initialize_failed"
+          errorCode: error61?.code ?? "mcp_initialize_failed",
+          error: diagnosticError(error61),
+          request: parsedBody,
+          leaseId: auth.leaseId
         });
         initializingLeases.delete(auth.leaseId);
         jsonRpcError(response, 500, -32603, "Internal MCP error");
@@ -95956,7 +96665,10 @@ function createMcpHttpHandler(options) {
       options.diagnostics?.record("error", "mcp.request.error", {
         clientId: auth.clientId,
         outcome: "error",
-        errorCode: error61?.code ?? "mcp_internal_error"
+        errorCode: error61?.code ?? "mcp_internal_error",
+        error: diagnosticError(error61),
+        request: parsedBody,
+        leaseId: auth.leaseId
       });
       if (session.transport.sessionId === void 0) await dispose(session).catch(() => void 0);
       if (!response.headersSent && !response.writableEnded) {
@@ -95991,7 +96703,7 @@ async function makeSession(options, auth, sessions, allSessions, dispose) {
     resolveClosed = resolve16;
   });
   const transport = new StreamableHTTPServerTransport({
-    sessionIdGenerator: randomUUID8,
+    sessionIdGenerator: randomUUID9,
     onsessioninitialized: (sessionId) => {
       if (session.closeStarted) return;
       if (sessions.has(sessionId)) throw new Error("MCP session identifier collision");
@@ -96023,7 +96735,7 @@ async function makeSession(options, auth, sessions, allSessions, dispose) {
     ...auth.assertActive === void 0 ? {} : { assertActive: auth.assertActive },
     transport,
     server,
-    authToken: randomUUID8(),
+    authToken: randomUUID9(),
     closed,
     closeStarted: false,
     resolveClosed
@@ -96103,7 +96815,7 @@ function jsonRpcError(response, status, code2, message2) {
 }
 
 // src/layout.ts
-import { readFile as readFile4 } from "node:fs/promises";
+import { readFile as readFile5 } from "node:fs/promises";
 var LAYOUT_VERSION = 1;
 var LAYOUT_GRID_COLUMNS = 12;
 var LAYOUT_MAX_ROW = 1e6;
@@ -96247,7 +96959,7 @@ async function readLayout(value) {
   const sidecar = layoutSidecarPath(value);
   let bytes;
   try {
-    bytes = await readFile4(sidecar);
+    bytes = await readFile5(sidecar);
   } catch (error61) {
     if (error61.code === "ENOENT") return null;
     throw new LayoutError(`layout sidecar is not readable: ${sidecar}`);
@@ -96268,19 +96980,19 @@ async function readLayout(value) {
 }
 
 // src/persistence.ts
-import { createHash as createHash6, randomUUID as randomUUID9 } from "node:crypto";
-import { mkdir as mkdir7, open as open6, realpath as realpath7, rename as rename4, unlink as unlink2 } from "node:fs/promises";
-import { basename as basename4, dirname as dirname5, join as join13, resolve as resolve9 } from "node:path";
+import { createHash as createHash6, randomUUID as randomUUID10 } from "node:crypto";
+import { mkdir as mkdir8, open as open7, realpath as realpath7, rename as rename5, unlink as unlink3 } from "node:fs/promises";
+import { basename as basename5, dirname as dirname5, join as join14, resolve as resolve10 } from "node:path";
 
 // src/packages.ts
 var import_yaml4 = __toESM(require_dist(), 1);
-import { lstat as lstat6, mkdir as mkdir6, readFile as readFile6, realpath as realpath6, stat as stat11 } from "node:fs/promises";
-import { isAbsolute as isAbsolute5, join as join12 } from "node:path";
+import { lstat as lstat6, mkdir as mkdir7, readFile as readFile7, realpath as realpath6, stat as stat12 } from "node:fs/promises";
+import { isAbsolute as isAbsolute5, join as join13 } from "node:path";
 
 // src/jobs.ts
-import { mkdtemp as mkdtemp2, readFile as readFile5, rm as rm5, writeFile as writeFile3 } from "node:fs/promises";
+import { mkdtemp as mkdtemp2, readFile as readFile6, rm as rm6, writeFile as writeFile4 } from "node:fs/promises";
 import { tmpdir as tmpdir3 } from "node:os";
-import { join as join11 } from "node:path";
+import { join as join12 } from "node:path";
 var PackageWorkerError = class extends Error {
   constructor(code2, message2, details) {
     super(message2);
@@ -96310,16 +97022,16 @@ var PackageWorker = class {
     const environment = this.options.environment;
     if (environment === null) throw failure("r_not_found", "selected R environment is unavailable");
     const operationId = typeof payload.operationId === "string" ? payload.operationId : void 0;
-    const directory = await mkdtemp2(join11(tmpdir3(), "alder-package-"));
+    const directory = await mkdtemp2(join12(tmpdir3(), "alder-package-"));
     let child;
     try {
-      const inputPath = join11(directory, "input.json");
-      const outputPath = join11(directory, "result.json");
-      await writeFile3(inputPath, JSON.stringify({ command, ...payload }), { mode: 384 });
+      const inputPath = join12(directory, "input.json");
+      const outputPath = join12(directory, "result.json");
+      await writeFile4(inputPath, JSON.stringify({ command, ...payload }), { mode: 384 });
       if (this.closed) throw failure("job_closed", "package service is closed");
       const spawning = this.options.processScope.spawn({
         executable: environment.rscript,
-        args: ["--vanilla", join11(this.options.resources.workerDirectory, "package-job.R"), inputPath, outputPath],
+        args: ["--vanilla", join12(this.options.resources.workerDirectory, "package-job.R"), inputPath, outputPath],
         cwd: this.options.projectDirectory,
         environment: workerEnvironment(environment, this.options.resources),
         stdio: "pipes"
@@ -96343,7 +97055,7 @@ var PackageWorker = class {
       if (exit === "timeout") throw failure("job_timeout", "R package operation timed out");
       if (output2.length > 0) await this.options.onProgress?.({ command, operationId, phase: "output", text: output2 });
       if (exit.code !== 0) throw failure("install_failed", output2 || `R package operation exited ${exit.code ?? "without status"}`);
-      const bytes = await readFile5(outputPath);
+      const bytes = await readFile6(outputPath);
       if (bytes.byteLength > MAX_OUTPUT_BYTES) throw failure("job_failed", "R package result is too large");
       const result = JSON.parse(bytes.toString("utf8"));
       if (!isRecord3(result) || typeof result.ok !== "boolean") throw failure("job_failed", "R package service returned an invalid result");
@@ -96355,7 +97067,7 @@ var PackageWorker = class {
       throw failure("job_failed", messageOf5(error61));
     } finally {
       if (child !== void 0) await this.stopChild(child);
-      await rm5(directory, { recursive: true, force: true });
+      await rm6(directory, { recursive: true, force: true });
     }
   }
   async close() {
@@ -96451,13 +97163,13 @@ var PackageError = class extends Error {
   details;
 };
 function packageMetadataPath(projectDirectory) {
-  return join12(projectDirectory, ...PACKAGE_METADATA_RELATIVE_PATH);
+  return join13(projectDirectory, ...PACKAGE_METADATA_RELATIVE_PATH);
 }
 function packageLibraryPath(projectDirectory) {
-  return join12(projectDirectory, ...PACKAGE_LIBRARY_RELATIVE_PATH);
+  return join13(projectDirectory, ...PACKAGE_LIBRARY_RELATIVE_PATH);
 }
 function packageRepositoryPath(projectDirectory) {
-  return join12(projectDirectory, ...PACKAGE_REPOSITORY_RELATIVE_PATH);
+  return join13(projectDirectory, ...PACKAGE_REPOSITORY_RELATIVE_PATH);
 }
 function validatePackageNames(packages, allowEmpty = true) {
   if (!Array.isArray(packages) || packages.some((value) => typeof value !== "string")) throw new PackageError("invalid_request", "packages must be an array of package names");
@@ -96474,7 +97186,7 @@ async function readPackageDeclarations(projectDirectory) {
   if (observation.state === "absent") return { path: project, metadata, packages: [], sidecarVersion: null };
   if (observation.state !== "present") throw new PackageError("package_metadata_error", "package metadata is not readable: " + metadata);
   try {
-    const mapping = parseYamlMapping(new TextDecoder("utf-8", { fatal: true }).decode(await readFile6(metadata)), "packages");
+    const mapping = parseYamlMapping(new TextDecoder("utf-8", { fatal: true }).decode(await readFile7(metadata)), "packages");
     if (Object.keys(mapping).length !== 1 || !Array.isArray(mapping.packages) || mapping.packages.some((value) => typeof value !== "string")) {
       throw new Error("package metadata must contain only a packages sequence");
     }
@@ -96579,7 +97291,7 @@ async function canonicalProjectDirectory(value) {
   if (!isAbsoluteNonEmptyPath(value)) throw new PackageError("invalid_request", "project directory must be an absolute path");
   try {
     const path3 = await realpath6(value);
-    if (!(await stat11(path3)).isDirectory()) throw new Error("not a directory");
+    if (!(await stat12(path3)).isDirectory()) throw new Error("not a directory");
     return path3;
   } catch (error61) {
     throw new PackageError("invalid_request", "project directory is unavailable: " + messageOf6(error61));
@@ -96588,7 +97300,7 @@ async function canonicalProjectDirectory(value) {
 async function projectRepositories(project) {
   const path3 = packageRepositoryPath(project);
   try {
-    const mapping = parseYamlMapping(new TextDecoder("utf-8", { fatal: true }).decode(await readFile6(path3)), "package repository");
+    const mapping = parseYamlMapping(new TextDecoder("utf-8", { fatal: true }).decode(await readFile7(path3)), "package repository");
     if (Object.keys(mapping).length !== 1 || typeof mapping.repository !== "string") {
       throw new Error("repository settings must contain one repository URL");
     }
@@ -96602,17 +97314,17 @@ async function projectRepositories(project) {
 }
 async function existingDirectory2(path3) {
   try {
-    return (await stat11(path3)).isDirectory();
+    return (await stat12(path3)).isDirectory();
   } catch {
     return false;
   }
 }
 async function ensureProjectLibrary(project, library) {
-  const alder = join12(project, ".alder");
-  await mkdir6(alder, { recursive: true, mode: 448 });
-  await mkdir6(library, { recursive: true, mode: 448 });
+  const alder = join13(project, ".alder");
+  await mkdir7(alder, { recursive: true, mode: 448 });
+  await mkdir7(library, { recursive: true, mode: 448 });
   if (!(await lstat6(alder)).isDirectory() || !(await lstat6(library)).isDirectory()) throw new Error("project library is not a directory");
-  if (await realpath6(library) !== join12(await realpath6(project), ".alder", "library")) throw new Error("project library is outside the project");
+  if (await realpath6(library) !== join13(await realpath6(project), ".alder", "library")) throw new Error("project library is outside the project");
 }
 function workerResult(value) {
   if (!isRecord4(value) || typeof value.ok !== "boolean" || !Array.isArray(value.records)) throw new PackageError("job_failed", "package service returned invalid data");
@@ -96686,7 +97398,7 @@ var PersistenceError = class extends Error {
 async function diskVersion(path3, previous) {
   let file2;
   try {
-    file2 = await open6(path3, "r");
+    file2 = await open7(path3, "r");
   } catch (error61) {
     if (error61.code === "ENOENT") {
       const bytes = new Uint8Array();
@@ -96757,16 +97469,16 @@ async function canonicalDestination(path3) {
     if (error61.code !== "ENOENT") throw error61;
     const parent = dirname5(path3);
     if (parent === path3) throw error61;
-    return join13(await canonicalDestination(parent), basename4(path3));
+    return join14(await canonicalDestination(parent), basename5(path3));
   }
 }
 async function resolveNotebookPath(path3) {
-  const spelling = resolve9(path3);
+  const spelling = resolve10(path3);
   try {
     return { spelling, canonical: await realpath7(spelling) };
   } catch (error61) {
     if (error61.code !== "ENOENT") throw error61;
-    return { spelling, canonical: join13(await realpath7(dirname5(spelling)), basename4(spelling)) };
+    return { spelling, canonical: join14(await realpath7(dirname5(spelling)), basename5(spelling)) };
   }
 }
 function cloneNotebook(document) {
@@ -96881,7 +97593,7 @@ var DocumentStore = class _DocumentStore {
     return next;
   }
   sidecarPath(kind) {
-    return kind === "config" ? join13(dirname5(this.path), ".alder", "config.yaml") : kind === "layout" ? `${this.path}.alder-layout.json` : packageMetadataPath(dirname5(this.path));
+    return kind === "config" ? join14(dirname5(this.path), ".alder", "config.yaml") : kind === "layout" ? `${this.path}.alder-layout.json` : packageMetadataPath(dirname5(this.path));
   }
   sidecarObservation(kind) {
     const current = this.sidecars.get(this.sidecarPath(kind));
@@ -96957,7 +97669,7 @@ var DocumentStore = class _DocumentStore {
       canonical = await realpath7(this.spelling);
     } catch (error61) {
       if (error61.code !== "ENOENT") throw error61;
-      canonical = join13(await realpath7(dirname5(this.spelling)), basename4(this.spelling));
+      canonical = join14(await realpath7(dirname5(this.spelling)), basename5(this.spelling));
     }
     const current = await diskVersion(this.path);
     if (canonical !== this.path || !sameDisk(this.version, current)) throw new FileConflict();
@@ -96969,7 +97681,7 @@ var DocumentStore = class _DocumentStore {
       this.documentValue = cloneNotebook(candidate);
       return { path: this.path, changed: false, digest: this.version.digest };
     }
-    const stage = join13(dirname5(this.path), `.alder-save-${randomUUID9()}`);
+    const stage = join14(dirname5(this.path), `.alder-save-${randomUUID10()}`);
     try {
       await writeStaged(stage, bytes, this.version.mode);
       await this.assertUnchanged();
@@ -96979,7 +97691,7 @@ var DocumentStore = class _DocumentStore {
       this.documentValue = cloneNotebook(candidate);
       return { path: this.path, changed: true, digest: committed.digest };
     } finally {
-      await unlink2(stage).catch((error61) => {
+      await unlink3(stage).catch((error61) => {
         if (error61.code !== "ENOENT") throw error61;
       });
     }
@@ -97010,11 +97722,11 @@ var DocumentStore = class _DocumentStore {
       };
       const candidate = { ...this.candidate(fixed), path: destination };
       const bytes = serializeNotebook(candidate);
-      let stage = join13(dirname5(destination), ".alder-save-as-" + randomUUID9());
+      let stage = join14(dirname5(destination), ".alder-save-as-" + randomUUID10());
       const removeStage = async () => {
         if (stage === null) return;
         const current = stage;
-        await unlink2(current).catch((error61) => {
+        await unlink3(current).catch((error61) => {
           if (error61.code !== "ENOENT") throw error61;
         });
         stage = null;
@@ -97076,7 +97788,7 @@ var DocumentStore = class _DocumentStore {
         canonical = await realpath7(this.spelling);
       } catch (error61) {
         if (error61.code !== "ENOENT") throw error61;
-        canonical = join13(await realpath7(dirname5(this.spelling)), basename4(this.spelling));
+        canonical = join14(await realpath7(dirname5(this.spelling)), basename5(this.spelling));
       }
       if (canonical !== this.path || current.digest !== precondition.expectedDiskDigest || this.versionToken(current) !== precondition.expectedDiskVersion) throw new FileConflict();
       const parsed = parseNotebook(current.bytes, this.path);
@@ -97088,7 +97800,7 @@ var DocumentStore = class _DocumentStore {
       const transientId = () => {
         let id2;
         do
-          id2 = "reload-" + randomUUID9();
+          id2 = "reload-" + randomUUID10();
         while (priorIds.has(id2) || transientIds.has(id2));
         transientIds.add(id2);
         return id2;
@@ -97174,13 +97886,13 @@ var DocumentStore = class _DocumentStore {
       const parent = dirname5(target);
       let stage = null;
       if (!sameBytes2(bytes, expected.bytes)) {
-        await mkdir7(parent, { recursive: true, mode: 448 });
-        stage = join13(parent, ".alder-sidecar-" + randomUUID9());
+        await mkdir8(parent, { recursive: true, mode: 448 });
+        stage = join14(parent, ".alder-sidecar-" + randomUUID10());
         try {
           await writeStaged(stage, bytes, expected.mode);
           await assertUnchanged();
         } catch (error61) {
-          await unlink2(stage).catch(() => void 0);
+          await unlink3(stage).catch(() => void 0);
           stage = null;
           throw error61;
         }
@@ -97192,7 +97904,7 @@ var DocumentStore = class _DocumentStore {
       const removeStage = async () => {
         if (stage === null) return;
         const current = stage;
-        await unlink2(current).catch((error61) => {
+        await unlink3(current).catch((error61) => {
           if (error61.code !== "ENOENT") throw error61;
         });
         stage = null;
@@ -97243,14 +97955,14 @@ var DocumentStore = class _DocumentStore {
 async function publishStaged(stage, target, expected, conflictMessage, kind = "source") {
   const committed = await diskVersion(stage);
   if (!sameDisk(expected, await diskVersion(target))) throw new FileConflict(conflictMessage, kind);
-  await rename4(stage, target);
+  await rename5(stage, target);
   await syncDirectory3(dirname5(target));
   return committed;
 }
 async function syncDirectory3(path3) {
   let directory;
   try {
-    directory = await open6(path3, "r");
+    directory = await open7(path3, "r");
     await directory.sync();
   } catch (error61) {
     const code2 = error61.code;
@@ -97260,7 +97972,7 @@ async function syncDirectory3(path3) {
   }
 }
 async function writeStaged(path3, bytes, mode) {
-  const file2 = await open6(path3, "wx", mode);
+  const file2 = await open7(path3, "wx", mode);
   try {
     await file2.chmod(mode);
     await file2.writeFile(bytes);
@@ -97274,1003 +97986,6 @@ async function writeStaged(path3, bytes, mode) {
 import { createHash as createHash7, randomUUID as randomUUID11 } from "node:crypto";
 import { access as access3, mkdir as mkdir9, open as open8, readFile as readFile8, realpath as realpath8, rename as rename6, rm as rm7 } from "node:fs/promises";
 import { dirname as dirname6, join as join15, resolve as resolve11 } from "node:path";
-
-// src/diagnostics.ts
-import { createHmac as createHmac2, randomBytes as randomBytes4, randomUUID as randomUUID10 } from "node:crypto";
-import { appendFile, chmod as chmod3, copyFile, link as link2, mkdir as mkdir8, open as open7, readdir as readdir3, readFile as readFile7, rename as rename5, rm as rm6, stat as stat12, writeFile as writeFile4 } from "node:fs/promises";
-import { basename as basename5, join as join14, resolve as resolve10 } from "node:path";
-var DIAGNOSTIC_SCHEMA_VERSION = 1;
-var DIAGNOSTIC_SEGMENT_BYTES = 5 * 1024 * 1024;
-var DIAGNOSTIC_TOTAL_BYTES = 25 * 1024 * 1024;
-var DIAGNOSTIC_MAX_SEGMENTS = 5;
-var DIAGNOSTIC_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1e3;
-var DIAGNOSTIC_QUEUE_LIMIT = 2048;
-var DIAGNOSTIC_BATCH_SIZE = 128;
-var LOCK_WAIT_MS = 2e3;
-var LOCK_STALE_MS = 3e4;
-var DIAGNOSTIC_EVENTS = [
-  "backend.close.summary",
-  "backend.fatal",
-  "backend.forced_exit",
-  "backend.launch",
-  "backend.session.open",
-  "backend.stop",
-  "backend.uncaught_exception",
-  "backend.unhandled_rejection",
-  "boundary.rejected",
-  "child.cancel",
-  "child.cleanup_failed",
-  "child.exit",
-  "child.kill",
-  "child.spawn",
-  "child.term",
-  "desktop.fatal",
-  "desktop.launch",
-  "desktop.quit",
-  "desktop.uncaught_exception",
-  "desktop.unhandled_rejection",
-  "diagnostic.unknown_event",
-  "host.action_failure",
-  "host.fatal",
-  "host.launch",
-  "host.ready",
-  "host.stop.settled",
-  "host.stop.started",
-  "lsp.failure",
-  "lsp.ready",
-  "lsp.start",
-  "lsp.stop",
-  "mcp.endpoint.closed",
-  "mcp.endpoint.ready",
-  "mcp.request.error",
-  "mcp.session.closed",
-  "mcp.session.error",
-  "mcp.session.opened",
-  "native_command.timeout",
-  "operation.accepted",
-  "operation.cancelled",
-  "operation.failed",
-  "operation.phase",
-  "operation.progress",
-  "operation.settled",
-  "operation.slow",
-  "operation.started",
-  "operation.timing",
-  "persistence.conflict",
-  "persistence.failure",
-  "persistence.recovery_flushed",
-  "process_scope.cleanup_failed",
-  "r.environment.ready",
-  "r.runtime.failure",
-  "r.runtime.ready",
-  "r.runtime.restart",
-  "r.runtime.start",
-  "renderer.bootstrap_failed",
-  "renderer.error",
-  "renderer.gone",
-  "renderer.load_failed",
-  "renderer.ready",
-  "renderer.recovered",
-  "renderer.recovery_failed",
-  "renderer.responsive",
-  "renderer.unhandled_rejection",
-  "renderer.unresponsive",
-  "run.visible",
-  "save.clean_state",
-  "save.source_published",
-  "window.close",
-  "window.open"
-];
-var FIELD_NAMES = /* @__PURE__ */ new Set([
-  "appLaunchId",
-  "backendInstanceId",
-  "sessionId",
-  "sessionEpoch",
-  "documentId",
-  "clientId",
-  "operationId",
-  "runId",
-  "cellId",
-  "childInstanceId",
-  "childRole",
-  "childPid",
-  "windowId",
-  "requestId",
-  "eventSequence",
-  "documentRevision",
-  "cellRevision",
-  "outputGeneration",
-  "phase",
-  "kind",
-  "mimeFamily",
-  "outcome",
-  "status",
-  "reason",
-  "errorCode",
-  "errorType",
-  "durationMs",
-  "queueMs",
-  "analysisMs",
-  "dispatchMs",
-  "firstOutputMs",
-  "completionMs",
-  "visibleMs",
-  "bytes",
-  "count",
-  "dropped",
-  "forced",
-  "cold",
-  "ready",
-  "dirty",
-  "conflict",
-  "truncated",
-  "unknown",
-  "missingPhases",
-  "notApplicablePhases",
-  "observedPhases",
-  "version",
-  "runtimeVersion",
-  "os",
-  "arch",
-  "signal",
-  "exitCode",
-  "lastProgressMs",
-  "activeOperationCount",
-  "activeRunId",
-  "kernelState",
-  "analyzerState",
-  "executionReady",
-  "processCount",
-  "rssBytes",
-  "cpuUserMicros",
-  "cpuSystemMicros",
-  "diagnosticBytes",
-  "recoveryBytes",
-  "artifactBytes",
-  "cacheBytes",
-  "elapsedMs",
-  "thresholdMs",
-  "rendererGeneration",
-  "mode"
-]);
-var ID_FIELDS = /* @__PURE__ */ new Set([
-  "appLaunchId",
-  "backendInstanceId",
-  "sessionId",
-  "sessionEpoch",
-  "documentId",
-  "clientId",
-  "operationId",
-  "runId",
-  "cellId",
-  "childInstanceId",
-  "windowId",
-  "requestId",
-  "activeRunId"
-]);
-var NUMERIC_FIELDS = /* @__PURE__ */ new Set([
-  "eventSequence",
-  "documentRevision",
-  "cellRevision",
-  "outputGeneration",
-  "durationMs",
-  "queueMs",
-  "analysisMs",
-  "dispatchMs",
-  "firstOutputMs",
-  "completionMs",
-  "visibleMs",
-  "bytes",
-  "count",
-  "dropped",
-  "exitCode",
-  "lastProgressMs",
-  "activeOperationCount",
-  "processCount",
-  "rssBytes",
-  "cpuUserMicros",
-  "cpuSystemMicros",
-  "diagnosticBytes",
-  "recoveryBytes",
-  "artifactBytes",
-  "cacheBytes",
-  "elapsedMs",
-  "thresholdMs",
-  "rendererGeneration",
-  "childPid"
-]);
-var BOOLEAN_FIELDS = /* @__PURE__ */ new Set(["forced", "cold", "ready", "dirty", "conflict", "truncated", "unknown", "executionReady"]);
-var SAFE_CATEGORIES = /* @__PURE__ */ new Set([
-  "success",
-  "error",
-  "cancelled",
-  "started",
-  "settled",
-  "running",
-  "queued",
-  "done",
-  "failed",
-  "other",
-  "unknown",
-  "none",
-  "transaction",
-  "save",
-  "save-as",
-  "run",
-  "restart",
-  "format",
-  "publish",
-  "packages-install",
-  "inspect",
-  "widget",
-  "output",
-  "artifact",
-  "upload",
-  "query",
-  "mcp",
-  "request",
-  "shutdown",
-  "stop",
-  "set-config",
-  "set-layout",
-  "set-runtime",
-  "set-app",
-  "reload-source",
-  "cancel-operation",
-  "interrupt",
-  "lazy-output",
-  "table-page",
-  "analysis",
-  "analysis-ready",
-  "analysis-not-applicable",
-  "kernel-dispatch",
-  "first-output",
-  "first-output-not-applicable",
-  "kernel-completion",
-  "authoritative-completion",
-  "visible-result",
-  "terminal",
-  "recovery-flush",
-  "authoritative-ack",
-  "publication",
-  "clean",
-  "environment",
-  "startup",
-  "first-progress",
-  "persistence",
-  "text",
-  "image",
-  "audio",
-  "video",
-  "application",
-  "multipart",
-  "binary",
-  "html",
-  "json",
-  "pdf",
-  "idle",
-  "ready",
-  "starting",
-  "stopping",
-  "unavailable",
-  "blocked",
-  "active",
-  "available",
-  "sigterm",
-  "sigkill",
-  "sigint",
-  "clean-exit",
-  "abnormal-exit",
-  "killed",
-  "crashed",
-  "oom",
-  "launch-failed",
-  "integrity-failure",
-  "script-error",
-  "unhandled-rejection",
-  "bootstrap-failed",
-  "load-failed",
-  "unresponsive",
-  "responsive",
-  "two-animation-frames",
-  "emergency",
-  "desktop",
-  "backend",
-  "host",
-  "renderer",
-  "cli",
-  "node",
-  "r",
-  "rscript",
-  "ark",
-  "air",
-  "quarto",
-  "child",
-  "darwin",
-  "linux",
-  "win32",
-  "arm64",
-  "x64"
-]);
-var SAFE_ERROR_CODES = /* @__PURE__ */ new Set([
-  "cancelled",
-  "internal_error",
-  "unknown",
-  "other",
-  "backend_fatal",
-  "desktop_start_failed",
-  "uncaught_exception",
-  "unhandled_rejection",
-  "close_timeout",
-  "command_timeout",
-  "lease_release_timeout",
-  "lease_release_failed",
-  "renderer_recovery_failed",
-  "renderer_bootstrap_failed",
-  "child_exit_failed",
-  "child_cleanup_failed",
-  "ordinary_exit_cleanup_failed",
-  "process_cleanup_failed",
-  "host_start_failed",
-  "r_environment_failed",
-  "r_start_failed",
-  "lsp_unavailable",
-  "source_conflict",
-  "source_write_failed",
-  "recovery_checkpoint_failed",
-  "sidecar_write_failed",
-  "operation_in_progress",
-  "publish_timeout",
-  "publish_failed",
-  "invalid_request",
-  "not_found",
-  "payload_too_large",
-  "unsupported_media_type",
-  "stale_value",
-  "output_expired",
-  "output_invalid",
-  "output_quota",
-  "service_unavailable",
-  "mcp_initialize_failed",
-  "mcp_internal_error",
-  "session_compromised",
-  "watcher_failed",
-  "recovery_conflict",
-  "ENOENT",
-  "EACCES",
-  "EPERM",
-  "ENOSPC",
-  "EIO"
-]);
-var SAFE_ERROR_TYPES = /* @__PURE__ */ new Set(["Error", "TypeError", "RangeError", "AggregateError", "ControllerError", "PublishingError", "ZodError"]);
-var TERMINAL_EVENTS = /* @__PURE__ */ new Set(["operation.settled", "operation.cancelled", "operation.failed"]);
-var SAFE_EVENTS = new Set(DIAGNOSTIC_EVENTS);
-var SLOW_THRESHOLDS = {
-  transaction: 5e3,
-  save: 1e4,
-  "save-as": 15e3,
-  run: 3e4,
-  restart: 45e3,
-  format: 3e4,
-  publish: 12e4,
-  "packages-install": 12e4,
-  inspect: 15e3
-};
-var EXPECTED_PHASES = {
-  transaction: ["recovery-flush", "authoritative-ack"],
-  save: ["publication", "clean"],
-  "save-as": ["publication", "clean"],
-  run: ["analysis-ready", "kernel-dispatch", "kernel-completion", "authoritative-completion"],
-  restart: ["terminal"],
-  format: ["terminal"],
-  publish: ["terminal"],
-  "packages-install": ["terminal"],
-  inspect: ["terminal"]
-};
-var DiagnosticsCore = class {
-  rootDir;
-  role;
-  component;
-  appLaunchId;
-  backendInstanceId;
-  processInstanceId;
-  appVersion;
-  buildId;
-  queueLimit;
-  segmentBytes;
-  totalBytes;
-  maxSegments;
-  maxAgeMs;
-  flushDelayMs;
-  stderr;
-  now;
-  monotonicNow;
-  slowThresholdMs;
-  queue = [];
-  activeOperations = /* @__PURE__ */ new Map();
-  flushTimer;
-  drainTail = Promise.resolve();
-  initialized = false;
-  disabled = false;
-  closed = false;
-  fallbackReported = false;
-  activePath = "";
-  activeSize = 0;
-  hmacKey;
-  eventSequence = 0;
-  generatedEvents = 0;
-  acceptedEvents = 0;
-  persistedEvents = 0;
-  droppedEvents = 0;
-  unavailableEvents = 0;
-  constructor(options) {
-    this.rootDir = resolve10(options.rootDir);
-    this.role = options.role;
-    this.component = SAFE_CATEGORIES.has(options.component ?? "") ? options.component : options.role;
-    this.appLaunchId = options.appLaunchId ?? randomUUID10();
-    this.backendInstanceId = options.backendInstanceId;
-    this.processInstanceId = options.processInstanceId ?? randomUUID10();
-    this.appVersion = safeVersion(options.appVersion);
-    this.buildId = safeVersion(options.buildId);
-    this.queueLimit = options.queueLimit ?? DIAGNOSTIC_QUEUE_LIMIT;
-    this.segmentBytes = options.segmentBytes ?? DIAGNOSTIC_SEGMENT_BYTES;
-    this.totalBytes = options.totalBytes ?? DIAGNOSTIC_TOTAL_BYTES;
-    this.maxSegments = options.maxSegments ?? DIAGNOSTIC_MAX_SEGMENTS;
-    this.maxAgeMs = options.maxAgeMs ?? DIAGNOSTIC_MAX_AGE_MS;
-    this.flushDelayMs = options.flushDelayMs ?? 25;
-    this.stderr = options.stderr === void 0 ? process.stderr : options.stderr;
-    this.now = options.now ?? (() => /* @__PURE__ */ new Date());
-    this.monotonicNow = options.monotonicNow ?? (() => performance.now());
-    this.slowThresholdMs = options.slowThresholdMs;
-  }
-  enqueue(severity, event, context, fields) {
-    this.generatedEvents++;
-    if (this.disabled || this.closed) {
-      this.unavailableEvents++;
-      return;
-    }
-    if (!/^[a-z][a-z0-9_.-]{1,79}$/.test(event)) {
-      this.droppedEvents++;
-      return;
-    }
-    const admitted = this.queue.length < this.queueLimit;
-    if (admitted) {
-      const sequence = ++this.eventSequence;
-      this.queue.push({
-        sequence,
-        timestamp: this.now().toISOString(),
-        monotonicMs: Math.round(this.monotonicNow() * 1e3) / 1e3,
-        severity,
-        event,
-        context,
-        fields
-      });
-      this.acceptedEvents++;
-    } else this.droppedEvents++;
-    this.observeOperation(event, { ...context, ...fields });
-    if (admitted) this.scheduleFlush(this.queue.length >= 64 ? 0 : this.flushDelayMs);
-  }
-  operationKey(fields) {
-    const operationId = typeof fields.operationId === "string" ? fields.operationId : null;
-    if (!operationId) return null;
-    const clientId = typeof fields.clientId === "string" ? fields.clientId : "internal";
-    return clientId + "\0" + operationId;
-  }
-  observeOperation(event, fields) {
-    const key2 = this.operationKey(fields);
-    if (!key2) return;
-    if (event === "operation.accepted") {
-      const operationId = String(fields.operationId);
-      const clientId = typeof fields.clientId === "string" ? fields.clientId : "internal";
-      const kind = typeof fields.kind === "string" ? fields.kind : "other";
-      const startedAt = this.monotonicNow();
-      const threshold = this.slowThresholdMs ?? SLOW_THRESHOLDS[kind] ?? 3e4;
-      const prior = this.activeOperations.get(key2);
-      if (prior) clearTimeout(prior.timer);
-      const timer = setTimeout(() => {
-        const active2 = this.activeOperations.get(key2);
-        if (!active2) return;
-        this.enqueue("warn", "operation.slow", {}, {
-          operationId,
-          clientId,
-          kind: active2.kind,
-          thresholdMs: threshold,
-          durationMs: Math.round(this.monotonicNow() - active2.startedAt),
-          lastProgressMs: Math.round(this.monotonicNow() - active2.lastProgressAt)
-        });
-      }, threshold);
-      timer.unref?.();
-      this.activeOperations.set(key2, { operationId, clientId, kind, startedAt, lastProgressAt: startedAt, phases: /* @__PURE__ */ new Set(), timer });
-      return;
-    }
-    const active = this.activeOperations.get(key2);
-    if (!active) return;
-    if (!TERMINAL_EVENTS.has(event)) {
-      const phase = typeof fields.phase === "string" ? fields.phase : event === "operation.progress" ? "first-progress" : void 0;
-      if (phase) {
-        active.phases.add(phase);
-        active.lastProgressAt = this.monotonicNow();
-      }
-      return;
-    }
-    clearTimeout(active.timer);
-    active.phases.add("terminal");
-    const expected = EXPECTED_PHASES[active.kind] ?? ["terminal"];
-    const notApplicable = Array.isArray(fields.notApplicablePhases) ? fields.notApplicablePhases.filter((value) => typeof value === "string") : [];
-    this.activeOperations.delete(key2);
-    this.enqueue("info", "operation.timing", {}, {
-      operationId: active.operationId,
-      clientId: active.clientId,
-      kind: active.kind,
-      outcome: event === "operation.settled" ? "success" : event === "operation.cancelled" ? "cancelled" : "error",
-      durationMs: Math.round(this.monotonicNow() - active.startedAt),
-      observedPhases: [...active.phases],
-      notApplicablePhases: notApplicable,
-      missingPhases: expected.filter((phase) => !active.phases.has(phase) && !notApplicable.includes(phase))
-    });
-  }
-  scheduleFlush(delay) {
-    if (this.flushTimer !== void 0 || this.closed || this.disabled) return;
-    this.flushTimer = setTimeout(() => {
-      this.flushTimer = void 0;
-      void this.flush().catch(() => void 0);
-    }, delay);
-    this.flushTimer.unref?.();
-  }
-  async initialize() {
-    if (this.initialized) return;
-    await mkdir8(this.rootDir, { recursive: true, mode: 448 });
-    await chmod3(this.rootDir, 448);
-    this.hmacKey = await loadOrCreateKey(this.rootDir);
-    this.activePath = join14(this.rootDir, `diagnostics-active-${this.role}-${process.pid}-${this.processInstanceId}.jsonl`);
-    this.activeSize = await stat12(this.activePath).then((info) => info.size, (error61) => {
-      if (error61.code === "ENOENT") return 0;
-      throw error61;
-    });
-    await chmod3(this.activePath, 384).catch((error61) => {
-      if (error61.code !== "ENOENT") throw error61;
-    });
-    this.initialized = true;
-  }
-  async hashIdentity(value) {
-    try {
-      await this.initialize();
-      return pseudonym(this.hmacKey, value);
-    } catch (error61) {
-      this.disable(error61);
-      return "id-unavailable";
-    }
-  }
-  serialize(record4) {
-    const key2 = this.hmacKey;
-    const value = {
-      schemaVersion: DIAGNOSTIC_SCHEMA_VERSION,
-      timestamp: record4.timestamp,
-      monotonicMs: record4.monotonicMs,
-      severity: record4.severity,
-      component: this.component,
-      event: SAFE_EVENTS.has(record4.event) ? record4.event : "diagnostic.unknown_event",
-      appVersion: this.appVersion,
-      buildId: this.buildId,
-      process: { role: this.role, instanceId: pseudonym(key2, this.processInstanceId), pid: process.pid },
-      appLaunchId: pseudonym(key2, this.appLaunchId),
-      eventSequence: record4.sequence,
-      ...this.backendInstanceId ? { backendInstanceId: pseudonym(key2, this.backendInstanceId) } : {},
-      ...sanitizeFields(record4.context, key2),
-      ...sanitizeFields(record4.fields, key2)
-    };
-    const line = JSON.stringify(value) + "\n";
-    return { line, bytes: Buffer.byteLength(line) };
-  }
-  async drainThrough(targetSequence) {
-    if (this.disabled) return;
-    try {
-      await this.initialize();
-    } catch (error61) {
-      this.disable(error61);
-      return;
-    }
-    while (this.queue.length > 0 && this.queue[0].sequence <= targetSequence) {
-      const raw = this.queue.slice(0, DIAGNOSTIC_BATCH_SIZE).filter((record4) => record4.sequence <= targetSequence);
-      if (raw.length === 0) break;
-      const serialized = raw.map((record4) => this.serialize(record4));
-      let persisted = 0;
-      try {
-        persisted = await this.appendRecords(serialized);
-      } catch (error61) {
-        this.disable(error61);
-        return;
-      }
-      this.queue.splice(0, raw.length);
-      this.persistedEvents += persisted;
-      this.droppedEvents += raw.length - persisted;
-    }
-  }
-  async appendRecords(records) {
-    return withDirectoryLock(this.rootDir, async () => {
-      await normalizeDeadActiveSegments(this.rootDir);
-      let persisted = 0;
-      let index = 0;
-      while (index < records.length) {
-        const first = records[index];
-        if (first.bytes > this.segmentBytes || first.bytes > this.totalBytes) {
-          index++;
-          continue;
-        }
-        if (this.activeSize > 0 && this.activeSize + first.bytes > this.segmentBytes) await this.rotateLocked();
-        const remaining = this.segmentBytes - this.activeSize;
-        const chunk = [];
-        let chunkBytes = 0;
-        while (index < records.length && chunkBytes + records[index].bytes <= remaining) {
-          chunk.push(records[index]);
-          chunkBytes += records[index].bytes;
-          index++;
-        }
-        if (chunk.length === 0) {
-          index++;
-          continue;
-        }
-        const allowed = await pruneSegmentsLocked(this.rootDir, {
-          maxAgeMs: this.maxAgeMs,
-          maxSegments: this.maxSegments,
-          totalBytes: this.totalBytes,
-          reserveBytes: chunkBytes,
-          prospectivePath: this.activePath
-        });
-        if (!allowed) continue;
-        await appendFile(this.activePath, chunk.map((record4) => record4.line).join(""), { mode: 384 });
-        this.activeSize += chunkBytes;
-        persisted += chunk.length;
-      }
-      await pruneSegmentsLocked(this.rootDir, {
-        maxAgeMs: this.maxAgeMs,
-        maxSegments: this.maxSegments,
-        totalBytes: this.totalBytes,
-        reserveBytes: 0,
-        prospectivePath: this.activePath
-      });
-      return persisted;
-    });
-  }
-  async rotateLocked() {
-    if (this.activeSize === 0) return;
-    const stamp = this.now().toISOString().replace(/[^0-9]/g, "").slice(0, 17);
-    const target = join14(this.rootDir, `diagnostics-${stamp}-${this.role}-${process.pid}-${randomUUID10()}.jsonl`);
-    await rename5(this.activePath, target);
-    await chmod3(target, 384);
-    this.activeSize = 0;
-  }
-  disable(error61) {
-    if (this.disabled) return;
-    this.disabled = true;
-    this.unavailableEvents += this.queue.length;
-    this.queue.length = 0;
-    for (const active of this.activeOperations.values()) clearTimeout(active.timer);
-    this.activeOperations.clear();
-    if (!this.fallbackReported && this.stderr) {
-      this.fallbackReported = true;
-      try {
-        this.stderr.write(`Alder diagnostics unavailable (${fixedErrorCode(error61)}).
-`);
-      } catch {
-      }
-    }
-  }
-  async flush() {
-    if (this.flushTimer !== void 0) {
-      clearTimeout(this.flushTimer);
-      this.flushTimer = void 0;
-    }
-    if (this.disabled || this.queue.length === 0) return;
-    const target = this.queue[this.queue.length - 1].sequence;
-    const operation = this.drainTail.then(() => this.drainThrough(target));
-    this.drainTail = operation.catch(() => void 0);
-    await operation;
-  }
-  async close() {
-    if (this.closed) {
-      await this.drainTail;
-      return;
-    }
-    this.closed = true;
-    for (const active of this.activeOperations.values()) clearTimeout(active.timer);
-    this.activeOperations.clear();
-    await this.flush();
-    if (this.initialized && !this.disabled && this.activeSize > 0) {
-      await withDirectoryLock(this.rootDir, async () => {
-        await this.rotateLocked();
-        await pruneSegmentsLocked(this.rootDir, {
-          maxAgeMs: this.maxAgeMs,
-          maxSegments: this.maxSegments,
-          totalBytes: this.totalBytes,
-          reserveBytes: 0
-        });
-      }).catch((error61) => this.disable(error61));
-    }
-  }
-  abandonQueued() {
-    const count = this.queue.length;
-    this.queue.length = 0;
-    this.unavailableEvents += count;
-    return count;
-  }
-  safeFields(fields) {
-    return this.initialize().then(() => sanitizeFields(fields, this.hmacKey));
-  }
-  status() {
-    return {
-      available: !this.disabled,
-      generatedEvents: this.generatedEvents,
-      acceptedEvents: this.acceptedEvents,
-      persistedEvents: this.persistedEvents,
-      droppedEvents: this.droppedEvents,
-      unavailableEvents: this.unavailableEvents,
-      queuedEvents: this.queue.length,
-      currentSegmentBytes: this.activeSize,
-      rootDir: this.rootDir
-    };
-  }
-};
-var StructuredDiagnostics = class _StructuredDiagnostics {
-  core;
-  context;
-  constructor(options, core, context = {}) {
-    this.core = core ?? new DiagnosticsCore(options);
-    this.context = context;
-  }
-  record(severity, event, fields = {}) {
-    this.core.enqueue(severity, event, this.context, fields);
-  }
-  child(fields) {
-    return new _StructuredDiagnostics({ rootDir: this.core.rootDir, role: this.core.role }, this.core, { ...this.context, ...fields });
-  }
-  hashIdentity(value) {
-    return this.core.hashIdentity(value);
-  }
-  flush() {
-    return this.core.flush();
-  }
-  close() {
-    return this.core.close();
-  }
-  abandonQueued() {
-    return this.core.abandonQueued();
-  }
-  safeFields(fields) {
-    return this.core.safeFields(fields);
-  }
-  status() {
-    return this.core.status();
-  }
-};
-function safeVersion(value) {
-  return value !== void 0 && /^(?:[A-Za-z]+[ -])?\d+(?:\.\d+){0,3}(?:[-+][A-Za-z0-9.]+)?$/.test(value) ? value : "unknown";
-}
-function pseudonym(key2, value) {
-  return "id-" + createHmac2("sha256", key2).update(value).digest("hex").slice(0, 24);
-}
-function safeCategory(value) {
-  return SAFE_CATEGORIES.has(value.toLowerCase()) ? value.toLowerCase() : "other";
-}
-function safeErrorCode(value) {
-  return SAFE_ERROR_CODES.has(value) ? value : "other";
-}
-function safeErrorType(value) {
-  return SAFE_ERROR_TYPES.has(value) ? value : "other";
-}
-function sanitizeFields(fields, key2) {
-  const output2 = {};
-  for (const [name, raw] of Object.entries(fields)) {
-    if (!FIELD_NAMES.has(name)) continue;
-    if (Array.isArray(raw)) {
-      output2[name] = raw.slice(0, 32).map((value) => typeof value === "string" ? safeCategory(value) : sanitizePrimitive(name, value, key2));
-    } else output2[name] = sanitizePrimitive(name, raw, key2);
-  }
-  return output2;
-}
-function sanitizePrimitive(name, value, key2) {
-  if (value === null) return null;
-  if (ID_FIELDS.has(name)) return pseudonym(key2, String(value));
-  if (NUMERIC_FIELDS.has(name)) return typeof value === "number" && Number.isFinite(value) ? value : null;
-  if (BOOLEAN_FIELDS.has(name)) return typeof value === "boolean" ? value : null;
-  if (name === "errorCode") return typeof value === "string" ? safeErrorCode(value) : "other";
-  if (name === "errorType") return typeof value === "string" ? safeErrorType(value) : "other";
-  if (name === "version" || name === "runtimeVersion") return typeof value === "string" ? safeVersion(value) : "unknown";
-  if (typeof value === "string") return safeCategory(value);
-  if (typeof value === "number") return Number.isFinite(value) ? value : null;
-  return value;
-}
-function fixedErrorCode(error61) {
-  const code2 = error61?.code;
-  return typeof code2 === "string" ? safeErrorCode(code2) : "other";
-}
-async function loadOrCreateKey(rootDir) {
-  const path3 = join14(rootDir, "identity.key");
-  try {
-    const existing = await readFile7(path3);
-    if (existing.length === 32) return existing;
-  } catch (error61) {
-    if (error61.code !== "ENOENT") throw error61;
-  }
-  const key2 = randomBytes4(32);
-  const temporary = join14(rootDir, `.identity-${process.pid}-${randomUUID10()}.tmp`);
-  const handle = await open7(temporary, "wx", 384);
-  try {
-    await handle.writeFile(key2);
-    await handle.sync();
-    await handle.close();
-    try {
-      await link2(temporary, path3);
-    } catch (error61) {
-      if (error61.code !== "EEXIST") throw error61;
-    }
-    const published = await readFile7(path3);
-    if (published.length !== 32) throw new Error("diagnostic identity key is invalid");
-    await chmod3(path3, 384);
-    return published;
-  } catch (error61) {
-    throw error61;
-  } finally {
-    await handle.close().catch(() => void 0);
-    await rm6(temporary, { force: true }).catch(() => void 0);
-  }
-}
-async function persistEmergencyDiagnostic(options) {
-  const rootDir = resolve10(options.rootDir);
-  await mkdir8(rootDir, { recursive: true, mode: 448 });
-  await chmod3(rootDir, 448);
-  const timestamp = (options.now ?? (() => /* @__PURE__ */ new Date()))().toISOString();
-  const fields = options.fields ?? {};
-  const value = {
-    schemaVersion: DIAGNOSTIC_SCHEMA_VERSION,
-    timestamp,
-    severity: "error",
-    component: SAFE_CATEGORIES.has(options.component ?? "") ? options.component : options.role,
-    event: SAFE_EVENTS.has(options.event) ? options.event : "diagnostic.unknown_event",
-    process: { role: options.role, pid: process.pid },
-    ...typeof fields.outcome === "string" ? { outcome: safeCategory(fields.outcome) } : {},
-    ...typeof fields.errorCode === "string" ? { errorCode: safeErrorCode(fields.errorCode) } : {},
-    ...typeof fields.errorType === "string" ? { errorType: safeErrorType(fields.errorType) } : {},
-    ...typeof fields.forced === "boolean" ? { forced: fields.forced } : {},
-    ...typeof fields.durationMs === "number" && Number.isFinite(fields.durationMs) ? { durationMs: fields.durationMs } : {},
-    mode: "emergency"
-  };
-  const path3 = join14(rootDir, `diagnostics-emergency-${options.role}-${process.pid}-${randomUUID10()}.jsonl`);
-  const handle = await open7(path3, "wx", 384);
-  try {
-    await handle.writeFile(JSON.stringify(value) + "\n");
-    await handle.sync();
-  } finally {
-    await handle.close();
-  }
-  const directory = await open7(rootDir, "r");
-  try {
-    await directory.sync();
-  } finally {
-    await directory.close();
-  }
-  return path3;
-}
-async function withDirectoryLock(rootDir, action) {
-  await mkdir8(rootDir, { recursive: true, mode: 448 });
-  const lock = join14(rootDir, ".retention-lock");
-  const deadline = Date.now() + LOCK_WAIT_MS;
-  while (true) {
-    try {
-      await mkdir8(lock, { mode: 448 });
-      break;
-    } catch (error61) {
-      if (error61.code !== "EEXIST") throw error61;
-      const info = await stat12(lock).catch(() => null);
-      if (info && Date.now() - info.mtimeMs > LOCK_STALE_MS) {
-        await rm6(lock, { recursive: true, force: true });
-        continue;
-      }
-      if (Date.now() >= deadline) throw Object.assign(new Error("diagnostic retention lock timed out"), { code: "EIO" });
-      await new Promise((resolveWait) => setTimeout(resolveWait, 10));
-    }
-  }
-  try {
-    return await action();
-  } finally {
-    await rm6(lock, { recursive: true, force: true });
-  }
-}
-function segmentInfo(name) {
-  if (!/^diagnostics-.*\.jsonl$/.test(name)) return null;
-  const match = /^diagnostics-active-[a-z]+-(\d+)-.*\.jsonl$/.exec(name);
-  return { active: match !== null, pid: match ? Number(match[1]) : null };
-}
-function pidAlive(pid) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-async function listSegments(rootDir) {
-  let names;
-  try {
-    names = await readdir3(rootDir);
-  } catch (error61) {
-    if (error61.code === "ENOENT") return [];
-    throw error61;
-  }
-  const entries2 = [];
-  for (const name of names) {
-    const parsed = segmentInfo(name);
-    if (!parsed) continue;
-    const path3 = join14(rootDir, name);
-    try {
-      const info = await stat12(path3);
-      entries2.push({ path: path3, name, size: info.size, mtimeMs: info.mtimeMs, ...parsed });
-    } catch (error61) {
-      if (error61.code !== "ENOENT") throw error61;
-    }
-  }
-  return entries2;
-}
-async function normalizeDeadActiveSegments(rootDir) {
-  for (const entry of await listSegments(rootDir)) {
-    if (!entry.active || entry.pid === null || entry.pid === process.pid || pidAlive(entry.pid)) continue;
-    const target = join14(rootDir, `diagnostics-recovered-${Date.now()}-${randomUUID10()}.jsonl`);
-    await rename5(entry.path, target).catch((error61) => {
-      if (error61.code !== "ENOENT") throw error61;
-    });
-  }
-}
-async function pruneSegmentsLocked(rootDir, options) {
-  const now = Date.now();
-  let entries2 = await listSegments(rootDir);
-  for (const entry of entries2.filter((item) => !item.active && now - item.mtimeMs > options.maxAgeMs)) await rm6(entry.path, { force: true });
-  entries2 = await listSegments(rootDir);
-  const prospectiveExists = options.prospectivePath ? entries2.some((entry) => resolve10(entry.path) === resolve10(options.prospectivePath)) : true;
-  const addedCount = options.reserveBytes > 0 && !prospectiveExists ? 1 : 0;
-  const removable = entries2.filter((entry) => !entry.active).sort((a, b) => a.mtimeMs - b.mtimeMs);
-  let total = entries2.reduce((sum, entry) => sum + entry.size, 0);
-  let count = entries2.length;
-  while ((total + options.reserveBytes > options.totalBytes || count + addedCount > options.maxSegments) && removable.length > 0) {
-    const entry = removable.shift();
-    await rm6(entry.path, { force: true });
-    total -= entry.size;
-    count--;
-  }
-  return total + options.reserveBytes <= options.totalBytes && count + addedCount <= options.maxSegments;
-}
-async function pruneCorruptRecoveryCopies(directory, options = {}) {
-  const retain = options.retain ?? 5, maxAgeMs = options.maxAgeMs ?? 30 * 24 * 60 * 60 * 1e3;
-  let names;
-  try {
-    names = (await readdir3(directory)).filter((name) => /^corrupt-.*\.json$/.test(name));
-  } catch (error61) {
-    if (error61.code === "ENOENT") return 0;
-    throw error61;
-  }
-  const now = Date.now();
-  const entries2 = (await Promise.all(names.map(async (name) => ({ name, info: await stat12(join14(directory, name)) })))).sort((a, b) => b.info.mtimeMs - a.info.mtimeMs);
-  let removed = 0;
-  for (let index = 0; index < entries2.length; index++) {
-    if (index < Math.min(3, retain)) continue;
-    if (index < retain && now - entries2[index].info.mtimeMs <= maxAgeMs) continue;
-    await rm6(join14(directory, entries2[index].name), { force: true });
-    removed++;
-  }
-  return removed;
-}
-async function drainDiagnosticsBounded(diagnostics, timeoutMs) {
-  let timer;
-  const timeout = new Promise((resolveTimeout) => {
-    timer = setTimeout(() => resolveTimeout(false), timeoutMs);
-  });
-  const drained = diagnostics.flush().then(() => true, () => false);
-  const result = await Promise.race([drained, timeout]);
-  if (timer) clearTimeout(timer);
-  if (!result) diagnostics.abandonQueued();
-  return result;
-}
-
-// src/recovery.ts
 var RecoveryError = class extends Error {
   constructor(code2, message2, originals = [], cause) {
     super(message2, cause === void 0 ? void 0 : { cause });
@@ -98501,7 +98216,7 @@ var RecoveryWriter = class _RecoveryWriter {
 
 // src/publishing.ts
 import { randomUUID as randomUUID12 } from "node:crypto";
-import { access as access4, chmod as chmod4, link as link3, mkdtemp as mkdtemp3, readFile as readFile9, rm as rm8, stat as stat13, unlink as unlink3, writeFile as writeFile5 } from "node:fs/promises";
+import { access as access4, chmod as chmod4, link as link2, mkdtemp as mkdtemp3, readFile as readFile9, rm as rm8, stat as stat13, unlink as unlink4, writeFile as writeFile5 } from "node:fs/promises";
 import { basename as basename6, dirname as dirname7, join as join16, resolve as resolve12 } from "node:path";
 import { tmpdir as tmpdir4 } from "node:os";
 
@@ -109115,11 +108830,11 @@ async function publishAbsentDestination(path3, bytes, signal) {
     await writeFile5(temporary, bytes, { flag: "wx", mode: 384 });
     await chmod4(temporary, 420);
     throwIfAborted3(signal);
-    await link3(temporary, path3);
+    await link2(temporary, path3);
   } catch (error61) {
     throw normalizePublishingError(error61);
   } finally {
-    await unlink3(temporary).catch(() => {
+    await unlink4(temporary).catch(() => {
     });
   }
 }
@@ -109833,7 +109548,7 @@ function boundedUtf8(value, maxBytes) {
 
 // src/uploads.ts
 import { randomUUID as randomUUID13 } from "node:crypto";
-import { chmod as chmod5, lstat as lstat7, mkdir as mkdir10, unlink as unlink4, writeFile as writeFile7 } from "node:fs/promises";
+import { chmod as chmod5, lstat as lstat7, mkdir as mkdir10, unlink as unlink5, writeFile as writeFile7 } from "node:fs/promises";
 import { join as join18 } from "node:path";
 var UPLOAD_MAX_FILES = 1024;
 var UPLOAD_MAX_BASE64_BYTES = 16 * 1024 * 1024;
@@ -109894,7 +109609,7 @@ var UploadStore = class {
   async remove(uploadId) {
     const paths = this.batches.get(uploadId) ?? [];
     this.batches.delete(uploadId);
-    await Promise.all(paths.map((path3) => unlink4(path3).catch((error61) => {
+    await Promise.all(paths.map((path3) => unlink5(path3).catch((error61) => {
       if (error61.code !== "ENOENT") throw error61;
     })));
   }
@@ -109988,20 +109703,49 @@ async function spawnChild(options, diagnostics) {
   const pid = child.pid;
   const childInstanceId = randomUUID14();
   const childRole = basename7(options.executable).replace(/[^A-Za-z0-9_.-]/g, "_").slice(0, 64) || "child";
-  diagnostics?.record("info", "child.spawn", { childInstanceId, childRole, childPid: pid });
+  let stdoutTail = Buffer.alloc(0), stderrTail = Buffer.alloc(0);
+  const retainTail = (current, chunk) => {
+    const next = Buffer.concat([current, Buffer.from(chunk)]);
+    return next.byteLength <= DIAGNOSTIC_CHILD_TAIL_BYTES ? next : next.subarray(next.byteLength - DIAGNOSTIC_CHILD_TAIL_BYTES);
+  };
+  setImmediate(() => {
+    child.stdout?.on("data", (chunk) => {
+      stdoutTail = retainTail(stdoutTail, chunk);
+    });
+    child.stderr?.on("data", (chunk) => {
+      stderrTail = retainTail(stderrTail, chunk);
+    });
+  });
+  diagnostics?.record("info", "child.spawn", {
+    childInstanceId,
+    childRole,
+    childPid: pid,
+    executable: options.executable,
+    argv: [...options.args],
+    cwd: options.cwd,
+    environment: { ...options.environment },
+    stdio: options.stdio
+  });
   void exited.then((result) => diagnostics?.record(result.code === 0 ? "info" : "warn", "child.exit", {
     childInstanceId,
     childRole,
     childPid: pid,
     exitCode: result.code,
     signal: result.signal,
-    outcome: result.code === 0 ? "success" : "error"
+    outcome: result.code === 0 ? "success" : "error",
+    stdoutTail: stdoutTail.toString("utf8"),
+    stderrTail: stderrTail.toString("utf8"),
+    stdoutTailBytes: stdoutTail.byteLength,
+    stderrTailBytes: stderrTail.byteLength
   }), (error61) => diagnostics?.record("error", "child.exit", {
     childInstanceId,
     childRole,
     childPid: pid,
     outcome: "error",
-    errorCode: error61?.code ?? "child_exit_failed"
+    errorCode: error61?.code ?? "child_exit_failed",
+    error: diagnosticError(error61),
+    stdoutTail: stdoutTail.toString("utf8"),
+    stderrTail: stderrTail.toString("utf8")
   }));
   let stopping;
   const onSignal = (signal) => diagnostics?.record(signal === "SIGKILL" ? "warn" : "info", signal === "SIGKILL" ? "child.kill" : "child.term", {
@@ -110021,7 +109765,8 @@ async function spawnChild(options, diagnostics) {
         childRole,
         childPid: pid,
         outcome: "error",
-        errorCode: error61?.code ?? "child_cleanup_failed"
+        errorCode: error61?.code ?? "child_cleanup_failed",
+        error: diagnosticError(error61)
       });
       throw error61;
     }
@@ -110076,7 +109821,8 @@ async function createProcessScope(_resources, diagnostics) {
               childRole: child.diagnosticRole,
               childPid: child.pid,
               outcome: "error",
-              errorCode: error61?.code ?? "ordinary_exit_cleanup_failed"
+              errorCode: error61?.code ?? "ordinary_exit_cleanup_failed",
+              error: diagnosticError(error61)
             });
           } finally {
             children.delete(child);
@@ -110100,7 +109846,8 @@ async function createProcessScope(_resources, diagnostics) {
         if (errors.length) diagnostics?.record("error", "process_scope.cleanup_failed", {
           count: errors.length,
           outcome: "error",
-          errorCode: "process_cleanup_failed"
+          errorCode: "process_cleanup_failed",
+          errors: errors.map((error61) => diagnosticError(error61))
         });
         if (errors.length) throw new AggregateError(errors, "could not stop owned processes");
       })();
@@ -110109,8 +109856,8 @@ async function createProcessScope(_resources, diagnostics) {
 }
 
 // src/sessions.ts
-import { createHash as createHash8, randomBytes as randomBytes5, randomUUID as randomUUID15 } from "node:crypto";
-import { readdir as readdir4, realpath as realpath9, unlink as unlink5 } from "node:fs/promises";
+import { createHash as createHash8, randomBytes as randomBytes4, randomUUID as randomUUID15 } from "node:crypto";
+import { readdir as readdir4, realpath as realpath9, unlink as unlink6 } from "node:fs/promises";
 import { basename as basename8, dirname as dirname8, join as join19, resolve as resolve13 } from "node:path";
 
 // src/backend-client.ts
@@ -110147,8 +109894,8 @@ async function acquireNotebookOwnership(options) {
   let origin = options.origin ?? "http://127.0.0.1:0";
   let browserOrigin = origin;
   const epoch = options.epoch ?? randomUUID15();
-  const continuityProof = options.continuityProof ?? randomBytes5(32).toString("hex");
-  const token = options.token ?? randomBytes5(32).toString("hex");
+  const continuityProof = options.continuityProof ?? randomBytes4(32).toString("hex");
+  const token = options.token ?? randomBytes4(32).toString("hex");
   const ownership = {
     get sessionKey() {
       return sessionKey;
@@ -110245,7 +109992,7 @@ async function retireUntitledRecoveryDescriptor(expected, dataRoot) {
   if (!current) return;
   if (JSON.stringify(current) !== JSON.stringify(expected)) throw new SessionUnavailableError("untitled recovery descriptor changed before retirement", { id: id2 });
   await verifyPrivateFile(path3);
-  await unlink5(path3).catch((error61) => {
+  await unlink6(path3).catch((error61) => {
     if (error61.code !== "ENOENT") throw error61;
   });
 }
@@ -110396,7 +110143,14 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
   const options = optionsSchema.parse({ ...input2, path: storagePath });
   const diagnostics = options.diagnostics;
   const hostStartedAt = performance.now();
-  diagnostics?.record("info", "host.launch", { cold: true });
+  diagnostics?.record("info", "host.launch", {
+    cold: true,
+    path: options.path,
+    session: options.session ?? null,
+    executionMode: options.executionMode ?? null,
+    suppressStartup: options.suppressStartup ?? false,
+    resources: options.resources
+  });
   const browserOriginHost = createOriginHost();
   let isUntitled = unsaved;
   const declaredProjectDirectory = options.session?.projectDirectory ?? process.env.ALDER_UNTITLED_PROJECT_DIRECTORY;
@@ -110895,7 +110649,10 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
             operationId: request.operationId ?? null,
             kind: request.kind,
             outcome: "error",
-            errorCode: error61 instanceof FileConflict ? "source_conflict" : error61?.code ?? "source_write_failed"
+            errorCode: error61 instanceof FileConflict ? "source_conflict" : error61?.code ?? "source_write_failed",
+            error: diagnosticError(error61),
+            path: context.path,
+            document: context.document
           });
           if (error61 instanceof FileConflict) throw error61;
           const diskError = asHostError(error61, "source_write_failed", request.operationId);
@@ -111701,7 +111458,8 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
           });
           diagnostics?.record("info", "r.environment.ready", {
             durationMs: Math.round(performance.now() - runtimeStartedAt),
-            runtimeVersion: selected.version
+            runtimeVersion: selected.version,
+            environment: selected
           });
           if (closing || bootstrapGeneration !== runtimeBootstrapGeneration || bootstrapUntitled !== isUntitled || bootstrapDirectory !== notebookDirectory) {
             rejectBootstrapReady(new Error("runtime bootstrap superseded"));
@@ -111718,7 +111476,10 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
           diagnostics?.record("error", "r.runtime.failure", {
             phase: "environment",
             outcome: "error",
-            errorCode: error61?.code ?? "r_environment_failed"
+            errorCode: error61?.code ?? "r_environment_failed",
+            error: diagnosticError(error61),
+            rscript: selectedRscript,
+            projectDirectory: bootstrapDirectory
           });
           controller.recordRuntimeAvailabilityError(asRuntimeHostError(error61));
           rejectBootstrapReady(error61);
@@ -111734,13 +111495,18 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
             durationMs: Math.round(performance.now() - runtimeStartedAt),
             analyzerState: runtime.analyzerState,
             kernelState: runtime.kernelState,
-            executionReady: runtime.executionReady
+            executionReady: runtime.executionReady,
+            environment: selected,
+            engineIdentity
           });
         } catch (error61) {
           diagnostics?.record("error", "r.runtime.failure", {
             phase: "startup",
             outcome: "error",
-            errorCode: error61?.code ?? "r_start_failed"
+            errorCode: error61?.code ?? "r_start_failed",
+            error: diagnosticError(error61),
+            environment: selected,
+            projectDirectory: bootstrapDirectory
           });
           rejectBootstrapReady(error61);
           await nextManager.close().catch(() => {
@@ -111796,7 +111562,9 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
       outcome: "error",
       errorCode: error61?.code ?? "host_start_failed",
       errorType: error61 instanceof Error ? error61.name : "unknown",
-      durationMs: Math.round(performance.now() - hostStartedAt)
+      durationMs: Math.round(performance.now() - hostStartedAt),
+      error: diagnosticError(error61),
+      path: options.path
     });
     try {
       await close();
@@ -111826,7 +111594,9 @@ async function createLsp(generation, currentGeneration, controller, engine, runt
     diagnostics?.record("error", "lsp.failure", {
       outcome: "error",
       errorCode: error61?.code ?? "lsp_unavailable",
-      durationMs: Math.round(performance.now() - startedAt)
+      durationMs: Math.round(performance.now() - startedAt),
+      error: diagnosticError(error61),
+      notebookDirectory
     });
     await client.stop().catch(() => {
     });
@@ -111874,7 +111644,8 @@ async function exitAfterBackendFatal(event, error61) {
     const fields = {
       outcome: "error",
       errorCode: error61?.code ?? (event === "backend.fatal" ? "backend_fatal" : event === "backend.unhandled_rejection" ? "unhandled_rejection" : "uncaught_exception"),
-      errorType: error61 instanceof Error ? error61.name : "other"
+      errorType: error61 instanceof Error ? error61.name : typeof error61,
+      error: diagnosticError(error61)
     };
     const emergency = await persistEmergencyDiagnostic({
       rootDir: diagnostics.status().rootDir,
@@ -111931,7 +111702,8 @@ var NotebookBackend = class {
       sessionId: options.sessionKey,
       sessionEpoch: host.ownership.epoch,
       cold,
-      documentId: options.path === null ? options.sessionKey : await this.diagnostics.hashIdentity(options.path)
+      documentId: options.path ?? options.sessionKey,
+      path: options.path
     });
     if (host.ownership.canonicalPath !== null) {
       for (const [stored, value] of this.hosts) if (value === host && stored !== "path:" + host.ownership.canonicalPath) this.hosts.delete(stored);
@@ -111969,7 +111741,9 @@ var NotebookBackend = class {
         },
         diagnostics: this.diagnostics?.child({
           sessionId: options.sessionKey,
-          documentId: options.path === null ? options.sessionKey : await this.diagnostics.hashIdentity(options.path)
+          documentId: options.path ?? options.sessionKey,
+          path: options.path,
+          projectDirectory: options.projectDirectory
         })
       });
       const key2 = host.ownership.canonicalPath === null ? "untitled:" + host.ownership.sessionKey : "path:" + host.ownership.canonicalPath;
@@ -111997,9 +111771,9 @@ var NotebookBackend = class {
 };
 async function serve(socketPath2) {
   const root = resolve15(dirname10(fileURLToPath(import.meta.url)), "..");
-  const diagnosticsRoot = process.env.ALDER_DIAGNOSTICS_DIR ?? join21(envPaths("alder", { suffix: "" }).data, "diagnostics");
+  const diagnosticDirectory = diagnosticsRoot();
   const diagnostics = new StructuredDiagnostics({
-    rootDir: diagnosticsRoot,
+    rootDir: diagnosticDirectory,
     role: "backend",
     component: "backend",
     appLaunchId: process.env.ALDER_APP_LAUNCH_ID,

@@ -3,12 +3,11 @@ import { randomUUID } from "node:crypto";
 import { chmod, mkdir, readFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import envPaths from "env-paths";
 import { ApplicationPreferences } from "./preferences.js";
 import { startHost, type RunningHost } from "./application.js";
 import { resolveApplicationResources, type ApplicationResources } from "./resources.js";
 import type { BackendSessionDescriptor, HostLaunchOptions } from "./sessions.js";
-import { StructuredDiagnostics, drainDiagnosticsBounded, persistEmergencyDiagnostic } from "./diagnostics.js";
+import { StructuredDiagnostics, diagnosticError, diagnosticsRoot, drainDiagnosticsBounded, persistEmergencyDiagnostic } from "./diagnostics.js";
 
 let activeBackendDiagnostics: StructuredDiagnostics | undefined;
 let handlingBackendFatal = false;
@@ -20,7 +19,8 @@ async function exitAfterBackendFatal(event: "backend.fatal" | "backend.uncaught_
   if (diagnostics) {
     const fields = {
       outcome: "error", errorCode: (error as NodeJS.ErrnoException)?.code ?? (event === "backend.fatal" ? "backend_fatal" : event === "backend.unhandled_rejection" ? "unhandled_rejection" : "uncaught_exception"),
-      errorType: error instanceof Error ? error.name : "other",
+      errorType: error instanceof Error ? error.name : typeof error,
+      error: diagnosticError(error),
     } as const;
     const emergency = await persistEmergencyDiagnostic({
       rootDir: diagnostics.status().rootDir, role: "backend", component: "backend", event, fields,
@@ -58,7 +58,7 @@ export class NotebookBackend {
     }
     this.diagnostics?.record("info", "backend.session.open", {
       sessionId: options.sessionKey, sessionEpoch: host.ownership.epoch, cold,
-      documentId: options.path === null ? options.sessionKey : await this.diagnostics!.hashIdentity(options.path),
+      documentId: options.path ?? options.sessionKey, path: options.path,
     });
     if (host.ownership.canonicalPath !== null) {
       for (const [stored, value] of this.hosts) if (value === host && stored !== "path:" + host.ownership.canonicalPath) this.hosts.delete(stored);
@@ -97,7 +97,9 @@ export class NotebookBackend {
         },
         diagnostics: this.diagnostics?.child({
           sessionId: options.sessionKey,
-          documentId: options.path === null ? options.sessionKey : await this.diagnostics!.hashIdentity(options.path),
+          documentId: options.path ?? options.sessionKey,
+          path: options.path,
+          projectDirectory: options.projectDirectory,
         }),
       });
       const key = host.ownership.canonicalPath === null ? "untitled:" + host.ownership.sessionKey : "path:" + host.ownership.canonicalPath;
@@ -125,9 +127,9 @@ export class NotebookBackend {
 
 async function serve(socketPath: string): Promise<void> {
   const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-  const diagnosticsRoot = process.env.ALDER_DIAGNOSTICS_DIR ?? join(envPaths("alder", { suffix: "" }).data, "diagnostics");
+  const diagnosticDirectory = diagnosticsRoot();
   const diagnostics = new StructuredDiagnostics({
-    rootDir: diagnosticsRoot,
+    rootDir: diagnosticDirectory,
     role: "backend", component: "backend", appLaunchId: process.env.ALDER_APP_LAUNCH_ID,
     backendInstanceId: randomUUID(), appVersion: process.env.ALDER_APP_VERSION,
     buildId: process.env.ALDER_BUILD_ID,

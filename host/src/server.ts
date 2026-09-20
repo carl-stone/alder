@@ -7,7 +7,7 @@ import { extname, join, resolve, sep } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { URL } from "node:url";
 import { WebSocket, WebSocketServer, type RawData } from "ws";
-import type { DiagnosticSink } from "./diagnostics.js";
+import { diagnosticError, type DiagnosticSink } from "./diagnostics.js";
 import {
   ARTIFACT_DESCRIPTOR_HEADER,
   ARTIFACT_RESOLUTION_MEDIA_TYPE,
@@ -1526,6 +1526,7 @@ export function createAlderServer(options: AlderServerOptions): AlderServer {
         kind, mimeFamily: family, bytes: Number.isSafeInteger(declaredBytes) && declaredBytes >= 0 ? declaredBytes : null,
         status: detail.status, errorCode: detail.code,
         outcome: "error",
+        error: diagnosticError(error), method: request.method, url: request.url, headers: request.headers,
       });
       if (response.writableEnded || response.destroyed) return;
       if (!response.headersSent) failResponse(response, error);

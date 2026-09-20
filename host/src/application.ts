@@ -3,7 +3,7 @@ import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import envPaths from "env-paths";
-import type { DiagnosticSink } from "./diagnostics.js";
+import { diagnosticError, type DiagnosticSink } from "./diagnostics.js";
 import { watch, type FSWatcher } from "chokidar";
 import { z } from "zod";
 import { Controller, type SourceCommitContext, type SourceCommitHandler, type SourcePublication } from "./controller.js";
@@ -147,7 +147,11 @@ async function startNotebookHost(
   const options = optionsSchema.parse({ ...input, path: storagePath });
   const diagnostics = options.diagnostics;
   const hostStartedAt = performance.now();
-  diagnostics?.record("info", "host.launch", { cold: true });
+  diagnostics?.record("info", "host.launch", {
+    cold: true, path: options.path, session: options.session ?? null,
+    executionMode: options.executionMode ?? null, suppressStartup: options.suppressStartup ?? false,
+    resources: options.resources,
+  });
   const browserOriginHost = createOriginHost();
   let isUntitled = unsaved;
   const declaredProjectDirectory = options.session?.projectDirectory ?? process.env.ALDER_UNTITLED_PROJECT_DIRECTORY;
@@ -635,6 +639,7 @@ async function startNotebookHost(
           diagnostics?.record(error instanceof FileConflict ? "warn" : "error", error instanceof FileConflict ? "persistence.conflict" : "persistence.failure", {
             operationId: request.operationId ?? null, kind: request.kind, outcome: "error",
             errorCode: error instanceof FileConflict ? "source_conflict" : (error as NodeJS.ErrnoException)?.code ?? "source_write_failed",
+            error: diagnosticError(error), path: context.path, document: context.document,
           });
           if (error instanceof FileConflict) throw error;
           const diskError = asHostError(error, "source_write_failed", request.operationId);
@@ -1370,6 +1375,7 @@ async function startNotebookHost(
           });
           diagnostics?.record("info", "r.environment.ready", {
             durationMs: Math.round(performance.now() - runtimeStartedAt), runtimeVersion: selected.version,
+            environment: selected,
           });
           if (closing || bootstrapGeneration !== runtimeBootstrapGeneration || bootstrapUntitled !== isUntitled || bootstrapDirectory !== notebookDirectory) {
             rejectBootstrapReady(new Error("runtime bootstrap superseded"));
@@ -1385,6 +1391,7 @@ async function startNotebookHost(
           runtimeError = error;
           diagnostics?.record("error", "r.runtime.failure", {
             phase: "environment", outcome: "error", errorCode: (error as NodeJS.ErrnoException)?.code ?? "r_environment_failed",
+            error: diagnosticError(error), rscript: selectedRscript, projectDirectory: bootstrapDirectory,
           });
           controller!.recordRuntimeAvailabilityError(asRuntimeHostError(error)!);
           rejectBootstrapReady(error);
@@ -1399,10 +1406,12 @@ async function startNotebookHost(
           diagnostics?.record("info", "r.runtime.ready", {
             durationMs: Math.round(performance.now() - runtimeStartedAt), analyzerState: runtime.analyzerState,
             kernelState: runtime.kernelState, executionReady: runtime.executionReady,
+            environment: selected, engineIdentity,
           });
         } catch (error) {
           diagnostics?.record("error", "r.runtime.failure", {
             phase: "startup", outcome: "error", errorCode: (error as NodeJS.ErrnoException)?.code ?? "r_start_failed",
+            error: diagnosticError(error), environment: selected, projectDirectory: bootstrapDirectory,
           });
           rejectBootstrapReady(error);
           await nextManager.close().catch(() => {});
@@ -1450,6 +1459,7 @@ async function startNotebookHost(
       outcome: "error", errorCode: (error as { code?: string })?.code ?? "host_start_failed",
       errorType: error instanceof Error ? error.name : "unknown",
       durationMs: Math.round(performance.now() - hostStartedAt),
+      error: diagnosticError(error), path: options.path,
     });
     try { await close(); } catch (cleanup) { throw new AggregateError([error, cleanup], "Alder startup and cleanup failed"); } throw error;
   }
@@ -1477,6 +1487,7 @@ async function createLsp(generation: number, currentGeneration: () => number, co
     diagnostics?.record("error", "lsp.failure", {
       outcome: "error", errorCode: (error as NodeJS.ErrnoException)?.code ?? "lsp_unavailable",
       durationMs: Math.round(performance.now() - startedAt),
+      error: diagnosticError(error), notebookDirectory,
     });
     await client.stop().catch(() => {});
     throw error;

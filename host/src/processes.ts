@@ -4,7 +4,7 @@ import { once } from "node:events";
 import { basename } from "node:path";
 import type { Readable, Writable } from "node:stream";
 import type { ApplicationResources } from "./resources.js";
-import type { DiagnosticSink } from "./diagnostics.js";
+import { DIAGNOSTIC_CHILD_TAIL_BYTES, diagnosticError, type DiagnosticSink } from "./diagnostics.js";
 
 export interface ProcessSpawnOptions {
   executable: string;
@@ -112,13 +112,29 @@ async function spawnChild(options: ProcessSpawnOptions, diagnostics?: Diagnostic
   const pid = child.pid!;
   const childInstanceId = randomUUID();
   const childRole = basename(options.executable).replace(/[^A-Za-z0-9_.-]/g, "_").slice(0, 64) || "child";
-  diagnostics?.record("info", "child.spawn", { childInstanceId, childRole, childPid: pid });
+  let stdoutTail: Buffer<ArrayBufferLike> = Buffer.alloc(0), stderrTail: Buffer<ArrayBufferLike> = Buffer.alloc(0);
+  const retainTail = (current: Buffer<ArrayBufferLike>, chunk: Buffer<ArrayBufferLike>): Buffer<ArrayBufferLike> => {
+    const next = Buffer.concat([current, Buffer.from(chunk)]);
+    return next.byteLength <= DIAGNOSTIC_CHILD_TAIL_BYTES ? next : next.subarray(next.byteLength - DIAGNOSTIC_CHILD_TAIL_BYTES);
+  };
+  setImmediate(() => {
+    child.stdout?.on("data", (chunk: Buffer) => { stdoutTail = retainTail(stdoutTail, chunk); });
+    child.stderr?.on("data", (chunk: Buffer) => { stderrTail = retainTail(stderrTail, chunk); });
+  });
+  diagnostics?.record("info", "child.spawn", {
+    childInstanceId, childRole, childPid: pid,
+    executable: options.executable, argv: [...options.args], cwd: options.cwd,
+    environment: { ...options.environment }, stdio: options.stdio,
+  });
   void exited.then(result => diagnostics?.record(result.code === 0 ? "info" : "warn", "child.exit", {
     childInstanceId, childRole, childPid: pid, exitCode: result.code, signal: result.signal,
     outcome: result.code === 0 ? "success" : "error",
+    stdoutTail: stdoutTail.toString("utf8"), stderrTail: stderrTail.toString("utf8"),
+    stdoutTailBytes: stdoutTail.byteLength, stderrTailBytes: stderrTail.byteLength,
   }), error => diagnostics?.record("error", "child.exit", {
     childInstanceId, childRole, childPid: pid, outcome: "error",
     errorCode: (error as NodeJS.ErrnoException)?.code ?? "child_exit_failed",
+    error: diagnosticError(error), stdoutTail: stdoutTail.toString("utf8"), stderrTail: stderrTail.toString("utf8"),
   }));
   let stopping: Promise<void> | undefined;
   const onSignal = (signal: "SIGTERM" | "SIGKILL"): void => diagnostics?.record(signal === "SIGKILL" ? "warn" : "info", signal === "SIGKILL" ? "child.kill" : "child.term", {
@@ -132,6 +148,7 @@ async function spawnChild(options: ProcessSpawnOptions, diagnostics?: Diagnostic
       diagnostics?.record("error", "child.cleanup_failed", {
         childInstanceId, childRole, childPid: pid, outcome: "error",
         errorCode: (error as NodeJS.ErrnoException)?.code ?? "child_cleanup_failed",
+        error: diagnosticError(error),
       });
       throw error;
     }
@@ -174,6 +191,7 @@ export async function createProcessScope(_resources?: ApplicationResources, diag
             diagnostics?.record("error", "child.cleanup_failed", {
               childInstanceId: child.diagnosticId, childRole: child.diagnosticRole, childPid: child.pid, outcome: "error",
               errorCode: (error as NodeJS.ErrnoException)?.code ?? "ordinary_exit_cleanup_failed",
+              error: diagnosticError(error),
             });
           } finally { children.delete(child); }
         }).catch(() => {});
@@ -192,6 +210,7 @@ export async function createProcessScope(_resources?: ApplicationResources, diag
         const errors = stopped.filter(result => result.status === "rejected").map(result => result.reason);
         if (errors.length) diagnostics?.record("error", "process_scope.cleanup_failed", {
           count: errors.length, outcome: "error", errorCode: "process_cleanup_failed",
+          errors: errors.map(error => diagnosticError(error)),
         });
         if (errors.length) throw new AggregateError(errors, "could not stop owned processes");
       })();

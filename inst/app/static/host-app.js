@@ -21108,7 +21108,16 @@ var visibleResultDiagnosticSchema = external_exports.object({
 }).strict();
 var rendererFailureDiagnosticSchema = external_exports.object({
   event: external_exports.enum(["renderer.error", "renderer.unhandled_rejection", "renderer.bootstrap_failed"]),
-  category: external_exports.enum(["script-error", "unhandled-rejection", "bootstrap-failed"])
+  category: external_exports.enum(["script-error", "unhandled-rejection", "bootstrap-failed"]),
+  error: external_exports.object({
+    name: boundedUtf8StringSchema(1024, true),
+    message: boundedUtf8StringSchema(MAX_FRAME_BYTES, true),
+    stack: boundedUtf8StringSchema(MAX_FRAME_BYTES, true).nullable(),
+    cause: protocolJsonSchema
+  }).strict(),
+  filename: boundedUtf8StringSchema(MAX_FRAME_BYTES, true).nullable(),
+  line: protocolIntegerSchema.nullable(),
+  column: protocolIntegerSchema.nullable()
 }).strict();
 var desktopDiagnosticSchema = external_exports.discriminatedUnion("event", [visibleResultDiagnosticSchema, rendererFailureDiagnosticSchema]);
 var desktopRecoveryRequestSchema = external_exports.object({
@@ -27113,14 +27122,50 @@ async function start() {
   await next.connect();
   await globalThis.alderDesktop?.rendererReady();
 }
-function reportRendererFailure(event, category) {
-  const desktop = globalThis.alderDesktop;
-  void desktop?.reportDiagnostic({ event, category }).catch(() => void 0);
+function rendererJson(value, seen = /* @__PURE__ */ new Set()) {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return value;
+  if (typeof value === "number") return Number.isFinite(value) ? value : String(value);
+  if (typeof value === "undefined") return null;
+  if (value instanceof Error) return rendererError(value, seen);
+  if (typeof value !== "object") return String(value);
+  if (seen.has(value)) return "[Circular]";
+  seen.add(value);
+  const output2 = Array.isArray(value) ? value.map((item) => rendererJson(item, seen)) : Object.fromEntries(Object.entries(value).map(([key, item]) => [key, rendererJson(item, seen)]));
+  seen.delete(value);
+  return output2;
 }
-window.addEventListener("error", () => reportRendererFailure("renderer.error", "script-error"));
-window.addEventListener("unhandledrejection", () => reportRendererFailure("renderer.unhandled_rejection", "unhandled-rejection"));
+function rendererError(value, seen = /* @__PURE__ */ new Set()) {
+  if (value instanceof Error) {
+    if (seen.has(value)) return { name: value.name, message: value.message, stack: value.stack ?? null, cause: "[Circular error cause]" };
+    seen.add(value);
+    return {
+      name: value.name,
+      message: value.message,
+      stack: value.stack ?? null,
+      cause: value.cause === void 0 ? null : rendererJson(value.cause, seen)
+    };
+  }
+  return { name: typeof value, message: String(value), stack: null, cause: null };
+}
+function reportRendererFailure(event, category, value, location2 = {}) {
+  const desktop = globalThis.alderDesktop;
+  void desktop?.reportDiagnostic({
+    event,
+    category,
+    error: rendererError(value),
+    filename: location2.filename ?? null,
+    line: location2.line ?? null,
+    column: location2.column ?? null
+  }).catch(() => void 0);
+}
+window.addEventListener("error", (event) => reportRendererFailure("renderer.error", "script-error", event.error ?? event.message, {
+  filename: event.filename,
+  line: event.lineno,
+  column: event.colno
+}));
+window.addEventListener("unhandledrejection", (event) => reportRendererFailure("renderer.unhandled_rejection", "unhandled-rejection", event.reason));
 void start().catch((error61) => {
-  reportRendererFailure("renderer.bootstrap_failed", "bootstrap-failed");
+  reportRendererFailure("renderer.bootstrap_failed", "bootstrap-failed", error61);
   view?.showError(error61);
 });
 function recoveryIdentity() {

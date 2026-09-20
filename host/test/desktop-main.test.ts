@@ -586,6 +586,34 @@ test("native recovery IPC accepts the owning main frame and keeps its recovery i
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("renderer failures retain their exact stack, cause, and source location", async () => {
+  const diagnosticRoot = await mkdtemp(join(tmpdir(), "alder-renderer-diagnostics-"));
+  const diagnostics = new StructuredDiagnostics({ rootDir: diagnosticRoot, role: "desktop", flushDelayMs: 0, stderr: null });
+  const window = windowWithLoad();
+  const handlers = new Map<string, (event: unknown, ...args: unknown[]) => unknown>();
+  const electronRuntime = runtime();
+  electronRuntime.BrowserWindow.fromWebContents = sender => sender === window.webContents ? window : null;
+  electronRuntime.ipcMain.handle = (channel, handler) => { handlers.set(channel, handler); };
+  const main = new ElectronMain(electronRuntime, { resources, diagnostics });
+  recordFor(main, connection("renderer-failure", "/Users/carl/notebooks/raw.R", async () => jsonResponse({})), window);
+  (main as any).installIpcHandlers();
+  const report = handlers.get("alderDesktop:diagnostic")!;
+  await report({ sender: window.webContents, senderFrame: window.webContents.mainFrame }, {
+    event: "renderer.error", category: "script-error",
+    error: { name: "Error", message: "renderer exploded", stack: "RAW_RENDERER_STACK\n at /Users/carl/notebooks/raw.R:14:9", cause: { message: "RAW_CAUSE", code: "E_RENDER" } },
+    filename: "/Users/carl/notebooks/raw.R", line: 14, column: 9,
+  });
+  await diagnostics.flush();
+  const diagnosticFiles = (await readdir(diagnosticRoot)).filter(name => name.endsWith(".jsonl"));
+  const records = (await Promise.all(diagnosticFiles.map(name => readFile(join(diagnosticRoot, name), "utf8"))))
+    .join("").trim().split("\n").map(line => JSON.parse(line));
+  const failure = records.find(record => record.event === "renderer.error");
+  assert.deepEqual(failure.error, { name: "Error", message: "renderer exploded", stack: "RAW_RENDERER_STACK\n at /Users/carl/notebooks/raw.R:14:9", cause: { message: "RAW_CAUSE", code: "E_RENDER" } });
+  assert.deepEqual({ filename: failure.filename, line: failure.line, column: failure.column }, { filename: "/Users/carl/notebooks/raw.R", line: 14, column: 9 });
+  await main.stop();
+  await rm(diagnosticRoot, { recursive: true, force: true });
+});
+
 test("typed renderer state drives native edited state and represented filename", async () => {
   const path = "/tmp/alder-native-document.R";
   const window = windowWithLoad();

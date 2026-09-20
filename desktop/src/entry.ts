@@ -1,7 +1,7 @@
 import { app, dialog } from "electron";
 import { join } from "node:path";
 import { startPackagedElectronMain } from "./main.js";
-import { StructuredDiagnostics, drainDiagnosticsBounded, persistEmergencyDiagnostic } from "../../host/src/diagnostics.js";
+import { StructuredDiagnostics, diagnosticError, drainDiagnosticsBounded, persistEmergencyDiagnostic } from "../../host/src/diagnostics.js";
 
 let handlingFatal = false;
 let diagnostics: StructuredDiagnostics | undefined;
@@ -18,7 +18,8 @@ async function fatal(event: "desktop.fatal" | "desktop.uncaught_exception" | "de
     });
     const fields = {
       outcome: "error", errorCode: (error as NodeJS.ErrnoException)?.code ?? (event === "desktop.fatal" ? "desktop_start_failed" : event === "desktop.unhandled_rejection" ? "unhandled_rejection" : "uncaught_exception"),
-      errorType: error instanceof Error ? error.name : "other",
+      errorType: error instanceof Error ? error.name : typeof error,
+      error: diagnosticError(error),
     } as const;
     const emergency = await persistEmergencyDiagnostic({ rootDir: diagnosticsRoot, role: "desktop", component: "desktop", event, fields })
       .then(() => true, () => false);
