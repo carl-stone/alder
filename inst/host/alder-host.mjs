@@ -7797,7 +7797,7 @@ var require_graceful_fs = __commonJS({
     function patch(fs2) {
       polyfills(fs2);
       fs2.gracefulify = patch;
-      fs2.createReadStream = createReadStream2;
+      fs2.createReadStream = createReadStream;
       fs2.createWriteStream = createWriteStream;
       var fs$readFile = fs2.readFile;
       fs2.readFile = readFile3;
@@ -8007,7 +8007,7 @@ var require_graceful_fs = __commonJS({
           }
         });
       }
-      function createReadStream2(path2, options) {
+      function createReadStream(path2, options) {
         return new fs2.ReadStream(path2, options);
       }
       function createWriteStream(path2, options) {
@@ -34710,10 +34710,8 @@ function recoverRequestId(input2) {
 }
 
 // src/diagnostics.ts
-import { createReadStream } from "node:fs";
 import { appendFile, chmod, copyFile, mkdir, open as open2, readdir, readFile, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
-import { createInterface } from "node:readline";
 
 // node_modules/env-paths/index.js
 import path from "node:path";
@@ -34853,9 +34851,10 @@ function diagnosticValue(value, seen = /* @__PURE__ */ new Set()) {
   return output2;
 }
 function segmentInfo(name) {
+  if (/^diagnostics-record-.*\.json$/.test(name)) return { active: false, pid: null, format: "record" };
   if (!/^diagnostics-.*\.jsonl$/.test(name)) return null;
   const match = /^diagnostics-active-[a-z]+-(\d+)-.*\.jsonl$/.exec(name);
-  return { active: match !== null, pid: match ? Number(match[1]) : null };
+  return { active: match !== null, pid: match ? Number(match[1]) : null, format: "jsonl" };
 }
 function pidAlive(pid) {
   try {
@@ -34887,23 +34886,27 @@ async function listSegments(rootDir) {
   }
   return entries;
 }
+function diagnosticQueryRange(options) {
+  const since = options.since === void 0 ? Number.NEGATIVE_INFINITY : Date.parse(options.since);
+  const until = options.until === void 0 ? Number.POSITIVE_INFINITY : Date.parse(options.until);
+  if (!Number.isFinite(since) && since !== Number.NEGATIVE_INFINITY) throw new Error("--since must be a valid ISO timestamp");
+  if (!Number.isFinite(until) && until !== Number.POSITIVE_INFINITY) throw new Error("--until must be a valid ISO timestamp");
+  if (since > until) throw new Error("--since must not be later than --until");
+  return { since, until };
+}
 async function readStore(rootDir, options) {
-  const since = options.since ? Date.parse(options.since) : Number.NEGATIVE_INFINITY;
-  const until = options.until ? Date.parse(options.until) : Number.POSITIVE_INFINITY;
-  if (Number.isNaN(since) || Number.isNaN(until) || since > until) throw new Error("invalid diagnostic query time range");
+  const { since, until } = diagnosticQueryRange(options);
   const records = [];
-  let malformedRecords = 0, scannedRecords = 0, truncated = false;
-  const entries = (await listSegments(rootDir)).sort((a, b) => a.mtimeMs - b.mtimeMs);
+  let malformedRecords = 0, scannedRecords = 0, examinedRecords = 0, truncated = false;
+  const entries = (await listSegments(rootDir)).sort((a, b) => b.mtimeMs - a.mtimeMs);
   outer: for (const entry2 of entries) {
-    const lines = createInterface({ input: createReadStream(entry2.path), crlfDelay: Infinity });
-    for await (const line of lines) {
+    if (entry2.mtimeMs < since) continue;
+    const contents = await readFile(entry2.path, "utf8");
+    if (options.id !== void 0 && !contents.includes(JSON.stringify(options.id))) continue;
+    const lines = entry2.format === "record" ? [contents] : contents.split("\n").reverse();
+    for (const line of lines) {
       if (!line.trim()) continue;
-      scannedRecords++;
-      if (scannedRecords > QUERY_RECORD_LIMIT) {
-        truncated = true;
-        lines.close();
-        break outer;
-      }
+      examinedRecords++;
       let record3;
       try {
         record3 = JSON.parse(line);
@@ -34917,11 +34920,17 @@ async function readStore(rootDir, options) {
       }
       const timestamp = Date.parse(record3.timestamp);
       if (!Number.isFinite(timestamp) || timestamp < since || timestamp > until) continue;
+      if (options.id !== void 0 && !containsExact(record3, options.id)) continue;
+      if (scannedRecords >= QUERY_RECORD_LIMIT) {
+        truncated = true;
+        break outer;
+      }
+      scannedRecords++;
       records.push(record3);
     }
   }
   records.sort(compareRecords);
-  return { records, malformedRecords, scannedRecords: Math.min(scannedRecords, QUERY_RECORD_LIMIT), truncated };
+  return { records, malformedRecords, scannedRecords, examinedRecords, truncated };
 }
 function compareRecords(a, b) {
   return String(a.timestamp).localeCompare(String(b.timestamp)) || String(a.process?.instanceId ?? "").localeCompare(String(b.process?.instanceId ?? "")) || Number(a.eventSequence ?? 0) - Number(b.eventSequence ?? 0);
@@ -34937,6 +34946,7 @@ function limited(values, limit) {
   return values.slice(Math.max(0, values.length - limit));
 }
 async function queryDiagnostics(query, options = {}) {
+  diagnosticQueryRange(options);
   const rootDir = resolve(options.rootDir ?? diagnosticsRoot());
   const limit = Math.max(1, Math.min(1e4, options.limit ?? 100));
   const rootInfo = await stat(rootDir).catch(() => null);
@@ -34953,10 +34963,11 @@ async function queryDiagnostics(query, options = {}) {
     activeWriters: entries.filter((entry2) => entry2.active && entry2.pid !== null && pidAlive(entry2.pid)).length,
     statuses: statusFiles
   };
-  const store = await readStore(rootDir, options).catch((error61) => ({ records: [], malformedRecords: 0, scannedRecords: 0, truncated: false, readError: diagnosticError(error61) }));
+  const store = await readStore(rootDir, query === "incident" ? options : { ...options, id: void 0 }).catch((error61) => ({ records: [], malformedRecords: 0, scannedRecords: 0, examinedRecords: 0, truncated: false, readError: diagnosticError(error61) }));
   const metadata = {
     ...base,
     scannedRecords: store.scannedRecords,
+    examinedRecords: store.examinedRecords,
     malformedRecords: store.malformedRecords,
     truncated: store.truncated,
     ..."readError" in store ? { readError: store.readError } : {}
@@ -34973,14 +34984,13 @@ async function queryDiagnostics(query, options = {}) {
     return { ...metadata, records: limited(records.filter((record3) => record3.severity === "error" || record3.outcome === "error" || /(?:fatal|failure|failed|uncaught|unhandled)/.test(String(record3.event))), limit) };
   }
   if (query === "incident") {
-    const incident = options.id ? records.filter((record3) => containsExact(record3, options.id)) : records;
-    return { ...metadata, records: limited(incident, limit) };
+    return { ...metadata, records: limited(records, limit) };
   }
   if (query === "operations") {
     const byId = /* @__PURE__ */ new Map();
     for (const record3 of records) {
       if (typeof record3.operationId !== "string") continue;
-      const key = String(record3.clientId ?? "internal") + "\0" + record3.operationId;
+      const key = [record3.appLaunchId, record3.backendInstanceId, record3.sessionEpoch ?? record3.sessionId, record3.clientId ?? "internal", record3.operationId].map((value) => String(value ?? "")).join("\0");
       const item = byId.get(key) ?? {};
       if (record3.event === "operation.accepted") item.accepted = record3;
       else if (TERMINAL_EVENTS.has(String(record3.event))) item.terminal = record3;
@@ -34989,7 +34999,7 @@ async function queryDiagnostics(query, options = {}) {
       byId.set(key, item);
     }
     const slowMs = options.slowMs ?? 5e3;
-    const operations = [...byId.values()].filter((item) => item.accepted && (!item.terminal || item.slow || Number(item.timing?.durationMs ?? item.terminal?.durationMs ?? 0) >= slowMs));
+    const operations = [...byId.values()].filter((item) => item.accepted && (!item.terminal || item.slow || Number(item.terminal?.durationMs ?? item.timing?.durationMs ?? 0) >= slowMs));
     return { ...metadata, slowMs, operations: limited(operations, limit) };
   }
   const durations = /* @__PURE__ */ new Map();
@@ -35792,10 +35802,17 @@ function parseCli(argv) {
   if (command === "mcp" && (browser || headless)) throw usageError("mcp does not accept --browser or --headless");
   const diagnosticFlags = [values.limit, values.since, values.until, values.id, values["slow-ms"]];
   if (command !== "diagnostics" && diagnosticFlags.some((value) => value !== void 0)) throw usageError("diagnostic query flags require the diagnostics command");
+  if (command === "diagnostics" && values.id !== void 0 && diagnosticQuery !== "incident") throw usageError("--id is only valid for diagnostics incident");
+  if (command === "diagnostics" && values["slow-ms"] !== void 0 && diagnosticQuery !== "operations") throw usageError("--slow-ms is only valid for diagnostics operations");
   const diagnosticLimit = values.limit === void 0 ? void 0 : Number(values.limit);
   const diagnosticSlowMs = values["slow-ms"] === void 0 ? void 0 : Number(values["slow-ms"]);
   if (diagnosticLimit !== void 0 && (!Number.isSafeInteger(diagnosticLimit) || diagnosticLimit <= 0 || diagnosticLimit > 1e4)) throw usageError("--limit must be an integer from 1 to 10000");
   if (diagnosticSlowMs !== void 0 && (!Number.isSafeInteger(diagnosticSlowMs) || diagnosticSlowMs < 0)) throw usageError("--slow-ms must be a non-negative integer");
+  const diagnosticSince = typeof values.since === "string" ? Date.parse(values.since) : Number.NEGATIVE_INFINITY;
+  const diagnosticUntil = typeof values.until === "string" ? Date.parse(values.until) : Number.POSITIVE_INFINITY;
+  if (!Number.isFinite(diagnosticSince) && diagnosticSince !== Number.NEGATIVE_INFINITY) throw usageError("--since must be a valid ISO timestamp");
+  if (!Number.isFinite(diagnosticUntil) && diagnosticUntil !== Number.POSITIVE_INFINITY) throw usageError("--until must be a valid ISO timestamp");
+  if (diagnosticSince > diagnosticUntil) throw usageError("--since must not be later than --until");
   const retryFlags = [values["request-id"], values["session-epoch"], values["document-revision"]];
   let retry;
   if (retryFlags.some((value) => value !== void 0)) {
@@ -36093,7 +36110,9 @@ async function runCli(argv = process.argv.slice(2)) {
     process.stdout.write("       alder --recover UUID [--browser|--headless]\n");
     process.stdout.write("       alder --list-recoveries\n");
     process.stdout.write("       alder check|run|publish|mcp NOTEBOOK.R\n");
-    process.stdout.write("       alder diagnostics status|launches|errors|operations|performance|incident [--limit N] [--since ISO] [--until ISO] [--id VALUE]\n");
+    process.stdout.write("       alder diagnostics status|launches|errors|operations|performance [--limit N] [--since ISO] [--until ISO]\n");
+    process.stdout.write("       alder diagnostics operations [--slow-ms N] [--limit N] [--since ISO] [--until ISO]\n");
+    process.stdout.write("       alder diagnostics incident [--id VALUE] [--limit N] [--since ISO] [--until ISO]\n");
     process.stdout.write("       alder run|publish NOTEBOOK.R --request-id ID --session-epoch EPOCH --document-revision N\n");
     return 0;
   }
@@ -36131,7 +36150,8 @@ if (entry) {
       process.exitCode = code;
     },
     (error61) => {
-      process.stderr.write("alder: " + errorText(error61) + "\n");
+      if (process.argv[2] === "diagnostics") process.stderr.write(JSON.stringify({ error: { code: "invalid_diagnostic_query", message: errorText(error61) } }) + "\n");
+      else process.stderr.write("alder: " + errorText(error61) + "\n");
       process.exitCode = typeof error61.exitCode === "number" ? Number(error61.exitCode) : 1;
     }
   );

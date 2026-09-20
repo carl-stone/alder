@@ -7,7 +7,7 @@ import { ApplicationPreferences } from "./preferences.js";
 import { startHost, type RunningHost } from "./application.js";
 import { resolveApplicationResources, type ApplicationResources } from "./resources.js";
 import type { BackendSessionDescriptor, HostLaunchOptions } from "./sessions.js";
-import { StructuredDiagnostics, diagnosticError, diagnosticsRoot, drainDiagnosticsBounded, persistEmergencyDiagnostic } from "./diagnostics.js";
+import { StructuredDiagnostics, diagnosticError, diagnosticsRoot, drainDiagnosticsBounded, persistEmergencyDiagnostic, recordDiagnosticDurable } from "./diagnostics.js";
 
 let activeBackendDiagnostics: StructuredDiagnostics | undefined;
 let handlingBackendFatal = false;
@@ -117,9 +117,9 @@ export class NotebookBackend {
 
   async close(): Promise<void> {
     const results = await Promise.allSettled([...new Set(this.hosts.values())].map(host => host.close()));
-    const rejected = results.filter(result => result.status === "rejected").length;
-    this.diagnostics?.record(rejected ? "error" : "info", "backend.close.summary", {
-      count: results.length, outcome: rejected ? "error" : "success", dropped: rejected,
+    const failures = results.flatMap(result => result.status === "rejected" ? [diagnosticError(result.reason)] : []);
+    await recordDiagnosticDurable(this.diagnostics, failures.length ? "error" : "info", "backend.close.summary", {
+      count: results.length, outcome: failures.length ? "error" : "success", dropped: failures.length, errors: failures,
     });
     await (await this.preferences).close();
   }
@@ -175,8 +175,13 @@ async function serve(socketPath: string): Promise<void> {
     clearTimeout(idleTimer);
     server.close();
     const deadline = setTimeout(() => {
-      diagnostics.record("error", "backend.forced_exit", { forced: true, durationMs: 5_000, errorCode: "close_timeout" });
-      void drainDiagnosticsBounded(diagnostics, 100).finally(() => process.exit(0));
+      const durableRecord = recordDiagnosticDurable(diagnostics, "error", "backend.forced_exit", {
+        forced: true, durationMs: 5_000, errorCode: "close_timeout",
+        error: diagnosticError(Object.assign(new Error("backend close exceeded 5000ms"), { code: "close_timeout" })),
+      });
+      void (durableRecord ?? Promise.resolve())
+        .finally(() => drainDiagnosticsBounded(diagnostics, 100))
+        .finally(() => process.exit(0));
     }, 5_000);
     void backend.close().finally(async () => {
       clearTimeout(deadline);

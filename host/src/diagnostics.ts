@@ -1,9 +1,7 @@
 import { randomUUID } from "node:crypto";
-import { createReadStream } from "node:fs";
 import { appendFile, chmod, copyFile, mkdir, open, readdir, readFile, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { arch, platform } from "node:os";
 import { basename, join, resolve } from "node:path";
-import { createInterface } from "node:readline";
 import envPaths from "env-paths";
 
 export const DIAGNOSTIC_SCHEMA_VERSION = 2;
@@ -23,8 +21,16 @@ export type DiagnosticFields = Readonly<Record<string, unknown>>;
 export type DiagnosticEvent = string;
 export interface DiagnosticSink {
   record(severity: DiagnosticSeverity, event: DiagnosticEvent, fields?: DiagnosticFields): void;
+  recordDurable?(severity: DiagnosticSeverity, event: DiagnosticEvent, fields?: DiagnosticFields): Promise<void>;
   child(fields: DiagnosticFields): DiagnosticSink;
   flush?(): Promise<void>;
+}
+
+export function recordDiagnosticDurable(sink: DiagnosticSink | undefined, severity: DiagnosticSeverity, event: DiagnosticEvent, fields: DiagnosticFields = {}): Promise<void> | undefined {
+  if (!sink) return undefined;
+  if (sink.recordDurable) return sink.recordDurable(severity, event, fields);
+  sink.record(severity, event, fields);
+  return undefined;
 }
 
 export interface DiagnosticsOptions {
@@ -72,8 +78,9 @@ interface QueuedRecord {
   readonly event: string;
   readonly context: DiagnosticFields;
   readonly fields: DiagnosticFields;
+  readonly durable: boolean;
 }
-interface SerializedRecord { readonly line: string; readonly bytes: number; }
+interface SerializedRecord { readonly line: string; readonly bytes: number; readonly durable: boolean; }
 interface ActiveOperation {
   readonly operationId: string;
   readonly clientId: string;
@@ -82,8 +89,9 @@ interface ActiveOperation {
   lastProgressAt: number;
   readonly phases: Set<string>;
   readonly timer: NodeJS.Timeout;
+  readonly scope: DiagnosticFields;
 }
-interface SegmentEntry { path: string; name: string; size: number; mtimeMs: number; active: boolean; pid: number | null; }
+interface SegmentEntry { path: string; name: string; size: number; mtimeMs: number; active: boolean; pid: number | null; format: "jsonl" | "record"; }
 
 const TERMINAL_EVENTS = new Set(["operation.settled", "operation.cancelled", "operation.failed"]);
 const SLOW_THRESHOLDS: Record<string, number> = {
@@ -220,17 +228,19 @@ class DiagnosticsCore {
     this.slowThresholdMs = options.slowThresholdMs;
   }
 
-  enqueue(severity: DiagnosticSeverity, event: DiagnosticEvent, context: DiagnosticFields, fields: DiagnosticFields): void {
+  enqueue(severity: DiagnosticSeverity, event: DiagnosticEvent, context: DiagnosticFields, fields: DiagnosticFields, durable = false): number | null {
     this.generatedEvents++;
-    if (this.disabled || this.closed) { this.unavailableEvents++; return; }
-    if (!/^[a-z][a-z0-9_.-]{1,127}$/.test(event)) { this.droppedEvents++; void this.persistStatus().catch(() => undefined); return; }
+    if (this.disabled || this.closed) { this.unavailableEvents++; return null; }
+    if (!/^[a-z][a-z0-9_.-]{1,127}$/.test(event)) { this.droppedEvents++; void this.persistStatus().catch(() => undefined); return null; }
     const admitted = this.queue.length < this.queueLimit;
+    let acceptedSequence: number | null = null;
     if (admitted) {
       const sequence = ++this.eventSequence;
+      acceptedSequence = sequence;
       const launchContext = event.endsWith(".launch") ? { processContext: diagnosticProcessContext() } : {};
       this.queue.push({
         sequence, timestamp: this.now().toISOString(), monotonicMs: Math.round(this.monotonicNow() * 1000) / 1000,
-        severity, event, context, fields: { ...launchContext, ...fields },
+        severity, event, context, fields: { ...launchContext, ...fields }, durable,
       });
       this.acceptedEvents++;
     } else {
@@ -239,12 +249,13 @@ class DiagnosticsCore {
     }
     this.observeOperation(event, { ...context, ...fields });
     if (admitted) this.scheduleFlush(severity === "error" || TERMINAL_EVENTS.has(event) || event.includes("fatal") ? 0 : this.queue.length >= 64 ? 0 : this.flushDelayMs);
+    return acceptedSequence;
   }
 
   private operationKey(fields: DiagnosticFields): string | null {
     const operationId = typeof fields.operationId === "string" ? fields.operationId : null;
     if (!operationId) return null;
-    return (typeof fields.clientId === "string" ? fields.clientId : "internal") + "\0" + operationId;
+    return [this.appLaunchId, this.backendInstanceId ?? "", fields.sessionEpoch ?? fields.sessionId ?? "", fields.clientId ?? "internal", operationId].map(String).join("\0");
   }
 
   private observeOperation(event: string, fields: DiagnosticFields): void {
@@ -262,13 +273,18 @@ class DiagnosticsCore {
         const active = this.activeOperations.get(key);
         if (!active) return;
         this.enqueue("warn", "operation.slow", {}, {
+          ...active.scope,
           operationId, clientId, kind: active.kind, thresholdMs: threshold,
           durationMs: Math.round(this.monotonicNow() - active.startedAt),
           lastProgressMs: Math.round(this.monotonicNow() - active.lastProgressAt),
         });
       }, threshold);
       timer.unref?.();
-      this.activeOperations.set(key, { operationId, clientId, kind, startedAt, lastProgressAt: startedAt, phases: new Set(), timer });
+      const scope = {
+        ...(typeof fields.sessionId === "string" ? { sessionId: fields.sessionId } : {}),
+        ...(typeof fields.sessionEpoch === "string" ? { sessionEpoch: fields.sessionEpoch } : {}),
+      };
+      this.activeOperations.set(key, { operationId, clientId, kind, startedAt, lastProgressAt: startedAt, phases: new Set(), timer, scope });
       return;
     }
     const active = this.activeOperations.get(key);
@@ -284,6 +300,7 @@ class DiagnosticsCore {
     const notApplicable = Array.isArray(fields.notApplicablePhases) ? fields.notApplicablePhases.filter(value => typeof value === "string") : [];
     this.activeOperations.delete(key);
     this.enqueue("info", "operation.timing", {}, {
+      ...active.scope,
       operationId: active.operationId, clientId: active.clientId, kind: active.kind,
       outcome: event === "operation.settled" ? "success" : event === "operation.cancelled" ? "cancelled" : "error",
       durationMs: Math.round(this.monotonicNow() - active.startedAt),
@@ -333,7 +350,7 @@ class DiagnosticsCore {
       ...(diagnosticValue(record.fields) as Record<string, unknown>),
     };
     const line = JSON.stringify(value) + "\n";
-    return { line, bytes: Buffer.byteLength(line) };
+    return { line, bytes: Buffer.byteLength(line), durable: record.durable };
   }
 
   private async drainThrough(targetSequence: number): Promise<void> {
@@ -360,7 +377,26 @@ class DiagnosticsCore {
       let index = 0;
       while (index < records.length) {
         const first = records[index]!;
-        if (first.bytes > this.segmentBytes || first.bytes > this.totalBytes) { index++; continue; }
+        if (first.bytes > this.segmentBytes) {
+          index++;
+          if (first.bytes > this.totalBytes) continue;
+          if (this.activeSize > 0) await this.rotateLocked();
+          const stamp = this.now().toISOString().replace(/[^0-9]/g, "").slice(0, 17);
+          const path = join(this.rootDir, `diagnostics-record-${stamp}-${this.role}-${process.pid}-${randomUUID()}.json`);
+          const allowed = await pruneSegmentsLocked(this.rootDir, {
+            maxAgeMs: this.maxAgeMs, maxSegments: this.maxSegments, totalBytes: this.totalBytes,
+            reserveBytes: first.bytes, prospectivePath: path,
+          });
+          if (!allowed) continue;
+          const temporary = path + `.${randomUUID()}.tmp`;
+          const handle = await open(temporary, "wx", 0o600);
+          try { await handle.writeFile(first.line); }
+          finally { await handle.close(); }
+          await rename(temporary, path);
+          await chmod(path, 0o600);
+          persisted++;
+          continue;
+        }
         if (this.activeSize > 0 && this.activeSize + first.bytes > this.segmentBytes) await this.rotateLocked();
         const remaining = this.segmentBytes - this.activeSize;
         const chunk: SerializedRecord[] = [];
@@ -374,7 +410,12 @@ class DiagnosticsCore {
           reserveBytes: chunkBytes, prospectivePath: this.activePath,
         });
         if (!allowed) continue;
-        await appendFile(this.activePath, chunk.map(record => record.line).join(""), { mode: 0o600 });
+        const output = chunk.map(record => record.line).join("");
+        if (chunk.some(record => record.durable)) {
+          const handle = await open(this.activePath, "a", 0o600);
+          try { await handle.writeFile(output); }
+          finally { await handle.close(); }
+        } else await appendFile(this.activePath, output, { mode: 0o600 });
         this.activeSize += chunkBytes;
         persisted += chunk.length;
       }
@@ -440,6 +481,16 @@ class DiagnosticsCore {
     await operation;
   }
 
+  async flushDurable(): Promise<void> {
+    try { await this.flush(); } catch (error) { await this.disable(error); }
+  }
+
+  async recordDurable(severity: DiagnosticSeverity, event: DiagnosticEvent, context: DiagnosticFields, fields: DiagnosticFields): Promise<void> {
+    if (!this.disabled && !this.closed && this.queue.length >= this.queueLimit) await this.flushDurable();
+    const sequence = this.enqueue(severity, event, context, fields, true);
+    if (sequence !== null) await this.flushDurable();
+  }
+
   async close(): Promise<void> {
     if (this.closed) { await this.drainTail; return; }
     this.closed = true;
@@ -487,6 +538,9 @@ export class StructuredDiagnostics implements DiagnosticSink {
     this.context = context;
   }
   record(severity: DiagnosticSeverity, event: DiagnosticEvent, fields: DiagnosticFields = {}): void { this.core.enqueue(severity, event, this.context, fields); }
+  async recordDurable(severity: DiagnosticSeverity, event: DiagnosticEvent, fields: DiagnosticFields = {}): Promise<void> {
+    await this.core.recordDurable(severity, event, this.context, fields);
+  }
   child(fields: DiagnosticFields): StructuredDiagnostics { return new StructuredDiagnostics({ rootDir: this.core.rootDir, role: this.core.role }, this.core, { ...this.context, ...fields }); }
   flush(): Promise<void> { return this.core.flush(); }
   close(): Promise<void> { return this.core.close(); }
@@ -535,7 +589,7 @@ async function withDirectoryLock<T>(rootDir: string, action: () => Promise<T>): 
   while (true) {
     try {
       const handle = await open(lock, "wx", 0o600);
-      try { await handle.writeFile(String(process.pid)); await handle.sync(); }
+      try { await handle.writeFile(String(process.pid)); }
       finally { await handle.close(); }
       break;
     }
@@ -557,10 +611,11 @@ async function withDirectoryLock<T>(rootDir: string, action: () => Promise<T>): 
   finally { await unlink(lock).catch(error => { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }); }
 }
 
-function segmentInfo(name: string): { active: boolean; pid: number | null } | null {
+function segmentInfo(name: string): { active: boolean; pid: number | null; format: "jsonl" | "record" } | null {
+  if (/^diagnostics-record-.*\.json$/.test(name)) return { active: false, pid: null, format: "record" };
   if (!/^diagnostics-.*\.jsonl$/.test(name)) return null;
   const match = /^diagnostics-active-[a-z]+-(\d+)-.*\.jsonl$/.exec(name);
-  return { active: match !== null, pid: match ? Number(match[1]) : null };
+  return { active: match !== null, pid: match ? Number(match[1]) : null, format: "jsonl" };
 }
 function pidAlive(pid: number): boolean { try { process.kill(pid, 0); return true; } catch { return false; } }
 async function listSegments(rootDir: string): Promise<SegmentEntry[]> {
@@ -668,31 +723,43 @@ export interface DiagnosticQueryOptions {
   slowMs?: number;
 }
 
-interface ReadStoreResult { records: Record<string, unknown>[]; malformedRecords: number; scannedRecords: number; truncated: boolean; }
+interface ReadStoreResult { records: Record<string, unknown>[]; malformedRecords: number; scannedRecords: number; examinedRecords: number; truncated: boolean; }
+
+function diagnosticQueryRange(options: DiagnosticQueryOptions): { since: number; until: number } {
+  const since = options.since === undefined ? Number.NEGATIVE_INFINITY : Date.parse(options.since);
+  const until = options.until === undefined ? Number.POSITIVE_INFINITY : Date.parse(options.until);
+  if (!Number.isFinite(since) && since !== Number.NEGATIVE_INFINITY) throw new Error("--since must be a valid ISO timestamp");
+  if (!Number.isFinite(until) && until !== Number.POSITIVE_INFINITY) throw new Error("--until must be a valid ISO timestamp");
+  if (since > until) throw new Error("--since must not be later than --until");
+  return { since, until };
+}
 
 async function readStore(rootDir: string, options: DiagnosticQueryOptions): Promise<ReadStoreResult> {
-  const since = options.since ? Date.parse(options.since) : Number.NEGATIVE_INFINITY;
-  const until = options.until ? Date.parse(options.until) : Number.POSITIVE_INFINITY;
-  if (Number.isNaN(since) || Number.isNaN(until) || since > until) throw new Error("invalid diagnostic query time range");
+  const { since, until } = diagnosticQueryRange(options);
   const records: Record<string, unknown>[] = [];
-  let malformedRecords = 0, scannedRecords = 0, truncated = false;
-  const entries = (await listSegments(rootDir)).sort((a, b) => a.mtimeMs - b.mtimeMs);
+  let malformedRecords = 0, scannedRecords = 0, examinedRecords = 0, truncated = false;
+  const entries = (await listSegments(rootDir)).sort((a, b) => b.mtimeMs - a.mtimeMs);
   outer: for (const entry of entries) {
-    const lines = createInterface({ input: createReadStream(entry.path), crlfDelay: Infinity });
-    for await (const line of lines) {
+    if (entry.mtimeMs < since) continue;
+    const contents = await readFile(entry.path, "utf8");
+    if (options.id !== undefined && !contents.includes(JSON.stringify(options.id))) continue;
+    const lines = entry.format === "record" ? [contents] : contents.split("\n").reverse();
+    for (const line of lines) {
       if (!line.trim()) continue;
-      scannedRecords++;
-      if (scannedRecords > QUERY_RECORD_LIMIT) { truncated = true; lines.close(); break outer; }
+      examinedRecords++;
       let record: unknown;
       try { record = JSON.parse(line); } catch { malformedRecords++; continue; }
       if (!isRecord(record) || typeof record.timestamp !== "string") { malformedRecords++; continue; }
       const timestamp = Date.parse(record.timestamp);
       if (!Number.isFinite(timestamp) || timestamp < since || timestamp > until) continue;
+      if (options.id !== undefined && !containsExact(record, options.id)) continue;
+      if (scannedRecords >= QUERY_RECORD_LIMIT) { truncated = true; break outer; }
+      scannedRecords++;
       records.push(record);
     }
   }
   records.sort(compareRecords);
-  return { records, malformedRecords, scannedRecords: Math.min(scannedRecords, QUERY_RECORD_LIMIT), truncated };
+  return { records, malformedRecords, scannedRecords, examinedRecords, truncated };
 }
 
 function compareRecords(a: Record<string, unknown>, b: Record<string, unknown>): number {
@@ -712,6 +779,7 @@ function containsExact(value: unknown, target: string, seen = new Set<unknown>()
 function limited<T>(values: readonly T[], limit: number): T[] { return values.slice(Math.max(0, values.length - limit)); }
 
 export async function queryDiagnostics(query: DiagnosticQuery, options: DiagnosticQueryOptions = {}): Promise<Record<string, unknown>> {
+  diagnosticQueryRange(options);
   const rootDir = resolve(options.rootDir ?? diagnosticsRoot());
   const limit = Math.max(1, Math.min(10_000, options.limit ?? 100));
   const rootInfo = await stat(rootDir).catch(() => null);
@@ -724,9 +792,9 @@ export async function queryDiagnostics(query: DiagnosticQuery, options: Diagnost
     segmentCount: entries.length, activeWriters: entries.filter(entry => entry.active && entry.pid !== null && pidAlive(entry.pid)).length,
     statuses: statusFiles,
   };
-  const store = await readStore(rootDir, options).catch(error => ({ records: [], malformedRecords: 0, scannedRecords: 0, truncated: false, readError: diagnosticError(error) }));
+  const store = await readStore(rootDir, query === "incident" ? options : { ...options, id: undefined }).catch(error => ({ records: [], malformedRecords: 0, scannedRecords: 0, examinedRecords: 0, truncated: false, readError: diagnosticError(error) }));
   const metadata = {
-    ...base, scannedRecords: store.scannedRecords, malformedRecords: store.malformedRecords,
+    ...base, scannedRecords: store.scannedRecords, examinedRecords: store.examinedRecords, malformedRecords: store.malformedRecords,
     truncated: store.truncated, ...("readError" in store ? { readError: store.readError } : {}),
   };
   if (query === "status") {
@@ -741,14 +809,13 @@ export async function queryDiagnostics(query: DiagnosticQuery, options: Diagnost
     return { ...metadata, records: limited(records.filter(record => record.severity === "error" || record.outcome === "error" || /(?:fatal|failure|failed|uncaught|unhandled)/.test(String(record.event))), limit) };
   }
   if (query === "incident") {
-    const incident = options.id ? records.filter(record => containsExact(record, options.id!)) : records;
-    return { ...metadata, records: limited(incident, limit) };
+    return { ...metadata, records: limited(records, limit) };
   }
   if (query === "operations") {
     const byId = new Map<string, { accepted?: Record<string, unknown>; terminal?: Record<string, unknown>; timing?: Record<string, unknown>; slow?: Record<string, unknown> }>();
     for (const record of records) {
       if (typeof record.operationId !== "string") continue;
-      const key = String(record.clientId ?? "internal") + "\0" + record.operationId;
+      const key = [record.appLaunchId, record.backendInstanceId, record.sessionEpoch ?? record.sessionId, record.clientId ?? "internal", record.operationId].map(value => String(value ?? "")).join("\0");
       const item = byId.get(key) ?? {};
       if (record.event === "operation.accepted") item.accepted = record;
       else if (TERMINAL_EVENTS.has(String(record.event))) item.terminal = record;
@@ -757,7 +824,7 @@ export async function queryDiagnostics(query: DiagnosticQuery, options: Diagnost
       byId.set(key, item);
     }
     const slowMs = options.slowMs ?? 5_000;
-    const operations = [...byId.values()].filter(item => item.accepted && (!item.terminal || item.slow || Number(item.timing?.durationMs ?? item.terminal?.durationMs ?? 0) >= slowMs));
+    const operations = [...byId.values()].filter(item => item.accepted && (!item.terminal || item.slow || Number(item.terminal?.durationMs ?? item.timing?.durationMs ?? 0) >= slowMs));
     return { ...metadata, slowMs, operations: limited(operations, limit) };
   }
   const durations = new Map<string, number[]>();

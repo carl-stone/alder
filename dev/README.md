@@ -94,6 +94,10 @@ recorded durations and resource snapshots. `incident` returns the chronological
 raw records in a time range or records containing an exact correlation identifier.
 Local records contain full paths, source, output, environment, commands and raw
 errors; a Help-menu raw copy is optional and contains the same uncensored data.
+Queries inspect newest retained evidence first while returning selected records in
+chronological order. Records larger than a normal JSONL segment are retained as
+bounded raw sidecars and reconstructed transparently. Invalid time ranges and
+query-specific flags fail with a JSON error and nonzero exit status.
 
 ## Generated files and R helpers
 

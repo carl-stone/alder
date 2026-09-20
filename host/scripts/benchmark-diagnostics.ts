@@ -30,17 +30,21 @@ async function ordinary(label: string, sink: DiagnosticSink): Promise<Record<str
     const operationId = `operation-${index}`;
     const before = performance.now();
     const source = [`sample_${index} <- rnorm(1000)`, `summary_${index} <- summary(sample_${index})`, `summary_${index}`];
-    sink.record("info", "operation.accepted", {
+    const accepted = {
       clientId: "benchmark-client", operationId, kind: "run", documentRevision: index,
       command: { type: "run", scope: "cell", target: { cellId: `cell-${index % 80}` }, source },
-    });
+    };
+    if (sink instanceof StructuredDiagnostics) await sink.recordDurable("info", "operation.accepted", accepted);
+    else sink.record("info", "operation.accepted", accepted);
     for (const phase of ["analysis-ready", "kernel-dispatch", "kernel-completion", "authoritative-completion"]) {
       sink.record("info", "operation.phase", { clientId: "benchmark-client", operationId, phase });
     }
-    sink.record("info", "operation.settled", {
+    const settled = {
       clientId: "benchmark-client", operationId, kind: "run", outcome: "success", durationMs: 1,
       notebookContext: { path: `/Users/research/project/notebook-${index % 5}.R`, cells: [{ id: `cell-${index % 80}`, source, output: { text: "Min. 1st Qu. Median Mean 3rd Qu. Max." } }] },
-    });
+    };
+    if (sink instanceof StructuredDiagnostics) await sink.recordDurable("info", "operation.settled", settled);
+    else sink.record("info", "operation.settled", settled);
     samples.push((performance.now() - before) * 1_000);
     if (sink instanceof StructuredDiagnostics && index % 250 === 249) await sink.flush();
   }
@@ -122,7 +126,7 @@ try {
   const bytesPerOperation = enabledBytes / iterations;
   const estimatedOperationsPerDay = 2_000;
   process.stdout.write(JSON.stringify({
-    benchmark: "alder-diagnostics", workload: "six lifecycle records plus raw command, three-line R source, cell output and notebook path per operation",
+    benchmark: "alder-diagnostics", workload: "six lifecycle records plus raw command, three-line R source, cell output and notebook path per operation; acknowledgement and terminal writes awaited",
     off, on, saturation, rotation,
     interpretation: {
       bytesPerOperation,

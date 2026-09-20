@@ -196,10 +196,17 @@ export function parseCli(argv: readonly string[]): CliOptions {
   if (command === "mcp" && (browser || headless)) throw usageError("mcp does not accept --browser or --headless");
   const diagnosticFlags = [values.limit, values.since, values.until, values.id, values["slow-ms"]];
   if (command !== "diagnostics" && diagnosticFlags.some(value => value !== undefined)) throw usageError("diagnostic query flags require the diagnostics command");
+  if (command === "diagnostics" && values.id !== undefined && diagnosticQuery !== "incident") throw usageError("--id is only valid for diagnostics incident");
+  if (command === "diagnostics" && values["slow-ms"] !== undefined && diagnosticQuery !== "operations") throw usageError("--slow-ms is only valid for diagnostics operations");
   const diagnosticLimit = values.limit === undefined ? undefined : Number(values.limit);
   const diagnosticSlowMs = values["slow-ms"] === undefined ? undefined : Number(values["slow-ms"]);
   if (diagnosticLimit !== undefined && (!Number.isSafeInteger(diagnosticLimit) || diagnosticLimit <= 0 || diagnosticLimit > 10_000)) throw usageError("--limit must be an integer from 1 to 10000");
   if (diagnosticSlowMs !== undefined && (!Number.isSafeInteger(diagnosticSlowMs) || diagnosticSlowMs < 0)) throw usageError("--slow-ms must be a non-negative integer");
+  const diagnosticSince = typeof values.since === "string" ? Date.parse(values.since) : Number.NEGATIVE_INFINITY;
+  const diagnosticUntil = typeof values.until === "string" ? Date.parse(values.until) : Number.POSITIVE_INFINITY;
+  if (!Number.isFinite(diagnosticSince) && diagnosticSince !== Number.NEGATIVE_INFINITY) throw usageError("--since must be a valid ISO timestamp");
+  if (!Number.isFinite(diagnosticUntil) && diagnosticUntil !== Number.POSITIVE_INFINITY) throw usageError("--until must be a valid ISO timestamp");
+  if (diagnosticSince > diagnosticUntil) throw usageError("--since must not be later than --until");
   const retryFlags = [values["request-id"], values["session-epoch"], values["document-revision"]];
   let retry: CliOptions["retry"];
   if (retryFlags.some(value => value !== undefined)) {
@@ -501,7 +508,9 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
     process.stdout.write("       alder --recover UUID [--browser|--headless]\n");
     process.stdout.write("       alder --list-recoveries\n");
     process.stdout.write("       alder check|run|publish|mcp NOTEBOOK.R\n");
-    process.stdout.write("       alder diagnostics status|launches|errors|operations|performance|incident [--limit N] [--since ISO] [--until ISO] [--id VALUE]\n");
+    process.stdout.write("       alder diagnostics status|launches|errors|operations|performance [--limit N] [--since ISO] [--until ISO]\n");
+    process.stdout.write("       alder diagnostics operations [--slow-ms N] [--limit N] [--since ISO] [--until ISO]\n");
+    process.stdout.write("       alder diagnostics incident [--id VALUE] [--limit N] [--since ISO] [--until ISO]\n");
     process.stdout.write("       alder run|publish NOTEBOOK.R --request-id ID --session-epoch EPOCH --document-revision N\n");
     return 0;
   }
@@ -533,7 +542,8 @@ if (entry) {
   void runCli().then(
     code => { process.exitCode = code; },
     error => {
-      process.stderr.write("alder: " + errorText(error) + "\n");
+      if (process.argv[2] === "diagnostics") process.stderr.write(JSON.stringify({ error: { code: "invalid_diagnostic_query", message: errorText(error) } }) + "\n");
+      else process.stderr.write("alder: " + errorText(error) + "\n");
       process.exitCode = typeof (error as { exitCode?: unknown }).exitCode === "number" ? Number((error as { exitCode: number }).exitCode) : 1;
     },
   );

@@ -3,7 +3,7 @@ import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import envPaths from "env-paths";
-import { diagnosticError, type DiagnosticSink } from "./diagnostics.js";
+import { diagnosticError, recordDiagnosticDurable, type DiagnosticSink } from "./diagnostics.js";
 import { watch, type FSWatcher } from "chokidar";
 import { z } from "zod";
 import { Controller, type SourceCommitContext, type SourceCommitHandler, type SourcePublication } from "./controller.js";
@@ -379,9 +379,10 @@ async function startNotebookHost(
     await attempt(() => store?.close());
     await attempt(() => ownership.close());
     await attempt(() => work === "" ? undefined : rm(work, { recursive: true, force: true }));
-    diagnostics?.record(errors.length ? "error" : "info", "host.stop.settled", {
+    await recordDiagnosticDurable(diagnostics, errors.length ? "error" : "info", "host.stop.settled", {
       outcome: errors.length ? "error" : "success", count: errors.length,
       durationMs: Math.round(performance.now() - hostStartedAt),
+      errors: errors.map(error => diagnosticError(error)),
     });
     if (errors.length > 0) throw new AggregateError(errors, "Alder shutdown failed");
   })().finally(resolveClosed);
@@ -1455,7 +1456,7 @@ async function startNotebookHost(
       close,
     };
   } catch (error) {
-    diagnostics?.record("error", "host.fatal", {
+    await recordDiagnosticDurable(diagnostics, "error", "host.fatal", {
       outcome: "error", errorCode: (error as { code?: string })?.code ?? "host_start_failed",
       errorType: error instanceof Error ? error.name : "unknown",
       durationMs: Math.round(performance.now() - hostStartedAt),

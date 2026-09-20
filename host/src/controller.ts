@@ -58,7 +58,7 @@ import { toLogicalCellBody } from "./cell-body.js";
 import { ReactiveGraph, type GraphCellInput } from "./graph.js";
 import { tailLog } from "./output-log.js";
 import { OutputStore, OutputStoreError, OUTPUT_ARTIFACT_CHUNK_BYTES } from "./outputs.js";
-import { diagnosticError, type DiagnosticSink } from "./diagnostics.js";
+import { diagnosticError, recordDiagnosticDurable, type DiagnosticSink } from "./diagnostics.js";
 const INTERNAL_CLIENT_ID = "internal";
 
 const OPERATION_JOURNAL_LIMIT = 256;
@@ -850,8 +850,12 @@ export class Controller {
 
   recordActionError(message: string, code = "internal_error"): void {
     this.assertNotClosed();
-    this.diagnostics?.record("warn", "host.action_failure", { errorCode: code, outcome: "error" });
-    this.replaceLastActionError(hostError(code, message));
+    const actionError = hostError(code, message);
+    const rawError = Object.assign(new Error(message), { code });
+    void recordDiagnosticDurable(this.diagnostics, "warn", "host.action_failure", {
+      errorCode: code, outcome: "error", message, error: diagnosticError(rawError), actionError,
+    });
+    this.replaceLastActionError(actionError);
   }
 
   recordRuntimeAvailabilityError(error: HostError): void {
@@ -933,15 +937,16 @@ export class Controller {
       dispatched: false, output: false, kernelCompleted: false,
     });
     const acceptedAt = performance.now();
-    this.diagnostics?.record("info", "operation.accepted", {
+    const diagnosticAcceptance = recordDiagnosticDurable(this.diagnostics, "info", "operation.accepted", {
       operationId: command.requestId, kind: command.type, clientId: command.clientId,
-      documentRevision: this.documentRevisionValue, command,
+      sessionEpoch: command.sessionEpoch, documentRevision: this.documentRevisionValue, command,
     });
     if (isExecutionCommand(command.type)) this.executionRequestIds.set(command.requestId, fingerprint);
     const operationCompletion = this.awaitOperation(command.requestId, command.clientId);
-    const execute = (): Promise<CommandResult> => {
+    const execute = async (): Promise<CommandResult> => {
+      if (diagnosticAcceptance) await diagnosticAcceptance;
       this.diagnostics?.record("info", "operation.started", {
-        operationId: command.requestId, clientId: command.clientId, kind: command.type,
+        operationId: command.requestId, clientId: command.clientId, sessionEpoch: command.sessionEpoch, kind: command.type,
         queueMs: Math.round(performance.now() - acceptedAt), documentRevision: this.documentRevisionValue,
       });
       return this.executeCommand(command, operationCompletion);
@@ -958,37 +963,39 @@ export class Controller {
       // Source edits and Stop must remain usable while execution is pending.
       completion = Promise.resolve().then(execute);
     }
-    const entry: CommandEntry = {
-      fingerprint, completion, settled: false,
-    };
-    this.commandEntries.set(command.requestId, entry);
-    void completion.then(result => {
+    const reported = completion.then(async result => {
       this.diagnosticProgressSeen.delete(this.operationKey(command.clientId, command.requestId));
       const runId = isRecord(result.result) && typeof result.result.runId === "string" ? result.result.runId : null;
       const cancelled = result.error?.code === "cancelled";
-      this.diagnostics?.record(result.error ? "warn" : "info", cancelled ? "operation.cancelled" : result.error ? "operation.failed" : "operation.settled", {
-        operationId: command.requestId, clientId: command.clientId, kind: command.type, runId,
+      const durable = recordDiagnosticDurable(this.diagnostics, result.error ? "warn" : "info", cancelled ? "operation.cancelled" : result.error ? "operation.failed" : "operation.settled", {
+        operationId: command.requestId, clientId: command.clientId, sessionEpoch: command.sessionEpoch, kind: command.type, runId,
         outcome: cancelled ? "cancelled" : result.error ? "error" : "success", errorCode: result.error?.code ?? null,
         notApplicablePhases: command.type === "run" ? this.runNotApplicablePhases(command.clientId, command.requestId) : [],
         durationMs: Math.round(performance.now() - acceptedAt), documentRevision: result.documentRevision,
         result, notebookContext: this.diagnosticOperationContext(command, result.error !== null),
       });
-    }, error => {
+      if (durable) await durable;
+      return result;
+    }, async error => {
       this.diagnosticProgressSeen.delete(this.operationKey(command.clientId, command.requestId));
-      this.diagnostics?.record("error", "operation.failed", {
-        operationId: command.requestId, clientId: command.clientId, kind: command.type, outcome: "error",
+      const durable = recordDiagnosticDurable(this.diagnostics, "error", "operation.failed", {
+        operationId: command.requestId, clientId: command.clientId, sessionEpoch: command.sessionEpoch, kind: command.type, outcome: "error",
         errorCode: error instanceof ControllerError ? error.code : "internal_error",
         errorType: error instanceof Error ? error.name : "unknown",
         notApplicablePhases: command.type === "run" ? this.runNotApplicablePhases(command.clientId, command.requestId) : [],
         durationMs: Math.round(performance.now() - acceptedAt), documentRevision: this.documentRevisionValue,
         error: diagnosticError(error), command, notebookContext: this.diagnosticOperationContext(command, true),
       });
+      if (durable) await durable;
+      throw error;
     });
-    void completion.finally(() => {
+    const entry: CommandEntry = { fingerprint, completion: reported, settled: false };
+    this.commandEntries.set(command.requestId, entry);
+    void reported.finally(() => {
       entry.settled = true;
       this.trimCommandEntries();
     }).catch(() => undefined);
-    return completion.then(clone);
+    return reported.then(clone);
   }
 
   private diagnosticOperationPhase(clientId: string, operationId: string, phase: string, kind = "run"): void {

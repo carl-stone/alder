@@ -60352,6 +60352,12 @@ var DIAGNOSTIC_CHILD_TAIL_BYTES = 64 * 1024;
 var DIAGNOSTIC_BATCH_SIZE = 128;
 var LOCK_WAIT_MS = 2e3;
 var LOCK_STALE_MS = 3e4;
+function recordDiagnosticDurable(sink, severity, event, fields = {}) {
+  if (!sink) return void 0;
+  if (sink.recordDurable) return sink.recordDurable(severity, event, fields);
+  sink.record(severity, event, fields);
+  return void 0;
+}
 var TERMINAL_EVENTS = /* @__PURE__ */ new Set(["operation.settled", "operation.cancelled", "operation.failed"]);
 var SLOW_THRESHOLDS = {
   transaction: 5e3,
@@ -60489,20 +60495,22 @@ var DiagnosticsCore = class {
     this.monotonicNow = options.monotonicNow ?? (() => performance.now());
     this.slowThresholdMs = options.slowThresholdMs;
   }
-  enqueue(severity, event, context, fields) {
+  enqueue(severity, event, context, fields, durable = false) {
     this.generatedEvents++;
     if (this.disabled || this.closed) {
       this.unavailableEvents++;
-      return;
+      return null;
     }
     if (!/^[a-z][a-z0-9_.-]{1,127}$/.test(event)) {
       this.droppedEvents++;
       void this.persistStatus().catch(() => void 0);
-      return;
+      return null;
     }
     const admitted = this.queue.length < this.queueLimit;
+    let acceptedSequence = null;
     if (admitted) {
       const sequence = ++this.eventSequence;
+      acceptedSequence = sequence;
       const launchContext = event.endsWith(".launch") ? { processContext: diagnosticProcessContext() } : {};
       this.queue.push({
         sequence,
@@ -60511,7 +60519,8 @@ var DiagnosticsCore = class {
         severity,
         event,
         context,
-        fields: { ...launchContext, ...fields }
+        fields: { ...launchContext, ...fields },
+        durable
       });
       this.acceptedEvents++;
     } else {
@@ -60520,11 +60529,12 @@ var DiagnosticsCore = class {
     }
     this.observeOperation(event, { ...context, ...fields });
     if (admitted) this.scheduleFlush(severity === "error" || TERMINAL_EVENTS.has(event) || event.includes("fatal") ? 0 : this.queue.length >= 64 ? 0 : this.flushDelayMs);
+    return acceptedSequence;
   }
   operationKey(fields) {
     const operationId = typeof fields.operationId === "string" ? fields.operationId : null;
     if (!operationId) return null;
-    return (typeof fields.clientId === "string" ? fields.clientId : "internal") + "\0" + operationId;
+    return [this.appLaunchId, this.backendInstanceId ?? "", fields.sessionEpoch ?? fields.sessionId ?? "", fields.clientId ?? "internal", operationId].map(String).join("\0");
   }
   observeOperation(event, fields) {
     const key2 = this.operationKey(fields);
@@ -60541,6 +60551,7 @@ var DiagnosticsCore = class {
         const active2 = this.activeOperations.get(key2);
         if (!active2) return;
         this.enqueue("warn", "operation.slow", {}, {
+          ...active2.scope,
           operationId,
           clientId,
           kind: active2.kind,
@@ -60550,7 +60561,11 @@ var DiagnosticsCore = class {
         });
       }, threshold);
       timer.unref?.();
-      this.activeOperations.set(key2, { operationId, clientId, kind, startedAt, lastProgressAt: startedAt, phases: /* @__PURE__ */ new Set(), timer });
+      const scope = {
+        ...typeof fields.sessionId === "string" ? { sessionId: fields.sessionId } : {},
+        ...typeof fields.sessionEpoch === "string" ? { sessionEpoch: fields.sessionEpoch } : {}
+      };
+      this.activeOperations.set(key2, { operationId, clientId, kind, startedAt, lastProgressAt: startedAt, phases: /* @__PURE__ */ new Set(), timer, scope });
       return;
     }
     const active = this.activeOperations.get(key2);
@@ -60569,6 +60584,7 @@ var DiagnosticsCore = class {
     const notApplicable = Array.isArray(fields.notApplicablePhases) ? fields.notApplicablePhases.filter((value) => typeof value === "string") : [];
     this.activeOperations.delete(key2);
     this.enqueue("info", "operation.timing", {}, {
+      ...active.scope,
       operationId: active.operationId,
       clientId: active.clientId,
       kind: active.kind,
@@ -60623,7 +60639,7 @@ var DiagnosticsCore = class {
       ...diagnosticValue(record4.fields)
     };
     const line = JSON.stringify(value) + "\n";
-    return { line, bytes: Buffer.byteLength(line) };
+    return { line, bytes: Buffer.byteLength(line), durable: record4.durable };
   }
   async drainThrough(targetSequence) {
     if (this.disabled) return;
@@ -60658,8 +60674,30 @@ var DiagnosticsCore = class {
       let index = 0;
       while (index < records.length) {
         const first = records[index];
-        if (first.bytes > this.segmentBytes || first.bytes > this.totalBytes) {
+        if (first.bytes > this.segmentBytes) {
           index++;
+          if (first.bytes > this.totalBytes) continue;
+          if (this.activeSize > 0) await this.rotateLocked();
+          const stamp = this.now().toISOString().replace(/[^0-9]/g, "").slice(0, 17);
+          const path3 = join2(this.rootDir, `diagnostics-record-${stamp}-${this.role}-${process.pid}-${randomUUID2()}.json`);
+          const allowed2 = await pruneSegmentsLocked(this.rootDir, {
+            maxAgeMs: this.maxAgeMs,
+            maxSegments: this.maxSegments,
+            totalBytes: this.totalBytes,
+            reserveBytes: first.bytes,
+            prospectivePath: path3
+          });
+          if (!allowed2) continue;
+          const temporary = path3 + `.${randomUUID2()}.tmp`;
+          const handle = await open4(temporary, "wx", 384);
+          try {
+            await handle.writeFile(first.line);
+          } finally {
+            await handle.close();
+          }
+          await rename2(temporary, path3);
+          await chmod(path3, 384);
+          persisted++;
           continue;
         }
         if (this.activeSize > 0 && this.activeSize + first.bytes > this.segmentBytes) await this.rotateLocked();
@@ -60683,7 +60721,15 @@ var DiagnosticsCore = class {
           prospectivePath: this.activePath
         });
         if (!allowed) continue;
-        await appendFile(this.activePath, chunk.map((record4) => record4.line).join(""), { mode: 384 });
+        const output2 = chunk.map((record4) => record4.line).join("");
+        if (chunk.some((record4) => record4.durable)) {
+          const handle = await open4(this.activePath, "a", 384);
+          try {
+            await handle.writeFile(output2);
+          } finally {
+            await handle.close();
+          }
+        } else await appendFile(this.activePath, output2, { mode: 384 });
         this.activeSize += chunkBytes;
         persisted += chunk.length;
       }
@@ -60755,6 +60801,18 @@ var DiagnosticsCore = class {
     this.drainTail = operation.catch(() => void 0);
     await operation;
   }
+  async flushDurable() {
+    try {
+      await this.flush();
+    } catch (error61) {
+      await this.disable(error61);
+    }
+  }
+  async recordDurable(severity, event, context, fields) {
+    if (!this.disabled && !this.closed && this.queue.length >= this.queueLimit) await this.flushDurable();
+    const sequence = this.enqueue(severity, event, context, fields, true);
+    if (sequence !== null) await this.flushDurable();
+  }
   async close() {
     if (this.closed) {
       await this.drainTail;
@@ -60812,6 +60870,9 @@ var StructuredDiagnostics = class _StructuredDiagnostics {
   }
   record(severity, event, fields = {}) {
     this.core.enqueue(severity, event, this.context, fields);
+  }
+  async recordDurable(severity, event, fields = {}) {
+    await this.core.recordDurable(severity, event, this.context, fields);
   }
   child(fields) {
     return new _StructuredDiagnostics({ rootDir: this.core.rootDir, role: this.core.role }, this.core, { ...this.context, ...fields });
@@ -60871,7 +60932,6 @@ async function withDirectoryLock(rootDir, action) {
       const handle = await open4(lock, "wx", 384);
       try {
         await handle.writeFile(String(process.pid));
-        await handle.sync();
       } finally {
         await handle.close();
       }
@@ -60901,9 +60961,10 @@ async function withDirectoryLock(rootDir, action) {
   }
 }
 function segmentInfo(name) {
+  if (/^diagnostics-record-.*\.json$/.test(name)) return { active: false, pid: null, format: "record" };
   if (!/^diagnostics-.*\.jsonl$/.test(name)) return null;
   const match = /^diagnostics-active-[a-z]+-(\d+)-.*\.jsonl$/.exec(name);
-  return { active: match !== null, pid: match ? Number(match[1]) : null };
+  return { active: match !== null, pid: match ? Number(match[1]) : null, format: "jsonl" };
 }
 function pidAlive(pid) {
   try {
@@ -73340,8 +73401,16 @@ var Controller = class {
   }
   recordActionError(message2, code2 = "internal_error") {
     this.assertNotClosed();
-    this.diagnostics?.record("warn", "host.action_failure", { errorCode: code2, outcome: "error" });
-    this.replaceLastActionError(hostError(code2, message2));
+    const actionError = hostError(code2, message2);
+    const rawError = Object.assign(new Error(message2), { code: code2 });
+    void recordDiagnosticDurable(this.diagnostics, "warn", "host.action_failure", {
+      errorCode: code2,
+      outcome: "error",
+      message: message2,
+      error: diagnosticError(rawError),
+      actionError
+    });
+    this.replaceLastActionError(actionError);
   }
   recordRuntimeAvailabilityError(error61) {
     this.assertNotClosed();
@@ -73422,19 +73491,22 @@ var Controller = class {
       kernelCompleted: false
     });
     const acceptedAt = performance.now();
-    this.diagnostics?.record("info", "operation.accepted", {
+    const diagnosticAcceptance = recordDiagnosticDurable(this.diagnostics, "info", "operation.accepted", {
       operationId: command.requestId,
       kind: command.type,
       clientId: command.clientId,
+      sessionEpoch: command.sessionEpoch,
       documentRevision: this.documentRevisionValue,
       command
     });
     if (isExecutionCommand(command.type)) this.executionRequestIds.set(command.requestId, fingerprint2);
     const operationCompletion = this.awaitOperation(command.requestId, command.clientId);
-    const execute = () => {
+    const execute = async () => {
+      if (diagnosticAcceptance) await diagnosticAcceptance;
       this.diagnostics?.record("info", "operation.started", {
         operationId: command.requestId,
         clientId: command.clientId,
+        sessionEpoch: command.sessionEpoch,
         kind: command.type,
         queueMs: Math.round(performance.now() - acceptedAt),
         documentRevision: this.documentRevisionValue
@@ -73452,19 +73524,14 @@ var Controller = class {
     } else {
       completion = Promise.resolve().then(execute);
     }
-    const entry = {
-      fingerprint: fingerprint2,
-      completion,
-      settled: false
-    };
-    this.commandEntries.set(command.requestId, entry);
-    void completion.then((result) => {
+    const reported = completion.then(async (result) => {
       this.diagnosticProgressSeen.delete(this.operationKey(command.clientId, command.requestId));
       const runId = isRecord(result.result) && typeof result.result.runId === "string" ? result.result.runId : null;
       const cancelled = result.error?.code === "cancelled";
-      this.diagnostics?.record(result.error ? "warn" : "info", cancelled ? "operation.cancelled" : result.error ? "operation.failed" : "operation.settled", {
+      const durable = recordDiagnosticDurable(this.diagnostics, result.error ? "warn" : "info", cancelled ? "operation.cancelled" : result.error ? "operation.failed" : "operation.settled", {
         operationId: command.requestId,
         clientId: command.clientId,
+        sessionEpoch: command.sessionEpoch,
         kind: command.type,
         runId,
         outcome: cancelled ? "cancelled" : result.error ? "error" : "success",
@@ -73475,11 +73542,14 @@ var Controller = class {
         result,
         notebookContext: this.diagnosticOperationContext(command, result.error !== null)
       });
-    }, (error61) => {
+      if (durable) await durable;
+      return result;
+    }, async (error61) => {
       this.diagnosticProgressSeen.delete(this.operationKey(command.clientId, command.requestId));
-      this.diagnostics?.record("error", "operation.failed", {
+      const durable = recordDiagnosticDurable(this.diagnostics, "error", "operation.failed", {
         operationId: command.requestId,
         clientId: command.clientId,
+        sessionEpoch: command.sessionEpoch,
         kind: command.type,
         outcome: "error",
         errorCode: error61 instanceof ControllerError ? error61.code : "internal_error",
@@ -73491,12 +73561,16 @@ var Controller = class {
         command,
         notebookContext: this.diagnosticOperationContext(command, true)
       });
+      if (durable) await durable;
+      throw error61;
     });
-    void completion.finally(() => {
+    const entry = { fingerprint: fingerprint2, completion: reported, settled: false };
+    this.commandEntries.set(command.requestId, entry);
+    void reported.finally(() => {
       entry.settled = true;
       this.trimCommandEntries();
     }).catch(() => void 0);
-    return completion.then(clone3);
+    return reported.then(clone3);
   }
   diagnosticOperationPhase(clientId, operationId, phase, kind = "run") {
     this.diagnostics?.record("info", "operation.phase", {
@@ -110390,10 +110464,11 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
     await attempt(() => store?.close());
     await attempt(() => ownership.close());
     await attempt(() => work === "" ? void 0 : rm10(work, { recursive: true, force: true }));
-    diagnostics?.record(errors.length ? "error" : "info", "host.stop.settled", {
+    await recordDiagnosticDurable(diagnostics, errors.length ? "error" : "info", "host.stop.settled", {
       outcome: errors.length ? "error" : "success",
       count: errors.length,
-      durationMs: Math.round(performance.now() - hostStartedAt)
+      durationMs: Math.round(performance.now() - hostStartedAt),
+      errors: errors.map((error61) => diagnosticError(error61))
     });
     if (errors.length > 0) throw new AggregateError(errors, "Alder shutdown failed");
   })().finally(resolveClosed);
@@ -111558,7 +111633,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
       close
     };
   } catch (error61) {
-    diagnostics?.record("error", "host.fatal", {
+    await recordDiagnosticDurable(diagnostics, "error", "host.fatal", {
       outcome: "error",
       errorCode: error61?.code ?? "host_start_failed",
       errorType: error61 instanceof Error ? error61.name : "unknown",
@@ -111760,11 +111835,12 @@ var NotebookBackend = class {
   }
   async close() {
     const results = await Promise.allSettled([...new Set(this.hosts.values())].map((host) => host.close()));
-    const rejected = results.filter((result) => result.status === "rejected").length;
-    this.diagnostics?.record(rejected ? "error" : "info", "backend.close.summary", {
+    const failures = results.flatMap((result) => result.status === "rejected" ? [diagnosticError(result.reason)] : []);
+    await recordDiagnosticDurable(this.diagnostics, failures.length ? "error" : "info", "backend.close.summary", {
       count: results.length,
-      outcome: rejected ? "error" : "success",
-      dropped: rejected
+      outcome: failures.length ? "error" : "success",
+      dropped: failures.length,
+      errors: failures
     });
     await (await this.preferences).close();
   }
@@ -111831,8 +111907,13 @@ async function serve(socketPath2) {
     clearTimeout(idleTimer);
     server.close();
     const deadline = setTimeout(() => {
-      diagnostics.record("error", "backend.forced_exit", { forced: true, durationMs: 5e3, errorCode: "close_timeout" });
-      void drainDiagnosticsBounded(diagnostics, 100).finally(() => process.exit(0));
+      const durableRecord = recordDiagnosticDurable(diagnostics, "error", "backend.forced_exit", {
+        forced: true,
+        durationMs: 5e3,
+        errorCode: "close_timeout",
+        error: diagnosticError(Object.assign(new Error("backend close exceeded 5000ms"), { code: "close_timeout" }))
+      });
+      void (durableRecord ?? Promise.resolve()).finally(() => drainDiagnosticsBounded(diagnostics, 100)).finally(() => process.exit(0));
     }, 5e3);
     void backend.close().finally(async () => {
       clearTimeout(deadline);

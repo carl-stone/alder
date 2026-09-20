@@ -4279,10 +4279,12 @@ test("automatic variable snapshot failures stay quiet and nonfatal", async (cont
 
 test("runtime availability failures survive source edits and save until restart recovery", async () => {
   const engine = new FakeEngine();
+  const diagnostics = new CollectingDiagnostics();
   const controller = createController({
     engine,
     notebook: { ...notebook([["a", "x <- 1"]]), path: "/tmp/runtime-init.R" },
     config: resolveSettings({ notebook: { on_startup: false } }),
+    diagnostics,
     sourceCommit: async (request, context) => {
       const document = request.document ?? context.document;
       context.preparePublication({
@@ -4305,6 +4307,10 @@ test("runtime availability failures survive source edits and save until restart 
     code: "internal_error", message: "ordinary action failure",
   });
   assert.equal(controller.snapshot().runtime.executionBlockedReason, null);
+  const actionFailure = diagnostics.events.find(item => item.event === "host.action_failure");
+  assert.equal(actionFailure?.fields.message, "ordinary action failure");
+  assert.equal((actionFailure?.fields.error as { message?: string; stack?: string }).message, "ordinary action failure");
+  assert.match((actionFailure?.fields.error as { stack?: string }).stack ?? "", /ordinary action failure/);
 
   for (const listener of engine.failureListeners) listener("kernel", new Error("kernel lost"));
   const unavailable = controller.snapshot();

@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -31,7 +32,26 @@ test("diagnostics CLI exposes the stable read-only query surface", () => {
   assert.equal(options.diagnosticLimit, 25);
   assert.throws(() => parseCli(["diagnostics", "unknown"]), /requires status/);
   assert.throws(() => parseCli(["diagnostics", "status", "--limit", "0"]), /1 to 10000/);
+  assert.throws(() => parseCli(["diagnostics", "errors", "--id", "ignored"]), /only valid.*incident/);
+  assert.throws(() => parseCli(["diagnostics", "status", "--slow-ms", "5"]), /only valid.*operations/);
+  assert.throws(() => parseCli(["diagnostics", "incident", "--since", "not-a-time"]), /valid ISO/);
+  assert.throws(() => parseCli(["diagnostics", "incident", "--since", "2026-09-20T02:00:00Z", "--until", "2026-09-20T01:00:00Z"]), /must not be later/);
   assert.throws(() => parseCli(["run", "notebook.R", "--since", "2026-09-19"]), /diagnostics command/);
+});
+
+test("invalid diagnostic query ranges exit nonzero with machine-readable errors", () => {
+  for (const args of [
+    ["diagnostics", "incident", "--since", "not-a-time"],
+    ["diagnostics", "incident", "--since", "2026-09-20T02:00:00Z", "--until", "2026-09-20T01:00:00Z"],
+    ["diagnostics", "errors", "--id", "ignored"],
+  ]) {
+    const result = spawnSync(process.execPath, ["--import", "tsx", "src/main.ts", ...args], { cwd: resolve("."), encoding: "utf8" });
+    assert.equal(result.status, 2, result.stderr);
+    const error = JSON.parse(result.stderr) as { error: { code: string; message: string } };
+    assert.equal(error.error.code, "invalid_diagnostic_query");
+    assert.equal(error.error.message.length > 0, true);
+    assert.equal(result.stdout, "");
+  }
 });
 
 test("CLI waits for cold runtime startup before the first operation", async () => {
