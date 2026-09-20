@@ -82996,6 +82996,7 @@ function createAlderServer(options) {
   const sockets = /* @__PURE__ */ new Set();
   const socketsByLease = /* @__PURE__ */ new Map();
   const leases = /* @__PURE__ */ new Map();
+  const completedDiscards = /* @__PURE__ */ new Set();
   const tickets = /* @__PURE__ */ new Map();
   const artifactLeases = /* @__PURE__ */ new Map();
   const capabilities = /* @__PURE__ */ new Map();
@@ -83520,13 +83521,26 @@ function createAlderServer(options) {
       }
       if (action !== "heartbeat" && action !== "release") throw new HttpBoundaryError("invalid_request", "lease action must be attach, heartbeat, or release", 400);
       const leaseAction = leaseActionRequestSchema.parse(body);
+      const disposition = leaseAction.disposition ?? "normal";
+      if (action === "release" && disposition === "discard" && !leases.has(leaseAction.leaseId)) {
+        const supplied = parseBearer(request.headers);
+        if (supplied === null || !constantTimeEqual(supplied, configuredBearer ?? bearer)) throw authFailure();
+        jsonResponse(response, 200, { released: true, escalated: true });
+        if (leases.size === 0 && !completedDiscards.has(leaseAction.leaseId)) {
+          completedDiscards.add(leaseAction.leaseId);
+          setImmediate(() => {
+            void Promise.resolve(options.onLastLeaseDiscard?.()).catch((error61) => logger("error", "discard shutdown callback failed: " + (error61 instanceof Error ? error61.message : "unknown")));
+          });
+        }
+        return;
+      }
       const resolved = requireLease(request, true);
       if (body.leaseId !== resolved.lease.leaseId) throw authFailure("lease identity does not match request");
       if (action === "release") {
-        const disposition = leaseAction.disposition ?? "normal";
         removeLease(resolved.lease.leaseId);
         jsonResponse(response, 200, { released: true });
-        if (disposition === "discard" && leases.size === 0) {
+        if (disposition === "discard" && leases.size === 0 && !completedDiscards.has(resolved.lease.leaseId)) {
+          completedDiscards.add(resolved.lease.leaseId);
           setImmediate(() => {
             void Promise.resolve(options.onLastLeaseDiscard?.()).catch((error61) => logger("error", "discard shutdown callback failed: " + (error61 instanceof Error ? error61.message : "unknown")));
           });

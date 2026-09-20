@@ -19,6 +19,7 @@ export const STARTUP_TIMEOUT_MS = 120_000;
 export const HEARTBEAT_INTERVAL_MS = 10_000;
 const LOOPBACK_HOSTS = new Set(["127.0.0.1"]);
 const IDENTITY_REQUEST_TIMEOUT_MS = 4_000;
+const RELEASE_REQUEST_TIMEOUT_MS = 750;
 const SESSION_KEY_PATTERN = /^[0-9a-f]{64}$/;
 const UNTITLED_SESSION_KEY_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const TOKEN_PATTERN = /^[0-9a-f]{64}$/;
@@ -177,7 +178,7 @@ export async function connectBackendSession(raw: unknown, requested: AcquireNote
 }
 
 function createConnection(descriptor: BackendSessionDescriptor, lease: SessionLease): SessionConnection {
-  let released = false;
+  let releaseState: "active" | "normal" | "discard" = "active";
   const authenticatedHeaders = (init: RequestInit = {}): Headers => {
     const headers = new Headers(init.headers);
     headers.set("Authorization", "Bearer " + descriptor.token);
@@ -186,29 +187,56 @@ function createConnection(descriptor: BackendSessionDescriptor, lease: SessionLe
     return headers;
   };
   const request: SessionRequest = async (path, init = {}) => {
-    if (released) throw new SessionUnavailableError("session lease is released");
+    if (releaseState !== "active") throw new SessionUnavailableError("session lease is released");
     const response = await requestRaw(descriptor.origin, path, { ...init, headers: authenticatedHeaders(init) });
     if (response.headers.get("X-Alder-Continuity-Proof") !== descriptor.continuityProof) throw new SessionAuthError("host HTTP continuity proof changed");
     return response;
   };
   const heartbeat = async (): Promise<void> => {
-    if (released) return;
+    if (releaseState !== "active") return;
     const response = await request("/api/lease", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "heartbeat", leaseId: lease.leaseId }) });
     if (!response.ok) throw new SessionUnavailableError("session heartbeat failed (" + response.status + ")");
     sessionLeaseSchema.parse(await response.json());
   };
-  let releasePromise: Promise<void> | undefined;
-  const release = (disposition: "normal" | "discard" = "normal"): Promise<void> => releasePromise ??= (async () => {
-    await request("/api/lease", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "release", leaseId: lease.leaseId, disposition }) }).catch(() => undefined);
-    released = true;
-  })();
-  const interval = setInterval(() => { void heartbeat().catch(() => undefined); }, HEARTBEAT_INTERVAL_MS);
+  let normalAttempt: Promise<void> | undefined;
+  let discardAttempt: Promise<void> | undefined;
+  let interval: ReturnType<typeof setInterval>;
+  const attemptRelease = async (disposition: "normal" | "discard"): Promise<void> => {
+    const response = await requestRaw(descriptor.origin, "/api/lease", {
+      method: "POST", headers: authenticatedHeaders({ headers: { "Content-Type": "application/json" } }),
+      body: JSON.stringify({ action: "release", leaseId: lease.leaseId, disposition }),
+      signal: AbortSignal.timeout(RELEASE_REQUEST_TIMEOUT_MS),
+    });
+    if (response.headers.get("X-Alder-Continuity-Proof") !== descriptor.continuityProof) throw new SessionAuthError("host HTTP continuity proof changed");
+    if (!response.ok) throw new SessionUnavailableError("session lease release failed (" + response.status + ")");
+    releaseState = disposition;
+    clearInterval(interval);
+  };
+  const release = (disposition: "normal" | "discard" = "normal"): Promise<void> => {
+    if (disposition === "normal") {
+      if (releaseState !== "active") return Promise.resolve();
+      if (discardAttempt) return discardAttempt;
+      if (normalAttempt) return normalAttempt;
+      const attempt = attemptRelease("normal");
+      normalAttempt = attempt;
+      void attempt.then(() => undefined, () => undefined).finally(() => { if (normalAttempt === attempt) normalAttempt = undefined; });
+      return attempt;
+    }
+    if (releaseState === "discard") return Promise.resolve();
+    if (discardAttempt) return discardAttempt;
+    const preceding = normalAttempt;
+    const attempt = (preceding ? preceding.then(() => undefined, () => undefined) : Promise.resolve()).then(() => attemptRelease("discard"));
+    discardAttempt = attempt;
+    void attempt.then(() => undefined, () => undefined).finally(() => { if (discardAttempt === attempt) discardAttempt = undefined; });
+    return attempt;
+  };
+  interval = setInterval(() => { void heartbeat().catch(() => undefined); }, HEARTBEAT_INTERVAL_MS);
   interval.unref();
   return {
     sessionKey: descriptor.sessionKey, canonicalPath: descriptor.canonicalPath, origin: descriptor.origin, browserOrigin: descriptor.browserOrigin,
     epoch: descriptor.epoch, continuityProof: descriptor.continuityProof,
     leaseId: lease.leaseId, clientId: lease.clientId, capabilities: [...descriptor.capabilities], request, heartbeat,
-    release: async disposition => { clearInterval(interval); await release(disposition); },
+    release,
   };
 }
 

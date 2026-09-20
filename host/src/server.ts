@@ -781,6 +781,7 @@ export function createAlderServer(options: AlderServerOptions): AlderServer {
   const sockets = new Set<WebSocket>();
   const socketsByLease = new Map<string, WebSocket>();
   const leases = new Map<string, Lease>();
+  const completedDiscards = new Set<string>();
   const tickets = new Map<string, Ticket>();
   const artifactLeases = new Map<string, { descriptor: ArtifactHandle; expiresAt: number }>();
   const capabilities = new Map<string, ArtifactCapabilityEntry>();
@@ -1325,13 +1326,24 @@ export function createAlderServer(options: AlderServerOptions): AlderServer {
       }
       if (action !== "heartbeat" && action !== "release") throw new HttpBoundaryError("invalid_request", "lease action must be attach, heartbeat, or release", 400);
       const leaseAction = leaseActionRequestSchema.parse(body);
+      const disposition = leaseAction.disposition ?? "normal";
+      if (action === "release" && disposition === "discard" && !leases.has(leaseAction.leaseId)) {
+        const supplied = parseBearer(request.headers);
+        if (supplied === null || !constantTimeEqual(supplied, configuredBearer ?? bearer)) throw authFailure();
+        jsonResponse(response, 200, { released: true, escalated: true });
+        if (leases.size === 0 && !completedDiscards.has(leaseAction.leaseId)) {
+          completedDiscards.add(leaseAction.leaseId);
+          setImmediate(() => { void Promise.resolve(options.onLastLeaseDiscard?.()).catch(error => logger("error", "discard shutdown callback failed: " + (error instanceof Error ? error.message : "unknown"))); });
+        }
+        return;
+      }
       const resolved = requireLease(request, true);
       if (body.leaseId !== resolved.lease.leaseId) throw authFailure("lease identity does not match request");
       if (action === "release") {
-        const disposition = leaseAction.disposition ?? "normal";
         removeLease(resolved.lease.leaseId);
         jsonResponse(response, 200, { released: true });
-        if (disposition === "discard" && leases.size === 0) {
+        if (disposition === "discard" && leases.size === 0 && !completedDiscards.has(resolved.lease.leaseId)) {
+          completedDiscards.add(resolved.lease.leaseId);
           setImmediate(() => { void Promise.resolve(options.onLastLeaseDiscard?.()).catch(error => logger("error", "discard shutdown callback failed: " + (error instanceof Error ? error.message : "unknown"))); });
         }
       } else {

@@ -57,6 +57,8 @@ test("same-notebook clients detach independently while different notebooks stay 
     assert.equal(first.epoch, peer.epoch); assert.notEqual(first.leaseId, peer.leaseId); assert.notEqual(first.epoch, second.epoch);
     await first.release();
     assert.equal((await notebook(peer)).path, firstPath);
+    await first.release("discard");
+    assert.equal((await notebook(peer)).path, firstPath);
     assert.equal((await notebook(second)).path, secondPath);
     await peer.release();
     assert.equal((await notebook(second)).path, secondPath);

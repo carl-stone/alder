@@ -190,6 +190,7 @@ interface ElectronWindowRecord {
   released: boolean;
   closeRequest?: Promise<void>;
   disposal?: Promise<void>;
+  disposalDisposition?: "normal" | "discard";
   monitor?: ReturnType<typeof setInterval>;
   reloadInProgress: boolean;
   monitorInProgress: boolean;
@@ -320,6 +321,7 @@ export class ElectronMain {
   private quitState: "idle" | "disposing" | "authorized" = "idle";
   private quitPromise?: Promise<void>;
   private readonly pendingDisposals = new Set<Promise<void>>();
+  private readonly normalReleasedConnections = new Set<SessionConnection>();
   private resourcesPromise?: Promise<ApplicationResources>;
   private recoveryStore?: NativeRecoveryStore;
   private diagnostics?: StructuredDiagnostics;
@@ -883,10 +885,10 @@ export class ElectronMain {
   private requestClose(record: ElectronWindowRecord): Promise<void> {
     if (record.released) return Promise.resolve();
     if (record.closeRequest) return record.closeRequest;
-    const close = this.performRequestClose(record);
-    record.closeRequest = close;
-    void close.then(() => undefined, () => undefined).finally(() => { if (record.closeRequest === close) record.closeRequest = undefined; });
-    return close;
+    let tracked!: Promise<void>;
+    tracked = this.performRequestClose(record).finally(() => { if (record.closeRequest === tracked) record.closeRequest = undefined; });
+    record.closeRequest = tracked;
+    return tracked;
   }
 
   private async performRequestClose(record: ElectronWindowRecord): Promise<void> {
@@ -1111,21 +1113,32 @@ export class ElectronMain {
   }
 
   private async disposeRecord(record: ElectronWindowRecord, disposition: "normal" | "discard" = "normal"): Promise<void> {
-    if (record.released) return;
-    if (record.disposal) return record.disposal;
-    const disposal = (async () => {
+    if (disposition === "normal") {
+      if (record.released) return;
+      if (record.disposal) return record.disposal;
+    } else {
+      if (record.disposalDisposition === "discard" && record.disposal) return record.disposal;
+      if (record.released && record.disposalDisposition === "discard") return;
+    }
+    const preceding = disposition === "discard" ? record.disposal : undefined;
+    const operation = (async () => {
+      if (preceding) await preceding.catch(() => undefined);
       let timer: ReturnType<typeof setTimeout> | undefined;
       try {
         await Promise.race([
           record.connection.release(disposition),
           new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new Error("native lease release timed out")), 1_000); }),
         ]);
-        record.released = true;
-        if (record.monitor) clearInterval(record.monitor);
-        for (const pending of record.pendingCommands.values()) pending.reject(new Error("Desktop window closed before the command completed."));
-        record.pendingCommands.clear();
-        this.records.delete(record);
-        this.removeRecordKeys(record);
+        if (!record.released) {
+          record.released = true;
+          if (record.monitor) clearInterval(record.monitor);
+          for (const pending of record.pendingCommands.values()) pending.reject(new Error("Desktop window closed before the command completed."));
+          record.pendingCommands.clear();
+          this.records.delete(record);
+          this.removeRecordKeys(record);
+        }
+        if (disposition === "normal") this.normalReleasedConnections.add(record.connection);
+        else this.normalReleasedConnections.delete(record.connection);
         this.diagnostics?.record("info", "window.close", {
         windowId: record.windowId, sessionId: record.connection.sessionKey, sessionEpoch: record.connection.epoch,
         outcome: "success", errorCode: null,
@@ -1142,12 +1155,14 @@ export class ElectronMain {
         if (timer) clearTimeout(timer);
       }
     })();
-    record.disposal = disposal;
-    this.pendingDisposals.add(disposal);
-    void disposal.then(() => undefined, () => undefined).finally(() => {
+    let disposal!: Promise<void>;
+    disposal = operation.finally(() => {
       this.pendingDisposals.delete(disposal);
       if (record.disposal === disposal) record.disposal = undefined;
     });
+    record.disposal = disposal;
+    record.disposalDisposition = disposition;
+    this.pendingDisposals.add(disposal);
     return disposal;
   }
 
@@ -1208,6 +1223,14 @@ export class ElectronMain {
     for (const pending of this.pendingDisposals) if (!disposals.includes(pending)) disposals.push(pending);
     const results = await Promise.allSettled(disposals);
     const failures = results.filter((result): result is PromiseRejectedResult => result.status === "rejected").map(result => result.reason);
+    if (disposition === "discard") {
+      const escalations = [...this.normalReleasedConnections].map(async connection => {
+        await connection.release("discard");
+        this.normalReleasedConnections.delete(connection);
+      });
+      const escalationResults = await Promise.allSettled(escalations);
+      failures.push(...escalationResults.filter((result): result is PromiseRejectedResult => result.status === "rejected").map(result => result.reason));
+    }
     if (failures.length) throw new AggregateError(failures, "one or more native leases could not be released");
   }
 

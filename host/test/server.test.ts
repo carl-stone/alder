@@ -557,6 +557,28 @@ test("discarding the final browser lease requests host shutdown", { timeout: 30_
     await rm(root, { recursive: true, force: true });
   }
 });
+test("a confirmed normal bearer release can be escalated once to final discard", { timeout: 5_000 }, async () => {
+  let discardCalls = 0;
+  const { server, origin, root } = await startFixture(undefined, {}, makeController(), {
+    onLastLeaseDiscard: () => { discardCalls += 1; },
+  });
+  try {
+    const leaseId = await attachBearerLease(origin);
+    const release = (disposition: "normal" | "discard") => fetch(origin + "/api/lease", {
+      method: "POST", headers: bearerHeaders(origin, leaseId),
+      body: JSON.stringify({ action: "release", leaseId, disposition }),
+    });
+    assert.equal((await release("normal")).status, 200);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(discardCalls, 0);
+    assert.equal((await release("discard")).status, 200);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(discardCalls, 1);
+    assert.equal((await release("discard")).status, 200);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(discardCalls, 1);
+  } finally { await server.close(); await rm(root, { recursive: true, force: true }); }
+});
 test("native window reload retires the previous browser lease and final discard closes the document", { timeout: 5_000 }, async () => {
   let discarded = 0;
   const { server, origin, root } = await startFixture(undefined, {}, makeController(), {

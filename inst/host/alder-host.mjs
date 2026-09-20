@@ -35442,6 +35442,7 @@ var STARTUP_TIMEOUT_MS = 12e4;
 var HEARTBEAT_INTERVAL_MS = 1e4;
 var LOOPBACK_HOSTS = /* @__PURE__ */ new Set(["127.0.0.1"]);
 var IDENTITY_REQUEST_TIMEOUT_MS = 4e3;
+var RELEASE_REQUEST_TIMEOUT_MS = 750;
 var SESSION_KEY_PATTERN = /^[0-9a-f]{64}$/;
 var UNTITLED_SESSION_KEY_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 var TOKEN_PATTERN = /^[0-9a-f]{64}$/;
@@ -35534,7 +35535,7 @@ async function connectBackendSession(raw, requested) {
   return createConnection(descriptor, lease);
 }
 function createConnection(descriptor, lease) {
-  let released = false;
+  let releaseState = "active";
   const authenticatedHeaders = (init = {}) => {
     const headers = new Headers(init.headers);
     headers.set("Authorization", "Bearer " + descriptor.token);
@@ -35543,23 +35544,55 @@ function createConnection(descriptor, lease) {
     return headers;
   };
   const request = async (path2, init = {}) => {
-    if (released) throw new SessionUnavailableError("session lease is released");
+    if (releaseState !== "active") throw new SessionUnavailableError("session lease is released");
     const response = await requestRaw(descriptor.origin, path2, { ...init, headers: authenticatedHeaders(init) });
     if (response.headers.get("X-Alder-Continuity-Proof") !== descriptor.continuityProof) throw new SessionAuthError("host HTTP continuity proof changed");
     return response;
   };
   const heartbeat = async () => {
-    if (released) return;
+    if (releaseState !== "active") return;
     const response = await request("/api/lease", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "heartbeat", leaseId: lease.leaseId }) });
     if (!response.ok) throw new SessionUnavailableError("session heartbeat failed (" + response.status + ")");
     sessionLeaseSchema.parse(await response.json());
   };
-  let releasePromise;
-  const release = (disposition = "normal") => releasePromise ??= (async () => {
-    await request("/api/lease", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "release", leaseId: lease.leaseId, disposition }) }).catch(() => void 0);
-    released = true;
-  })();
-  const interval = setInterval(() => {
+  let normalAttempt;
+  let discardAttempt;
+  let interval;
+  const attemptRelease = async (disposition) => {
+    const response = await requestRaw(descriptor.origin, "/api/lease", {
+      method: "POST",
+      headers: authenticatedHeaders({ headers: { "Content-Type": "application/json" } }),
+      body: JSON.stringify({ action: "release", leaseId: lease.leaseId, disposition }),
+      signal: AbortSignal.timeout(RELEASE_REQUEST_TIMEOUT_MS)
+    });
+    if (response.headers.get("X-Alder-Continuity-Proof") !== descriptor.continuityProof) throw new SessionAuthError("host HTTP continuity proof changed");
+    if (!response.ok) throw new SessionUnavailableError("session lease release failed (" + response.status + ")");
+    releaseState = disposition;
+    clearInterval(interval);
+  };
+  const release = (disposition = "normal") => {
+    if (disposition === "normal") {
+      if (releaseState !== "active") return Promise.resolve();
+      if (discardAttempt) return discardAttempt;
+      if (normalAttempt) return normalAttempt;
+      const attempt2 = attemptRelease("normal");
+      normalAttempt = attempt2;
+      void attempt2.then(() => void 0, () => void 0).finally(() => {
+        if (normalAttempt === attempt2) normalAttempt = void 0;
+      });
+      return attempt2;
+    }
+    if (releaseState === "discard") return Promise.resolve();
+    if (discardAttempt) return discardAttempt;
+    const preceding = normalAttempt;
+    const attempt = (preceding ? preceding.then(() => void 0, () => void 0) : Promise.resolve()).then(() => attemptRelease("discard"));
+    discardAttempt = attempt;
+    void attempt.then(() => void 0, () => void 0).finally(() => {
+      if (discardAttempt === attempt) discardAttempt = void 0;
+    });
+    return attempt;
+  };
+  interval = setInterval(() => {
     void heartbeat().catch(() => void 0);
   }, HEARTBEAT_INTERVAL_MS);
   interval.unref();
@@ -35575,10 +35608,7 @@ function createConnection(descriptor, lease) {
     capabilities: [...descriptor.capabilities],
     request,
     heartbeat,
-    release: async (disposition) => {
-      clearInterval(interval);
-      await release(disposition);
-    }
+    release
   };
 }
 async function assertAttachConfiguration(identity, requested, sessionKey) {
