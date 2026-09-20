@@ -138,10 +138,16 @@ export class Chrome {
   }
 
   async click(selector: string): Promise<void> {
-    const point = await this.evaluate(`(() => { const element = document.querySelector(${JSON.stringify(selector)}); if (!element) throw new Error('missing click target'); element.scrollIntoView({block:'center'}); const rect = element.getBoundingClientRect(); return {x:rect.x+rect.width/2,y:rect.y+rect.height/2}; })()`);
+    const locate = `(() => { const element = document.querySelector(${JSON.stringify(selector)}); if (!element) throw new Error('missing click target'); element.scrollIntoView({block:'center'}); const rect = element.getBoundingClientRect(); return {x:rect.x+rect.width/2,y:rect.y+rect.height/2}; })()`;
+    const point = await this.evaluate(locate);
     await this.send('Input.dispatchMouseEvent', { type: 'mouseMoved', ...point });
-    await this.send('Input.dispatchMouseEvent', { type: 'mousePressed', ...point, button: 'left', clickCount: 1 });
-    await this.send('Input.dispatchMouseEvent', { type: 'mouseReleased', ...point, button: 'left', clickCount: 1 });
+    // Hover can reveal controls or coincide with an application rerender. Use
+    // the target's current geometry for the trusted press rather than stale
+    // coordinates captured before that browser work completed.
+    const current = await this.evaluate(locate);
+    await this.send('Input.dispatchMouseEvent', { type: 'mouseMoved', ...current });
+    await this.send('Input.dispatchMouseEvent', { type: 'mousePressed', ...current, button: 'left', clickCount: 1 });
+    await this.send('Input.dispatchMouseEvent', { type: 'mouseReleased', ...current, button: 'left', clickCount: 1 });
   }
 
   async close(): Promise<void> {

@@ -465,6 +465,8 @@ test('long notebooks virtualize editors and preserve edited source through recov
         .every((node, index) => node.dataset.cell === 'cell-' + (index + 1)),
       sourcePreserved: window.__alderHost.client.document.cell('cell-75').desiredBody.join('\\n') === 'value_75 <- 7500\\nvalue_75',
     })`), { orderPreserved: true, sourcePreserved: true });
+    await browser.click('#panel-toggle');
+    await browser.wait("document.getElementById('dataflow-panel').hidden === false && document.getElementById('dataflow-panel').getAttribute('role') === 'complementary'");
     await browser.click('#panel-tab-variables');
     await browser.wait(`document.querySelector('#panel-variables .variable-row[data-target-cell="cell-1"] .variable-name')?.textContent === 'value_1'`);
     const renameSnapshot = app.controller.snapshot();
@@ -820,14 +822,30 @@ test('scalar, form, and button controls drive the intended reactive cells once',
 
       assert.equal(await browser.evaluate(`(() => {
         const control = document.querySelector('[data-cell="cell-5"] [data-role=widget][data-name=settings][data-kind=slider]');
+        window.__formEvents = [];
+        for (const target of document.querySelectorAll('[data-cell="cell-5"] [data-role=widget]')) {
+          for (const type of ['keydown', 'keyup', 'input', 'change', 'mousedown', 'mouseup', 'click']) {
+            target.addEventListener(type, event => window.__formEvents.push({type, kind:target.dataset.kind,
+              value:target.value, checked:target.checked, trusted:event.isTrusted,
+              active:document.activeElement?.dataset?.kind || document.activeElement?.tagName}));
+          }
+        }
         control?.focus();
         return control?.value === '2' && document.activeElement === control;
       })()`), true);
       await arrowRight();
+      await browser.wait(`document.querySelector('[data-cell="cell-5"] [data-role=widget][data-name=settings][data-kind=slider]')?.value === '3' &&
+        window.__alderHost.client.document.snapshot.cells[4].outputs[0]?.data?.spec?.child?.value?.factor === 3`, 30_000);
       await browser.click('[data-cell="cell-5"] [data-role=widget][data-name=settings][data-kind=checkbox]');
       await browser.wait(`document.querySelector('[data-cell="cell-5"] [data-role=widget][data-name=settings][data-kind=checkbox]')?.checked === true &&
         window.__alderHost.client.document.snapshot.cells[4].outputs[0]?.data?.spec?.child?.value?.enabled === true &&
+        window.__alderHost.client.document.snapshot.cells[4].outputs[0]?.data?.spec?.child?.value?.factor === 3 &&
         document.querySelector('[data-cell="cell-5"] [data-form-submit=true]')?.disabled === false`, 30_000);
+      assert.deepEqual(await browser.evaluate(`window.__formEvents.map(event => [event.type, event.kind, event.trusted])`), [
+        ['keydown', 'slider', true], ['input', 'slider', true], ['change', 'slider', true], ['keyup', 'slider', true],
+        ['mousedown', 'checkbox', true], ['mouseup', 'checkbox', true], ['click', 'checkbox', true],
+        ['input', 'checkbox', true], ['change', 'checkbox', true],
+      ]);
       for (let iteration = 0; iteration < 20; iteration += 1) {
         const expected = iteration % 2 === 1;
         await browser.click('[data-cell="cell-5"] [data-role=widget][data-name=settings][data-kind=checkbox]');
@@ -863,7 +881,7 @@ test('scalar, form, and button controls drive the intended reactive cells once',
     console.error(JSON.stringify({ runtime: app?.controller.snapshot().runtime, browser: await browser?.evaluate(`(() => {
       const output = window.__alderHost?.view?.output;
       const submit = document.querySelector('[data-cell="cell-5"] [data-form-submit=true]');
-      return { formClicks:window.__formClicks, submitDisabled:submit?.disabled, origin:submit && output?.controlOrigins?.get(submit),
+      return { formClicks:window.__formClicks, formEvents:window.__formEvents, submitDisabled:submit?.disabled, origin:submit && output?.controlOrigins?.get(submit),
         pendingWidgets:[...(output?.pendingWidgets?.keys() ?? [])], pendingForms:[...(output?.pendingForms?.keys() ?? [])],
         lastFailure:String(output?.lastFailure?.error ?? ''), status:document.querySelector('#status')?.textContent };
     })()`).catch(() => null), cells: app?.controller.snapshot().cells.map((cell) => ({
