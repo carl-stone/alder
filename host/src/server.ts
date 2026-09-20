@@ -781,7 +781,7 @@ export function createAlderServer(options: AlderServerOptions): AlderServer {
   const sockets = new Set<WebSocket>();
   const socketsByLease = new Map<string, WebSocket>();
   const leases = new Map<string, Lease>();
-  const completedDiscards = new Set<string>();
+  const normalReleaseReceipts = new Map<string, { clientId: string; consumed: boolean }>();
   const tickets = new Map<string, Ticket>();
   const artifactLeases = new Map<string, { descriptor: ArtifactHandle; expiresAt: number }>();
   const capabilities = new Map<string, ArtifactCapabilityEntry>();
@@ -1330,9 +1330,12 @@ export function createAlderServer(options: AlderServerOptions): AlderServer {
       if (action === "release" && disposition === "discard" && !leases.has(leaseAction.leaseId)) {
         const supplied = parseBearer(request.headers);
         if (supplied === null || !constantTimeEqual(supplied, configuredBearer ?? bearer)) throw authFailure();
+        const receipt = normalReleaseReceipts.get(leaseAction.leaseId);
+        if (receipt === undefined || clientHeader(request.headers) !== receipt.clientId) throw authFailure("normal release receipt does not match request");
         jsonResponse(response, 200, { released: true, escalated: true });
-        if (leases.size === 0 && !completedDiscards.has(leaseAction.leaseId)) {
-          completedDiscards.add(leaseAction.leaseId);
+        const firstConsumption = !receipt.consumed;
+        receipt.consumed = true;
+        if (leases.size === 0 && firstConsumption) {
           setImmediate(() => { void Promise.resolve(options.onLastLeaseDiscard?.()).catch(error => logger("error", "discard shutdown callback failed: " + (error instanceof Error ? error.message : "unknown"))); });
         }
         return;
@@ -1340,10 +1343,13 @@ export function createAlderServer(options: AlderServerOptions): AlderServer {
       const resolved = requireLease(request, true);
       if (body.leaseId !== resolved.lease.leaseId) throw authFailure("lease identity does not match request");
       if (action === "release") {
+        if (disposition === "normal" && resolved.auth.kind === "bearer") {
+          normalReleaseReceipts.set(resolved.lease.leaseId, { clientId: resolved.lease.clientId, consumed: false });
+          while (normalReleaseReceipts.size > MAX_ACTIVE_LEASES) normalReleaseReceipts.delete(normalReleaseReceipts.keys().next().value!);
+        }
         removeLease(resolved.lease.leaseId);
         jsonResponse(response, 200, { released: true });
-        if (disposition === "discard" && leases.size === 0 && !completedDiscards.has(resolved.lease.leaseId)) {
-          completedDiscards.add(resolved.lease.leaseId);
+        if (disposition === "discard" && leases.size === 0) {
           setImmediate(() => { void Promise.resolve(options.onLastLeaseDiscard?.()).catch(error => logger("error", "discard shutdown callback failed: " + (error instanceof Error ? error.message : "unknown"))); });
         }
       } else {

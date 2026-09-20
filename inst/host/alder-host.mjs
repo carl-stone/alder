@@ -35559,16 +35559,26 @@ function createConnection(descriptor, lease) {
   let discardAttempt;
   let interval;
   const attemptRelease = async (disposition) => {
-    const response = await requestRaw(descriptor.origin, "/api/lease", {
-      method: "POST",
-      headers: authenticatedHeaders({ headers: { "Content-Type": "application/json" } }),
-      body: JSON.stringify({ action: "release", leaseId: lease.leaseId, disposition }),
-      signal: AbortSignal.timeout(RELEASE_REQUEST_TIMEOUT_MS)
-    });
-    if (response.headers.get("X-Alder-Continuity-Proof") !== descriptor.continuityProof) throw new SessionAuthError("host HTTP continuity proof changed");
-    if (!response.ok) throw new SessionUnavailableError("session lease release failed (" + response.status + ")");
-    releaseState = disposition;
-    clearInterval(interval);
+    const controller = new AbortController();
+    const timeoutError = Object.assign(new Error("session lease release timed out"), { name: "TimeoutError" });
+    const timer = setTimeout(() => controller.abort(timeoutError), RELEASE_REQUEST_TIMEOUT_MS);
+    try {
+      const response = await requestRaw(descriptor.origin, "/api/lease", {
+        method: "POST",
+        headers: authenticatedHeaders({ headers: { "Content-Type": "application/json" } }),
+        body: JSON.stringify({ action: "release", leaseId: lease.leaseId, disposition }),
+        signal: controller.signal
+      });
+      if (response.headers.get("X-Alder-Continuity-Proof") !== descriptor.continuityProof) throw new SessionAuthError("host HTTP continuity proof changed");
+      if (!response.ok) throw new SessionUnavailableError("session lease release failed (" + response.status + ")");
+      releaseState = disposition;
+      clearInterval(interval);
+    } catch (error61) {
+      if (controller.signal.aborted && controller.signal.reason === timeoutError) throw timeoutError;
+      throw error61;
+    } finally {
+      clearTimeout(timer);
+    }
   };
   const release = (disposition = "normal") => {
     if (disposition === "normal") {

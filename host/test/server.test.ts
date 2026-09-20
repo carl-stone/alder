@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { request as httpRequest } from "node:http";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -114,7 +115,7 @@ function bearerHeaders(origin: string, leaseId?: string): Record<string, string>
   };
 }
 
-async function attachBearerLease(origin: string): Promise<string> {
+async function attachBearerSession(origin: string): Promise<{ leaseId: string; clientId: string }> {
   const response = await fetch(origin + "/api/lease", {
     method: "POST",
     headers: bearerHeaders(origin),
@@ -122,8 +123,10 @@ async function attachBearerLease(origin: string): Promise<string> {
   });
   const text = await response.text();
   assert.equal(response.status, 200, text);
-  return (JSON.parse(text) as { leaseId?: unknown }).leaseId as string;
+  return JSON.parse(text) as { leaseId: string; clientId: string };
 }
+
+async function attachBearerLease(origin: string): Promise<string> { return (await attachBearerSession(origin)).leaseId; }
 
 async function requestResolution(origin: string, leaseId: string, descriptor: ArtifactHandle, extra: Record<string, string> = {}): Promise<Response> {
   return await fetch(origin + "/api/query", {
@@ -563,18 +566,51 @@ test("a confirmed normal bearer release can be escalated once to final discard",
     onLastLeaseDiscard: () => { discardCalls += 1; },
   });
   try {
-    const leaseId = await attachBearerLease(origin);
-    const release = (disposition: "normal" | "discard") => fetch(origin + "/api/lease", {
-      method: "POST", headers: bearerHeaders(origin, leaseId),
+    const session = await attachBearerSession(origin);
+    const release = (leaseId: string, clientId: string, disposition: "normal" | "discard") => fetch(origin + "/api/lease", {
+      method: "POST", headers: { ...bearerHeaders(origin, leaseId), "X-Alder-Client-Id": clientId },
       body: JSON.stringify({ action: "release", leaseId, disposition }),
     });
-    assert.equal((await release("normal")).status, 200);
+    const arbitrary = await release(randomUUID(), session.clientId, "discard");
+    assert.equal(arbitrary.status, 403);
+    assert.equal((await release(session.leaseId, session.clientId, "normal")).status, 200);
     await new Promise(resolve => setImmediate(resolve));
     assert.equal(discardCalls, 0);
-    assert.equal((await release("discard")).status, 200);
+    assert.equal((await release(session.leaseId, randomUUID(), "discard")).status, 403);
+    assert.equal((await release(randomUUID(), session.clientId, "discard")).status, 403);
+    assert.equal((await release(session.leaseId, session.clientId, "discard")).status, 200);
     await new Promise(resolve => setImmediate(resolve));
     assert.equal(discardCalls, 1);
-    assert.equal((await release("discard")).status, 200);
+    assert.equal((await release(session.leaseId, session.clientId, "discard")).status, 200);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(discardCalls, 1);
+    assert.equal((await release(session.leaseId, randomUUID(), "discard")).status, 403);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(discardCalls, 1);
+  } finally { await server.close(); await rm(root, { recursive: true, force: true }); }
+});
+test("normal-release escalation is consumed without stopping another bearer peer", { timeout: 5_000 }, async () => {
+  let discardCalls = 0;
+  const { server, origin, root } = await startFixture(undefined, {}, makeController(), {
+    onLastLeaseDiscard: () => { discardCalls += 1; },
+  });
+  try {
+    const released = await attachBearerSession(origin);
+    const peer = await attachBearerSession(origin);
+    const release = (session: { leaseId: string; clientId: string }, disposition: "normal" | "discard") => fetch(origin + "/api/lease", {
+      method: "POST", headers: { ...bearerHeaders(origin, session.leaseId), "X-Alder-Client-Id": session.clientId },
+      body: JSON.stringify({ action: "release", leaseId: session.leaseId, disposition }),
+    });
+    assert.equal((await release(released, "normal")).status, 200);
+    assert.equal((await release(released, "discard")).status, 200);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(discardCalls, 0);
+    const heartbeat = await fetch(origin + "/api/lease", {
+      method: "POST", headers: { ...bearerHeaders(origin, peer.leaseId), "X-Alder-Client-Id": peer.clientId },
+      body: JSON.stringify({ action: "heartbeat", leaseId: peer.leaseId }),
+    });
+    assert.equal(heartbeat.status, 200);
+    assert.equal((await release(peer, "discard")).status, 200);
     await new Promise(resolve => setImmediate(resolve));
     assert.equal(discardCalls, 1);
   } finally { await server.close(); await rm(root, { recursive: true, force: true }); }
