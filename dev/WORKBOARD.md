@@ -9,17 +9,16 @@ copies in other worktrees are snapshots.
 
 ## Current assignment
 
-**Repository integration and cleanup — Implementing.**
+**Repository integration and cleanup — Accepted.**
 
-The primary implementation task is synchronizing the latest canonical lead documents onto accepted
-commit `b316bc37385cb7e71516a6e477e555db60b08a9f`, fast-forwarding and pushing `main`,
-then cleaning merged temporary worktrees and branches without discarding unique uncommitted work.
-The old `main` checkout contains the obsolete pre-reset working tree, so it must be preserved long
-enough to confirm that the accepted branch plus canonical documents contain everything still useful.
+Integrated commit `554da34d0d3faf9bb0822100ff50cc9703a2745f` was pushed to `main` by
+strict fast-forward and independently verified on the remote. Local `main` and the standing
+implementation worktree are clean at that checkpoint. Twelve obsolete temporary Alder worktrees
+and their merged branches were removed after exact comparison and focused review; no unique useful
+work was discarded. The separate Ark source repository was untouched.
 
-Finish when local and remote `main` resolve to the same clean integrated commit, the accepted app
-and release README remain intact, canonical lead documents are committed, and obsolete merged
-worktrees are removed or retained only with a concrete unique-work reason.
+The accepted app, release README and three feature GIFs are now on `main`. Only `main` and the clean
+standing implementation branch remain locally, with no unmerged branches or safety stashes.
 
 **Testing constraint:** do not take over Carl's visible desktop. Use background or
 isolated Mac checks for native behavior.
@@ -41,7 +40,7 @@ No item is active. New approved work is added here before assignment.
 | Mac UI/UX polish | Accepted | Primary implementer and independent reviewers | `1e5af1b`: daily-use correctness, content-first layout, stable virtualization, deterministic native cleanup and complete signed-app acceptance passed |
 | Accepted Mac build local delivery | Accepted | Primary implementer | Exact accepted signed app installed at `/Users/carlstone/Applications/Alder.app`; background ready/quit smoke passed with natural cleanup |
 | Release README and feature demo | Accepted | Primary implementer and independent reviewers | `b316bc3`: release-facing install/use guide and three compact real-app feature captures; media and factual reviews passed |
-| Repository integration and cleanup | Implementing | Primary implementer | Commit canonical lead docs, fast-forward and push `main`, verify remote head, and safely prune obsolete merged worktrees |
+| Repository integration and cleanup | Accepted | Primary implementer and focused cleanup reviewers | `554da34`: canonical docs and accepted app fast-forwarded to remote `main`; obsolete worktrees, branches and safety stashes removed after review |
 
 The following requirements apply to the relevant slices and are checked again
 when accepting the complete app:
