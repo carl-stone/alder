@@ -25,9 +25,9 @@ implementation; obsolete inline platform branches and assumptions are removed; a
 finds no duplicated platform product or speculative abstraction. Mac-only behavior remains queued
 for qualification on a Mac and is not claimed from Linux evidence.
 
-**Next action:** reconcile the standing implementation task onto the droplet at current `main`,
-inventory failures produced by a Linux build/test run, and propose the first runnable extraction
-checkpoint before changing shared boundaries.
+**Next action:** the Linux primary implementation task inventories failures produced by a real
+build/test run and delivers the first runnable extraction checkpoint before broadening shared
+boundaries. The droplet has the required Node, R and native build toolchain.
 
 The previous repository integration checkpoint remains accepted. Commit
 `554da34d0d3faf9bb0822100ff50cc9703a2745f` was pushed to `main` by
@@ -225,17 +225,22 @@ consumes only Alder's installed read-only diagnostic commands. It creates bounde
 content-bound incident candidates from actionable evidence, rejects unhealthy sources and
 inconsistent replay, retries atomically, and leaves empty or unchanged ticks silent and
 mutation-free. Thirty-eight tests, a real installed-app read-only check and a fresh combined
-demo passed independent review. No hooks, scheduler, notification, delivery or model wake are
-installed. The standing task remains owner of this separate prototype.
+demo passed independent review on Mac. The unchanged copy on Linux currently reproduces one
+SQLite lock failure in its concurrent workflow test (37/38 pass); this remains a separate
+orchestration concern and does not expand the active Alder assignment. No hooks, scheduler,
+notification, delivery or model wake are installed. The standing task remains owner of this
+separate prototype.
 
 ## Task locations
 
 | Role | Location |
 | --- | --- |
-| Lead task | `01a0b55f-feaf-7c03-9964-b448891e33d5` |
-| Primary implementation task | `01a0b5a6-22ac-7480-9394-5cc4c1ba807d`; handoff to `droplet` in progress |
-| Implementation worktree | Destination managed worktree on `droplet`; source `/Users/carlstone/.codex/worktrees/ebd6/alder` retained until handoff verifies |
-| Implementation branch | `codex/mac-document-foundation` |
-| Orchestration implementation task | `01a0bbd7-8b7e-7712-9fb4-b1c0f3289e41`; handoff to `droplet` in progress |
-| Ignored orchestration workspace | `.tmp-orchestrator`, copied separately because Git does not carry ignored state |
-| Lead documentation checkout | `/Users/carlstone/alder` |
+| Lead task | `01a0b55f-feaf-7c03-9964-b448891e33d5`; currently `local`, user handoff to `droplet` remains |
+| Primary implementation task | `01a0bf49-f444-7042-a6ee-8be9c7d2cd79` on `droplet` |
+| Implementation worktree | `/root/.codex/worktrees/5ae4/alder` |
+| Implementation base | `origin/main` at or after `1d67139` |
+| Prior Mac implementation task | `01a0b5a6-22ac-7480-9394-5cc4c1ba807d` retained as history on `local` |
+| Orchestration implementation task | `01a0bf4a-93d6-7672-869a-85c8318cf5d0` on `droplet` |
+| Ignored orchestration workspace | `/root/workspace/alder/.tmp-orchestrator` |
+| Prior Mac orchestration task | `01a0bbd7-8b7e-7712-9fb4-b1c0f3289e41` retained as history on `local` |
+| Lead documentation checkout | Current host's Alder `main`; `/root/workspace/alder` after droplet handoff |
