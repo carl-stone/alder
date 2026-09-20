@@ -3,6 +3,7 @@ import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import WebSocket from 'ws';
+import { cleanupOwnedProcesses, ownedProcessRows, waitForOwnedExit } from './native-process-cleanup.mjs';
 
 if (process.platform !== 'darwin') throw new Error('Native app acceptance requires macOS.');
 const app = resolve(process.argv[2] ?? 'host/.application-desktop/Alder.app');
@@ -16,6 +17,7 @@ const children = new Set();
 const ownedPids = new Set();
 const sessions = new Set();
 const started = performance.now();
+let launchSequence = 0;
 await mkdir(workspace);
 await writeFile(notebook, '# ---\n# runtime:\n#   on_cell_change: lazy\n# ---\n# %%\nvalue <- 0L\nvalue\n');
 function environment() {
@@ -31,6 +33,7 @@ function environment() {
 }
 
 async function launch(name) {
+  const launchName = `${name}-${++launchSequence}`;
   const stderr = [];
   const child = spawn(executable, [
     '--headless=new', '--remote-debugging-port=0', `--user-data-dir=${join(temporary, name)}`, notebook,
@@ -39,18 +42,22 @@ async function launch(name) {
   ownedPids.add(child.pid);
   child.stderr.on('data', chunk => stderr.push(Buffer.from(chunk)));
   const endpoint = await new Promise((resolveEndpoint, reject) => {
-    const timer = setTimeout(() => reject(new Error(`packaged app startup timed out: ${Buffer.concat(stderr)}`)), 30_000);
+    const timer = setTimeout(() => reject(new Error(`packaged app ${launchName} startup timed out: ${Buffer.concat(stderr)}`)), 30_000);
     child.once('error', error => { clearTimeout(timer); reject(error); });
-    child.once('exit', code => { clearTimeout(timer); reject(new Error(`packaged app exited ${code}: ${Buffer.concat(stderr)}`)); });
+    child.once('exit', code => { clearTimeout(timer); reject(new Error(`packaged app ${launchName} exited ${code}: ${Buffer.concat(stderr)}`)); });
     child.stderr.on('data', () => {
       const match = /DevTools listening on (ws:\/\/[^\s]+)/.exec(Buffer.concat(stderr).toString('utf8'));
       if (match) { clearTimeout(timer); resolveEndpoint(match[1]); }
     });
   });
-  const cdp = await Cdp.connect(endpoint);
-  sessions.add(cdp);
-  await cdp.wait("document.querySelector('.cm-content') && document.getElementById('r-state')?.textContent === 'R ready' && !document.querySelector('[data-act=run]')?.disabled", 45_000);
-  return { child, cdp, stderr };
+  try {
+    const cdp = await Cdp.connect(endpoint);
+    sessions.add(cdp);
+    await cdp.wait("document.querySelector('.cm-content') && document.getElementById('r-state')?.textContent === 'R ready' && !document.querySelector('[data-act=run]')?.disabled", 45_000);
+    return { child, cdp, stderr, ownedPids: new Set([child.pid]) };
+  } catch (error) {
+    throw new Error(`packaged app ${launchName} did not become usable`, { cause: error });
+  }
 }
 
 async function replaceEditor(cdp, source) {
@@ -92,67 +99,22 @@ async function waitDiskSource(source, timeout = 20_000) {
 
 async function stop(instance) {
   if (!instance) return;
-  const owned = processTree(instance.child.pid);
-  for (const pid of owned) ownedPids.add(pid);
-  try { await shortcut(instance.cdp, 'q', 'KeyQ', 81, 4); } catch {}
-  const exited = await Promise.race([
-    new Promise(resolveExit => instance.child.once('exit', () => resolveExit(true))),
-    new Promise(resolveExit => setTimeout(() => resolveExit(false), 5_000)),
-  ]);
-  if (!exited) {
-    await instance.cdp.send('Browser.close', {}, '').catch(() => {});
-    await new Promise(resolveWait => setTimeout(resolveWait, 500));
-  }
-  if (instance.child.exitCode === null && instance.child.signalCode === null) instance.child.kill('SIGTERM');
-  await new Promise(resolveWait => setTimeout(resolveWait, 500));
-  if (instance.child.exitCode === null && instance.child.signalCode === null) instance.child.kill('SIGKILL');
-  for (const pid of owned.reverse()) {
-    try { process.kill(pid, 'SIGTERM'); } catch {}
-  }
-  await new Promise(resolveWait => setTimeout(resolveWait, 250));
-  for (const pid of owned) {
-    try { process.kill(pid, 'SIGKILL'); } catch {}
-  }
+  ownedProcessRows(ownedPids, temporary);
+  ownedProcessRows(instance.ownedPids, '');
+  requestNativeQuit(instance.child.pid);
+  try { await waitForOwnedExit(instance.ownedPids, '', 10_000); }
+  catch (error) { throw new Error(`packaged Electron ${instance.child.pid} process tree survived native quit`, { cause: error }); }
   instance.cdp.close();
   sessions.delete(instance.cdp);
   children.delete(instance.child);
 }
 
-function processTree(rootPid) {
-  const rows = execFileSync('/bin/ps', ['-axo', 'pid=,ppid='], { encoding: 'utf8' }).split('\n').map(line => {
-    const match = /^(?:\s*)(\d+)\s+(\d+)/.exec(line);
-    return match ? { pid: Number(match[1]), ppid: Number(match[2]) } : null;
-  }).filter(Boolean);
-  const found = [];
-  const parents = new Set([rootPid]);
-  for (;;) {
-    const children = rows.filter(row => parents.has(row.ppid) && !parents.has(row.pid));
-    if (!children.length) break;
-    for (const child of children) { parents.add(child.pid); found.push(child.pid); }
-  }
-  return found;
-}
-
-async function auditOwnedProcesses(timeout = 10_000) {
-  const deadline = Date.now() + timeout;
-  let survivors = [];
-  do {
-    const rows = execFileSync('/bin/ps', ['-axo', 'pid=,ppid=,command='], { encoding: 'utf8' }).split('\n').map(line => {
-      const match = /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line);
-      return match ? { pid: Number(match[1]), ppid: Number(match[2]), command: match[3] } : null;
-    }).filter(Boolean);
-    let expanded = true;
-    while (expanded) {
-      expanded = false;
-      for (const row of rows) if (ownedPids.has(row.ppid) && !ownedPids.has(row.pid)) {
-        ownedPids.add(row.pid); expanded = true;
-      }
-    }
-    survivors = rows.filter(row => ownedPids.has(row.pid) || row.command.includes(temporary));
-    if (!survivors.length) return;
-    await new Promise(resolveWait => setTimeout(resolveWait, 25));
-  } while (Date.now() < deadline);
-  throw new Error(`owned packaged processes survived native cleanup:\n${survivors.map(row => `${row.pid} ${row.command}`).join('\n')}`);
+function requestNativeQuit(pid) {
+  execFileSync('/usr/bin/osascript', ['-l', 'JavaScript', '-e', [
+    'ObjC.import("AppKit")',
+    `const application = $.NSRunningApplication.runningApplicationWithProcessIdentifier(${pid})`,
+    'if (!application || !application.terminate) throw new Error("native quit request failed")',
+  ].join('; ')], { stdio: 'pipe' });
 }
 
 class Cdp {
@@ -235,6 +197,7 @@ class Cdp {
 
 let primary;
 let peer;
+let runError;
 try {
   primary = await launch('electron-primary');
   if (cleanupProbe) throw new Error('intentional cleanup probe');
@@ -347,18 +310,23 @@ try {
     diagnostics: { retainedBytes: status.retainedBytes, launches: launches.records.length, errors: errors.records.length, operations: operations.operations.length, performance: performanceSummary.summaries.length },
   }) + '\n');
 } catch (error) {
-  if (!(cleanupProbe && String(error?.message).includes('intentional cleanup probe'))) throw error;
+  if (!(cleanupProbe && String(error?.message).includes('intentional cleanup probe'))) runError = error;
 } finally {
   await chmod(workspace, 0o700).catch(() => undefined);
-  await stop(peer);
-  await stop(primary);
-  for (const cdp of sessions) cdp.close();
-  for (const child of children) {
-    if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM');
+  const stopErrors = [];
+  try { await stop(peer); } catch (error) { stopErrors.push(error); }
+  try { await stop(primary); } catch (error) { stopErrors.push(error); }
+  for (const child of children) if (child.exitCode === null && child.signalCode === null) {
+    try { requestNativeQuit(child.pid); } catch (error) { stopErrors.push(error); }
   }
-  await new Promise(resolveWait => setTimeout(resolveWait, 500));
-  for (const child of children) if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
-  await new Promise(resolveWait => setTimeout(resolveWait, 250));
-  await auditOwnedProcesses();
+  let naturalExitError;
+  try { await waitForOwnedExit(ownedPids, temporary); } catch (error) { naturalExitError = error; }
+  const cleanup = await cleanupOwnedProcesses(ownedPids, temporary);
+  for (const cdp of sessions) cdp.close();
   await rm(temporary, { recursive: true, force: true });
+  if (cleanupProbe) process.stdout.write(JSON.stringify({ cleanupProbe: true, naturalExit: naturalExitError === undefined, fallbackRequired: cleanup.fallbackRequired }) + '\n');
+  else if (cleanup.fallbackRequired) process.stderr.write(JSON.stringify({ nativeCleanup: true, naturalExit: naturalExitError === undefined, fallbackRequired: true }) + '\n');
+  const failures = [runError, ...stopErrors, naturalExitError].filter(Boolean);
+  if (failures.length === 1) throw failures[0];
+  if (failures.length > 1) throw new AggregateError(failures, 'native acceptance and cleanup failed');
 }
