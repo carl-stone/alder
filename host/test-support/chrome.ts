@@ -156,33 +156,59 @@ export class Chrome {
       const matches = [...document.querySelectorAll('#notebook > .cell[data-cell]')]
         .filter(cell => cell.dataset.cell === ${encodedId});
       if (matches.length !== 1) throw new Error('expected one activation cell, found ' + matches.length);
+      const cells = [...document.querySelectorAll('#notebook > .cell[data-cell]')];
+      const index = cells.indexOf(matches[0]);
+      window.__alderActivationTarget = {
+        cell: matches[0], index, previous: cells[index - 1] ?? null, next: cells[index + 1] ?? null,
+      };
       matches[0].scrollIntoView({block:'center'});
-      window.__alderActivationTarget = matches[0];
       return true;
     })()`);
     const stateExpression = `(() => {
       const matches = [...document.querySelectorAll('#notebook > .cell[data-cell]')]
         .filter(cell => cell.dataset.cell === ${encodedId});
       const cell = matches[0];
-      if (matches.length !== 1 || !cell || cell !== window.__alderActivationTarget || !cell.isConnected ||
+      const target = window.__alderActivationTarget;
+      if (matches.length !== 1 || !cell || cell !== target?.cell || !cell.isConnected ||
           cell.parentElement?.id !== 'notebook') {
-        return {kind:'invalid', reason:'requested cell was removed, replaced, or moved'};
+        return {kind:'invalid', reason:'requested cell was removed or replaced'};
+      }
+      const cells = [...document.querySelectorAll('#notebook > .cell[data-cell]')];
+      const index = cells.indexOf(cell);
+      if (index !== target.index || (cells[index - 1] ?? null) !== target.previous ||
+          (cells[index + 1] ?? null) !== target.next) {
+        return {kind:'invalid', reason:'requested cell moved within the notebook'};
       }
       const cellRect = cell.getBoundingClientRect();
       if (cellRect.bottom <= 0 || cellRect.top >= window.innerHeight) {
         return {kind:'invalid', reason:'requested cell is no longer anchored in the viewport'};
       }
+      const visible = (element, clickable = false) => {
+        for (let node = element; node instanceof HTMLElement; node = node.parentElement) {
+          const style = getComputedStyle(node);
+          if (node.hidden || node.inert || style.display === 'none' ||
+              style.visibility === 'hidden' || style.visibility === 'collapse' ||
+              Number.parseFloat(style.opacity) === 0) return false;
+          if (node === cell) break;
+        }
+        if (!clickable) return true;
+        const style = getComputedStyle(element);
+        return style.pointerEvents !== 'none' && element.getAttribute('aria-disabled') !== 'true' &&
+          !('disabled' in element && element.disabled) && element.tabIndex >= 0;
+      };
       const editors = [...cell.querySelectorAll('.cm-content')];
       const placeholders = [...cell.querySelectorAll('[data-virtual-source]')];
       if (editors.length === 1 && placeholders.length === 0 && editors[0].closest('[data-cell]') === cell) {
         const rect = editors[0].getBoundingClientRect();
-        return rect.width > 0 && rect.height > 0
+        return visible(editors[0]) && rect.width > 0 && rect.height > 0 &&
+            rect.bottom > 0 && rect.top < window.innerHeight
           ? {kind:'mounted'}
           : {kind:'invalid', reason:'requested editor is not visible'};
       }
       if (placeholders.length === 1 && editors.length === 0 && placeholders[0].closest('[data-cell]') === cell) {
         const rect = placeholders[0].getBoundingClientRect();
-        return rect.width > 0 && rect.height > 0
+        return visible(placeholders[0], true) && rect.width > 0 && rect.height > 0 &&
+            rect.bottom > 0 && rect.top < window.innerHeight
           ? {kind:'virtual', x:rect.x + rect.width / 2, y:rect.y + rect.height / 2}
           : {kind:'invalid', reason:'requested virtual source is not clickable'};
       }

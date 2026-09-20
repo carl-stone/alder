@@ -76,6 +76,42 @@ function peerCommand(app: RunningHost, command: Record<string, unknown>): HostCo
   } as HostCommand;
 }
 
+test('virtual editor activation rejects invalid target transitions', {
+  skip: process.env.ALDER_BROWSER_TEST !== '1', timeout: 60_000,
+}, async () => {
+  const browser = await Chrome.open('about:blank');
+  const cell = (id: string, source: string) => `<section class="cell" data-cell="${id}"><div data-role="source">${source}</div></section>`;
+  const placeholder = '<pre data-virtual-source tabindex="0">value</pre>';
+  const editor = '<div class="cm-content" contenteditable="true">value</div>';
+  const setNotebook = async (contents: string): Promise<void> => {
+    await browser.evaluate(`document.body.innerHTML = '<main id="notebook">' + ${JSON.stringify(contents)} + '</main>'`);
+  };
+  const rejects = async (contents: string, pattern: RegExp, setup?: string): Promise<void> => {
+    await setNotebook(contents);
+    if (setup) await browser.evaluate(setup);
+    await assert.rejects(browser.activateVirtualEditor('target', 500), pattern);
+  };
+  try {
+    await rejects(cell('other', placeholder), /expected one activation cell, found 0/);
+    await rejects(cell('target', placeholder) + cell('target', placeholder), /expected one activation cell, found 2/);
+    await rejects(cell('target', '<div>empty</div>'), /neither one virtual source nor one mounted editor/);
+    await rejects(cell('target', placeholder + editor), /neither one virtual source nor one mounted editor/);
+    await rejects(cell('target', placeholder), /removed or replaced/, `(() => {
+      const target = document.querySelector('[data-cell="target"]');
+      target.querySelector('[data-virtual-source]').addEventListener('mousemove', () => target.replaceWith(target.cloneNode(true)), {once:true});
+    })()`);
+    await rejects(cell('target', `<div data-cell="wrong">${editor}</div>`), /neither one virtual source nor one mounted editor/);
+    await rejects(cell('target', placeholder), /no longer anchored/, `document.querySelector('[data-cell="target"]').style.cssText = 'position:fixed;top:2000px;height:40px'`);
+    await rejects(cell('before', placeholder) + cell('target', placeholder) + cell('after', placeholder), /moved within the notebook/, `(() => {
+      const target = document.querySelector('[data-cell="target"]');
+      target.querySelector('[data-virtual-source]').addEventListener('mousemove', () => target.parentElement.append(target), {once:true});
+    })()`);
+    await rejects(cell('target', `<div style="visibility:hidden">${editor}</div>`), /requested editor is not visible/);
+  } finally {
+    await browser.close();
+  }
+});
+
 test('an immediate Save captures the current CodeMirror source', {
   skip: process.env.ALDER_BROWSER_TEST !== '1', timeout: 120_000,
 }, async () => {
