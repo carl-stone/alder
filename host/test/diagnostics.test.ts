@@ -1,7 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdir, mkdtemp, readFile, readdir, stat, utimes, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { mkdir, mkdtemp, open, readFile, readdir, stat, unlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -12,6 +13,7 @@ import {
   persistEmergencyDiagnostic,
   pruneCorruptRecoveryCopies,
   queryDiagnostics,
+  writeDiagnosticRecordSidecar,
 } from "../src/diagnostics.js";
 
 async function records(root: string): Promise<Record<string, unknown>[]> {
@@ -85,6 +87,32 @@ test("queries ignore a malformed or truncated tail and never mutate diagnostic f
   await assert.rejects(queryDiagnostics("incident", { rootDir: root, since: "2026-09-20T02:00:00Z", until: "2026-09-20T01:00:00Z" }), /must not be later/);
 });
 
+test("a segment pruned after the query snapshot cannot discard already readable evidence", { timeout: 5_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "alder-diagnostics-query-prune-race-"));
+  const vanished = join(root, "diagnostics-old.jsonl");
+  const gate = join(root, "diagnostics-newest-gate.jsonl");
+  await writeFile(vanished, JSON.stringify({
+    schemaVersion: 2, timestamp: "2026-09-19T00:00:00.000Z", severity: "error", event: "operation.failed", operationId: "vanished",
+  }) + "\n");
+  const fifo = spawnSync("mkfifo", [gate], { encoding: "utf8" });
+  assert.equal(fifo.status, 0, fifo.stderr);
+  const future = new Date(Date.now() + 10_000);
+  await utimes(gate, future, future);
+
+  const pending = queryDiagnostics("errors", { rootDir: root, limit: 10 });
+  const writer = await open(gate, "w"); // Resolves only after readStore has snapshotted both paths and opened the newest one.
+  await unlink(vanished);
+  await writer.writeFile(JSON.stringify({
+    schemaVersion: 2, timestamp: "2026-09-20T00:00:00.000Z", severity: "error", event: "host.fatal", error: { message: "retained after prune race" },
+  }) + "\n");
+  await writer.close();
+
+  const result = await pending;
+  assert.equal("readError" in result, false);
+  assert.equal((result.records as unknown[]).length, 1);
+  assert.equal(JSON.stringify(result).includes("retained after prune race"), true);
+});
+
 test("bounded queries select newest matching evidence beyond 200000 older records", async () => {
   const root = await mkdtemp(join(tmpdir(), "alder-diagnostics-query-cap-"));
   const oldPath = join(root, "diagnostics-older.jsonl");
@@ -129,6 +157,35 @@ test("oversized failed operations use retained sidecars and remain visible throu
   });
   assert.equal(cli.status, 0, cli.stderr);
   assert.equal(cli.stdout.includes("OVERSIZED_STACK"), true);
+});
+
+test("failed oversized sidecar commits remove their own temporary", async () => {
+  const root = await mkdtemp(join(tmpdir(), "alder-diagnostics-sidecar-failure-"));
+  const destination = join(root, `diagnostics-record-20260920000000000-host-${process.pid}-${randomUUID()}.json`);
+  await mkdir(destination);
+  await assert.rejects(writeDiagnosticRecordSidecar(destination, "oversized record"));
+  assert.deepEqual((await readdir(root)).filter(name => name.endsWith(".tmp")), []);
+});
+
+test("initialization removes crashed oversized temporaries, preserves a live writer, and enforces the retained cap", async () => {
+  const root = await mkdtemp(join(tmpdir(), "alder-diagnostics-sidecar-orphans-"));
+  const dead = `diagnostics-record-20260920000000000-host-99999999-${randomUUID()}.json.${randomUUID()}.tmp`;
+  const live = `diagnostics-record-20260920000000001-host-${process.pid}-${randomUUID()}.json.${randomUUID()}.tmp`;
+  await writeFile(join(root, dead), "d".repeat(16_384));
+  await writeFile(join(root, live), "live writer");
+  const logger = new StructuredDiagnostics({
+    rootDir: root, role: "host", segmentBytes: 1_024, totalBytes: 4_096, maxSegments: 4,
+    flushDelayMs: 60_000, stderr: null,
+  });
+  await logger.recordDurable("error", "operation.failed", { operationId: "after-orphan-cleanup", error: { message: "retained" } });
+  await logger.close();
+
+  const names = await readdir(root);
+  assert.equal(names.includes(dead), false);
+  assert.equal(names.includes(live), true);
+  const status = await queryDiagnostics("status", { rootDir: root });
+  assert.equal(Number(status.retainedBytes) <= 4_096, true);
+  assert.equal(Number(status.segmentCount) <= 4, true);
 });
 
 test("unavailable storage never blocks callers and is observable in logger and query health", async () => {

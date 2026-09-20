@@ -842,7 +842,8 @@ export class Controller {
     if (!this.diagnosticProgressSeen.has(diagnosticKey)) {
       this.diagnosticProgressSeen.add(diagnosticKey);
       this.diagnostics?.record("info", "operation.progress", {
-        operationId, clientId: operation.clientId, kind: "packages-install", phase: value.phase, documentRevision: this.documentRevisionValue,
+        operationId, clientId: operation.clientId, sessionEpoch: this.epochValue,
+        kind: "packages-install", phase: value.phase, documentRevision: this.documentRevisionValue,
       });
     }
     this.rememberOperation(operation);
@@ -1000,7 +1001,8 @@ export class Controller {
 
   private diagnosticOperationPhase(clientId: string, operationId: string, phase: string, kind = "run"): void {
     this.diagnostics?.record("info", "operation.phase", {
-      clientId, operationId, kind, phase, documentRevision: this.documentRevisionValue,
+      clientId, operationId, sessionEpoch: this.epochValue,
+      kind, phase, documentRevision: this.documentRevisionValue,
     });
   }
 

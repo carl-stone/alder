@@ -34901,7 +34901,13 @@ async function readStore(rootDir, options) {
   const entries = (await listSegments(rootDir)).sort((a, b) => b.mtimeMs - a.mtimeMs);
   outer: for (const entry2 of entries) {
     if (entry2.mtimeMs < since) continue;
-    const contents = await readFile(entry2.path, "utf8");
+    let contents;
+    try {
+      contents = await readFile(entry2.path, "utf8");
+    } catch (error61) {
+      if (error61.code === "ENOENT") continue;
+      throw error61;
+    }
     if (options.id !== void 0 && !contents.includes(JSON.stringify(options.id))) continue;
     const lines = entry2.format === "record" ? [contents] : contents.split("\n").reverse();
     for (const line of lines) {

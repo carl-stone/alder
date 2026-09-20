@@ -60607,6 +60607,7 @@ var DiagnosticsCore = class {
     if (this.initialized) return;
     await mkdir2(this.rootDir, { recursive: true, mode: 448 });
     await chmod(this.rootDir, 448);
+    await withDirectoryLock(this.rootDir, () => normalizeDeadActiveSegments(this.rootDir));
     const suffix = `${this.role}-${process.pid}-${this.processInstanceId}`;
     this.activePath = join2(this.rootDir, `diagnostics-active-${suffix}.jsonl`);
     this.statusPath = join2(this.rootDir, `diagnostics-status-${suffix}.json`);
@@ -60688,15 +60689,7 @@ var DiagnosticsCore = class {
             prospectivePath: path3
           });
           if (!allowed2) continue;
-          const temporary = path3 + `.${randomUUID2()}.tmp`;
-          const handle = await open4(temporary, "wx", 384);
-          try {
-            await handle.writeFile(first.line);
-          } finally {
-            await handle.close();
-          }
-          await rename2(temporary, path3);
-          await chmod(path3, 384);
+          await writeDiagnosticRecordSidecar(path3, first.line);
           persisted++;
           continue;
         }
@@ -60974,6 +60967,41 @@ function pidAlive(pid) {
     return false;
   }
 }
+function recordTemporaryOwner(name) {
+  const match = /^diagnostics-record-[0-9]+-(?:desktop|backend|host|renderer|cli)-(\d+)-[0-9a-f-]+\.json\.[0-9a-f-]+\.tmp$/.exec(name);
+  return match ? Number(match[1]) : null;
+}
+async function removeDeadRecordTemporaries(rootDir) {
+  let names;
+  try {
+    names = await readdir(rootDir);
+  } catch (error61) {
+    if (error61.code === "ENOENT") return;
+    throw error61;
+  }
+  for (const name of names) {
+    const owner = recordTemporaryOwner(name);
+    if (owner === null || owner === process.pid || pidAlive(owner)) continue;
+    await rm2(join2(rootDir, name), { force: true });
+  }
+}
+async function writeDiagnosticRecordSidecar(path3, contents) {
+  const temporary = path3 + `.${randomUUID2()}.tmp`;
+  let handle;
+  let committed = false;
+  try {
+    handle = await open4(temporary, "wx", 384);
+    await handle.writeFile(contents);
+    await handle.close();
+    handle = void 0;
+    await rename2(temporary, path3);
+    committed = true;
+    await chmod(path3, 384);
+  } finally {
+    await handle?.close().catch(() => void 0);
+    if (!committed) await rm2(temporary, { force: true }).catch(() => void 0);
+  }
+}
 async function listSegments(rootDir) {
   let names;
   try {
@@ -60997,6 +61025,7 @@ async function listSegments(rootDir) {
   return entries2;
 }
 async function normalizeDeadActiveSegments(rootDir) {
+  await removeDeadRecordTemporaries(rootDir);
   for (const entry of await listSegments(rootDir)) {
     if (!entry.active || entry.pid === null || entry.pid === process.pid || pidAlive(entry.pid)) continue;
     const target = join2(rootDir, `diagnostics-recovered-${Date.now()}-${randomUUID2()}.jsonl`);
@@ -61006,6 +61035,7 @@ async function normalizeDeadActiveSegments(rootDir) {
   }
 }
 async function pruneSegmentsLocked(rootDir, options) {
+  await removeDeadRecordTemporaries(rootDir);
   const now = Date.now();
   let entries2 = await listSegments(rootDir);
   for (const entry of entries2.filter((item) => !item.active && now - item.mtimeMs > options.maxAgeMs)) await rm2(entry.path, { force: true });
@@ -73392,6 +73422,7 @@ var Controller = class {
       this.diagnostics?.record("info", "operation.progress", {
         operationId,
         clientId: operation.clientId,
+        sessionEpoch: this.epochValue,
         kind: "packages-install",
         phase: value.phase,
         documentRevision: this.documentRevisionValue
@@ -73576,6 +73607,7 @@ var Controller = class {
     this.diagnostics?.record("info", "operation.phase", {
       clientId,
       operationId,
+      sessionEpoch: this.epochValue,
       kind,
       phase,
       documentRevision: this.documentRevisionValue

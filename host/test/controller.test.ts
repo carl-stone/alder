@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { mkdtemp } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -10,7 +11,7 @@ import { Controller, ControllerError, type ControllerOptions, type SourcePublica
 import { parseNotebook, serializeNotebook } from "../src/notebook.js";
 import { preferenceDefaults, resolveSettings } from "../src/settings.js";
 import { OutputStore } from "../src/outputs.js";
-import type { DiagnosticFields, DiagnosticSeverity, DiagnosticSink } from "../src/diagnostics.js";
+import { StructuredDiagnostics, queryDiagnostics, type DiagnosticFields, type DiagnosticSeverity, type DiagnosticSink } from "../src/diagnostics.js";
 import {
   MAX_DEPENDENCY_EDGES,
   MAX_NOTEBOOK_SOURCE_BYTES,
@@ -1367,6 +1368,32 @@ test("run diagnostics report causal host phases and mark empty execution phases 
   assert.deepEqual(terminal?.fields.notApplicablePhases, ["first-output", "kernel-dispatch", "kernel-completion"]);
   assert.ok(emptyDiagnostics.events.some(item => item.event === "operation.phase" && item.fields.operationId === emptyRun.requestId && item.fields.phase === "authoritative-completion"));
   await empty.close();
+
+  const root = await mkdtemp(join(tmpdir(), "alder-controller-diagnostic-phases-"));
+  const persisted = new StructuredDiagnostics({
+    rootDir: root, role: "host", appLaunchId: "controller-phase-launch", backendInstanceId: "controller-phase-backend",
+    flushDelayMs: 60_000, stderr: null,
+  });
+  const scoped = persisted.child({ sessionId: "controller-phase-session" });
+  const durable = createController({
+    epoch: "controller-phase-epoch", engine: new FakeEngine(), notebook: notebook([["a", "x <- 1"]]),
+    config: resolveSettings({ notebook: { on_startup: false } }), diagnostics: scoped,
+  });
+  await durable.start();
+  const durableRun = command(durable, { type: "run", scope: "all" });
+  await durable.dispatch(durableRun);
+  await settle(durable, durableRun.requestId);
+  await durable.close();
+  await persisted.close();
+
+  const queried = await queryDiagnostics("operations", { rootDir: root, slowMs: 0, limit: 10 });
+  const operation = (queried.operations as Array<{
+    accepted?: Record<string, unknown>; terminal?: Record<string, unknown>; timing?: Record<string, unknown>;
+  }>).find(item => item.accepted?.operationId === durableRun.requestId);
+  assert.deepEqual(operation?.timing?.observedPhases, ["analysis-ready", "kernel-dispatch", "kernel-completion", "authoritative-completion", "terminal"]);
+  assert.deepEqual(operation?.timing?.missingPhases, []);
+  const incident = await queryDiagnostics("incident", { rootDir: root, id: durableRun.requestId, limit: 20 });
+  assert.ok((incident.records as Array<Record<string, unknown>>).every(record => record.sessionEpoch === "controller-phase-epoch"));
 });
 
 test("body edits rebuild current static facts while execution waits for replacement analysis", async () => {

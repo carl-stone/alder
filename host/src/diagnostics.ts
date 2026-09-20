@@ -319,6 +319,7 @@ class DiagnosticsCore {
     if (this.initialized) return;
     await mkdir(this.rootDir, { recursive: true, mode: 0o700 });
     await chmod(this.rootDir, 0o700);
+    await withDirectoryLock(this.rootDir, () => normalizeDeadActiveSegments(this.rootDir));
     const suffix = `${this.role}-${process.pid}-${this.processInstanceId}`;
     this.activePath = join(this.rootDir, `diagnostics-active-${suffix}.jsonl`);
     this.statusPath = join(this.rootDir, `diagnostics-status-${suffix}.json`);
@@ -388,12 +389,7 @@ class DiagnosticsCore {
             reserveBytes: first.bytes, prospectivePath: path,
           });
           if (!allowed) continue;
-          const temporary = path + `.${randomUUID()}.tmp`;
-          const handle = await open(temporary, "wx", 0o600);
-          try { await handle.writeFile(first.line); }
-          finally { await handle.close(); }
-          await rename(temporary, path);
-          await chmod(path, 0o600);
+          await writeDiagnosticRecordSidecar(path, first.line);
           persisted++;
           continue;
         }
@@ -618,6 +614,38 @@ function segmentInfo(name: string): { active: boolean; pid: number | null; forma
   return { active: match !== null, pid: match ? Number(match[1]) : null, format: "jsonl" };
 }
 function pidAlive(pid: number): boolean { try { process.kill(pid, 0); return true; } catch { return false; } }
+function recordTemporaryOwner(name: string): number | null {
+  const match = /^diagnostics-record-[0-9]+-(?:desktop|backend|host|renderer|cli)-(\d+)-[0-9a-f-]+\.json\.[0-9a-f-]+\.tmp$/.exec(name);
+  return match ? Number(match[1]) : null;
+}
+async function removeDeadRecordTemporaries(rootDir: string): Promise<void> {
+  let names: string[];
+  try { names = await readdir(rootDir); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return; throw error; }
+  for (const name of names) {
+    const owner = recordTemporaryOwner(name);
+    if (owner === null || owner === process.pid || pidAlive(owner)) continue;
+    await rm(join(rootDir, name), { force: true });
+  }
+}
+
+export async function writeDiagnosticRecordSidecar(path: string, contents: string): Promise<void> {
+  const temporary = path + `.${randomUUID()}.tmp`;
+  let handle: Awaited<ReturnType<typeof open>> | undefined;
+  let committed = false;
+  try {
+    handle = await open(temporary, "wx", 0o600);
+    await handle.writeFile(contents);
+    await handle.close();
+    handle = undefined;
+    await rename(temporary, path);
+    committed = true;
+    await chmod(path, 0o600);
+  } finally {
+    await handle?.close().catch(() => undefined);
+    if (!committed) await rm(temporary, { force: true }).catch(() => undefined);
+  }
+}
+
 async function listSegments(rootDir: string): Promise<SegmentEntry[]> {
   let names: string[];
   try { names = await readdir(rootDir); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error; }
@@ -631,6 +659,7 @@ async function listSegments(rootDir: string): Promise<SegmentEntry[]> {
   return entries;
 }
 async function normalizeDeadActiveSegments(rootDir: string): Promise<void> {
+  await removeDeadRecordTemporaries(rootDir);
   for (const entry of await listSegments(rootDir)) {
     if (!entry.active || entry.pid === null || entry.pid === process.pid || pidAlive(entry.pid)) continue;
     const target = join(rootDir, `diagnostics-recovered-${Date.now()}-${randomUUID()}.jsonl`);
@@ -640,6 +669,7 @@ async function normalizeDeadActiveSegments(rootDir: string): Promise<void> {
 async function pruneSegmentsLocked(rootDir: string, options: {
   maxAgeMs: number; maxSegments: number; totalBytes: number; reserveBytes: number; prospectivePath?: string;
 }): Promise<boolean> {
+  await removeDeadRecordTemporaries(rootDir);
   const now = Date.now();
   let entries = await listSegments(rootDir);
   for (const entry of entries.filter(item => !item.active && now - item.mtimeMs > options.maxAgeMs)) await rm(entry.path, { force: true });
@@ -741,7 +771,12 @@ async function readStore(rootDir: string, options: DiagnosticQueryOptions): Prom
   const entries = (await listSegments(rootDir)).sort((a, b) => b.mtimeMs - a.mtimeMs);
   outer: for (const entry of entries) {
     if (entry.mtimeMs < since) continue;
-    const contents = await readFile(entry.path, "utf8");
+    let contents: string;
+    try { contents = await readFile(entry.path, "utf8"); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+      throw error;
+    }
     if (options.id !== undefined && !contents.includes(JSON.stringify(options.id))) continue;
     const lines = entry.format === "record" ? [contents] : contents.split("\n").reverse();
     for (const line of lines) {
