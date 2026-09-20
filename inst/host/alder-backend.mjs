@@ -73887,7 +73887,8 @@ var Controller = class {
       }
       if (command.type === "run") {
         if (command.startup === true && this.startupActivated) {
-          throw new ControllerError("startup_already_activated", "startup was already activated", 409);
+          this.completeOperation(command.requestId, { startupActivated: true }, command.clientId);
+          return this.commandResult(command.requestId, await completion);
         }
         this.startupActivated = true;
       }
@@ -75157,15 +75158,26 @@ var Controller = class {
     if (cell === void 0 || cell.revision !== job.revision) return;
     const error61 = response.error ?? { message: "Unknown error" };
     this.outputStore.discardExact(cell.outputs);
-    cell.status = "error";
     cell.outputs = [];
     cell.displayOrder = [];
     cell.outputsStale = false;
     cell.progress = null;
+    if (error61.interrupted === true) {
+      cell.status = "stopped";
+      cell.error = null;
+      cell.log = response.log === void 0 ? [] : completedLog(response.log);
+      this.replaceLastActionError(null, {
+        operationId: job.operationId,
+        runId: job.runId
+      });
+      if (dropDescendants) this.dropRunDescendants(job.id, job.runId);
+      return;
+    }
+    cell.status = "error";
     cell.error = clone3(error61);
     cell.log = [
       ...response.log === void 0 ? cell.log : completedLog(response.log),
-      error61.interrupted ? "Error: Interrupted" : `Error: ${error61.message}`
+      `Error: ${error61.message}`
     ];
     this.replaceLastActionError(
       hostError("eval_error", error61.message, job.operationId),
@@ -81140,9 +81152,32 @@ var Engine = class extends EventEmitter3 {
     if (type !== "execute_result" && type !== "display_data" && type !== "update_display_data") return;
     await this.applyPendingClear(state);
     const records = await this.ingestDisplay(state, message2);
-    for (const record4 of records) {
+    const transient = optionalRecord(message2.content.transient);
+    const displayId = typeof transient?.display_id === "string" && transient.display_id.length > 0 ? transient.display_id : void 0;
+    for (const [recordOffset, record4] of records.entries()) {
+      const displayKey = displayId === void 0 ? void 0 : `${displayId}:${recordOffset}`;
+      const existing = displayKey === void 0 ? void 0 : state.displayOutputs.get(displayKey);
+      if (existing !== void 0) {
+        const previous = state.outputs[existing];
+        if (previous === void 0) throw new FrameProtocolError("Ark updated an unavailable display output");
+        const previousBytes = jsonByteSize(previous);
+        const nextBytes = jsonByteSize(record4);
+        if (state.outputBytes - previousBytes + nextBytes > this.maxOutputBytes()) {
+          state.truncated = true;
+          this.outputStoreValue?.discardExact([record4]);
+          continue;
+        }
+        state.outputs[existing] = record4;
+        state.outputBytes = state.outputBytes - previousBytes + nextBytes;
+        await this.discardDuringEvaluation(state, [previous]);
+        continue;
+      }
       if (this.addEvaluationOutput(state, record4) === void 0) {
         this.outputStoreValue?.discardExact([record4]);
+        continue;
+      }
+      if (displayKey !== void 0) {
+        state.displayOutputs.set(displayKey, state.outputs.length - 1);
         continue;
       }
       this.emitEvaluationEvent(state, {
@@ -81308,6 +81343,7 @@ var Engine = class extends EventEmitter3 {
     const outputs = state.outputs;
     state.outputs = [];
     state.outputBytes = 0;
+    state.displayOutputs.clear();
     state.console = new OutputLog(MAX_LOG_BYTES2);
     state.log = [];
     state.truncated = false;
@@ -81845,6 +81881,7 @@ function makeEvaluation(requestId, payload, onEvent, kernelGeneration, token, ma
     rSequence: 0,
     outputs: [],
     outputBytes: 0,
+    displayOutputs: /* @__PURE__ */ new Map(),
     log: [],
     console: new OutputLog(MAX_LOG_BYTES2),
     truncated: false,
@@ -109044,7 +109081,14 @@ var FormattingService = class {
     for (const cell of cells) {
       if (cell.type === "markdown") continue;
       if (signal?.aborted) throw new FormattingError("cancelled", "formatting was cancelled");
-      const body = await formatOne(this.airExecutable, this.processScope, cell.body, signal);
+      let body;
+      try {
+        body = await formatOne(this.airExecutable, this.processScope, cell.body, signal);
+      } catch (error61) {
+        if (!(error61 instanceof FormattingError) || error61.code === "cancelled") throw error61;
+        const index = document.cells.findIndex((candidate) => candidate.id === cell.id) + 1;
+        throw new FormattingError(error61.code, `Cell ${index}: ${error61.message}`);
+      }
       edits.push({
         type: "edit",
         cell: { cellId: cell.id },
@@ -109067,7 +109111,9 @@ async function formatOne(airExecutable, processScope, body, signal) {
     await writeFile6(input2, text2, { encoding: "utf8", mode: 384 });
     const result = await runAir(airExecutable, input2, processScope, directory, signal);
     if (result.code !== 0) {
-      const detail = result.stderr.trim() || result.stdout.trim() || "exit status " + (result.code ?? "unknown");
+      const rawDetail = result.stderr.trim() || result.stdout.trim() || "exit status " + (result.code ?? "unknown");
+      const normalized = rawDetail.replaceAll(input2, "cell.R").replace(/\u001b\[[0-9;]*m/g, "");
+      const detail = [...normalized].length > 4096 ? [...normalized].slice(0, 4095).join("") + "\u2026" : normalized;
       throw new FormattingError("format_failed", "air could not format the cell: " + detail);
     }
     const bytes = await readFile10(input2);
@@ -110376,6 +110422,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
       return {};
     }
   };
+  let launchExecutionMode = options.executionMode;
   const configurationFor = (document, project = projectSettings) => {
     let notebook = {};
     try {
@@ -110385,7 +110432,8 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
       settingsErrors.set("notebook", `Fix runtime settings in ${document.path ?? "this notebook"}: ${errorMessage(error61)}`);
     }
     publishSettingsError();
-    return resolveSettings({ preferences: preferences.snapshot().values, notebook, project });
+    const resolved = resolveSettings({ preferences: preferences.snapshot().values, notebook, project });
+    return launchExecutionMode === void 0 ? resolved : { ...resolved, on_cell_change: launchExecutionMode };
   };
   let projectLayoutIntent = null;
   const pendingSidecars = { layout: false, packages: false };
@@ -110773,6 +110821,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
         const notebook2 = readNotebookSettings(document.metadata);
         const nextConfig = resolveSettings({ preferences: preferences.snapshot().values, notebook: notebook2, project: projectSettings });
         await appendRecovery({ fromRevision: context.fromRevision, document, disk: context.disk });
+        if (request.patch.on_cell_change !== void 0) launchExecutionMode = void 0;
         config3 = nextConfig;
         publishSource(context, { document, path: context.path, config: nextConfig, layout: context.layout, disk: context.disk, sidecars: context.sidecars, dirty: true, advanceRevision: true });
         settingsErrors.delete("notebook");
@@ -111303,17 +111352,6 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
     };
     unsubscribePreferences = preferences.subscribe(refreshPreferences);
     refreshPreferences();
-    if (options.executionMode !== void 0 && options.executionMode !== controller.snapshot().runtime.executionMode) {
-      const result = await controller.dispatch({
-        type: "set-runtime",
-        requestId: randomUUID16(),
-        clientId: "launch",
-        sessionEpoch: controller.epoch,
-        expectedDocumentRevision: controller.snapshot().documentRevision,
-        on_cell_change: options.executionMode
-      });
-      if (result.error) controller.recordActionError(`Could not apply launch execution mode: ${result.error.message}`, result.error.code);
-    }
     if (runtimeError !== null) controller.recordRuntimeAvailabilityError(asRuntimeHostError(runtimeError));
     if (recoveryConflict) controller.recordActionError("notebook changed on disk; recovery draft retained", "recovery_conflict");
     const getLsp = () => {

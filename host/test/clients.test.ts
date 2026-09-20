@@ -745,6 +745,85 @@ test("Format exposes scoped progress and cancels only its accepted operation", a
   });
 });
 
+test("formatter failures preserve source and identify the affected cell and line", async () => {
+  await withViewDom(async (dom, domWindow) => {
+    await installInteractionDialogs(dom);
+    Object.defineProperty(globalThis, "location", { configurable: true, writable: true, value: { search: "?view=editor", href: "http://notebook.test/book.R?view=editor", origin: "http://notebook.test" } });
+    const initial = snapshot([cell("broken", ["x <- ("])]);
+    const client = settingsClient({
+      formatCells: async () => { throw new Error("Cell 1: air could not format the cell: cell.R:1:6: unexpected end of input"); },
+    });
+    const view = new NotebookView(client, dom);
+    try {
+      view.render(new BrowserDocument(initial));
+      dom.getElementById("format-start")!.dispatchEvent(new domWindow.Event("click", { bubbles: true }));
+      await waitUntil(() => dom.getElementById("format-error")?.hasAttribute("hidden") === false);
+      assert.match(dom.getElementById("format-error")!.textContent ?? "", /Cell 1: .*cell\.R:1:6: unexpected end of input/);
+      assert.equal(dom.getElementById("format-return")!.textContent, "Return to Cell 1, line 1");
+      assert.deepEqual(initial.cells[0]!.body, ["x <- ("]);
+      assert.equal(dom.getElementById("format-progress")!.textContent, "Formatting failed. Your source was not changed.");
+    } finally { view.destroy(); }
+  });
+});
+
+test("warning success and stopped cells have distinct non-error badges", async () => {
+  await withViewDom(async (dom) => {
+    Object.defineProperty(globalThis, "location", { configurable: true, writable: true, value: { search: "?view=editor", href: "http://notebook.test/book.R?view=editor", origin: "http://notebook.test" } });
+    const warning = cell("warning", ["warning('careful'); 42"]);
+    warning.status = "done";
+    warning.log = ["Warning: careful"];
+    const stopped = cell("stopped", ["Sys.sleep(30)"]);
+    stopped.status = "stopped";
+    const view = new NotebookView(settingsClient(), dom);
+    try {
+      view.render(new BrowserDocument(snapshot([warning, stopped])));
+      const badges = [...dom.querySelectorAll<HTMLElement>("[data-role=badge]")];
+      assert.deepEqual(badges.map(badge => badge.textContent), ["warning", "stopped"]);
+      assert.ok(badges[0]!.classList.contains("warning"));
+      assert.ok(badges[1]!.classList.contains("stopped"));
+      assert.equal(dom.querySelector(".cell.error"), null);
+      assert.match(dom.querySelector(".log-area")?.textContent ?? "", /Warning: careful/);
+    } finally { view.destroy(); }
+  });
+});
+
+test("toolbar shows basename, exposes the full path, and disables empty lazy runs", async () => {
+  await withViewDom(async (dom) => {
+    const initial = snapshot([]);
+    initial.path = "/Users/example/notebooks/analysis.R";
+    initial.runtime.executionMode = "lazy";
+    const view = new NotebookView(settingsClient(), dom);
+    try {
+      view.render(new BrowserDocument(initial));
+      const path = dom.getElementById("path")!;
+      assert.equal(path.textContent, "analysis.R");
+      assert.equal(path.title, initial.path);
+      assert.match(path.getAttribute("aria-label") ?? "", /analysis\.R.*\/Users\/example\/notebooks\/analysis\.R/);
+      assert.equal(dom.querySelector<HTMLButtonElement>("#run-all")!.disabled, true);
+      view.render(new BrowserDocument(initial));
+      assert.equal(path.textContent, "analysis.R");
+    } finally { view.destroy(); }
+  });
+});
+
+test("lazy Run outdated enables immediately after a local edit", async () => {
+  await withViewDom(async (dom) => {
+    const ready = cell("ready", ["x <- 1"]);
+    ready.status = "done";
+    const initial = snapshot([ready]);
+    initial.runtime.executionMode = "lazy";
+    const document = new BrowserDocument(initial);
+    const view = new NotebookView(settingsClient(), dom);
+    try {
+      view.render(document);
+      assert.equal(dom.querySelector<HTMLButtonElement>("#run-all")!.disabled, true);
+      document.edit("ready", ["x <- 2"]);
+      view.render(document);
+      assert.equal(dom.querySelector<HTMLButtonElement>("#run-all")!.disabled, false);
+    } finally { view.destroy(); }
+  });
+});
+
 test("Shift-Enter runs the focused cell and advances after completion", async () => {
   await withViewDom(async (dom) => {
     Object.defineProperty(globalThis, "location", { configurable: true, writable: true, value: { search: "?view=editor", href: "http://notebook.test/book.R?view=editor", origin: "http://notebook.test" } });
@@ -1277,7 +1356,7 @@ test("format-on-save still saves the current draft when Air fails", async () => 
         dom.getElementById("save")!.dispatchEvent(new domWindow.Event("click"));
         await waitUntil(() => dom.getElementById("status")!.textContent!.includes("Saved; formatting failed:"));
         assert.equal(await readFile(path, "utf8"), "current <- 42\n");
-        assert.match(dom.getElementById("status")!.textContent!, /Saved; formatting failed: air could not format the cell/);
+        assert.match(dom.getElementById("status")!.textContent!, /Saved; formatting failed: Cell 1: air could not format the cell/);
         assert.equal(dom.getElementById("status")!.classList.contains("error"), false);
       } finally { view.destroy(); }
     });
@@ -1849,6 +1928,29 @@ for (const replayRestart of [false, true]) test(`renderer reload suppresses star
       await waitUntil(() => socket.commands().length === 1);
       socket.reply(socket.commands()[0]!); await explicit;
       assert.equal(client.recoveryState.uncertainRun, false);
+    } finally { client.close(); }
+  });
+});
+
+test("a completed startup marker does not become a clean-open recovery candidate", async () => {
+  const store = new MemoryRecoveryStore();
+  const before = new BrowserDocument(startupSnapshot());
+  await store.saveDraft(before.recoveryDraft("window-clean", null, { requestId: "startup-finished", epoch: "epoch-1" })!);
+  const next = startupSnapshot();
+  next.runtime.startupActivated = true;
+  next.operations = [{
+    id: "startup-finished", clientId: "browser-test", kind: "run", status: "done",
+    documentRevision: 0, runId: "run-finished", result: null, error: null,
+  }];
+  await withBrowserFetch(async () => recoveryResponse(), async () => {
+    const { client, socket } = await browserClient(store, next, { draftId: "window-clean" });
+    try {
+      assert.equal(client.recoveryState.status, "none");
+      assert.equal(client.recoveryState.local, null);
+      assert.equal(client.recoveryState.uncertainRun, false);
+      assert.equal(socket.commands().length, 0);
+      await client.flushDraftPersistence();
+      assert.equal(await store.readDraft("window-clean"), null);
     } finally { client.close(); }
   });
 });

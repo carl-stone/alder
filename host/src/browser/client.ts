@@ -645,8 +645,14 @@ export class BrowserNotebookClient {
 
   private restoreDraft(draft: BrowserRecoveryDraft): void {
     const document = this.requireDocument();
-    if (draft.pendingRun && !this.activeRuns.has(draft.pendingRun.requestId)) this.uncertainRun ??= draft.pendingRun;
-    this.pendingRun ??= draft.pendingRun;
+    const recordedRun = draft.pendingRun === null ? undefined
+      : document.snapshot.operations.find((operation) => operation.id === draft.pendingRun!.requestId);
+    const runAlreadySettled = recordedRun !== undefined
+      && (recordedRun.status === "done" || recordedRun.status === "error"
+        || recordedRun.status === "interrupted" || recordedRun.status === "cancelled");
+    const pendingRun = runAlreadySettled ? null : draft.pendingRun;
+    if (pendingRun && !this.activeRuns.has(pendingRun.requestId)) this.uncertainRun ??= pendingRun;
+    this.pendingRun ??= pendingRun;
     const reconciled = reconcileDraft(draft, document.snapshot);
     if (reconciled.draft.changes.length) document.restoreDraft(reconciled.draft, reconciled.conflict);
     if (!reconciled.conflict) document.rebaseDraftToSnapshot();

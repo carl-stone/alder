@@ -61,6 +61,27 @@ if (crashPath) {
   process.send?.({ acknowledged: true });
   setInterval(() => {}, 60_000);
 } else {
+  test("a clean open has no recovery candidate or dirty startup deferral", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "alder-clean-open-")));
+    const path = join(directory, "notebook.R");
+    let app: RunningHost | undefined;
+    try {
+      await writeFile(path, "# %%\nx <- 1\n");
+      app = await startHost({ path, resources: resources(directory), recoveryDirectory: join(directory, "recovery"),
+        executionMode: "lazy", suppressStartup: true });
+      assert.equal(app.controller.snapshot().dirty, false);
+      assert.equal(app.controller.configuration().deferStartup, false);
+      assert.equal(app.controller.snapshot().runtime.executionMode, "lazy");
+      assert.deepEqual(app.controller.snapshot().metadata, {});
+      const recovery = await app.controller.query({ type: "recovery" });
+      assert.equal(recovery.result.candidate, null);
+      assert.equal(recovery.result.corruption, null);
+    } finally {
+      await app?.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   test("an acknowledged edit survives backend death and reopen", { timeout: 15_000 }, async () => {
     const directory = await realpath(await mkdtemp(join(tmpdir(), "alder-acknowledged-crash-")));
     const path = join(directory, "notebook.R");

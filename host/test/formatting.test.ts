@@ -97,6 +97,24 @@ test("formatter failure is surfaced instead of falling back", async () => {
   }
 });
 
+test("formatter failure is bounded and reports the cell-relative location", async () => {
+  const fake = await fakeAir("#!/usr/bin/env node\nconst path = process.argv[3]; process.stderr.write('\\u001b[31m' + path + ':2:4: malformed ' + 'x'.repeat(10000)); process.exit(3);\n");
+  const scope = directProcessScope();
+  try {
+    await assert.rejects(
+      new FormattingService(fake.executable, scope).formatCells(document, ["code-1"]),
+      (error: unknown) => error instanceof FormattingError
+        && error.message.includes("cell.R:2:4: malformed")
+        && !error.message.includes("alder-format-")
+        && !error.message.includes("\u001b")
+        && error.message.length < 4200,
+    );
+  } finally {
+    await scope.close();
+    await rm(fake.directory, { recursive: true, force: true });
+  }
+});
+
 test("cancelling formatting terminates its Air child", async () => {
   const directory = await mkdtemp(join(tmpdir(), "alder-format-cancel-"));
   const started = join(directory, "started");

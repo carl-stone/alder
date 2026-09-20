@@ -653,6 +653,25 @@ test("stock Ark starts, repeats evaluations, and returns native plot output", in
     }
   });
 
+test("stock Ark composes base graphics updates into one final plot", integration,
+  async () => {
+    const directory = await mkdtemp(join(tmpdir(), "alder-engine-ark-composed-plot-"));
+    const { engine, processScope } = await openEngine(directory);
+    try {
+      const epoch = (await engine.start()).kernel!.kernelEpoch;
+      const result = await engine.evaluate(payload(epoch, "composed-plot", "composed-plot",
+        "plot(1:5, 1:5); abline(h = 3, col = 'red'); legend('topleft', 'line', lty = 1, col = 'red')"));
+      assert.equal(result.ok, true);
+      assert.equal(result.outputs?.filter((output) => output.data.kind === "image").length, 1);
+      const pages = await engine.evaluate(payload(epoch, "separate-plots", "separate-plots",
+        "plot(1:3, 1:3); plot(3:1, 1:3)"));
+      assert.equal(pages.ok, true);
+      assert.equal(pages.outputs?.filter((output) => output.data.kind === "image").length, 2);
+    } finally {
+      await closeEngine(engine, processScope, directory);
+    }
+  });
+
 test("stock Ark keeps scalar, form, and button widget values in R", integration,
   async () => {
     const directory = await mkdtemp(join(tmpdir(), "alder-engine-widgets-"));

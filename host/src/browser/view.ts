@@ -290,8 +290,6 @@ export class NotebookView {
         void this.repaginateTables(pageSize).catch(error => this.showError(error));
       }
     }
-    const path = snapshot.path || "untitled notebook";
-    if (this.path && this.path.textContent !== path) this.path.textContent = path;
     const targetId = event && ['cell', 'cell-started', 'cell-output', 'cell-completed', 'diagnostics'].includes(event.type)
       ? event.cellId : undefined;
     const target = targetId ? notebook.cell(targetId) : undefined;
@@ -372,6 +370,12 @@ export class NotebookView {
   }
 
   showError(error: unknown): void {
+    if (isObject(error) && error.code === "interrupted") {
+      this.actionError = null;
+      this.actionNotice = "Stopped.";
+      this.renderStatus();
+      return;
+    }
     this.actionNotice = null;
     this.actionError = error instanceof Error ? error.message : String(error);
     this.renderStatus();
@@ -543,9 +547,12 @@ export class NotebookView {
     element.dataset.cellName = cellName(server);
     const badge = element.querySelector<HTMLElement>("[data-role=badge]");
     if (badge) {
-      const label = cell.tombstone ? "deleted on server" : cell.conflict ? "source conflict" : status;
+      const warning = !cell.tombstone && !cell.conflict && status === "done"
+        && (server?.log.some((line) => /^Warning(?: message)?:/i.test(line)) ?? false);
+      const label = cell.tombstone ? "deleted on server" : cell.conflict ? "source conflict" : warning ? "warning" : status;
       if (badge.textContent !== label) badge.textContent = label;
-      badge.className = `cell-badge ${cell.conflict ? "error" : status}`;
+      badge.className = `cell-badge ${cell.conflict ? "error" : warning ? "warning" : status}`;
+      element.classList.toggle("warning", warning);
     }
     const type = element.querySelector<HTMLSelectElement>("[data-role=type]");
     if (type && this.dom.activeElement !== type) type.value = cell.desiredType;
@@ -711,7 +718,7 @@ export class NotebookView {
           }).catch((error) => this.showError(error));
         },
         onSave: () => void this.action(() => this.saveNotebook()).catch((error) => this.showError(error)),
-        onFormat: () => void this.action(() => this.formatCells([cell.key])).catch((error) => this.showError(error)),
+        onFormat: () => void this.action(() => this.formatCells([cell.key])).catch((error) => this.showFormatFailure(error, [cell.key])),
         onJump: (kind, value) => {
           if (kind === "move") {
             void this.action(() => this.moveCellBy(cell.key, value < 0 ? -1 : 1)).catch((error) => this.showError(error));
@@ -1091,6 +1098,13 @@ export class NotebookView {
     const busy = snapshot.runtime.busy;
     const dirty = snapshot.dirty || (this.documentValue?.pendingSource().changes.length ?? 0) > 0;
     const available = !this.hostClosed && snapshot.runtime.executionReady && snapshot.runtime.kernelState === "ready";
+    const runnableOutdated = this.documentValue?.cells.some((cell) => cell.desiredType === "code"
+      && !cell.tombstone && !cell.conflict
+      && cell.server?.options.disabled !== true
+      && cell.desiredBody.some((line) => line.trim().length > 0)
+      && (cell.generation > cell.acknowledgedGeneration || cell.creationId !== null
+        || cell.server?.status === "idle" || cell.server?.status === "stale"
+        || cell.server?.status === "error" || cell.server?.status === "stopped")) === true;
     const signature = JSON.stringify({
       runPending: this.runPending,
       hostClosed: this.hostClosed,
@@ -1100,6 +1114,8 @@ export class NotebookView {
       kernelReady: snapshot.runtime.kernelState === "ready",
       dirty,
       saveState: this.saveStateValue,
+      path: snapshot.path,
+      runnableOutdated,
     });
     if (signature === this.toolbarSignature) return;
     this.toolbarSignature = signature;
@@ -1108,7 +1124,11 @@ export class NotebookView {
     if (runtime) setDisabled(runtime, this.hostClosed);
     const path = this.dom.getElementById("path");
     const notebookName = snapshot.path?.split(/[\\/]/).at(-1) ?? "Untitled";
-    if (path) path.textContent = notebookName;
+    if (path) {
+      path.textContent = notebookName;
+      path.title = snapshot.path ?? "Untitled notebook";
+      path.setAttribute("aria-label", snapshot.path ? `Notebook ${notebookName}; ${snapshot.path}` : "Untitled notebook");
+    }
     this.dom.title = this.appView ? `${notebookName} — Preview — Alder` : `${notebookName} — Alder`;
     const saveState = this.dom.getElementById("save-state");
     if (saveState) saveState.textContent = dirty && this.saveStateValue === "saved" ? "Edited" : ({ edited: "Edited", saving: "Saving…", saved: "Saved", failed: "Save failed" } as const)[this.saveStateValue];
@@ -1118,7 +1138,8 @@ export class NotebookView {
     if (runAll) {
       const label = snapshot.runtime.executionMode === "lazy" ? "Run outdated cells" : "Run All";
       if (runAll.textContent !== label) runAll.textContent = label;
-      setDisabled(runAll, this.runPending || busy || !available);
+      setDisabled(runAll, this.runPending || busy || !available
+        || (snapshot.runtime.executionMode === "lazy" && !runnableOutdated));
     }
     const stop = this.dom.getElementById("stop") as HTMLButtonElement | null;
     if (stop) {
@@ -1902,16 +1923,26 @@ export class NotebookView {
 
     const formatStart = this.dom.getElementById("format-start") as HTMLButtonElement | null;
     const formatProgress = this.dom.getElementById("format-progress");
+    const formatError = this.dom.getElementById("format-error");
+    const formatReturn = this.dom.getElementById("format-return") as HTMLButtonElement | null;
     this.formatCancelButton = this.dom.getElementById("format-cancel") as HTMLButtonElement | null;
+    formatReturn?.addEventListener("click", () => {
+      const key = formatReturn.dataset.cellKey;
+      const line = Number.parseInt(formatReturn.dataset.line ?? "", 10);
+      const target = dialog("format-dialog");
+      if (target) this.closeDialog(target);
+      if (key) this.navigateToCell(key, Number.isSafeInteger(line) ? Math.max(0, line - 1) : undefined);
+    });
     formatStart?.addEventListener("click", () => {
       if (formatStart.disabled) return;
       setDisabled(formatStart, true);
       if (formatProgress) formatProgress.textContent = "Formatting…";
+      if (formatError) formatError.hidden = true;
+      if (formatReturn) formatReturn.hidden = true;
       void this.action(() => this.formatCells()).then(() => {
         if (formatProgress) formatProgress.textContent = "Formatting complete.";
       }).catch((error) => {
-        if (formatProgress) formatProgress.textContent = "Formatting failed.";
-        this.showError(error);
+        this.showFormatFailure(error);
       }).finally(() => setDisabled(formatStart, false));
     });
     this.formatCancelButton?.addEventListener("click", () => {
@@ -1998,6 +2029,33 @@ export class NotebookView {
       if (acceptedOperationId !== null) this.activeFormatOperationIds.delete(acceptedOperationId);
       if (this.formatCancelButton && this.activeFormatOperationIds.size === 0) this.formatCancelButton.disabled = true;
     }
+  }
+
+  private showFormatFailure(error: unknown, keys?: readonly string[]): void {
+    const message = (error instanceof Error ? error.message : String(error)).replace(/\s+$/u, "").slice(0, 4096);
+    const reportedCell = message.match(/\bCell (\d+):/i);
+    const reportedIndex = reportedCell === null ? -1 : Number.parseInt(reportedCell[1]!, 10) - 1;
+    const key = keys?.length === 1 ? keys[0]
+      : reportedIndex >= 0 ? this.documentValue?.cells[reportedIndex]?.key : undefined;
+    const cell = key === undefined ? undefined : this.documentValue?.cell(key)?.server ?? undefined;
+    const index = key === undefined ? -1 : (this.documentValue?.cells.findIndex((candidate) => candidate.key === key) ?? -1);
+    const location = message.match(/(?:cell\.R|line)[: ]+(\d+)(?::(\d+))?/i);
+    const prefix = cell === undefined || reportedCell !== null ? "" : `${cellLabelAt(cell, index)}: `;
+    const progress = this.dom.getElementById("format-progress");
+    if (progress) progress.textContent = "Formatting failed. Your source was not changed.";
+    const detail = this.dom.getElementById("format-error");
+    if (detail) {
+      detail.textContent = prefix + message;
+      detail.hidden = false;
+    }
+    const back = this.dom.getElementById("format-return") as HTMLButtonElement | null;
+    if (back) {
+      back.hidden = key === undefined;
+      back.dataset.cellKey = key ?? "";
+      back.dataset.line = location?.[1] ?? "";
+      if (key !== undefined) back.textContent = location?.[1] ? `Return to Cell ${index + 1}, line ${location[1]}` : `Return to Cell ${index + 1}`;
+    }
+    this.openDialog("format-dialog");
   }
 
   private renderPackageProgress(operation: OperationRecord, target?: PackageOperationTarget): void {

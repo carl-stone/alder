@@ -300,6 +300,7 @@ main { max-width: 920px; margin: 24px auto; padding: 0 16px; }
 .cell-badge.done { border-color: var(--done); color: var(--done); }
 .cell-badge.stale { border-color: var(--stale); color: var(--stale); }
 .cell-badge.error { border-color: var(--danger); color: var(--danger); }
+.cell-badge.warning, .cell-badge.stopped { border-color: var(--stale); color: var(--stale); }
 .source-area .cm-host {
   min-height: 64px;
   padding: 6px 0;
@@ -958,6 +959,18 @@ body.panel-closed #editor-workspace {
 .settings-section legend { padding: 0; font-weight: 600; }
 .settings-section > p { margin: 4px 0 var(--space-3); color: var(--muted); font-size: 12px; }
 .settings-error { color: var(--danger); font-size: 13px; overflow-wrap: anywhere; }
+.format-error {
+  max-height: 180px;
+  overflow: auto;
+  padding: var(--space-3);
+  border: 1px solid var(--danger-border);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--danger) 6%, var(--panel));
+  color: var(--danger);
+  font: 12px/1.5 var(--mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 .settings-wide { grid-column: 1 / -1; }
 .settings-grid {
   display: grid;
@@ -1099,6 +1112,7 @@ body.panel-closed #editor-workspace { grid-template-columns: minmax(0, 1040px); 
 .cell.running::before { background: var(--running); }
 .cell.stale { background: var(--panel); }
 .cell.stale::before, .cell.stopped::before { background: var(--stale); }
+.cell.warning::before { background: var(--stale); }
 .cell.error { border-color: var(--danger-border); }
 .cell.error::before, .cell.source-conflict::before, .cell.tombstone::before { background: var(--danger); }
 .cell:focus-within { border-color: color-mix(in srgb, var(--accent) 55%, var(--border)); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 12%, transparent); }
@@ -1118,6 +1132,8 @@ body.panel-closed #editor-workspace { grid-template-columns: minmax(0, 1040px); 
 .cell-badge.idle, .cell-badge.done { color: var(--muted); }
 .cell-badge.running::before { content: "● "; }
 .cell-badge.stale::before { content: "△ "; }
+.cell-badge.warning::before { content: "▲ "; }
+.cell-badge.stopped::before { content: "■ "; }
 .cell-badge.error::before { content: "! "; }
 .cell-overflow-menu {
   z-index: 60;

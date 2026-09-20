@@ -681,6 +681,9 @@ test("no-run suppresses this opening's startup without changing settings or expl
       } else {
         const startup = await controller.dispatch(command(controller, { type: "run", scope: "all", startup: true }));
         assert.equal(startup.error, null);
+        const duplicate = await controller.dispatch(command(controller, { type: "run", scope: "all", startup: true }));
+        assert.equal(duplicate.error, null);
+        assert.equal(controller.snapshot().lastActionError, null);
       }
       const suppressed = controller.snapshot();
       assert.equal(engine.evaluations.length, 0);
@@ -2301,6 +2304,9 @@ test("completed and interrupted cells clear progress and ignore output after Sto
   engine.finishEvaluation({ ok: false, error: { message: "Interrupted", interrupted: true } });
   await controller.awaitOperation(interruptedRun.requestId, "controller-tests");
   assert.equal(controller.snapshot().cells[0]?.progress, null);
+  assert.equal(controller.snapshot().cells[0]?.status, "stopped");
+  assert.equal(controller.snapshot().cells[0]?.error, null);
+  assert.ok(!controller.snapshot().cells[0]?.log.some(line => /Error: Interrupted/.test(line)));
   await controller.close();
 });
 
@@ -3209,7 +3215,8 @@ test("a matching interrupted Stop cancels the run after its cell result is publi
   const settled = await controller.awaitOperation(run.requestId, "controller-tests");
   assert.equal(settled.status, "cancelled");
   assert.equal(settled.error?.code, "interrupted");
-  assert.equal(controller.snapshot().cells[0]?.status, "error");
+  assert.equal(controller.snapshot().cells[0]?.status, "stopped");
+  assert.equal(controller.snapshot().cells[0]?.error, null);
   assert.deepEqual(events, ["cell-completed", "cancelled"]);
   unsubscribe();
   await controller.close();

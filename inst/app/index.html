@@ -59,7 +59,9 @@
     </div>
     <p>Format every R code cell with Alder's configured formatter.</p>
     <p id="format-progress" role="status" aria-live="polite">Ready to format.</p>
+    <pre id="format-error" class="format-error" role="alert" hidden></pre>
     <div class="settings-actions">
+      <button id="format-return" class="btn" type="button" hidden>Return to cell</button>
       <button id="format-cancel" class="btn" type="button" disabled>Cancel formatting</button>
       <button id="format-start" class="btn primary" type="button">Format</button>
     </div>

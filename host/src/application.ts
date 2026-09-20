@@ -268,12 +268,14 @@ async function startNotebookHost(
       return {};
     }
   };
+  let launchExecutionMode = options.executionMode;
   const configurationFor = (document: NotebookDocument, project = projectSettings): Config => {
     let notebook: NotebookSettingsPatch = {};
     try { notebook = readNotebookSettings(document.metadata); settingsErrors.delete("notebook"); }
     catch (error) { settingsErrors.set("notebook", `Fix runtime settings in ${document.path ?? "this notebook"}: ${errorMessage(error)}`); }
     publishSettingsError();
-    return resolveSettings({ preferences: preferences.snapshot().values, notebook, project });
+    const resolved = resolveSettings({ preferences: preferences.snapshot().values, notebook, project });
+    return launchExecutionMode === undefined ? resolved : { ...resolved, on_cell_change: launchExecutionMode };
   };
   let projectLayoutIntent: Layout | null = null;
   const pendingSidecars = { layout: false, packages: false };
@@ -654,6 +656,7 @@ async function startNotebookHost(
         const notebook = readNotebookSettings(document.metadata);
         const nextConfig = resolveSettings({ preferences: preferences.snapshot().values, notebook, project: projectSettings });
         await appendRecovery({ fromRevision: context.fromRevision, document, disk: context.disk });
+        if ((request.patch as NotebookSettingsPatch).on_cell_change !== undefined) launchExecutionMode = undefined;
         config = nextConfig;
         publishSource(context, { document, path: context.path, config: nextConfig, layout: context.layout, disk: context.disk, sidecars: context.sidecars, dirty: true, advanceRevision: true });
         settingsErrors.delete("notebook");
@@ -1168,13 +1171,6 @@ async function startNotebookHost(
     };
     unsubscribePreferences = preferences.subscribe(refreshPreferences);
     refreshPreferences();
-    if (options.executionMode !== undefined && options.executionMode !== controller.snapshot().runtime.executionMode) {
-      // The launch choice uses the same dirty/recovery path as the notebook control.
-      const result = await controller.dispatch({ type: "set-runtime", requestId: randomUUID(), clientId: "launch",
-        sessionEpoch: controller.epoch, expectedDocumentRevision: controller.snapshot().documentRevision,
-        on_cell_change: options.executionMode });
-      if (result.error) controller.recordActionError(`Could not apply launch execution mode: ${result.error.message}`, result.error.code);
-    }
     if (runtimeError !== null) controller.recordRuntimeAvailabilityError(asRuntimeHostError(runtimeError)!);
     if (recoveryConflict) controller.recordActionError("notebook changed on disk; recovery draft retained", "recovery_conflict");
     const getLsp = (): Promise<LspClient> => {

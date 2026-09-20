@@ -50,7 +50,14 @@ export class FormattingService {
     for (const cell of cells) {
       if (cell.type === "markdown") continue;
       if (signal?.aborted) throw new FormattingError("cancelled", "formatting was cancelled");
-      const body = await formatOne(this.airExecutable, this.processScope, cell.body, signal);
+      let body: string[];
+      try {
+        body = await formatOne(this.airExecutable, this.processScope, cell.body, signal);
+      } catch (error) {
+        if (!(error instanceof FormattingError) || error.code === "cancelled") throw error;
+        const index = document.cells.findIndex(candidate => candidate.id === cell.id) + 1;
+        throw new FormattingError(error.code, `Cell ${index}: ${error.message}`);
+      }
       edits.push({
         type: "edit",
         cell: { cellId: cell.id },
@@ -79,7 +86,9 @@ async function formatOne(
     await writeFile(input, text, { encoding: "utf8", mode: 0o600 });
     const result = await runAir(airExecutable, input, processScope, directory, signal);
     if (result.code !== 0) {
-      const detail = result.stderr.trim() || result.stdout.trim() || "exit status " + (result.code ?? "unknown");
+      const rawDetail = result.stderr.trim() || result.stdout.trim() || "exit status " + (result.code ?? "unknown");
+      const normalized = rawDetail.replaceAll(input, "cell.R").replace(/\u001b\[[0-9;]*m/g, "");
+      const detail = [...normalized].length > 4096 ? [...normalized].slice(0, 4095).join("") + "…" : normalized;
       throw new FormattingError("format_failed", "air could not format the cell: " + detail);
     }
     const bytes = await readFile(input);

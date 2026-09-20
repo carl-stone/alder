@@ -22290,8 +22290,11 @@ var BrowserNotebookClient = class {
   }
   restoreDraft(draft) {
     const document2 = this.requireDocument();
-    if (draft.pendingRun && !this.activeRuns.has(draft.pendingRun.requestId)) this.uncertainRun ??= draft.pendingRun;
-    this.pendingRun ??= draft.pendingRun;
+    const recordedRun = draft.pendingRun === null ? void 0 : document2.snapshot.operations.find((operation) => operation.id === draft.pendingRun.requestId);
+    const runAlreadySettled = recordedRun !== void 0 && (recordedRun.status === "done" || recordedRun.status === "error" || recordedRun.status === "interrupted" || recordedRun.status === "cancelled");
+    const pendingRun = runAlreadySettled ? null : draft.pendingRun;
+    if (pendingRun && !this.activeRuns.has(pendingRun.requestId)) this.uncertainRun ??= pendingRun;
+    this.pendingRun ??= pendingRun;
     const reconciled = reconcileDraft(draft, document2.snapshot);
     if (reconciled.draft.changes.length) document2.restoreDraft(reconciled.draft, reconciled.conflict);
     if (!reconciled.conflict) document2.rebaseDraftToSnapshot();
@@ -23965,8 +23968,6 @@ var NotebookView = class {
         void this.repaginateTables(pageSize).catch((error61) => this.showError(error61));
       }
     }
-    const path = snapshot.path || "untitled notebook";
-    if (this.path && this.path.textContent !== path) this.path.textContent = path;
     const targetId = event && ["cell", "cell-started", "cell-output", "cell-completed", "diagnostics"].includes(event.type) ? event.cellId : void 0;
     const target = targetId ? notebook.cell(targetId) : void 0;
     const deleted = event?.type === "cell" && isObject3(event.payload) && event.payload.deleted === true;
@@ -24032,6 +24033,12 @@ var NotebookView = class {
     this.cancelVariablesProjection();
   }
   showError(error61) {
+    if (isObject3(error61) && error61.code === "interrupted") {
+      this.actionError = null;
+      this.actionNotice = "Stopped.";
+      this.renderStatus();
+      return;
+    }
     this.actionNotice = null;
     this.actionError = error61 instanceof Error ? error61.message : String(error61);
     this.renderStatus();
@@ -24206,9 +24213,11 @@ var NotebookView = class {
     element3.dataset.cellName = cellName(server);
     const badge = element3.querySelector("[data-role=badge]");
     if (badge) {
-      const label = cell.tombstone ? "deleted on server" : cell.conflict ? "source conflict" : status;
+      const warning = !cell.tombstone && !cell.conflict && status === "done" && (server?.log.some((line) => /^Warning(?: message)?:/i.test(line)) ?? false);
+      const label = cell.tombstone ? "deleted on server" : cell.conflict ? "source conflict" : warning ? "warning" : status;
       if (badge.textContent !== label) badge.textContent = label;
-      badge.className = `cell-badge ${cell.conflict ? "error" : status}`;
+      badge.className = `cell-badge ${cell.conflict ? "error" : warning ? "warning" : status}`;
+      element3.classList.toggle("warning", warning);
     }
     const type = element3.querySelector("[data-role=type]");
     if (type && this.dom.activeElement !== type) type.value = cell.desiredType;
@@ -24362,7 +24371,7 @@ var NotebookView = class {
           }).catch((error61) => this.showError(error61));
         },
         onSave: () => void this.action(() => this.saveNotebook()).catch((error61) => this.showError(error61)),
-        onFormat: () => void this.action(() => this.formatCells([cell.key])).catch((error61) => this.showError(error61)),
+        onFormat: () => void this.action(() => this.formatCells([cell.key])).catch((error61) => this.showFormatFailure(error61, [cell.key])),
         onJump: (kind, value) => {
           if (kind === "move") {
             void this.action(() => this.moveCellBy(cell.key, value < 0 ? -1 : 1)).catch((error61) => this.showError(error61));
@@ -24730,6 +24739,7 @@ ${cell.desiredBody.join("\n")}`));
     const busy = snapshot.runtime.busy;
     const dirty = snapshot.dirty || (this.documentValue?.pendingSource().changes.length ?? 0) > 0;
     const available = !this.hostClosed && snapshot.runtime.executionReady && snapshot.runtime.kernelState === "ready";
+    const runnableOutdated = this.documentValue?.cells.some((cell) => cell.desiredType === "code" && !cell.tombstone && !cell.conflict && cell.server?.options.disabled !== true && cell.desiredBody.some((line) => line.trim().length > 0) && (cell.generation > cell.acknowledgedGeneration || cell.creationId !== null || cell.server?.status === "idle" || cell.server?.status === "stale" || cell.server?.status === "error" || cell.server?.status === "stopped")) === true;
     const signature = JSON.stringify({
       runPending: this.runPending,
       hostClosed: this.hostClosed,
@@ -24738,7 +24748,9 @@ ${cell.desiredBody.join("\n")}`));
       executionMode: snapshot.runtime.executionMode,
       kernelReady: snapshot.runtime.kernelState === "ready",
       dirty,
-      saveState: this.saveStateValue
+      saveState: this.saveStateValue,
+      path: snapshot.path,
+      runnableOutdated
     });
     if (signature === this.toolbarSignature) return;
     this.toolbarSignature = signature;
@@ -24747,7 +24759,11 @@ ${cell.desiredBody.join("\n")}`));
     if (runtime) setDisabled(runtime, this.hostClosed);
     const path = this.dom.getElementById("path");
     const notebookName = snapshot.path?.split(/[\\/]/).at(-1) ?? "Untitled";
-    if (path) path.textContent = notebookName;
+    if (path) {
+      path.textContent = notebookName;
+      path.title = snapshot.path ?? "Untitled notebook";
+      path.setAttribute("aria-label", snapshot.path ? `Notebook ${notebookName}; ${snapshot.path}` : "Untitled notebook");
+    }
     this.dom.title = this.appView ? `${notebookName} \u2014 Preview \u2014 Alder` : `${notebookName} \u2014 Alder`;
     const saveState = this.dom.getElementById("save-state");
     if (saveState) saveState.textContent = dirty && this.saveStateValue === "saved" ? "Edited" : { edited: "Edited", saving: "Saving\u2026", saved: "Saved", failed: "Save failed" }[this.saveStateValue];
@@ -24757,7 +24773,7 @@ ${cell.desiredBody.join("\n")}`));
     if (runAll) {
       const label = snapshot.runtime.executionMode === "lazy" ? "Run outdated cells" : "Run All";
       if (runAll.textContent !== label) runAll.textContent = label;
-      setDisabled(runAll, this.runPending || busy || !available);
+      setDisabled(runAll, this.runPending || busy || !available || snapshot.runtime.executionMode === "lazy" && !runnableOutdated);
     }
     const stop = this.dom.getElementById("stop");
     if (stop) {
@@ -25497,16 +25513,26 @@ ${cell.desiredBody.join("\n")}`));
     close("shortcuts-close", "shortcuts-dialog");
     const formatStart = this.dom.getElementById("format-start");
     const formatProgress = this.dom.getElementById("format-progress");
+    const formatError2 = this.dom.getElementById("format-error");
+    const formatReturn = this.dom.getElementById("format-return");
     this.formatCancelButton = this.dom.getElementById("format-cancel");
+    formatReturn?.addEventListener("click", () => {
+      const key = formatReturn.dataset.cellKey;
+      const line = Number.parseInt(formatReturn.dataset.line ?? "", 10);
+      const target = dialog("format-dialog");
+      if (target) this.closeDialog(target);
+      if (key) this.navigateToCell(key, Number.isSafeInteger(line) ? Math.max(0, line - 1) : void 0);
+    });
     formatStart?.addEventListener("click", () => {
       if (formatStart.disabled) return;
       setDisabled(formatStart, true);
       if (formatProgress) formatProgress.textContent = "Formatting\u2026";
+      if (formatError2) formatError2.hidden = true;
+      if (formatReturn) formatReturn.hidden = true;
       void this.action(() => this.formatCells()).then(() => {
         if (formatProgress) formatProgress.textContent = "Formatting complete.";
       }).catch((error61) => {
-        if (formatProgress) formatProgress.textContent = "Formatting failed.";
-        this.showError(error61);
+        this.showFormatFailure(error61);
       }).finally(() => setDisabled(formatStart, false));
     });
     this.formatCancelButton?.addEventListener("click", () => {
@@ -25588,6 +25614,31 @@ ${cell.desiredBody.join("\n")}`));
       if (acceptedOperationId !== null) this.activeFormatOperationIds.delete(acceptedOperationId);
       if (this.formatCancelButton && this.activeFormatOperationIds.size === 0) this.formatCancelButton.disabled = true;
     }
+  }
+  showFormatFailure(error61, keys) {
+    const message2 = (error61 instanceof Error ? error61.message : String(error61)).replace(/\s+$/u, "").slice(0, 4096);
+    const reportedCell = message2.match(/\bCell (\d+):/i);
+    const reportedIndex = reportedCell === null ? -1 : Number.parseInt(reportedCell[1], 10) - 1;
+    const key = keys?.length === 1 ? keys[0] : reportedIndex >= 0 ? this.documentValue?.cells[reportedIndex]?.key : void 0;
+    const cell = key === void 0 ? void 0 : this.documentValue?.cell(key)?.server ?? void 0;
+    const index = key === void 0 ? -1 : this.documentValue?.cells.findIndex((candidate) => candidate.key === key) ?? -1;
+    const location2 = message2.match(/(?:cell\.R|line)[: ]+(\d+)(?::(\d+))?/i);
+    const prefix = cell === void 0 || reportedCell !== null ? "" : `${cellLabelAt(cell, index)}: `;
+    const progress = this.dom.getElementById("format-progress");
+    if (progress) progress.textContent = "Formatting failed. Your source was not changed.";
+    const detail = this.dom.getElementById("format-error");
+    if (detail) {
+      detail.textContent = prefix + message2;
+      detail.hidden = false;
+    }
+    const back = this.dom.getElementById("format-return");
+    if (back) {
+      back.hidden = key === void 0;
+      back.dataset.cellKey = key ?? "";
+      back.dataset.line = location2?.[1] ?? "";
+      if (key !== void 0) back.textContent = location2?.[1] ? `Return to Cell ${index + 1}, line ${location2[1]}` : `Return to Cell ${index + 1}`;
+    }
+    this.openDialog("format-dialog");
   }
   renderPackageProgress(operation, target) {
     const candidate = target ?? [...this.packageOperations].find((entry) => entry.operationId === operation.id);

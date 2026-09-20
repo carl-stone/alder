@@ -167,6 +167,7 @@ interface ActiveEvaluation {
   rSequence: number;
   outputs: OutputRecord[];
   outputBytes: number;
+  displayOutputs: Map<string, number>;
   log: string[];
   console: OutputLog;
   truncated: boolean;
@@ -1488,9 +1489,36 @@ export class Engine extends EventEmitter implements EngineAdapter {
     if (type !== "execute_result" && type !== "display_data" && type !== "update_display_data") return;
     await this.applyPendingClear(state);
     const records = await this.ingestDisplay(state, message);
-    for (const record of records) {
+    const transient = optionalRecord(message.content.transient);
+    const displayId = typeof transient?.display_id === "string" && transient.display_id.length > 0
+      ? transient.display_id : undefined;
+    for (const [recordOffset, record] of records.entries()) {
+      const displayKey = displayId === undefined ? undefined : `${displayId}:${recordOffset}`;
+      const existing = displayKey === undefined ? undefined : state.displayOutputs.get(displayKey);
+      if (existing !== undefined) {
+        const previous = state.outputs[existing];
+        if (previous === undefined) throw new FrameProtocolError("Ark updated an unavailable display output");
+        const previousBytes = jsonByteSize(previous);
+        const nextBytes = jsonByteSize(record);
+        if (state.outputBytes - previousBytes + nextBytes > this.maxOutputBytes()) {
+          state.truncated = true;
+          this.outputStoreValue?.discardExact([record]);
+          continue;
+        }
+        state.outputs[existing] = record;
+        state.outputBytes = state.outputBytes - previousBytes + nextBytes;
+        await this.discardDuringEvaluation(state, [previous]);
+        continue;
+      }
       if (this.addEvaluationOutput(state, record) === undefined) {
         this.outputStoreValue?.discardExact([record]);
+        continue;
+      }
+      if (displayKey !== undefined) {
+        state.displayOutputs.set(displayKey, state.outputs.length - 1);
+        // Ark uses update_display_data for base graphics additions. Hold the
+        // display until completion so a plot, abline, and legend appear as one
+        // composed figure rather than transient duplicate snapshots.
         continue;
       }
       this.emitEvaluationEvent(state, {
@@ -1663,6 +1691,7 @@ export class Engine extends EventEmitter implements EngineAdapter {
     const outputs = state.outputs;
     state.outputs = [];
     state.outputBytes = 0;
+    state.displayOutputs.clear();
     state.console = new OutputLog(MAX_LOG_BYTES);
     state.log = [];
     state.truncated = false;
@@ -2283,7 +2312,7 @@ function makeEvaluation(
 ): ActiveEvaluation {
   return {
     requestId, payload, onEvent, kernelGeneration, started: false, sequence: 0, rSequence: 0,
-    outputs: [], outputBytes: 0, log: [],
+    outputs: [], outputBytes: 0, displayOutputs: new Map(), log: [],
     console: new OutputLog(MAX_LOG_BYTES), truncated: false, stopped: false,
     finished: false, kernelTerminal: false, interruptSent: false, clearPending: false,
     deferredArtifactReleases: new Set(), messageTail: Promise.resolve(),

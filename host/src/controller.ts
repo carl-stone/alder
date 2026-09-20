@@ -1274,7 +1274,8 @@ export class Controller {
       }
       if (command.type === "run") {
         if (command.startup === true && this.startupActivated) {
-          throw new ControllerError("startup_already_activated", "startup was already activated", 409);
+          this.completeOperation(command.requestId, { startupActivated: true }, command.clientId);
+          return this.commandResult(command.requestId, await completion);
         }
         this.startupActivated = true;
       }
@@ -2706,15 +2707,26 @@ export class Controller {
     if (cell === undefined || cell.revision !== job.revision) return;
     const error = response.error ?? { message: "Unknown error" };
     this.outputStore.discardExact(cell.outputs);
-    cell.status = "error";
     cell.outputs = [];
     cell.displayOrder = [];
     cell.outputsStale = false;
     cell.progress = null;
+    if (error.interrupted === true) {
+      cell.status = "stopped";
+      cell.error = null;
+      cell.log = response.log === undefined ? [] : completedLog(response.log);
+      this.replaceLastActionError(null, {
+        operationId: job.operationId,
+        runId: job.runId,
+      });
+      if (dropDescendants) this.dropRunDescendants(job.id, job.runId);
+      return;
+    }
+    cell.status = "error";
     cell.error = clone(error);
     cell.log = [
       ...(response.log === undefined ? cell.log : completedLog(response.log)),
-      error.interrupted ? "Error: Interrupted" : `Error: ${error.message}`,
+      `Error: ${error.message}`,
     ];
     this.replaceLastActionError(
       hostError("eval_error", error.message, job.operationId),
