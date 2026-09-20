@@ -69,6 +69,20 @@ Verify actual Mac typing, menus, dialogs, save/reopen and recovery where relevan
 See [host/test/AGENTS.md](../host/test/AGENTS.md) for host, browser and desktop
 tests, and [tests/AGENTS.md](../tests/AGENTS.md) for R helper tests.
 
+The installed R semantics generator runs in final acceptance and can be replayed
+against a staged application root. Its defaults are two fixed seeds with fourteen
+cases each. `ALDER_R_SEMANTICS_SEED` accepts up to sixteen comma-separated
+unsigned 32-bit integer seeds,
+`ALDER_R_SEMANTICS_CASES` expands the corpus up to 256 cases per seed, and
+`ALDER_R_SEMANTICS_CASE` replays one generated case by zero-based corpus index.
+`ALDER_R_SEMANTICS_SHRINK_ATTEMPTS` bounds mismatch minimization (default 16).
+
+```sh
+(cd host && ALDER_APPLICATION_ROOT="$PWD/.application" \
+  ALDER_RSCRIPT="$(which Rscript)" \
+  node --import tsx --test --test-concurrency=1 test/generative-r-semantics.test.ts)
+```
+
 ## Inspect local diagnostics
 
 The installed `alder` command locates Alder's automatic local diagnostic store;

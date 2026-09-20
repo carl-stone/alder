@@ -40,7 +40,7 @@ const installedEnvironment = {
   ALDER_TEST_RSCRIPT: rscript,
   PATH: `${dirname(quarto)}:${environment.PATH}`,
 };
-for (const file of ['engine.test.ts', 'jupyter.test.ts', 'host.test.ts', 'mcp-installed.test.ts']) {
+for (const file of ['engine.test.ts', 'jupyter.test.ts', 'host.test.ts', 'mcp-installed.test.ts', 'generative-r-semantics.test.ts']) {
   run(`installed ${file}`, node, ['--import', 'tsx', '--test', '--test-concurrency=1', `test/${file}`], {
     cwd: join(root, 'host'), env: installedEnvironment,
   });

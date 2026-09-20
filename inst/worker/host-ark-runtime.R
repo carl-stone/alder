@@ -1096,10 +1096,24 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
     if (anyNA(v) || any(!nzchar(v)) || any(duplicated(v))) return(NULL)
     v
   }
+  adopt_owned_defs <- function(id, defs) {
+    owned <- character()
+    for (nm in defs) {
+      if (!exists(nm, envir = NB_ENV, inherits = FALSE)) next
+      previous <- NAME_OWNER[[nm]] %||% NULL
+      if (!is.null(previous) && !identical(previous, id)) {
+        CELL_DEFS[[previous]] <- setdiff(CELL_DEFS[[previous]] %||% character(), nm)
+      }
+      NAME_OWNER[[nm]] <- id
+      owned <- c(owned, nm)
+    }
+    owned
+  }
   # eval_cell carries the analyzed unique definition-name array. Entering:
   # drop this cell's previous bindings, evaluate directly in NB_ENV. Success:
-  # own only requested definitions that now exist. Error/interrupt: remove
-  # definitions created before the failure and leave this cell with none.
+  # own only requested definitions that now exist. Ordinary errors leave R's
+  # visible state intact and adopt new or observably changed definitions;
+  # interruption removes definitions created before the stop.
   # Empty code therefore completes cleanup without a special early return.
   # Evaluate one registered lazy thunk. The key is invalidated whenever its
   # defining cell starts another execution, so a stale UI request cannot
@@ -1222,6 +1236,51 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
                                      message = conditionMessage(error))))
       FALSE
     })
+  }
+
+  # Capture an ordinary binding without invoking active-binding getters or
+  # forcing promises. The retained SEXP is enough for `identical()` to notice
+  # copy-on-modify values after a failed cell. Same-value writes and mutations
+  # inside reference objects compare equal and conservatively keep their owner.
+  snapshot_binding <- function(name) {
+    if (!exists(name, envir = NB_ENV, inherits = FALSE)) {
+      return(list(exists = FALSE, comparable = TRUE, value = list(NULL)))
+    }
+    active <- tryCatch(bindingIsActive(name, NB_ENV), error = function(error) NULL)
+    if (is.null(active) || isTRUE(active)) {
+      return(list(exists = TRUE, comparable = FALSE, value = list(NULL)))
+    }
+    lazy <- tryCatch(
+      unname(rlang::env_binding_are_lazy(NB_ENV, name))[[1L]],
+      error = function(error) NULL
+    )
+    if (is.null(lazy) || isTRUE(lazy)) {
+      return(list(exists = TRUE, comparable = FALSE, value = list(NULL)))
+    }
+    captured <- tryCatch({
+      list(ok = TRUE, value = list(get(name, envir = NB_ENV, inherits = FALSE)))
+    }, error = function(error) list(ok = FALSE, value = list(NULL)))
+    list(exists = TRUE, comparable = isTRUE(captured$ok), value = captured$value)
+  }
+
+  snapshot_declared_bindings <- function(defs) {
+    stats::setNames(lapply(defs, snapshot_binding), defs)
+  }
+
+  changed_declared_bindings <- function(defs, before) {
+    changed <- character()
+    for (name in defs) {
+      after <- snapshot_binding(name)
+      if (!isTRUE(after$exists)) next
+      prior <- before[[name]]
+      if (is.null(prior) || !isTRUE(prior$exists)) {
+        changed <- c(changed, name)
+      } else if (isTRUE(prior$comparable) && isTRUE(after$comparable) &&
+                 !identical(prior$value[[1L]], after$value[[1L]])) {
+        changed <- c(changed, name)
+      }
+    }
+    changed
   }
 
   cleanup_failure <- function(name, action, error = NULL) {
@@ -1915,6 +1974,8 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
     pre <- character()
     pre_values <- NULL
     completed <- FALSE
+    ordinary_error <- FALSE
+    interrupted <- FALSE
     on.exit({
       tryCatch({
         if (length(RENDER_LOG$value %||% character())) {
@@ -1928,10 +1989,16 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
           if (!initial_clear_complete) {
             clear_owned_bindings(id, previous_defs)
           }
-          if (baseline_captured) {
-            cleanup_failed_defs(defs, pre)
+          if (baseline_captured && isTRUE(ordinary_error) && !isTRUE(interrupted)) {
+            # Ordinary R keeps visible mutations completed before an error.
+            # Own new or observably changed declared bindings. An unchanged or
+            # safely incomparable prior binding keeps its existing owner.
+            retained <- changed_declared_bindings(defs, pre_values)
+            CELL_DEFS[[id]] <- adopt_owned_defs(id, retained)
+          } else {
+            if (baseline_captured) cleanup_failed_defs(defs, pre)
+            CELL_DEFS[[id]] <- NULL
           }
-          CELL_DEFS[[id]] <- NULL
         }
       }, error = function(error) {
         mark_kernel_invalid(list(cleanup_failure(id, "cleanup", error)))
@@ -1984,29 +2051,36 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
     if (!isTRUE(initial_clear$ok)) stop(kernel_state_condition())
 
     pre <- ls(NB_ENV, all.names = TRUE)
+    pre_values <- snapshot_declared_bindings(defs)
     baseline_captured <- TRUE
 
     exprs <- parse(text = code, keep.source = TRUE)
     value <- NULL
     visible <- FALSE
     vname <- ""
-    stopped <- tryCatch({
-      if (length(exprs)) {
-        for (i in seq_along(exprs)) {
-          if (i == length(exprs)) {
-            wv <- withVisible(eval(exprs[[i]], envir = NB_ENV))
-            value <- wv$value
-            visible <- wv$visible
-            if (wv$visible && is.symbol(exprs[[i]])) {
-              vname <- as.character(exprs[[i]])
+    stopped <- tryCatch(
+      withCallingHandlers({
+        if (length(exprs)) {
+          for (i in seq_along(exprs)) {
+            if (i == length(exprs)) {
+              wv <- withVisible(eval(exprs[[i]], envir = NB_ENV))
+              value <- wv$value
+              visible <- wv$visible
+              if (wv$visible && is.symbol(exprs[[i]])) {
+                vname <- as.character(exprs[[i]])
+              }
+            } else {
+              eval(exprs[[i]], envir = NB_ENV)
             }
-          } else {
-            eval(exprs[[i]], envir = NB_ENV)
           }
         }
-      }
-      NULL
-    }, alder_stop = identity)
+        NULL
+      }, interrupt = function(error) {
+        interrupted <<- TRUE
+      }, error = function(error) {
+        if (!inherits(error, "interrupt")) ordinary_error <<- TRUE
+      }),
+      alder_stop = identity)
 
     if (inherits(stopped, "alder_stop")) {
       cleanup <- cleanup_failed_defs(defs, pre)
@@ -2026,16 +2100,7 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
       return(invisible(NULL))
     }
 
-    new_owned <- character()
-    for (nm in defs) {
-      if (!exists(nm, envir = NB_ENV, inherits = FALSE)) next
-      previous <- NAME_OWNER[[nm]] %||% NULL
-      if (!is.null(previous) && !identical(previous, id)) {
-        CELL_DEFS[[previous]] <- setdiff(CELL_DEFS[[previous]] %||% character(), nm)
-      }
-      NAME_OWNER[[nm]] <- id
-      new_owned <- c(new_owned, nm)
-    }
+    new_owned <- adopt_owned_defs(id, defs)
     CELL_DEFS[[id]] <- new_owned
 
     ark_native <- inherits(value, "gg") || inherits(value, "ggplot") ||

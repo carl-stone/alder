@@ -279,6 +279,51 @@ test("ordinary R errors preserve condition metadata and leave the kernel usable"
       assert.equal(failedCondition?.call, "sentinel_call()");
       assert.ok(Array.isArray(failedCondition?.trace));
 
+      const partial = payload(epoch, "partial-error", "partial-error", "partial_value <- 3L; stop('partial failure', call. = FALSE)");
+      partial.definitions = ["partial_value"];
+      const partialFailure = await engine.evaluate(partial);
+      assert.equal(partialFailure.ok, false);
+      const retained = await engine.evaluate(payload(epoch, "partial-read", "partial-read", "partial_value"));
+      assert.equal(retained.ok, true);
+      assert.match(JSON.stringify(retained.outputs), /3/);
+      const cleared = await engine.request("clear_cell", { ids: ["partial-error"] });
+      assert.equal(cleared.ok, true);
+      const removed = await engine.evaluate(payload(epoch, "partial-removed", "partial-removed", "exists('partial_value', inherits = FALSE)"));
+      assert.equal(removed.ok, true);
+      assert.match(JSON.stringify(removed.outputs), /FALSE/);
+
+      const owner = payload(epoch, "owner-a", "owner-a", "owned_value <- 1L");
+      owner.definitions = ["owned_value"];
+      assert.equal((await engine.evaluate(owner)).ok, true);
+      const beforeAssignment = payload(epoch, "owner-b-before", "owner-b-before", "stop('before assignment', call. = FALSE); owned_value <- 2L");
+      beforeAssignment.definitions = ["owned_value"];
+      assert.equal((await engine.evaluate(beforeAssignment)).ok, false);
+      assert.equal((await engine.request("clear_cell", { ids: ["owner-b-before"] })).ok, true);
+      const priorOwnerRetained = await engine.evaluate(payload(epoch, "owner-read", "owner-read", "owned_value"));
+      assert.match(JSON.stringify(priorOwnerRetained.outputs), /1/);
+
+      const sameValue = payload(epoch, "owner-b-same", "owner-b-same", "owned_value <- 1L; stop('after same assignment', call. = FALSE)");
+      sameValue.definitions = ["owned_value"];
+      assert.equal((await engine.evaluate(sameValue)).ok, false);
+      assert.equal((await engine.request("clear_cell", { ids: ["owner-b-same"] })).ok, true);
+      const indistinguishableWriteKeepsPriorOwner = await engine.evaluate(payload(epoch, "owner-retained", "owner-retained", "owned_value"));
+      assert.match(JSON.stringify(indistinguishableWriteKeepsPriorOwner.outputs), /1/);
+
+      const explicitStop = payload(epoch, "explicit-stop", "explicit-stop", "explicit_stopped <- 9L; stop(structure(list(message='Stopped', call=NULL), class=c('alder_stop','error','condition')))");
+      explicitStop.definitions = ["explicit_stopped"];
+      await engine.evaluate(explicitStop);
+      const explicitRemoved = await engine.evaluate(payload(epoch, "explicit-stop-read", "explicit-stop-read", "exists('explicit_stopped', inherits = FALSE)"));
+      assert.match(JSON.stringify(explicitRemoved.outputs), /FALSE/);
+
+      const interruptedSource = payload(epoch, "interrupt-partial", "interrupt-partial", "interrupted_value <- 9L; Sys.sleep(30); interrupted_value");
+      interruptedSource.definitions = ["interrupted_value"];
+      const interruptedEvaluation = engine.evaluate(interruptedSource);
+      setTimeout(() => { void engine.interrupt(); }, 750).unref();
+      const interrupted = await interruptedEvaluation;
+      assert.equal(interrupted.ok, false);
+      const interruptedRemoved = await engine.evaluate(payload(epoch, "interrupt-read", "interrupt-read", "exists('interrupted_value', inherits = FALSE)"));
+      assert.match(JSON.stringify(interruptedRemoved.outputs), /FALSE/);
+
       const collision = await engine.evaluate(payload(epoch, "condition-collision", "condition-collision",
         "stop(structure(list(message = \"collision\", details = list(condition = \"raw-condition\", data = \"raw-data\")), class = c(\"simpleError\", \"error\", \"condition\")))"));
       assert.equal(collision.ok, false);
@@ -294,6 +339,277 @@ test("ordinary R errors preserve condition metadata and leave the kernel usable"
       const recovered = await engine.evaluate(payload(epoch, "after-error", "after-error", "40 + 2"));
       assert.equal(recovered.ok, true);
       assert.match(JSON.stringify(recovered.outputs), /42/);
+    } finally {
+      await closeEngine(engine, processScope, directory);
+    }
+  });
+
+test("native promise semantics and conservative failed-cell ownership", integration,
+  async () => {
+    const directory = await mkdtemp(join(tmpdir(), "alder-engine-failed-ownership-"));
+    const { engine, processScope } = await openEngine(directory);
+    try {
+      const handshake = await engine.start();
+      const epoch = handshake.kernel!.kernelEpoch;
+      let revision = 1;
+      const analyze = async (cellId: string, source: string) => {
+        const result = analysisResultSchema.parse(await engine.analyze([
+          { id: cellId, revision: 1, type: "code", source },
+        ], revision++));
+        return result.cells[0]!;
+      };
+      const evaluateAnalyzed = async (cellId: string, source: string) => {
+        const analysis = await analyze(cellId, source);
+        assert.equal(analysis.error, null);
+        const request = payload(epoch, cellId, cellId, source);
+        request.definitions = [...analysis.defs];
+        return { analysis, response: await engine.evaluate(request) };
+      };
+      const bindingExists = async (name: string, suffix: string) => {
+        const source = `exists(${JSON.stringify(name)}, inherits = FALSE)`;
+        const result = await engine.evaluate(payload(epoch, `probe-${suffix}`, `probe-${suffix}`, source));
+        assert.equal(result.ok, true);
+        return JSON.stringify(result.outputs).includes("TRUE");
+      };
+
+      const promiseCases = [
+        {
+          label: "substitute-argument",
+          absent: "inspected_value",
+          source: `inspect_arg <- function(arg) paste(deparse(substitute(arg)), collapse = "")
+inspect_arg(inspected_value <- 1L)`,
+        },
+        {
+          label: "captured-promise",
+          absent: "captured_value",
+          source: `capture_arg <- function(arg) {
+  expression <- substitute(arg)
+  function() paste(deparse(expression), collapse = "")
+}
+captured <- capture_arg(captured_value <- 2L)
+captured()`,
+        },
+      ] as const;
+      for (const entry of promiseCases) {
+        const oracle = execFileSync(selectedRscript(), [
+          "--vanilla", "--slave", "-e",
+          "value <- withVisible(eval(parse(text = Sys.getenv('ALDER_SEMANTIC_SOURCE')), envir = .GlobalEnv))$value; print(value)",
+        ], {
+          encoding: "utf8",
+          env: { ...cleanEnvironment(), ALDER_SEMANTIC_SOURCE: entry.source },
+        });
+        const evaluated = await evaluateAnalyzed(entry.label, entry.source);
+        assert.equal(evaluated.response.ok, true, entry.label);
+        const rendered = evaluated.response.outputs
+          ?.filter((record) => record.data.kind === "text")
+          .map((record) => record.data.kind === "text" ? record.data.text : "");
+        assert.deepEqual(rendered, [oracle.trimEnd()], entry.label);
+        assert.equal(await bindingExists(entry.absent, `${entry.label}-not-forced`), false);
+      }
+
+      const cases = [
+        {
+          label: "left",
+          name: "left_value",
+          source: "left_value <- 2L; stop('after left', call. = FALSE)",
+        },
+        {
+          label: "right",
+          name: "right_value",
+          source: "2L -> right_value; stop('after right', call. = FALSE)",
+        },
+        {
+          label: "equals",
+          name: "equals_value",
+          source: "equals_value = 2L; stop('after equals', call. = FALSE)",
+        },
+        {
+          label: "subscript",
+          name: "subscript_value",
+          setup: "subscript_value <- c(1L, 2L)",
+          source: "subscript_value[1] <- 9L; stop('after subscript', call. = FALSE)",
+          selfRef: true,
+        },
+        {
+          label: "double-subscript",
+          name: "double_subscript_value",
+          setup: "double_subscript_value <- list(1L, 2L)",
+          source: "double_subscript_value[[1]] <- 9L; stop('after double subscript', call. = FALSE)",
+          selfRef: true,
+        },
+        {
+          label: "dollar",
+          name: "dollar_value",
+          setup: "dollar_value <- list(item = 1L)",
+          source: "dollar_value$item <- 9L; stop('after dollar', call. = FALSE)",
+          selfRef: true,
+        },
+        {
+          label: "attr",
+          name: "attr_value",
+          setup: "attr_value <- 1L",
+          source: "attr(attr_value, 'label') <- 'changed'; stop('after attr', call. = FALSE)",
+          selfRef: true,
+        },
+        {
+          label: "names",
+          name: "names_value",
+          setup: "names_value <- c(1L, 2L)",
+          source: "names(names_value) <- c('a', 'b'); stop('after names', call. = FALSE)",
+          selfRef: true,
+        },
+        {
+          label: "class",
+          name: "class_value",
+          setup: "class_value <- 1L",
+          source: "class(class_value) <- 'tagged'; stop('after class', call. = FALSE)",
+          selfRef: true,
+        },
+        {
+          label: "replacement-function",
+          name: "replacement_value",
+          setup: "`bump_value<-` <- function(x, value) value; replacement_value <- 1L",
+          source: "bump_value(replacement_value) <- 9L; stop('after replacement', call. = FALSE)",
+          selfRef: true,
+        },
+        {
+          label: "for",
+          name: "loop_index",
+          source: "for (loop_index in 1:3) { stop('after iterator', call. = FALSE) }",
+        },
+        {
+          label: "nested",
+          name: "nested_value",
+          source: "if (TRUE) { nested_value <- 4L }; stop('after nested', call. = FALSE)",
+        },
+        {
+          label: "assign",
+          name: "assigned_value",
+          source: "assign('assigned_value', 2L); stop('after assign', call. = FALSE)",
+        },
+        {
+          label: "qualified-assign",
+          name: "qualified_value",
+          source: "base::assign('qualified_value', 2L); stop('after qualified assign', call. = FALSE)",
+        },
+      ] as const;
+
+      for (const entry of cases) {
+        if ("setup" in entry) {
+          const setup = await evaluateAnalyzed(`setup-${entry.label}`, entry.setup);
+          assert.equal(setup.response.ok, true, entry.label);
+        }
+        const failed = await evaluateAnalyzed(`failed-${entry.label}`, entry.source);
+        assert.deepEqual(failed.analysis.defs, [entry.name], entry.label);
+        if ("selfRef" in entry && entry.selfRef) {
+          assert.ok(failed.analysis.selfRefs.includes(entry.name), entry.label);
+        }
+        assert.equal(failed.response.ok, false, entry.label);
+        assert.equal(await bindingExists(entry.name, `${entry.label}-before-clear`), true, entry.label);
+        assert.equal((await engine.request("clear_cell", { ids: [`failed-${entry.label}`] })).ok,
+          true, entry.label);
+        assert.equal(await bindingExists(entry.name, `${entry.label}-after-clear`), false, entry.label);
+      }
+
+      const prior = await evaluateAnalyzed("prior-owner", "prior_value <- 1L");
+      assert.equal(prior.response.ok, true);
+      const beforeWrite = await evaluateAnalyzed("before-write", "stop('before write', call. = FALSE); prior_value <- 2L");
+      assert.deepEqual(beforeWrite.analysis.defs, ["prior_value"]);
+      assert.equal(beforeWrite.response.ok, false);
+      assert.equal((await engine.request("clear_cell", { ids: ["before-write"] })).ok, true);
+      const retained = await engine.evaluate(payload(epoch, "prior-read", "prior-read", "prior_value"));
+      assert.match(JSON.stringify(retained.outputs), /1/);
+
+      const lazySetup = await evaluateAnalyzed("lazy-setup", `promise_forced <- FALSE
+delayedAssign("lazy_prior", { promise_forced <<- TRUE; 7L }, assign.env = .GlobalEnv)`);
+      assert.equal(lazySetup.response.ok, true);
+      const lazyFailure = await evaluateAnalyzed("lazy-before-write",
+        "stop('before lazy write', call. = FALSE); lazy_prior <- 8L");
+      assert.deepEqual(lazyFailure.analysis.defs, ["lazy_prior"]);
+      assert.equal(lazyFailure.response.ok, false);
+      assert.equal((await engine.request("clear_cell", { ids: ["lazy-before-write"] })).ok, true);
+      const promiseState = await engine.evaluate(payload(epoch, "promise-state", "promise-state", "promise_forced"));
+      assert.match(JSON.stringify(promiseState.outputs), /FALSE/);
+      assert.equal(await bindingExists("lazy_prior", "lazy-prior-retained"), true);
+
+      const activeSetup = await engine.evaluate(payload(epoch, "active-setup", "active-setup", `active_reads <- 0L
+makeActiveBinding("active_prior", function(value) {
+  if (missing(value)) { active_reads <<- active_reads + 1L; 1L } else invisible(NULL)
+}, .GlobalEnv)`));
+      assert.equal(activeSetup.ok, true);
+      const activeFailure = await evaluateAnalyzed("active-before-write",
+        "stop('before active write', call. = FALSE); active_prior <- 2L");
+      assert.equal(activeFailure.response.ok, false);
+      assert.equal((await engine.request("clear_cell", { ids: ["active-before-write"] })).ok, true);
+      const activeState = await engine.evaluate(payload(epoch, "active-state", "active-state", "active_reads"));
+      assert.match(JSON.stringify(activeState.outputs), /0/);
+      assert.equal(await bindingExists("active_prior", "active-prior-retained"), true);
+
+      const referenceOwner = await evaluateAnalyzed("reference-owner",
+        "reference_value <- new.env(); reference_value$item <- 1L");
+      assert.equal(referenceOwner.response.ok, true);
+      const referenceMutation = await evaluateAnalyzed("reference-mutation",
+        "reference_value$item <- 2L; stop('after reference mutation', call. = FALSE)");
+      assert.deepEqual(referenceMutation.analysis.defs, ["reference_value"]);
+      assert.equal(referenceMutation.response.ok, false);
+      assert.equal((await engine.request("clear_cell", { ids: ["reference-mutation"] })).ok, true);
+      const referenceRetained = await engine.evaluate(payload(epoch, "reference-read", "reference-read",
+        "reference_value$item"));
+      assert.match(JSON.stringify(referenceRetained.outputs), /2/);
+      assert.equal((await engine.request("clear_cell", { ids: ["reference-owner"] })).ok, true);
+
+      const replacementOwner = await evaluateAnalyzed("replacement-owner", "failed_replacement_value <- c(1L, 2L)");
+      assert.equal(replacementOwner.response.ok, true);
+      const failedReplacement = await evaluateAnalyzed("replacement-before-write",
+        "failed_replacement_value[stop('index failure', call. = FALSE)] <- 9L");
+      assert.deepEqual(failedReplacement.analysis.defs, ["failed_replacement_value"]);
+      assert.ok(failedReplacement.analysis.selfRefs.includes("failed_replacement_value"));
+      assert.equal(failedReplacement.response.ok, false);
+      assert.equal((await engine.request("clear_cell", { ids: ["replacement-before-write"] })).ok, true);
+      const replacementRetained = await engine.evaluate(payload(epoch, "replacement-read", "replacement-read",
+        "identical(failed_replacement_value, c(1L, 2L))"));
+      assert.match(JSON.stringify(replacementRetained.outputs), /TRUE/);
+
+      const loopOwner = await evaluateAnalyzed("loop-owner", "zero_loop_index <- 7L");
+      assert.equal(loopOwner.response.ok, true);
+      const zeroLoop = await evaluateAnalyzed("zero-loop",
+        "for (zero_loop_index in integer()) {}; stop('after zero loop', call. = FALSE)");
+      assert.deepEqual(zeroLoop.analysis.defs, ["zero_loop_index"]);
+      assert.equal(zeroLoop.response.ok, false);
+      assert.equal(await bindingExists("zero_loop_index", "zero-loop-before-clear"), true);
+      assert.equal((await engine.request("clear_cell", { ids: ["zero-loop"] })).ok, true);
+      assert.equal(await bindingExists("zero_loop_index", "zero-loop-after-clear"), false);
+
+      const sameValue = await evaluateAnalyzed("same-value", "prior_value <- 1L; stop('after same value', call. = FALSE)");
+      assert.deepEqual(sameValue.analysis.defs, ["prior_value"]);
+      assert.equal(sameValue.response.ok, false);
+      assert.equal((await engine.request("clear_cell", { ids: ["same-value"] })).ok, true);
+      assert.equal(await bindingExists("prior_value", "same-value-after-clear"), true);
+      assert.equal((await engine.request("clear_cell", { ids: ["prior-owner"] })).ok, true);
+      assert.equal(await bindingExists("prior_value", "prior-owner-after-clear"), false);
+
+      const superOwner = await evaluateAnalyzed("super-owner", "super_value <- 1L");
+      assert.equal(superOwner.response.ok, true);
+      const superassignment = await evaluateAnalyzed("superassignment", "super_value <<- 2L; stop('after superassignment', call. = FALSE)");
+      assert.deepEqual(superassignment.analysis.defs, []);
+      assert.equal(superassignment.response.ok, false);
+      assert.equal((await engine.request("clear_cell", { ids: ["superassignment"] })).ok, true);
+      const superRetained = await engine.evaluate(payload(epoch, "super-read", "super-read", "super_value"));
+      assert.match(JSON.stringify(superRetained.outputs), /2/);
+      assert.equal((await engine.request("clear_cell", { ids: ["super-owner"] })).ok, true);
+      assert.equal(await bindingExists("super_value", "super-owner-after-clear"), false);
+
+      const rightSuperOwner = await evaluateAnalyzed("right-super-owner", "right_super_value <- 1L");
+      assert.equal(rightSuperOwner.response.ok, true);
+      const rightSuperassignment = await evaluateAnalyzed("right-superassignment",
+        "2L ->> right_super_value; stop('after right superassignment', call. = FALSE)");
+      assert.deepEqual(rightSuperassignment.analysis.defs, []);
+      assert.equal(rightSuperassignment.response.ok, false);
+      assert.equal((await engine.request("clear_cell", { ids: ["right-superassignment"] })).ok, true);
+      const rightSuperRetained = await engine.evaluate(payload(epoch, "right-super-read", "right-super-read",
+        "right_super_value"));
+      assert.match(JSON.stringify(rightSuperRetained.outputs), /2/);
+      assert.equal((await engine.request("clear_cell", { ids: ["right-super-owner"] })).ok, true);
     } finally {
       await closeEngine(engine, processScope, directory);
     }
