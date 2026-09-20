@@ -50,12 +50,16 @@ and ordinary R helpers outside that boundary. Do not rely on private Ark hooks.
 This constraint is Carl's decision and is
 not subject to the lead's discretion over the working design below.
 
-**Platform scope.** Mac is the sole active delivery target. Delete Linux and
-Windows implementations, installers, container tooling and platform-only checks
-now; those platforms will be implemented and qualified separately later. Keep
-the application core OS-independent wherever practical and put necessary Mac
-differences behind small adapters. Do not build speculative adapters for future
-platforms or turn the shared core into a separate Mac application.
+**Platform scope.** Mac remains the sole active delivery target, while Linux is
+the primary development environment for the portability phase. Developing on the
+Linux droplet is an architectural pressure test: shared notebook, reactivity,
+protocol, browser and R behavior must run without macOS facilities, and required
+platform behavior belongs behind small explicit adapters. Keep macOS as the
+qualification host for Electron integration, native menus and dialogs, Finder and
+LaunchServices behavior, sleep/wake, signing and release delivery. Do not recreate
+the deleted Linux product, installer or release pipeline, retain Windows code, or
+build a speculative portability framework. Add only the Linux adapter behavior
+needed to run and test the shared application during development.
 
 **Rewrite authority.** This is pre-release software. Whole components may be
 rewritten or deleted. Choose languages for their fit and measured performance

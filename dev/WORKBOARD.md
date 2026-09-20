@@ -1,6 +1,7 @@
 # Alder workboard
 
-Updated: 2026-09-20. Goal: a dependable Mac notebook for scientific R work.
+Updated: 2026-09-20. Goal: a dependable Mac notebook for scientific R work,
+developed through a portable core with explicit platform boundaries.
 Current work only. [Lead instructions](LEAD.md) define coordination and state
 transitions; [architecture](ARCHITECTURE.md) holds product and design decisions.
 Carl and the lead own this board; implementation and review tasks have read access.
@@ -9,9 +10,27 @@ copies in other worktrees are snapshots.
 
 ## Current assignment
 
-**Repository integration and cleanup — Accepted.**
+**Linux-hosted platform-boundary extraction — Implementing.**
 
-Integrated commit `554da34d0d3faf9bb0822100ff50cc9703a2745f` was pushed to `main` by
+The primary implementation task is moving to the Linux droplet. Use Linux execution to expose
+implicit macOS dependencies and replace them with the smallest explicit platform services for R
+discovery and launch, process lifecycle, private local IPC and filesystem behavior, resource
+location and system-browser launch. Shared notebook, execution, reactivity, protocol, browser,
+R-helper and diagnostic behavior must run on Linux without duplicating the application or
+building a Linux release pipeline. Preserve the accepted Mac product and upstream unmodified Ark.
+
+**Finish condition:** the shared application and its relevant behavioral tests run on the Linux
+development host; platform-dependent code is concentrated in named adapters with a clear Mac
+implementation; obsolete inline platform branches and assumptions are removed; and focused review
+finds no duplicated platform product or speculative abstraction. Mac-only behavior remains queued
+for qualification on a Mac and is not claimed from Linux evidence.
+
+**Next action:** reconcile the standing implementation task onto the droplet at current `main`,
+inventory failures produced by a Linux build/test run, and propose the first runnable extraction
+checkpoint before changing shared boundaries.
+
+The previous repository integration checkpoint remains accepted. Commit
+`554da34d0d3faf9bb0822100ff50cc9703a2745f` was pushed to `main` by
 strict fast-forward and independently verified on the remote. Local `main` and the standing
 implementation worktree are clean at that checkpoint. Twelve obsolete temporary Alder worktrees
 and their merged branches were removed after exact comparison and focused review; no unique useful
@@ -25,7 +44,7 @@ isolated Mac checks for native behavior.
 
 ## Work queue
 
-No item is active. New approved work is added here before assignment.
+One item is active. New approved work is added here before assignment.
 
 | Work | State | Owner | Finish condition |
 | --- | --- | --- | --- |
@@ -41,6 +60,7 @@ No item is active. New approved work is added here before assignment.
 | Accepted Mac build local delivery | Accepted | Primary implementer | Exact accepted signed app installed at `/Users/carlstone/Applications/Alder.app`; background ready/quit smoke passed with natural cleanup |
 | Release README and feature demo | Accepted | Primary implementer and independent reviewers | `b316bc3`: release-facing install/use guide and three compact real-app feature captures; media and factual reviews passed |
 | Repository integration and cleanup | Accepted | Primary implementer and focused cleanup reviewers | `554da34`: canonical docs and accepted app fast-forwarded to remote `main`; obsolete worktrees, branches and safety stashes removed after review |
+| Linux-hosted platform-boundary extraction | Implementing | Primary implementer | Shared application and relevant behavior tests run on Linux through small explicit platform adapters while Mac delivery remains intact and Mac-only qualification remains deferred |
 | Native Mac reliability qualification | Queued | Unassigned | Sleep/wake, real Finder/dialog/window flows, packaged crash recovery and supported-filesystem behavior work through visible installed-app paths without lost work or stranded processes |
 | Scientific workflow qualification | Queued | Unassigned | A realistic scientific notebook, real CRAN/Bioconductor packages, representative R reactivity idioms, two live notebooks under load and rich publishing are independently qualified through packaged Alder |
 | Product completion and public Mac delivery | Queued | Unassigned | Project/Git ownership, notebook-wide search, agent presence, accessibility, scale, upgrade state, release identity, architecture support and signed/notarized distribution have explicit accepted behavior |
@@ -195,7 +215,7 @@ task rather than this board.
 ## Coordination tooling
 
 The standing orchestration implementation task owns the ignored
-`/Users/carlstone/alder/.tmp-orchestrator` prototype. This work is separate from the
+project-local ignored `.tmp-orchestrator` prototype. This work is separate from the
 Alder application queue and cannot change product code, the application worktree or
 this canonical board.
 
@@ -213,9 +233,9 @@ installed. The standing task remains owner of this separate prototype.
 | Role | Location |
 | --- | --- |
 | Lead task | `01a0b55f-feaf-7c03-9964-b448891e33d5` |
-| Primary implementation task | `01a0b5a6-22ac-7480-9394-5cc4c1ba807d` on `local` |
-| Implementation worktree | `/Users/carlstone/.codex/worktrees/ebd6/alder` |
+| Primary implementation task | `01a0b5a6-22ac-7480-9394-5cc4c1ba807d`; handoff to `droplet` in progress |
+| Implementation worktree | Destination managed worktree on `droplet`; source `/Users/carlstone/.codex/worktrees/ebd6/alder` retained until handoff verifies |
 | Implementation branch | `codex/mac-document-foundation` |
-| Orchestration implementation task | `01a0bbd7-8b7e-7712-9fb4-b1c0f3289e41` on `local` |
-| Ignored orchestration workspace | `/Users/carlstone/alder/.tmp-orchestrator` |
+| Orchestration implementation task | `01a0bbd7-8b7e-7712-9fb4-b1c0f3289e41`; handoff to `droplet` in progress |
+| Ignored orchestration workspace | `.tmp-orchestrator`, copied separately because Git does not carry ignored state |
 | Lead documentation checkout | `/Users/carlstone/alder` |
