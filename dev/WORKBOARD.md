@@ -41,6 +41,41 @@ No item is active. New approved work is added here before assignment.
 | Accepted Mac build local delivery | Accepted | Primary implementer | Exact accepted signed app installed at `/Users/carlstone/Applications/Alder.app`; background ready/quit smoke passed with natural cleanup |
 | Release README and feature demo | Accepted | Primary implementer and independent reviewers | `b316bc3`: release-facing install/use guide and three compact real-app feature captures; media and factual reviews passed |
 | Repository integration and cleanup | Accepted | Primary implementer and focused cleanup reviewers | `554da34`: canonical docs and accepted app fast-forwarded to remote `main`; obsolete worktrees, branches and safety stashes removed after review |
+| Native Mac reliability qualification | Queued | Unassigned | Sleep/wake, real Finder/dialog/window flows, packaged crash recovery and supported-filesystem behavior work through visible installed-app paths without lost work or stranded processes |
+| Scientific workflow qualification | Queued | Unassigned | A realistic scientific notebook, real CRAN/Bioconductor packages, representative R reactivity idioms, two live notebooks under load and rich publishing are independently qualified through packaged Alder |
+| Product completion and public Mac delivery | Queued | Unassigned | Project/Git ownership, notebook-wide search, agent presence, accessibility, scale, upgrade state, release identity, architecture support and signed/notarized distribution have explicit accepted behavior |
+
+## Queued real-use qualification
+
+These checkpoints are recorded for later assignment. None is active.
+
+1. **Native Mac reliability.** Exercise laptop sleep/wake with clean and unsaved notebooks,
+   active execution and multiple windows. Use LaunchServices and Finder, File > Open, New,
+   Save As and replacement sheets, dirty close choices, dock reactivation, second-instance
+   forwarding and two distinct notebook windows. Kill the renderer, backend and entire app in
+   turn with acknowledged and still-local edits. Qualify iCloud Drive and case-sensitive APFS;
+   define clear behavior for network and removable volumes, external rename/move, Git checkout
+   and disappearing or permission-changing paths. Include multi-monitor window restoration,
+   recent documents, upgrade/reinstall state and cleanup of retained application data.
+2. **Scientific workflow qualification.** Run the bulk differential-expression example as a
+   real packaged-app workflow with independently checked scientific results, upstream edits,
+   interruption, restart, retained outputs and diagnostics. Install an ordinary CRAN package and
+   a mixed CRAN/Bioconductor stack through the product, including cancellation, compiler or
+   network failure, partial library mutation and retry. Build a hand-authored reactivity corpus
+   covering data.table, tidy evaluation, formulas, purrr lambdas, S4, R6, replacement functions,
+   namespaced mask verbs and user wrappers; classify genuinely opaque code visibly rather than
+   inferring expected dependencies from Alder's analyzer. Exercise two active R kernels under
+   sustained CPU, memory, plot, table, log and widget load. Inspect rich Preview/published HTML
+   offline and sustain Ark language assistance through realistic editing and R restarts.
+3. **Product completion and public delivery.** Define project-root discovery instead of assuming
+   the notebook directory, decide which `.alder` state is versioned, and ensure generated package
+   libraries and caches do not pollute Git. Add notebook-wide search across virtualized cells.
+   Show attached-agent presence and useful attribution for remote edits or runs. Qualify keyboard-
+   only use, VoiceOver, focus retention, contrast and reduced motion, then explore research-scale
+   notebooks, large data and output pressure. Finalize the app icon, bundle identity and update
+   policy; choose Apple-silicon-only, separate Intel artifacts or a universal build; exercise the
+   supported macOS floor; and produce a quarantined-download, Developer ID signed, notarized and
+   stapled release artifact with an install, upgrade and reinstall journey.
 
 The following requirements apply to the relevant slices and are checked again
 when accepting the complete app:
