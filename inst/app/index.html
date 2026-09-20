@@ -102,12 +102,18 @@
           aria-labelledby="settings-title">
     <form id="settings-form" method="dialog">
       <div class="settings-head">
-        <h2 id="settings-title">Settings</h2>
+        <div>
+          <h2 id="settings-title">Settings</h2>
+          <p>Application, notebook, and project preferences</p>
+        </div>
         <button id="settings-close" class="btn mini" type="button"
                 aria-label="Close settings">Close</button>
       </div>
-      <p id="settings-error" class="settings-error" role="alert" hidden></p>
-      <fieldset class="settings-section">
+      <div id="settings-body" class="settings-body" tabindex="0"
+           aria-label="Settings options; scroll for more">
+        <p class="settings-scroll-hint">Scroll to review all settings</p>
+        <p id="settings-error" class="settings-error" role="alert" hidden></p>
+        <fieldset class="settings-section">
         <legend>Application</legend>
         <p>Shared by every open notebook and remembered when Alder restarts.</p>
         <div class="settings-grid">
@@ -165,8 +171,8 @@
         </label>
         <button id="settings-choose-r" class="btn" type="button">Choose R…</button>
         </div>
-      </fieldset>
-      <fieldset class="settings-section">
+        </fieldset>
+        <fieldset class="settings-section">
         <legend>This notebook</legend>
         <p>Saved with this notebook.</p>
         <div class="settings-grid">
@@ -185,8 +191,8 @@
             Cache cell results
           </label>
         </div>
-      </fieldset>
-      <fieldset class="settings-section">
+        </fieldset>
+        <fieldset class="settings-section">
         <legend>This project</legend>
         <p>Used by notebooks in this project.</p>
         <div class="settings-grid">
@@ -194,7 +200,8 @@
             <input id="settings-cache-directory" name="cache_directory" type="text" placeholder="Default cache location">
           </label>
         </div>
-      </fieldset>
+        </fieldset>
+      </div>
       <div class="settings-actions">
         <button id="settings-cancel" class="btn" type="button">Cancel</button>
         <button id="settings-apply" class="btn primary" type="submit">Apply</button>
@@ -259,9 +266,9 @@
           <span class="cell-badge" data-role="badge">idle</span>
         </div>
         <div class="cell-actions" data-role="cell-actions">
-          <button data-act="run" class="btn mini primary" type="button">Run</button>
+          <button data-act="run" class="cell-icon-action cell-run-action" type="button" title="Run cell">▶</button>
           <details class="cell-overflow">
-            <summary class="btn mini" aria-label="Cell actions">•••</summary>
+            <summary class="cell-icon-action" aria-label="Cell actions" title="Cell actions">•••</summary>
             <div class="cell-overflow-menu">
               <label class="type-control" data-editor-only>Type
                 <select data-role="type" aria-label="Cell type">
@@ -284,7 +291,7 @@
       <div class="output-area" data-role="output" aria-label="Cell output"></div>
       <div class="log-area" data-role="log"></div>
       <div class="cell-add editor-only" data-role="cell-add">
-        <button data-act="add" data-type="code" class="btn mini insert-cell" type="button" aria-label="Insert code cell below">+ Add cell</button>
+        <button data-act="add" data-type="code" class="insert-cell" type="button" aria-label="Insert code cell below" title="Insert code cell below">+</button>
       </div>
     </section>
   </template>

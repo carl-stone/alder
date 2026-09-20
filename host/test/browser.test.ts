@@ -145,7 +145,10 @@ test('production editor themes render real tokens and the inspector owns narrow 
 
     await browser.send('Emulation.setDeviceMetricsOverride', { width: 1200, height: 900, deviceScaleFactor: 1, mobile: false });
     await browser.wait("matchMedia('(max-width: 900px)').matches === false");
-    await browser.evaluate(`document.getElementById('panel-toggle').focus()`);
+    await browser.evaluate(`(() => { const toggle = document.getElementById('panel-toggle'); toggle.focus(); toggle.click(); })()`);
+    await browser.wait("document.getElementById('dataflow-panel').hidden === false && document.getElementById('dataflow-panel').getAttribute('role') === 'complementary'");
+    assert.equal(await browser.evaluate(`document.activeElement === document.getElementById('panel-toggle')`), true,
+      'opening the wide inspector must not steal focus');
     await browser.send('Emulation.setDeviceMetricsOverride', { width: 760, height: 900, deviceScaleFactor: 1, mobile: false });
     await browser.wait("document.getElementById('dataflow-panel').getAttribute('role') === 'dialog' && document.getElementById('notebook').inert");
     const geometry = await browser.evaluate(`(() => {
@@ -180,6 +183,74 @@ test('production editor themes render real tokens and the inspector owns narrow 
     await browser.send('Emulation.setDeviceMetricsOverride', { width: 1200, height: 900, deviceScaleFactor: 1, mobile: false });
     await browser.wait("document.getElementById('dataflow-panel').getAttribute('role') === 'complementary' && !document.getElementById('notebook').inert");
     assert.equal(await browser.evaluate(`document.activeElement === document.getElementById('panel-toggle')`), true);
+  } finally {
+    await browser?.close();
+    await app?.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('Settings keeps context and actions visible while its body scrolls', {
+  skip: process.env.ALDER_BROWSER_TEST !== '1', timeout: 90_000,
+}, async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'alder-browser-settings-layout-'));
+  const path = join(directory, 'settings.R');
+  await writeFile(path, '# %%\nx <- 1\nx\n');
+  let app: RunningHost | undefined, browser: Chrome | undefined;
+  try {
+    app = await startInstalledHost(path);
+    browser = await openAuthenticatedBrowser(app);
+    await browser.wait("Boolean(window.__alderHost?.client.document?.snapshot.runtime.executionReady && document.querySelector('.cm-content'))");
+    for (const viewport of [{ width: 1280, height: 820 }, { width: 760, height: 700 }]) {
+      await browser.send('Emulation.setDeviceMetricsOverride', { ...viewport, deviceScaleFactor: 1, mobile: false });
+      await browser.evaluate("document.getElementById('panel-toggle').focus(); window.__alderHost.view.performDesktopAction('settings')");
+      await browser.wait("document.getElementById('settings').open");
+      assert.equal(await browser.evaluate("document.getElementById('settings').contains(document.activeElement)"), true,
+        `Settings must take focus at ${viewport.width}x${viewport.height}`);
+      const top = await browser.evaluate(`(() => {
+        const dialog = document.getElementById('settings').getBoundingClientRect();
+        const head = document.querySelector('#settings .settings-head').getBoundingClientRect();
+        const body = document.getElementById('settings-body');
+        const actions = document.querySelector('#settings .settings-actions').getBoundingClientRect();
+        return {dialog:{top:dialog.top,bottom:dialog.bottom,left:dialog.left,right:dialog.right},
+          head:{top:head.top,bottom:head.bottom}, actions:{top:actions.top,bottom:actions.bottom},
+          body:{top:body.getBoundingClientRect().top,bottom:body.getBoundingClientRect().bottom,
+            clientHeight:body.clientHeight,scrollHeight:body.scrollHeight,scrollTop:body.scrollTop}};
+      })()`);
+      assert.ok(top.dialog.top >= 7 && top.dialog.bottom <= viewport.height - 7, JSON.stringify(top));
+      assert.ok(top.head.bottom <= top.body.top + 1 && top.actions.top >= top.body.bottom - 1, JSON.stringify(top));
+      assert.ok(top.body.scrollHeight > top.body.clientHeight, JSON.stringify(top));
+      await browser.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9 });
+      await browser.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9 });
+      assert.equal(await browser.evaluate("document.getElementById('settings').contains(document.activeElement)"), true);
+      const scrolled = await browser.evaluate(`(() => {
+        const body = document.getElementById('settings-body');
+        const head = document.querySelector('#settings .settings-head').getBoundingClientRect();
+        const actions = document.querySelector('#settings .settings-actions').getBoundingClientRect();
+        body.scrollTop = body.scrollHeight;
+        return new Promise(resolve => requestAnimationFrame(() => resolve({scrollTop:body.scrollTop,
+          headTop:head.top, currentHeadTop:document.querySelector('#settings .settings-head').getBoundingClientRect().top,
+          actionsBottom:actions.bottom, currentActionsBottom:document.querySelector('#settings .settings-actions').getBoundingClientRect().bottom})));
+      })()`);
+      assert.ok(scrolled.scrollTop > 0, JSON.stringify(scrolled));
+      assert.ok(Math.abs(scrolled.headTop - scrolled.currentHeadTop) < 1, JSON.stringify(scrolled));
+      assert.ok(Math.abs(scrolled.actionsBottom - scrolled.currentActionsBottom) < 1, JSON.stringify(scrolled));
+      if (viewport.width === 1280) {
+        await browser.click('#settings-cancel');
+      } else {
+        await browser.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
+        await browser.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
+      }
+      await browser.wait("!document.getElementById('settings').open");
+      assert.equal(await browser.evaluate("document.activeElement === document.getElementById('panel-toggle')"), true);
+    }
+    await browser.evaluate("document.getElementById('panel-toggle').focus(); window.__alderHost.view.performDesktopAction('settings')");
+    await browser.wait("document.getElementById('settings').open");
+    await browser.evaluate("document.getElementById('settings-table-page-size').value = '30'");
+    await browser.click('#settings-apply');
+    await browser.wait("!document.getElementById('settings').open && window.__alderHost.client.document.snapshot.config.table.page_size === 30");
+    assert.equal(await browser.evaluate("document.activeElement === document.getElementById('panel-toggle')"), true);
+    assert.deepEqual(browser.errors, []);
   } finally {
     await browser?.close();
     await app?.close();
@@ -242,10 +313,29 @@ test('trusted browser edit-and-Run presents the current chain and creation retai
     assert.equal(result.revision, 1);
     assert.deepEqual(await browser.evaluate(`window.__journey.command.changes.filter(change => change.type === 'edit').map(change => change.body)`), [['a <- 40', 'a']]);
     assert.equal(app.controller.snapshot().cells[2]!.status, 'done');
+    const targets = await browser.evaluate(`(() => {
+      const run = document.querySelector('[data-cell="cell-3"] [data-act=run]').getBoundingClientRect();
+      const menu = document.querySelector('[data-cell="cell-3"] details.cell-overflow > summary').getBoundingClientRect();
+      const insert = document.querySelector('[data-cell="cell-3"] [data-act=add]').getBoundingClientRect();
+      const bottom = document.querySelector('.empty-bar [data-act=add]').getBoundingClientRect();
+      return {run:[run.width,run.height],menu:[menu.width,menu.height],insert:[insert.width,insert.height],bottom:[bottom.width,bottom.height]};
+    })()`);
+    for (const size of Object.values(targets) as number[][]) assert.ok(size[0]! >= 28 && size[1]! >= 28, JSON.stringify(targets));
     await browser.click('[data-cell="cell-3"] [data-act=add][data-type=code]');
     await browser.wait("document.querySelectorAll('#notebook > .cell').length === 4 && document.activeElement?.classList.contains('cm-content')");
     await browser.wait('window.__alderHost.client.document.cells.every(cell => cell.id !== null)');
     assert.equal(await browser.evaluate("document.activeElement?.classList.contains('cm-content')"), true);
+    await browser.click('[data-cell="cell-3"] details.cell-overflow > summary');
+    await browser.wait("document.querySelector('[data-cell=\"cell-3\"] details.cell-overflow').open");
+    await browser.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
+    await browser.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
+    await browser.wait("!document.querySelector('[data-cell=\"cell-3\"] details.cell-overflow').open && document.activeElement === document.querySelector('[data-cell=\"cell-3\"] details.cell-overflow > summary')");
+    await browser.click('#notebook > .cell:nth-of-type(4) .cm-content');
+    await browser.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, modifiers: 8 });
+    await browser.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, modifiers: 8 });
+    await browser.wait("document.querySelectorAll('#notebook > .cell').length === 5 && document.activeElement?.closest('.cell') === document.querySelector('#notebook > .cell:nth-of-type(5)')");
+    await browser.click('.empty-bar [data-act=add]');
+    await browser.wait("document.querySelectorAll('#notebook > .cell').length === 6 && document.activeElement?.closest('.cell') === document.querySelector('#notebook > .cell:nth-of-type(6)')");
     await browser.click('[data-cell="cell-1"] .cm-content');
     await replaceFocusedEditor(browser, 'Sys.sleep(5)\na <- 40\na');
     await browser.click('[data-cell="cell-1"] [data-act=run]');
@@ -266,7 +356,8 @@ test('trusted browser edit-and-Run presents the current chain and creation retai
     assert.equal(app.controller.snapshot().cells[0]?.error, null);
     await browser.click('[data-cell="cell-1"] .cm-content');
     await replaceFocusedEditor(browser, 'a <- 40\na');
-    await browser.click('[data-cell="cell-1"] [data-act=run]');
+    await browser.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, modifiers: 4 });
+    await browser.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, modifiers: 4 });
     await browser.wait(`window.__alderHost.client.document.snapshot.cells.slice(0,3).every(cell => cell.status === 'done') &&
       document.querySelector('[data-cell="cell-3"] [data-role=output]').textContent.includes('42')`);
     await browser.evaluate('new Promise(resolve => setTimeout(resolve, 150))');
@@ -407,6 +498,91 @@ test('long notebooks virtualize editors and preserve edited source through recov
     await browser?.send('Network.emulateNetworkConditions', {
       offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1,
     }).catch(() => {});
+    await browser?.close();
+    await app?.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('virtualized short and mixed-output notebooks keep requested cells anchored', {
+  skip: process.env.ALDER_BROWSER_TEST !== '1', timeout: 120_000,
+}, async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'alder-browser-geometry-'));
+  const path = join(directory, 'geometry.R');
+  const source = Array.from({ length: 45 }, (_value, index) => {
+    const cell = index + 1;
+    const body = cell === 8 ? "data.frame(group = letters[1:8], value = seq_len(8))"
+      : cell === 24 ? "plot(1:12, (1:12)^2, type = 'b', col = 'steelblue')"
+      : cell === 39 ? "warning('review this result'); 39L"
+      : `value_${cell} <- ${cell}L\nvalue_${cell}`;
+    return `# %%\n${body}\n`;
+  }).join('');
+  await writeFile(path, source);
+  let app: RunningHost | undefined, browser: Chrome | undefined;
+  try {
+    app = await startInstalledHost(path, { executionMode: 'lazy' });
+    browser = await openAuthenticatedBrowser(app);
+    await browser.send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 820, deviceScaleFactor: 1, mobile: false });
+    await browser.wait("window.__alderHost?.client.document?.snapshot.runtime.executionReady && document.querySelectorAll('#notebook > .cell').length === 45", 30_000);
+    await browser.wait("document.querySelectorAll('[data-virtual-source]').length > 15 && document.querySelectorAll('.cm-content').length < 25");
+    await browser.evaluate(`window.__measureCellAnchor = async id => {
+      const cell = document.querySelector('[data-cell="cell-' + id + '"]');
+      if (!cell) throw new Error('missing cell ' + id);
+      cell.scrollIntoView({block:'center'});
+      const initialTop = cell.getBoundingClientRect().top;
+      const initialHeight = document.documentElement.scrollHeight;
+      let previousTop = initialTop, previousHeight = initialHeight, stable = 0;
+      for (let frame = 0; frame < 30 && stable < 3; frame += 1) {
+        await new Promise(resolve => requestAnimationFrame(resolve));
+        const top = cell.getBoundingClientRect().top;
+        const height = document.documentElement.scrollHeight;
+        if (Math.abs(top - previousTop) < .25 && Math.abs(height - previousHeight) < .25) stable += 1;
+        else stable = 0;
+        previousTop = top;
+        previousHeight = height;
+      }
+      return {id, drift:Math.abs(previousTop - initialTop), heightDrift:Math.abs(previousHeight - initialHeight),
+        top:previousTop, height:previousHeight, stable};
+    }`);
+    const measureSequence = async () => await browser!.evaluate(`(async () => {
+      const results = [];
+      for (const id of [1, 28, 45, 1]) results.push(await window.__measureCellAnchor(id));
+      return results;
+    })()`);
+    const shortCells = await measureSequence();
+    for (const result of shortCells) {
+      assert.ok(result.stable >= 3, JSON.stringify(shortCells));
+      assert.ok(result.drift <= 8, JSON.stringify(shortCells));
+      assert.ok(result.heightDrift <= 8, JSON.stringify(shortCells));
+    }
+
+    await browser.evaluate(`(async () => {
+      const client = window.__alderHost.client;
+      for (const id of ['cell-8', 'cell-24', 'cell-39']) {
+        const started = await client.startRunCell(client.document.cell(id).key);
+        await started.completed;
+      }
+    })()`);
+    await browser.wait(`window.__alderHost.client.document.snapshot.cells.filter(cell => ['cell-8','cell-24','cell-39'].includes(cell.id)).every(cell => cell.status === 'done') &&
+      document.querySelector('[data-cell="cell-24"] [data-role=output] img')?.complete`, 30_000);
+    await browser.evaluate(`(async () => {
+      let previous = document.documentElement.scrollHeight, stable = 0;
+      for (let frame = 0; frame < 30 && stable < 3; frame += 1) {
+        await new Promise(resolve => requestAnimationFrame(resolve));
+        const height = document.documentElement.scrollHeight;
+        if (Math.abs(height - previous) < .25) stable += 1; else stable = 0;
+        previous = height;
+      }
+      if (stable < 3) throw new Error('mixed-output notebook geometry did not settle');
+    })()`);
+    const mixedOutput = await measureSequence();
+    for (const result of mixedOutput) {
+      assert.ok(result.stable >= 3, JSON.stringify(mixedOutput));
+      assert.ok(result.drift <= 8, JSON.stringify(mixedOutput));
+      assert.ok(result.heightDrift <= 8, JSON.stringify(mixedOutput));
+    }
+    assert.deepEqual(browser.errors, []);
+  } finally {
     await browser?.close();
     await app?.close();
     await rm(directory, { recursive: true, force: true });

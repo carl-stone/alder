@@ -530,8 +530,8 @@ export class NotebookView {
     element.dataset.revision = String(cell.serverRevision);
     element.id = `cell-${safePart(cell.id ?? cell.key)}`;
     element.className = `cell ${status}${cell.conflict ? " source-conflict" : ""}${cell.tombstone ? " tombstone" : ""}`;
-    element.style.contentVisibility = "auto";
-    element.style.containIntrinsicBlockSize = "300px";
+    element.style.removeProperty("content-visibility");
+    element.style.removeProperty("contain-intrinsic-block-size");
     const title = element.querySelector<HTMLElement>("[data-role=cell-title]");
     const cellIndex = this.documentValue?.cells.findIndex((candidate) => candidate.key === cell.key) ?? -1;
     if (title) {
@@ -552,6 +552,7 @@ export class NotebookView {
       const label = cell.tombstone ? "deleted on server" : cell.conflict ? "source conflict" : warning ? "warning" : status;
       if (badge.textContent !== label) badge.textContent = label;
       badge.className = `cell-badge ${cell.conflict ? "error" : warning ? "warning" : status}`;
+      badge.hidden = !cell.tombstone && !cell.conflict && !warning && (status === "idle" || status === "done");
       element.classList.toggle("warning", warning);
     }
     const type = element.querySelector<HTMLSelectElement>("[data-role=type]");
@@ -821,19 +822,23 @@ export class NotebookView {
     }
     if (this.documentValue?.focusedKey === key || view.element.contains(this.dom.activeElement)) return;
     this.captureSelection(key);
-    // Retain the measured block height so destroying CodeMirror cannot move
-    // the page underneath a user who is scrolling a long notebook.
-    view.element.style.minHeight = `${Math.ceil(view.element.getBoundingClientRect().height)}px`;
+    const source = view.element.querySelector<HTMLElement>("[data-role=source]");
+    const sourceBox = source?.getBoundingClientRect().height ?? 0;
+    const sourceStyle = source && this.dom.defaultView?.getComputedStyle(source);
+    const sourcePadding = sourceStyle
+      ? (Number.parseFloat(sourceStyle.paddingTop) || 0) + (Number.parseFloat(sourceStyle.paddingBottom) || 0)
+      : 0;
+    const sourceHeight = Math.ceil(Math.max(0, sourceBox - sourcePadding));
     view.editor?.destroy();
     this.editors.delete(key);
     view.editor = null;
     view.fallback = null;
-    const source = view.element.querySelector<HTMLElement>("[data-role=source]");
-    if (source) this.installPlaceholder(source, key, view, cell);
+    if (source) this.installPlaceholder(source, key, view, cell, sourceHeight);
   }
 
-  private installPlaceholder(source: HTMLElement, key: string, view: CellView, cell: LocalCell): void {
+  private installPlaceholder(source: HTMLElement, key: string, view: CellView, cell: LocalCell, measuredHeight = 0): void {
     const placeholder = element(this.dom, "pre", "source-placeholder", cell.desiredBody.join("\n"));
+    if (measuredHeight > 0) placeholder.style.minHeight = `${measuredHeight}px`;
     placeholder.dataset.virtualSource = "true";
     placeholder.tabIndex = 0;
     placeholder.setAttribute("aria-label", `${cell.desiredType === "markdown" ? "Markdown" : "R"} source; focus to edit`);
@@ -2171,6 +2176,8 @@ export class NotebookView {
       projectVersion: snapshot.sidecars.config.version, documentRevision: snapshot.documentRevision };
     this.settingsError = null;
     this.renderSettingsError();
+    const body = this.dom.getElementById("settings-body");
+    if (body) body.scrollTop = 0;
     this.openDialog("settings");
   }
 
@@ -3401,14 +3408,14 @@ function isPanelTab(value: string): value is DataflowPanelTab {
 
 function loadPanelPreference(browser: Window): { open: boolean; tab: DataflowPanelTab } {
   const fallback = {
-    open: browser.matchMedia?.("(max-width: 900px)").matches !== true,
+    open: false,
     tab: "outline" as DataflowPanelTab,
   };
   try {
     const value: unknown = JSON.parse(browser.localStorage.getItem("alder.panel") ?? "null");
     if (!isObject(value)) return fallback;
     return {
-      open: value.open !== false,
+      open: typeof value.open === "boolean" ? value.open : fallback.open,
       tab: typeof value.tab === "string" && isPanelTab(value.tab) ? value.tab : fallback.tab,
     };
   } catch {

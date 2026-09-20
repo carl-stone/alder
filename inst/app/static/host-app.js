@@ -24198,8 +24198,8 @@ var NotebookView = class {
     element3.dataset.revision = String(cell.serverRevision);
     element3.id = `cell-${safePart2(cell.id ?? cell.key)}`;
     element3.className = `cell ${status}${cell.conflict ? " source-conflict" : ""}${cell.tombstone ? " tombstone" : ""}`;
-    element3.style.contentVisibility = "auto";
-    element3.style.containIntrinsicBlockSize = "300px";
+    element3.style.removeProperty("content-visibility");
+    element3.style.removeProperty("contain-intrinsic-block-size");
     const title = element3.querySelector("[data-role=cell-title]");
     const cellIndex = this.documentValue?.cells.findIndex((candidate) => candidate.key === cell.key) ?? -1;
     if (title) {
@@ -24217,6 +24217,7 @@ var NotebookView = class {
       const label = cell.tombstone ? "deleted on server" : cell.conflict ? "source conflict" : warning ? "warning" : status;
       if (badge.textContent !== label) badge.textContent = label;
       badge.className = `cell-badge ${cell.conflict ? "error" : warning ? "warning" : status}`;
+      badge.hidden = !cell.tombstone && !cell.conflict && !warning && (status === "idle" || status === "done");
       element3.classList.toggle("warning", warning);
     }
     const type = element3.querySelector("[data-role=type]");
@@ -24470,16 +24471,20 @@ var NotebookView = class {
     }
     if (this.documentValue?.focusedKey === key || view2.element.contains(this.dom.activeElement)) return;
     this.captureSelection(key);
-    view2.element.style.minHeight = `${Math.ceil(view2.element.getBoundingClientRect().height)}px`;
+    const source = view2.element.querySelector("[data-role=source]");
+    const sourceBox = source?.getBoundingClientRect().height ?? 0;
+    const sourceStyle = source && this.dom.defaultView?.getComputedStyle(source);
+    const sourcePadding = sourceStyle ? (Number.parseFloat(sourceStyle.paddingTop) || 0) + (Number.parseFloat(sourceStyle.paddingBottom) || 0) : 0;
+    const sourceHeight = Math.ceil(Math.max(0, sourceBox - sourcePadding));
     view2.editor?.destroy();
     this.editors.delete(key);
     view2.editor = null;
     view2.fallback = null;
-    const source = view2.element.querySelector("[data-role=source]");
-    if (source) this.installPlaceholder(source, key, view2, cell);
+    if (source) this.installPlaceholder(source, key, view2, cell, sourceHeight);
   }
-  installPlaceholder(source, key, view2, cell) {
+  installPlaceholder(source, key, view2, cell, measuredHeight = 0) {
     const placeholder = element2(this.dom, "pre", "source-placeholder", cell.desiredBody.join("\n"));
+    if (measuredHeight > 0) placeholder.style.minHeight = `${measuredHeight}px`;
     placeholder.dataset.virtualSource = "true";
     placeholder.tabIndex = 0;
     placeholder.setAttribute("aria-label", `${cell.desiredType === "markdown" ? "Markdown" : "R"} source; focus to edit`);
@@ -25748,6 +25753,8 @@ ${cell.desiredBody.join("\n")}`));
     };
     this.settingsError = null;
     this.renderSettingsError();
+    const body = this.dom.getElementById("settings-body");
+    if (body) body.scrollTop = 0;
     this.openDialog("settings");
   }
   bindSettings() {
@@ -26895,14 +26902,14 @@ function isPanelTab(value) {
 }
 function loadPanelPreference(browser) {
   const fallback = {
-    open: browser.matchMedia?.("(max-width: 900px)").matches !== true,
+    open: false,
     tab: "outline"
   };
   try {
     const value = JSON.parse(browser.localStorage.getItem("alder.panel") ?? "null");
     if (!isObject3(value)) return fallback;
     return {
-      open: value.open !== false,
+      open: typeof value.open === "boolean" ? value.open : fallback.open,
       tab: typeof value.tab === "string" && isPanelTab(value.tab) ? value.tab : fallback.tab
     };
   } catch {

@@ -629,6 +629,10 @@ test("narrow inspector traps focus, closes with Escape, and returns focus", asyn
     try {
       const panel = dom.getElementById("dataflow-panel")!;
       assert.equal(panel.getAttribute("role"), "complementary");
+      assert.equal(panel.hidden, true, "an empty inspector starts closed on a fresh wide window");
+      opener.dispatchEvent(new domWindow.Event("click", { bubbles: true }));
+      assert.equal(panel.hidden, false);
+      assert.ok(active === opener, "opening the wide inspector does not steal focus");
       narrow = true;
       domWindow.dispatchEvent(new domWindow.Event("resize"));
       assert.equal(panel.hidden, false);
@@ -783,6 +787,23 @@ test("warning success and stopped cells have distinct non-error badges", async (
       assert.ok(badges[1]!.classList.contains("stopped"));
       assert.equal(dom.querySelector(".cell.error"), null);
       assert.match(dom.querySelector(".log-area")?.textContent ?? "", /Warning: careful/);
+    } finally { view.destroy(); }
+  });
+});
+
+test("quiet cells hide redundant status while attention states remain prominent", async () => {
+  await withViewDom(async (dom) => {
+    Object.defineProperty(globalThis, "location", { configurable: true, writable: true, value: { search: "?view=editor", href: "http://notebook.test/book.R?view=editor", origin: "http://notebook.test" } });
+    const idle = cell("idle", ["x <- 1"]);
+    const done = cell("done", ["x <- 2"]); done.status = "done";
+    const stale = cell("stale", ["x <- 3"]); stale.status = "stale";
+    const view = new NotebookView(settingsClient(), dom);
+    try {
+      view.render(new BrowserDocument(snapshot([idle, done, stale])));
+      const badges = [...dom.querySelectorAll<HTMLElement>("[data-role=badge]")];
+      assert.deepEqual(badges.map(badge => badge.hidden), [true, true, false]);
+      assert.equal(badges[2]!.textContent, "stale");
+      assert.equal(dom.querySelectorAll("[data-role=cell-add]").length, 3);
     } finally { view.destroy(); }
   });
 });
