@@ -150,6 +150,73 @@ export class Chrome {
     await this.send('Input.dispatchMouseEvent', { type: 'mouseReleased', ...current, button: 'left', clickCount: 1 });
   }
 
+  async activateVirtualEditor(cellId: string, timeout = 15_000): Promise<void> {
+    const encodedId = JSON.stringify(cellId);
+    await this.evaluate(`(() => {
+      const matches = [...document.querySelectorAll('#notebook > .cell[data-cell]')]
+        .filter(cell => cell.dataset.cell === ${encodedId});
+      if (matches.length !== 1) throw new Error('expected one activation cell, found ' + matches.length);
+      matches[0].scrollIntoView({block:'center'});
+      window.__alderActivationTarget = matches[0];
+      return true;
+    })()`);
+    const stateExpression = `(() => {
+      const matches = [...document.querySelectorAll('#notebook > .cell[data-cell]')]
+        .filter(cell => cell.dataset.cell === ${encodedId});
+      const cell = matches[0];
+      if (matches.length !== 1 || !cell || cell !== window.__alderActivationTarget || !cell.isConnected ||
+          cell.parentElement?.id !== 'notebook') {
+        return {kind:'invalid', reason:'requested cell was removed, replaced, or moved'};
+      }
+      const cellRect = cell.getBoundingClientRect();
+      if (cellRect.bottom <= 0 || cellRect.top >= window.innerHeight) {
+        return {kind:'invalid', reason:'requested cell is no longer anchored in the viewport'};
+      }
+      const editors = [...cell.querySelectorAll('.cm-content')];
+      const placeholders = [...cell.querySelectorAll('[data-virtual-source]')];
+      if (editors.length === 1 && placeholders.length === 0 && editors[0].closest('[data-cell]') === cell) {
+        const rect = editors[0].getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0
+          ? {kind:'mounted'}
+          : {kind:'invalid', reason:'requested editor is not visible'};
+      }
+      if (placeholders.length === 1 && editors.length === 0 && placeholders[0].closest('[data-cell]') === cell) {
+        const rect = placeholders[0].getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0
+          ? {kind:'virtual', x:rect.x + rect.width / 2, y:rect.y + rect.height / 2}
+          : {kind:'invalid', reason:'requested virtual source is not clickable'};
+      }
+      return {kind:'invalid', reason:'requested cell has neither one virtual source nor one mounted editor'};
+    })()`;
+    const readState = async (): Promise<{ kind: string; reason?: string; x?: number; y?: number }> => {
+      const state = await this.evaluate(stateExpression);
+      if (state.kind === 'invalid') throw new Error(`editor activation failed for ${cellId}: ${state.reason}`);
+      return state;
+    };
+    const waitForMounted = async (): Promise<void> => {
+      const deadline = performance.now() + timeout;
+      while (performance.now() < deadline) {
+        const state = await readState();
+        if (state.kind === 'mounted') return;
+        await new Promise(resolve => setTimeout(resolve, 25));
+      }
+      throw new Error(`editor activation timed out for ${cellId}`);
+    };
+
+    let state = await readState();
+    if (state.kind === 'mounted') return;
+    await this.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: state.x!, y: state.y! });
+    state = await readState();
+    if (state.kind === 'mounted') return;
+    await this.send('Input.dispatchMouseEvent', {
+      type: 'mousePressed', x: state.x!, y: state.y!, button: 'left', clickCount: 1,
+    });
+    await this.send('Input.dispatchMouseEvent', {
+      type: 'mouseReleased', x: state.x!, y: state.y!, button: 'left', clickCount: 1,
+    });
+    await waitForMounted();
+  }
+
   async close(): Promise<void> {
     await this.send('Browser.close', {}, '').catch(() => {});
     this.socket.terminate();

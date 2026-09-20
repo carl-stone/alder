@@ -451,10 +451,7 @@ test('long notebooks virtualize editors and preserve edited source through recov
     await browser.wait(`window.__alderHost.client.document.cell('cell-75').serverRevision === 1 &&
       window.__alderHost.client.document.snapshot.cells.every(cell => !cell.analysisPending) &&
       window.__alderHost.client.document.snapshot.runtime.busy === false`, 30_000);
-    await browser.evaluate(`document.querySelector('[data-cell="cell-1"]')?.scrollIntoView({ block: 'center' })`);
-    if (await browser.evaluate(`document.querySelector('[data-cell="cell-1"] [data-virtual-source]') !== null`)) {
-      await browser.click('[data-cell="cell-1"] [data-virtual-source]');
-    }
+    await browser.activateVirtualEditor('cell-1');
     await browser.wait(`!document.querySelector('[data-cell="cell-1"] [data-act=run]')?.disabled &&
       document.querySelector('[data-cell="cell-1"] .cm-content') !== null`);
     await browser.click('[data-cell="cell-1"] [data-act=run]');
