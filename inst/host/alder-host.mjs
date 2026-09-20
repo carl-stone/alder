@@ -34710,7 +34710,7 @@ function recoverRequestId(input2) {
 }
 
 // src/diagnostics.ts
-import { appendFile, chmod, copyFile, mkdir, open as open2, readdir, readFile, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
+import { appendFile, chmod, copyFile, lstat, mkdir, open as open2, readdir, readFile, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 
 // node_modules/env-paths/index.js
@@ -34864,6 +34864,31 @@ function pidAlive(pid) {
     return false;
   }
 }
+function recordTemporaryOwner(name) {
+  const match = /^diagnostics-record-[0-9]+-(?:desktop|backend|host|renderer|cli)-(\d+)-[0-9a-f-]+\.json\.[0-9a-f-]+\.tmp$/.exec(name);
+  return match ? Number(match[1]) : null;
+}
+async function listRecordTemporaries(rootDir) {
+  let names;
+  try {
+    names = await readdir(rootDir);
+  } catch (error61) {
+    if (error61.code === "ENOENT") return [];
+    throw error61;
+  }
+  const entries = [];
+  for (const name of names) {
+    const owner = recordTemporaryOwner(name);
+    if (owner === null) continue;
+    try {
+      const info = await lstat(join(rootDir, name));
+      if (info.isFile()) entries.push({ size: info.size, ownerAlive: owner === process.pid || pidAlive(owner) });
+    } catch (error61) {
+      if (error61.code !== "ENOENT") throw error61;
+    }
+  }
+  return entries;
+}
 async function listSegments(rootDir) {
   let names;
   try {
@@ -34958,7 +34983,13 @@ async function queryDiagnostics(query, options = {}) {
   const rootInfo = await stat(rootDir).catch(() => null);
   const storeAvailable = rootInfo?.isDirectory() === true;
   const entries = await listSegments(rootDir).catch(() => []);
-  const retainedBytes = entries.reduce((sum, entry2) => sum + entry2.size, 0);
+  const queryableBytes = entries.reduce((sum, entry2) => sum + entry2.size, 0);
+  const temporaries = query === "status" ? await listRecordTemporaries(rootDir).catch(() => []) : [];
+  const liveTemporaries = temporaries.filter((entry2) => entry2.ownerAlive);
+  const orphanTemporaries = temporaries.filter((entry2) => !entry2.ownerAlive);
+  const liveTemporaryBytes = liveTemporaries.reduce((sum, entry2) => sum + entry2.size, 0);
+  const orphanTemporaryBytes = orphanTemporaries.reduce((sum, entry2) => sum + entry2.size, 0);
+  const retainedBytes = queryableBytes + orphanTemporaryBytes;
   const statusFiles = await readStatuses(rootDir);
   const base = {
     schemaVersion: DIAGNOSTIC_SCHEMA_VERSION,
@@ -34967,6 +34998,16 @@ async function queryDiagnostics(query, options = {}) {
     retainedBytes,
     segmentCount: entries.length,
     activeWriters: entries.filter((entry2) => entry2.active && entry2.pid !== null && pidAlive(entry2.pid)).length,
+    ...query === "status" ? {
+      queryableBytes,
+      retainedFileCount: entries.length + orphanTemporaries.length,
+      orphanTemporaryCount: orphanTemporaries.length,
+      orphanTemporaryBytes,
+      liveTemporaryCount: liveTemporaries.length,
+      liveTemporaryBytes,
+      incompleteTemporaryCount: temporaries.length,
+      incompleteTemporaryBytes: orphanTemporaryBytes + liveTemporaryBytes
+    } : {},
     statuses: statusFiles
   };
   const store = await readStore(rootDir, query === "incident" ? options : { ...options, id: void 0 }).catch((error61) => ({ records: [], malformedRecords: 0, scannedRecords: 0, examinedRecords: 0, truncated: false, readError: diagnosticError(error61) }));
@@ -34980,7 +35021,7 @@ async function queryDiagnostics(query, options = {}) {
   };
   if (query === "status") {
     const droppedRecords = statusFiles.reduce((sum, status) => sum + Number(status.droppedEvents ?? 0) + Number(status.unavailableEvents ?? 0), 0);
-    return { ...metadata, available: storeAvailable && !("readError" in store), degraded: !storeAvailable || droppedRecords > 0 || store.malformedRecords > 0 || statusFiles.some((status) => status.available === false), droppedRecords };
+    return { ...metadata, available: storeAvailable && !("readError" in store), degraded: !storeAvailable || orphanTemporaries.length > 0 || droppedRecords > 0 || store.malformedRecords > 0 || statusFiles.some((status) => status.available === false), droppedRecords };
   }
   const records = store.records;
   if (query === "launches") {
@@ -35198,7 +35239,7 @@ var SharedBackend = class {
 // src/private-paths.ts
 import { constants } from "node:fs";
 import { randomUUID } from "node:crypto";
-import { chmod as chmod2, lstat, mkdir as mkdir3, open as openFile, rename as rename2, rm as rm3 } from "node:fs/promises";
+import { chmod as chmod2, lstat as lstat2, mkdir as mkdir3, open as openFile, rename as rename2, rm as rm3 } from "node:fs/promises";
 import { dirname as dirname2, join as join4, parse as parse3, resolve as resolve3, sep } from "node:path";
 var PrivatePathError = class extends Error {
   constructor(code, message, cause) {
@@ -35247,7 +35288,7 @@ async function inspectPath(path2, expectFinal = null) {
     current = join4(current, components[index]);
     let info;
     try {
-      info = await lstat(current);
+      info = await lstat2(current);
     } catch (error61) {
       if (isMissing(error61)) {
         exists = false;
@@ -35290,7 +35331,7 @@ function validatePrivateStats(info, kind, path2) {
 async function inspectExisting(path2, kind) {
   const inspection = await inspectPath(path2, kind);
   if (!inspection.exists) throw missing(inspection.path);
-  const info = await lstat(inspection.path);
+  const info = await lstat2(inspection.path);
   validatePrivateStats(info, kind, inspection.path);
   return inspection;
 }
@@ -35307,7 +35348,7 @@ async function syncDirectory(directory) {
 }
 async function verifyPrivateDirectory(path2) {
   const inspection = await inspectExisting(path2, "directory");
-  const info = await lstat(inspection.path);
+  const info = await lstat2(inspection.path);
   validatePrivateStats(info, "directory", inspection.path);
 }
 async function securePrivateDirectory(path2) {
@@ -35362,7 +35403,7 @@ async function writePrivateFile(path2, bytes) {
   const parent = dirname2(inspection.path);
   await ensurePrivateDirectory(parent);
   try {
-    const target = await lstat(inspection.path);
+    const target = await lstat2(inspection.path);
     if (target.isSymbolicLink()) throw new PrivatePathError("private_path_reparse", "private path is a symlink: " + inspection.path);
     if (!target.isFile()) throw new PrivatePathError("private_path_type", "private path is not a regular file: " + inspection.path);
     validatePrivateStats(target, "file", inspection.path);

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { appendFile, chmod, copyFile, mkdir, open, readdir, readFile, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
+import { appendFile, chmod, copyFile, lstat, mkdir, open, readdir, readFile, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { arch, platform } from "node:os";
 import { basename, join, resolve } from "node:path";
 import envPaths from "env-paths";
@@ -92,6 +92,7 @@ interface ActiveOperation {
   readonly scope: DiagnosticFields;
 }
 interface SegmentEntry { path: string; name: string; size: number; mtimeMs: number; active: boolean; pid: number | null; format: "jsonl" | "record"; }
+interface RecordTemporaryEntry { size: number; ownerAlive: boolean; }
 
 const TERMINAL_EVENTS = new Set(["operation.settled", "operation.cancelled", "operation.failed"]);
 const SLOW_THRESHOLDS: Record<string, number> = {
@@ -628,6 +629,21 @@ async function removeDeadRecordTemporaries(rootDir: string): Promise<void> {
   }
 }
 
+async function listRecordTemporaries(rootDir: string): Promise<RecordTemporaryEntry[]> {
+  let names: string[];
+  try { names = await readdir(rootDir); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error; }
+  const entries: RecordTemporaryEntry[] = [];
+  for (const name of names) {
+    const owner = recordTemporaryOwner(name);
+    if (owner === null) continue;
+    try {
+      const info = await lstat(join(rootDir, name));
+      if (info.isFile()) entries.push({ size: info.size, ownerAlive: owner === process.pid || pidAlive(owner) });
+    } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+  }
+  return entries;
+}
+
 export async function writeDiagnosticRecordSidecar(path: string, contents: string): Promise<void> {
   const temporary = path + `.${randomUUID()}.tmp`;
   let handle: Awaited<ReturnType<typeof open>> | undefined;
@@ -820,11 +836,23 @@ export async function queryDiagnostics(query: DiagnosticQuery, options: Diagnost
   const rootInfo = await stat(rootDir).catch(() => null);
   const storeAvailable = rootInfo?.isDirectory() === true;
   const entries = await listSegments(rootDir).catch(() => []);
-  const retainedBytes = entries.reduce((sum, entry) => sum + entry.size, 0);
+  const queryableBytes = entries.reduce((sum, entry) => sum + entry.size, 0);
+  const temporaries = query === "status" ? await listRecordTemporaries(rootDir).catch(() => []) : [];
+  const liveTemporaries = temporaries.filter(entry => entry.ownerAlive);
+  const orphanTemporaries = temporaries.filter(entry => !entry.ownerAlive);
+  const liveTemporaryBytes = liveTemporaries.reduce((sum, entry) => sum + entry.size, 0);
+  const orphanTemporaryBytes = orphanTemporaries.reduce((sum, entry) => sum + entry.size, 0);
+  const retainedBytes = queryableBytes + orphanTemporaryBytes;
   const statusFiles = await readStatuses(rootDir);
   const base = {
     schemaVersion: DIAGNOSTIC_SCHEMA_VERSION, query, rootDir, retainedBytes,
     segmentCount: entries.length, activeWriters: entries.filter(entry => entry.active && entry.pid !== null && pidAlive(entry.pid)).length,
+    ...(query === "status" ? {
+      queryableBytes, retainedFileCount: entries.length + orphanTemporaries.length,
+      orphanTemporaryCount: orphanTemporaries.length, orphanTemporaryBytes,
+      liveTemporaryCount: liveTemporaries.length, liveTemporaryBytes,
+      incompleteTemporaryCount: temporaries.length, incompleteTemporaryBytes: orphanTemporaryBytes + liveTemporaryBytes,
+    } : {}),
     statuses: statusFiles,
   };
   const store = await readStore(rootDir, query === "incident" ? options : { ...options, id: undefined }).catch(error => ({ records: [], malformedRecords: 0, scannedRecords: 0, examinedRecords: 0, truncated: false, readError: diagnosticError(error) }));
@@ -834,7 +862,7 @@ export async function queryDiagnostics(query: DiagnosticQuery, options: Diagnost
   };
   if (query === "status") {
     const droppedRecords = statusFiles.reduce((sum, status) => sum + Number(status.droppedEvents ?? 0) + Number(status.unavailableEvents ?? 0), 0);
-    return { ...metadata, available: storeAvailable && !("readError" in store), degraded: !storeAvailable || droppedRecords > 0 || store.malformedRecords > 0 || statusFiles.some(status => status.available === false), droppedRecords };
+    return { ...metadata, available: storeAvailable && !("readError" in store), degraded: !storeAvailable || orphanTemporaries.length > 0 || droppedRecords > 0 || store.malformedRecords > 0 || statusFiles.some(status => status.available === false), droppedRecords };
   }
   const records = store.records;
   if (query === "launches") {

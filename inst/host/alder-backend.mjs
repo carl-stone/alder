@@ -60340,7 +60340,7 @@ import { tmpdir as tmpdir6 } from "node:os";
 
 // src/diagnostics.ts
 import { randomUUID as randomUUID2 } from "node:crypto";
-import { appendFile, chmod, copyFile, mkdir as mkdir2, open as open4, readdir, readFile as readFile2, rename as rename2, rm as rm2, stat as stat2, unlink, writeFile } from "node:fs/promises";
+import { appendFile, chmod, copyFile, lstat, mkdir as mkdir2, open as open4, readdir, readFile as readFile2, rename as rename2, rm as rm2, stat as stat2, unlink, writeFile } from "node:fs/promises";
 import { basename, join as join2, resolve } from "node:path";
 var DIAGNOSTIC_SCHEMA_VERSION = 2;
 var DIAGNOSTIC_SEGMENT_BYTES = 10 * 1024 * 1024;
@@ -61102,7 +61102,7 @@ import { readdir as readdir3, stat as stat5 } from "node:fs/promises";
 import * as sp2 from "node:path";
 
 // node_modules/readdirp/index.js
-import { lstat, readdir as readdir2, realpath, stat as stat3 } from "node:fs/promises";
+import { lstat as lstat2, readdir as readdir2, realpath, stat as stat3 } from "node:fs/promises";
 import { join as pjoin, resolve as presolve, sep as psep } from "node:path";
 import { Readable } from "node:stream";
 var EntryTypes = {
@@ -61192,7 +61192,7 @@ var ReaddirpStream = class extends Readable {
     const type = opts.type ?? defaultOptions.type;
     this._fileFilter = normalizeFilter(opts.fileFilter);
     this._directoryFilter = normalizeFilter(opts.directoryFilter);
-    const statMethod = opts.lstat ? lstat : stat3;
+    const statMethod = opts.lstat ? lstat2 : stat3;
     if (wantBigintFsStats) {
       this._stat = (path3) => statMethod(path3, { bigint: true });
     } else {
@@ -61334,7 +61334,7 @@ var ReaddirpStream = class extends Readable {
     const full = entry.fullPath;
     try {
       const entryRealPath = await realpath(full);
-      const entryRealPathStats = await lstat(entryRealPath);
+      const entryRealPathStats = await lstat2(entryRealPath);
       if (entryRealPathStats.isFile()) {
         return "file";
       }
@@ -61377,7 +61377,7 @@ function readdirp(root, options = {}) {
 
 // node_modules/chokidar/handler.js
 import { watch as fs_watch, unwatchFile, watchFile } from "node:fs";
-import { realpath as fsrealpath, lstat as lstat2, open as open5, stat as stat4 } from "node:fs/promises";
+import { realpath as fsrealpath, lstat as lstat3, open as open5, stat as stat4 } from "node:fs/promises";
 import { type as osType } from "node:os";
 import * as sp from "node:path";
 var STR_DATA = "data";
@@ -61404,7 +61404,7 @@ var EVENTS = {
 };
 var EV = EVENTS;
 var THROTTLE_MODE_WATCH = "watch";
-var statMethods = { lstat: lstat2, stat: stat4 };
+var statMethods = { lstat: lstat3, stat: stat4 };
 var KEY_LISTENERS = "listeners";
 var KEY_ERR = "errHandlers";
 var KEY_RAW = "rawEmitters";
@@ -66164,7 +66164,7 @@ var OutputLog = class {
 import { randomUUID as randomUUID3 } from "node:crypto";
 import { constants, unlinkSync } from "node:fs";
 import {
-  lstat as lstat3,
+  lstat as lstat4,
   mkdir as mkdir3,
   open as open6,
   realpath as realpath2,
@@ -71779,7 +71779,7 @@ var OutputStore = class {
     let file2;
     let before2;
     try {
-      before2 = await lstat3(artifact.path);
+      before2 = await lstat4(artifact.path);
       if (!before2.isFile()) throw new OutputStoreError("output_expired", "artifact is no longer a retained regular file");
       file2 = await open6(artifact.path, constants.O_RDONLY | constants.O_NOFOLLOW);
     } catch (error61) {
@@ -82130,7 +82130,7 @@ function asError2(error61) {
 import { randomBytes as randomBytes3, randomUUID as randomUUID8, timingSafeEqual as timingSafeEqual2 } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { createServer as createHttpServer } from "node:http";
-import { lstat as lstat5, readFile as readFile4, realpath as realpath5, stat as stat11 } from "node:fs/promises";
+import { lstat as lstat6, readFile as readFile4, realpath as realpath5, stat as stat11 } from "node:fs/promises";
 import { extname as extname3, join as join11, resolve as resolve9, sep as sep2 } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { URL as URL2 } from "node:url";
@@ -82148,7 +82148,7 @@ var import_websocket_server = __toESM(require_websocket_server(), 1);
 // src/private-paths.ts
 import { constants as constants2 } from "node:fs";
 import { randomUUID as randomUUID7 } from "node:crypto";
-import { chmod as chmod3, lstat as lstat4, mkdir as mkdir6, open as openFile, rename as rename4, rm as rm5 } from "node:fs/promises";
+import { chmod as chmod3, lstat as lstat5, mkdir as mkdir6, open as openFile, rename as rename4, rm as rm5 } from "node:fs/promises";
 import { dirname as dirname4, join as join10, parse as parse3, resolve as resolve8, sep } from "node:path";
 var PrivatePathError = class extends Error {
   constructor(code2, message2, cause) {
@@ -82197,7 +82197,7 @@ async function inspectPath(path3, expectFinal = null) {
     current = join10(current, components[index]);
     let info;
     try {
-      info = await lstat4(current);
+      info = await lstat5(current);
     } catch (error61) {
       if (isMissing(error61)) {
         exists = false;
@@ -82240,7 +82240,7 @@ function validatePrivateStats(info, kind, path3) {
 async function inspectExisting(path3, kind) {
   const inspection = await inspectPath(path3, kind);
   if (!inspection.exists) throw missing(inspection.path);
-  const info = await lstat4(inspection.path);
+  const info = await lstat5(inspection.path);
   validatePrivateStats(info, kind, inspection.path);
   return inspection;
 }
@@ -82257,12 +82257,12 @@ async function syncDirectory2(directory) {
 }
 async function verifyPrivateDirectory(path3) {
   const inspection = await inspectExisting(path3, "directory");
-  const info = await lstat4(inspection.path);
+  const info = await lstat5(inspection.path);
   validatePrivateStats(info, "directory", inspection.path);
 }
 async function verifyPrivateFile(path3) {
   const inspection = await inspectExisting(path3, "file");
-  const info = await lstat4(inspection.path);
+  const info = await lstat5(inspection.path);
   validatePrivateStats(info, "file", inspection.path);
 }
 async function securePrivateDirectory(path3) {
@@ -82317,7 +82317,7 @@ async function writePrivateFile(path3, bytes) {
   const parent = dirname4(inspection.path);
   await ensurePrivateDirectory(parent);
   try {
-    const target = await lstat4(inspection.path);
+    const target = await lstat5(inspection.path);
     if (target.isSymbolicLink()) throw new PrivatePathError("private_path_reparse", "private path is a symlink: " + inspection.path);
     if (!target.isFile()) throw new PrivatePathError("private_path_type", "private path is not a regular file: " + inspection.path);
     validatePrivateStats(target, "file", inspection.path);
@@ -82512,7 +82512,7 @@ async function safeChildPath(root, encodedRelative, allowedExtensions, allowNest
     const rootPath = await realpath5(root);
     const candidatePath = await realpath5(resolve9(root, relative4));
     if (candidatePath !== rootPath && !candidatePath.startsWith(`${rootPath}${sep2}`)) return null;
-    const info = await lstat5(candidatePath);
+    const info = await lstat6(candidatePath);
     return info.isFile() ? candidatePath : null;
   } catch {
     return null;
@@ -97092,7 +97092,7 @@ import { basename as basename5, dirname as dirname5, join as join14, resolve as 
 
 // src/packages.ts
 var import_yaml4 = __toESM(require_dist(), 1);
-import { lstat as lstat6, mkdir as mkdir7, readFile as readFile7, realpath as realpath6, stat as stat12 } from "node:fs/promises";
+import { lstat as lstat7, mkdir as mkdir7, readFile as readFile7, realpath as realpath6, stat as stat12 } from "node:fs/promises";
 import { isAbsolute as isAbsolute5, join as join13 } from "node:path";
 
 // src/jobs.ts
@@ -97429,7 +97429,7 @@ async function ensureProjectLibrary(project, library) {
   const alder = join13(project, ".alder");
   await mkdir7(alder, { recursive: true, mode: 448 });
   await mkdir7(library, { recursive: true, mode: 448 });
-  if (!(await lstat6(alder)).isDirectory() || !(await lstat6(library)).isDirectory()) throw new Error("project library is not a directory");
+  if (!(await lstat7(alder)).isDirectory() || !(await lstat7(library)).isDirectory()) throw new Error("project library is not a directory");
   if (await realpath6(library) !== join13(await realpath6(project), ".alder", "library")) throw new Error("project library is outside the project");
 }
 function workerResult(value) {
@@ -109654,7 +109654,7 @@ function boundedUtf8(value, maxBytes) {
 
 // src/uploads.ts
 import { randomUUID as randomUUID13 } from "node:crypto";
-import { chmod as chmod5, lstat as lstat7, mkdir as mkdir10, unlink as unlink5, writeFile as writeFile7 } from "node:fs/promises";
+import { chmod as chmod5, lstat as lstat8, mkdir as mkdir10, unlink as unlink5, writeFile as writeFile7 } from "node:fs/promises";
 import { join as join18 } from "node:path";
 var UPLOAD_MAX_FILES = 1024;
 var UPLOAD_MAX_BASE64_BYTES = 16 * 1024 * 1024;
@@ -109676,7 +109676,7 @@ var UploadStore = class {
   async ensureDirectory() {
     if (this.closed) throw invalid4("session_stopped", "upload store is closed");
     await mkdir10(this.directory, { recursive: true, mode: 448 });
-    const info = await lstat7(this.directory);
+    const info = await lstat8(this.directory);
     if (info.isSymbolicLink() || !info.isDirectory()) throw invalid4("invalid_request", "upload directory is not a directory");
     await chmod5(this.directory, 448);
   }

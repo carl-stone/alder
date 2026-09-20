@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdir, mkdtemp, open, readFile, readdir, stat, unlink, utimes, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, open, readFile, readdir, stat, truncate, unlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -186,6 +186,53 @@ test("initialization removes crashed oversized temporaries, preserves a live wri
   const status = await queryDiagnostics("status", { rootDir: root });
   assert.equal(Number(status.retainedBytes) <= 4_096, true);
   assert.equal(Number(status.segmentCount) <= 4, true);
+});
+
+test("stopped status accounts for dead oversized temporaries without mutating or exposing unrelated files", async () => {
+  const root = await mkdtemp(join(tmpdir(), "alder-diagnostics-stopped-temporaries-"));
+  const finalName = "diagnostics-recovered-status.jsonl";
+  const finalContents = JSON.stringify({
+    schemaVersion: 2, timestamp: "2026-09-20T00:00:00.000Z", severity: "error", event: "host.fatal", error: { message: "queryable" },
+  }) + "\n";
+  const dead = `diagnostics-record-20260920000000000-host-99999999-${randomUUID()}.json.${randomUUID()}.tmp`;
+  const live = `diagnostics-record-20260920000000001-host-${process.pid}-${randomUUID()}.json.${randomUUID()}.tmp`;
+  const malformed = `diagnostics-record-20260920000000002-unknown-99999999-${randomUUID()}.json.${randomUUID()}.tmp`;
+  const unrelated = "unrelated-large-file.tmp";
+  await writeFile(join(root, finalName), finalContents);
+  for (const [name, size] of [[dead, 12 * 1024 * 1024], [live, 4_096], [malformed, 8_192], [unrelated, 16_384]] as const) {
+    await writeFile(join(root, name), "");
+    await truncate(join(root, name), size);
+  }
+  const snapshot = async () => Promise.all((await readdir(root)).sort().map(async name => {
+    const info = await lstat(join(root, name));
+    return { name, size: info.size, mtimeMs: info.mtimeMs, mode: info.mode };
+  }));
+  const before = await snapshot();
+
+  const status = await queryDiagnostics("status", { rootDir: root });
+  assert.equal(status.queryableBytes, Buffer.byteLength(finalContents));
+  assert.equal(status.retainedBytes, Buffer.byteLength(finalContents) + 12 * 1024 * 1024);
+  assert.equal(status.segmentCount, 1);
+  assert.equal(status.retainedFileCount, 2);
+  assert.equal(status.orphanTemporaryCount, 1);
+  assert.equal(status.orphanTemporaryBytes, 12 * 1024 * 1024);
+  assert.equal(status.liveTemporaryCount, 1);
+  assert.equal(status.liveTemporaryBytes, 4_096);
+  assert.equal(status.incompleteTemporaryCount, 2);
+  assert.equal(status.incompleteTemporaryBytes, 12 * 1024 * 1024 + 4_096);
+  assert.equal(status.examinedRecords, 1);
+  assert.equal(status.degraded, true);
+  assert.deepEqual(await snapshot(), before);
+
+  const liveOnlyRoot = await mkdtemp(join(tmpdir(), "alder-diagnostics-live-temporary-"));
+  const liveOnly = `diagnostics-record-20260920000000003-host-${process.pid}-${randomUUID()}.json.${randomUUID()}.tmp`;
+  await writeFile(join(liveOnlyRoot, liveOnly), "in progress");
+  const liveStatus = await queryDiagnostics("status", { rootDir: liveOnlyRoot });
+  assert.equal(liveStatus.retainedBytes, 0);
+  assert.equal(liveStatus.orphanTemporaryCount, 0);
+  assert.equal(liveStatus.liveTemporaryCount, 1);
+  assert.equal(liveStatus.degraded, false);
+  assert.deepEqual(await readdir(liveOnlyRoot), [liveOnly]);
 });
 
 test("unavailable storage never blocks callers and is observable in logger and query health", async () => {
