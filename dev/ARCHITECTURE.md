@@ -250,29 +250,34 @@ duplicate qualification layers and tests that only pin superseded designs. Do
 not recreate their scope under new names. Use ordinary process cleanup through
 platform facilities; retire the former custom supervisor and containment framework.
 
-**Local diagnostics.** Keep one small structured JSONL diagnostics facility shared by
-the desktop and backend. It records bounded lifecycle, terminal, failure and coarse
-timing events correlated across app launch, backend, session, operation, run and child
-process. It never records notebook source or output, values, widgets, uploads, command
-arguments, environment values, credentials, raw errors or absolute user paths.
-Caller-controlled identifiers become keyed one-way pseudonyms at the persistence
-boundary; fixed internal categories retain the kind of failure without its content.
+**Local diagnostics.** Alder automatically persists full-fidelity structured diagnostics
+shared by the desktop, renderer, backend and owned child processes. Records correlate app
+launches, sessions, notebooks, operations, runs, cells and processes and retain the raw
+context needed to diagnose failures: paths and identifiers, commands and arguments,
+notebook and cell source at meaningful operation/failure boundaries, outputs and bounded
+child stdout/stderr, raw errors with stacks and causes, runtime state, relevant environment
+and dependency versions, lifecycle events and truthful phase timings. Do not redact,
+pseudonymize or replace captured values with privacy categories in the local store.
 
-Diagnostics writes remain asynchronous and best effort during ordinary work. Logging
-failure cannot block editing, saving, execution, recovery or cleanup. Batch persistence
-and bounded queues prevent event recording from becoming a foreground latency or disk
-workload. Private segments rotate under a five-file, seven-day and approximately 25 MiB
-total cap. Fatal desktop or backend evidence uses a minimal lock-independent private
-segment before exit and joins the same retention and export inventory afterward.
-Concurrent processes atomically establish one per-install pseudonymization key.
+Persistence is automatic; diagnosing ordinary use must never depend on Carl manually
+exporting a bundle before evidence exists. Keep writes off foreground editing, saving and
+execution paths, but make acknowledged operations, failures and fatal evidence durable.
+Use bounded queues, rotation and compression or references for large existing artifacts so
+diagnostics cannot consume unbounded disk or turn high-volume output into foreground work.
+Capture complete diagnostic payloads at useful boundaries rather than duplicating every
+keystroke, stream chunk or large binary object. Logging failure cannot block notebook use
+and must itself leave an observable degraded/dropped-record signal whenever possible.
 
-Help can save a local, previewable diagnostics bundle after coordinating desktop and
-backend drains. Export remains an explicit local action and contains a privacy manifest;
-there is no remote telemetry, database, crash dump, per-keystroke or stream-chunk trace.
-Measure and report scientific project-cache size separately, but do not make diagnostics
-responsible for deleting user-created cache data. Performance evidence reports event
-counts, retained size and wall/CPU cost without checksum or byte-accounting machinery
-that is unrelated to an actual integrity boundary.
+Provide a stable read-only command-line inspection interface that works while Alder is
+running or stopped. Agents must be able to locate the store and query recent launches,
+sessions, errors, crashes, slow or incomplete operations, resource/performance summaries
+and the raw context around a selected incident without knowing internal filenames. Machine-
+readable output is the contract for future monitoring and automatic triage. A Help action
+may mark an incident, open the diagnostics location or make a portable copy, but export is
+only a convenience and is never required for local diagnosis. There is no remote upload or
+central service in the Mac app; automatic triage consumes the same local read-only boundary
+as agents. Measure retained size and recording overhead under realistic notebook activity
+and choose generous bounded retention from evidence rather than privacy concerns.
 
 ## Delivery and acceptance
 

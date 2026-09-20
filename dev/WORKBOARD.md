@@ -1,6 +1,6 @@
 # Alder workboard
 
-Updated: 2026-09-19. Goal: a dependable Mac notebook for scientific R work.
+Updated: 2026-09-20. Goal: a dependable Mac notebook for scientific R work.
 Current work only. [Lead instructions](LEAD.md) define coordination and state
 transitions; [architecture](ARCHITECTURE.md) holds product and design decisions.
 Carl and the lead own this board; implementation and review tasks have read access.
@@ -9,47 +9,24 @@ copies in other worktrees are snapshots.
 
 ## Current assignment
 
-**Simplification verification and acceptance — Implementing.**
+**Repository integration and cleanup — Implementing.**
 
-**Owner:** primary implementer in the listed implementation worktree.
+The primary implementation task is synchronizing the latest canonical lead documents onto accepted
+commit `b316bc37385cb7e71516a6e477e555db60b08a9f`, fast-forwarding and pushing `main`,
+then cleaning merged temporary worktrees and branches without discarding unique uncommitted work.
+The old `main` checkout contains the obsolete pre-reset working tree, so it must be preserved long
+enough to confirm that the accepted branch plus canonical documents contain everything still useful.
 
-Finish the simplification campaign by aligning the supporting tests and tooling with the
-smaller production design, then produce the exact Mac release candidate. Remove tests,
-fixtures, mocks, scripts and dependencies that exist only for deleted mechanisms; replace
-implementation-pinning assertions with concise checks of preserved user-visible behavior
-and important failure boundaries. Fill only material gaps exposed by the simplification
-reviews, including launch-scoped `--no-run` acquisition.
-
-**Accept when:** the remaining verification suite clearly protects documents/sessions,
-execution/reactivity, outputs/widgets/cache, optional services, publishing, recovery,
-diagnostics/privacy, native lifecycle and child cleanup without duplicating internal
-call-count or layer-shape assertions. Fast checks remain proportionate and terminate
-normally. One exact clean candidate then passes independent test-quality review and one
-complete uninterrupted signed-app acceptance, including installed Host/Browser journeys,
-strict signing/notices, hidden packaged diagnostics export/privacy and zero owned children.
-
-**Baseline:** accepted production simplification through
-`21f678ca1bda44d27d4debb1101f1eb87c59a767`. Architecture review passed `a334513`; the
-focused correction review passed fresh/existing `--no-run`, Host 11/11, Browser 9/9,
-strict unknown-option validation and cleanup.
-
-**Non-goals:** do not preserve test count or suite layout; do not delete a behavior test
-merely to shorten the suite; do not add coverage quotas, checksum inventories, benchmark
-gates, qualification frameworks or tests whose only assertion is that the current
-implementation remains arranged the same way.
-
-**Next action:** primary implementer performs the final behavior-led test/tooling sweep,
-runs focused checks and returns one exact clean candidate. The lead holds the turn through
-independent review; only after that passes does the final reviewer run `accept:final` on
-the same commit.
+Finish when local and remote `main` resolve to the same clean integrated commit, the accepted app
+and release README remain intact, canonical lead documents are committed, and obsolete merged
+worktrees are removed or retained only with a concrete unique-work reason.
 
 **Testing constraint:** do not take over Carl's visible desktop. Use background or
 isolated Mac checks for native behavior.
 
 ## Work queue
 
-Only the current assignment is active. Queued items are approved work in intended
-order; their implementation details are settled when assigned.
+No item is active. New approved work is added here before assignment.
 
 | Work | State | Owner | Finish condition |
 | --- | --- | --- | --- |
@@ -57,7 +34,14 @@ order; their implementation details are settled when assigned.
 | Local diagnostics and observability | Accepted | Primary implementer | `ea21b96`: bounded private local diagnostics, safe export, durable fatal evidence, truthful timings and full signed-app acceptance |
 | Dead code and dependency removal | Accepted | Primary implementer | `1080f153`: removed confirmed unreachable code, five obsolete files and eight unused dependencies; independent reachability and behavior reviews passed |
 | Production-path simplification | Accepted | Primary implementer | `a334513` plus `21f678c`: clearer live ownership with launch-scoped no-run restored; architecture and focused behavior reviews passed |
-| Simplification verification and acceptance | Implementing | Primary implementer | Rebuild affected tests around user-visible behavior, remove obsolete fixtures/tooling, and pass focused workflows plus the complete signed-app acceptance on the simplified tree |
+| Simplification verification and acceptance | Accepted | Primary implementer and independent reviewers | `818a95d`: focused correction review and complete signed-app acceptance passed |
+| Full-fidelity automatic diagnostics and agent inspection | Accepted | Primary implementer and independent reviewers | `b1887eb`: full raw automatic evidence, agent query boundary, focused reviews and complete signed-app acceptance passed |
+| Differential R execution generator | Accepted | Primary implementer and independent reviewers | `597e6f9`: packaged Rscript differential generator, corrected failed-cell semantics, focused reviews and full signed-app acceptance passed |
+| Automatic diagnostic triage | Accepted | Orchestration implementation task and independent reviewers | Corrected ten-file shadow controller: deterministic public-CLI triage, full evidence, bounded retention, silent idle ticks and no model/task delivery; 38 tests, real installed integration and combined demo passed |
+| Mac UI/UX polish | Accepted | Primary implementer and independent reviewers | `1e5af1b`: daily-use correctness, content-first layout, stable virtualization, deterministic native cleanup and complete signed-app acceptance passed |
+| Accepted Mac build local delivery | Accepted | Primary implementer | Exact accepted signed app installed at `/Users/carlstone/Applications/Alder.app`; background ready/quit smoke passed with natural cleanup |
+| Release README and feature demo | Accepted | Primary implementer and independent reviewers | `b316bc3`: release-facing install/use guide and three compact real-app feature captures; media and factual reviews passed |
+| Repository integration and cleanup | Implementing | Primary implementer | Commit canonical lead docs, fast-forward and push `main`, verify remote head, and safely prune obsolete merged worktrees |
 
 The following requirements apply to the relevant slices and are checked again
 when accepting the complete app:
@@ -157,21 +141,38 @@ commit that the next stage can safely simplify.
 
 ## Latest accepted checkpoint
 
-`21f678c` is the accepted Mac application after production-path simplification; `1080f153` removed dead code and dependencies, `ea21b96` supplies bounded local diagnostics and `41ccbfd`
-records the synchronized architecture and workboard state. Independent runtime/privacy
-and performance/storage reviews passed, followed by one uninterrupted signed-app
-acceptance in 347.96 seconds. The run passed R helpers 164, fast host/generative 441
-with 41 classified source-only skips, installed Engine 19, Jupyter 5, Host 11 and MCP 1,
-browser journeys 9, native cleanup and the full packaged journey. A separate hidden
-packaged run exported private diagnostics from 543 events without any planted notebook
-content, path, caller identifier or secret. Strict signing, dependency notices and owned-
-child cleanup passed.
+`1e5af1b` is the accepted Mac application after the UI/UX polish and deterministic native
+cleanup campaign. One uninterrupted final acceptance passed in 373.78 seconds with no skipped
+phase: R helpers 164; host/generative 477 with 49 classified skips; installed Engine 21,
+Jupyter 5, Host 12, MCP 1 and differential generator 12; browser journeys 12; packaged app
+journeys 12 with 20 immediate saves; strict signing, staged notices and zero owned children.
+The native cleanup probe observed natural Electron/backend/R/Ark exit with no fallback. The
+app now has truthful recovery, composed plots, stopped/warning/error states, actionable service
+failures, quieter notebook chrome, stable long-notebook geometry, responsive inspector and
+viewport-bounded Settings. The bounded R differential generator, full-fidelity local
+diagnostics and installed read-only agent queries remain included.
 
 The staged app at `host/.application-desktop/Alder.app` follows the implementation
 checkout and may contain newer, unaccepted changes. Acceptance is tied to the commit
 above, not that mutable app path. Build and launch commands are in
 [README.md](README.md). Older checkpoint detail lives in Git and the implementation
 task rather than this board.
+
+## Coordination tooling
+
+The standing orchestration implementation task owns the ignored
+`/Users/carlstone/alder/.tmp-orchestrator` prototype. This work is separate from the
+Alder application queue and cannot change product code, the application worktree or
+this canonical board.
+
+**Current state: Accepted shadow controller with automatic diagnostic triage.** The ignored
+ten-file stdlib Python and SQLite prototype retains the reviewed task-lifecycle foundation and
+consumes only Alder's installed read-only diagnostic commands. It creates bounded,
+content-bound incident candidates from actionable evidence, rejects unhealthy sources and
+inconsistent replay, retries atomically, and leaves empty or unchanged ticks silent and
+mutation-free. Thirty-eight tests, a real installed-app read-only check and a fresh combined
+demo passed independent review. No hooks, scheduler, notification, delivery or model wake are
+installed. The standing task remains owner of this separate prototype.
 
 ## Task locations
 
@@ -181,4 +182,6 @@ task rather than this board.
 | Primary implementation task | `01a0b5a6-22ac-7480-9394-5cc4c1ba807d` on `local` |
 | Implementation worktree | `/Users/carlstone/.codex/worktrees/ebd6/alder` |
 | Implementation branch | `codex/mac-document-foundation` |
+| Orchestration implementation task | `01a0bbd7-8b7e-7712-9fb4-b1c0f3289e41` on `local` |
+| Ignored orchestration workspace | `/Users/carlstone/alder/.tmp-orchestrator` |
 | Lead documentation checkout | `/Users/carlstone/alder` |

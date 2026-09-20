@@ -33,6 +33,11 @@ bounded workers or fresh review where useful, with explicit ownership. Choose
 agent capabilities for the work; a model label or reviewer approval does not
 replace checking the actual result.
 
+A separate standing orchestration implementation task may own the ignored
+project-local controller recorded on the workboard. It never owns Alder product
+code, the application worktree or the canonical board. Keep its assignment and
+review cycle separate from the primary app implementer's active checkpoint.
+
 ## Report task state precisely
 
 Before telling Carl that work is running, ready for review or complete, check the
@@ -80,6 +85,12 @@ implementation checks first, then independent boundary reviews, then corrections
 Run the complete signed-app acceptance only after the focused reviews pass, and run it
 once on the exact candidate intended for acceptance. A later source change invalidates
 that acceptance even when described as harmless.
+
+Do not yield the lead turn while the board is in Review merely to report that reviewers
+are running. Wait on the assigned reviewers until they finish or require attention,
+then record and dispatch the resulting transition before yielding. This keeps review
+completion from depending on Carl sending another message. Use a scheduled heartbeat
+only when Carl explicitly accepts its recurring model cost.
 
 A blocker is an annotation, not another state: record its concrete reason,
 who can resolve it and the next action. Preserve the current work state.
