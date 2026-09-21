@@ -50,11 +50,12 @@ and ordinary R helpers outside that boundary. Do not rely on private Ark hooks.
 This constraint is Carl's decision and is
 not subject to the lead's discretion over the working design below.
 
-**Platform scope.** Mac remains the sole active delivery target, while Linux is
-the primary development environment for the portability phase. Developing on the
-Linux droplet is an architectural pressure test: shared notebook, reactivity,
-protocol, browser and R behavior must run without macOS facilities, and required
-platform behavior belongs behind small explicit adapters. Keep macOS as the
+**Platform scope.** Mac remains the sole active delivery target and the current
+development host. Linux is an architectural pressure test for the portability
+phase: shared notebook, reactivity, protocol, browser and R behavior must run
+without macOS facilities, and required platform behavior belongs behind small
+explicit adapters. Develop and review the boundaries on Mac, then verify shared
+behavior on the Linux droplet at a checkpoint. Keep macOS as the
 qualification host for Electron integration, native menus and dialogs, Finder and
 LaunchServices behavior, sleep/wake, signing and release delivery. Do not recreate
 the deleted Linux product, installer or release pipeline, retain Windows code, or
