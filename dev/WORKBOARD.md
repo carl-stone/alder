@@ -10,7 +10,7 @@ copies in other worktrees are snapshots.
 
 ## Current assignment
 
-**Platform-boundary extraction — Review on Mac.**
+**Platform-boundary extraction — Implementing on Mac.**
 
 The primary implementation task is back on the Mac. Use Linux execution at a checkpoint to expose
 implicit macOS dependencies and replace them with the smallest explicit platform services for R
@@ -51,11 +51,12 @@ independent focused reviews accepted the slice. This does not qualify a Linux re
 real R and Ark. Correct concrete platform failures without duplicating product code; distinguish
 missing optional tools and Mac-only UI checks from failures of the portable core.
 
-**Next action:** review clean candidate `98eab47` against the Linux shared-behavior finish
-condition, especially its output-order receipt and one nonrecurring kernel sequence error in
-the geometry journey. Its final Linux R and browser runs passed 34/34 and 12/12; focused Mac
-browser and flat dev/release asset checks passed. The two absent optional Air/Quarto tools
-remain unqualified. Integrate only after review accepts the exact candidate.
+**Next action:** receive the focused investigation of one intermittent Linux geometry-journey
+`invalid_engine_sequence` from candidate `98eab47`. Core/output-order and browser-test review
+otherwise passed; final Linux R and browser runs passed 34/34 and 12/12, and focused Mac browser
+and flat dev/release asset checks passed. The primary implementer is capturing event identity,
+checking bounded reproduction and correcting any concrete cause before integration. The two
+absent optional Air/Quarto tools remain unqualified.
 
 The accepted Mac app, release README and three feature GIFs remain on `main`. The separate Ark
 source repository is untouched.
@@ -81,7 +82,7 @@ One item is active. New approved work is added here before assignment.
 | Accepted Mac build local delivery | Accepted | Primary implementer | Exact accepted signed app installed at `/Users/carlstone/Applications/Alder.app`; background ready/quit smoke passed with natural cleanup |
 | Release README and feature demo | Accepted | Primary implementer and independent reviewers | `b316bc3`: release-facing install/use guide and three compact real-app feature captures; media and factual reviews passed |
 | Repository integration and cleanup | Accepted | Primary implementer and focused cleanup reviewers | `554da34`: canonical docs and accepted app fast-forwarded to remote `main`; obsolete worktrees, branches and safety stashes removed after review |
-| Platform-boundary extraction | Review | Lead and focused reviewers | Shared application and relevant behavior tests run on Linux through small explicit platform adapters while Mac delivery remains intact and Mac-only qualification remains deferred |
+| Platform-boundary extraction | Implementing | Primary implementer | Shared application and relevant behavior tests run on Linux through small explicit platform adapters while Mac delivery remains intact and Mac-only qualification remains deferred |
 | Native Mac reliability qualification | Queued | Unassigned | Sleep/wake, real Finder/dialog/window flows, packaged crash recovery and supported-filesystem behavior work through visible installed-app paths without lost work or stranded processes |
 | Scientific workflow qualification | Queued | Unassigned | A realistic scientific notebook, real CRAN/Bioconductor packages, representative R reactivity idioms, two live notebooks under load and rich publishing are independently qualified through packaged Alder |
 | Product completion and public Mac delivery | Queued | Unassigned | Project/Git ownership, notebook-wide search, agent presence, accessibility, scale, upgrade state, release identity, architecture support and signed/notarized distribution have explicit accepted behavior |
