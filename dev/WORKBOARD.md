@@ -51,11 +51,11 @@ independent focused reviews accepted the slice. This does not qualify a Linux re
 real R and Ark. Correct concrete platform failures without duplicating product code; distinguish
 missing optional tools and Mac-only UI checks from failures of the portable core.
 
-**Next action:** review the corrected shared-behavior qualification candidate. Review of
-`0fa0e0e` found that its Linux development asset fix would break the flattened Mac release
-asset layout. The primary implementer is aligning the development root with the release
-layout and checking both shapes before integration. Its Linux R, host and browser runs
-passed; the two absent optional Air/Quarto tools remain unqualified.
+**Next action:** receive a focused correction of three Linux browser failures in candidate
+`402d2c6`, then rerun the shared browser suite before integration. The flat development and
+Mac release asset layout passed review. The remaining failures concern explicit Run timing,
+the lazy Run-outdated control, and mixed output order. The two absent optional Air/Quarto
+tools remain unqualified.
 
 The accepted Mac app, release README and three feature GIFs remain on `main`. The separate Ark
 source repository is untouched.
@@ -246,8 +246,9 @@ pilot.** The reviewed one-shot Sol Medium runner rewrote Carl's rough syntax-dia
 posted one interpretation comment and applied `triaged`. Unchanged replay made no changes;
 clarification, retry and stale-claim cases passed focused review. The Mac task is now adding a
 small scheduled poller that baselines old issues and processes new Carl-authored reports or
-answers without waking the model on idle ticks. Verify the installed service and real idle
-poll before accepting the automatic workflow.
+answers without waking the model on idle ticks. It is installed and its first real idle poll
+left issue #10 unchanged. Review found that a failed issue's retry backoff can starve later
+work; the Mac task is correcting that before acceptance.
 
 The accepted ten-file stdlib Python and SQLite shadow controller retains the reviewed
 task-lifecycle foundation and
