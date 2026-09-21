@@ -240,15 +240,16 @@ The standing orchestration implementation task owns the ignored project-local
 Alder application queue and cannot change product code, the application worktree or
 this canonical board.
 
-**Current state: Implementing automatic Mac polling for the accepted GitHub issue-triage
-pilot.** The reviewed one-shot Sol Medium runner rewrote Carl's rough syntax-diagnostic
+**Current state: GitHub issue triage accepted and scheduled on the Mac.** The reviewed
+one-shot Sol Medium runner rewrote Carl's rough syntax-diagnostic
 [issue #10](https://github.com/carl-stone/alder/issues/10) with the expected product behavior,
 posted one interpretation comment and applied `triaged`. Unchanged replay made no changes;
-clarification, retry and stale-claim cases passed focused review. The Mac task is now adding a
-small scheduled poller that baselines old issues and processes new Carl-authored reports or
-answers without waking the model on idle ticks. It is installed and its first real idle poll
-left issue #10 unchanged. Review found that a failed issue's retry backoff can starve later
-work; the Mac task is correcting that before acceptance.
+clarification, retry and stale-claim cases passed focused review. The per-user launchd service
+`dev.alder.issue-triage` runs every ten minutes from the ignored `.tmp-orchestrator` workspace.
+It baselines old issues at #13, processes new Carl-authored reports and answers without a model
+wake on idle ticks, and lets other work proceed while a failed issue backs off. Its first two
+real runs exited successfully with empty logs and left #10 unchanged. The poller tests and
+independent final review passed; no new live issue was created solely for testing.
 
 The accepted ten-file stdlib Python and SQLite shadow controller retains the reviewed
 task-lifecycle foundation and
