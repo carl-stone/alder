@@ -10,7 +10,7 @@ copies in other worktrees are snapshots.
 
 ## Current assignment
 
-**Platform-boundary extraction — Review on Mac.**
+**Platform-boundary extraction — Implementing on Mac.**
 
 The primary implementation task is back on the Mac. Use Linux execution at a checkpoint to expose
 implicit macOS dependencies and replace them with the smallest explicit platform services for R
@@ -25,30 +25,23 @@ implementation; obsolete inline platform branches and assumptions are removed; a
 finds no duplicated platform product or speculative abstraction. Mac-only behavior remains queued
 for qualification on a Mac and is not claimed from Linux evidence.
 
-**First candidate:** `7a7cc79` extracts R discovery and launch rules into a small Mac/Linux
-adapter. Focused review found a Mac analyzer regression: the final spawned environment still
-contains `R_HOME`, because a helper's omission cannot remove the key from an earlier spread.
-The helper-only test missed the actual spawn environment. This candidate is not accepted.
+**Accepted subcheckpoint:** `c82c551` integrates the reviewed R discovery/launch adapter and
+the Mac analyzer environment correction. A live test now checks the actual spawned analyzer
+environment. Focused Mac checks and independent correction review passed; generated host bundle
+was rebuilt. Main and the standing implementation worktree are clean at that commit. Linux R
+execution remains unqualified.
 
-**Correction candidate:** `d447943` applies the Mac `R_HOME` policy to the final merged analyzer
-environment and checks the actual spawned environment in a live Mac test. The implementation
-worktree is clean; focused Mac build, tests and staged analyzer launch passed. Generated host
-bundle was rebuilt. Independent correction review is underway.
+**Current bounded slice:** extract the host CLI system-browser opener into a small Mac/Linux
+platform seam. Preserve the private launcher file so the bootstrap bearer stays out of process
+arguments; cover actual command choice, cleanup and failure behavior on both hosts.
 
-**Next action:** finish focused review of `d447943`, then integrate
-and assign the next bounded seam. The Linux droplet remains available
+**Next action:** receive a clean browser-opener candidate with focused Mac host checks, then
+review it. The Linux droplet remains available
 for focused later validation; its first inventory found that host, editor and desktop typechecks
 pass, while the full test command stopped at the `tsx` sandbox IPC socket before Alder tests.
 
-The previous repository integration checkpoint remains accepted. Commit
-`554da34d0d3faf9bb0822100ff50cc9703a2745f` was pushed to `main` by
-strict fast-forward and independently verified on the remote. Local `main` and the standing
-implementation worktree are clean at that checkpoint. Twelve obsolete temporary Alder worktrees
-and their merged branches were removed after exact comparison and focused review; no unique useful
-work was discarded. The separate Ark source repository was untouched.
-
-The accepted app, release README and three feature GIFs are now on `main`. Only `main` and the clean
-standing implementation branch remain locally, with no unmerged branches or safety stashes.
+The accepted Mac app, release README and three feature GIFs remain on `main`. The separate Ark
+source repository is untouched.
 
 **Testing constraint:** do not take over Carl's visible desktop. Use background or
 isolated Mac checks for native behavior.
@@ -71,7 +64,7 @@ One item is active. New approved work is added here before assignment.
 | Accepted Mac build local delivery | Accepted | Primary implementer | Exact accepted signed app installed at `/Users/carlstone/Applications/Alder.app`; background ready/quit smoke passed with natural cleanup |
 | Release README and feature demo | Accepted | Primary implementer and independent reviewers | `b316bc3`: release-facing install/use guide and three compact real-app feature captures; media and factual reviews passed |
 | Repository integration and cleanup | Accepted | Primary implementer and focused cleanup reviewers | `554da34`: canonical docs and accepted app fast-forwarded to remote `main`; obsolete worktrees, branches and safety stashes removed after review |
-| Platform-boundary extraction | Review | Lead and focused reviewer | Shared application and relevant behavior tests run on Linux through small explicit platform adapters while Mac delivery remains intact and Mac-only qualification remains deferred |
+| Platform-boundary extraction | Implementing | Primary implementer | Shared application and relevant behavior tests run on Linux through small explicit platform adapters while Mac delivery remains intact and Mac-only qualification remains deferred |
 | Native Mac reliability qualification | Queued | Unassigned | Sleep/wake, real Finder/dialog/window flows, packaged crash recovery and supported-filesystem behavior work through visible installed-app paths without lost work or stranded processes |
 | Scientific workflow qualification | Queued | Unassigned | A realistic scientific notebook, real CRAN/Bioconductor packages, representative R reactivity idioms, two live notebooks under load and rich publishing are independently qualified through packaged Alder |
 | Product completion and public Mac delivery | Queued | Unassigned | Project/Git ownership, notebook-wide search, agent presence, accessibility, scale, upgrade state, release identity, architecture support and signed/notarized distribution have explicit accepted behavior |
