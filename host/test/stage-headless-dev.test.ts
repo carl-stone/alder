@@ -64,6 +64,10 @@ test("edit-only development root serves and saves a notebook without R tools", a
     assert.equal(app.ready.type, "host.ready");
     const response = await fetch(app.ready.origin);
     assert.equal(response.status, 200);
+    for (const asset of ["/static/style.css", "/static/host-app.js", "/static/vendor/alder-editor.js"]) {
+      const file = await fetch(app.ready.origin + asset);
+      assert.equal(file.status, 200, `${asset} must load from the staged root`);
+    }
     const cell = app.controller.snapshot().cells[0]!;
     const command = (type: "transaction" | "save", changes?: unknown[]) => parseHostCommand({
       type, ...(changes === undefined ? {} : { changes }), requestId: randomUUID(), clientId: "dev-root-test",

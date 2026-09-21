@@ -10,6 +10,7 @@ import type { HostCommand } from '../src/protocol.js';
 import { Chrome } from '../test-support/chrome.js';
 
 type RunningHost = Awaited<ReturnType<typeof startHost>>;
+const commandModifier = process.platform === 'darwin' ? 4 : 2;
 
 let stagedResources: Awaited<ReturnType<typeof resolveApplicationResources>> | undefined;
 let browserDataHome: string | undefined;
@@ -44,7 +45,6 @@ async function startInstalledHost(path: string, options: {
 }
 
 async function replaceFocusedEditor(browser: Chrome, text: string): Promise<void> {
-  const commandModifier = process.platform === 'darwin' ? 4 : 2;
   await browser.send('Input.dispatchKeyEvent', {
     type: 'keyDown', key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, modifiers: commandModifier,
   });
@@ -123,7 +123,7 @@ test('an immediate Save captures the current CodeMirror source', {
     app = await startInstalledHost(path);
     browser = await openAuthenticatedBrowser(app);
     await browser.wait("Boolean(window.__alderHost?.client.document?.snapshot.runtime.executionReady && document.querySelector('.cm-content'))");
-    const shortcut = async (key: string, code: string, virtualKeyCode: number, modifiers = 4) => {
+    const shortcut = async (key: string, code: string, virtualKeyCode: number, modifiers = commandModifier) => {
       await browser!.send('Input.dispatchKeyEvent', { type: 'keyDown', key, code, windowsVirtualKeyCode: virtualKeyCode, modifiers });
       await browser!.send('Input.dispatchKeyEvent', { type: 'keyUp', key, code, windowsVirtualKeyCode: virtualKeyCode, modifiers });
     };
@@ -392,8 +392,8 @@ test('trusted browser edit-and-Run presents the current chain and creation retai
     assert.equal(app.controller.snapshot().cells[0]?.error, null);
     await browser.click('[data-cell="cell-1"] .cm-content');
     await replaceFocusedEditor(browser, 'a <- 40\na');
-    await browser.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, modifiers: 4 });
-    await browser.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, modifiers: 4 });
+    await browser.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, modifiers: commandModifier });
+    await browser.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, modifiers: commandModifier });
     await browser.wait(`window.__alderHost.client.document.snapshot.cells.slice(0,3).every(cell => cell.status === 'done') &&
       document.querySelector('[data-cell="cell-3"] [data-role=output]').textContent.includes('42')`);
     await browser.evaluate('new Promise(resolve => setTimeout(resolve, 150))');

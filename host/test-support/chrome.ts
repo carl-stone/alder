@@ -92,7 +92,7 @@ export class Chrome {
       const browserVersion = await browser.send('Browser.getVersion', {}, '');
       const product = String(browserVersion?.product ?? '');
       if (!/Chrome|Chromium/u.test(product)) throw new Error('Provisioned browser is not Chromium: ' + product);
-      const expectedToken = 'Macintosh';
+      const expectedToken = process.platform === 'darwin' ? 'Macintosh' : 'Linux';
       if (!String(browserVersion?.userAgent ?? '').includes(expectedToken)) throw new Error('Provisioned browser platform identity mismatch');
 
       const target = await browser.send('Target.createTarget', { url: 'about:blank' }, '');

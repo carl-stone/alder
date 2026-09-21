@@ -71,6 +71,29 @@ The CLI `run` command returns its scheduled cell plan. The focused test checks
 the completed cell output is `[1] 42`. Opening, editing and saving a notebook do
 not require R or Ark; formatting and publishing require their separate tools.
 
+For the shared Linux suite, also put `codetools` in the private library and
+make `jsonlite` available in an ordinary site library for the project-package
+fixture. Point the browser tests at a Linux Chrome for Testing executable:
+
+```sh
+cp -a "$(Rscript --vanilla -e 'cat(find.package("codetools"))')" /path/to/alder-r-library/
+Rscript -e 'install.packages("jsonlite", lib="/usr/local/lib/R/site-library", repos="https://cloud.r-project.org")'
+node host/scripts/stage-headless-dev.mjs --ark /path/to/ark --r-library /path/to/alder-r-library
+export ALDER_APPLICATION_ROOT="$PWD/host/.application-dev"
+(cd host && node --import tsx --test --test-concurrency=1 \
+  test/host.test.ts test/controller.test.ts test/document-foundation.test.ts \
+  test/graph.test.ts test/notebook.test.ts test/server.test.ts \
+  test/sessions.test.ts test/shared-backend.test.ts \
+  test/engine.test.ts test/jupyter.test.ts test/resources-r-environment.test.ts)
+export CHROME_BIN=/path/to/chrome
+export ALDER_BROWSER_TEST=1
+(cd host && node --import tsx --test test/browser.test.ts)
+```
+
+Use the [Chrome for Testing downloads](https://googlechromelabs.github.io/chrome-for-testing/)
+for the host architecture. The dev root does not stage optional Air or Quarto;
+tests of formatting and publishing require those tools at their manifest paths.
+
 ## Final Mac acceptance
 
 Run the bounded final acceptance from the repository root:

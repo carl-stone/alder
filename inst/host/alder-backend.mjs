@@ -80413,7 +80413,8 @@ var Engine = class extends EventEmitter3 {
       onEvent,
       kernelGeneration,
       this.arkEventToken,
-      this.maxArkPayloadBytes()
+      this.maxArkPayloadBytes(),
+      this.runtime.controlDirectory
     );
     this.evaluations.set(requestId, state);
     try {
@@ -80521,8 +80522,8 @@ var Engine = class extends EventEmitter3 {
       writeFileSync(batch.permit, "", { flag: "wx", mode: 384 });
       batch.states = values.map((value) => ({ ...makeEvaluation(requestId, value, (event) => {
         callbacks = callbacks.then(() => onEvent?.(event));
-      }, kernelGeneration, this.arkEventToken, this.maxArkPayloadBytes()), batch }));
-      const eventStream = new ArkEventStreamDecoder(this.arkEventToken, this.maxArkPayloadBytes());
+      }, kernelGeneration, this.arkEventToken, this.maxArkPayloadBytes(), this.runtime.controlDirectory), batch }));
+      const eventStream = new ArkEventStreamDecoder(this.arkEventToken, this.maxArkPayloadBytes(), this.runtime.controlDirectory);
       this.evaluations.set(requestId, batch.states[0]);
       const code2 = values.map((value, offset) => arkCall("evaluate", encodeArkRequest({
         request: String(requestId),
@@ -81509,7 +81510,7 @@ var Engine = class extends EventEmitter3 {
     let result;
     let messageError;
     let messageTail = Promise.resolve();
-    const eventStream = new ArkEventStreamDecoder(this.arkEventToken, this.maxArkPayloadBytes());
+    const eventStream = new ArkEventStreamDecoder(this.arkEventToken, this.maxArkPayloadBytes(), this.runtime.controlDirectory);
     try {
       const request = encodeArkRequest({ request: marker, command, payload }, this.maxArkPayloadBytes());
       let started = false;
@@ -81903,7 +81904,7 @@ function evaluationWire(value, controlDirectory) {
     defs: value.definitions
   };
 }
-function makeEvaluation(requestId, payload, onEvent, kernelGeneration, token, maxBytes) {
+function makeEvaluation(requestId, payload, onEvent, kernelGeneration, token, maxBytes, controlDirectory) {
   return {
     requestId,
     payload,
@@ -81925,7 +81926,7 @@ function makeEvaluation(requestId, payload, onEvent, kernelGeneration, token, ma
     clearPending: false,
     deferredArtifactReleases: /* @__PURE__ */ new Set(),
     messageTail: Promise.resolve(),
-    eventStream: new ArkEventStreamDecoder(token, maxBytes)
+    eventStream: new ArkEventStreamDecoder(token, maxBytes, controlDirectory)
   };
 }
 function successfulExecution(message2) {
@@ -81966,13 +81967,15 @@ function streamText(message2) {
   return text2;
 }
 var ArkEventStreamDecoder = class {
-  constructor(token, maxBytes) {
+  constructor(token, maxBytes, controlDirectory) {
     this.token = token;
     this.maxBytes = maxBytes;
+    this.controlDirectory = controlDirectory;
     this.prefix = `ALDER:${token}:`;
   }
   token;
   maxBytes;
+  controlDirectory;
   pending = "";
   prefix;
   end = ":\n";
@@ -82014,6 +82017,11 @@ var ArkEventStreamDecoder = class {
         throw new FrameProtocolError("invalid Alder Ark event: " + asError2(error61).message);
       }
       validateArkEvent(event, this.token);
+      if (process.platform === "linux" && ["finished", "condition", "command_result", "batch_end"].includes(String(event.type))) {
+        const request = String(event.request);
+        if (!/^[A-Za-z0-9-]{1,80}$/.test(request)) throw new FrameProtocolError("invalid Alder Ark acknowledgement request");
+        writeFileSync(join10(this.controlDirectory, `.alder-event-ack-${request}`), "", { flag: "wx", mode: 384 });
+      }
       parts.push({ event });
       this.pending = this.pending.slice(end + this.end.length);
     }
@@ -111553,7 +111561,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
           return recovery.recoveryId;
         }
       },
-      staticDir: options.resources.rendererDirectory,
+      staticDir: join21(options.resources.rendererDirectory, "static"),
       indexFile: join21(options.resources.rendererDirectory, "index.html"),
       uploads,
       artifactStore,

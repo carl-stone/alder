@@ -669,7 +669,7 @@ export class Engine extends EventEmitter implements EngineAdapter {
     const requestId = this.nextRequestId();
     const wire = evaluationWire(value, this.runtime!.controlDirectory);
     const state = makeEvaluation(requestId, value, onEvent, kernelGeneration,
-      this.arkEventToken, this.maxArkPayloadBytes());
+      this.arkEventToken, this.maxArkPayloadBytes(), this.runtime!.controlDirectory);
     this.evaluations.set(requestId, state);
     try {
       const request = encodeArkRequest({ request: String(requestId), ...wire }, this.maxArkPayloadBytes());
@@ -780,8 +780,8 @@ export class Engine extends EventEmitter implements EngineAdapter {
       writeFileSync(batch.permit, "", { flag: "wx", mode: 0o600 });
       batch.states = values.map((value) => ({ ...makeEvaluation(requestId!, value, (event) => {
         callbacks = callbacks.then(() => onEvent?.(event));
-      }, kernelGeneration, this.arkEventToken, this.maxArkPayloadBytes()), batch }));
-      const eventStream = new ArkEventStreamDecoder(this.arkEventToken, this.maxArkPayloadBytes());
+      }, kernelGeneration, this.arkEventToken, this.maxArkPayloadBytes(), this.runtime!.controlDirectory), batch }));
+      const eventStream = new ArkEventStreamDecoder(this.arkEventToken, this.maxArkPayloadBytes(), this.runtime!.controlDirectory);
       this.evaluations.set(requestId, batch.states[0]!);
       const code = values.map((value, offset) => arkCall("evaluate", encodeArkRequest({
         request: String(requestId), ...evaluationWire(value, this.runtime!.controlDirectory),
@@ -1848,7 +1848,7 @@ export class Engine extends EventEmitter implements EngineAdapter {
     let result: Record<string, unknown> | undefined;
     let messageError: Error | undefined;
     let messageTail = Promise.resolve();
-    const eventStream = new ArkEventStreamDecoder(this.arkEventToken, this.maxArkPayloadBytes());
+    const eventStream = new ArkEventStreamDecoder(this.arkEventToken, this.maxArkPayloadBytes(), this.runtime!.controlDirectory);
     try {
       const request = encodeArkRequest({ request: marker, command, payload }, this.maxArkPayloadBytes());
       let started = false;
@@ -2308,6 +2308,7 @@ function makeEvaluation(
   kernelGeneration: number,
   token: string,
   maxBytes: number,
+  controlDirectory: string,
 ): ActiveEvaluation {
   return {
     requestId, payload, onEvent, kernelGeneration, started: false, sequence: 0, rSequence: 0,
@@ -2315,7 +2316,7 @@ function makeEvaluation(
     console: new OutputLog(MAX_LOG_BYTES), truncated: false, stopped: false,
     finished: false, kernelTerminal: false, interruptSent: false, clearPending: false,
     deferredArtifactReleases: new Set(), messageTail: Promise.resolve(),
-    eventStream: new ArkEventStreamDecoder(token, maxBytes),
+    eventStream: new ArkEventStreamDecoder(token, maxBytes, controlDirectory),
   };
 }
 
@@ -2364,7 +2365,8 @@ class ArkEventStreamDecoder {
   private readonly prefix: string;
   private readonly end = ":\u001e\n";
 
-  constructor(private readonly token: string, private readonly maxBytes: number) {
+  constructor(private readonly token: string, private readonly maxBytes: number,
+    private readonly controlDirectory: string) {
     this.prefix = `\u001eALDER:${token}:`;
   }
 
@@ -2403,6 +2405,12 @@ class ArkEventStreamDecoder {
         throw new FrameProtocolError("invalid Alder Ark event: " + asError(error).message);
       }
       validateArkEvent(event, this.token);
+      if (process.platform === "linux" && ["finished", "condition", "command_result", "batch_end"].includes(String(event.type))) {
+        // R waits for this receipt so Ark cannot send idle before its last stderr frame reaches IOPub.
+        const request = String(event.request);
+        if (!/^[A-Za-z0-9-]{1,80}$/.test(request)) throw new FrameProtocolError("invalid Alder Ark acknowledgement request");
+        writeFileSync(join(this.controlDirectory, `.alder-event-ack-${request}`), "", { flag: "wx", mode: 0o600 });
+      }
       parts.push({ event });
       this.pending = this.pending.slice(end + this.end.length);
     }
