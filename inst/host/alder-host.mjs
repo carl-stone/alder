@@ -35142,6 +35142,13 @@ function invalid(message) {
   return new ResourceValidationError(message);
 }
 
+// src/browser-platform.ts
+function systemBrowserCommand(platform) {
+  if (platform === "darwin") return "open";
+  if (platform === "linux") return "xdg-open";
+  throw new Error(`system browser launch is unavailable on ${platform}`);
+}
+
 // src/sessions.ts
 import { createHash, randomBytes, randomUUID as randomUUID2 } from "node:crypto";
 import { readdir as readdir2, realpath as realpath2, unlink as unlink2 } from "node:fs/promises";
@@ -35963,7 +35970,7 @@ function browserLauncherHtml(url2) {
 }
 async function openSystemBrowser(url2, options = {}) {
   const platform = options.platform ?? process.platform;
-  if (platform !== "darwin") throw new Error("Alder currently supports macOS");
+  const command = systemBrowserCommand(platform);
   const cleanupDelayMs = options.cleanupDelayMs ?? BROWSER_LAUNCHER_CLEANUP_MS;
   if (!Number.isSafeInteger(cleanupDelayMs) || cleanupDelayMs < 0 || cleanupDelayMs > BROWSER_LAUNCHER_MAX_CLEANUP_MS) {
     throw new RangeError("browser launcher cleanup delay is invalid");
@@ -35981,7 +35988,6 @@ async function openSystemBrowser(url2, options = {}) {
     await handle.sync();
     await handle.close();
     handle = void 0;
-    const command = "open";
     const launcherUrl = pathToFileURL(launcherPath).href;
     const args = [launcherUrl];
     const spawnOpener = options.spawn ?? ((executable, openerArgs, spawnOptions) => spawn2(executable, [...openerArgs], spawnOptions));

@@ -108,91 +108,95 @@ async function waitForMissing(path: string): Promise<void> {
   }
 }
 
-test("external browser launch keeps its bearer out of opener arguments", async () => {
-  const root = await mkdtemp(join(tmpdir(), "alder-browser-opener-test-"));
-  const ticket = "d".repeat(64);
-  const target = `https://browser.example/index.html#ticket=${ticket}&next=</script><img src=x onerror=1>\u2028`;
-  const child = new FakeBrowserOpener();
-  let command: string | undefined;
-  let args: readonly string[] | undefined;
-  let spawnOptions: unknown;
-  let launcherPath: string | undefined;
-  try {
-    await openSystemBrowser(target, {
-      platform: "darwin",
-      temporaryRoot: root,
-      cleanupDelayMs: 50,
-      spawn: (executable, openerArgs, options) => {
-        command = executable;
-        args = [...openerArgs];
-        spawnOptions = options;
-        launcherPath = fileURLToPath(openerArgs.at(-1)!);
-        queueMicrotask(() => child.emit("spawn"));
-        return child;
-      },
-    });
-
-    assert.equal(command, "open");
-    assert.deepEqual(spawnOptions, { detached: true, stdio: "ignore" });
-    assert.equal(args?.length, 1);
-    assert.match(args![0]!, /^file:\/\//);
-    assert.equal(args![0]!.includes(ticket), false);
-    assert.equal(args![0]!.includes("browser.example"), false);
-    assert.equal(new URL(args![0]!).hash, "");
-    assert.equal(child.unrefCalled, true);
-    assert.equal(launcherPath!.includes(ticket), false);
-
-    const directoryInfo = await stat(dirname(launcherPath!));
-    const launcherInfo = await stat(launcherPath!);
-    assert.equal(directoryInfo.mode & 0o777, 0o700);
-    assert.equal(launcherInfo.mode & 0o777, 0o600);
-    const contents = await readFile(launcherPath!, "utf8");
-    assert.match(contents, /^<!doctype html>/);
-    assert.match(contents, /<meta name="referrer" content="no-referrer">/);
-    assert.equal(contents.includes(ticket), true);
-    assert.equal(contents.includes("</script><img"), false);
-    const redirect = /location\.replace\((.*)\)<\/script>/.exec(contents);
-    assert.ok(redirect);
-    assert.equal(JSON.parse(redirect[1]!), target);
-
-    await waitForMissing(dirname(launcherPath!));
-    assert.deepEqual(await readdir(root), []);
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
-test("external browser launch removes its private launcher on spawn failure", async () => {
-  const root = await mkdtemp(join(tmpdir(), "alder-browser-opener-failure-test-"));
-  const ticket = "e".repeat(64);
-  const target = `https://browser.example/index.html#ticket=${ticket}`;
-  const child = new FakeBrowserOpener();
-  let args: readonly string[] = [];
-  try {
-    await assert.rejects(
-      openSystemBrowser(target, {
-        platform: "darwin",
+for (const [platform, expectedCommand] of [["darwin", "open"], ["linux", "xdg-open"]] as const) {
+  test(`${platform} browser launch keeps its bearer out of opener arguments`, async () => {
+    const root = await mkdtemp(join(tmpdir(), "alder-browser-opener-test-"));
+    const ticket = "d".repeat(64);
+    const target = `https://browser.example/index.html#ticket=${ticket}&next=</script><img src=x onerror=1>\u2028`;
+    const child = new FakeBrowserOpener();
+    let command: string | undefined;
+    let args: readonly string[] | undefined;
+    let spawnOptions: unknown;
+    let launcherPath: string | undefined;
+    try {
+      await openSystemBrowser(target, {
+        platform,
         temporaryRoot: root,
-        spawn: (_executable, openerArgs) => {
+        cleanupDelayMs: 50,
+        spawn: (executable, openerArgs, options) => {
+          command = executable;
           args = [...openerArgs];
-          queueMicrotask(() => child.emit("error", new Error("opener unavailable")));
+          spawnOptions = options;
+          launcherPath = fileURLToPath(openerArgs.at(-1)!);
+          queueMicrotask(() => child.emit("spawn"));
           return child;
         },
-      }),
-      (error: unknown) => {
-        assert.ok(error instanceof Error);
-        assert.equal(error.message, "could not open system browser");
-        assert.equal(error.message.includes(ticket), false);
-        assert.equal(error.message.includes(target), false);
-        return true;
-      },
-    );
-    assert.equal(args.some(argument => argument.includes(ticket) || argument.includes("browser.example")), false);
-    assert.deepEqual(await readdir(root), []);
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-});
+      });
+
+      assert.equal(command, expectedCommand);
+      assert.deepEqual(spawnOptions, { detached: true, stdio: "ignore" });
+      assert.equal(args?.length, 1);
+      assert.match(args![0]!, /^file:\/\//);
+      assert.equal(args![0]!.includes(ticket), false);
+      assert.equal(args![0]!.includes("browser.example"), false);
+      assert.equal(new URL(args![0]!).hash, "");
+      assert.equal(child.unrefCalled, true);
+      assert.equal(launcherPath!.includes(ticket), false);
+
+      const directoryInfo = await stat(dirname(launcherPath!));
+      const launcherInfo = await stat(launcherPath!);
+      assert.equal(directoryInfo.mode & 0o777, 0o700);
+      assert.equal(launcherInfo.mode & 0o777, 0o600);
+      const contents = await readFile(launcherPath!, "utf8");
+      assert.match(contents, /^<!doctype html>/);
+      assert.match(contents, /<meta name="referrer" content="no-referrer">/);
+      assert.equal(contents.includes(ticket), true);
+      assert.equal(contents.includes("</script><img"), false);
+      const redirect = /location\.replace\((.*)\)<\/script>/.exec(contents);
+      assert.ok(redirect);
+      assert.equal(JSON.parse(redirect[1]!), target);
+
+      await waitForMissing(dirname(launcherPath!));
+      assert.deepEqual(await readdir(root), []);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+}
+
+for (const platform of ["darwin", "linux"] as const) {
+  test(`${platform} browser launch removes its private launcher on spawn failure`, async () => {
+    const root = await mkdtemp(join(tmpdir(), "alder-browser-opener-failure-test-"));
+    const ticket = "e".repeat(64);
+    const target = `https://browser.example/index.html#ticket=${ticket}`;
+    const child = new FakeBrowserOpener();
+    let args: readonly string[] = [];
+    try {
+      await assert.rejects(
+        openSystemBrowser(target, {
+          platform,
+          temporaryRoot: root,
+          spawn: (_executable, openerArgs) => {
+            args = [...openerArgs];
+            queueMicrotask(() => child.emit("error", new Error("opener unavailable")));
+            return child;
+          },
+        }),
+        (error: unknown) => {
+          assert.ok(error instanceof Error);
+          assert.equal(error.message, "could not open system browser");
+          assert.equal(error.message.includes(ticket), false);
+          assert.equal(error.message.includes(target), false);
+          return true;
+        },
+      );
+      assert.equal(args.some(argument => argument.includes(ticket) || argument.includes("browser.example")), false);
+      assert.deepEqual(await readdir(root), []);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+}
 
 test("desktop-unavailable CLI error gives explicit alternatives", () => {
   const error = desktopUnavailableError();
