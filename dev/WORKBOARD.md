@@ -51,10 +51,11 @@ independent focused reviews accepted the slice. This does not qualify a Linux re
 real R and Ark. Correct concrete platform failures without duplicating product code; distinguish
 missing optional tools and Mac-only UI checks from failures of the portable core.
 
-**Next action:** receive the shared-behavior qualification candidate, review its actual Linux
-suite and notebook evidence, then accept or dispatch a correction. The Linux droplet remains available
-for focused later validation; its first inventory found that host, editor and desktop typechecks
-pass, while the full test command stopped at the `tsx` sandbox IPC socket before Alder tests.
+**Next action:** review the corrected shared-behavior qualification candidate. Review of
+`0fa0e0e` found that its Linux development asset fix would break the flattened Mac release
+asset layout. The primary implementer is aligning the development root with the release
+layout and checking both shapes before integration. Its Linux R, host and browser runs
+passed; the two absent optional Air/Quarto tools remain unqualified.
 
 The accepted Mac app, release README and three feature GIFs remain on `main`. The separate Ark
 source repository is untouched.
@@ -239,15 +240,14 @@ The standing orchestration implementation task owns the ignored project-local
 Alder application queue and cannot change product code, the application worktree or
 this canonical board.
 
-**Current state: Implementing a GitHub issue-triage pilot.** The standing orchestration task on
-the Mac is adding a one-issue-at-a-time workflow with a Sol Medium agent. Its pilot takes
-Carl's rough syntax-diagnostic report, clarifies the product outcome in the issue body and a
-comment, applies `triaged`, and proves that rerunning does not duplicate work. Review the actual
-issue and runner before installing any recurring scheduler. The first live run updated
-[issue #10](https://github.com/carl-stone/alder/issues/10) and an unchanged rerun added no
-comment. Focused review found reusable-workflow corrections: remove hardcoded pilot text,
-verify Carl as author, resume after a product-question reply, and release stalled claims.
-The Mac task is correcting these before any polling is enabled.
+**Current state: Implementing automatic Mac polling for the accepted GitHub issue-triage
+pilot.** The reviewed one-shot Sol Medium runner rewrote Carl's rough syntax-diagnostic
+[issue #10](https://github.com/carl-stone/alder/issues/10) with the expected product behavior,
+posted one interpretation comment and applied `triaged`. Unchanged replay made no changes;
+clarification, retry and stale-claim cases passed focused review. The Mac task is now adding a
+small scheduled poller that baselines old issues and processes new Carl-authored reports or
+answers without waking the model on idle ticks. Verify the installed service and real idle
+poll before accepting the automatic workflow.
 
 The accepted ten-file stdlib Python and SQLite shadow controller retains the reviewed
 task-lifecycle foundation and
