@@ -8887,7 +8887,7 @@ var require_proper_lockfile = __commonJS({
 
 // src/main.ts
 import { spawn as spawn2 } from "node:child_process";
-import { constants as constants2 } from "node:fs";
+import { constants as constants2, realpathSync } from "node:fs";
 import { chmod as chmod3, mkdtemp, open as open3, rm as rm4 } from "node:fs/promises";
 import { tmpdir as tmpdir2 } from "node:os";
 import { dirname as dirname4, join as join6, resolve as resolve5 } from "node:path";
@@ -36236,7 +36236,13 @@ async function runCli(argv = process.argv.slice(2)) {
   if (cli.command === "mcp") return runMcp(cli, resources);
   return runDesktop(cli, resources);
 }
-var entry = process.argv[1] === fileURLToPath(import.meta.url);
+var entry = false;
+if (process.argv[1] !== void 0) {
+  try {
+    entry = realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+  }
+}
 if (entry) {
   void runCli().then(
     (code) => {

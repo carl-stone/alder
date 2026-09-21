@@ -35,6 +35,26 @@ available, it runs cells through the unchanged, pinned Ark kernel and the Alder
 R helper installed in the staged app. Open a notebook with File > Open or
 **Open notebook…**.
 
+## Headless development root
+
+On a Linux development host, build the shared assets and stage a checkout-linked
+headless root without Mac release tools:
+
+```sh
+npm ci --prefix host
+export PATH="$PWD/host/node_modules/node/bin:$PATH"
+npm ci --prefix js
+npm run build --prefix js
+npm run build --prefix host
+npm run stage:dev --prefix host
+host/.application-dev/bin/alder NOTEBOOK.R --headless --no-run
+```
+
+The manifest points to the built host, browser and worker assets, the installed
+Node runtime and development resource locations. R execution and optional
+formatting/publishing need their tools and a compatible R helper separately;
+they are not prerequisites for opening and editing a notebook.
+
 ## Final Mac acceptance
 
 Run the bounded final acceptance from the repository root:

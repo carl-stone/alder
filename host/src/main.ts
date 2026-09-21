@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { constants } from "node:fs";
+import { constants, realpathSync } from "node:fs";
 import { chmod, mkdtemp, open, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -537,7 +537,11 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
 }
 export { artifactHandleSchema, decodeHostQueryResultWire, encodeHostCommandWire, encodeHostQueryWire, hostQueryResultSchema, hostSnapshotSchema };
 
-const entry = process.argv[1] === fileURLToPath(import.meta.url);
+let entry = false;
+if (process.argv[1] !== undefined) {
+  try { entry = realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url)); }
+  catch { /* Imported by a caller without a filesystem entry point. */ }
+}
 if (entry) {
   void runCli().then(
     code => { process.exitCode = code; },

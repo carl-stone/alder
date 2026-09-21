@@ -59,6 +59,7 @@ host/.runtime/
 host/.runtime/ark-build/
 host/.application/
 host/.application-desktop/
+host/.application-dev/
 host/.release/
 host/.evidence*/
 host/.qualification/
