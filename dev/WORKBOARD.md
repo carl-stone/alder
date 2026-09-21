@@ -10,41 +10,28 @@ copies in other worktrees are snapshots.
 
 ## Current assignment
 
-**Platform-boundary extraction — Review on Mac.**
+**Native Mac reliability — Implementing on Mac.**
 
-The primary implementation task is back on the Mac. Use Linux execution at a checkpoint to expose
-implicit macOS dependencies and replace them with the smallest explicit platform services for R
-discovery and launch, process lifecycle, private local IPC and filesystem behavior, resource
-location and system-browser launch. Shared notebook, execution, reactivity, protocol, browser,
-R-helper and diagnostic behavior must run on Linux without duplicating the application or
-building a Linux release pipeline. Preserve the accepted Mac product and upstream unmodified Ark.
+The shared portable-core checkpoint is accepted on pushed main `42cfda8`. The next work is
+qualified Mac use through the packaged application. The last fully accepted signed Mac build
+is `1e5af1b`; later Linux-development source changes have focused Mac checks but no complete
+signed-app acceptance yet. Preserve upstream unmodified Ark.
 
-**Finish condition:** the shared application and its relevant behavioral tests run on the Linux
-development host; platform-dependent code is concentrated in named adapters with a clear Mac
-implementation; obsolete inline platform branches and assumptions are removed; and focused review
-finds no duplicated platform product or speculative abstraction. Mac-only behavior remains queued
-for qualification on a Mac and is not claimed from Linux evidence.
+**Finish condition:** ordinary Mac launch, document/window use, recovery and owned-child cleanup
+remain dependable through native failures. Exercise real user journeys through the packaged app
+while keeping Carl's visible desktop free. Record scenarios that genuinely require foreground
+interaction for a later supervised pass; do not infer them from headless checks.
 
-**Accepted subcheckpoints:** `c82c551` established the R discovery/launch adapter and corrected
-the Mac analyzer environment; `8c39ed2` established the system-browser command seam; `0b6feff`
-added a checkout-linked headless development root; `a2b1724` ran live R and upstream unmodified
-Ark through the shared Linux host.
+**Current bounded slice:** rebuild and run the documented full signed-app acceptance on current
+main in a background or isolated context, then qualify one background-testable native document
+or window failure journey. Correct a concrete defect if found. Keep this as one runnable checkpoint
+before expanding to the rest of the native reliability queue.
 
-**Latest accepted subcheckpoint:** integrated main `42cfda8` qualifies shared Linux R, host and
-browser behavior. R integration passed 34/34 and browser journeys 12/12. A reproduced Linux
-Ark start/output race and mixed-output ordering were corrected at the transport seam without
-forking Ark; five focused geometry/output repetitions passed after the fix. Focused Mac browser
-and staged asset checks passed. Development and Mac release asset layouts now agree. The two
-absent optional Air/Quarto tools remain unqualified; this is not a Linux release or Mac native
-qualification. Main and the implementation worktree are clean and pushed at the same commit.
+**Next action:** receive the primary implementer's exact packaged-app baseline and native-journey
+result; review any source change and accept or dispatch one focused correction.
 
-**Next action:** complete a focused finish-condition audit of remaining platform assumptions in
-process lifecycle, local IPC/filesystem and resource location. Accept the platform item if no
-concrete portable-core gap remains; otherwise assign one bounded correction slice. Mac-only
-native reliability remains queued for later Mac qualification.
-
-The accepted Mac app, release README and three feature GIFs remain on `main`. The separate Ark
-source repository is untouched.
+The release README and three feature GIFs remain on `main`. The separate Ark source repository
+is untouched.
 
 **Testing constraint:** do not take over Carl's visible desktop. Use background or
 isolated Mac checks for native behavior.
@@ -67,8 +54,8 @@ One item is active. New approved work is added here before assignment.
 | Accepted Mac build local delivery | Accepted | Primary implementer | Exact accepted signed app installed at `/Users/carlstone/Applications/Alder.app`; background ready/quit smoke passed with natural cleanup |
 | Release README and feature demo | Accepted | Primary implementer and independent reviewers | `b316bc3`: release-facing install/use guide and three compact real-app feature captures; media and factual reviews passed |
 | Repository integration and cleanup | Accepted | Primary implementer and focused cleanup reviewers | `554da34`: canonical docs and accepted app fast-forwarded to remote `main`; obsolete worktrees, branches and safety stashes removed after review |
-| Platform-boundary extraction | Review | Lead and focused reviewer | Shared application and relevant behavior tests run on Linux through small explicit platform adapters while Mac delivery remains intact and Mac-only qualification remains deferred |
-| Native Mac reliability qualification | Queued | Unassigned | Sleep/wake, real Finder/dialog/window flows, packaged crash recovery and supported-filesystem behavior work through visible installed-app paths without lost work or stranded processes |
+| Platform-boundary extraction | Accepted | Primary implementer and focused reviewers | `42cfda8`: shared Linux R 34/34, browser 12/12 and reviewed localized Mac/Linux seams; no duplicated product or Ark fork |
+| Native Mac reliability qualification | Implementing | Primary implementer | Sleep/wake, real Finder/dialog/window flows, packaged crash recovery and supported-filesystem behavior work through visible installed-app paths without lost work or stranded processes |
 | Scientific workflow qualification | Queued | Unassigned | A realistic scientific notebook, real CRAN/Bioconductor packages, representative R reactivity idioms, two live notebooks under load and rich publishing are independently qualified through packaged Alder |
 | Product completion and public Mac delivery | Queued | Unassigned | Project/Git ownership, notebook-wide search, agent presence, accessibility, scale, upgrade state, release identity, architecture support and signed/notarized distribution have explicit accepted behavior |
 
