@@ -234,13 +234,19 @@ task rather than this board.
 
 ## Coordination tooling
 
-The standing orchestration implementation task owns the ignored
-project-local ignored `.tmp-orchestrator` prototype. This work is separate from the
+The standing orchestration implementation task owns the ignored project-local
+`.tmp-orchestrator` prototype. This work is separate from the
 Alder application queue and cannot change product code, the application worktree or
 this canonical board.
 
-**Current state: Accepted shadow controller with automatic diagnostic triage.** The ignored
-ten-file stdlib Python and SQLite prototype retains the reviewed task-lifecycle foundation and
+**Current state: Implementing a GitHub issue-triage pilot.** The standing orchestration task on
+the droplet is adding a one-issue-at-a-time workflow with a Sol Medium agent. Its pilot takes
+Carl's rough syntax-diagnostic report, clarifies the product outcome in the issue body and a
+comment, applies `triaged`, and proves that rerunning does not duplicate work. Review the actual
+issue and runner before installing any recurring scheduler.
+
+The accepted ten-file stdlib Python and SQLite shadow controller retains the reviewed
+task-lifecycle foundation and
 consumes only Alder's installed read-only diagnostic commands. It creates bounded,
 content-bound incident candidates from actionable evidence, rejects unhealthy sources and
 inconsistent replay, retries atomically, and leaves empty or unchanged ticks silent and
@@ -248,8 +254,8 @@ mutation-free. Thirty-eight tests, a real installed-app read-only check and a fr
 demo passed independent review on Mac. The unchanged copy on Linux currently reproduces one
 SQLite lock failure in its concurrent workflow test (37/38 pass); this remains a separate
 orchestration concern and does not expand the active Alder assignment. No hooks, scheduler,
-notification, delivery or model wake are installed. The standing task remains owner of this
-separate prototype.
+notification, delivery or model wake were installed at the prior accepted checkpoint. The
+standing task remains owner of this separate prototype.
 
 ## Task locations
 
