@@ -102,7 +102,7 @@ test("R selection is explicit and environment serialization is deterministic", a
     assert.equal(kernel.ALDER_PROJECT_LIBRARY, projectLibrary);
     assert.equal(kernel.R_HOME, selected.rHome);
     assert.equal(kernel.ALDER_RESOURCES_ROOT, fixture.resources.root);
-    assert.match(kernel.DYLD_LIBRARY_PATH!, new RegExp(fixture.rHome));
+    assert.match(kernel[process.platform === "linux" ? "LD_LIBRARY_PATH" : "DYLD_LIBRARY_PATH"]!, new RegExp(fixture.rHome));
   } finally {
     await removeFixture(fixture);
   }
@@ -166,9 +166,9 @@ async function makeFixture(helperVersion = "0.1.0"): Promise<Fixture> {
   const normalLibrary = join(root, "normal-library");
   const baseLibrary = join(rHome, "library");
   for (const path of [join(rHome, "lib"), normalLibrary, baseLibrary]) await mkdir(path, { recursive: true });
-  await writeFile(join(rHome, "lib/libR.dylib"), "fake R");
+  await writeFile(join(rHome, "lib", process.platform === "linux" ? "libR.so" : "libR.dylib"), "fake R");
   const rscript = join(root, "fake-Rscript");
-  const output = [rHome, "R version 4.6.1 (fake)", "darwin", process.arch, normalLibrary, "--ALDER-LIBS-END--", baseLibrary].join("\n") + "\n";
+  const output = [rHome, "R version 4.6.1 (fake)", process.platform, process.arch, normalLibrary, "--ALDER-LIBS-END--", baseLibrary].join("\n") + "\n";
   const helperOutput = helperVersion + "\nR 4.6.1; fake\n";
   await writeFile(rscript, `#!${process.execPath}\nconst args = process.argv.join(' '); const value = args.includes('loadNamespace') ? ${JSON.stringify(helperOutput)} : args.includes('writeLines(.libPaths())') ? ${JSON.stringify(normalLibrary + "\n" + baseLibrary + "\n")} : ${JSON.stringify(output)}; process.stdout.write(value);\n`, { mode: 0o755 });
   await writeFile(join(root, "manifest.json"), JSON.stringify({
