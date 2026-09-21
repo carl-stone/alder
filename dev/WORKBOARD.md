@@ -240,7 +240,7 @@ Alder application queue and cannot change product code, the application worktree
 this canonical board.
 
 **Current state: Implementing a GitHub issue-triage pilot.** The standing orchestration task on
-the droplet is adding a one-issue-at-a-time workflow with a Sol Medium agent. Its pilot takes
+the Mac is adding a one-issue-at-a-time workflow with a Sol Medium agent. Its pilot takes
 Carl's rough syntax-diagnostic report, clarifies the product outcome in the issue body and a
 comment, applies `triaged`, and proves that rerunning does not duplicate work. Review the actual
 issue and runner before installing any recurring scheduler.
@@ -266,7 +266,7 @@ standing task remains owner of this separate prototype.
 | Implementation worktree | `/Users/carlstone/.codex/worktrees/ebd6/alder` |
 | Implementation branch | `codex/mac-document-foundation`; reconcile with current `origin/main` |
 | Linux inventory task | `01a0bf49-f444-7042-a6ee-8be9c7d2cd79` on `droplet`; interrupted without tracked changes |
-| Orchestration implementation task | `01a0bf4a-93d6-7672-869a-85c8318cf5d0` on `droplet` |
-| Ignored orchestration workspace | `/root/workspace/alder/.tmp-orchestrator` |
-| Prior Mac orchestration task | `01a0bbd7-8b7e-7712-9fb4-b1c0f3289e41` retained as history on `local` |
+| Orchestration implementation task | `01a0bbd7-8b7e-7712-9fb4-b1c0f3289e41` on `local` |
+| Ignored orchestration workspace | `/Users/carlstone/alder/.tmp-orchestrator` |
+| Prior droplet orchestration task | `01a0bf4a-93d6-7672-869a-85c8318cf5d0` archived after failed Mac handoff; no pilot edits |
 | Lead documentation checkout | `/Users/carlstone/alder` |
