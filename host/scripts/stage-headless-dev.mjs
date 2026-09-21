@@ -46,7 +46,8 @@ try {
   else await cp(rLibrary, join(temporary, 'r-library'), { recursive: true });
   await cp(join(root, 'inst/host'), join(temporary, 'host'), { recursive: true });
   await symlink(join(root, 'host/node_modules'), join(temporary, 'host/node_modules'));
-  await symlink(join(root, 'inst/app'), join(temporary, 'app'));
+  await cp(join(root, 'inst/app/static'), join(temporary, 'app'), { recursive: true });
+  await cp(join(root, 'inst/app/index.html'), join(temporary, 'app/index.html'));
   await cp(join(root, 'inst/worker'), join(temporary, 'worker'), { recursive: true });
   await symlink(process.execPath, join(temporary, 'bin/node'));
   if (ark !== null) await symlink(ark, join(temporary, 'runtime/ark'));

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
@@ -30,6 +30,9 @@ test("development staging resolves a runnable headless host from the checkout", 
     assert.equal(info.resources.root, resources.root);
     assert.equal(info.resources.hostEntry, resources.hostEntry);
     assert.equal(info.resources.rendererDirectory, resources.rendererDirectory);
+    assert.equal((await lstat(resources.rendererDirectory)).isDirectory(), true);
+    assert.equal(await readFile(join(resources.rendererDirectory, "index.html"), "utf8"),
+      await readFile(join(repositoryRoot, "inst/app/index.html"), "utf8"));
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
@@ -64,10 +67,7 @@ test("edit-only development root serves and saves a notebook without R tools", a
     assert.equal(app.ready.type, "host.ready");
     const response = await fetch(app.ready.origin);
     assert.equal(response.status, 200);
-    for (const asset of ["/static/style.css", "/static/host-app.js", "/static/vendor/alder-editor.js"]) {
-      const file = await fetch(app.ready.origin + asset);
-      assert.equal(file.status, 200, `${asset} must load from the staged root`);
-    }
+    await assertBrowserAssets(app.ready.origin);
     const cell = app.controller.snapshot().cells[0]!;
     const command = (type: "transaction" | "save", changes?: unknown[]) => parseHostCommand({
       type, ...(changes === undefined ? {} : { changes }), requestId: randomUUID(), clientId: "dev-root-test",
@@ -85,6 +85,28 @@ test("edit-only development root serves and saves a notebook without R tools", a
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("Mac release root serves its flat browser assets", { skip: process.platform !== "darwin" || !process.env.ALDER_RELEASE_ROOT }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "alder-release-assets-test-"));
+  const notebook = join(directory, "notebook.R");
+  let app: Awaited<ReturnType<typeof startHost>> | undefined;
+  try {
+    await writeFile(notebook, "# %%\nx <- 1\n");
+    app = await startHost({ path: notebook, resources: await resolveApplicationResources(process.env.ALDER_RELEASE_ROOT!),
+      recoveryDirectory: join(directory, "recovery"), suppressStartup: true });
+    await assertBrowserAssets(app.ready.origin);
+  } finally {
+    await app?.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+async function assertBrowserAssets(origin: string): Promise<void> {
+  for (const asset of ["/static/style.css", "/static/host-app.js", "/static/vendor/alder-editor.js"]) {
+    const file = await fetch(origin + asset);
+    assert.equal(file.status, 200, `${asset} must load from the staged root`);
+  }
+}
 
 test("staged Linux notebook runs 6 * 7 through Ark", { skip: process.platform !== "linux" || !process.env.ALDER_LINUX_DEV_ROOT,
   timeout: 90_000 }, async () => {

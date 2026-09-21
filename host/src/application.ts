@@ -1296,7 +1296,7 @@ async function startNotebookHost(
         token: ownership.token,
         get recoveryId() { return recovery!.recoveryId; },
       },
-      staticDir: join(options.resources.rendererDirectory, "static"),
+      staticDir: options.resources.rendererDirectory,
       indexFile: join(options.resources.rendererDirectory, "index.html"),
       uploads,
       artifactStore,

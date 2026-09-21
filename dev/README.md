@@ -50,8 +50,9 @@ node host/scripts/stage-headless-dev.mjs --ark /path/to/ark --r-library /path/to
 host/.application-dev/bin/alder NOTEBOOK.R --headless --no-run
 ```
 
-The manifest points to the built host and browser assets and the installed Node
-runtime. Staging copies the worker assets and R library inside the root, as the
+The manifest points to the built host and installed Node runtime. Staging copies
+the browser assets into the same flat `app` layout as the Mac release, along with
+the worker assets and R library inside the root, as the
 R helper requires, and links the upstream Ark executable. Omit `--ark` and
 `--r-library` to stage an edit-only root. Use R 4.6.x from the [CRAN Linux instructions](https://cloud.r-project.org/bin/linux/),
 the pinned upstream [Ark 0.1.252 release](https://github.com/posit-dev/ark/releases/tag/0.1.252)
