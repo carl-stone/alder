@@ -10,7 +10,7 @@ copies in other worktrees are snapshots.
 
 ## Current assignment
 
-**Platform-boundary extraction — Implementing on Mac.**
+**Platform-boundary extraction — Review on Mac.**
 
 The primary implementation task is back on the Mac. Use Linux execution at a checkpoint to expose
 implicit macOS dependencies and replace them with the smallest explicit platform services for R
@@ -25,11 +25,16 @@ implementation; obsolete inline platform branches and assumptions are removed; a
 finds no duplicated platform product or speculative abstraction. Mac-only behavior remains queued
 for qualification on a Mac and is not claimed from Linux evidence.
 
-**Next action:** the Mac primary implementation task inspects actual platform-coupled seams and
-delivers the first runnable extraction checkpoint before broadening shared boundaries. The Linux
-droplet remains available for a focused later check. Its first inventory found that host, editor
-and desktop typechecks pass; the full test command stopped at the `tsx` sandbox IPC socket before
-running Alder tests. No tracked implementation changes were made there.
+**Current candidate:** `7a7cc79` extracts R discovery and launch rules into a small Mac/Linux
+adapter, preserving the Mac R framework fallback and analyzer environment. The Mac implementation
+worktree is clean. Host typecheck/build, focused R-environment tests, a staged Mac R probe and a
+live analyzer/Ark execution check passed. The packaged app was not rebuilt, and Linux R launch
+remains unqualified.
+
+**Next action:** review the candidate against the R platform boundary and its tests. If accepted,
+integrate that exact commit and assign the next bounded seam. The Linux droplet remains available
+for focused later validation; its first inventory found that host, editor and desktop typechecks
+pass, while the full test command stopped at the `tsx` sandbox IPC socket before Alder tests.
 
 The previous repository integration checkpoint remains accepted. Commit
 `554da34d0d3faf9bb0822100ff50cc9703a2745f` was pushed to `main` by
@@ -62,7 +67,7 @@ One item is active. New approved work is added here before assignment.
 | Accepted Mac build local delivery | Accepted | Primary implementer | Exact accepted signed app installed at `/Users/carlstone/Applications/Alder.app`; background ready/quit smoke passed with natural cleanup |
 | Release README and feature demo | Accepted | Primary implementer and independent reviewers | `b316bc3`: release-facing install/use guide and three compact real-app feature captures; media and factual reviews passed |
 | Repository integration and cleanup | Accepted | Primary implementer and focused cleanup reviewers | `554da34`: canonical docs and accepted app fast-forwarded to remote `main`; obsolete worktrees, branches and safety stashes removed after review |
-| Platform-boundary extraction | Implementing | Primary implementer | Shared application and relevant behavior tests run on Linux through small explicit platform adapters while Mac delivery remains intact and Mac-only qualification remains deferred |
+| Platform-boundary extraction | Review | Lead and focused reviewer | Shared application and relevant behavior tests run on Linux through small explicit platform adapters while Mac delivery remains intact and Mac-only qualification remains deferred |
 | Native Mac reliability qualification | Queued | Unassigned | Sleep/wake, real Finder/dialog/window flows, packaged crash recovery and supported-filesystem behavior work through visible installed-app paths without lost work or stranded processes |
 | Scientific workflow qualification | Queued | Unassigned | A realistic scientific notebook, real CRAN/Bioconductor packages, representative R reactivity idioms, two live notebooks under load and rich publishing are independently qualified through packaged Alder |
 | Product completion and public Mac delivery | Queued | Unassigned | Project/Git ownership, notebook-wide search, agent presence, accessibility, scale, upgrade state, release identity, architecture support and signed/notarized distribution have explicit accepted behavior |
