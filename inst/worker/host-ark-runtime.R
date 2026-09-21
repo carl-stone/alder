@@ -342,11 +342,16 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
     frame <- paste0("\036ALDER:", ark_event_token, ":",
                     alder_private_base64_encode(charToRaw(enc2utf8(data_json))),
                     ":\036\n")
+    # Flush ordinary console text before publishing the next structured
+    # output, so cat() and out$append() keep their source order.
+    if (event_type %in% c("append", "progress", "log", "result")) utils::flush.console()
     write_ark_event(frame)
     if (identical(Sys.info()[["sysname"]], "Linux") &&
-        event_type %in% c("finished", "condition", "command_result", "batch_end")) {
-      # Ark forwards native stderr asynchronously on Linux. Keep the R request
-      # alive until Node receives its terminal event, before Ark can send idle.
+        event_type %in% c("append", "progress", "log", "result", "finished",
+                          "condition", "command_result", "batch_end")) {
+      # Ark forwards native stderr asynchronously on Linux. Wait for each
+      # structured output to reach Node before R can emit the next console
+      # output, and keep terminal events ahead of Ark's idle notification.
       if (!grepl("^[A-Za-z0-9-]{1,80}$", request)) {
         stop("invalid Alder Ark acknowledgement request", call. = FALSE)
       }
@@ -354,7 +359,7 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
       deadline <- proc.time()[["elapsed"]] + 5
       while (!file.exists(ack)) {
         if (proc.time()[["elapsed"]] > deadline) {
-          stop("Alder Ark terminal event was not acknowledged", call. = FALSE)
+          stop("Alder Ark event was not acknowledged", call. = FALSE)
         }
         Sys.sleep(0.002)
       }

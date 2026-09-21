@@ -82017,7 +82017,7 @@ var ArkEventStreamDecoder = class {
         throw new FrameProtocolError("invalid Alder Ark event: " + asError2(error61).message);
       }
       validateArkEvent(event, this.token);
-      if (process.platform === "linux" && ["finished", "condition", "command_result", "batch_end"].includes(String(event.type))) {
+      if (process.platform === "linux" && ["append", "progress", "log", "result", "finished", "condition", "command_result", "batch_end"].includes(String(event.type))) {
         const request = String(event.request);
         if (!/^[A-Za-z0-9-]{1,80}$/.test(request)) throw new FrameProtocolError("invalid Alder Ark acknowledgement request");
         writeFileSync(join10(this.controlDirectory, `.alder-event-ack-${request}`), "", { flag: "wx", mode: 384 });

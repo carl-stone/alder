@@ -304,6 +304,8 @@ test('trusted browser edit-and-Run presents the current chain and creation retai
     app = await startInstalledHost(path);
     browser = await openAuthenticatedBrowser(app);
     await browser.wait("window.__alderHost?.client.document?.snapshot.runtime.executionReady && document.querySelectorAll('.cm-content').length === 3");
+    await browser.evaluate("window.__alderHost.client.setRuntime({executionMode:'lazy'})");
+    await browser.wait("window.__alderHost.client.document.snapshot.runtime.executionMode === 'lazy'");
     await browser.click('[data-cell="cell-1"] .cm-content');
     await replaceFocusedEditor(browser, 'a <- 40\na');
     await browser.evaluate(`(() => {
@@ -347,7 +349,8 @@ test('trusted browser edit-and-Run presents the current chain and creation retai
       return output?.textContent.includes('42');
     })()`);
     assert.equal(result.revision, 1);
-    assert.deepEqual(await browser.evaluate(`window.__journey.command.changes.filter(change => change.type === 'edit').map(change => change.body)`), [['a <- 40', 'a']]);
+    assert.equal(await browser.evaluate("window.__journey.command.type"), "run");
+    assert.deepEqual(app.controller.snapshot().cells[0]!.body, ["a <- 40", "a"]);
     assert.equal(app.controller.snapshot().cells[2]!.status, 'done');
     const targets = await browser.evaluate(`(() => {
       const run = document.querySelector('[data-cell="cell-3"] [data-act=run]').getBoundingClientRect();
@@ -432,6 +435,22 @@ test('long notebooks virtualize editors and preserve edited source through recov
     assert.equal(await browser.evaluate("document.querySelectorAll('#panel-variables .variable-row').length"), 0,
       'unexecuted source definitions are not runtime variables');
 
+    await browser.send('Network.enable');
+    await browser.evaluate(`(() => {
+      window.__transportStates = [];
+      const view = window.__alderHost.view;
+      const original = view.setTransportState.bind(view);
+      view.setTransportState = (state, error) => {
+        window.__transportStates.push({state, message:error?.message || ''});
+        return original(state, error);
+      };
+      return true;
+    })()`);
+    await browser.send('Network.emulateNetworkConditions', {
+      offline: true, latency: 0, downloadThroughput: 0, uploadThroughput: 0,
+    });
+    await browser.evaluate("window.__alderHost.client.transport.socket.close(4001, 'test recovery')");
+    await browser.wait("window.__transportStates.some(entry => entry.state === 'closed')");
     await browser.click('[data-cell="cell-75"] [data-virtual-source]');
     await browser.wait("document.activeElement?.classList.contains('cm-content') && document.activeElement.closest('[data-cell=\"cell-75\"]') !== null");
     await replaceFocusedEditor(browser, 'value_75 <- 7500\nvalue_75');
@@ -449,22 +468,6 @@ test('long notebooks virtualize editors and preserve edited source through recov
     })() && document.querySelectorAll('.cm-content').length < 25 &&
       window.__alderHost.client.document.cell('cell-75').desiredBody.join('\\n') === 'value_75 <- 7500\\nvalue_75'`);
 
-    await browser.send('Network.enable');
-    await browser.evaluate(`(() => {
-      window.__transportStates = [];
-      const view = window.__alderHost.view;
-      const original = view.setTransportState.bind(view);
-      view.setTransportState = (state, error) => {
-        window.__transportStates.push({state, message:error?.message || ''});
-        return original(state, error);
-      };
-      return true;
-    })()`);
-    await browser.send('Network.emulateNetworkConditions', {
-      offline: true, latency: 0, downloadThroughput: 0, uploadThroughput: 0,
-    });
-    await browser.evaluate("window.__alderHost.client.transport.socket.close(4001, 'test recovery')");
-    await browser.wait("window.__transportStates.some(entry => entry.state === 'closed')");
     const peer80Snapshot = app.controller.snapshot();
     const peer80 = peer80Snapshot.cells.find(cell => cell.id === 'cell-80');
     assert.ok(peer80);
@@ -683,7 +686,7 @@ test('source conflicts and peer deletion retain the exact local draft until expl
       window.__alderHost.client.document.cells[0].tombstone === false &&
       window.__alderHost.client.document.cells[0].desiredBody.join('\\n') === 'draft <- 123\\ndraft'`, 30_000);
     const restoredId = await browser.evaluate('window.__alderHost.client.document.cells[0].id');
-    assert.equal(await browser.evaluate(`document.querySelector('[data-cell="${restoredId}"]') !== null`), true);
+    await browser.wait(`document.querySelector('[data-cell="${restoredId}"]') !== null`);
     assert.deepEqual(app.controller.snapshot().cells[0]!.body, ['draft <- 123', 'draft']);
     await browser.click(`[data-cell="${restoredId}"] .cm-content`);
     await replaceFocusedEditor(browser, 'discarded <- 456');
@@ -744,7 +747,8 @@ test('scientific outputs support lazy evaluation, table paging, and a trusted wi
     await browser.evaluate(`document.querySelector('[data-cell="cell-6"]').scrollIntoView({block:'center'})`);
     await browser.wait(`document.querySelector('[data-cell="cell-6"] .out-lazy') !== null`);
     await browser.evaluate("window.__alderHost.client.setRuntime({executionMode:'lazy'})");
-    await browser.wait("window.__alderHost.client.document.snapshot.runtime.executionMode === 'lazy' && !document.querySelector('#run-all')?.disabled");
+    await browser.wait("window.__alderHost.client.document.snapshot.runtime.executionMode === 'lazy' && document.querySelector('#run-all')?.textContent === 'Run outdated cells'");
+    assert.equal(await browser.evaluate("window.__alderHost.client.document.snapshot.cells.every(cell => cell.status === 'done') && document.querySelector('#run-all')?.disabled"), true);
 
     await browser.click('[data-cell="cell-5"] .table-pager button:last-child');
     await browser.wait("document.querySelector('[data-cell=\"cell-5\"] .table-page-label')?.textContent.includes('26..50 of 60')");
