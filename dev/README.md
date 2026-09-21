@@ -46,14 +46,30 @@ export PATH="$PWD/host/node_modules/node/bin:$PATH"
 npm ci --prefix js
 npm run build --prefix js
 npm run build --prefix host
-npm run stage:dev --prefix host
+node host/scripts/stage-headless-dev.mjs --ark /path/to/ark --r-library /path/to/alder-r-library
 host/.application-dev/bin/alder NOTEBOOK.R --headless --no-run
 ```
 
-The manifest points to the built host, browser and worker assets, the installed
-Node runtime and development resource locations. R execution and optional
-formatting/publishing need their tools and a compatible R helper separately;
-they are not prerequisites for opening and editing a notebook.
+The manifest points to the built host and browser assets and the installed Node
+runtime. Staging copies the worker assets and R library inside the root, as the
+R helper requires, and links the upstream Ark executable. Omit `--ark` and
+`--r-library` to stage an edit-only root. Use R 4.6.x from the [CRAN Linux instructions](https://cloud.r-project.org/bin/linux/),
+the pinned upstream [Ark 0.1.252 release](https://github.com/posit-dev/ark/releases/tag/0.1.252)
+for the host architecture, and install the Alder helper in a private R library:
+
+```sh
+mkdir -p /path/to/alder-r-library
+Rscript -e 'install.packages(c("jsonlite", "mime", "rlang", "processx"), lib="/path/to/alder-r-library", repos="https://cloud.r-project.org")'
+R CMD INSTALL --library=/path/to/alder-r-library .
+printf '%s\n' '# %%' '6 * 7' > /tmp/alder-example.R
+host/.application-dev/bin/alder run /tmp/alder-example.R
+export ALDER_LINUX_DEV_ROOT="$PWD/host/.application-dev"
+(cd host && node --import tsx --test test/stage-headless-dev.test.ts)
+```
+
+The CLI `run` command returns its scheduled cell plan. The focused test checks
+the completed cell output is `[1] 42`. Opening, editing and saving a notebook do
+not require R or Ark; formatting and publishing require their separate tools.
 
 ## Final Mac acceptance
 
