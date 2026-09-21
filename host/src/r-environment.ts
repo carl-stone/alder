@@ -10,6 +10,7 @@ import {
   type ApplicationResources,
 } from "./resources.js";
 import { rEnvironmentSchema, type REnvironment } from "./protocol.js";
+import { rLoaderEnvironment, rPlatform, type RPlatform } from "./r-platform.js";
 const execFileAsync = promisify(execFile);
 const R_VERSION_RANGE = ">=4.6.0 <4.7.0";
 const R_PROBE_TIMEOUT_MS = 10_000;
@@ -47,19 +48,20 @@ interface RProbe {
 
 export async function resolveREnvironment(options: ResolveREnvironmentOptions): Promise<REnvironment> {
   options.signal?.throwIfAborted();
+  const platformServices = currentRPlatform();
   const resources = options.resources;
   const manifest = await verifiedApplicationManifest(resources).catch((error) => {
     if (error instanceof REnvironmentError) throw error;
     throw invalid(`application manifest cannot be read while selecting R: ${messageOf(error)}`);
   });
   await validateHelperLibrary(resources);
-  const selected = await selectRscript(options.rscript, resources.electronEntry !== null);
+  const selected = await selectRscript(options.rscript, resources.electronEntry !== null, platformServices);
   const probe = await probeR(selected, options.signal);
   const version = normalizeVersion(probe.version);
   if (!/^4\.6\./.test(version)) throw unsupported(version);
   const rHome = await existingDirectory(probe.rHome, "selected R_HOME");
-  await validateSharedLibrary(rHome);
-  validateRPlatform(probe.platform);
+  await validateSharedLibrary(rHome, platformServices);
+  validateRPlatform(probe.platform, platformServices);
   validateRArchitecture(probe.arch);
   const platformResult = rEnvironmentSchema.shape.platform.safeParse(process.platform);
   if (!platformResult.success) throw invalid(`unsupported host platform ${process.platform}`);
@@ -110,9 +112,18 @@ export function rServiceEnvironmentVariables(
     R_LIBS_SITE: "",
     R_LIBS_USER: "",
   };
-  const loaderDirectories = [join(environment.rHome, "lib"), join(environment.rHome, "lib", "R")];
-  values.DYLD_LIBRARY_PATH = prependPath(loaderDirectories, process.env.DYLD_LIBRARY_PATH);
+  Object.assign(values, rLoaderEnvironment(environment.rHome));
   if (analysisEnvironmentId !== undefined) values.ALDER_ANALYSIS_ENVIRONMENT_ID = analysisEnvironmentId;
+  return values;
+}
+
+export function rAnalyzerEnvironmentVariables(
+  environment: REnvironment,
+  resources: ApplicationResources,
+  analysisEnvironmentId?: string,
+): Record<string, string> {
+  const values = rServiceEnvironmentVariables(environment, resources, analysisEnvironmentId);
+  if (!rPlatform().analyzerNeedsRHome) delete values.R_HOME;
   return values;
 }
 
@@ -133,22 +144,20 @@ export function rKernelEnvironmentVariables(
     ...(projectLibrary !== undefined && environment.libraryPaths.includes(projectLibrary)
       ? { ALDER_PROJECT_LIBRARY: projectLibrary }
       : {}),
-    DYLD_LIBRARY_PATH: prependPath(
-      [join(environment.rHome, "lib"), join(environment.rHome, "lib", "R")],
-      process.env.DYLD_LIBRARY_PATH,
-    ),
+    ...rLoaderEnvironment(environment.rHome),
   };
 }
 
 async function selectRscript(
   requested: string | undefined,
   desktop: boolean,
+  platform: RPlatform,
 ): Promise<string> {
   if (requested !== undefined) return resolveSelectedPath(requested, "selected Rscript");
   const discovered = await findOnPath("Rscript");
   if (discovered !== null) return discovered;
-  if (desktop) {
-    const framework = await resolveExecutableCandidate("/Library/Frameworks/R.framework/Resources/bin/Rscript");
+  if (desktop && platform.desktopRscriptFallback !== null) {
+    const framework = await resolveExecutableCandidate(platform.desktopRscriptFallback);
     if (framework !== null) return framework;
     throw notFound("Rscript was not found on PATH or at the standard macOS R framework location");
   }
@@ -267,7 +276,7 @@ async function validateHelperLoad(environment: REnvironment, manifest: Applicati
         R_LIBS: helperLibrary,
         R_LIBS_SITE: "",
         R_LIBS_USER: "",
-        DYLD_LIBRARY_PATH: prependPath([join(environment.rHome, "lib"), join(environment.rHome, "lib", "R")], process.env.DYLD_LIBRARY_PATH),
+        ...rLoaderEnvironment(environment.rHome),
       },
       timeout: R_PROBE_TIMEOUT_MS,
       maxBuffer: 512 * 1024,
@@ -282,19 +291,22 @@ async function validateHelperLoad(environment: REnvironment, manifest: Applicati
   }
 }
 
-async function validateSharedLibrary(rHome: string): Promise<void> {
-  const candidates = [join(rHome, "lib", "libR.dylib"), join(rHome, "lib", "R", "libR.dylib")];
+async function validateSharedLibrary(rHome: string, platform: RPlatform): Promise<void> {
+  const candidates = [join(rHome, "lib", platform.sharedLibrary), join(rHome, "lib", "R", platform.sharedLibrary)];
   for (const candidate of candidates) {
     if (await isFile(candidate)) return;
   }
   throw invalid(`selected R has no loadable shared library under ${rHome}`);
 }
-function validateRPlatform(platform: string): void {
-  const normalized = platform.toLowerCase();
-  const expected = "darwin";
-  if (!normalized.includes(expected)) {
-    throw invalid(`selected R platform ${platform} does not match ${process.platform}`);
+function validateRPlatform(value: string, platform: RPlatform): void {
+  if (!platform.matchesRPlatform(value)) {
+    throw invalid(`selected R platform ${value} does not match ${platform.name}`);
   }
+}
+
+function currentRPlatform(): RPlatform {
+  try { return rPlatform(); }
+  catch (error) { throw invalid(messageOf(error)); }
 }
 
 function validateRArchitecture(arch: string): void {
@@ -382,10 +394,6 @@ function uniquePaths(paths: readonly string[]): string[] {
 
 function createIdentity(value: Record<string, unknown>): string {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");
-}
-
-function prependPath(prefixes: readonly string[], existing: string | undefined): string {
-  return [...prefixes, ...(existing ? existing.split(delimiter) : [])].join(delimiter);
 }
 
 function withoutRHome(environment: NodeJS.ProcessEnv): NodeJS.ProcessEnv {

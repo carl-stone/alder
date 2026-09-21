@@ -7387,7 +7387,7 @@ var require_punycode = __commonJS({
     var damp = 700;
     var initialBias = 72;
     var initialN = 128;
-    var delimiter2 = "-";
+    var delimiter3 = "-";
     var regexPunycode = /^xn--/;
     var regexNonASCII = /[^\0-\x7F]/;
     var regexSeparators = /[\x2E\u3002\uFF0E\uFF61]/g;
@@ -7473,7 +7473,7 @@ var require_punycode = __commonJS({
       let i = 0;
       let n = initialN;
       let bias = initialBias;
-      let basic = input2.lastIndexOf(delimiter2);
+      let basic = input2.lastIndexOf(delimiter3);
       if (basic < 0) {
         basic = 0;
       }
@@ -7533,7 +7533,7 @@ var require_punycode = __commonJS({
       const basicLength = output2.length;
       let handledCPCount = basicLength;
       if (basicLength) {
-        output2.push(delimiter2);
+        output2.push(delimiter3);
       }
       while (handledCPCount < inputLength) {
         let m = maxInt;
@@ -13510,7 +13510,7 @@ var require_util = __commonJS({
       return path3;
     });
     exports.normalize = normalize3;
-    function join22(aRoot, aPath) {
+    function join23(aRoot, aPath) {
       if (aRoot === "") {
         aRoot = ".";
       }
@@ -13542,7 +13542,7 @@ var require_util = __commonJS({
       }
       return joined;
     }
-    exports.join = join22;
+    exports.join = join23;
     exports.isAbsolute = function(aPath) {
       return aPath.charAt(0) === "/" || urlRegexp.test(aPath);
     };
@@ -13756,7 +13756,7 @@ var require_util = __commonJS({
             parsed.path = parsed.path.substring(0, index + 1);
           }
         }
-        sourceURL = join22(urlGenerate(parsed), sourceURL);
+        sourceURL = join23(urlGenerate(parsed), sourceURL);
       }
       return normalize3(sourceURL);
     }
@@ -15197,7 +15197,7 @@ var require_previous_map = __commonJS({
   "node_modules/postcss/lib/previous-map.js"(exports, module) {
     "use strict";
     var { existsSync, readFileSync, realpathSync } = __require("fs");
-    var { dirname: dirname11, isAbsolute: isAbsolute6, join: join22, relative: relative4, sep: sep3 } = __require("path");
+    var { dirname: dirname11, isAbsolute: isAbsolute6, join: join23, relative: relative4, sep: sep3 } = __require("path");
     var { SourceMapConsumer, SourceMapGenerator } = require_source_map();
     function realPath(path3) {
       try {
@@ -15312,7 +15312,7 @@ var require_previous_map = __commonJS({
           return this.decodeInline(this.annotation);
         } else if (this.annotation) {
           let map2 = this.annotation;
-          if (file2) map2 = join22(dirname11(file2), map2);
+          if (file2) map2 = join23(dirname11(file2), map2);
           let unknown2 = this.loadFile(map2, file2, false);
           if (unknown2) {
             try {
@@ -42925,8 +42925,8 @@ function emoji() {
 }
 var ipv4 = /^(?:(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])$/;
 var ipv6 = /^(([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,7}:|([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,5}(:[0-9a-fA-F]{1,4}){1,2}|([0-9a-fA-F]{1,4}:){1,4}(:[0-9a-fA-F]{1,4}){1,3}|([0-9a-fA-F]{1,4}:){1,3}(:[0-9a-fA-F]{1,4}){1,4}|([0-9a-fA-F]{1,4}:){1,2}(:[0-9a-fA-F]{1,4}){1,5}|[0-9a-fA-F]{1,4}:((:[0-9a-fA-F]{1,4}){1,6})|:((:[0-9a-fA-F]{1,4}){1,7}|:))$/;
-var mac = (delimiter2) => {
-  const escapedDelim = escapeRegex(delimiter2 ?? ":");
+var mac = (delimiter3) => {
+  const escapedDelim = escapeRegex(delimiter3 ?? ":");
   return new RegExp(`^(?:[0-9A-F]{2}${escapedDelim}){5}[0-9A-F]{2}$|^(?:[0-9a-f]{2}${escapedDelim}){5}[0-9a-f]{2}$`);
 };
 var cidrv4 = /^((25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\/([0-9]|[1-2][0-9]|3[0-2])$/;
@@ -60335,7 +60335,7 @@ var ApplicationPreferences = class _ApplicationPreferences {
 // src/application.ts
 import { randomUUID as randomUUID16 } from "node:crypto";
 import { mkdtemp as mkdtemp5, realpath as realpath10, rm as rm10 } from "node:fs/promises";
-import { basename as basename9, dirname as dirname9, join as join20, resolve as resolve14 } from "node:path";
+import { basename as basename9, dirname as dirname9, join as join21, resolve as resolve14 } from "node:path";
 import { tmpdir as tmpdir6 } from "node:os";
 
 // src/diagnostics.ts
@@ -78473,12 +78473,12 @@ import { createHash as createHash5, randomBytes as randomBytes2, randomUUID as r
 import { access as access2, mkdir as mkdir5, mkdtemp, rm as rm4, stat as stat10 } from "node:fs/promises";
 import { rmSync, writeFileSync } from "node:fs";
 import { tmpdir as tmpdir2 } from "node:os";
-import { basename as basename4, extname as extname2, join as join9, resolve as resolve7 } from "node:path";
+import { basename as basename4, extname as extname2, join as join10, resolve as resolve7 } from "node:path";
 
 // src/r-environment.ts
 import { createHash as createHash4 } from "node:crypto";
 import { realpath as realpath4, stat as stat8 } from "node:fs/promises";
-import { delimiter, isAbsolute as isAbsolute4, join as join7, resolve as resolve6 } from "node:path";
+import { delimiter as delimiter2, isAbsolute as isAbsolute4, join as join8, resolve as resolve6 } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
@@ -78542,6 +78542,36 @@ function invalid(message2) {
   return new ResourceValidationError(message2);
 }
 
+// src/r-platform.ts
+import { delimiter, join as join7 } from "node:path";
+var mac3 = {
+  name: "darwin",
+  desktopRscriptFallback: "/Library/Frameworks/R.framework/Resources/bin/Rscript",
+  sharedLibrary: "libR.dylib",
+  loaderPathVariable: "DYLD_LIBRARY_PATH",
+  analyzerNeedsRHome: false,
+  matchesRPlatform: (value) => value.toLowerCase().includes("darwin")
+};
+var linux2 = {
+  name: "linux",
+  desktopRscriptFallback: null,
+  sharedLibrary: "libR.so",
+  loaderPathVariable: "LD_LIBRARY_PATH",
+  analyzerNeedsRHome: true,
+  matchesRPlatform: (value) => value.toLowerCase().includes("linux")
+};
+function rPlatform(platform = process.platform) {
+  if (platform === "darwin") return mac3;
+  if (platform === "linux") return linux2;
+  throw new Error(`unsupported R host platform ${platform}`);
+}
+function rLoaderEnvironment(rHome, platform = rPlatform()) {
+  const key2 = platform.loaderPathVariable;
+  const directories = [join7(rHome, "lib"), join7(rHome, "lib", "R")];
+  const existing = process.env[key2];
+  return { [key2]: [...directories, ...existing ? existing.split(delimiter) : []].join(delimiter) };
+}
+
 // src/r-environment.ts
 var execFileAsync = promisify(execFile);
 var R_VERSION_RANGE = ">=4.6.0 <4.7.0";
@@ -78558,19 +78588,20 @@ var REnvironmentError = class extends Error {
 };
 async function resolveREnvironment(options) {
   options.signal?.throwIfAborted();
+  const platformServices = currentRPlatform();
   const resources2 = options.resources;
   const manifest = await verifiedApplicationManifest(resources2).catch((error61) => {
     if (error61 instanceof REnvironmentError) throw error61;
     throw invalid2(`application manifest cannot be read while selecting R: ${messageOf3(error61)}`);
   });
   await validateHelperLibrary(resources2);
-  const selected = await selectRscript(options.rscript, resources2.electronEntry !== null);
+  const selected = await selectRscript(options.rscript, resources2.electronEntry !== null, platformServices);
   const probe = await probeR(selected, options.signal);
   const version2 = normalizeVersion(probe.version);
   if (!/^4\.6\./.test(version2)) throw unsupported(version2);
   const rHome = await existingDirectory(probe.rHome, "selected R_HOME");
-  await validateSharedLibrary(rHome);
-  validateRPlatform(probe.platform);
+  await validateSharedLibrary(rHome, platformServices);
+  validateRPlatform(probe.platform, platformServices);
   validateRArchitecture(probe.arch);
   const platformResult = rEnvironmentSchema.shape.platform.safeParse(process.platform);
   if (!platformResult.success) throw invalid2(`unsupported host platform ${process.platform}`);
@@ -78612,31 +78643,32 @@ function rServiceEnvironmentVariables(environment, resources2, analysisEnvironme
     R_LIBS_SITE: "",
     R_LIBS_USER: ""
   };
-  const loaderDirectories = [join7(environment.rHome, "lib"), join7(environment.rHome, "lib", "R")];
-  values.DYLD_LIBRARY_PATH = prependPath(loaderDirectories, process.env.DYLD_LIBRARY_PATH);
+  Object.assign(values, rLoaderEnvironment(environment.rHome));
   if (analysisEnvironmentId !== void 0) values.ALDER_ANALYSIS_ENVIRONMENT_ID = analysisEnvironmentId;
   return values;
 }
+function rAnalyzerEnvironmentVariables(environment, resources2, analysisEnvironmentId) {
+  const values = rServiceEnvironmentVariables(environment, resources2, analysisEnvironmentId);
+  if (!rPlatform().analyzerNeedsRHome) delete values.R_HOME;
+  return values;
+}
 function rKernelEnvironmentVariables(environment, resources2, projectDirectory) {
-  const projectLibrary = projectDirectory === void 0 ? void 0 : join7(projectDirectory, ".alder", "library");
+  const projectLibrary = projectDirectory === void 0 ? void 0 : join8(projectDirectory, ".alder", "library");
   return {
     R_HOME: environment.rHome,
     ALDER_R_PRIVATE_LIBRARY: resources2.rLibraryDirectory,
     ALDER_RESOURCES_ROOT: resources2.root,
     ALDER_WORKER_DIR: resources2.workerDirectory,
     ...projectLibrary !== void 0 && environment.libraryPaths.includes(projectLibrary) ? { ALDER_PROJECT_LIBRARY: projectLibrary } : {},
-    DYLD_LIBRARY_PATH: prependPath(
-      [join7(environment.rHome, "lib"), join7(environment.rHome, "lib", "R")],
-      process.env.DYLD_LIBRARY_PATH
-    )
+    ...rLoaderEnvironment(environment.rHome)
   };
 }
-async function selectRscript(requested, desktop) {
+async function selectRscript(requested, desktop, platform) {
   if (requested !== void 0) return resolveSelectedPath(requested, "selected Rscript");
   const discovered = await findOnPath("Rscript");
   if (discovered !== null) return discovered;
-  if (desktop) {
-    const framework = await resolveExecutableCandidate("/Library/Frameworks/R.framework/Resources/bin/Rscript");
+  if (desktop && platform.desktopRscriptFallback !== null) {
+    const framework = await resolveExecutableCandidate(platform.desktopRscriptFallback);
     if (framework !== null) return framework;
     throw notFound("Rscript was not found on PATH or at the standard macOS R framework location");
   }
@@ -78644,8 +78676,8 @@ async function selectRscript(requested, desktop) {
 }
 async function findOnPath(command) {
   const pathValue2 = process.env.PATH ?? "";
-  for (const directory of pathValue2.split(delimiter).filter(Boolean)) {
-    const candidates = [join7(directory, command)];
+  for (const directory of pathValue2.split(delimiter2).filter(Boolean)) {
+    const candidates = [join8(directory, command)];
     for (const candidate of candidates) {
       const resolved = await resolveExecutableCandidate(candidate);
       if (resolved !== null) return resolved;
@@ -78724,7 +78756,7 @@ async function probeProjectLibraries(rscript, projectDirectory, signal) {
   }
 }
 async function validateHelperLibrary(resources2) {
-  const description = join7(resources2.rLibraryDirectory, "alder", "DESCRIPTION");
+  const description = join8(resources2.rLibraryDirectory, "alder", "DESCRIPTION");
   try {
     const info = await stat8(description);
     if (!info.isFile()) throw new Error("not a file");
@@ -78746,7 +78778,7 @@ async function validateHelperLoad(environment, manifest, helperLibrary, signal) 
         R_LIBS: helperLibrary,
         R_LIBS_SITE: "",
         R_LIBS_USER: "",
-        DYLD_LIBRARY_PATH: prependPath([join7(environment.rHome, "lib"), join7(environment.rHome, "lib", "R")], process.env.DYLD_LIBRARY_PATH)
+        ...rLoaderEnvironment(environment.rHome)
       },
       timeout: R_PROBE_TIMEOUT_MS,
       maxBuffer: 512 * 1024
@@ -78760,18 +78792,23 @@ async function validateHelperLoad(environment, manifest, helperLibrary, signal) 
     throw invalid2(`Alder helper package cannot load under selected R: ${messageOf3(error61)}`);
   }
 }
-async function validateSharedLibrary(rHome) {
-  const candidates = [join7(rHome, "lib", "libR.dylib"), join7(rHome, "lib", "R", "libR.dylib")];
+async function validateSharedLibrary(rHome, platform) {
+  const candidates = [join8(rHome, "lib", platform.sharedLibrary), join8(rHome, "lib", "R", platform.sharedLibrary)];
   for (const candidate of candidates) {
     if (await isFile(candidate)) return;
   }
   throw invalid2(`selected R has no loadable shared library under ${rHome}`);
 }
-function validateRPlatform(platform) {
-  const normalized = platform.toLowerCase();
-  const expected = "darwin";
-  if (!normalized.includes(expected)) {
-    throw invalid2(`selected R platform ${platform} does not match ${process.platform}`);
+function validateRPlatform(value, platform) {
+  if (!platform.matchesRPlatform(value)) {
+    throw invalid2(`selected R platform ${value} does not match ${platform.name}`);
+  }
+}
+function currentRPlatform() {
+  try {
+    return rPlatform();
+  } catch (error61) {
+    throw invalid2(messageOf3(error61));
   }
 }
 function validateRArchitecture(arch) {
@@ -78847,9 +78884,6 @@ function uniquePaths(paths) {
 }
 function createIdentity(value) {
   return createHash4("sha256").update(JSON.stringify(value)).digest("hex");
-}
-function prependPath(prefixes, existing) {
-  return [...prefixes, ...existing ? existing.split(delimiter) : []].join(delimiter);
 }
 function withoutRHome(environment) {
   const result = { ...environment };
@@ -79011,7 +79045,7 @@ function validateMaxFrameBytes(value) {
 import { createHmac, randomBytes, randomUUID as randomUUID5, timingSafeEqual } from "node:crypto";
 import { EventEmitter as EventEmitter2 } from "node:events";
 import { access, chmod as chmod2, mkdir as mkdir4, rm as rm3, stat as stat9, writeFile as writeFile3 } from "node:fs/promises";
-import { join as join8 } from "node:path";
+import { join as join9 } from "node:path";
 import { createConnection, createServer } from "node:net";
 var MESSAGE_DELIMITER = Buffer.from("<IDS|MSG>");
 var JUPYTER_VERSION = "5.3";
@@ -79100,7 +79134,7 @@ var ArkKernel = class extends EventEmitter2 {
       this.assertStartAllowed();
       const ports = await reserveConnectionPorts();
       this.assertStartAllowed();
-      this.connectionFile = join8(
+      this.connectionFile = join9(
         this.options.connectionDirectory,
         `ark-${process.pid}-${randomUUID5()}.json`
       );
@@ -79709,9 +79743,9 @@ function decodeMessage(frames, key2, maxMessageBytes = DEFAULT_MAX_FRAME_BYTES) 
       throw new FrameProtocolError("Jupyter message exceeds the configured byte limit");
     }
   }
-  const delimiter2 = frames.findIndex((frame) => frame.equals(MESSAGE_DELIMITER));
-  if (delimiter2 < 0) throw new FrameProtocolError("Jupyter message delimiter is missing");
-  const body = frames.slice(delimiter2 + 1);
+  const delimiter3 = frames.findIndex((frame) => frame.equals(MESSAGE_DELIMITER));
+  if (delimiter3 < 0) throw new FrameProtocolError("Jupyter message delimiter is missing");
+  const body = frames.slice(delimiter3 + 1);
   if (body.length < 5) {
     throw new FrameProtocolError(`Jupyter message has ${body.length} body frames, expected at least 5`);
   }
@@ -79723,7 +79757,7 @@ function decodeMessage(frames, key2, maxMessageBytes = DEFAULT_MAX_FRAME_BYTES) 
   const metadata = asRecord(parseJsonFrame(metadataBytes, "metadata"), "Jupyter metadata");
   const content = asRecord(parseJsonFrame(contentBytes, "content", maxMessageBytes), "Jupyter content");
   return {
-    identities: frames.slice(0, delimiter2),
+    identities: frames.slice(0, delimiter3),
     header,
     parentHeader,
     metadata,
@@ -80483,7 +80517,7 @@ var Engine = class extends EventEmitter3 {
         throw new EngineTransportError("engine request queue is full", "kernel");
       }
       requestId = this.nextRequestId();
-      batch.permit = join9(this.runtime.controlDirectory, ".alder-batch-" + randomUUID6());
+      batch.permit = join10(this.runtime.controlDirectory, ".alder-batch-" + randomUUID6());
       writeFileSync(batch.permit, "", { flag: "wx", mode: 384 });
       batch.states = values.map((value) => ({ ...makeEvaluation(requestId, value, (event) => {
         callbacks = callbacks.then(() => onEvent?.(event));
@@ -80947,8 +80981,7 @@ var Engine = class extends EventEmitter3 {
   makeRPeer(role, startupTimeoutMs, maxFrameBytes, generation) {
     const paths = this.paths;
     const environment = this.requireEnvironment("analyzer");
-    const peerEnvironment = { ...paths.analyzerEnvironment, ...rServiceEnvironmentVariables(environment, this.options.resources, this.analysisEnvironmentId), ALDER_HOST_ROLE: role };
-    if (process.platform === "darwin") delete peerEnvironment.R_HOME;
+    const peerEnvironment = { ...paths.analyzerEnvironment, ...rAnalyzerEnvironmentVariables(environment, this.options.resources, this.analysisEnvironmentId), ALDER_HOST_ROLE: role };
     return new RPeer(
       role,
       environment.rscript,
@@ -81853,7 +81886,7 @@ function evaluationWire(value, controlDirectory) {
   const encoded = encodeSource(value.source, "evaluation source");
   let source;
   if (encoded.bytes > 1024 * 1024) {
-    const path3 = join9(controlDirectory, ".alder-source-" + randomUUID6());
+    const path3 = join10(controlDirectory, ".alder-source-" + randomUUID6());
     writeFileSync(path3, encoded.text, { encoding: "utf8", flag: "wx", mode: 384 });
     source = { code_path: path3 };
   } else {
@@ -82055,9 +82088,9 @@ function encodeSource(value, label) {
   return { text: value, base64: source.toString("base64"), bytes: source.length };
 }
 async function prepareRuntime(paths) {
-  const captureDirectory = await mkdtemp(join9(paths.artifactDirectory, ".alder-capture-"));
+  const captureDirectory = await mkdtemp(join10(paths.artifactDirectory, ".alder-capture-"));
   try {
-    const controlDirectory = await mkdtemp(join9(paths.artifactDirectory, ".alder-control-"));
+    const controlDirectory = await mkdtemp(join10(paths.artifactDirectory, ".alder-control-"));
     return { captureDirectory, controlDirectory, ownedDirectories: [captureDirectory, controlDirectory] };
   } catch (error61) {
     await rm4(captureDirectory, { recursive: true, force: true }).catch(() => {
@@ -82069,9 +82102,9 @@ async function resolvePaths(options, environment, signal, pathOptions = options)
   throwIfAborted(signal);
   const resources2 = options.resources;
   const workerDirectory = resolve7(resources2.workerDirectory);
-  const arkStartupScript = join9(workerDirectory, "host-ark.R");
-  const analyzerScript = join9(workerDirectory, "host-analyzer.R");
-  const framingScript = join9(workerDirectory, "host-framing.R");
+  const arkStartupScript = join10(workerDirectory, "host-ark.R");
+  const analyzerScript = join10(workerDirectory, "host-analyzer.R");
+  const framingScript = join10(workerDirectory, "host-framing.R");
   const arkExecutable = resolve7(resources2.arkExecutable);
   await Promise.all([
     requireFile2(arkExecutable, "Ark executable"),
@@ -82090,7 +82123,7 @@ async function resolvePaths(options, environment, signal, pathOptions = options)
     artifactDirectory = resolve7(options.artifactDirectory);
     await mkdir5(artifactDirectory, { recursive: true });
     throwIfAborted(signal);
-    cacheDirectory = pathOptions.cacheDirectory === void 0 ? await mkdtemp(join9(tmpdir2(), "alder-engine-cache-")) : resolve7(pathOptions.cacheDirectory);
+    cacheDirectory = pathOptions.cacheDirectory === void 0 ? await mkdtemp(join10(tmpdir2(), "alder-engine-cache-")) : resolve7(pathOptions.cacheDirectory);
     if (pathOptions.cacheDirectory === void 0) ownedDirectories.push(cacheDirectory);
     else await mkdir5(cacheDirectory, { recursive: true });
   } catch (error61) {
@@ -82168,7 +82201,7 @@ import { randomBytes as randomBytes3, randomUUID as randomUUID8, timingSafeEqual
 import { createReadStream } from "node:fs";
 import { createServer as createHttpServer } from "node:http";
 import { lstat as lstat6, readFile as readFile4, realpath as realpath5, stat as stat11 } from "node:fs/promises";
-import { extname as extname3, join as join11, resolve as resolve9, sep as sep2 } from "node:path";
+import { extname as extname3, join as join12, resolve as resolve9, sep as sep2 } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { URL as URL2 } from "node:url";
 
@@ -82186,7 +82219,7 @@ var import_websocket_server = __toESM(require_websocket_server(), 1);
 import { constants as constants2 } from "node:fs";
 import { randomUUID as randomUUID7 } from "node:crypto";
 import { chmod as chmod3, lstat as lstat5, mkdir as mkdir6, open as openFile, rename as rename4, rm as rm5 } from "node:fs/promises";
-import { dirname as dirname4, join as join10, parse as parse3, resolve as resolve8, sep } from "node:path";
+import { dirname as dirname4, join as join11, parse as parse3, resolve as resolve8, sep } from "node:path";
 var PrivatePathError = class extends Error {
   constructor(code2, message2, cause) {
     super(message2);
@@ -82231,7 +82264,7 @@ async function inspectPath(path3, expectFinal = null) {
   let current = root;
   let exists = true;
   for (let index = 0; index < components.length; index += 1) {
-    current = join10(current, components[index]);
+    current = join11(current, components[index]);
     let info;
     try {
       info = await lstat5(current);
@@ -82362,7 +82395,7 @@ async function writePrivateFile(path3, bytes) {
     if (!isMissing(error61)) throw error61;
   }
   const basename10 = inspection.path.slice(inspection.path.lastIndexOf(sep) + 1);
-  const temporary = join10(parent, `.${basename10}.${randomUUID7()}.tmp`);
+  const temporary = join11(parent, `.${basename10}.${randomUUID7()}.tmp`);
   let handle;
   try {
     const flags = constants2.O_WRONLY | constants2.O_CREAT | constants2.O_EXCL | (constants2.O_NOFOLLOW ?? 0);
@@ -83445,7 +83478,7 @@ function createAlderServer(options) {
     if (path3 === "/" || path3 === "/index.html") {
       assertBrowserAuthority(request);
       if (!method(response, request.method ?? "", "GET")) return;
-      const index = options.indexFile ?? join11(options.staticDir, "..", "index.html");
+      const index = options.indexFile ?? join12(options.staticDir, "..", "index.html");
       let html = await readFile4(index, "utf8");
       if (!html.includes("__ALDER_CSP_NONCE__")) throw new HttpBoundaryError("internal_error", "bootstrap shell is missing its CSP nonce marker", 500);
       html = html.replaceAll("__ALDER_CSP_NONCE__", nonce);
@@ -97145,17 +97178,17 @@ async function readLayout(value) {
 // src/persistence.ts
 import { createHash as createHash6, randomUUID as randomUUID10 } from "node:crypto";
 import { mkdir as mkdir8, open as open7, realpath as realpath7, rename as rename5, unlink as unlink3 } from "node:fs/promises";
-import { basename as basename5, dirname as dirname5, join as join14, resolve as resolve10 } from "node:path";
+import { basename as basename5, dirname as dirname5, join as join15, resolve as resolve10 } from "node:path";
 
 // src/packages.ts
 var import_yaml4 = __toESM(require_dist(), 1);
 import { lstat as lstat7, mkdir as mkdir7, readFile as readFile7, realpath as realpath6, stat as stat12 } from "node:fs/promises";
-import { isAbsolute as isAbsolute5, join as join13 } from "node:path";
+import { isAbsolute as isAbsolute5, join as join14 } from "node:path";
 
 // src/jobs.ts
 import { mkdtemp as mkdtemp2, readFile as readFile6, rm as rm6, writeFile as writeFile4 } from "node:fs/promises";
 import { tmpdir as tmpdir3 } from "node:os";
-import { join as join12 } from "node:path";
+import { join as join13 } from "node:path";
 var PackageWorkerError = class extends Error {
   constructor(code2, message2, details) {
     super(message2);
@@ -97185,16 +97218,16 @@ var PackageWorker = class {
     const environment = this.options.environment;
     if (environment === null) throw failure("r_not_found", "selected R environment is unavailable");
     const operationId = typeof payload.operationId === "string" ? payload.operationId : void 0;
-    const directory = await mkdtemp2(join12(tmpdir3(), "alder-package-"));
+    const directory = await mkdtemp2(join13(tmpdir3(), "alder-package-"));
     let child;
     try {
-      const inputPath = join12(directory, "input.json");
-      const outputPath = join12(directory, "result.json");
+      const inputPath = join13(directory, "input.json");
+      const outputPath = join13(directory, "result.json");
       await writeFile4(inputPath, JSON.stringify({ command, ...payload }), { mode: 384 });
       if (this.closed) throw failure("job_closed", "package service is closed");
       const spawning = this.options.processScope.spawn({
         executable: environment.rscript,
-        args: ["--vanilla", join12(this.options.resources.workerDirectory, "package-job.R"), inputPath, outputPath],
+        args: ["--vanilla", join13(this.options.resources.workerDirectory, "package-job.R"), inputPath, outputPath],
         cwd: this.options.projectDirectory,
         environment: workerEnvironment(environment, this.options.resources),
         stdio: "pipes"
@@ -97326,13 +97359,13 @@ var PackageError = class extends Error {
   details;
 };
 function packageMetadataPath(projectDirectory) {
-  return join13(projectDirectory, ...PACKAGE_METADATA_RELATIVE_PATH);
+  return join14(projectDirectory, ...PACKAGE_METADATA_RELATIVE_PATH);
 }
 function packageLibraryPath(projectDirectory) {
-  return join13(projectDirectory, ...PACKAGE_LIBRARY_RELATIVE_PATH);
+  return join14(projectDirectory, ...PACKAGE_LIBRARY_RELATIVE_PATH);
 }
 function packageRepositoryPath(projectDirectory) {
-  return join13(projectDirectory, ...PACKAGE_REPOSITORY_RELATIVE_PATH);
+  return join14(projectDirectory, ...PACKAGE_REPOSITORY_RELATIVE_PATH);
 }
 function validatePackageNames(packages, allowEmpty = true) {
   if (!Array.isArray(packages) || packages.some((value) => typeof value !== "string")) throw new PackageError("invalid_request", "packages must be an array of package names");
@@ -97483,11 +97516,11 @@ async function existingDirectory2(path3) {
   }
 }
 async function ensureProjectLibrary(project, library) {
-  const alder = join13(project, ".alder");
+  const alder = join14(project, ".alder");
   await mkdir7(alder, { recursive: true, mode: 448 });
   await mkdir7(library, { recursive: true, mode: 448 });
   if (!(await lstat7(alder)).isDirectory() || !(await lstat7(library)).isDirectory()) throw new Error("project library is not a directory");
-  if (await realpath6(library) !== join13(await realpath6(project), ".alder", "library")) throw new Error("project library is outside the project");
+  if (await realpath6(library) !== join14(await realpath6(project), ".alder", "library")) throw new Error("project library is outside the project");
 }
 function workerResult(value) {
   if (!isRecord4(value) || typeof value.ok !== "boolean" || !Array.isArray(value.records)) throw new PackageError("job_failed", "package service returned invalid data");
@@ -97632,7 +97665,7 @@ async function canonicalDestination(path3) {
     if (error61.code !== "ENOENT") throw error61;
     const parent = dirname5(path3);
     if (parent === path3) throw error61;
-    return join14(await canonicalDestination(parent), basename5(path3));
+    return join15(await canonicalDestination(parent), basename5(path3));
   }
 }
 async function resolveNotebookPath(path3) {
@@ -97641,7 +97674,7 @@ async function resolveNotebookPath(path3) {
     return { spelling, canonical: await realpath7(spelling) };
   } catch (error61) {
     if (error61.code !== "ENOENT") throw error61;
-    return { spelling, canonical: join14(await realpath7(dirname5(spelling)), basename5(spelling)) };
+    return { spelling, canonical: join15(await realpath7(dirname5(spelling)), basename5(spelling)) };
   }
 }
 function cloneNotebook(document) {
@@ -97756,7 +97789,7 @@ var DocumentStore = class _DocumentStore {
     return next;
   }
   sidecarPath(kind) {
-    return kind === "config" ? join14(dirname5(this.path), ".alder", "config.yaml") : kind === "layout" ? `${this.path}.alder-layout.json` : packageMetadataPath(dirname5(this.path));
+    return kind === "config" ? join15(dirname5(this.path), ".alder", "config.yaml") : kind === "layout" ? `${this.path}.alder-layout.json` : packageMetadataPath(dirname5(this.path));
   }
   sidecarObservation(kind) {
     const current = this.sidecars.get(this.sidecarPath(kind));
@@ -97832,7 +97865,7 @@ var DocumentStore = class _DocumentStore {
       canonical = await realpath7(this.spelling);
     } catch (error61) {
       if (error61.code !== "ENOENT") throw error61;
-      canonical = join14(await realpath7(dirname5(this.spelling)), basename5(this.spelling));
+      canonical = join15(await realpath7(dirname5(this.spelling)), basename5(this.spelling));
     }
     const current = await diskVersion(this.path);
     if (canonical !== this.path || !sameDisk(this.version, current)) throw new FileConflict();
@@ -97844,7 +97877,7 @@ var DocumentStore = class _DocumentStore {
       this.documentValue = cloneNotebook(candidate);
       return { path: this.path, changed: false, digest: this.version.digest };
     }
-    const stage = join14(dirname5(this.path), `.alder-save-${randomUUID10()}`);
+    const stage = join15(dirname5(this.path), `.alder-save-${randomUUID10()}`);
     try {
       await writeStaged(stage, bytes, this.version.mode);
       await this.assertUnchanged();
@@ -97885,7 +97918,7 @@ var DocumentStore = class _DocumentStore {
       };
       const candidate = { ...this.candidate(fixed), path: destination };
       const bytes = serializeNotebook(candidate);
-      let stage = join14(dirname5(destination), ".alder-save-as-" + randomUUID10());
+      let stage = join15(dirname5(destination), ".alder-save-as-" + randomUUID10());
       const removeStage = async () => {
         if (stage === null) return;
         const current = stage;
@@ -97951,7 +97984,7 @@ var DocumentStore = class _DocumentStore {
         canonical = await realpath7(this.spelling);
       } catch (error61) {
         if (error61.code !== "ENOENT") throw error61;
-        canonical = join14(await realpath7(dirname5(this.spelling)), basename5(this.spelling));
+        canonical = join15(await realpath7(dirname5(this.spelling)), basename5(this.spelling));
       }
       if (canonical !== this.path || current.digest !== precondition.expectedDiskDigest || this.versionToken(current) !== precondition.expectedDiskVersion) throw new FileConflict();
       const parsed = parseNotebook(current.bytes, this.path);
@@ -98050,7 +98083,7 @@ var DocumentStore = class _DocumentStore {
       let stage = null;
       if (!sameBytes2(bytes, expected.bytes)) {
         await mkdir8(parent, { recursive: true, mode: 448 });
-        stage = join14(parent, ".alder-sidecar-" + randomUUID10());
+        stage = join15(parent, ".alder-sidecar-" + randomUUID10());
         try {
           await writeStaged(stage, bytes, expected.mode);
           await assertUnchanged();
@@ -98148,7 +98181,7 @@ async function writeStaged(path3, bytes, mode) {
 // src/recovery.ts
 import { createHash as createHash7, randomUUID as randomUUID11 } from "node:crypto";
 import { access as access3, mkdir as mkdir9, open as open8, readFile as readFile8, realpath as realpath8, rename as rename6, rm as rm7 } from "node:fs/promises";
-import { dirname as dirname6, join as join15, resolve as resolve11 } from "node:path";
+import { dirname as dirname6, join as join16, resolve as resolve11 } from "node:path";
 var RecoveryError = class extends Error {
   constructor(code2, message2, originals = [], cause) {
     super(message2, cause === void 0 ? void 0 : { cause });
@@ -98214,8 +98247,8 @@ var RecoveryWriter = class _RecoveryWriter {
   constructor(options) {
     this.rootDir = resolve11(options.rootDir);
     this.key = options.key;
-    this.directory = join15(this.rootDir, "recovery-" + hash2(JSON.stringify(options.key)));
-    this.journalPath = join15(this.directory, "journal.json");
+    this.directory = join16(this.rootDir, "recovery-" + hash2(JSON.stringify(options.key)));
+    this.journalPath = join16(this.directory, "journal.json");
     this.recoveryId = options.recoveryId ?? randomUUID11();
     this.baseline = normalizeBaseline(options.baseline);
     this.latestFingerprint = fingerprint(this.baseline);
@@ -98232,9 +98265,9 @@ var RecoveryWriter = class _RecoveryWriter {
     return writer;
   }
   static async hasJournal(options) {
-    const directory = join15(resolve11(options.rootDir), "recovery-" + hash2(JSON.stringify(options.key)));
+    const directory = join16(resolve11(options.rootDir), "recovery-" + hash2(JSON.stringify(options.key)));
     try {
-      await access3(join15(directory, "journal.json"));
+      await access3(join16(directory, "journal.json"));
       return true;
     } catch (error61) {
       if (missing2(error61)) return false;
@@ -98245,7 +98278,7 @@ var RecoveryWriter = class _RecoveryWriter {
     try {
       await mkdir9(this.directory, { recursive: true, mode: 448 });
       await pruneCorruptRecoveryCopies(this.directory);
-      const identityPath = join15(this.directory, "document.id");
+      const identityPath = join16(this.directory, "document.id");
       try {
         const id2 = (await readPrivateFile(identityPath, { maxBytes: 128 })).toString("utf8");
         if (!/^[A-Za-z0-9_-]{1,128}$/.test(id2)) throw new Error("Recovery identity is invalid");
@@ -98293,7 +98326,7 @@ var RecoveryWriter = class _RecoveryWriter {
     if (!/^[A-Za-z0-9_-]{1,128}$/.test(recoveryId)) throw new RecoveryError("recovery_invalid", "Recovery identity is invalid");
     await this.writeQueue;
     if (this.pending || this.corruptJournal) throw Object.assign(new Error("Save As destination has pending recovery data"), { code: "destination_recovery_conflict" });
-    await this.atomicWrite(join15(this.directory, "document.id"), Buffer.from(recoveryId));
+    await this.atomicWrite(join16(this.directory, "document.id"), Buffer.from(recoveryId));
     this.recoveryId = recoveryId;
   }
   update(baseline) {
@@ -98342,9 +98375,9 @@ var RecoveryWriter = class _RecoveryWriter {
       if (!this.dirty) return;
       try {
         await mkdir9(this.directory, { recursive: true, mode: 448 });
-        await this.atomicWrite(join15(this.directory, "document.id"), Buffer.from(this.recoveryId));
+        await this.atomicWrite(join16(this.directory, "document.id"), Buffer.from(this.recoveryId));
         if (this.corruptJournal) {
-          await rename6(this.journalPath, join15(this.directory, "corrupt-" + randomUUID11() + ".json")).catch((error61) => {
+          await rename6(this.journalPath, join16(this.directory, "corrupt-" + randomUUID11() + ".json")).catch((error61) => {
             if (!missing2(error61)) throw error61;
           });
           await pruneCorruptRecoveryCopies(this.directory);
@@ -98380,7 +98413,7 @@ var RecoveryWriter = class _RecoveryWriter {
 // src/publishing.ts
 import { randomUUID as randomUUID12 } from "node:crypto";
 import { access as access4, chmod as chmod4, link as link2, mkdtemp as mkdtemp3, readFile as readFile9, rm as rm8, stat as stat13, unlink as unlink4, writeFile as writeFile5 } from "node:fs/promises";
-import { basename as basename6, dirname as dirname7, join as join16, resolve as resolve12 } from "node:path";
+import { basename as basename6, dirname as dirname7, join as join17, resolve as resolve12 } from "node:path";
 import { tmpdir as tmpdir4 } from "node:os";
 
 // node_modules/linkedom/esm/shared/symbols.js
@@ -108750,9 +108783,9 @@ async function publishSnapshot(outputStore, processScope, quartoExecutable, sour
   let stagingDirectory;
   outputStore.pin(snapshot.artifacts);
   try {
-    stagingDirectory = await mkdtemp3(join16(tmpdir4(), "alder-publish-"));
-    const qmdPath = join16(stagingDirectory, "snapshot.qmd");
-    const renderedPath = join16(stagingDirectory, "rendered.html");
+    stagingDirectory = await mkdtemp3(join17(tmpdir4(), "alder-publish-"));
+    const qmdPath = join17(stagingDirectory, "snapshot.qmd");
+    const renderedPath = join17(stagingDirectory, "rendered.html");
     const qmd = await composeQmd(snapshot, outputStore, options.includeCode, options.signal);
     await writeFile5(qmdPath, qmd, { encoding: "utf8", mode: 384, flag: "wx" });
     await runQuarto(processScope, quartoExecutable, stagingDirectory, qmdPath, renderedPath, options.signal, quartoTimeoutMs);
@@ -108987,7 +109020,7 @@ async function validateDestinationPath(path3) {
   return outputPath;
 }
 async function publishAbsentDestination(path3, bytes, signal) {
-  const temporary = join16(dirname7(path3), `.${basename6(path3)}.alder-${process.pid}-${randomUUID12()}.tmp`);
+  const temporary = join17(dirname7(path3), `.${basename6(path3)}.alder-${process.pid}-${randomUUID12()}.tmp`);
   try {
     throwIfAborted3(signal);
     await writeFile5(temporary, bytes, { flag: "wx", mode: 384 });
@@ -109063,7 +109096,7 @@ var PUBLISH_CSS = `
 // src/formatting.ts
 import { mkdtemp as mkdtemp4, readFile as readFile10, rm as rm9, writeFile as writeFile6 } from "node:fs/promises";
 import { tmpdir as tmpdir5 } from "node:os";
-import { join as join17 } from "node:path";
+import { join as join18 } from "node:path";
 import { TextDecoder as TextDecoder2 } from "node:util";
 var FormattingError = class extends Error {
   constructor(code2, message2) {
@@ -109121,8 +109154,8 @@ var FormattingService = class {
   }
 };
 async function formatOne(airExecutable, processScope, body, signal) {
-  const directory = await mkdtemp4(join17(tmpdir5(), "alder-format-"));
-  const input2 = join17(directory, "cell.R");
+  const directory = await mkdtemp4(join18(tmpdir5(), "alder-format-"));
+  const input2 = join18(directory, "cell.R");
   try {
     const text2 = body.join("\n");
     if (Buffer.byteLength(text2, "utf8") > MAX_OUTPUT_BYTES2) {
@@ -109721,7 +109754,7 @@ function boundedUtf8(value, maxBytes) {
 // src/uploads.ts
 import { randomUUID as randomUUID13 } from "node:crypto";
 import { chmod as chmod5, lstat as lstat8, mkdir as mkdir10, unlink as unlink5, writeFile as writeFile7 } from "node:fs/promises";
-import { join as join18 } from "node:path";
+import { join as join19 } from "node:path";
 var UPLOAD_MAX_FILES = 1024;
 var UPLOAD_MAX_BASE64_BYTES = 16 * 1024 * 1024;
 var UPLOAD_MAX_TOTAL_BYTES = 12 * 1024 * 1024;
@@ -109766,7 +109799,7 @@ var UploadStore = class {
       const value = [];
       for (const file2 of decoded) {
         if (this.closed) throw invalid4("session_stopped", "upload store is closed");
-        const path3 = join18(this.directory, `upload-${randomUUID13()}`);
+        const path3 = join19(this.directory, `upload-${randomUUID13()}`);
         paths.push(path3);
         await writeFile7(path3, file2.bytes, { flag: "wx", mode: 384 });
         await chmod5(path3, 384);
@@ -110030,7 +110063,7 @@ async function createProcessScope(_resources, diagnostics) {
 // src/sessions.ts
 import { createHash as createHash8, randomBytes as randomBytes4, randomUUID as randomUUID15 } from "node:crypto";
 import { readdir as readdir4, realpath as realpath9, unlink as unlink6 } from "node:fs/promises";
-import { basename as basename8, dirname as dirname8, join as join19, resolve as resolve13 } from "node:path";
+import { basename as basename8, dirname as dirname8, join as join20, resolve as resolve13 } from "node:path";
 
 // src/backend-client.ts
 var import_proper_lockfile = __toESM(require_proper_lockfile(), 1);
@@ -110133,7 +110166,7 @@ function isUntitledRecoveryId(value) {
   return typeof value === "string" && UNTITLED_SESSION_KEY_PATTERN.test(value);
 }
 function untitledRecoveryDescriptorDirectory(dataRoot) {
-  return join19(resolve13(dataRoot ?? envPaths("alder", { suffix: "" }).data), UNTITLED_RECOVERY_DIRECTORY);
+  return join20(resolve13(dataRoot ?? envPaths("alder", { suffix: "" }).data), UNTITLED_RECOVERY_DIRECTORY);
 }
 async function registerUntitledRecoveryDescriptor(id2, projectDirectory, dataRoot) {
   const validId = requireUntitledRecoveryId(id2);
@@ -110183,7 +110216,7 @@ async function canonicalizeProjectDirectory(value) {
   return realpath9(path3).catch(() => path3);
 }
 function untitledRecoveryDescriptorPath(directory, id2) {
-  return join19(directory, id2 + ".json");
+  return join20(directory, id2 + ".json");
 }
 async function readUntitledRecoveryDescriptor(path3, id2) {
   let bytes;
@@ -110222,7 +110255,7 @@ async function canonicalizeDestination(path3) {
   try {
     return await realpath9(target);
   } catch {
-    return join19(await realpath9(dirname8(target)), basename8(target));
+    return join20(await realpath9(dirname8(target)), basename8(target));
   }
 }
 function sessionKeyFor(path3) {
@@ -110293,8 +110326,8 @@ var optionsSchema = external_exports.object({
 async function startHost(input2) {
   const options = optionsSchema.parse(input2);
   if (options.path !== null) return startNotebookHost(options, options.path, false, options.path);
-  const temporary = await realpath10(await mkdtemp5(join20(tmpdir6(), "alder-unsaved-")));
-  const storagePath = join20(temporary, "Untitled.R");
+  const temporary = await realpath10(await mkdtemp5(join21(tmpdir6(), "alder-unsaved-")));
+  const storagePath = join21(temporary, "Untitled.R");
   try {
     const app = await startNotebookHost(options, storagePath, true, null);
     const closed = app.closed.finally(() => rm10(temporary, { recursive: true, force: true }));
@@ -110586,14 +110619,14 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
       lsp = value;
     };
     var setLsp = setLsp2;
-    work = await realpath10(await mkdtemp5(join20(tmpdir6(), "alder-host-")));
-    uploads = new UploadStore(join20(work, "uploads"));
-    cacheDirectory = unsaved ? join20(work, "cache") : join20(notebookDirectory, ".alder", "cache");
+    work = await realpath10(await mkdtemp5(join21(tmpdir6(), "alder-host-")));
+    uploads = new UploadStore(join21(work, "uploads"));
+    cacheDirectory = unsaved ? join21(work, "cache") : join21(notebookDirectory, ".alder", "cache");
     const opened = await DocumentStore.open(storagePath);
     store = opened.store;
     let notebook = opened.notebook;
     if (isUntitled) notebook = { ...notebook, path: null };
-    const projectPath = isUntitled ? join20(notebookDirectory, ".alder", "config.yaml") : projectConfigPath(store.path);
+    const projectPath = isUntitled ? join21(notebookDirectory, ".alder", "config.yaml") : projectConfigPath(store.path);
     projectSettings = await loadProjectSettings(projectPath);
     config3 = configurationFor(notebook);
     projectLayoutIntent = isUntitled ? null : await readLayout(store.path);
@@ -110854,7 +110887,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
         const published = await prepared.publish();
         projectSettings = published.value;
         config3 = configurationFor(context.document);
-        cacheDirectory = config3.cache.dir ? resolve14(notebookDirectory, config3.cache.dir) : join20(notebookDirectory, ".alder", "cache");
+        cacheDirectory = config3.cache.dir ? resolve14(notebookDirectory, config3.cache.dir) : join21(notebookDirectory, ".alder", "cache");
         settingsErrors.delete("project");
         publishSettingsError();
         const sidecars = { ...context.sidecars, config: published.observation };
@@ -110890,7 +110923,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
           pendingSidecars.packages = false;
           const sidecars = { ...context.sidecars, packages: published.observation };
           publishSource(context, { document: context.document, path: context.path, layout: context.layout, disk: context.disk, sidecars, dirty: context.dirty, advanceRevision: false });
-          return { ok: true, path: notebookDirectory, metadata: join20(notebookDirectory, ".alder", "packages.yaml"), packages: [...published.value], sidecarVersion: published.observation.version };
+          return { ok: true, path: notebookDirectory, metadata: join21(notebookDirectory, ".alder", "packages.yaml"), packages: [...published.value], sidecarVersion: published.observation.version };
         } catch (error61) {
           const code2 = pendingSidecars.packages ? "sidecar_write_failed" : "recovery_checkpoint_failed";
           return publishSidecarFailure(context, context.document, context.config, context.layout, "packages", error61, code2);
@@ -110930,7 +110963,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
           const destinationDirectory = dirname9(destination);
           const destinationProjectConfig = await loadProjectSettings(projectConfigPath(destination));
           const destinationConfig = configurationFor(context.document, destinationProjectConfig);
-          const destinationCache = destinationConfig.cache.dir ? resolve14(destinationDirectory, destinationConfig.cache.dir) : join20(destinationDirectory, ".alder", "cache");
+          const destinationCache = destinationConfig.cache.dir ? resolve14(destinationDirectory, destinationConfig.cache.dir) : join21(destinationDirectory, ".alder", "cache");
           const destinationLayout = await readLayout(destination);
           let destinationPackages = [];
           try {
@@ -111313,7 +111346,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
             if (store === void 0) throw Object.assign(new Error("notebook has no saved source"), { code: "notebook_has_no_path" });
             const snapshot = publicationSnapshot(store.currentDocument, liveSnapshot);
             const requestedPath = typeof payload.outputPath === "string" && payload.outputPath.length > 0 ? payload.outputPath : null;
-            const outputPath = requestedPath ?? join20(work, "publish-" + randomUUID16() + ".html");
+            const outputPath = requestedPath ?? join21(work, "publish-" + randomUUID16() + ".html");
             const pendingPublish = publisher.publishSnapshot(snapshot, { outputPath, includeCode: payload.includeCode === true, signal: operation?.signal });
             activePublishes.add(pendingPublish);
             const result = await pendingPublish.finally(() => {
@@ -111521,7 +111554,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
         }
       },
       staticDir: options.resources.rendererDirectory,
-      indexFile: join20(options.resources.rendererDirectory, "index.html"),
+      indexFile: join21(options.resources.rendererDirectory, "index.html"),
       uploads,
       artifactStore,
       diagnostics,

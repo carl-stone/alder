@@ -4,10 +4,12 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import {
+  rAnalyzerEnvironmentVariables,
   resolveREnvironment,
   rKernelEnvironmentVariables,
   rServiceEnvironmentVariables,
 } from "../src/r-environment.js";
+import { rLoaderEnvironment, rPlatform } from "../src/r-platform.js";
 import { resolveApplicationResources } from "../src/resources.js";
 
 interface Fixture {
@@ -40,6 +42,22 @@ test("missing editor files give an actionable startup error", async () => {
     await rm(fixture.resources.rendererDirectory, { recursive: true });
     await assert.rejects(resolveApplicationResources(fixture.root), /rendererDirectory is unavailable/);
   } finally { await removeFixture(fixture); }
+});
+
+test("R platform services select the host's library and loader rules", () => {
+  const mac = rPlatform("darwin");
+  const linux = rPlatform("linux");
+  assert.equal(mac.desktopRscriptFallback, "/Library/Frameworks/R.framework/Resources/bin/Rscript");
+  assert.equal(mac.sharedLibrary, "libR.dylib");
+  assert.equal(mac.matchesRPlatform("aarch64-apple-darwin"), true);
+  assert.equal(mac.analyzerNeedsRHome, false);
+  assert.equal(linux.desktopRscriptFallback, null);
+  assert.equal(linux.sharedLibrary, "libR.so");
+  assert.equal(linux.matchesRPlatform("x86_64-pc-linux-gnu"), true);
+  assert.equal(linux.matchesRPlatform("aarch64-apple-darwin"), false);
+  assert.equal(linux.analyzerNeedsRHome, true);
+  assert.match(rLoaderEnvironment("/opt/R", mac).DYLD_LIBRARY_PATH!, /^\/opt\/R\/lib:\/opt\/R\/lib\/R(?:$|:)/);
+  assert.match(rLoaderEnvironment("/opt/R", linux).LD_LIBRARY_PATH!, /^\/opt\/R\/lib:\/opt\/R\/lib\/R(?:$|:)/);
 });
 
 test("R selection is explicit and environment serialization is deterministic", async () => {
@@ -79,6 +97,8 @@ test("R selection is explicit and environment serialization is deterministic", a
     assert.equal(service.R_LIBS_USER, "");
     assert.equal(service.R_LIBS_SITE, "");
     assert.equal(service.ALDER_ANALYSIS_ENVIRONMENT_ID, "analysis-1");
+    const analyzer = rAnalyzerEnvironmentVariables(selected, fixture.resources, "analysis-1");
+    assert.equal(analyzer.R_HOME, undefined);
     const kernel = rKernelEnvironmentVariables(selected, fixture.resources, fixture.root);
     assert.equal(kernel.R_LIBS, undefined);
     assert.equal(kernel.R_LIBS_USER, undefined);

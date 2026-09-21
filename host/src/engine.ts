@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { basename, extname, join, resolve } from "node:path";
 import type { ApplicationResources } from "./resources.js";
 
-import { rKernelEnvironmentVariables, rServiceEnvironmentVariables } from "./r-environment.js";
+import { rAnalyzerEnvironmentVariables, rKernelEnvironmentVariables, rServiceEnvironmentVariables } from "./r-environment.js";
 import type { OwnedProcess, ProcessScope } from "./processes.js";
 
 
@@ -1260,8 +1260,7 @@ export class Engine extends EventEmitter implements EngineAdapter {
   ): RPeer {
     const paths = this.paths!;
     const environment = this.requireEnvironment("analyzer");
-    const peerEnvironment = { ...paths.analyzerEnvironment, ...rServiceEnvironmentVariables(environment, this.options.resources, this.analysisEnvironmentId), ALDER_HOST_ROLE: role };
-    if (process.platform === "darwin") delete (peerEnvironment as Record<string, string>).R_HOME;
+    const peerEnvironment = { ...paths.analyzerEnvironment, ...rAnalyzerEnvironmentVariables(environment, this.options.resources, this.analysisEnvironmentId), ALDER_HOST_ROLE: role };
     return new RPeer(
       role,
       environment.rscript,
