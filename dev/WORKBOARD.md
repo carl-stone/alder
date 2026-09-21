@@ -10,7 +10,7 @@ copies in other worktrees are snapshots.
 
 ## Current assignment
 
-**Platform-boundary extraction — Review on Mac.**
+**Platform-boundary extraction — Implementing on Mac.**
 
 The primary implementation task is back on the Mac. Use Linux execution at a checkpoint to expose
 implicit macOS dependencies and replace them with the smallest explicit platform services for R
@@ -42,13 +42,17 @@ reported `host.ready` and served the browser entry page. Focused Mac and Linux c
 independent reviews passed. The unchanged Mac release staging command hit disk exhaustion while
 copying the checkout for R CMD build; the existing staged app was not replaced.
 
-**Current candidate:** `0a60462` wires optional upstream Ark and a private R helper library
-into the Linux development root. The implementer reports Linux R 4.6.1 and upstream Ark
-0.1.252 executing `6 * 7` to `[1] 42` through the shared host. Focused Mac/Linux checks and
-no-R edit/save/HTTP smoke passed; independent review is underway.
+**Accepted subcheckpoint:** `a2b1724` wires optional upstream Ark and a private R helper library
+into the Linux development root. Linux R 4.6.1 and unmodified upstream Ark 0.1.252 executed
+`6 * 7` to `[1] 42` through the shared host; no-R edit/save/HTTP smoke also passed. Two
+independent focused reviews accepted the slice. This does not qualify a Linux release.
 
-**Next action:** finish focused review of the Linux R execution candidate and integrate the
-exact accepted result or dispatch a correction. The Linux droplet remains available
+**Current bounded slice:** qualify the shared headless host/browser behavior suite on Linux with
+real R and Ark. Correct concrete platform failures without duplicating product code; distinguish
+missing optional tools and Mac-only UI checks from failures of the portable core.
+
+**Next action:** receive the shared-behavior qualification candidate, review its actual Linux
+suite and notebook evidence, then accept or dispatch a correction. The Linux droplet remains available
 for focused later validation; its first inventory found that host, editor and desktop typechecks
 pass, while the full test command stopped at the `tsx` sandbox IPC socket before Alder tests.
 
@@ -76,7 +80,7 @@ One item is active. New approved work is added here before assignment.
 | Accepted Mac build local delivery | Accepted | Primary implementer | Exact accepted signed app installed at `/Users/carlstone/Applications/Alder.app`; background ready/quit smoke passed with natural cleanup |
 | Release README and feature demo | Accepted | Primary implementer and independent reviewers | `b316bc3`: release-facing install/use guide and three compact real-app feature captures; media and factual reviews passed |
 | Repository integration and cleanup | Accepted | Primary implementer and focused cleanup reviewers | `554da34`: canonical docs and accepted app fast-forwarded to remote `main`; obsolete worktrees, branches and safety stashes removed after review |
-| Platform-boundary extraction | Review | Lead and focused reviewers | Shared application and relevant behavior tests run on Linux through small explicit platform adapters while Mac delivery remains intact and Mac-only qualification remains deferred |
+| Platform-boundary extraction | Implementing | Primary implementer | Shared application and relevant behavior tests run on Linux through small explicit platform adapters while Mac delivery remains intact and Mac-only qualification remains deferred |
 | Native Mac reliability qualification | Queued | Unassigned | Sleep/wake, real Finder/dialog/window flows, packaged crash recovery and supported-filesystem behavior work through visible installed-app paths without lost work or stranded processes |
 | Scientific workflow qualification | Queued | Unassigned | A realistic scientific notebook, real CRAN/Bioconductor packages, representative R reactivity idioms, two live notebooks under load and rich publishing are independently qualified through packaged Alder |
 | Product completion and public Mac delivery | Queued | Unassigned | Project/Git ownership, notebook-wide search, agent presence, accessibility, scale, upgrade state, release identity, architecture support and signed/notarized distribution have explicit accepted behavior |
