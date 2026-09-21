@@ -243,7 +243,11 @@ this canonical board.
 the Mac is adding a one-issue-at-a-time workflow with a Sol Medium agent. Its pilot takes
 Carl's rough syntax-diagnostic report, clarifies the product outcome in the issue body and a
 comment, applies `triaged`, and proves that rerunning does not duplicate work. Review the actual
-issue and runner before installing any recurring scheduler.
+issue and runner before installing any recurring scheduler. The first live run updated
+[issue #10](https://github.com/carl-stone/alder/issues/10) and an unchanged rerun added no
+comment. Focused review found reusable-workflow corrections: remove hardcoded pilot text,
+verify Carl as author, resume after a product-question reply, and release stalled claims.
+The Mac task is correcting these before any polling is enabled.
 
 The accepted ten-file stdlib Python and SQLite shadow controller retains the reviewed
 task-lifecycle foundation and
