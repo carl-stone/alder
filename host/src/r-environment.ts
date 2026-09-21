@@ -118,11 +118,12 @@ export function rServiceEnvironmentVariables(
 }
 
 export function rAnalyzerEnvironmentVariables(
+  base: Record<string, string>,
   environment: REnvironment,
   resources: ApplicationResources,
   analysisEnvironmentId?: string,
 ): Record<string, string> {
-  const values = rServiceEnvironmentVariables(environment, resources, analysisEnvironmentId);
+  const values = { ...base, ...rServiceEnvironmentVariables(environment, resources, analysisEnvironmentId) };
   if (!rPlatform().analyzerNeedsRHome) delete values.R_HOME;
   return values;
 }

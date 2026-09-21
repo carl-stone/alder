@@ -1260,7 +1260,7 @@ export class Engine extends EventEmitter implements EngineAdapter {
   ): RPeer {
     const paths = this.paths!;
     const environment = this.requireEnvironment("analyzer");
-    const peerEnvironment = { ...paths.analyzerEnvironment, ...rAnalyzerEnvironmentVariables(environment, this.options.resources, this.analysisEnvironmentId), ALDER_HOST_ROLE: role };
+    const peerEnvironment = { ...rAnalyzerEnvironmentVariables(paths.analyzerEnvironment, environment, this.options.resources, this.analysisEnvironmentId), ALDER_HOST_ROLE: role };
     return new RPeer(
       role,
       environment.rscript,

@@ -4,7 +4,6 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import {
-  rAnalyzerEnvironmentVariables,
   resolveREnvironment,
   rKernelEnvironmentVariables,
   rServiceEnvironmentVariables,
@@ -97,8 +96,6 @@ test("R selection is explicit and environment serialization is deterministic", a
     assert.equal(service.R_LIBS_USER, "");
     assert.equal(service.R_LIBS_SITE, "");
     assert.equal(service.ALDER_ANALYSIS_ENVIRONMENT_ID, "analysis-1");
-    const analyzer = rAnalyzerEnvironmentVariables(selected, fixture.resources, "analysis-1");
-    assert.equal(analyzer.R_HOME, undefined);
     const kernel = rKernelEnvironmentVariables(selected, fixture.resources, fixture.root);
     assert.equal(kernel.R_LIBS, undefined);
     assert.equal(kernel.R_LIBS_USER, undefined);

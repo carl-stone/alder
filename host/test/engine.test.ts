@@ -9,7 +9,7 @@ import test from "node:test";
 
 import { Engine, type EngineOptions } from "../src/engine.js";
 import { LspClient, type DiagnosticsByCell } from "../src/lsp.js";
-import { createProcessScope, type ProcessScope } from "../src/processes.js";
+import { createProcessScope, type ProcessScope, type ProcessSpawnOptions } from "../src/processes.js";
 import type { ApplicationResources } from "../src/resources.js";
 import { analysisResultSchema, type EvaluationPayload, type REnvironment } from "../src/protocol.js";
 
@@ -74,7 +74,7 @@ function selectedEnvironment(resources: ApplicationResources): REnvironment {
   return { rscript, rHome, version, platform: process.platform, arch: process.arch, libraryPaths: ordered, identity };
 }
 
-async function openEngine(directory: string, overrides: Partial<EngineOptions> = {}): Promise<{
+async function openEngine(directory: string, overrides: Partial<EngineOptions> = {}, onSpawn?: (options: ProcessSpawnOptions) => void): Promise<{
   engine: Engine;
   processScope: ProcessScope;
   environment: REnvironment;
@@ -82,9 +82,13 @@ async function openEngine(directory: string, overrides: Partial<EngineOptions> =
   const resources = resourcesFor(applicationRoot!);
   const environment = selectedEnvironment(resources);
   const processScope = await createProcessScope(resources);
+  const observedScope: ProcessScope = onSpawn === undefined ? processScope : {
+    spawn: options => { onSpawn(options); return processScope.spawn(options); },
+    close: () => processScope.close(),
+  };
   const engine = new Engine({
     resources,
-    processScope,
+    processScope: observedScope,
     environment,
     notebookDirectory: directory,
     artifactDirectory: join(directory, "artifacts"),
@@ -95,6 +99,20 @@ async function openEngine(directory: string, overrides: Partial<EngineOptions> =
   });
   return { engine, processScope, environment };
 }
+
+test("analyzer child launches with the host's R_HOME policy", integration, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "alder-analyzer-environment-"));
+  let analyzerEnvironment: Record<string, string> | undefined;
+  const { engine, processScope, environment } = await openEngine(directory, {}, options => {
+    if (options.environment.ALDER_HOST_ROLE === "analyzer") analyzerEnvironment = options.environment;
+  });
+  try {
+    await engine.startAnalyzer();
+    assert.ok(analyzerEnvironment, "analyzer child was spawned");
+    if (process.platform === "darwin") assert.equal(analyzerEnvironment.R_HOME, undefined);
+    else if (process.platform === "linux") assert.equal(analyzerEnvironment.R_HOME, environment.rHome);
+  } finally { await closeEngine(engine, processScope, directory); }
+});
 
 async function closeEngine(engine: Engine, processScope: ProcessScope, directory: string): Promise<void> {
   await engine.close().catch(() => {});

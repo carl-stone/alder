@@ -78647,8 +78647,8 @@ function rServiceEnvironmentVariables(environment, resources2, analysisEnvironme
   if (analysisEnvironmentId !== void 0) values.ALDER_ANALYSIS_ENVIRONMENT_ID = analysisEnvironmentId;
   return values;
 }
-function rAnalyzerEnvironmentVariables(environment, resources2, analysisEnvironmentId) {
-  const values = rServiceEnvironmentVariables(environment, resources2, analysisEnvironmentId);
+function rAnalyzerEnvironmentVariables(base, environment, resources2, analysisEnvironmentId) {
+  const values = { ...base, ...rServiceEnvironmentVariables(environment, resources2, analysisEnvironmentId) };
   if (!rPlatform().analyzerNeedsRHome) delete values.R_HOME;
   return values;
 }
@@ -80981,7 +80981,7 @@ var Engine = class extends EventEmitter3 {
   makeRPeer(role, startupTimeoutMs, maxFrameBytes, generation) {
     const paths = this.paths;
     const environment = this.requireEnvironment("analyzer");
-    const peerEnvironment = { ...paths.analyzerEnvironment, ...rAnalyzerEnvironmentVariables(environment, this.options.resources, this.analysisEnvironmentId), ALDER_HOST_ROLE: role };
+    const peerEnvironment = { ...rAnalyzerEnvironmentVariables(paths.analyzerEnvironment, environment, this.options.resources, this.analysisEnvironmentId), ALDER_HOST_ROLE: role };
     return new RPeer(
       role,
       environment.rscript,
