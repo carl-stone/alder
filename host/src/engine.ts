@@ -2405,8 +2405,8 @@ class ArkEventStreamDecoder {
         throw new FrameProtocolError("invalid Alder Ark event: " + asError(error).message);
       }
       validateArkEvent(event, this.token);
-      if (process.platform === "linux" && ["append", "progress", "log", "result", "finished", "condition", "command_result", "batch_end"].includes(String(event.type))) {
-        // R waits for this receipt to preserve output order and keep terminal frames ahead of Ark idle.
+      if (process.platform === "linux" && ["started", "append", "progress", "log", "result", "finished", "condition", "command_result", "batch_end"].includes(String(event.type))) {
+        // R waits for this receipt to keep start, output, and terminal frames in order.
         const request = String(event.request);
         if (!/^[A-Za-z0-9-]{1,80}$/.test(request)) throw new FrameProtocolError("invalid Alder Ark acknowledgement request");
         writeFileSync(join(this.controlDirectory, `.alder-event-ack-${request}`), "", { flag: "wx", mode: 0o600 });

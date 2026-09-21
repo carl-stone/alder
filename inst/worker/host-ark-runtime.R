@@ -347,11 +347,11 @@ NAME_OWNER <- new.env(parent = emptyenv())# name -> owning cell id
     if (event_type %in% c("append", "progress", "log", "result")) utils::flush.console()
     write_ark_event(frame)
     if (identical(Sys.info()[["sysname"]], "Linux") &&
-        event_type %in% c("append", "progress", "log", "result", "finished",
+        event_type %in% c("started", "append", "progress", "log", "result", "finished",
                           "condition", "command_result", "batch_end")) {
       # Ark forwards native stderr asynchronously on Linux. Wait for each
-      # structured output to reach Node before R can emit the next console
-      # output, and keep terminal events ahead of Ark's idle notification.
+      # start/structured output to reach Node before R emits later output,
+      # and keep terminal events ahead of Ark's idle notification.
       if (!grepl("^[A-Za-z0-9-]{1,80}$", request)) {
         stop("invalid Alder Ark acknowledgement request", call. = FALSE)
       }
