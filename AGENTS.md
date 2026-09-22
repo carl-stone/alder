@@ -23,7 +23,7 @@ Work is coordinated across separate Codex conversations, called tasks. One
   Only Carl and the lead edit the canonical board; workers report results or
   proposed changes. Queued work and doc changes do not expand an active assignment.
   Use the implementation worktree or the worktree assigned in your brief for code;
-  the lead's documentation checkout still contains older source.
+  the lead's checkout is for documentation and coordination and may lag the candidate.
 - **Builds, checks and generated files:** [dev/README.md](dev/README.md).
   Consult it before building or changing generated assets.
 - **Tests:** follow the nearest test instructions. Host and browser tests use

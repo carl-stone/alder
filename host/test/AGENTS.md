@@ -50,6 +50,12 @@ in [dev/README.md](../../dev/README.md).
 - Assert the durable outcome and the important negative outcome: saved bytes and
   the retained draft, project-library installation and unchanged user library,
   current published HTML and absence of publication after a cancelled save.
+- Choose fixture values that distinguish the intended result from a fallback or
+  stale state. A dirty flag does not prove recovery if missing state defaults to
+  dirty; an old reply carrying unchanged identity does not exercise an overwrite
+  race. Check that the assertion would fail for the actual defective outcome.
+  Replay the pre-fix path when that is uncertain, rather than adding more assertions
+  around a trigger that never reaches the defect.
 - Use explicit events, eventual conditions or controllable promises for
   concurrency. Avoid fixed sleeps. A timeout should bound a test, not coordinate
   it. Ensure temporary processes, servers, files and listeners are cleaned up.

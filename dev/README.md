@@ -6,10 +6,10 @@ product and design. An assignment is a bounded change ending in a runnable build
 
 ## Choose the right checkout
 
-During the reset, the lead's documentation checkout and the implementation
-worktree contain different code. Use the implementation worktree listed on the
-canonical workboard for app development and the commands below. The lead checkout
-still contains older source; do not use its retired staging recipes as requirements.
+Use the implementation worktree listed on the canonical workboard for app
+development and the commands below. The lead's checkout is for documentation and
+coordination and may lag the active candidate, even when its main branch contains
+the latest accepted app.
 Independent workers use the worktree assigned in their own brief.
 
 ## Build and open the Mac app
