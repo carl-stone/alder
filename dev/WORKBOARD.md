@@ -31,13 +31,15 @@ rename, then adopt the published state without fictional rollback. Directory syn
 can also fail after rename: report committed with a durability warning and retain
 recovery. The current assignment includes this refinement, not the later work below.
 
-**Correction and next action:** review of `b18e5ac` found that retained recovery
-still belongs to the old source path: reopening that source lets a later destination
-Save delete its new owner's journal. Give the fallback independent ownership.
-Identity retry must work after another edit, and a warned Save As must publish the
-same needs-retry state used by ordinary Save so Quit cannot silently discard it.
-Clear obsolete warnings on successful Save As. Primary implementer owns this
-correction; submit focused cases for review before complete signed-app acceptance.
+**Correction and next action:** review of `b18e5ac` found that recovery cleanup
+outlives ownership of the old source path. Retain the existing in-memory source
+claim for as long as its journal/untitled descriptor remains this save's fallback;
+release it after recovery retirement or host close. While unresolved, opening that
+source gives a clear retry message. Do not add fallback files or restore protocols.
+Identity retry must work after another edit, and warned Save As uses the ordinary
+needs-retry host state so Quit cannot silently discard it. Clear obsolete warnings
+on success. Primary implementer submits focused corrections for review before
+complete signed-app acceptance.
 
 **Approved next slices, in order:**
 
