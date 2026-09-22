@@ -553,8 +553,23 @@ if (crashPath) {
       assert.equal(firstSave.error, null);
       assert.match((firstSave.result as { durabilityWarning?: string }).durabilityWarning ?? "", /identity persistence unavailable/);
       assert.equal(attempts, 1);
-      const failedSecond = await dispatch(app, { type: "save-as", path: occupied, expectedDestination: "absent" });
-      assert.equal(failedSecond.error?.code, "destination_exists");
+      const observed = await observeSaveAsDestination(occupied);
+      const openRecovery = RecoveryWriter.open.bind(RecoveryWriter);
+      let changed = false;
+      context.mock.method(RecoveryWriter, "open", async options => {
+        const writer = await openRecovery(options);
+        if (options.deferIdentityWrite && !changed) {
+          changed = true;
+          await writeFile(occupied, "# %%\ny <- 10\n");
+        }
+        return writer;
+      });
+      const failedSecond = await dispatch(app, { type: "save-as", path: occupied, expectedDestination: {
+        expectedDiskDigest: observed.digest, expectedDiskVersion: observed.version,
+      } });
+      assert.equal(failedSecond.error?.code, "source_conflict");
+      assert.equal(changed, true, "second Save As reached recovery preparation before the conflict");
+      assert.equal(await readFile(occupied, "utf8"), "# %%\ny <- 10\n");
       assert.equal(app.controller.snapshot().path, first);
       assert.equal(app.controller.snapshot().dirty, true);
       const stillWarned = await dispatch(app, { type: "save" });
