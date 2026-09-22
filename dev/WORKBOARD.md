@@ -10,7 +10,7 @@ copies in other worktrees are snapshots.
 
 ## Current assignment
 
-**Native architecture and recovery corrections — integrating accepted work.**
+**Native architecture and recovery corrections — accepted and integrated.**
 
 **Latest accepted checkpoint:** `90d0d87`. Native restart adopts authenticated
 initial editor state with its new connection and preserves prior state on failure.
@@ -20,21 +20,21 @@ acceptance passed in 24 seconds: recover accepted/local edits, immediately edit
 and Run the new value, save it, and exit cleanly. Signing and process checks passed.
 Earlier accepted slices cover Save As identity, same-content external replacement,
 separate detach/discard/shutdown, crash recovery and harness failure cleanup.
-The installed user copy is unchanged. Ark remains unmodified upstream.
+Accepted app and canonical guidance are integrated on pushed main `b5d3fd6`;
+both checkouts were clean at integration. The installed user copy is unchanged.
+Ark remains unmodified upstream.
 
-**Finish condition:** ordinary Mac launch, document/window use, recovery and owned-child cleanup
+**Accepted scope:** ordinary Mac launch, document/window use, recovery and owned-child cleanup
 remain dependable through native failures. Exercise real user journeys through the packaged app
 while keeping Carl's visible desktop free. Record scenarios that genuinely require foreground
 interaction for a later supervised pass; do not infer them from headless checks.
 
-**Current bounded slice:** integrate accepted `90d0d87` and current canonical
-guidance on main. Preserve the signed stage and installed user copy; no product
-changes or additional qualification are assigned.
+**Current assignment:** none. The architecture correction campaign is complete;
+the signed stage is available in the implementation worktree. Remaining native,
+scientific and public-delivery qualification requires a separate assignment.
 
-**Owner and next action:** primary integrates and pushes the reviewed app with
-canonical docs, then reports the clean main commit and holds. Lead records the
-integration. Remaining native, scientific and public-delivery qualification stays
-queued for a separate assignment.
+**Owner and next action:** primary is idle, holding the accepted app. Lead owns
+the next assignment; queued items below have not been started.
 
 **Remaining native evidence:** Finder/Open, native Save As replacement, dirty-close
 sheets, Dock activation and native zero-window Quit need foreground interaction.
@@ -49,7 +49,7 @@ isolated Mac checks for native behavior.
 
 ## Work queue
 
-One item is active. New approved work is added here before assignment.
+No item is active. New approved work is added here before assignment.
 
 | Work | State | Owner | Finish condition |
 | --- | --- | --- | --- |
@@ -66,7 +66,7 @@ One item is active. New approved work is added here before assignment.
 | Release README and feature demo | Accepted | Primary implementer and independent reviewers | `b316bc3`: release-facing install/use guide and three compact real-app feature captures; media and factual reviews passed |
 | Repository integration and cleanup | Accepted | Primary implementer and focused cleanup reviewers | `554da34`: canonical docs and accepted app fast-forwarded to remote `main`; obsolete worktrees, branches and safety stashes removed after review |
 | Platform-boundary extraction | Accepted | Primary implementer and focused reviewers | `42cfda8`: shared Linux R 34/34, browser 12/12 and reviewed localized Mac/Linux seams; no duplicated product or Ark fork |
-| Native architecture and recovery corrections | Implementing | Primary implementer | Accepted `90d0d87` and canonical guidance integrated on clean pushed main |
+| Native architecture and recovery corrections | Accepted | Primary implementer and independent reviewers | Accepted `90d0d87` and canonical guidance integrated on pushed main `b5d3fd6`; full signed-app and corrected backend-crash checks passed |
 | Remaining native Mac real-use qualification | Queued | Unassigned | Foreground Mac controls, sleep/wake, storage environments and remaining native scenarios below are qualified |
 | Scientific workflow qualification | Queued | Unassigned | A realistic scientific notebook, real CRAN/Bioconductor packages, representative R reactivity idioms, two live notebooks under load and rich publishing are independently qualified through packaged Alder |
 | Product completion and public Mac delivery | Queued | Unassigned | Project/Git ownership, notebook-wide search, agent presence, accessibility, scale, upgrade state, release identity, architecture support and signed/notarized distribution have explicit accepted behavior |
