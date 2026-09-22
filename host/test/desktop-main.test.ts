@@ -609,6 +609,41 @@ test("application quit escalates a just-completed normal close to discard", asyn
   assert.deepEqual(hostConnection.releaseDispositions, ["normal", "discard"]);
 });
 
+test("Quit after the last window succeeds when its normally released host has exited", async context => {
+  let releases = 0;
+  const hostConnection = await fetchedConnection(context, async () => {
+    releases += 1;
+    if (releases === 1) return new Response(JSON.stringify({ released: true }), {
+      status: 200, headers: { "Content-Type": "application/json", "X-Alder-Continuity-Proof": "proof" },
+    });
+    throw new TypeError("fetch failed", { cause: Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" }) });
+  });
+  const window = windowWithLoad();
+  const electronRuntime = runtime();
+  const events = new Map<string, (...args: any[]) => unknown>();
+  electronRuntime.app.requestSingleInstanceLock = () => true;
+  electronRuntime.app.whenReady = async () => undefined;
+  electronRuntime.app.on = (event, handler) => { events.set(event, handler); return electronRuntime.app; };
+  let quits = 0;
+  let errorDialogs = 0;
+  electronRuntime.app.quit = () => { quits += 1; };
+  electronRuntime.dialog.showMessageBox = async () => { errorDialogs += 1; return { response: 0 }; };
+  const main = new ElectronMain(electronRuntime, { resources, initialPath: null });
+  main.openNotebook = async () => undefined;
+  await main.start();
+  const record = recordFor(main, hostConnection, window);
+  record.windowState = { path: hostConnection.canonicalPath, dirty: false, saveState: "saved", sessionEpoch: "epoch" };
+
+  await (main as any).requestClose(record);
+  assert.equal(window.destroyed, true);
+  assert.equal(releases, 1);
+  events.get("before-quit")!({ preventDefault: () => undefined });
+  while (quits === 0) await new Promise(resolve => setImmediate(resolve));
+  assert.equal(releases, 2);
+  assert.equal(errorDialogs, 0);
+  assert.equal(main.windows().length, 0);
+});
+
 test("application quit discards every window before one authorized exit", async () => {
   const firstConnection = connection("multi-quit-a", "/tmp/alder-multi-quit-a.R", async () => jsonResponse({}));
   const secondConnection = connection("multi-quit-b", "/tmp/alder-multi-quit-b.R", async () => jsonResponse({}));
@@ -688,7 +723,9 @@ for (const failureMode of ["transport", "non-success", "timeout"] as const) {
         status, headers: { "Content-Type": "application/json", "X-Alder-Continuity-Proof": "proof" },
       });
       if (attempts > 1) return response();
-      if (failureMode === "transport") throw new TypeError("REAL_RELEASE_TRANSPORT_FAILURE");
+      if (failureMode === "transport") throw new TypeError("REAL_RELEASE_TRANSPORT_FAILURE", {
+        cause: Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" }),
+      });
       if (failureMode === "non-success") return response(503);
       return new Promise<Response>((_resolve, reject) => {
         const signal = init.signal!;

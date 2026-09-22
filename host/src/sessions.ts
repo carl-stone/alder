@@ -200,6 +200,8 @@ function createConnection(descriptor: BackendSessionDescriptor, lease: SessionLe
   };
   let normalAttempt: Promise<void> | undefined;
   let discardAttempt: Promise<void> | undefined;
+  const hostExitedAfterNormalRelease = (error: unknown): boolean => error instanceof TypeError
+    && (error.cause as { code?: unknown } | undefined)?.code === "ECONNREFUSED";
   let interval: ReturnType<typeof setInterval>;
   const attemptRelease = async (disposition: "normal" | "discard"): Promise<void> => {
     const controller = new AbortController();
@@ -236,7 +238,13 @@ function createConnection(descriptor: BackendSessionDescriptor, lease: SessionLe
     if (releaseState === "discard") return Promise.resolve();
     if (discardAttempt) return discardAttempt;
     const preceding = normalAttempt;
-    const attempt = (preceding ? preceding.then(() => undefined, () => undefined) : Promise.resolve()).then(() => attemptRelease("discard"));
+    const attempt = (preceding ? preceding.then(() => undefined, () => undefined) : Promise.resolve())
+      .then(() => attemptRelease("discard"))
+      .catch(error => {
+        if (releaseState !== "normal" || !hostExitedAfterNormalRelease(error)) throw error;
+        // The acknowledged normal release already relinquished the lease. Its host has since exited.
+        releaseState = "discard";
+      });
     discardAttempt = attempt;
     void attempt.then(() => undefined, () => undefined).finally(() => { if (discardAttempt === attempt) discardAttempt = undefined; });
     return attempt;

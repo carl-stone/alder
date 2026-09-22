@@ -35564,6 +35564,7 @@ function createConnection(descriptor, lease) {
   };
   let normalAttempt;
   let discardAttempt;
+  const hostExitedAfterNormalRelease = (error61) => error61 instanceof TypeError && error61.cause?.code === "ECONNREFUSED";
   let interval;
   const attemptRelease = async (disposition) => {
     const controller = new AbortController();
@@ -35603,7 +35604,10 @@ function createConnection(descriptor, lease) {
     if (releaseState === "discard") return Promise.resolve();
     if (discardAttempt) return discardAttempt;
     const preceding = normalAttempt;
-    const attempt = (preceding ? preceding.then(() => void 0, () => void 0) : Promise.resolve()).then(() => attemptRelease("discard"));
+    const attempt = (preceding ? preceding.then(() => void 0, () => void 0) : Promise.resolve()).then(() => attemptRelease("discard")).catch((error61) => {
+      if (releaseState !== "normal" || !hostExitedAfterNormalRelease(error61)) throw error61;
+      releaseState = "discard";
+    });
     discardAttempt = attempt;
     void attempt.then(() => void 0, () => void 0).finally(() => {
       if (discardAttempt === attempt) discardAttempt = void 0;
