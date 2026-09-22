@@ -1,6 +1,6 @@
 # Alder workboard
 
-Updated: 2026-09-21. Goal: a dependable Mac notebook for scientific R work,
+Updated: 2026-09-22. Goal: a dependable Mac notebook for scientific R work,
 developed through a portable core with explicit platform boundaries.
 Current work only. [Lead instructions](LEAD.md) define coordination and state
 transitions; [architecture](ARCHITECTURE.md) holds product and design decisions.
@@ -12,60 +12,47 @@ copies in other worktrees are snapshots.
 
 **Native Mac reliability — Implementing on Mac.**
 
-The shared portable-core checkpoint is accepted on pushed main `42cfda8`.
-`b74355a` is the latest accepted Mac checkpoint, integrated on main at `572f7b6`.
-The staged signed app is refreshed; the installed user copy remains untouched.
-Preserve upstream unmodified Ark.
+**Latest accepted checkpoint:** source `3520e53`, integrated on pushed main at
+`e3b1ed6`. Full signed-app acceptance and the separate external-path journey passed.
+Earlier accepted slices cover backend/renderer/app crash recovery, independent
+windows and last-window reopening. Acceptance belongs to that source checkpoint;
+the staged app at `host/.application-desktop/Alder.app` may advance during work.
+The installed user copy is unchanged. Ark remains unmodified upstream.
 
 **Finish condition:** ordinary Mac launch, document/window use, recovery and owned-child cleanup
 remain dependable through native failures. Exercise real user journeys through the packaged app
 while keeping Carl's visible desktop free. Record scenarios that genuinely require foreground
 interaction for a later supervised pass; do not infer them from headless checks.
 
-**Accepted subcheckpoint:** `b74355a` adds a packaged whole-app `SIGKILL`
-journey: backend-acknowledged unsaved source and a separate renderer-local draft
-both survive relaunch, with no implicit Run or Save; old owned children exit
-naturally. `227d01d` covered renderer failure and retained-draft selection;
-`5b3321a` covered backend failure. Independent reviews, complete signed-app
-acceptance, focused crash journeys, strict signing and clean child audits passed.
-
-**Current bounded slice:** native file/window use. The existing signed packaged
-two-window journey passes second-instance forwarding, independent Run/Save and
-closing one window while the other continues.
-
-**Accepted subcheckpoint:** `dd6b2a2`, integrated on pushed main at `7ee5cf6`,
-passes independent lifecycle and test review, complete signed-app acceptance,
-strict signing, ordinary packaged multi-window cleanup and a separate last-window
-reopen journey.
-It keeps the Mac app resident with zero windows, reopens a forwarded document in the
-original process, and handles Quit after the closed notebook host idles out. Its MCP
-test waits for normal backend idle shutdown before deleting temporary diagnostics.
-The headless last-window journey uses forced teardown and does not qualify native
-Quit. Finder/Open, Save As replacement, dirty-close sheets and Dock activation still
-require a supervised foreground pass.
-
-**Accepted subcheckpoint:** `f225f33` plus generated bundle `3520e53`, integrated
-on pushed main at `e3b1ed6`, passed the complete signed-app gate, independent
-focused reviews and the separate packaged external-path journey. Atomic replacement,
-Git reset, rename and delete preserve an acknowledged edit, still-local draft and
-independent disk contents; Save As recovery copies reopen in a fresh process. The
-narrow host-exit fix handles `ECONNRESET` after acknowledged normal release while
-active-lease failure still blocks Quit. The hidden path exercises renderer Save As,
-not the native chooser.
-
 **Current bounded slice:** Save As currently publishes destination bytes before
 fallible recovery/ownership setup completes. A later failure can report Save As
-failed while leaving the destination changed. Move fallible preparation before the
-file commit and make post-commit adoption minimal. Prove both existing-destination
-replacement and new-path failure leave the user's notebook and disk in a truthful,
-recoverable state. Then correct explicit Close on a dead host so it can abandon the
-unreachable lease and retain recovery.
+failed while leaving the destination changed. Complete fallible preparation before
+rename, then adopt the published state without fictional rollback. Directory sync
+can also fail after rename: report committed with a durability warning and retain
+recovery. The current assignment includes this refinement, not the later work below.
 
-**Further review findings:** byte-identical external replacements should not stale
-R results; native host monitoring need not fetch the full notebook every five
-seconds per window. The Mac acceptance script needs failure-path child cleanup,
-and older Quit tests need bounded waits. Treat these as focused follow-ons, not a
-new framework or test-count target.
+**Approved next slices, in order:**
+
+1. **Separate detach, discard and shutdown.** Delete historical released-connection
+   tracking, release upgrades and server receipts. Detach is idempotent; explicit
+   document Discard covers accepted edits and local drafts while protecting peers.
+   Close after host failure retains recovery and cannot be vetoed by failed HTTP
+   cleanup. Backend owns bounded no-client shutdown, including orphaned runs.
+   Check the ticket-failure heartbeat leak and the failed-renderer Close then Quit
+   path: the latter currently can erase recovery through a later discard upgrade.
+2. **Remove duplicate work.** Use source content changes to invalidate R results,
+   keeping disk identity for conflict checks. Remove periodic full-notebook queries
+   from native health monitoring; retain a small bootstrap/liveness fallback where
+   the renderer cannot report failure.
+3. **Make failure tests deterministic and finite.** Use existing I/O seams to fail
+   before/after save publication and control close/exit ordering. Fix `accept-mac`
+   cleanup on failure through the existing scoped helper; bound old Quit test waits.
+   Replace tests of deleted release machinery with recovery/peer/exit behavior.
+
+**Remaining native evidence:** Finder/Open, native Save As replacement, dirty-close
+sheets, Dock activation and native zero-window Quit need foreground interaction.
+The headless last-window journey uses forced teardown; the external-path journey
+uses the renderer Save As command. Neither qualifies those native controls.
 
 The release README and three feature GIFs remain on `main`. The separate Ark source repository
 is untouched.
@@ -224,21 +211,6 @@ entry point or accepted behavior needs it. Each checkpoint must remove replaced 
 completely, leave generated artifacts reproducible from source, and end with a clean
 commit that the next stage can safely simplify.
 
-## Latest accepted checkpoint
-
-`5b3321a` is the latest accepted Mac application source. Fresh full final acceptance passed:
-signed build, R and host checks, installed services, twelve production browser journeys, packaged
-recovery journeys, license notices and natural owned-child cleanup. A separate packaged backend
-hard-crash journey qualified accepted and local drafts, resumed R, Save, rerun and removal of the
-dead Ark group. Earlier UI/UX and diagnostics acceptance detail lives in Git and the implementation
-task.
-
-The staged app at `host/.application-desktop/Alder.app` follows the implementation
-checkout and may contain newer, unaccepted changes. Acceptance is tied to the commit
-above, not that mutable app path. Build and launch commands are in
-[README.md](README.md). Older checkpoint detail lives in Git and the implementation
-task rather than this board.
-
 ## Coordination tooling
 
 The standing orchestration implementation task owns the ignored project-local
@@ -276,7 +248,7 @@ standing task remains owner of this separate prototype.
 | Lead task | `01a0b55f-feaf-7c03-9964-b448891e33d5` on `local` |
 | Primary implementation task | `01a0b5a6-22ac-7480-9394-5cc4c1ba807d` on `local` |
 | Implementation worktree | `/Users/carlstone/.codex/worktrees/ebd6/alder` |
-| Implementation branch | `codex/native-backend-crash`; now based on pushed main `2136dcc` |
+| Implementation branch | `codex/native-backend-crash` |
 | Linux inventory task | `01a0bf49-f444-7042-a6ee-8be9c7d2cd79` on `droplet`; interrupted without tracked changes |
 | Orchestration implementation task | `01a0bbd7-8b7e-7712-9fb4-b1c0f3289e41` on `local` |
 | Ignored orchestration workspace | `/Users/carlstone/alder/.tmp-orchestrator` |

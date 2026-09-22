@@ -53,6 +53,17 @@ in [dev/README.md](../../dev/README.md).
 - Use explicit events, eventual conditions or controllable promises for
   concurrency. Avoid fixed sleeps. A timeout should bound a test, not coordinate
   it. Ensure temporary processes, servers, files and listeners are cleaned up.
+- For a changed asynchronous seam, deliberately pause or fail at the existing
+  I/O boundary before and after its irreversible effect. Check disk contents,
+  visible document identity, retained edits or child exit as appropriate. A
+  repeated green run is not a substitute for reproducing the failing ordering.
+  Keep the few distinct outcomes; do not build a general scheduler or fault
+  framework. When replacing a flawed protocol, replace tests of that protocol
+  with tests of the user guarantee.
+- Every wait must settle or stop its own work at its deadline. A test-runner
+  timeout alone does not stop a polling loop or a child process. Fixture teardown
+  waits for its writers to exit before deleting their files, on both success and
+  failure. Use the existing scoped process helper and retain the original failure.
 - Keep fixtures local and network-free. Use a tiny local R package, temporary
   projects and temporary output paths. Do not depend on a mutable repository or
   an already-installed user package.

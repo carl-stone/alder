@@ -94,6 +94,22 @@ process-identity certification, recovery mutexes or Save As lock rekey protocols
 over that owner. Authenticate the real local API and recover by reconnecting to
 the backend or starting a new one when its socket owner is gone.
 
+Client detachment, document discard and process termination are separate operations.
+Releasing an attachment only detaches that client and is idempotent. Do not retain
+released connections or server receipts so a later Quit can upgrade a release to
+discard. Recovery deletion belongs to an explicit document action after the user's
+Discard choice; it must cover accepted unsaved source as well as that client's
+draft, without deleting work owned by another attached client. Closing a failed
+renderer with recovery retained must remain non-destructive when the app later quits.
+After the user elects to close with recovery retained, an unreachable host cannot
+veto local window teardown: stop the local heartbeat and retain the recovery data.
+This does not mean the remote cleanup succeeded or that unsaved work was saved.
+
+The backend owns the no-client grace period and host/child shutdown. New attachments
+cancel pending idle shutdown; an orphaned run must not keep an unused host alive
+indefinitely. Desktop code does not reimplement that owner through historical lease
+lists or document-wide health polls. Preserve other attached clients and their work.
+
 **Documents.** Maintain an in-memory working document, a saved baseline, an
 external-file fingerprint and a recovery snapshot. Stage saves and atomically
 replace the destination. Offer an understandable external-edit conflict choice.
@@ -104,6 +120,28 @@ reload or close. Retain revision checks for concurrent edits and stale execution
 results. Provide a bounded close path when the host is unhealthy. Save As carries
 the notebook and notebook-owned metadata; it never copies source-project package
 or project settings into the destination project.
+
+The controller's source lane is the single serialized owner of document mutations.
+The disk store stages and publishes bytes; the recovery writer checkpoints accepted
+edits. Independent computation stays outside that lane and can apply results only
+to the session and document revision it was started for. Do not create another
+transaction coordinator, global work queue or general event journal.
+
+Save and Save As have one irreversible file commit point: successful publication
+of the staged file by rename. Complete fallible destination, ownership and recovery
+preparation before that point. A pre-publication failure leaves the target and
+current document identity unchanged. After publication, adopt the published path,
+baseline and document identity coherently; do not use a rollback binder to pretend
+the destination was untouched. Directory sync can fail after rename: report that
+the file was saved but durability could not be confirmed, retain recovery, and offer
+an actionable retry. Post-commit watcher, event-delivery or cleanup errors cannot
+turn a committed save into an ordinary failed save. If recovery persistence is
+unavailable, retain the old durable checkpoint and local typing rather than
+acknowledging an edit as durable without a record.
+
+Keep disk identity and source content distinct. A replaced inode or changed file
+mode may affect overwrite permission and conflict detection; it does not by itself
+mean the R program changed or require invalidating its results.
 
 **Commands and recovery.** Replace the general command admission/receipt,
 per-client sequence and event-replay framework with simple request IDs, document
@@ -254,6 +292,13 @@ tests and native interaction checks. Retire cross-platform release matrices,
 duplicate qualification layers and tests that only pin superseded designs. Do
 not recreate their scope under new names. Use ordinary process cleanup through
 platform facilities; retire the former custom supervisor and containment framework.
+
+The process owner exposes completion when its writers and owned children have
+actually stopped. A closed transport, acknowledged release or sent signal does not
+prove exit. Use bounded cleanup on success and failure, preserving the original
+error; remove temporary directories only after their writers stop. Reuse the
+existing scoped process helper rather than adding a second supervisor. Retrying a
+cleanup call should await the same cleanup attempt, not create overlapping work.
 
 **Local diagnostics.** Alder automatically persists full-fidelity structured diagnostics
 shared by the desktop, renderer, backend and owned child processes. Records correlate app

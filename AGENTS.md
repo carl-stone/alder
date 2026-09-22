@@ -60,6 +60,10 @@ Work is coordinated across separate Codex conversations, called tasks. One
 - Deliver complete, runnable slices and remove replaced production paths. Use
   concrete notebook examples and independently established expected behavior.
   Existing code and tests are evidence of past behavior, not requirements.
+- When changing asynchronous operations, identify the authoritative owner, the
+  irreversible side effect and the actual completion signal. Remove overlapping
+  ownership or rollback claims that cannot undo a committed effect. Follow the
+  concrete document, attachment and process boundaries in dev/ARCHITECTURE.md.
 - Keep checks proportionate and tied to behavior. A test must protect a useful
   contract or failure mode, and refactoring behind that boundary should not
   require rewriting its assertion. There is no requirement to preserve test
