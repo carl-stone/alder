@@ -39,8 +39,12 @@ has an acknowledged unsaved edit, and preserve any still-local editor draft wher
 Verify recovery or actionable failure, explicit Save semantics, post-recovery execution and
 child cleanup without taking over the visible desktop.
 
-**Next action:** receive the primary implementer's exact crash-recovery candidate and focused
-native evidence; review any product change before another full signed-app acceptance.
+**Correction in progress:** clean candidate `0f7d741` passed a packaged crash-recovery
+journey, but independent review found that a failed restart can leave its retry button
+inert and a dead backend can leave its old heartbeat timer running. The primary
+implementer owns one consolidated correction: make restart attempts retryable and
+coordinate the monitor/button, stop abandoned local heartbeats, and check both with
+focused regressions. Review the corrected commit before one full signed-app acceptance.
 
 The release README and three feature GIFs remain on `main`. The separate Ark source repository
 is untouched.
@@ -251,7 +255,7 @@ standing task remains owner of this separate prototype.
 | Lead task | `01a0b55f-feaf-7c03-9964-b448891e33d5` on `local` |
 | Primary implementation task | `01a0b5a6-22ac-7480-9394-5cc4c1ba807d` on `local` |
 | Implementation worktree | `/Users/carlstone/.codex/worktrees/ebd6/alder` |
-| Implementation branch | `codex/mac-document-foundation`; reconcile with current `origin/main` |
+| Implementation branch | `codex/native-backend-crash`; current correction checkpoint |
 | Linux inventory task | `01a0bf49-f444-7042-a6ee-8be9c7d2cd79` on `droplet`; interrupted without tracked changes |
 | Orchestration implementation task | `01a0bbd7-8b7e-7712-9fb4-b1c0f3289e41` on `local` |
 | Ignored orchestration workspace | `/Users/carlstone/alder/.tmp-orchestrator` |
