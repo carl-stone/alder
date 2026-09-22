@@ -607,11 +607,37 @@ async function runBackendCrashJourney(primary) {
     const state = await primary.cdp.evaluate("({status:document.getElementById('status')?.textContent,saveState:document.getElementById('save-state')?.textContent,actionError:window.__alderHost.view.actionError,cells:window.__alderHost.client.document.snapshot.cells.map(cell=>cell.body),pending:window.__alderHost.client.document.pendingSource().changes})");
     throw new Error(`Save after host restart lost source: ${JSON.stringify({ saved, state })}`);
   }
-  await primary.cdp.wait('window.__alderHost.client.document.snapshot.dirty === false', 10_000);
+  await primary.cdp.wait("window.__alderHost.client.document.snapshot.dirty === false && document.getElementById('save-state')?.textContent === 'Saved'", 10_000);
+  await primary.cdp.evaluate(`(() => {
+    window.__backendCrashRuns = [];
+    window.addEventListener('alder:host-command', event => {
+      if (event.detail.command.type === 'run') window.__backendCrashRuns.push({ command: event.detail.command, result: event.detail.result });
+    });
+  })()`);
   const afterRecovery = 'local_value <- 45L\nlocal_value';
   await replaceEditor(primary.cdp, afterRecovery, 1);
-  await primary.cdp.evaluate("document.querySelector('[data-cell=cell-2] [data-act=run]').click()");
-  await primary.cdp.wait("document.querySelector('#notebook')?.textContent.includes('[1] 45') && document.getElementById('r-state')?.textContent === 'R ready'", 30_000);
+  const runBefore = await primary.cdp.evaluate(`(() => {
+    const button = document.querySelector('[data-cell=cell-2] [data-act=run]');
+    button?.scrollIntoView({block: 'center'});
+    const cell = window.__alderHost.client.document.cells[1];
+    return { disabled: button?.disabled, saveState: document.getElementById('save-state')?.textContent,
+      desired: cell?.desiredBody, server: cell?.serverBody, pending: window.__alderHost.client.document.pendingSource().changes };
+  })()`);
+  if (runBefore.disabled) throw new Error(`Run was disabled immediately after editing recovered source: ${JSON.stringify(runBefore)}`);
+  await click(primary.cdp, '[data-cell=cell-2] [data-act=run]');
+  try {
+    await primary.cdp.wait("document.querySelector('[data-cell=cell-2] [data-role=output]')?.textContent.includes('[1] 45') && document.getElementById('r-state')?.textContent === 'R ready'", 30_000);
+  } catch (error) {
+    const after = await primary.cdp.evaluate(`(() => ({ runs: window.__backendCrashRuns,
+      cell: window.__alderHost.client.document.cells[1],
+      snapshotCell: window.__alderHost.client.document.snapshot.cells[1],
+      pending: window.__alderHost.client.document.pendingSource().changes,
+      outputs: [...document.querySelectorAll('[data-role=output]')].map(node => node.textContent),
+      actionError: window.__alderHost.view.actionError,
+      lastActionError: window.__alderHost.client.document.snapshot.lastActionError }))()`)
+      .catch(diagnosticError => ({ diagnosticError: String(diagnosticError) }));
+    throw new Error(`Run after recovery failed: ${JSON.stringify({ runBefore, after })}`, { cause: error });
+  }
   await primary.cdp.evaluate("document.getElementById('save').click()");
   const finalBody = `${accepted}\n# %%\n${afterRecovery}`;
   const finalDeadline = Date.now() + 20_000;
