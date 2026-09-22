@@ -130,7 +130,8 @@ transaction coordinator, global work queue or general event journal.
 Save and Save As have one irreversible file commit point: successful publication
 of the staged file by rename. Complete fallible destination, ownership and recovery
 preparation before that point. A pre-publication failure leaves the target and
-current document identity unchanged. After publication, adopt the published path,
+current document identity unchanged; preparation does not replace the destination's
+recovery identity. After publication, adopt the published path,
 baseline and document identity coherently; do not use a rollback binder to pretend
 the destination was untouched. Directory sync can fail after rename: report that
 the file was saved but durability could not be confirmed, retain recovery, and offer
@@ -138,6 +139,13 @@ an actionable retry. Post-commit watcher, event-delivery or cleanup errors canno
 turn a committed save into an ordinary failed save. If recovery persistence is
 unavailable, retain the old durable checkpoint and local typing rather than
 acknowledging an edit as durable without a record.
+
+Recovery cleanup cannot outlive ownership of its storage. An unresolved Save As
+retains the existing source claim while its old journal or untitled descriptor is
+needed. Reopening that source waits for retry or host close with a clear message;
+it must not attach to the destination. Retire recovery under the claim, then release
+it. Host close releases all claims while preserving recovery that is still needed.
+Retry state belongs to the active document and changes only with a committed handoff.
 
 Keep disk identity and source content distinct. A replaced inode or changed file
 mode may affect overwrite permission and conflict detection; it does not by itself
