@@ -14,7 +14,7 @@ copies in other worktrees are snapshots.
 
 **Latest accepted checkpoint:** source `e3bba94`. Full signed-app acceptance and
 the separate packaged Save As journey passed with a clean tree and natural cleanup.
-Integration into main is the first step of the current assignment.
+The same source is integrated on pushed main at `801c54a` with the canonical docs.
 Earlier accepted slices cover backend/renderer/app crash recovery, independent
 windows and last-window reopening. Acceptance belongs to that source checkpoint;
 the staged app at `host/.application-desktop/Alder.app` may advance during work.
@@ -32,9 +32,8 @@ unsaved source and local drafts, protecting other attached clients. User-approve
 close after host failure retains recovery and cannot be vetoed by failed HTTP
 cleanup. Backend owns bounded no-client shutdown, including orphaned runs.
 
-**Owner and next action:** primary implementer first integrates the accepted
-checkpoint with canonical docs and pushes main, then implements the lifecycle
-slice. Check ticket-failure heartbeat cleanup, failed-renderer Close then Quit,
+**Owner and next action:** primary implementer owns the lifecycle slice on the
+integrated main baseline. Check ticket-failure heartbeat cleanup, failed-renderer Close then Quit,
 peer continuity, explicit discard and eventual unused host/Ark/R exit. Replace
 tests of deleted release machinery with these behaviors. Submit a clean focused
 candidate for review; do not start the later slices or run full acceptance early.
@@ -80,7 +79,7 @@ One item is active. New approved work is added here before assignment.
 | Release README and feature demo | Accepted | Primary implementer and independent reviewers | `b316bc3`: release-facing install/use guide and three compact real-app feature captures; media and factual reviews passed |
 | Repository integration and cleanup | Accepted | Primary implementer and focused cleanup reviewers | `554da34`: canonical docs and accepted app fast-forwarded to remote `main`; obsolete worktrees, branches and safety stashes removed after review |
 | Platform-boundary extraction | Accepted | Primary implementer and focused reviewers | `42cfda8`: shared Linux R 34/34, browser 12/12 and reviewed localized Mac/Linux seams; no duplicated product or Ark fork |
-| Native Mac reliability qualification | Implementing | Primary implementer | Integrate accepted `e3bba94`, then separate detach, explicit Discard and bounded backend shutdown |
+| Native Mac reliability qualification | Implementing | Primary implementer | Separate detach, explicit Discard and bounded backend shutdown from accepted `801c54a` |
 | Scientific workflow qualification | Queued | Unassigned | A realistic scientific notebook, real CRAN/Bioconductor packages, representative R reactivity idioms, two live notebooks under load and rich publishing are independently qualified through packaged Alder |
 | Product completion and public Mac delivery | Queued | Unassigned | Project/Git ownership, notebook-wide search, agent presence, accessibility, scale, upgrade state, release identity, architecture support and signed/notarized distribution have explicit accepted behavior |
 
