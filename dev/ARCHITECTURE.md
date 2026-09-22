@@ -127,6 +127,11 @@ without requiring another live-host query before it becomes the restart target.
 Keep the matching named-session key in step. Fallback identity queries cannot
 overwrite a newer committed identity or apply after their connection or renderer
 generation has been replaced.
+During backend replacement, stage the new editor's initial state under its
+authenticated navigation and adopt it with the replacement connection. Failed
+navigation preserves the prior window state. Editor readiness includes delivering
+that initial state; message timing must not produce a false dirty indicator or
+reject the new editor as belonging to the old session.
 
 **Documents.** Maintain an in-memory working document, a saved baseline, an
 external-file fingerprint and a recovery snapshot. Stage saves and atomically
