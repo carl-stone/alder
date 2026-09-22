@@ -10,7 +10,7 @@ copies in other worktrees are snapshots.
 
 ## Current assignment
 
-**Native Mac reliability — Implementing on Mac.**
+**Native Mac reliability — Review on Mac.**
 
 The shared portable-core checkpoint is accepted on pushed main `42cfda8`.
 `227d01d` is the latest accepted Mac source, integrated on main at `4351a84`.
@@ -35,7 +35,11 @@ acknowledged by the backend but unsaved and another still local to the renderer.
 Relaunch the saved notebook in a new app process and verify both edits are
 recoverable without implicit Run or Save; then run and save explicitly. Verify
 ordinary cleanup of old owned children and no interference with the installed
-user app. Correct any real failure and return a clean candidate for review.
+user app.
+
+**Candidate ready:** clean `b74355a` adds the packaged whole-app crash journey
+without product-code changes. Focused background checks and crash journeys pass;
+independent review is underway before the full signed-app gate.
 
 The release README and three feature GIFs remain on `main`. The separate Ark source repository
 is untouched.
@@ -62,7 +66,7 @@ One item is active. New approved work is added here before assignment.
 | Release README and feature demo | Accepted | Primary implementer and independent reviewers | `b316bc3`: release-facing install/use guide and three compact real-app feature captures; media and factual reviews passed |
 | Repository integration and cleanup | Accepted | Primary implementer and focused cleanup reviewers | `554da34`: canonical docs and accepted app fast-forwarded to remote `main`; obsolete worktrees, branches and safety stashes removed after review |
 | Platform-boundary extraction | Accepted | Primary implementer and focused reviewers | `42cfda8`: shared Linux R 34/34, browser 12/12 and reviewed localized Mac/Linux seams; no duplicated product or Ark fork |
-| Native Mac reliability qualification | Implementing | Primary implementer | Sleep/wake, real Finder/dialog/window flows, packaged crash recovery and supported-filesystem behavior work through visible installed-app paths without lost work or stranded processes |
+| Native Mac reliability qualification | Review | Lead and independent reviewers | Sleep/wake, real Finder/dialog/window flows, packaged crash recovery and supported-filesystem behavior work through visible installed-app paths without lost work or stranded processes |
 | Scientific workflow qualification | Queued | Unassigned | A realistic scientific notebook, real CRAN/Bioconductor packages, representative R reactivity idioms, two live notebooks under load and rich publishing are independently qualified through packaged Alder |
 | Product completion and public Mac delivery | Queued | Unassigned | Project/Git ownership, notebook-wide search, agent presence, accessibility, scale, upgrade state, release identity, architecture support and signed/notarized distribution have explicit accepted behavior |
 
