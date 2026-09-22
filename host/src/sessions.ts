@@ -405,4 +405,4 @@ async function readUntitledRecoveryDescriptor(path: string, id: string): Promise
 }
 async function canonicalizePath(path: string | null): Promise<string | null> { if (path === null) return null; const target = resolve(path); try { return await realpath(target); } catch { return target; } }
 async function canonicalizeDestination(path: string): Promise<string> { const target = resolve(path); try { return await realpath(target); } catch { return join(await realpath(dirname(target)), basename(target)); } }
-function sessionKeyFor(path: string): string { return createHash("sha256").update("path:" + path).digest("hex"); }
+export function sessionKeyFor(path: string): string { return createHash("sha256").update("path:" + path).digest("hex"); }

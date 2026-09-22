@@ -7,7 +7,7 @@ import { join } from "node:path";
 
 import { HOST_PROTOCOL, type SessionConnection } from "../src/protocol.js";
 import { StructuredDiagnostics } from "../src/diagnostics.js";
-import { connectBackendSession } from "../src/sessions.js";
+import { connectBackendSession, sessionKeyFor } from "../src/sessions.js";
 import { ElectronMain, type ElectronRuntime, type ElectronWindow } from "../../desktop/src/main.js";
 import { NativeRecoveryStore } from "../../desktop/src/recovery-store.js";
 
@@ -404,11 +404,12 @@ test("renderer Save As report immediately updates native identity and restart ta
     await writeFile(oldPath, "old\n");
     await writeFile(newPath, "new\n");
     const newCanonicalPath = await realpath(newPath);
+    const newSessionKey = sessionKeyFor(newCanonicalPath);
     let identityRequests = 0;
     const oldConnection = connection("session-before", oldPath, async path => {
       assert.equal(path, "/api/identity");
       identityRequests += 1;
-      return jsonResponse(identity("session-after", newCanonicalPath));
+      return jsonResponse(identity(newSessionKey, newCanonicalPath));
     });
     const window = windowWithLoad();
     const handlers = new Map<string, (event: unknown, ...args: unknown[]) => Promise<unknown>>();
@@ -416,7 +417,7 @@ test("renderer Save As report immediately updates native identity and restart ta
     electronRuntime.BrowserWindow.fromWebContents = () => window;
     electronRuntime.ipcMain.handle = (channel, handler) => { handlers.set(channel, handler); };
     let restartPath: string | null | undefined;
-    const nextConnection = connection("session-after", newCanonicalPath, async path => {
+    const nextConnection = connection(newSessionKey, newCanonicalPath, async path => {
       assert.equal(path, "/api/ticket");
       return jsonResponse({ ticket: "c".repeat(64), expiresAt: "2026-12-01T00:00:00.000Z" });
     });
@@ -434,6 +435,9 @@ test("renderer Save As report immediately updates native identity and restart ta
     const update = handlers.get("alderDesktop:windowState")!;
     const event = { sender: window.webContents, senderFrame: window.webContents.mainFrame };
     const reported = update(event, { path: newCanonicalPath, dirty: false, saveState: "saved", sessionEpoch: "epoch" });
+    assert.equal(identityRequests, 0);
+    assert.equal(record.connection.canonicalPath, newCanonicalPath);
+    assert.equal(record.connection.sessionKey, newSessionKey);
     const restarting = (main as any).restartHost(record);
     await Promise.all([reported, restarting]);
 
@@ -450,6 +454,101 @@ test("renderer Save As report immediately updates native identity and restart ta
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("an old identity reply cannot rewrite a replacement connection", async () => {
+  const oldPath = "/tmp/alder-old-identity.R";
+  const newPath = "/tmp/alder-new-identity.R";
+  const delayed = Promise.withResolvers<Response>();
+  const started = Promise.withResolvers<void>();
+  const old = connection(sessionKeyFor(oldPath), oldPath, async () => { started.resolve(); return delayed.promise; });
+  const next = connection(sessionKeyFor(newPath), newPath, async () => jsonResponse(identity(sessionKeyFor(newPath), newPath)));
+  const window = windowWithLoad();
+  const main = new ElectronMain(runtime(), { resources });
+  const record = recordFor(main, old, window);
+  const check = (main as any).assertHostContinuity(record);
+  await started.promise;
+  (main as any).replaceConnection(record, next);
+  delayed.resolve(jsonResponse(identity(sessionKeyFor(oldPath), oldPath)));
+  await check;
+  assert.equal(record.connection, next);
+  assert.equal(record.connection.canonicalPath, newPath);
+  assert.equal((main as any).byKey.get(oldPath), undefined);
+  assert.equal((main as any).byKey.get(newPath)?.has(record), true);
+  assert.equal(window.titles.at(-1), "alder-new-identity.R — Alder");
+});
+
+test("a newer renderer Save As report wins over an in-flight older identity reply", async () => {
+  const oldPath = "/tmp/alder-before-identity.R";
+  const newPath = "/tmp/alder-after-identity.R";
+  const delayed = Promise.withResolvers<Response>();
+  const started = Promise.withResolvers<void>();
+  const old = connection(sessionKeyFor(oldPath), oldPath, async () => { started.resolve(); return delayed.promise; });
+  const window = windowWithLoad();
+  const handlers = new Map<string, (event: unknown, ...args: unknown[]) => unknown>();
+  const electronRuntime = runtime();
+  electronRuntime.BrowserWindow.fromWebContents = () => window;
+  electronRuntime.ipcMain.handle = (channel, handler) => { handlers.set(channel, handler); };
+  const main = new ElectronMain(electronRuntime, { resources });
+  const record = recordFor(main, old, window);
+  (main as any).installIpcHandlers();
+  const check = (main as any).assertHostContinuity(record);
+  await started.promise;
+  handlers.get("alderDesktop:windowState")!({ sender: window.webContents, senderFrame: window.webContents.mainFrame },
+    { path: newPath, dirty: true, saveState: "edited", sessionEpoch: "epoch" });
+  delayed.resolve(jsonResponse(identity(sessionKeyFor(oldPath), oldPath)));
+  await check;
+  assert.equal(record.connection.canonicalPath, newPath);
+  assert.equal(record.connection.sessionKey, sessionKeyFor(newPath));
+  assert.equal(record.windowState.path, newPath);
+  assert.equal(record.windowState.dirty, true);
+  assert.equal((main as any).byKey.get(oldPath), undefined);
+  assert.equal((main as any).byKey.get(newPath)?.has(record), true);
+});
+
+test("a reported Save As survives backend death and restarts at its destination with the native draft", async () => {
+  const root = await mkdtemp(join(tmpdir(), "alder-dead-save-as-"));
+  try {
+    const oldPath = join(root, "before.R");
+    const newPath = join(root, "after.R");
+    const recoveryId = "r".repeat(43);
+    const native = new NativeRecoveryStore(join(root, "native-drafts"));
+    const old = connection(sessionKeyFor(oldPath), oldPath, async () => { throw new Error("backend exited"); });
+    const next = connection(sessionKeyFor(newPath), newPath, async endpoint => {
+      assert.equal(endpoint, "/api/ticket");
+      return jsonResponse({ ticket: "c".repeat(64), expiresAt: "2026-12-01T00:00:00.000Z" });
+    });
+    const window = windowWithLoad();
+    const handlers = new Map<string, (event: unknown, ...args: unknown[]) => unknown>();
+    const electronRuntime = runtime();
+    electronRuntime.BrowserWindow.fromWebContents = () => window;
+    electronRuntime.ipcMain.handle = (channel, handler) => { handlers.set(channel, handler); };
+    let acquiredPath: string | null | undefined;
+    const main = new ElectronMain(electronRuntime, { resources, acquireSession: async options => {
+      acquiredPath = options.path;
+      return next;
+    } });
+    const record = recordFor(main, old, window);
+    record.loadGeneration = 1;
+    record.authenticatedRendererGeneration = 1;
+    (main as any).installIpcHandlers();
+    (main as any).loadAuthenticatedNotebook = async () => undefined;
+    window.webContents.send = (_channel, value) => {
+      const command = value as { requestId: string; action: string };
+      const settle = () => record.pendingCommands.get(command.requestId)?.resolve({ requestId: command.requestId, status: "ok" });
+      if (command.action === "prepare-unload") void native.write(recoveryId, "draft:" + record.draftId, { body: "unsubmitted edit" }).then(settle);
+      else queueMicrotask(settle);
+    };
+    handlers.get("alderDesktop:windowState")!({ sender: window.webContents, senderFrame: window.webContents.mainFrame },
+      { path: newPath, dirty: true, saveState: "edited", sessionEpoch: "epoch" });
+    const draftId = record.draftId;
+    await (main as any).restartHost(record);
+    assert.equal(acquiredPath, newPath);
+    assert.equal(record.connection, next);
+    assert.equal(record.draftId, draftId);
+    assert.deepEqual(await native.read(recoveryId, "draft:" + draftId), { body: "unsubmitted edit" });
+    assert.equal((main as any).byKey.get(newPath)?.has(record), true);
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test("native restart requests a fresh notebook document response on the same host origin", async () => {

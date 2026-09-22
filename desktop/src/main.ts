@@ -9,6 +9,7 @@ import { IPC_CHANNELS } from "./ipc.js";
 
 import {
   acquireNotebookSession,
+  sessionKeyFor,
   type AcquireNotebookSessionOptions,
 } from "../../host/src/sessions.js";
 import {
@@ -714,14 +715,14 @@ export class ElectronMain {
       if (!response.ok) throw new Error("The host rejected renderer timing metadata.");
     });
     ipc.removeHandler?.(IPC_CHANNELS.windowState);
-    ipc.handle(IPC_CHANNELS.windowState, async (event, ...args) => {
+    ipc.handle(IPC_CHANNELS.windowState, (event, ...args) => {
       if (args.length !== 1) throw new Error("Window state requires one value");
       const record = this.recordForEvent(event);
       const state = windowStateSchema.parse(args[0]);
       if (state.sessionEpoch !== record.connection.epoch) throw new Error("Window state belongs to another session");
       if (state.path !== record.connection.canonicalPath) {
-        await this.assertHostContinuity(record);
-        if (state.path !== record.connection.canonicalPath) return;
+        if (state.path === null) throw new Error("A named notebook cannot return to an untitled identity");
+        this.adoptHostIdentity(record, sessionKeyFor(state.path), state.path);
       }
       record.windowState = state;
       record.dirty = state.dirty;
@@ -1017,9 +1018,18 @@ export class ElectronMain {
     const check = (previous ?? Promise.resolve()).catch(() => undefined).then(async () => {
       if (record.released) throw new Error("desktop application window is released");
       const connection = record.connection;
-      const response = await connection.request("/api/identity", { method: "GET", signal: AbortSignal.timeout(HOST_REQUEST_TIMEOUT_MS) });
+      const generation = record.loadGeneration;
+      const path = connection.canonicalPath;
+      const sessionKey = connection.sessionKey;
+      const superseded = (): boolean => record.released || record.connection !== connection || record.loadGeneration !== generation
+        || connection.canonicalPath !== path || connection.sessionKey !== sessionKey;
+      let response: Response;
+      try { response = await connection.request("/api/identity", { method: "GET", signal: AbortSignal.timeout(HOST_REQUEST_TIMEOUT_MS) }); }
+      catch (error) { if (superseded()) return; throw error; }
+      if (superseded()) return;
       if (!response.ok) throw new Error("desktop host identity query failed (" + response.status + ")");
       const bytes = new Uint8Array(await response.arrayBuffer());
+      if (superseded()) return;
       if (bytes.byteLength > MAX_QUERY_RESPONSE_BYTES) throw new Error("desktop host identity response is too large");
       const identity = hostIdentitySchema.parse(decodeJsonFrame(bytes, MAX_QUERY_RESPONSE_BYTES));
       if (identity.continuityProof !== connection.continuityProof || identity.epoch !== connection.epoch ||
@@ -1031,7 +1041,7 @@ export class ElectronMain {
       if (pathChanged !== sessionChanged || (pathChanged && identity.canonicalPath === null)) {
         throw new Error("desktop host path identity changed without an authoritative Save As");
       }
-      if (record.released) throw new Error("desktop application window is released");
+      if (superseded()) return;
       if (pathChanged) this.adoptHostIdentity(record, identity.sessionKey, identity.canonicalPath);
     });
     this.identityChecks.set(record, check);
