@@ -13510,7 +13510,7 @@ var require_util = __commonJS({
       return path3;
     });
     exports.normalize = normalize3;
-    function join23(aRoot, aPath) {
+    function join24(aRoot, aPath) {
       if (aRoot === "") {
         aRoot = ".";
       }
@@ -13542,7 +13542,7 @@ var require_util = __commonJS({
       }
       return joined;
     }
-    exports.join = join23;
+    exports.join = join24;
     exports.isAbsolute = function(aPath) {
       return aPath.charAt(0) === "/" || urlRegexp.test(aPath);
     };
@@ -13756,7 +13756,7 @@ var require_util = __commonJS({
             parsed.path = parsed.path.substring(0, index + 1);
           }
         }
-        sourceURL = join23(urlGenerate(parsed), sourceURL);
+        sourceURL = join24(urlGenerate(parsed), sourceURL);
       }
       return normalize3(sourceURL);
     }
@@ -15197,7 +15197,7 @@ var require_previous_map = __commonJS({
   "node_modules/postcss/lib/previous-map.js"(exports, module) {
     "use strict";
     var { existsSync, readFileSync, realpathSync } = __require("fs");
-    var { dirname: dirname11, isAbsolute: isAbsolute6, join: join23, relative: relative4, sep: sep3 } = __require("path");
+    var { dirname: dirname12, isAbsolute: isAbsolute6, join: join24, relative: relative4, sep: sep3 } = __require("path");
     var { SourceMapConsumer, SourceMapGenerator } = require_source_map();
     function realPath(path3) {
       try {
@@ -15224,7 +15224,7 @@ var require_previous_map = __commonJS({
         if (!this.mapFile && opts.from) {
           this.mapFile = opts.from;
         }
-        if (this.mapFile) this.root = dirname11(this.mapFile);
+        if (this.mapFile) this.root = dirname12(this.mapFile);
         if (text2) this.text = text2;
       }
       consumer() {
@@ -15270,12 +15270,12 @@ var require_previous_map = __commonJS({
         if (!trusted && !this.unsafeMap) {
           if (!/\.map$/i.test(path3)) return void 0;
           if (!cssFile) return void 0;
-          let rel = relative4(realPath(dirname11(cssFile)), realPath(path3));
+          let rel = relative4(realPath(dirname12(cssFile)), realPath(path3));
           if (rel === ".." || rel.startsWith(".." + sep3) || isAbsolute6(rel)) {
             return void 0;
           }
         }
-        this.root = dirname11(path3);
+        this.root = dirname12(path3);
         if (existsSync(path3)) {
           this.mapFile = path3;
           return readFileSync(path3, "utf-8").toString().trim();
@@ -15312,7 +15312,7 @@ var require_previous_map = __commonJS({
           return this.decodeInline(this.annotation);
         } else if (this.annotation) {
           let map2 = this.annotation;
-          if (file2) map2 = join23(dirname11(file2), map2);
+          if (file2) map2 = join24(dirname12(file2), map2);
           let unknown2 = this.loadFile(map2, file2, false);
           if (unknown2) {
             try {
@@ -15817,12 +15817,12 @@ var require_fromJSON = __commonJS({
 var require_map_generator = __commonJS({
   "node_modules/postcss/lib/map-generator.js"(exports, module) {
     "use strict";
-    var { dirname: dirname11, relative: relative4, resolve: resolve16, sep: sep3 } = __require("path");
+    var { dirname: dirname12, relative: relative4, resolve: resolve16, sep: sep3 } = __require("path");
     var { SourceMapConsumer, SourceMapGenerator } = require_source_map();
     var { pathToFileURL: pathToFileURL2 } = __require("url");
     var Input = require_input();
     var sourceMapAvailable = Boolean(SourceMapConsumer && SourceMapGenerator);
-    var pathAvailable = Boolean(dirname11 && resolve16 && relative4 && sep3);
+    var pathAvailable = Boolean(dirname12 && resolve16 && relative4 && sep3);
     var MapGenerator = class {
       constructor(stringify, root, opts, cssString) {
         this.stringify = stringify;
@@ -15854,7 +15854,7 @@ var require_map_generator = __commonJS({
       applyPrevMaps() {
         for (let prev of this.previous()) {
           let from = this.toUrl(this.path(prev.file));
-          let root = prev.root || dirname11(prev.file);
+          let root = prev.root || dirname12(prev.file);
           let map2;
           if (this.mapOpts.sourcesContent === false) {
             map2 = new SourceMapConsumer(prev.text);
@@ -16050,9 +16050,9 @@ var require_map_generator = __commonJS({
         if (/^\w+:\/\//.test(file2)) return file2;
         let cached2 = this.memoizedPaths.get(file2);
         if (cached2) return cached2;
-        let from = this.opts.to ? dirname11(this.opts.to) : ".";
+        let from = this.opts.to ? dirname12(this.opts.to) : ".";
         if (typeof this.mapOpts.annotation === "string") {
-          from = dirname11(resolve16(from, this.mapOpts.annotation));
+          from = dirname12(resolve16(from, this.mapOpts.annotation));
         }
         let path3 = relative4(from, file2);
         this.memoizedPaths.set(file2, path3);
@@ -40859,7 +40859,7 @@ var require_proper_lockfile = __commonJS({
 import { createServer as createServer2 } from "node:net";
 import { randomUUID as randomUUID17 } from "node:crypto";
 import { chmod as chmod6, mkdir as mkdir11, readFile as readFile11 } from "node:fs/promises";
-import { dirname as dirname10, resolve as resolve15 } from "node:path";
+import { dirname as dirname11, resolve as resolve15 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // src/preferences.ts
@@ -60335,7 +60335,7 @@ var ApplicationPreferences = class _ApplicationPreferences {
 // src/application.ts
 import { randomUUID as randomUUID16 } from "node:crypto";
 import { mkdtemp as mkdtemp5, realpath as realpath10, rm as rm10 } from "node:fs/promises";
-import { basename as basename9, dirname as dirname9, join as join21, resolve as resolve14 } from "node:path";
+import { basename as basename9, dirname as dirname10, join as join22, resolve as resolve14 } from "node:path";
 import { tmpdir as tmpdir6 } from "node:os";
 
 // src/diagnostics.ts
@@ -61881,9 +61881,9 @@ var NodeFsHandler = class {
     if (this.fsw.closed) {
       return;
     }
-    const dirname11 = sp.dirname(file2);
+    const dirname12 = sp.dirname(file2);
     const basename10 = sp.basename(file2);
-    const parent = this.fsw._getWatchedDir(dirname11);
+    const parent = this.fsw._getWatchedDir(dirname12);
     let prevStats = stats;
     if (parent.has(basename10))
       return;
@@ -61910,7 +61910,7 @@ var NodeFsHandler = class {
             prevStats = newStats2;
           }
         } catch (error61) {
-          this.fsw._remove(dirname11, basename10);
+          this.fsw._remove(dirname12, basename10);
         }
       } else if (parent.has(basename10)) {
         const at = newStats.atimeMs;
@@ -79433,7 +79433,8 @@ var ArkKernel = class extends EventEmitter2 {
       args,
       cwd: this.options.cwd,
       environment: { ...this.options.environment, RUST_LOG: "off", RUST_LOG_STYLE: "never" },
-      stdio: "pipes"
+      stdio: "pipes",
+      guardOnOwnerDeath: true
     });
     this.childSpawnPromise = spawnPromise;
     try {
@@ -109839,7 +109840,7 @@ var UploadStore = class {
 import { spawn } from "node:child_process";
 import { randomUUID as randomUUID14 } from "node:crypto";
 import { once } from "node:events";
-import { basename as basename7 } from "node:path";
+import { basename as basename7, dirname as dirname8, join as join20 } from "node:path";
 function signalGroup(pid, signal) {
   try {
     process.kill(-pid, signal);
@@ -109900,8 +109901,57 @@ async function stopGroup(pid, child, exited, onSignal) {
   onSignal("SIGKILL");
   if (signalGroup(pid, "SIGKILL") === "denied") return stopChild(child, exited, false, onSignal);
 }
-async function spawnChild(options, diagnostics) {
-  const child = spawn(options.executable, [...options.args], {
+async function guardianProcessId(child) {
+  const control = child.stdio[4];
+  if (!control || typeof control.on !== "function") throw new Error("Ark guardian control pipe is unavailable");
+  return new Promise((resolve16, reject) => {
+    let input2 = "";
+    let settled = false;
+    const timer = setTimeout(() => finish(new Error("Ark guardian did not report its child")), 5e3);
+    const finish = (error61, pid) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      control.off("data", onData);
+      control.off("end", onEnd);
+      control.off("error", onError);
+      child.off("exit", onExit);
+      if (error61) reject(error61);
+      else resolve16(pid);
+    };
+    const onEnd = () => finish(new Error("Ark guardian closed its control pipe before reporting its child"));
+    const onError = (error61) => finish(error61);
+    const onExit = () => finish(new Error("Ark guardian exited before reporting its child"));
+    const onData = (chunk) => {
+      input2 += chunk.toString("utf8");
+      if (input2.length > 1024) return finish(new Error("Ark guardian response is too large"));
+      const newline2 = input2.indexOf("\n");
+      if (newline2 < 0) return;
+      try {
+        const value = JSON.parse(input2.slice(0, newline2));
+        if (typeof value.error === "string") return finish(new Error(value.error));
+        if (!Number.isSafeInteger(value.pid) || value.pid <= 0) return finish(new Error("Ark guardian returned an invalid child ID"));
+        finish(void 0, value.pid);
+      } catch (error61) {
+        finish(error61 instanceof Error ? error61 : new Error(String(error61)));
+      }
+    };
+    control.on("data", onData);
+    control.once("end", onEnd);
+    control.once("error", onError);
+    child.once("exit", onExit);
+  });
+}
+async function spawnChild(options, resources2, diagnostics) {
+  if (options.guardOnOwnerDeath && (!resources2?.hostEntry || !resources2.nodeExecutable || options.stdio !== "pipes")) {
+    throw new Error("guarded Ark launch requires packaged Node, host resources, and pipes");
+  }
+  const child = options.guardOnOwnerDeath ? spawn(resources2.nodeExecutable, [join20(dirname8(resources2.hostEntry), "ark-guardian.mjs"), options.executable, ...options.args], {
+    cwd: options.cwd,
+    env: options.environment,
+    detached: false,
+    stdio: ["pipe", "pipe", "pipe", "pipe", "pipe"]
+  }) : spawn(options.executable, [...options.args], {
     cwd: options.cwd,
     env: options.environment,
     detached: true,
@@ -109914,7 +109964,14 @@ async function spawnChild(options, diagnostics) {
   void exited.catch(() => {
   });
   await once(child, "spawn");
-  const pid = child.pid;
+  let pid;
+  try {
+    pid = options.guardOnOwnerDeath ? await guardianProcessId(child) : child.pid;
+  } catch (error61) {
+    if (options.guardOnOwnerDeath) signalChild(child, "SIGTERM");
+    throw error61;
+  }
+  const ownedStdin = options.guardOnOwnerDeath ? child.stdio[3] : child.stdin;
   const childInstanceId = randomUUID14();
   const childRole = basename7(options.executable).replace(/[^A-Za-z0-9_.-]/g, "_").slice(0, 64) || "child";
   let stdoutTail = Buffer.alloc(0), stderrTail = Buffer.alloc(0);
@@ -109987,14 +110044,22 @@ async function spawnChild(options, diagnostics) {
     if (!await waitForExit2(exited, 1e3)) {
       throw new Error(`owned process ${pid} remained alive after termination`);
     }
-    child.stdin?.destroy();
+    ownedStdin?.destroy();
+    if (options.guardOnOwnerDeath) child.stdin?.destroy();
   };
+  if (options.guardOnOwnerDeath) {
+    void exited.finally(() => {
+      ownedStdin?.destroy();
+      child.stdin?.destroy();
+    }).catch(() => {
+    });
+  }
   return {
     child,
     pid,
     diagnosticId: childInstanceId,
     diagnosticRole: childRole,
-    stdin: child.stdin,
+    stdin: ownedStdin,
     stdout: child.stdout,
     stderr: child.stderr,
     exited,
@@ -110002,7 +110067,7 @@ async function spawnChild(options, diagnostics) {
     stop
   };
 }
-async function createProcessScope(_resources, diagnostics) {
+async function createProcessScope(resources2, diagnostics) {
   const children = /* @__PURE__ */ new Set();
   const pending = /* @__PURE__ */ new Set();
   let closing;
@@ -110019,7 +110084,7 @@ async function createProcessScope(_resources, diagnostics) {
     spawn(options) {
       if (closing) return Promise.reject(new Error("process scope is closed"));
       const operation = (async () => {
-        const child = await spawnChild(options, diagnostics);
+        const child = await spawnChild(options, resources2, diagnostics);
         children.add(child);
         if (closing) {
           await child.terminate();
@@ -110072,7 +110137,7 @@ async function createProcessScope(_resources, diagnostics) {
 // src/sessions.ts
 import { createHash as createHash8, randomBytes as randomBytes4, randomUUID as randomUUID15 } from "node:crypto";
 import { readdir as readdir4, realpath as realpath9, unlink as unlink6 } from "node:fs/promises";
-import { basename as basename8, dirname as dirname8, join as join20, resolve as resolve13 } from "node:path";
+import { basename as basename8, dirname as dirname9, join as join21, resolve as resolve13 } from "node:path";
 
 // src/backend-client.ts
 var import_proper_lockfile = __toESM(require_proper_lockfile(), 1);
@@ -110175,7 +110240,7 @@ function isUntitledRecoveryId(value) {
   return typeof value === "string" && UNTITLED_SESSION_KEY_PATTERN.test(value);
 }
 function untitledRecoveryDescriptorDirectory(dataRoot) {
-  return join20(resolve13(dataRoot ?? envPaths("alder", { suffix: "" }).data), UNTITLED_RECOVERY_DIRECTORY);
+  return join21(resolve13(dataRoot ?? envPaths("alder", { suffix: "" }).data), UNTITLED_RECOVERY_DIRECTORY);
 }
 async function registerUntitledRecoveryDescriptor(id2, projectDirectory, dataRoot) {
   const validId = requireUntitledRecoveryId(id2);
@@ -110225,7 +110290,7 @@ async function canonicalizeProjectDirectory(value) {
   return realpath9(path3).catch(() => path3);
 }
 function untitledRecoveryDescriptorPath(directory, id2) {
-  return join20(directory, id2 + ".json");
+  return join21(directory, id2 + ".json");
 }
 async function readUntitledRecoveryDescriptor(path3, id2) {
   let bytes;
@@ -110264,7 +110329,7 @@ async function canonicalizeDestination(path3) {
   try {
     return await realpath9(target);
   } catch {
-    return join20(await realpath9(dirname8(target)), basename8(target));
+    return join21(await realpath9(dirname9(target)), basename8(target));
   }
 }
 function sessionKeyFor(path3) {
@@ -110335,8 +110400,8 @@ var optionsSchema = external_exports.object({
 async function startHost(input2) {
   const options = optionsSchema.parse(input2);
   if (options.path !== null) return startNotebookHost(options, options.path, false, options.path);
-  const temporary = await realpath10(await mkdtemp5(join21(tmpdir6(), "alder-unsaved-")));
-  const storagePath = join21(temporary, "Untitled.R");
+  const temporary = await realpath10(await mkdtemp5(join22(tmpdir6(), "alder-unsaved-")));
+  const storagePath = join22(temporary, "Untitled.R");
   try {
     const app = await startNotebookHost(options, storagePath, true, null);
     const closed = app.closed.finally(() => rm10(temporary, { recursive: true, force: true }));
@@ -110369,7 +110434,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
   let isUntitled = unsaved;
   const declaredProjectDirectory = options.session?.projectDirectory ?? process.env.ALDER_UNTITLED_PROJECT_DIRECTORY;
   const untitledProjectDirectory = declaredProjectDirectory !== void 0 && resolve14(declaredProjectDirectory) === declaredProjectDirectory ? await realpath10(declaredProjectDirectory).catch(() => declaredProjectDirectory) : null;
-  const initialNotebookDirectory = unsaved ? untitledProjectDirectory ?? process.cwd() : dirname9(resolve14(storagePath));
+  const initialNotebookDirectory = unsaved ? untitledProjectDirectory ?? process.cwd() : dirname10(resolve14(storagePath));
   let notebookDirectory = await realpath10(initialNotebookDirectory).catch(() => initialNotebookDirectory);
   let selectedRscript;
   let configuredToken = options.session?.token;
@@ -110628,14 +110693,14 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
       lsp = value;
     };
     var setLsp = setLsp2;
-    work = await realpath10(await mkdtemp5(join21(tmpdir6(), "alder-host-")));
-    uploads = new UploadStore(join21(work, "uploads"));
-    cacheDirectory = unsaved ? join21(work, "cache") : join21(notebookDirectory, ".alder", "cache");
+    work = await realpath10(await mkdtemp5(join22(tmpdir6(), "alder-host-")));
+    uploads = new UploadStore(join22(work, "uploads"));
+    cacheDirectory = unsaved ? join22(work, "cache") : join22(notebookDirectory, ".alder", "cache");
     const opened = await DocumentStore.open(storagePath);
     store = opened.store;
     let notebook = opened.notebook;
     if (isUntitled) notebook = { ...notebook, path: null };
-    const projectPath = isUntitled ? join21(notebookDirectory, ".alder", "config.yaml") : projectConfigPath(store.path);
+    const projectPath = isUntitled ? join22(notebookDirectory, ".alder", "config.yaml") : projectConfigPath(store.path);
     projectSettings = await loadProjectSettings(projectPath);
     config3 = configurationFor(notebook);
     projectLayoutIntent = isUntitled ? null : await readLayout(store.path);
@@ -110896,7 +110961,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
         const published = await prepared.publish();
         projectSettings = published.value;
         config3 = configurationFor(context.document);
-        cacheDirectory = config3.cache.dir ? resolve14(notebookDirectory, config3.cache.dir) : join21(notebookDirectory, ".alder", "cache");
+        cacheDirectory = config3.cache.dir ? resolve14(notebookDirectory, config3.cache.dir) : join22(notebookDirectory, ".alder", "cache");
         settingsErrors.delete("project");
         publishSettingsError();
         const sidecars = { ...context.sidecars, config: published.observation };
@@ -110932,7 +110997,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
           pendingSidecars.packages = false;
           const sidecars = { ...context.sidecars, packages: published.observation };
           publishSource(context, { document: context.document, path: context.path, layout: context.layout, disk: context.disk, sidecars, dirty: context.dirty, advanceRevision: false });
-          return { ok: true, path: notebookDirectory, metadata: join21(notebookDirectory, ".alder", "packages.yaml"), packages: [...published.value], sidecarVersion: published.observation.version };
+          return { ok: true, path: notebookDirectory, metadata: join22(notebookDirectory, ".alder", "packages.yaml"), packages: [...published.value], sidecarVersion: published.observation.version };
         } catch (error61) {
           const code2 = pendingSidecars.packages ? "sidecar_write_failed" : "recovery_checkpoint_failed";
           return publishSidecarFailure(context, context.document, context.config, context.layout, "packages", error61, code2);
@@ -110954,7 +111019,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
         const oldStore = store;
         const oldRecovery = recovery;
         const oldManager = packageManager;
-        const tentativeDirectory = dirname9(resolve14(request.path));
+        const tentativeDirectory = dirname10(resolve14(request.path));
         const reservation = !isUntitled && tentativeDirectory === notebookDirectory && runtimeEnvironment === null ? void 0 : controller.reserveRuntimeContext();
         let preparedOwner;
         let preparedSave;
@@ -110969,10 +111034,10 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
           preparedSave = await oldStore.prepareSaveAs(request.path, context.document, request.expectedDestination);
           if (preparedSave.destination !== preparedOwner.canonicalPath) throw new Error("Save As destination canonicalization changed during preparation");
           const destination = preparedSave.destination;
-          const destinationDirectory = dirname9(destination);
+          const destinationDirectory = dirname10(destination);
           const destinationProjectConfig = await loadProjectSettings(projectConfigPath(destination));
           const destinationConfig = configurationFor(context.document, destinationProjectConfig);
-          const destinationCache = destinationConfig.cache.dir ? resolve14(destinationDirectory, destinationConfig.cache.dir) : join21(destinationDirectory, ".alder", "cache");
+          const destinationCache = destinationConfig.cache.dir ? resolve14(destinationDirectory, destinationConfig.cache.dir) : join22(destinationDirectory, ".alder", "cache");
           const destinationLayout = await readLayout(destination);
           let destinationPackages = [];
           try {
@@ -111161,7 +111226,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
           const nextConfig = configurationFor(nextDocument, nextProjectConfig);
           if (sidecarsChanged) {
             try {
-              nextPackageDeclarationIntent = [...(await readPackageDeclarations(dirname9(store.path))).packages];
+              nextPackageDeclarationIntent = [...(await readPackageDeclarations(dirname10(store.path))).packages];
             } catch {
               nextPackageDeclarationIntent = [];
             }
@@ -111355,7 +111420,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
             if (store === void 0) throw Object.assign(new Error("notebook has no saved source"), { code: "notebook_has_no_path" });
             const snapshot = publicationSnapshot(store.currentDocument, liveSnapshot);
             const requestedPath = typeof payload.outputPath === "string" && payload.outputPath.length > 0 ? payload.outputPath : null;
-            const outputPath = requestedPath ?? join21(work, "publish-" + randomUUID16() + ".html");
+            const outputPath = requestedPath ?? join22(work, "publish-" + randomUUID16() + ".html");
             const pendingPublish = publisher.publishSnapshot(snapshot, { outputPath, includeCode: payload.includeCode === true, signal: operation?.signal });
             activePublishes.add(pendingPublish);
             const result = await pendingPublish.finally(() => {
@@ -111563,7 +111628,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
         }
       },
       staticDir: options.resources.rendererDirectory,
-      indexFile: join21(options.resources.rendererDirectory, "index.html"),
+      indexFile: join22(options.resources.rendererDirectory, "index.html"),
       uploads,
       artifactStore,
       diagnostics,
@@ -111978,7 +112043,7 @@ var NotebookBackend = class {
   }
 };
 async function serve(socketPath2) {
-  const root = resolve15(dirname10(fileURLToPath(import.meta.url)), "..");
+  const root = resolve15(dirname11(fileURLToPath(import.meta.url)), "..");
   const diagnosticDirectory = diagnosticsRoot();
   const diagnostics = new StructuredDiagnostics({
     rootDir: diagnosticDirectory,
@@ -112004,7 +112069,7 @@ async function serve(socketPath2) {
       if (backend.idle) stop();
     }, 1e3);
   });
-  await mkdir11(dirname10(socketPath2), { recursive: true, mode: 448 });
+  await mkdir11(dirname11(socketPath2), { recursive: true, mode: 448 });
   const server = createServer2((socket) => {
     clearTimeout(idleTimer);
     idleTimer = setTimeout(() => {

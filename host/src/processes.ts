@@ -1,7 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
-import { basename } from "node:path";
+import { basename, dirname, join } from "node:path";
 import type { Readable, Writable } from "node:stream";
 import type { ApplicationResources } from "./resources.js";
 import { DIAGNOSTIC_CHILD_TAIL_BYTES, diagnosticError, type DiagnosticSink } from "./diagnostics.js";
@@ -12,6 +12,8 @@ export interface ProcessSpawnOptions {
   cwd: string;
   environment: Record<string, string>;
   stdio: "pipes" | "ignore";
+  /** Keep this child group owned even if the shared backend is killed outright. */
+  guardOnOwnerDeath?: boolean;
 }
 
 export interface OwnedProcess {
@@ -97,19 +99,73 @@ async function stopGroup(pid: number, child: ChildProcess, exited: OwnedProcess[
   if (signalGroup(pid, "SIGKILL") === "denied") return stopChild(child, exited, false, onSignal);
 }
 
-async function spawnChild(options: ProcessSpawnOptions, diagnostics?: DiagnosticSink): Promise<ChildHandle> {
-  // A process group lets normal shutdown include children started by R or a helper.
-  const child = spawn(options.executable, [...options.args], {
-    cwd: options.cwd, env: options.environment, detached: true,
-    stdio: options.stdio === "pipes" ? ["pipe", "pipe", "pipe"] : "ignore",
+async function guardianProcessId(child: ChildProcess): Promise<number> {
+  const control = child.stdio[4];
+  if (!control || typeof control.on !== "function") throw new Error("Ark guardian control pipe is unavailable");
+  return new Promise<number>((resolve, reject) => {
+    let input = "";
+    let settled = false;
+    const timer = setTimeout(() => finish(new Error("Ark guardian did not report its child")), 5_000);
+    const finish = (error?: Error, pid?: number): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      control.off("data", onData);
+      control.off("end", onEnd);
+      control.off("error", onError);
+      child.off("exit", onExit);
+      if (error) reject(error);
+      else resolve(pid!);
+    };
+    const onEnd = (): void => finish(new Error("Ark guardian closed its control pipe before reporting its child"));
+    const onError = (error: Error): void => finish(error);
+    const onExit = (): void => finish(new Error("Ark guardian exited before reporting its child"));
+    const onData = (chunk: Buffer): void => {
+      input += chunk.toString("utf8");
+      if (input.length > 1024) return finish(new Error("Ark guardian response is too large"));
+      const newline = input.indexOf("\n");
+      if (newline < 0) return;
+      try {
+        const value = JSON.parse(input.slice(0, newline)) as { pid?: unknown; error?: unknown };
+        if (typeof value.error === "string") return finish(new Error(value.error));
+        if (!Number.isSafeInteger(value.pid) || (value.pid as number) <= 0) return finish(new Error("Ark guardian returned an invalid child ID"));
+        finish(undefined, value.pid as number);
+      } catch (error) { finish(error instanceof Error ? error : new Error(String(error))); }
+    };
+    control.on("data", onData);
+    control.once("end", onEnd);
+    control.once("error", onError);
+    child.once("exit", onExit);
   });
+}
+
+async function spawnChild(options: ProcessSpawnOptions, resources?: ApplicationResources, diagnostics?: DiagnosticSink): Promise<ChildHandle> {
+  // A process group lets normal shutdown include children started by R or a helper.
+  if (options.guardOnOwnerDeath && (!resources?.hostEntry || !resources.nodeExecutable || options.stdio !== "pipes")) {
+    throw new Error("guarded Ark launch requires packaged Node, host resources, and pipes");
+  }
+  const child = options.guardOnOwnerDeath
+    ? spawn(resources!.nodeExecutable, [join(dirname(resources!.hostEntry), "ark-guardian.mjs"), options.executable, ...options.args], {
+      cwd: options.cwd, env: options.environment, detached: false,
+      stdio: ["pipe", "pipe", "pipe", "pipe", "pipe"],
+    })
+    : spawn(options.executable, [...options.args], {
+      cwd: options.cwd, env: options.environment, detached: true,
+      stdio: options.stdio === "pipes" ? ["pipe", "pipe", "pipe"] : "ignore",
+    });
   const exited = new Promise<{ code: number | null; signal: string | null }>((resolve, reject) => {
     child.once("error", reject);
     child.once("exit", (code, signal) => resolve({ code, signal }));
   });
   void exited.catch(() => {});
   await once(child, "spawn");
-  const pid = child.pid!;
+  let pid: number;
+  try { pid = options.guardOnOwnerDeath ? await guardianProcessId(child) : child.pid!; }
+  catch (error) {
+    if (options.guardOnOwnerDeath) signalChild(child, "SIGTERM");
+    throw error;
+  }
+  const ownedStdin = options.guardOnOwnerDeath ? child.stdio[3] as Writable | null : child.stdin;
   const childInstanceId = randomUUID();
   const childRole = basename(options.executable).replace(/[^A-Za-z0-9_.-]/g, "_").slice(0, 64) || "child";
   let stdoutTail: Buffer<ArrayBufferLike> = Buffer.alloc(0), stderrTail: Buffer<ArrayBufferLike> = Buffer.alloc(0);
@@ -155,15 +211,19 @@ async function spawnChild(options: ProcessSpawnOptions, diagnostics?: Diagnostic
     if (!await waitForExit(exited, 1_000)) {
       throw new Error(`owned process ${pid} remained alive after termination`);
     }
-    child.stdin?.destroy();
+    ownedStdin?.destroy();
+    if (options.guardOnOwnerDeath) child.stdin?.destroy();
   };
+  if (options.guardOnOwnerDeath) {
+    void exited.finally(() => { ownedStdin?.destroy(); child.stdin?.destroy(); }).catch(() => {});
+  }
   return {
     child, pid, diagnosticId: childInstanceId, diagnosticRole: childRole,
-    stdin: child.stdin, stdout: child.stdout, stderr: child.stderr, exited, terminate, stop,
+    stdin: ownedStdin, stdout: child.stdout, stderr: child.stderr, exited, terminate, stop,
   };
 }
 
-export async function createProcessScope(_resources?: ApplicationResources, diagnostics?: DiagnosticSink): Promise<ProcessScope> {
+export async function createProcessScope(resources?: ApplicationResources, diagnostics?: DiagnosticSink): Promise<ProcessScope> {
   const children = new Set<ChildHandle>();
   const pending = new Set<Promise<OwnedProcess>>();
   let closing: Promise<void> | undefined;
@@ -177,7 +237,7 @@ export async function createProcessScope(_resources?: ApplicationResources, diag
     spawn(options) {
       if (closing) return Promise.reject(new Error("process scope is closed"));
       const operation = (async () => {
-        const child = await spawnChild(options, diagnostics);
+        const child = await spawnChild(options, resources, diagnostics);
         children.add(child);
         if (closing) {
           await child.terminate();

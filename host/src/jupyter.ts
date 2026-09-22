@@ -517,6 +517,7 @@ export class ArkKernel extends EventEmitter {
       cwd: this.options.cwd,
       environment: { ...this.options.environment, RUST_LOG: "off", RUST_LOG_STYLE: "never" },
       stdio: "pipes",
+      guardOnOwnerDeath: true,
     });
     this.childSpawnPromise = spawnPromise;
     try {

@@ -8,7 +8,7 @@ const destination = resolve(root, '../inst/host');
 await mkdir(destination, { recursive: true });
 const hostBuild = await build({
   absWorkingDir: root,
-  entryPoints: { 'alder-host': 'src/main.ts', 'alder-backend': 'src/backend.ts' },
+  entryPoints: { 'alder-host': 'src/main.ts', 'alder-backend': 'src/backend.ts', 'ark-guardian': 'src/ark-guardian.ts' },
   outdir: destination, outExtension: { '.js': '.mjs' },
   bundle: true, platform: 'node', format: 'esm', target: 'node24',
   packages: 'bundle', legalComments: 'linked',

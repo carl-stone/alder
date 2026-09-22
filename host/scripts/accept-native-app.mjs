@@ -17,6 +17,7 @@ const workspace = join(temporary, 'workspace');
 const notebook = join(workspace, 'native-accept.R');
 const children = new Set();
 const ownedPids = new Set();
+const ownedArkGroups = new Set();
 const sessions = new Set();
 const started = performance.now();
 let launchSequence = 0;
@@ -109,6 +110,43 @@ async function waitFileSource(path, source, timeout = 20_000) {
     await new Promise(resolveWait => setTimeout(resolveWait, 25));
   }
   throw new Error(`native Save did not persist ${JSON.stringify(source)} to ${path}`);
+}
+
+function backendForWorkspace(excludedPid) {
+  const rows = execFileSync('/bin/ps', ['-axo', 'pid=,ppid=,command='], { encoding: 'utf8' }).split('\n');
+  const matches = rows.map(line => /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line))
+    .filter(match => match && Number(match[1]) !== excludedPid && match[3].includes(temporary) && match[3].includes('alder-backend.mjs'));
+  if (matches.length !== 1) throw new Error(`expected one packaged backend, found ${matches.length}`);
+  return Number(matches[0][1]);
+}
+
+function captureBackendArk(backendPid) {
+  const arkPath = join(app, 'Contents/Resources/alder/runtime/ark');
+  const descendants = ownedProcessRows(new Set([backendPid]), '');
+  const kernels = descendants.filter(row => row.command.startsWith(arkPath + ' '));
+  if (kernels.length !== 1) throw new Error(`expected one Ark owned by backend ${backendPid}, found ${kernels.length}`);
+  const guardian = descendants.find(row => row.pid === kernels[0].ppid && row.command.includes('/host/ark-guardian.mjs'));
+  if (!guardian) throw new Error(`Ark ${kernels[0].pid} has no backend-owned guardian`);
+  const pid = kernels[0].pid;
+  const pgid = Number(execFileSync('/bin/ps', ['-o', 'pgid=', '-p', String(pid)], { encoding: 'utf8' }).trim());
+  if (pgid !== pid) throw new Error(`Ark ${pid} is not its own process-group leader (group ${pgid})`);
+  ownedPids.add(guardian.pid);
+  ownedPids.add(pid);
+  ownedArkGroups.add(pgid);
+  return { pid, pgid };
+}
+
+async function waitArkGroupGone(pgid, timeout = 5_000) {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    try { process.kill(-pgid, 0); }
+    catch (error) {
+      if (error.code === 'ESRCH') return;
+      throw error;
+    }
+    await new Promise(resolveWait => setTimeout(resolveWait, 25));
+  }
+  throw new Error(`packaged Ark process group ${pgid} survived`);
 }
 
 async function stop(instance) {
@@ -331,15 +369,15 @@ async function runBackendCrashJourney(primary) {
   await primary.cdp.wait(`window.__alderHost.client.document.snapshot.cells[0].body.join('\\n') === ${JSON.stringify(accepted)} &&
     window.__alderHost.client.document.snapshot.dirty && window.__alderHost.client.document.pendingSource().changes.length === 0`, 15_000);
   if (await readFile(notebook, 'utf8') !== initialNotebook) throw new Error('accepted edit saved before explicit Save');
-  const rows = execFileSync('/bin/ps', ['-axo', 'pid=,ppid=,command='], { encoding: 'utf8' }).split('\n');
-  const backend = rows.map(line => /^(\s*\d+)\s+(\d+)\s+(.*)$/.exec(line))
-    .find(match => match && match[3].includes(temporary) && match[3].includes('alder-backend.mjs'));
-  if (!backend) throw new Error('packaged notebook backend was not found');
+  const backendPid = backendForWorkspace();
+  const oldArk = captureBackendArk(backendPid);
   await replaceEditor(primary.cdp, localDraft, 1);
   const beforeCrash = await primary.cdp.evaluate("({accepted:window.__alderHost.client.document.snapshot.cells[0].body.join('\\n'),serverDraft:window.__alderHost.client.document.snapshot.cells[1].body.join('\\n'),localDraft:window.__alderHost.client.document.cells[1].desiredBody.join('\\n')})");
   if (beforeCrash.accepted !== accepted || beforeCrash.serverDraft !== 'local_value <- 0L\nlocal_value'
     || beforeCrash.localDraft !== localDraft) throw new Error(`crash setup did not hold one accepted edit and one local draft: ${JSON.stringify(beforeCrash)}`);
-  process.kill(Number(backend[1]), 'SIGKILL');
+  process.kill(backendPid, 'SIGKILL');
+  await waitForOwnedExit(new Set([oldArk.pid]), '', 5_000);
+  await waitArkGroupGone(oldArk.pgid);
   await primary.cdp.wait(`[...document.querySelectorAll('.cm-content')[1].querySelectorAll('.cm-line')].map(node => node.textContent).join('\\n') === ${JSON.stringify(localDraft)} &&
     window.__alderHost.client.document.snapshot.cells[0].body.join('\\n') === ${JSON.stringify(accepted)}`, 10_000);
   if (await readFile(notebook, 'utf8') !== initialNotebook) throw new Error('backend crash changed notebook on disk');
@@ -352,6 +390,7 @@ async function runBackendCrashJourney(primary) {
   await primary.cdp.wait(`window.__alderHost?.client?.document?.snapshot?.cells[0]?.body.join('\\n') === ${JSON.stringify(accepted)} &&
     window.__alderHost.client.document.snapshot.cells[1]?.body.join('\\n') === ${JSON.stringify(localDraft)} &&
     window.__alderHost.view.transportState === 'open' && document.getElementById('r-state')?.textContent === 'R ready'`, 60_000);
+  const recoveredArk = captureBackendArk(backendForWorkspace(backendPid));
   if (await readFile(notebook, 'utf8') !== initialNotebook) throw new Error('host restart saved the draft without Save');
   await primary.cdp.evaluate("document.getElementById('save').click()");
   const expectedBody = `${accepted}\n# %%\n${localDraft}`;
@@ -378,6 +417,7 @@ async function runBackendCrashJourney(primary) {
   }
   if (savedSource(await readFile(notebook, 'utf8')) !== finalBody) throw new Error('Run and Save after recovery did not persist the new source');
   process.stdout.write(JSON.stringify({ backendCrash: true, accepted, localDraft, recovered: true,
+    oldArkPid: oldArk.pid, oldArkGroupGone: true, recoveredArkPid: recoveredArk.pid,
     outputAfterRecovery: 45, savedAfterRecovery: true }) + '\n');
 }
 
@@ -537,7 +577,10 @@ try {
     try { requestNativeQuit(child.pid); } catch (error) { stopErrors.push(error); }
   }
   let naturalExitError;
-  try { await waitForOwnedExit(ownedPids, temporary); } catch (error) { naturalExitError = error; }
+  try {
+    await waitForOwnedExit(ownedPids, temporary);
+    for (const pgid of ownedArkGroups) await waitArkGroupGone(pgid);
+  } catch (error) { naturalExitError = error; }
   const cleanup = await cleanupOwnedProcesses(ownedPids, temporary);
   for (const cdp of sessions) cdp.close();
   await rm(temporary, { recursive: true, force: true });

@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
-import { ChildProcess } from "node:child_process";
+import { ChildProcess, spawn } from "node:child_process";
 import { once } from "node:events";
+import { dirname, resolve } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import { createProcessScope } from "../src/processes.js";
+import type { ApplicationResources } from "../src/resources.js";
 import type { DiagnosticFields, DiagnosticSeverity, DiagnosticSink } from "../src/diagnostics.js";
 
 class CollectingDiagnostics implements DiagnosticSink {
@@ -13,6 +16,10 @@ class CollectingDiagnostics implements DiagnosticSink {
 
 const environment = Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => typeof entry[1] === "string"));
 const options = (source: string) => ({ executable: process.execPath, args: ["-e", source], cwd: process.cwd(), environment, stdio: "pipes" as const });
+const guardResources = () => ({
+  hostEntry: resolve(dirname(fileURLToPath(import.meta.url)), "../../inst/host/alder-host.mjs"),
+  nodeExecutable: process.execPath,
+}) as ApplicationResources;
 const exists = (pid: number): boolean => { try { process.kill(pid, 0); return true; } catch { return false; } };
 async function waitGone(pid: number): Promise<void> {
   const deadline = Date.now() + 3_000;
@@ -32,6 +39,49 @@ test("owned processes deliver output and exit status without a native supervisor
     await outputEnded;
     assert.equal(Buffer.concat(chunks).toString(), "source\n");
   } finally { await scope.close(); }
+});
+
+test("a guarded child group exits after its backend owner is killed", { timeout: 10_000 }, async () => {
+  const hostEntry = guardResources().hostEntry;
+  const source = `
+    const { createProcessScope } = await import(${JSON.stringify(new URL("../src/processes.js", import.meta.url).href)});
+    const scope = await createProcessScope({ hostEntry: ${JSON.stringify(hostEntry)}, nodeExecutable: process.execPath });
+    const child = await scope.spawn({ executable: process.execPath, args: ["-e", "setInterval(() => {}, 1000)"],
+      cwd: process.cwd(), environment: process.env, stdio: "pipes", guardOnOwnerDeath: true });
+    console.log(child.pid);
+    setInterval(() => {}, 1000);
+  `;
+  const owner = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", source], {
+    cwd: resolve(dirname(fileURLToPath(import.meta.url)), ".."), stdio: ["ignore", "pipe", "pipe"],
+  });
+  let arkPid: number | undefined;
+  try {
+    const [bytes] = await once(owner.stdout!, "data");
+    arkPid = Number(String(bytes).trim());
+    assert.ok(Number.isSafeInteger(arkPid) && arkPid > 0);
+    assert.equal(exists(arkPid), true);
+    owner.kill("SIGKILL");
+    await once(owner, "exit");
+    await waitGone(arkPid);
+  } finally {
+    if (owner.exitCode === null && owner.signalCode === null) owner.kill("SIGKILL");
+    if (arkPid !== undefined && exists(arkPid)) try { process.kill(-arkPid, "SIGKILL"); } catch { /* already gone */ }
+  }
+});
+
+test("a guarded child keeps its pipes and exits on an ordinary scope close", { timeout: 8_000 }, async () => {
+  const scope = await createProcessScope(guardResources());
+  const child = await scope.spawn({ ...options("process.stdin.on('data', bytes => process.stdout.write(bytes)); setInterval(() => {}, 1000)"), guardOnOwnerDeath: true });
+  try {
+    const output = once(child.stdout!, "data");
+    child.stdin!.write("guarded\n");
+    assert.equal(String((await output)[0]), "guarded\n");
+    await scope.close();
+    await waitGone(child.pid);
+  } finally {
+    await scope.close().catch(() => undefined);
+    if (exists(child.pid)) try { process.kill(-child.pid, "SIGKILL"); } catch { /* already gone */ }
+  }
 });
 
 test("owned child diagnostics retain argv, cwd, environment and bounded stdout and stderr tails", async () => {
