@@ -31,14 +31,13 @@ rename, then adopt the published state without fictional rollback. Directory syn
 can also fail after rename: report committed with a durability warning and retain
 recovery. The current assignment includes this refinement, not the later work below.
 
-**Correction and next action:** focused review of clean `610d4d6` found two remaining
-commit-boundary defects: a durability warning still retires the only recovery
-journal, and preparation overwrites the destination recovery identity before file
-publication. Primary implementer must retain recoverable edits through uncertain
-durability, preserve destination identity on precommit failure, support a real
-retry without another edit, and show the successful-save warning directly. Check
-recovery after reopening before a later Save can repair it. Submit a clean focused
-candidate; lead reviews corrections before complete signed-app acceptance.
+**Correction and next action:** review of `b18e5ac` found that retained recovery
+still belongs to the old source path: reopening that source lets a later destination
+Save delete its new owner's journal. Give the fallback independent ownership.
+Identity retry must work after another edit, and a warned Save As must publish the
+same needs-retry state used by ordinary Save so Quit cannot silently discard it.
+Clear obsolete warnings on successful Save As. Primary implementer owns this
+correction; submit focused cases for review before complete signed-app acceptance.
 
 **Approved next slices, in order:**
 
@@ -88,7 +87,7 @@ One item is active. New approved work is added here before assignment.
 | Release README and feature demo | Accepted | Primary implementer and independent reviewers | `b316bc3`: release-facing install/use guide and three compact real-app feature captures; media and factual reviews passed |
 | Repository integration and cleanup | Accepted | Primary implementer and focused cleanup reviewers | `554da34`: canonical docs and accepted app fast-forwarded to remote `main`; obsolete worktrees, branches and safety stashes removed after review |
 | Platform-boundary extraction | Accepted | Primary implementer and focused reviewers | `42cfda8`: shared Linux R 34/34, browser 12/12 and reviewed localized Mac/Linux seams; no duplicated product or Ark fork |
-| Native Mac reliability qualification | Implementing | Primary implementer | Correct `610d4d6` recovery retention, destination identity publication and visible retryable warning; submit focused candidate for review |
+| Native Mac reliability qualification | Implementing | Primary implementer | Correct recovery fallback ownership, retry after editing and warned-save close state in `b18e5ac`; submit focused candidate |
 | Scientific workflow qualification | Queued | Unassigned | A realistic scientific notebook, real CRAN/Bioconductor packages, representative R reactivity idioms, two live notebooks under load and rich publishing are independently qualified through packaged Alder |
 | Product completion and public Mac delivery | Queued | Unassigned | Project/Git ownership, notebook-wide search, agent presence, accessibility, scale, upgrade state, release identity, architecture support and signed/notarized distribution have explicit accepted behavior |
 
