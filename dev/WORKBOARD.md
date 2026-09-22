@@ -10,7 +10,7 @@ copies in other worktrees are snapshots.
 
 ## Current assignment
 
-**Native Mac reliability — Review on Mac.**
+**Native Mac reliability — Implementing on Mac.**
 
 **Latest accepted checkpoint:** `8dfb454` adds reviewed harness failure cleanup and
 its normally scheduled regression. App source remains `310427b`: focused reviews,
@@ -29,15 +29,19 @@ remain dependable through native failures. Exercise real user journeys through t
 while keeping Carl's visible desktop free. Record scenarios that genuinely require foreground
 interaction for a later supervised pass; do not infer them from headless checks.
 
-**Current bounded slice:** confirm and correct native state immediately after a
-new-host restart. Initial editor state can arrive before native connection adoption
-and fail the epoch check. Establish whether this produces a false dirty indicator,
-error or unnecessary Save prompt, then fix the authenticated handoff if needed.
+**Current bounded slice:** finish backend-restart recovery as a usable notebook.
+The initial native state handoff passes focused review, but the same-stage crash
+journey retained the recovered local draft without executing its new value, and
+native quit required forced cleanup. Diagnose the failed ordering and correct the
+smallest responsible boundary; do not weaken the expected recovered result.
 
-**Owner and next action:** production handoff review passed `39741cf`; lead verified
-the focused test correction in clean candidate `48c7566`. The final acceptance
-reviewer owns the full signed-app gate and isolated backend-crash journey on that
-candidate. Primary holds; lead records acceptance or consolidates remaining failures.
+**Owner and next action:** primary receives the consolidated failure from exact
+clean `48c7566`. Its complete signed-app gate passed (473.98 seconds), but the
+required backend-crash journey failed after 72 seconds: visible draft included
+`local_value <- 45L`, R was ready, output stayed `[1] 43`, and host snapshot source
+still held only the first cell. Native cleanup was forced; no test processes remain.
+Reviewer supplies the original evidence and inspects the test sequence read-only.
+Primary returns a focused clean correction for review before another full gate.
 
 **Remaining native evidence:** Finder/Open, native Save As replacement, dirty-close
 sheets, Dock activation and native zero-window Quit need foreground interaction.
@@ -69,7 +73,7 @@ One item is active. New approved work is added here before assignment.
 | Release README and feature demo | Accepted | Primary implementer and independent reviewers | `b316bc3`: release-facing install/use guide and three compact real-app feature captures; media and factual reviews passed |
 | Repository integration and cleanup | Accepted | Primary implementer and focused cleanup reviewers | `554da34`: canonical docs and accepted app fast-forwarded to remote `main`; obsolete worktrees, branches and safety stashes removed after review |
 | Platform-boundary extraction | Accepted | Primary implementer and focused reviewers | `42cfda8`: shared Linux R 34/34, browser 12/12 and reviewed localized Mac/Linux seams; no duplicated product or Ark fork |
-| Native Mac reliability qualification | Review | Lead and final acceptance reviewer | Full signed-app acceptance and backend-crash journey on reviewed `48c7566` |
+| Native Mac reliability qualification | Implementing | Primary implementer | Recovered accepted and local edits execute and save correctly; native close exits owned children; focused review and signed-app acceptance pass |
 | Scientific workflow qualification | Queued | Unassigned | A realistic scientific notebook, real CRAN/Bioconductor packages, representative R reactivity idioms, two live notebooks under load and rich publishing are independently qualified through packaged Alder |
 | Product completion and public Mac delivery | Queued | Unassigned | Project/Git ownership, notebook-wide search, agent presence, accessibility, scale, upgrade state, release identity, architecture support and signed/notarized distribution have explicit accepted behavior |
 
