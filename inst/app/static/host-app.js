@@ -26049,7 +26049,9 @@ ${cell.desiredBody.join("\n")}`));
       }
       if (action === "retry-connection") {
         event.preventDefault();
-        this.client.retryConnection();
+        const desktop = globalThis.alderDesktop;
+        if (desktop) void desktop.restartHost().catch((error61) => this.showError(error61));
+        else this.client.retryConnection();
         return;
       }
       if (action === "close-window") {
@@ -26301,6 +26303,10 @@ ${cell.desiredBody.join("\n")}`));
       settingsError: Boolean(settingsError),
       editorHelpError: Boolean(editorHelpError),
       transportError: Boolean(this.transportError),
+      recoveryRuntime: [
+        this.documentValue?.snapshot.runtime.kernelState ?? null,
+        this.documentValue?.snapshot.runtime.rEnvironment?.rscript ?? null
+      ],
       editorHelpRestarting: this.editorHelpRestarting,
       recovery: { status: recovery.status, local: recovery.local !== null, candidate: recovery.candidate === null ? null : [recovery.candidate.state, recovery.candidate.documentRevision], uncertainRun: recovery.uncertainRun, corruption: recovery.corruption?.code ?? null, persistenceError: recovery.persistenceError?.code ?? null },
       canUndoDelete: this.deletedCell !== null
@@ -26321,7 +26327,8 @@ ${cell.desiredBody.join("\n")}`));
       banner.setAttribute("role", "region");
       banner.setAttribute("aria-label", "Connection status");
       banner.appendChild(elementNode(this.dom, "span", "connection-message", this.transportError));
-      const retry = elementNode(this.dom, "button", "btn mini", "Restart connection");
+      const desktop = globalThis.alderDesktop;
+      const retry = elementNode(this.dom, "button", "btn mini", desktop ? "Restart host" : "Restart connection");
       retry.type = "button";
       retry.dataset.statusAction = "retry-connection";
       const close = elementNode(this.dom, "button", "btn mini", "Close");
@@ -26392,6 +26399,13 @@ ${cell.desiredBody.join("\n")}`));
       actions.appendChild(button);
     };
     if (state.local || state.candidate?.state === "restored") add("Continue recovered", async () => this.client.continueRecovered());
+    if (state.local && this.documentValue?.snapshot.runtime.rEnvironment !== null && this.documentValue?.snapshot.runtime.kernelState !== "ready") {
+      add("Start R", async () => {
+        const rscript = this.documentValue?.snapshot.runtime.rEnvironment?.rscript;
+        if (!rscript) throw new Error("Choose an R installation before starting R");
+        await this.client.selectR(rscript);
+      });
+    }
     if (state.status === "conflict" || state.candidate?.state === "conflict") add("Save recovered copy", () => this.saveRecoveryCopy());
     if (state.local || state.candidate || state.corruption) add("Open saved", async () => {
       if (window.confirm("Open the saved notebook and remove the recovered edits?")) await this.client.discardRecovery();

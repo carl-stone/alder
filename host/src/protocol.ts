@@ -1320,7 +1320,7 @@ export const desktopRecoveryRequestSchema = z.object({
   name: z.string().max(256).optional(), value: z.unknown().optional(),
 }).strict();
 export type DesktopRecoveryRequest = z.infer<typeof desktopRecoveryRequestSchema>;
-export interface PreloadApi { recovery(request: DesktopRecoveryRequest): Promise<unknown>; openNotebook(): Promise<void>; chooseSavePath(): Promise<SaveDestination | null>; chooseRscript(): Promise<string | null>; getDraftId(): Promise<string>; rendererReady(): Promise<void>; reportDiagnostic(event: DesktopDiagnostic): Promise<void>; updateWindowState(state: WindowState): Promise<void>; completeDesktopCommand(result: DesktopCommandResult): Promise<void>; onDesktopCommand(callback: (command: DesktopCommand) => void): () => void; }
+export interface PreloadApi { recovery(request: DesktopRecoveryRequest): Promise<unknown>; openNotebook(): Promise<void>; restartHost(): Promise<void>; chooseSavePath(): Promise<SaveDestination | null>; chooseRscript(): Promise<string | null>; getDraftId(): Promise<string>; rendererReady(): Promise<void>; reportDiagnostic(event: DesktopDiagnostic): Promise<void>; updateWindowState(state: WindowState): Promise<void>; completeDesktopCommand(result: DesktopCommandResult): Promise<void>; onDesktopCommand(callback: (command: DesktopCommand) => void): () => void; }
 
 export class ProtocolError extends Error { readonly code: string; constructor(code: string, message: string) { super(message); this.name = "ProtocolError"; this.code = code; } }
 export function decodeJsonFrame(input: string | Uint8Array, maxBytes = MAX_FRAME_BYTES): unknown {

@@ -630,6 +630,11 @@ export class ElectronMain {
       if (path) await this.openReplacingPristineUntitled(record, path);
       return undefined;
     });
+    noArguments(IPC_CHANNELS.restartHost, record => {
+      if (record.hostFailureShown || record.monitorInProgress) return;
+      record.hostFailureShown = true;
+      void this.restartHost(record);
+    });
     noArguments(IPC_CHANNELS.chooseSavePath, async (record) => {
       const result = await this.runtime.dialog.showSaveDialog(record.window, {
         title: "Save notebook",

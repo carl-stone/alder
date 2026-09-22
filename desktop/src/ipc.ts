@@ -2,6 +2,7 @@
 export const IPC_CHANNELS = Object.freeze({
   recovery: "alderDesktop:recovery",
   openNotebook: "alderDesktop:openNotebook",
+  restartHost: "alderDesktop:restartHost",
   chooseSavePath: "alderDesktop:chooseSavePath",
   chooseRscript: "alderDesktop:chooseRscript",
   getDraftId: "alderDesktop:getDraftId",

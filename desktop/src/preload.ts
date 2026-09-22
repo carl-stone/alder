@@ -50,6 +50,9 @@ export function createPreloadApi(ipc: IpcRendererLike): PreloadApi {
     openNotebook: async (): Promise<void> => {
       validateVoid(await ipc.invoke(IPC_CHANNELS.openNotebook), "openNotebook");
     },
+    restartHost: async (): Promise<void> => {
+      validateVoid(await ipc.invoke(IPC_CHANNELS.restartHost), "restartHost");
+    },
     chooseSavePath: async (): Promise<SaveDestination | null> => {
       const value = await ipc.invoke(IPC_CHANNELS.chooseSavePath);
       if (value === null) return null;

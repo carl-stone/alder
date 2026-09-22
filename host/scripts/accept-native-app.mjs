@@ -10,6 +10,7 @@ const app = resolve(process.argv[2] ?? 'host/.application-desktop/Alder.app');
 const executable = join(app, 'Contents/MacOS/Alder');
 const cleanupProbe = process.argv.includes('--cleanup-probe');
 const multiWindow = process.argv.includes('--multi-window');
+const backendCrash = process.argv.includes('--backend-crash');
 const saveIterations = Number(process.env.ALDER_NATIVE_SAVE_ITERATIONS ?? 20);
 const temporary = await mkdtemp('/tmp/alder-native-accept-');
 const workspace = join(temporary, 'workspace');
@@ -20,7 +21,10 @@ const sessions = new Set();
 const started = performance.now();
 let launchSequence = 0;
 await mkdir(workspace);
-await writeFile(notebook, '# ---\n# runtime:\n#   on_cell_change: lazy\n# ---\n# %%\nvalue <- 0L\nvalue\n');
+const initialNotebook = backendCrash
+  ? '# ---\n# runtime:\n#   on_cell_change: lazy\n# ---\n# %%\naccepted_value <- 0L\naccepted_value\n# %%\nlocal_value <- 0L\nlocal_value\n'
+  : '# ---\n# runtime:\n#   on_cell_change: lazy\n# ---\n# %%\nvalue <- 0L\nvalue\n';
+await writeFile(notebook, initialNotebook);
 function environment() {
   const result = { ...process.env,
     HOME: temporary,
@@ -61,13 +65,13 @@ async function launch(name) {
   }
 }
 
-async function replaceEditor(cdp, source) {
-  const point = await cdp.evaluate(`(() => { const node=document.querySelector('.cm-content'); node.scrollIntoView({block:'center'}); const r=node.getBoundingClientRect(); return {x:r.x+Math.min(40,r.width/2),y:r.y+Math.min(15,r.height/2)} })()`);
+async function replaceEditor(cdp, source, index = 0) {
+  const point = await cdp.evaluate(`(() => { const node=document.querySelectorAll('.cm-content')[${index}]; node.scrollIntoView({block:'center'}); const r=node.getBoundingClientRect(); return {x:r.x+Math.min(40,r.width/2),y:r.y+Math.min(15,r.height/2)} })()`);
   await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', ...point, button: 'left', clickCount: 1 });
   await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', ...point, button: 'left', clickCount: 1 });
   await shortcut(cdp, 'a', 'KeyA', 65, 4);
   await cdp.send('Input.insertText', { text: source });
-  await cdp.wait(`[...document.querySelectorAll('.cm-content .cm-line')].map(node => node.textContent).join('\\n') === ${JSON.stringify(source)}`, 10_000);
+  await cdp.wait(`[...document.querySelectorAll('.cm-content')[${index}].querySelectorAll('.cm-line')].map(node => node.textContent).join('\\n') === ${JSON.stringify(source)}`, 10_000);
 }
 
 async function shortcut(cdp, key, code, windowsVirtualKeyCode, modifiers = 4) {
@@ -194,6 +198,13 @@ class Cdp {
       snapshotSource: window.__alderHost?.client?.document?.snapshot?.cells?.[0]?.body,
       snapshotDirty: window.__alderHost?.client?.document?.snapshot?.dirty,
       saveState: document.getElementById('save-state')?.textContent,
+      runtime: window.__alderHost?.client?.document?.snapshot?.runtime && {
+        kernelState: window.__alderHost.client.document.snapshot.runtime.kernelState,
+        executionReady: window.__alderHost.client.document.snapshot.runtime.executionReady,
+        startupActivated: window.__alderHost.client.document.snapshot.runtime.startupActivated,
+        rEnvironment: window.__alderHost.client.document.snapshot.runtime.rEnvironment,
+      },
+      actionError: window.__alderHost?.view?.actionError,
     }))()`).catch(() => null);
     throw new Error(`packaged app condition timed out: ${expression}; state=${JSON.stringify(diagnostic)}`);
   }
@@ -312,6 +323,64 @@ async function runMultiWindowJourney(primary) {
   }
 }
 
+async function runBackendCrashJourney(primary) {
+  await disableAutosave(primary.cdp);
+  const accepted = 'accepted_value <- 43L\naccepted_value';
+  const localDraft = 'local_value <- 44L\nlocal_value';
+  await replaceEditor(primary.cdp, accepted);
+  await primary.cdp.wait(`window.__alderHost.client.document.snapshot.cells[0].body.join('\\n') === ${JSON.stringify(accepted)} &&
+    window.__alderHost.client.document.snapshot.dirty && window.__alderHost.client.document.pendingSource().changes.length === 0`, 15_000);
+  if (await readFile(notebook, 'utf8') !== initialNotebook) throw new Error('accepted edit saved before explicit Save');
+  const rows = execFileSync('/bin/ps', ['-axo', 'pid=,ppid=,command='], { encoding: 'utf8' }).split('\n');
+  const backend = rows.map(line => /^(\s*\d+)\s+(\d+)\s+(.*)$/.exec(line))
+    .find(match => match && match[3].includes(temporary) && match[3].includes('alder-backend.mjs'));
+  if (!backend) throw new Error('packaged notebook backend was not found');
+  await replaceEditor(primary.cdp, localDraft, 1);
+  const beforeCrash = await primary.cdp.evaluate("({accepted:window.__alderHost.client.document.snapshot.cells[0].body.join('\\n'),serverDraft:window.__alderHost.client.document.snapshot.cells[1].body.join('\\n'),localDraft:window.__alderHost.client.document.cells[1].desiredBody.join('\\n')})");
+  if (beforeCrash.accepted !== accepted || beforeCrash.serverDraft !== 'local_value <- 0L\nlocal_value'
+    || beforeCrash.localDraft !== localDraft) throw new Error(`crash setup did not hold one accepted edit and one local draft: ${JSON.stringify(beforeCrash)}`);
+  process.kill(Number(backend[1]), 'SIGKILL');
+  await primary.cdp.wait(`[...document.querySelectorAll('.cm-content')[1].querySelectorAll('.cm-line')].map(node => node.textContent).join('\\n') === ${JSON.stringify(localDraft)} &&
+    window.__alderHost.client.document.snapshot.cells[0].body.join('\\n') === ${JSON.stringify(accepted)}`, 10_000);
+  if (await readFile(notebook, 'utf8') !== initialNotebook) throw new Error('backend crash changed notebook on disk');
+  await primary.cdp.wait("window.__alderHost.view.transportState === 'closed' && document.querySelector('[data-status-action=retry-connection]')?.textContent === 'Restart host'", 15_000);
+  await primary.cdp.evaluate("document.querySelector('[data-status-action=retry-connection]').click()");
+  await primary.cdp.wait("[...document.querySelectorAll('[data-recovery-panel] button')].some(button => button.textContent === 'Continue recovered')", 60_000);
+  await primary.cdp.evaluate("[...document.querySelectorAll('[data-recovery-panel] button')].find(button => button.textContent === 'Continue recovered').click()");
+  await primary.cdp.wait("[...document.querySelectorAll('[data-recovery-panel] button')].some(button => button.textContent === 'Start R')", 10_000);
+  await primary.cdp.evaluate("[...document.querySelectorAll('[data-recovery-panel] button')].find(button => button.textContent === 'Start R').click()");
+  await primary.cdp.wait(`window.__alderHost?.client?.document?.snapshot?.cells[0]?.body.join('\\n') === ${JSON.stringify(accepted)} &&
+    window.__alderHost.client.document.snapshot.cells[1]?.body.join('\\n') === ${JSON.stringify(localDraft)} &&
+    window.__alderHost.view.transportState === 'open' && document.getElementById('r-state')?.textContent === 'R ready'`, 60_000);
+  if (await readFile(notebook, 'utf8') !== initialNotebook) throw new Error('host restart saved the draft without Save');
+  await primary.cdp.evaluate("document.getElementById('save').click()");
+  const expectedBody = `${accepted}\n# %%\n${localDraft}`;
+  const deadline = Date.now() + 20_000;
+  let saved = await readFile(notebook, 'utf8');
+  while (savedSource(saved) !== expectedBody && Date.now() < deadline) {
+    await new Promise(resolveWait => setTimeout(resolveWait, 25));
+    saved = await readFile(notebook, 'utf8');
+  }
+  if (savedSource(saved) !== expectedBody) {
+    const state = await primary.cdp.evaluate("({status:document.getElementById('status')?.textContent,saveState:document.getElementById('save-state')?.textContent,actionError:window.__alderHost.view.actionError,cells:window.__alderHost.client.document.snapshot.cells.map(cell=>cell.body),pending:window.__alderHost.client.document.pendingSource().changes})");
+    throw new Error(`Save after host restart lost source: ${JSON.stringify({ saved, state })}`);
+  }
+  await primary.cdp.wait('window.__alderHost.client.document.snapshot.dirty === false', 10_000);
+  const afterRecovery = 'local_value <- 45L\nlocal_value';
+  await replaceEditor(primary.cdp, afterRecovery, 1);
+  await primary.cdp.evaluate("document.querySelector('[data-cell=cell-2] [data-act=run]').click()");
+  await primary.cdp.wait("document.querySelector('#notebook')?.textContent.includes('[1] 45') && document.getElementById('r-state')?.textContent === 'R ready'", 30_000);
+  await primary.cdp.evaluate("document.getElementById('save').click()");
+  const finalBody = `${accepted}\n# %%\n${afterRecovery}`;
+  const finalDeadline = Date.now() + 20_000;
+  while (savedSource(await readFile(notebook, 'utf8')) !== finalBody && Date.now() < finalDeadline) {
+    await new Promise(resolveWait => setTimeout(resolveWait, 25));
+  }
+  if (savedSource(await readFile(notebook, 'utf8')) !== finalBody) throw new Error('Run and Save after recovery did not persist the new source');
+  process.stdout.write(JSON.stringify({ backendCrash: true, accepted, localDraft, recovered: true,
+    outputAfterRecovery: 45, savedAfterRecovery: true }) + '\n');
+}
+
 
 let primary;
 let peer;
@@ -320,6 +389,7 @@ try {
   primary = await launch('electron-primary');
   if (cleanupProbe) throw new Error('intentional cleanup probe');
   if (multiWindow) await runMultiWindowJourney(primary);
+  else if (backendCrash) await runBackendCrashJourney(primary);
   else {
 
   await primary.cdp.evaluate(`(() => { const cause = new Error('PACKAGED_RENDERER_CAUSE'); const error = new Error('PACKAGED_RENDERER_FAILURE', { cause }); error.stack = 'PACKAGED_RENDERER_STACK'; window.dispatchEvent(new ErrorEvent('error', { error, message: error.message, filename: '/packaged/native-accept-renderer.js', lineno: 14, colno: 9 })) })()`);
