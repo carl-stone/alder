@@ -15,7 +15,7 @@ copies in other worktrees are snapshots.
 **Latest accepted checkpoint:** source `237a254`. Independent lifecycle rereviews
 and full signed-app acceptance passed in 473.82 seconds: real-R orphan-run exit,
 explicit Discard, browser/native journeys, strict signing and natural cleanup.
-Primary will integrate it with canonical docs on main before the next source edits.
+The same source is integrated with canonical docs on pushed main at `65a3e4b`.
 Earlier accepted slices cover backend/renderer/app crash recovery, independent
 windows and last-window reopening. Acceptance belongs to that source checkpoint;
 the staged app at `host/.application-desktop/Alder.app` may advance during work.
@@ -32,8 +32,8 @@ full-notebook health queries with existing renderer connection reporting and a
 small fallback for bootstrap/failed-renderer cases. Preserve authoritative Save As
 identity adoption, native path/window bookkeeping and conflict detection.
 
-**Owner and next action:** primary first integrates accepted `237a254` and canonical
-docs on main, then owns the duplicate-work slice. Prove unchanged-content external
+**Owner and next action:** primary owns the duplicate-work slice from integrated
+`65a3e4b`. Prove unchanged-content external
 replacement preserves results, actual source edits still update/conflict correctly,
 and Save As followed immediately by native restart/reopen uses the destination.
 Keep one authority for identity and connection status; remove replaced paths and
