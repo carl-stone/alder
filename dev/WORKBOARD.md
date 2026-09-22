@@ -10,7 +10,7 @@ copies in other worktrees are snapshots.
 
 ## Current assignment
 
-**Native Mac reliability — Implementing on Mac.**
+**Native Mac reliability — Review on Mac.**
 
 The shared portable-core checkpoint is accepted on pushed main `42cfda8`. The next work is
 qualified Mac use through the packaged application. The last fully accepted signed Mac build
@@ -27,8 +27,11 @@ main in a background or isolated context, then qualify one background-testable n
 or window failure journey. Correct a concrete defect if found. Keep this as one runnable checkpoint
 before expanding to the rest of the native reliability queue.
 
-**Next action:** receive the primary implementer's exact packaged-app baseline and native-journey
-result; review any source change and accept or dispatch one focused correction.
+**Next action:** review clean candidate `ed11cc6` for its bounded R helper package build and
+packaged same-file peer journey. Fresh full signed-app acceptance passed with signing and owned-
+child cleanup; the new journey checks that an unsaved edit executes and reaches a peer before
+disk Save, then persists and survives peer close. Native unsaved close prompts still need a
+foreground-capable later pass. Accept or dispatch one focused correction.
 
 The release README and three feature GIFs remain on `main`. The separate Ark source repository
 is untouched.
@@ -55,7 +58,7 @@ One item is active. New approved work is added here before assignment.
 | Release README and feature demo | Accepted | Primary implementer and independent reviewers | `b316bc3`: release-facing install/use guide and three compact real-app feature captures; media and factual reviews passed |
 | Repository integration and cleanup | Accepted | Primary implementer and focused cleanup reviewers | `554da34`: canonical docs and accepted app fast-forwarded to remote `main`; obsolete worktrees, branches and safety stashes removed after review |
 | Platform-boundary extraction | Accepted | Primary implementer and focused reviewers | `42cfda8`: shared Linux R 34/34, browser 12/12 and reviewed localized Mac/Linux seams; no duplicated product or Ark fork |
-| Native Mac reliability qualification | Implementing | Primary implementer | Sleep/wake, real Finder/dialog/window flows, packaged crash recovery and supported-filesystem behavior work through visible installed-app paths without lost work or stranded processes |
+| Native Mac reliability qualification | Review | Lead and focused reviewers | Sleep/wake, real Finder/dialog/window flows, packaged crash recovery and supported-filesystem behavior work through visible installed-app paths without lost work or stranded processes |
 | Scientific workflow qualification | Queued | Unassigned | A realistic scientific notebook, real CRAN/Bioconductor packages, representative R reactivity idioms, two live notebooks under load and rich publishing are independently qualified through packaged Alder |
 | Product completion and public Mac delivery | Queued | Unassigned | Project/Git ownership, notebook-wide search, agent presence, accessibility, scale, upgrade state, release identity, architecture support and signed/notarized distribution have explicit accepted behavior |
 
