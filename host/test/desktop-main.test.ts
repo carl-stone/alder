@@ -638,7 +638,9 @@ test("Quit after the last window succeeds when its normally released host has ex
   assert.equal(window.destroyed, true);
   assert.equal(releases, 1);
   events.get("before-quit")!({ preventDefault: () => undefined });
-  while (quits === 0) await new Promise(resolve => setImmediate(resolve));
+  const quitDeadline = Date.now() + 2_000;
+  while (quits === 0 && Date.now() < quitDeadline) await new Promise(resolve => setImmediate(resolve));
+  assert.equal(quits, 1, "Quit did not complete after the released host exited");
   assert.equal(releases, 2);
   assert.equal(errorDialogs, 0);
   assert.equal(main.windows().length, 0);
