@@ -13,7 +13,7 @@ copies in other worktrees are snapshots.
 **Native Mac reliability — Implementing on Mac.**
 
 The shared portable-core checkpoint is accepted on pushed main `42cfda8`.
-`5b3321a` is the latest accepted Mac source, pending integration to main. The
+`5b3321a` is the latest accepted Mac source, integrated on main at `2136dcc`. The
 staged signed app is refreshed; the installed user copy remains untouched.
 Preserve upstream unmodified Ark.
 
@@ -37,8 +37,8 @@ explicit Save, continued R execution and natural child cleanup without taking ov
 Carl's visible desktop. Keep failures actionable rather than silently replaying or
 saving work; record any foreground-only presentation that cannot be qualified here.
 
-**Next action:** primary implementer integrates accepted `5b3321a` with current
-main, then develops the renderer-crash slice and returns one clean focused candidate.
+**Next action:** primary implementer is developing the renderer-crash slice and
+returns one clean focused candidate for independent review.
 
 The release README and three feature GIFs remain on `main`. The separate Ark source repository
 is untouched.
@@ -249,7 +249,7 @@ standing task remains owner of this separate prototype.
 | Lead task | `01a0b55f-feaf-7c03-9964-b448891e33d5` on `local` |
 | Primary implementation task | `01a0b5a6-22ac-7480-9394-5cc4c1ba807d` on `local` |
 | Implementation worktree | `/Users/carlstone/.codex/worktrees/ebd6/alder` |
-| Implementation branch | `codex/native-backend-crash`; current correction checkpoint |
+| Implementation branch | `codex/native-backend-crash`; now based on pushed main `2136dcc` |
 | Linux inventory task | `01a0bf49-f444-7042-a6ee-8be9c7d2cd79` on `droplet`; interrupted without tracked changes |
 | Orchestration implementation task | `01a0bbd7-8b7e-7712-9fb4-b1c0f3289e41` on `local` |
 | Ignored orchestration workspace | `/Users/carlstone/alder/.tmp-orchestrator` |
