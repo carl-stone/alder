@@ -12,35 +12,33 @@ copies in other worktrees are snapshots.
 
 **Native Mac reliability — Implementing on Mac.**
 
-The shared portable-core checkpoint is accepted on pushed main `42cfda8`. Current main
-`e9293e5` also passed fresh full signed Mac acceptance and packaged native journeys.
-The staged signed app is refreshed; the installed user copy was left untouched. Preserve
-upstream unmodified Ark.
+The shared portable-core checkpoint is accepted on pushed main `42cfda8`.
+`5b3321a` is the latest accepted Mac source, pending integration to main. The
+staged signed app is refreshed; the installed user copy remains untouched.
+Preserve upstream unmodified Ark.
 
 **Finish condition:** ordinary Mac launch, document/window use, recovery and owned-child cleanup
 remain dependable through native failures. Exercise real user journeys through the packaged app
 while keeping Carl's visible desktop free. Record scenarios that genuinely require foreground
 interaction for a later supervised pass; do not infer them from headless checks.
 
-**Accepted subcheckpoint:** `f086e40` packages the R helper from its actual source files rather
-than copying the generated checkout, removing the disk-exhaustion path. Full signed-app acceptance,
-strict signing and natural child cleanup passed. A packaged second client saw an executed unsaved
-draft while disk still held the old source, then observed Save and detached without stopping the
-primary app. This was two app processes, not two windows in one process.
+**Accepted subcheckpoint:** `5b3321a` preserves acknowledged unsaved edits and a
+still-local draft through a packaged backend `SIGKILL`, then resumes R, saves and
+runs. A small Ark guardian removes the dead backend's kernel group, and native
+cleanup checks track both old and recovered groups. Independent reviews, complete
+signed-app acceptance, separate packaged crash journey, strict signing and clean
+owned-child audit passed. Nineteen stale staged-test kernels were terminated;
+the installed user's kernel was untouched. Earlier accepted packaging and
+two-window fixes are `f086e40` and `e9293e5`.
 
-**Accepted subcheckpoint:** `e9293e5` fixes transaction-event dirty state so Save and the native
-unsaved indicator match edited source. A packaged second-instance launch forwarded notebook B
-into the running app; two windows edited, ran and saved separate notebooks without cross-talk,
-and window A remained usable after B closed. Focused checks and full signed-app acceptance
-passed with natural cleanup. Native unsaved-close choices remain unqualified.
+**Current bounded slice:** hard-kill the packaged renderer while a notebook has
+an acknowledged unsaved edit and a still-local draft. Verify recoverable source,
+explicit Save, continued R execution and natural child cleanup without taking over
+Carl's visible desktop. Keep failures actionable rather than silently replaying or
+saving work; record any foreground-only presentation that cannot be qualified here.
 
-**Current bounded slice:** exercise an actual packaged backend process crash while a notebook
-has an acknowledged unsaved edit, and preserve any still-local editor draft where feasible.
-Verify recovery or actionable failure, explicit Save semantics, post-recovery execution and
-child cleanup without taking over the visible desktop.
-
-**Next action:** receive the primary implementer's exact crash-recovery candidate and focused
-native evidence; review any product change before another full signed-app acceptance.
+**Next action:** primary implementer integrates accepted `5b3321a` with current
+main, then develops the renderer-crash slice and returns one clean focused candidate.
 
 The release README and three feature GIFs remain on `main`. The separate Ark source repository
 is untouched.
@@ -201,12 +199,12 @@ commit that the next stage can safely simplify.
 
 ## Latest accepted checkpoint
 
-`e9293e5` is the latest accepted Mac application source. Fresh full final acceptance passed:
+`5b3321a` is the latest accepted Mac application source. Fresh full final acceptance passed:
 signed build, R and host checks, installed services, twelve production browser journeys, packaged
-recovery journeys, license notices and natural owned-child cleanup. The focused packaged
-two-window journey separately qualified second-instance forwarding, isolated notebook drafts,
-execution, dirty state and Save. Earlier UI/UX and diagnostics acceptance detail lives in Git
-and the implementation task.
+recovery journeys, license notices and natural owned-child cleanup. A separate packaged backend
+hard-crash journey qualified accepted and local drafts, resumed R, Save, rerun and removal of the
+dead Ark group. Earlier UI/UX and diagnostics acceptance detail lives in Git and the implementation
+task.
 
 The staged app at `host/.application-desktop/Alder.app` follows the implementation
 checkout and may contain newer, unaccepted changes. Acceptance is tied to the commit
@@ -251,7 +249,7 @@ standing task remains owner of this separate prototype.
 | Lead task | `01a0b55f-feaf-7c03-9964-b448891e33d5` on `local` |
 | Primary implementation task | `01a0b5a6-22ac-7480-9394-5cc4c1ba807d` on `local` |
 | Implementation worktree | `/Users/carlstone/.codex/worktrees/ebd6/alder` |
-| Implementation branch | `codex/mac-document-foundation`; reconcile with current `origin/main` |
+| Implementation branch | `codex/native-backend-crash`; current correction checkpoint |
 | Linux inventory task | `01a0bf49-f444-7042-a6ee-8be9c7d2cd79` on `droplet`; interrupted without tracked changes |
 | Orchestration implementation task | `01a0bbd7-8b7e-7712-9fb4-b1c0f3289e41` on `local` |
 | Ignored orchestration workspace | `/Users/carlstone/alder/.tmp-orchestrator` |
