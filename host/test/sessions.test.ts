@@ -52,13 +52,13 @@ test("a normally released lease can finish after its loopback host exits, while 
     const options = { path: canonicalPath, resources: { root: "/tmp/alder-resources", nodeExecutable: "/usr/bin/node", hostEntry: "/tmp/alder-host.mjs" } };
     const closedLease = await connectBackendSession(descriptor, options);
     const activeLease = await connectBackendSession(descriptor, options);
-    await closedLease.release("normal");
+    await closedLease.release();
     await new Promise<void>((resolve, reject) => {
       server.close(error => error ? reject(error) : resolve());
       server.closeAllConnections();
     });
-    await closedLease.release("discard");
-    await assert.rejects(activeLease.release("discard"));
+    await closedLease.release();
+    await assert.rejects(activeLease.release());
   } finally {
     if (server.listening) await new Promise<void>(resolve => server.close(() => resolve()));
   }

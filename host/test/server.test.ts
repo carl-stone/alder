@@ -61,7 +61,7 @@ async function startFixture(
   mcpHandler?: McpHttpHandler,
   auth: Pick<AlderServerOptions, "externalOrigin" | "externalBearerValidated"> = {},
   controller: ControllerAdapter = makeController(),
-  timing: Pick<AlderServerOptions, "leaseExpiryMs" | "leaseSweepIntervalMs" | "onShutdown" | "onLastLeaseDiscard" | "diagnostics" | "flushDiagnostics"> = {},
+  timing: Pick<AlderServerOptions, "leaseExpiryMs" | "leaseSweepIntervalMs" | "onShutdown" | "diagnostics" | "flushDiagnostics"> = {},
   recoveryIdentity: { recoveryId: string } | undefined = undefined,
   port = 0,
 ) {
@@ -540,147 +540,32 @@ test("browser lease owns one WebSocket and release revokes it", { timeout: 30_00
   }
 });
 
-test("discarding the final browser lease requests host shutdown", { timeout: 30_000 }, async () => {
-  let discardCalls = 0;
-  const { server, origin, root } = await startFixture(undefined, {}, makeController(), {
-    onLastLeaseDiscard: async () => { discardCalls += 1; },
-  });
+test("explicit discard sees independent peers while parent and browser child share one owner", { timeout: 5_000 }, async () => {
+  const decisions: boolean[] = [];
+  const controller: ControllerAdapter = {
+    ...makeController(),
+    dispatch: async (command, authority) => {
+      if (command.type === "discard-document") decisions.push(authority?.mayDiscardDocument() ?? false);
+      return commandResult(command.requestId);
+    },
+  };
+  const { server, origin, root } = await startFixture(undefined, {}, controller);
   try {
-    const session = await createCookieSession(origin);
-    const released = await fetch(origin + "/api/lease", {
-      method: "POST",
-      headers: { Origin: origin, Cookie: session.cookie, "X-CSRF-Token": session.csrf, "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "release", leaseId: session.leaseId, disposition: "discard" }),
-    });
-    assert.equal(released.status, 200, await released.text());
-    await new Promise<void>(resolve => setImmediate(resolve));
-    assert.equal(discardCalls, 1);
-  } finally {
-    await server.close();
-    await rm(root, { recursive: true, force: true });
-  }
-});
-test("a confirmed normal bearer release can be escalated once to final discard", { timeout: 5_000 }, async () => {
-  let discardCalls = 0;
-  const { server, origin, root } = await startFixture(undefined, {}, makeController(), {
-    onLastLeaseDiscard: () => { discardCalls += 1; },
-  });
-  try {
-    const session = await attachBearerSession(origin);
-    const release = (leaseId: string, clientId: string, disposition: "normal" | "discard") => fetch(origin + "/api/lease", {
-      method: "POST", headers: { ...bearerHeaders(origin, leaseId), "X-Alder-Client-Id": clientId },
-      body: JSON.stringify({ action: "release", leaseId, disposition }),
-    });
-    const arbitrary = await release(randomUUID(), session.clientId, "discard");
-    assert.equal(arbitrary.status, 403);
-    assert.equal((await release(session.leaseId, session.clientId, "normal")).status, 200);
-    await new Promise(resolve => setImmediate(resolve));
-    assert.equal(discardCalls, 0);
-    assert.equal((await release(session.leaseId, randomUUID(), "discard")).status, 403);
-    assert.equal((await release(randomUUID(), session.clientId, "discard")).status, 403);
-    assert.equal((await release(session.leaseId, session.clientId, "discard")).status, 200);
-    await new Promise(resolve => setImmediate(resolve));
-    assert.equal(discardCalls, 1);
-    assert.equal((await release(session.leaseId, session.clientId, "discard")).status, 200);
-    await new Promise(resolve => setImmediate(resolve));
-    assert.equal(discardCalls, 1);
-    assert.equal((await release(session.leaseId, randomUUID(), "discard")).status, 403);
-    await new Promise(resolve => setImmediate(resolve));
-    assert.equal(discardCalls, 1);
-  } finally { await server.close(); await rm(root, { recursive: true, force: true }); }
-});
-test("normal-release escalation is consumed without stopping another bearer peer", { timeout: 5_000 }, async () => {
-  let discardCalls = 0;
-  const { server, origin, root } = await startFixture(undefined, {}, makeController(), {
-    onLastLeaseDiscard: () => { discardCalls += 1; },
-  });
-  try {
-    const released = await attachBearerSession(origin);
+    const parent = await attachBearerSession(origin);
+    const child = await createCookieSession(origin, parent.leaseId);
     const peer = await attachBearerSession(origin);
-    const release = (session: { leaseId: string; clientId: string }, disposition: "normal" | "discard") => fetch(origin + "/api/lease", {
-      method: "POST", headers: { ...bearerHeaders(origin, session.leaseId), "X-Alder-Client-Id": session.clientId },
-      body: JSON.stringify({ action: "release", leaseId: session.leaseId, disposition }),
+    const discard = (clientId: string, headers: Record<string, string>) => fetch(origin + "/api/command", {
+      method: "POST", headers,
+      body: JSON.stringify({ type: "discard-document", requestId: randomUUID(), clientId,
+        sessionEpoch: "server-test-epoch", expectedDocumentRevision: 0 }),
     });
-    assert.equal((await release(released, "normal")).status, 200);
-    assert.equal((await release(released, "discard")).status, 200);
-    await new Promise(resolve => setImmediate(resolve));
-    assert.equal(discardCalls, 0);
-    const heartbeat = await fetch(origin + "/api/lease", {
-      method: "POST", headers: { ...bearerHeaders(origin, peer.leaseId), "X-Alder-Client-Id": peer.clientId },
-      body: JSON.stringify({ action: "heartbeat", leaseId: peer.leaseId }),
-    });
-    assert.equal(heartbeat.status, 200);
-    assert.equal((await release(peer, "discard")).status, 200);
-    await new Promise(resolve => setImmediate(resolve));
-    assert.equal(discardCalls, 1);
-  } finally { await server.close(); await rm(root, { recursive: true, force: true }); }
-});
-test("native window reload retires the previous browser lease and final discard closes the document", { timeout: 5_000 }, async () => {
-  let discarded = 0;
-  const { server, origin, root } = await startFixture(undefined, {}, makeController(), {
-    onLastLeaseDiscard: () => { discarded += 1; },
-  });
-  try {
-    const parentLeaseId = await attachBearerLease(origin);
-    const initial = await createCookieSession(origin, parentLeaseId);
-    const reloaded = await createCookieSession(origin, parentLeaseId);
-    assert.notEqual(initial.leaseId, reloaded.leaseId);
-    const heartbeat = (session: CookieSession) => fetch(origin + "/api/lease", {
-      method: "POST", headers: { Origin: origin, Cookie: session.cookie, "X-CSRF-Token": session.csrf, "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "heartbeat", leaseId: session.leaseId }),
-    });
-    assert.equal((await heartbeat(initial)).status, 403);
-    assert.equal((await heartbeat(reloaded)).status, 200);
-    const released = await fetch(origin + "/api/lease", {
-      method: "POST", headers: bearerHeaders(origin, parentLeaseId),
-      body: JSON.stringify({ action: "release", leaseId: parentLeaseId, disposition: "discard" }),
-    });
-    assert.equal(released.status, 200, await released.text());
-    await new Promise(resolve => setImmediate(resolve));
-    assert.equal(discarded, 1);
-    assert.equal((await heartbeat(reloaded)).status, 403);
-  } finally { await server.close(); await rm(root, { recursive: true, force: true }); }
-});
-
-test("native parent discard revokes only its browser children and keeps an attached agent alive", { timeout: 5_000 }, async () => {
-  let discarded = 0;
-  const { server, origin, root } = await startFixture(undefined, {}, makeController(), {
-    onLastLeaseDiscard: () => { discarded += 1; },
-  });
-  try {
-    const parentLeaseId = await attachBearerLease(origin);
-    const agentLeaseId = await attachBearerLease(origin);
-    const browser = await createCookieSession(origin, parentLeaseId);
-    const unexchanged = await fetch(origin + "/api/ticket", {
-      method: "POST", headers: bearerHeaders(origin, parentLeaseId),
-      body: JSON.stringify({ origin, parentLeaseId }),
-    });
-    assert.equal(unexchanged.status, 200);
-    const { ticket } = await unexchanged.json() as { ticket: string };
-    const release = (leaseId: string) => fetch(origin + "/api/lease", {
-      method: "POST", headers: bearerHeaders(origin, leaseId),
-      body: JSON.stringify({ action: "release", leaseId, disposition: "discard" }),
-    });
-    assert.equal((await release(parentLeaseId)).status, 200);
-    await new Promise(resolve => setImmediate(resolve));
-    assert.equal(discarded, 0);
-    const revokedBrowser = await fetch(origin + "/api/lease", {
-      method: "POST", headers: { Origin: origin, Cookie: browser.cookie, "X-CSRF-Token": browser.csrf, "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "heartbeat", leaseId: browser.leaseId }),
-    });
-    assert.equal(revokedBrowser.status, 403);
-    const staleTicket = await fetch(origin + "/api/session", {
-      method: "POST", headers: { Origin: origin, "Content-Type": "application/json" }, body: JSON.stringify({ ticket }),
-    });
-    assert.equal(staleTicket.status, 403);
-    const agentHeartbeat = await fetch(origin + "/api/lease", {
-      method: "POST", headers: bearerHeaders(origin, agentLeaseId),
-      body: JSON.stringify({ action: "heartbeat", leaseId: agentLeaseId }),
-    });
-    assert.equal(agentHeartbeat.status, 200);
-    assert.equal((await release(agentLeaseId)).status, 200);
-    await new Promise(resolve => setImmediate(resolve));
-    assert.equal(discarded, 1);
+    const cookieHeaders = { Origin: origin, Cookie: child.cookie, "X-CSRF-Token": child.csrf, "Content-Type": "application/json" };
+    assert.equal((await discard(child.clientId, cookieHeaders)).status, 200);
+    assert.deepEqual(decisions, [false]);
+    assert.equal((await fetch(origin + "/api/lease", { method: "POST", headers: bearerHeaders(origin, peer.leaseId),
+      body: JSON.stringify({ action: "release", leaseId: peer.leaseId }) })).status, 200);
+    assert.equal((await discard(child.clientId, cookieHeaders)).status, 200);
+    assert.deepEqual(decisions, [false, true]);
   } finally { await server.close(); await rm(root, { recursive: true, force: true }); }
 });
 

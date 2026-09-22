@@ -159,9 +159,18 @@ export class BrowserNotebookClient {
   }
 
   async discardAndClose(): Promise<void> {
-    await this.discardRecovery();
-    await this.transport.release("discard");
-    this.finishClose();
+    await this.withSourceLock(async () => {
+      await this.flushDraftPersistence();
+      const result = await this.dispatchSettled({ type: "discard-document", ...this.base("discard-document") });
+      if (result.error !== null) throw new BrowserTransportError(result.error.code, result.error.message);
+      if (this.draftPersistenceTimer !== undefined) clearTimeout(this.draftPersistenceTimer);
+      this.draftPersistenceTimer = undefined;
+      this.draftPersistenceQueued = false;
+      await this.beginDraftMutation();
+      await this.draftStore().clearDraft(this.draftId);
+    });
+    try { await this.transport.release().catch(() => undefined); }
+    finally { this.finishClose(); }
   }
   async close(): Promise<void> {
     await this.flushDraftPersistence();
@@ -264,17 +273,9 @@ export class BrowserNotebookClient {
   private async discardRecoveryUnlocked(): Promise<void> {
     await this.beginDraftMutation();
     if (this.recoveryStateValue.candidate !== null || this.recoveryStateValue.corruption !== null) {
-      const snapshot = this.requireDocument().snapshot;
-      if (snapshot.disk.digest !== null && snapshot.disk.version !== null) {
-        await this.dispatchSettled({
-          type: "reload-source",
-          ...this.base("reload-source"),
-          expectedDiskDigest: snapshot.disk.digest,
-          expectedDiskVersion: snapshot.disk.version,
-          discardRecovery: true,
-        });
-        this.recoveryStateValue = { ...this.recoveryStateValue, candidate: null, corruption: null };
-      }
+      const result = await this.dispatchSettled({ type: "discard-document", ...this.base("discard-document") });
+      if (isRecord(result.result) && result.result.peerActive === true) throw new BrowserTransportError("peer_active", "Close other notebook windows before opening the saved copy.");
+      this.recoveryStateValue = { ...this.recoveryStateValue, candidate: null, corruption: null };
     }
     await this.draftStore().clearDraft(this.draftId);
     this.resetAuthoritativeDocument();

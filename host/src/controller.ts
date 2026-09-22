@@ -109,7 +109,7 @@ export interface DurableCommitInput {
   };
   readonly fingerprint: string;
 }
-export type SourceCommitKind = "transaction" | "runtime" | "sidecar" | "save" | "save-as" | "reload-source" | "watcher";
+export type SourceCommitKind = "transaction" | "runtime" | "sidecar" | "save" | "discard-document" | "save-as" | "reload-source" | "watcher";
 
 export interface SourceDiskExpectation {
   readonly digest: string | null;
@@ -129,7 +129,7 @@ export interface SourceCommitRequest {
   readonly patch?: Record<string, unknown>;
   readonly packages?: readonly string[];
   readonly layout?: JsonValue;
-  readonly discardRecovery?: boolean;
+  readonly mayDiscardDocument?: () => boolean;
   readonly document?: NotebookDocument;
   readonly delta?: DurableCommitInput["delta"];
 }
@@ -908,7 +908,7 @@ export class Controller {
     });
   }
 
-  dispatch(command: HostCommand): Promise<CommandResult> {
+  dispatch(command: HostCommand, authority?: { mayDiscardDocument: () => boolean }): Promise<CommandResult> {
     this.assertNotClosed();
     if (command.sessionEpoch !== this.epochValue) {
       return Promise.reject(new ControllerError(
@@ -954,7 +954,7 @@ export class Controller {
         operationId: command.requestId, clientId: command.clientId, sessionEpoch: command.sessionEpoch, kind: command.type,
         queueMs: Math.round(performance.now() - acceptedAt), documentRevision: this.documentRevisionValue,
       });
-      return this.executeCommand(command, operationCompletion);
+      return this.executeCommand(command, operationCompletion, authority);
     };
     let completion: Promise<CommandResult>;
     if (command.type === "run") {
@@ -1271,7 +1271,7 @@ export class Controller {
     this.listeners.clear();
   }
 
-  private async executeCommand(command: HostCommand, completion: Promise<OperationRecord>): Promise<CommandResult> {
+  private async executeCommand(command: HostCommand, completion: Promise<OperationRecord>, authority?: { mayDiscardDocument: () => boolean }): Promise<CommandResult> {
     try {
       if (this.closed || isTerminal(this.operationFor(command.requestId, command.clientId)?.status ?? "error")) {
         return this.commandResult(command.requestId, await completion);
@@ -1359,6 +1359,10 @@ export class Controller {
           result = await this.saveNotebook(command.expectedDocumentRevision, command.requestId);
           this.diagnosticOperationPhase(command.clientId, command.requestId, "publication", "save");
           this.diagnosticOperationPhase(command.clientId, command.requestId, "clean", "save");
+          break;
+        case "discard-document":
+          result = await this.executeSourceService({ kind: "discard-document", expectedDocumentRevision: command.expectedDocumentRevision,
+            operationId: command.requestId, mayDiscardDocument: authority?.mayDiscardDocument });
           break;
         case "save-as":
         case "reload-source":
@@ -1611,7 +1615,7 @@ export class Controller {
         ...(graphChanged ? { graph: clone(this.graphValue.state) } : {}),
       }, { operationId });
     } else {
-      const authoritativeReload = request.kind === "reload-source" || request.kind === "watcher";
+      const authoritativeReload = request.kind === "discard-document" || request.kind === "reload-source" || request.kind === "watcher";
       this.bump("notebook", {
         sourceCommit: request.kind,
         documentRevision: this.documentRevisionValue,
@@ -5694,7 +5698,6 @@ export class Controller {
           expectedDocumentRevision: command.expectedDocumentRevision,
           expectedDisk: { digest: command.expectedDiskDigest, version: command.expectedDiskVersion },
           operationId: command.requestId,
-          discardRecovery: command.discardRecovery,
           fingerprint: stableStringify({ expectedDiskDigest: command.expectedDiskDigest, expectedDiskVersion: command.expectedDiskVersion }),
         });
       case "upload":

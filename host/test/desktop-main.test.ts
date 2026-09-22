@@ -463,98 +463,27 @@ test("native close waits for the renderer to persist its latest draft", async ()
   assert.equal(window.destroyed, true);
 });
 
-test("repeated application quit awaits one final native lease discard before one authorized exit", async () => {
-  const hostConnection = connection("clean-quit", "/tmp/alder-clean-quit.R", async endpoint => {
-    assert.equal(endpoint, "/api/ticket");
-    return jsonResponse({ ticket: "a".repeat(64), expiresAt: "2026-12-01T00:00:00.000Z" });
-  });
-  let releaseStarted!: () => void;
-  let finishRelease!: () => void;
-  const started = new Promise<void>(resolve => { releaseStarted = resolve; });
-  const finish = new Promise<void>(resolve => { finishRelease = resolve; });
-  hostConnection.release = async disposition => {
-    hostConnection.releaseCount += 1;
-    hostConnection.releaseDispositions.push(disposition ?? "normal");
-    releaseStarted();
-    await finish;
-  };
+test("unreachable host cannot veto a clean local Close", { timeout: 3_000 }, async () => {
+  const hostConnection = connection("offline-close", "/tmp/alder-offline-close.R", async () => jsonResponse({}));
+  let abandoned = 0;
+  hostConnection.release = async () => { hostConnection.releaseCount += 1; throw new Error("host offline"); };
+  hostConnection.abandon = () => { abandoned += 1; };
   const window = windowWithLoad();
-  const electronRuntime = runtime();
-  const events = new Map<string, (...args: any[]) => unknown>();
-  electronRuntime.app.requestSingleInstanceLock = () => true;
-  electronRuntime.app.whenReady = async () => undefined;
-  electronRuntime.app.on = (event, handler) => { events.set(event, handler); return electronRuntime.app; };
-  let quits = 0;
-  electronRuntime.app.quit = () => { quits += 1; };
-  electronRuntime.BrowserWindow = Object.assign(function () { return window; }, { fromWebContents: () => null }) as unknown as ElectronRuntime["BrowserWindow"];
-  const main = new ElectronMain(electronRuntime, { resources, initialPath: "/tmp/alder-clean-quit.R", acquireSession: async () => hostConnection });
-  (main as any).loadAuthenticatedNotebook = async () => undefined;
-  await main.start();
-  const record = [...(main as any).records][0];
+  const main = new ElectronMain(runtime(), { resources });
+  const record = recordFor(main, hostConnection, window);
   record.windowState = { path: hostConnection.canonicalPath, dirty: false, saveState: "saved", sessionEpoch: "epoch" };
-  window.webContents.send = (_channel, payload) => {
-    const command = payload as { requestId?: string };
-    if (command.requestId) queueMicrotask(() => record.pendingCommands.get(command.requestId)?.resolve({ requestId: command.requestId, status: "ok" }));
-  };
-
-  let prevented = 0;
-  const beforeQuit = events.get("before-quit")!;
-  beforeQuit({ preventDefault: () => { prevented += 1; } });
-  await started;
-  beforeQuit({ preventDefault: () => { prevented += 1; } });
-  assert.equal(quits, 0);
-  assert.equal(prevented, 2);
-  assert.equal(window.destroyed, false);
-  assert.deepEqual(hostConnection.releaseDispositions, ["discard"]);
-  finishRelease();
-  while (quits === 0) await new Promise(resolve => setImmediate(resolve));
+  await (main as any).requestClose(record);
   assert.equal(window.destroyed, true);
+  assert.equal(main.windows().length, 0);
   assert.equal(hostConnection.releaseCount, 1);
-  assert.equal(quits, 1);
-  beforeQuit({ preventDefault: () => { prevented += 1; } });
-  assert.equal(prevented, 2);
-  assert.equal(quits, 1);
+  assert.equal(abandoned, 1);
 });
 
-test("discard failure is bounded and keeps the owned window available for a later retry", { timeout: 4_000 }, async () => {
-  const hostConnection = connection("offline-discard", null, async () => {
-    throw new Error("host is unavailable");
-  });
-  let releaseDisposition: string | undefined;
-  let releaseAttempts = 0;
-  hostConnection.release = async disposition => {
-    releaseAttempts += 1;
-    releaseDisposition = disposition;
-    if (releaseAttempts === 1) await new Promise<void>(() => undefined);
-  };
-  const window = windowWithLoad();
-  const actions: unknown[] = [];
-  window.webContents.send = (_channel, payload) => { actions.push(payload); };
-  const main = new ElectronMain(runtime(1), { resources });
-  const record = recordFor(main, hostConnection, window);
-
-  await (main as any).requestClose(record);
-
-  assert.deepEqual(actions.map(value => (value as { action: string }).action), ["prepare-unload", "close"]);
-  assert.equal(releaseDisposition, "discard");
-  assert.equal(window.destroyed, false);
-  assert.equal(main.windows().length, 1);
-  await (main as any).requestClose(record);
-  assert.equal(releaseAttempts, 2);
-  assert.equal(window.destroyed, true);
-  assert.equal(main.windows().length, 0);
-});
-
-test("application quit joins an ordinary close release already in flight", async () => {
-  const hostConnection = connection("ordinary-close-quit", "/tmp/alder-ordinary-close-quit.R", async () => jsonResponse({}));
-  const release = Promise.withResolvers<void>();
+test("quit joins one in-flight detach", { timeout: 3_000 }, async () => {
+  const hostConnection = connection("quit-detach", "/tmp/alder-quit-detach.R", async () => jsonResponse({}));
+  const finish = Promise.withResolvers<void>();
   const started = Promise.withResolvers<void>();
-  hostConnection.release = async disposition => {
-    hostConnection.releaseCount += 1;
-    hostConnection.releaseDispositions.push(disposition ?? "normal");
-    started.resolve();
-    await release.promise;
-  };
+  hostConnection.release = async () => { hostConnection.releaseCount += 1; started.resolve(); await finish.promise; };
   const window = windowWithLoad();
   const electronRuntime = runtime();
   const events = new Map<string, (...args: any[]) => unknown>();
@@ -568,206 +497,16 @@ test("application quit joins an ordinary close release already in flight", async
   await main.start();
   const record = recordFor(main, hostConnection, window);
   record.windowState = { path: hostConnection.canonicalPath, dirty: false, saveState: "saved", sessionEpoch: "epoch" };
-
-  const ordinaryClose = (main as any).requestClose(record);
+  const closing = (main as any).requestClose(record);
   await started.promise;
-  let prevented = 0;
-  events.get("before-quit")!({ preventDefault: () => { prevented += 1; } });
-  await new Promise(resolve => setImmediate(resolve));
-  assert.equal(quits, 0);
-  assert.equal(prevented, 1);
-  assert.deepEqual(hostConnection.releaseDispositions, ["normal"]);
-  release.resolve();
-  await ordinaryClose;
-  while (quits === 0) await new Promise(resolve => setImmediate(resolve));
+  events.get("before-quit")!({ preventDefault: () => undefined });
+  finish.resolve();
+  await closing;
+  const deadline = Date.now() + 2_000;
+  while (quits === 0 && Date.now() < deadline) await new Promise(resolve => setImmediate(resolve));
   assert.equal(quits, 1);
-  assert.equal(hostConnection.releaseCount, 2);
-  assert.deepEqual(hostConnection.releaseDispositions, ["normal", "discard"]);
+  assert.equal(hostConnection.releaseCount, 1);
 });
-
-test("application quit escalates a just-completed normal close to discard", async () => {
-  const hostConnection = connection("completed-close-quit", "/tmp/alder-completed-close-quit.R", async () => jsonResponse({}));
-  const window = windowWithLoad();
-  const electronRuntime = runtime();
-  const events = new Map<string, (...args: any[]) => unknown>();
-  electronRuntime.app.requestSingleInstanceLock = () => true;
-  electronRuntime.app.whenReady = async () => undefined;
-  electronRuntime.app.on = (event, handler) => { events.set(event, handler); return electronRuntime.app; };
-  let quits = 0;
-  electronRuntime.app.quit = () => { quits += 1; };
-  const main = new ElectronMain(electronRuntime, { resources, initialPath: null });
-  main.openNotebook = async () => undefined;
-  await main.start();
-  const record = recordFor(main, hostConnection, window);
-  record.windowState = { path: hostConnection.canonicalPath, dirty: false, saveState: "saved", sessionEpoch: "epoch" };
-
-  await (main as any).requestClose(record);
-  assert.deepEqual(hostConnection.releaseDispositions, ["normal"]);
-  events.get("before-quit")!({ preventDefault: () => undefined });
-  while (quits === 0) await new Promise(resolve => setImmediate(resolve));
-  assert.equal(quits, 1);
-  assert.deepEqual(hostConnection.releaseDispositions, ["normal", "discard"]);
-});
-
-for (const transportCode of ["ECONNREFUSED", "ECONNRESET"] as const) test(`Quit after the last window succeeds when its normally released host exits with ${transportCode}`, async context => {
-  let releases = 0;
-  const hostConnection = await fetchedConnection(context, async () => {
-    releases += 1;
-    if (releases === 1) return new Response(JSON.stringify({ released: true }), {
-      status: 200, headers: { "Content-Type": "application/json", "X-Alder-Continuity-Proof": "proof" },
-    });
-    throw new TypeError("fetch failed", { cause: Object.assign(new Error(`host exited with ${transportCode}`), { code: transportCode }) });
-  });
-  const window = windowWithLoad();
-  const electronRuntime = runtime();
-  const events = new Map<string, (...args: any[]) => unknown>();
-  electronRuntime.app.requestSingleInstanceLock = () => true;
-  electronRuntime.app.whenReady = async () => undefined;
-  electronRuntime.app.on = (event, handler) => { events.set(event, handler); return electronRuntime.app; };
-  let quits = 0;
-  let errorDialogs = 0;
-  electronRuntime.app.quit = () => { quits += 1; };
-  electronRuntime.dialog.showMessageBox = async () => { errorDialogs += 1; return { response: 0 }; };
-  const main = new ElectronMain(electronRuntime, { resources, initialPath: null });
-  main.openNotebook = async () => undefined;
-  await main.start();
-  const record = recordFor(main, hostConnection, window);
-  record.windowState = { path: hostConnection.canonicalPath, dirty: false, saveState: "saved", sessionEpoch: "epoch" };
-
-  await (main as any).requestClose(record);
-  assert.equal(window.destroyed, true);
-  assert.equal(releases, 1);
-  events.get("before-quit")!({ preventDefault: () => undefined });
-  const quitDeadline = Date.now() + 2_000;
-  while (quits === 0 && Date.now() < quitDeadline) await new Promise(resolve => setImmediate(resolve));
-  assert.equal(quits, 1, "Quit did not complete after the released host exited");
-  assert.equal(releases, 2);
-  assert.equal(errorDialogs, 0);
-  assert.equal(main.windows().length, 0);
-});
-
-test("application quit discards every window before one authorized exit", async () => {
-  const firstConnection = connection("multi-quit-a", "/tmp/alder-multi-quit-a.R", async () => jsonResponse({}));
-  const secondConnection = connection("multi-quit-b", "/tmp/alder-multi-quit-b.R", async () => jsonResponse({}));
-  const electronRuntime = runtime();
-  const events = new Map<string, (...args: any[]) => unknown>();
-  electronRuntime.app.requestSingleInstanceLock = () => true;
-  electronRuntime.app.whenReady = async () => undefined;
-  electronRuntime.app.on = (event, handler) => { events.set(event, handler); return electronRuntime.app; };
-  let quits = 0;
-  electronRuntime.app.quit = () => { quits += 1; };
-  const main = new ElectronMain(electronRuntime, { resources, initialPath: null });
-  main.openNotebook = async () => undefined;
-  await main.start();
-  for (const [hostConnection, window] of [[firstConnection, windowWithLoad()], [secondConnection, windowWithLoad()]] as const) {
-    const record = recordFor(main, hostConnection, window);
-    record.windowState = { path: hostConnection.canonicalPath, dirty: false, saveState: "saved", sessionEpoch: "epoch" };
-  }
-
-  events.get("before-quit")!({ preventDefault: () => undefined });
-  while (quits === 0) await new Promise(resolve => setImmediate(resolve));
-  assert.equal(quits, 1);
-  assert.deepEqual(firstConnection.releaseDispositions, ["discard"]);
-  assert.deepEqual(secondConnection.releaseDispositions, ["discard"]);
-  assert.equal(main.windows().length, 0);
-});
-
-test("lease rejection blocks authorization and preserves the original failure", async () => {
-  const hostConnection = connection("reject-quit", "/tmp/alder-reject-quit.R", async () => jsonResponse({}));
-  const failure = new Error("EXACT_RELEASE_FAILURE");
-  let rejectRelease = true;
-  hostConnection.release = async disposition => {
-    hostConnection.releaseCount += 1;
-    hostConnection.releaseDispositions.push(disposition ?? "normal");
-    if (rejectRelease) throw failure;
-  };
-  const window = windowWithLoad();
-  const electronRuntime = runtime();
-  const events = new Map<string, (...args: any[]) => unknown>();
-  electronRuntime.app.requestSingleInstanceLock = () => true;
-  electronRuntime.app.whenReady = async () => undefined;
-  electronRuntime.app.on = (event, handler) => { events.set(event, handler); return electronRuntime.app; };
-  let quits = 0;
-  electronRuntime.app.quit = () => { quits += 1; };
-  const messages: string[] = [];
-  electronRuntime.dialog.showMessageBox = async (...args: any[]) => {
-    const options = args.at(-1) as { message?: string };
-    messages.push(options.message ?? "");
-    return { response: 0 };
-  };
-  const main = new ElectronMain(electronRuntime, { resources, initialPath: null });
-  main.openNotebook = async () => undefined;
-  await main.start();
-  const record = recordFor(main, hostConnection, window);
-  record.windowState = { path: hostConnection.canonicalPath, dirty: false, saveState: "saved", sessionEpoch: "epoch" };
-
-  events.get("before-quit")!({ preventDefault: () => undefined });
-  while ((main as any).quitState !== "idle") await new Promise(resolve => setImmediate(resolve));
-  assert.equal(quits, 0);
-  assert.equal(window.destroyed, false);
-  assert.equal(main.windows().length, 1);
-  assert.deepEqual(hostConnection.releaseDispositions, ["discard"]);
-  assert.ok(messages.some(message => message.includes("EXACT_RELEASE_FAILURE")));
-  rejectRelease = false;
-  events.get("before-quit")!({ preventDefault: () => undefined });
-  while (quits === 0) await new Promise(resolve => setImmediate(resolve));
-  assert.equal(quits, 1);
-  assert.equal(window.destroyed, true);
-  assert.deepEqual(hostConnection.releaseDispositions, ["discard", "discard"]);
-});
-
-for (const failureMode of ["transport", "transport-reset", "non-success", "timeout"] as const) {
-  test(`real SessionConnection ${failureMode} keeps quit retryable until discard succeeds`, { timeout: 4_000 }, async context => {
-    let attempts = 0;
-    const hostConnection = await fetchedConnection(context, async init => {
-      attempts += 1;
-      const response = (status = 200) => new Response(JSON.stringify({ released: status === 200 }), {
-        status, headers: { "Content-Type": "application/json", "X-Alder-Continuity-Proof": "proof" },
-      });
-      if (attempts > 1) return response();
-      if (failureMode === "transport" || failureMode === "transport-reset") throw new TypeError("REAL_RELEASE_TRANSPORT_FAILURE", {
-        cause: Object.assign(new Error("loopback host transport failure"), { code: failureMode === "transport-reset" ? "ECONNRESET" : "ECONNREFUSED" }),
-      });
-      if (failureMode === "non-success") return response(503);
-      return new Promise<Response>((_resolve, reject) => {
-        const signal = init.signal!;
-        const abort = () => reject(signal.reason);
-        if (signal.aborted) abort();
-        else signal.addEventListener("abort", abort, { once: true });
-      });
-    });
-    const window = windowWithLoad();
-    const electronRuntime = runtime();
-    const events = new Map<string, (...args: any[]) => unknown>();
-    electronRuntime.app.requestSingleInstanceLock = () => true;
-    electronRuntime.app.whenReady = async () => undefined;
-    electronRuntime.app.on = (event, handler) => { events.set(event, handler); return electronRuntime.app; };
-    let quits = 0;
-    electronRuntime.app.quit = () => { quits += 1; };
-    const main = new ElectronMain(electronRuntime, { resources, initialPath: null });
-    main.openNotebook = async () => undefined;
-    await main.start();
-    const record = recordFor(main, hostConnection, window);
-    record.windowState = { path: hostConnection.canonicalPath, dirty: false, saveState: "saved", sessionEpoch: "epoch" };
-
-    const beforeQuit = events.get("before-quit")!;
-    beforeQuit({ preventDefault: () => undefined });
-    const firstQuitDeadline = Date.now() + 2_000;
-    while ((main as any).quitState !== "idle" && Date.now() < firstQuitDeadline) await new Promise(resolve => setImmediate(resolve));
-    assert.equal((main as any).quitState, "idle", "failed discard did not return Quit to a retryable state");
-    assert.equal(quits, 0);
-    assert.equal(window.destroyed, false);
-    assert.equal(main.windows().length, 1);
-    assert.equal(attempts, 1);
-
-    beforeQuit({ preventDefault: () => undefined });
-    const retryDeadline = Date.now() + 2_000;
-    while (quits === 0 && Date.now() < retryDeadline) await new Promise(resolve => setImmediate(resolve));
-    assert.equal(quits, 1, "Quit did not complete after a successful discard retry");
-    assert.equal(window.destroyed, true);
-    assert.equal(attempts, 2);
-  });
-}
 
 test("cancelled quit preserves unsaved windows and a later quit can discard them", { timeout: 4_000 }, async () => {
   const hostConnection = connection("cancel-quit", null, async () => { throw new Error("host unavailable"); });
@@ -804,7 +543,7 @@ test("cancelled quit preserves unsaved windows and a later quit can discard them
   while (quits === 0) await new Promise(resolve => setTimeout(resolve, 10));
   assert.equal(dialogs, 2);
   assert.equal(window.destroyed, true);
-  assert.deepEqual(hostConnection.releaseDispositions, ["discard"]);
+  assert.deepEqual(hostConnection.releaseDispositions, ["normal"]);
 });
 
 for (const decision of ["Cancel", "Save"] as const) {

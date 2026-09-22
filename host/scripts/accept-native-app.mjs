@@ -169,7 +169,7 @@ async function stop(instance) {
   ownedProcessRows(ownedPids, temporary);
   ownedProcessRows(instance.ownedPids, '');
   requestNativeQuit(instance.child.pid);
-  try { await waitForOwnedExit(instance.ownedPids, '', 10_000); }
+  try { await waitForOwnedExit(instance.ownedPids, '', 25_000); }
   catch (error) { throw new Error(`packaged Electron ${instance.child.pid} process tree survived native quit`, { cause: error }); }
   instance.cdp.close();
   sessions.delete(instance.cdp);

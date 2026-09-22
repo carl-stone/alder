@@ -33373,8 +33373,9 @@ var publishCommandSchema = external_exports.object({ ...commandIdentityShape, ty
 var uploadFileSchema = external_exports.object({ name: pathSchema, content_base64: boundedUtf8StringSchema(16 * 1024 * 1024, true) }).strict();
 var uploadCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("upload"), name: idSchema, path: external_exports.array(idSchema).max(256), files: external_exports.array(uploadFileSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS), kernelEpoch: idSchema }).strict();
 var saveCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("save"), expectedDocumentRevision: revisionSchema }).strict();
+var discardDocumentCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("discard-document"), expectedDocumentRevision: revisionSchema }).strict();
 var saveAsCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("save-as"), path: pathSchema, expectedDestination: external_exports.union([external_exports.literal("absent"), external_exports.object({ expectedDiskDigest: external_exports.string().regex(/^[0-9a-f]{64}$/), expectedDiskVersion: boundedUtf8StringSchema(MAX_ID_BYTES, true) }).strict()]), expectedDocumentRevision: revisionSchema }).strict();
-var reloadSourceCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("reload-source"), expectedDocumentRevision: revisionSchema, expectedDiskDigest: external_exports.string().regex(/^[0-9a-f]{64}$/), expectedDiskVersion: boundedUtf8StringSchema(MAX_ID_BYTES, true), discardRecovery: external_exports.boolean().optional() }).strict();
+var reloadSourceCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("reload-source"), expectedDocumentRevision: revisionSchema, expectedDiskDigest: external_exports.string().regex(/^[0-9a-f]{64}$/), expectedDiskVersion: boundedUtf8StringSchema(MAX_ID_BYTES, true) }).strict();
 var formatCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("format"), cellIds: external_exports.array(idSchema).max(MAX_NOTEBOOK_CELLS).optional(), expectedRevisions: safeStringRecordSchema(revisionSchema), expectedDocumentRevision: revisionSchema }).strict();
 var setPreferencesCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("set-preferences"), patch: preferencesPatchSchema, expectedPreferencesVersion: boundedUtf8StringSchema(MAX_ID_BYTES).nullable() }).strict();
 var setConfigCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("set-config"), patch: projectSettingsPatchSchema, expectedSidecarVersion: boundedUtf8StringSchema(MAX_ID_BYTES).nullable(), expectedDocumentRevision: revisionSchema }).strict();
@@ -33465,6 +33466,7 @@ var hostCommandSchema = external_exports.discriminatedUnion("type", [
   publishCommandSchema,
   uploadCommandSchema,
   saveCommandSchema,
+  discardDocumentCommandSchema,
   saveAsCommandSchema,
   reloadSourceCommandSchema,
   formatCommandSchema,
@@ -33483,7 +33485,7 @@ var hostCommandSchema = external_exports.discriminatedUnion("type", [
 ]);
 var cellStatusSchema = external_exports.enum(["idle", "stale", "running", "done", "error", "stopped", "disabled"]);
 var operationStatusSchema = external_exports.enum(["accepted", "running", "done", "error", "interrupted", "cancelled"]);
-var operationKindSchema = external_exports.enum(["transaction", "run", "select-r", "set-app", "packages-declare", "packages-install", "publish", "upload", "save", "save-as", "reload-source", "format", "set-preferences", "set-config", "set-layout", "set-runtime", "restart", "widget", "inspect", "lazy-output", "table-page", "interrupt", "cancel-operation", "shutdown", "widget-reset", "analysis"]);
+var operationKindSchema = external_exports.enum(["transaction", "run", "select-r", "set-app", "packages-declare", "packages-install", "publish", "upload", "save", "discard-document", "save-as", "reload-source", "format", "set-preferences", "set-config", "set-layout", "set-runtime", "restart", "widget", "inspect", "lazy-output", "table-page", "interrupt", "cancel-operation", "shutdown", "widget-reset", "analysis"]);
 var hostErrorSchema = external_exports.object({ code: boundedUtf8StringSchema(256, true), message: boundedUtf8StringSchema(MAX_FRAME_BYTES), operationId: idSchema.nullable().optional(), details: protocolJsonSchema.optional() }).strict();
 var MAX_OPERATION_PROGRESS_BYTES = 64 * 1024;
 var operationProgressDataSchema = protocolJsonSchema.superRefine((value, context) => {
@@ -33870,9 +33872,7 @@ var outputRecordShape = external_exports.object({ id: idSchema, sessionEpoch: id
 var outputRecordSchema = protocolJsonSchema.pipe(outputRecordShape);
 var sessionLeaseSchema = external_exports.object({ leaseId: idSchema, clientId: idSchema, epoch: idSchema }).strict();
 var attachLeaseRequestSchema = external_exports.object({ action: external_exports.literal("attach") }).strict();
-var leaseActionRequestSchema = external_exports.object({ action: external_exports.enum(["heartbeat", "release"]), leaseId: idSchema, disposition: external_exports.enum(["normal", "discard"]).optional() }).strict().superRefine((value, context) => {
-  if (value.action === "heartbeat" && value.disposition !== void 0) context.addIssue({ code: "custom", path: ["disposition"], message: "heartbeat cannot have a release disposition" });
-});
+var leaseActionRequestSchema = external_exports.object({ action: external_exports.enum(["heartbeat", "release"]), leaseId: idSchema }).strict();
 var ticketMintRequestSchema = external_exports.object({ origin: boundedUtf8StringSchema(2048, true), parentLeaseId: idSchema.optional() }).strict();
 var ticketMintResponseSchema = external_exports.object({ ticket: idSchema, expiresAt: boundedUtf8StringSchema(256, true) }).strict();
 var ticketExchangeRequestSchema = external_exports.object({ ticket: idSchema }).strict();
@@ -35562,14 +35562,9 @@ function createConnection(descriptor, lease) {
     if (!response.ok) throw new SessionUnavailableError("session heartbeat failed (" + response.status + ")");
     sessionLeaseSchema.parse(await response.json());
   };
-  let normalAttempt;
-  let discardAttempt;
-  const hostExitedAfterNormalRelease = (error61) => {
-    const code = error61 instanceof TypeError ? error61.cause?.code : void 0;
-    return code === "ECONNREFUSED" || code === "ECONNRESET";
-  };
+  let releaseAttempt;
   let interval;
-  const attemptRelease = async (disposition) => {
+  const attemptRelease = async () => {
     const controller = new AbortController();
     const timeoutError = Object.assign(new Error("session lease release timed out"), { name: "TimeoutError" });
     const timer = setTimeout(() => controller.abort(timeoutError), RELEASE_REQUEST_TIMEOUT_MS);
@@ -35577,13 +35572,11 @@ function createConnection(descriptor, lease) {
       const response = await requestRaw(descriptor.origin, "/api/lease", {
         method: "POST",
         headers: authenticatedHeaders({ headers: { "Content-Type": "application/json" } }),
-        body: JSON.stringify({ action: "release", leaseId: lease.leaseId, disposition }),
+        body: JSON.stringify({ action: "release", leaseId: lease.leaseId }),
         signal: controller.signal
       });
       if (response.headers.get("X-Alder-Continuity-Proof") !== descriptor.continuityProof) throw new SessionAuthError("host HTTP continuity proof changed");
       if (!response.ok) throw new SessionUnavailableError("session lease release failed (" + response.status + ")");
-      releaseState = disposition;
-      clearInterval(interval);
     } catch (error61) {
       if (controller.signal.aborted && controller.signal.reason === timeoutError) throw timeoutError;
       throw error61;
@@ -35591,31 +35584,13 @@ function createConnection(descriptor, lease) {
       clearTimeout(timer);
     }
   };
-  const release = (disposition = "normal") => {
+  const release = () => {
     if (releaseState === "abandoned") return Promise.reject(new SessionUnavailableError("session lease was abandoned locally"));
-    if (disposition === "normal") {
-      if (releaseState !== "active") return Promise.resolve();
-      if (discardAttempt) return discardAttempt;
-      if (normalAttempt) return normalAttempt;
-      const attempt2 = attemptRelease("normal");
-      normalAttempt = attempt2;
-      void attempt2.then(() => void 0, () => void 0).finally(() => {
-        if (normalAttempt === attempt2) normalAttempt = void 0;
-      });
-      return attempt2;
-    }
-    if (releaseState === "discard") return Promise.resolve();
-    if (discardAttempt) return discardAttempt;
-    const preceding = normalAttempt;
-    const attempt = (preceding ? preceding.then(() => void 0, () => void 0) : Promise.resolve()).then(() => attemptRelease("discard")).catch((error61) => {
-      if (releaseState !== "normal" || !hostExitedAfterNormalRelease(error61)) throw error61;
-      releaseState = "discard";
-    });
-    discardAttempt = attempt;
-    void attempt.then(() => void 0, () => void 0).finally(() => {
-      if (discardAttempt === attempt) discardAttempt = void 0;
-    });
-    return attempt;
+    if (releaseAttempt) return releaseAttempt;
+    releaseState = "released";
+    clearInterval(interval);
+    releaseAttempt = attemptRelease();
+    return releaseAttempt;
   };
   interval = setInterval(() => {
     void heartbeat().catch(() => void 0);

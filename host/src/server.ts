@@ -71,7 +71,7 @@ const ORIGIN_HOST_PATTERN = /^[0-9a-f]{32}\.localhost$/;
 export interface ControllerAdapter {
   snapshot(clientId?: string): HostSnapshot;
   subscribe(listener: (event: HostEvent) => void): () => void;
-  dispatch(command: HostCommand): Promise<CommandResult>;
+  dispatch(command: HostCommand, authority?: { mayDiscardDocument: () => boolean }): Promise<CommandResult>;
   registerClient?(clientId: string): void;
   releaseClient?(clientId: string): void;
   query?(query: HostQuery, callerClientId?: string): Promise<HostQueryResult> | HostQueryResult;
@@ -145,7 +145,6 @@ export interface AlderServerOptions {
   flushDiagnostics?: () => Promise<void>;
   onClientCount?: (count: number) => void;
   onLeaseCount?: (count: number) => void;
-  onLastLeaseDiscard?: () => void | Promise<void>;
   acceptingLeases?: () => boolean;
   onBrowserActivity?: () => void;
   onShutdown?: () => void | Promise<void>;
@@ -781,7 +780,6 @@ export function createAlderServer(options: AlderServerOptions): AlderServer {
   const sockets = new Set<WebSocket>();
   const socketsByLease = new Map<string, WebSocket>();
   const leases = new Map<string, Lease>();
-  const normalReleaseReceipts = new Map<string, { clientId: string; consumed: boolean }>();
   const tickets = new Map<string, Ticket>();
   const artifactLeases = new Map<string, { descriptor: ArtifactHandle; expiresAt: number }>();
   const capabilities = new Map<string, ArtifactCapabilityEntry>();
@@ -1070,6 +1068,13 @@ export function createAlderServer(options: AlderServerOptions): AlderServer {
     options.onLeaseCount?.(leases.size);
     return lease;
   }
+  async function dispatchCommand(command: HostCommand, lease: Lease): Promise<CommandResult> {
+    return options.controller.dispatch(command, { mayDiscardDocument: () => {
+      if (leases.get(lease.leaseId) !== lease) return false;
+      const root = lease.parentLeaseId ?? lease.leaseId;
+      return ![...leases.values()].some(other => (other.parentLeaseId ?? other.leaseId) !== root);
+    } });
+  }
   function cleanupTicket(ticket: string): void {
     tickets.delete(ticket);
   }
@@ -1326,32 +1331,11 @@ export function createAlderServer(options: AlderServerOptions): AlderServer {
       }
       if (action !== "heartbeat" && action !== "release") throw new HttpBoundaryError("invalid_request", "lease action must be attach, heartbeat, or release", 400);
       const leaseAction = leaseActionRequestSchema.parse(body);
-      const disposition = leaseAction.disposition ?? "normal";
-      if (action === "release" && disposition === "discard" && !leases.has(leaseAction.leaseId)) {
-        const supplied = parseBearer(request.headers);
-        if (supplied === null || !constantTimeEqual(supplied, configuredBearer ?? bearer)) throw authFailure();
-        const receipt = normalReleaseReceipts.get(leaseAction.leaseId);
-        if (receipt === undefined || clientHeader(request.headers) !== receipt.clientId) throw authFailure("normal release receipt does not match request");
-        jsonResponse(response, 200, { released: true, escalated: true });
-        const firstConsumption = !receipt.consumed;
-        receipt.consumed = true;
-        if (leases.size === 0 && firstConsumption) {
-          setImmediate(() => { void Promise.resolve(options.onLastLeaseDiscard?.()).catch(error => logger("error", "discard shutdown callback failed: " + (error instanceof Error ? error.message : "unknown"))); });
-        }
-        return;
-      }
       const resolved = requireLease(request, true);
       if (body.leaseId !== resolved.lease.leaseId) throw authFailure("lease identity does not match request");
       if (action === "release") {
-        if (disposition === "normal" && resolved.auth.kind === "bearer") {
-          normalReleaseReceipts.set(resolved.lease.leaseId, { clientId: resolved.lease.clientId, consumed: false });
-          while (normalReleaseReceipts.size > MAX_ACTIVE_LEASES) normalReleaseReceipts.delete(normalReleaseReceipts.keys().next().value!);
-        }
         removeLease(resolved.lease.leaseId);
         jsonResponse(response, 200, { released: true });
-        if (disposition === "discard" && leases.size === 0) {
-          setImmediate(() => { void Promise.resolve(options.onLastLeaseDiscard?.()).catch(error => logger("error", "discard shutdown callback failed: " + (error instanceof Error ? error.message : "unknown"))); });
-        }
       } else {
         resolved.lease.lastSeen = Date.now();
         jsonResponse(response, 200, { leaseId: resolved.lease.leaseId, clientId: resolved.lease.clientId, epoch: session.epoch });
@@ -1369,7 +1353,7 @@ export function createAlderServer(options: AlderServerOptions): AlderServer {
       assertCurrentHttpLease(resolved.lease);
       const release = retainMcpLease(resolved.lease);
       try {
-        const result = await options.controller.dispatch(command);
+        const result = await dispatchCommand(command, resolved.lease);
         assertCurrentHttpLease(resolved.lease);
         const bounded = await responseEnvelope(result, options.controller.snapshot(resolved.lease.clientId));
         jsonResponse(response, 200, bounded);
@@ -1758,7 +1742,7 @@ export function createAlderServer(options: AlderServerOptions): AlderServer {
           try {
             if (transportClosing) return;
             requireCurrentLease();
-            const result = await options.controller.dispatch(command);
+            const result = await dispatchCommand(command, resolved.lease);
             requireCurrentLease();
             const bounded = await responseEnvelope(result, options.controller.snapshot(resolved.lease.clientId));
             // The result acknowledges its cursor; deliver those source updates first.

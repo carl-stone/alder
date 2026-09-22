@@ -63506,8 +63506,9 @@ var publishCommandSchema = external_exports.object({ ...commandIdentityShape, ty
 var uploadFileSchema = external_exports.object({ name: pathSchema, content_base64: boundedUtf8StringSchema(16 * 1024 * 1024, true) }).strict();
 var uploadCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("upload"), name: idSchema, path: external_exports.array(idSchema).max(256), files: external_exports.array(uploadFileSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS), kernelEpoch: idSchema }).strict();
 var saveCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("save"), expectedDocumentRevision: revisionSchema }).strict();
+var discardDocumentCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("discard-document"), expectedDocumentRevision: revisionSchema }).strict();
 var saveAsCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("save-as"), path: pathSchema, expectedDestination: external_exports.union([external_exports.literal("absent"), external_exports.object({ expectedDiskDigest: external_exports.string().regex(/^[0-9a-f]{64}$/), expectedDiskVersion: boundedUtf8StringSchema(MAX_ID_BYTES, true) }).strict()]), expectedDocumentRevision: revisionSchema }).strict();
-var reloadSourceCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("reload-source"), expectedDocumentRevision: revisionSchema, expectedDiskDigest: external_exports.string().regex(/^[0-9a-f]{64}$/), expectedDiskVersion: boundedUtf8StringSchema(MAX_ID_BYTES, true), discardRecovery: external_exports.boolean().optional() }).strict();
+var reloadSourceCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("reload-source"), expectedDocumentRevision: revisionSchema, expectedDiskDigest: external_exports.string().regex(/^[0-9a-f]{64}$/), expectedDiskVersion: boundedUtf8StringSchema(MAX_ID_BYTES, true) }).strict();
 var formatCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("format"), cellIds: external_exports.array(idSchema).max(MAX_NOTEBOOK_CELLS).optional(), expectedRevisions: safeStringRecordSchema(revisionSchema), expectedDocumentRevision: revisionSchema }).strict();
 var setPreferencesCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("set-preferences"), patch: preferencesPatchSchema, expectedPreferencesVersion: boundedUtf8StringSchema(MAX_ID_BYTES).nullable() }).strict();
 var setConfigCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("set-config"), patch: projectSettingsPatchSchema, expectedSidecarVersion: boundedUtf8StringSchema(MAX_ID_BYTES).nullable(), expectedDocumentRevision: revisionSchema }).strict();
@@ -63598,6 +63599,7 @@ var hostCommandSchema = external_exports.discriminatedUnion("type", [
   publishCommandSchema,
   uploadCommandSchema,
   saveCommandSchema,
+  discardDocumentCommandSchema,
   saveAsCommandSchema,
   reloadSourceCommandSchema,
   formatCommandSchema,
@@ -63616,7 +63618,7 @@ var hostCommandSchema = external_exports.discriminatedUnion("type", [
 ]);
 var cellStatusSchema = external_exports.enum(["idle", "stale", "running", "done", "error", "stopped", "disabled"]);
 var operationStatusSchema = external_exports.enum(["accepted", "running", "done", "error", "interrupted", "cancelled"]);
-var operationKindSchema = external_exports.enum(["transaction", "run", "select-r", "set-app", "packages-declare", "packages-install", "publish", "upload", "save", "save-as", "reload-source", "format", "set-preferences", "set-config", "set-layout", "set-runtime", "restart", "widget", "inspect", "lazy-output", "table-page", "interrupt", "cancel-operation", "shutdown", "widget-reset", "analysis"]);
+var operationKindSchema = external_exports.enum(["transaction", "run", "select-r", "set-app", "packages-declare", "packages-install", "publish", "upload", "save", "discard-document", "save-as", "reload-source", "format", "set-preferences", "set-config", "set-layout", "set-runtime", "restart", "widget", "inspect", "lazy-output", "table-page", "interrupt", "cancel-operation", "shutdown", "widget-reset", "analysis"]);
 var hostErrorSchema = external_exports.object({ code: boundedUtf8StringSchema(256, true), message: boundedUtf8StringSchema(MAX_FRAME_BYTES), operationId: idSchema.nullable().optional(), details: protocolJsonSchema.optional() }).strict();
 var MAX_OPERATION_PROGRESS_BYTES = 64 * 1024;
 var operationProgressDataSchema = protocolJsonSchema.superRefine((value, context) => {
@@ -64020,9 +64022,7 @@ var outputRecordShape = external_exports.object({ id: idSchema, sessionEpoch: id
 var outputRecordSchema = protocolJsonSchema.pipe(outputRecordShape);
 var sessionLeaseSchema = external_exports.object({ leaseId: idSchema, clientId: idSchema, epoch: idSchema }).strict();
 var attachLeaseRequestSchema = external_exports.object({ action: external_exports.literal("attach") }).strict();
-var leaseActionRequestSchema = external_exports.object({ action: external_exports.enum(["heartbeat", "release"]), leaseId: idSchema, disposition: external_exports.enum(["normal", "discard"]).optional() }).strict().superRefine((value, context) => {
-  if (value.action === "heartbeat" && value.disposition !== void 0) context.addIssue({ code: "custom", path: ["disposition"], message: "heartbeat cannot have a release disposition" });
-});
+var leaseActionRequestSchema = external_exports.object({ action: external_exports.enum(["heartbeat", "release"]), leaseId: idSchema }).strict();
 var ticketMintRequestSchema = external_exports.object({ origin: boundedUtf8StringSchema(2048, true), parentLeaseId: idSchema.optional() }).strict();
 var ticketMintResponseSchema = external_exports.object({ ticket: idSchema, expiresAt: boundedUtf8StringSchema(256, true) }).strict();
 var ticketExchangeRequestSchema = external_exports.object({ ticket: idSchema }).strict();
@@ -73487,7 +73487,7 @@ var Controller = class {
       signal?.addEventListener("abort", abort, { once: true });
     });
   }
-  dispatch(command) {
+  dispatch(command, authority) {
     this.assertNotClosed();
     if (command.sessionEpoch !== this.epochValue) {
       return Promise.reject(new ControllerError(
@@ -73545,7 +73545,7 @@ var Controller = class {
         queueMs: Math.round(performance.now() - acceptedAt),
         documentRevision: this.documentRevisionValue
       });
-      return this.executeCommand(command, operationCompletion);
+      return this.executeCommand(command, operationCompletion, authority);
     };
     let completion;
     if (command.type === "run") {
@@ -73883,7 +73883,7 @@ var Controller = class {
     await this.engine.close();
     this.listeners.clear();
   }
-  async executeCommand(command, completion) {
+  async executeCommand(command, completion, authority) {
     try {
       if (this.closed || isTerminal(this.operationFor(command.requestId, command.clientId)?.status ?? "error")) {
         return this.commandResult(command.requestId, await completion);
@@ -73969,6 +73969,14 @@ var Controller = class {
           result = await this.saveNotebook(command.expectedDocumentRevision, command.requestId);
           this.diagnosticOperationPhase(command.clientId, command.requestId, "publication", "save");
           this.diagnosticOperationPhase(command.clientId, command.requestId, "clean", "save");
+          break;
+        case "discard-document":
+          result = await this.executeSourceService({
+            kind: "discard-document",
+            expectedDocumentRevision: command.expectedDocumentRevision,
+            operationId: command.requestId,
+            mayDiscardDocument: authority?.mayDiscardDocument
+          });
           break;
         case "save-as":
         case "reload-source":
@@ -74207,7 +74215,7 @@ var Controller = class {
         ...graphChanged ? { graph: clone3(this.graphValue.state) } : {}
       }, { operationId });
     } else {
-      const authoritativeReload = request.kind === "reload-source" || request.kind === "watcher";
+      const authoritativeReload = request.kind === "discard-document" || request.kind === "reload-source" || request.kind === "watcher";
       this.bump("notebook", {
         sourceCommit: request.kind,
         documentRevision: this.documentRevisionValue,
@@ -77761,7 +77769,6 @@ var Controller = class {
           expectedDocumentRevision: command.expectedDocumentRevision,
           expectedDisk: { digest: command.expectedDiskDigest, version: command.expectedDiskVersion },
           operationId: command.requestId,
-          discardRecovery: command.discardRecovery,
           fingerprint: stableStringify({ expectedDiskDigest: command.expectedDiskDigest, expectedDiskVersion: command.expectedDiskVersion })
         });
       case "upload":
@@ -83042,7 +83049,6 @@ function createAlderServer(options) {
   const sockets = /* @__PURE__ */ new Set();
   const socketsByLease = /* @__PURE__ */ new Map();
   const leases = /* @__PURE__ */ new Map();
-  const normalReleaseReceipts = /* @__PURE__ */ new Map();
   const tickets = /* @__PURE__ */ new Map();
   const artifactLeases = /* @__PURE__ */ new Map();
   const capabilities = /* @__PURE__ */ new Map();
@@ -83320,6 +83326,13 @@ function createAlderServer(options) {
     options.onLeaseCount?.(leases.size);
     return lease;
   }
+  async function dispatchCommand(command, lease) {
+    return options.controller.dispatch(command, { mayDiscardDocument: () => {
+      if (leases.get(lease.leaseId) !== lease) return false;
+      const root = lease.parentLeaseId ?? lease.leaseId;
+      return ![...leases.values()].some((other) => (other.parentLeaseId ?? other.leaseId) !== root);
+    } });
+  }
   function cleanupTicket(ticket) {
     tickets.delete(ticket);
   }
@@ -83567,36 +83580,11 @@ function createAlderServer(options) {
       }
       if (action !== "heartbeat" && action !== "release") throw new HttpBoundaryError("invalid_request", "lease action must be attach, heartbeat, or release", 400);
       const leaseAction = leaseActionRequestSchema.parse(body);
-      const disposition = leaseAction.disposition ?? "normal";
-      if (action === "release" && disposition === "discard" && !leases.has(leaseAction.leaseId)) {
-        const supplied = parseBearer(request.headers);
-        if (supplied === null || !constantTimeEqual(supplied, configuredBearer ?? bearer)) throw authFailure();
-        const receipt = normalReleaseReceipts.get(leaseAction.leaseId);
-        if (receipt === void 0 || clientHeader(request.headers) !== receipt.clientId) throw authFailure("normal release receipt does not match request");
-        jsonResponse(response, 200, { released: true, escalated: true });
-        const firstConsumption = !receipt.consumed;
-        receipt.consumed = true;
-        if (leases.size === 0 && firstConsumption) {
-          setImmediate(() => {
-            void Promise.resolve(options.onLastLeaseDiscard?.()).catch((error61) => logger("error", "discard shutdown callback failed: " + (error61 instanceof Error ? error61.message : "unknown")));
-          });
-        }
-        return;
-      }
       const resolved = requireLease(request, true);
       if (body.leaseId !== resolved.lease.leaseId) throw authFailure("lease identity does not match request");
       if (action === "release") {
-        if (disposition === "normal" && resolved.auth.kind === "bearer") {
-          normalReleaseReceipts.set(resolved.lease.leaseId, { clientId: resolved.lease.clientId, consumed: false });
-          while (normalReleaseReceipts.size > MAX_ACTIVE_LEASES) normalReleaseReceipts.delete(normalReleaseReceipts.keys().next().value);
-        }
         removeLease(resolved.lease.leaseId);
         jsonResponse(response, 200, { released: true });
-        if (disposition === "discard" && leases.size === 0) {
-          setImmediate(() => {
-            void Promise.resolve(options.onLastLeaseDiscard?.()).catch((error61) => logger("error", "discard shutdown callback failed: " + (error61 instanceof Error ? error61.message : "unknown")));
-          });
-        }
       } else {
         resolved.lease.lastSeen = Date.now();
         jsonResponse(response, 200, { leaseId: resolved.lease.leaseId, clientId: resolved.lease.clientId, epoch: session.epoch });
@@ -83613,7 +83601,7 @@ function createAlderServer(options) {
       assertCurrentHttpLease(resolved.lease);
       const release = retainMcpLease(resolved.lease);
       try {
-        const result = await options.controller.dispatch(command);
+        const result = await dispatchCommand(command, resolved.lease);
         assertCurrentHttpLease(resolved.lease);
         const bounded = await responseEnvelope(result, options.controller.snapshot(resolved.lease.clientId));
         jsonResponse(response, 200, bounded);
@@ -84063,7 +84051,7 @@ function createAlderServer(options) {
           try {
             if (transportClosing) return;
             requireCurrentLease();
-            const result = await options.controller.dispatch(command);
+            const result = await dispatchCommand(command, resolved.lease);
             requireCurrentLease();
             const bounded = await responseEnvelope(result, options.controller.snapshot(resolved.lease.clientId));
             await eventChain;
@@ -110736,21 +110724,6 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
     });
     if (errors.length > 0) throw new AggregateError(errors, "Alder shutdown failed");
   })().finally(resolveClosed);
-  const discardAndClose = async () => {
-    if (recovery !== void 0) {
-      const state = await recovery.load();
-      if (state.fingerprint !== null) await recovery.clearIfMatch({ documentRevision: state.baseline.documentRevision, fingerprint: state.fingerprint });
-      recoveryPending = false;
-      recoveryFingerprint = void 0;
-    }
-    for (const retained of retainedSaveAsRecovery) {
-      await retained.retire();
-    }
-    if (untitledRecoveryDescriptor !== void 0) await retireUntitledRecoveryDescriptor(untitledRecoveryDescriptor);
-    for (const retained of retainedSaveAsRecovery) ownership.releaseRetained(retained.key);
-    retainedSaveAsRecovery.length = 0;
-    await close();
-  };
   try {
     let setLsp2 = function(value) {
       lsp = value;
@@ -111040,6 +111013,65 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
           return { committed: true, diskError };
         }
       }
+      if (request.kind === "discard-document") {
+        if (request.mayDiscardDocument?.() !== true) {
+          publishSource(context, {
+            document: context.document,
+            path: context.path,
+            layout: context.layout,
+            disk: context.disk,
+            sidecars: context.sidecars,
+            dirty: context.dirty,
+            advanceRevision: false
+          });
+          return { discarded: false, peerActive: true };
+        }
+        const prepared = isUntitled ? null : await store.prepareReload({
+          expectedDiskDigest: context.disk.digest ?? "",
+          expectedDiskVersion: context.disk.version ?? ""
+        }, context.document);
+        if (request.mayDiscardDocument?.() !== true) {
+          publishSource(context, {
+            document: context.document,
+            path: context.path,
+            layout: context.layout,
+            disk: context.disk,
+            sidecars: context.sidecars,
+            dirty: context.dirty,
+            advanceRevision: false
+          });
+          return { discarded: false, peerActive: true };
+        }
+        const saved = isUntitled ? parseNotebook(new Uint8Array(), null) : prepared.notebook;
+        for (const retained of retainedSaveAsRecovery) await retained.retire();
+        if (untitledRecoveryDescriptor !== void 0) {
+          await retireUntitledRecoveryDescriptor(untitledRecoveryDescriptor);
+          untitledRecoveryDescriptor = void 0;
+        }
+        await recovery.discard();
+        for (const retained of retainedSaveAsRecovery) ownership.releaseRetained(retained.key);
+        retainedSaveAsRecovery.length = 0;
+        prepared?.adopt();
+        recoveryPending = false;
+        recoveryFingerprint = void 0;
+        recoveryConflict = false;
+        saveAsIdentityPending = false;
+        notebook = saved;
+        config3 = configurationFor(saved);
+        publishSource(context, {
+          document: saved,
+          path: isUntitled ? null : store.path,
+          config: config3,
+          layout: context.layout,
+          disk: isUntitled ? context.disk : prepared.observation,
+          sidecars: context.sidecars,
+          dirty: false,
+          advanceRevision: true,
+          invalidateRuntime: true
+        });
+        controller?.clearActionError("save_durability_uncertain");
+        return { discarded: true };
+      }
       if (request.kind === "runtime") {
         const updated = setNotebookSettings(context.document, request.patch);
         const document = setMetadata(context.document, "runtime", updated.metadata?.runtime ?? null);
@@ -111317,7 +111349,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
             publishSource(context, { document: context.document, path: context.path, layout: context.layout, disk: context.disk, sidecars: context.sidecars, dirty: context.dirty, advanceRevision: false });
             return { changed: false };
           }
-          if (context.dirty && (sourceChanged || sidecarsChanged || request.kind === "reload-source") && request.discardRecovery !== true) {
+          if (context.dirty && (sourceChanged || sidecarsChanged || request.kind === "reload-source")) {
             if (sourceChanged) await store.adoptSourceObservation(observed.store);
             store.adoptSidecarObservations(observed.store);
             await observed.store.close();
@@ -111363,12 +111395,6 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
           await observed.store.close();
           publishSource(context, { document: nextDocument, path: store.path, layout: nextLayout, disk: nextDisk, sidecars: nextSidecars, dirty: false, advanceRevision: sourceChanged || sidecarsChanged, invalidateRuntime: sourceChanged, config: nextConfig });
           notebook = nextDocument;
-          if (request.discardRecovery === true) {
-            await recovery.discard();
-            recoveryPending = false;
-            recoveryFingerprint = void 0;
-            recoveryConflict = false;
-          }
           if (sidecarsChanged) {
             projectSettings = { ...nextProjectConfig };
             projectLayoutIntent = nextLayout;
@@ -111713,16 +111739,15 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
           if (lsp || lspStarting) void invalidateLsp();
         } else scheduleLspSync();
       }
-      if (event.type === "operation") scheduleIdle();
     });
     const scheduleIdle = () => {
       clearTimeout(idleTimer);
-      if (clientCount !== 0 || leaseCount !== 0 || controller?.hasActiveOperations() === true || !everConnected || options.idleTimeout === 0 || closing) return;
+      if (clientCount !== 0 || leaseCount !== 0 || !everConnected || options.idleTimeout === 0 || closing) return;
       const activity = browserActivity;
       idleTimer = setTimeout(() => {
         idleTimer = void 0;
         void (async () => {
-          if (activity !== browserActivity || clientCount !== 0 || leaseCount !== 0 || controller?.hasActiveOperations() === true || closing) return;
+          if (activity !== browserActivity || clientCount !== 0 || leaseCount !== 0 || closing) return;
           await close();
         })().catch((error61) => {
           if (!closing) controller.recordActionError(errorMessage(error61), "idle_close_failed");
@@ -111810,7 +111835,6 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
         if (count > 0) everConnected = true;
         scheduleIdle();
       },
-      onLastLeaseDiscard: discardAndClose,
       onBrowserActivity: () => {
         everConnected = true;
         browserActivity++;

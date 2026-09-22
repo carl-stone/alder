@@ -179,7 +179,7 @@ export async function connectBackendSession(raw: unknown, requested: AcquireNote
 }
 
 function createConnection(descriptor: BackendSessionDescriptor, lease: SessionLease): SessionConnection {
-  let releaseState: "active" | "normal" | "discard" | "abandoned" = "active";
+  let releaseState: "active" | "released" | "abandoned" = "active";
   const authenticatedHeaders = (init: RequestInit = {}): Headers => {
     const headers = new Headers(init.headers);
     headers.set("Authorization", "Bearer " + descriptor.token);
@@ -199,27 +199,20 @@ function createConnection(descriptor: BackendSessionDescriptor, lease: SessionLe
     if (!response.ok) throw new SessionUnavailableError("session heartbeat failed (" + response.status + ")");
     sessionLeaseSchema.parse(await response.json());
   };
-  let normalAttempt: Promise<void> | undefined;
-  let discardAttempt: Promise<void> | undefined;
-  const hostExitedAfterNormalRelease = (error: unknown): boolean => {
-    const code = error instanceof TypeError ? (error.cause as { code?: unknown } | undefined)?.code : undefined;
-    return code === "ECONNREFUSED" || code === "ECONNRESET";
-  };
+  let releaseAttempt: Promise<void> | undefined;
   let interval: ReturnType<typeof setInterval>;
-  const attemptRelease = async (disposition: "normal" | "discard"): Promise<void> => {
+  const attemptRelease = async (): Promise<void> => {
     const controller = new AbortController();
     const timeoutError = Object.assign(new Error("session lease release timed out"), { name: "TimeoutError" });
     const timer = setTimeout(() => controller.abort(timeoutError), RELEASE_REQUEST_TIMEOUT_MS);
     try {
       const response = await requestRaw(descriptor.origin, "/api/lease", {
         method: "POST", headers: authenticatedHeaders({ headers: { "Content-Type": "application/json" } }),
-        body: JSON.stringify({ action: "release", leaseId: lease.leaseId, disposition }),
+        body: JSON.stringify({ action: "release", leaseId: lease.leaseId }),
         signal: controller.signal,
       });
       if (response.headers.get("X-Alder-Continuity-Proof") !== descriptor.continuityProof) throw new SessionAuthError("host HTTP continuity proof changed");
       if (!response.ok) throw new SessionUnavailableError("session lease release failed (" + response.status + ")");
-      releaseState = disposition;
-      clearInterval(interval);
     } catch (error) {
       if (controller.signal.aborted && controller.signal.reason === timeoutError) throw timeoutError;
       throw error;
@@ -227,30 +220,13 @@ function createConnection(descriptor: BackendSessionDescriptor, lease: SessionLe
       clearTimeout(timer);
     }
   };
-  const release = (disposition: "normal" | "discard" = "normal"): Promise<void> => {
+  const release = (): Promise<void> => {
     if (releaseState === "abandoned") return Promise.reject(new SessionUnavailableError("session lease was abandoned locally"));
-    if (disposition === "normal") {
-      if (releaseState !== "active") return Promise.resolve();
-      if (discardAttempt) return discardAttempt;
-      if (normalAttempt) return normalAttempt;
-      const attempt = attemptRelease("normal");
-      normalAttempt = attempt;
-      void attempt.then(() => undefined, () => undefined).finally(() => { if (normalAttempt === attempt) normalAttempt = undefined; });
-      return attempt;
-    }
-    if (releaseState === "discard") return Promise.resolve();
-    if (discardAttempt) return discardAttempt;
-    const preceding = normalAttempt;
-    const attempt = (preceding ? preceding.then(() => undefined, () => undefined) : Promise.resolve())
-      .then(() => attemptRelease("discard"))
-      .catch(error => {
-        if (releaseState !== "normal" || !hostExitedAfterNormalRelease(error)) throw error;
-        // The acknowledged normal release already relinquished the lease. Its host has since exited.
-        releaseState = "discard";
-      });
-    discardAttempt = attempt;
-    void attempt.then(() => undefined, () => undefined).finally(() => { if (discardAttempt === attempt) discardAttempt = undefined; });
-    return attempt;
+    if (releaseAttempt) return releaseAttempt;
+    releaseState = "released";
+    clearInterval(interval);
+    releaseAttempt = attemptRelease();
+    return releaseAttempt;
   };
   interval = setInterval(() => { void heartbeat().catch(() => undefined); }, HEARTBEAT_INTERVAL_MS);
   interval.unref();

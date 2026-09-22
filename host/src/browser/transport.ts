@@ -149,6 +149,7 @@ export class BrowserTransport {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private reconnectAttempts = 0;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  private releaseAttempt: Promise<void> | null = null;
   private lastRecovery: Recovery | null = null;
   readonly recoveryStore: BrowserDraftStore;
 
@@ -202,16 +203,24 @@ export class BrowserTransport {
     });
   }
 
-  async release(disposition: "normal" | "discard" = "normal"): Promise<void> {
-    const response = await fetch(notebookUrl("/api/lease"), {
-      method: "POST",
-      credentials: "include",
-      headers: { "Content-Type": "application/json", "X-Alder-CSRF": this.csrf },
-      body: JSON.stringify({ action: "release", leaseId: this.leaseId, disposition }),
-    });
-    this.assertResponseContinuity(response);
-    if (!response.ok) throw new BrowserTransportError("lease_release_failed", "browser lease release failed (" + response.status + ")");
-    this.close();
+  release(): Promise<void> {
+    if (this.releaseAttempt !== null) return this.releaseAttempt;
+    this.releaseAttempt = (async () => {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 750);
+      try {
+        const response = await fetch(notebookUrl("/api/lease"), {
+          method: "POST",
+          credentials: "include",
+          headers: { "Content-Type": "application/json", "X-Alder-CSRF": this.csrf },
+          body: JSON.stringify({ action: "release", leaseId: this.leaseId }),
+          signal: controller.signal,
+        });
+        this.assertResponseContinuity(response);
+        if (!response.ok) throw new BrowserTransportError("lease_release_failed", "browser lease release failed (" + response.status + ")");
+      } finally { clearTimeout(timeout); this.close(); }
+    })();
+    return this.releaseAttempt;
   }
   close(): void {
     this.stopped = true;

@@ -20549,8 +20549,9 @@ var publishCommandSchema = external_exports.object({ ...commandIdentityShape, ty
 var uploadFileSchema = external_exports.object({ name: pathSchema, content_base64: boundedUtf8StringSchema(16 * 1024 * 1024, true) }).strict();
 var uploadCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("upload"), name: idSchema, path: external_exports.array(idSchema).max(256), files: external_exports.array(uploadFileSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS), kernelEpoch: idSchema }).strict();
 var saveCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("save"), expectedDocumentRevision: revisionSchema }).strict();
+var discardDocumentCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("discard-document"), expectedDocumentRevision: revisionSchema }).strict();
 var saveAsCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("save-as"), path: pathSchema, expectedDestination: external_exports.union([external_exports.literal("absent"), external_exports.object({ expectedDiskDigest: external_exports.string().regex(/^[0-9a-f]{64}$/), expectedDiskVersion: boundedUtf8StringSchema(MAX_ID_BYTES, true) }).strict()]), expectedDocumentRevision: revisionSchema }).strict();
-var reloadSourceCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("reload-source"), expectedDocumentRevision: revisionSchema, expectedDiskDigest: external_exports.string().regex(/^[0-9a-f]{64}$/), expectedDiskVersion: boundedUtf8StringSchema(MAX_ID_BYTES, true), discardRecovery: external_exports.boolean().optional() }).strict();
+var reloadSourceCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("reload-source"), expectedDocumentRevision: revisionSchema, expectedDiskDigest: external_exports.string().regex(/^[0-9a-f]{64}$/), expectedDiskVersion: boundedUtf8StringSchema(MAX_ID_BYTES, true) }).strict();
 var formatCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("format"), cellIds: external_exports.array(idSchema).max(MAX_NOTEBOOK_CELLS).optional(), expectedRevisions: safeStringRecordSchema(revisionSchema), expectedDocumentRevision: revisionSchema }).strict();
 var setPreferencesCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("set-preferences"), patch: preferencesPatchSchema, expectedPreferencesVersion: boundedUtf8StringSchema(MAX_ID_BYTES).nullable() }).strict();
 var setConfigCommandSchema = external_exports.object({ ...commandIdentityShape, type: external_exports.literal("set-config"), patch: projectSettingsPatchSchema, expectedSidecarVersion: boundedUtf8StringSchema(MAX_ID_BYTES).nullable(), expectedDocumentRevision: revisionSchema }).strict();
@@ -20641,6 +20642,7 @@ var hostCommandSchema = external_exports.discriminatedUnion("type", [
   publishCommandSchema,
   uploadCommandSchema,
   saveCommandSchema,
+  discardDocumentCommandSchema,
   saveAsCommandSchema,
   reloadSourceCommandSchema,
   formatCommandSchema,
@@ -20659,7 +20661,7 @@ var hostCommandSchema = external_exports.discriminatedUnion("type", [
 ]);
 var cellStatusSchema = external_exports.enum(["idle", "stale", "running", "done", "error", "stopped", "disabled"]);
 var operationStatusSchema = external_exports.enum(["accepted", "running", "done", "error", "interrupted", "cancelled"]);
-var operationKindSchema = external_exports.enum(["transaction", "run", "select-r", "set-app", "packages-declare", "packages-install", "publish", "upload", "save", "save-as", "reload-source", "format", "set-preferences", "set-config", "set-layout", "set-runtime", "restart", "widget", "inspect", "lazy-output", "table-page", "interrupt", "cancel-operation", "shutdown", "widget-reset", "analysis"]);
+var operationKindSchema = external_exports.enum(["transaction", "run", "select-r", "set-app", "packages-declare", "packages-install", "publish", "upload", "save", "discard-document", "save-as", "reload-source", "format", "set-preferences", "set-config", "set-layout", "set-runtime", "restart", "widget", "inspect", "lazy-output", "table-page", "interrupt", "cancel-operation", "shutdown", "widget-reset", "analysis"]);
 var hostErrorSchema = external_exports.object({ code: boundedUtf8StringSchema(256, true), message: boundedUtf8StringSchema(MAX_FRAME_BYTES), operationId: idSchema.nullable().optional(), details: protocolJsonSchema.optional() }).strict();
 var MAX_OPERATION_PROGRESS_BYTES = 64 * 1024;
 var operationProgressDataSchema = protocolJsonSchema.superRefine((value, context) => {
@@ -21057,9 +21059,7 @@ var outputRecordShape = external_exports.object({ id: idSchema, sessionEpoch: id
 var outputRecordSchema = protocolJsonSchema.pipe(outputRecordShape);
 var sessionLeaseSchema = external_exports.object({ leaseId: idSchema, clientId: idSchema, epoch: idSchema }).strict();
 var attachLeaseRequestSchema = external_exports.object({ action: external_exports.literal("attach") }).strict();
-var leaseActionRequestSchema = external_exports.object({ action: external_exports.enum(["heartbeat", "release"]), leaseId: idSchema, disposition: external_exports.enum(["normal", "discard"]).optional() }).strict().superRefine((value, context) => {
-  if (value.action === "heartbeat" && value.disposition !== void 0) context.addIssue({ code: "custom", path: ["disposition"], message: "heartbeat cannot have a release disposition" });
-});
+var leaseActionRequestSchema = external_exports.object({ action: external_exports.enum(["heartbeat", "release"]), leaseId: idSchema }).strict();
 var ticketMintRequestSchema = external_exports.object({ origin: boundedUtf8StringSchema(2048, true), parentLeaseId: idSchema.optional() }).strict();
 var ticketMintResponseSchema = external_exports.object({ ticket: idSchema, expiresAt: boundedUtf8StringSchema(256, true) }).strict();
 var ticketExchangeRequestSchema = external_exports.object({ ticket: idSchema }).strict();
@@ -21423,6 +21423,7 @@ var BrowserTransport = class {
   reconnectTimer = null;
   reconnectAttempts = 0;
   heartbeatTimer = null;
+  releaseAttempt = null;
   lastRecovery = null;
   recoveryStore;
   get id() {
@@ -21481,16 +21482,27 @@ var BrowserTransport = class {
       this.flush();
     });
   }
-  async release(disposition = "normal") {
-    const response = await fetch(notebookUrl("/api/lease"), {
-      method: "POST",
-      credentials: "include",
-      headers: { "Content-Type": "application/json", "X-Alder-CSRF": this.csrf },
-      body: JSON.stringify({ action: "release", leaseId: this.leaseId, disposition })
-    });
-    this.assertResponseContinuity(response);
-    if (!response.ok) throw new BrowserTransportError("lease_release_failed", "browser lease release failed (" + response.status + ")");
-    this.close();
+  release() {
+    if (this.releaseAttempt !== null) return this.releaseAttempt;
+    this.releaseAttempt = (async () => {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 750);
+      try {
+        const response = await fetch(notebookUrl("/api/lease"), {
+          method: "POST",
+          credentials: "include",
+          headers: { "Content-Type": "application/json", "X-Alder-CSRF": this.csrf },
+          body: JSON.stringify({ action: "release", leaseId: this.leaseId }),
+          signal: controller.signal
+        });
+        this.assertResponseContinuity(response);
+        if (!response.ok) throw new BrowserTransportError("lease_release_failed", "browser lease release failed (" + response.status + ")");
+      } finally {
+        clearTimeout(timeout);
+        this.close();
+      }
+    })();
+    return this.releaseAttempt;
   }
   close() {
     this.stopped = true;
@@ -21826,9 +21838,21 @@ var BrowserNotebookClient = class {
     return this.documentValue;
   }
   async discardAndClose() {
-    await this.discardRecovery();
-    await this.transport.release("discard");
-    this.finishClose();
+    await this.withSourceLock(async () => {
+      await this.flushDraftPersistence();
+      const result = await this.dispatchSettled({ type: "discard-document", ...this.base("discard-document") });
+      if (result.error !== null) throw new BrowserTransportError(result.error.code, result.error.message);
+      if (this.draftPersistenceTimer !== void 0) clearTimeout(this.draftPersistenceTimer);
+      this.draftPersistenceTimer = void 0;
+      this.draftPersistenceQueued = false;
+      await this.beginDraftMutation();
+      await this.draftStore().clearDraft(this.draftId);
+    });
+    try {
+      await this.transport.release().catch(() => void 0);
+    } finally {
+      this.finishClose();
+    }
   }
   async close() {
     await this.flushDraftPersistence();
@@ -21923,17 +21947,9 @@ var BrowserNotebookClient = class {
   async discardRecoveryUnlocked() {
     await this.beginDraftMutation();
     if (this.recoveryStateValue.candidate !== null || this.recoveryStateValue.corruption !== null) {
-      const snapshot = this.requireDocument().snapshot;
-      if (snapshot.disk.digest !== null && snapshot.disk.version !== null) {
-        await this.dispatchSettled({
-          type: "reload-source",
-          ...this.base("reload-source"),
-          expectedDiskDigest: snapshot.disk.digest,
-          expectedDiskVersion: snapshot.disk.version,
-          discardRecovery: true
-        });
-        this.recoveryStateValue = { ...this.recoveryStateValue, candidate: null, corruption: null };
-      }
+      const result = await this.dispatchSettled({ type: "discard-document", ...this.base("discard-document") });
+      if (isRecord2(result.result) && result.result.peerActive === true) throw new BrowserTransportError("peer_active", "Close other notebook windows before opening the saved copy.");
+      this.recoveryStateValue = { ...this.recoveryStateValue, candidate: null, corruption: null };
     }
     await this.draftStore().clearDraft(this.draftId);
     this.resetAuthoritativeDocument();

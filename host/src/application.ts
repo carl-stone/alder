@@ -391,21 +391,6 @@ async function startNotebookHost(
     });
     if (errors.length > 0) throw new AggregateError(errors, "Alder shutdown failed");
   })().finally(resolveClosed);
-  const discardAndClose = async (): Promise<void> => {
-    if (recovery !== undefined) {
-      const state = await recovery.load();
-      if (state.fingerprint !== null) await recovery.clearIfMatch({ documentRevision: state.baseline.documentRevision, fingerprint: state.fingerprint });
-      recoveryPending = false;
-      recoveryFingerprint = undefined;
-    }
-    for (const retained of retainedSaveAsRecovery) {
-      await retained.retire();
-    }
-    if (untitledRecoveryDescriptor !== undefined) await retireUntitledRecoveryDescriptor(untitledRecoveryDescriptor);
-    for (const retained of retainedSaveAsRecovery) ownership.releaseRetained(retained.key);
-    retainedSaveAsRecovery.length = 0;
-    await close();
-  };
   try {
     work = await realpath(await mkdtemp(join(tmpdir(), "alder-host-")));
     uploads = new UploadStore(join(work, "uploads"));
@@ -686,6 +671,43 @@ async function startNotebookHost(
           return { committed: true, diskError };
         }
       }
+      if (request.kind === "discard-document") {
+        if (request.mayDiscardDocument?.() !== true) {
+          publishSource(context, { document: context.document, path: context.path, layout: context.layout,
+            disk: context.disk, sidecars: context.sidecars, dirty: context.dirty, advanceRevision: false });
+          return { discarded: false, peerActive: true };
+        }
+        const prepared = isUntitled ? null : await store!.prepareReload({
+          expectedDiskDigest: context.disk.digest ?? "", expectedDiskVersion: context.disk.version ?? "",
+        }, context.document);
+        if (request.mayDiscardDocument?.() !== true) {
+          publishSource(context, { document: context.document, path: context.path, layout: context.layout,
+            disk: context.disk, sidecars: context.sidecars, dirty: context.dirty, advanceRevision: false });
+          return { discarded: false, peerActive: true };
+        }
+        const saved = isUntitled ? parseNotebook(new Uint8Array(), null) : prepared!.notebook;
+        for (const retained of retainedSaveAsRecovery) await retained.retire();
+        if (untitledRecoveryDescriptor !== undefined) {
+          await retireUntitledRecoveryDescriptor(untitledRecoveryDescriptor);
+          untitledRecoveryDescriptor = undefined;
+        }
+        await recovery!.discard();
+        for (const retained of retainedSaveAsRecovery) ownership.releaseRetained(retained.key);
+        retainedSaveAsRecovery.length = 0;
+        prepared?.adopt();
+        recoveryPending = false;
+        recoveryFingerprint = undefined;
+        recoveryConflict = false;
+        saveAsIdentityPending = false;
+        notebook = saved;
+        config = configurationFor(saved);
+        publishSource(context, { document: saved, path: isUntitled ? null : store!.path,
+          config,
+          layout: context.layout, disk: isUntitled ? context.disk : prepared!.observation,
+          sidecars: context.sidecars, dirty: false, advanceRevision: true, invalidateRuntime: true });
+        controller?.clearActionError("save_durability_uncertain");
+        return { discarded: true };
+      }
       if (request.kind === "runtime") {
         const updated = setNotebookSettings(context.document, request.patch as NotebookSettingsPatch);
         const document = setMetadata(context.document, "runtime", updated.metadata?.runtime ?? null);
@@ -932,7 +954,7 @@ async function startNotebookHost(
             publishSource(context, { document: context.document, path: context.path, layout: context.layout, disk: context.disk, sidecars: context.sidecars, dirty: context.dirty, advanceRevision: false });
             return { changed: false };
           }
-          if (context.dirty && (sourceChanged || sidecarsChanged || request.kind === "reload-source") && request.discardRecovery !== true) {
+          if (context.dirty && (sourceChanged || sidecarsChanged || request.kind === "reload-source")) {
             if (sourceChanged) await store.adoptSourceObservation(observed.store);
             store.adoptSidecarObservations(observed.store);
             await observed.store.close();
@@ -976,12 +998,6 @@ async function startNotebookHost(
           await observed.store.close();
           publishSource(context, { document: nextDocument, path: store.path, layout: nextLayout, disk: nextDisk, sidecars: nextSidecars, dirty: false, advanceRevision: sourceChanged || sidecarsChanged, invalidateRuntime: sourceChanged, config: nextConfig });
           notebook = nextDocument;
-          if (request.discardRecovery === true) {
-            await recovery!.discard();
-            recoveryPending = false;
-            recoveryFingerprint = undefined;
-            recoveryConflict = false;
-          }
           if (sidecarsChanged) {
             projectSettings = { ...nextProjectConfig };
             projectLayoutIntent = nextLayout;
@@ -1305,16 +1321,15 @@ async function startNotebookHost(
           if (lsp || lspStarting) void invalidateLsp();
         } else scheduleLspSync();
       }
-      if (event.type === "operation") scheduleIdle();
     });
     const scheduleIdle = (): void => {
       clearTimeout(idleTimer);
-      if (clientCount !== 0 || leaseCount !== 0 || controller?.hasActiveOperations() === true || !everConnected || options.idleTimeout === 0 || closing) return;
+      if (clientCount !== 0 || leaseCount !== 0 || !everConnected || options.idleTimeout === 0 || closing) return;
       const activity = browserActivity;
       idleTimer = setTimeout(() => {
         idleTimer = undefined;
         void (async () => {
-          if (activity !== browserActivity || clientCount !== 0 || leaseCount !== 0 || controller?.hasActiveOperations() === true || closing) return;
+          if (activity !== browserActivity || clientCount !== 0 || leaseCount !== 0 || closing) return;
           await close();
         })().catch(error => { if (!closing) controller!.recordActionError(errorMessage(error), "idle_close_failed"); });
       }, options.idleTimeout * 1000);
@@ -1375,7 +1390,6 @@ async function startNotebookHost(
       acceptingLeases: () => closing === undefined,
       onClientCount: (count: number) => { clientCount = count; browserActivity++; if (count > 0) everConnected = true; scheduleIdle(); },
       onLeaseCount: (count: number) => { leaseCount = count; browserActivity++; if (count > 0) everConnected = true; scheduleIdle(); },
-      onLastLeaseDiscard: discardAndClose,
       onBrowserActivity: () => { everConnected = true; browserActivity++; scheduleIdle(); },
       onCompromised: async (reason: string) => { controller!.recordActionError(reason, "session_compromised"); await close(); },
       onShutdown: close,

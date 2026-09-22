@@ -158,12 +158,7 @@ async function verifySequence(sequence: readonly Action[], caseIndex: number): P
         conflict = false;
       } else if (action === "discard") {
         if (dirty) {
-          const snapshot = primary.controller.snapshot();
-          assert.equal(snapshot.disk.state, "present", label(action, step));
-          const result = await dispatch(primary, {
-            type: "reload-source", expectedDiskDigest: snapshot.disk.digest,
-            expectedDiskVersion: snapshot.disk.version, discardRecovery: true,
-          });
+          const result = await dispatch(primary, { type: "discard-document" });
           requireSuccess(result, action, step);
           working = sourceBody(disk);
           dirty = false;
@@ -352,7 +347,7 @@ async function dispatch(app: RunningHost, value: Record<string, unknown>): Promi
   return app.controller.dispatch(parseHostCommand({
     ...value, requestId: randomUUID(), clientId: "generated-client", sessionEpoch: snapshot.epoch,
     expectedDocumentRevision: snapshot.documentRevision,
-  }));
+  }), value.type === "discard-document" ? { mayDiscardDocument: () => true } : undefined);
 }
 
 function requireSuccess(result: CommandResult, action: Action, step: number): void {

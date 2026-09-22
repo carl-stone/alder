@@ -11,7 +11,7 @@ import { randomUUID } from "node:crypto";
 import { startHost, type RunningHost } from "../src/application.js";
 import { observeSaveAsDestination } from "../src/persistence.js";
 import { RecoveryWriter } from "../src/recovery.js";
-import { connectBackendSession } from "../src/sessions.js";
+import { connectBackendSession, retireUntitledRecoveryDescriptor, selectUntitledRecoveryDescriptor } from "../src/sessions.js";
 import { encodeHostCommandWire, parseHostCommand, type CommandResult } from "../src/protocol.js";
 import type { ApplicationResources } from "../src/resources.js";
 
@@ -381,8 +381,12 @@ if (crashPath) {
         epoch: app.ownership.epoch, continuityProof: app.ownership.continuityProof,
         token: app.ownership.token, capabilities: app.ready.capabilities,
       }, { path: destination, resources: resources(directory) });
-      await connection.release("discard");
-      await Promise.race([app.closed, delay(3_000, undefined, { ref: false }).then(() => { throw new Error("discard did not close the host within 3 seconds"); })]);
+      const discarded = await connection.request("/api/command", { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type: "discard-document", requestId: randomUUID(), clientId: connection.clientId,
+          sessionEpoch: connection.epoch, expectedDocumentRevision: app.controller.snapshot().documentRevision }) });
+      assert.equal(discarded.status, 200, await discarded.text());
+      await connection.release();
+      await app.close();
       app = undefined;
       sourceApp = await startDocument(source, directory);
       assert.deepEqual(sourceApp.controller.snapshot().cells[0]!.body, ["x <- 1"]);
@@ -748,11 +752,78 @@ if (crashPath) {
       app = await startDocument(path, directory);
       assert.deepEqual(app.controller.snapshot().cells[0]!.body, ["x <- 1"]);
       assert.equal((await app.controller.query({ type: "recovery" })).result.corruption?.code, "recovery_corrupt");
-      const disk = app.controller.snapshot().disk;
-      await command(app, { type: "reload-source", expectedDiskDigest: disk.digest, expectedDiskVersion: disk.version, discardRecovery: true });
+      const discarded = await app.controller.dispatch(parseHostCommand({ type: "discard-document", requestId: randomUUID(),
+        clientId: "document-test", sessionEpoch: app.controller.snapshot().epoch,
+        expectedDocumentRevision: app.controller.snapshot().documentRevision }), { mayDiscardDocument: () => true });
+      assert.equal(discarded.error, null);
       const recovery = await app.controller.query({ type: "recovery" });
       assert.equal(recovery.result.candidate, null);
       assert.equal(recovery.result.corruption, null);
     } finally { await app?.close(); await rm(directory, { recursive: true, force: true }); }
+  });
+
+  test("explicit discard resets accepted source only after the independent peer detaches", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "alder-peer-discard-")));
+    const path = join(directory, "notebook.R");
+    await writeFile(path, "# %%\nx <- 1\n");
+    let app: RunningHost | undefined;
+    try {
+      app = await startDocument(path, directory);
+      await edit(app, "x <- 2");
+      const descriptor = {
+        sessionKey: app.ownership.sessionKey, canonicalPath: app.ownership.canonicalPath,
+        origin: app.ownership.origin, browserOrigin: app.ownership.browserOrigin,
+        epoch: app.ownership.epoch, continuityProof: app.ownership.continuityProof,
+        token: app.ownership.token, capabilities: app.ready.capabilities,
+      };
+      const owner = await connectBackendSession(descriptor, { path, resources: resources(directory) });
+      const peer = await connectBackendSession(descriptor, { path, resources: resources(directory) });
+      try {
+        const discard = async () => {
+          const response = await owner.request("/api/command", { method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ type: "discard-document", requestId: randomUUID(), clientId: owner.clientId,
+              sessionEpoch: owner.epoch, expectedDocumentRevision: app!.controller.snapshot().documentRevision }) });
+          const body = await response.text();
+          assert.equal(response.status, 200, body);
+          return JSON.parse(body) as CommandResult;
+        };
+        const guarded = await discard();
+        assert.equal((guarded.result as { peerActive: boolean }).peerActive, true);
+        assert.deepEqual(app.controller.snapshot().cells[0]!.body, ["x <- 2"]);
+        await peer.release();
+        const cleared = await discard();
+        assert.equal((cleared.result as { discarded: boolean }).discarded, true);
+        assert.deepEqual(app.controller.snapshot().cells[0]!.body, ["x <- 1"]);
+        assert.equal(app.controller.snapshot().dirty, false);
+        assert.equal((await app.controller.query({ type: "recovery" })).result.candidate, null);
+      } finally { await owner.release(); await peer.release(); }
+    } finally { await app?.close(); await rm(directory, { recursive: true, force: true }); }
+  });
+
+  test("explicit discard empties an untitled notebook and retires its recovery identity", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "alder-untitled-discard-")));
+    const id = randomUUID();
+    let app: RunningHost | undefined;
+    try {
+      app = await startHost({ path: null, resources: resources(directory), recoveryDirectory: join(directory, "recovery"),
+        suppressStartup: true, session: { sessionKey: id, projectDirectory: directory } });
+      const created = await command(app, { type: "transaction", changes: [{
+        type: "create", creationId: "new-cell", after: null, cellType: "code", body: ["x <- 2"], options: {},
+      }] });
+      assert.equal(created.error, null);
+      assert.equal(app.controller.snapshot().dirty, true);
+      const discarded = await app.controller.dispatch(parseHostCommand({ type: "discard-document", requestId: randomUUID(),
+        clientId: "document-test", sessionEpoch: app.controller.snapshot().epoch,
+        expectedDocumentRevision: app.controller.snapshot().documentRevision }), { mayDiscardDocument: () => true });
+      assert.equal(discarded.error, null);
+      assert.equal(app.controller.snapshot().cells.length, 0);
+      assert.equal(app.controller.snapshot().dirty, false);
+      await assert.rejects(selectUntitledRecoveryDescriptor(id), /not found/);
+    } finally {
+      await app?.close();
+      const descriptor = await selectUntitledRecoveryDescriptor(id).catch(() => null);
+      if (descriptor) await retireUntitledRecoveryDescriptor(descriptor);
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 }

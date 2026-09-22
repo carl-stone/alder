@@ -2074,7 +2074,7 @@ test("an older run result cannot clear a newer in-flight edit's recovery compari
   } finally { client.close(); }
 });
 
-test("Save As carries confirmed destination fingerprint and discard releases the lease", async () => {
+test("Save As carries confirmed destination fingerprint and explicit discard precedes detach", async () => {
   const { client, socket } = await browserClient();
   try {
     const expectedDestination = { expectedDiskDigest: "a".repeat(64), expectedDiskVersion: "old-version" };
@@ -2084,10 +2084,33 @@ test("Save As carries confirmed destination fingerprint and discard releases the
     assert.equal(command.type, "save-as");
     assert.deepEqual(command.expectedDestination, expectedDestination);
     socket.reply(command); await saving;
-    await withBrowserFetch(async (_input, init) => {
-      assert.deepEqual(JSON.parse(String(init?.body)), { action: "release", leaseId: "lease-1", disposition: "discard" });
+    const closing = withBrowserFetch(async (_input, init) => {
+      assert.deepEqual(JSON.parse(String(init?.body)), { action: "release", leaseId: "lease-1" });
       return new Response("{}", { status: 200 });
     }, () => client.discardAndClose());
+    await waitUntil(() => socket.commands().length === 2);
+    const discard = socket.commands()[1]!;
+    assert.equal(discard.type, "discard-document");
+    socket.reply(discard);
+    await closing;
+    assert.equal(socket.readyState, 3);
+  } finally { client.close(); }
+});
+
+test("a peer-safe Discard closes only this browser draft", async () => {
+  const store = new MemoryRecoveryStore();
+  const { client, socket } = await browserClient(store);
+  try {
+    client.editCell("c1", "local <- 8");
+    await client.flushDraftPersistence();
+    assert.ok(await store.readDraft(client.draftId));
+    const closing = withBrowserFetch(async () => new Response("{}", { status: 200 }), () => client.discardAndClose());
+    await waitUntil(() => socket.commands().length === 1);
+    const discard = socket.commands()[0]!;
+    assert.equal(discard.type, "discard-document");
+    socket.reply(discard, { discarded: false, peerActive: true });
+    await closing;
+    assert.equal(await store.readDraft(client.draftId), null);
     assert.equal(socket.readyState, 3);
   } finally { client.close(); }
 });

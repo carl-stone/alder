@@ -712,8 +712,9 @@ export const publishCommandSchema = z.object({ ...commandIdentityShape, type: z.
 export const uploadFileSchema = z.object({ name: pathSchema, content_base64: boundedUtf8StringSchema(16 * 1024 * 1024, true) }).strict();
 export const uploadCommandSchema = z.object({ ...commandIdentityShape, type: z.literal("upload"), name: idSchema, path: z.array(idSchema).max(256), files: z.array(uploadFileSchema).max(MAX_PROTOCOL_COLLECTION_ITEMS), kernelEpoch: idSchema }).strict();
 export const saveCommandSchema = z.object({ ...commandIdentityShape, type: z.literal("save"), expectedDocumentRevision: revisionSchema }).strict();
+export const discardDocumentCommandSchema = z.object({ ...commandIdentityShape, type: z.literal("discard-document"), expectedDocumentRevision: revisionSchema }).strict();
 export const saveAsCommandSchema = z.object({ ...commandIdentityShape, type: z.literal("save-as"), path: pathSchema, expectedDestination: z.union([z.literal("absent"), z.object({ expectedDiskDigest: z.string().regex(/^[0-9a-f]{64}$/), expectedDiskVersion: boundedUtf8StringSchema(MAX_ID_BYTES, true) }).strict()]), expectedDocumentRevision: revisionSchema }).strict();
-export const reloadSourceCommandSchema = z.object({ ...commandIdentityShape, type: z.literal("reload-source"), expectedDocumentRevision: revisionSchema, expectedDiskDigest: z.string().regex(/^[0-9a-f]{64}$/), expectedDiskVersion: boundedUtf8StringSchema(MAX_ID_BYTES, true), discardRecovery: z.boolean().optional() }).strict();
+export const reloadSourceCommandSchema = z.object({ ...commandIdentityShape, type: z.literal("reload-source"), expectedDocumentRevision: revisionSchema, expectedDiskDigest: z.string().regex(/^[0-9a-f]{64}$/), expectedDiskVersion: boundedUtf8StringSchema(MAX_ID_BYTES, true) }).strict();
 export const formatCommandSchema = z.object({ ...commandIdentityShape, type: z.literal("format"), cellIds: z.array(idSchema).max(MAX_NOTEBOOK_CELLS).optional(), expectedRevisions: safeStringRecordSchema(revisionSchema), expectedDocumentRevision: revisionSchema }).strict();
 export const setPreferencesCommandSchema = z.object({ ...commandIdentityShape, type: z.literal("set-preferences"), patch: preferencesPatchSchema, expectedPreferencesVersion: boundedUtf8StringSchema(MAX_ID_BYTES).nullable() }).strict();
 export const setConfigCommandSchema = z.object({ ...commandIdentityShape, type: z.literal("set-config"), patch: projectSettingsPatchSchema, expectedSidecarVersion: boundedUtf8StringSchema(MAX_ID_BYTES).nullable(), expectedDocumentRevision: revisionSchema }).strict();
@@ -798,7 +799,7 @@ const activeClientIdsSchema = z.array(idSchema).max(128).refine(
 export const shutdownCommandSchema = z.object({ ...commandIdentityShape, type: z.literal("shutdown"), expectedDocumentRevision: revisionSchema, expectedClientIds: activeClientIdsSchema }).strict();
 export const hostCommandSchema = z.discriminatedUnion("type", [
   transactionCommandSchema, runCommandSchema, selectRCommandSchema, setAppCommandSchema, packagesDeclareCommandSchema, packagesInstallCommandSchema,
-  publishCommandSchema, uploadCommandSchema, saveCommandSchema, saveAsCommandSchema, reloadSourceCommandSchema, formatCommandSchema,
+  publishCommandSchema, uploadCommandSchema, saveCommandSchema, discardDocumentCommandSchema, saveAsCommandSchema, reloadSourceCommandSchema, formatCommandSchema,
   setPreferencesCommandSchema, setConfigCommandSchema, setLayoutCommandSchema, setRuntimeCommandSchema, restartCommandSchema, widgetCommandSchema, inspectCommandSchema,
   lazyOutputCommandSchema, tablePageCommandSchema, interruptCommandSchema, cancelOperationCommandSchema, shutdownCommandSchema,
 ]);
@@ -808,7 +809,7 @@ export type CellStatus = "idle" | "stale" | "running" | "done" | "error" | "stop
 export const cellStatusSchema = z.enum(["idle", "stale", "running", "done", "error", "stopped", "disabled"]);
 export type OperationStatus = "accepted" | "running" | "done" | "error" | "interrupted" | "cancelled";
 export const operationStatusSchema = z.enum(["accepted", "running", "done", "error", "interrupted", "cancelled"]);
-export const operationKindSchema = z.enum(["transaction", "run", "select-r", "set-app", "packages-declare", "packages-install", "publish", "upload", "save", "save-as", "reload-source", "format", "set-preferences", "set-config", "set-layout", "set-runtime", "restart", "widget", "inspect", "lazy-output", "table-page", "interrupt", "cancel-operation", "shutdown", "widget-reset", "analysis"]);
+export const operationKindSchema = z.enum(["transaction", "run", "select-r", "set-app", "packages-declare", "packages-install", "publish", "upload", "save", "discard-document", "save-as", "reload-source", "format", "set-preferences", "set-config", "set-layout", "set-runtime", "restart", "widget", "inspect", "lazy-output", "table-page", "interrupt", "cancel-operation", "shutdown", "widget-reset", "analysis"]);
 export type OperationKind = z.infer<typeof operationKindSchema>;
 export const hostErrorSchema = z.object({ code: boundedUtf8StringSchema(256, true), message: boundedUtf8StringSchema(MAX_FRAME_BYTES), operationId: idSchema.nullable().optional(), details: protocolJsonSchema.optional() }).strict();
 export type HostError = z.infer<typeof hostErrorSchema>;
@@ -1257,17 +1258,14 @@ export type OutputRecord = z.infer<typeof outputRecordSchema>;
 export const sessionLeaseSchema = z.object({ leaseId: idSchema, clientId: idSchema, epoch: idSchema }).strict();
 export type SessionLease = z.infer<typeof sessionLeaseSchema>;
 export const attachLeaseRequestSchema = z.object({ action: z.literal("attach") }).strict();
-export const leaseActionRequestSchema = z.object({ action: z.enum(["heartbeat", "release"]), leaseId: idSchema, disposition: z.enum(["normal", "discard"]).optional() }).strict().superRefine((value, context) => {
-  if (value.action === "heartbeat" && value.disposition !== undefined) context.addIssue({ code: "custom", path: ["disposition"], message: "heartbeat cannot have a release disposition" });
-});
+export const leaseActionRequestSchema = z.object({ action: z.enum(["heartbeat", "release"]), leaseId: idSchema }).strict();
 export const ticketMintRequestSchema = z.object({ origin: boundedUtf8StringSchema(2_048, true), parentLeaseId: idSchema.optional() }).strict();
 export const ticketMintResponseSchema = z.object({ ticket: idSchema, expiresAt: boundedUtf8StringSchema(256, true) }).strict();
 export const ticketExchangeRequestSchema = z.object({ ticket: idSchema }).strict();
 export const hostIdentitySchema = z.object({ protocol: z.literal(HOST_PROTOCOL), epoch: idSchema, continuityProof: idSchema, sessionKey: idSchema, canonicalPath: pathSchema.nullable(), capabilities: z.array(boundedUtf8StringSchema(256, true)).max(MAX_PROTOCOL_COLLECTION_ITEMS), origin: boundedUtf8StringSchema(2_048, true), browserOrigin: boundedUtf8StringSchema(2_048, true), address: z.object({ host: boundedUtf8StringSchema(256, true), port: z.number().int().min(0).max(65_535).safe(), origin: boundedUtf8StringSchema(2_048, true), browserOrigin: boundedUtf8StringSchema(2_048, true) }).strict().optional(), leaseId: idSchema.optional(), clientId: idSchema.optional(), documentReady: z.boolean(), configuration: hostConfigurationSchema }).strict();
 export type SessionRequest = (path: string, init?: RequestInit) => Promise<Response>;
 export interface SessionConnectionData { sessionKey: string; canonicalPath: string | null; origin: string; browserOrigin: string; epoch: string; continuityProof: string; leaseId: string; clientId: string; capabilities: string[]; }
-export type SessionReleaseDisposition = "normal" | "discard";
-export interface SessionConnection extends SessionConnectionData { request: SessionRequest; heartbeat(): Promise<void>; release(disposition?: SessionReleaseDisposition): Promise<void>; abandon(): void; }
+export interface SessionConnection extends SessionConnectionData { request: SessionRequest; heartbeat(): Promise<void>; release(): Promise<void>; abandon(): void; }
 
 export const windowActionSchema = z.enum([
   "new", "open", "save", "save-as", "publish", "format", "packages",
