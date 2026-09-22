@@ -84,6 +84,7 @@ export class NotebookView {
   private documentValue: BrowserDocument | null = null;
   private actionError: string | null = null;
   private actionNotice: string | null = null;
+  private saveWarning: string | null = null;
   private saveStateValue: "edited" | "saving" | "saved" | "failed" = "saved";
   private transportError: string | null = null;
   private transportState: "connecting" | "open" | "recovering" | "closed" = "connecting";
@@ -1119,6 +1120,7 @@ export class NotebookView {
       kernelReady: snapshot.runtime.kernelState === "ready",
       dirty,
       saveState: this.saveStateValue,
+      saveWarning: this.saveWarning !== null,
       path: snapshot.path,
       runnableOutdated,
     });
@@ -1136,7 +1138,8 @@ export class NotebookView {
     }
     this.dom.title = this.appView ? `${notebookName} — Preview — Alder` : `${notebookName} — Alder`;
     const saveState = this.dom.getElementById("save-state");
-    if (saveState) saveState.textContent = dirty && this.saveStateValue === "saved" ? "Edited" : ({ edited: "Edited", saving: "Saving…", saved: "Saved", failed: "Save failed" } as const)[this.saveStateValue];
+    if (saveState) saveState.textContent = this.saveWarning !== null && this.saveStateValue === "saved" ? "Saved — retry"
+      : dirty && this.saveStateValue === "saved" ? "Edited" : ({ edited: "Edited", saving: "Saving…", saved: "Saved", failed: "Save failed" } as const)[this.saveStateValue];
     const rState = this.dom.getElementById("r-state");
     if (rState) rState.textContent = snapshot.runtime.busy ? "R running" : available ? "R ready" : snapshot.runtime.kernelState === "starting" ? "R starting" : "R unavailable";
     const runAll = this.dom.getElementById("run-all") as HTMLButtonElement | null;
@@ -1157,7 +1160,7 @@ export class NotebookView {
       setDisabled(restart, this.hostClosed || busy);
     }
     const save = this.dom.getElementById("save") as HTMLButtonElement | null;
-    if (save) setDisabled(save, this.hostClosed || !dirty);
+    if (save) setDisabled(save, this.hostClosed || (!dirty && this.saveWarning === null));
   }
 
   private renderDataflow(snapshot: HostSnapshot, event?: HostEvent): void {
@@ -2238,6 +2241,17 @@ export class NotebookView {
     });
   }
 
+  private showSaveOutcome(result: CommandResult): void {
+    this.actionError = null;
+    this.saveWarning = typeof operationPayload(result).durabilityWarning === "string"
+      ? "Saved, but durability is unconfirmed. Choose Save again to retry."
+      : null;
+    this.setSaveState("saved");
+    this.toolbarSignature = "";
+    if (this.documentValue) this.renderControls(this.documentValue.snapshot);
+    this.renderStatus();
+  }
+
   private async saveNotebook(mode: "explicit" | "autosave" = "explicit"): Promise<CommandResult | undefined> {
     if (this.autosaveTimer !== null) window.clearTimeout(this.autosaveTimer);
     this.autosaveTimer = null;
@@ -2256,7 +2270,7 @@ export class NotebookView {
     this.setSaveState("saving");
     try {
       const result = await (destination === undefined ? this.client.save() : this.client.saveAs(destination));
-      this.setSaveState("saved");
+      this.showSaveOutcome(result);
       if (formatFailure !== null) this.actionNotice = "Saved; formatting failed: " + formatFailure;
       return result;
     } catch (error) {
@@ -2269,7 +2283,7 @@ export class NotebookView {
     const desktop = (globalThis as typeof globalThis & { alderDesktop?: import("../protocol.js").PreloadApi }).alderDesktop;
     if (!desktop) throw new Error("Save a copy is available in the desktop app");
     const destination = await desktop.chooseSavePath();
-    if (destination !== null) await this.client.saveAs(destination);
+    if (destination !== null) this.showSaveOutcome(await this.client.saveAs(destination));
   }
 
   async saveForDesktop(): Promise<"saved" | "cancelled"> {
@@ -2285,7 +2299,7 @@ export class NotebookView {
       if (destination === null) return "cancelled";
       await this.flushEditorSources();
       this.setSaveState("saving");
-      try { await this.client.saveAs(destination); this.setSaveState("saved"); }
+      try { this.showSaveOutcome(await this.client.saveAs(destination)); }
       catch (error) { this.setSaveState("failed"); throw error; }
       return "ok";
     }
@@ -2748,7 +2762,7 @@ export class NotebookView {
       : recovery.persistenceError ? "Local edit recovery is not durable."
       : recovery.candidate?.state === "restored" ? "Unsaved edits recovered."
       : recovery.corruption ? "Recovery data needs your review." : recoveryConflict ? "Recovered edits need your review." : null;
-    const message = this.hostClosed ? "Notebook closed." : recoveryMessage ?? this.actionError ?? stateError ?? settingsError ?? editorHelpError ?? this.actionNotice ?? "";
+    const message = this.hostClosed ? "Notebook closed." : this.actionError ?? this.saveWarning ?? recoveryMessage ?? stateError ?? settingsError ?? editorHelpError ?? this.actionNotice ?? "";
     const signature = JSON.stringify({
       runtimeBlocked: runtimeBlocked === null ? null : [runtimeBlocked.code, runtimeBlocked.message],
       message,

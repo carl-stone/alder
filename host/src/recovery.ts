@@ -29,6 +29,7 @@ export interface RecoveryWriterOptions {
   key: string;
   baseline: RecoveryBaseline;
   recoveryId?: string;
+  deferIdentityWrite?: boolean;
 }
 export type RecoveryErrorCode = "recovery_corrupt" | "recovery_write_failed" | "recovery_invalid" | "recovery_closed";
 export class RecoveryError extends Error {
@@ -96,6 +97,7 @@ export class RecoveryWriter {
   private corruptJournal = false;
   private writeQueue: Promise<void> = Promise.resolve();
   private closed = false;
+  private readonly deferIdentityWrite: boolean;
 
   private constructor(options: RecoveryWriterOptions) {
     this.rootDir = resolve(options.rootDir);
@@ -103,6 +105,7 @@ export class RecoveryWriter {
     this.directory = join(this.rootDir, "recovery-" + hash(JSON.stringify(options.key)));
     this.journalPath = join(this.directory, "journal.json");
     this.recoveryId = options.recoveryId ?? randomUUID();
+    this.deferIdentityWrite = options.deferIdentityWrite === true;
     this.baseline = normalizeBaseline(options.baseline);
     this.latestFingerprint = fingerprint(this.baseline);
   }
@@ -135,7 +138,7 @@ export class RecoveryWriter {
         this.recoveryId = id;
       } catch (error) {
         if (!missing(error)) this.report(error, "recovery_corrupt", [identityPath]);
-        await this.atomicWrite(identityPath, Buffer.from(this.recoveryId));
+        if (!this.deferIdentityWrite) await this.atomicWrite(identityPath, Buffer.from(this.recoveryId));
       }
       let bytes: Buffer;
       try { bytes = await readFile(this.journalPath); }

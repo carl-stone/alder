@@ -465,6 +465,41 @@ test("multiple retained drafts remain separate choices in the notebook recovery 
   });
 });
 
+test("both Save As entry paths show a committed durability warning above recovery status until retry", async () => {
+  await withViewDom(async dom => {
+    dom.body.insertAdjacentHTML("beforeend", '<div id="save-state"></div>');
+    const initial = snapshot();
+    initial.path = null;
+    const desktopDescriptor = Object.getOwnPropertyDescriptor(globalThis, "alderDesktop");
+    Object.defineProperty(globalThis, "alderDesktop", { configurable: true, value: { chooseSavePath: async () => "/tmp/saved-copy.R" } });
+    let warning = true;
+    const client = settingsClient({
+      recoveryState: { status: "none", local: null, candidate: null, corruption: null, persistenceError: null,
+        retainedDrafts: [{ draftId: "old", updatedAt: 1, preview: "older work" }] },
+      saveAs: async () => resultFor("save-as-warning", warning ? { durabilityWarning: "directory sync failed" } : { path: "/tmp/saved-copy.R" }),
+    });
+    const view = new NotebookView(client, dom);
+    try {
+      view.render(new BrowserDocument(initial));
+      await view.saveForDesktop();
+      assert.match(dom.getElementById("status")!.textContent ?? "", /Saved, but durability is unconfirmed.*Save again/);
+      assert.equal(dom.getElementById("save-state")!.textContent, "Saved — retry");
+      assert.equal((dom.getElementById("save") as HTMLButtonElement).disabled, false);
+      await view.performDesktopAction("save-as");
+      assert.match(dom.getElementById("status")!.textContent ?? "", /Saved, but durability is unconfirmed/);
+      warning = false;
+      await view.performDesktopAction("save-as");
+      assert.equal(dom.getElementById("save-state")!.textContent, "Saved");
+      assert.doesNotMatch(dom.getElementById("status")!.textContent ?? "", /durability is unconfirmed/);
+      assert.equal((dom.getElementById("save") as HTMLButtonElement).disabled, true);
+    } finally {
+      view.destroy();
+      if (desktopDescriptor) Object.defineProperty(globalThis, "alderDesktop", desktopDescriptor);
+      else Reflect.deleteProperty(globalThis, "alderDesktop");
+    }
+  });
+});
+
 test("recovery choices show a busy state while a retained draft opens", async () => {
   await withViewDom(async dom => {
     const client = settingsClient({

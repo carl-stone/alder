@@ -97751,6 +97751,7 @@ var DocumentStore = class _DocumentStore {
   sidecarTargets = /* @__PURE__ */ new Map();
   queue = Promise.resolve();
   documentValue;
+  directorySyncPending = false;
   static async open(path3) {
     if (typeof path3 !== "string" || path3.length === 0 || path3.includes("\0")) throw new PersistenceError("invalid_path", "notebook path must be a non-empty path");
     const resolved = await resolveNotebookPath(path3);
@@ -97885,17 +97886,34 @@ var DocumentStore = class _DocumentStore {
     const bytes = serializeNotebook(candidate);
     if (this.version.identity !== null && sameBytes2(bytes, this.version.bytes)) {
       this.documentValue = cloneNotebook(candidate);
+      if (this.directorySyncPending) {
+        try {
+          await syncDirectory3(dirname5(this.path));
+          this.directorySyncPending = false;
+        } catch (error61) {
+          return { path: this.path, changed: false, digest: this.version.digest, durabilityWarning: "Saved bytes remain visible, but directory sync failed; choose Save again to confirm crash durability: " + String(error61) };
+        }
+      }
       return { path: this.path, changed: false, digest: this.version.digest };
     }
     const stage = join15(dirname5(this.path), `.alder-save-${randomUUID10()}`);
     try {
       await writeStaged(stage, bytes, this.version.mode);
       await this.assertUnchanged();
-      const committed = await publishStaged(stage, this.path, this.version, "Notebook changed while saving");
+      let syncFailure;
+      const committed = await publishStaged(stage, this.path, this.version, "Notebook changed while saving", "source", (error61) => {
+        syncFailure = error61;
+      });
       this.version = committed;
       this.observedVersion = cloneDiskVersion(committed);
       this.documentValue = cloneNotebook(candidate);
-      return { path: this.path, changed: true, digest: committed.digest };
+      this.directorySyncPending = syncFailure !== void 0;
+      return {
+        path: this.path,
+        changed: true,
+        digest: committed.digest,
+        ...syncFailure === void 0 ? {} : { durabilityWarning: "Saved bytes remain visible, but directory sync failed; choose Save again to confirm crash durability: " + String(syncFailure) }
+      };
     } finally {
       await unlink3(stage).catch((error61) => {
         if (error61.code !== "ENOENT") throw error61;
@@ -97971,6 +97989,7 @@ var DocumentStore = class _DocumentStore {
               destinationStore.version = committed;
               destinationStore.observedVersion = cloneDiskVersion(committed);
               destinationStore.documentValue = cloneNotebook(candidate);
+              destinationStore.directorySyncPending = syncFailure !== void 0;
               return { store: destinationStore, result: {
                 path: destination,
                 changed: true,
@@ -98268,12 +98287,14 @@ var RecoveryWriter = class _RecoveryWriter {
   corruptJournal = false;
   writeQueue = Promise.resolve();
   closed = false;
+  deferIdentityWrite;
   constructor(options) {
     this.rootDir = resolve11(options.rootDir);
     this.key = options.key;
     this.directory = join16(this.rootDir, "recovery-" + hash2(JSON.stringify(options.key)));
     this.journalPath = join16(this.directory, "journal.json");
     this.recoveryId = options.recoveryId ?? randomUUID11();
+    this.deferIdentityWrite = options.deferIdentityWrite === true;
     this.baseline = normalizeBaseline(options.baseline);
     this.latestFingerprint = fingerprint(this.baseline);
   }
@@ -98309,7 +98330,7 @@ var RecoveryWriter = class _RecoveryWriter {
         this.recoveryId = id2;
       } catch (error61) {
         if (!missing2(error61)) this.report(error61, "recovery_corrupt", [identityPath]);
-        await this.atomicWrite(identityPath, Buffer.from(this.recoveryId));
+        if (!this.deferIdentityWrite) await this.atomicWrite(identityPath, Buffer.from(this.recoveryId));
       }
       let bytes;
       try {
@@ -110504,6 +110525,8 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
   }
   let store;
   let recovery;
+  const retainedSaveAsRecovery = [];
+  let saveAsIdentityPending = false;
   let processScope;
   let packageManager;
   let controller;
@@ -110681,6 +110704,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
     await attempt(() => packageManager?.close());
     await attempt(() => recovery?.flush());
     await attempt(() => recovery?.close());
+    for (const retained of retainedSaveAsRecovery) await attempt(() => retained.close());
     await attempt(() => processScope?.close());
     await attempt(() => store?.close());
     await attempt(() => ownership.close());
@@ -110700,6 +110724,9 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
       recoveryPending = false;
       recoveryFingerprint = void 0;
     }
+    for (const retained of retainedSaveAsRecovery) await retained.retire();
+    retainedSaveAsRecovery.length = 0;
+    if (untitledRecoveryDescriptor !== void 0) await retireUntitledRecoveryDescriptor(untitledRecoveryDescriptor);
     await close();
   };
   try {
@@ -110915,9 +110942,19 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
           const disk = sourceProtocolObservation(store);
           const retry = await retryPendingSidecars(request.operationId);
           const sidecars = retry.sidecars;
+          let identityWarning;
+          if (saveAsIdentityPending && result.durabilityWarning === void 0) {
+            try {
+              await recovery.adoptRecoveryId(recovery.recoveryId);
+              saveAsIdentityPending = false;
+            } catch (error61) {
+              identityWarning = "Saved bytes remain visible, but recovery identity could not be confirmed; choose Save again: " + errorMessage(error61);
+            }
+          }
+          const durabilityWarning = [result.durabilityWarning, identityWarning].filter(Boolean).join(" ") || void 0;
           let clearError = null;
           let cleared = false;
-          if (recoveryPending && recoveryFingerprint !== void 0) {
+          if (durabilityWarning === void 0 && recoveryPending && recoveryFingerprint !== void 0) {
             try {
               cleared = await recovery.clearIfMatch({ documentRevision: context.fromRevision, fingerprint: recoveryFingerprint });
               if (cleared) {
@@ -110929,7 +110966,27 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
               clearError = error61;
             }
           }
-          const dirty = retry.error !== null || clearError !== null || recoveryPending || pendingSidecars.layout || pendingSidecars.packages;
+          if (durabilityWarning === void 0 && clearError === null) {
+            const remaining = [];
+            for (const retained of retainedSaveAsRecovery) {
+              try {
+                await retained.retire();
+              } catch (error61) {
+                remaining.push(retained);
+                clearError = error61;
+              }
+            }
+            retainedSaveAsRecovery.splice(0, retainedSaveAsRecovery.length, ...remaining);
+            if (remaining.length === 0 && untitledRecoveryDescriptor !== void 0) {
+              try {
+                await retireUntitledRecoveryDescriptor(untitledRecoveryDescriptor);
+                untitledRecoveryDescriptor = void 0;
+              } catch (error61) {
+                clearError = error61;
+              }
+            }
+          }
+          const dirty = retry.error !== null || clearError !== null || durabilityWarning !== void 0 || retainedSaveAsRecovery.length > 0 || saveAsIdentityPending || recoveryPending || pendingSidecars.layout || pendingSidecars.packages;
           publishSource(context, { document: context.document, path: store.path, layout: resolvedLayout, disk, sidecars, dirty, advanceRevision: false });
           diagnostics?.record(dirty ? "warn" : "info", "save.clean_state", {
             operationId: request.operationId ?? null,
@@ -110937,9 +110994,11 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
             dirty,
             documentRevision: context.fromRevision
           });
-          if (retry.error !== null) return { ...result, committed: true, diskError: { code: "sidecar_write_failed", sidecar: retry.error.kind, message: errorMessage(retry.error.error) } };
-          if (clearError !== null) return { ...result, committed: true, diskError: { code: "recovery_checkpoint_failed", message: errorMessage(clearError) } };
-          return result;
+          if (durabilityWarning !== void 0) controller?.recordActionError(durabilityWarning, "save_durability_uncertain");
+          const saveResult = { ...result, ...durabilityWarning === void 0 ? {} : { durabilityWarning } };
+          if (retry.error !== null) return { ...saveResult, committed: true, diskError: { code: "sidecar_write_failed", sidecar: retry.error.kind, message: errorMessage(retry.error.error) } };
+          if (clearError !== null) return { ...saveResult, committed: true, diskError: { code: "recovery_checkpoint_failed", message: errorMessage(clearError) } };
+          return saveResult;
         } catch (error61) {
           diagnostics?.record(error61 instanceof FileConflict ? "warn" : "error", error61 instanceof FileConflict ? "persistence.conflict" : "persistence.failure", {
             operationId: request.operationId ?? null,
@@ -111040,8 +111099,6 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
         let savePublication;
         let destinationStore;
         let destinationRecovery;
-        let destinationRecoveryPreviousId;
-        let destinationRecoveryAdopted = false;
         let nextManager;
         try {
           preparedOwner = await ownership.prepareRekey(request.path);
@@ -111083,14 +111140,12 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
             rootDir: recoveryRoot,
             key: preparedOwner.sessionKey,
             baseline: destinationBaseline,
-            recoveryId: oldRecovery.recoveryId
+            recoveryId: oldRecovery.recoveryId,
+            deferIdentityWrite: true
           });
-          if ((await destinationRecovery.load()).pending) {
+          if (destinationRecovery.issue !== null || (await destinationRecovery.load()).pending) {
             throw Object.assign(new Error("Save As destination has pending recovery data"), { code: "destination_recovery_conflict" });
           }
-          destinationRecoveryPreviousId = destinationRecovery.recoveryId;
-          await destinationRecovery.adoptRecoveryId(oldRecovery.recoveryId);
-          destinationRecoveryAdopted = true;
           const publicationBinder = context.preparePublication({
             document: { ...context.document, path: destination },
             path: destination,
@@ -111128,6 +111183,33 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
               recoveryConflict = false;
             };
           });
+          let identityWarning;
+          saveAsIdentityPending = false;
+          try {
+            await destinationRecovery.adoptRecoveryId(oldRecovery.recoveryId);
+          } catch (error61) {
+            destinationRecovery.recoveryId = oldRecovery.recoveryId;
+            saveAsIdentityPending = true;
+            identityWarning = "Saved destination bytes, but recovery identity could not be confirmed; choose Save again: " + errorMessage(error61);
+          }
+          const durabilityWarning = [savePublication.result.durabilityWarning, identityWarning].filter(Boolean).join(" ");
+          let recoveryCleanupFailed = false;
+          if (durabilityWarning) {
+            retainedSaveAsRecovery.push(oldRecovery);
+            savePublication = { ...savePublication, result: { ...savePublication.result, durabilityWarning } };
+          } else {
+            const remaining = [];
+            for (const retained of [oldRecovery, ...retainedSaveAsRecovery]) {
+              try {
+                await retained.retire();
+              } catch (error61) {
+                recoveryCleanupFailed = true;
+                remaining.push(retained);
+                controller?.recordActionError("Saved destination; old recovery cleanup failed: " + errorMessage(error61), "recovery_cleanup_failed");
+              }
+            }
+            retainedSaveAsRecovery.splice(0, retainedSaveAsRecovery.length, ...remaining);
+          }
           try {
             reservation?.release();
           } catch (error61) {
@@ -111143,10 +111225,9 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
           } catch (error61) {
             controller?.recordActionError(errorMessage(error61), "lsp_cleanup_failed");
           }
-          if (untitledRecoveryDescriptor !== void 0) void retireUntitledRecoveryDescriptor(untitledRecoveryDescriptor).catch((error61) => controller?.recordActionError(errorMessage(error61), "recovery_checkpoint_failed"));
+          if (!durabilityWarning && !recoveryCleanupFailed && untitledRecoveryDescriptor !== void 0) void retireUntitledRecoveryDescriptor(untitledRecoveryDescriptor).catch((error61) => controller?.recordActionError(errorMessage(error61), "recovery_checkpoint_failed"));
           void oldStore.close().catch(() => {
           });
-          await oldRecovery.retire().catch((error61) => controller?.recordActionError("Saved destination; old recovery cleanup failed: " + errorMessage(error61), "recovery_cleanup_failed"));
           if (runtimeChanged) {
             try {
               startRuntime(true);
@@ -111157,13 +111238,11 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
           void oldManager?.close().catch(() => {
           });
           await watcherReady;
-          if (savePublication?.result.durabilityWarning) controller?.recordActionError(savePublication.result.durabilityWarning, "save_durability_uncertain");
+          if (durabilityWarning) controller?.recordActionError(durabilityWarning, "save_durability_uncertain");
           return savePublication.result;
         } catch (error61) {
           reservation?.release();
           if (destinationRecovery !== void 0 && destinationRecovery !== recovery) {
-            if (destinationRecoveryAdopted && destinationRecoveryPreviousId !== void 0) await destinationRecovery.adoptRecoveryId(destinationRecoveryPreviousId).catch(() => {
-            });
             await destinationRecovery.close().catch(() => {
             });
           }

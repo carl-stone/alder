@@ -261,6 +261,7 @@ export class DocumentStore {
   private readonly sidecarTargets = new Map<string, string>();
   private queue: Promise<unknown> = Promise.resolve();
   private documentValue!: NotebookDocument;
+  private directorySyncPending = false;
 
   private constructor(readonly path: string, private readonly spelling: string) {}
 
@@ -400,7 +401,7 @@ export class DocumentStore {
     return { ...candidate, path: this.path };
   }
 
-  save(snapshot: SourceNotebook | NotebookDocument): Promise<{ path: string; changed: boolean; digest: string }> {
+  save(snapshot: SourceNotebook | NotebookDocument): Promise<{ path: string; changed: boolean; digest: string; durabilityWarning?: string }> {
     const fixed = structuredClone(snapshot);
     const next = this.queue.then(async () => this.commit(this.candidate(fixed)));
     this.queue = next.catch(() => undefined);
@@ -419,22 +420,29 @@ export class DocumentStore {
     if (canonical !== this.path || !sameDisk(this.version, current)) throw new FileConflict();
   }
 
-  private async commit(candidate: NotebookDocument): Promise<{ path: string; changed: boolean; digest: string }> {
+  private async commit(candidate: NotebookDocument): Promise<{ path: string; changed: boolean; digest: string; durabilityWarning?: string }> {
     await this.assertUnchanged();
     const bytes = serializeNotebook(candidate);
     if (this.version.identity !== null && sameBytes(bytes, this.version.bytes)) {
       this.documentValue = cloneNotebook(candidate);
+      if (this.directorySyncPending) {
+        try { await syncDirectory(dirname(this.path)); this.directorySyncPending = false; }
+        catch (error) { return { path: this.path, changed: false, digest: this.version.digest, durabilityWarning: "Saved bytes remain visible, but directory sync failed; choose Save again to confirm crash durability: " + String(error) }; }
+      }
       return { path: this.path, changed: false, digest: this.version.digest };
     }
     const stage = join(dirname(this.path), `.alder-save-${randomUUID()}`);
     try {
       await writeStaged(stage, bytes, this.version.mode);
       await this.assertUnchanged();
-      const committed = await publishStaged(stage, this.path, this.version, "Notebook changed while saving");
+      let syncFailure: unknown;
+      const committed = await publishStaged(stage, this.path, this.version, "Notebook changed while saving", "source", error => { syncFailure = error; });
       this.version = committed;
       this.observedVersion = cloneDiskVersion(committed);
       this.documentValue = cloneNotebook(candidate);
-      return { path: this.path, changed: true, digest: committed.digest };
+      this.directorySyncPending = syncFailure !== undefined;
+      return { path: this.path, changed: true, digest: committed.digest,
+        ...(syncFailure === undefined ? {} : { durabilityWarning: "Saved bytes remain visible, but directory sync failed; choose Save again to confirm crash durability: " + String(syncFailure) }) };
     } finally {
       await unlink(stage).catch((error) => {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
@@ -516,6 +524,7 @@ export class DocumentStore {
               destinationStore.version = committed;
               destinationStore.observedVersion = cloneDiskVersion(committed);
               destinationStore.documentValue = cloneNotebook(candidate);
+              destinationStore.directorySyncPending = syncFailure !== undefined;
               return { store: destinationStore, result: { path: destination, changed: true, digest,
                 ...(syncFailure === undefined ? {} : { durabilityWarning: "Saved destination bytes, but directory sync failed; crash durability is uncertain: " + String(syncFailure) }) } };
             } finally {

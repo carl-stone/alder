@@ -23926,6 +23926,7 @@ var NotebookView = class {
   documentValue = null;
   actionError = null;
   actionNotice = null;
+  saveWarning = null;
   saveStateValue = "saved";
   transportError = null;
   transportState = "connecting";
@@ -24853,6 +24854,7 @@ ${cell.desiredBody.join("\n")}`));
       kernelReady: snapshot.runtime.kernelState === "ready",
       dirty,
       saveState: this.saveStateValue,
+      saveWarning: this.saveWarning !== null,
       path: snapshot.path,
       runnableOutdated
     });
@@ -24870,7 +24872,7 @@ ${cell.desiredBody.join("\n")}`));
     }
     this.dom.title = this.appView ? `${notebookName} \u2014 Preview \u2014 Alder` : `${notebookName} \u2014 Alder`;
     const saveState = this.dom.getElementById("save-state");
-    if (saveState) saveState.textContent = dirty && this.saveStateValue === "saved" ? "Edited" : { edited: "Edited", saving: "Saving\u2026", saved: "Saved", failed: "Save failed" }[this.saveStateValue];
+    if (saveState) saveState.textContent = this.saveWarning !== null && this.saveStateValue === "saved" ? "Saved \u2014 retry" : dirty && this.saveStateValue === "saved" ? "Edited" : { edited: "Edited", saving: "Saving\u2026", saved: "Saved", failed: "Save failed" }[this.saveStateValue];
     const rState = this.dom.getElementById("r-state");
     if (rState) rState.textContent = snapshot.runtime.busy ? "R running" : available ? "R ready" : snapshot.runtime.kernelState === "starting" ? "R starting" : "R unavailable";
     const runAll = this.dom.getElementById("run-all");
@@ -24890,7 +24892,7 @@ ${cell.desiredBody.join("\n")}`));
       setDisabled(restart, this.hostClosed || busy);
     }
     const save = this.dom.getElementById("save");
-    if (save) setDisabled(save, this.hostClosed || !dirty);
+    if (save) setDisabled(save, this.hostClosed || !dirty && this.saveWarning === null);
   }
   renderDataflow(snapshot, event) {
     if (this.appView) return;
@@ -25912,6 +25914,14 @@ ${cell.desiredBody.join("\n")}`));
       });
     });
   }
+  showSaveOutcome(result) {
+    this.actionError = null;
+    this.saveWarning = typeof operationPayload(result).durabilityWarning === "string" ? "Saved, but durability is unconfirmed. Choose Save again to retry." : null;
+    this.setSaveState("saved");
+    this.toolbarSignature = "";
+    if (this.documentValue) this.renderControls(this.documentValue.snapshot);
+    this.renderStatus();
+  }
   async saveNotebook(mode = "explicit") {
     if (this.autosaveTimer !== null) window.clearTimeout(this.autosaveTimer);
     this.autosaveTimer = null;
@@ -25931,7 +25941,7 @@ ${cell.desiredBody.join("\n")}`));
     this.setSaveState("saving");
     try {
       const result = await (destination === void 0 ? this.client.save() : this.client.saveAs(destination));
-      this.setSaveState("saved");
+      this.showSaveOutcome(result);
       if (formatFailure !== null) this.actionNotice = "Saved; formatting failed: " + formatFailure;
       return result;
     } catch (error61) {
@@ -25943,7 +25953,7 @@ ${cell.desiredBody.join("\n")}`));
     const desktop = globalThis.alderDesktop;
     if (!desktop) throw new Error("Save a copy is available in the desktop app");
     const destination = await desktop.chooseSavePath();
-    if (destination !== null) await this.client.saveAs(destination);
+    if (destination !== null) this.showSaveOutcome(await this.client.saveAs(destination));
   }
   async saveForDesktop() {
     return await this.saveNotebook("explicit") === void 0 ? "cancelled" : "saved";
@@ -25958,8 +25968,7 @@ ${cell.desiredBody.join("\n")}`));
       await this.flushEditorSources();
       this.setSaveState("saving");
       try {
-        await this.client.saveAs(destination);
-        this.setSaveState("saved");
+        this.showSaveOutcome(await this.client.saveAs(destination));
       } catch (error61) {
         this.setSaveState("failed");
         throw error61;
@@ -26393,7 +26402,7 @@ ${cell.desiredBody.join("\n")}`));
     const recovery = this.client.recoveryState;
     const recoveryConflict = recovery.status === "conflict" || recovery.candidate?.state === "conflict" || recovery.corruption !== null;
     const recoveryMessage = recovery.selectingRetainedDraft ? "Opening selected draft\u2026" : recovery.uncertainRun ? "The previous run may have been interrupted. Run explicitly when you are ready." : recovery.local !== null ? recovery.status === "conflict" ? "Recovered edits conflict with newer changes." : "Unsaved edits recovered." : recovery.retainedDrafts?.length ? "Retained drafts are available for review." : recovery.persistenceError ? "Local edit recovery is not durable." : recovery.candidate?.state === "restored" ? "Unsaved edits recovered." : recovery.corruption ? "Recovery data needs your review." : recoveryConflict ? "Recovered edits need your review." : null;
-    const message2 = this.hostClosed ? "Notebook closed." : recoveryMessage ?? this.actionError ?? stateError ?? settingsError ?? editorHelpError ?? this.actionNotice ?? "";
+    const message2 = this.hostClosed ? "Notebook closed." : this.actionError ?? this.saveWarning ?? recoveryMessage ?? stateError ?? settingsError ?? editorHelpError ?? this.actionNotice ?? "";
     const signature = JSON.stringify({
       runtimeBlocked: runtimeBlocked === null ? null : [runtimeBlocked.code, runtimeBlocked.message],
       message: message2,
