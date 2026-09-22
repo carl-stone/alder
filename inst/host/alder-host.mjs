@@ -35588,6 +35588,7 @@ function createConnection(descriptor, lease) {
     }
   };
   const release = (disposition = "normal") => {
+    if (releaseState === "abandoned") return Promise.reject(new SessionUnavailableError("session lease was abandoned locally"));
     if (disposition === "normal") {
       if (releaseState !== "active") return Promise.resolve();
       if (discardAttempt) return discardAttempt;
@@ -35613,6 +35614,11 @@ function createConnection(descriptor, lease) {
     void heartbeat().catch(() => void 0);
   }, HEARTBEAT_INTERVAL_MS);
   interval.unref();
+  const abandon = () => {
+    if (releaseState !== "active") return;
+    releaseState = "abandoned";
+    clearInterval(interval);
+  };
   return {
     sessionKey: descriptor.sessionKey,
     canonicalPath: descriptor.canonicalPath,
@@ -35625,7 +35631,8 @@ function createConnection(descriptor, lease) {
     capabilities: [...descriptor.capabilities],
     request,
     heartbeat,
-    release
+    release,
+    abandon
   };
 }
 async function assertAttachConfiguration(identity, requested, sessionKey) {

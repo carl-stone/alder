@@ -57,6 +57,7 @@ function connection(
     capabilities: [],
     request,
     heartbeat: async () => undefined,
+    abandon: () => undefined,
     releaseCount: 0,
     releaseDispositions: [] as string[],
     release: async (disposition = "normal") => {
@@ -987,6 +988,70 @@ test("desktop restart failure preserves the existing editor and releases only th
   assert.equal(record.released, false);
   assert.equal(main.windows().length, 1);
   assert.equal(window.destroyed, false);
+});
+test("desktop host restart stays retryable after acquisition fails, including a monitor race", async () => {
+  const path = "/tmp/alder-desktop-restart-retry.R";
+  const oldConnection = connection("restart-retry-old", path, async () => jsonResponse({}));
+  const replacement = connection("restart-retry-new", path, async endpoint => {
+    assert.equal(endpoint, "/api/ticket");
+    return jsonResponse({ ticket: "b".repeat(64), expiresAt: "2026-12-01T00:00:00.000Z" });
+  });
+  const handlers = new Map<string, (event: unknown) => Promise<unknown>>();
+  const electronRuntime = runtime();
+  const window = windowWithLoad();
+  electronRuntime.BrowserWindow.fromWebContents = () => window;
+  electronRuntime.ipcMain.handle = (channel, handler) => { handlers.set(channel, handler); };
+  const firstAcquisition = Promise.withResolvers<SessionConnection>();
+  const acquisitionStarted = Promise.withResolvers<void>();
+  let acquisitions = 0;
+  const main = new ElectronMain(electronRuntime, {
+    resources, acquireSession: async () => {
+      acquisitions += 1;
+      acquisitionStarted.resolve();
+      return acquisitions === 1 ? firstAcquisition.promise : replacement;
+    },
+  });
+  const record = recordFor(main, oldConnection, window);
+  record.loadGeneration = 1;
+  let errors = 0;
+  (main as any).showApplicationError = async () => { errors += 1; };
+  (main as any).loadAuthenticatedNotebook = async () => undefined;
+  (main as any).querySnapshot = async () => { throw new Error("backend stopped"); };
+  (main as any).installIpcHandlers();
+  const invoke = () => handlers.get("alderDesktop:restartHost")!({ sender: window.webContents, senderFrame: window.webContents.mainFrame });
+  await (main as any).monitorHost(record);
+  const first = invoke();
+  const concurrent = invoke();
+  await acquisitionStarted.promise;
+  await (main as any).monitorHost(record);
+  assert.equal(acquisitions, 1);
+  firstAcquisition.reject(new Error("temporary session acquisition failure"));
+  await Promise.all([first, concurrent]);
+  assert.equal(errors, 1);
+  assert.equal(record.connection, oldConnection);
+  assert.equal(window.destroyed, false);
+  await invoke();
+  assert.equal(acquisitions, 2);
+  assert.equal(record.connection, replacement);
+  assert.equal(oldConnection.releaseCount, 1);
+});
+test("desktop replacement abandons a dead old lease when its HTTP release fails", async () => {
+  const path = "/tmp/alder-desktop-dead-lease.R";
+  const oldConnection = connection("dead-old", path, async () => jsonResponse({}));
+  const replacement = connection("dead-new", path, async endpoint => {
+    assert.equal(endpoint, "/api/ticket");
+    return jsonResponse({ ticket: "c".repeat(64), expiresAt: "2026-12-01T00:00:00.000Z" });
+  });
+  let abandoned = 0;
+  oldConnection.release = async () => { throw new Error("backend is gone"); };
+  oldConnection.abandon = () => { abandoned += 1; };
+  const main = new ElectronMain(runtime(), { resources, acquireSession: async () => replacement });
+  const record = recordFor(main, oldConnection, windowWithLoad());
+  (main as any).loadAuthenticatedNotebook = async () => undefined;
+  await (main as any).restartHost(record);
+  assert.equal(record.connection, replacement);
+  assert.equal(abandoned, 1);
+  assert.equal(replacement.releaseCount, 0);
 });
 test("opening a notebook replaces a clean untitled launch window", async () => {
   const openedPath = join(tmpdir(), "opened.R");

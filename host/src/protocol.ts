@@ -1267,7 +1267,7 @@ export const hostIdentitySchema = z.object({ protocol: z.literal(HOST_PROTOCOL),
 export type SessionRequest = (path: string, init?: RequestInit) => Promise<Response>;
 export interface SessionConnectionData { sessionKey: string; canonicalPath: string | null; origin: string; browserOrigin: string; epoch: string; continuityProof: string; leaseId: string; clientId: string; capabilities: string[]; }
 export type SessionReleaseDisposition = "normal" | "discard";
-export interface SessionConnection extends SessionConnectionData { request: SessionRequest; heartbeat(): Promise<void>; release(disposition?: SessionReleaseDisposition): Promise<void>; }
+export interface SessionConnection extends SessionConnectionData { request: SessionRequest; heartbeat(): Promise<void>; release(disposition?: SessionReleaseDisposition): Promise<void>; abandon(): void; }
 
 export const windowActionSchema = z.enum([
   "new", "open", "save", "save-as", "publish", "format", "packages",

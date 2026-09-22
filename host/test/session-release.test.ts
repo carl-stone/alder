@@ -62,6 +62,41 @@ test("SessionConnection propagates a transport rejection and retries", async con
   assert.equal(attempts, 2);
 });
 
+test("abandoning failed releases stops each replaced connection's heartbeat", async context => {
+  const callbacks = new Map<object, () => void>();
+  const intervals = context.mock.method(globalThis, "setInterval", (callback: () => void) => {
+    const handle = { unref: () => undefined };
+    callbacks.set(handle, callback);
+    return handle as unknown as ReturnType<typeof setInterval>;
+  });
+  context.mock.method(globalThis, "clearInterval", (handle: ReturnType<typeof setInterval>) => { callbacks.delete(handle); });
+  let heartbeats = 0;
+  context.mock.method(globalThis, "fetch", async (_input: string | URL | Request, init?: RequestInit) => {
+    const body = init?.body === undefined ? undefined : JSON.parse(String(init.body)) as { action?: string };
+    if (init?.method === "GET") return json(identity());
+    if (body?.action === "attach" || body?.action === "heartbeat") {
+      if (body.action === "heartbeat") heartbeats += 1;
+      return json({ leaseId: "lease", clientId: "client", epoch: descriptor.epoch });
+    }
+    throw new Error("dead backend");
+  });
+  const first = await connectBackendSession(descriptor, requested);
+  await assert.rejects(first.release(), /dead backend/);
+  first.abandon();
+  const second = await connectBackendSession(descriptor, requested);
+  await assert.rejects(second.release(), /dead backend/);
+  second.abandon();
+  const third = await connectBackendSession(descriptor, requested);
+  assert.equal(intervals.mock.callCount(), 3);
+  assert.equal(callbacks.size, 1);
+  for (const callback of callbacks.values()) callback();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(heartbeats, 1);
+  await assert.rejects(first.release(), /abandoned locally/);
+  third.abandon();
+  assert.equal(callbacks.size, 0);
+});
+
 test("SessionConnection aborts a stalled release and starts a new discard attempt", { timeout: 3_000 }, async context => {
   let attempts = 0;
   const connection = await connectWithFetch(context, async init => {

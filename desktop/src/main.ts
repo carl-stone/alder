@@ -195,6 +195,7 @@ interface ElectronWindowRecord {
   reloadInProgress: boolean;
   monitorInProgress: boolean;
   hostFailureShown: boolean;
+  hostRestart?: Promise<void>;
   loadGeneration: number;
   loadingOrigin?: string;
   rendererReadyGeneration: number;
@@ -630,11 +631,7 @@ export class ElectronMain {
       if (path) await this.openReplacingPristineUntitled(record, path);
       return undefined;
     });
-    noArguments(IPC_CHANNELS.restartHost, record => {
-      if (record.hostFailureShown || record.monitorInProgress) return;
-      record.hostFailureShown = true;
-      void this.restartHost(record);
-    });
+    noArguments(IPC_CHANNELS.restartHost, record => this.restartHost(record));
     noArguments(IPC_CHANNELS.chooseSavePath, async (record) => {
       const result = await this.runtime.dialog.showSaveDialog(record.window, {
         title: "Save notebook",
@@ -1031,11 +1028,16 @@ export class ElectronMain {
     return notebookQueryResultSchema.parse(envelope.result);
   }
   private async monitorHost(record: ElectronWindowRecord): Promise<void> {
-    if (record.released || record.hostFailureShown || record.monitorInProgress) return;
+    if (record.released || record.hostRestart || record.hostFailureShown || record.monitorInProgress) return;
     record.monitorInProgress = true;
     try {
       await this.querySnapshot(record);
     } catch (error) {
+      if (record.released || record.hostRestart) return;
+      // An authenticated page has its own actionable connection banner. A native
+      // sheet would hide its Restart host button and can outlive a successful retry.
+      if (record.loadGeneration > 0 && !record.window.webContents.isDestroyed?.()) return;
+      const failedConnection = record.connection;
       record.hostFailureShown = true;
       const answer = await this.runtime.dialog.showMessageBox(record.window, {
         type: "error",
@@ -1046,14 +1048,26 @@ export class ElectronMain {
         defaultId: 0,
         cancelId: 1,
       }).catch(() => ({ response: 1 }));
+      if (record.released || record.hostRestart || record.connection !== failedConnection) return;
       if (answer.response === 0 && !record.released) await this.restartHost(record);
       else if (!record.released) await this.requestClose(record);
     } finally {
       record.monitorInProgress = false;
+      record.hostFailureShown = false;
     }
   }
 
-  private async restartHost(record: ElectronWindowRecord): Promise<void> {
+  private restartHost(record: ElectronWindowRecord): Promise<void> {
+    if (record.released) return Promise.resolve();
+    if (record.hostRestart) return record.hostRestart;
+    const attempt = this.performHostRestart(record);
+    record.hostRestart = attempt;
+    void attempt.then(() => { if (record.hostRestart === attempt) record.hostRestart = undefined; },
+      () => { if (record.hostRestart === attempt) record.hostRestart = undefined; });
+    return attempt;
+  }
+
+  private async performHostRestart(record: ElectronWindowRecord): Promise<void> {
     const old = record.connection;
     let next: SessionConnection | undefined;
     let navigationStarted = false;
@@ -1086,15 +1100,13 @@ export class ElectronMain {
         return;
       }
       this.replaceConnection(record, next);
-      await old.release().catch(() => undefined);
-      record.hostFailureShown = false;
+      await old.release().catch(() => { old.abandon(); });
     } catch (error) {
       if (next !== undefined && next !== record.connection) await next.release().catch(() => undefined);
       if (!record.released && navigationStarted) {
         try {
           const rollbackTicket = await this.mintTicket(old);
           await this.loadAuthenticatedNotebook(record, rollbackTicket, old);
-          record.hostFailureShown = false;
         } catch (rollbackError) {
           error = new Error((error instanceof Error ? error.message : String(error)) + "; previous host is unavailable: " + (rollbackError instanceof Error ? rollbackError.message : String(rollbackError)));
         }

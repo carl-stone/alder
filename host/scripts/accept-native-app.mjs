@@ -543,7 +543,8 @@ try {
   await rm(temporary, { recursive: true, force: true });
   if (cleanupProbe) process.stdout.write(JSON.stringify({ cleanupProbe: true, naturalExit: naturalExitError === undefined, fallbackRequired: cleanup.fallbackRequired }) + '\n');
   else if (cleanup.fallbackRequired) process.stderr.write(JSON.stringify({ nativeCleanup: true, naturalExit: naturalExitError === undefined, fallbackRequired: true }) + '\n');
-  const failures = [runError, ...stopErrors, naturalExitError].filter(Boolean);
+  const failures = [runError, ...stopErrors, naturalExitError,
+    cleanup.fallbackRequired ? new Error('packaged app required forced process cleanup') : undefined].filter(Boolean);
   if (failures.length === 1) throw failures[0];
   if (failures.length > 1) throw new AggregateError(failures, 'native acceptance and cleanup failed');
 }

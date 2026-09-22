@@ -178,7 +178,7 @@ export async function connectBackendSession(raw: unknown, requested: AcquireNote
 }
 
 function createConnection(descriptor: BackendSessionDescriptor, lease: SessionLease): SessionConnection {
-  let releaseState: "active" | "normal" | "discard" = "active";
+  let releaseState: "active" | "normal" | "discard" | "abandoned" = "active";
   const authenticatedHeaders = (init: RequestInit = {}): Headers => {
     const headers = new Headers(init.headers);
     headers.set("Authorization", "Bearer " + descriptor.token);
@@ -223,6 +223,7 @@ function createConnection(descriptor: BackendSessionDescriptor, lease: SessionLe
     }
   };
   const release = (disposition: "normal" | "discard" = "normal"): Promise<void> => {
+    if (releaseState === "abandoned") return Promise.reject(new SessionUnavailableError("session lease was abandoned locally"));
     if (disposition === "normal") {
       if (releaseState !== "active") return Promise.resolve();
       if (discardAttempt) return discardAttempt;
@@ -242,11 +243,16 @@ function createConnection(descriptor: BackendSessionDescriptor, lease: SessionLe
   };
   interval = setInterval(() => { void heartbeat().catch(() => undefined); }, HEARTBEAT_INTERVAL_MS);
   interval.unref();
+  const abandon = (): void => {
+    if (releaseState !== "active") return;
+    releaseState = "abandoned";
+    clearInterval(interval);
+  };
   return {
     sessionKey: descriptor.sessionKey, canonicalPath: descriptor.canonicalPath, origin: descriptor.origin, browserOrigin: descriptor.browserOrigin,
     epoch: descriptor.epoch, continuityProof: descriptor.continuityProof,
     leaseId: lease.leaseId, clientId: lease.clientId, capabilities: [...descriptor.capabilities], request, heartbeat,
-    release,
+    release, abandon,
   };
 }
 
