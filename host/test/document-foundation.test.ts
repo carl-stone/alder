@@ -4,6 +4,7 @@ import { fork } from "node:child_process";
 import { once } from "node:events";
 import { mkdir, mkdtemp, open, readFile, readdir, realpath, rm, stat, writeFile, type FileHandle } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { setTimeout as delay } from "node:timers/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
@@ -381,7 +382,8 @@ if (crashPath) {
         token: app.ownership.token, capabilities: app.ready.capabilities,
       }, { path: destination, resources: resources(directory) });
       await connection.release("discard");
-      await app.closed; app = undefined;
+      await Promise.race([app.closed, delay(3_000, undefined, { ref: false }).then(() => { throw new Error("discard did not close the host within 3 seconds"); })]);
+      app = undefined;
       sourceApp = await startDocument(source, directory);
       assert.deepEqual(sourceApp.controller.snapshot().cells[0]!.body, ["x <- 1"]);
       await edit(sourceApp, "x <- 2");
@@ -526,6 +528,58 @@ if (crashPath) {
       assert.equal(await recoveryIdentity(app), sourceId);
       assert.deepEqual(app.controller.snapshot().cells[0]!.body, ["x <- 8"]);
     } finally { context.mock.restoreAll(); await app?.close(); await rm(directory, { recursive: true, force: true }); }
+  });
+
+  test("failed second Save As preserves the first destination's pending identity retry", async context => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "alder-save-as-identity-precommit-")));
+    const source = join(directory, "source.R"), first = join(directory, "first.R"), occupied = join(directory, "occupied.R");
+    await writeFile(source, "# %%\nx <- 1\n");
+    await writeFile(occupied, "# %%\ny <- 9\n");
+    let app: RunningHost | undefined;
+    let reopenedSource: RunningHost | undefined;
+    try {
+      app = await startDocument(source, directory);
+      await edit(app, "x <- 7");
+      const sourceId = await recoveryIdentity(app);
+      const adopt = RecoveryWriter.prototype.adoptRecoveryId;
+      let failIdentity = true;
+      let attempts = 0;
+      context.mock.method(RecoveryWriter.prototype, "adoptRecoveryId", async function (this: RecoveryWriter, id: string) {
+        attempts++;
+        if (failIdentity) throw new Error("identity persistence unavailable");
+        return adopt.call(this, id);
+      });
+      const firstSave = await dispatch(app, { type: "save-as", path: first, expectedDestination: "absent" });
+      assert.equal(firstSave.error, null);
+      assert.match((firstSave.result as { durabilityWarning?: string }).durabilityWarning ?? "", /identity persistence unavailable/);
+      assert.equal(attempts, 1);
+      const failedSecond = await dispatch(app, { type: "save-as", path: occupied, expectedDestination: "absent" });
+      assert.equal(failedSecond.error?.code, "destination_exists");
+      assert.equal(app.controller.snapshot().path, first);
+      assert.equal(app.controller.snapshot().dirty, true);
+      const stillWarned = await dispatch(app, { type: "save" });
+      assert.equal(stillWarned.error, null);
+      assert.match((stillWarned.result as { durabilityWarning?: string }).durabilityWarning ?? "", /identity persistence unavailable/);
+      assert.equal(attempts, 2, "unchanged Save must retry recovery identity persistence");
+      await assert.rejects(startDocument(source, directory), /unfinished Save As/);
+      failIdentity = false;
+      const settled = await dispatch(app, { type: "save" });
+      assert.equal(settled.error, null);
+      assert.equal((settled.result as { durabilityWarning?: string }).durabilityWarning, undefined);
+      assert.equal(attempts, 3);
+      assert.equal(app.controller.snapshot().dirty, false);
+      assert.equal(app.controller.snapshot().lastActionError, null);
+      reopenedSource = await startDocument(source, directory);
+      assert.deepEqual(reopenedSource.controller.snapshot().cells[0]!.body, ["x <- 1"]);
+      await app.close(); app = undefined;
+      app = await startDocument(first, directory);
+      assert.equal(await recoveryIdentity(app), sourceId);
+      assert.deepEqual(app.controller.snapshot().cells[0]!.body, ["x <- 7"]);
+    } finally {
+      context.mock.restoreAll();
+      await reopenedSource?.close(); await app?.close();
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   test("Save As succeeds when retiring the old recovery journal fails after publication", async context => {

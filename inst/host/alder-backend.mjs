@@ -111186,7 +111186,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
           const retryBinder = context.preparePublication({ ...publication, dirty: true });
           let durabilityWarning;
           let retainOldClaim = false;
-          saveAsIdentityPending = false;
+          let nextIdentityPending = false;
           await preparedOwner.commit(async () => {
             return async () => {
               savePublication = await preparedSave.publish();
@@ -111195,7 +111195,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
                 await destinationRecovery.adoptRecoveryId(oldRecovery.recoveryId);
               } catch (error61) {
                 destinationRecovery.recoveryId = oldRecovery.recoveryId;
-                saveAsIdentityPending = true;
+                nextIdentityPending = true;
                 identityWarning = "Saved destination bytes, but recovery identity could not be confirmed; choose Save again: " + errorMessage(error61);
               }
               durabilityWarning = [savePublication.result.durabilityWarning, identityWarning].filter(Boolean).join(" ") || void 0;
@@ -111231,6 +111231,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
               (retainOldClaim || retainedSaveAsRecovery.length > 0 ? retryBinder : cleanBinder)();
               store = destinationStore;
               recovery = destinationRecovery;
+              saveAsIdentityPending = nextIdentityPending;
               packageManager = nextManager;
               notebookDirectory = destinationDirectory;
               cacheDirectory = destinationCache;
