@@ -32,11 +32,13 @@ unsaved source and local drafts, protecting other attached clients. User-approve
 close after host failure retains recovery and cannot be vetoed by failed HTTP
 cleanup. Backend owns bounded no-client shutdown, including orphaned runs.
 
-**Owner and next action:** primary implementer owns the lifecycle slice on the
-integrated main baseline. Check ticket-failure heartbeat cleanup, failed-renderer Close then Quit,
-peer continuity, explicit discard and eventual unused host/Ark/R exit. Replace
-tests of deleted release machinery with these behaviors. Submit a clean focused
-candidate for review; do not start the later slices or run full acceptance early.
+**Owner and next action:** primary corrects reviewed candidate `75388d4`. A dirty
+window with a dead host needs an explicit Close keeping recovery; live untitled
+Discard must preserve discovery of later acknowledged edits and retain recovery
+on failure. Replace the stale installed-host release/discard test, prove active R
+run plus last detach naturally exits with recovery retained, and restore compact
+Quit-wait and parent/child-detach checks with finite waits. Submit one clean
+corrected candidate for focused rereview before full signed-app acceptance.
 
 **Approved next slices, in order:**
 
@@ -79,7 +81,7 @@ One item is active. New approved work is added here before assignment.
 | Release README and feature demo | Accepted | Primary implementer and independent reviewers | `b316bc3`: release-facing install/use guide and three compact real-app feature captures; media and factual reviews passed |
 | Repository integration and cleanup | Accepted | Primary implementer and focused cleanup reviewers | `554da34`: canonical docs and accepted app fast-forwarded to remote `main`; obsolete worktrees, branches and safety stashes removed after review |
 | Platform-boundary extraction | Accepted | Primary implementer and focused reviewers | `42cfda8`: shared Linux R 34/34, browser 12/12 and reviewed localized Mac/Linux seams; no duplicated product or Ark fork |
-| Native Mac reliability qualification | Implementing | Primary implementer | Separate detach, explicit Discard and bounded backend shutdown from accepted `801c54a` |
+| Native Mac reliability qualification | Implementing | Primary implementer | Correct the two lifecycle failures and focused test gaps found in `75388d4`, then rereview and run full signed-app acceptance |
 | Scientific workflow qualification | Queued | Unassigned | A realistic scientific notebook, real CRAN/Bioconductor packages, representative R reactivity idioms, two live notebooks under load and rich publishing are independently qualified through packaged Alder |
 | Product completion and public Mac delivery | Queued | Unassigned | Project/Git ownership, notebook-wide search, agent presence, accessibility, scale, upgrade state, release identity, architecture support and signed/notarized distribution have explicit accepted behavior |
 
