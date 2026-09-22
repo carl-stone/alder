@@ -311,6 +311,8 @@ async function runExternalPathJourney() {
     if (before.server !== 'local_value <- 0L\nlocal_value' || before.local !== local) throw new Error(`${label} setup lost the renderer-local draft: ${JSON.stringify(before)}`);
     await mutate();
     await primary.cdp.wait("document.querySelector('#status')?.textContent.includes('external notebook state changed')", 20_000);
+    const atConflict = await primary.cdp.evaluate("({server:window.__alderHost.client.document.snapshot.cells[1].body.join('\\n'),local:window.__alderHost.client.document.cells[1].desiredBody.join('\\n'),pending:window.__alderHost.client.document.pendingSource().changes.length})");
+    if (atConflict.server !== 'local_value <- 0L\nlocal_value' || atConflict.local !== local || atConflict.pending === 0) throw new Error(`${label} external conflict did not retain a renderer-local draft: ${JSON.stringify(atConflict)}`);
     await shortcut(primary.cdp, 's', 'KeyS', 83, 4);
     await primary.cdp.wait("document.getElementById('save-state')?.textContent === 'Save failed'", 20_000);
     await diskUnchanged(expectedDisk);
