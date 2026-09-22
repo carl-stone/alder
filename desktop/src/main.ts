@@ -356,6 +356,7 @@ export class ElectronMain {
       }
     });
     this.runtime.app.on("activate", () => this.focusOrOpenUntitled());
+    if (process.platform === "darwin") this.runtime.app.on("window-all-closed", () => undefined);
     this.runtime.app.on("before-quit", (event: { preventDefault?: () => void }) => {
       if (this.quitState === "authorized") return;
       event.preventDefault?.();

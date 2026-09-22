@@ -9,7 +9,8 @@ if (process.platform !== 'darwin') throw new Error('Native app acceptance requir
 const app = resolve(process.argv[2] ?? 'host/.application-desktop/Alder.app');
 const executable = join(app, 'Contents/MacOS/Alder');
 const cleanupProbe = process.argv.includes('--cleanup-probe');
-const multiWindow = process.argv.includes('--multi-window');
+const reopenAfterLastWindow = process.argv.includes('--reopen-after-last-window');
+const multiWindow = process.argv.includes('--multi-window') || reopenAfterLastWindow;
 const backendCrash = process.argv.includes('--backend-crash');
 const rendererCrash = process.argv.includes('--renderer-crash');
 const draftHandoff = process.argv.includes('--draft-handoff');
@@ -198,10 +199,7 @@ class Cdp {
     });
   }
   static async connect(endpoint, targetId) {
-    const socket = new WebSocket(endpoint);
-    await new Promise((resolveOpen, reject) => { socket.once('open', resolveOpen); socket.once('error', reject); });
-    const cdp = new Cdp(socket);
-    await cdp.send('Target.setDiscoverTargets', { discover: true }, '');
+    const cdp = await Cdp.connectBrowser(endpoint);
     let target;
     const deadline = Date.now() + 30_000;
     while (Date.now() < deadline) {
@@ -216,6 +214,13 @@ class Cdp {
     cdp.targetId = target.targetId;
     await cdp.send('Runtime.enable');
     await cdp.send('Page.enable');
+    return cdp;
+  }
+  static async connectBrowser(endpoint) {
+    const socket = new WebSocket(endpoint);
+    await new Promise((resolveOpen, reject) => { socket.once('open', resolveOpen); socket.once('error', reject); });
+    const cdp = new Cdp(socket);
+    await cdp.send('Target.setDiscoverTargets', { discover: true }, '');
     return cdp;
   }
   send(method, params = {}, sessionId = this.session) {
@@ -365,8 +370,65 @@ async function runMultiWindowJourney(primary) {
     await shortcut(primary.cdp, 's', 'KeyS', 83, 4);
     await waitFileSource(notebook, 'a_window <- 17L\na_window');
     if (savedSource(await readFile(notebookB, 'utf8')) !== sourceB) throw new Error('closing B changed its saved notebook');
+    if (reopenAfterLastWindow) {
+      await primary.cdp.wait('window.__alderHost.client.document.snapshot.dirty === false', 10_000);
+      const browser = await Cdp.connectBrowser(primary.endpoint);
+      sessions.add(browser);
+      try {
+        await primary.cdp.evaluate('window.close()');
+        const closedAt = Date.now() + 15_000;
+        while (Date.now() < closedAt) {
+          const targets = await browser.send('Target.getTargets', {}, '');
+          if (!targets.targetInfos.some(target => target.type === 'page')) break;
+          await new Promise(resolveWait => setTimeout(resolveWait, 50));
+        }
+        if ((await browser.send('Target.getTargets', {}, '')).targetInfos.some(target => target.type === 'page')
+          || primary.child.exitCode !== null) throw new Error('closing the last window did not leave the Mac app running without pages');
+        const reopenError = [];
+        const reopenLaunch = spawn(executable, ['--headless=new', `--user-data-dir=${profile}`, notebookB], {
+          cwd: temporary, env: environment(), stdio: ['ignore', 'ignore', 'pipe'],
+        });
+        children.add(reopenLaunch);
+        ownedPids.add(reopenLaunch.pid);
+        reopenLaunch.stderr.on('data', chunk => reopenError.push(Buffer.from(chunk)));
+        const reopenedExit = await new Promise((resolveExit, reject) => {
+          const timer = setTimeout(() => reject(new Error('launch after last window did not forward and exit')), 20_000);
+          reopenLaunch.once('exit', (code, signal) => { clearTimeout(timer); resolveExit({ code, signal }); });
+          reopenLaunch.once('error', error => { clearTimeout(timer); reject(error); });
+        });
+        if (reopenedExit.code !== 0 || reopenedExit.signal !== null) throw new Error(`launch after last window failed: ${JSON.stringify(reopenedExit)} ${Buffer.concat(reopenError)}`);
+        children.delete(reopenLaunch);
+        const reopenedAt = Date.now() + 45_000;
+        let target;
+        while (Date.now() < reopenedAt) {
+          const targets = await browser.send('Target.getTargets', {}, '');
+          target = targets.targetInfos.find(candidate => candidate.type === 'page');
+          if (target) break;
+          await new Promise(resolveWait => setTimeout(resolveWait, 50));
+        }
+        if (!target) throw new Error('forwarded notebook did not reopen after the last window closed');
+        const reopened = await Cdp.connect(primary.endpoint, target.targetId);
+        sessions.add(reopened);
+        try {
+          await reopened.wait(`window.__alderHost?.client?.document?.snapshot?.path === ${JSON.stringify(canonicalB)} &&
+            window.__alderHost.client.document.snapshot.cells[0]?.body.join('\\n') === ${JSON.stringify(sourceB)} &&
+            document.getElementById('r-state')?.textContent === 'R ready'`, 45_000);
+          const pages = (await browser.send('Target.getTargets', {}, '')).targetInfos.filter(candidate => candidate.type === 'page');
+          if (pages.length !== 1 || pages[0].targetId !== target.targetId) throw new Error(`forwarded reopen created unexpected windows: ${JSON.stringify(pages)}`);
+          if (savedSource(await readFile(notebook, 'utf8')) !== 'a_window <- 17L\na_window'
+            || savedSource(await readFile(notebookB, 'utf8')) !== sourceB) throw new Error('reopening after last close changed saved notebooks');
+        } finally {
+          reopened.close();
+          sessions.delete(reopened);
+        }
+      } finally {
+        browser.close();
+        sessions.delete(browser);
+      }
+    }
     process.stdout.write(JSON.stringify({ multiWindow: true, forwardedExit: secondExit.code, rendererWindows: 2,
-      notebooks: [notebook, notebookB], outputs: [11, 29, 17], closeRetainedPrimary: true }) + '\n');
+      notebooks: [notebook, notebookB], outputs: [11, 29, 17], closeRetainedPrimary: true,
+      ...(reopenAfterLastWindow ? { reopenedAfterLastWindow: true } : {}) }) + '\n');
   } finally {
     windowB.close();
     sessions.delete(windowB);
@@ -722,22 +784,28 @@ try {
   await chmod(workspace, 0o700).catch(() => undefined);
   const stopErrors = [];
   try { await stop(peer); } catch (error) { stopErrors.push(error); }
-  try { await stop(primary); } catch (error) { stopErrors.push(error); }
-  for (const child of children) if (child.exitCode === null && child.signalCode === null) {
+  if (!reopenAfterLastWindow) {
+    try { await stop(primary); } catch (error) { stopErrors.push(error); }
+  }
+  for (const child of children) if (!reopenAfterLastWindow && child.exitCode === null && child.signalCode === null) {
     try { requestNativeQuit(child.pid); } catch (error) { stopErrors.push(error); }
   }
   let naturalExitError;
   try {
-    await waitForOwnedExit(ownedPids, temporary);
-    for (const pgid of ownedArkGroups) await waitArkGroupGone(pgid);
+    if (!reopenAfterLastWindow) {
+      await waitForOwnedExit(ownedPids, temporary);
+      for (const pgid of ownedArkGroups) await waitArkGroupGone(pgid);
+    }
   } catch (error) { naturalExitError = error; }
+  // A macOS app stays resident without windows; this headless-only journey cannot invoke the foreground Quit menu.
   const cleanup = await cleanupOwnedProcesses(ownedPids, temporary);
   for (const cdp of sessions) cdp.close();
   await rm(temporary, { recursive: true, force: true });
   if (cleanupProbe) process.stdout.write(JSON.stringify({ cleanupProbe: true, naturalExit: naturalExitError === undefined, fallbackRequired: cleanup.fallbackRequired }) + '\n');
+  else if (reopenAfterLastWindow) process.stdout.write(JSON.stringify({ headlessCleanup: 'forced-after-last-window', terminatedPids: cleanup.terminatedPids.length, killedPids: cleanup.killedPids.length }) + '\n');
   else if (cleanup.fallbackRequired) process.stderr.write(JSON.stringify({ nativeCleanup: true, naturalExit: naturalExitError === undefined, fallbackRequired: true }) + '\n');
   const failures = [runError, ...stopErrors, naturalExitError,
-    cleanup.fallbackRequired ? new Error('packaged app required forced process cleanup') : undefined].filter(Boolean);
+    cleanup.fallbackRequired && !reopenAfterLastWindow ? new Error('packaged app required forced process cleanup') : undefined].filter(Boolean);
   if (failures.length === 1) throw failures[0];
   if (failures.length > 1) throw new AggregateError(failures, 'native acceptance and cleanup failed');
 }
