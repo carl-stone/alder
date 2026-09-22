@@ -200,8 +200,10 @@ function createConnection(descriptor: BackendSessionDescriptor, lease: SessionLe
   };
   let normalAttempt: Promise<void> | undefined;
   let discardAttempt: Promise<void> | undefined;
-  const hostExitedAfterNormalRelease = (error: unknown): boolean => error instanceof TypeError
-    && (error.cause as { code?: unknown } | undefined)?.code === "ECONNREFUSED";
+  const hostExitedAfterNormalRelease = (error: unknown): boolean => {
+    const code = error instanceof TypeError ? (error.cause as { code?: unknown } | undefined)?.code : undefined;
+    return code === "ECONNREFUSED" || code === "ECONNRESET";
+  };
   let interval: ReturnType<typeof setInterval>;
   const attemptRelease = async (disposition: "normal" | "discard"): Promise<void> => {
     const controller = new AbortController();
