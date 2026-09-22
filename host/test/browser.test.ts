@@ -451,7 +451,8 @@ test('long notebooks virtualize editors and preserve edited source through recov
     });
     await browser.evaluate("window.__alderHost.client.transport.socket.close(4001, 'test recovery')");
     await browser.wait("window.__transportStates.some(entry => entry.state === 'closed')");
-    await browser.click('[data-cell="cell-75"] [data-virtual-source]');
+    await browser.activateVirtualEditor('cell-75');
+    await browser.click('[data-cell="cell-75"] .cm-content');
     await browser.wait("document.activeElement?.classList.contains('cm-content') && document.activeElement.closest('[data-cell=\"cell-75\"]') !== null");
     await replaceFocusedEditor(browser, 'value_75 <- 7500\nvalue_75');
     assert.equal(await browser.evaluate(`(() => {
