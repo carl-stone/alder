@@ -10,7 +10,7 @@ copies in other worktrees are snapshots.
 
 ## Current assignment
 
-**Native Mac reliability — Implementing on Mac.**
+**Native Mac reliability — Review on Mac.**
 
 The shared portable-core checkpoint is accepted on pushed main `42cfda8`.
 `b74355a` is the latest accepted Mac checkpoint, integrated on main at `572f7b6`.
@@ -33,10 +33,9 @@ acceptance, focused crash journeys, strict signing and clean child audits passed
 two-window journey passes second-instance forwarding, independent Run/Save and
 closing one window while the other continues.
 
-**Correction underway:** `6f38788` corrects the zero-window Quit lifecycle after
-the notebook host idles out; product review passed. A focused test review found
-that its Quit assertion can wait indefinitely if the behavior regresses. The
-primary implementer is bounding that wait before final review. The preceding
+**Candidate ready:** clean `21fc5e1` bounds the zero-window Quit regression test;
+its parent `6f38788` corrects Quit after the notebook host idles out and passed
+product review. The focused test correction is in final review. The preceding
 `5c80216` keeps the app resident after its last window and adds a packaged
 path-forwarding/reopen journey. Both packaged window journeys pass. The headless
 reopen journey uses forced teardown and does not qualify native Quit. Finder/Open,
@@ -68,7 +67,7 @@ One item is active. New approved work is added here before assignment.
 | Release README and feature demo | Accepted | Primary implementer and independent reviewers | `b316bc3`: release-facing install/use guide and three compact real-app feature captures; media and factual reviews passed |
 | Repository integration and cleanup | Accepted | Primary implementer and focused cleanup reviewers | `554da34`: canonical docs and accepted app fast-forwarded to remote `main`; obsolete worktrees, branches and safety stashes removed after review |
 | Platform-boundary extraction | Accepted | Primary implementer and focused reviewers | `42cfda8`: shared Linux R 34/34, browser 12/12 and reviewed localized Mac/Linux seams; no duplicated product or Ark fork |
-| Native Mac reliability qualification | Implementing | Primary implementer | Bound the zero-window Quit test wait, review clean candidate, run complete signed-app acceptance, then continue native Mac qualification |
+| Native Mac reliability qualification | Review | Lead and independent reviewers | Review clean `21fc5e1`, run complete signed-app acceptance on that exact source, then continue native Mac qualification |
 | Scientific workflow qualification | Queued | Unassigned | A realistic scientific notebook, real CRAN/Bioconductor packages, representative R reactivity idioms, two live notebooks under load and rich publishing are independently qualified through packaged Alder |
 | Product completion and public Mac delivery | Queued | Unassigned | Project/Git ownership, notebook-wide search, agent presence, accessibility, scale, upgrade state, release identity, architecture support and signed/notarized distribution have explicit accepted behavior |
 
