@@ -10,7 +10,7 @@ copies in other worktrees are snapshots.
 
 ## Current assignment
 
-**Native Mac reliability — Implementing on Mac.**
+**Native Mac reliability — Review on Mac.**
 
 **Latest accepted checkpoint:** source `3520e53`, integrated on pushed main at
 `e3b1ed6`. Full signed-app acceptance and the separate external-path journey passed.
@@ -31,11 +31,13 @@ rename, then adopt the published state without fictional rollback. Directory syn
 can also fail after rename: report committed with a durability warning and retain
 recovery. The current assignment includes this refinement, not the later work below.
 
-**Correction and next action:** `9714d26` passed source review. Its new regression
-fails before reaching the old state reset, so it does not catch the fixed bug.
-Primary implementer changes only that trigger to a late destination conflict and
-demonstrates failure with the old reset placement. Lead reviews that test, then
-assigns full signed-app acceptance; the staged app still contains an older candidate.
+**Candidate and next action:** `e3bba94` passed focused production, UI and test
+review. The late-conflict regression failed with the old reset and passed with the
+fix. A bounded acceptance worker owns the complete signed Mac gate and separate
+packaged Save As journey on that exact source. Primary implementer holds changes.
+Low disk space must be resolved using only this task's regenerable outputs before
+building; installed user app remains untouched. Lead records the gate result and
+dispatches the next transition.
 
 **Approved next slices, in order:**
 
@@ -85,7 +87,7 @@ One item is active. New approved work is added here before assignment.
 | Release README and feature demo | Accepted | Primary implementer and independent reviewers | `b316bc3`: release-facing install/use guide and three compact real-app feature captures; media and factual reviews passed |
 | Repository integration and cleanup | Accepted | Primary implementer and focused cleanup reviewers | `554da34`: canonical docs and accepted app fast-forwarded to remote `main`; obsolete worktrees, branches and safety stashes removed after review |
 | Platform-boundary extraction | Accepted | Primary implementer and focused reviewers | `42cfda8`: shared Linux R 34/34, browser 12/12 and reviewed localized Mac/Linux seams; no duplicated product or Ark fork |
-| Native Mac reliability qualification | Implementing | Primary implementer | Correct the false-green late-conflict regression; source fix passed review, full acceptance follows test review |
+| Native Mac reliability qualification | Review | Lead and acceptance worker | Run full signed-app acceptance plus packaged Save As on reviewed `e3bba94` |
 | Scientific workflow qualification | Queued | Unassigned | A realistic scientific notebook, real CRAN/Bioconductor packages, representative R reactivity idioms, two live notebooks under load and rich publishing are independently qualified through packaged Alder |
 | Product completion and public Mac delivery | Queued | Unassigned | Project/Git ownership, notebook-wide search, agent presence, accessibility, scale, upgrade state, release identity, architecture support and signed/notarized distribution have explicit accepted behavior |
 
