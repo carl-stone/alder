@@ -199,6 +199,7 @@ interface ElectronWindowRecord {
   loadGeneration: number;
   authenticatedRendererGeneration?: number;
   loadingOrigin?: string;
+  loadingState?: { connection: SessionConnection; state: WindowState | null; authenticated: boolean };
   rendererReadyGeneration: number;
   rendererReady?: { promise: Promise<void>; resolve: () => void };
   windowState: WindowState | null;
@@ -525,12 +526,15 @@ export class ElectronMain {
     record.monitor.unref?.();
   }
 
-  private async loadAuthenticatedNotebook(record: ElectronWindowRecord, ticket: string, connection: SessionConnection = record.connection): Promise<void> {
+  private async loadAuthenticatedNotebook(record: ElectronWindowRecord, ticket: string, connection: SessionConnection = record.connection): Promise<WindowState | null> {
     const webRequest = record.window.webContents.session?.webRequest;
     if (webRequest === undefined) throw new Error("Electron response interception is unavailable");
     const generation = (record.loadGeneration ?? 0) + 1;
+    const previousState = record.windowState;
     record.loadGeneration = generation;
     record.windowState = null;
+    const loadingState = { connection, state: null as WindowState | null, authenticated: false };
+    record.loadingState = loadingState;
     record.rendererReadyGeneration = generation;
     let resolveRendererReady!: () => void;
     const rendererReadyPromise = new Promise<void>(resolve => { resolveRendererReady = resolve; });
@@ -558,10 +562,11 @@ export class ElectronMain {
         callback({ responseHeaders: details.responseHeaders });
         return;
       }
-      receivedMainFrame = true;
       const headers = details.responseHeaders ?? {};
       const proofHeader = Object.entries(headers).find(([name]) => name.toLowerCase() === "x-alder-continuity-proof")?.[1];
       const proof = Array.isArray(proofHeader) ? proofHeader[0] : proofHeader;
+      receivedMainFrame = proof === continuityProof;
+      loadingState.authenticated = receivedMainFrame;
       callback(proof === continuityProof
         ? { responseHeaders: details.responseHeaders }
         : { cancel: true });
@@ -579,9 +584,16 @@ export class ElectronMain {
         windowId: record.windowId, sessionId: connection.sessionKey, sessionEpoch: connection.epoch,
         rendererGeneration: generation, durationMs: Math.round(performance.now() - record.openedAt), ready: true,
       });
+      return loadingState.state;
+    } catch (error) {
+      if (record.loadGeneration === generation) record.windowState = previousState;
+      throw error;
     } finally {
       bootstrapTicket = null;
-      if (record.loadGeneration === generation) record.loadingOrigin = undefined;
+      if (record.loadGeneration === generation) {
+        record.loadingOrigin = undefined;
+        record.loadingState = undefined;
+      }
     }
   }
   private async mintTicket(connection: SessionConnection): Promise<string> {
@@ -684,7 +696,7 @@ export class ElectronMain {
     });
     noArguments(IPC_CHANNELS.getDraftId, record => record.draftId);
     noArguments(IPC_CHANNELS.rendererReady, (record) => {
-      if (record.rendererReadyGeneration === record.loadGeneration) record.rendererReady?.resolve();
+      if (record.rendererReadyGeneration === record.loadGeneration && record.loadingState?.authenticated) record.rendererReady?.resolve();
     });
     ipc.removeHandler?.(IPC_CHANNELS.diagnostic);
     ipc.handle(IPC_CHANNELS.diagnostic, async (event, ...args) => {
@@ -719,14 +731,15 @@ export class ElectronMain {
       if (args.length !== 1) throw new Error("Window state requires one value");
       const record = this.recordForEvent(event);
       const state = windowStateSchema.parse(args[0]);
-      if (state.sessionEpoch !== record.connection.epoch) throw new Error("Window state belongs to another session");
-      if (state.path !== record.connection.canonicalPath) {
-        if (state.path === null) throw new Error("A named notebook cannot return to an untitled identity");
-        this.adoptHostIdentity(record, sessionKeyFor(state.path), state.path);
+      const loading = record.loadingState;
+      const connection = loading?.connection ?? record.connection;
+      if (state.sessionEpoch !== connection.epoch) throw new Error("Window state belongs to another session");
+      if (loading && !loading.authenticated) throw new Error("Notebook response is not authenticated");
+      if (loading && loading.connection !== record.connection) {
+        loading.state = state;
+        return;
       }
-      record.windowState = state;
-      record.dirty = state.dirty;
-      applyNativeWindowState(record.window, state);
+      this.applyWindowState(record, state);
     });
     ipc.removeHandler?.(IPC_CHANNELS.commandResult);
     ipc.handle(IPC_CHANNELS.commandResult, (event, ...args) => {
@@ -735,6 +748,16 @@ export class ElectronMain {
       const result = desktopCommandResultSchema.parse(args[0]);
       record.pendingCommands.get(result.requestId)?.resolve(result);
     });
+  }
+
+  private applyWindowState(record: ElectronWindowRecord, state: WindowState): void {
+    if (state.path !== record.connection.canonicalPath) {
+      if (state.path === null) throw new Error("A named notebook cannot return to an untitled identity");
+      this.adoptHostIdentity(record, sessionKeyFor(state.path), state.path);
+    }
+    record.windowState = state;
+    record.dirty = state.dirty;
+    applyNativeWindowState(record.window, state);
   }
 
   private recordForEvent(event: ElectronIpcEvent): ElectronWindowRecord {
@@ -1161,12 +1184,13 @@ export class ElectronMain {
       // Keep the old lease and identity authoritative until the replacement
       // page has passed its authenticated response check.
       navigationStarted = true;
-      await this.loadAuthenticatedNotebook(record, ticket, next);
+      const initialState = await this.loadAuthenticatedNotebook(record, ticket, next);
       if (record.released) {
         await this.releaseDiscardedConnection(next);
         return;
       }
       this.replaceConnection(record, next);
+      if (initialState) this.applyWindowState(record, initialState);
       await this.releaseDiscardedConnection(old);
     } catch (error) {
       if (next !== undefined && next !== record.connection) await this.releaseDiscardedConnection(next);

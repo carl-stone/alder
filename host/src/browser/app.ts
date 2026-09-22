@@ -90,20 +90,21 @@ window.addEventListener("pagehide", () => {
   desktopUnsubscribe = null;
 });
 
+function updateWindowState(document: import("./document.js").BrowserDocument): Promise<void> {
+  const desktop = (globalThis as typeof globalThis & { alderDesktop?: PreloadApi }).alderDesktop;
+  const pending = document.pendingSource();
+  const dirty = document.snapshot.dirty || pending.changes.length > 0;
+  const current = view?.documentSaveState ?? "saved";
+  const saveState = dirty && current === "saved" ? "edited" : current;
+  const state: WindowState = { path: document.snapshot.path, dirty, saveState, sessionEpoch: document.epoch };
+  return desktop?.updateWindowState(state) ?? Promise.resolve();
+}
+
 function bindClient(next: BrowserNotebookClient): void {
   client = next;
-  const updateWindowState = (document: import("./document.js").BrowserDocument): void => {
-    const desktop = (globalThis as typeof globalThis & { alderDesktop?: PreloadApi }).alderDesktop;
-    const pending = document.pendingSource();
-    const dirty = document.snapshot.dirty || pending.changes.length > 0;
-    const current = view?.documentSaveState ?? "saved";
-    const saveState = dirty && current === "saved" ? "edited" : current;
-    const state: WindowState = { path: document.snapshot.path, dirty, saveState, sessionEpoch: document.epoch };
-    void desktop?.updateWindowState(state).catch((error) => view?.showError(error));
-  };
-  window.addEventListener("alder:window-state", () => { if (client?.document) updateWindowState(client.document); });
+  window.addEventListener("alder:window-state", () => { if (client?.document) void updateWindowState(client.document).catch(error => view?.showError(error)); });
   next.subscribe((document, event, localCellKeys) => {
-    updateWindowState(document);
+    void updateWindowState(document).catch(error => view?.showError(error));
     if (!event) {
       flushRenders();
       view?.render(document, event, localCellKeys);
@@ -196,6 +197,7 @@ async function start(): Promise<void> {
   bindDesktopActions(next);
   window.__alderHost = { client: next, view };
   await next.connect();
+  if (next.document) await updateWindowState(next.document);
   await (globalThis as typeof globalThis & { alderDesktop?: PreloadApi }).alderDesktop?.rendererReady();
 }
 

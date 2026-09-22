@@ -576,6 +576,51 @@ test("native restart requests a fresh notebook document response on the same hos
   assert.equal(urls[1]!.hash, "#ticket=" + "b".repeat(64));
 });
 
+test("new host reports clean native state before renderer readiness without losing its epoch", async () => {
+  const path = "/tmp/alder-restarted-clean.R";
+  const old = connection("restart-old", path, async () => jsonResponse({}));
+  const next = connection("restart-new", path, async endpoint => {
+    assert.equal(endpoint, "/api/ticket");
+    return jsonResponse({ ticket: "b".repeat(64), expiresAt: "2026-12-01T00:00:00.000Z" });
+  });
+  next.epoch = "next-epoch";
+  const handlers = new Map<string, (event: unknown, ...args: unknown[]) => unknown>();
+  const electronRuntime = runtime();
+  const event = {} as { sender: ElectronWindow["webContents"]; senderFrame: ElectronWindow["webContents"]["mainFrame"] };
+  let headersCallback: ((details: { resourceType: string; responseHeaders: Record<string, string[]> }, callback: (decision: { cancel?: boolean }) => void) => void) | undefined;
+  let stateError: unknown;
+  const window = windowWithLoad(async () => {
+    assert.throws(() => handlers.get("alderDesktop:windowState")!(event, { path, dirty: false, saveState: "saved", sessionEpoch: "next-epoch" }), /not authenticated/);
+    headersCallback!({ resourceType: "mainFrame", responseHeaders: { "X-Alder-Continuity-Proof": ["proof"] } }, decision => assert.equal(decision.cancel, undefined));
+    assert.throws(() => handlers.get("alderDesktop:windowState")!(event, { path, dirty: true, saveState: "edited", sessionEpoch: "epoch" }), /another session/);
+    try {
+      await handlers.get("alderDesktop:windowState")!(event, { path, dirty: false, saveState: "saved", sessionEpoch: "next-epoch" });
+    } catch (error) { stateError = error; }
+    await handlers.get("alderDesktop:rendererReady")!(event);
+  });
+  event.sender = window.webContents;
+  event.senderFrame = window.webContents.mainFrame;
+  window.webContents.session!.webRequest!.onHeadersReceived = (_filter, callback) => { headersCallback = callback as typeof headersCallback; };
+  electronRuntime.BrowserWindow.fromWebContents = sender => sender === window.webContents ? window : null;
+  electronRuntime.ipcMain.handle = (channel, handler) => { handlers.set(channel, handler); };
+  electronRuntime.dialog.showMessageBox = async () => { throw new Error("clean close must not prompt"); };
+  const main = new ElectronMain(electronRuntime, { resources, acquireSession: async () => next });
+  const record = recordFor(main, old, window);
+  record.windowState = { path, dirty: true, saveState: "edited", sessionEpoch: "epoch" };
+  (main as any).assertHostContinuity = async () => undefined;
+  (main as any).installIpcHandlers();
+
+  await (main as any).restartHost(record);
+
+  assert.equal(stateError, undefined);
+  assert.equal(record.connection, next);
+  assert.equal((await (main as any).readWindowState(record)).dirty, false);
+  assert.equal(window.documentEdits.at(-1), false);
+  assert.throws(() => handlers.get("alderDesktop:windowState")!(event, { path, dirty: true, saveState: "edited", sessionEpoch: "epoch" }), /another session/);
+  await (main as any).requestClose(record);
+  assert.equal(window.destroyed, true);
+});
+
 test("cancelled close keeps the editor open when the host is unavailable", async () => {
   const oldPath = "/tmp/alder-desktop-dirty-query-failure.R";
   const oldConnection = connection("session-dirty", oldPath, async path => {
@@ -1130,17 +1175,31 @@ test("desktop restart failure preserves the existing editor and releases only th
     assert.equal(path, "/api/ticket");
     return jsonResponse({ ticket: "b".repeat(64), expiresAt: "2026-01-01T00:00:00.000Z" });
   });
+  nextConnection.epoch = "failed-epoch";
   let loadCount = 0;
+  let response: ((details: { resourceType: string; responseHeaders: Record<string, string[]> }, callback: (decision: { cancel?: boolean }) => void) => void) | undefined;
+  const handlers = new Map<string, (event: unknown, ...args: unknown[]) => unknown>();
   const window = windowWithLoad(async () => {
     loadCount += 1;
+    if (loadCount === 1) {
+      response!({ resourceType: "mainFrame", responseHeaders: { "X-Alder-Continuity-Proof": ["proof"] } }, decision => assert.equal(decision.cancel, undefined));
+      handlers.get("alderDesktop:windowState")!({ sender: window.webContents, senderFrame: window.webContents.mainFrame },
+        { path: oldPath, dirty: false, saveState: "saved", sessionEpoch: "failed-epoch" });
+    }
     throw new Error("authenticated page load failed");
   });
-  const main = new ElectronMain(runtime(0), {
+  window.webContents.session!.webRequest!.onHeadersReceived = (_filter, callback) => { response = callback as typeof response; };
+  const electronRuntime = runtime(0);
+  electronRuntime.BrowserWindow.fromWebContents = sender => sender === window.webContents ? window : null;
+  electronRuntime.ipcMain.handle = (channel, handler) => { handlers.set(channel, handler); };
+  const main = new ElectronMain(electronRuntime, {
     resources,
     acquireSession: async () => nextConnection,
   });
   const record = recordFor(main, oldConnection, window);
+  record.windowState = { path: oldPath, dirty: true, saveState: "edited", sessionEpoch: "epoch" };
   (main as any).showApplicationError = async () => undefined;
+  (main as any).installIpcHandlers();
 
   await (main as any).restartHost(record);
 
@@ -1148,6 +1207,7 @@ test("desktop restart failure preserves the existing editor and releases only th
   assert.equal(nextConnection.releaseCount, 1);
   assert.equal(oldConnection.releaseCount, 0);
   assert.equal(record.released, false);
+  assert.equal((await (main as any).readWindowState(record)).dirty, true);
   assert.equal(main.windows().length, 1);
   assert.equal(window.destroyed, false);
 });

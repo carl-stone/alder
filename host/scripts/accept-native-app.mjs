@@ -585,6 +585,8 @@ async function runBackendCrashJourney(primary) {
   await primary.cdp.wait("window.__alderHost.view.transportState === 'closed' && document.querySelector('[data-status-action=retry-connection]')?.textContent === 'Restart host'", 15_000);
   await primary.cdp.evaluate("document.querySelector('[data-status-action=retry-connection]').click()");
   await primary.cdp.wait("[...document.querySelectorAll('[data-recovery-panel] button')].some(button => button.textContent === 'Continue recovered')", 60_000);
+  const restartError = await primary.cdp.evaluate('window.__alderHost.view.actionError');
+  if (restartError) throw new Error(`host restart displayed an error: ${restartError}`);
   await primary.cdp.evaluate("[...document.querySelectorAll('[data-recovery-panel] button')].find(button => button.textContent === 'Continue recovered').click()");
   await primary.cdp.wait("[...document.querySelectorAll('[data-recovery-panel] button')].some(button => button.textContent === 'Start R')", 10_000);
   await primary.cdp.evaluate("[...document.querySelectorAll('[data-recovery-panel] button')].find(button => button.textContent === 'Start R').click()");

@@ -27225,22 +27225,22 @@ window.addEventListener("pagehide", () => {
   desktopUnsubscribe?.();
   desktopUnsubscribe = null;
 });
+function updateWindowState(document2) {
+  const desktop = globalThis.alderDesktop;
+  const pending = document2.pendingSource();
+  const dirty = document2.snapshot.dirty || pending.changes.length > 0;
+  const current = view?.documentSaveState ?? "saved";
+  const saveState = dirty && current === "saved" ? "edited" : current;
+  const state = { path: document2.snapshot.path, dirty, saveState, sessionEpoch: document2.epoch };
+  return desktop?.updateWindowState(state) ?? Promise.resolve();
+}
 function bindClient(next) {
   client = next;
-  const updateWindowState = (document2) => {
-    const desktop = globalThis.alderDesktop;
-    const pending = document2.pendingSource();
-    const dirty = document2.snapshot.dirty || pending.changes.length > 0;
-    const current = view?.documentSaveState ?? "saved";
-    const saveState = dirty && current === "saved" ? "edited" : current;
-    const state = { path: document2.snapshot.path, dirty, saveState, sessionEpoch: document2.epoch };
-    void desktop?.updateWindowState(state).catch((error61) => view?.showError(error61));
-  };
   window.addEventListener("alder:window-state", () => {
-    if (client?.document) updateWindowState(client.document);
+    if (client?.document) void updateWindowState(client.document).catch((error61) => view?.showError(error61));
   });
   next.subscribe((document2, event, localCellKeys) => {
-    updateWindowState(document2);
+    void updateWindowState(document2).catch((error61) => view?.showError(error61));
     if (!event) {
       flushRenders();
       view?.render(document2, event, localCellKeys);
@@ -27334,6 +27334,7 @@ async function start() {
   bindDesktopActions(next);
   window.__alderHost = { client: next, view };
   await next.connect();
+  if (next.document) await updateWindowState(next.document);
   await globalThis.alderDesktop?.rendererReady();
 }
 function rendererJson(value, seen = /* @__PURE__ */ new Set()) {
