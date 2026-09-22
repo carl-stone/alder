@@ -10,7 +10,7 @@ copies in other worktrees are snapshots.
 
 ## Current assignment
 
-**Native Mac reliability — Review on Mac.**
+**Native Mac reliability — Implementing on Mac.**
 
 The shared portable-core checkpoint is accepted on pushed main `42cfda8`. Current main
 `e9293e5` also passed fresh full signed Mac acceptance and packaged native journeys.
@@ -39,12 +39,15 @@ has an acknowledged unsaved edit, and preserve any still-local editor draft wher
 Verify recovery or actionable failure, explicit Save semantics, post-recovery execution and
 child cleanup without taking over the visible desktop.
 
-**Final acceptance running:** focused independent review passed clean `2d52a1d`.
-It skips the draft-flush IPC only when no authenticated renderer remains after
-failed navigation/rollback; the first live-editor flush remains required.
-Focused tests, signed build and packaged crash/cleanup journeys passed. The
-primary implementer owns one full signed-app acceptance on this exact source;
-the lead then accepts or returns a concrete failure for correction.
+**Correction in progress:** full signed acceptance on `2d52a1d` stopped at a
+long-notebook browser test whose fixed-cell placeholder click raced editor mounting.
+The test-only fix `adbdf39` passed isolated and independent review. A more serious
+crash-test finding remains: hard-killing the shared backend strands its detached
+Ark child; 19 staged test kernels survived as PPID-1 processes while the native
+harness reported natural cleanup. The primary implementer owns an Ark-upstream-
+unchanged lifecycle fix and exact-child cleanup qualification, plus careful cleanup
+of verified stale test kernels. Review the next clean candidate before rerunning
+full signed acceptance.
 
 The release README and three feature GIFs remain on `main`. The separate Ark source repository
 is untouched.
@@ -71,7 +74,7 @@ One item is active. New approved work is added here before assignment.
 | Release README and feature demo | Accepted | Primary implementer and independent reviewers | `b316bc3`: release-facing install/use guide and three compact real-app feature captures; media and factual reviews passed |
 | Repository integration and cleanup | Accepted | Primary implementer and focused cleanup reviewers | `554da34`: canonical docs and accepted app fast-forwarded to remote `main`; obsolete worktrees, branches and safety stashes removed after review |
 | Platform-boundary extraction | Accepted | Primary implementer and focused reviewers | `42cfda8`: shared Linux R 34/34, browser 12/12 and reviewed localized Mac/Linux seams; no duplicated product or Ark fork |
-| Native Mac reliability qualification | Review | Lead and independent reviewers | Sleep/wake, real Finder/dialog/window flows, packaged crash recovery and supported-filesystem behavior work through visible installed-app paths without lost work or stranded processes |
+| Native Mac reliability qualification | Implementing | Primary implementer | Sleep/wake, real Finder/dialog/window flows, packaged crash recovery and supported-filesystem behavior work through visible installed-app paths without lost work or stranded processes |
 | Scientific workflow qualification | Queued | Unassigned | A realistic scientific notebook, real CRAN/Bioconductor packages, representative R reactivity idioms, two live notebooks under load and rich publishing are independently qualified through packaged Alder |
 | Product completion and public Mac delivery | Queued | Unassigned | Project/Git ownership, notebook-wide search, agent presence, accessibility, scale, upgrade state, release identity, architecture support and signed/notarized distribution have explicit accepted behavior |
 
