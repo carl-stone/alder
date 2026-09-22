@@ -10,10 +10,10 @@ copies in other worktrees are snapshots.
 
 ## Current assignment
 
-**Native Mac reliability — Review on Mac.**
+**Native Mac reliability — Implementing on Mac.**
 
 The shared portable-core checkpoint is accepted on pushed main `42cfda8`. Current main
-`f086e40` also passed fresh full signed Mac acceptance and a packaged same-file peer journey.
+`e9293e5` also passed fresh full signed Mac acceptance and packaged native journeys.
 The staged signed app is refreshed; the installed user copy was left untouched. Preserve
 upstream unmodified Ark.
 
@@ -28,16 +28,19 @@ strict signing and natural child cleanup passed. A packaged second client saw an
 draft while disk still held the old source, then observed Save and detached without stopping the
 primary app. This was two app processes, not two windows in one process.
 
-**Current bounded slice:** qualify second-instance forwarding into one packaged Mac app with two
-distinct notebook windows. Verify independent editing, execution, Save, one-window close and
-remaining-window use in a background or isolated context. Leave native unsaved-close choices for
-a foreground-capable later pass.
+**Accepted subcheckpoint:** `e9293e5` fixes transaction-event dirty state so Save and the native
+unsaved indicator match edited source. A packaged second-instance launch forwarded notebook B
+into the running app; two windows edited, ran and saved separate notebooks without cross-talk,
+and window A remained usable after B closed. Focused checks and full signed-app acceptance
+passed with natural cleanup. Native unsaved-close choices remain unqualified.
 
-**Next action:** receive full signed-app acceptance for clean candidate `3fcaa79`, then accept
-or dispatch a focused correction. Two read-only reviews accepted the one-field authoritative
-dirty transaction event and the opt-in packaged two-window journey. Focused host/controller
-checks, both packaged native journeys and strict signing passed. The complete final acceptance
-is now running on this exact source candidate; unsaved native close choices remain queued.
+**Current bounded slice:** exercise an actual packaged backend process crash while a notebook
+has an acknowledged unsaved edit, and preserve any still-local editor draft where feasible.
+Verify recovery or actionable failure, explicit Save semantics, post-recovery execution and
+child cleanup without taking over the visible desktop.
+
+**Next action:** receive the primary implementer's exact crash-recovery candidate and focused
+native evidence; review any product change before another full signed-app acceptance.
 
 The release README and three feature GIFs remain on `main`. The separate Ark source repository
 is untouched.
@@ -64,7 +67,7 @@ One item is active. New approved work is added here before assignment.
 | Release README and feature demo | Accepted | Primary implementer and independent reviewers | `b316bc3`: release-facing install/use guide and three compact real-app feature captures; media and factual reviews passed |
 | Repository integration and cleanup | Accepted | Primary implementer and focused cleanup reviewers | `554da34`: canonical docs and accepted app fast-forwarded to remote `main`; obsolete worktrees, branches and safety stashes removed after review |
 | Platform-boundary extraction | Accepted | Primary implementer and focused reviewers | `42cfda8`: shared Linux R 34/34, browser 12/12 and reviewed localized Mac/Linux seams; no duplicated product or Ark fork |
-| Native Mac reliability qualification | Review | Lead and focused reviewers | Sleep/wake, real Finder/dialog/window flows, packaged crash recovery and supported-filesystem behavior work through visible installed-app paths without lost work or stranded processes |
+| Native Mac reliability qualification | Implementing | Primary implementer | Sleep/wake, real Finder/dialog/window flows, packaged crash recovery and supported-filesystem behavior work through visible installed-app paths without lost work or stranded processes |
 | Scientific workflow qualification | Queued | Unassigned | A realistic scientific notebook, real CRAN/Bioconductor packages, representative R reactivity idioms, two live notebooks under load and rich publishing are independently qualified through packaged Alder |
 | Product completion and public Mac delivery | Queued | Unassigned | Project/Git ownership, notebook-wide search, agent presence, accessibility, scale, upgrade state, release identity, architecture support and signed/notarized distribution have explicit accepted behavior |
 
@@ -198,12 +201,12 @@ commit that the next stage can safely simplify.
 
 ## Latest accepted checkpoint
 
-`f086e40` is the latest accepted Mac application source. Fresh full final acceptance passed
-after the portable-core changes and R helper package staging correction: signed build, R and
-host checks, installed services, browser and packaged journeys, license notices and natural
-owned-child cleanup. The packaged peer journey additionally qualified live unsaved source sharing
-and Save propagation between two app processes. Earlier UI/UX and diagnostics acceptance detail
-lives in Git and the implementation task.
+`e9293e5` is the latest accepted Mac application source. Fresh full final acceptance passed:
+signed build, R and host checks, installed services, twelve production browser journeys, packaged
+recovery journeys, license notices and natural owned-child cleanup. The focused packaged
+two-window journey separately qualified second-instance forwarding, isolated notebook drafts,
+execution, dirty state and Save. Earlier UI/UX and diagnostics acceptance detail lives in Git
+and the implementation task.
 
 The staged app at `host/.application-desktop/Alder.app` follows the implementation
 checkout and may contain newer, unaccepted changes. Acceptance is tied to the commit
