@@ -31,12 +31,11 @@ rename, then adopt the published state without fictional rollback. Directory syn
 can also fail after rename: report committed with a durability warning and retain
 recovery. The current assignment includes this refinement, not the later work below.
 
-**Correction and next action:** `f15e388` passed ownership, close and UI review.
-Its second Save As attempt resets the current identity-retry flag before the new
-file commits; a precommit failure must preserve that flag. Primary implementer
-corrects this with one sequence regression and bounds the discard test's close
-wait, then submits a focused candidate for final review. Full signed-app acceptance
-follows review; the staged app still contains an older candidate.
+**Correction and next action:** `9714d26` passed source review. Its new regression
+fails before reaching the old state reset, so it does not catch the fixed bug.
+Primary implementer changes only that trigger to a late destination conflict and
+demonstrates failure with the old reset placement. Lead reviews that test, then
+assigns full signed-app acceptance; the staged app still contains an older candidate.
 
 **Approved next slices, in order:**
 
@@ -86,7 +85,7 @@ One item is active. New approved work is added here before assignment.
 | Release README and feature demo | Accepted | Primary implementer and independent reviewers | `b316bc3`: release-facing install/use guide and three compact real-app feature captures; media and factual reviews passed |
 | Repository integration and cleanup | Accepted | Primary implementer and focused cleanup reviewers | `554da34`: canonical docs and accepted app fast-forwarded to remote `main`; obsolete worktrees, branches and safety stashes removed after review |
 | Platform-boundary extraction | Accepted | Primary implementer and focused reviewers | `42cfda8`: shared Linux R 34/34, browser 12/12 and reviewed localized Mac/Linux seams; no duplicated product or Ark fork |
-| Native Mac reliability qualification | Implementing | Primary implementer | Preserve prior identity warning when a second Save As fails; bound discard close wait, then submit focused candidate |
+| Native Mac reliability qualification | Implementing | Primary implementer | Correct the false-green late-conflict regression; source fix passed review, full acceptance follows test review |
 | Scientific workflow qualification | Queued | Unassigned | A realistic scientific notebook, real CRAN/Bioconductor packages, representative R reactivity idioms, two live notebooks under load and rich publishing are independently qualified through packaged Alder |
 | Product completion and public Mac delivery | Queued | Unassigned | Project/Git ownership, notebook-wide search, agent presence, accessibility, scale, upgrade state, release identity, architecture support and signed/notarized distribution have explicit accepted behavior |
 
