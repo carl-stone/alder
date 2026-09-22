@@ -44,20 +44,22 @@ The headless last-window journey uses forced teardown and does not qualify nativ
 Quit. Finder/Open, Save As replacement, dirty-close sheets and Dock activation still
 require a supervised foreground pass.
 
-**Accepted subcheckpoint pending integration:** `f225f33` plus generated bundle
-`3520e53` passed the complete signed-app gate, independent focused reviews and the
-separate packaged external-path journey. Atomic replacement, Git reset, rename and
-delete preserve an acknowledged edit, still-local draft and independent disk
-contents; Save As recovery copies reopen in a fresh process. The narrow host-exit
-fix handles `ECONNRESET` after acknowledged normal release while active-lease
-failure still blocks Quit. The hidden path exercises renderer Save As, not the
-native chooser. The primary implementer is integrating the accepted source.
+**Accepted subcheckpoint:** `f225f33` plus generated bundle `3520e53`, integrated
+on pushed main at `e3b1ed6`, passed the complete signed-app gate, independent
+focused reviews and the separate packaged external-path journey. Atomic replacement,
+Git reset, rename and delete preserve an acknowledged edit, still-local draft and
+independent disk contents; Save As recovery copies reopen in a fresh process. The
+narrow host-exit fix handles `ECONNRESET` after acknowledged normal release while
+active-lease failure still blocks Quit. The hidden path exercises renderer Save As,
+not the native chooser.
 
-**Next boundary correction:** Save As currently publishes destination bytes before
+**Current bounded slice:** Save As currently publishes destination bytes before
 fallible recovery/ownership setup completes. A later failure can report Save As
 failed while leaving the destination changed. Move fallible preparation before the
-file commit and make post-commit adoption minimal. Then correct explicit Close on a
-dead host so it can abandon the unreachable lease and retain recovery.
+file commit and make post-commit adoption minimal. Prove both existing-destination
+replacement and new-path failure leave the user's notebook and disk in a truthful,
+recoverable state. Then correct explicit Close on a dead host so it can abandon the
+unreachable lease and retain recovery.
 
 **Further review findings:** byte-identical external replacements should not stale
 R results; native host monitoring need not fetch the full notebook every five
@@ -90,7 +92,7 @@ One item is active. New approved work is added here before assignment.
 | Release README and feature demo | Accepted | Primary implementer and independent reviewers | `b316bc3`: release-facing install/use guide and three compact real-app feature captures; media and factual reviews passed |
 | Repository integration and cleanup | Accepted | Primary implementer and focused cleanup reviewers | `554da34`: canonical docs and accepted app fast-forwarded to remote `main`; obsolete worktrees, branches and safety stashes removed after review |
 | Platform-boundary extraction | Accepted | Primary implementer and focused reviewers | `42cfda8`: shared Linux R 34/34, browser 12/12 and reviewed localized Mac/Linux seams; no duplicated product or Ark fork |
-| Native Mac reliability qualification | Implementing | Primary implementer | Integrate accepted `3520e53` content to main, then correct Save As commit boundary before the next full gate |
+| Native Mac reliability qualification | Implementing | Primary implementer | Correct Save As commit boundary so failed Save As cannot leave a published destination with old in-app identity; submit clean focused candidate for review |
 | Scientific workflow qualification | Queued | Unassigned | A realistic scientific notebook, real CRAN/Bioconductor packages, representative R reactivity idioms, two live notebooks under load and rich publishing are independently qualified through packaged Alder |
 | Product completion and public Mac delivery | Queued | Unassigned | Project/Git ownership, notebook-wide search, agent presence, accessibility, scale, upgrade state, release identity, architecture support and signed/notarized distribution have explicit accepted behavior |
 
