@@ -10,42 +10,35 @@ copies in other worktrees are snapshots.
 
 ## Current assignment
 
-**Native Mac reliability — Review on Mac.**
+**Native Mac reliability — Implementing on Mac.**
 
-The shared portable-core checkpoint is accepted on pushed main `42cfda8`. Current main
-`e9293e5` also passed fresh full signed Mac acceptance and packaged native journeys.
-The staged signed app is refreshed; the installed user copy was left untouched. Preserve
-upstream unmodified Ark.
+The shared portable-core checkpoint is accepted on pushed main `42cfda8`.
+`5b3321a` is the latest accepted Mac source, pending integration to main. The
+staged signed app is refreshed; the installed user copy remains untouched.
+Preserve upstream unmodified Ark.
 
 **Finish condition:** ordinary Mac launch, document/window use, recovery and owned-child cleanup
 remain dependable through native failures. Exercise real user journeys through the packaged app
 while keeping Carl's visible desktop free. Record scenarios that genuinely require foreground
 interaction for a later supervised pass; do not infer them from headless checks.
 
-**Accepted subcheckpoint:** `f086e40` packages the R helper from its actual source files rather
-than copying the generated checkout, removing the disk-exhaustion path. Full signed-app acceptance,
-strict signing and natural child cleanup passed. A packaged second client saw an executed unsaved
-draft while disk still held the old source, then observed Save and detached without stopping the
-primary app. This was two app processes, not two windows in one process.
+**Accepted subcheckpoint:** `5b3321a` preserves acknowledged unsaved edits and a
+still-local draft through a packaged backend `SIGKILL`, then resumes R, saves and
+runs. A small Ark guardian removes the dead backend's kernel group, and native
+cleanup checks track both old and recovered groups. Independent reviews, complete
+signed-app acceptance, separate packaged crash journey, strict signing and clean
+owned-child audit passed. Nineteen stale staged-test kernels were terminated;
+the installed user's kernel was untouched. Earlier accepted packaging and
+two-window fixes are `f086e40` and `e9293e5`.
 
-**Accepted subcheckpoint:** `e9293e5` fixes transaction-event dirty state so Save and the native
-unsaved indicator match edited source. A packaged second-instance launch forwarded notebook B
-into the running app; two windows edited, ran and saved separate notebooks without cross-talk,
-and window A remained usable after B closed. Focused checks and full signed-app acceptance
-passed with natural cleanup. Native unsaved-close choices remain unqualified.
+**Current bounded slice:** hard-kill the packaged renderer while a notebook has
+an acknowledged unsaved edit and a still-local draft. Verify recoverable source,
+explicit Save, continued R execution and natural child cleanup without taking over
+Carl's visible desktop. Keep failures actionable rather than silently replaying or
+saving work; record any foreground-only presentation that cannot be qualified here.
 
-**Current bounded slice:** exercise an actual packaged backend process crash while a notebook
-has an acknowledged unsaved edit, and preserve any still-local editor draft where feasible.
-Verify recovery or actionable failure, explicit Save semantics, post-recovery execution and
-child cleanup without taking over the visible desktop.
-
-**Final acceptance running:** independent focused reviews passed clean `5b3321a`.
-The Ark launch guardian stops the exact kernel group after backend hard death;
-Ark remains upstream unmodified. Packaged crash checks track old/new groups,
-and 19 verified stale staged-test kernels were terminated without touching the
-installed user's kernel. The primary implementer owns one full signed-app
-acceptance on this exact source; the lead then accepts or returns a concrete
-failure for correction.
+**Next action:** primary implementer integrates accepted `5b3321a` with current
+main, then develops the renderer-crash slice and returns one clean focused candidate.
 
 The release README and three feature GIFs remain on `main`. The separate Ark source repository
 is untouched.
@@ -72,7 +65,7 @@ One item is active. New approved work is added here before assignment.
 | Release README and feature demo | Accepted | Primary implementer and independent reviewers | `b316bc3`: release-facing install/use guide and three compact real-app feature captures; media and factual reviews passed |
 | Repository integration and cleanup | Accepted | Primary implementer and focused cleanup reviewers | `554da34`: canonical docs and accepted app fast-forwarded to remote `main`; obsolete worktrees, branches and safety stashes removed after review |
 | Platform-boundary extraction | Accepted | Primary implementer and focused reviewers | `42cfda8`: shared Linux R 34/34, browser 12/12 and reviewed localized Mac/Linux seams; no duplicated product or Ark fork |
-| Native Mac reliability qualification | Review | Lead and independent reviewers | Sleep/wake, real Finder/dialog/window flows, packaged crash recovery and supported-filesystem behavior work through visible installed-app paths without lost work or stranded processes |
+| Native Mac reliability qualification | Implementing | Primary implementer | Sleep/wake, real Finder/dialog/window flows, packaged crash recovery and supported-filesystem behavior work through visible installed-app paths without lost work or stranded processes |
 | Scientific workflow qualification | Queued | Unassigned | A realistic scientific notebook, real CRAN/Bioconductor packages, representative R reactivity idioms, two live notebooks under load and rich publishing are independently qualified through packaged Alder |
 | Product completion and public Mac delivery | Queued | Unassigned | Project/Git ownership, notebook-wide search, agent presence, accessibility, scale, upgrade state, release identity, architecture support and signed/notarized distribution have explicit accepted behavior |
 
@@ -206,12 +199,12 @@ commit that the next stage can safely simplify.
 
 ## Latest accepted checkpoint
 
-`e9293e5` is the latest accepted Mac application source. Fresh full final acceptance passed:
+`5b3321a` is the latest accepted Mac application source. Fresh full final acceptance passed:
 signed build, R and host checks, installed services, twelve production browser journeys, packaged
-recovery journeys, license notices and natural owned-child cleanup. The focused packaged
-two-window journey separately qualified second-instance forwarding, isolated notebook drafts,
-execution, dirty state and Save. Earlier UI/UX and diagnostics acceptance detail lives in Git
-and the implementation task.
+recovery journeys, license notices and natural owned-child cleanup. A separate packaged backend
+hard-crash journey qualified accepted and local drafts, resumed R, Save, rerun and removal of the
+dead Ark group. Earlier UI/UX and diagnostics acceptance detail lives in Git and the implementation
+task.
 
 The staged app at `host/.application-desktop/Alder.app` follows the implementation
 checkout and may contain newer, unaccepted changes. Acceptance is tied to the commit
