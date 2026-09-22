@@ -37,8 +37,13 @@ explicit Save, continued R execution and natural child cleanup without taking ov
 Carl's visible desktop. Keep failures actionable rather than silently replaying or
 saving work; record any foreground-only presentation that cannot be qualified here.
 
-**Next action:** primary implementer is developing the renderer-crash slice and
-returns one clean focused candidate for independent review.
+**Correction in progress:** clean `2555343` passed packaged renderer `SIGKILL`
+journeys and focused review of preserved edits, explicit Save, continued R and
+authenticated reload. Review found one remaining failure path: a transient ticket
+or navigation error leaves a dead window with no native reload action while its
+backend remains healthy. The primary implementer owns a retryable native recovery
+action and a failure-then-success regression. Review the next clean candidate
+before one full signed-app acceptance.
 
 The release README and three feature GIFs remain on `main`. The separate Ark source repository
 is untouched.
