@@ -1038,7 +1038,7 @@ export class ElectronMain {
       if (record.released || record.hostRestart) return;
       // An authenticated page has its own actionable connection banner. A native
       // sheet would hide its Restart host button and can outlive a successful retry.
-      if (record.authenticatedRendererGeneration === record.loadGeneration && !record.window.webContents.isDestroyed?.()) return;
+      if (this.hasAuthenticatedRenderer(record)) return;
       const failedConnection = record.connection;
       record.hostFailureShown = true;
       const answer = await this.runtime.dialog.showMessageBox(record.window, {
@@ -1069,13 +1069,18 @@ export class ElectronMain {
     return attempt;
   }
 
+  private hasAuthenticatedRenderer(record: ElectronWindowRecord): boolean {
+    return record.authenticatedRendererGeneration === record.loadGeneration && !record.window.webContents.isDestroyed?.();
+  }
+
   private async performHostRestart(record: ElectronWindowRecord): Promise<void> {
     const old = record.connection;
     let next: SessionConnection | undefined;
     let navigationStarted = false;
     try {
-      // Preserve live edits while the old page still owns its authenticated IPC origin.
-      await this.prepareRendererUnload(record);
+      // Preserve live edits while an authenticated page can still answer IPC.
+      // After failed navigation and rollback, the first flush is already stored.
+      if (this.hasAuthenticatedRenderer(record)) await this.prepareRendererUnload(record);
       const resources = await this.applicationResources();
       const acquire = this.options.acquireSession ?? acquireNotebookSession;
       next = await acquire({

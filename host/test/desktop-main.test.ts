@@ -1064,10 +1064,14 @@ test("failed replacement and rollback loads offer native restart, then a later r
   const failedReplacement = connection("both-loads-failed", path, ticket);
   const workingReplacement = connection("both-loads-working", path, ticket);
   const replacements = [failedReplacement, workingReplacement];
+  let acquisitions = 0;
   const electronRuntime = runtime(0);
   let recoveryOffers = 0;
   electronRuntime.dialog.showMessageBox = async () => { recoveryOffers += 1; return { response: 0 }; };
-  const main = new ElectronMain(electronRuntime, { resources, acquireSession: async () => replacements.shift()! });
+  const main = new ElectronMain(electronRuntime, { resources, acquireSession: async () => {
+    acquisitions += 1;
+    return replacements.shift()!;
+  } });
   let headersCallback: ((details: { resourceType: string; responseHeaders: Record<string, string[]> }, callback: (decision: { cancel?: boolean }) => void) => void) | undefined;
   let record: any;
   let loads = 0;
@@ -1080,6 +1084,17 @@ test("failed replacement and rollback loads offer native restart, then a later r
   });
   window.webContents.session!.webRequest!.onHeadersReceived = (_filter, callback) => { headersCallback = callback as typeof headersCallback; };
   record = recordFor(main, oldConnection, window);
+  record.loadGeneration = 1;
+  record.authenticatedRendererGeneration = 1;
+  const acknowledgeCommand = window.webContents.send.bind(window.webContents);
+  let draftFlushes = 0;
+  window.webContents.send = (channel, value) => {
+    if ((value as { action?: string }).action === "prepare-unload") {
+      draftFlushes += 1;
+      if (loads > 0) return;
+    }
+    acknowledgeCommand(channel, value);
+  };
   const draftId = record.draftId;
   (main as any).querySnapshot = async () => { throw new Error("backend stopped"); };
   (main as any).showApplicationError = async () => undefined;
@@ -1091,6 +1106,8 @@ test("failed replacement and rollback loads offer native restart, then a later r
   assert.equal(window.destroyed, false);
   await (main as any).monitorHost(record);
   assert.equal(recoveryOffers, 1);
+  assert.equal(acquisitions, 2);
+  assert.equal(draftFlushes, 1);
   assert.equal(record.connection, workingReplacement);
   assert.equal(oldConnection.releaseCount, 1);
   await (main as any).monitorHost(record);
@@ -1224,6 +1241,8 @@ test("host restart preserves the live editor when its current draft cannot be st
   let acquired = false;
   const main = new ElectronMain(runtime(), { resources, acquireSession: async () => { acquired = true; throw new Error("should not replace editor"); } });
   const record = recordFor(main, connection("restart-draft", "/tmp/restart-draft.R", async () => jsonResponse({})), window);
+  record.loadGeneration = 1;
+  record.authenticatedRendererGeneration = 1;
   window.webContents.send = () => undefined;
   await (main as any).restartHost(record);
   assert.equal(acquired, false);
