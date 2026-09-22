@@ -10,7 +10,7 @@ copies in other worktrees are snapshots.
 
 ## Current assignment
 
-**Native Mac reliability — Implementing on Mac.**
+**Native Mac reliability — Review on Mac.**
 
 **Latest accepted checkpoint:** source `237a254`. Independent lifecycle rereviews
 and full signed-app acceptance passed in 473.82 seconds: real-R orphan-run exit,
@@ -32,11 +32,10 @@ full-notebook health queries with existing renderer connection reporting and a
 small fallback for bootstrap/failed-renderer cases. Preserve authoritative Save As
 identity adoption, native path/window bookkeeping and conflict detection.
 
-**Owner and next action:** production rereview passed `349c2e1`; primary corrects
-one false-green regression trigger. The delayed old-host reply must report a third
-Save As identity so the pre-fix code would overwrite the replacement connection.
-Keep the reviewed source unchanged, run that focused regression and return a clean
-test correction. Lead then verifies the assertion and dispatches full acceptance.
+**Owner and next action:** production rereview passed `349c2e1`; the lead verified
+the narrow test correction in clean candidate `310427b`. The final acceptance
+reviewer owns the full signed-app gate and packaged Save As/restart journey on
+that candidate. Primary holds; lead records acceptance or a consolidated correction.
 
 **Approved next slice:**
 
@@ -81,7 +80,7 @@ One item is active. New approved work is added here before assignment.
 | Release README and feature demo | Accepted | Primary implementer and independent reviewers | `b316bc3`: release-facing install/use guide and three compact real-app feature captures; media and factual reviews passed |
 | Repository integration and cleanup | Accepted | Primary implementer and focused cleanup reviewers | `554da34`: canonical docs and accepted app fast-forwarded to remote `main`; obsolete worktrees, branches and safety stashes removed after review |
 | Platform-boundary extraction | Accepted | Primary implementer and focused reviewers | `42cfda8`: shared Linux R 34/34, browser 12/12 and reviewed localized Mac/Linux seams; no duplicated product or Ark fork |
-| Native Mac reliability qualification | Implementing | Primary implementer | Correct one stale-reply regression trigger on reviewed source `349c2e1`, then full signed-app acceptance |
+| Native Mac reliability qualification | Review | Lead and final acceptance reviewer | Run full signed-app acceptance and packaged Save As/restart on `310427b` |
 | Scientific workflow qualification | Queued | Unassigned | A realistic scientific notebook, real CRAN/Bioconductor packages, representative R reactivity idioms, two live notebooks under load and rich publishing are independently qualified through packaged Alder |
 | Product completion and public Mac delivery | Queued | Unassigned | Project/Git ownership, notebook-wide search, agent presence, accessibility, scale, upgrade state, release identity, architecture support and signed/notarized distribution have explicit accepted behavior |
 
