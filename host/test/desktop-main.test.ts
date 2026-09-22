@@ -396,7 +396,7 @@ test("Open and startup errors use ownerless native dialogs", async () => {
   assert.equal(dialogCalls[1]!.length, 1);
 });
 
-test("desktop identity polling adopts an authoritative Save As and preserves one window", async () => {
+test("renderer Save As report immediately updates native identity and restart target without notebook polling", async () => {
   const root = await mkdtemp(join(tmpdir(), "alder-desktop-identity-"));
   try {
     const oldPath = join(root, "before.R");
@@ -404,25 +404,74 @@ test("desktop identity polling adopts an authoritative Save As and preserves one
     await writeFile(oldPath, "old\n");
     await writeFile(newPath, "new\n");
     const newCanonicalPath = await realpath(newPath);
+    let identityRequests = 0;
     const oldConnection = connection("session-before", oldPath, async path => {
       assert.equal(path, "/api/identity");
+      identityRequests += 1;
       return jsonResponse(identity("session-after", newCanonicalPath));
     });
     const window = windowWithLoad();
-    const main = new ElectronMain(runtime(), { resources });
+    const handlers = new Map<string, (event: unknown, ...args: unknown[]) => Promise<unknown>>();
+    const electronRuntime = runtime();
+    electronRuntime.BrowserWindow.fromWebContents = () => window;
+    electronRuntime.ipcMain.handle = (channel, handler) => { handlers.set(channel, handler); };
+    let restartPath: string | null | undefined;
+    const nextConnection = connection("session-after", newCanonicalPath, async path => {
+      assert.equal(path, "/api/ticket");
+      return jsonResponse({ ticket: "c".repeat(64), expiresAt: "2026-12-01T00:00:00.000Z" });
+    });
+    const main = new ElectronMain(electronRuntime, { resources, acquireSession: async options => {
+      restartPath = options.path;
+      return nextConnection;
+    } });
     const record = recordFor(main, oldConnection, window);
+    record.loadGeneration = 1;
+    record.authenticatedRendererGeneration = 1;
+    (main as any).installIpcHandlers();
+    (main as any).loadAuthenticatedNotebook = async () => undefined;
+    await (main as any).monitorHost(record);
+    assert.equal(identityRequests, 0);
+    const update = handlers.get("alderDesktop:windowState")!;
+    const event = { sender: window.webContents, senderFrame: window.webContents.mainFrame };
+    const reported = update(event, { path: newCanonicalPath, dirty: false, saveState: "saved", sessionEpoch: "epoch" });
+    const restarting = (main as any).restartHost(record);
+    await Promise.all([reported, restarting]);
 
-    await (main as any).assertHostContinuity(record);
-
-    assert.equal(record.connection.sessionKey, "session-after");
+    assert.equal(restartPath, newCanonicalPath);
+    assert.equal(record.connection, nextConnection);
     assert.equal(record.connection.canonicalPath, newCanonicalPath);
+    assert.ok(identityRequests > 0);
     assert.equal((main as any).byKey.get(oldPath), undefined);
     assert.equal((main as any).byKey.get(newCanonicalPath)?.has(record), true);
     assert.deepEqual(record.keys, new Set([newCanonicalPath]));
     assert.equal(window.titles.at(-1), "after.R — Alder");
+    await main.openNotebook(newCanonicalPath);
+    assert.equal(window.focusedCount, 1);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("native restart requests a fresh notebook document response on the same host origin", async () => {
+  const urls: URL[] = [];
+  let response: ((details: { resourceType: string; responseHeaders: Record<string, string[]> }, callback: (result: { cancel?: boolean }) => void) => void) | undefined;
+  let record: any;
+  const window = windowWithLoad(async url => {
+    urls.push(new URL(url));
+    response!({ resourceType: "mainFrame", responseHeaders: { "X-Alder-Continuity-Proof": ["proof"] } }, result => assert.equal(result.cancel, undefined));
+    queueMicrotask(() => record.rendererReady.resolve());
+  });
+  window.webContents.session!.webRequest!.onHeadersReceived = (_filter, callback) => { response = callback as typeof response; };
+  const main = new ElectronMain(runtime(), { resources });
+  record = recordFor(main, connection("same-origin-reload", "/tmp/same-origin-reload.R", async () => jsonResponse({})), window);
+  await (main as any).loadAuthenticatedNotebook(record, "a".repeat(64));
+  await (main as any).loadAuthenticatedNotebook(record, "b".repeat(64));
+  assert.equal(urls.length, 2);
+  assert.equal(urls[0]!.pathname, "/index.html");
+  assert.equal(urls[1]!.pathname, "/index.html");
+  assert.notEqual(urls[0]!.search, urls[1]!.search);
+  assert.equal(urls[0]!.hash, "#ticket=" + "a".repeat(64));
+  assert.equal(urls[1]!.hash, "#ticket=" + "b".repeat(64));
 });
 
 test("cancelled close keeps the editor open when the host is unavailable", async () => {

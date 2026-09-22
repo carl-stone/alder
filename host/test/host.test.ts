@@ -469,6 +469,48 @@ test("clean external reload does not create recovery startup deferral", {
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("same-content external replacement keeps a completed R result while a source edit reloads", {
+  skip: !APPLICATION_ROOT, timeout: 60_000,
+}, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "alder-same-content-reload-"));
+  const path = join(directory, "notebook.R");
+  const counter = join(directory, "runs.txt");
+  const source = `# %%\ncount <- if (file.exists(${JSON.stringify(counter)})) as.integer(readLines(${JSON.stringify(counter)})) else 0L\nwriteLines(as.character(count + 1L), ${JSON.stringify(counter)})\ncount + 1L\n`;
+  let app: RunningHost | undefined;
+  try {
+    await writeFile(path, source);
+    app = await startInstalledHost(path, { executionMode: "automatic" });
+    assert.equal((await dispatchHost(app, { type: "run", scope: "all", changes: [] })).error, null);
+    const completed = app.controller.snapshot();
+    assert.match(JSON.stringify(completed.cells[0]!.outputs), /\b1\b/);
+    assert.equal(await readFile(counter, "utf8"), "1\n");
+    const replacement = join(directory, "replacement.R");
+    await writeFile(replacement, source);
+    await rename(replacement, path);
+    const deadline = Date.now() + 5_000;
+    while (app.controller.snapshot().disk.version === completed.disk.version && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    const unchanged = app.controller.snapshot();
+    assert.notEqual(unchanged.disk.version, completed.disk.version);
+    assert.equal(unchanged.documentRevision, completed.documentRevision);
+    assert.deepEqual(unchanged.cells[0]!.outputs, completed.cells[0]!.outputs);
+    assert.equal(await readFile(counter, "utf8"), "1\n");
+    await writeFile(path, "# %%\n43\n");
+    const contentDeadline = Date.now() + 5_000;
+    while (app.controller.snapshot().cells[0]!.body[0] !== "43" && Date.now() < contentDeadline) {
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    const changed = app.controller.snapshot();
+    assert.deepEqual(changed.cells[0]!.body, ["43"]);
+    assert.ok(changed.documentRevision > unchanged.documentRevision);
+    assert.equal(changed.dirty, false);
+  } finally {
+    await app?.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 test("installed host runs exact edited source, saves bytes and publishes committed results", {
   skip: !APPLICATION_ROOT, timeout: 90_000,
 }, async () => {

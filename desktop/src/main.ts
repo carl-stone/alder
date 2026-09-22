@@ -270,6 +270,7 @@ function authenticatedNotebookUrl(origin: string, ticket: string): string {
   if (!isLoopbackHttpOrigin(origin)) throw new Error("desktop host origin is not a loopback HTTP origin");
   if (typeof ticket !== "string" || !/^[0-9a-f]{64}$/.test(ticket)) throw new Error("desktop bootstrap ticket is invalid");
   const url = new URL("/index.html", origin);
+  url.searchParams.set("navigation", randomUUID());
   url.hash = `ticket=${encodeURIComponent(ticket)}`;
   return url.href;
 }
@@ -419,6 +420,11 @@ export class ElectronMain {
       const pending = this.pending.get(hint);
       if (pending) await pending;
       if (!options.newWindow) {
+        const prior = [...(this.byKey.get(hint) ?? [])].filter(record => !record.released);
+        await Promise.allSettled(prior.map(record => this.assertHostContinuity(record)));
+        if (prior.length === 0 && !this.byKey.has(hint)) {
+          await Promise.allSettled([...this.records].filter(record => !record.released).map(record => this.assertHostContinuity(record)));
+        }
         const existing = this.byKey.get(hint)?.values().next().value as ElectronWindowRecord | undefined;
         if (existing && !existing.released) {
           this.focus(existing);
@@ -708,11 +714,15 @@ export class ElectronMain {
       if (!response.ok) throw new Error("The host rejected renderer timing metadata.");
     });
     ipc.removeHandler?.(IPC_CHANNELS.windowState);
-    ipc.handle(IPC_CHANNELS.windowState, (event, ...args) => {
+    ipc.handle(IPC_CHANNELS.windowState, async (event, ...args) => {
       if (args.length !== 1) throw new Error("Window state requires one value");
       const record = this.recordForEvent(event);
       const state = windowStateSchema.parse(args[0]);
       if (state.sessionEpoch !== record.connection.epoch) throw new Error("Window state belongs to another session");
+      if (state.path !== record.connection.canonicalPath) {
+        await this.assertHostContinuity(record);
+        if (state.path !== record.connection.canonicalPath) return;
+      }
       record.windowState = state;
       record.dirty = state.dirty;
       applyNativeWindowState(record.window, state);
@@ -1065,10 +1075,10 @@ export class ElectronMain {
     return notebookQueryResultSchema.parse(envelope.result);
   }
   private async monitorHost(record: ElectronWindowRecord): Promise<void> {
-    if (record.released || record.hostRestart || record.hostFailureShown || record.monitorInProgress) return;
+    if (record.released || record.hostRestart || record.hostFailureShown || record.monitorInProgress || this.hasAuthenticatedRenderer(record)) return;
     record.monitorInProgress = true;
     try {
-      await this.querySnapshot(record);
+      await this.assertHostContinuity(record);
     } catch (error) {
       if (record.released || record.hostRestart) return;
       // An authenticated page has its own actionable connection banner. A native
@@ -1109,13 +1119,18 @@ export class ElectronMain {
   }
 
   private async performHostRestart(record: ElectronWindowRecord): Promise<void> {
-    const old = record.connection;
+    let old = record.connection;
     let next: SessionConnection | undefined;
     let navigationStarted = false;
     try {
       // Preserve live edits while an authenticated page can still answer IPC.
       // After failed navigation and rollback, the first flush is already stored.
       if (this.hasAuthenticatedRenderer(record)) await this.prepareRendererUnload(record);
+      try { await this.assertHostContinuity(record); }
+      catch (error) {
+        if (record.windowState && record.windowState.path !== record.connection.canonicalPath) throw error;
+      }
+      old = record.connection;
       const resources = await this.applicationResources();
       const acquire = this.options.acquireSession ?? acquireNotebookSession;
       next = await acquire({

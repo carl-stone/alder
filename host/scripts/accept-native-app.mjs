@@ -389,15 +389,28 @@ async function runSaveAsBoundaryJourney() {
   if (await readFile(destination, 'utf8') !== initialNotebook.replace('value <- 0L\nvalue', 'value <- 17L\nvalue')) throw new Error('Save As did not publish source and notebook metadata');
   if (await readFile(projectSettings, 'utf8') !== 'packages:\n  - stats\n') throw new Error('Save As changed destination project settings');
   await replaceEditor(primary.cdp, 'value <- 18L\nvalue');
-  await shortcut(primary.cdp, 's', 'KeyS', 83, 4);
-  await waitFileSource(destination, 'value <- 18L\nvalue');
+  await primary.cdp.wait("window.__alderHost.client.document.snapshot.cells[0].body.join('\\n') === 'value <- 18L\\nvalue' && window.__alderHost.client.document.snapshot.dirty", 15_000);
+  await primary.cdp.evaluate("window.__alderBeforeRestart = window.__alderHost.client; void window.alderDesktop.restartHost().then(() => window.__restartOutcome = 'settled', error => window.__restartOutcome = String(error)); true");
+  await primary.cdp.wait(`!window.__alderBeforeRestart && window.__alderHost?.client?.document?.snapshot?.path === ${JSON.stringify(canonicalDestination)} &&
+    window.__alderHost.client.document.snapshot.cells[0].body.join('\\n') === 'value <- 18L\\nvalue' &&
+    window.__alderHost.client.document.snapshot.dirty && window.__alderHost.view.transportState === 'open'`, 20_000).catch(async error => {
+    const state = await primary.cdp.evaluate("({before: !!window.__alderBeforeRestart, outcome: window.__restartOutcome, path: window.__alderHost?.client?.document?.snapshot?.path, dirty: window.__alderHost?.client?.document?.snapshot?.dirty, transport: window.__alderHost?.view?.transportState})").catch(() => null);
+    throw new Error(`native restart after Save As did not restore the draft: ${JSON.stringify(state)}; app stderr: ${Buffer.concat(primary.stderr).toString('utf8').slice(-1500)}`, { cause: error });
+  });
+  await primary.cdp.wait("[...document.querySelectorAll('[data-recovery-panel] button')].some(button => button.textContent === 'Continue recovered')", 10_000);
+  await primary.cdp.evaluate("[...document.querySelectorAll('[data-recovery-panel] button')].find(button => button.textContent === 'Continue recovered').click()");
+  await primary.cdp.evaluate("document.getElementById('save').click()");
+  await waitFileSource(destination, 'value <- 18L\nvalue', 8_000).catch(async error => {
+    const state = await primary.cdp.evaluate("({saveState:document.getElementById('save-state')?.textContent, saveDisabled:document.getElementById('save')?.disabled, status:document.getElementById('status')?.textContent, actionError:window.__alderHost?.view?.actionError, recovery:window.__alderHost?.client?.recoveryState, path:window.__alderHost?.client?.document?.snapshot?.path, dirty:window.__alderHost?.client?.document?.snapshot?.dirty, source:window.__alderHost?.client?.document?.snapshot?.cells?.[0]?.body})").catch(() => null);
+    throw new Error(`Save after native restart failed: ${JSON.stringify(state)}; disk=${JSON.stringify(await readFile(destination, 'utf8'))}`, { cause: error });
+  });
   if (await readFile(destination, 'utf8') !== initialNotebook.replace('value <- 0L\nvalue', 'value <- 18L\nvalue')) throw new Error('later Save changed notebook metadata');
   await stop(primary);
   primary = await launch('electron-save-as-reopened', false, destination);
   await primary.cdp.wait(`window.__alderHost.client.document.snapshot.path === ${JSON.stringify(canonicalDestination)} && window.__alderHost.client.document.snapshot.cells[0].body.join('\\n') === 'value <- 18L\\nvalue'`, 30_000);
   if (await readFile(notebook, 'utf8') !== initialNotebook) throw new Error('Save As changed the original notebook');
   if (await readFile(projectSettings, 'utf8') !== 'packages:\n  - stats\n') throw new Error('Save As changed destination project settings after relaunch');
-  process.stdout.write(JSON.stringify({ saveAsBoundary: true, destinationCommitted: true, originalPreserved: true, projectSettingsPreserved: true, laterSaveAndRelaunch: true, nativeChooser: 'not-exercised' }) + '\n');
+  process.stdout.write(JSON.stringify({ saveAsBoundary: true, destinationCommitted: true, originalPreserved: true, projectSettingsPreserved: true, nativeRestartKeptDraft: true, laterSaveAndRelaunch: true, nativeChooser: 'not-exercised' }) + '\n');
 }
 
 async function runMultiWindowJourney(primary) {

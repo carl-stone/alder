@@ -110664,6 +110664,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
   const sourceProtocolObservation = (candidate) => isUntitled ? { state: "untitled", digest: null, version: null, error: null } : candidate.observation();
   const sidecarProtocolObservations = (candidate, untitled = isUntitled) => untitled ? { config: { state: "absent", digest: null, version: null, error: null }, layout: { state: "absent", digest: null, version: null, error: null }, packages: { state: "absent", digest: null, version: null, error: null } } : { config: candidate.sidecarObservation("config"), layout: candidate.sidecarObservation("layout"), packages: candidate.sidecarObservation("packages") };
   const sameObservation = (left, right) => left.state === right.state && left.digest === right.digest && left.version === right.version;
+  const sameContent = (left, right) => left.state === right.state && left.digest === right.digest;
   const asHostError = (error61, code2, operationId) => ({
     code: code2,
     message: errorMessage(error61),
@@ -111367,20 +111368,37 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
           observed = await DocumentStore.open(store.path);
           const current = observed.store.observation();
           const currentSidecars = sidecarProtocolObservations(observed.store);
-          const sourceChanged = !sameObservation(context.disk, current);
-          const sidecarsChanged = !sameObservation(context.sidecars.config, currentSidecars.config) || !sameObservation(context.sidecars.layout, currentSidecars.layout) || !sameObservation(context.sidecars.packages, currentSidecars.packages);
-          if (request.kind === "watcher" && !sourceChanged && !sidecarsChanged) {
+          const sourceObservationChanged = !sameObservation(context.disk, current);
+          const sourceChanged = !sameContent(context.disk, current);
+          const sidecarObservationsChanged = !sameObservation(context.sidecars.config, currentSidecars.config) || !sameObservation(context.sidecars.layout, currentSidecars.layout) || !sameObservation(context.sidecars.packages, currentSidecars.packages);
+          const sidecarsChanged = !sameContent(context.sidecars.config, currentSidecars.config) || !sameContent(context.sidecars.layout, currentSidecars.layout) || !sameContent(context.sidecars.packages, currentSidecars.packages);
+          if (request.kind === "watcher" && !sourceObservationChanged && !sidecarObservationsChanged) {
             await observed.store.close();
             publishSource(context, { document: context.document, path: context.path, layout: context.layout, disk: context.disk, sidecars: context.sidecars, dirty: context.dirty, advanceRevision: false });
             return { changed: false };
           }
+          if (request.kind === "watcher" && !sourceChanged && !sidecarsChanged) {
+            if (sourceObservationChanged) await store.adoptSourceObservation(observed.store);
+            if (sidecarObservationsChanged) store.adoptSidecarObservations(observed.store);
+            await observed.store.close();
+            publishSource(context, {
+              document: context.document,
+              path: context.path,
+              layout: context.layout,
+              disk: current,
+              sidecars: currentSidecars,
+              dirty: context.dirty,
+              advanceRevision: false
+            });
+            return { changed: false, disk: current };
+          }
           if (context.dirty && (sourceChanged || sidecarsChanged || request.kind === "reload-source")) {
-            if (sourceChanged) await store.adoptSourceObservation(observed.store);
+            if (sourceObservationChanged) await store.adoptSourceObservation(observed.store);
             store.adoptSidecarObservations(observed.store);
             await observed.store.close();
-            publishSource(context, { document: context.document, path: context.path, layout: context.layout, disk: sourceChanged ? current : context.disk, sidecars: currentSidecars, dirty: true, advanceRevision: false });
+            publishSource(context, { document: context.document, path: context.path, layout: context.layout, disk: sourceObservationChanged ? current : context.disk, sidecars: currentSidecars, dirty: true, advanceRevision: false });
             controller.recordActionError("external notebook state changed; local draft retained", sourceChanged ? "source_conflict" : "sidecar_conflict");
-            return { conflict: true, disk: sourceChanged ? current : context.disk };
+            return { conflict: true, disk: sourceObservationChanged ? current : context.disk };
           }
           if (request.kind === "watcher" && current.state === "absent" && !context.dirty) {
             await store.adoptSourceObservation(observed.store);

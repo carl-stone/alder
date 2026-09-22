@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { fork } from "node:child_process";
 import { once } from "node:events";
-import { chmod, mkdir, mkdtemp, open, readFile, readdir, realpath, rm, stat, writeFile, type FileHandle } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm, stat, writeFile, type FileHandle } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { setTimeout as delay } from "node:timers/promises";
 import { dirname, join, resolve } from "node:path";
@@ -187,6 +187,43 @@ if (crashPath) {
       await edit(app, "x <- 3");
       await command(app, { type: "save" });
       assert.equal(await readFile(copy, "utf8"), "# %%\nx <- 3\n");
+    } finally { await app?.close(); await rm(directory, { recursive: true, force: true }); }
+  });
+
+  test("same-content replacement preserves a dirty draft and still protects its save baseline", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "alder-same-source-dirty-")));
+    const path = join(directory, "notebook.R");
+    const source = "# %%\nx <- 1\n";
+    let app: RunningHost | undefined;
+    try {
+      await writeFile(path, source);
+      app = await startDocument(path, directory);
+      await edit(app, "x <- 2");
+      const before = app.controller.snapshot();
+      const replacement = join(directory, "replacement.R");
+      await writeFile(replacement, source);
+      await rename(replacement, path);
+      const deadline = Date.now() + 5_000;
+      while (app.controller.snapshot().disk.version === before.disk.version && Date.now() < deadline) {
+        await delay(20);
+      }
+      const observed = app.controller.snapshot();
+      assert.notEqual(observed.disk.version, before.disk.version);
+      assert.equal(observed.documentRevision, before.documentRevision);
+      assert.deepEqual(observed.cells[0]!.body, ["x <- 2"]);
+      assert.equal(observed.dirty, true);
+      assert.equal((await dispatch(app, { type: "save" })).error?.code, "source_conflict");
+      assert.equal(await readFile(path, "utf8"), source);
+      await writeFile(path, "# %%\nx <- 9\n");
+      const contentDeadline = Date.now() + 5_000;
+      while (app.controller.snapshot().disk.digest === observed.disk.digest && Date.now() < contentDeadline) {
+        await delay(20);
+      }
+      assert.notEqual(app.controller.snapshot().disk.digest, observed.disk.digest);
+      assert.deepEqual(app.controller.snapshot().cells[0]!.body, ["x <- 2"]);
+      assert.equal(app.controller.snapshot().dirty, true);
+      assert.equal((await dispatch(app, { type: "save" })).error?.code, "source_conflict");
+      assert.equal(await readFile(path, "utf8"), "# %%\nx <- 9\n");
     } finally { await app?.close(); await rm(directory, { recursive: true, force: true }); }
   });
 
