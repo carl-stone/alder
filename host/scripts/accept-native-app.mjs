@@ -1,5 +1,5 @@
 import { execFileSync, spawn } from 'node:child_process';
-import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, realpath, rename, rm, unlink, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import WebSocket from 'ws';
@@ -15,6 +15,7 @@ const backendCrash = process.argv.includes('--backend-crash');
 const rendererCrash = process.argv.includes('--renderer-crash');
 const draftHandoff = process.argv.includes('--draft-handoff');
 const appCrash = process.argv.includes('--app-crash');
+const externalPathChurn = process.argv.includes('--external-path-churn');
 const saveIterations = Number(process.env.ALDER_NATIVE_SAVE_ITERATIONS ?? 20);
 const temporary = await mkdtemp('/tmp/alder-native-accept-');
 const workspace = join(temporary, 'workspace');
@@ -26,7 +27,7 @@ const sessions = new Set();
 const started = performance.now();
 let launchSequence = 0;
 await mkdir(workspace);
-const initialNotebook = backendCrash || rendererCrash || draftHandoff || appCrash
+const initialNotebook = backendCrash || rendererCrash || draftHandoff || appCrash || externalPathChurn
   ? `# ---\n# runtime:\n#   on_cell_change: lazy\n${appCrash ? '#   on_startup: true\n' : ''}# ---\n# %%\naccepted_value <- 0L\naccepted_value\n# %%\nlocal_value <- 0L\nlocal_value\n`
   : '# ---\n# runtime:\n#   on_cell_change: lazy\n# ---\n# %%\nvalue <- 0L\nvalue\n';
 await writeFile(notebook, initialNotebook);
@@ -42,11 +43,11 @@ function environment() {
   return result;
 }
 
-async function launch(name, allowRetainedRecovery = false) {
+async function launch(name, allowRetainedRecovery = false, path = notebook) {
   const launchName = `${name}-${++launchSequence}`;
   const stderr = [];
   const child = spawn(executable, [
-    '--headless=new', '--remote-debugging-port=0', `--user-data-dir=${join(temporary, name)}`, notebook,
+    '--headless=new', '--remote-debugging-port=0', `--user-data-dir=${join(temporary, name)}`, path,
   ], { cwd: temporary, env: environment(), stdio: ['ignore', 'ignore', 'pipe'] });
   children.add(child);
   ownedPids.add(child.pid);
@@ -285,6 +286,90 @@ async function disableAutosave(cdp) {
     await cdp.evaluate("document.getElementById('settings-cancel').click()");
   }
   await cdp.wait("!document.getElementById('settings')?.open", 10_000);
+}
+
+async function runExternalPathJourney() {
+  const diskUnchanged = async expected => {
+    if (expected === null) {
+      try { await readFile(notebook); } catch (error) {
+        if (error.code === 'ENOENT') return;
+        throw error;
+      }
+      throw new Error('Save recreated the missing notebook path');
+    }
+    if (await readFile(notebook, 'utf8') !== expected) throw new Error('Save changed the independently edited notebook');
+  };
+  const exercise = async (label, value, mutate, expectedDisk) => {
+    await disableAutosave(primary.cdp);
+    const accepted = `accepted_value <- ${value}L\naccepted_value`;
+    const local = `local_value <- ${value + 1}L\nlocal_value`;
+    await replaceEditor(primary.cdp, accepted);
+    await primary.cdp.wait(`window.__alderHost.client.document.snapshot.cells[0].body.join('\\n') === ${JSON.stringify(accepted)} &&
+      window.__alderHost.client.document.pendingSource().changes.length === 0`, 15_000);
+    await replaceEditor(primary.cdp, local, 1);
+    const before = await primary.cdp.evaluate("({server:window.__alderHost.client.document.snapshot.cells[1].body.join('\\n'),local:window.__alderHost.client.document.cells[1].desiredBody.join('\\n')})");
+    if (before.server !== 'local_value <- 0L\nlocal_value' || before.local !== local) throw new Error(`${label} setup lost the renderer-local draft: ${JSON.stringify(before)}`);
+    await mutate();
+    await primary.cdp.wait("document.querySelector('#status')?.textContent.includes('external notebook state changed')", 20_000);
+    await shortcut(primary.cdp, 's', 'KeyS', 83, 4);
+    await primary.cdp.wait("document.getElementById('save-state')?.textContent === 'Save failed'", 20_000);
+    await diskUnchanged(expectedDisk);
+    const afterConflict = await primary.cdp.evaluate("({accepted:window.__alderHost.client.document.snapshot.cells[0].body.join('\\n'),local:window.__alderHost.client.document.cells[1].desiredBody.join('\\n'),error:window.__alderHost.view.actionError})");
+    if (afterConflict.accepted !== accepted || afterConflict.local !== local || !afterConflict.error?.includes('Notebook changed on disk')) throw new Error(`${label} Save conflict lost source or feedback: ${JSON.stringify(afterConflict)}`);
+    const recovered = join(workspace, `recovered-${label}.R`);
+    await primary.cdp.evaluate(`window.__alderHost.client.saveAs(${JSON.stringify(recovered)})`);
+    const expectedSource = `${accepted}\n# %%\n${local}`;
+    await waitFileSource(recovered, expectedSource);
+    const canonicalRecovered = await realpath(recovered);
+    await primary.cdp.wait(`window.__alderHost.client.document.snapshot.path === ${JSON.stringify(canonicalRecovered)} && !window.__alderHost.client.document.snapshot.dirty`, 20_000);
+    await diskUnchanged(expectedDisk);
+    await stop(primary);
+    primary = await launch(`electron-recovered-${label}`, false, recovered);
+    await primary.cdp.wait(`window.__alderHost.client.document.snapshot.path === ${JSON.stringify(canonicalRecovered)} &&
+      window.__alderHost.client.document.snapshot.cells[0].body.join('\\n') === ${JSON.stringify(accepted)} &&
+      window.__alderHost.client.document.snapshot.cells[1].body.join('\\n') === ${JSON.stringify(local)}`, 30_000);
+    await diskUnchanged(expectedDisk);
+    await stop(primary);
+    primary = undefined;
+  };
+
+  const atomic = '# %%\nexternal_atomic <- 901L\nexternal_atomic\n';
+  await exercise('atomic', 41, async () => {
+    const staged = join(workspace, 'external-atomic.R');
+    await writeFile(staged, atomic);
+    await rename(staged, notebook);
+  }, atomic);
+
+  const git = (...args) => execFileSync('git', ['-C', workspace, ...args], {
+    env: { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' }, stdio: 'pipe',
+  });
+  const gitCommit = message => {
+    git('add', 'native-accept.R');
+    git('-c', 'user.name=Alder acceptance', '-c', 'user.email=alder@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '-q', '-m', message);
+  };
+  await writeFile(notebook, initialNotebook);
+  git('init', '-q');
+  gitCommit('baseline');
+  const gitReplacement = '# %%\nexternal_git <- 902L\nexternal_git\n';
+  await writeFile(notebook, gitReplacement);
+  gitCommit('external replacement');
+  const replacementCommit = git('rev-parse', 'HEAD').toString().trim();
+  git('reset', '--hard', 'HEAD~1');
+  primary = await launch('electron-git', false, notebook);
+  await exercise('git', 43, async () => git('reset', '--hard', replacementCommit), gitReplacement);
+
+  await writeFile(notebook, initialNotebook);
+  primary = await launch('electron-rename', false, notebook);
+  const renamed = join(workspace, 'renamed-external.R');
+  await exercise('rename', 45, async () => rename(notebook, renamed), null);
+  if (await readFile(renamed, 'utf8') !== initialNotebook) throw new Error('external renamed file changed during recovery');
+
+  await writeFile(notebook, initialNotebook);
+  primary = await launch('electron-delete', false, notebook);
+  await exercise('delete', 47, async () => unlink(notebook), null);
+  process.stdout.write(JSON.stringify({ externalPathChurn: ['atomic-replace', 'git-reset', 'rename', 'delete'],
+    saveConflicts: 4, acknowledgedAndLocalPreserved: true, saveAsCopiesRelaunched: 4,
+    saveAsPresentation: 'renderer-command-without-native-panel' }) + '\n');
 }
 
 async function runMultiWindowJourney(primary) {
@@ -638,6 +723,7 @@ try {
   primary = await launch('electron-primary');
   if (cleanupProbe) throw new Error('intentional cleanup probe');
   if (multiWindow) await runMultiWindowJourney(primary);
+  else if (externalPathChurn) await runExternalPathJourney();
   else if (backendCrash) await runBackendCrashJourney(primary);
   else if (rendererCrash) await runRendererCrashJourney(primary);
   else if (draftHandoff) await runDraftHandoffJourney();
