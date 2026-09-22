@@ -10,12 +10,13 @@ copies in other worktrees are snapshots.
 
 ## Current assignment
 
-**Native Mac reliability — Review on Mac.**
+**Native Mac reliability — Implementing on Mac.**
 
-**Latest accepted checkpoint:** source `237a254`. Independent lifecycle rereviews
-and full signed-app acceptance passed in 473.82 seconds: real-R orphan-run exit,
-explicit Discard, browser/native journeys, strict signing and natural cleanup.
-The same source is integrated with canonical docs on pushed main at `65a3e4b`.
+**Latest accepted checkpoint:** source `310427b`. Focused reviews, full signed-app
+acceptance (475.60 seconds) and packaged Save As/restart (39.31 seconds) passed.
+Same-content external replacement preserves R results; native identity follows
+acknowledged Save As and ignores stale replies. Strict signing and natural cleanup
+passed. Primary will integrate this source with canonical docs on main.
 Earlier accepted slices cover backend/renderer/app crash recovery, independent
 windows and last-window reopening. Acceptance belongs to that source checkpoint;
 the staged app at `host/.application-desktop/Alder.app` may advance during work.
@@ -26,29 +27,25 @@ remain dependable through native failures. Exercise real user journeys through t
 while keeping Carl's visible desktop free. Record scenarios that genuinely require foreground
 interaction for a later supervised pass; do not infer them from headless checks.
 
-**Current bounded slice:** remove duplicate work. Separate source content changes
-from physical disk identity when invalidating R results. Replace native periodic
-full-notebook health queries with existing renderer connection reporting and a
-small fallback for bootstrap/failed-renderer cases. Preserve authoritative Save As
-identity adoption, native path/window bookkeeping and conflict detection.
+**Current bounded slice:** finish `accept-mac` failure teardown using the existing
+scoped process cleanup helper. Stop owned children before removing temporary files,
+on both success and failure, and preserve the original acceptance error. Keep
+product source and the accepted installed-app behavior unchanged.
 
-**Owner and next action:** production rereview passed `349c2e1`; the lead verified
-the narrow test correction in clean candidate `310427b`. The final acceptance
-reviewer owns the full signed-app gate and packaged Save As/restart journey on
-that candidate. Primary holds; lead records acceptance or a consolidated correction.
+**Owner and next action:** primary first integrates accepted `310427b` with canonical
+docs on main, then owns the small harness correction. Reuse the existing helper;
+prove the normal packaged check and one controlled failure both clean up their
+children, with failure exit/error retained. Submit a clean focused candidate for
+review. Product source is already accepted, so do not rebuild the app or rerun
+unrelated suites for a harness-only change.
 
 **Approved next slice:**
 
-1. **Finish acceptance-harness failure cleanup.** Fix `accept-mac` failure teardown
-   through the existing scoped process helper. A failed phase must stop its owned
-   children before removing temporary files and retain the original error. The
-   save/discard ordering checks, release-test replacement and old Quit polling
-   bounds are covered by accepted slices; do not rebuild them as another framework.
-2. **Confirm native state immediately after a new-host restart.** Review noticed
+1. **Confirm native state immediately after a new-host restart.** Review noticed
    that the initial editor state can arrive before native connection adoption and
    fail its epoch check. Reproduce whether this leaves a false dirty indicator or
    error on immediate Close, then correct the handoff if needed. This is queued;
-   the current identity correction must not expand into it.
+   the current harness correction must not expand into it.
 
 **Remaining native evidence:** Finder/Open, native Save As replacement, dirty-close
 sheets, Dock activation and native zero-window Quit need foreground interaction.
@@ -80,7 +77,7 @@ One item is active. New approved work is added here before assignment.
 | Release README and feature demo | Accepted | Primary implementer and independent reviewers | `b316bc3`: release-facing install/use guide and three compact real-app feature captures; media and factual reviews passed |
 | Repository integration and cleanup | Accepted | Primary implementer and focused cleanup reviewers | `554da34`: canonical docs and accepted app fast-forwarded to remote `main`; obsolete worktrees, branches and safety stashes removed after review |
 | Platform-boundary extraction | Accepted | Primary implementer and focused reviewers | `42cfda8`: shared Linux R 34/34, browser 12/12 and reviewed localized Mac/Linux seams; no duplicated product or Ark fork |
-| Native Mac reliability qualification | Review | Lead and final acceptance reviewer | Run full signed-app acceptance and packaged Save As/restart on `310427b` |
+| Native Mac reliability qualification | Implementing | Primary implementer | Duplicate-work/identity source `310427b` accepted; now correct acceptance-harness failure cleanup |
 | Scientific workflow qualification | Queued | Unassigned | A realistic scientific notebook, real CRAN/Bioconductor packages, representative R reactivity idioms, two live notebooks under load and rich publishing are independently qualified through packaged Alder |
 | Product completion and public Mac delivery | Queued | Unassigned | Project/Git ownership, notebook-wide search, agent presence, accessibility, scale, upgrade state, release identity, architecture support and signed/notarized distribution have explicit accepted behavior |
 
