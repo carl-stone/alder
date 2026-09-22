@@ -37,13 +37,13 @@ explicit Save, continued R execution and natural child cleanup without taking ov
 Carl's visible desktop. Keep failures actionable rather than silently replaying or
 saving work; record any foreground-only presentation that cannot be qualified here.
 
-**Correction in progress:** clean `2555343` passed packaged renderer `SIGKILL`
-journeys and focused review of preserved edits, explicit Save, continued R and
-authenticated reload. Review found one remaining failure path: a transient ticket
-or navigation error leaves a dead window with no native reload action while its
-backend remains healthy. The primary implementer owns a retryable native recovery
-action and a failure-then-success regression. Review the next clean candidate
-before one full signed-app acceptance.
+**Correction in progress:** clean `411ba49` passed focused retry and packaged
+renderer-crash review, but its Close Window option strands renderer-local drafts:
+new windows get new draft IDs while recovery reads only the current ID, so the
+dialog's reopen promise is false. The primary implementer owns a document-scoped
+retained-draft handoff across close/reopen and app relaunch that keeps simultaneous
+windows independent and does not silently merge multiple drafts. Review the next
+clean candidate before one full signed-app acceptance.
 
 The release README and three feature GIFs remain on `main`. The separate Ark source repository
 is untouched.
