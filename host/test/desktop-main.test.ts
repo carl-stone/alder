@@ -1013,6 +1013,7 @@ test("desktop host restart stays retryable after acquisition fails, including a 
   });
   const record = recordFor(main, oldConnection, window);
   record.loadGeneration = 1;
+  record.authenticatedRendererGeneration = 1;
   let errors = 0;
   (main as any).showApplicationError = async () => { errors += 1; };
   (main as any).loadAuthenticatedNotebook = async () => undefined;
@@ -1052,6 +1053,82 @@ test("desktop replacement abandons a dead old lease when its HTTP release fails"
   assert.equal(record.connection, replacement);
   assert.equal(abandoned, 1);
   assert.equal(replacement.releaseCount, 0);
+});
+test("failed replacement and rollback loads offer native restart, then a later retry succeeds", async () => {
+  const path = "/tmp/alder-desktop-restart-both-loads.R";
+  const ticket = async (endpoint: string) => {
+    assert.equal(endpoint, "/api/ticket");
+    return jsonResponse({ ticket: "d".repeat(64), expiresAt: "2026-12-01T00:00:00.000Z" });
+  };
+  const oldConnection = connection("both-loads-old", path, ticket);
+  const failedReplacement = connection("both-loads-failed", path, ticket);
+  const workingReplacement = connection("both-loads-working", path, ticket);
+  const replacements = [failedReplacement, workingReplacement];
+  const electronRuntime = runtime(0);
+  let recoveryOffers = 0;
+  electronRuntime.dialog.showMessageBox = async () => { recoveryOffers += 1; return { response: 0 }; };
+  const main = new ElectronMain(electronRuntime, { resources, acquireSession: async () => replacements.shift()! });
+  let headersCallback: ((details: { resourceType: string; responseHeaders: Record<string, string[]> }, callback: (decision: { cancel?: boolean }) => void) => void) | undefined;
+  let record: any;
+  let loads = 0;
+  const window = windowWithLoad(async () => {
+    loads += 1;
+    if (loads <= 2) throw new Error("authenticated load failed");
+    assert.ok(headersCallback);
+    headersCallback({ resourceType: "mainFrame", responseHeaders: { "X-Alder-Continuity-Proof": ["proof"] } }, decision => assert.equal(decision.cancel, undefined));
+    queueMicrotask(() => record.rendererReady.resolve());
+  });
+  window.webContents.session!.webRequest!.onHeadersReceived = (_filter, callback) => { headersCallback = callback as typeof headersCallback; };
+  record = recordFor(main, oldConnection, window);
+  const draftId = record.draftId;
+  (main as any).querySnapshot = async () => { throw new Error("backend stopped"); };
+  (main as any).showApplicationError = async () => undefined;
+
+  await (main as any).restartHost(record);
+  assert.equal(failedReplacement.releaseCount, 1);
+  assert.equal(record.connection, oldConnection);
+  assert.equal(record.draftId, draftId);
+  assert.equal(window.destroyed, false);
+  await (main as any).monitorHost(record);
+  assert.equal(recoveryOffers, 1);
+  assert.equal(record.connection, workingReplacement);
+  assert.equal(oldConnection.releaseCount, 1);
+  await (main as any).monitorHost(record);
+  assert.equal(recoveryOffers, 1);
+});
+test("discarded replacement stops its local lease after failed release", async () => {
+  const path = "/tmp/alder-desktop-discarded-replacement.R";
+  const oldConnection = connection("discard-old", path, async () => jsonResponse({}));
+  const next = connection("discard-next", path, async () => { throw new Error("ticket unavailable"); });
+  let abandoned = 0;
+  next.release = async () => { throw new Error("discard release unavailable"); };
+  next.abandon = () => { abandoned += 1; };
+  const main = new ElectronMain(runtime(), { resources, acquireSession: async () => next });
+  const record = recordFor(main, oldConnection, windowWithLoad());
+  (main as any).showApplicationError = async () => undefined;
+
+  await (main as any).restartHost(record);
+  assert.equal(record.connection, oldConnection);
+  assert.equal(abandoned, 1);
+  assert.equal(oldConnection.releaseCount, 0);
+  assert.equal(record.released, false);
+});
+test("window closed during ticket acquisition abandons a discarded replacement if release fails", async () => {
+  const path = "/tmp/alder-desktop-closed-restart.R";
+  const oldConnection = connection("closed-old", path, async () => jsonResponse({}));
+  let record: any;
+  const next = connection("closed-next", path, async () => {
+    record.released = true;
+    return jsonResponse({ ticket: "e".repeat(64), expiresAt: "2026-12-01T00:00:00.000Z" });
+  });
+  let abandoned = 0;
+  next.release = async () => { throw new Error("discard release unavailable"); };
+  next.abandon = () => { abandoned += 1; };
+  const main = new ElectronMain(runtime(), { resources, acquireSession: async () => next });
+  record = recordFor(main, oldConnection, windowWithLoad());
+  await (main as any).restartHost(record);
+  assert.equal(abandoned, 1);
+  assert.equal(record.connection, oldConnection);
 });
 test("opening a notebook replaces a clean untitled launch window", async () => {
   const openedPath = join(tmpdir(), "opened.R");

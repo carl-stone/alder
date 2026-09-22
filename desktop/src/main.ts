@@ -197,6 +197,7 @@ interface ElectronWindowRecord {
   hostFailureShown: boolean;
   hostRestart?: Promise<void>;
   loadGeneration: number;
+  authenticatedRendererGeneration?: number;
   loadingOrigin?: string;
   rendererReadyGeneration: number;
   rendererReady?: { promise: Promise<void>; resolve: () => void };
@@ -567,6 +568,7 @@ export class ElectronMain {
         const timeout = setTimeout(() => rejectReady(new Error("Electron notebook renderer did not become ready")), RENDERER_READY_TIMEOUT_MS);
         rendererReadyPromise.then(() => { clearTimeout(timeout); resolveReady(); }, rejectReady);
       });
+      record.authenticatedRendererGeneration = generation;
       this.diagnostics?.record("info", "renderer.ready", {
         windowId: record.windowId, sessionId: connection.sessionKey, sessionEpoch: connection.epoch,
         rendererGeneration: generation, durationMs: Math.round(performance.now() - record.openedAt), ready: true,
@@ -1036,7 +1038,7 @@ export class ElectronMain {
       if (record.released || record.hostRestart) return;
       // An authenticated page has its own actionable connection banner. A native
       // sheet would hide its Restart host button and can outlive a successful retry.
-      if (record.loadGeneration > 0 && !record.window.webContents.isDestroyed?.()) return;
+      if (record.authenticatedRendererGeneration === record.loadGeneration && !record.window.webContents.isDestroyed?.()) return;
       const failedConnection = record.connection;
       record.hostFailureShown = true;
       const answer = await this.runtime.dialog.showMessageBox(record.window, {
@@ -1088,7 +1090,7 @@ export class ElectronMain {
       if (next === old) throw new Error("desktop host restart returned the active lease");
       const ticket = await this.mintTicket(next);
       if (record.released) {
-        await next.release();
+        await this.releaseDiscardedConnection(next);
         return;
       }
       // Keep the old lease and identity authoritative until the replacement
@@ -1096,13 +1098,13 @@ export class ElectronMain {
       navigationStarted = true;
       await this.loadAuthenticatedNotebook(record, ticket, next);
       if (record.released) {
-        await next.release();
+        await this.releaseDiscardedConnection(next);
         return;
       }
       this.replaceConnection(record, next);
-      await old.release().catch(() => { old.abandon(); });
+      await this.releaseDiscardedConnection(old);
     } catch (error) {
-      if (next !== undefined && next !== record.connection) await next.release().catch(() => undefined);
+      if (next !== undefined && next !== record.connection) await this.releaseDiscardedConnection(next);
       if (!record.released && navigationStarted) {
         try {
           const rollbackTicket = await this.mintTicket(old);
@@ -1113,6 +1115,11 @@ export class ElectronMain {
       }
       await this.showApplicationError("Restart host", error instanceof Error ? error.message : "The shared host could not be restarted.");
     }
+  }
+
+  private async releaseDiscardedConnection(connection: SessionConnection): Promise<void> {
+    try { await connection.release(); }
+    catch { connection.abandon(); }
   }
 
   private replaceConnection(record: ElectronWindowRecord, connection: SessionConnection): void {
