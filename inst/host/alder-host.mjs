@@ -35564,7 +35564,10 @@ function createConnection(descriptor, lease) {
   };
   let normalAttempt;
   let discardAttempt;
-  const hostExitedAfterNormalRelease = (error61) => error61 instanceof TypeError && error61.cause?.code === "ECONNREFUSED";
+  const hostExitedAfterNormalRelease = (error61) => {
+    const code = error61 instanceof TypeError ? error61.cause?.code : void 0;
+    return code === "ECONNREFUSED" || code === "ECONNRESET";
+  };
   let interval;
   const attemptRelease = async (disposition) => {
     const controller = new AbortController();
