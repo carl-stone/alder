@@ -752,15 +752,18 @@ for (const failureMode of ["transport", "transport-reset", "non-success", "timeo
 
     const beforeQuit = events.get("before-quit")!;
     beforeQuit({ preventDefault: () => undefined });
-    while ((main as any).quitState !== "idle") await new Promise(resolve => setImmediate(resolve));
+    const firstQuitDeadline = Date.now() + 2_000;
+    while ((main as any).quitState !== "idle" && Date.now() < firstQuitDeadline) await new Promise(resolve => setImmediate(resolve));
+    assert.equal((main as any).quitState, "idle", "failed discard did not return Quit to a retryable state");
     assert.equal(quits, 0);
     assert.equal(window.destroyed, false);
     assert.equal(main.windows().length, 1);
     assert.equal(attempts, 1);
 
     beforeQuit({ preventDefault: () => undefined });
-    while (quits === 0) await new Promise(resolve => setImmediate(resolve));
-    assert.equal(quits, 1);
+    const retryDeadline = Date.now() + 2_000;
+    while (quits === 0 && Date.now() < retryDeadline) await new Promise(resolve => setImmediate(resolve));
+    assert.equal(quits, 1, "Quit did not complete after a successful discard retry");
     assert.equal(window.destroyed, true);
     assert.equal(attempts, 2);
   });
