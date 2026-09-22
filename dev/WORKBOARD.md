@@ -32,12 +32,11 @@ scoped process cleanup helper. Stop owned children before removing temporary fil
 on both success and failure, and preserve the original acceptance error. Keep
 product source and the accepted installed-app behavior unchanged.
 
-**Owner and next action:** primary owns the small harness correction from integrated
-`773773e`. Reuse the existing helper;
-prove the normal packaged check and one controlled failure both clean up their
-children, with failure exit/error retained. Submit a clean focused candidate for
-review. Product source is already accepted, so do not rebuild the app or rerun
-unrelated suites for a harness-only change.
+**Owner and next action:** focused harness review and the real injected failure
+test passed `5983b2e`. Primary wires that opt-in regression into the existing final
+Mac acceptance command; otherwise it is skipped. Run the exact focused invocation
+against the accepted stage and return a clean small correction. Product source
+and signed stage remain unchanged; no rebuild or unrelated suites.
 
 **Approved next slice:**
 
@@ -77,7 +76,7 @@ One item is active. New approved work is added here before assignment.
 | Release README and feature demo | Accepted | Primary implementer and independent reviewers | `b316bc3`: release-facing install/use guide and three compact real-app feature captures; media and factual reviews passed |
 | Repository integration and cleanup | Accepted | Primary implementer and focused cleanup reviewers | `554da34`: canonical docs and accepted app fast-forwarded to remote `main`; obsolete worktrees, branches and safety stashes removed after review |
 | Platform-boundary extraction | Accepted | Primary implementer and focused reviewers | `42cfda8`: shared Linux R 34/34, browser 12/12 and reviewed localized Mac/Linux seams; no duplicated product or Ark fork |
-| Native Mac reliability qualification | Implementing | Primary implementer | Duplicate-work/identity source `310427b` accepted; now correct acceptance-harness failure cleanup |
+| Native Mac reliability qualification | Implementing | Primary implementer | Wire reviewed harness cleanup regression from `5983b2e` into existing Mac acceptance |
 | Scientific workflow qualification | Queued | Unassigned | A realistic scientific notebook, real CRAN/Bioconductor packages, representative R reactivity idioms, two live notebooks under load and rich publishing are independently qualified through packaged Alder |
 | Product completion and public Mac delivery | Queued | Unassigned | Project/Git ownership, notebook-wide search, agent presence, accessibility, scale, upgrade state, release identity, architecture support and signed/notarized distribution have explicit accepted behavior |
 
