@@ -10,7 +10,7 @@ copies in other worktrees are snapshots.
 
 ## Current assignment
 
-**Native Mac reliability — Review on Mac.**
+**Native Mac reliability — Implementing on Mac.**
 
 The shared portable-core checkpoint is accepted on pushed main `42cfda8`.
 `b74355a` is the latest accepted Mac checkpoint, integrated on main at `572f7b6`.
@@ -33,15 +33,14 @@ acceptance, focused crash journeys, strict signing and clean child audits passed
 two-window journey passes second-instance forwarding, independent Run/Save and
 closing one window while the other continues.
 
-**Candidate ready:** clean `dd6b2a2` waits for the installed MCP test's owned backend
-to finish its expected idle shutdown before removing temporary diagnostics. That
-focused test passes twice; independent review is underway before repeating complete
-signed-app acceptance. Its parent `21fc5e1` bounds the zero-window Quit test; the
-preceding `6f38788` corrects Quit after the notebook host idles out. Earlier full
-acceptance stages passed through installed host checks. The preceding
-`5c80216` keeps the app resident after its last window and adds a packaged
-path-forwarding/reopen journey. Both packaged window journeys pass. The headless
-reopen journey uses forced teardown and does not qualify native Quit. Finder/Open,
+**Accepted subcheckpoint pending integration:** exact clean `dd6b2a2` passes
+independent lifecycle and test review, complete signed-app acceptance, strict signing,
+ordinary packaged multi-window cleanup and a separate last-window reopen journey.
+It keeps the Mac app resident with zero windows, reopens a forwarded document in the
+original process, and handles Quit after the closed notebook host idles out. Its MCP
+test waits for normal backend idle shutdown before deleting temporary diagnostics.
+The headless last-window journey uses forced teardown and does not qualify native
+Quit. The primary implementer is merging this accepted source to main. Finder/Open,
 Save As replacement, dirty-close sheets and Dock activation still require a
 supervised foreground pass.
 
@@ -70,7 +69,7 @@ One item is active. New approved work is added here before assignment.
 | Release README and feature demo | Accepted | Primary implementer and independent reviewers | `b316bc3`: release-facing install/use guide and three compact real-app feature captures; media and factual reviews passed |
 | Repository integration and cleanup | Accepted | Primary implementer and focused cleanup reviewers | `554da34`: canonical docs and accepted app fast-forwarded to remote `main`; obsolete worktrees, branches and safety stashes removed after review |
 | Platform-boundary extraction | Accepted | Primary implementer and focused reviewers | `42cfda8`: shared Linux R 34/34, browser 12/12 and reviewed localized Mac/Linux seams; no duplicated product or Ark fork |
-| Native Mac reliability qualification | Review | Lead and independent reviewers | Review clean `dd6b2a2`, repeat complete signed-app acceptance on that exact source, then continue native Mac qualification |
+| Native Mac reliability qualification | Implementing | Primary implementer | Integrate accepted `dd6b2a2` source to main; then assign the next bounded native Mac reliability slice |
 | Scientific workflow qualification | Queued | Unassigned | A realistic scientific notebook, real CRAN/Bioconductor packages, representative R reactivity idioms, two live notebooks under load and rich publishing are independently qualified through packaged Alder |
 | Product completion and public Mac delivery | Queued | Unassigned | Project/Git ownership, notebook-wide search, agent presence, accessibility, scale, upgrade state, release identity, architecture support and signed/notarized distribution have explicit accepted behavior |
 
