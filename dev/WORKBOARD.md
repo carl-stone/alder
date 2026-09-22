@@ -10,11 +10,11 @@ copies in other worktrees are snapshots.
 
 ## Current assignment
 
-**Native Mac reliability — Review on Mac.**
+**Native Mac reliability — Implementing on Mac.**
 
 The shared portable-core checkpoint is accepted on pushed main `42cfda8`.
-`5b3321a` is the latest accepted Mac source, integrated on main at `2136dcc`. The
-staged signed app is refreshed; the installed user copy remains untouched.
+`227d01d` is the latest accepted Mac source, integrated on main at `4351a84`.
+The staged signed app is refreshed; the installed user copy remains untouched.
 Preserve upstream unmodified Ark.
 
 **Finish condition:** ordinary Mac launch, document/window use, recovery and owned-child cleanup
@@ -22,26 +22,20 @@ remain dependable through native failures. Exercise real user journeys through t
 while keeping Carl's visible desktop free. Record scenarios that genuinely require foreground
 interaction for a later supervised pass; do not infer them from headless checks.
 
-**Accepted subcheckpoint:** `5b3321a` preserves acknowledged unsaved edits and a
-still-local draft through a packaged backend `SIGKILL`, then resumes R, saves and
-runs. A small Ark guardian removes the dead backend's kernel group, and native
-cleanup checks track both old and recovered groups. Independent reviews, complete
-signed-app acceptance, separate packaged crash journey, strict signing and clean
-owned-child audit passed. Nineteen stale staged-test kernels were terminated;
-the installed user's kernel was untouched. Earlier accepted packaging and
-two-window fixes are `f086e40` and `e9293e5`.
+**Accepted subcheckpoint:** `227d01d` preserves acknowledged unsaved edits and
+renderer-local drafts through packaged renderer failure, discovers separate
+retained drafts after app relaunch, and requires an explicit recovery choice.
+Selection, Save and startup stay separate. Independent reviews, complete signed-
+app acceptance, renderer-crash and app-relaunch journeys, strict signing and
+clean owned-child audits passed. Earlier backend-crash cleanup was accepted at
+`5b3321a`; packaging and two-window fixes at `f086e40` and `e9293e5`.
 
-**Current bounded slice:** hard-kill the packaged renderer while a notebook has
-an acknowledged unsaved edit and a still-local draft. Verify recoverable source,
-explicit Save, continued R execution and natural child cleanup without taking over
-Carl's visible desktop. Keep failures actionable rather than silently replaying or
-saving work; record any foreground-only presentation that cannot be qualified here.
-
-**Candidate ready:** clean `227d01d` makes Restore draft and Use saved notebook
-mutually exclusive during selection and shows a busy state. Its delayed-claim
-test confirms startup Run and Save stay blocked while a draft is claimed.
-Focused review is underway; if it passes, run one full signed-app acceptance
-before integration.
+**Current bounded slice:** hard-kill the entire packaged app with one source edit
+acknowledged by the backend but unsaved and another still local to the renderer.
+Relaunch the saved notebook in a new app process and verify both edits are
+recoverable without implicit Run or Save; then run and save explicitly. Verify
+ordinary cleanup of old owned children and no interference with the installed
+user app. Correct any real failure and return a clean candidate for review.
 
 The release README and three feature GIFs remain on `main`. The separate Ark source repository
 is untouched.
@@ -68,7 +62,7 @@ One item is active. New approved work is added here before assignment.
 | Release README and feature demo | Accepted | Primary implementer and independent reviewers | `b316bc3`: release-facing install/use guide and three compact real-app feature captures; media and factual reviews passed |
 | Repository integration and cleanup | Accepted | Primary implementer and focused cleanup reviewers | `554da34`: canonical docs and accepted app fast-forwarded to remote `main`; obsolete worktrees, branches and safety stashes removed after review |
 | Platform-boundary extraction | Accepted | Primary implementer and focused reviewers | `42cfda8`: shared Linux R 34/34, browser 12/12 and reviewed localized Mac/Linux seams; no duplicated product or Ark fork |
-| Native Mac reliability qualification | Review | Lead and independent reviewers | Sleep/wake, real Finder/dialog/window flows, packaged crash recovery and supported-filesystem behavior work through visible installed-app paths without lost work or stranded processes |
+| Native Mac reliability qualification | Implementing | Primary implementer | Sleep/wake, real Finder/dialog/window flows, packaged crash recovery and supported-filesystem behavior work through visible installed-app paths without lost work or stranded processes |
 | Scientific workflow qualification | Queued | Unassigned | A realistic scientific notebook, real CRAN/Bioconductor packages, representative R reactivity idioms, two live notebooks under load and rich publishing are independently qualified through packaged Alder |
 | Product completion and public Mac delivery | Queued | Unassigned | Project/Git ownership, notebook-wide search, agent presence, accessibility, scale, upgrade state, release identity, architecture support and signed/notarized distribution have explicit accepted behavior |
 
