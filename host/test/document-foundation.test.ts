@@ -2,12 +2,14 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { fork } from "node:child_process";
 import { once } from "node:events";
-import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, open, readFile, readdir, realpath, rm, stat, writeFile, type FileHandle } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import { startHost, type RunningHost } from "../src/application.js";
+import { observeSaveAsDestination } from "../src/persistence.js";
+import { RecoveryWriter } from "../src/recovery.js";
 import { encodeHostCommandWire, parseHostCommand, type CommandResult } from "../src/protocol.js";
 import type { ApplicationResources } from "../src/resources.js";
 
@@ -209,6 +211,150 @@ if (crashPath) {
       assert.equal(await readFile(join(destinationDirectory, ".alder", "packages.yaml"), "utf8"), destinationPackages);
       assert.equal(await readFile(join(destinationDirectory, ".alder", "layout.json"), "utf8"), destinationLayout);
     } finally { await app?.close(); await rm(directory, { recursive: true, force: true }); }
+  });
+
+  for (const existing of [false, true]) test(`Save As recovery preparation failure preserves ${existing ? "existing" : "absent"} destination and original work`, async context => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "alder-save-as-recovery-failure-")));
+    const source = join(directory, "source.R");
+    const destination = join(directory, "destination.R");
+    await writeFile(source, "# %%\nx <- 1\n");
+    if (existing) await writeFile(destination, "# %%\ny <- 9\n");
+    let app: RunningHost | undefined;
+    try {
+      app = await startDocument(source, directory);
+      await edit(app, "x <- 7");
+      const prior = app.controller.snapshot();
+      const sourceId = await recoveryIdentity(app);
+      const observed = existing ? await observeSaveAsDestination(destination) : null;
+      context.mock.method(RecoveryWriter, "open", async () => { throw new Error("destination recovery unavailable"); });
+      const result = await dispatch(app, { type: "save-as", path: destination, expectedDestination: existing
+        ? { expectedDiskDigest: observed!.digest, expectedDiskVersion: observed!.version }
+        : "absent" });
+      assert.ok(result.error, "Save As should report the preparation failure");
+      assert.equal(app.controller.snapshot().path, prior.path);
+      assert.deepEqual(app.controller.snapshot().cells[0]!.body, ["x <- 7"]);
+      assert.equal(app.controller.snapshot().dirty, true);
+      assert.equal(await recoveryIdentity(app), sourceId);
+      assert.equal(await readFile(source, "utf8"), "# %%\nx <- 1\n");
+      if (existing) assert.equal(await readFile(destination, "utf8"), "# %%\ny <- 9\n");
+      else await assert.rejects(readFile(destination), { code: "ENOENT" });
+      context.mock.restoreAll();
+      await command(app, { type: "save" });
+      assert.equal(await readFile(source, "utf8"), "# %%\nx <- 7\n");
+    } finally { context.mock.restoreAll(); await app?.close(); await rm(directory, { recursive: true, force: true }); }
+  });
+
+  test("Save As keeps its committed identity when destination directory sync fails", async context => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "alder-save-as-sync-failure-")));
+    const sourceDirectory = join(directory, "source");
+    const destinationDirectory = join(directory, "destination");
+    await mkdir(sourceDirectory);
+    await mkdir(destinationDirectory);
+    const source = join(sourceDirectory, "source.R");
+    const destination = join(destinationDirectory, "destination.R");
+    await writeFile(source, "# %%\nx <- 1\n");
+    await writeFile(destination, "# %%\ny <- 9\n");
+    let app: RunningHost | undefined;
+    try {
+      app = await startDocument(source, directory);
+      await edit(app, "x <- 7");
+      const sourceId = await recoveryIdentity(app);
+      const observed = await observeSaveAsDestination(destination);
+      const directoryInode = (await stat(destinationDirectory)).ino;
+      const handle = await open(destinationDirectory, "r");
+      const handlePrototype = Object.getPrototypeOf(handle) as { sync: (this: FileHandle) => Promise<void> };
+      const sync = handlePrototype.sync;
+      await handle.close();
+      context.mock.method(handlePrototype, "sync", async function (this: FileHandle) {
+        if ((await this.stat()).ino === directoryInode) throw Object.assign(new Error("simulated destination directory sync failure"), { code: "EIO" });
+        return sync.call(this);
+      });
+      const result = await dispatch(app, { type: "save-as", path: destination, expectedDestination: {
+        expectedDiskDigest: observed.digest, expectedDiskVersion: observed.version,
+      } });
+      assert.equal(result.error, null);
+      assert.match((result.result as { durabilityWarning?: string }).durabilityWarning ?? "", /crash durability is uncertain/);
+      assert.equal(app.controller.snapshot().path, destination);
+      assert.equal(app.controller.snapshot().dirty, false);
+      assert.equal(app.controller.snapshot().lastActionError?.code, "save_durability_uncertain");
+      assert.equal(await readFile(destination, "utf8"), "# %%\nx <- 7\n");
+      assert.equal(await recoveryIdentity(app), sourceId);
+      context.mock.restoreAll();
+      await edit(app, "x <- 8");
+      await command(app, { type: "save" });
+      assert.equal(await readFile(destination, "utf8"), "# %%\nx <- 8\n");
+      await app.close(); app = undefined;
+      app = await startDocument(destination, directory);
+      assert.deepEqual(app.controller.snapshot().cells[0]!.body, ["x <- 8"]);
+      assert.equal(await recoveryIdentity(app), sourceId);
+    } finally { context.mock.restoreAll(); await app?.close(); await rm(directory, { recursive: true, force: true }); }
+  });
+
+  test("Save As succeeds when retiring the old recovery journal fails after publication", async context => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "alder-save-as-retire-failure-")));
+    const source = join(directory, "source.R");
+    const destination = join(directory, "destination.R");
+    await writeFile(source, "# %%\nx <- 1\n");
+    let app: RunningHost | undefined;
+    try {
+      app = await startDocument(source, directory);
+      await edit(app, "x <- 7");
+      context.mock.method(RecoveryWriter.prototype, "retire", async () => { throw new Error("old recovery cleanup failed"); });
+      const result = await dispatch(app, { type: "save-as", path: destination, expectedDestination: "absent" });
+      assert.equal(result.error, null);
+      assert.equal(app.controller.snapshot().path, destination);
+      assert.equal(app.controller.snapshot().lastActionError?.code, "recovery_cleanup_failed");
+      assert.equal(await readFile(destination, "utf8"), "# %%\nx <- 7\n");
+      context.mock.restoreAll();
+      await edit(app, "x <- 8");
+      await command(app, { type: "save" });
+      assert.equal(await readFile(destination, "utf8"), "# %%\nx <- 8\n");
+    } finally { context.mock.restoreAll(); await app?.close(); await rm(directory, { recursive: true, force: true }); }
+  });
+
+  test("Save As conflict after recovery preparation restores both notebook identities", async context => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "alder-save-as-late-conflict-")));
+    const source = join(directory, "source.R");
+    const destination = join(directory, "destination.R");
+    await writeFile(source, "# %%\nx <- 1\n");
+    await writeFile(destination, "# %%\ny <- 9\n");
+    let sourceApp: RunningHost | undefined;
+    let destinationApp: RunningHost | undefined;
+    try {
+      destinationApp = await startDocument(destination, directory);
+      const destinationId = await recoveryIdentity(destinationApp);
+      await destinationApp.close(); destinationApp = undefined;
+      sourceApp = await startDocument(source, directory);
+      await edit(sourceApp, "x <- 7");
+      const sourceId = await recoveryIdentity(sourceApp);
+      const observed = await observeSaveAsDestination(destination);
+      const adopt = RecoveryWriter.prototype.adoptRecoveryId;
+      let changed = false;
+      context.mock.method(RecoveryWriter.prototype, "adoptRecoveryId", async function (id: string) {
+        await adopt.call(this, id);
+        if (id === sourceId && !changed) {
+          changed = true;
+          await writeFile(destination, "# %%\ny <- 10\n");
+        }
+      });
+      const result = await dispatch(sourceApp, { type: "save-as", path: destination, expectedDestination: {
+        expectedDiskDigest: observed.digest, expectedDiskVersion: observed.version,
+      } });
+      assert.equal(result.error?.code, "source_conflict");
+      assert.equal(sourceApp.controller.snapshot().path, source);
+      assert.deepEqual(sourceApp.controller.snapshot().cells[0]!.body, ["x <- 7"]);
+      assert.equal(await recoveryIdentity(sourceApp), sourceId);
+      assert.equal(await readFile(destination, "utf8"), "# %%\ny <- 10\n");
+      context.mock.restoreAll();
+      await sourceApp.close(); sourceApp = undefined;
+      destinationApp = await startDocument(destination, directory);
+      assert.equal(await recoveryIdentity(destinationApp), destinationId);
+    } finally {
+      context.mock.restoreAll();
+      await sourceApp?.close();
+      await destinationApp?.close();
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   test("Save As refuses and preserves a destination with pending recovery", async () => {

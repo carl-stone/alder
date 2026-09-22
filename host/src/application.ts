@@ -756,18 +756,17 @@ async function startNotebookHost(
           if (await RecoveryWriter.hasJournal({ rootDir: recoveryRoot, key: preparedOwner.sessionKey })) {
             throw Object.assign(new Error("Save As destination has pending recovery data"), { code: "destination_recovery_conflict" });
           }
-          savePublication = await preparedSave.publish();
-          destinationStore = savePublication.store;
+          destinationStore = preparedSave.store;
           nextManager = new PackageManager({ resources: options.resources, environment: destinationRuntime, processScope: processScope!, projectDirectory: destinationDirectory, onProgress: onPackageProgress });
-          const destinationDisk = destinationStore.observation();
+          const destinationDisk = preparedSave.disk;
           const destinationSidecars = sidecarProtocolObservations(destinationStore, false);
-          const destinationSerialized = serializeNotebookWithParts(destinationStore.currentDocument);
+          const destinationSerialized = serializeNotebookWithParts(preparedSave.document);
           const destinationRevision = context.fromRevision;
           const destinationBaseline: RecoveryBaseline = {
             schemaVersion: 1,
             documentRevision: destinationRevision,
             physicalBytes: destinationSerialized.bytes,
-            cells: recoveryCellStates(destinationStore.currentDocument),
+            cells: recoveryCellStates(preparedSave.document),
             path: destination,
             notebookDiskObservation: recoveryObservation(destinationDisk),
           };
@@ -781,6 +780,8 @@ async function startNotebookHost(
             throw Object.assign(new Error("Save As destination has pending recovery data"), { code: "destination_recovery_conflict" });
           }
           destinationRecoveryPreviousId = destinationRecovery.recoveryId;
+          await destinationRecovery.adoptRecoveryId(oldRecovery.recoveryId);
+          destinationRecoveryAdopted = true;
           const publicationBinder = context.preparePublication({
             document: { ...context.document, path: destination },
             path: destination,
@@ -794,75 +795,47 @@ async function startNotebookHost(
             rEnvironment: destinationRuntime,
           });
           await preparedOwner.commit(async () => {
-            const rollbackControllerPublication = (): void => {
-              const binder = context.preparePublication({
-                document: context.document,
-                path: context.path,
-                config: context.config,
-                layout: context.layout,
-                disk: context.disk,
-                sidecars: context.sidecars,
-                dirty: context.dirty,
-                advanceRevision: false,
-                invalidateRuntime: false,
-                rEnvironment: runtimeEnvironment,
-              });
-              binder();
-            };
             return async () => {
-              try {
-                await destinationRecovery!.adoptRecoveryId(oldRecovery.recoveryId);
-                destinationRecoveryAdopted = true;
-                // Apply the controller publication before adopting any destination state.
-                publicationBinder();
-                store = destinationStore;
-                recovery = destinationRecovery;
-                packageManager = nextManager;
-                notebookDirectory = destinationDirectory;
-                cacheDirectory = destinationCache;
-                config = destinationConfig;
-                projectSettings = { ...destinationProjectConfig };
-                resolvedLayout = destinationLayout;
-                projectLayoutIntent = destinationLayout;
-                packageDeclarationIntent = destinationPackages;
-                pendingSidecars.layout = false;
-                pendingSidecars.packages = false;
-                isUntitled = false;
-                runtimeEnvironment = destinationRuntime;
-                runtimeError = null;
-                recoveryDocumentRevision = destinationRevision;
-                recoveryPending = false;
-                recoveryFingerprint = undefined;
-                recoveryConflict = false;
-                reservation?.release();
-                try {
-                  bindWatcher(destination);
-                } catch (error) {
-                  controller?.recordActionError(errorMessage(error), "watcher_failed");
-                }
-                invalidateLsp();
-                if (runtimeError !== null) controller!.recordRuntimeAvailabilityError(asRuntimeHostError(runtimeError)!);
-                if (untitledRecoveryDescriptor !== undefined) void retireUntitledRecoveryDescriptor(untitledRecoveryDescriptor).catch(error => controller?.recordActionError(errorMessage(error), "recovery_checkpoint_failed"));
-                void oldStore.close().catch(() => {});
-                await oldRecovery.retire().catch(() => {});
-                if (runtimeChanged) startRuntime(true);
-                void oldManager?.close().catch(() => {});
-              } catch (error) {
-                if (destinationRecoveryAdopted && destinationRecoveryPreviousId !== undefined) {
-                  await destinationRecovery!.adoptRecoveryId(destinationRecoveryPreviousId).catch(() => {});
-                  destinationRecoveryAdopted = false;
-                }
-                try {
-                  rollbackControllerPublication();
-                } catch {
-                  // Preserve the original publication failure; ownership rollback remains authoritative.
-                }
-                throw error;
-              }
+              savePublication = await preparedSave!.publish();
+              publicationBinder();
+              store = destinationStore;
+              recovery = destinationRecovery;
+              packageManager = nextManager;
+              notebookDirectory = destinationDirectory;
+              cacheDirectory = destinationCache;
+              config = destinationConfig;
+              projectSettings = { ...destinationProjectConfig };
+              resolvedLayout = destinationLayout;
+              projectLayoutIntent = destinationLayout;
+              packageDeclarationIntent = destinationPackages;
+              pendingSidecars.layout = false;
+              pendingSidecars.packages = false;
+              isUntitled = false;
+              runtimeEnvironment = destinationRuntime;
+              runtimeError = null;
+              recoveryDocumentRevision = destinationRevision;
+              recoveryPending = false;
+              recoveryFingerprint = undefined;
+              recoveryConflict = false;
             };
           });
+          try { reservation?.release(); }
+          catch (error) { controller?.recordActionError(errorMessage(error), "runtime_cleanup_failed"); }
+          try { bindWatcher(destination); }
+          catch (error) { controller?.recordActionError(errorMessage(error), "watcher_failed"); }
+          try { invalidateLsp(); }
+          catch (error) { controller?.recordActionError(errorMessage(error), "lsp_cleanup_failed"); }
+          if (untitledRecoveryDescriptor !== undefined) void retireUntitledRecoveryDescriptor(untitledRecoveryDescriptor).catch(error => controller?.recordActionError(errorMessage(error), "recovery_checkpoint_failed"));
+          void oldStore.close().catch(() => {});
+          await oldRecovery.retire().catch(error => controller?.recordActionError("Saved destination; old recovery cleanup failed: " + errorMessage(error), "recovery_cleanup_failed"));
+          if (runtimeChanged) {
+            try { startRuntime(true); }
+            catch (error) { controller?.recordActionError(errorMessage(error), "runtime_restart_failed"); }
+          }
+          void oldManager?.close().catch(() => {});
           await watcherReady;
-          return savePublication.result;
+          if (savePublication?.result.durabilityWarning) controller?.recordActionError(savePublication.result.durabilityWarning, "save_durability_uncertain");
+          return savePublication!.result;
         } catch (error) {
           reservation?.release();
           if (destinationRecovery !== undefined && destinationRecovery !== recovery) {

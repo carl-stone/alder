@@ -16,6 +16,7 @@ const rendererCrash = process.argv.includes('--renderer-crash');
 const draftHandoff = process.argv.includes('--draft-handoff');
 const appCrash = process.argv.includes('--app-crash');
 const externalPathChurn = process.argv.includes('--external-path-churn');
+const saveAsBoundary = process.argv.includes('--save-as-boundary');
 const saveIterations = Number(process.env.ALDER_NATIVE_SAVE_ITERATIONS ?? 20);
 const temporary = await mkdtemp('/tmp/alder-native-accept-');
 const workspace = join(temporary, 'workspace');
@@ -374,6 +375,31 @@ async function runExternalPathJourney() {
     saveAsPresentation: 'renderer-command-without-native-panel' }) + '\n');
 }
 
+async function runSaveAsBoundaryJourney() {
+  const destinationDirectory = join(workspace, 'destination-project');
+  const projectSettings = join(destinationDirectory, '.alder', 'packages.yaml');
+  const destination = join(destinationDirectory, 'saved-copy.R');
+  await mkdir(dirname(projectSettings), { recursive: true });
+  await writeFile(projectSettings, 'packages:\n  - stats\n');
+  await replaceEditor(primary.cdp, 'value <- 17L\nvalue');
+  await primary.cdp.wait("window.__alderHost.client.document.snapshot.cells[0].body.join('\\n') === 'value <- 17L\\nvalue'", 15_000);
+  await primary.cdp.evaluate(`window.__alderHost.client.saveAs(${JSON.stringify(destination)})`);
+  const canonicalDestination = await realpath(destination);
+  await primary.cdp.wait(`window.__alderHost.client.document.snapshot.path === ${JSON.stringify(canonicalDestination)} && !window.__alderHost.client.document.snapshot.dirty`, 20_000);
+  if (await readFile(destination, 'utf8') !== initialNotebook.replace('value <- 0L\nvalue', 'value <- 17L\nvalue')) throw new Error('Save As did not publish source and notebook metadata');
+  if (await readFile(projectSettings, 'utf8') !== 'packages:\n  - stats\n') throw new Error('Save As changed destination project settings');
+  await replaceEditor(primary.cdp, 'value <- 18L\nvalue');
+  await shortcut(primary.cdp, 's', 'KeyS', 83, 4);
+  await waitFileSource(destination, 'value <- 18L\nvalue');
+  if (await readFile(destination, 'utf8') !== initialNotebook.replace('value <- 0L\nvalue', 'value <- 18L\nvalue')) throw new Error('later Save changed notebook metadata');
+  await stop(primary);
+  primary = await launch('electron-save-as-reopened', false, destination);
+  await primary.cdp.wait(`window.__alderHost.client.document.snapshot.path === ${JSON.stringify(canonicalDestination)} && window.__alderHost.client.document.snapshot.cells[0].body.join('\\n') === 'value <- 18L\\nvalue'`, 30_000);
+  if (await readFile(notebook, 'utf8') !== initialNotebook) throw new Error('Save As changed the original notebook');
+  if (await readFile(projectSettings, 'utf8') !== 'packages:\n  - stats\n') throw new Error('Save As changed destination project settings after relaunch');
+  process.stdout.write(JSON.stringify({ saveAsBoundary: true, destinationCommitted: true, originalPreserved: true, projectSettingsPreserved: true, laterSaveAndRelaunch: true, nativeChooser: 'not-exercised' }) + '\n');
+}
+
 async function runMultiWindowJourney(primary) {
   const notebookB = join(workspace, 'native-accept-b.R');
   await writeFile(notebookB, '# ---\n# runtime:\n#   on_cell_change: lazy\n# ---\n# %%\nb_window <- 2L\nb_window\n');
@@ -726,6 +752,7 @@ try {
   if (cleanupProbe) throw new Error('intentional cleanup probe');
   if (multiWindow) await runMultiWindowJourney(primary);
   else if (externalPathChurn) await runExternalPathJourney();
+  else if (saveAsBoundary) await runSaveAsBoundaryJourney();
   else if (backendCrash) await runBackendCrashJourney(primary);
   else if (rendererCrash) await runRendererCrashJourney(primary);
   else if (draftHandoff) await runDraftHandoffJourney();

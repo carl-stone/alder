@@ -47,6 +47,7 @@ export interface PublishedSaveAsResult {
   readonly path: string;
   readonly changed: true;
   readonly digest: string;
+  readonly durabilityWarning?: string;
 }
 
 export interface PublishedSaveAs {
@@ -57,6 +58,9 @@ export interface PublishedSaveAs {
 export interface PreparedSaveAs {
   readonly destination: string;
   readonly digest: string;
+  readonly document: NotebookDocument;
+  readonly store: DocumentStore;
+  readonly disk: DiskObservation;
   publish(): Promise<PublishedSaveAs>;
   abort(): Promise<void>;
 }
@@ -481,10 +485,12 @@ export class DocumentStore {
       // Prepare the destination binder before committing the file, so sidecar
       // read failures cannot turn a successful disk save into a failed adoption.
       const destinationStore = new DocumentStore(destination, spelling);
+      let stagedVersion: DiskVersion;
       try {
         await destinationStore.loadSidecars();
         await writeStaged(stage, bytes, expected.mode);
         await assertUnchanged();
+        stagedVersion = await diskVersion(stage);
       } catch (error) {
         await removeStage();
         throw error;
@@ -492,25 +498,26 @@ export class DocumentStore {
       const digest = sha256(bytes);
       let aborted = false;
       let publication: Promise<PublishedSaveAs> | null = null;
-      const result: PublishedSaveAs = {
-        store: destinationStore,
-        result: { path: destination, changed: true, digest },
-      };
       return {
         destination,
         digest,
+        document: cloneNotebook(candidate),
+        store: destinationStore,
+        disk: diskObservation(stagedVersion),
         publish: () => {
           if (aborted) return Promise.reject(new PersistenceError("publication_invalid", "Save As preparation has been aborted"));
           if (publication !== null) return publication;
           publication = (async () => {
             try {
               await assertUnchanged();
-              const committed = await publishStaged(stage!, destination, expected, "Save As destination changed while saving");
+              let syncFailure: unknown;
+              const committed = await publishStaged(stage!, destination, expected, "Save As destination changed while saving", "source", error => { syncFailure = error; });
               stage = null;
               destinationStore.version = committed;
               destinationStore.observedVersion = cloneDiskVersion(committed);
               destinationStore.documentValue = cloneNotebook(candidate);
-              return result;
+              return { store: destinationStore, result: { path: destination, changed: true, digest,
+                ...(syncFailure === undefined ? {} : { durabilityWarning: "Saved destination bytes, but directory sync failed; crash durability is uncertain: " + String(syncFailure) }) } };
             } finally {
               await removeStage();
             }
@@ -724,11 +731,18 @@ async function publishStaged(
   expected: DiskVersion,
   conflictMessage: string,
   kind: "source" | "sidecar" = "source",
+  onDirectorySyncFailure?: (error: unknown) => void,
 ): Promise<DiskVersion> {
   const committed = await diskVersion(stage);
   if (!sameDisk(expected, await diskVersion(target))) throw new FileConflict(conflictMessage, kind);
   await rename(stage, target);
-  await syncDirectory(dirname(target));
+  // Rename is the visible commit point. A later directory-sync error cannot
+  // turn the published Save As back into an untouched destination.
+  try { await syncDirectory(dirname(target)); }
+  catch (error) {
+    if (onDirectorySyncFailure === undefined) throw error;
+    onDirectorySyncFailure(error);
+  }
   return committed;
 }
 

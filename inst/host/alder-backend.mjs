@@ -97938,10 +97938,12 @@ var DocumentStore = class _DocumentStore {
         stage = null;
       };
       const destinationStore = new _DocumentStore(destination, spelling);
+      let stagedVersion;
       try {
         await destinationStore.loadSidecars();
         await writeStaged(stage, bytes, expected.mode);
         await assertUnchanged();
+        stagedVersion = await diskVersion(stage);
       } catch (error61) {
         await removeStage();
         throw error61;
@@ -97949,25 +97951,32 @@ var DocumentStore = class _DocumentStore {
       const digest = sha256(bytes);
       let aborted2 = false;
       let publication = null;
-      const result = {
-        store: destinationStore,
-        result: { path: destination, changed: true, digest }
-      };
       return {
         destination,
         digest,
+        document: cloneNotebook(candidate),
+        store: destinationStore,
+        disk: diskObservation(stagedVersion),
         publish: () => {
           if (aborted2) return Promise.reject(new PersistenceError("publication_invalid", "Save As preparation has been aborted"));
           if (publication !== null) return publication;
           publication = (async () => {
             try {
               await assertUnchanged();
-              const committed = await publishStaged(stage, destination, expected, "Save As destination changed while saving");
+              let syncFailure;
+              const committed = await publishStaged(stage, destination, expected, "Save As destination changed while saving", "source", (error61) => {
+                syncFailure = error61;
+              });
               stage = null;
               destinationStore.version = committed;
               destinationStore.observedVersion = cloneDiskVersion(committed);
               destinationStore.documentValue = cloneNotebook(candidate);
-              return result;
+              return { store: destinationStore, result: {
+                path: destination,
+                changed: true,
+                digest,
+                ...syncFailure === void 0 ? {} : { durabilityWarning: "Saved destination bytes, but directory sync failed; crash durability is uncertain: " + String(syncFailure) }
+              } };
             } finally {
               await removeStage();
             }
@@ -98158,11 +98167,16 @@ var DocumentStore = class _DocumentStore {
     await this.queue;
   }
 };
-async function publishStaged(stage, target, expected, conflictMessage, kind = "source") {
+async function publishStaged(stage, target, expected, conflictMessage, kind = "source", onDirectorySyncFailure) {
   const committed = await diskVersion(stage);
   if (!sameDisk(expected, await diskVersion(target))) throw new FileConflict(conflictMessage, kind);
   await rename5(stage, target);
-  await syncDirectory3(dirname5(target));
+  try {
+    await syncDirectory3(dirname5(target));
+  } catch (error61) {
+    if (onDirectorySyncFailure === void 0) throw error61;
+    onDirectorySyncFailure(error61);
+  }
   return committed;
 }
 async function syncDirectory3(path3) {
@@ -111051,18 +111065,17 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
           if (await RecoveryWriter.hasJournal({ rootDir: recoveryRoot, key: preparedOwner.sessionKey })) {
             throw Object.assign(new Error("Save As destination has pending recovery data"), { code: "destination_recovery_conflict" });
           }
-          savePublication = await preparedSave.publish();
-          destinationStore = savePublication.store;
+          destinationStore = preparedSave.store;
           nextManager = new PackageManager({ resources: options.resources, environment: destinationRuntime, processScope, projectDirectory: destinationDirectory, onProgress: onPackageProgress });
-          const destinationDisk = destinationStore.observation();
+          const destinationDisk = preparedSave.disk;
           const destinationSidecars = sidecarProtocolObservations(destinationStore, false);
-          const destinationSerialized = serializeNotebookWithParts(destinationStore.currentDocument);
+          const destinationSerialized = serializeNotebookWithParts(preparedSave.document);
           const destinationRevision = context.fromRevision;
           const destinationBaseline = {
             schemaVersion: 1,
             documentRevision: destinationRevision,
             physicalBytes: destinationSerialized.bytes,
-            cells: recoveryCellStates(destinationStore.currentDocument),
+            cells: recoveryCellStates(preparedSave.document),
             path: destination,
             notebookDiskObservation: recoveryObservation(destinationDisk)
           };
@@ -111076,6 +111089,8 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
             throw Object.assign(new Error("Save As destination has pending recovery data"), { code: "destination_recovery_conflict" });
           }
           destinationRecoveryPreviousId = destinationRecovery.recoveryId;
+          await destinationRecovery.adoptRecoveryId(oldRecovery.recoveryId);
+          destinationRecoveryAdopted = true;
           const publicationBinder = context.preparePublication({
             document: { ...context.document, path: destination },
             path: destination,
@@ -111089,76 +111104,60 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
             rEnvironment: destinationRuntime
           });
           await preparedOwner.commit(async () => {
-            const rollbackControllerPublication = () => {
-              const binder = context.preparePublication({
-                document: context.document,
-                path: context.path,
-                config: context.config,
-                layout: context.layout,
-                disk: context.disk,
-                sidecars: context.sidecars,
-                dirty: context.dirty,
-                advanceRevision: false,
-                invalidateRuntime: false,
-                rEnvironment: runtimeEnvironment
-              });
-              binder();
-            };
             return async () => {
-              try {
-                await destinationRecovery.adoptRecoveryId(oldRecovery.recoveryId);
-                destinationRecoveryAdopted = true;
-                publicationBinder();
-                store = destinationStore;
-                recovery = destinationRecovery;
-                packageManager = nextManager;
-                notebookDirectory = destinationDirectory;
-                cacheDirectory = destinationCache;
-                config3 = destinationConfig;
-                projectSettings = { ...destinationProjectConfig };
-                resolvedLayout = destinationLayout;
-                projectLayoutIntent = destinationLayout;
-                packageDeclarationIntent = destinationPackages;
-                pendingSidecars.layout = false;
-                pendingSidecars.packages = false;
-                isUntitled = false;
-                runtimeEnvironment = destinationRuntime;
-                runtimeError = null;
-                recoveryDocumentRevision = destinationRevision;
-                recoveryPending = false;
-                recoveryFingerprint = void 0;
-                recoveryConflict = false;
-                reservation?.release();
-                try {
-                  bindWatcher(destination);
-                } catch (error61) {
-                  controller?.recordActionError(errorMessage(error61), "watcher_failed");
-                }
-                invalidateLsp();
-                if (runtimeError !== null) controller.recordRuntimeAvailabilityError(asRuntimeHostError(runtimeError));
-                if (untitledRecoveryDescriptor !== void 0) void retireUntitledRecoveryDescriptor(untitledRecoveryDescriptor).catch((error61) => controller?.recordActionError(errorMessage(error61), "recovery_checkpoint_failed"));
-                void oldStore.close().catch(() => {
-                });
-                await oldRecovery.retire().catch(() => {
-                });
-                if (runtimeChanged) startRuntime(true);
-                void oldManager?.close().catch(() => {
-                });
-              } catch (error61) {
-                if (destinationRecoveryAdopted && destinationRecoveryPreviousId !== void 0) {
-                  await destinationRecovery.adoptRecoveryId(destinationRecoveryPreviousId).catch(() => {
-                  });
-                  destinationRecoveryAdopted = false;
-                }
-                try {
-                  rollbackControllerPublication();
-                } catch {
-                }
-                throw error61;
-              }
+              savePublication = await preparedSave.publish();
+              publicationBinder();
+              store = destinationStore;
+              recovery = destinationRecovery;
+              packageManager = nextManager;
+              notebookDirectory = destinationDirectory;
+              cacheDirectory = destinationCache;
+              config3 = destinationConfig;
+              projectSettings = { ...destinationProjectConfig };
+              resolvedLayout = destinationLayout;
+              projectLayoutIntent = destinationLayout;
+              packageDeclarationIntent = destinationPackages;
+              pendingSidecars.layout = false;
+              pendingSidecars.packages = false;
+              isUntitled = false;
+              runtimeEnvironment = destinationRuntime;
+              runtimeError = null;
+              recoveryDocumentRevision = destinationRevision;
+              recoveryPending = false;
+              recoveryFingerprint = void 0;
+              recoveryConflict = false;
             };
           });
+          try {
+            reservation?.release();
+          } catch (error61) {
+            controller?.recordActionError(errorMessage(error61), "runtime_cleanup_failed");
+          }
+          try {
+            bindWatcher(destination);
+          } catch (error61) {
+            controller?.recordActionError(errorMessage(error61), "watcher_failed");
+          }
+          try {
+            invalidateLsp();
+          } catch (error61) {
+            controller?.recordActionError(errorMessage(error61), "lsp_cleanup_failed");
+          }
+          if (untitledRecoveryDescriptor !== void 0) void retireUntitledRecoveryDescriptor(untitledRecoveryDescriptor).catch((error61) => controller?.recordActionError(errorMessage(error61), "recovery_checkpoint_failed"));
+          void oldStore.close().catch(() => {
+          });
+          await oldRecovery.retire().catch((error61) => controller?.recordActionError("Saved destination; old recovery cleanup failed: " + errorMessage(error61), "recovery_cleanup_failed"));
+          if (runtimeChanged) {
+            try {
+              startRuntime(true);
+            } catch (error61) {
+              controller?.recordActionError(errorMessage(error61), "runtime_restart_failed");
+            }
+          }
+          void oldManager?.close().catch(() => {
+          });
           await watcherReady;
+          if (savePublication?.result.durabilityWarning) controller?.recordActionError(savePublication.result.durabilityWarning, "save_durability_uncertain");
           return savePublication.result;
         } catch (error61) {
           reservation?.release();
