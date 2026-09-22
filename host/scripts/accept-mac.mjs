@@ -6,6 +6,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { cleanupOwnedProcesses, ownedProcessRows, waitForOwnedExit } from './native-process-cleanup.mjs';
 
 if (process.platform !== 'darwin') throw new Error('Mac acceptance requires macOS.');
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
@@ -36,7 +37,10 @@ if (entitlements.includes('<key>')) throw new Error('the Alder app unexpectedly 
 
 const temporary = await mkdtemp(join(tmpdir(), 'alder-mac-accept-'));
 const runtimeDirectory = join('/tmp', `alder-mac-accept-${process.pid}`);
+const ownedPids = new Set();
 let differential;
+let failure;
+let failed = false;
 try {
   const source = join(temporary, 'format.R');
   await writeFile(source, 'answer<-function(x){x+1}\n');
@@ -49,15 +53,39 @@ try {
   const html = await readFile(join(temporary, 'accept.html'), 'utf8');
   if (!html.includes('Staged Quarto is ready.')) throw new Error('staged Quarto did not render the acceptance document');
 
-  differential = await evaluatePackagedKernel(temporary, runtimeDirectory);
-} finally {
-  await rm(runtimeDirectory, { recursive: true, force: true });
-  await rm(temporary, { recursive: true, force: true });
+  differential = await evaluatePackagedKernel(temporary, runtimeDirectory, ownedPids);
+} catch (error) {
+  failure = error;
+  failed = true;
 }
+
+const cleanupStarted = performance.now();
+const cleanupErrors = [];
+let ownedExited = false;
+try {
+  await waitForOwnedExit(ownedPids, runtimeDirectory, failed ? 1_000 : 10_000);
+  ownedExited = true;
+} catch (error) {
+  try {
+    await cleanupOwnedProcesses(ownedPids, runtimeDirectory);
+    ownedExited = true;
+    if (!failed) cleanupErrors.push(error);
+  } catch (ownedError) { cleanupErrors.push(ownedError); }
+}
+timings['child-cleanup'] = Math.round(performance.now() - cleanupStarted);
+if (ownedExited) {
+  try {
+    await rm(runtimeDirectory, { recursive: true, force: true });
+    await rm(temporary, { recursive: true, force: true });
+  } catch (error) { cleanupErrors.push(error); }
+}
+const errors = [...(failed ? [failure] : []), ...cleanupErrors];
+if (errors.length > 1) throw new AggregateError(errors, 'Mac acceptance and owned cleanup failed');
+if (errors.length === 1) throw errors[0];
 
 process.stdout.write(JSON.stringify({ app, differential, timings }) + '\n');
 
-async function evaluatePackagedKernel(directory, runtimePath) {
+async function evaluatePackagedKernel(directory, runtimePath, ownedPids) {
   const started = performance.now();
   const notebook = join(directory, 'ark-accept.R');
   const configDirectory = join(directory, 'config');
@@ -102,6 +130,7 @@ async function evaluatePackagedKernel(directory, runtimePath) {
     const state = await bounded(client.callTool({ name: 'notebook_state', arguments: {} }), 'initial packaged state');
     if (state.isError) throw new Error('packaged notebook state failed');
     const snapshot = requireRecord(requireRecord(requireRecord(state.structuredContent).result).snapshot);
+    if (process.env.ALDER_ACCEPT_MAC_FAIL_AFTER_START === '1') throw new Error('injected packaged check failure after runtime startup');
     const result = await bounded(client.callTool({ name: 'run_all', arguments: {
       requestId: randomUUID(),
       sessionEpoch: requireString(snapshot.epoch),
@@ -134,18 +163,12 @@ async function evaluatePackagedKernel(directory, runtimePath) {
     if (diagnostics) throw new Error(`${error instanceof Error ? error.message : String(error)}\n${diagnostics}`, { cause: error });
     throw error;
   } finally {
+    if (transport.pid !== null) ownedPids.add(transport.pid);
+    try { for (const row of ownedProcessRows(ownedPids, runtimePath)) ownedPids.add(row.pid); } catch {}
     await client.close().catch(() => undefined);
     await transport.close().catch(() => undefined);
   }
   timings['ark-evaluation'] = Math.round(performance.now() - started);
-  const cleanupStarted = performance.now();
-  const cleanupDeadline = cleanupStarted + 10_000;
-  while (ownedProcesses([directory, runtimePath]).length > 0 && performance.now() < cleanupDeadline) {
-    await new Promise(resolve => setTimeout(resolve, 100));
-  }
-  const remaining = ownedProcesses([directory, runtimePath]);
-  timings['child-cleanup'] = Math.round(performance.now() - cleanupStarted);
-  if (remaining.length > 0) throw new Error(`packaged host left owned children running:\n${remaining.join('\n')}`);
   return { seed: `0x${DIFFERENTIAL_SEED.toString(16)}`, cases: corpus.length, maxSourceBytes: 65_536, timeoutMs: DIFFERENTIAL_TIMEOUT_MS };
 }
 
@@ -211,11 +234,6 @@ async function bounded(promise, label) {
   } finally {
     clearTimeout(timer);
   }
-}
-
-function ownedProcesses(markers) {
-  return execFileSync('/bin/ps', ['-axo', 'pid=,ppid=,command='], { encoding: 'utf8' })
-    .split('\n').map(line => line.trim()).filter(line => markers.some(marker => line.includes(marker)));
 }
 
 function requireRecord(value) {
