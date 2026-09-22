@@ -32,12 +32,13 @@ full-notebook health queries with existing renderer connection reporting and a
 small fallback for bootstrap/failed-renderer cases. Preserve authoritative Save As
 identity adoption, native path/window bookkeeping and conflict detection.
 
-**Owner and next action:** primary owns the duplicate-work slice from integrated
-`65a3e4b`. Prove unchanged-content external
-replacement preserves results, actual source edits still update/conflict correctly,
-and Save As followed immediately by native restart/reopen uses the destination.
-Keep one authority for identity and connection status; remove replaced paths and
-submit a clean focused candidate. Full acceptance follows independent review.
+**Owner and next action:** primary corrects reviewed candidate `681df5d`. The
+watcher/content change passed review. Native identity must consume the committed
+path through existing authenticated editor state without another host round trip;
+late identity responses must not change a replacement connection or newer path.
+Cover delayed old replies and host death after acknowledged Save As. Add the
+packaged journey's pre-Save disk assertion, then submit one clean correction for
+focused rereview before full acceptance.
 
 **Approved next slice:**
 
@@ -77,7 +78,7 @@ One item is active. New approved work is added here before assignment.
 | Release README and feature demo | Accepted | Primary implementer and independent reviewers | `b316bc3`: release-facing install/use guide and three compact real-app feature captures; media and factual reviews passed |
 | Repository integration and cleanup | Accepted | Primary implementer and focused cleanup reviewers | `554da34`: canonical docs and accepted app fast-forwarded to remote `main`; obsolete worktrees, branches and safety stashes removed after review |
 | Platform-boundary extraction | Accepted | Primary implementer and focused reviewers | `42cfda8`: shared Linux R 34/34, browser 12/12 and reviewed localized Mac/Linux seams; no duplicated product or Ark fork |
-| Native Mac reliability qualification | Implementing | Primary implementer | Lifecycle `237a254` accepted; now separate content from disk identity and remove duplicate native health queries |
+| Native Mac reliability qualification | Implementing | Primary implementer | Correct native identity handoff and stale replies in `681df5d`, then rereview and full signed-app acceptance |
 | Scientific workflow qualification | Queued | Unassigned | A realistic scientific notebook, real CRAN/Bioconductor packages, representative R reactivity idioms, two live notebooks under load and rich publishing are independently qualified through packaged Alder |
 | Product completion and public Mac delivery | Queued | Unassigned | Project/Git ownership, notebook-wide search, agent presence, accessibility, scale, upgrade state, release identity, architecture support and signed/notarized distribution have explicit accepted behavior |
 

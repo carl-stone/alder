@@ -121,6 +121,13 @@ cancel pending idle shutdown; an orphaned run must not keep an unused host alive
 indefinitely. Desktop code does not reimplement that owner through historical lease
 lists or document-wide health polls. Preserve other attached clients and their work.
 
+Native document identity follows the host-acknowledged path reported by the active,
+authenticated editor frame. Record a committed Save As through that existing bridge
+without requiring another live-host query before it becomes the restart target.
+Keep the matching named-session key in step. Fallback identity queries cannot
+overwrite a newer committed identity or apply after their connection or renderer
+generation has been replaced.
+
 **Documents.** Maintain an in-memory working document, a saved baseline, an
 external-file fingerprint and a recovery snapshot. Stage saves and atomically
 replace the destination. Offer an understandable external-edit conflict choice.
