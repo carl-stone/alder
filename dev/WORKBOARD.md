@@ -10,7 +10,7 @@ copies in other worktrees are snapshots.
 
 ## Current assignment
 
-**Native Mac reliability — Implementing on Mac.**
+**Native Mac reliability — Review on Mac.**
 
 **Latest accepted checkpoint:** source `e3bba94`. Full signed-app acceptance and
 the separate packaged Save As journey passed with a clean tree and natural cleanup.
@@ -32,13 +32,11 @@ unsaved source and local drafts, protecting other attached clients. User-approve
 close after host failure retains recovery and cannot be vetoed by failed HTTP
 cleanup. Backend owns bounded no-client shutdown, including orphaned runs.
 
-**Owner and next action:** primary corrects reviewed candidate `75388d4`. A dirty
-window with a dead host needs an explicit Close keeping recovery; live untitled
-Discard must preserve discovery of later acknowledged edits and retain recovery
-on failure. Replace the stale installed-host release/discard test, prove active R
-run plus last detach naturally exits with recovery retained, and restore compact
-Quit-wait and parent/child-detach checks with finite waits. Submit one clean
-corrected candidate for focused rereview before full signed-app acceptance.
+**Owner and next action:** focused core, native-close and test rereviews passed
+clean correction `237a254`. The final acceptance reviewer now owns the full
+signed-app gate on that commit. Verify natural process cleanup and report any
+failed phase before changing the candidate. Primary holds; lead records acceptance
+or sends one consolidated correction before assigning later work.
 
 **Approved next slices, in order:**
 
@@ -81,7 +79,7 @@ One item is active. New approved work is added here before assignment.
 | Release README and feature demo | Accepted | Primary implementer and independent reviewers | `b316bc3`: release-facing install/use guide and three compact real-app feature captures; media and factual reviews passed |
 | Repository integration and cleanup | Accepted | Primary implementer and focused cleanup reviewers | `554da34`: canonical docs and accepted app fast-forwarded to remote `main`; obsolete worktrees, branches and safety stashes removed after review |
 | Platform-boundary extraction | Accepted | Primary implementer and focused reviewers | `42cfda8`: shared Linux R 34/34, browser 12/12 and reviewed localized Mac/Linux seams; no duplicated product or Ark fork |
-| Native Mac reliability qualification | Implementing | Primary implementer | Correct the two lifecycle failures and focused test gaps found in `75388d4`, then rereview and run full signed-app acceptance |
+| Native Mac reliability qualification | Review | Lead and independent reviewers | Rereview lifecycle correction `237a254`, then run full signed-app acceptance |
 | Scientific workflow qualification | Queued | Unassigned | A realistic scientific notebook, real CRAN/Bioconductor packages, representative R reactivity idioms, two live notebooks under load and rich publishing are independently qualified through packaged Alder |
 | Product completion and public Mac delivery | Queued | Unassigned | Project/Git ownership, notebook-wide search, agent presence, accessibility, scale, upgrade state, release identity, architecture support and signed/notarized distribution have explicit accepted behavior |
 
