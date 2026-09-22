@@ -256,11 +256,37 @@ try {
   await primary.cdp.wait("document.querySelector('[data-role=output]')?.textContent.includes('42')", 30_000);
   await primary.cdp.wait("!document.title.includes('Edited')", 15_000);
 
+  await primary.cdp.evaluate("document.getElementById('settings-open').click()");
+  await primary.cdp.wait("document.getElementById('settings')?.open", 10_000);
+  if (await primary.cdp.evaluate("document.getElementById('settings-autosave')?.checked")) {
+    await primary.cdp.evaluate("document.getElementById('settings-autosave').click()");
+    await primary.cdp.evaluate("document.getElementById('settings-apply').click()");
+    await primary.cdp.wait("window.__alderHost.client.document.snapshot.config.autosave === false", 15_000);
+  } else {
+    await primary.cdp.evaluate("document.getElementById('settings-cancel').click()");
+  }
+
+  const unsavedPeerSource = 'peer_pending <- 43L\npeer_pending';
+  await replaceEditor(primary.cdp, unsavedPeerSource);
+  await primary.cdp.wait(`window.__alderHost.client.document.cell('cell-1')?.desiredBody.join('\\n') === ${JSON.stringify(unsavedPeerSource)}`, 10_000);
+  await click(primary.cdp, '[data-act=run]');
+  await primary.cdp.wait("document.querySelector('[data-role=output]')?.textContent.includes('43')", 30_000);
+  await primary.cdp.wait(`window.__alderHost.client.document.snapshot.cells[0].body.join('\\n') === ${JSON.stringify(unsavedPeerSource)}`, 20_000);
+  if (savedSource(await readFile(notebook, 'utf8')) !== '6 * 7') throw new Error('unsaved source reached disk before Save');
   peer = await launch('electron-peer');
-  await peer.cdp.wait("[...document.querySelectorAll('.cm-content .cm-line')].map(node => node.textContent).join('\\n') === '6 * 7'", 20_000);
+  await peer.cdp.wait(`[...document.querySelectorAll('.cm-content .cm-line')].map(node => node.textContent).join('\\n') === ${JSON.stringify(unsavedPeerSource)}`, 20_000);
+  await shortcut(primary.cdp, 's', 'KeyS', 83, 4);
+  await waitDiskSource(unsavedPeerSource);
+  await peer.cdp.wait("window.__alderHost.client.document.snapshot.dirty === false", 10_000);
   await stop(peer); peer = undefined;
   if (primary.child.exitCode !== null) throw new Error('closing the second same-file client stopped the first app');
-  await primary.cdp.wait("document.getElementById('r-state')?.textContent === 'R ready'", 10_000);
+  await primary.cdp.wait(`document.getElementById('r-state')?.textContent === 'R ready' &&
+    [...document.querySelectorAll('.cm-content .cm-line')].map(node => node.textContent).join('\\n') === ${JSON.stringify(unsavedPeerSource)} &&
+    window.__alderHost.client.document.snapshot.cells[0].body.join('\\n') === ${JSON.stringify(unsavedPeerSource)}`, 10_000);
+  if (savedSource(await readFile(notebook, 'utf8')) !== unsavedPeerSource) throw new Error('peer close lost the saved primary source');
+  await replaceEditor(primary.cdp, '6 * 7');
+  await shortcut(primary.cdp, 's', 'KeyS', 83, 4);
+  await waitDiskSource('6 * 7');
 
   const processRows = execFileSync('/bin/ps', ['-axo', 'pid=,ppid=,command='], { encoding: 'utf8' })
     .split('\n').map(line => line.trim()).filter(Boolean).map(line => {
@@ -306,7 +332,7 @@ try {
   if (!JSON.stringify(operations).includes('slow_value') || !operations.operations.length) throw new Error(`packaged slow operation is absent: ${JSON.stringify(operations)}`);
   if (!performanceSummary.summaries.length) throw new Error(`packaged performance summary is empty: ${JSON.stringify(performanceSummary)}`);
   process.stdout.write(JSON.stringify({ app, elapsedMs: Math.round(performance.now() - started), immediateSaveIterations: saveIterations,
-    journeys: ['open-reopen', 'editor-run', 'immediate-save', 'renderer-error', 'slow-run', 'ark-error', 'persistence-failure', 'interrupt-recovery', 'same-file-peer-detach', 'ark-recovery', 'quit-relaunch', 'stopped-diagnostic-queries'],
+    journeys: ['open-reopen', 'editor-run', 'immediate-save', 'renderer-error', 'slow-run', 'ark-error', 'persistence-failure', 'interrupt-recovery', 'same-file-peer-draft-save-detach', 'ark-recovery', 'quit-relaunch', 'stopped-diagnostic-queries'],
     diagnostics: { retainedBytes: status.retainedBytes, launches: launches.records.length, errors: errors.records.length, operations: operations.operations.length, performance: performanceSummary.summaries.length },
   }) + '\n');
 } catch (error) {

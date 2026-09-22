@@ -77,7 +77,14 @@ try {
     execFileSync('R', ['--slave', '--vanilla', '-e',
       'if (getRversion() < "4.6.0" || getRversion() >= "4.7.0") stop("Alder requires R 4.6.x for its bundled helper")'],
     { stdio: 'inherit' });
-    execFileSync('R', ['CMD', 'build', root, '--no-build-vignettes', '--no-manual'], {
+    // The app ships only the R helper package. Building from the repository
+    // would copy generated app bundles and node_modules into R's temporary tree.
+    const packageSource = join(rPackageBuild, 'alder');
+    await mkdir(packageSource);
+    for (const entry of ['DESCRIPTION', 'NAMESPACE', 'LICENSE', 'README.md', 'R', 'man', 'inst/examples']) {
+      await cp(join(root, entry), join(packageSource, entry), { recursive: true });
+    }
+    execFileSync('R', ['CMD', 'build', packageSource, '--no-build-vignettes', '--no-manual'], {
       cwd: rPackageBuild, stdio: 'inherit',
     });
     const archives = (await readdir(rPackageBuild)).filter(name => /^alder_[^/]+[.]tar[.]gz$/.test(name));
