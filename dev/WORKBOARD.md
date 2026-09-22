@@ -10,10 +10,10 @@ copies in other worktrees are snapshots.
 
 ## Current assignment
 
-**Native Mac reliability — Review on Mac.**
+**Native Mac reliability — Implementing on Mac.**
 
 The shared portable-core checkpoint is accepted on pushed main `42cfda8`.
-`227d01d` is the latest accepted Mac source, integrated on main at `4351a84`.
+`b74355a` is the latest accepted Mac checkpoint, integrated on main at `572f7b6`.
 The staged signed app is refreshed; the installed user copy remains untouched.
 Preserve upstream unmodified Ark.
 
@@ -22,24 +22,20 @@ remain dependable through native failures. Exercise real user journeys through t
 while keeping Carl's visible desktop free. Record scenarios that genuinely require foreground
 interaction for a later supervised pass; do not infer them from headless checks.
 
-**Accepted subcheckpoint:** `227d01d` preserves acknowledged unsaved edits and
-renderer-local drafts through packaged renderer failure, discovers separate
-retained drafts after app relaunch, and requires an explicit recovery choice.
-Selection, Save and startup stay separate. Independent reviews, complete signed-
-app acceptance, renderer-crash and app-relaunch journeys, strict signing and
-clean owned-child audits passed. Earlier backend-crash cleanup was accepted at
-`5b3321a`; packaging and two-window fixes at `f086e40` and `e9293e5`.
+**Accepted subcheckpoint:** `b74355a` adds a packaged whole-app `SIGKILL`
+journey: backend-acknowledged unsaved source and a separate renderer-local draft
+both survive relaunch, with no implicit Run or Save; old owned children exit
+naturally. `227d01d` covered renderer failure and retained-draft selection;
+`5b3321a` covered backend failure. Independent reviews, complete signed-app
+acceptance, focused crash journeys, strict signing and clean child audits passed.
 
-**Current bounded slice:** hard-kill the entire packaged app with one source edit
-acknowledged by the backend but unsaved and another still local to the renderer.
-Relaunch the saved notebook in a new app process and verify both edits are
-recoverable without implicit Run or Save; then run and save explicitly. Verify
-ordinary cleanup of old owned children and no interference with the installed
-user app.
-
-**Candidate ready:** clean `b74355a` adds the packaged whole-app crash journey
-without product-code changes. Focused background checks and crash journeys pass;
-independent review is underway before the full signed-app gate.
+**Current bounded slice:** qualify native file and window use through the staged
+packaged app: New and Open, Save As and replacement choice, dirty close
+Save/Discard/Cancel, reopening after the last window, second-instance file
+forwarding and two distinct windows. Preserve unsaved work and correct document
+ownership across each path. Use isolated/background Mac checks without taking
+Carl's visible desktop; identify any Finder or dialog presentation that truly
+requires a later supervised foreground pass. Keep test machinery small.
 
 The release README and three feature GIFs remain on `main`. The separate Ark source repository
 is untouched.
@@ -66,7 +62,7 @@ One item is active. New approved work is added here before assignment.
 | Release README and feature demo | Accepted | Primary implementer and independent reviewers | `b316bc3`: release-facing install/use guide and three compact real-app feature captures; media and factual reviews passed |
 | Repository integration and cleanup | Accepted | Primary implementer and focused cleanup reviewers | `554da34`: canonical docs and accepted app fast-forwarded to remote `main`; obsolete worktrees, branches and safety stashes removed after review |
 | Platform-boundary extraction | Accepted | Primary implementer and focused reviewers | `42cfda8`: shared Linux R 34/34, browser 12/12 and reviewed localized Mac/Linux seams; no duplicated product or Ark fork |
-| Native Mac reliability qualification | Review | Lead and independent reviewers | Sleep/wake, real Finder/dialog/window flows, packaged crash recovery and supported-filesystem behavior work through visible installed-app paths without lost work or stranded processes |
+| Native Mac reliability qualification | Implementing | Primary implementer | Sleep/wake, real Finder/dialog/window flows, packaged crash recovery and supported-filesystem behavior work through visible installed-app paths without lost work or stranded processes |
 | Scientific workflow qualification | Queued | Unassigned | A realistic scientific notebook, real CRAN/Bioconductor packages, representative R reactivity idioms, two live notebooks under load and rich publishing are independently qualified through packaged Alder |
 | Product completion and public Mac delivery | Queued | Unassigned | Project/Git ownership, notebook-wide search, agent presence, accessibility, scale, upgrade state, release identity, architecture support and signed/notarized distribution have explicit accepted behavior |
 
