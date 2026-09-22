@@ -44,8 +44,12 @@ export class NotebookBackend {
 
   async open(options: HostLaunchOptions): Promise<BackendSessionDescriptor> {
     const key = options.path === null ? "untitled:" + options.sessionKey : "path:" + options.path;
+    for (const [stored, item] of this.hosts) {
+      const current = item.ownership.canonicalPath === null ? "untitled:" + item.ownership.sessionKey : "path:" + item.ownership.canonicalPath;
+      if (stored !== current) { this.hosts.delete(stored); this.hosts.set(current, item); }
+    }
     let host = this.hosts.get(key);
-    if (host && host.ownership.canonicalPath !== options.path) { this.hosts.delete(key); host = undefined; }
+    if (host && host.ownership.canonicalPath !== options.path) host = undefined;
     host ??= [...this.hosts.values()].find(item => item.ownership.canonicalPath === options.path && options.path !== null);
     const cold = !host;
     if (!host) {

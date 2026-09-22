@@ -830,7 +830,8 @@ for (const decision of ["Cancel", "Save"] as const) {
     const main = new ElectronMain(electronRuntime, { resources, acquireSession: async () => hostConnection, closeSettlementTimeoutMs: 1_000 });
     (main as any).loadAuthenticatedNotebook = async () => undefined;
     let dirty = true;
-    (main as any).readWindowState = async () => ({ path, dirty, saveState: dirty ? "edited" : "saved", sessionEpoch: "epoch" });
+    // A committed Save As warning reports saved bytes but still needs a retry.
+    (main as any).readWindowState = async () => ({ path, dirty, saveState: "saved", sessionEpoch: "epoch" });
     try {
       await main.openNotebook(path);
       window.close();
@@ -861,6 +862,44 @@ for (const decision of ["Cancel", "Save"] as const) {
     }
   });
 }
+
+test("native Close keeps a warned Save As open on Cancel, then closes after retry", { timeout: 3_000 }, async () => {
+  const path = "/tmp/alder-save-as-warning-close.R";
+  const hostConnection = connection("save-as-warning-close", path, async endpoint => {
+    assert.equal(endpoint, "/api/ticket");
+    return jsonResponse({ ticket: "a".repeat(64), expiresAt: "2026-12-01T00:00:00.000Z" });
+  });
+  const window = windowWithLoad();
+  const actions: string[] = [];
+  let dirty = true;
+  let dialogs = 0;
+  let main: ElectronMain;
+  window.webContents.send = (_channel, payload) => {
+    const command = payload as { requestId?: string; action: string };
+    actions.push(command.action);
+    if (command.action === "save") dirty = false;
+    if (command.requestId) queueMicrotask(() => ([...(main as any).records][0] as any)?.pendingCommands.get(command.requestId)?.resolve({ requestId: command.requestId, status: "ok" }));
+  };
+  const electronRuntime = runtime();
+  electronRuntime.BrowserWindow = Object.assign(function () { return window; }, { fromWebContents: () => window }) as unknown as ElectronRuntime["BrowserWindow"];
+  electronRuntime.dialog.showMessageBox = async () => ({ response: dialogs++ === 0 ? 2 : 0 });
+  main = new ElectronMain(electronRuntime, { resources, acquireSession: async () => hostConnection, closeSettlementTimeoutMs: 1_000 });
+  (main as any).loadAuthenticatedNotebook = async () => undefined;
+  (main as any).readWindowState = async () => ({ path, dirty, saveState: "saved", sessionEpoch: "epoch" });
+  try {
+    await main.openNotebook(path);
+    const record = [...(main as any).records][0];
+    await (main as any).requestClose(record);
+    assert.equal(window.destroyed, false);
+    assert.equal(hostConnection.releaseCount, 0);
+    assert.deepEqual(actions, []);
+    await (main as any).requestClose(record);
+    assert.equal(window.destroyed, true);
+    assert.equal(hostConnection.releaseCount, 1);
+    assert.deepEqual(actions, ["save", "prepare-unload"]);
+    assert.equal(dialogs, 2);
+  } finally { await main.stop(); }
+});
 
 test("native recovery IPC accepts the owning main frame and keeps its recovery identity scoped", async () => {
   const root = await realpath(await mkdtemp(join(tmpdir(), "alder-desktop-recovery-ipc-")));

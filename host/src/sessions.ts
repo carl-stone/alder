@@ -83,7 +83,7 @@ export interface NotebookOwnershipOptions {
 export interface PreparedNotebookRekey {
   readonly canonicalPath: string;
   readonly sessionKey: string;
-  commit(preparePublication: () => Promise<() => void | Promise<void>>): Promise<void>;
+  commit(preparePublication: () => Promise<() => void | Promise<void>>, retainPrevious?: () => boolean): Promise<void>;
   abort(): Promise<void>;
 }
 
@@ -97,6 +97,7 @@ export interface NotebookOwnership {
   readonly browserOrigin: string;
   readonly publishReady: (origin: string, address?: { host: string; port: number; origin: string; browserOrigin: string }) => Promise<void>;
   readonly prepareRekey: (path: string) => Promise<PreparedNotebookRekey>;
+  readonly releaseRetained: (sessionKey: string) => void;
   readonly close: () => Promise<void>;
 }
 
@@ -266,14 +267,18 @@ function createConnection(descriptor: BackendSessionDescriptor, lease: SessionLe
   };
 }
 
-interface Claim { ownership: NotebookOwnership; }
+interface Claim { ownership: NotebookOwnership; retained?: boolean; }
 const claims = new Map<string, Claim>();
 
 export async function acquireNotebookOwnership(options: NotebookOwnershipOptions): Promise<NotebookOwnership> {
   let canonicalPath = await canonicalizePath(options.path);
   let sessionKey = canonicalPath === null ? requireUntitledRecoveryId(options.sessionKey) : sessionKeyFor(canonicalPath);
   let claimKey = canonicalPath === null ? "untitled:" + sessionKey : "path:" + canonicalPath;
-  if (claims.has(claimKey)) throw new SessionUnavailableError("notebook is already open", { canonicalPath });
+  const retainedClaims = new Map<string, string>();
+  const existingClaim = claims.get(claimKey);
+  if (existingClaim) throw new SessionUnavailableError(existingClaim.retained
+    ? "This notebook's recovery is held by an unfinished Save As. Retry Save or close the current notebook before opening it."
+    : "notebook is already open", { canonicalPath });
   let closed = false;
   let origin = options.origin ?? "http://127.0.0.1:0";
   let browserOrigin = origin;
@@ -292,7 +297,10 @@ export async function acquireNotebookOwnership(options: NotebookOwnershipOptions
       const destination = await canonicalizeDestination(path);
       const destinationKey = "path:" + destination;
       const destinationSessionKey = sessionKeyFor(destination);
-      if (destinationKey !== claimKey && claims.has(destinationKey)) throw new SessionUnavailableError("Save As destination is already open", { canonicalPath: destination });
+      const destinationClaim = claims.get(destinationKey);
+      if (destinationKey !== claimKey && destinationClaim) throw new SessionUnavailableError(destinationClaim.retained
+        ? "Save As destination recovery is held by another unfinished Save As. Retry Save or close that notebook before using this destination."
+        : "Save As destination is already open", { canonicalPath: destination });
       const reservation = { ownership };
       if (destinationKey !== claimKey) claims.set(destinationKey, reservation);
       let phase: "prepared" | "committed" | "aborted" = "prepared";
@@ -301,12 +309,15 @@ export async function acquireNotebookOwnership(options: NotebookOwnershipOptions
         phase = "aborted";
         if (destinationKey !== claimKey && claims.get(destinationKey) === reservation) claims.delete(destinationKey);
       };
-      const commit = async (preparePublication: () => Promise<() => void | Promise<void>>): Promise<void> => {
+      const commit = async (preparePublication: () => Promise<() => void | Promise<void>>, retainPrevious?: () => boolean): Promise<void> => {
         if (phase !== "prepared") throw new SessionUnavailableError("prepared Save As ownership is no longer available");
         try {
           const publish = await preparePublication();
           await publish();
-          if (destinationKey !== claimKey && claims.get(claimKey)?.ownership === ownership) claims.delete(claimKey);
+          if (destinationKey !== claimKey && claims.get(claimKey)?.ownership === ownership) {
+            if (retainPrevious?.()) { retainedClaims.set(sessionKey, claimKey); claims.set(claimKey, { ownership, retained: true }); }
+            else claims.delete(claimKey);
+          }
           canonicalPath = destination;
           sessionKey = destinationSessionKey;
           claimKey = destinationKey;
@@ -316,7 +327,19 @@ export async function acquireNotebookOwnership(options: NotebookOwnershipOptions
       };
       return { canonicalPath: destination, sessionKey: destinationSessionKey, commit, abort };
     },
-    close: async () => { if (closed) return; closed = true; if (claims.get(claimKey)?.ownership === ownership) claims.delete(claimKey); },
+    releaseRetained: (key: string) => {
+      const retained = retainedClaims.get(key);
+      if (retained === undefined) return;
+      if (claims.get(retained)?.ownership === ownership) claims.delete(retained);
+      retainedClaims.delete(key);
+    },
+    close: async () => {
+      if (closed) return;
+      closed = true;
+      if (claims.get(claimKey)?.ownership === ownership) claims.delete(claimKey);
+      for (const retained of retainedClaims.values()) if (claims.get(retained)?.ownership === ownership) claims.delete(retained);
+      retainedClaims.clear();
+    },
   } satisfies NotebookOwnership;
   claims.set(claimKey, { ownership });
   return ownership;

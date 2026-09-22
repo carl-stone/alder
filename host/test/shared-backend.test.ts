@@ -47,6 +47,50 @@ async function editFirstCell(connection: SessionConnection, body: string): Promi
   assert.equal(result.error, null);
 }
 
+async function command(connection: SessionConnection, value: Record<string, unknown>) {
+  const snapshot = await notebook(connection);
+  const request = parseHostCommand({ ...value, requestId: randomUUID(), clientId: connection.clientId,
+    sessionEpoch: connection.epoch, expectedDocumentRevision: snapshot.documentRevision });
+  const response = await connection.request("/api/command", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(encodeHostCommandWire(request)) });
+  const body = await response.text();
+  assert.equal(response.status, 200, body);
+  return JSON.parse(body) as { error: { message: string } | null; result?: { durabilityWarning?: string } };
+}
+
+test("warned Save As keeps its source claim and backend host through a denied reopen", { timeout: 15_000 }, async context => {
+  const value = await fixture(context);
+  const source = join(value.root, "source.R"), destination = join(value.root, "destination.R");
+  await writeFile(source, "# %%\nx <- 1\n");
+  const backend = new NotebookBackend(value.resources);
+  const clients: SessionConnection[] = [];
+  try {
+    const current = await value.connect(backend, source); clients.push(current);
+    await editFirstCell(current, "x <- 7");
+    const adopt = RecoveryWriter.prototype.adoptRecoveryId;
+    let failIdentity = true;
+    context.mock.method(RecoveryWriter.prototype, "adoptRecoveryId", async function (this: RecoveryWriter, id: string) {
+      if (failIdentity) { failIdentity = false; throw new Error("identity sync fault"); }
+      return adopt.call(this, id);
+    });
+    const warned = await command(current, { type: "save-as", path: destination, expectedDestination: "absent" });
+    assert.equal(warned.error, null);
+    assert.match(warned.result?.durabilityWarning ?? "", /identity sync fault/);
+    await assert.rejects(backend.open(value.options(source)), /unfinished Save As.*Retry Save or close/);
+    assert.equal(backend.idle, false);
+    const destinationClient = await value.connect(backend, destination); clients.push(destinationClient);
+    assert.equal((await notebook(destinationClient)).path, destination);
+    const settled = await command(destinationClient, { type: "save" });
+    assert.equal(settled.error, null);
+    assert.equal(settled.result?.durabilityWarning, undefined);
+    const reopened = await value.connect(backend, source); clients.push(reopened);
+    assert.equal((await notebook(reopened)).path, source);
+  } finally {
+    await Promise.allSettled(clients.map(client => client.release()));
+    await backend.close();
+    await rm(value.root, { recursive: true, force: true });
+  }
+});
+
 test("same-notebook clients detach independently while different notebooks stay isolated", { timeout: 15_000 }, async context => {
   const value = await fixture(context); const firstPath = join(value.root, "first.R"), secondPath = join(value.root, "second.R");
   await writeFile(firstPath, "# %%\nfirst <- 1\n"); await writeFile(secondPath, "# %%\nsecond <- 2\n");

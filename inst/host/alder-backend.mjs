@@ -73443,6 +73443,9 @@ var Controller = class {
     });
     this.replaceLastActionError(actionError);
   }
+  clearActionError(code2) {
+    if (this.lastActionError?.code === code2) this.replaceLastActionError(null);
+  }
   recordRuntimeAvailabilityError(error61) {
     this.assertNotClosed();
     if (!this.setRuntimeAvailabilityError(error61)) return;
@@ -110203,7 +110206,9 @@ async function acquireNotebookOwnership(options) {
   let canonicalPath = await canonicalizePath(options.path);
   let sessionKey = canonicalPath === null ? requireUntitledRecoveryId(options.sessionKey) : sessionKeyFor(canonicalPath);
   let claimKey = canonicalPath === null ? "untitled:" + sessionKey : "path:" + canonicalPath;
-  if (claims.has(claimKey)) throw new SessionUnavailableError("notebook is already open", { canonicalPath });
+  const retainedClaims = /* @__PURE__ */ new Map();
+  const existingClaim = claims.get(claimKey);
+  if (existingClaim) throw new SessionUnavailableError(existingClaim.retained ? "This notebook's recovery is held by an unfinished Save As. Retry Save or close the current notebook before opening it." : "notebook is already open", { canonicalPath });
   let closed = false;
   let origin = options.origin ?? "http://127.0.0.1:0";
   let browserOrigin = origin;
@@ -110235,7 +110240,8 @@ async function acquireNotebookOwnership(options) {
       const destination = await canonicalizeDestination(path3);
       const destinationKey = "path:" + destination;
       const destinationSessionKey = sessionKeyFor(destination);
-      if (destinationKey !== claimKey && claims.has(destinationKey)) throw new SessionUnavailableError("Save As destination is already open", { canonicalPath: destination });
+      const destinationClaim = claims.get(destinationKey);
+      if (destinationKey !== claimKey && destinationClaim) throw new SessionUnavailableError(destinationClaim.retained ? "Save As destination recovery is held by another unfinished Save As. Retry Save or close that notebook before using this destination." : "Save As destination is already open", { canonicalPath: destination });
       const reservation = { ownership };
       if (destinationKey !== claimKey) claims.set(destinationKey, reservation);
       let phase = "prepared";
@@ -110244,12 +110250,17 @@ async function acquireNotebookOwnership(options) {
         phase = "aborted";
         if (destinationKey !== claimKey && claims.get(destinationKey) === reservation) claims.delete(destinationKey);
       };
-      const commit = async (preparePublication) => {
+      const commit = async (preparePublication, retainPrevious) => {
         if (phase !== "prepared") throw new SessionUnavailableError("prepared Save As ownership is no longer available");
         try {
           const publish = await preparePublication();
           await publish();
-          if (destinationKey !== claimKey && claims.get(claimKey)?.ownership === ownership) claims.delete(claimKey);
+          if (destinationKey !== claimKey && claims.get(claimKey)?.ownership === ownership) {
+            if (retainPrevious?.()) {
+              retainedClaims.set(sessionKey, claimKey);
+              claims.set(claimKey, { ownership, retained: true });
+            } else claims.delete(claimKey);
+          }
           canonicalPath = destination;
           sessionKey = destinationSessionKey;
           claimKey = destinationKey;
@@ -110262,10 +110273,18 @@ async function acquireNotebookOwnership(options) {
       };
       return { canonicalPath: destination, sessionKey: destinationSessionKey, commit, abort };
     },
+    releaseRetained: (key2) => {
+      const retained = retainedClaims.get(key2);
+      if (retained === void 0) return;
+      if (claims.get(retained)?.ownership === ownership) claims.delete(retained);
+      retainedClaims.delete(key2);
+    },
     close: async () => {
       if (closed) return;
       closed = true;
       if (claims.get(claimKey)?.ownership === ownership) claims.delete(claimKey);
+      for (const retained of retainedClaims.values()) if (claims.get(retained)?.ownership === ownership) claims.delete(retained);
+      retainedClaims.clear();
     }
   };
   claims.set(claimKey, { ownership });
@@ -110724,9 +110743,12 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
       recoveryPending = false;
       recoveryFingerprint = void 0;
     }
-    for (const retained of retainedSaveAsRecovery) await retained.retire();
-    retainedSaveAsRecovery.length = 0;
+    for (const retained of retainedSaveAsRecovery) {
+      await retained.retire();
+    }
     if (untitledRecoveryDescriptor !== void 0) await retireUntitledRecoveryDescriptor(untitledRecoveryDescriptor);
+    for (const retained of retainedSaveAsRecovery) ownership.releaseRetained(retained.key);
+    retainedSaveAsRecovery.length = 0;
     await close();
   };
   try {
@@ -110802,6 +110824,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
       };
       recovery.update(baseline2);
       await recovery.flush();
+      if (saveAsIdentityPending) saveAsIdentityPending = false;
       const state = await recovery.load();
       notebook = input3.document;
       recoveryFingerprint = state.fingerprint ?? void 0;
@@ -110967,23 +110990,24 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
             }
           }
           if (durabilityWarning === void 0 && clearError === null) {
-            const remaining = [];
             for (const retained of retainedSaveAsRecovery) {
               try {
                 await retained.retire();
               } catch (error61) {
-                remaining.push(retained);
                 clearError = error61;
               }
             }
-            retainedSaveAsRecovery.splice(0, retainedSaveAsRecovery.length, ...remaining);
-            if (remaining.length === 0 && untitledRecoveryDescriptor !== void 0) {
+            if (clearError === null && untitledRecoveryDescriptor !== void 0) {
               try {
                 await retireUntitledRecoveryDescriptor(untitledRecoveryDescriptor);
                 untitledRecoveryDescriptor = void 0;
               } catch (error61) {
                 clearError = error61;
               }
+            }
+            if (clearError === null) {
+              for (const retained of retainedSaveAsRecovery) ownership.releaseRetained(retained.key);
+              retainedSaveAsRecovery.length = 0;
             }
           }
           const dirty = retry.error !== null || clearError !== null || durabilityWarning !== void 0 || retainedSaveAsRecovery.length > 0 || saveAsIdentityPending || recoveryPending || pendingSidecars.layout || pendingSidecars.packages;
@@ -110995,6 +111019,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
             documentRevision: context.fromRevision
           });
           if (durabilityWarning !== void 0) controller?.recordActionError(durabilityWarning, "save_durability_uncertain");
+          else controller?.clearActionError("save_durability_uncertain");
           const saveResult = { ...result, ...durabilityWarning === void 0 ? {} : { durabilityWarning } };
           if (retry.error !== null) return { ...saveResult, committed: true, diskError: { code: "sidecar_write_failed", sidecar: retry.error.kind, message: errorMessage(retry.error.error) } };
           if (clearError !== null) return { ...saveResult, committed: true, diskError: { code: "recovery_checkpoint_failed", message: errorMessage(clearError) } };
@@ -111146,22 +111171,64 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
           if (destinationRecovery.issue !== null || (await destinationRecovery.load()).pending) {
             throw Object.assign(new Error("Save As destination has pending recovery data"), { code: "destination_recovery_conflict" });
           }
-          const publicationBinder = context.preparePublication({
+          const publication = {
             document: { ...context.document, path: destination },
             path: destination,
             config: destinationConfig,
             layout: destinationLayout,
             disk: destinationDisk,
             sidecars: destinationSidecars,
-            dirty: false,
             advanceRevision: false,
             invalidateRuntime: runtimeChanged,
             rEnvironment: destinationRuntime
-          });
+          };
+          const cleanBinder = context.preparePublication({ ...publication, dirty: false });
+          const retryBinder = context.preparePublication({ ...publication, dirty: true });
+          let durabilityWarning;
+          let retainOldClaim = false;
+          saveAsIdentityPending = false;
           await preparedOwner.commit(async () => {
             return async () => {
               savePublication = await preparedSave.publish();
-              publicationBinder();
+              let identityWarning;
+              try {
+                await destinationRecovery.adoptRecoveryId(oldRecovery.recoveryId);
+              } catch (error61) {
+                destinationRecovery.recoveryId = oldRecovery.recoveryId;
+                saveAsIdentityPending = true;
+                identityWarning = "Saved destination bytes, but recovery identity could not be confirmed; choose Save again: " + errorMessage(error61);
+              }
+              durabilityWarning = [savePublication.result.durabilityWarning, identityWarning].filter(Boolean).join(" ") || void 0;
+              if (durabilityWarning === void 0) {
+                try {
+                  await oldRecovery.retire();
+                } catch (error61) {
+                  durabilityWarning = "Saved destination, but old recovery cleanup failed; choose Save again: " + errorMessage(error61);
+                }
+                if (durabilityWarning === void 0) {
+                  for (const retained of retainedSaveAsRecovery) {
+                    try {
+                      await retained.retire();
+                    } catch (error61) {
+                      durabilityWarning = "Saved destination, but earlier recovery cleanup failed; choose Save again: " + errorMessage(error61);
+                    }
+                  }
+                }
+                if (durabilityWarning === void 0 && untitledRecoveryDescriptor !== void 0) {
+                  try {
+                    await retireUntitledRecoveryDescriptor(untitledRecoveryDescriptor);
+                    untitledRecoveryDescriptor = void 0;
+                  } catch (error61) {
+                    durabilityWarning = "Saved destination, but untitled recovery cleanup failed; choose Save again: " + errorMessage(error61);
+                  }
+                }
+                if (durabilityWarning === void 0) {
+                  for (const retained of retainedSaveAsRecovery) ownership.releaseRetained(retained.key);
+                  retainedSaveAsRecovery.length = 0;
+                }
+              }
+              retainOldClaim = durabilityWarning !== void 0;
+              (retainOldClaim || retainedSaveAsRecovery.length > 0 ? retryBinder : cleanBinder)();
               store = destinationStore;
               recovery = destinationRecovery;
               packageManager = nextManager;
@@ -111182,34 +111249,11 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
               recoveryFingerprint = void 0;
               recoveryConflict = false;
             };
-          });
-          let identityWarning;
-          saveAsIdentityPending = false;
-          try {
-            await destinationRecovery.adoptRecoveryId(oldRecovery.recoveryId);
-          } catch (error61) {
-            destinationRecovery.recoveryId = oldRecovery.recoveryId;
-            saveAsIdentityPending = true;
-            identityWarning = "Saved destination bytes, but recovery identity could not be confirmed; choose Save again: " + errorMessage(error61);
-          }
-          const durabilityWarning = [savePublication.result.durabilityWarning, identityWarning].filter(Boolean).join(" ");
-          let recoveryCleanupFailed = false;
-          if (durabilityWarning) {
+          }, () => retainOldClaim);
+          if (retainOldClaim) {
             retainedSaveAsRecovery.push(oldRecovery);
-            savePublication = { ...savePublication, result: { ...savePublication.result, durabilityWarning } };
-          } else {
-            const remaining = [];
-            for (const retained of [oldRecovery, ...retainedSaveAsRecovery]) {
-              try {
-                await retained.retire();
-              } catch (error61) {
-                recoveryCleanupFailed = true;
-                remaining.push(retained);
-                controller?.recordActionError("Saved destination; old recovery cleanup failed: " + errorMessage(error61), "recovery_cleanup_failed");
-              }
-            }
-            retainedSaveAsRecovery.splice(0, retainedSaveAsRecovery.length, ...remaining);
           }
+          if (durabilityWarning !== void 0) savePublication = { ...savePublication, result: { ...savePublication.result, durabilityWarning } };
           try {
             reservation?.release();
           } catch (error61) {
@@ -111225,7 +111269,6 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
           } catch (error61) {
             controller?.recordActionError(errorMessage(error61), "lsp_cleanup_failed");
           }
-          if (!durabilityWarning && !recoveryCleanupFailed && untitledRecoveryDescriptor !== void 0) void retireUntitledRecoveryDescriptor(untitledRecoveryDescriptor).catch((error61) => controller?.recordActionError(errorMessage(error61), "recovery_checkpoint_failed"));
           void oldStore.close().catch(() => {
           });
           if (runtimeChanged) {
@@ -111239,6 +111282,7 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
           });
           await watcherReady;
           if (durabilityWarning) controller?.recordActionError(durabilityWarning, "save_durability_uncertain");
+          else controller?.clearActionError("save_durability_uncertain");
           return savePublication.result;
         } catch (error61) {
           reservation?.release();
@@ -112033,11 +112077,15 @@ var NotebookBackend = class {
   }
   async open(options) {
     const key2 = options.path === null ? "untitled:" + options.sessionKey : "path:" + options.path;
-    let host = this.hosts.get(key2);
-    if (host && host.ownership.canonicalPath !== options.path) {
-      this.hosts.delete(key2);
-      host = void 0;
+    for (const [stored, item] of this.hosts) {
+      const current = item.ownership.canonicalPath === null ? "untitled:" + item.ownership.sessionKey : "path:" + item.ownership.canonicalPath;
+      if (stored !== current) {
+        this.hosts.delete(stored);
+        this.hosts.set(current, item);
+      }
     }
+    let host = this.hosts.get(key2);
+    if (host && host.ownership.canonicalPath !== options.path) host = void 0;
     host ??= [...this.hosts.values()].find((item) => item.ownership.canonicalPath === options.path && options.path !== null);
     const cold = !host;
     if (!host) {

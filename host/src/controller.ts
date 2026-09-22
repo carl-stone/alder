@@ -859,6 +859,10 @@ export class Controller {
     this.replaceLastActionError(actionError);
   }
 
+  clearActionError(code: string): void {
+    if (this.lastActionError?.code === code) this.replaceLastActionError(null);
+  }
+
   recordRuntimeAvailabilityError(error: HostError): void {
     this.assertNotClosed();
     if (!this.setRuntimeAvailabilityError(error)) return;
