@@ -9,6 +9,7 @@ import { HOST_PROTOCOL, type SessionConnection } from "../src/protocol.js";
 import { StructuredDiagnostics } from "../src/diagnostics.js";
 import { connectBackendSession } from "../src/sessions.js";
 import { ElectronMain, type ElectronRuntime, type ElectronWindow } from "../../desktop/src/main.js";
+import { NativeRecoveryStore } from "../../desktop/src/recovery-store.js";
 
 type RequestHandler = (path: string, init?: RequestInit) => Promise<Response>;
 
@@ -479,6 +480,55 @@ test("unreachable host cannot veto a clean local Close", { timeout: 3_000 }, asy
   assert.equal(abandoned, 1);
 });
 
+test("dirty responsive renderer can Close and Keep Recovery after host command failure", { timeout: 4_000 }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "alder-keep-recovery-"));
+  const recoveryId = randomUUID();
+  const store = new NativeRecoveryStore(directory);
+  const path = "/tmp/alder-dirty-offline.R";
+  const hostConnection = connection("dirty-offline", path, async endpoint => {
+    assert.equal(endpoint, "/api/ticket");
+    return jsonResponse({ ticket: "a".repeat(64), expiresAt: "2026-12-01T00:00:00.000Z" });
+  });
+  const window = windowWithLoad();
+  const electronRuntime = runtime();
+  electronRuntime.BrowserWindow = Object.assign(function () { return window; }, { fromWebContents: () => window }) as unknown as ElectronRuntime["BrowserWindow"];
+  const dialogs: string[][] = [];
+  electronRuntime.dialog.showMessageBox = async (_window, options) => {
+    dialogs.push(options.buttons ?? []);
+    return { response: dialogs.length === 1 ? 1 : 0 };
+  };
+  const main = new ElectronMain(electronRuntime, { resources, acquireSession: async () => hostConnection });
+  (main as any).loadAuthenticatedNotebook = async () => undefined;
+  await main.openNotebook(path);
+  const record = [...(main as any).records][0];
+  record.recoveryId = recoveryId;
+  record.windowState = { path: hostConnection.canonicalPath, dirty: true, saveState: "edited", sessionEpoch: "epoch" };
+  const actions: string[] = [];
+  window.webContents.send = (_channel, payload) => {
+    const command = payload as { requestId: string; action: string };
+    actions.push(command.action);
+    if (command.action === "prepare-unload") {
+      void store.write(recoveryId, "draft:" + record.draftId, { body: "typing retained" })
+        .then(() => record.pendingCommands.get(command.requestId)?.resolve({ requestId: command.requestId, status: "ok" }));
+    } else {
+      queueMicrotask(() => record.pendingCommands.get(command.requestId)?.resolve({
+        requestId: command.requestId, status: "error", message: "host command unavailable",
+      }));
+    }
+  };
+  try {
+    await (main as any).requestClose(record);
+    assert.equal(window.destroyed, true);
+    assert.equal(main.windows().length, 0);
+    assert.equal(hostConnection.releaseCount, 1);
+    assert.deepEqual(actions, ["prepare-unload", "close", "prepare-unload"]);
+    assert.deepEqual(dialogs[1], ["Close and Keep Recovery", "Keep Window Open"]);
+    const reopenedStore = new NativeRecoveryStore(directory);
+    assert.deepEqual(await reopenedStore.read(recoveryId, "draft:" + record.draftId), { body: "typing retained" });
+    assert.deepEqual((await reopenedStore.listDrafts(recoveryId)).draftIds, [record.draftId]);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
 test("quit joins one in-flight detach", { timeout: 3_000 }, async () => {
   const hostConnection = connection("quit-detach", "/tmp/alder-quit-detach.R", async () => jsonResponse({}));
   const finish = Promise.withResolvers<void>();
@@ -500,6 +550,9 @@ test("quit joins one in-flight detach", { timeout: 3_000 }, async () => {
   const closing = (main as any).requestClose(record);
   await started.promise;
   events.get("before-quit")!({ preventDefault: () => undefined });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(quits, 0);
+  assert.equal(window.destroyed, false);
   finish.resolve();
   await closing;
   const deadline = Date.now() + 2_000;
@@ -540,7 +593,9 @@ test("cancelled quit preserves unsaved windows and a later quit can discard them
 
   response = 1;
   beforeQuit({ preventDefault: () => { prevented += 1; } });
-  while (quits === 0) await new Promise(resolve => setTimeout(resolve, 10));
+  const quitDeadline = Date.now() + 2_000;
+  while (quits === 0 && Date.now() < quitDeadline) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(quits, 1, "Quit did not finish after the second close choice");
   assert.equal(dialogs, 2);
   assert.equal(window.destroyed, true);
   assert.deepEqual(hostConnection.releaseDispositions, ["normal"]);
@@ -591,7 +646,9 @@ for (const decision of ["Cancel", "Save"] as const) {
         window.close();
         assert.equal(window.destroyed, false, "the window must remain open until saving finishes");
         dirty = false;
-        while (!window.destroyed) await new Promise(resolve => setTimeout(resolve, 10));
+        const closeDeadline = Date.now() + 2_000;
+        while (!window.destroyed && Date.now() < closeDeadline) await new Promise(resolve => setTimeout(resolve, 10));
+        assert.equal(window.destroyed, true, "saved notebook did not close");
         assert.deepEqual(actions.map(value => (value as { action: string }).action), ["save", "prepare-unload"]);
         assert.equal(hostConnection.releaseCount, 1);
       }

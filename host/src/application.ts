@@ -686,12 +686,24 @@ async function startNotebookHost(
           return { discarded: false, peerActive: true };
         }
         const saved = isUntitled ? parseNotebook(new Uint8Array(), null) : prepared!.notebook;
-        for (const retained of retainedSaveAsRecovery) await retained.retire();
-        if (untitledRecoveryDescriptor !== undefined) {
-          await retireUntitledRecoveryDescriptor(untitledRecoveryDescriptor);
-          untitledRecoveryDescriptor = undefined;
+        let currentJournalCleared = false;
+        try {
+          await recovery!.discard();
+          currentJournalCleared = true;
+          for (const retained of retainedSaveAsRecovery) await retained.retire();
+        } catch (error) {
+          if (currentJournalCleared && context.dirty) {
+            const physicalBytes = serializeNotebookWithParts(context.document).bytes;
+            recovery!.update({ schemaVersion: 1, physicalBytes, documentRevision: context.fromRevision,
+              cells: recoveryCellStates(context.document), path: context.path,
+              notebookDiskObservation: recoveryObservation(context.disk) });
+            await recovery!.flush();
+            const restored = await recovery!.load();
+            recoveryPending = true;
+            recoveryFingerprint = restored.fingerprint ?? undefined;
+          }
+          throw error;
         }
-        await recovery!.discard();
         for (const retained of retainedSaveAsRecovery) ownership.releaseRetained(retained.key);
         retainedSaveAsRecovery.length = 0;
         prepared?.adopt();

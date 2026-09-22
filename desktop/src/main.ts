@@ -955,7 +955,22 @@ export class ElectronMain {
       await this.finishClose(record);
       finished = true;
     } catch (error) {
-      await this.showApplicationError("Close notebook", error instanceof Error ? error.message : "The notebook remains open because its state could not be read.");
+      try {
+        await this.prepareRendererUnload(record);
+      } catch (flushError) {
+        await this.showApplicationError("Close notebook", flushError instanceof Error ? flushError.message : "The editor could not preserve its latest draft.");
+        return;
+      }
+      const answer = await this.runtime.dialog.showMessageBox(record.window, {
+        type: "warning", title: "Keep notebook recovery?",
+        message: "The notebook host did not complete the close action.",
+        detail: `${error instanceof Error ? error.message : "The host is unavailable."}\n\nClose and keep recovery preserves unsaved work for reopening. It does not save or discard the notebook.`,
+        buttons: ["Close and Keep Recovery", "Keep Window Open"], defaultId: 1, cancelId: 1,
+      });
+      if (answer.response === 0) {
+        await this.finishClose(record);
+        finished = true;
+      }
     } finally {
       if (!finished) record.closing = false;
     }

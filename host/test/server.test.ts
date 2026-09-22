@@ -569,6 +569,40 @@ test("explicit discard sees independent peers while parent and browser child sha
   } finally { await server.close(); await rm(root, { recursive: true, force: true }); }
 });
 
+test("detaching a native parent revokes its browser child and unused ticket while a peer remains attached", { timeout: 5_000 }, async () => {
+  const { server, origin, root } = await startFixture();
+  try {
+    const parentLeaseId = await attachBearerLease(origin);
+    const child = await createCookieSession(origin, parentLeaseId);
+    const peer = await attachBearerSession(origin);
+    const issued = await fetch(origin + "/api/ticket", {
+      method: "POST", headers: bearerHeaders(origin, parentLeaseId),
+      body: JSON.stringify({ origin, parentLeaseId }),
+    });
+    assert.equal(issued.status, 200);
+    const { ticket } = await issued.json() as { ticket: string };
+    const released = await fetch(origin + "/api/lease", {
+      method: "POST", headers: bearerHeaders(origin, parentLeaseId),
+      body: JSON.stringify({ action: "release", leaseId: parentLeaseId }),
+    });
+    assert.equal(released.status, 200);
+    const childHeartbeat = await fetch(origin + "/api/lease", {
+      method: "POST", headers: { Origin: origin, Cookie: child.cookie, "X-CSRF-Token": child.csrf, "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "heartbeat", leaseId: child.leaseId }),
+    });
+    assert.equal(childHeartbeat.status, 403);
+    const staleTicket = await fetch(origin + "/api/session", {
+      method: "POST", headers: { Origin: origin, "Content-Type": "application/json" }, body: JSON.stringify({ ticket }),
+    });
+    assert.equal(staleTicket.status, 403);
+    const peerHeartbeat = await fetch(origin + "/api/lease", {
+      method: "POST", headers: bearerHeaders(origin, peer.leaseId),
+      body: JSON.stringify({ action: "heartbeat", leaseId: peer.leaseId }),
+    });
+    assert.equal(peerHeartbeat.status, 200);
+  } finally { await server.close(); await rm(root, { recursive: true, force: true }); }
+});
+
 test("WebSocket command pin survives idle sweep and still honors release", { timeout: 30_000 }, async () => {
   let releaseDispatch: (() => void) | undefined;
   let dispatchStartedResolve!: () => void;

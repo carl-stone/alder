@@ -198,13 +198,21 @@ export class RecoveryWriter {
   }
 
   async discard(): Promise<void> {
-    this.pending = false;
-    this.dirty = false;
     await this.writeQueue;
-    await rm(this.journalPath, { force: true });
-    await syncDirectory(this.directory);
-    this.issue = null;
-    this.corruptJournal = false;
+    try {
+      await rm(this.journalPath, { force: true });
+      await syncDirectory(this.directory);
+      this.pending = false;
+      this.dirty = false;
+      this.issue = null;
+      this.corruptJournal = false;
+    } catch (error) {
+      this.dirty = this.pending;
+      this.report(error, "recovery_write_failed", [this.journalPath]);
+      const failure = this.issue;
+      if (this.pending) await this.flush().catch(() => undefined);
+      throw failure;
+    }
   }
 
   private async atomicWrite(path: string, bytes: Uint8Array): Promise<void> {

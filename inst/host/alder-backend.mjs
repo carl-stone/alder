@@ -98382,13 +98382,21 @@ var RecoveryWriter = class _RecoveryWriter {
     return true;
   }
   async discard() {
-    this.pending = false;
-    this.dirty = false;
     await this.writeQueue;
-    await rm7(this.journalPath, { force: true });
-    await syncDirectory4(this.directory);
-    this.issue = null;
-    this.corruptJournal = false;
+    try {
+      await rm7(this.journalPath, { force: true });
+      await syncDirectory4(this.directory);
+      this.pending = false;
+      this.dirty = false;
+      this.issue = null;
+      this.corruptJournal = false;
+    } catch (error61) {
+      this.dirty = this.pending;
+      this.report(error61, "recovery_write_failed", [this.journalPath]);
+      const failure2 = this.issue;
+      if (this.pending) await this.flush().catch(() => void 0);
+      throw failure2;
+    }
   }
   async atomicWrite(path3, bytes) {
     const temporary = path3 + "." + randomUUID11() + ".tmp";
@@ -111043,12 +111051,29 @@ async function startNotebookHost(input2, storagePath, unsaved, ownershipPath) {
           return { discarded: false, peerActive: true };
         }
         const saved = isUntitled ? parseNotebook(new Uint8Array(), null) : prepared.notebook;
-        for (const retained of retainedSaveAsRecovery) await retained.retire();
-        if (untitledRecoveryDescriptor !== void 0) {
-          await retireUntitledRecoveryDescriptor(untitledRecoveryDescriptor);
-          untitledRecoveryDescriptor = void 0;
+        let currentJournalCleared = false;
+        try {
+          await recovery.discard();
+          currentJournalCleared = true;
+          for (const retained of retainedSaveAsRecovery) await retained.retire();
+        } catch (error61) {
+          if (currentJournalCleared && context.dirty) {
+            const physicalBytes = serializeNotebookWithParts(context.document).bytes;
+            recovery.update({
+              schemaVersion: 1,
+              physicalBytes,
+              documentRevision: context.fromRevision,
+              cells: recoveryCellStates(context.document),
+              path: context.path,
+              notebookDiskObservation: recoveryObservation(context.disk)
+            });
+            await recovery.flush();
+            const restored = await recovery.load();
+            recoveryPending = true;
+            recoveryFingerprint = restored.fingerprint ?? void 0;
+          }
+          throw error61;
         }
-        await recovery.discard();
         for (const retained of retainedSaveAsRecovery) ownership.releaseRetained(retained.key);
         retainedSaveAsRecovery.length = 0;
         prepared?.adopt();

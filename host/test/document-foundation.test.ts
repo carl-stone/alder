@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { fork } from "node:child_process";
 import { once } from "node:events";
-import { mkdir, mkdtemp, open, readFile, readdir, realpath, rm, stat, writeFile, type FileHandle } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, open, readFile, readdir, realpath, rm, stat, writeFile, type FileHandle } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { setTimeout as delay } from "node:timers/promises";
 import { dirname, join, resolve } from "node:path";
@@ -11,7 +11,8 @@ import { randomUUID } from "node:crypto";
 import { startHost, type RunningHost } from "../src/application.js";
 import { observeSaveAsDestination } from "../src/persistence.js";
 import { RecoveryWriter } from "../src/recovery.js";
-import { connectBackendSession, retireUntitledRecoveryDescriptor, selectUntitledRecoveryDescriptor } from "../src/sessions.js";
+import { NativeRecoveryStore } from "../../desktop/src/recovery-store.js";
+import { connectBackendSession, listUntitledRecoveryDescriptors, retireUntitledRecoveryDescriptor, selectUntitledRecoveryDescriptor } from "../src/sessions.js";
 import { encodeHostCommandWire, parseHostCommand, type CommandResult } from "../src/protocol.js";
 import type { ApplicationResources } from "../src/resources.js";
 
@@ -800,7 +801,7 @@ if (crashPath) {
     } finally { await app?.close(); await rm(directory, { recursive: true, force: true }); }
   });
 
-  test("explicit discard empties an untitled notebook and retires its recovery identity", async () => {
+  test("an untitled document remains discoverable after Discard followed by a new edit", async () => {
     const directory = await realpath(await mkdtemp(join(tmpdir(), "alder-untitled-discard-")));
     const id = randomUUID();
     let app: RunningHost | undefined;
@@ -818,7 +819,72 @@ if (crashPath) {
       assert.equal(discarded.error, null);
       assert.equal(app.controller.snapshot().cells.length, 0);
       assert.equal(app.controller.snapshot().dirty, false);
-      await assert.rejects(selectUntitledRecoveryDescriptor(id), /not found/);
+      assert.ok((await listUntitledRecoveryDescriptors()).some(descriptor => descriptor.id === id));
+      await command(app, { type: "transaction", changes: [{
+        type: "create", creationId: "later-cell", after: null, cellType: "code", body: ["later <- 3"], options: {},
+      }] });
+      await app.close(); app = undefined;
+      assert.ok((await listUntitledRecoveryDescriptors()).some(descriptor => descriptor.id === id));
+      app = await startHost({ path: null, resources: resources(directory), recoveryDirectory: join(directory, "recovery"),
+        suppressStartup: true, session: { sessionKey: id, untitledRecoveryId: id, projectDirectory: directory } });
+      assert.deepEqual(app.controller.snapshot().cells[0]!.body, ["later <- 3"]);
+    } finally {
+      await app?.close();
+      const descriptor = await selectUntitledRecoveryDescriptor(id).catch(() => null);
+      if (descriptor) await retireUntitledRecoveryDescriptor(descriptor);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("failed untitled Discard retains its original recovery inventory entry", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "alder-untitled-discard-failure-")));
+    const id = randomUUID();
+    let app: RunningHost | undefined;
+    let recoveryFolder: string | undefined;
+    try {
+      app = await startHost({ path: null, resources: resources(directory), recoveryDirectory: join(directory, "recovery"),
+        suppressStartup: true, session: { sessionKey: id, projectDirectory: directory } });
+      await command(app, { type: "transaction", changes: [{
+        type: "create", creationId: "original-cell", after: null, cellType: "code", body: ["original <- 7"], options: {},
+      }] });
+      const recoveryRoot = join(directory, "recovery");
+      recoveryFolder = join(recoveryRoot, (await readdir(recoveryRoot)).find(name => name.startsWith("recovery-"))!);
+      await chmod(recoveryFolder, 0o500);
+      const failed = await app.controller.dispatch(parseHostCommand({ type: "discard-document", requestId: randomUUID(),
+        clientId: "document-test", sessionEpoch: app.controller.snapshot().epoch,
+        expectedDocumentRevision: app.controller.snapshot().documentRevision }), { mayDiscardDocument: () => true });
+      assert.notEqual(failed.error, null);
+      await chmod(recoveryFolder, 0o700);
+      assert.deepEqual(app.controller.snapshot().cells[0]!.body, ["original <- 7"]);
+      await app.close(); app = undefined;
+      assert.ok((await listUntitledRecoveryDescriptors()).some(descriptor => descriptor.id === id));
+      app = await startHost({ path: null, resources: resources(directory), recoveryDirectory: join(directory, "recovery"),
+        suppressStartup: true, session: { sessionKey: id, untitledRecoveryId: id, projectDirectory: directory } });
+      assert.deepEqual(app.controller.snapshot().cells[0]!.body, ["original <- 7"]);
+    } finally {
+      if (recoveryFolder) await chmod(recoveryFolder, 0o700).catch(() => undefined);
+      await app?.close();
+      const descriptor = await selectUntitledRecoveryDescriptor(id).catch(() => null);
+      if (descriptor) await retireUntitledRecoveryDescriptor(descriptor);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("a local-only untitled draft remains discoverable after host shutdown", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "alder-untitled-local-draft-")));
+    const id = randomUUID();
+    const native = new NativeRecoveryStore(join(directory, "native-drafts"));
+    let app: RunningHost | undefined;
+    try {
+      app = await startHost({ path: null, resources: resources(directory), recoveryDirectory: join(directory, "recovery"),
+        suppressStartup: true, session: { sessionKey: id, projectDirectory: directory } });
+      const recoveryId = await recoveryIdentity(app);
+      await native.write(recoveryId, "draft:local-window", { body: "typed but not submitted" });
+      await app.close(); app = undefined;
+      assert.ok((await listUntitledRecoveryDescriptors()).some(descriptor => descriptor.id === id));
+      app = await startHost({ path: null, resources: resources(directory), recoveryDirectory: join(directory, "recovery"),
+        suppressStartup: true, session: { sessionKey: id, untitledRecoveryId: id, projectDirectory: directory } });
+      assert.deepEqual(await native.read(recoveryId, "draft:local-window"), { body: "typed but not submitted" });
     } finally {
       await app?.close();
       const descriptor = await selectUntitledRecoveryDescriptor(id).catch(() => null);

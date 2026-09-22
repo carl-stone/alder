@@ -45,7 +45,7 @@ async function startInstalledHost(path: string, options: { executionMode?: "auto
 function hostCommand(app: RunningHost, value: Record<string, unknown>): HostCommand {
   const snapshot = app.controller.snapshot();
   const type = String(value.type);
-  const needsRevision = ["transaction", "run", "publish", "save", "save-as", "reload-source", "format", "set-app", "set-config", "set-layout", "set-runtime", "packages-declare", "packages-install"].includes(type);
+  const needsRevision = ["transaction", "run", "publish", "save", "discard-document", "save-as", "reload-source", "format", "set-app", "set-config", "set-layout", "set-runtime", "packages-declare", "packages-install"].includes(type);
   return {
     ...value,
     requestId: typeof value.requestId === "string" ? value.requestId : randomUUID(),
@@ -63,7 +63,7 @@ async function dispatchHost(app: RunningHost, value: Record<string, unknown>) {
   return app.controller.dispatch(hostCommand(app, value));
 }
 
-type HttpSession = { origin: string; cookie: string; csrf: string; leaseId: string };
+type HttpSession = { origin: string; cookie: string; csrf: string; leaseId: string; clientId: string; epoch: string };
 
 async function localPackageRepository(root: string, packageName: string): Promise<string> {
   const repository = join(root, "repository");
@@ -160,26 +160,29 @@ async function openHttpSession(app: RunningHost): Promise<HttpSession> {
     body: JSON.stringify({ ticket: ticketValue.ticket }),
   });
   assert.equal(sessionResponse.ok, true, "host test session exchange must succeed");
-  const session = await sessionResponse.json() as { leaseId?: unknown; csrf?: unknown };
+  const session = await sessionResponse.json() as { leaseId?: unknown; clientId?: unknown; epoch?: unknown; csrf?: unknown };
   assert.equal(typeof session.leaseId, "string");
+  assert.equal(typeof session.clientId, "string");
+  assert.equal(typeof session.epoch, "string");
   assert.equal(typeof session.csrf, "string");
   const setCookie = typeof sessionResponse.headers.getSetCookie === "function"
     ? sessionResponse.headers.getSetCookie()[0]
     : sessionResponse.headers.get("set-cookie");
   const cookie = setCookie?.split(";", 1)[0];
   assert.ok(cookie, "host test session exchange must set a cookie");
-  return { origin, cookie, csrf: session.csrf as string, leaseId: session.leaseId as string };
+  return { origin, cookie, csrf: session.csrf as string, leaseId: session.leaseId as string,
+    clientId: session.clientId as string, epoch: session.epoch as string };
 }
 
-async function closeHttpSession(session: HttpSession, disposition?: "discard"): Promise<void> {
+async function closeHttpSession(session: HttpSession): Promise<void> {
   const response = await fetch(session.origin + "/api/lease", {
     method: "POST",
     headers: { Origin: session.origin, Cookie: session.cookie, "X-CSRF-Token": session.csrf, "Content-Type": "application/json" },
-    body: JSON.stringify({ action: "release", leaseId: session.leaseId, ...(disposition === undefined ? {} : { disposition }) }),
+    body: JSON.stringify({ action: "release", leaseId: session.leaseId }),
   });
   assert.equal(response.ok, true, "host test lease release must succeed");
 }
-test("discarding the last lease removes unsaved recovery", {
+test("explicit document Discard removes unsaved recovery before lease detach", {
   skip: !APPLICATION_ROOT, timeout: 60_000,
 }, async () => {
   const directory = await mkdtemp(join(tmpdir(), "alder-host-discard-"));
@@ -189,7 +192,7 @@ test("discarding the last lease removes unsaved recovery", {
   let app: RunningHost | undefined;
   let session: HttpSession | undefined;
   try {
-    app = await startInstalledHost(path);
+    app = await startInstalledHost(path, { idleTimeout: 0.1 });
     const before = app.controller.snapshot();
     const edit = await dispatchHost(app, {
       type: "transaction",
@@ -200,9 +203,22 @@ test("discarding the last lease removes unsaved recovery", {
     assert.equal(app.controller.snapshot().dirty, true);
 
     session = await openHttpSession(app);
-    await closeHttpSession(session, "discard");
+    const discard = await fetch(session.origin + "/api/command", {
+      method: "POST", headers: { Origin: session.origin, Cookie: session.cookie, "X-CSRF-Token": session.csrf, "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "discard-document", requestId: randomUUID(), clientId: session.clientId,
+        sessionEpoch: session.epoch, expectedDocumentRevision: app.controller.snapshot().documentRevision }),
+    });
+    const discardBody = await discard.text();
+    assert.equal(discard.status, 200, discardBody);
+    assert.equal((JSON.parse(discardBody) as CommandResult).error, null);
+    await closeHttpSession(session);
     session = undefined;
-    await app.closed;
+    let idleTimer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([app.closed, new Promise<never>((_resolve, reject) => {
+        idleTimer = setTimeout(() => reject(new Error("idle host did not close")), 5_000);
+      })]);
+    } finally { if (idleTimer) clearTimeout(idleTimer); }
     app = undefined;
     assert.equal(await readFile(path, "utf8"), original);
 
@@ -213,6 +229,57 @@ test("discarding the last lease removes unsaved recovery", {
     assert.equal(recovery.result.candidate, null);
   } finally {
     if (session !== undefined) await closeHttpSession(session);
+    await app?.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("an orphaned running cell cannot extend the no-client grace period", {
+  skip: !APPLICATION_ROOT, timeout: 45_000,
+}, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "alder-host-orphan-idle-"));
+  const path = join(directory, "notebook.R");
+  await writeFile(path, "# %%\nvalue <- 1\n");
+  let app: RunningHost | undefined;
+  let session: HttpSession | undefined;
+  try {
+    app = await startInstalledHost(path, { executionMode: "lazy", idleTimeout: 0.25 });
+    const cell = app.controller.snapshot().cells[0]!;
+    const edit = await dispatchHost(app, { type: "transaction", changes: [{
+      type: "edit", cell: { cellId: cell.id }, expectedRevision: cell.revision, cellType: "code",
+      body: ["Sys.sleep(30); accepted <- 42; accepted"],
+    }] });
+    assert.equal(edit.error, null);
+    session = await openHttpSession(app);
+    const run = dispatchHost(app, { type: "run", scope: "all", changes: [] });
+    void run.catch(() => undefined);
+    const runningDeadline = Date.now() + 5_000;
+    while (app.controller.snapshot().cells[0]!.status !== "running" && Date.now() < runningDeadline) {
+      await new Promise(resolveWait => setTimeout(resolveWait, 20));
+    }
+    assert.equal(app.controller.snapshot().cells[0]!.status, "running");
+    const rows = execFileSync("/bin/ps", ["-axo", "pid=,ppid=,command="], { encoding: "utf8" })
+      .split("\n").map(line => /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line)).filter((row): row is RegExpExecArray => row !== null);
+    const ark = rows.filter(row => row[3]!.includes(app!.artifactDirectory) && row[3]!.includes("/runtime/ark ")).map(row => Number(row[1]));
+    const analyzer = rows.filter(row => Number(row[2]) === process.pid && row[3]!.includes("host-analyzer.R")).map(row => Number(row[1]));
+    assert.ok(ark.length > 0, "the cell must still own Ark before detach");
+    assert.ok(analyzer.length > 0, "the host must still own R analysis before detach");
+    await closeHttpSession(session); session = undefined;
+    const idleDeadline = Date.now() + 8_000;
+    await Promise.race([app.closed, new Promise<never>((_resolve, reject) => {
+      const poll = setInterval(() => { if (Date.now() > idleDeadline) { clearInterval(poll); reject(new Error("running cell kept the unused host alive")); } }, 25);
+      void app!.closed.finally(() => clearInterval(poll));
+    })]);
+    app = undefined;
+    await run.catch(() => undefined);
+    for (const pid of [...ark, ...analyzer]) {
+      assert.throws(() => process.kill(pid, 0), { code: "ESRCH" }, "owned Ark/R child survived natural idle shutdown");
+    }
+    app = await startInstalledHost(path, { executionMode: "lazy", idleTimeout: 0 });
+    assert.deepEqual(app.controller.snapshot().cells[0]!.body, ["Sys.sleep(30); accepted <- 42; accepted"]);
+    assert.equal(app.controller.snapshot().dirty, true);
+  } finally {
+    if (session) await closeHttpSession(session).catch(() => undefined);
     await app?.close();
     await rm(directory, { recursive: true, force: true });
   }
