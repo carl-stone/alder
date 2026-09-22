@@ -18,7 +18,7 @@ full signed-app acceptance (475.60 seconds) and packaged Save As/restart (39.31 
 Same-content external replacement preserves R results; native identity follows
 acknowledged Save As and ignores stale replies. Strict signing and natural cleanup
 passed. Harness success and injected failure checks passed against that signed app;
-primary will integrate the harness checkpoint with canonical docs on main.
+the harness checkpoint is integrated with canonical docs on pushed main `47bb7e6`.
 Earlier accepted slices cover backend/renderer/app crash recovery, independent
 windows and last-window reopening. Acceptance belongs to that source checkpoint;
 the staged app at `host/.application-desktop/Alder.app` may advance during work.
@@ -34,8 +34,8 @@ new-host restart. Initial editor state can arrive before native connection adopt
 and fail the epoch check. Establish whether this produces a false dirty indicator,
 error or unnecessary Save prompt, then fix the authenticated handoff if needed.
 
-**Owner and next action:** primary integrates accepted `8dfb454` and canonical docs
-on main, then owns the restart-state check. Exercise a genuinely new host epoch,
+**Owner and next action:** primary owns the restart-state check from integrated
+`47bb7e6`. Exercise a genuinely new host epoch,
 including clean immediate Close and retained dirty work. Keep old-frame rejection
 and failed-navigation recovery while giving the adopted page's initial state one
 clear commit point. Report a clean focused correction or evidence that no product
