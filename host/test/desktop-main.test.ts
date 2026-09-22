@@ -459,6 +459,7 @@ test("renderer Save As report immediately updates native identity and restart ta
 test("an old identity reply cannot rewrite a replacement connection", async () => {
   const oldPath = "/tmp/alder-old-identity.R";
   const newPath = "/tmp/alder-new-identity.R";
+  const stalePath = "/tmp/alder-stale-save-as.R";
   const delayed = Promise.withResolvers<Response>();
   const started = Promise.withResolvers<void>();
   const old = connection(sessionKeyFor(oldPath), oldPath, async () => { started.resolve(); return delayed.promise; });
@@ -469,11 +470,13 @@ test("an old identity reply cannot rewrite a replacement connection", async () =
   const check = (main as any).assertHostContinuity(record);
   await started.promise;
   (main as any).replaceConnection(record, next);
-  delayed.resolve(jsonResponse(identity(sessionKeyFor(oldPath), oldPath)));
+  delayed.resolve(jsonResponse(identity(sessionKeyFor(stalePath), stalePath)));
   await check;
   assert.equal(record.connection, next);
   assert.equal(record.connection.canonicalPath, newPath);
+  assert.equal(record.connection.sessionKey, sessionKeyFor(newPath));
   assert.equal((main as any).byKey.get(oldPath), undefined);
+  assert.equal((main as any).byKey.get(stalePath), undefined);
   assert.equal((main as any).byKey.get(newPath)?.has(record), true);
   assert.equal(window.titles.at(-1), "alder-new-identity.R — Alder");
 });
