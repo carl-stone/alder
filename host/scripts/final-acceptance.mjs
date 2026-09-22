@@ -27,6 +27,9 @@ await rm(join(root, 'desktop/.vite'), { recursive: true, force: true });
 run('R helper tests', 'Rscript', ['-e', 'testthat::test_local(stop_on_failure = TRUE)']);
 run('fresh signed Mac build', 'npm', ['run', 'build:mac', '--prefix', 'desktop']);
 run('signed resources and Ark differential', node, ['host/scripts/accept-mac.mjs', app]);
+run('packaged Mac cleanup failure regression', node, ['--import', 'tsx', '--test', 'test/accept-mac-cleanup.test.ts'], {
+  cwd: join(root, 'host'), env: { ...environment, ALDER_ACCEPT_MAC_APP: app },
+});
 run('fast host and generative tests', 'npm', ['test', '--prefix', 'host']);
 
 const manifest = JSON.parse(await readFile(join(applicationRoot, 'manifest.json'), 'utf8'));
