@@ -465,6 +465,23 @@ test("multiple retained drafts remain separate choices in the notebook recovery 
   });
 });
 
+test("recovery choices show a busy state while a retained draft opens", async () => {
+  await withViewDom(async dom => {
+    const client = settingsClient({
+      recoveryState: { status: "none", local: null, candidate: null, corruption: null, persistenceError: null, uncertainRun: false,
+        selectingRetainedDraft: true, retainedDrafts: [{ draftId: "first", updatedAt: 1, preview: "first <- 42" }] },
+    });
+    const view = new NotebookView(client, dom);
+    try {
+      view.render(new BrowserDocument(snapshot()));
+      const panel = dom.querySelector("[data-recovery-panel]")!;
+      assert.equal(panel.getAttribute("aria-busy"), "true");
+      assert.match(panel.textContent ?? "", /Opening the selected draft/);
+      assert.deepEqual([...panel.querySelectorAll<HTMLButtonElement>("button")].map(button => button.disabled), [true, true]);
+    } finally { view.destroy(); }
+  });
+});
+
 test("undo waits for positional restore and surfaces a failed commit", async () => {
   await withViewDom(async (dom, domWindow) => {
     Object.defineProperty(globalThis, "location", { configurable: true, writable: true, value: { search: "?view=editor", href: "http://notebook.test/book.R?view=editor", origin: "http://notebook.test" } });
@@ -1773,7 +1790,7 @@ test("reopened browser chooses one of two retained drafts and Save clears only t
   } finally { await client.close(); }
 });
 
-test("draft selection rejects local and structural edits while its claim is pending", async () => {
+test("draft selection rejects saved choice and source edits while its claim is pending", async () => {
   class DeferredClaimStore extends MemoryRecoveryStore {
     claimed = false;
     claimStarted!: () => void;
@@ -1791,33 +1808,39 @@ test("draft selection rejects local and structural edits while its claim is pend
     }
   }
   const store = new DeferredClaimStore();
-  const old = new BrowserDocument(snapshot());
+  const old = new BrowserDocument(startupSnapshot());
   old.edit("c1", ["chosen <- 42"]);
   await store.saveDraft(old.recoveryDraft("retained")!);
-  const { client, socket } = await browserClient(store, snapshot(), { draftId: "new-window" });
-  try {
-    const restoring = client.restoreRetainedDraft("retained");
-    await store.started;
-    assert.throws(() => client.createCell("c1", "code", ["stray <- 1"]), /selected draft/);
-    assert.throws(() => client.editCell("c2", "stray <- 2"), /selected draft/);
-    await assert.rejects(client.moveCell("c2", null), /selected draft/);
-    await assert.rejects(client.restoreCellAt(1, "code", ["stray <- 3"]), /selected draft/);
-    await assert.rejects(client.save(), /selected draft/);
-    assert.equal(socket.commands().length, 0);
-    store.releaseClaim();
-    await restoring;
-    assert.equal(store.claimed, true);
-    assert.equal(client.draftId, "retained");
-    assert.deepEqual(client.document!.cells.map(cell => cell.id), ["c1", "c2"]);
-    assert.deepEqual(client.document!.cell("c1")!.desiredBody, ["chosen <- 42"]);
-    assert.deepEqual(client.document!.cell("c2")!.desiredBody, ["x + 1"]);
-    assert.equal(await store.readDraft("new-window"), null);
-    assert.deepEqual((await store.readDraft("retained"))?.changes.map(change => change.type), ["edit"]);
-    assert.equal(socket.commands().length, 0, "selection did not submit or save either source");
-  } finally {
-    store.releaseClaim();
-    await client.close();
-  }
+  await withBrowserFetch(async () => recoveryResponse(), async () => {
+    const { client, socket } = await browserClient(store, startupSnapshot(), { draftId: "new-window" });
+    try {
+      const restoring = client.restoreRetainedDraft("retained");
+      await store.started;
+      assert.equal(client.recoveryState.selectingRetainedDraft, true);
+      assert.throws(() => client.dismissRetainedDrafts(), /selected draft/);
+      assert.equal(client.recoveryState.retainedDrafts?.length, 1);
+      assert.throws(() => client.createCell("c1", "code", ["stray <- 1"]), /selected draft/);
+      assert.throws(() => client.editCell("c2", "stray <- 2"), /selected draft/);
+      await assert.rejects(client.moveCell("c2", null), /selected draft/);
+      await assert.rejects(client.restoreCellAt(1, "code", ["stray <- 3"]), /selected draft/);
+      await assert.rejects(client.save(), /selected draft/);
+      assert.equal(socket.commands().length, 0, "saved-source startup and Save stayed blocked during the claim");
+      store.releaseClaim();
+      await restoring;
+      assert.equal(client.recoveryState.selectingRetainedDraft, false);
+      assert.equal(store.claimed, true);
+      assert.equal(client.draftId, "retained");
+      assert.deepEqual(client.document!.cells.map(cell => cell.id), ["c1", "c2"]);
+      assert.deepEqual(client.document!.cell("c1")!.desiredBody, ["chosen <- 42"]);
+      assert.deepEqual(client.document!.cell("c2")!.desiredBody, ["x + 1"]);
+      assert.equal(await store.readDraft("new-window"), null);
+      assert.deepEqual((await store.readDraft("retained"))?.changes.map(change => change.type), ["edit"]);
+      assert.equal(socket.commands().length, 0, "selection did not submit or save either source");
+    } finally {
+      store.releaseClaim();
+      await client.close();
+    }
+  });
 });
 
 test("rapid and spaced typing coalesces bounded draft writes with the latest text", async () => {

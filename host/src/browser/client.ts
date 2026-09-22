@@ -78,6 +78,7 @@ export interface BrowserRecoveryState {
   corruption: HostError | null;
   persistenceError: HostError | null;
   retainedDrafts?: readonly { draftId: string; updatedAt: number; preview: string }[];
+  selectingRetainedDraft?: boolean;
 }
 
 type RecoveryListener = (state: BrowserRecoveryState) => void;
@@ -208,6 +209,8 @@ export class BrowserNotebookClient {
     if (!this.recoveryStateValue.retainedDrafts?.some(draft => draft.draftId === draftId)) throw new Error("The selected draft is not available");
     if (this.requireDocument().pendingSource().changes.length || this.recoveryStateValue.local || this.draftSubmission) throw new Error("Finish the current local edits before restoring another draft");
     this.selectingRetainedDraft = true;
+    this.recoveryStateValue = { ...this.recoveryStateValue, selectingRetainedDraft: true };
+    this.notifyRecovery();
     let claimed = false;
     try {
       await this.withSourceLock(async () => {
@@ -229,10 +232,15 @@ export class BrowserNotebookClient {
         this.notifyRecovery();
       }
       throw error;
-    } finally { this.selectingRetainedDraft = false; }
+    } finally {
+      this.selectingRetainedDraft = false;
+      this.recoveryStateValue = { ...this.recoveryStateValue, selectingRetainedDraft: false };
+      this.notifyRecovery();
+    }
   }
 
   dismissRetainedDrafts(): void {
+    if (this.selectingRetainedDraft) throw new Error("Wait for the selected draft to open before using the saved notebook");
     this.retainedDraftsDismissed = true;
     this.recoveryStateValue = { ...this.recoveryStateValue, retainedDrafts: [] };
     this.notifyRecovery();
@@ -637,7 +645,7 @@ export class BrowserNotebookClient {
     return hostQueryResultSchema.parse(decodeHostQueryResultWire(query, value));
   }
   private async activateStartupIfSafe(): Promise<void> {
-    if (this.startupActivated || !this.browserRecoveryInspected || !this.hostRecoveryInspected) return;
+    if (this.startupActivated || this.selectingRetainedDraft || !this.browserRecoveryInspected || !this.hostRecoveryInspected) return;
     const state = this.recoveryStateValue;
     if (this.pendingRun || state.local || state.candidate || state.corruption || state.retainedDrafts?.length) return;
     const snapshot = this.requireDocument().snapshot;

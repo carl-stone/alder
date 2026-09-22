@@ -2742,7 +2742,7 @@ export class NotebookView {
     const runtimeBlocked = this.documentValue?.snapshot.runtime.executionBlockedReason ?? null;
     const recovery = this.client.recoveryState;
     const recoveryConflict = recovery.status === "conflict" || recovery.candidate?.state === "conflict" || recovery.corruption !== null;
-    const recoveryMessage = recovery.uncertainRun ? "The previous run may have been interrupted. Run explicitly when you are ready." : recovery.local !== null
+    const recoveryMessage = recovery.selectingRetainedDraft ? "Opening selected draft…" : recovery.uncertainRun ? "The previous run may have been interrupted. Run explicitly when you are ready." : recovery.local !== null
       ? recovery.status === "conflict" ? "Recovered edits conflict with newer changes." : "Unsaved edits recovered."
       : recovery.retainedDrafts?.length ? "Retained drafts are available for review."
       : recovery.persistenceError ? "Local edit recovery is not durable."
@@ -2760,7 +2760,7 @@ export class NotebookView {
       recoveryRuntime: [this.documentValue?.snapshot.runtime.kernelState ?? null,
         this.documentValue?.snapshot.runtime.rEnvironment?.rscript ?? null],
       editorHelpRestarting: this.editorHelpRestarting,
-      recovery: { status: recovery.status, local: recovery.local !== null, retainedDrafts: recovery.retainedDrafts?.map(draft => draft.draftId) ?? [], candidate: recovery.candidate === null ? null : [recovery.candidate.state, recovery.candidate.documentRevision], uncertainRun: recovery.uncertainRun, corruption: recovery.corruption?.code ?? null, persistenceError: recovery.persistenceError?.code ?? null },
+      recovery: { status: recovery.status, local: recovery.local !== null, retainedDrafts: recovery.retainedDrafts?.map(draft => draft.draftId) ?? [], selectingRetainedDraft: recovery.selectingRetainedDraft === true, candidate: recovery.candidate === null ? null : [recovery.candidate.state, recovery.candidate.documentRevision], uncertainRun: recovery.uncertainRun, corruption: recovery.corruption?.code ?? null, persistenceError: recovery.persistenceError?.code ?? null },
       canUndoDelete: this.deletedCell !== null,
     });
     if (signature === this.statusSignature) return;
@@ -2834,10 +2834,11 @@ export class NotebookView {
   private renderRecoveryControls(): void {
     if (!this.status) return;
     const state = this.client.recoveryState;
-    if (!state.local && !state.candidate && !state.uncertainRun && !state.corruption && !state.persistenceError && !state.retainedDrafts?.length) return;
+    if (!state.local && !state.candidate && !state.uncertainRun && !state.corruption && !state.persistenceError && !state.retainedDrafts?.length && !state.selectingRetainedDraft) return;
     const panel = elementNode(this.dom, "div", "recovery-panel", "") as HTMLDivElement;
     panel.dataset.recovery = "true"; panel.dataset.recoveryPanel = "true"; panel.setAttribute("role", "alert");
-    const detail = state.uncertainRun ? "The previous run may have been interrupted. It has not been run again." : state.local ? state.status === "conflict"
+    if (state.selectingRetainedDraft) panel.setAttribute("aria-busy", "true");
+    const detail = state.selectingRetainedDraft ? "Opening the selected draft. Wait before choosing another recovery action." : state.uncertainRun ? "The previous run may have been interrupted. It has not been run again." : state.local ? state.status === "conflict"
       ? "Your edits are preserved. Review the conflicting cells before saving."
       : "Your unsaved edits have been recovered."
       : state.persistenceError?.message ?? state.corruption?.message ?? (state.candidate?.state === "conflict"
@@ -2848,6 +2849,7 @@ export class NotebookView {
     const add = (label: string, action: () => Promise<void>): void => {
       const button = elementNode(this.dom, "button", "btn mini", label) as HTMLButtonElement;
       button.type = "button"; button.dataset.recovery = "true";
+      button.disabled = state.selectingRetainedDraft === true;
       button.addEventListener("click", () => { void this.action(action).catch(error => this.showError(error)); });
       actions.appendChild(button);
     };

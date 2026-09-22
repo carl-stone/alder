@@ -21874,6 +21874,8 @@ var BrowserNotebookClient = class {
     if (!this.recoveryStateValue.retainedDrafts?.some((draft) => draft.draftId === draftId)) throw new Error("The selected draft is not available");
     if (this.requireDocument().pendingSource().changes.length || this.recoveryStateValue.local || this.draftSubmission) throw new Error("Finish the current local edits before restoring another draft");
     this.selectingRetainedDraft = true;
+    this.recoveryStateValue = { ...this.recoveryStateValue, selectingRetainedDraft: true };
+    this.notifyRecovery();
     let claimed = false;
     try {
       await this.withSourceLock(async () => {
@@ -21897,9 +21899,12 @@ var BrowserNotebookClient = class {
       throw error61;
     } finally {
       this.selectingRetainedDraft = false;
+      this.recoveryStateValue = { ...this.recoveryStateValue, selectingRetainedDraft: false };
+      this.notifyRecovery();
     }
   }
   dismissRetainedDrafts() {
+    if (this.selectingRetainedDraft) throw new Error("Wait for the selected draft to open before using the saved notebook");
     this.retainedDraftsDismissed = true;
     this.recoveryStateValue = { ...this.recoveryStateValue, retainedDrafts: [] };
     this.notifyRecovery();
@@ -22278,7 +22283,7 @@ var BrowserNotebookClient = class {
     return hostQueryResultSchema.parse(decodeHostQueryResultWire(query, value));
   }
   async activateStartupIfSafe() {
-    if (this.startupActivated || !this.browserRecoveryInspected || !this.hostRecoveryInspected) return;
+    if (this.startupActivated || this.selectingRetainedDraft || !this.browserRecoveryInspected || !this.hostRecoveryInspected) return;
     const state = this.recoveryStateValue;
     if (this.pendingRun || state.local || state.candidate || state.corruption || state.retainedDrafts?.length) return;
     const snapshot = this.requireDocument().snapshot;
@@ -26387,7 +26392,7 @@ ${cell.desiredBody.join("\n")}`));
     const runtimeBlocked = this.documentValue?.snapshot.runtime.executionBlockedReason ?? null;
     const recovery = this.client.recoveryState;
     const recoveryConflict = recovery.status === "conflict" || recovery.candidate?.state === "conflict" || recovery.corruption !== null;
-    const recoveryMessage = recovery.uncertainRun ? "The previous run may have been interrupted. Run explicitly when you are ready." : recovery.local !== null ? recovery.status === "conflict" ? "Recovered edits conflict with newer changes." : "Unsaved edits recovered." : recovery.retainedDrafts?.length ? "Retained drafts are available for review." : recovery.persistenceError ? "Local edit recovery is not durable." : recovery.candidate?.state === "restored" ? "Unsaved edits recovered." : recovery.corruption ? "Recovery data needs your review." : recoveryConflict ? "Recovered edits need your review." : null;
+    const recoveryMessage = recovery.selectingRetainedDraft ? "Opening selected draft\u2026" : recovery.uncertainRun ? "The previous run may have been interrupted. Run explicitly when you are ready." : recovery.local !== null ? recovery.status === "conflict" ? "Recovered edits conflict with newer changes." : "Unsaved edits recovered." : recovery.retainedDrafts?.length ? "Retained drafts are available for review." : recovery.persistenceError ? "Local edit recovery is not durable." : recovery.candidate?.state === "restored" ? "Unsaved edits recovered." : recovery.corruption ? "Recovery data needs your review." : recoveryConflict ? "Recovered edits need your review." : null;
     const message2 = this.hostClosed ? "Notebook closed." : recoveryMessage ?? this.actionError ?? stateError ?? settingsError ?? editorHelpError ?? this.actionNotice ?? "";
     const signature = JSON.stringify({
       runtimeBlocked: runtimeBlocked === null ? null : [runtimeBlocked.code, runtimeBlocked.message],
@@ -26402,7 +26407,7 @@ ${cell.desiredBody.join("\n")}`));
         this.documentValue?.snapshot.runtime.rEnvironment?.rscript ?? null
       ],
       editorHelpRestarting: this.editorHelpRestarting,
-      recovery: { status: recovery.status, local: recovery.local !== null, retainedDrafts: recovery.retainedDrafts?.map((draft) => draft.draftId) ?? [], candidate: recovery.candidate === null ? null : [recovery.candidate.state, recovery.candidate.documentRevision], uncertainRun: recovery.uncertainRun, corruption: recovery.corruption?.code ?? null, persistenceError: recovery.persistenceError?.code ?? null },
+      recovery: { status: recovery.status, local: recovery.local !== null, retainedDrafts: recovery.retainedDrafts?.map((draft) => draft.draftId) ?? [], selectingRetainedDraft: recovery.selectingRetainedDraft === true, candidate: recovery.candidate === null ? null : [recovery.candidate.state, recovery.candidate.documentRevision], uncertainRun: recovery.uncertainRun, corruption: recovery.corruption?.code ?? null, persistenceError: recovery.persistenceError?.code ?? null },
       canUndoDelete: this.deletedCell !== null
     });
     if (signature === this.statusSignature) return;
@@ -26475,18 +26480,20 @@ ${cell.desiredBody.join("\n")}`));
   renderRecoveryControls() {
     if (!this.status) return;
     const state = this.client.recoveryState;
-    if (!state.local && !state.candidate && !state.uncertainRun && !state.corruption && !state.persistenceError && !state.retainedDrafts?.length) return;
+    if (!state.local && !state.candidate && !state.uncertainRun && !state.corruption && !state.persistenceError && !state.retainedDrafts?.length && !state.selectingRetainedDraft) return;
     const panel = elementNode(this.dom, "div", "recovery-panel", "");
     panel.dataset.recovery = "true";
     panel.dataset.recoveryPanel = "true";
     panel.setAttribute("role", "alert");
-    const detail = state.uncertainRun ? "The previous run may have been interrupted. It has not been run again." : state.local ? state.status === "conflict" ? "Your edits are preserved. Review the conflicting cells before saving." : "Your unsaved edits have been recovered." : state.persistenceError?.message ?? state.corruption?.message ?? (state.candidate?.state === "conflict" ? "The saved notebook changed after these edits. Use Save As to preserve a copy, or reopen the saved file to discard them." : state.retainedDrafts?.length ? "Retained drafts are available. Choose one to restore; the others remain available." : "Unsaved changes were recovered.");
+    if (state.selectingRetainedDraft) panel.setAttribute("aria-busy", "true");
+    const detail = state.selectingRetainedDraft ? "Opening the selected draft. Wait before choosing another recovery action." : state.uncertainRun ? "The previous run may have been interrupted. It has not been run again." : state.local ? state.status === "conflict" ? "Your edits are preserved. Review the conflicting cells before saving." : "Your unsaved edits have been recovered." : state.persistenceError?.message ?? state.corruption?.message ?? (state.candidate?.state === "conflict" ? "The saved notebook changed after these edits. Use Save As to preserve a copy, or reopen the saved file to discard them." : state.retainedDrafts?.length ? "Retained drafts are available. Choose one to restore; the others remain available." : "Unsaved changes were recovered.");
     panel.appendChild(elementNode(this.dom, "div", "recovery-message", detail));
     const actions = elementNode(this.dom, "div", "recovery-actions", "");
     const add = (label, action) => {
       const button = elementNode(this.dom, "button", "btn mini", label);
       button.type = "button";
       button.dataset.recovery = "true";
+      button.disabled = state.selectingRetainedDraft === true;
       button.addEventListener("click", () => {
         void this.action(action).catch((error61) => this.showError(error61));
       });
