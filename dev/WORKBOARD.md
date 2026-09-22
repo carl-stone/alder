@@ -30,16 +30,19 @@ while keeping Carl's visible desktop free. Record scenarios that genuinely requi
 interaction for a later supervised pass; do not infer them from headless checks.
 
 **Current bounded slice:** finish backend-restart recovery as a usable notebook.
-The initial native state handoff passes focused review, but the same-stage crash
-journey retained the recovered local draft without executing its new value, and
-native quit required forced cleanup. Diagnose the failed ordering and correct the
-smallest responsible boundary; do not weaken the expected recovered result.
+The initial native state handoff passes focused review. The same-stage crash
+journey recovered and saved both edits, then failed to show the result of a new
+edit followed immediately by Run. Native quit required forced cleanup after the
+assertion failed. Diagnose the failed ordering and correct the smallest responsible
+boundary; do not weaken the expected current-draft execution result.
 
 **Owner and next action:** primary receives the consolidated failure from exact
 clean `48c7566`. Its complete signed-app gate passed (473.98 seconds), but the
 required backend-crash journey failed after 72 seconds: visible draft included
-`local_value <- 45L`, R was ready, output stayed `[1] 43`, and host snapshot source
-still held only the first cell. Native cleanup was forced; no test processes remain.
+`local_value <- 45L`, R was ready, and the notebook did not show `[1] 45`.
+Timeout diagnostics only captured the first cell's source/output; they do not
+establish the second cell's accepted state. Native cleanup was forced after the
+unsaved edit; no test processes remain.
 Reviewer supplies the original evidence and inspects the test sequence read-only.
 Primary returns a focused clean correction for review before another full gate.
 
