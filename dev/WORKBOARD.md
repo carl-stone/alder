@@ -39,12 +39,12 @@ has an acknowledged unsaved edit, and preserve any still-local editor draft wher
 Verify recovery or actionable failure, explicit Save semantics, post-recovery execution and
 child cleanup without taking over the visible desktop.
 
-**Correction in progress:** clean candidate `0f7d741` passed a packaged crash-recovery
-journey, but independent review found that a failed restart can leave its retry button
-inert and a dead backend can leave its old heartbeat timer running. The primary
-implementer owns one consolidated correction: make restart attempts retryable and
-coordinate the monitor/button, stop abandoned local heartbeats, and check both with
-focused regressions. Review the corrected commit before one full signed-app acceptance.
+**Correction in progress:** clean `c6540e2` fixes early restart retry and the dead
+old lease, but independent review found two remaining failure paths: after both
+replacement navigation and rollback fail, no usable restart action remains; and a
+newly acquired replacement lease can retain its heartbeat when failed release
+discards it. The primary implementer owns these two fixes and focused regressions.
+Review the next clean candidate before one full signed-app acceptance.
 
 The release README and three feature GIFs remain on `main`. The separate Ark source repository
 is untouched.
