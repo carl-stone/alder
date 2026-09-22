@@ -10,7 +10,7 @@ copies in other worktrees are snapshots.
 
 ## Current assignment
 
-**Native Mac reliability — Implementing on Mac.**
+**Native Mac reliability — Review on Mac.**
 
 The shared portable-core checkpoint is accepted on pushed main `42cfda8`.
 `b74355a` is the latest accepted Mac checkpoint, integrated on main at `572f7b6`.
@@ -44,11 +44,12 @@ The headless last-window journey uses forced teardown and does not qualify nativ
 Quit. Finder/Open, Save As replacement, dirty-close sheets and Dock activation still
 require a supervised foreground pass.
 
-**Current bounded slice:** qualify external path changes in an isolated packaged
-notebook with unsaved edits: external replacement, rename/delete and Git checkout.
-Preserve the user's draft and external disk contents, give a clear next action, and
-verify Save/Save As and relaunch recovery. Fix observed product defects simply; do
-not build a filesystem abstraction or expand the test suite for its own sake.
+**Candidate ready:** clean `822967e` adds a packaged external-path journey. In
+isolated notebooks, atomic replacement, Git reset, rename and delete each produce a
+visible conflict while preserving an acknowledged unsaved edit, a renderer-local
+draft and independent disk contents. Save As creates a recovery copy that reopens in
+a fresh packaged process. Focused checks pass; independent review is underway.
+The hidden path exercises the renderer Save As command, not the native chooser.
 
 The release README and three feature GIFs remain on `main`. The separate Ark source repository
 is untouched.
@@ -75,7 +76,7 @@ One item is active. New approved work is added here before assignment.
 | Release README and feature demo | Accepted | Primary implementer and independent reviewers | `b316bc3`: release-facing install/use guide and three compact real-app feature captures; media and factual reviews passed |
 | Repository integration and cleanup | Accepted | Primary implementer and focused cleanup reviewers | `554da34`: canonical docs and accepted app fast-forwarded to remote `main`; obsolete worktrees, branches and safety stashes removed after review |
 | Platform-boundary extraction | Accepted | Primary implementer and focused reviewers | `42cfda8`: shared Linux R 34/34, browser 12/12 and reviewed localized Mac/Linux seams; no duplicated product or Ark fork |
-| Native Mac reliability qualification | Implementing | Primary implementer | Qualify external replacement, rename/delete and Git checkout with unsaved edits in packaged Alder; fix observed loss or misleading recovery, then submit a clean candidate for review |
+| Native Mac reliability qualification | Review | Lead and independent reviewers | Review clean `822967e`; accept and integrate if its packaged journey proves external-path safety, then assign the next bounded Mac reliability slice |
 | Scientific workflow qualification | Queued | Unassigned | A realistic scientific notebook, real CRAN/Bioconductor packages, representative R reactivity idioms, two live notebooks under load and rich publishing are independently qualified through packaged Alder |
 | Product completion and public Mac delivery | Queued | Unassigned | Project/Git ownership, notebook-wide search, agent presence, accessibility, scale, upgrade state, release identity, architecture support and signed/notarized distribution have explicit accepted behavior |
 
