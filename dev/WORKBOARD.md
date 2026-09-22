@@ -39,12 +39,12 @@ has an acknowledged unsaved edit, and preserve any still-local editor draft wher
 Verify recovery or actionable failure, explicit Save semantics, post-recovery execution and
 child cleanup without taking over the visible desktop.
 
-**Correction in progress:** clean `c6540e2` fixes early restart retry and the dead
-old lease, but independent review found two remaining failure paths: after both
-replacement navigation and rollback fail, no usable restart action remains; and a
-newly acquired replacement lease can retain its heartbeat when failed release
-discards it. The primary implementer owns these two fixes and focused regressions.
-Review the next clean candidate before one full signed-app acceptance.
+**Correction in progress:** clean `093e1cf` makes the native recovery dialog appear
+after failed replacement and rollback, and its discarded-lease cleanup passed review.
+One retry path remains: the native Restart action still waits for an IPC response
+from a renderer that failed to load. The primary implementer owns this focused fix
+and a regression without a fake renderer acknowledgement. Review the next clean
+candidate before one full signed-app acceptance.
 
 The release README and three feature GIFs remain on `main`. The separate Ark source repository
 is untouched.
