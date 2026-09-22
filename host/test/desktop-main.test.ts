@@ -609,14 +609,14 @@ test("application quit escalates a just-completed normal close to discard", asyn
   assert.deepEqual(hostConnection.releaseDispositions, ["normal", "discard"]);
 });
 
-test("Quit after the last window succeeds when its normally released host has exited", async context => {
+for (const transportCode of ["ECONNREFUSED", "ECONNRESET"] as const) test(`Quit after the last window succeeds when its normally released host exits with ${transportCode}`, async context => {
   let releases = 0;
   const hostConnection = await fetchedConnection(context, async () => {
     releases += 1;
     if (releases === 1) return new Response(JSON.stringify({ released: true }), {
       status: 200, headers: { "Content-Type": "application/json", "X-Alder-Continuity-Proof": "proof" },
     });
-    throw new TypeError("fetch failed", { cause: Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" }) });
+    throw new TypeError("fetch failed", { cause: Object.assign(new Error(`host exited with ${transportCode}`), { code: transportCode }) });
   });
   const window = windowWithLoad();
   const electronRuntime = runtime();
@@ -716,7 +716,7 @@ test("lease rejection blocks authorization and preserves the original failure", 
   assert.deepEqual(hostConnection.releaseDispositions, ["discard", "discard"]);
 });
 
-for (const failureMode of ["transport", "non-success", "timeout"] as const) {
+for (const failureMode of ["transport", "transport-reset", "non-success", "timeout"] as const) {
   test(`real SessionConnection ${failureMode} keeps quit retryable until discard succeeds`, { timeout: 4_000 }, async context => {
     let attempts = 0;
     const hostConnection = await fetchedConnection(context, async init => {
@@ -725,8 +725,8 @@ for (const failureMode of ["transport", "non-success", "timeout"] as const) {
         status, headers: { "Content-Type": "application/json", "X-Alder-Continuity-Proof": "proof" },
       });
       if (attempts > 1) return response();
-      if (failureMode === "transport") throw new TypeError("REAL_RELEASE_TRANSPORT_FAILURE", {
-        cause: Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" }),
+      if (failureMode === "transport" || failureMode === "transport-reset") throw new TypeError("REAL_RELEASE_TRANSPORT_FAILURE", {
+        cause: Object.assign(new Error("loopback host transport failure"), { code: failureMode === "transport-reset" ? "ECONNRESET" : "ECONNREFUSED" }),
       });
       if (failureMode === "non-success") return response(503);
       return new Promise<Response>((_resolve, reject) => {
