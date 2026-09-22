@@ -16,7 +16,7 @@ copies in other worktrees are snapshots.
 acceptance (475.60 seconds) and packaged Save As/restart (39.31 seconds) passed.
 Same-content external replacement preserves R results; native identity follows
 acknowledged Save As and ignores stale replies. Strict signing and natural cleanup
-passed. Primary will integrate this source with canonical docs on main.
+passed. The same source is integrated with canonical docs on pushed main `773773e`.
 Earlier accepted slices cover backend/renderer/app crash recovery, independent
 windows and last-window reopening. Acceptance belongs to that source checkpoint;
 the staged app at `host/.application-desktop/Alder.app` may advance during work.
@@ -32,8 +32,8 @@ scoped process cleanup helper. Stop owned children before removing temporary fil
 on both success and failure, and preserve the original acceptance error. Keep
 product source and the accepted installed-app behavior unchanged.
 
-**Owner and next action:** primary first integrates accepted `310427b` with canonical
-docs on main, then owns the small harness correction. Reuse the existing helper;
+**Owner and next action:** primary owns the small harness correction from integrated
+`773773e`. Reuse the existing helper;
 prove the normal packaged check and one controlled failure both clean up their
 children, with failure exit/error retained. Submit a clean focused candidate for
 review. Product source is already accepted, so do not rebuild the app or rerun
