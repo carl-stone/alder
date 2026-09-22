@@ -10,7 +10,7 @@ copies in other worktrees are snapshots.
 
 ## Current assignment
 
-**Native Mac reliability — Implementing on Mac.**
+**Native Mac reliability — Review on Mac.**
 
 **Latest accepted checkpoint:** `8dfb454` adds reviewed harness failure cleanup and
 its normally scheduled regression. App source remains `310427b`: focused reviews,
@@ -29,22 +29,20 @@ remain dependable through native failures. Exercise real user journeys through t
 while keeping Carl's visible desktop free. Record scenarios that genuinely require foreground
 interaction for a later supervised pass; do not infer them from headless checks.
 
-**Current bounded slice:** finish backend-restart recovery as a usable notebook.
-The initial native state handoff passes focused review. The same-stage crash
-journey recovered and saved both edits, then failed to show the result of a new
-edit followed immediately by Run. Native quit required forced cleanup after the
-assertion failed. Diagnose the failed ordering and correct the smallest responsible
-boundary; do not weaken the expected current-draft execution result.
+**Current bounded slice:** qualify backend-restart recovery and immediate edit/Run.
+Product source remains reviewed `48c7566`; candidate `90d0d87` changes only the
+packaged journey. It waits for the preceding Save UI to settle before a new edit,
+uses a trusted pointer click on enabled Run, and checks that cell's new result.
+It does not wait for background acceptance of the new source. Failure diagnostics
+now include the relevant cell and command. The original synthetic-click failure's
+precise mechanism was not established; no production fix is claimed for it.
 
-**Owner and next action:** primary receives the consolidated failure from exact
-clean `48c7566`. Its complete signed-app gate passed (473.98 seconds), but the
-required backend-crash journey failed after 72 seconds: visible draft included
-`local_value <- 45L`, R was ready, and the notebook did not show `[1] 45`.
-Timeout diagnostics only captured the first cell's source/output; they do not
-establish the second cell's accepted state. Native cleanup was forced after the
-unsaved edit; no test processes remain.
-Reviewer supplies the original evidence and inspects the test sequence read-only.
-Primary returns a focused clean correction for review before another full gate.
+**Owner and next action:** test reviewer inspects clean `90d0d87` for a masked race
+and independently runs the corrected backend-crash journey on the existing stage.
+Primary's three focused packaged passes and browser edit/Run pass are ready for
+review; all quit naturally. The full signed-app gate already passed unchanged app
+source `48c7566` in 473.98 seconds. Primary holds; lead accepts the evidence or
+consolidates a concrete correction.
 
 **Remaining native evidence:** Finder/Open, native Save As replacement, dirty-close
 sheets, Dock activation and native zero-window Quit need foreground interaction.
@@ -76,7 +74,7 @@ One item is active. New approved work is added here before assignment.
 | Release README and feature demo | Accepted | Primary implementer and independent reviewers | `b316bc3`: release-facing install/use guide and three compact real-app feature captures; media and factual reviews passed |
 | Repository integration and cleanup | Accepted | Primary implementer and focused cleanup reviewers | `554da34`: canonical docs and accepted app fast-forwarded to remote `main`; obsolete worktrees, branches and safety stashes removed after review |
 | Platform-boundary extraction | Accepted | Primary implementer and focused reviewers | `42cfda8`: shared Linux R 34/34, browser 12/12 and reviewed localized Mac/Linux seams; no duplicated product or Ark fork |
-| Native Mac reliability qualification | Implementing | Primary implementer | Recovered accepted and local edits execute and save correctly; native close exits owned children; focused review and signed-app acceptance pass |
+| Native Mac reliability qualification | Review | Lead and test reviewer | Recovered accepted and local edits execute and save correctly; native close exits owned children; focused review and signed-app acceptance pass |
 | Scientific workflow qualification | Queued | Unassigned | A realistic scientific notebook, real CRAN/Bioconductor packages, representative R reactivity idioms, two live notebooks under load and rich publishing are independently qualified through packaged Alder |
 | Product completion and public Mac delivery | Queued | Unassigned | Project/Git ownership, notebook-wide search, agent presence, accessibility, scale, upgrade state, release identity, architecture support and signed/notarized distribution have explicit accepted behavior |
 
