@@ -13,6 +13,7 @@ const multiWindow = process.argv.includes('--multi-window');
 const backendCrash = process.argv.includes('--backend-crash');
 const rendererCrash = process.argv.includes('--renderer-crash');
 const draftHandoff = process.argv.includes('--draft-handoff');
+const appCrash = process.argv.includes('--app-crash');
 const saveIterations = Number(process.env.ALDER_NATIVE_SAVE_ITERATIONS ?? 20);
 const temporary = await mkdtemp('/tmp/alder-native-accept-');
 const workspace = join(temporary, 'workspace');
@@ -24,8 +25,8 @@ const sessions = new Set();
 const started = performance.now();
 let launchSequence = 0;
 await mkdir(workspace);
-const initialNotebook = backendCrash || rendererCrash || draftHandoff
-  ? '# ---\n# runtime:\n#   on_cell_change: lazy\n# ---\n# %%\naccepted_value <- 0L\naccepted_value\n# %%\nlocal_value <- 0L\nlocal_value\n'
+const initialNotebook = backendCrash || rendererCrash || draftHandoff || appCrash
+  ? `# ---\n# runtime:\n#   on_cell_change: lazy\n${appCrash ? '#   on_startup: true\n' : ''}# ---\n# %%\naccepted_value <- 0L\naccepted_value\n# %%\nlocal_value <- 0L\nlocal_value\n`
   : '# ---\n# runtime:\n#   on_cell_change: lazy\n# ---\n# %%\nvalue <- 0L\nvalue\n';
 await writeFile(notebook, initialNotebook);
 function environment() {
@@ -40,7 +41,7 @@ function environment() {
   return result;
 }
 
-async function launch(name) {
+async function launch(name, allowRetainedRecovery = false) {
   const launchName = `${name}-${++launchSequence}`;
   const stderr = [];
   const child = spawn(executable, [
@@ -61,7 +62,9 @@ async function launch(name) {
   try {
     const cdp = await Cdp.connect(endpoint);
     sessions.add(cdp);
-    await cdp.wait("document.querySelector('.cm-content') && document.getElementById('r-state')?.textContent === 'R ready' && !document.querySelector('[data-act=run]')?.disabled", 45_000);
+    await cdp.wait(`document.querySelector('.cm-content') && (
+      document.getElementById('r-state')?.textContent === 'R ready' && !document.querySelector('[data-act=run]')?.disabled
+      ${allowRetainedRecovery ? "|| window.__alderHost?.client?.recoveryState?.retainedDrafts?.length > 0" : ''})`, 45_000);
     return { child, cdp, endpoint, stderr, ownedPids: new Set([child.pid]) };
   } catch (error) {
     throw new Error(`packaged app ${launchName} did not become usable`, { cause: error });
@@ -488,23 +491,34 @@ async function runRendererCrashJourney(primary) {
     backendPreserved: true, arkPreserved: true, outputAfterRecovery: 44, savedAfterRecovery: true }) + '\n');
 }
 
-async function runDraftHandoffJourney() {
+async function runDraftHandoffJourney(wholeAppCrash = false) {
   await disableAutosave(primary.cdp);
-  const localDraft = 'local_value <- 57L\nlocal_value';
+  const accepted = 'accepted_value <- 43L\naccepted_value';
+  const localDraft = wholeAppCrash ? 'local_value <- accepted_value + 14L\nlocal_value' : 'local_value <- 57L\nlocal_value';
+  if (wholeAppCrash) {
+    await replaceEditor(primary.cdp, accepted);
+    await primary.cdp.wait(`window.__alderHost.client.document.snapshot.cells[0].body.join('\\n') === ${JSON.stringify(accepted)} &&
+      window.__alderHost.client.document.snapshot.dirty && window.__alderHost.client.document.pendingSource().changes.length === 0`, 15_000);
+  }
+  const oldBackendPid = wholeAppCrash ? backendForWorkspace() : null;
+  const oldArk = wholeAppCrash ? captureBackendArk(oldBackendPid) : null;
   await replaceEditor(primary.cdp, localDraft, 1);
   const before = await primary.cdp.evaluate(`(async () => {
     const client = window.__alderHost.client;
     await client.flushDraftPersistence();
-    return { draftId: client.draftId, local: client.document.cells[1].desiredBody.join('\\n'),
+    return { draftId: client.draftId, accepted: client.document.snapshot.cells[0].body.join('\\n'),
+      local: client.document.cells[1].desiredBody.join('\\n'),
       server: client.document.snapshot.cells[1].body.join('\\n'),
       activeClients: client.document.snapshot.activeClientIds?.length,
       durable: await client.transport.recoveryStore.readDraft(client.draftId) };
   })()`);
-  if (before.local !== localDraft || before.server !== 'local_value <- 0L\nlocal_value'
+  if (before.accepted !== (wholeAppCrash ? accepted : 'accepted_value <- 0L\naccepted_value')
+    || before.local !== localDraft || before.server !== 'local_value <- 0L\nlocal_value'
     || before.durable?.changes?.[0]?.body?.join('\n') !== localDraft) throw new Error(`draft handoff setup was not durable: ${JSON.stringify(before)}`);
   if (await readFile(notebook, 'utf8') !== initialNotebook) throw new Error('draft handoff saved before explicit Save');
   ownedProcessRows(ownedPids, temporary);
   const oldPid = primary.child.pid;
+  const oldOwned = wholeAppCrash ? new Set(ownedProcessRows(new Set([oldPid, oldBackendPid]), temporary).map(row => row.pid)) : null;
   process.kill(oldPid, 'SIGKILL');
   await new Promise((resolveExit, reject) => {
     if (primary.child.exitCode !== null || primary.child.signalCode !== null) return resolveExit();
@@ -513,26 +527,45 @@ async function runDraftHandoffJourney() {
   });
   primary.cdp.close(); sessions.delete(primary.cdp); children.delete(primary.child);
   primary = undefined;
-  const reopened = primary = await launch('electron-primary');
+  if (wholeAppCrash) {
+    await waitForOwnedExit(oldOwned, temporary, 60_000);
+    await waitArkGroupGone(oldArk.pgid);
+  }
+  const reopened = primary = await launch('electron-primary', wholeAppCrash);
   await reopened.cdp.wait(`window.__alderHost.client.recoveryState.retainedDrafts?.some(draft => draft.draftId === ${JSON.stringify(before.draftId)})`, 30_000);
+  if (wholeAppCrash) {
+    const recovered = await reopened.cdp.evaluate(`({accepted:window.__alderHost.client.document.snapshot.cells[0].body.join('\\n'),
+      dirty:window.__alderHost.client.document.snapshot.dirty,
+      freshRuns:window.__alderHost.client.document.snapshot.operations.filter(op => op.kind === 'run' && op.clientId === window.__alderHost.client.transport.id).length})`);
+    if (recovered.accepted !== accepted || !recovered.dirty || recovered.freshRuns !== 0) throw new Error(`app relaunch did not offer accepted work without Run: ${JSON.stringify(recovered)}`);
+  }
   await reopened.cdp.wait("[...document.querySelectorAll('[data-recovery-panel] button')].some(button => button.textContent?.startsWith('Restore draft'))", 10_000);
   await reopened.cdp.evaluate("[...document.querySelectorAll('[data-recovery-panel] button')].find(button => button.textContent?.startsWith('Restore draft')).click()");
   await reopened.cdp.wait(`window.__alderHost.client.draftId === ${JSON.stringify(before.draftId)} &&
     window.__alderHost.client.document.cells[1].desiredBody.join('\\n') === ${JSON.stringify(localDraft)}`, 15_000);
-  const restored = await reopened.cdp.evaluate("({server:window.__alderHost.client.document.snapshot.cells[1].body.join('\\n'),pending:window.__alderHost.client.document.pendingSource().changes.length})");
-  if (restored.server !== 'local_value <- 0L\nlocal_value' || restored.pending !== 1) throw new Error(`reopened app replayed draft without permission: ${JSON.stringify(restored)}`);
+  const restored = await reopened.cdp.evaluate("({server:window.__alderHost.client.document.snapshot.cells[1].body.join('\\n'),pending:window.__alderHost.client.document.pendingSource().changes.length,freshRuns:window.__alderHost.client.document.snapshot.operations.filter(op => op.kind === 'run' && op.clientId === window.__alderHost.client.transport.id).length})");
+  if (restored.server !== 'local_value <- 0L\nlocal_value' || restored.pending !== 1 || wholeAppCrash && restored.freshRuns !== 0) throw new Error(`reopened app replayed draft or ran without permission: ${JSON.stringify(restored)}`);
   if (await readFile(notebook, 'utf8') !== initialNotebook) throw new Error('reopened app saved before explicit Save');
+  if (wholeAppCrash) {
+    await reopened.cdp.wait("[...document.querySelectorAll('[data-recovery-panel] button')].some(button => button.textContent === 'Start R')", 10_000);
+    await reopened.cdp.evaluate("[...document.querySelectorAll('[data-recovery-panel] button')].find(button => button.textContent === 'Start R').click()");
+    await reopened.cdp.wait("document.getElementById('r-state')?.textContent === 'R ready'", 60_000);
+    const implicitRuns = await reopened.cdp.evaluate("window.__alderHost.client.document.snapshot.operations.filter(op => op.kind === 'run' && op.clientId === window.__alderHost.client.transport.id).length");
+    if (implicitRuns !== 0) throw new Error(`starting R implicitly ran recovered source: ${implicitRuns}`);
+  }
   await reopened.cdp.evaluate("document.querySelector('[data-cell=cell-2] [data-act=run]').click()");
   await reopened.cdp.wait("document.querySelector('#notebook')?.textContent.includes('[1] 57') && document.getElementById('r-state')?.textContent === 'R ready'", 30_000);
   await reopened.cdp.evaluate("document.getElementById('save').click()");
-  const expectedBody = `accepted_value <- 0L\naccepted_value\n# %%\n${localDraft}`;
+  const expectedBody = `${wholeAppCrash ? accepted : 'accepted_value <- 0L\naccepted_value'}\n# %%\n${localDraft}`;
   const deadline = Date.now() + 20_000;
   while (savedSource(await readFile(notebook, 'utf8')) !== expectedBody && Date.now() < deadline) await new Promise(resolveWait => setTimeout(resolveWait, 25));
   if (savedSource(await readFile(notebook, 'utf8')) !== expectedBody) throw new Error('reopened app Save lost selected draft');
   await reopened.cdp.evaluate("window.__alderHost.client.flushDraftPersistence()");
   if (await reopened.cdp.evaluate(`window.__alderHost.client.transport.recoveryStore.readDraft(${JSON.stringify(before.draftId)})`) !== null) throw new Error('Save retained the selected draft');
   await reopened.cdp.wait(`window.__alderHost.client.document.snapshot.activeClientIds?.length === ${before.activeClients}`, 45_000);
-  process.stdout.write(JSON.stringify({ draftHandoff: true, reopenedInNewProcess: true, selectedDraftRecovered: true, implicitReplay: false, outputAfterRecovery: 57, savedAfterRecovery: true }) + '\n');
+  process.stdout.write(JSON.stringify({ ...(wholeAppCrash ? { appCrash: true, oldBackendGone: true, oldArkGroupGone: true, acceptedRecovered: true }
+    : { draftHandoff: true }), reopenedInNewProcess: true, selectedDraftRecovered: true, implicitReplay: false,
+    implicitRun: false, outputAfterRecovery: 57, savedAfterRecovery: true }) + '\n');
 }
 
 
@@ -546,6 +579,7 @@ try {
   else if (backendCrash) await runBackendCrashJourney(primary);
   else if (rendererCrash) await runRendererCrashJourney(primary);
   else if (draftHandoff) await runDraftHandoffJourney();
+  else if (appCrash) await runDraftHandoffJourney(true);
   else {
 
   await primary.cdp.evaluate(`(() => { const cause = new Error('PACKAGED_RENDERER_CAUSE'); const error = new Error('PACKAGED_RENDERER_FAILURE', { cause }); error.stack = 'PACKAGED_RENDERER_STACK'; window.dispatchEvent(new ErrorEvent('error', { error, message: error.message, filename: '/packaged/native-accept-renderer.js', lineno: 14, colno: 9 })) })()`);
