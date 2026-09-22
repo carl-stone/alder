@@ -12,9 +12,10 @@ copies in other worktrees are snapshots.
 
 **Native Mac reliability — Implementing on Mac.**
 
-**Latest accepted checkpoint:** source `e3bba94`. Full signed-app acceptance and
-the separate packaged Save As journey passed with a clean tree and natural cleanup.
-Integration into main is the first step of the current assignment.
+**Latest accepted checkpoint:** source `237a254`. Independent lifecycle rereviews
+and full signed-app acceptance passed in 473.82 seconds: real-R orphan-run exit,
+explicit Discard, browser/native journeys, strict signing and natural cleanup.
+Primary will integrate it with canonical docs on main before the next source edits.
 Earlier accepted slices cover backend/renderer/app crash recovery, independent
 windows and last-window reopening. Acceptance belongs to that source checkpoint;
 the staged app at `host/.application-desktop/Alder.app` may advance during work.
@@ -25,30 +26,26 @@ remain dependable through native failures. Exercise real user journeys through t
 while keeping Carl's visible desktop free. Record scenarios that genuinely require foreground
 interaction for a later supervised pass; do not infer them from headless checks.
 
-**Current bounded slice:** separate client detachment, document Discard and
-backend shutdown. Delete historical released-connection tracking, release upgrades
-and server receipts. Detach is idempotent; only explicit Discard removes accepted
-unsaved source and local drafts, protecting other attached clients. User-approved
-close after host failure retains recovery and cannot be vetoed by failed HTTP
-cleanup. Backend owns bounded no-client shutdown, including orphaned runs.
+**Current bounded slice:** remove duplicate work. Separate source content changes
+from physical disk identity when invalidating R results. Replace native periodic
+full-notebook health queries with existing renderer connection reporting and a
+small fallback for bootstrap/failed-renderer cases. Preserve authoritative Save As
+identity adoption, native path/window bookkeeping and conflict detection.
 
-**Owner and next action:** primary implementer first integrates the accepted
-checkpoint with canonical docs and pushes main, then implements the lifecycle
-slice. Check ticket-failure heartbeat cleanup, failed-renderer Close then Quit,
-peer continuity, explicit discard and eventual unused host/Ark/R exit. Replace
-tests of deleted release machinery with these behaviors. Submit a clean focused
-candidate for review; do not start the later slices or run full acceptance early.
+**Owner and next action:** primary first integrates accepted `237a254` and canonical
+docs on main, then owns the duplicate-work slice. Prove unchanged-content external
+replacement preserves results, actual source edits still update/conflict correctly,
+and Save As followed immediately by native restart/reopen uses the destination.
+Keep one authority for identity and connection status; remove replaced paths and
+submit a clean focused candidate. Full acceptance follows independent review.
 
-**Approved next slices, in order:**
+**Approved next slice:**
 
-1. **Remove duplicate work.** Use source content changes to invalidate R results,
-   keeping disk identity for conflict checks. Remove periodic full-notebook queries
-   from native health monitoring; retain a small bootstrap/liveness fallback where
-   the renderer cannot report failure.
-2. **Make failure tests deterministic and finite.** Use existing I/O seams to fail
-   before/after save publication and control close/exit ordering. Fix `accept-mac`
-   cleanup on failure through the existing scoped helper; bound old Quit test waits.
-   Replace tests of deleted release machinery with recovery/peer/exit behavior.
+1. **Finish acceptance-harness failure cleanup.** Fix `accept-mac` failure teardown
+   through the existing scoped process helper. A failed phase must stop its owned
+   children before removing temporary files and retain the original error. The
+   save/discard ordering checks, release-test replacement and old Quit polling
+   bounds are covered by accepted slices; do not rebuild them as another framework.
 
 **Remaining native evidence:** Finder/Open, native Save As replacement, dirty-close
 sheets, Dock activation and native zero-window Quit need foreground interaction.
@@ -80,7 +77,7 @@ One item is active. New approved work is added here before assignment.
 | Release README and feature demo | Accepted | Primary implementer and independent reviewers | `b316bc3`: release-facing install/use guide and three compact real-app feature captures; media and factual reviews passed |
 | Repository integration and cleanup | Accepted | Primary implementer and focused cleanup reviewers | `554da34`: canonical docs and accepted app fast-forwarded to remote `main`; obsolete worktrees, branches and safety stashes removed after review |
 | Platform-boundary extraction | Accepted | Primary implementer and focused reviewers | `42cfda8`: shared Linux R 34/34, browser 12/12 and reviewed localized Mac/Linux seams; no duplicated product or Ark fork |
-| Native Mac reliability qualification | Implementing | Primary implementer | Integrate accepted `e3bba94`, then separate detach, explicit Discard and bounded backend shutdown |
+| Native Mac reliability qualification | Implementing | Primary implementer | Lifecycle `237a254` accepted; now separate content from disk identity and remove duplicate native health queries |
 | Scientific workflow qualification | Queued | Unassigned | A realistic scientific notebook, real CRAN/Bioconductor packages, representative R reactivity idioms, two live notebooks under load and rich publishing are independently qualified through packaged Alder |
 | Product completion and public Mac delivery | Queued | Unassigned | Project/Git ownership, notebook-wide search, agent presence, accessibility, scale, upgrade state, release identity, architecture support and signed/notarized distribution have explicit accepted behavior |
 

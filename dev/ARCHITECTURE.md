@@ -101,9 +101,20 @@ discard. Recovery deletion belongs to an explicit document action after the user
 Discard choice; it must cover accepted unsaved source as well as that client's
 draft, without deleting work owned by another attached client. Closing a failed
 renderer with recovery retained must remain non-destructive when the app later quits.
+When another independent client is attached, closing with Discard removes only
+the caller's local draft; accepted edits remain in the shared notebook. With sole
+ownership, Discard resets the live document as well as recovery, so a reconnect
+cannot resurrect discarded edits. Count a desktop parent and its browser child
+as one client group. Evaluate this peer rule inside the serialized document action
+using current attachment state, and advance the revision when source is reset.
+Discard does not end the document's lifetime. An untitled host that can accept
+later edits must retain its recovery discovery identity; clearing the old journal
+cannot make subsequent acknowledged edits undiscoverable after a crash.
 After the user elects to close with recovery retained, an unreachable host cannot
 veto local window teardown: stop the local heartbeat and retain the recovery data.
 This does not mean the remote cleanup succeeded or that unsaved work was saved.
+Offer this explicit local exit when a dirty window cannot Save or Discard because
+the host is unavailable, including when the renderer itself is still responsive.
 
 The backend owns the no-client grace period and host/child shutdown. New attachments
 cancel pending idle shutdown; an orphaned run must not keep an unused host alive
