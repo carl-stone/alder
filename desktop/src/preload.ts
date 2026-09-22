@@ -47,6 +47,12 @@ function validateVoid(value: unknown, label: string): void {
 export function createPreloadApi(ipc: IpcRendererLike): PreloadApi {
   const api: PreloadApi = {
     recovery: request => ipc.invoke(IPC_CHANNELS.recovery, desktopRecoveryRequestSchema.parse(request)),
+    onRecoveryChanged: callback => {
+      if (typeof callback !== "function") throw new TypeError("onRecoveryChanged callback must be a function");
+      const listener = (): void => callback();
+      ipc.on(IPC_CHANNELS.recoveryChanged, listener);
+      return (): void => ipc.removeListener(IPC_CHANNELS.recoveryChanged, listener);
+    },
     openNotebook: async (): Promise<void> => {
       validateVoid(await ipc.invoke(IPC_CHANNELS.openNotebook), "openNotebook");
     },

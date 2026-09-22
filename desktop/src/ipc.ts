@@ -1,6 +1,7 @@
 /** Fixed channels for the context-isolated desktop bridge. */
 export const IPC_CHANNELS = Object.freeze({
   recovery: "alderDesktop:recovery",
+  recoveryChanged: "alderDesktop:recoveryChanged",
   openNotebook: "alderDesktop:openNotebook",
   restartHost: "alderDesktop:restartHost",
   chooseSavePath: "alderDesktop:chooseSavePath",

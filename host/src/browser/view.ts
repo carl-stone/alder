@@ -2744,6 +2744,7 @@ export class NotebookView {
     const recoveryConflict = recovery.status === "conflict" || recovery.candidate?.state === "conflict" || recovery.corruption !== null;
     const recoveryMessage = recovery.uncertainRun ? "The previous run may have been interrupted. Run explicitly when you are ready." : recovery.local !== null
       ? recovery.status === "conflict" ? "Recovered edits conflict with newer changes." : "Unsaved edits recovered."
+      : recovery.retainedDrafts?.length ? "Retained drafts are available for review."
       : recovery.persistenceError ? "Local edit recovery is not durable."
       : recovery.candidate?.state === "restored" ? "Unsaved edits recovered."
       : recovery.corruption ? "Recovery data needs your review." : recoveryConflict ? "Recovered edits need your review." : null;
@@ -2759,7 +2760,7 @@ export class NotebookView {
       recoveryRuntime: [this.documentValue?.snapshot.runtime.kernelState ?? null,
         this.documentValue?.snapshot.runtime.rEnvironment?.rscript ?? null],
       editorHelpRestarting: this.editorHelpRestarting,
-      recovery: { status: recovery.status, local: recovery.local !== null, candidate: recovery.candidate === null ? null : [recovery.candidate.state, recovery.candidate.documentRevision], uncertainRun: recovery.uncertainRun, corruption: recovery.corruption?.code ?? null, persistenceError: recovery.persistenceError?.code ?? null },
+      recovery: { status: recovery.status, local: recovery.local !== null, retainedDrafts: recovery.retainedDrafts?.map(draft => draft.draftId) ?? [], candidate: recovery.candidate === null ? null : [recovery.candidate.state, recovery.candidate.documentRevision], uncertainRun: recovery.uncertainRun, corruption: recovery.corruption?.code ?? null, persistenceError: recovery.persistenceError?.code ?? null },
       canUndoDelete: this.deletedCell !== null,
     });
     if (signature === this.statusSignature) return;
@@ -2833,7 +2834,7 @@ export class NotebookView {
   private renderRecoveryControls(): void {
     if (!this.status) return;
     const state = this.client.recoveryState;
-    if (!state.local && !state.candidate && !state.uncertainRun && !state.corruption && !state.persistenceError) return;
+    if (!state.local && !state.candidate && !state.uncertainRun && !state.corruption && !state.persistenceError && !state.retainedDrafts?.length) return;
     const panel = elementNode(this.dom, "div", "recovery-panel", "") as HTMLDivElement;
     panel.dataset.recovery = "true"; panel.dataset.recoveryPanel = "true"; panel.setAttribute("role", "alert");
     const detail = state.uncertainRun ? "The previous run may have been interrupted. It has not been run again." : state.local ? state.status === "conflict"
@@ -2841,7 +2842,7 @@ export class NotebookView {
       : "Your unsaved edits have been recovered."
       : state.persistenceError?.message ?? state.corruption?.message ?? (state.candidate?.state === "conflict"
         ? "The saved notebook changed after these edits. Use Save As to preserve a copy, or reopen the saved file to discard them."
-        : "Unsaved changes were recovered.");
+        : state.retainedDrafts?.length ? "Retained drafts are available. Choose one to restore; the others remain available." : "Unsaved changes were recovered.");
     panel.appendChild(elementNode(this.dom, "div", "recovery-message", detail));
     const actions = elementNode(this.dom, "div", "recovery-actions", "") as HTMLDivElement;
     const add = (label: string, action: () => Promise<void>): void => {
@@ -2851,6 +2852,12 @@ export class NotebookView {
       actions.appendChild(button);
     };
     if (state.local || state.candidate?.state === "restored") add("Continue recovered", async () => this.client.continueRecovered());
+    for (const [index, draft] of (state.retainedDrafts ?? []).entries()) {
+      const updated = new Date(draft.updatedAt);
+      const time = Number.isFinite(updated.getTime()) ? updated.toLocaleString() : "unknown time";
+      add(`Restore draft ${index + 1} (${time}): ${draft.preview}`, () => this.client.restoreRetainedDraft(draft.draftId));
+    }
+    if (state.retainedDrafts?.length) add("Use saved notebook", async () => this.client.dismissRetainedDrafts());
     if (state.local && this.documentValue?.snapshot.runtime.rEnvironment !== null
       && this.documentValue?.snapshot.runtime.kernelState !== "ready") {
       add("Start R", async () => {

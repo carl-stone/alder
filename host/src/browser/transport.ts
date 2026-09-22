@@ -35,6 +35,8 @@ export interface BrowserDraftStore {
   readDraft(draftId: string): Promise<BrowserRecoveryDraft | null>;
   saveDraft(draft: BrowserRecoveryDraft): Promise<void>;
   clearDraft(draftId: string): Promise<void>;
+  listDrafts?(): Promise<BrowserRecoveryDraft[]>;
+  claimDraft?(draftId: string): Promise<void>;
 }
 export class MemoryRecoveryStore implements BrowserDraftStore {
   private readonly drafts = new Map<string, BrowserRecoveryDraft>();

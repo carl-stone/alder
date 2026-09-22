@@ -64085,7 +64085,7 @@ var rendererFailureDiagnosticSchema = external_exports.object({
 var desktopDiagnosticSchema = external_exports.discriminatedUnion("event", [visibleResultDiagnosticSchema, rendererFailureDiagnosticSchema]);
 var desktopRecoveryRequestSchema = external_exports.object({
   recoveryId: external_exports.string().regex(/^[A-Za-z0-9_-]{1,128}$/),
-  action: external_exports.enum(["read", "write", "remove"]),
+  action: external_exports.enum(["read", "write", "remove", "list", "claim"]),
   name: external_exports.string().max(256).optional(),
   value: external_exports.unknown().optional()
 }).strict();

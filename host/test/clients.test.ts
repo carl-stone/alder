@@ -8,7 +8,7 @@ import { BrowserDocument, reconcileDraft } from "../src/browser/document.js";
 import { NotebookView } from "../src/browser/view.js";
 import { OutputRenderer } from "../src/output-renderer.js";
 import { parseHTML } from "linkedom";
-import { BrowserTransport, BrowserTransportError, IndexedDBRecoveryStore, MemoryRecoveryStore, type BrowserRecoveryDraft, type WebSocketLike } from "../src/browser/transport.js";
+import { BrowserTransport, BrowserTransportError, IndexedDBRecoveryStore, MemoryRecoveryStore, type BrowserDraftStore, type BrowserRecoveryDraft, type WebSocketLike } from "../src/browser/transport.js";
 
 import { encodeFilePathUri, fileUri, translateLspResult } from "../src/lsp.js";
 import { fromFilePosition, layoutNotebook, parseNotebook, serializeNotebook, toFilePosition, type NotebookDocument } from "../src/notebook.js";
@@ -435,6 +435,33 @@ test("source conflict and recovery choices invoke their explicit resolutions", a
       if (confirmDescriptor) Object.defineProperty(window, "confirm", confirmDescriptor);
       else Reflect.deleteProperty(window, "confirm");
     }
+  });
+});
+
+test("multiple retained drafts remain separate choices in the notebook recovery panel", async () => {
+  await withViewDom(async (dom, domWindow) => {
+    const selected: string[] = [];
+    const client = settingsClient({
+      recoveryState: { status: "none", local: null, candidate: null, corruption: null, persistenceError: null, uncertainRun: false,
+        retainedDrafts: [
+          { draftId: "first", updatedAt: 1, preview: "first <- 42" },
+          { draftId: "second", updatedAt: 2, preview: "second <- 19" },
+        ] },
+      restoreRetainedDraft: async id => { selected.push(id); },
+      dismissRetainedDrafts: () => { selected.push("saved"); },
+    });
+    const view = new NotebookView(client, dom);
+    try {
+      view.render(new BrowserDocument(snapshot()));
+      const buttons = [...dom.querySelectorAll<HTMLButtonElement>("[data-recovery-panel] button")];
+      assert.equal(buttons.length, 3);
+      assert.match(buttons[0]!.textContent ?? "", /^Restore draft 1 \(.+\): first <- 42$/);
+      assert.match(buttons[1]!.textContent ?? "", /^Restore draft 2 \(.+\): second <- 19$/);
+      assert.equal(buttons[2]!.textContent, "Use saved notebook");
+      buttons[1]!.dispatchEvent(new domWindow.Event("click", { bubbles: true }));
+      await waitUntil(() => selected.length === 1);
+      assert.deepEqual(selected, ["second"]);
+    } finally { view.destroy(); }
   });
 });
 
@@ -1579,7 +1606,7 @@ function resultFor(id: string, result: unknown, _status = "done", cursor = 1): C
 function recoverySnapshot(value: HostSnapshot): unknown {
   return { type: "recovery", protocolVersion: HOST_CLIENT_PROTOCOL_VERSION, recovery: encodeRecoveryWire({ kind: "snapshot", epoch: value.epoch, cursor: value.cursor, snapshot: value }) };
 }
-async function browserClient(store = new MemoryRecoveryStore(), initial = snapshot(), options: { reconnect?: boolean; draftId?: string } = {}) {
+async function browserClient(store: BrowserDraftStore = new MemoryRecoveryStore(), initial = snapshot(), options: { reconnect?: boolean; draftId?: string } = {}) {
   const sockets: FakeSocket[] = [];
   const client = new BrowserNotebookClient({ url: "ws://127.0.0.1/api/socket", clientId: "browser-test", draftId: options.draftId ?? "window-1", leaseId: "lease-1", csrf: "csrf-1", reconnect: options.reconnect ?? false,
     reconnectDelayMs: 1, recoveryStore: store, requestAnimationFrame: () => 0,
@@ -1701,6 +1728,49 @@ test("unsubmitted typing survives renderer close and reload", async () => {
     assert.deepEqual(second.client.document!.cell("c1")!.desiredBody, ["typed but not submitted"]);
     assert.equal(second.client.recoveryState.status, "restored");
   } finally { await second.client.close(); }
+});
+
+test("reopened browser chooses one of two retained drafts and Save clears only that choice", async () => {
+  class DiscoveryStore extends MemoryRecoveryStore {
+    readonly ids = new Set<string>();
+    override async saveDraft(value: BrowserRecoveryDraft): Promise<void> { this.ids.add(value.draftId); await super.saveDraft(value); }
+    override async clearDraft(id: string): Promise<void> { this.ids.delete(id); await super.clearDraft(id); }
+    async listDrafts(): Promise<BrowserRecoveryDraft[]> { return (await Promise.all([...this.ids].map(id => this.readDraft(id)))).filter((value): value is BrowserRecoveryDraft => value !== null); }
+    async claimDraft(id: string): Promise<void> { if (!this.ids.has(id)) throw new Error("selected draft missing"); }
+  }
+  const store = new DiscoveryStore();
+  for (const [id, key, body] of [["old-first", "c1", "chosen <- 42"], ["old-second", "c2", "other <- 19"]]) {
+    const document = new BrowserDocument(snapshot());
+    document.edit(key!, [body!]);
+    await store.saveDraft(document.recoveryDraft(id!)!);
+  }
+  const { client, socket } = await browserClient(store, snapshot(), { draftId: "new-window" });
+  try {
+    assert.deepEqual(client.recoveryState.retainedDrafts?.map(value => value.draftId).sort(), ["old-first", "old-second"]);
+    const later = new BrowserDocument(snapshot()); later.edit("c2", ["later <- 28"]);
+    await store.saveDraft(later.recoveryDraft("closed-peer")!);
+    await client.refreshRetainedDrafts();
+    assert.deepEqual(client.recoveryState.retainedDrafts?.map(value => value.draftId).sort(), ["closed-peer", "old-first", "old-second"]);
+    assert.equal(client.document!.pendingSource().changes.length, 0);
+    assert.equal(socket.commands().length, 0);
+    await client.restoreRetainedDraft("old-first");
+    assert.equal(client.draftId, "old-first");
+    assert.deepEqual(client.document!.cell("c1")!.desiredBody, ["chosen <- 42"]);
+    assert.deepEqual(client.document!.cell("c2")!.desiredBody, ["x + 1"]);
+    assert.equal(socket.commands().length, 0, "selecting a draft does not replay it to the host");
+    const saving = client.save();
+    await waitUntil(() => socket.commands().length === 1);
+    socket.reply(socket.commands()[0]!, { edited: [{ id: "c1", revision: 1 }], created: {}, deleted: [] }, 1);
+    await waitUntil(() => socket.commands().length === 2);
+    socket.reply(socket.commands()[1]!, { saved: true }, 1);
+    await saving;
+    await client.flushDraftPersistence();
+    assert.equal(await store.readDraft("old-first"), null);
+    assert.deepEqual((await store.readDraft("old-second"))?.changes[0], {
+      type: "edit", cell: { cellId: "c2" }, expectedRevision: 0, cellType: "code", body: ["other <- 19"],
+    });
+    assert.ok(await store.readDraft("closed-peer"));
+  } finally { await client.close(); }
 });
 
 test("rapid and spaced typing coalesces bounded draft writes with the latest text", async () => {
@@ -1924,6 +1994,26 @@ function startupSnapshot(): HostSnapshot {
   return value;
 }
 const recoveryResponse = () => new Response(JSON.stringify({ epoch: "epoch-1", documentRevision: 0, cursor: 0, result: { candidate: null, corruption: null } }), { status: 200 });
+
+test("startup waits while retained drafts await an explicit choice", async () => {
+  class DiscoveryStore extends MemoryRecoveryStore {
+    async listDrafts(): Promise<BrowserRecoveryDraft[]> { return [await this.readDraft("closed-window")].filter((value): value is BrowserRecoveryDraft => value !== null); }
+  }
+  const store = new DiscoveryStore();
+  const document = new BrowserDocument(startupSnapshot()); document.edit("c1", ["unsaved <- 42"]);
+  await store.saveDraft(document.recoveryDraft("closed-window")!);
+  await withBrowserFetch(async () => recoveryResponse(), async () => {
+    const { client, socket } = await browserClient(store, startupSnapshot(), { draftId: "new-window" });
+    try {
+      assert.equal(client.recoveryState.retainedDrafts?.length, 1);
+      assert.equal(socket.commands().length, 0);
+      client.dismissRetainedDrafts();
+      await waitUntil(() => socket.commands().length === 1);
+      assert.equal(socket.commands()[0]!.type, "run");
+      socket.reply(socket.commands()[0]!);
+    } finally { client.close(); }
+  });
+});
 
 for (const replayRestart of [false, true]) test(`renderer reload suppresses startup after uncertain ${replayRestart ? "restart" : "run"} even without edits`, async () => {
   const store = new MemoryRecoveryStore();

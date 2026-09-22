@@ -21122,7 +21122,7 @@ var rendererFailureDiagnosticSchema = external_exports.object({
 var desktopDiagnosticSchema = external_exports.discriminatedUnion("event", [visibleResultDiagnosticSchema, rendererFailureDiagnosticSchema]);
 var desktopRecoveryRequestSchema = external_exports.object({
   recoveryId: external_exports.string().regex(/^[A-Za-z0-9_-]{1,128}$/),
-  action: external_exports.enum(["read", "write", "remove"]),
+  action: external_exports.enum(["read", "write", "remove", "list", "claim"]),
   name: external_exports.string().max(256).optional(),
   value: external_exports.unknown().optional()
 }).strict();
@@ -21769,6 +21769,7 @@ var BrowserNotebookClient = class {
         if (state === "open" && this.recoveryAttempted) void this.refreshRecoveryState();
       }
     });
+    this.selectedDraftId = options.draftId ?? this.transport.id;
   }
   options;
   transport;
@@ -21796,8 +21797,11 @@ var BrowserNotebookClient = class {
   browserRecoveryInspected = false;
   hostRecoveryInspected = false;
   startupActivated = false;
+  selectedDraftId;
+  selectingRetainedDraft = false;
+  retainedDraftsDismissed = false;
   get draftId() {
-    return this.options.draftId ?? this.transport.id;
+    return this.selectedDraftId;
   }
   get document() {
     return this.documentValue;
@@ -21862,6 +21866,49 @@ var BrowserNotebookClient = class {
       await this.draftPersistence;
     }
     if (this.draftPersistenceError) throw this.draftPersistenceError;
+  }
+  async restoreRetainedDraft(draftId) {
+    const store = this.draftStore();
+    if (!store.claimDraft) throw new Error("This draft cannot be claimed by the current window");
+    if (this.selectingRetainedDraft) throw new Error("A draft is already being restored");
+    if (!this.recoveryStateValue.retainedDrafts?.some((draft) => draft.draftId === draftId)) throw new Error("The selected draft is not available");
+    if (this.requireDocument().pendingSource().changes.length || this.recoveryStateValue.local) throw new Error("Finish the current local edits before restoring another draft");
+    this.selectingRetainedDraft = true;
+    let claimed = false;
+    try {
+      await this.flushDraftPersistence();
+      const draft = await store.readDraft(draftId);
+      if (!draft) throw new Error("The selected draft is no longer available");
+      if (this.requireDocument().pendingSource().changes.length) throw new Error("Finish the current local edits before restoring another draft");
+      await store.claimDraft(draftId);
+      claimed = true;
+      this.selectedDraftId = draftId;
+      this.retainedDraftsDismissed = true;
+      this.recoveryStateValue = { ...this.recoveryStateValue, retainedDrafts: [] };
+      this.restoreDraft(draft);
+      await this.flushDraftPersistence();
+    } catch (error61) {
+      if (!claimed) {
+        this.recoveryStateValue = { ...this.recoveryStateValue, retainedDrafts: await this.discoverRetainedDrafts().catch(() => this.recoveryStateValue.retainedDrafts ?? []) };
+        this.notifyRecovery();
+      }
+      throw error61;
+    } finally {
+      this.selectingRetainedDraft = false;
+    }
+  }
+  dismissRetainedDrafts() {
+    this.retainedDraftsDismissed = true;
+    this.recoveryStateValue = { ...this.recoveryStateValue, retainedDrafts: [] };
+    this.notifyRecovery();
+    void this.activateStartupIfSafe();
+  }
+  async refreshRetainedDrafts() {
+    if (!this.browserRecoveryInspected || this.retainedDraftsDismissed || this.selectingRetainedDraft || this.recoveryStateValue.local || this.requireDocument().pendingSource().changes.length || !this.draftStore().listDrafts) return;
+    const drafts = await this.discoverRetainedDrafts();
+    if (this.retainedDraftsDismissed || this.selectingRetainedDraft || this.recoveryStateValue.local || this.requireDocument().pendingSource().changes.length) return;
+    this.recoveryStateValue = { ...this.recoveryStateValue, retainedDrafts: drafts };
+    this.notifyRecovery();
   }
   async discardRecovery() {
     await this.beginDraftMutation();
@@ -21929,6 +21976,7 @@ var BrowserNotebookClient = class {
     });
   }
   editCell(key, source, type) {
+    if (this.selectingRetainedDraft) throw new Error("Wait for the selected draft to open before editing");
     const lines = typeof source === "string" ? splitSource(source) : [...source];
     const cell = this.requireDocument().edit(key, lines, type);
     this.notify(void 0, [key]);
@@ -22218,7 +22266,7 @@ var BrowserNotebookClient = class {
   async activateStartupIfSafe() {
     if (this.startupActivated || !this.browserRecoveryInspected || !this.hostRecoveryInspected) return;
     const state = this.recoveryStateValue;
-    if (this.pendingRun || state.local || state.candidate || state.corruption) return;
+    if (this.pendingRun || state.local || state.candidate || state.corruption || state.retainedDrafts?.length) return;
     const snapshot = this.requireDocument().snapshot;
     if (snapshot.runtime.startupActivated) {
       this.startupActivated = true;
@@ -22285,8 +22333,18 @@ var BrowserNotebookClient = class {
     if (selected) {
       this.restoreDraft(selected);
       await this.flushDraftPersistence();
+    } else if (this.draftStore().listDrafts) {
+      this.recoveryStateValue = { ...this.recoveryStateValue, retainedDrafts: await this.discoverRetainedDrafts() };
     }
     this.notifyRecovery();
+  }
+  async discoverRetainedDrafts() {
+    const drafts = await this.draftStore().listDrafts?.() ?? [];
+    return drafts.filter((draft) => draft.draftId !== this.draftId).sort((left, right) => right.updatedAt - left.updatedAt).map((draft) => ({
+      draftId: draft.draftId,
+      updatedAt: draft.updatedAt,
+      preview: draft.changes.find((change) => "body" in change)?.body.join(" ").trim().slice(0, 80) || "Unsaved edits"
+    }));
   }
   restoreDraft(draft) {
     const document2 = this.requireDocument();
@@ -22587,14 +22645,30 @@ var DesktopRecoveryStore = class {
   async readDraft(draftId) {
     const value = await this.call({ recoveryId: this.recoveryId, action: "read", name: "draft:" + draftId });
     const draft = readRecoveryDraft(value);
-    if (value !== null && draft === null) this.onWarning?.("The saved draft could not be read and has been retained.");
-    return draft;
+    if (value !== null && (draft === null || draft.draftId !== draftId)) this.onWarning?.("The saved draft could not be read and has been retained.");
+    return draft?.draftId === draftId ? draft : null;
   }
   async saveDraft(draft) {
     await this.call({ recoveryId: this.recoveryId, action: "write", name: "draft:" + draft.draftId, value: draft });
   }
   async clearDraft(draftId) {
     await this.call({ recoveryId: this.recoveryId, action: "remove", name: "draft:" + draftId });
+  }
+  async listDrafts() {
+    const result = await this.call({ recoveryId: this.recoveryId, action: "list" });
+    if (typeof result !== "object" || result === null || !Array.isArray(result.draftIds)) throw new Error("Draft inventory is invalid");
+    const inventory = result;
+    if (inventory.damaged) this.onWarning?.("Some saved drafts are damaged and have been retained.");
+    const drafts = [];
+    for (const id of inventory.draftIds) {
+      if (typeof id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(id)) throw new Error("Draft inventory contains an invalid identity");
+      const draft = await this.readDraft(id);
+      if (draft) drafts.push(draft);
+    }
+    return drafts;
+  }
+  async claimDraft(draftId) {
+    await this.call({ recoveryId: this.recoveryId, action: "claim", name: "draft:" + draftId });
   }
 };
 
@@ -26293,7 +26367,7 @@ ${cell.desiredBody.join("\n")}`));
     const runtimeBlocked = this.documentValue?.snapshot.runtime.executionBlockedReason ?? null;
     const recovery = this.client.recoveryState;
     const recoveryConflict = recovery.status === "conflict" || recovery.candidate?.state === "conflict" || recovery.corruption !== null;
-    const recoveryMessage = recovery.uncertainRun ? "The previous run may have been interrupted. Run explicitly when you are ready." : recovery.local !== null ? recovery.status === "conflict" ? "Recovered edits conflict with newer changes." : "Unsaved edits recovered." : recovery.persistenceError ? "Local edit recovery is not durable." : recovery.candidate?.state === "restored" ? "Unsaved edits recovered." : recovery.corruption ? "Recovery data needs your review." : recoveryConflict ? "Recovered edits need your review." : null;
+    const recoveryMessage = recovery.uncertainRun ? "The previous run may have been interrupted. Run explicitly when you are ready." : recovery.local !== null ? recovery.status === "conflict" ? "Recovered edits conflict with newer changes." : "Unsaved edits recovered." : recovery.retainedDrafts?.length ? "Retained drafts are available for review." : recovery.persistenceError ? "Local edit recovery is not durable." : recovery.candidate?.state === "restored" ? "Unsaved edits recovered." : recovery.corruption ? "Recovery data needs your review." : recoveryConflict ? "Recovered edits need your review." : null;
     const message2 = this.hostClosed ? "Notebook closed." : recoveryMessage ?? this.actionError ?? stateError ?? settingsError ?? editorHelpError ?? this.actionNotice ?? "";
     const signature = JSON.stringify({
       runtimeBlocked: runtimeBlocked === null ? null : [runtimeBlocked.code, runtimeBlocked.message],
@@ -26308,7 +26382,7 @@ ${cell.desiredBody.join("\n")}`));
         this.documentValue?.snapshot.runtime.rEnvironment?.rscript ?? null
       ],
       editorHelpRestarting: this.editorHelpRestarting,
-      recovery: { status: recovery.status, local: recovery.local !== null, candidate: recovery.candidate === null ? null : [recovery.candidate.state, recovery.candidate.documentRevision], uncertainRun: recovery.uncertainRun, corruption: recovery.corruption?.code ?? null, persistenceError: recovery.persistenceError?.code ?? null },
+      recovery: { status: recovery.status, local: recovery.local !== null, retainedDrafts: recovery.retainedDrafts?.map((draft) => draft.draftId) ?? [], candidate: recovery.candidate === null ? null : [recovery.candidate.state, recovery.candidate.documentRevision], uncertainRun: recovery.uncertainRun, corruption: recovery.corruption?.code ?? null, persistenceError: recovery.persistenceError?.code ?? null },
       canUndoDelete: this.deletedCell !== null
     });
     if (signature === this.statusSignature) return;
@@ -26381,12 +26455,12 @@ ${cell.desiredBody.join("\n")}`));
   renderRecoveryControls() {
     if (!this.status) return;
     const state = this.client.recoveryState;
-    if (!state.local && !state.candidate && !state.uncertainRun && !state.corruption && !state.persistenceError) return;
+    if (!state.local && !state.candidate && !state.uncertainRun && !state.corruption && !state.persistenceError && !state.retainedDrafts?.length) return;
     const panel = elementNode(this.dom, "div", "recovery-panel", "");
     panel.dataset.recovery = "true";
     panel.dataset.recoveryPanel = "true";
     panel.setAttribute("role", "alert");
-    const detail = state.uncertainRun ? "The previous run may have been interrupted. It has not been run again." : state.local ? state.status === "conflict" ? "Your edits are preserved. Review the conflicting cells before saving." : "Your unsaved edits have been recovered." : state.persistenceError?.message ?? state.corruption?.message ?? (state.candidate?.state === "conflict" ? "The saved notebook changed after these edits. Use Save As to preserve a copy, or reopen the saved file to discard them." : "Unsaved changes were recovered.");
+    const detail = state.uncertainRun ? "The previous run may have been interrupted. It has not been run again." : state.local ? state.status === "conflict" ? "Your edits are preserved. Review the conflicting cells before saving." : "Your unsaved edits have been recovered." : state.persistenceError?.message ?? state.corruption?.message ?? (state.candidate?.state === "conflict" ? "The saved notebook changed after these edits. Use Save As to preserve a copy, or reopen the saved file to discard them." : state.retainedDrafts?.length ? "Retained drafts are available. Choose one to restore; the others remain available." : "Unsaved changes were recovered.");
     panel.appendChild(elementNode(this.dom, "div", "recovery-message", detail));
     const actions = elementNode(this.dom, "div", "recovery-actions", "");
     const add = (label, action) => {
@@ -26399,6 +26473,12 @@ ${cell.desiredBody.join("\n")}`));
       actions.appendChild(button);
     };
     if (state.local || state.candidate?.state === "restored") add("Continue recovered", async () => this.client.continueRecovered());
+    for (const [index, draft] of (state.retainedDrafts ?? []).entries()) {
+      const updated = new Date(draft.updatedAt);
+      const time3 = Number.isFinite(updated.getTime()) ? updated.toLocaleString() : "unknown time";
+      add(`Restore draft ${index + 1} (${time3}): ${draft.preview}`, () => this.client.restoreRetainedDraft(draft.draftId));
+    }
+    if (state.retainedDrafts?.length) add("Use saved notebook", async () => this.client.dismissRetainedDrafts());
     if (state.local && this.documentValue?.snapshot.runtime.rEnvironment !== null && this.documentValue?.snapshot.runtime.kernelState !== "ready") {
       add("Start R", async () => {
         const rscript = this.documentValue?.snapshot.runtime.rEnvironment?.rscript;
@@ -27054,7 +27134,10 @@ function bindDesktopActions(next) {
       void desktop.openNotebook().catch((error61) => view?.showError(error61));
     });
   }
-  desktopUnsubscribe = desktop.onDesktopCommand((command) => {
+  const stopRecovery = desktop.onRecoveryChanged(() => {
+    void next.refreshRetainedDrafts().catch((error61) => view?.showError(error61));
+  });
+  const stopCommands = desktop.onDesktopCommand((command) => {
     const run = async () => {
       if (command.action === "prepare-unload") {
         await next.flushDraftPersistence();
@@ -27080,6 +27163,10 @@ function bindDesktopActions(next) {
       }
     );
   });
+  desktopUnsubscribe = () => {
+    stopRecovery();
+    stopCommands();
+  };
 }
 window.addEventListener("pagehide", () => {
   unsafeLinkObserver.disconnect();
@@ -27139,6 +27226,9 @@ window.addEventListener("beforeunload", (event) => {
   const pending = document2?.pendingSource();
   if (!document2?.snapshot.dirty && !pending?.changes.length) return;
   event.preventDefault();
+});
+window.addEventListener("focus", () => {
+  void client?.refreshRetainedDrafts().catch((error61) => view?.showError(error61));
 });
 async function bootstrapSession() {
   const current = new URL(location.href);

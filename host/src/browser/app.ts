@@ -60,7 +60,8 @@ function bindDesktopActions(next: BrowserNotebookClient): void {
       void desktop.openNotebook().catch((error) => view?.showError(error));
     });
   }
-  desktopUnsubscribe = desktop.onDesktopCommand((command: DesktopCommand) => {
+  const stopRecovery = desktop.onRecoveryChanged(() => { void next.refreshRetainedDrafts().catch(error => view?.showError(error)); });
+  const stopCommands = desktop.onDesktopCommand((command: DesktopCommand) => {
     const run = async (): Promise<"ok" | "cancelled"> => {
       if (command.action === "prepare-unload") { await next.flushDraftPersistence(); return "ok"; }
       if (command.action === "close") { await next.discardAndClose(); return "ok"; }
@@ -80,6 +81,7 @@ function bindDesktopActions(next: BrowserNotebookClient): void {
       },
     );
   });
+  desktopUnsubscribe = () => { stopRecovery(); stopCommands(); };
 }
 
 window.addEventListener("pagehide", () => {
@@ -141,6 +143,7 @@ window.addEventListener("beforeunload", (event) => {
   if (!document?.snapshot.dirty && !pending?.changes.length) return;
   event.preventDefault();
 });
+window.addEventListener("focus", () => { void client?.refreshRetainedDrafts().catch(error => view?.showError(error)); });
 
 async function bootstrapSession(): Promise<BrowserSessionCredentials> {
   const current = new URL(location.href);

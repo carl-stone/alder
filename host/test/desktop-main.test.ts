@@ -848,6 +848,59 @@ test("native recovery IPC accepts the owning main frame and keeps its recovery i
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("same-document windows keep active drafts separate and a new app process can claim one orphan", async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "alder-desktop-draft-handoff-")));
+  try {
+    const windows = [windowWithLoad(), windowWithLoad()];
+    const handlers = new Map<string, (event: unknown, ...args: unknown[]) => Promise<unknown>>();
+    const electronRuntime = runtime();
+    electronRuntime.app.getPath = () => root;
+    electronRuntime.BrowserWindow.fromWebContents = sender => windows.find(window => window.webContents === sender) ?? null;
+    electronRuntime.ipcMain.handle = (channel, handler) => { handlers.set(channel, handler); };
+    const main = new ElectronMain(electronRuntime, { resources });
+    const records = windows.map((window, index) => recordFor(main, connection(`same-document-${index}`, "/tmp/same-document.R", async () => jsonResponse({})), window));
+    const notifications: string[] = [];
+    const sendFirst = windows[0]!.webContents.send.bind(windows[0]!.webContents);
+    windows[0]!.webContents.send = (channel, value) => {
+      notifications.push(channel);
+      sendFirst(channel, value);
+    };
+    (main as any).installIpcHandlers();
+    const recovery = handlers.get("alderDesktop:recovery")!;
+    const event = (window: ElectronWindow) => ({ sender: window.webContents, senderFrame: window.webContents.mainFrame });
+    const recoveryId = "document-recovery-id";
+    for (const [index, window] of windows.entries()) {
+      await recovery(event(window), { action: "write", recoveryId, name: "draft:" + records[index].draftId, value: { source: `window ${index}` } });
+    }
+    assert.deepEqual((await recovery(event(windows[0]!), { action: "list", recoveryId }) as { draftIds: string[] }).draftIds, []);
+    await (main as any).disposeRecord(records[1]);
+    windows[1]!.destroy();
+    assert.ok(notifications.includes("alderDesktop:recoveryChanged"));
+    assert.deepEqual((await recovery(event(windows[0]!), { action: "list", recoveryId }) as { draftIds: string[] }).draftIds, [records[1].draftId]);
+    await (main as any).disposeRecord(records[0]);
+    windows[0]!.destroy();
+
+    const reopened = windowWithLoad();
+    const newHandlers = new Map<string, (event: unknown, ...args: unknown[]) => Promise<unknown>>();
+    const nextRuntime = runtime();
+    nextRuntime.app.getPath = () => root;
+    nextRuntime.BrowserWindow.fromWebContents = sender => sender === reopened.webContents ? reopened : null;
+    nextRuntime.ipcMain.handle = (channel, handler) => { newHandlers.set(channel, handler); };
+    const nextMain = new ElectronMain(nextRuntime, { resources });
+    const nextRecord = recordFor(nextMain, connection("reopened-document", "/tmp/same-document.R", async () => jsonResponse({})), reopened);
+    (nextMain as any).installIpcHandlers();
+    const nextRecovery = newHandlers.get("alderDesktop:recovery")!;
+    const candidates = (await nextRecovery(event(reopened), { action: "list", recoveryId }) as { draftIds: string[] }).draftIds;
+    assert.deepEqual(candidates.sort(), records.map(record => record.draftId).sort());
+    await nextRecovery(event(reopened), { action: "claim", recoveryId, name: "draft:" + records[1].draftId });
+    assert.equal(nextRecord.draftId, records[1].draftId);
+    assert.deepEqual((await nextRecovery(event(reopened), { action: "list", recoveryId }) as { draftIds: string[] }).draftIds, [records[0].draftId]);
+    await nextRecovery(event(reopened), { action: "remove", recoveryId, name: "draft:" + records[1].draftId });
+    assert.deepEqual((await nextRecovery(event(reopened), { action: "list", recoveryId }) as { draftIds: string[] }).draftIds, [records[0].draftId]);
+    assert.deepEqual(await nextRecovery(event(reopened), { action: "read", recoveryId, name: "draft:" + records[0].draftId }), { source: "window 0" });
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("renderer failures retain their exact stack, cause, and source location", async () => {
   const diagnosticRoot = await mkdtemp(join(tmpdir(), "alder-renderer-diagnostics-"));
   const diagnostics = new StructuredDiagnostics({ rootDir: diagnosticRoot, role: "desktop", flushDelayMs: 0, stderr: null });
@@ -874,6 +927,87 @@ test("renderer failures retain their exact stack, cause, and source location", a
   assert.deepEqual({ filename: failure.filename, line: failure.line, column: failure.column }, { filename: "/Users/carl/notebooks/raw.R", line: 14, column: 9 });
   await main.stop();
   await rm(diagnosticRoot, { recursive: true, force: true });
+});
+
+test("a failed renderer load offers a native retry and restores the existing notebook connection", async () => {
+  const host = connection("renderer-retry", "/tmp/renderer-retry.R", async endpoint => {
+    assert.equal(endpoint, "/api/ticket");
+    return jsonResponse({ ticket: "e".repeat(64), expiresAt: "2026-12-01T00:00:00.000Z" });
+  });
+  let loaded = 0;
+  let responseHeaders: ((details: { resourceType: string; responseHeaders: Record<string, string[]> }, callback: (decision: { cancel?: boolean }) => void) => void) | undefined;
+  let record: any;
+  const window = windowWithLoad(async () => {
+    loaded += 1;
+    if (loaded === 1) throw new Error("page navigation failed");
+    assert.ok(responseHeaders);
+    responseHeaders({ resourceType: "mainFrame", responseHeaders: { "X-Alder-Continuity-Proof": ["proof"] } }, decision => assert.equal(decision.cancel, undefined));
+    queueMicrotask(() => record.rendererReady.resolve());
+  });
+  window.webContents.session!.webRequest!.onHeadersReceived = (_filter, callback) => { responseHeaders = callback as typeof responseHeaders; };
+  const electronRuntime = runtime();
+  let offers = 0;
+  electronRuntime.dialog.showMessageBox = async (_owner, options) => {
+    offers += 1;
+    assert.equal(loaded, 1);
+    assert.equal(record.authenticatedRendererGeneration, undefined);
+    assert.deepEqual(options.buttons, ["Retry Reload", "Close Window"]);
+    return { response: 0 };
+  };
+  const main = new ElectronMain(electronRuntime, { resources });
+  record = recordFor(main, host, window);
+  const draftId = record.draftId;
+  await (main as any).recoverRenderer(record);
+  assert.equal(loaded, 2);
+  assert.equal(offers, 1);
+  assert.equal(record.authenticatedRendererGeneration, record.loadGeneration);
+  assert.equal(record.draftId, draftId);
+  assert.equal(record.connection, host);
+  assert.equal(host.releaseCount, 0);
+  assert.equal(window.destroyed, false);
+});
+
+test("Close Window after failed renderer reload leaves its draft selectable on reopen", async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "alder-renderer-close-reopen-")));
+  try {
+    const host = connection("renderer-close", "/tmp/renderer-close.R", async () => { throw new Error("ticket unavailable"); });
+    const window = windowWithLoad();
+    const handlers = new Map<string, (event: unknown, ...args: unknown[]) => Promise<unknown>>();
+    const electronRuntime = runtime();
+    electronRuntime.app.getPath = () => root;
+    electronRuntime.BrowserWindow.fromWebContents = sender => sender === window.webContents ? window : null;
+    electronRuntime.ipcMain.handle = (channel, handler) => { handlers.set(channel, handler); };
+    electronRuntime.dialog.showMessageBox = async (_owner, options) => {
+      assert.deepEqual(options.buttons, ["Retry Reload", "Close Window"]);
+      return { response: 1 };
+    };
+    const main = new ElectronMain(electronRuntime, { resources });
+    const record = recordFor(main, host, window);
+    (main as any).installIpcHandlers();
+    const recoveryId = "renderer-close-recovery";
+    const name = "draft:" + record.draftId;
+    const value = { source: "local edit before crash" };
+    await handlers.get("alderDesktop:recovery")!({ sender: window.webContents, senderFrame: window.webContents.mainFrame }, { action: "write", recoveryId, name, value });
+    await (main as any).recoverRenderer(record);
+    assert.equal(window.destroyed, true);
+    assert.deepEqual(host.releaseDispositions, ["normal"]);
+
+    const reopened = windowWithLoad();
+    const nextHandlers = new Map<string, (event: unknown, ...args: unknown[]) => Promise<unknown>>();
+    const nextRuntime = runtime();
+    nextRuntime.app.getPath = () => root;
+    nextRuntime.BrowserWindow.fromWebContents = sender => sender === reopened.webContents ? reopened : null;
+    nextRuntime.ipcMain.handle = (channel, handler) => { nextHandlers.set(channel, handler); };
+    const nextMain = new ElectronMain(nextRuntime, { resources });
+    const nextRecord = recordFor(nextMain, connection("renderer-reopened", "/tmp/renderer-close.R", async () => jsonResponse({})), reopened);
+    (nextMain as any).installIpcHandlers();
+    const event = { sender: reopened.webContents, senderFrame: reopened.webContents.mainFrame };
+    const recovery = nextHandlers.get("alderDesktop:recovery")!;
+    assert.deepEqual((await recovery(event, { action: "list", recoveryId }) as { draftIds: string[] }).draftIds, [record.draftId]);
+    await recovery(event, { action: "claim", recoveryId, name });
+    assert.equal(nextRecord.draftId, record.draftId);
+    assert.deepEqual(await recovery(event, { action: "read", recoveryId, name }), value);
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test("typed renderer state drives native edited state and represented filename", async () => {

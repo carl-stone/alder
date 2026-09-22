@@ -204,7 +204,7 @@ interface ElectronWindowRecord {
   windowState: WindowState | null;
   readonly pendingCommands: Map<string, { resolve: (result: ReturnType<typeof desktopCommandResultSchema.parse>) => void; reject: (error: Error) => void }>;
   recoveryId?: string;
-  readonly draftId: string;
+  draftId: string;
 }
 
 /**
@@ -620,6 +620,23 @@ export class ElectronMain {
         case "read": return store.read(request.recoveryId, request.name ?? "");
         case "write": return store.write(request.recoveryId, request.name ?? "", request.value);
         case "remove": return store.remove(request.recoveryId, request.name ?? "");
+        case "list": {
+          if (request.name !== undefined || request.value !== undefined) throw new Error("Draft inventory does not accept a record");
+          const inventory = await store.listDrafts(request.recoveryId);
+          const active = new Set([...this.records].filter(item => !item.released).map(item => item.draftId));
+          return { ...inventory, draftIds: inventory.draftIds.filter(id => !active.has(id)) };
+        }
+        case "claim": {
+          const name = request.name ?? "";
+          if (!/^draft:[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(name) || request.value !== undefined) throw new Error("Invalid draft claim");
+          const draftId = name.slice("draft:".length);
+          if (await store.read(request.recoveryId, name) === null) throw new Error("The selected draft is no longer available");
+          if (await store.read(request.recoveryId, "draft:" + record.draftId) !== null) throw new Error("This window already has unsaved local edits");
+          if ([...this.records].some(item => item !== record && !item.released && item.draftId === draftId)) throw new Error("Another window is already using this draft");
+          record.draftId = draftId;
+          this.notifyRetainedDraftsChanged(request.recoveryId);
+          return;
+        }
       }
     });
     noArguments(IPC_CHANNELS.openNotebook, async (record) => {
@@ -773,41 +790,57 @@ export class ElectronMain {
         reason: details?.reason ?? "unknown", exitCode: details?.exitCode ?? null, details, outcome: "error",
       });
       record.reloadInProgress = true;
-      void this.recoverRenderer(record, details?.reason ?? "unknown").finally(() => { record.reloadInProgress = false; });
+      void this.recoverRenderer(record).finally(() => { record.reloadInProgress = false; });
     });
   }
 
-  private async recoverRenderer(record: ElectronWindowRecord, reason: string): Promise<void> {
-    const answer = await this.runtime.dialog.showMessageBox(record.window, {
-      type: "warning",
-      title: "Alder window recovered",
-      message: "The notebook editor stopped unexpectedly.",
-      detail: `Renderer reason: ${reason}. Alder will reload the authenticated host page and retain recovery data.`,
-      buttons: ["Reload", "Close"],
-      defaultId: 0,
-      cancelId: 1,
-    }).catch(() => ({ response: 0 }));
-    if (record.released) return;
-    if (answer.response !== 0) {
-      await this.requestClose(record);
-      return;
+  private async recoverRenderer(record: ElectronWindowRecord): Promise<void> {
+    while (!record.released) {
+      try {
+        const ticket = await this.mintTicket(record.connection);
+        await this.loadAuthenticatedNotebook(record, ticket);
+        this.diagnostics?.record("info", "renderer.recovered", {
+          windowId: record.windowId, sessionEpoch: record.connection.epoch,
+          rendererGeneration: record.loadGeneration, outcome: "success",
+        });
+        return;
+      } catch (error) {
+        this.diagnostics?.record("error", "renderer.recovery_failed", {
+          windowId: record.windowId, sessionEpoch: record.connection.epoch,
+          rendererGeneration: record.loadGeneration, outcome: "error",
+          errorCode: (error as NodeJS.ErrnoException)?.code ?? "renderer_recovery_failed",
+          error: diagnosticError(error),
+        });
+        const answer = await this.runtime.dialog.showMessageBox(record.window, {
+          type: "error", title: "Renderer recovery", message: "The notebook editor could not be reloaded.",
+          detail: `${error instanceof Error ? error.message : "Renderer reload failed."}\n\n${record.connection.canonicalPath === null
+            ? "This untitled notebook has no file to reopen. Retry Reload to restore available recovery data before closing."
+            : "Alder recovery data remains available. Closing this window does not save the notebook; reopen it to review unsaved work."}`,
+          buttons: ["Retry Reload", "Close Window"], defaultId: 0, cancelId: 1,
+        });
+        if (record.released) return;
+        if (answer.response === 0) continue;
+        if (await this.closeFailedRenderer(record)) return;
+      }
     }
-    try {
-      const ticket = await this.mintTicket(record.connection);
-      await this.loadAuthenticatedNotebook(record, ticket);
-      this.diagnostics?.record("info", "renderer.recovered", {
-        windowId: record.windowId, sessionEpoch: record.connection.epoch,
-        rendererGeneration: record.loadGeneration, outcome: "success",
-      });
-    } catch (error) {
-      this.diagnostics?.record("error", "renderer.recovery_failed", {
-        windowId: record.windowId, sessionEpoch: record.connection.epoch,
-        rendererGeneration: record.loadGeneration, outcome: "error",
-        errorCode: (error as NodeJS.ErrnoException)?.code ?? "renderer_recovery_failed",
-        error: diagnosticError(error),
-      });
-      await this.showApplicationError("Renderer recovery", error instanceof Error ? error.message : "The renderer could not be recovered.");
+  }
+
+  private async closeFailedRenderer(record: ElectronWindowRecord): Promise<boolean> {
+    while (!record.released) {
+      try {
+        await this.disposeRecord(record);
+        if (!record.window.isDestroyed()) record.window.destroy();
+        return true;
+      } catch (error) {
+        const answer = await this.runtime.dialog.showMessageBox(record.window, {
+          type: "error", title: "Close notebook", message: "Alder could not release the notebook connection.",
+          detail: error instanceof Error ? error.message : "The connection could not be released.",
+          buttons: ["Retry Close", "Retry Reload"], defaultId: 0, cancelId: 1,
+        });
+        if (answer.response !== 0) return false;
+      }
     }
+    return true;
   }
 
   private async dispatchAction(record: ElectronWindowRecord, action: WindowAction, timeoutMs = 30_000): Promise<"ok" | "cancelled"> {
@@ -1165,6 +1198,7 @@ export class ElectronMain {
           record.pendingCommands.clear();
           this.records.delete(record);
           this.removeRecordKeys(record);
+          this.notifyRetainedDraftsChanged(record.recoveryId);
         }
         if (disposition === "normal") this.normalReleasedConnections.add(record.connection);
         else this.normalReleasedConnections.delete(record.connection);
@@ -1193,6 +1227,13 @@ export class ElectronMain {
     record.disposalDisposition = disposition;
     this.pendingDisposals.add(disposal);
     return disposal;
+  }
+
+  private notifyRetainedDraftsChanged(recoveryId: string | undefined): void {
+    if (!recoveryId) return;
+    for (const record of this.records) if (!record.released && record.recoveryId === recoveryId && !record.window.webContents.isDestroyed?.()) {
+      record.window.webContents.send(IPC_CHANNELS.recoveryChanged, {});
+    }
   }
 
   private async showDiagnostics(): Promise<void> {

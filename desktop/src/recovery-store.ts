@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { chmod, lstat, mkdir, open, rename, rm } from "node:fs/promises";
+import { chmod, lstat, mkdir, open, readdir, rename, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
 const RECOVERY_ID = /^[A-Za-z0-9_-]{1,128}$/;
@@ -69,6 +69,23 @@ export class NativeRecoveryStore {
     this.validName(name);
     const directory = await this.directory(recoveryId);
     return (await this.readRecord(join(directory, fileName(name))))?.value ?? null;
+  }
+
+  async listDrafts(recoveryId: string): Promise<{ draftIds: string[]; damaged: number }> {
+    const directory = await this.directory(recoveryId);
+    const draftIds: string[] = [];
+    let damaged = 0;
+    for (const entry of await readdir(directory)) {
+      if (!/^[a-f0-9]{64}\.json$/.test(entry)) continue;
+      try {
+        const record = await this.readRecord(join(directory, entry));
+        if (record?.name.startsWith("draft:")) draftIds.push(record.name.slice("draft:".length));
+      } catch (error) {
+        if (!(error instanceof DesktopRecoveryError) || error.code !== "desktop_recovery_corrupt") throw error;
+        damaged += 1;
+      }
+    }
+    return { draftIds, damaged };
   }
 
   private enqueue<T>(path: string, operation: () => Promise<T>): Promise<T> {

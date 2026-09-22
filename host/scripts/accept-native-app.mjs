@@ -11,6 +11,8 @@ const executable = join(app, 'Contents/MacOS/Alder');
 const cleanupProbe = process.argv.includes('--cleanup-probe');
 const multiWindow = process.argv.includes('--multi-window');
 const backendCrash = process.argv.includes('--backend-crash');
+const rendererCrash = process.argv.includes('--renderer-crash');
+const draftHandoff = process.argv.includes('--draft-handoff');
 const saveIterations = Number(process.env.ALDER_NATIVE_SAVE_ITERATIONS ?? 20);
 const temporary = await mkdtemp('/tmp/alder-native-accept-');
 const workspace = join(temporary, 'workspace');
@@ -22,7 +24,7 @@ const sessions = new Set();
 const started = performance.now();
 let launchSequence = 0;
 await mkdir(workspace);
-const initialNotebook = backendCrash
+const initialNotebook = backendCrash || rendererCrash || draftHandoff
   ? '# ---\n# runtime:\n#   on_cell_change: lazy\n# ---\n# %%\naccepted_value <- 0L\naccepted_value\n# %%\nlocal_value <- 0L\nlocal_value\n'
   : '# ---\n# runtime:\n#   on_cell_change: lazy\n# ---\n# %%\nvalue <- 0L\nvalue\n';
 await writeFile(notebook, initialNotebook);
@@ -134,6 +136,13 @@ function captureBackendArk(backendPid) {
   ownedPids.add(pid);
   ownedArkGroups.add(pgid);
   return { pid, pgid };
+}
+
+function packagedRenderer(primary) {
+  const descendants = ownedProcessRows(new Set([primary.child.pid]), '');
+  const renderers = descendants.filter(row => row.command.includes('--type=renderer') && row.command.includes('Alder Helper'));
+  if (renderers.length !== 1) throw new Error(`expected one packaged renderer, found ${renderers.length}: ${JSON.stringify(renderers)}`);
+  return renderers[0].pid;
 }
 
 async function waitArkGroupGone(pgid, timeout = 5_000) {
@@ -421,6 +430,111 @@ async function runBackendCrashJourney(primary) {
     outputAfterRecovery: 45, savedAfterRecovery: true }) + '\n');
 }
 
+async function runRendererCrashJourney(primary) {
+  await disableAutosave(primary.cdp);
+  const accepted = 'accepted_value <- 43L\naccepted_value';
+  const localDraft = 'local_value <- 44L\nlocal_value';
+  await replaceEditor(primary.cdp, accepted);
+  await primary.cdp.wait(`window.__alderHost.client.document.snapshot.cells[0].body.join('\\n') === ${JSON.stringify(accepted)} &&
+    window.__alderHost.client.document.snapshot.dirty && window.__alderHost.client.document.pendingSource().changes.length === 0`, 15_000);
+  const backendPid = backendForWorkspace();
+  const ark = captureBackendArk(backendPid);
+  const rendererPid = packagedRenderer(primary);
+  await replaceEditor(primary.cdp, localDraft, 1);
+  const before = await primary.cdp.evaluate(`(async () => {
+    const client = window.__alderHost.client;
+    const source = client.document.cells[1].desiredBody.join('\\n');
+    const pending = client.document.pendingSource().changes.length;
+    await client.flushDraftPersistence();
+    return { source, pending, accepted: client.document.snapshot.cells[0].body.join('\\n'),
+      serverDraft: client.document.snapshot.cells[1].body.join('\\n'),
+      durableDraft: await client.transport.recoveryStore.readDraft(client.draftId) };
+  })()`);
+  if (before.accepted !== accepted || before.serverDraft !== 'local_value <- 0L\nlocal_value'
+    || before.source !== localDraft || before.pending !== 1
+    || before.durableDraft?.changes?.[0]?.body?.join('\n') !== localDraft) {
+    throw new Error(`renderer crash setup did not durably hold both edits: ${JSON.stringify(before)}`);
+  }
+  if (await readFile(notebook, 'utf8') !== initialNotebook) throw new Error('renderer crash setup saved before explicit Save');
+  process.kill(rendererPid, 'SIGKILL');
+  await waitForOwnedExit(new Set([rendererPid]), '', 5_000);
+  const recovered = await Cdp.connect(primary.endpoint);
+  sessions.add(recovered);
+  primary.cdp.close();
+  sessions.delete(primary.cdp);
+  primary.cdp = recovered;
+  await recovered.wait(`window.__alderHost?.client?.document?.snapshot?.cells[0]?.body.join('\\n') === ${JSON.stringify(accepted)} &&
+    window.__alderHost.client.document.cells[1]?.desiredBody.join('\\n') === ${JSON.stringify(localDraft)} &&
+    document.getElementById('r-state')?.textContent === 'R ready'`, 45_000);
+  const restored = await recovered.evaluate("({serverDraft:window.__alderHost.client.document.snapshot.cells[1].body.join('\\n'),pending:window.__alderHost.client.document.pendingSource().changes.length})");
+  if (restored.serverDraft !== 'local_value <- 0L\nlocal_value' || restored.pending !== 1) {
+    throw new Error(`renderer recovery implicitly replayed the local draft: ${JSON.stringify(restored)}`);
+  }
+  if (await readFile(notebook, 'utf8') !== initialNotebook) throw new Error('renderer recovery saved before explicit Save');
+  if (backendForWorkspace() !== backendPid) throw new Error('renderer recovery replaced the live backend');
+  const afterArk = captureBackendArk(backendPid);
+  if (afterArk.pid !== ark.pid) throw new Error('renderer recovery replaced the live Ark');
+  await recovered.evaluate("document.querySelector('[data-cell=cell-2] [data-act=run]').click()");
+  await recovered.wait("document.querySelector('#notebook')?.textContent.includes('[1] 44') && document.getElementById('r-state')?.textContent === 'R ready'", 30_000);
+  if (await readFile(notebook, 'utf8') !== initialNotebook) throw new Error('running after renderer recovery saved without Save');
+  await recovered.evaluate("document.getElementById('save').click()");
+  const expectedBody = `${accepted}\n# %%\n${localDraft}`;
+  const deadline = Date.now() + 20_000;
+  while (savedSource(await readFile(notebook, 'utf8')) !== expectedBody && Date.now() < deadline) {
+    await new Promise(resolveWait => setTimeout(resolveWait, 25));
+  }
+  if (savedSource(await readFile(notebook, 'utf8')) !== expectedBody) throw new Error('Save after renderer recovery lost source');
+  process.stdout.write(JSON.stringify({ rendererCrash: true, accepted, localDraft, recovered: true,
+    backendPreserved: true, arkPreserved: true, outputAfterRecovery: 44, savedAfterRecovery: true }) + '\n');
+}
+
+async function runDraftHandoffJourney() {
+  await disableAutosave(primary.cdp);
+  const localDraft = 'local_value <- 57L\nlocal_value';
+  await replaceEditor(primary.cdp, localDraft, 1);
+  const before = await primary.cdp.evaluate(`(async () => {
+    const client = window.__alderHost.client;
+    await client.flushDraftPersistence();
+    return { draftId: client.draftId, local: client.document.cells[1].desiredBody.join('\\n'),
+      server: client.document.snapshot.cells[1].body.join('\\n'),
+      activeClients: client.document.snapshot.activeClientIds?.length,
+      durable: await client.transport.recoveryStore.readDraft(client.draftId) };
+  })()`);
+  if (before.local !== localDraft || before.server !== 'local_value <- 0L\nlocal_value'
+    || before.durable?.changes?.[0]?.body?.join('\n') !== localDraft) throw new Error(`draft handoff setup was not durable: ${JSON.stringify(before)}`);
+  if (await readFile(notebook, 'utf8') !== initialNotebook) throw new Error('draft handoff saved before explicit Save');
+  ownedProcessRows(ownedPids, temporary);
+  const oldPid = primary.child.pid;
+  process.kill(oldPid, 'SIGKILL');
+  await new Promise((resolveExit, reject) => {
+    if (primary.child.exitCode !== null || primary.child.signalCode !== null) return resolveExit();
+    primary.child.once('exit', resolveExit);
+    primary.child.once('error', reject);
+  });
+  primary.cdp.close(); sessions.delete(primary.cdp); children.delete(primary.child);
+  primary = undefined;
+  const reopened = primary = await launch('electron-primary');
+  await reopened.cdp.wait(`window.__alderHost.client.recoveryState.retainedDrafts?.some(draft => draft.draftId === ${JSON.stringify(before.draftId)})`, 30_000);
+  await reopened.cdp.wait("[...document.querySelectorAll('[data-recovery-panel] button')].some(button => button.textContent?.startsWith('Restore draft'))", 10_000);
+  await reopened.cdp.evaluate("[...document.querySelectorAll('[data-recovery-panel] button')].find(button => button.textContent?.startsWith('Restore draft')).click()");
+  await reopened.cdp.wait(`window.__alderHost.client.draftId === ${JSON.stringify(before.draftId)} &&
+    window.__alderHost.client.document.cells[1].desiredBody.join('\\n') === ${JSON.stringify(localDraft)}`, 15_000);
+  const restored = await reopened.cdp.evaluate("({server:window.__alderHost.client.document.snapshot.cells[1].body.join('\\n'),pending:window.__alderHost.client.document.pendingSource().changes.length})");
+  if (restored.server !== 'local_value <- 0L\nlocal_value' || restored.pending !== 1) throw new Error(`reopened app replayed draft without permission: ${JSON.stringify(restored)}`);
+  if (await readFile(notebook, 'utf8') !== initialNotebook) throw new Error('reopened app saved before explicit Save');
+  await reopened.cdp.evaluate("document.querySelector('[data-cell=cell-2] [data-act=run]').click()");
+  await reopened.cdp.wait("document.querySelector('#notebook')?.textContent.includes('[1] 57') && document.getElementById('r-state')?.textContent === 'R ready'", 30_000);
+  await reopened.cdp.evaluate("document.getElementById('save').click()");
+  const expectedBody = `accepted_value <- 0L\naccepted_value\n# %%\n${localDraft}`;
+  const deadline = Date.now() + 20_000;
+  while (savedSource(await readFile(notebook, 'utf8')) !== expectedBody && Date.now() < deadline) await new Promise(resolveWait => setTimeout(resolveWait, 25));
+  if (savedSource(await readFile(notebook, 'utf8')) !== expectedBody) throw new Error('reopened app Save lost selected draft');
+  await reopened.cdp.evaluate("window.__alderHost.client.flushDraftPersistence()");
+  if (await reopened.cdp.evaluate(`window.__alderHost.client.transport.recoveryStore.readDraft(${JSON.stringify(before.draftId)})`) !== null) throw new Error('Save retained the selected draft');
+  await reopened.cdp.wait(`window.__alderHost.client.document.snapshot.activeClientIds?.length === ${before.activeClients}`, 45_000);
+  process.stdout.write(JSON.stringify({ draftHandoff: true, reopenedInNewProcess: true, selectedDraftRecovered: true, implicitReplay: false, outputAfterRecovery: 57, savedAfterRecovery: true }) + '\n');
+}
+
 
 let primary;
 let peer;
@@ -430,6 +544,8 @@ try {
   if (cleanupProbe) throw new Error('intentional cleanup probe');
   if (multiWindow) await runMultiWindowJourney(primary);
   else if (backendCrash) await runBackendCrashJourney(primary);
+  else if (rendererCrash) await runRendererCrashJourney(primary);
+  else if (draftHandoff) await runDraftHandoffJourney();
   else {
 
   await primary.cdp.evaluate(`(() => { const cause = new Error('PACKAGED_RENDERER_CAUSE'); const error = new Error('PACKAGED_RENDERER_FAILURE', { cause }); error.stack = 'PACKAGED_RENDERER_STACK'; window.dispatchEvent(new ErrorEvent('error', { error, message: error.message, filename: '/packaged/native-accept-renderer.js', lineno: 14, colno: 9 })) })()`);

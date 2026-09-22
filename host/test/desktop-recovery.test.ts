@@ -21,6 +21,8 @@ const bridge = (store: NativeRecoveryStore): DesktopRecoveryCall => async reques
     case "read": return store.read(request.recoveryId, request.name!);
     case "write": return store.write(request.recoveryId, request.name!, request.value);
     case "remove": return store.remove(request.recoveryId, request.name!);
+    case "list": return store.listDrafts(request.recoveryId);
+    case "claim": return undefined;
   }
 };
 const recordPath = (root: string, name: string): string => join(root, recoveryId, createHash("sha256").update(name).digest("hex") + ".json");
@@ -37,6 +39,21 @@ test("plain desktop drafts survive new renderer origins and native store instanc
     assert.equal(await new NativeRecoveryStore(directory).read("different-document", "draft:" + draft.draftId), null);
     await reopened.clearDraft(draft.draftId);
     assert.equal(await reopened.readDraft(draft.draftId), null);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test("document draft inventory survives a new store instance and clearing one draft leaves its peer", async () => {
+  const directory = await temporary();
+  try {
+    const first = new DesktopRecoveryStore(recoveryId, bridge(new NativeRecoveryStore(directory)));
+    const peer = { ...draft, draftId: "peer-window", updatedAt: 2, changes: [{ ...draft.changes[0]!, body: ["peer <- 19"] }] } as BrowserRecoveryDraft;
+    await first.saveDraft(draft);
+    await first.saveDraft(peer);
+    const reopened = new DesktopRecoveryStore(recoveryId, bridge(new NativeRecoveryStore(directory)));
+    assert.deepEqual((await reopened.listDrafts()).map(item => item.draftId).sort(), [draft.draftId, peer.draftId].sort());
+    await reopened.clearDraft(draft.draftId);
+    assert.deepEqual((await reopened.listDrafts()).map(item => item.draftId), [peer.draftId]);
+    assert.deepEqual(await reopened.readDraft(peer.draftId), peer);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
@@ -67,6 +84,7 @@ test("damaged JSON is reported and retained when later work replaces that record
     const corrupt = "{ incomplete recovery";
     await writeFile(path, corrupt, { mode: 0o600 });
     await assert.rejects(new NativeRecoveryStore(directory).read(recoveryId, "draft:" + draft.draftId), { code: "desktop_recovery_corrupt" });
+    assert.deepEqual(await native.listDrafts(recoveryId), { draftIds: [], damaged: 1 });
     assert.equal(await readFile(path, "utf8"), corrupt);
     await renderer.saveDraft({ ...draft, updatedAt: 18 });
     const retained = (await readdir(join(directory, recoveryId))).filter(name => name.startsWith("corrupt-"));

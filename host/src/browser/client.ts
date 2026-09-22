@@ -77,6 +77,7 @@ export interface BrowserRecoveryState {
   uncertainRun: boolean;
   corruption: HostError | null;
   persistenceError: HostError | null;
+  retainedDrafts?: readonly { draftId: string; updatedAt: number; preview: string }[];
 }
 
 type RecoveryListener = (state: BrowserRecoveryState) => void;
@@ -113,6 +114,9 @@ export class BrowserNotebookClient {
   private browserRecoveryInspected = false;
   private hostRecoveryInspected = false;
   private startupActivated = false;
+  private selectedDraftId: string;
+  private selectingRetainedDraft = false;
+  private retainedDraftsDismissed = false;
 
   constructor(private readonly options: NotebookClientOptions = {}) {
     this.frame = options.requestAnimationFrame ?? ((callback) => requestAnimationFrame(callback));
@@ -126,9 +130,10 @@ export class BrowserNotebookClient {
         if (state === "open" && this.recoveryAttempted) void this.refreshRecoveryState();
       },
     });
+    this.selectedDraftId = options.draftId ?? this.transport.id;
   }
 
-  get draftId(): string { return this.options.draftId ?? this.transport.id; }
+  get draftId(): string { return this.selectedDraftId; }
 
   get document(): BrowserDocument | null { return this.documentValue; }
 
@@ -194,6 +199,52 @@ export class BrowserNotebookClient {
       await this.draftPersistence;
     }
     if (this.draftPersistenceError) throw this.draftPersistenceError;
+  }
+
+  async restoreRetainedDraft(draftId: string): Promise<void> {
+    const store = this.draftStore();
+    if (!store.claimDraft) throw new Error("This draft cannot be claimed by the current window");
+    if (this.selectingRetainedDraft) throw new Error("A draft is already being restored");
+    if (!this.recoveryStateValue.retainedDrafts?.some(draft => draft.draftId === draftId)) throw new Error("The selected draft is not available");
+    if (this.requireDocument().pendingSource().changes.length || this.recoveryStateValue.local) throw new Error("Finish the current local edits before restoring another draft");
+    this.selectingRetainedDraft = true;
+    let claimed = false;
+    try {
+      await this.flushDraftPersistence();
+      const draft = await store.readDraft(draftId);
+      if (!draft) throw new Error("The selected draft is no longer available");
+      if (this.requireDocument().pendingSource().changes.length) throw new Error("Finish the current local edits before restoring another draft");
+      await store.claimDraft(draftId);
+      claimed = true;
+      this.selectedDraftId = draftId;
+      this.retainedDraftsDismissed = true;
+      this.recoveryStateValue = { ...this.recoveryStateValue, retainedDrafts: [] };
+      this.restoreDraft(draft);
+      await this.flushDraftPersistence();
+    } catch (error) {
+      if (!claimed) {
+        this.recoveryStateValue = { ...this.recoveryStateValue, retainedDrafts: await this.discoverRetainedDrafts().catch(() => this.recoveryStateValue.retainedDrafts ?? []) };
+        this.notifyRecovery();
+      }
+      throw error;
+    } finally { this.selectingRetainedDraft = false; }
+  }
+
+  dismissRetainedDrafts(): void {
+    this.retainedDraftsDismissed = true;
+    this.recoveryStateValue = { ...this.recoveryStateValue, retainedDrafts: [] };
+    this.notifyRecovery();
+    void this.activateStartupIfSafe();
+  }
+
+  async refreshRetainedDrafts(): Promise<void> {
+    if (!this.browserRecoveryInspected || this.retainedDraftsDismissed || this.selectingRetainedDraft || this.recoveryStateValue.local
+      || this.requireDocument().pendingSource().changes.length || !this.draftStore().listDrafts) return;
+    const drafts = await this.discoverRetainedDrafts();
+    if (this.retainedDraftsDismissed || this.selectingRetainedDraft || this.recoveryStateValue.local
+      || this.requireDocument().pendingSource().changes.length) return;
+    this.recoveryStateValue = { ...this.recoveryStateValue, retainedDrafts: drafts };
+    this.notifyRecovery();
   }
 
   async discardRecovery(): Promise<void> {
@@ -267,6 +318,7 @@ export class BrowserNotebookClient {
   }
 
   editCell(key: string, source: string | readonly string[], type?: CellType): LocalCell {
+    if (this.selectingRetainedDraft) throw new Error("Wait for the selected draft to open before editing");
     const lines = typeof source === "string" ? splitSource(source) : [...source];
     const cell = this.requireDocument().edit(key, lines, type);
     this.notify(undefined, [key]);
@@ -572,7 +624,7 @@ export class BrowserNotebookClient {
   private async activateStartupIfSafe(): Promise<void> {
     if (this.startupActivated || !this.browserRecoveryInspected || !this.hostRecoveryInspected) return;
     const state = this.recoveryStateValue;
-    if (this.pendingRun || state.local || state.candidate || state.corruption) return;
+    if (this.pendingRun || state.local || state.candidate || state.corruption || state.retainedDrafts?.length) return;
     const snapshot = this.requireDocument().snapshot;
     if (snapshot.runtime.startupActivated) { this.startupActivated = true; return; }
     if (!snapshot.runtime.documentReady || snapshot.runtime.rEnvironment === null) return;
@@ -639,8 +691,18 @@ export class BrowserNotebookClient {
     if (selected) {
       this.restoreDraft(selected);
       await this.flushDraftPersistence();
+    } else if (this.draftStore().listDrafts) {
+      this.recoveryStateValue = { ...this.recoveryStateValue, retainedDrafts: await this.discoverRetainedDrafts() };
     }
     this.notifyRecovery();
+  }
+
+  private async discoverRetainedDrafts(): Promise<NonNullable<BrowserRecoveryState["retainedDrafts"]>> {
+    const drafts = await this.draftStore().listDrafts?.() ?? [];
+    return drafts.filter(draft => draft.draftId !== this.draftId)
+      .sort((left, right) => right.updatedAt - left.updatedAt)
+      .map(draft => ({ draftId: draft.draftId, updatedAt: draft.updatedAt,
+        preview: draft.changes.find(change => "body" in change)?.body.join(" ").trim().slice(0, 80) || "Unsaved edits" }));
   }
 
   private restoreDraft(draft: BrowserRecoveryDraft): void {
