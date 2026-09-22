@@ -10,7 +10,7 @@ copies in other worktrees are snapshots.
 
 ## Current assignment
 
-**Native Mac reliability — Implementing on Mac.**
+**Native Mac reliability — Review on Mac.**
 
 **Latest accepted checkpoint:** `8dfb454` adds reviewed harness failure cleanup and
 its normally scheduled regression. App source remains `310427b`: focused reviews,
@@ -34,11 +34,10 @@ new-host restart. Initial editor state can arrive before native connection adopt
 and fail the epoch check. Establish whether this produces a false dirty indicator,
 error or unnecessary Save prompt, then fix the authenticated handoff if needed.
 
-**Owner and next action:** production handoff review passed `39741cf`. Primary
-strengthens the failed-navigation regression: a synthesized dirty fallback cannot
-count as restored previous state. Keep IPC rejection assertions compatible with
-both synchronous and asynchronous handlers. Production source stays unchanged;
-return a clean focused test correction before full signed-app acceptance.
+**Owner and next action:** production handoff review passed `39741cf`; lead verified
+the focused test correction in clean candidate `48c7566`. The final acceptance
+reviewer owns the full signed-app gate and isolated backend-crash journey on that
+candidate. Primary holds; lead records acceptance or consolidates remaining failures.
 
 **Remaining native evidence:** Finder/Open, native Save As replacement, dirty-close
 sheets, Dock activation and native zero-window Quit need foreground interaction.
@@ -70,7 +69,7 @@ One item is active. New approved work is added here before assignment.
 | Release README and feature demo | Accepted | Primary implementer and independent reviewers | `b316bc3`: release-facing install/use guide and three compact real-app feature captures; media and factual reviews passed |
 | Repository integration and cleanup | Accepted | Primary implementer and focused cleanup reviewers | `554da34`: canonical docs and accepted app fast-forwarded to remote `main`; obsolete worktrees, branches and safety stashes removed after review |
 | Platform-boundary extraction | Accepted | Primary implementer and focused reviewers | `42cfda8`: shared Linux R 34/34, browser 12/12 and reviewed localized Mac/Linux seams; no duplicated product or Ark fork |
-| Native Mac reliability qualification | Implementing | Primary implementer | Strengthen rollback evidence on reviewed source `39741cf`, then full signed-app acceptance |
+| Native Mac reliability qualification | Review | Lead and final acceptance reviewer | Full signed-app acceptance and backend-crash journey on reviewed `48c7566` |
 | Scientific workflow qualification | Queued | Unassigned | A realistic scientific notebook, real CRAN/Bioconductor packages, representative R reactivity idioms, two live notebooks under load and rich publishing are independently qualified through packaged Alder |
 | Product completion and public Mac delivery | Queued | Unassigned | Project/Git ownership, notebook-wide search, agent presence, accessibility, scale, upgrade state, release identity, architecture support and signed/notarized distribution have explicit accepted behavior |
 
