@@ -32,13 +32,11 @@ full-notebook health queries with existing renderer connection reporting and a
 small fallback for bootstrap/failed-renderer cases. Preserve authoritative Save As
 identity adoption, native path/window bookkeeping and conflict detection.
 
-**Owner and next action:** primary corrects reviewed candidate `681df5d`. The
-watcher/content change passed review. Native identity must consume the committed
-path through existing authenticated editor state without another host round trip;
-late identity responses must not change a replacement connection or newer path.
-Cover delayed old replies and host death after acknowledged Save As. Add the
-packaged journey's pre-Save disk assertion, then submit one clean correction for
-focused rereview before full acceptance.
+**Owner and next action:** production rereview passed `349c2e1`; primary corrects
+one false-green regression trigger. The delayed old-host reply must report a third
+Save As identity so the pre-fix code would overwrite the replacement connection.
+Keep the reviewed source unchanged, run that focused regression and return a clean
+test correction. Lead then verifies the assertion and dispatches full acceptance.
 
 **Approved next slice:**
 
@@ -47,6 +45,11 @@ focused rereview before full acceptance.
    children before removing temporary files and retain the original error. The
    save/discard ordering checks, release-test replacement and old Quit polling
    bounds are covered by accepted slices; do not rebuild them as another framework.
+2. **Confirm native state immediately after a new-host restart.** Review noticed
+   that the initial editor state can arrive before native connection adoption and
+   fail its epoch check. Reproduce whether this leaves a false dirty indicator or
+   error on immediate Close, then correct the handoff if needed. This is queued;
+   the current identity correction must not expand into it.
 
 **Remaining native evidence:** Finder/Open, native Save As replacement, dirty-close
 sheets, Dock activation and native zero-window Quit need foreground interaction.
@@ -78,7 +81,7 @@ One item is active. New approved work is added here before assignment.
 | Release README and feature demo | Accepted | Primary implementer and independent reviewers | `b316bc3`: release-facing install/use guide and three compact real-app feature captures; media and factual reviews passed |
 | Repository integration and cleanup | Accepted | Primary implementer and focused cleanup reviewers | `554da34`: canonical docs and accepted app fast-forwarded to remote `main`; obsolete worktrees, branches and safety stashes removed after review |
 | Platform-boundary extraction | Accepted | Primary implementer and focused reviewers | `42cfda8`: shared Linux R 34/34, browser 12/12 and reviewed localized Mac/Linux seams; no duplicated product or Ark fork |
-| Native Mac reliability qualification | Implementing | Primary implementer | Correct native identity handoff and stale replies in `681df5d`, then rereview and full signed-app acceptance |
+| Native Mac reliability qualification | Implementing | Primary implementer | Correct one stale-reply regression trigger on reviewed source `349c2e1`, then full signed-app acceptance |
 | Scientific workflow qualification | Queued | Unassigned | A realistic scientific notebook, real CRAN/Bioconductor packages, representative R reactivity idioms, two live notebooks under load and rich publishing are independently qualified through packaged Alder |
 | Product completion and public Mac delivery | Queued | Unassigned | Project/Git ownership, notebook-wide search, agent presence, accessibility, scale, upgrade state, release identity, architecture support and signed/notarized distribution have explicit accepted behavior |
 
