@@ -1,5 +1,5 @@
 import { execFileSync, spawn } from 'node:child_process';
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import WebSocket from 'ws';
@@ -9,6 +9,7 @@ if (process.platform !== 'darwin') throw new Error('Native app acceptance requir
 const app = resolve(process.argv[2] ?? 'host/.application-desktop/Alder.app');
 const executable = join(app, 'Contents/MacOS/Alder');
 const cleanupProbe = process.argv.includes('--cleanup-probe');
+const multiWindow = process.argv.includes('--multi-window');
 const saveIterations = Number(process.env.ALDER_NATIVE_SAVE_ITERATIONS ?? 20);
 const temporary = await mkdtemp('/tmp/alder-native-accept-');
 const workspace = join(temporary, 'workspace');
@@ -54,7 +55,7 @@ async function launch(name) {
     const cdp = await Cdp.connect(endpoint);
     sessions.add(cdp);
     await cdp.wait("document.querySelector('.cm-content') && document.getElementById('r-state')?.textContent === 'R ready' && !document.querySelector('[data-act=run]')?.disabled", 45_000);
-    return { child, cdp, stderr, ownedPids: new Set([child.pid]) };
+    return { child, cdp, endpoint, stderr, ownedPids: new Set([child.pid]) };
   } catch (error) {
     throw new Error(`packaged app ${launchName} did not become usable`, { cause: error });
   }
@@ -97,6 +98,15 @@ async function waitDiskSource(source, timeout = 20_000) {
   throw new Error(`native Save did not persist ${JSON.stringify(source)}`);
 }
 
+async function waitFileSource(path, source, timeout = 20_000) {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    if (savedSource(await readFile(path, 'utf8')) === source) return;
+    await new Promise(resolveWait => setTimeout(resolveWait, 25));
+  }
+  throw new Error(`native Save did not persist ${JSON.stringify(source)} to ${path}`);
+}
+
 async function stop(instance) {
   if (!instance) return;
   ownedProcessRows(ownedPids, temporary);
@@ -133,7 +143,7 @@ class Cdp {
       this.pending.clear();
     });
   }
-  static async connect(endpoint) {
+  static async connect(endpoint, targetId) {
     const socket = new WebSocket(endpoint);
     await new Promise((resolveOpen, reject) => { socket.once('open', resolveOpen); socket.once('error', reject); });
     const cdp = new Cdp(socket);
@@ -142,13 +152,14 @@ class Cdp {
     const deadline = Date.now() + 30_000;
     while (Date.now() < deadline) {
       const targets = await cdp.send('Target.getTargets', {}, '');
-      target = targets.targetInfos.find(candidate => candidate.type === 'page');
+      target = targets.targetInfos.find(candidate => candidate.type === 'page' && (!targetId || candidate.targetId === targetId));
       if (target) break;
       await new Promise(resolveWait => setTimeout(resolveWait, 50));
     }
     if (!target) throw new Error('packaged app did not publish a renderer target');
     const attached = await cdp.send('Target.attachToTarget', { targetId: target.targetId, flatten: true }, '');
     cdp.session = attached.sessionId;
+    cdp.targetId = target.targetId;
     await cdp.send('Runtime.enable');
     await cdp.send('Page.enable');
     return cdp;
@@ -180,6 +191,9 @@ class Cdp {
       cellRuns: [...document.querySelectorAll('[data-act=run]')].map(node => ({ disabled: node.disabled, cell: node.closest('[data-cell]')?.getAttribute('data-cell') })),
       source: [...document.querySelectorAll('.cm-content .cm-line')].map(node => node.textContent).join('\\n'),
       output: document.querySelector('[data-role=output]')?.textContent,
+      snapshotSource: window.__alderHost?.client?.document?.snapshot?.cells?.[0]?.body,
+      snapshotDirty: window.__alderHost?.client?.document?.snapshot?.dirty,
+      saveState: document.getElementById('save-state')?.textContent,
     }))()`).catch(() => null);
     throw new Error(`packaged app condition timed out: ${expression}; state=${JSON.stringify(diagnostic)}`);
   }
@@ -194,6 +208,110 @@ class Cdp {
   close() { this.socket.terminate(); }
 }
 
+async function disableAutosave(cdp) {
+  await cdp.evaluate("document.getElementById('settings-open').click()");
+  await cdp.wait("document.getElementById('settings')?.open", 10_000);
+  if (await cdp.evaluate("document.getElementById('settings-autosave')?.checked")) {
+    await cdp.evaluate("document.getElementById('settings-autosave').click()");
+    await cdp.evaluate("document.getElementById('settings-apply').click()");
+    await cdp.wait("window.__alderHost.client.document.snapshot.config.autosave === false", 15_000);
+  } else {
+    await cdp.evaluate("document.getElementById('settings-cancel').click()");
+  }
+  await cdp.wait("!document.getElementById('settings')?.open", 10_000);
+}
+
+async function runMultiWindowJourney(primary) {
+  const notebookB = join(workspace, 'native-accept-b.R');
+  await writeFile(notebookB, '# ---\n# runtime:\n#   on_cell_change: lazy\n# ---\n# %%\nb_window <- 2L\nb_window\n');
+  const canonicalA = await realpath(notebook);
+  const canonicalB = await realpath(notebookB);
+  const profile = join(temporary, 'electron-primary');
+  const secondaryError = [];
+  const secondary = spawn(executable, ['--headless=new', `--user-data-dir=${profile}`, notebookB], {
+    cwd: temporary, env: environment(), stdio: ['ignore', 'ignore', 'pipe'],
+  });
+  children.add(secondary);
+  ownedPids.add(secondary.pid);
+  secondary.stderr.on('data', chunk => secondaryError.push(Buffer.from(chunk)));
+  const secondExit = await new Promise((resolveExit, reject) => {
+    const timer = setTimeout(() => reject(new Error('second packaged launch did not forward and exit')), 20_000);
+    secondary.once('exit', (code, signal) => { clearTimeout(timer); resolveExit({ code, signal }); });
+    secondary.once('error', error => { clearTimeout(timer); reject(error); });
+  });
+  if (secondExit.code !== 0 || secondExit.signal !== null) throw new Error(`second packaged launch failed: ${JSON.stringify(secondExit)} ${Buffer.concat(secondaryError)}`);
+  children.delete(secondary);
+  const deadline = Date.now() + 45_000;
+  let secondTarget;
+  while (Date.now() < deadline) {
+    const targets = await primary.cdp.send('Target.getTargets', {}, '');
+    secondTarget = targets.targetInfos.find(target => target.type === 'page' && target.targetId !== primary.cdp.targetId);
+    if (secondTarget) break;
+    await new Promise(resolveWait => setTimeout(resolveWait, 50));
+  }
+  if (!secondTarget) throw new Error('forwarded notebook did not create a second renderer window');
+  const windowB = await Cdp.connect(primary.endpoint, secondTarget.targetId);
+  sessions.add(windowB);
+  try {
+    await windowB.wait(`window.__alderHost?.client?.document?.snapshot?.path === ${JSON.stringify(canonicalB)} && document.getElementById('r-state')?.textContent === 'R ready'`, 45_000);
+    await primary.cdp.wait(`window.__alderHost.client.document.snapshot.path === ${JSON.stringify(canonicalA)} && document.getElementById('r-state')?.textContent === 'R ready'`, 10_000);
+    const pages = (await primary.cdp.send('Target.getTargets', {}, '')).targetInfos.filter(target => target.type === 'page');
+    if (pages.length !== 2 || primary.child.exitCode !== null) throw new Error(`expected two renderer windows in one app: ${JSON.stringify(pages)}`);
+    await disableAutosave(primary.cdp);
+    await disableAutosave(windowB);
+
+    const sourceA = 'a_window <- 11L\na_window';
+    const sourceB = 'b_window <- 29L\nb_window';
+    await replaceEditor(primary.cdp, sourceA);
+    await primary.cdp.wait(`window.__alderHost.client.document.snapshot.cells[0].body.join('\\n') === ${JSON.stringify(sourceA)} &&
+      window.__alderHost.client.document.snapshot.dirty && document.getElementById('save-state')?.textContent === 'Edited'`, 15_000);
+    await replaceEditor(windowB, sourceB);
+    await windowB.wait(`window.__alderHost.client.document.snapshot.cells[0].body.join('\\n') === ${JSON.stringify(sourceB)} &&
+      window.__alderHost.client.document.snapshot.dirty && document.getElementById('save-state')?.textContent === 'Edited'`, 15_000);
+    await primary.cdp.wait('window.__alderHost.client.document.snapshot.dirty', 10_000);
+    if (savedSource(await readFile(notebook, 'utf8')) !== 'value <- 0L\nvalue'
+      || savedSource(await readFile(notebookB, 'utf8')) !== 'b_window <- 2L\nb_window') throw new Error('one draft reached disk before Save');
+
+    await click(primary.cdp, '[data-act=run]');
+    await primary.cdp.wait("document.querySelector('[data-role=output]')?.textContent.includes('11') && document.getElementById('r-state')?.textContent === 'R ready'", 30_000);
+    await click(windowB, '[data-act=run]');
+    await windowB.wait("document.querySelector('[data-role=output]')?.textContent.includes('29') && document.getElementById('r-state')?.textContent === 'R ready'", 30_000);
+    await primary.cdp.wait('window.__alderHost.client.document.snapshot.dirty', 10_000);
+    await windowB.wait('window.__alderHost.client.document.snapshot.dirty', 10_000);
+    await primary.cdp.wait("document.querySelector('[data-role=output]')?.textContent.includes('11') && !document.querySelector('[data-role=output]')?.textContent.includes('29')", 10_000);
+    await windowB.wait("document.querySelector('[data-role=output]')?.textContent.includes('29') && !document.querySelector('[data-role=output]')?.textContent.includes('11')", 10_000);
+
+    await shortcut(primary.cdp, 's', 'KeyS', 83, 4);
+    await waitFileSource(notebook, sourceA);
+    await primary.cdp.wait('window.__alderHost.client.document.snapshot.dirty === false', 10_000);
+    if (savedSource(await readFile(notebookB, 'utf8')) !== 'b_window <- 2L\nb_window') throw new Error('saving A changed B on disk');
+    await windowB.wait('window.__alderHost.client.document.snapshot.dirty', 10_000);
+    await shortcut(windowB, 's', 'KeyS', 83, 4);
+    await waitFileSource(notebookB, sourceB);
+    await windowB.wait('window.__alderHost.client.document.snapshot.dirty === false', 10_000);
+    await windowB.evaluate('window.close()');
+    const closeDeadline = Date.now() + 15_000;
+    while (Date.now() < closeDeadline) {
+      const targets = await primary.cdp.send('Target.getTargets', {}, '');
+      if (!targets.targetInfos.some(target => target.targetId === secondTarget.targetId)) break;
+      await new Promise(resolveWait => setTimeout(resolveWait, 50));
+    }
+    const remaining = (await primary.cdp.send('Target.getTargets', {}, '')).targetInfos.filter(target => target.type === 'page');
+    if (remaining.length !== 1 || remaining[0].targetId !== primary.cdp.targetId) throw new Error(`closing B did not retain only A: ${JSON.stringify(remaining)}`);
+    await replaceEditor(primary.cdp, 'a_window <- 17L\na_window');
+    await click(primary.cdp, '[data-act=run]');
+    await primary.cdp.wait("document.querySelector('[data-role=output]')?.textContent.includes('17')", 30_000);
+    await shortcut(primary.cdp, 's', 'KeyS', 83, 4);
+    await waitFileSource(notebook, 'a_window <- 17L\na_window');
+    if (savedSource(await readFile(notebookB, 'utf8')) !== sourceB) throw new Error('closing B changed its saved notebook');
+    process.stdout.write(JSON.stringify({ multiWindow: true, forwardedExit: secondExit.code, rendererWindows: 2,
+      notebooks: [notebook, notebookB], outputs: [11, 29, 17], closeRetainedPrimary: true }) + '\n');
+  } finally {
+    windowB.close();
+    sessions.delete(windowB);
+  }
+}
+
 
 let primary;
 let peer;
@@ -201,6 +319,8 @@ let runError;
 try {
   primary = await launch('electron-primary');
   if (cleanupProbe) throw new Error('intentional cleanup probe');
+  if (multiWindow) await runMultiWindowJourney(primary);
+  else {
 
   await primary.cdp.evaluate(`(() => { const cause = new Error('PACKAGED_RENDERER_CAUSE'); const error = new Error('PACKAGED_RENDERER_FAILURE', { cause }); error.stack = 'PACKAGED_RENDERER_STACK'; window.dispatchEvent(new ErrorEvent('error', { error, message: error.message, filename: '/packaged/native-accept-renderer.js', lineno: 14, colno: 9 })) })()`);
   await new Promise(resolveWait => setTimeout(resolveWait, 250));
@@ -335,6 +455,7 @@ try {
     journeys: ['open-reopen', 'editor-run', 'immediate-save', 'renderer-error', 'slow-run', 'ark-error', 'persistence-failure', 'interrupt-recovery', 'same-file-peer-draft-save-detach', 'ark-recovery', 'quit-relaunch', 'stopped-diagnostic-queries'],
     diagnostics: { retainedBytes: status.retainedBytes, launches: launches.records.length, errors: errors.records.length, operations: operations.operations.length, performance: performanceSummary.summaries.length },
   }) + '\n');
+  }
 } catch (error) {
   if (!(cleanupProbe && String(error?.message).includes('intentional cleanup probe'))) runError = error;
 } finally {

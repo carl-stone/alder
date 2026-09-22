@@ -74196,6 +74196,7 @@ var Controller = class {
         deleted: delta?.deleted ?? [],
         order: this.cells.map((cell) => cell.id),
         metadata: clone3(this.metadata),
+        dirty: this.changed,
         config: clone3(this.config),
         runtime: this.runtimeSnapshot(),
         layout: clone3(this.layout),

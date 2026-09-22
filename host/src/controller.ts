@@ -1599,6 +1599,7 @@ export class Controller {
         deleted: delta?.deleted ?? [],
         order: this.cells.map((cell) => cell.id),
         metadata: clone(this.metadata),
+        dirty: this.changed,
         config: clone(this.config),
         runtime: this.runtimeSnapshot(),
         layout: clone(this.layout),
