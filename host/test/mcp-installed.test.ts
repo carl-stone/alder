@@ -6,6 +6,7 @@ import test from "node:test";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { cleanupOwnedProcesses, ownedProcessRows, waitForOwnedExit } from "../scripts/native-process-cleanup.mjs";
 
 const APPLICATION_ROOT = process.env.ALDER_APPLICATION_ROOT;
 const TEST_RSCRIPT = process.env.ALDER_TEST_RSCRIPT;
@@ -53,6 +54,7 @@ test("the staged alder launcher serves MCP over official stdio", installedIntegr
   const client = new Client({ name: "mcp-installed-test", version: "1" }, { capabilities: {} });
   const stderr = transport.stderr;
   const stderrChunks: Buffer[] = [];
+  const ownedPids = new Set<number>();
   stderr?.on("data", chunk => stderrChunks.push(Buffer.from(chunk)));
 
   try {
@@ -75,10 +77,17 @@ test("the staged alder launcher serves MCP over official stdio", installedIntegr
     if (diagnostics.length > 0) throw new Error(String(error) + "\n" + diagnostics, { cause: error });
     throw error;
   } finally {
+    for (const row of ownedProcessRows(ownedPids, runtimeDirectory)) ownedPids.add(row.pid);
     await client.close().catch(() => undefined);
     await transport.close().catch(() => undefined);
-    await rm(directory, { recursive: true, force: true });
-    await rm(runtimeDirectory, { recursive: true, force: true });
+    // Normal MCP detach retains recovery until the idle host exits; its diagnostics may still be writing.
+    try {
+      await waitForOwnedExit(ownedPids, runtimeDirectory, 25_000);
+    } finally {
+      await cleanupOwnedProcesses(ownedPids, runtimeDirectory);
+      await rm(directory, { recursive: true, force: true });
+      await rm(runtimeDirectory, { recursive: true, force: true });
+    }
   }
 });
 
