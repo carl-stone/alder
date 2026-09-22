@@ -10,7 +10,7 @@ copies in other worktrees are snapshots.
 
 ## Current assignment
 
-**Native Mac reliability — Review on Mac.**
+**Native Mac reliability — Implementing on Mac.**
 
 The shared portable-core checkpoint is accepted on pushed main `42cfda8`.
 `b74355a` is the latest accepted Mac checkpoint, integrated on main at `572f7b6`.
@@ -44,11 +44,12 @@ The headless last-window journey uses forced teardown and does not qualify nativ
 Quit. Finder/Open, Save As replacement, dirty-close sheets and Dock activation still
 require a supervised foreground pass.
 
-**Candidate ready:** clean `8b1ac98` extends the narrow host-gone condition to
+**Correction underway:** clean `8b1ac98` extends the narrow host-gone condition to
 `ECONNRESET` after an acknowledged normal release; the host-exit regression failed
-twice during full acceptance before this correction. Focused release and desktop
-checks, twenty repeated loopback runs and the broad host suite pass. Independent
-review is underway before rebuilding and repeating the complete signed-app gate.
+twice during full acceptance before this correction. Product review passed. The
+existing loopback test does not deterministically generate `ECONNRESET`, so the
+primary implementer is adding a small direct behavioral regression before the
+complete signed-app gate.
 Its parent `1cf7aad` adds a packaged external-path journey: atomic replacement,
 Git reset, rename and delete preserve an acknowledged edit, still-local draft and
 independent disk contents; Save As recovery copies reopen in a fresh process.
@@ -79,7 +80,7 @@ One item is active. New approved work is added here before assignment.
 | Release README and feature demo | Accepted | Primary implementer and independent reviewers | `b316bc3`: release-facing install/use guide and three compact real-app feature captures; media and factual reviews passed |
 | Repository integration and cleanup | Accepted | Primary implementer and focused cleanup reviewers | `554da34`: canonical docs and accepted app fast-forwarded to remote `main`; obsolete worktrees, branches and safety stashes removed after review |
 | Platform-boundary extraction | Accepted | Primary implementer and focused reviewers | `42cfda8`: shared Linux R 34/34, browser 12/12 and reviewed localized Mac/Linux seams; no duplicated product or Ark fork |
-| Native Mac reliability qualification | Review | Lead and independent reviewers | Review clean `8b1ac98`; repeat complete signed-app acceptance and separate external-path journey, then integrate if passed |
+| Native Mac reliability qualification | Implementing | Primary implementer | Add deterministic `ECONNRESET` after-normal-release regression; review clean candidate, repeat complete gate and external-path journey, then integrate if passed |
 | Scientific workflow qualification | Queued | Unassigned | A realistic scientific notebook, real CRAN/Bioconductor packages, representative R reactivity idioms, two live notebooks under load and rich publishing are independently qualified through packaged Alder |
 | Product completion and public Mac delivery | Queued | Unassigned | Project/Git ownership, notebook-wide search, agent presence, accessibility, scale, upgrade state, release identity, architecture support and signed/notarized distribution have explicit accepted behavior |
 
