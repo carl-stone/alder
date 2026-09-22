@@ -1773,6 +1773,53 @@ test("reopened browser chooses one of two retained drafts and Save clears only t
   } finally { await client.close(); }
 });
 
+test("draft selection rejects local and structural edits while its claim is pending", async () => {
+  class DeferredClaimStore extends MemoryRecoveryStore {
+    claimed = false;
+    claimStarted!: () => void;
+    readonly started = new Promise<void>(resolve => { this.claimStarted = resolve; });
+    releaseClaim!: () => void;
+    readonly release = new Promise<void>(resolve => { this.releaseClaim = resolve; });
+    async listDrafts(): Promise<BrowserRecoveryDraft[]> {
+      const draft = await this.readDraft("retained");
+      return draft ? [draft] : [];
+    }
+    async claimDraft(): Promise<void> {
+      this.claimStarted();
+      await this.release;
+      this.claimed = true;
+    }
+  }
+  const store = new DeferredClaimStore();
+  const old = new BrowserDocument(snapshot());
+  old.edit("c1", ["chosen <- 42"]);
+  await store.saveDraft(old.recoveryDraft("retained")!);
+  const { client, socket } = await browserClient(store, snapshot(), { draftId: "new-window" });
+  try {
+    const restoring = client.restoreRetainedDraft("retained");
+    await store.started;
+    assert.throws(() => client.createCell("c1", "code", ["stray <- 1"]), /selected draft/);
+    assert.throws(() => client.editCell("c2", "stray <- 2"), /selected draft/);
+    await assert.rejects(client.moveCell("c2", null), /selected draft/);
+    await assert.rejects(client.restoreCellAt(1, "code", ["stray <- 3"]), /selected draft/);
+    await assert.rejects(client.save(), /selected draft/);
+    assert.equal(socket.commands().length, 0);
+    store.releaseClaim();
+    await restoring;
+    assert.equal(store.claimed, true);
+    assert.equal(client.draftId, "retained");
+    assert.deepEqual(client.document!.cells.map(cell => cell.id), ["c1", "c2"]);
+    assert.deepEqual(client.document!.cell("c1")!.desiredBody, ["chosen <- 42"]);
+    assert.deepEqual(client.document!.cell("c2")!.desiredBody, ["x + 1"]);
+    assert.equal(await store.readDraft("new-window"), null);
+    assert.deepEqual((await store.readDraft("retained"))?.changes.map(change => change.type), ["edit"]);
+    assert.equal(socket.commands().length, 0, "selection did not submit or save either source");
+  } finally {
+    store.releaseClaim();
+    await client.close();
+  }
+});
+
 test("rapid and spaced typing coalesces bounded draft writes with the latest text", async () => {
   const store = new MemoryRecoveryStore();
   const saved: BrowserRecoveryDraft[] = [];

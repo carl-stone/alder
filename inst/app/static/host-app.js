@@ -21872,21 +21872,23 @@ var BrowserNotebookClient = class {
     if (!store.claimDraft) throw new Error("This draft cannot be claimed by the current window");
     if (this.selectingRetainedDraft) throw new Error("A draft is already being restored");
     if (!this.recoveryStateValue.retainedDrafts?.some((draft) => draft.draftId === draftId)) throw new Error("The selected draft is not available");
-    if (this.requireDocument().pendingSource().changes.length || this.recoveryStateValue.local) throw new Error("Finish the current local edits before restoring another draft");
+    if (this.requireDocument().pendingSource().changes.length || this.recoveryStateValue.local || this.draftSubmission) throw new Error("Finish the current local edits before restoring another draft");
     this.selectingRetainedDraft = true;
     let claimed = false;
     try {
-      await this.flushDraftPersistence();
-      const draft = await store.readDraft(draftId);
-      if (!draft) throw new Error("The selected draft is no longer available");
-      if (this.requireDocument().pendingSource().changes.length) throw new Error("Finish the current local edits before restoring another draft");
-      await store.claimDraft(draftId);
-      claimed = true;
-      this.selectedDraftId = draftId;
-      this.retainedDraftsDismissed = true;
-      this.recoveryStateValue = { ...this.recoveryStateValue, retainedDrafts: [] };
-      this.restoreDraft(draft);
-      await this.flushDraftPersistence();
+      await this.withSourceLock(async () => {
+        if (this.requireDocument().pendingSource().changes.length || this.recoveryStateValue.local || this.draftSubmission) throw new Error("Finish the current local edits before restoring another draft");
+        await this.flushDraftPersistence();
+        const draft = await store.readDraft(draftId);
+        if (!draft) throw new Error("The selected draft is no longer available");
+        await store.claimDraft(draftId);
+        claimed = true;
+        this.selectedDraftId = draftId;
+        this.retainedDraftsDismissed = true;
+        this.recoveryStateValue = { ...this.recoveryStateValue, retainedDrafts: [] };
+        this.restoreDraft(draft);
+        await this.flushDraftPersistence();
+      }, true);
     } catch (error61) {
       if (!claimed) {
         this.recoveryStateValue = { ...this.recoveryStateValue, retainedDrafts: await this.discoverRetainedDrafts().catch(() => this.recoveryStateValue.retainedDrafts ?? []) };
@@ -21911,6 +21913,9 @@ var BrowserNotebookClient = class {
     this.notifyRecovery();
   }
   async discardRecovery() {
+    return this.withSourceLock(() => this.discardRecoveryUnlocked());
+  }
+  async discardRecoveryUnlocked() {
     await this.beginDraftMutation();
     if (this.recoveryStateValue.candidate !== null || this.recoveryStateValue.corruption !== null) {
       const snapshot = this.requireDocument().snapshot;
@@ -21943,21 +21948,24 @@ var BrowserNotebookClient = class {
     this.notifyRecovery();
   }
   async reloadAuthoritativeRecovery() {
-    await this.flushDraftPersistence();
-    const snapshot = this.requireDocument().snapshot;
-    if (snapshot.disk.digest === null || snapshot.disk.version === null) throw new Error("authoritative source is not reloadable");
-    const result = await this.dispatchSettled({
-      type: "reload-source",
-      ...this.base("reload-source"),
-      expectedDiskDigest: snapshot.disk.digest,
-      expectedDiskVersion: snapshot.disk.version
+    return this.withSourceLock(async () => {
+      await this.flushDraftPersistence();
+      const snapshot = this.requireDocument().snapshot;
+      if (snapshot.disk.digest === null || snapshot.disk.version === null) throw new Error("authoritative source is not reloadable");
+      const result = await this.dispatchSettled({
+        type: "reload-source",
+        ...this.base("reload-source"),
+        expectedDiskDigest: snapshot.disk.digest,
+        expectedDiskVersion: snapshot.disk.version
+      });
+      if (isRecord2(result.result) && result.result.conflict === true) {
+        throw new BrowserTransportError("document_conflict", "Authoritative reload was refused because the host document has unsaved changes", true);
+      }
+      await this.discardRecoveryUnlocked();
     });
-    if (isRecord2(result.result) && result.result.conflict === true) {
-      throw new BrowserTransportError("document_conflict", "Authoritative reload was refused because the host document has unsaved changes", true);
-    }
-    await this.discardRecovery();
   }
   createCell(afterKey, type = "code", body = []) {
+    this.assertCanMutateSource();
     const document2 = this.requireDocument();
     const cell = document2.create(operationId("create"), afterKey, type, body);
     document2.focus(cell.key);
@@ -21976,7 +21984,7 @@ var BrowserNotebookClient = class {
     });
   }
   editCell(key, source, type) {
-    if (this.selectingRetainedDraft) throw new Error("Wait for the selected draft to open before editing");
+    this.assertCanMutateSource();
     const lines = typeof source === "string" ? splitSource(source) : [...source];
     const cell = this.requireDocument().edit(key, lines, type);
     this.notify(void 0, [key]);
@@ -22046,10 +22054,12 @@ var BrowserNotebookClient = class {
   }
   async save() {
     await this.commitEdits();
+    this.assertCanMutateSource();
     return this.dispatchSettled({ type: "save", ...this.base("save") });
   }
   async saveAs(destination) {
     await this.commitEdits();
+    this.assertCanMutateSource();
     const target = typeof destination === "string" ? { path: destination, expectedDestination: "absent" } : destination;
     const result = await this.dispatchSettled({ type: "save-as", ...target, ...this.base("save-as") });
     await this.refreshRecoveryState();
@@ -22057,6 +22067,7 @@ var BrowserNotebookClient = class {
   }
   async selectR(rscript) {
     await this.commitEdits();
+    this.assertCanMutateSource();
     return this.dispatchSettled({
       type: "select-r",
       ...this.base("select-r"),
@@ -22117,11 +22128,13 @@ var BrowserNotebookClient = class {
     });
   }
   discardLocalCell(key) {
+    this.assertCanMutateSource();
     this.requireDocument().discardLocal(key);
     this.notify();
     this.queueDraftPersistence();
   }
   useServerVersion(key) {
+    this.assertCanMutateSource();
     this.requireDocument().useServerVersion(key);
     this.notify(void 0, [key]);
     this.queueDraftPersistence();
@@ -22186,6 +22199,7 @@ var BrowserNotebookClient = class {
   }
   async formatCells(keys, onAccepted) {
     await this.commitEdits();
+    this.assertCanMutateSource();
     const cells = keys?.map((key) => this.requireCell(key)) ?? [...this.requireDocument().cells];
     const acknowledged = cells.filter((cell) => cell.id !== null);
     return this.dispatchSettled({ type: "format", ...this.base("format"), ...keys ? { cellIds: acknowledged.map((cell) => cell.id) } : {}, expectedRevisions: Object.fromEntries(acknowledged.map((cell) => [cell.id, cell.serverRevision])) }, onAccepted);
@@ -22392,6 +22406,7 @@ var BrowserNotebookClient = class {
     return { completed: command.changes?.length ? this.dispatchSource(command) : this.dispatch(command) };
   }
   async dispatchSource(command) {
+    this.assertCanMutateSource();
     const document2 = this.requireDocument();
     const changes = command.changes ?? [];
     const acceptance = changes.length > 0 ? deferredPromise() : null;
@@ -22532,7 +22547,11 @@ var BrowserNotebookClient = class {
     if (!event && localCellKeys?.length === 0) return;
     for (const listener of this.listeners) listener(this.documentValue, event, localCellKeys);
   }
-  async withSourceLock(operation) {
+  assertCanMutateSource() {
+    if (this.selectingRetainedDraft) throw new Error("Wait for the selected draft to open before editing");
+  }
+  async withSourceLock(operation, selectingDraft = false) {
+    if (!selectingDraft) this.assertCanMutateSource();
     const predecessor = this.sourceQueue;
     let release;
     this.sourceQueue = new Promise((resolve) => {
@@ -22540,6 +22559,7 @@ var BrowserNotebookClient = class {
     });
     await predecessor;
     try {
+      if (!selectingDraft) this.assertCanMutateSource();
       return await operation();
     } finally {
       release();
