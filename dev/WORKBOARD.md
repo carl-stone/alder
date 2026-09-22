@@ -10,10 +10,11 @@ copies in other worktrees are snapshots.
 
 ## Current assignment
 
-**Native Mac reliability — Review on Mac.**
+**Native Mac reliability — Implementing on Mac.**
 
-**Latest accepted checkpoint:** source `3520e53`, integrated on pushed main at
-`e3b1ed6`. Full signed-app acceptance and the separate external-path journey passed.
+**Latest accepted checkpoint:** source `e3bba94`. Full signed-app acceptance and
+the separate packaged Save As journey passed with a clean tree and natural cleanup.
+Integration into main is the first step of the current assignment.
 Earlier accepted slices cover backend/renderer/app crash recovery, independent
 windows and last-window reopening. Acceptance belongs to that source checkpoint;
 the staged app at `host/.application-desktop/Alder.app` may advance during work.
@@ -24,34 +25,27 @@ remain dependable through native failures. Exercise real user journeys through t
 while keeping Carl's visible desktop free. Record scenarios that genuinely require foreground
 interaction for a later supervised pass; do not infer them from headless checks.
 
-**Current bounded slice:** Save As currently publishes destination bytes before
-fallible recovery/ownership setup completes. A later failure can report Save As
-failed while leaving the destination changed. Complete fallible preparation before
-rename, then adopt the published state without fictional rollback. Directory sync
-can also fail after rename: report committed with a durability warning and retain
-recovery. The current assignment includes this refinement, not the later work below.
+**Current bounded slice:** separate client detachment, document Discard and
+backend shutdown. Delete historical released-connection tracking, release upgrades
+and server receipts. Detach is idempotent; only explicit Discard removes accepted
+unsaved source and local drafts, protecting other attached clients. User-approved
+close after host failure retains recovery and cannot be vetoed by failed HTTP
+cleanup. Backend owns bounded no-client shutdown, including orphaned runs.
 
-**Candidate and next action:** `e3bba94` passed focused production, UI and test
-review. Signing now passes without source/config changes after removing the unused
-555 MB headless stage owned by this task. A bounded acceptance worker reruns the
-complete signed Mac gate and separate packaged Save As journey on the exact clean
-candidate. Primary implementer holds changes. Installed user app remains untouched;
-lead records the result and dispatches the next transition.
+**Owner and next action:** primary implementer first integrates the accepted
+checkpoint with canonical docs and pushes main, then implements the lifecycle
+slice. Check ticket-failure heartbeat cleanup, failed-renderer Close then Quit,
+peer continuity, explicit discard and eventual unused host/Ark/R exit. Replace
+tests of deleted release machinery with these behaviors. Submit a clean focused
+candidate for review; do not start the later slices or run full acceptance early.
 
 **Approved next slices, in order:**
 
-1. **Separate detach, discard and shutdown.** Delete historical released-connection
-   tracking, release upgrades and server receipts. Detach is idempotent; explicit
-   document Discard covers accepted edits and local drafts while protecting peers.
-   Close after host failure retains recovery and cannot be vetoed by failed HTTP
-   cleanup. Backend owns bounded no-client shutdown, including orphaned runs.
-   Check the ticket-failure heartbeat leak and the failed-renderer Close then Quit
-   path: the latter currently can erase recovery through a later discard upgrade.
-2. **Remove duplicate work.** Use source content changes to invalidate R results,
+1. **Remove duplicate work.** Use source content changes to invalidate R results,
    keeping disk identity for conflict checks. Remove periodic full-notebook queries
    from native health monitoring; retain a small bootstrap/liveness fallback where
    the renderer cannot report failure.
-3. **Make failure tests deterministic and finite.** Use existing I/O seams to fail
+2. **Make failure tests deterministic and finite.** Use existing I/O seams to fail
    before/after save publication and control close/exit ordering. Fix `accept-mac`
    cleanup on failure through the existing scoped helper; bound old Quit test waits.
    Replace tests of deleted release machinery with recovery/peer/exit behavior.
@@ -86,7 +80,7 @@ One item is active. New approved work is added here before assignment.
 | Release README and feature demo | Accepted | Primary implementer and independent reviewers | `b316bc3`: release-facing install/use guide and three compact real-app feature captures; media and factual reviews passed |
 | Repository integration and cleanup | Accepted | Primary implementer and focused cleanup reviewers | `554da34`: canonical docs and accepted app fast-forwarded to remote `main`; obsolete worktrees, branches and safety stashes removed after review |
 | Platform-boundary extraction | Accepted | Primary implementer and focused reviewers | `42cfda8`: shared Linux R 34/34, browser 12/12 and reviewed localized Mac/Linux seams; no duplicated product or Ark fork |
-| Native Mac reliability qualification | Review | Lead and acceptance worker | Complete signed-app acceptance and separate packaged Save As on reviewed `e3bba94` |
+| Native Mac reliability qualification | Implementing | Primary implementer | Integrate accepted `e3bba94`, then separate detach, explicit Discard and bounded backend shutdown |
 | Scientific workflow qualification | Queued | Unassigned | A realistic scientific notebook, real CRAN/Bioconductor packages, representative R reactivity idioms, two live notebooks under load and rich publishing are independently qualified through packaged Alder |
 | Product completion and public Mac delivery | Queued | Unassigned | Project/Git ownership, notebook-wide search, agent presence, accessibility, scale, upgrade state, release identity, architecture support and signed/notarized distribution have explicit accepted behavior |
 
