@@ -1,6 +1,7 @@
 ^demo\.R$
 ^\.lintr$
 ^AGENTS\.md$
+^\.codex$
 ^tests/AGENTS\.md$
 ^[^/]+[.]tar([.](gz|bz2|xz|zst))?$
 ^[^/]+[.](tgz|zip)$

@@ -12,6 +12,22 @@ coordination and may lag the active candidate, even when its main branch contain
 the latest accepted app.
 Independent workers use the worktree assigned in their own brief.
 
+## Codex model
+
+The project [Codex configuration](../.codex/config.toml) selects `gpt-6-astra`
+for core Alder development. Reasoning effort is inherited from the user's or
+session's settings; keep the existing supported effort when switching models.
+Explicit model choices for separate workflows, such as GPT-6 Sol with medium
+reasoning for orchestration, remain intentional overrides.
+
+Codex loads project configuration only for trusted projects. Existing chats and
+explicit launch overrides can retain another model: check the app's model
+selector, or use `/status` and `/debug-config` in the CLI. Select Astra in the
+existing chat when needed (`/model` in the CLI). See the official
+[configuration guide](https://learn.chatgpt.com/docs/config-file/config-basic)
+for precedence. To roll back, restore the chat's previous model and remove or
+revert the project's `model` setting; no Alder rebuild is required.
+
 ## Build and open the Mac app
 
 Run on macOS from the implementation checkout's repository root. Start with an
